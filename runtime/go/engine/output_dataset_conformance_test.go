@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // The GO ARM of the output-Dataset author-surface contract (conformance/output_dataset.json).

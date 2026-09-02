@@ -42,7 +42,7 @@ import (
 	"sort"
 	"strings"
 
-	applbundle "github.com/medmahmoudi26/kontra-local/cli/appliance/bundle"
+	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
 )
 
 func cmdRelease(args []string) error {

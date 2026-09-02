@@ -28,7 +28,7 @@ const file_kontra_v1_actor_service_proto_rawDesc = "" +
 	"\x1dkontra/v1/actor_service.proto\x12\tkontra.v1\x1a\x1atemporal/v1/temporal.proto\x1a\x15kontra/v1/entry.proto2\xa4\x01\n" +
 	"\fActorService\x12n\n" +
 	"\x03Run\x12\x15.kontra.v1.EntryInput\x1a\x12.kontra.v1.BareRef\"<\x8a\xc4\x038*.actor-${!idempotency_key.or(run_id).or(\"run\")}\xc2\x01\x05\x12\x03run\x1a$\x8a\xc4\x03 \n" +
-	"\fkontra-actor\"\x10\b\x01\x12\fkontra.actorBGZEgithub.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1b\x06proto3"
+	"\fkontra-actor\"\x10\b\x01\x12\fkontra.actorBAZ?github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1b\x06proto3"
 
 var file_kontra_v1_actor_service_proto_goTypes = []any{
 	(*EntryInput)(nil), // 0: kontra.v1.EntryInput

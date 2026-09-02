@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // A RECEIPT IS WHAT EXISTENCE WAS PRETENDING TO BE.

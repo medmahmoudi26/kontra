@@ -275,7 +275,7 @@ const file_kontra_v1_run_proto_rawDesc = "" +
 	"\n" +
 	"chunk_size\x18\x01 \x01(\rR\tchunkSize\x12+\n" +
 	"\x11parallel_sessions\x18\x02 \x01(\rR\x10parallelSessions\x12/\n" +
-	"\x14schedule_to_close_ms\x18\x03 \x01(\x04R\x11scheduleToCloseMsBGZEgithub.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1b\x06proto3"
+	"\x14schedule_to_close_ms\x18\x03 \x01(\x04R\x11scheduleToCloseMsBAZ?github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1b\x06proto3"
 
 var (
 	file_kontra_v1_run_proto_rawDescOnce sync.Once

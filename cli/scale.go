@@ -27,7 +27,7 @@ import (
 	docker "github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance"
+	"github.com/medmahmoudi26/kontra/cli/appliance"
 )
 
 // controlPlaneNetwork is the compose network the control plane runs on; a same-host worker

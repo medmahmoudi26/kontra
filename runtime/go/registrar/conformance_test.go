@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // The GO ARM of the cross-SDK catalog contract (conformance/catalog.json).

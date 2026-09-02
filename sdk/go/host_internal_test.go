@@ -3,7 +3,7 @@ package kontra
 import (
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // IN-PACKAGE, because the thing under test is deliberately unexported: `host` is the seam the

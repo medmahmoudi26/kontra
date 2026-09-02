@@ -11,9 +11,9 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
-	kontra "github.com/medmahmoudi26/kontra-local/sdk/go"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/hitl"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/narrate"
+	kontra "github.com/medmahmoudi26/kontra/sdk/go"
+	"github.com/medmahmoudi26/kontra/sdk/go/hitl"
+	"github.com/medmahmoudi26/kontra/sdk/go/narrate"
 )
 
 // The two things a workflow says out loud, from the top level.

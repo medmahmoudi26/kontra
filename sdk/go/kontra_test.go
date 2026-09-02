@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // The entrypoint is Serve(), and Run() is GONE rather than aliased (ADR 0023 §23).

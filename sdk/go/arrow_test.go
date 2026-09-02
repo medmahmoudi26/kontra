@@ -43,7 +43,7 @@ func deps(t *testing.T) []string {
 // any package under sdk/go acquires an import — direct or transitive, in code or in a test
 // helper — of a package under runtime/go.
 func TestTheSDKImportsNothingOfTheRuntime(t *testing.T) {
-	const runtimePrefix = "github.com/medmahmoudi26/kontra-local/runtime/"
+	const runtimePrefix = "github.com/medmahmoudi26/kontra/runtime/"
 	for _, p := range deps(t) {
 		if strings.HasPrefix(p, runtimePrefix) {
 			t.Errorf("sdk/go imports %s — the arrow is runtime -> sdk, never the reverse.\n"+

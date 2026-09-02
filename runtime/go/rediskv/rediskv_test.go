@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/medmahmoudi26/kontra-local/runtime/go/globalstore"
+	"github.com/medmahmoudi26/kontra/runtime/go/globalstore"
 )
 
 // EtagKV against a REAL Redis — the Go peer of tests/test_redis_kv.py.

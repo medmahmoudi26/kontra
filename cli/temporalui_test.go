@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance"
+	"github.com/medmahmoudi26/kontra/cli/appliance"
 )
 
 // THE FLAG IS OFF AND OFF MEANS NOTHING HAPPENS: no artifact hydrated, no port bound, no process.

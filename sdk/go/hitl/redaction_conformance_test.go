@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/hitl"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/narrate"
+	"github.com/medmahmoudi26/kontra/sdk/go/hitl"
+	"github.com/medmahmoudi26/kontra/sdk/go/narrate"
 )
 
 // The GO ARM of the redaction contract (conformance/redaction.json). The Python arm is

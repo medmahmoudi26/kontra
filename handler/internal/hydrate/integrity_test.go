@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // THE FAILURES ISSUE 15 IS ABOUT ARE ALL FAILURES THAT LOOK LIKE SUCCESS. Every test in this

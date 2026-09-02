@@ -21,7 +21,7 @@
 // asked for them and an unused export is a promise nobody checked.
 package casstore
 
-import "github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+import "github.com/medmahmoudi26/kontra/handler/internal/cas"
 
 // Local is the store rooted at a directory: objects at <root>/cas/<ab>/<digest>, in-flight
 // writes at <root>/tmp.

@@ -42,8 +42,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/handler/casstore"
-	"github.com/medmahmoudi26/kontra-local/handler/hydratestore"
+	"github.com/medmahmoudi26/kontra/handler/casstore"
+	"github.com/medmahmoudi26/kontra/handler/hydratestore"
 )
 
 // HydrateOptions is one hydration of the control plane's artifacts.

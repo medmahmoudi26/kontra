@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/handler/casstore"
-	"github.com/medmahmoudi26/kontra-local/handler/hydratestore"
+	"github.com/medmahmoudi26/kontra/handler/casstore"
+	"github.com/medmahmoudi26/kontra/handler/hydratestore"
 )
 
 // fakeBundle writes a real bundle — same deterministic tar writer, same manifest member, same

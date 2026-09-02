@@ -1,8 +1,8 @@
-module github.com/medmahmoudi26/kontra-local/runtime/go
+module github.com/medmahmoudi26/kontra/runtime/go
 
 go 1.26.4
 
-require github.com/medmahmoudi26/kontra-local/sdk/go v0.0.0
+require github.com/medmahmoudi26/kontra/sdk/go v0.0.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
@@ -64,4 +64,4 @@ require (
 
 // The SDK is this same checkout; there is no published module. The arrow is one-way and the
 // module graph says so: sdk/go requires nothing of runtime/go.
-replace github.com/medmahmoudi26/kontra-local/sdk/go => ../../sdk/go
+replace github.com/medmahmoudi26/kontra/sdk/go => ../../sdk/go

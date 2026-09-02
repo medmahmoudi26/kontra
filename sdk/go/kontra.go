@@ -25,7 +25,7 @@
 //	}
 package kontra
 
-import "github.com/medmahmoudi26/kontra-local/sdk/go/core"
+import "github.com/medmahmoudi26/kontra/sdk/go/core"
 
 // Unit is one indivisible piece of work — the grain of retry and of commit. Its Value is the
 // caller's payload; Str/Into read fields off it. An author no longer names a Unit to produce

@@ -33,7 +33,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/objectstore"
+	"github.com/medmahmoudi26/kontra/handler/internal/objectstore"
 )
 
 type CAS struct{ store *objectstore.Store }

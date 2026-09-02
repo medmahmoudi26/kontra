@@ -854,7 +854,7 @@ func wardenUnit(state, driver string, trust trustOptions) string {
 	}
 	return `[Unit]
 Description=kontra Warden (reconciles this Machine's Workers)
-Documentation=https://github.com/medmahmoudi26/kontra-local/blob/main/docs/adr/0037-the-warden-and-the-fleet-as-capacity.md
+Documentation=https://github.com/medmahmoudi26/kontra/blob/main/docs/adr/0037-the-warden-and-the-fleet-as-capacity.md
 After=network-online.target
 Wants=network-online.target
 

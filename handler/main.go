@@ -18,11 +18,11 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
-	kontrav1 "github.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/codec"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/identity"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/objectstore"
+	kontrav1 "github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/codec"
+	"github.com/medmahmoudi26/kontra/handler/internal/identity"
+	"github.com/medmahmoudi26/kontra/handler/internal/objectstore"
 )
 
 func main() {

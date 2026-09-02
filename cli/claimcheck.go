@@ -57,7 +57,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 
-	"github.com/medmahmoudi26/kontra-local/handler/claimcheck"
+	"github.com/medmahmoudi26/kontra/handler/claimcheck"
 )
 
 // casOverHTTP is a claimcheck.Backing that GETs an object out of the store over unsigned HTTP,

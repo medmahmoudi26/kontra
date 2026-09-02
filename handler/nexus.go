@@ -14,9 +14,9 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporalnexus"
 
-	kontrav1temporal "github.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1/kontrav1temporal"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/identity"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/wire"
+	kontrav1temporal "github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1/kontrav1temporal"
+	"github.com/medmahmoudi26/kontra/handler/internal/identity"
+	"github.com/medmahmoudi26/kontra/handler/internal/wire"
 )
 
 // newNexusService hand-wires the kontra.actor:run op against the wire types (byte-exact

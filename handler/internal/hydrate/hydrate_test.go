@@ -19,7 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 func TestHydrateAFileArtifact(t *testing.T) {

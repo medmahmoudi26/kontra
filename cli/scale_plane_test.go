@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance"
+	"github.com/medmahmoudi26/kontra/cli/appliance"
 )
 
 // WHICH CONTROL PLANE A WORKER CONTAINER DIALS — the resolution that replaced four hard-coded

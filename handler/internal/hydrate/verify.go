@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // WHAT LEAVES THE STORE (issue 15). The rest of this package makes sure nothing wrong ever

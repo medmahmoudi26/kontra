@@ -19,11 +19,11 @@ package main
 import (
 	"strings"
 
-	kontra "github.com/medmahmoudi26/kontra-local/sdk/go"
+	kontra "github.com/medmahmoudi26/kontra/sdk/go"
 	// Registers the actor host behind a.Serve(). Serving is a runtime act; the author surface
 	// declares the seam (kontra.Host) and the runtime fills it from init(), the way database/sql
 	// takes its drivers. Leave this out and Serve() exits naming this exact line.
-	_ "github.com/medmahmoudi26/kontra-local/runtime/go"
+	_ "github.com/medmahmoudi26/kontra/runtime/go"
 )
 
 func main() {

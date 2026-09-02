@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // A FULL DISK IS NOT A LOUD FAILURE ON THIS SYSTEM, and that is not a hypothesis. A SeaweedFS

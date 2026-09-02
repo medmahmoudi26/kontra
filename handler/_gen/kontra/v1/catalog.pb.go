@@ -408,7 +408,7 @@ const file_kontra_v1_catalog_proto_rawDesc = "" +
 	"\x05input\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x05input\x12/\n" +
 	"\x06output\x18\x04 \x01(\v2\x17.google.protobuf.StructR\x06output\x12\x14\n" +
 	"\x05queue\x18\x05 \x01(\tR\x05queue\x12\x14\n" +
-	"\x05error\x18\x06 \x01(\tR\x05errorBGZEgithub.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1b\x06proto3"
+	"\x05error\x18\x06 \x01(\tR\x05errorBAZ?github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1b\x06proto3"
 
 var (
 	file_kontra_v1_catalog_proto_rawDescOnce sync.Once

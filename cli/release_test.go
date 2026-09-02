@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	applbundle "github.com/medmahmoudi26/kontra-local/cli/appliance/bundle"
+	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
 )
 
 // A NEW WORD WIRED TO NOTHING is a switch-statement bug, and `dispatch`'s own header says it was

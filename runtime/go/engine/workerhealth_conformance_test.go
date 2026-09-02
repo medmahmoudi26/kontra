@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // The GO HOST's arm of conformance/workerhealth.json — one of two WRITERS of the two series the

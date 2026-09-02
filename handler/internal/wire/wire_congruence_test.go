@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	kontrav1 "github.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1"
+	kontrav1 "github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )

@@ -13,7 +13,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/hitl"
+	"github.com/medmahmoudi26/kontra/sdk/go/hitl"
 )
 
 // WHAT A TEST CAN SEE HERE, and it is more than the narration next door: the test environment

@@ -33,13 +33,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/codec"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/kv"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/objstore"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/registry"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/temporalsrv"
-	"github.com/medmahmoudi26/kontra-local/handler/hydratestore"
+	"github.com/medmahmoudi26/kontra/cli/appliance"
+	"github.com/medmahmoudi26/kontra/cli/appliance/codec"
+	"github.com/medmahmoudi26/kontra/cli/appliance/kv"
+	"github.com/medmahmoudi26/kontra/cli/appliance/objstore"
+	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
+	"github.com/medmahmoudi26/kontra/cli/appliance/temporalsrv"
+	"github.com/medmahmoudi26/kontra/handler/hydratestore"
 )
 
 func cmdUp(args []string) error {

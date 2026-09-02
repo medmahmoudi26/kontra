@@ -54,11 +54,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/runtime/go/globalstore"
-	"github.com/medmahmoudi26/kontra-local/runtime/go/rediskv"
-	"github.com/medmahmoudi26/kontra-local/runtime/go/statekv"
-	"github.com/medmahmoudi26/kontra-local/runtime/go/unitstore"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/runtime/go/globalstore"
+	"github.com/medmahmoudi26/kontra/runtime/go/rediskv"
+	"github.com/medmahmoudi26/kontra/runtime/go/statekv"
+	"github.com/medmahmoudi26/kontra/runtime/go/unitstore"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // Package-level config, set once at boot. Configure is called before the worker starts polling;

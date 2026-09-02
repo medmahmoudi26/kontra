@@ -14,8 +14,8 @@ package kontra
 // the runtime fills it from init(), and the author's main package links it with a blank import:
 //
 //	import (
-//		kontra "github.com/medmahmoudi26/kontra-local/sdk/go"
-//		_ "github.com/medmahmoudi26/kontra-local/runtime/go"   // links the actor host
+//		kontra "github.com/medmahmoudi26/kontra/sdk/go"
+//		_ "github.com/medmahmoudi26/kontra/runtime/go"   // links the actor host
 //	)
 //
 // The result is asserted, not asserted-in-prose: `go list -deps ./sdk/go/...` names no package
@@ -27,7 +27,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // schemaVersion is the actor.json schema tag this SDK accepts (kept local so the author surface
@@ -68,7 +68,7 @@ func (a *Actor) Serve() {
 	}
 	if host == nil {
 		fmt.Fprintln(os.Stderr, "[kontra] no actor runtime is linked into this binary; add\n"+
-			"\t_ \"github.com/medmahmoudi26/kontra-local/runtime/go\"\n"+
+			"\t_ \"github.com/medmahmoudi26/kontra/runtime/go\"\n"+
 			"to your main package's imports (and the module to go.mod)")
 		os.Exit(1)
 	}

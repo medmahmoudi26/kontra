@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // ONE REAL ARTIFACT, END TO END, ON AN EMPTY STORE.

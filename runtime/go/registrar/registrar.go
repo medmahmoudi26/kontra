@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/schema"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/schema"
 )
 
 // The catalog wire shape lives HERE, locally, so actorkit stays decoupled from /handler

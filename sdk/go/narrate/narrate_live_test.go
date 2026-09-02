@@ -17,7 +17,7 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/narrate"
+	"github.com/medmahmoudi26/kontra/sdk/go/narrate"
 )
 
 // WHAT THE UNIT TESTS CANNOT SEE, against a real server.

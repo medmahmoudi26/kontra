@@ -10,7 +10,7 @@ package kontrav1temporal
 import (
 	"context"
 	errs "github.com/cludden/protoc-gen-go-temporal/pkg/errs"
-	v1 "github.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1"
+	v1 "github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1"
 	nexus "github.com/nexus-rpc/sdk-go/nexus"
 	temporalnexus "go.temporal.io/sdk/temporalnexus"
 	worker "go.temporal.io/sdk/worker"

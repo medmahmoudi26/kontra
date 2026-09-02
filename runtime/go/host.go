@@ -3,8 +3,8 @@
 // host as the implementation behind kontra.Actor.Serve():
 //
 //	import (
-//		kontra "github.com/medmahmoudi26/kontra-local/sdk/go"
-//		_ "github.com/medmahmoudi26/kontra-local/runtime/go"
+//		kontra "github.com/medmahmoudi26/kontra/sdk/go"
+//		_ "github.com/medmahmoudi26/kontra/runtime/go"
 //	)
 //
 //	func main() {
@@ -25,8 +25,8 @@
 package kontrahost
 
 import (
-	"github.com/medmahmoudi26/kontra-local/runtime/go/temporalhost"
-	kontra "github.com/medmahmoudi26/kontra-local/sdk/go"
+	"github.com/medmahmoudi26/kontra/runtime/go/temporalhost"
+	kontra "github.com/medmahmoudi26/kontra/sdk/go"
 )
 
 func init() { kontra.Host(temporalhost.Serve) }

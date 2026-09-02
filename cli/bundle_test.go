@@ -18,7 +18,7 @@ import (
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/registry"
+	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
 )
 
 // A Go actor's Bundle must carry the actor as an EXECUTABLE, because the Machine's systemd unit

@@ -18,8 +18,8 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/converter"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/objstore"
-	"github.com/medmahmoudi26/kontra-local/handler/codecserver"
+	"github.com/medmahmoudi26/kontra/cli/appliance/objstore"
+	"github.com/medmahmoudi26/kontra/handler/codecserver"
 )
 
 // startTestS3 brings up the object store this codec reads, on its own temp directory and a free

@@ -27,8 +27,8 @@
 package claimcheck
 
 import (
-	"github.com/medmahmoudi26/kontra-local/handler/internal/codec"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/objectstore"
+	"github.com/medmahmoudi26/kontra/handler/internal/codec"
+	"github.com/medmahmoudi26/kontra/handler/internal/objectstore"
 )
 
 // Marker is the encoding-metadata value stamped on an offloaded (ref) payload. The ONE Go

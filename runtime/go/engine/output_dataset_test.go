@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/runtime/go/unitstore"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/runtime/go/unitstore"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // failingPutter is a store whose every write fails — a disk-full SeaweedFS is a bare 500 on each

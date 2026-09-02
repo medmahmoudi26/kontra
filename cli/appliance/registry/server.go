@@ -58,7 +58,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/handler/casstore"
+	"github.com/medmahmoudi26/kontra/handler/casstore"
 )
 
 // DefaultPort is the port actor images are pushed to and pulled from.

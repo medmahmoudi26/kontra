@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/runtime/go/unitstore"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/runtime/go/unitstore"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // fakeSM is an in-memory engine.StateStore that JSON-roundtrips values (mimicking the real

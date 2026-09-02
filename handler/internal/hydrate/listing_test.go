@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // A member path may contain a space, a quote or a newline-shaped escape, and a listing that

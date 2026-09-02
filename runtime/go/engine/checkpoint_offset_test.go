@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // storeRecords decodes every distinct record the fake store holds — the durable row count a reader

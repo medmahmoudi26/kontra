@@ -12,8 +12,8 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/catalog"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/narrate"
+	"github.com/medmahmoudi26/kontra/sdk/go/catalog"
+	"github.com/medmahmoudi26/kontra/sdk/go/narrate"
 )
 
 // THE UNIT TESTS CANNOT SEE THE SENTENCE, and that is a property of the test environment rather

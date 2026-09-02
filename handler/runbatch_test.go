@@ -18,8 +18,8 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/identity"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/wire"
+	"github.com/medmahmoudi26/kontra/handler/internal/identity"
+	"github.com/medmahmoudi26/kontra/handler/internal/wire"
 )
 
 // runEnv wires a TestWorkflowEnvironment with the activities the run path touches. RunBatch and

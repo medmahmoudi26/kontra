@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/hitl"
+	"github.com/medmahmoudi26/kontra/sdk/go/hitl"
 )
 
 // WHAT THE UNIT TESTS CANNOT SEE, against a real server: that a parked run is readable with NO

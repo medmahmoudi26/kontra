@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package kontra.v1;
 
-option go_package = "github.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1";
+option go_package = "github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1";
 
 import "google/protobuf/struct.proto";
 

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // A tar.gz artifact is expanded ONCE, into a golden tree named by the archive's digest, and

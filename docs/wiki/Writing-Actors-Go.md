@@ -6,12 +6,12 @@ The Go SDK mirrors the Python author surface as plain registration calls. A Go a
 package main
 
 import (
-    kontra "github.com/medmahmoudi26/kontra-local/sdk/go"
+    kontra "github.com/medmahmoudi26/kontra/sdk/go"
     // The actor RUNTIME, imported for its side effect: its init() registers the Temporal actor
     // host behind a.Serve(). The author surface declares the seam and never imports across it
     // (runtime -> sdk is one-way), so this blank import is what puts a host in your binary.
     // Leave it out and Serve() exits at startup naming this line, rather than hanging.
-    _ "github.com/medmahmoudi26/kontra-local/runtime/go"
+    _ "github.com/medmahmoudi26/kontra/runtime/go"
 )
 ```
 
@@ -19,12 +19,12 @@ Both are modules in this checkout, so an actor's `go.mod` requires and replaces 
 
 ```
 require (
-    github.com/medmahmoudi26/kontra-local/runtime/go v0.0.0
-    github.com/medmahmoudi26/kontra-local/sdk/go v0.0.0
+    github.com/medmahmoudi26/kontra/runtime/go v0.0.0
+    github.com/medmahmoudi26/kontra/sdk/go v0.0.0
 )
 
-replace github.com/medmahmoudi26/kontra-local/sdk/go => ../../../sdk/go
-replace github.com/medmahmoudi26/kontra-local/runtime/go => ../../../runtime/go
+replace github.com/medmahmoudi26/kontra/sdk/go => ../../../sdk/go
+replace github.com/medmahmoudi26/kontra/runtime/go => ../../../runtime/go
 ```
 
 A **caller** — a workflow that drives actors rather than serving one — needs `sdk/go` alone; `go/dnssweep` is one, and its dependency graph carries no Redis and no S3 client at all.
@@ -33,8 +33,8 @@ A **caller** — a workflow that drives actors rather than serving one — needs
 package main
 
 import (
-    kontra "github.com/medmahmoudi26/kontra-local/sdk/go"
-    _ "github.com/medmahmoudi26/kontra-local/runtime/go"
+    kontra "github.com/medmahmoudi26/kontra/sdk/go"
+    _ "github.com/medmahmoudi26/kontra/runtime/go"
 )
 
 type In struct {

@@ -264,7 +264,7 @@ const file_kontra_v1_entry_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x0e \x01(\tR\tsessionIdJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\b\x10\tR\n" +
 	"output_uriR\x11parallel_sessionsR\n" +
-	"chunk_sizeR\x06tenantBGZEgithub.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1b\x06proto3"
+	"chunk_sizeR\x06tenantBAZ?github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1b\x06proto3"
 
 var (
 	file_kontra_v1_entry_proto_rawDescOnce sync.Once

@@ -44,7 +44,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/handler/codecserver"
+	"github.com/medmahmoudi26/kontra/handler/codecserver"
 )
 
 // DefaultPort is the port the codec listens on.

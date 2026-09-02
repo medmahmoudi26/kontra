@@ -41,7 +41,7 @@ import (
 	"oras.land/oras-go/v2/content/memory"
 	"oras.land/oras-go/v2/registry/remote"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/registry"
+	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
 )
 
 type bundle struct {

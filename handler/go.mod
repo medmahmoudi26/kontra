@@ -1,4 +1,4 @@
-module github.com/medmahmoudi26/kontra-local/handler
+module github.com/medmahmoudi26/kontra/handler
 
 go 1.25.4
 

@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/objectstore"
+	"github.com/medmahmoudi26/kontra/handler/internal/objectstore"
 )
 
 // TestKeyLayoutIsCongruent is the guard the package header promises: the appliance's local

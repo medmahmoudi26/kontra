@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance"
+	"github.com/medmahmoudi26/kontra/cli/appliance"
 )
 
 // startTemporalUI starts Temporal's Web UI if the flag asked for one, and otherwise does nothing

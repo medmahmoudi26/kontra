@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/runtime/go/codec"
-	"github.com/medmahmoudi26/kontra-local/runtime/go/engine"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/runtime/go/codec"
+	"github.com/medmahmoudi26/kontra/runtime/go/engine"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // TestOneInstancePerActorID pins per-process activation.

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // actorWith wires a KontraActor over a fake state store and sets the package registry for this

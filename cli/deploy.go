@@ -26,7 +26,7 @@ import (
 	docker "github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/archive"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/registry"
+	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
 )
 
 // baseImage is the canonical Python host (infra/Dockerfile.pyworker) every

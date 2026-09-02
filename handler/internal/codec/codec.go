@@ -18,9 +18,9 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/converter"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/objectstore"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/wire"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/objectstore"
+	"github.com/medmahmoudi26/kontra/handler/internal/wire"
 )
 
 // Marker is the encoding-metadata value stamped on an offloaded (ref) payload. VERBATIM —

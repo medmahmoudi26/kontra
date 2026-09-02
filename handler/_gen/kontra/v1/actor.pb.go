@@ -346,7 +346,7 @@ const file_kontra_v1_actor_proto_rawDesc = "" +
 	"\bcategory\x18\x03 \x01(\tR\bcategory\"9\n" +
 	"\tErrorInfo\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessageBGZEgithub.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1b\x06proto3"
+	"\amessage\x18\x02 \x01(\tR\amessageBAZ?github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1b\x06proto3"
 
 var (
 	file_kontra_v1_actor_proto_rawDescOnce sync.Once

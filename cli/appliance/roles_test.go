@@ -14,9 +14,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/codec"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/objstore"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/temporalsrv"
+	"github.com/medmahmoudi26/kontra/cli/appliance/codec"
+	"github.com/medmahmoudi26/kontra/cli/appliance/objstore"
+	"github.com/medmahmoudi26/kontra/cli/appliance/temporalsrv"
 )
 
 // startForTest boots an embedded Temporal and returns it with an idempotent stop. The `once` is

@@ -25,8 +25,8 @@
 package hydratestore
 
 import (
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/hydrate"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/hydrate"
 )
 
 // Store is the appliance's artifact store: the CAS for fetched bytes, plus the golden trees

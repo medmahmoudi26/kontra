@@ -28,10 +28,10 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
-	"github.com/medmahmoudi26/kontra-local/runtime/go/codec"
-	"github.com/medmahmoudi26/kontra-local/runtime/go/engine"
-	"github.com/medmahmoudi26/kontra-local/runtime/go/registrar"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/core"
+	"github.com/medmahmoudi26/kontra/runtime/go/codec"
+	"github.com/medmahmoudi26/kontra/runtime/go/engine"
+	"github.com/medmahmoudi26/kontra/runtime/go/registrar"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // TaskQueue is the sessions queue this host binds: `{name}-{version}-sessions`, or

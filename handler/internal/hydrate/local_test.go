@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // AN ARTIFACT THIS MACHINE ALREADY HAS is the appliance's own bundle: `kontra bundle

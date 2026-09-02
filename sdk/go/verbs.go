@@ -3,8 +3,8 @@ package kontra
 import (
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/hitl"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/narrate"
+	"github.com/medmahmoudi26/kontra/sdk/go/hitl"
+	"github.com/medmahmoudi26/kontra/sdk/go/narrate"
 )
 
 // ── THE TWO THINGS A WORKFLOW SAYS OUT LOUD ────────────────────────────────────────────────────

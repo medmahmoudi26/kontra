@@ -1,4 +1,4 @@
-module github.com/medmahmoudi26/kontra-local/cli
+module github.com/medmahmoudi26/kontra/cli
 
 go 1.26.4
 
@@ -16,9 +16,9 @@ require (
 // A LOCAL-PATH REPLACE because the two are one repo with no published version to pin. go.work
 // already arranges this inside the workspace; the replace is what makes it hold for
 // `GOWORK=off go build`, which is how install.sh builds the binary.
-require github.com/medmahmoudi26/kontra-local/handler v0.0.0
+require github.com/medmahmoudi26/kontra/handler v0.0.0
 
-replace github.com/medmahmoudi26/kontra-local/handler => ../handler
+replace github.com/medmahmoudi26/kontra/handler => ../handler
 
 require (
 	github.com/google/uuid v1.6.0

@@ -25,11 +25,11 @@ import (
 	"go.temporal.io/sdk/workflow"
 	"gopkg.in/yaml.v3"
 
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/bundle"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/codec"
-	"github.com/medmahmoudi26/kontra-local/cli/appliance/temporalsrv"
-	"github.com/medmahmoudi26/kontra-local/handler/codecserver"
-	"github.com/medmahmoudi26/kontra-local/handler/hydratestore"
+	"github.com/medmahmoudi26/kontra/cli/appliance/bundle"
+	"github.com/medmahmoudi26/kontra/cli/appliance/codec"
+	"github.com/medmahmoudi26/kontra/cli/appliance/temporalsrv"
+	"github.com/medmahmoudi26/kontra/handler/codecserver"
+	"github.com/medmahmoudi26/kontra/handler/hydratestore"
 )
 
 // --- the pin table ----------------------------------------------------------------------------

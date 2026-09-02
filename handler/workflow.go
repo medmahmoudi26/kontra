@@ -8,8 +8,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/identity"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/wire"
+	"github.com/medmahmoudi26/kontra/handler/internal/identity"
+	"github.com/medmahmoudi26/kontra/handler/internal/wire"
 )
 
 // RunWorkflow is the backing workflow for the kontra.actor:run Nexus op. It rehydrates the

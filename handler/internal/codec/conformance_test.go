@@ -11,8 +11,8 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/converter"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/objectstore"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/objectstore"
 )
 
 // The cross-language gate: the Go codec must pass the SAME conformance/codec/fixtures.json

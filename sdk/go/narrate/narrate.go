@@ -91,8 +91,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra-local/sdk/go/catalog"
-	"github.com/medmahmoudi26/kontra-local/sdk/go/wfstate"
+	"github.com/medmahmoudi26/kontra/sdk/go/catalog"
+	"github.com/medmahmoudi26/kontra/sdk/go/wfstate"
 )
 
 // MaxSentenceBytes is how many UTF-8 BYTES one sentence may take.

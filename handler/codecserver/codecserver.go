@@ -32,8 +32,8 @@ import (
 
 	"go.temporal.io/sdk/converter"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/codec"
-	"github.com/medmahmoudi26/kontra-local/handler/internal/objectstore"
+	"github.com/medmahmoudi26/kontra/handler/internal/codec"
+	"github.com/medmahmoudi26/kontra/handler/internal/objectstore"
 )
 
 // DefaultThreshold is the offload line: strictly more than this many bytes is offloaded, this

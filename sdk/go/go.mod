@@ -1,4 +1,4 @@
-module github.com/medmahmoudi26/kontra-local/sdk/go
+module github.com/medmahmoudi26/kontra/sdk/go
 
 go 1.26.4
 

@@ -24,14 +24,14 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13kontra/v1/run.proto\x12\tkontra.v1\"\x90\x02\n\x0bRunEnvelope\x12&\n\x05\x61\x63tor\x18\x01 \x01(\x0b\x32\x10.kontra.v1.ActorR\x05\x61\x63tor\x12\x15\n\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x17\n\x07node_id\x18\x03 \x01(\tR\x06nodeId\x12\x16\n\x06tenant\x18\x04 \x01(\tR\x06tenant\x12\'\n\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\x12\x18\n\x07payload\x18\x06 \x01(\x0cR\x07payload\x12\x16\n\x06params\x18\x07 \x01(\x0cR\x06params\x12\x36\n\x08\x64ispatch\x18\x08 \x01(\x0b\x32\x1a.kontra.v1.DispatchOptionsR\x08\x64ispatch\"5\n\x05\x41\x63tor\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n\x07version\x18\x02 \x01(\tR\x07version\"\x8e\x01\n\x0f\x44ispatchOptions\x12\x1d\n\nchunk_size\x18\x01 \x01(\rR\tchunkSize\x12+\n\x11parallel_sessions\x18\x02 \x01(\rR\x10parallelSessions\x12/\n\x14schedule_to_close_ms\x18\x03 \x01(\x04R\x11scheduleToCloseMsBGZEgithub.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13kontra/v1/run.proto\x12\tkontra.v1\"\x90\x02\n\x0bRunEnvelope\x12&\n\x05\x61\x63tor\x18\x01 \x01(\x0b\x32\x10.kontra.v1.ActorR\x05\x61\x63tor\x12\x15\n\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x17\n\x07node_id\x18\x03 \x01(\tR\x06nodeId\x12\x16\n\x06tenant\x18\x04 \x01(\tR\x06tenant\x12\'\n\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\x12\x18\n\x07payload\x18\x06 \x01(\x0cR\x07payload\x12\x16\n\x06params\x18\x07 \x01(\x0cR\x06params\x12\x36\n\x08\x64ispatch\x18\x08 \x01(\x0b\x32\x1a.kontra.v1.DispatchOptionsR\x08\x64ispatch\"5\n\x05\x41\x63tor\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n\x07version\x18\x02 \x01(\tR\x07version\"\x8e\x01\n\x0f\x44ispatchOptions\x12\x1d\n\nchunk_size\x18\x01 \x01(\rR\tchunkSize\x12+\n\x11parallel_sessions\x18\x02 \x01(\rR\x10parallelSessions\x12/\n\x14schedule_to_close_ms\x18\x03 \x01(\x04R\x11scheduleToCloseMsBAZ?github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'kontra.v1.run_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'ZEgithub.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1'
+  _globals['DESCRIPTOR']._serialized_options = b'Z?github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1'
   _globals['_RUNENVELOPE']._serialized_start=35
   _globals['_RUNENVELOPE']._serialized_end=307
   _globals['_ACTOR']._serialized_start=309

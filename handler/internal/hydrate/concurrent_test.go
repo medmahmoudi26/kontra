@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra-local/handler/internal/cas"
+	"github.com/medmahmoudi26/kontra/handler/internal/cas"
 )
 
 // The env the parent hands the children. A child is this same test binary, run with
