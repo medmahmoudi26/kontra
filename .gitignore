@@ -1,0 +1,15 @@
+# Local development
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+dist/
+build/
+
+# The operator's own actors and workflows — never the repo's
+.kontra/
+
+# Secrets, in every shape they have taken
+.env
+*.pem
+*.key
