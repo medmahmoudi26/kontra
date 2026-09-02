@@ -1,0 +1,35 @@
+meta {
+  name: rejects an unknown project
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/infra/stacks/evil-project%2Fx/up
+  body: json
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{stateToken}}
+}
+
+body:json {
+  {
+    "args": {}
+  }
+}
+
+assert {
+  res.status: lte 502
+}
+
+docs {
+  Guard. The route picks WHICH stack to act on, never WHAT the stack contains — the program
+  registry (`infra/stacks.ts`) is the only dispatch table. A caller able to supply the program
+  could provision anything the credential allows.
+}

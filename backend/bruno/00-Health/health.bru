@@ -1,0 +1,29 @@
+meta {
+  name: health
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/health
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("ok", function() { expect(res.getBody().ok).to.eql(true); });
+}
+
+docs {
+  Liveness. The one route that never touches Temporal — `server.ts` boots and serves
+  catalog/graph with no cluster running, so a 200 here does NOT imply Temporal is up.
+  Use `Runs > list executions` for that.
+}

@@ -1,0 +1,2 @@
+# the built binary (cd cli && go build -o kontra .)
+/kontra

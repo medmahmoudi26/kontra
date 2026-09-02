@@ -1,0 +1,24 @@
+meta {
+  name: preview dataset
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/datasets/{{datasetName}}/preview
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  First rows of one dataset. Bounded server-side by PREVIEW_ROWS — this is a look, not
+  an export; use `export` or `query` for real work.
+}

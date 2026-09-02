@@ -1,0 +1,9 @@
+node_modules
+dist
+*.tsbuildinfo
+# SQLite run-record store + DuckLake dataset catalog (local artifacts)
+orchestrator.db
+orchestrator.db-wal
+orchestrator.db-shm
+orchestrator-datasets.ducklake*
+orchestrator-data.json

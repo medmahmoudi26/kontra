@@ -1,0 +1,28 @@
+/**
+ * FiraCode Nerd Font, Regular only.
+ *
+ * SEE `README.md` IN THIS DIRECTORY for provenance, the SHA-256, and how the OFL-1.1 licence was
+ * established from the font's own `name` table. `LICENSE-OFL-1.1.txt` ships beside the font because
+ * OFL-1.1 §2 requires the copyright notice and the licence to travel with every copy.
+ *
+ * REGULAR ONLY, AND NO SYNTHETIC BOLD FACE. The reference implementation ships Bold too, which is
+ * another 1.11 MB for a face a terminal barely uses: a Machine's journal is one weight, and the
+ * places a tile does want emphasis (a failing chip, an elided-bytes badge) are chrome, not terminal
+ * cells. xterm's own `fontWeightBold` then resolves against this same file and the browser
+ * synthesises the weight, which for box-drawing and powerline glyphs is what you want anyway — a
+ * separately hinted bold face makes U+E0B0 a different width and tears a powerline seam.
+ *
+ * `font-display: swap` renders in the fallback first and swaps when the font arrives. That is the
+ * right trade for a 1.08 MB face (the alternative, `block`, is a blank wall for up to 3 s) but it has
+ * a consequence this page cannot ignore: the swap changes xterm's cell metrics after a terminal has
+ * already measured itself, and the measured cols/rows are what the streamer `stty`s before
+ * `tmux attach`. `theme.ts`'s `whenTerminalFontReady()` is how `TerminalTile` learns to re-measure.
+ */
+
+@font-face {
+  font-family: 'FiraCode Nerd Font';
+  src: url('./FiraCodeNerdFont-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

@@ -1,0 +1,34 @@
+meta {
+  name: set digest
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/api/actors/echo@0.1.0/digest
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+body:json {
+  {
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  Worker self-registration of its OCI image digest (ADR 0011). Updates ONLY the digest,
+  preserving catalogued schemas.
+
+  This is the switch that turns admission pinning on: once a digest is catalogued, a
+  dispatch whose node pins a different one is rejected with 409. Nothing sets
+  `KONTRA_ACTOR_DIGEST` on the fleet today, which is why pinning is currently OFF there.
+}

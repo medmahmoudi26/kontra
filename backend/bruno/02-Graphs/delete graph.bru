@@ -1,0 +1,23 @@
+meta {
+  name: delete graph
+  type: http
+  seq: 5
+}
+
+delete {
+  url: {{baseUrl}}/api/graphs/bruno-smoke
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  Cleanup for the smoke graph above; keeps the collection re-runnable.
+}

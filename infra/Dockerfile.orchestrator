@@ -1,0 +1,136 @@
+# The orchestrator image: one Node image, three entrypoints — the HTTP API + built SPA
+# (dist/src/server.js), the isolated materializer (dist/src/materializer.js) and the Pulumi
+# provisioner (dist/src/infra.js). Compose runs each as its own service.
+#
+# Build context is ./backend (see docker-compose.yml). No actor code and no Python here:
+# Actors run in their own images on their own task queues, and the (optional) authoring
+# endpoint needs a python3 that this lean image omits.
+
+# ---- build: compile TS to dist/ and the SPA to web/dist/ ----
+FROM node:22-slim AS build
+WORKDIR /app
+RUN corepack enable   # pnpm, pinned by each package.json "packageManager" field
+
+# Server build (tsc). The contract surface now lives at the seam root
+# (types.ts + the generated _gen + the congruence guard), not a contract/ subdir.
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY tsconfig.json ./
+# graph.schema.json went with the interpreter (ADR 0023 §12) — there is no graph to validate.
+COPY types.ts entry.contract.ts ./
+COPY _gen ./_gen
+COPY src ./src
+RUN pnpm run build
+
+# SPA build (resolves @core/@contract against ../src and the seam root, copied above).
+#
+# The query workbench calls token-gated routes (they read every dataset), and Vite can only
+# expose a `VITE_`-prefixed var, at BUILD time. Note what that means: the token ends up inside
+# the bundle, so it is only as private as the page serving it — which is why this whole surface
+# belongs on the private network, not behind a public port. Leave it unset and the workbench
+# renders but says "unauthorized" instead of silently showing nothing.
+WORKDIR /app/web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web/ ./
+ARG VITE_KONTRA_EXPLORE_TOKEN=""
+ENV VITE_KONTRA_EXPLORE_TOKEN=$VITE_KONTRA_EXPLORE_TOKEN
+# The Dashboard (ADR 0020) reaches a DIFFERENT origin — the streamer's own port on
+# orchestrator-infra — so its base URL cannot be inferred from the page and has to be injected.
+# Left unset, the page falls back to its own host on :8090, which is right for local compose.
+#
+# Its token mints WebSocket tickets and nothing else. Deliberately NOT the state token: that one
+# also authorises POST /api/infra/stacks/:fqn/:op, and this value ends up inside the bundle, so a
+# browser credential must not be able to spend money. Unset leaves the Dashboard saying it has no
+# token, and the streamer answering 503 — fail-closed on both sides.
+ARG VITE_KONTRA_PANEL_BASE=""
+ENV VITE_KONTRA_PANEL_BASE=$VITE_KONTRA_PANEL_BASE
+# NO panel token is baked in. It used to be (`VITE_KONTRA_PANEL_TOKEN`), and the comment above
+# describes why that was tolerable for the workbench and not here: a token inside the bundle is a
+# secret inside a shipped artifact — it outlives the container, travels with the image, and cannot be
+# rotated without a rebuild. The SPA now POSTs to orchestrator-api's own
+# `/api/panels/ticket`, same origin and credential-free, and THAT process holds the token.
+# This does not authenticate the API, which has no auth to speak of; it removes the durable leak.
+RUN pnpm run build
+
+# ---- pulumi: the CLI the Automation API drives (ADR 0019) ----
+#
+# `@pulumi/pulumi` is a CLIENT of the `pulumi` binary, not a replacement for it: an inline
+# program still forks the CLI, which forks `pulumi-language-nodejs`, which forks one process
+# per provider. Without these on PATH orchestrator-infra imports fine and fails at the first
+# `up` — the worst place to discover a missing dependency.
+#
+# Pinned to the SDK's own version so the engine and the client never disagree about state
+# format, and staged so the runtime image gets the binaries without curl or a package index.
+FROM node:22-slim AS pulumi
+ARG PULUMI_VERSION=3.256.0
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL "https://get.pulumi.com/releases/sdk/pulumi-v${PULUMI_VERSION}-linux-x64.tar.gz" \
+       | tar -xz -C /usr/local \
+    && rm -rf /var/lib/apt/lists/*
+# THE TARBALL IS EVERY LANGUAGE, AND WE SPEAK ONE. The SDK ships a language host per supported
+# language — go, python, java, dotnet, yaml, pcl, bun — at ~31-36 MB each, and ADR 0019 drives the
+# Automation API from a NODE inline program. `pulumi-language-nodejs` is the only one that can ever
+# be forked here; the rest are 201 MB of binaries this image cannot execute a line of.
+#
+# DELETED BY NAME, NOT BY A GLOB THAT KEEPS WHAT IT RECOGNISES. A future language host would be
+# dead weight rather than a broken build, which is the right direction to fail in — and `pulumi`
+# itself, `pulumi-language-nodejs` and `pulumi-resource-pulumi-nodejs` are named as keepers so a
+# rename upstream breaks the build here instead of at the first `up`.
+RUN cd /usr/local/pulumi \
+    && rm -rf pulumi-language-go pulumi-language-python pulumi-language-python-exec \
+              pulumi-language-java pulumi-language-dotnet pulumi-language-yaml \
+              pulumi-language-pcl pulumi-language-bun pulumi-resource-pulumi-python \
+              pulumi-watch \
+    && test -x pulumi && test -x pulumi-language-nodejs
+
+# ---- runtime: prod deps + compiled output only ----
+FROM node:22-slim
+WORKDIR /app
+ENV NODE_ENV=production
+# ca-certificates: node:22-slim omits it, and DuckDB fetches its ducklake extension
+# over https at first dataset write — without the CA bundle every parquet dataset
+# materialization fails with an SSL error.
+# openssh-client: the Dashboard streamer (ADR 0020) SHELLS OUT to `ssh` for every probe, snapshot and
+# attach. Pulumi never needed it — `command.remote.Command` dials SSH in Go — so this image has never
+# had it, and without it every Terminal fails with ENOENT while `docker compose config` and every unit
+# test still pass. tmux: the client binary the streamer drives; `--mode local` runs it against a
+# mounted socket, and it is ~1 MB.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client tmux \
+    && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+COPY package.json pnpm-lock.yaml ./
+# `@temporalio/core-bridge` SHIPS FIVE PLATFORMS AND THIS IMAGE IS ONE. The Rust core is published
+# prebuilt for aarch64/x86_64 darwin, x86_64 windows, and aarch64/x86_64 linux-gnu — 140 MB, of
+# which 30 MB is loadable here and 110 MB could not be executed if we tried. Deleted after the
+# install rather than through a package-manager knob because there isn't one: the binaries are
+# files in the published tarball, not optional dependencies.
+#
+# `-mindepth 1 -maxdepth 1 ! -name` so the KEEPER is named and everything else goes: a new target
+# added upstream is dropped by default, which is the safe direction — and the `test -f` below turns
+# a rename of the one we keep into a build failure instead of a worker that cannot start.
+RUN pnpm install --frozen-lockfile --prod && pnpm store prune \
+    && for rel in node_modules/.pnpm/@temporalio+core-bridge@*/node_modules/@temporalio/core-bridge/releases; do \
+         find "$rel" -mindepth 1 -maxdepth 1 ! -name 'x86_64-unknown-linux-gnu' -exec rm -rf {} + ; \
+         test -d "$rel/x86_64-unknown-linux-gnu" ; \
+       done
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/web/dist ./web/dist
+
+# The engine, plus the provider plugins BAKED IN rather than fetched on first use. A provision
+# that downloads its own provider makes `fleet up` depend on GitHub being reachable at exactly
+# the moment we are trying to build machines, and turns a version bump into a silent one.
+COPY --from=pulumi /usr/local/pulumi /usr/local/pulumi
+ENV PATH=/usr/local/pulumi:$PATH
+ENV PULUMI_SKIP_UPDATE_CHECK=true
+RUN pulumi plugin install resource digitalocean 4.78.1 \
+    && pulumi plugin install resource command 1.2.1
+
+ENV KONTRA_ORCHESTRATOR_PORT=8088
+EXPOSE 8088
+# THE MERGED ENTRY POINT (ADR 0031 §1): one process, three roles, three unchanged task queues.
+# `KONTRA_ORCHESTRATOR_ROLES` selects the subset — unset means all three, which is the appliance.
+# `dist/src/server.js`, `dist/src/materializer.js` and `dist/src/infra.js` still run standalone and
+# are what a `command:` overrides with; docker-compose.yml's orchestrator-infra is the one that
+# does, because a Pulumi engine may not share this PID.
+CMD ["node", "dist/src/main.js"]

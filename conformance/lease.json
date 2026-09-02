@@ -1,0 +1,110 @@
+{
+ "why": "A **Lease** (ADR 0037) is written by one language and read by two others, with no registration step between them. `sdk/python/actorkit/fleet.py` BUILDS a lease id and schedules the two activities by name; `backend/src/lease.ts` parses that id back and serialises the **Lease** workflow; `cli/lease.go` decodes the **Lease** workflow off the HTTP surface. Nothing joins the three but matching string literals.",
+
+ "failure": "A LEASE HELD UNDER ONE SPELLING AND DROPPED UNDER ANOTHER IS A LEASE THAT IS NEVER DROPPED, and a Lease that is never dropped is Machines that bill until a human notices. There is no loud failure anywhere on the path: the hold succeeds, the drop succeeds against an id the **Lease** workflow is not holding, `Map.delete` of an absent key returns quietly, and the **Lease** workflow keeps a claim whose holder nothing can find. Every side stays green — Python asserts the Python spelling, TypeScript asserts the TypeScript one — and the only observable is a cloud bill. The **Lease** workflow's clock bounds the damage to one TTL, which is exactly why the TTL exists and is not a reason to let the spellings drift.",
+
+ "shape": "Three sections, each with exactly two implementations, and they are not the same two. `names` is Python and TypeScript. `lease_id` is Python (the writer) and TypeScript (the reader). `lease_set_wire` is TypeScript (the writer) and Go (the reader). There is no section with one implementation: a value only one language computes is pinned by that language's own test, not here.",
+
+ "names": {
+  "why": "Every string below reaches a Temporal activity name or is spliced into an id. None of them fails loudly when it is wrong: an activity scheduled under a name nobody registered does not error, it sits on the queue until ScheduleToStart fires, which presents as a Run that hangs at the first line of its fleet scope.",
+  "cases": [
+   {
+    "name": "hold_activity",
+    "value": "holdFleetLease",
+    "why": "The activity a Run calls to claim a Fleet. Declared as `HOLD_ACTIVITY` in `backend/src/lease.ts` and as `HOLD_LEASE_ACTIVITY` in `actorkit.fleet`, and it must equal the EXPORTED FUNCTION NAME in `backend/src/activities/lease.ts` — that is what Temporal registers it under."
+   },
+   {
+    "name": "drop_activity",
+    "value": "dropFleetLease",
+    "why": "The activity a Run calls to let go. Same two declarations, same registration rule."
+   },
+   {
+    "name": "separator",
+    "value": "#",
+    "why": "What divides a holder from its nonce in a lease id. One character, in two languages, and it is the whole of the grammar the section below pins."
+   }
+  ]
+ },
+
+ "lease_id": {
+  "why": "Python BUILDS these ids and TypeScript READS them. The reader is not decoration: `kontra fleet leases` answers 'who is holding this Fleet' out of the holder half, and the **Lease** workflow's own query renders it. A grammar with a writer and no reader would have let any format through; a reader that split differently from the writer would name the wrong Run on the one screen an operator looks at when a Fleet will not die.",
+  "rules": "Build: holder + separator + nonce, always, including when the holder is empty. Parse: split on the LAST separator, not the first — a Temporal workflow id may legally contain a `#` and a nonce never does, so the last one is the only one that is structurally the separator. An id with no separator at all parses as a holder with an empty nonce rather than as an error, because this parses what a **Lease** workflow is HOLDING and a **Lease** workflow that refuses to describe an entry it cannot parse goes blank exactly when somebody needs it.",
+  "cases": [
+   {
+    "why": "The ordinary case: a Run's Temporal workflow id and a deterministic nonce.",
+    "holder": "nscheck-recon-7",
+    "nonce": "a1b2c3d4",
+    "lease": "nscheck-recon-7#a1b2c3d4",
+    "parses": true
+   },
+   {
+    "why": "THE INPUT THAT BREAKS A FIRST-SEPARATOR SPLIT. A workflow id may contain `#`; splitting on the first would report the holder as `weird` and name a Run that does not exist.",
+    "holder": "weird#run",
+    "nonce": "deadbeef",
+    "lease": "weird#run#deadbeef",
+    "parses": true
+   },
+   {
+    "why": "AN UNATTRIBUTED LEASE — `destroy_on_exit=False` takes one. The holder is empty and the separator is still there, so the id is not simply the nonce and the reader must not invent a holder for it.",
+    "holder": "",
+    "nonce": "0f0f0f0f",
+    "lease": "#0f0f0f0f",
+    "parses": true
+   },
+   {
+    "why": "A workflow id with slashes in it, which every fleet-shaped id in this repo has. The separator is not a path separator and neither side may treat it as one.",
+    "holder": "kontra-fleet/nscheck-0.1.0",
+    "nonce": "c0ffee01",
+    "lease": "kontra-fleet/nscheck-0.1.0#c0ffee01",
+    "parses": true
+   },
+   {
+    "why": "PARSE-ONLY: an id with no separator at all. Nothing in this repo builds one, which is exactly why it is here — a reader meets ids a writer it has never seen produced, and this one must read as a holder with no nonce rather than as a crash or as an empty holder.",
+    "holder": "hand-written-lease",
+    "nonce": "",
+    "lease": "hand-written-lease",
+    "parses": true,
+    "builds": false
+   }
+  ]
+ },
+
+ "lease_set_wire": {
+  "why": "The JSON `GET /api/infra/stacks/:fqn/leases` returns. `backend/src/lease.ts` declares the shape the orchestrator serialises and `cli/lease.go` declares a Go struct whose `json:\"...\"` tags decode it. Neither imports the other. This is `terminal.json`'s contract in a second place, written knowing what the first one cost: a `campaign` key the streamer had renamed years earlier, blanking a column in `kontra panels` on every Fleet, with both languages green throughout.",
+  "keys": {
+   "envelope": {
+    "required": ["fleet", "leases"],
+    "optional": ["destroyed"]
+   },
+   "lease": {
+    "required": ["lease", "holder", "expiresAt"],
+    "optional": []
+   },
+   "containment": "ASYMMETRIC, and the asymmetry is the design. TypeScript is the WRITER: its interfaces carry exactly required + optional, because a key it stops sending is one a reader is still waiting for. Go is a READER: its tags must be a SUBSET, because ignoring a key is correct — what it may NOT do is declare a key nobody sends, since `encoding/json` leaves that at the zero value on every response and an empty holder renders identically to a Lease genuinely held by nobody. That reading is not hypothetical here: an unattributed Lease IS a real state with an empty holder, so a misspelled `holder` key would make every Lease look adopted."
+  },
+  "notes": {
+   "holder": "'' is a VALUE, not an absence: an unattributed Lease is one nothing can be asked about, which is why it expires on its clock and is never renewed. A reader must render the empty case as something other than a missing field.",
+   "expiresAt": "Milliseconds since the epoch, as a number. Not an ISO string and not seconds: the **Lease** workflow computes deadlines in milliseconds and a reader that divides or parses is inventing precision it was not given.",
+   "destroyed": "Absent while the Fleet stands. Present and true only once the **Lease** workflow has run the teardown, which it only reaches at zero Leases — so it is also the answer to 'was this Fleet destroyed by the last one out, or by a hand?'"
+  },
+  "golden": {
+   "why": "One serialised **Lease** workflow, so a driver proves it round-trips rather than only that the spellings match. Two Leases, because the shared case is the one this whole slice exists for, and one of them unattributed, because that is the state a wrong `holder` key would hide.",
+   "body": {
+    "fleet": "kontra-fleet/nscheck-0.1.0",
+    "leases": [
+     {
+      "lease": "#0f0f0f0f",
+      "holder": "",
+      "expiresAt": 1756569600000
+     },
+     {
+      "lease": "nscheck-recon-7#a1b2c3d4",
+      "holder": "nscheck-recon-7",
+      "expiresAt": 1756566000000
+     }
+    ]
+   },
+   "order": "Sorted by lease id, ascending, byte-wise. A query answer that reorders between two reads reads as churn on a screen an operator refreshes, and `#` sorts before an alphanumeric — which is why the unattributed one is first here and why that is not an accident to be normalised away."
+  }
+ }
+}

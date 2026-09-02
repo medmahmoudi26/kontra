@@ -1,0 +1,24 @@
+meta {
+  name: summaries health
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/summaries/health
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: eq 200
+}
+
+docs {
+  Health of the summary/materialization pipeline — distinct from `/api/health`, which is
+  just liveness.
+}

@@ -1,0 +1,29 @@
+meta {
+  name: list graphs
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/graphs
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("is an array", function() { expect(res.getBody()).to.be.an("array"); });
+}
+
+docs {
+  Saved graphs. A **Graph** is the design-time document; a **Run** is one execution of
+  one (CONTEXT.md). Position data is normalised on read — legacy position-less graphs
+  once blanked the web UI via a React Flow throw.
+}

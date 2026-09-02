@@ -1,0 +1,36 @@
+meta {
+  name: post progress
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{baseUrl}}/api/runs/{{runId}}/progress
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+body:json {
+  {
+    "nodes": {
+      "n1": {
+        "done": 1,
+        "total": 10
+      }
+    }
+  }
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  Progress ingest. Note this route is UNAUTHENTICATED, like most of the API — anything
+  that can reach :8088 can write progress for any run. Recorded in `auth.ts`, and the
+  reason `/api/infra/*` must be token-gated from its first commit (ADR 0019).
+}

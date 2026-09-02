@@ -1,0 +1,62 @@
+# kontra build-actor — the GitLab CI equivalent of `.github/actions/build-actor/action.yml`.
+#
+# ═══ PUSH, NOT PULL ═══
+#
+# kontra never holds a token to a customer's source. This job runs in the customer's pipeline with
+# the customer's registry credential; the only thing that leaves it is an OCI artifact going to an
+# address the customer named. Nothing here dials kontra.
+#
+# ═══ kontra OWNS NO REGISTRY ═══
+#
+# ADR 0036: `kontra build --push <ref>` takes any OCI reference. `KONTRA_PUSH` may be GitLab's own
+# `$CI_REGISTRY_IMAGE`, ghcr.io, Harbor, ECR, or an airgap mirror. It MUST name a registry host — a
+# reference with no host is Docker Hub in the OCI grammar and `kontra build` refuses it, because
+# docker.io rate-limits manifest reads at 100/hour PER IP and one Fleet exhausts that for every
+# unrelated job on the same egress address.
+#
+# ═══ HOW TO USE IT ═══
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/<org>/kontra/v1/.gitlab/kontra-build-actor.yml'
+#
+#   publish nscheck:
+#     extends: .kontra-build-actor
+#     variables:
+#       KONTRA_ACTOR: examples/go/nscheck
+#       KONTRA_PUSH: "$CI_REGISTRY_IMAGE/bundles/nscheck"     # untagged: takes actor.json's version
+#
+# The three commands below are the whole of it, which is the point: Jenkins, Buildkite or a shell
+# script do the same thing with the same flags. `cli/build_test.go` asserts every `--flag` typed in
+# this file is one `kontra build` actually has, so a rename here cannot go quietly out of date.
+
+.kontra-build-actor:
+  image: golang:1.26
+  variables:
+    # The actor directory (the one holding actor.json), and the OCI reference to publish to.
+    KONTRA_ACTOR: ''
+    KONTRA_PUSH: ''
+    # Credentials for the registry named in KONTRA_PUSH. On GitLab's own registry the predefined
+    # $CI_REGISTRY_USER / $CI_REGISTRY_PASSWORD are already scoped to this project; for anything
+    # else, set these as masked CI variables. Leave the password empty for an anonymous registry.
+    KONTRA_REGISTRY_USER: "$CI_REGISTRY_USER"
+    KONTRA_REGISTRY_PASSWORD: "$CI_REGISTRY_PASSWORD"
+  script:
+    - set -euo pipefail
+    - test -n "$KONTRA_ACTOR" || { echo "KONTRA_ACTOR is the actor directory and is required"; exit 2; }
+    - test -n "$KONTRA_PUSH"  || { echo "KONTRA_PUSH is the OCI reference and is required"; exit 2; }
+    # THE LOGIN HOST IS DERIVED FROM THE REFERENCE, never taken as a separate variable — a login
+    # aimed at a host the artifact is not going to is a credential sent somewhere for no reason.
+    - |
+      if [ -n "${KONTRA_REGISTRY_PASSWORD:-}" ]; then
+        host="${KONTRA_PUSH#*://}"; host="${host%%/*}"
+        printf '%s' "$KONTRA_REGISTRY_PASSWORD" | docker login "$host" --username "$KONTRA_REGISTRY_USER" --password-stdin
+      fi
+    # ONE COMMAND. --json because the digest is a FIELD, not a line to grep.
+    - kontra build --actor "$KONTRA_ACTOR" --push "$KONTRA_PUSH" --json | tee kontra-artifact.json
+  artifacts:
+    # The digest is the actor's identity under ADR 0032 and the thing a later job (or a human)
+    # records. Keeping it as a job artifact is what makes "which digest did this pipeline publish"
+    # answerable after the log has rotated.
+    paths:
+      - kontra-artifact.json
+    expire_in: 30 days

@@ -1,0 +1,164 @@
+# kontra.yaml — repo-level facts ONLY.
+#
+# This file holds NO per-actor identity. Actors are discovered by the
+# `actors.roots` glob; each actor's (name, version) is INHERITED from its own
+# actor.json and never restated here. Every value below is sourced from the real
+# repo (codec.py constants, manifest.py, the protos, docker-compose.yml, and the
+# hardcoded execution defaults in workflows.py / step.proto) — nothing invented.
+
+apiVersion: kontra.dev/v1
+
+# The single logical contract version. This is the bare token factored into the
+# wire strings — the codec marker ("binary/claim-check-v1") and the manifest
+# schemaVersion ("kontra.actor.v1") REFERENCE it, but the produced bytes stay
+# byte-identical. Also the buf package token (kontra.v1, buf-owned). It is the
+# ONE place to bump the version; the literal strings are never edited directly.
+contractVersion: v1
+
+# Where actors live. Glob only — identity is inherited from each actor.json under
+# these roots (today: echo, pipeline, checkpoint, playwright). Never enumerated here.
+actors:
+  roots:
+    - examples/python/*
+
+# Compat ownership, split across the two surfaces that evolve on different
+# cadences with opposite variance rules. This block RECORDS ownership; it does not
+# enforce it.
+#
+# THIS BLOCK USED TO NAME A SERVICE THAT WAS NEVER RUNNING. `actorIO.owner` named an
+# external schema registry, with an `infra` endpoint and two `profiles` requiring it —
+# and there was no such service in any compose file and no client that ever called one.
+# This is the repo-level facts file, the one place a reader is told to trust. ADR 0027
+# deleted the claim; per-actor I/O compat is owned in-process now, at POST /api/actors.
+contracts:
+  # buf owns the internal control-plane ENVELOPE only (RunEnvelope / StepOptions /
+  # RetryPolicy). Shared identically by TS + Python + Go, so it must not churn
+  # per actor. The payload/params bytes are OPAQUE at this layer.
+  envelope:
+    owner: buf
+    scope: control-plane-only          # StepOptions + (future) RunEnvelope; per-actor I/O is NOT here
+    package: kontra.v1                  # buf package path (contracts/kontra/v1/)
+    messages:
+      - EntryInput                      # entry.proto — the LIVE dispatch input (child-workflow `run`)
+      - StepOptions                     # step.proto — per-step scheduling + author-declared retry
+      - RetryPolicy                     # step.proto — mirrors temporalio RetryPolicy
+      - RunEnvelope                     # run.proto — FUTURE Nexus dispatch envelope; NOT wired (see run.proto)
+  # Per-actor I/O compat is owned IN-PROCESS by the catalog's registration gate
+  # (backend/src/catalog.ts): Draft 2020-12 JSON Schema, carried per (name,
+  # version), and a re-registration whose input/output/params schema differs from the
+  # stored one is refused with 409 (ADR 0004 — the version is immutable and a schema
+  # change bumps it). A NEW version IS compared against the one immediately before it
+  # (backend/src/compat.ts): input BACKWARD, output FORWARD. That half REPORTS and
+  # never refuses — a breaking change in a new version is what versions are for — and the
+  # finding is stored on the actor row and shown on the Actors page (ADR 0027 §4, closed).
+  actorIO:
+    owner: catalog-registration-gate      # backend/src/catalog.ts, POST /api/actors
+    schema: json-schema-draft-2020-12
+    sameVersionChange: refused            # 409 VersionImmutable, naming the Method that moved
+    # STRUCTURAL only: top-level properties/required/declared type. A narrowed bound, a changed
+    # meaning and a dropped Method read clean; `params` is not compared; and unknown (a first
+    # version, a Method new in this one, a schema with no properties) is never called compatible.
+    crossVersionCompat: structural-report  # backend/src/compat.ts — 200 + a stored finding, never a refusal
+    # References are the only payloads that flow through workflow code. Outputs are
+    # offloaded and returned as {ref, unitCount}; payloads strip run-scoped fields
+    # so identical content content-addresses to the same CAS object across runs.
+    refPolicy: refs-as-currency         # ref-out; run-independent content addressing
+
+# The claim-check codec wire constants — the EXECUTION-path data-movement seam.
+# Copied VERBATIM from runtime/python/internals/codec.py and pinned by the conformance
+# corpus; the Python <-> TS ports must produce these byte-for-byte.
+codec:
+  threshold: 131072                                # codec.py: KONTRA_S3_THRESHOLD default = 128 * 1024; offload iff len(data) > threshold
+  marker: binary/claim-check-v1                    # codec.py:35 _CLAIM_CHECK; the `encoding` metadata that triggers decode
+  base64: YmluYXJ5L2NsYWltLWNoZWNrLXYx             # std (not url-safe) base64 of the marker, as it appears in the corpus
+  casKeyLayout: cas/{sha256[:2]}/{sha256}          # codec.py cas_key(); single content-addressed layout under the store prefix
+  shaCase: lower-hex                               # hashlib.sha256(...).hexdigest()
+  conformanceCorpus: conformance/codec/fixtures.json   # the source of truth both harnesses are checked against
+
+# Local infrastructure endpoints, mirrored from docker-compose.yml. Cloud swaps the
+# endpoints, not the shape. Iceberg is env-GATED (not wired locally yet).
+infra:
+  temporalAddress: temporal:7233                   # docker-compose temporal: gRPC :7233 ($KONTRA_ADDRESS)
+  namespace: default                               # single local namespace; namespace-per-author in prod
+  s3:
+    endpoint: http://seaweed:8333                  # docker-compose seaweed: S3 gateway :8333 ($KONTRA_S3_ENDPOINT)
+    bucket: kontra                                 # $KONTRA_S3_BUCKET
+    prefix: ""                                     # $KONTRA_S3_PREFIX — empty by default
+    # CAS keys are tenant-FREE today — the real implemented layout is codec.casKeyLayout
+    # above (cas/<sha[:2]>/<sha>, no tenant segment). Under namespace-per-author the
+    # scheme below adds a {tenant} segment; PLANNED (P3, ADR 0001), not yet wired.
+    casKeyScheme: cas/{tenant}/{sha256[:2]}/{sha256}   # PLANNED (P3) — not implemented
+  # NO SCHEMA REGISTRY. There was an entry here claiming WIRED, with an endpoint env var
+  # and a compose service — and the service was in no compose file, the push script named
+  # in its comment did not exist, and its only importer was imported by nothing. Per-actor
+  # schemas are carried in the actor descriptor and gated at POST /api/actors; there is no
+  # separate registry to point at (ADR 0027).
+  # Output query is a read-only side-channel over OUTPUTS only, NEVER on the execution
+  # path (ADR 0005). The BUILT tier is browser DuckDB-WASM over GET /api/runs/:id/output
+  # (frontend/src/run/dataset.ts) — needs NO extra infra. `iceberg` below is the
+  # FUTURE server-side tier: an async Parquet sink on a real catalog for analytics too
+  # large/cross-run for the browser. P4 — not built; env-gated off.
+  iceberg:
+    enabled: false
+    endpointEnv: KONTRA_ICEBERG_CATALOG
+
+# Degraded local run modes — each profile selects which infra seams are required.
+# Pick the smallest profile that covers what you're exercising.
+#
+# There is no `schemas` profile any more. It required a schema-registry seam that no
+# profile could ever satisfy, so the one profile a reader would pick to "turn schema
+# enforcement on" named a service that could not be started (ADR 0027). Per-actor schema
+# enforcement is not optional and not a seam: it is the registration gate, always on.
+profiles:
+  core:                                            # execution only: Temporal + S3 claim-check
+    requires: [temporal, s3]
+  # The built query plane (browser DuckDB over outputs) needs no extra infra — it has
+  # no profile. `query` below is the FUTURE server-side Iceberg sink only.
+  query:                                           # core + future server-side Iceberg/DuckDB sink (P4)
+    requires: [temporal, s3, iceberg]
+  full:                                            # everything wired
+    requires: [temporal, s3, iceberg]
+
+# Execution defaults, surfaced PER SURFACE from the real hardcodes (workflows.py /
+# step.proto). Only maximum_attempts is declared in the repo today; the retry
+# interval/backoff are INHERITED Temporal SDK defaults (initial 1s, coefficient 2.0,
+# max 100x), not hardcoded — surfaced here for documentation, not as new knobs.
+defaults:
+  # No schedule_to_close_timeout is set on ANY activity today. What exists is the
+  # step start ceiling and a schedule_to_start probe to surface a dead worker.
+  scheduleToClose: null                            # not set anywhere — documented absence, not a value
+  timeouts:
+    loadStartToClose: 365d                         # workflows.py:150 — large hard ceiling only; heartbeat is the real liveness
+    loadHeartbeat: 60s                             # workflows.py:151 (beats every 5s at runtime, runtime.py:184)
+    stepStartToClose: 30m                          # workflows.py:217
+    stepScheduleToStart: 30s                       # workflows.py:220 — surfaces a missing dedicated worker promptly
+    stepHeartbeat: 30s                             # workflows.py:221 (beats every 10s at runtime, runtime.py:132)
+    blobStartToClose: 5m                           # workflows.py:315/381 — fetch_blob / store_blob
+  # maximum_attempts per surface; the SDK-default backoff (initial 1s, coefficient
+  # 2.0, max 100x initial) is INHERITED, not declared. step.proto's RetryPolicy
+  # defaults (initialIntervalMs 1000 / backoffCoefficient 2.0 / maxIntervalMs 60000)
+  # are the author-declarable shape that REPLACES the hardcoded step maxAttempts=3.
+  retry:
+    load:
+      maxAttempts: 1                               # workflows.py:152
+    step:
+      maxAttempts: 3                               # workflows.py:227 (the hardcode step.proto.RetryPolicy will own)
+      initialIntervalMs: 1000                      # step.proto:37 default (SDK-default backoff inherited, not declared)
+      backoffCoefficient: 2.0                      # step.proto:38 default
+      maxIntervalMs: 60000                         # step.proto:39 default
+    blob:
+      maxAttempts: 3                               # workflows.py:316/383 — fetch_blob / store_blob
+  # Per-step failure policy is author-declared (P1: Promise.allSettled + per-record
+  # isolation replaces fail-fast Promise.all). Default surfaced here.
+  onFailure: fail                                  # fail | isolate — fail-fast today; per-record isolation is the P1 target
+
+# Tenancy — namespace-per-AUTHOR in production; locally a single namespace with the
+# tenant field present as "default" so adding real tenants needs no history migration.
+tenancy:
+  model: namespace-per-author
+  default: default                                 # RunEnvelope.tenant (run.proto field 4); selects namespace + scopes the CAS key
+
+# Build-time guarantees. Identity is content-pinned and immutable; images are signed.
+build:
+  immutableVersions: true                          # build refuses to overwrite an existing (name, version)
+  signImages: true                                 # identity should ultimately pin to an image digest, not a mutable :latest tag

@@ -1,0 +1,48 @@
+# Canonical "global" Kontra image — the unit of truth, identical in local and
+# cloud (only routing differs). One actor per image is the boundary everywhere.
+#
+# Contains ONLY the actor-host runtime: the `actorkit` author surface and the
+# `internals` engine (as source on PYTHONPATH, mirroring the repo layout — BOTH
+# seams, since `actor.serve()` hands control from the first to the second) +
+# temporalio (the actor IS a Temporal
+# activity worker, ADR 0018) + redis (the durable state tiers) + boto3
+# (the per-unit blob store) + pydantic. It carries NO actor dependency —
+# Playwright/Chromium and friends live in the per-actor images that are FROM this
+# one (see examples/python/<actor>/Dockerfile). Declaring a dep here would put it
+# on every actor; deps belong to the actor that needs them.
+#
+# NOT pip-installed as a distribution: the source rides on PYTHONPATH exactly like
+# the checkout does — one entry per seam, each named after the package inside it
+# (sdk/python/actorkit, runtime/python/internals), so no shim is needed to point
+# an import name at a differently-named directory.
+#
+# temporalio because the actor process IS a Temporal activity worker. One interpreter serves
+# the actor host and the SDK; nothing here serves HTTP, so there is no web framework in the set.
+#
+# Built and tagged `kontra-host:1` (a MAJOR tag) by `kontra deploy` / the
+# Makefile, so per-actor images pin `FROM kontra-host:1` and survive base patches.
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+COPY sdk/python ./sdk/python
+COPY runtime/python ./runtime/python
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir \
+       temporalio redis boto3 pydantic
+
+ENV PYTHONPATH=/app/sdk/python:/app/runtime/python:/app/sdk/python/_gen
+
+# Runtime interface version. Per-actor images can be checked for ABI compatibility
+# against the base (org.kontra.interface) without rebuilding the world on a patch.
+LABEL org.kontra.interface=v1
+
+# No ENTRYPOINT here: the base carries no actor, so it has nothing to run. Each
+# per-actor image is FROM this one, and the worker entrypoint runs
+#   python3 /actor/<name>/actor.py
+# — a Python actor is run by Python, directly, with no CLI wrapper. The actor.py's
+# `actor.serve()` self-locates its actor.json, derives its task queue from it, and
+# serves RunBatch/Close as a Temporal activity worker.
+# Wiring is env only ($KONTRA_ADDRESS, $KONTRA_REDIS_HOST, $KONTRA_S3_ENDPOINT).

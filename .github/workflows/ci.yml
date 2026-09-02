@@ -1,0 +1,507 @@
+name: ci
+
+# Four seams, four independent jobs:
+#   python  — install the sdk/python seam, ruff + non-e2e pytest, incl. the codec corpus
+#   ts      — orchestrator pnpm install + vitest (incl. the TS conformance test)
+#   go      — the four modules under the root go.work, then the standalone example modules
+#   proto   — `make proto-check` (buf lint + buf breaking against the fork point) + stub drift
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: sdk/python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Editable install of the sdk/python seam (distribution `kontra-sdk`,
+      # package `actorkit`) with dev (pytest) + seaweed (boto3) extras, plus ruff.
+      - name: Install the sdk/python seam
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e './sdk/python[dev,seaweed]'
+          python -m pip install ruff
+
+      # The repo-root `tests/` suite covers the EXAMPLE actors as well as the SDK, and an
+      # example imports its own third-party deps at module scope — so pytest cannot even
+      # COLLECT those modules without them. They are deliberately not SDK extras (an actor's
+      # dependencies live in its own image; see sdk/python/pyproject.toml), so they are
+      # installed here instead, pinned to the same ranges the actor Dockerfiles use.
+      # Only pure-Python, CI-cheap deps belong on this line: crawl4ai/Playwright are NOT
+      # installed, which is why the tests that need a browser carry the `e2e` marker.
+      - name: Install example-actor test dependencies
+        run: python -m pip install 'simhash>=2.1,<3'
+
+      # Lint is advisory for now (no ruff config committed yet) — surface findings
+      # without failing the gate. Remove `|| true` once a ruff config lands.
+      - name: ruff check
+        run: ruff check sdk/python runtime/python conformance tests || true
+
+      # Fast suite: everything except the e2e marker (which boots a Temporal server).
+      - name: pytest (non-e2e)
+        run: pytest -m 'not e2e'
+
+      # The example actors' OWN tests, one process per directory — `testpaths` cannot include
+      # them (the actor registry is a process-global singleton, so importing two example actors
+      # into one session collides on a Method name).
+      #
+      # This step exists because the gap was load-bearing: the ADR 0028 migration to
+      # `async def m(self, batch, dataset)` left webcrawl's and crawl4ai's tests on the old
+      # one-arg call, and the branch stayed green for a week because nothing ran them. An
+      # example actor is the surface an author copies from.
+      - name: pytest (example actors, one process each)
+        run: make test-examples-python
+
+  ts:
+    name: orchestrator
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # Node 22+: the orchestrator uses node:sqlite (catalog/graphs store) — 20 lacks it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # A PYTHON THAT CAN `import actorkit`, because part of this suite runs one.
+      #
+      # `actorControl.test.ts`'s "the generated file, run by Python" block executes the caller this
+      # repo GENERATES against the real SDK — the only check that the generated source is not merely
+      # well-typed but actually runnable. It resolves an interpreter through `KONTRA_PYTHON`, then the
+      # repo venv, then bare `python3`, and it THROWS when none of them can import the SDK rather than
+      # skipping: a check that cannot run is not a check that passed. That is the right call, and it
+      # means this Node job owes it an interpreter — six tests failed here on
+      # `ModuleNotFoundError: No module named 'temporalio'` while passing on every developer machine,
+      # where the SDK is always installed.
+      #
+      # `working-directory` is overridden to the repo root: the editable install path is relative to
+      # it, and this job otherwise runs inside `orchestrator/`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install the Python SDK (the generated-caller check executes it)
+        working-directory: .
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e './sdk/python[dev]'
+
+      # tsc --noEmit: the type gate. It is what enforces that the committed generated
+      # boundary types (_gen) stay compatible with how the interpreter uses them, and
+      # that the entry.contract.ts congruence guard holds.
+      - name: typecheck (tsc --noEmit)
+        run: pnpm run typecheck
+
+      # vitest run over src/**/*.test.ts — includes src/codec/conformance.test.ts,
+      # the TS peer of the byte-compatible claim-check codec gate.
+      - name: vitest (incl. TS conformance test)
+        run: pnpm test
+
+  # frontend is a SEPARATE pnpm project with its own lockfile and its own vitest, and it
+  # had no CI job at all — which is how two real UI regressions rode a fully green branch in
+  # August 2026: `workflowSource.ts` stopped recognising a promoted Dataset as a write, so the
+  # Workflows page under-reported a workflow's outputs, and a generated-caller test broke. Every
+  # gated suite was green the whole time. ~1100 tests were running only when someone remembered.
+  web:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      # THE PARENT'S DEPENDENCIES, AND WHY THIS JOB NEEDS THEM.
+      #
+      # `frontend` is its own package, but its typecheck is NOT self-contained: the SPA
+      # imports shared modules through the `@core/*` alias (`@core/scratch`, `@core/actorControl`,
+      # `@core/panels/pollers`, ...) which resolve to `backend/src`, and tsc follows those
+      # imports into the server's own dependency graph — `@temporalio/client`, `@opentelemetry/*`.
+      # It also finds `@types/node` there, since TypeScript walks `node_modules/@types` upward.
+      #
+      # None of that is in `frontend/node_modules`, so with only the web install this job
+      # failed on eight `TS2307: Cannot find module` errors that no developer could reproduce —
+      # locally the parent install always exists, so the typecheck passed on every machine and
+      # only ever failed here.
+      - name: pnpm install (orchestrator — the SPA typechecks through @core/* into it)
+        working-directory: backend
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: typecheck (tsc --noEmit)
+        run: pnpm run typecheck
+
+      - name: vitest
+        run: pnpm test
+
+  go:
+    name: handler + cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: handler/go.mod
+          cache-dependency-path: |
+            handler/go.sum
+            cli/go.sum
+            sdk/go/go.sum
+            runtime/go/go.sum
+
+      # FOUR modules under the root go.work; `go test ./...` doesn't cross module
+      # boundaries, so run each seam explicitly.
+      #
+      # The Go SDK was absent from both this job and go.work until 2026-08-14, so the entire
+      # thing — including its arm of the codec and blobkey conformance corpora, which exist
+      # precisely to catch cross-SDK drift — had never run in CI. Two of those corpora are
+      # two-sided by design: a Python-only run asserts half a contract.
+      #
+      # sdk/go RUNS FIRST AND ON ITS OWN, which is not cosmetic: its arrow_test.go asks
+      # `go list -deps ./...` whether the author surface reaches the runtime, and the answer is a
+      # property of THIS module's graph. Running it here, before the runtime is built, is also the
+      # cheapest possible statement of the split — if sdk/go needed runtime/go, this step could not
+      # resolve its own imports.
+      - name: sdk/go (build + vet + test, incl. the sdk -> runtime arrow)
+        working-directory: sdk/go
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      - name: runtime/go (build + vet + test)
+        working-directory: runtime/go
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      - name: handler (build + vet + test)
+        working-directory: handler
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      - name: cli (build + vet + test)
+        working-directory: cli
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      # THE SEVEN-STANDALONE-MODULES GATE MOVED TO kontra-actors, IT DID NOT GO AWAY.
+      #
+      # It existed for a reason worth repeating where it used to live: a Go actor is a module an
+      # author COPIES, so it carries its own go.mod and reaches the SDK through a `replace` — which
+      # made the surface a new author starts from the only surface with no gate. That was not
+      # hypothetical: the ADR 0028 migration left two Python actors on the old one-arg call and the
+      # branch stayed green for a week because nothing ran them.
+      #
+      # ADR 0038 moved every actor to kontra-actors, so the gate lives in that repository's own CI
+      # (`GOWORK=off`, `GOTOOLCHAIN=auto`, one `cd` per module — all three load-bearing, see the
+      # note in this repo's Makefile). What remains here is `testdata/fixtureactor`, which the
+      # parity gate and the build-actor job below both use, and which is not a Go module.
+
+  build-actor:
+    # THE CI TEMPLATES, EXERCISED. `.github/actions/build-actor/action.yml` and
+    # `.gitlab/kontra-build-actor.yml` are shipped surface — somebody's pipeline runs those exact
+    # strings — and nothing joins them to `kontra build`'s flag set but matching literals.
+    # `cli/build_test.go` catches a flag that stopped existing; only running them catches a step
+    # that stopped working.
+    #
+    # AGAINST A LOCAL registry:2 AND NOTHING ELSE. ADR 0036 makes the destination the customer's
+    # registry, and this job must never authenticate to one: it publishes to a service container on
+    # loopback, which is also the `localhost:5000` single-box case the ADR keeps.
+    #
+    # The GitLab half is not a GitLab runner and is not pretended to be one. What is asserted is
+    # that its three commands work — the same claim the composite action makes — because the value
+    # of both files is the command line, not the YAML dialect.
+    name: build-actor (the CI templates)
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: handler/go.mod
+          cache-dependency-path: |
+            handler/go.sum
+            cli/go.sum
+
+      - name: install kontra
+        run: go build -o /usr/local/bin/kontra ./cli
+
+      - name: the GitHub Action, against the local registry
+        id: built
+        uses: ./.github/actions/build-actor
+        with:
+          actor: testdata/fixtureactor
+          push: localhost:5000/bundles/fixtureactor
+
+      # THE OUTPUT IS THE CONTRACT. An action whose steps all exit 0 and whose outputs are empty is
+      # the shape of a wrapper that silently stopped parsing what it wraps — the reason `--json`
+      # exists at all rather than a `sed` over the human output.
+      - name: the digest reached the outputs
+        env:
+          DIGEST: ${{ steps.built.outputs.digest }}
+          PINNED: ${{ steps.built.outputs.pinned }}
+          PLACEABLE: ${{ steps.built.outputs.placeable }}
+        run: |
+          set -euo pipefail
+          echo "digest=$DIGEST pinned=$PINNED placeable=$PLACEABLE"
+          case "$DIGEST" in sha256:*) ;; *) echo "the action produced no manifest digest"; exit 1;; esac
+          test "$PLACEABLE" = "true"
+          # …and the registry really holds what the action says it pushed.
+          curl -sf -o /dev/null -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "http://localhost:5000/v2/bundles/fixtureactor/manifests/${DIGEST}"
+
+      - name: the GitLab template's commands, run as written
+        env:
+          KONTRA_ACTOR: testdata/fixtureactor
+          KONTRA_PUSH: localhost:5000/bundles/fixtureactor-gitlab
+        run: |
+          set -euo pipefail
+          # Extracted from the template rather than retyped, so a change there is a change here.
+          python3 - <<'PY' > /tmp/gitlab-script.sh
+          import yaml
+          job = yaml.safe_load(open('.gitlab/kontra-build-actor.yml'))['.kontra-build-actor']
+          print('\n'.join(job['script']))
+          PY
+          test -s /tmp/gitlab-script.sh
+          KONTRA_REGISTRY_PASSWORD='' bash /tmp/gitlab-script.sh
+          test -s kontra-artifact.json
+          python3 -c "import json;d=json.load(open('kontra-artifact.json'));assert d['digest'].startswith('sha256:'),d"
+
+  proto:
+    name: proto-envelope
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # THE GATE READS ITS BASELINE OUT OF THIS CLONE, so the clone has to contain one:
+          # fetch-depth: 0 brings every branch down as a remote-tracking ref AND the history
+          # behind them, which is what `git merge-base HEAD origin/<base>` needs. A shallow
+          # checkout has no common ancestor with anything and `make proto-check` says so rather
+          # than diffing against nothing.
+          fetch-depth: 0
+
+      # github_token lets `buf generate` pull the remote plugins (protocolbuffers
+      # python/pyi + community ts-proto) without rate-limiting.
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+          # PIN the buf CLI. Every codegen plugin in buf.gen.yaml is already version-pinned,
+          # but the well-known types (google/protobuf/*.proto) ship INSIDE the buf binary —
+          # so an unpinned CLI regenerates `backend/_gen/google/protobuf/descriptor.ts`
+          # from a different descriptor.proto than the committed stubs were built from, and
+          # the drift check fails on vendored WKT churn that no one authored. 1.70.0 is the
+          # version that reproduces the committed stubs byte-for-byte.
+          version: 1.70.0
+
+      # protoc-gen-go-temporal is a LOCAL binary plugin (not on the BSR) that buf.gen.yaml
+      # invokes for actor_service.proto's Nexus op — install it so `buf generate` succeeds.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: handler/go.mod
+
+      #
+      # RETRIED, BECAUSE THIS STEP'S ONLY FAILURE MODE IS SOMEBODY ELSE'S NETWORK. `go install` of a
+      # pinned version verifies each module against sum.golang.org, and a checksum tile read that
+      # dies mid-stream fails the whole job with no test having run. OBSERVED 2026-08-27 on
+      # `04f1ba7`: `reading https://sum.golang.org/tile/8/0/x020/688: stream error: INTERNAL_ERROR;
+      # received from peer`, on a commit whose diff touches no proto, no plugin and no Go module.
+      # The pin is unchanged and the sumdb still verifies — this retries the fetch, it does not
+      # weaken what is checked (no GOFLAGS, no GONOSUMDB, no GOPRIVATE).
+      - name: install protoc-gen-go_temporal (local buf plugin)
+        run: |
+          for attempt in 1 2 3; do
+            go install github.com/cludden/protoc-gen-go-temporal/cmd/protoc-gen-go_temporal@v1.24.0 && break
+            if [ "$attempt" = 3 ]; then
+              echo "::error::go install failed three times; this is not a transient fetch"
+              exit 1
+            fi
+            echo "attempt $attempt failed, retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # ONE GATE, ONE SPELLING. `buf lint` and `buf breaking` used to be two inline steps that
+      # existed nowhere else, so the only way to run the contract check was to open a PR and read
+      # the log. `make proto-check` (scripts/proto-check.sh) is the same command on a laptop and
+      # here, which is the only reason a developer can find out before pushing.
+      #
+      # The baseline is the FORK POINT, resolved from this clone. On a PR that is the branch the
+      # PR targets — what THIS PR can actually break, so a stacked PR is measured against the
+      # branch it stacks on and not an unrelated `main`. On a push it is `github.event.before`,
+      # the commit main was at BEFORE the push, which is the only way a change that never saw a PR
+      # gets checked at all — and it is that rather than HEAD^ because a push can carry several
+      # commits, and then HEAD^ is inside the push: a break in its first commit would be on both
+      # sides of the diff and read clean, which is the exact hole this baseline exists to close.
+      # A push that has no reachable `before` (main created, or force-pushed over) fails the gate
+      # loudly instead of comparing against nothing; re-run it with PROTO_BASELINE set.
+      #
+      # Reading the baseline out of the local clone is also why the `insteadOf` token dance is
+      # gone: the old step cloned `https://github.com/<repo>` to get the base branch and, the repo
+      # being private, needed credentials to do it. Nothing is fetched now — the refs are already
+      # here (fetch-depth: 0), and `git merge-base` resolves them to a sha buf reads from `.git`.
+      #
+      # NO LONGER ADVISORY, and this is the moment the old comment named. It was `|| echo
+      # ::warning::` while ADR 0023's flag day landed — the step purge deleted
+      # `kontra/v1/step.proto` and FILE_NO_DELETE reports that as breaking because it IS breaking.
+      # main now carries the deletion, so the diff against it is empty and the gate passes
+      # strictly; leaving it advisory past that point would silence the next UNINTENDED break,
+      # which is the whole reason it exists.
+      - name: proto gate (buf lint + buf breaking)
+        env:
+          PROTO_BASELINE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: make proto-check
+
+      # The generated stubs are committed (sdk/python/_gen + backend/_gen +
+      # handler/_gen); regenerate and fail if anything drifts from what's checked in.
+      # `if: !cancelled()` so a FAILING proto gate cannot mask this: the two answer independent
+      # questions (is the contract change compatible? vs are the committed stubs in sync?), and an
+      # unguarded step would simply never run on the day the gate goes red — which is precisely a
+      # day somebody is editing protos, so a real stub drift would ship undetected.
+      - name: buf generate (drift check)
+        if: ${{ !cancelled() }}
+        run: |
+          buf generate
+          git diff --exit-code -- sdk/python/_gen backend/_gen handler/_gen \
+            || { echo "::error::generated proto stubs are stale — run 'just buf-generate' and commit"; exit 1; }
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════
+  # THE PARITY GATE — does the binary replace compose for LOCAL DEVELOPMENT? (ADR 0031 §5, issue 18)
+  #
+  # Every other job in this file answers a question about source. This one answers a question about
+  # a RUNNING SYSTEM, and it is the only one that can: it starts `kontra up` on a throwaway data
+  # directory, builds and pushes an actor image to the registry inside that process, runs worker
+  # containers against it, dispatches four Batches, and compares the unit and drop counts against
+  # known integers.
+  #
+  # WHY COUNTS AND NOT STATUS. The three failures this exists to catch all reported `completed`: a
+  # chained dispatch that isolated every Unit on a fleet while being invisible on one box; a wiped
+  # batch that came back clean in seven minutes; a node whose Units all failed reporting success
+  # with empty output. `scripts/parity-gate.sh` carries the assertions and the reasoning — this job
+  # is the machine that runs it.
+  #
+  # AND IT RUNS `make test-examples` TWICE, on one commit: the `python` job above runs it with no
+  # control plane (the SDK-side contract, `-m 'not e2e'`), and the gate runs it again with
+  # `E2E=1` against the appliance. Issue 18 asks for that comparison "on the same commit that runs
+  # it against compose"; THE COMPOSE HALF NO LONGER EXISTS — docker-compose.yml lost Temporal, the
+  # object store, the KV, the codec, the registry and orchestrator-api to ADR 0031's earlier
+  # slices, so there is nothing left there to run a suite against. Two runs of one suite, one
+  # control plane apart, is the comparison that is actually available.
+  #
+  # IT IS THE SLOWEST JOB HERE and it is meant to be: a pnpm install, a vite build, two Go builds
+  # and a Docker image. That is the price of a gate that runs something instead of reading it.
+  parity:
+    name: parity gate (the binary runs the local actor path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # THE GO TOOLCHAIN BUILDS TWO THINGS HERE, and the second is easy to forget: the CLI, and —
+      # through `kontra serve --mode local`, which the e2e leg needs a Worker from — `go run .`
+      # inside handler/. Both modules are under the root go.work.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: handler/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install the Python SDK and the example actors' test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e './sdk/python[dev,seaweed]'
+          python -m pip install 'simhash>=2.1,<3'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+
+      # THE ORCHESTRATOR FROM THE CHECKOUT, not from a bundle. `kontra up --orchestrator=local`
+      # runs `backend/dist` directly, which is what makes this job about THIS commit's control
+      # plane; `--orchestrator=bundle` would resolve a 330 MB dependency tree and build a
+      # content-addressed artifact, which `.github/workflows/appliance.yml` already gates four
+      # platforms of. Two different questions, two different jobs.
+      # THE SPA IS A SIBLING NOW, NOT A CHILD. It was `cd web` from inside the orchestrator, and the
+      # rename that made `orchestrator/` into `backend/` + `frontend/` could not see that: the path
+      # this step walks is not spelled anywhere, it is ACCUMULATED across two `cd`s, so a sweep for
+      # `orchestrator/web` matched nothing and the second hop kept pointing at a directory that had
+      # stopped existing. `tests/test_workflow_paths.py` now resolves these the way the shell does.
+      - name: build the orchestrator and the SPA
+        run: |
+          cd backend
+          pnpm install --frozen-lockfile
+          pnpm exec tsc
+          cd ../frontend
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      # DOCKER, AND THE ADDRESS A CONTAINER CAN REACH. The appliance binds 127.0.0.1 by default
+      # (ADR 0031 §3) and an actor Worker is a container (ADR 0031 §2), whose loopback is its own —
+      # so the gate binds docker0's gateway. Asserted rather than assumed, because a runner image
+      # that changed its bridge subnet would otherwise fail deep inside a dispatch.
+      - name: docker is here and its bridge gateway is a local address
+        run: |
+          set -euo pipefail
+          docker version --format 'engine {{.Server.Version}}'
+          gw=$(docker network inspect bridge --format '{{ (index .IPAM.Config 0).Gateway }}')
+          echo "bridge gateway: $gw"
+          ip -o addr show | grep -q " inet $gw/" \
+            || { echo "::error::the daemon's bridge gateway $gw is not an address on this runner"; exit 1; }
+
+      # THE GATE. Its exit code is the job's, and it prints which condition failed and what it
+      # measured. Not piped into anything: a pipeline reports its LAST stage's status, which is how
+      # a suite that fails gets reported as passing.
+      - name: scripts/parity-gate.sh
+        env:
+          KONTRA_GATE_ORCHESTRATOR: local
+        run: bash scripts/parity-gate.sh

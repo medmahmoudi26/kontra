@@ -1,0 +1,33 @@
+meta {
+  name: save graph
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/graphs
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "bruno-smoke",
+    "name": "bruno smoke",
+    "nodes": [],
+    "edges": []
+  }
+}
+
+assert {
+  res.status: lte 400
+}
+
+docs {
+  Upsert a saved graph. The body is the design document (nodes/edges), not an execution
+  graph — `serialize/toExecutionGraph.ts` performs that translation at dispatch.
+}

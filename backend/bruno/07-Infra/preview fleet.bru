@@ -1,0 +1,45 @@
+meta {
+  name: preview fleet
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/infra/stacks/kontra-fleet%2Fcampaign-bruno/preview
+  body: json
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{stateToken}}
+}
+
+body:json {
+  {
+    "args": {
+      "role": "crawl",
+      "machines": 1
+    }
+  }
+}
+
+assert {
+  res.status: lte 502
+}
+
+docs {
+  AUTHENTICATED with the STATE token — deliberately the narrower one. Reading a dataset
+  and provisioning cloud machines are not the same privilege, and the explore token is handed
+  out for the workbench.
+
+  Starts a `preview` workflow and returns immediately with `{fqn, op, workflowId, runId}`. The
+  route NEVER blocks on Pulumi: a ten-machine `up` takes minutes, longer than any proxy holds a
+  connection.
+
+  The stack fqn is URL-encoded (`kontra-fleet%2Fcampaign-bruno`) because it contains a slash.
+  It is also the workflow id — which is what makes two concurrent `up`s on one stack impossible.
+}

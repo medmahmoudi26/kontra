@@ -1,0 +1,38 @@
+{
+ "why": "the output-Dataset author surface (ADR 0028), pinned so the Python and Go SDKs AGREE rather than each passing a check against its own docs. A Method pushes to its third parameter at whatever granularity it likes; this file fixes, for each granularity, the units in and the ordered records out. Each side selects the body named by `case` and drives it through its real engine in inline mode (no object store), then compares the run's `results` to `expected`. The peers assert THIS file: runtime/go/engine/output_dataset_conformance_test.go and tests/test_output_dataset_conformance.py.",
+ "covers": {
+  "one-per-unit": "the ordinary 1->1: push one record per Unit, in input order",
+  "one-per-three": "1->0-or-1 keyed on the Unit's index: push {i: index} when index%3==0 — proves the granularity is the author's, no flag",
+  "n-per-unit": "1->N and 1->0 in one Batch: push `value` records for a Unit whose value is N; a Unit with value 0 pushes nothing and does not fail",
+  "none-for-a-unit": "a Unit may push nothing and is not a failure — it just produced no rows",
+  "whole-batch": "one record for the WHOLE Batch, pushed AFTER the loop: it has no current Unit, so it rides the tail and folds into results after the per-Unit output"
+ },
+ "ordering": "records pushed while a Unit is current attribute to it and assemble in input-index order; records pushed with no current Unit ride the tail in push order and fold in after. These cases push sequentially (no author-written goroutines), so the order is deterministic and asserted; concurrent pushes are a separate, set-not-sequence guarantee each SDK tests on its own.",
+ "cases": [
+  {
+   "case": "one-per-unit",
+   "units": ["a", "b", "c"],
+   "expected": [{"u": "a"}, {"u": "b"}, {"u": "c"}]
+  },
+  {
+   "case": "one-per-three",
+   "units": ["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+   "expected": [{"i": 0}, {"i": 3}, {"i": 6}]
+  },
+  {
+   "case": "n-per-unit",
+   "units": [2, 0, 1],
+   "expected": [{"seed": 2, "k": 0}, {"seed": 2, "k": 1}, {"seed": 1, "k": 0}]
+  },
+  {
+   "case": "none-for-a-unit",
+   "units": ["a", "skip", "b"],
+   "expected": [{"u": "a"}, {"u": "b"}]
+  },
+  {
+   "case": "whole-batch",
+   "units": ["a", "b", "c"],
+   "expected": [{"total": 3}]
+  }
+ ]
+}

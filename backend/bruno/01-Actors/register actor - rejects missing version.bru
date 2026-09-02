@@ -1,0 +1,36 @@
+meta {
+  name: register actor - rejects missing version
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/actors
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+body:json {
+  {
+    "key": "broken@0.0.0",
+    "name": "broken"
+  }
+}
+
+assert {
+  res.status: eq 400
+}
+
+tests {
+  test("names the missing fields", function() { expect(res.getBody().error).to.contain("version"); });
+}
+
+docs {
+  Guard test. Identity is the cross-plane key (the catalog row and its schemas, the Nexus
+  endpoint, the Temporal task queue), so a partial identity must be refused loudly rather
+  than stored.
+}

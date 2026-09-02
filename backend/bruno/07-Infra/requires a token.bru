@@ -1,0 +1,40 @@
+meta {
+  name: requires a token
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/api/infra/stacks/kontra-fleet%2Fcampaign-bruno/up
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+body:json {
+  {
+    "args": {
+      "role": "crawl",
+      "machines": 1
+    }
+  }
+}
+
+assert {
+  res.status: gte 401
+}
+
+docs {
+  No Authorization header. MUST NOT be 2xx.
+
+  This is the most important assertion in the collection: this route reaches the one process
+  holding DIGITALOCEAN_TOKEN. The other 26 routes on :8088 are unauthenticated (auth.ts records
+  that), so an ungated infra route would hand anyone who can reach the port the ability to spend
+  money and stand up attack infrastructure.
+
+  `503` means no token is configured server-side (checkBearer fails closed); `401` means the
+  token was missing or wrong. Either is a pass — `200` is a critical failure.
+}

@@ -1,0 +1,58 @@
+meta {
+  name: register actor - refuses a changed schema
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/api/actors
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+body:json {
+  {
+    "key": "echo@0.1.0",
+    "name": "echo",
+    "version": "0.1.0",
+    "schemaVersion": "kontra.actor.v1",
+    "operations": [
+      {
+        "name": "run",
+        "description": "Echo each unit back.",
+        "input": { "type": "object", "properties": { "text": { "type": "integer" } } }
+      }
+    ]
+  }
+}
+
+assert {
+  res.status: eq 409
+}
+
+tests {
+  test("names the Method whose schema moved", function() {
+    expect(res.getBody().error).to.contain('Method "run"');
+  });
+  test("says the fix is a version bump", function() {
+    expect(res.getBody().error).to.contain("bump");
+  });
+}
+
+docs {
+  ADR 0004, enforced: `echo@0.1.0` was registered two requests ago with `text` as a string;
+  this posts the same version with `text` as an integer. Refused 409 — the version is
+  immutable and any input/output/params change must bump it.
+
+  THE DEV-LOOP COST IS THE POINT. Editing an actor's types and re-serving without bumping
+  now fails here, loudly, instead of overwriting the schema a designed pipeline was typed
+  against and surfacing later inside a run as data that does not fit. Nothing bypasses it.
+
+  This one request depends on the `register actor` above it: run the folder, not the
+  request. Alone, against a catalog with no `echo@0.1.0`, this body is a first
+  registration and answers 200.
+}

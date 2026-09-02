@@ -1,0 +1,34 @@
+meta {
+  name: start run
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/runs
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+body:json {
+  {
+    "graph": {
+      "nodes": [],
+      "edges": []
+    },
+    "params": {}
+  }
+}
+
+assert {
+  res.status: lte 500
+}
+
+docs {
+  Dispatch an inline execution graph without saving it first. Returns a server-minted
+  run id, same as the saved-graph path.
+}

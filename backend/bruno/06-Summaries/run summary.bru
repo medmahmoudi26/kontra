@@ -1,0 +1,23 @@
+meta {
+  name: run summary
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/summaries/runs/{{runId}}
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  Materialized summary for one run.
+}

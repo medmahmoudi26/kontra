@@ -1,0 +1,38 @@
+.git
+.venv
+.venv-actor
+# NOTHING THAT BUILDS FROM THIS CONTEXT NEEDS THESE, and they are most of it.
+#
+# `infra/Dockerfile.pyworker` is the only Dockerfile whose context is the repo root — `kontra
+# deploy` tars it to build `kontra-host:1` — and it COPYs `sdk/python` + `runtime/python` and
+# nothing else. Without
+# these two lines that build streams ~1.5 GB to the daemon before the first RUN: 500 MB of
+# orchestrator dependencies and a scratch directory full of transcripts. On a box where disk is
+# the thing that runs out, an ignored file is cheaper than a deleted one.
+**/node_modules
+.scratch
+.demo
+*.jsonl
+.pytest_cache
+__pycache__
+*.pyc
+*.egg-info
+build
+dist
+out
+sdk/python/_gen
+# the example actors live in the seam but are NOT runtime — keep them out of the
+# kontra-host base (its build context is the repo root; the per-actor images build
+# from their own context under examples/python/<name>, unaffected by this).
+examples/python
+
+# Compiled example binaries — 52 MB each, and .gitignore does NOT apply to Docker: a Go
+# actor's build context is the repo root (it needs sdk/go + runtime/go), so every sibling example's
+# binary rode along. That is what filled the disk mid-deploy. Listed explicitly because
+# Docker's matcher cannot express .gitignore's "no extension" shape rule — so a NEW example
+# needs a line here. The examples' SOURCES must stay: the actor being built lives among them.
+examples/go/subfinder/subfinder
+examples/go/nuclei/nuclei
+examples/go/desync/desync
+examples/go/dnsfacts/dnsfacts
+examples/go/linkfind/linkfind

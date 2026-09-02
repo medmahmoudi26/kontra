@@ -1,0 +1,111 @@
+# kontra/build-actor — build an actor's Artifact and push it to a registry YOU own.
+#
+# ═══ PUSH, NOT PULL ═══
+#
+# kontra never holds a token to a customer's source. This job runs inside the customer's CI, with
+# the customer's registry credential, and the only thing that leaves it is an OCI artifact going to
+# an address the customer named. Nothing here dials kontra, and kontra needs no read access to this
+# repository. For a product sold to security teams that is not a small property, and it is the
+# reason the shape is an action rather than a webhook kontra calls back.
+#
+# ═══ kontra OWNS NO REGISTRY ═══
+#
+# ADR 0036: `kontra build --push <ref>` takes any OCI reference. `push:` below may be ghcr.io,
+# GitLab's registry, Harbor, ECR, or a mirror in an airgap. There is no kontra registry, no kontra
+# versioning scheme and no kontra deployment store to be inside of — what kontra keeps is which
+# digest a version currently names, and this action's `digest` output is that value.
+#
+# `push:` MUST NAME A REGISTRY. A reference with no host means Docker Hub in the OCI grammar, and
+# `kontra build` refuses it: docker.io rate-limits manifest reads at 100/hour PER IP, so one Fleet
+# pulling one actor exhausts it for every unrelated job on that egress address.
+#
+# ═══ THIS FILE IS THE ACTION; PUBLISHING IT AS kontra/build-actor@v1 IS A REPO SPLIT ═══
+#
+# It lives here so it is versioned with the CLI whose flags it types and is exercised by this repo's
+# own CI (`.github/workflows/ci.yml`, job `build-actor`). Publishing it under `kontra/build-actor@v1`
+# moves the file and changes nothing in it. `cli/build_test.go` asserts every flag typed below is a
+# flag `kontra build` actually has — the failure mode this guards is documented drift, where the
+# markdown still renders and the only thing that changes is that the operator gets `flag provided but
+# not defined`.
+#
+# A GitLab CI equivalent is `.gitlab/kontra-build-actor.yml`. Both are the same three commands, so
+# Jenkins, Buildkite or a shell script work identically.
+
+name: kontra build-actor
+description: Build a kontra actor's Artifact and publish it to an OCI registry you own.
+
+inputs:
+  actor:
+    description: Path to the actor directory (the one holding actor.json).
+    required: true
+  push:
+    description: >-
+      The OCI reference to publish to, e.g. ghcr.io/<org>/bundles/<actor>:<version>. Must name a
+      registry host; a reference with no host is Docker Hub and is refused. An untagged reference
+      takes the actor's own version from actor.json.
+    required: true
+  registry-username:
+    description: Username for `docker login` against the registry in `push`. Omit for an anonymous registry.
+    required: false
+    default: ''
+  registry-password:
+    description: >-
+      Password or token for `docker login`. Pass a secret, never a literal. It is used only to
+      authenticate to YOUR registry and never leaves this job.
+    required: false
+    default: ''
+
+outputs:
+  digest:
+    description: The OCI manifest digest of the published Artifact — the identity a run records (ADR 0032).
+    value: ${{ steps.build.outputs.digest }}
+  reference:
+    description: The tagged reference it was published to.
+    value: ${{ steps.build.outputs.reference }}
+  pinned:
+    description: The immutable reference — `<repo>@sha256:…`. This is the one to record and to mirror.
+    value: ${{ steps.build.outputs.pinned }}
+  placeable:
+    description: >-
+      Whether a Fleet placement can resolve this Artifact. A placement derives `bundles/<actor>` at
+      its own registry, so an Artifact pushed to any other repository is publishable and mirrorable
+      but not placeable until it is copied there.
+    value: ${{ steps.build.outputs.placeable }}
+
+runs:
+  using: composite
+  steps:
+    # THE CREDENTIAL IS THE CUSTOMER'S AND IS SCOPED TO THE HOST THEY NAMED. The registry is derived
+    # from `push` rather than taken as a fourth input, so a login cannot be aimed at a host the
+    # artifact is not going to.
+    - name: Log in to the registry
+      if: inputs.registry-password != ''
+      shell: bash
+      env:
+        KONTRA_PUSH: ${{ inputs.push }}
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+      run: |
+        set -euo pipefail
+        host="${KONTRA_PUSH#*://}"
+        host="${host%%/*}"
+        printf '%s' "$REGISTRY_PASSWORD" | docker login "$host" --username "$REGISTRY_USERNAME" --password-stdin
+
+    # ONE COMMAND. --json because the digest is a FIELD and not a line to grep: a wrapper that
+    # scraped the human output would break on any change to it and would pass while the value drifted.
+    - name: kontra build --push
+      id: build
+      shell: bash
+      env:
+        KONTRA_ACTOR: ${{ inputs.actor }}
+        KONTRA_PUSH: ${{ inputs.push }}
+      run: |
+        set -euo pipefail
+        out="$(kontra build --actor "$KONTRA_ACTOR" --push "$KONTRA_PUSH" --json)"
+        printf '%s\n' "$out"
+        python3 - "$out" <<'PY' >> "$GITHUB_OUTPUT"
+        import json, sys
+        d = json.loads(sys.argv[1])
+        for k in ("digest", "reference", "pinned", "placeable"):
+            print(f"{k}={json.dumps(d[k]) if isinstance(d[k], bool) else d[k]}")
+        PY

@@ -1,0 +1,95 @@
+{
+ "why": "Where a Bundle lives once it is an OCI artifact (ADR 0036). Two writers on opposite sides of a language boundary and no registration step: cli/bundle.go PUSHES to this address and backend/src/activities/fleet.ts RESOLVES from it, and the address is assembled from four separate arguments on each side. That is the shape this repo has already been bitten by five times in one restructure — a path that is never spelled as a literal anywhere, so a sweep for it matches nothing.",
+ "failure": "A drift here has no loud failure. The resolver 404s on a Bundle that was published perfectly well, and `fleet.ready()` then waits out its whole timeout on a queue nothing will ever poll — a fleet that provisioned, installed and reported success.",
+ "repo": {
+  "why": "The OCI repository name. `bundles/` is what keeps an actor's Bundle from colliding with the Image `kontra deploy` pushes to <registry>/<name>:<version>.",
+  "cases": [
+   {
+    "why": "ordinary actor",
+    "name": "nscheck",
+    "expect": "bundles/nscheck"
+   },
+   {
+    "why": "hyphens are legal in an OCI name component and this repo ships one",
+    "name": "crawl4ai-canon",
+    "expect": "bundles/crawl4ai-canon"
+   },
+   {
+    "why": "a name that PREFIXES another must not resolve into it",
+    "name": "nscheck-2",
+    "expect": "bundles/nscheck-2"
+   }
+  ]
+ },
+ "reference": {
+  "why": "The mutable name a version resolves through, and the immutable one a mirror copies. A tag moves when somebody deploys; the digest it names never does — which is the same bargain latest.json made, made by the registry instead.",
+  "cases": [
+   {
+    "why": "the controller's registry, which is where a Fleet's Machines pull from",
+    "registry": "10.124.0.2:5000",
+    "name": "nscheck",
+    "version": "0.1.0",
+    "digest": "sha256:7f888382253136f4bc3b0fae5ddeb45e4220583f139c1cd67cb95c0febdb96eb",
+    "tagged": "10.124.0.2:5000/bundles/nscheck:0.1.0",
+    "pinned": "10.124.0.2:5000/bundles/nscheck@sha256:7f888382253136f4bc3b0fae5ddeb45e4220583f139c1cd67cb95c0febdb96eb"
+   },
+   {
+    "why": "the single box, where the registry is the appliance's own port on loopback",
+    "registry": "localhost:5000",
+    "name": "webcrawl",
+    "version": "0.2.0-rc1",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "tagged": "localhost:5000/bundles/webcrawl:0.2.0-rc1",
+    "pinned": "localhost:5000/bundles/webcrawl@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+   }
+  ]
+ },
+ "urls": {
+  "why": "The two distribution-spec endpoints. The MANIFEST url is read once per run by the control plane, which verifies the body against the digest the registry reports; the BLOB url is what every Machine curls, and it is the only one that reaches a Machine at all.",
+  "invariant": "A blob url ENDS with the digest of the bytes it serves. That is what lets a caller pair a url with the sha it is about to verify, and it is asserted separately below because validateMachineActor refuses a pair that disagrees — under the object store those were two independent strings and a mismatched pair was a 65 MiB download that failed at the end.",
+  "cases": [
+   {
+    "why": "what a Machine fetches, and what the control plane resolved it from",
+    "registry": "10.124.0.2:5000",
+    "name": "nscheck",
+    "version": "0.1.0",
+    "sha": "d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "manifest": "http://10.124.0.2:5000/v2/bundles/nscheck/manifests/0.1.0",
+    "blob": "http://10.124.0.2:5000/v2/bundles/nscheck/blobs/sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40"
+   },
+   {
+    "why": "a version with a hyphen and a dot: both are legal in a tag and neither may be escaped",
+    "registry": "localhost:5000",
+    "name": "crawl4ai-canon",
+    "version": "0.2.0-rc1",
+    "sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "manifest": "http://localhost:5000/v2/bundles/crawl4ai-canon/manifests/0.2.0-rc1",
+    "blob": "http://localhost:5000/v2/bundles/crawl4ai-canon/blobs/sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   },
+   {
+    "why": "an all-zero sha is a legal digest and must not be treated as absent",
+    "registry": "10.124.0.2:5000",
+    "name": "nscheck-2",
+    "version": "1.0.0",
+    "sha": "0000000000000000000000000000000000000000000000000000000000000000",
+    "manifest": "http://10.124.0.2:5000/v2/bundles/nscheck-2/manifests/1.0.0",
+    "blob": "http://10.124.0.2:5000/v2/bundles/nscheck-2/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   {
+    "why": "an operator who typed a scheme keeps it — hardcoding http:// would silently downgrade the one deployment that bothered to configure TLS, on the one request that leaves the VPC (this is the airgap mirror case)",
+    "registry": "https://mirror.internal",
+    "name": "nscheck",
+    "version": "0.1.0",
+    "sha": "d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "manifest": "https://mirror.internal/v2/bundles/nscheck/manifests/0.1.0",
+    "blob": "https://mirror.internal/v2/bundles/nscheck/blobs/sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40"
+   }
+  ]
+ },
+ "media_types": {
+  "why": "The three types the manifest carries. A mirror, a scanner and a future `kontra` reader all filter on artifactType, and the config type is what makes the engine part of the digest rather than a mutable file beside it.",
+  "artifact": "application/vnd.kontra.bundle.v1+json",
+  "config": "application/vnd.kontra.bundle.config.v1+json",
+  "layer": "application/vnd.kontra.bundle.layer.v1.tar+gzip"
+ }
+}

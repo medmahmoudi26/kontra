@@ -1,0 +1,92 @@
+{
+ "why": "A Run id rendered as ONE path segment and ONE SQL identifier. It is the first half of a temp Dataset's storage name (ADR 0028) — `tmp_<slug>_<hex8>` — and it has THREE writers: `_slug` in the Python SDK, `tempSlug` in the Go SDK, and `safeName` in the orchestrator, which sanitises the name again on its way to a DuckLake table and an object key. The two SDKs must agree byte for byte; the orchestrator must leave what they produce ALONE, because a name a caller reads in `kontra dataset ls` and a name the lake stores being two strings for one Dataset is the drift a run-derived name exists to remove.",
+ "measured": "2026-08-28. The three rules are NOT the same rule, which both SDK comments said they were. (1) BOUND: the SDKs cut at 64; `safeName` does not truncate. (2) EMPTY: the SDKs fall back to `run`, `safeName` to `unnamed`. (3) LEADING DIGIT: `safeName` prefixes `a` so the name is a legal bare SQL identifier; neither SDK does — see the `2026-sweep` row, whose `safe_name` is `a2026-sweep`. And on RAW input the character mapping itself differs: `safeName`'s regex has no `u` flag, so it walks UTF-16 code units and turns one astral code point into TWO underscores where both SDKs write one. None of that is live, and the reason is the composed shape: the orchestrator is only ever handed `tmp_<slug>_<hex8>`, which is already ASCII, already under any bound that matters, and always starts with `t`. That is the bound on this corpus, stated so the next reader does not have to re-derive it: what is pinned is that the SDKs agree and that the orchestrator is a no-op on their output.",
+ "bound": 64,
+ "empty": "run",
+ "cases": [
+  {
+   "why": "a real Run id — `<type>-<unixseconds>`, which must pass through untouched",
+   "in": "nscheck-1787150959",
+   "slug": "nscheck-1787150959",
+   "safe_name": "nscheck-1787150959"
+  },
+  {
+   "why": "an explicit --id carrying a path separator and a colon: the two characters an object key and a SQL identifier cannot hold",
+   "in": "runs/2026-08-19T14:49:20+00:00 sweep",
+   "slug": "runs_2026-08-19T14_49_20_00_00_sweep",
+   "safe_name": "runs_2026-08-19T14_49_20_00_00_sweep"
+  },
+  {
+   "why": "a quote and a semicolon — the injection shape, because this string becomes a table name",
+   "in": "o'brien; drop table t",
+   "slug": "o_brien__drop_table_t",
+   "safe_name": "o_brien__drop_table_t"
+  },
+  {
+   "why": "a dot and a dash, which are LEGAL and must SURVIVE; the class most likely to be over-sanitised",
+   "in": "acme.com-scan",
+   "slug": "acme.com-scan",
+   "safe_name": "acme.com-scan"
+  },
+  {
+   "why": "non-ASCII letters: Python's str.isalnum() is Unicode-aware, so the isascii() guard is the whole reason these are underscores rather than letters",
+   "in": "café-münchen",
+   "slug": "caf_-m_nchen",
+   "safe_name": "caf_-m_nchen"
+  },
+  {
+   "why": "an astral code point — ONE rune to Python and Go, TWO UTF-16 code units to a browser",
+   "in": "sweep-📦",
+   "slug": "sweep-_",
+   "safe_name": "sweep-_"
+  },
+  {
+   "why": "a combining sequence: two code points that render as one glyph, so the count differs from the glyph count on every side",
+   "in": "nfd-cafe\u0301",
+   "slug": "nfd-cafe_",
+   "safe_name": "nfd-cafe_"
+  },
+  {
+   "why": "longer than the bound, which must be cut to exactly 64",
+   "in": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+   "slug": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+   "safe_name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+  },
+  {
+   "why": "exactly the bound",
+   "in": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+   "slug": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+   "safe_name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+  },
+  {
+   "why": "one past the bound — the off-by-one a `>=` and a `>` disagree on",
+   "in": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+   "slug": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+   "safe_name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+  },
+  {
+   "why": "empty: an id nothing can be derived from still has to yield a legal segment",
+   "in": "",
+   "slug": "run",
+   "safe_name": "run"
+  },
+  {
+   "why": "nothing but illegal characters, so the empty-fallback must NOT fire — `___` is a legal name",
+   "in": "///",
+   "slug": "___",
+   "safe_name": "___"
+  },
+  {
+   "why": "a LEADING DIGIT, which is legal in a path segment and not in a bare SQL identifier: the one row where the SDKs and the orchestrator part company",
+   "in": "2026-sweep",
+   "slug": "2026-sweep",
+   "safe_name": "a2026-sweep"
+  },
+  {
+   "why": "a NUL and a newline — the two bytes that silently end a string somewhere downstream",
+   "in": "a\u0000b\nc",
+   "slug": "a_b_c",
+   "safe_name": "a_b_c"
+  }
+ ]
+}

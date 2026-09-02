@@ -1,0 +1,40 @@
+meta {
+  name: query datasets
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/api/datasets/query
+  body: json
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{exploreToken}}
+}
+
+body:json {
+  {
+    "sql": "SELECT 1 AS ok",
+    "limit": 10
+  }
+}
+
+assert {
+  res.status: lte 500
+}
+
+docs {
+  AUTHENTICATED. DuckDB over the lake, embedded in the orchestrator (ADR 0014).
+
+  `scope` optionally narrows ONE dataset by `version`/`dt`, exactly as `kontra` passes it.
+
+  Trap worth knowing: never divide counts from two separate queries against a dataset a
+  run is still writing. One CTE, one query — otherwise you are dividing two different
+  snapshots and the ratio is fiction.
+}

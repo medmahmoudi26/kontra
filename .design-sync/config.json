@@ -1,0 +1,91 @@
+{
+  "projectId": "cf64b3c8-5663-43ec-955c-31c66d5cbd49",
+  "shape": "package",
+  "pkg": "@kontra/frontend",
+  "globalName": "KontraDashboard",
+  "buildCmd": "cd frontend && ../../.ds-sync/node_modules/.bin/tailwindcss -i .ds-tailwind.css -o .ds-styles.css",
+  "tsconfig": ".ds-tsconfig.json",
+  "readmeHeader": ".design-sync/conventions.md",
+  "cssEntry": ".ds-styles.css",
+  "extraFonts": [
+    "src/panels/fonts/nerd-font.css"
+  ],
+  "overrides": {
+    "TileHeader": { "cardMode": "column" },
+    "Button": { "cardMode": "column" },
+    "MethodCall": { "cardMode": "column" },
+    "TileWall": { "cardMode": "column" },
+    "WorkerPane": { "cardMode": "column" },
+    "Streak": { "cardMode": "column" },
+    "RegisterFolder": { "cardMode": "column" },
+    "ScratchInspector": { "cardMode": "column" },
+    "ServeConsole": { "cardMode": "column" },
+    "SideResizer": { "cardMode": "column" },
+    "SideRail": { "cardMode": "column" },
+    "SideDockControls": { "cardMode": "column" },
+    "PaneStack": { "cardMode": "column" },
+    "FolderWorkbench": { "cardMode": "column" },
+    "MethodCallPanel": { "cardMode": "column", "viewport": "900x1100" }
+  },
+  "componentSrcMap": {
+    "Badge": "src/components/ui/badge.tsx",
+    "Button": "src/components/ui/button.tsx",
+    "Input": "src/components/ui/input.tsx",
+
+    "StatusBar": "src/panels/chrome/StatusBar.tsx",
+    "TileHeader": "src/panels/chrome/TileHeader.tsx",
+    "TileMenu": "src/panels/chrome/TileMenu.tsx",
+    "SidebarTree": "src/panels/chrome/SidebarTree.tsx",
+    "StyleControls": "src/panels/chrome/StyleControls.tsx",
+    "PaneResizer": "src/panels/chrome/PaneResizer.tsx",
+    "PaneFilterBar": "src/panels/chrome/PaneFilterBar.tsx",
+    "PaneThroughput": "src/panels/chrome/PaneThroughput.tsx",
+    "SideResizer": "src/panels/chrome/SideDock.tsx",
+    "SideRail": "src/panels/chrome/SideDock.tsx",
+    "SideDockControls": "src/panels/chrome/SideDock.tsx",
+    "PaneStack": "src/panels/chrome/PaneStack.tsx",
+
+    "TileWall": "src/panels/grid/TileWall.tsx",
+    "WallEmpty": "src/panels/grid/TileWall.tsx",
+
+    "WidgetView": "src/panels/widgets/WidgetView.tsx",
+    "Markdown": "src/panels/widgets/Markdown.tsx",
+    "MermaidBlock": "src/panels/widgets/MermaidBlock.tsx",
+
+    "ActorCard": "src/panels/ActorCard.tsx",
+    "MethodRow": "src/panels/MethodContract.tsx",
+    "MethodCall": "src/panels/MethodCall.tsx",
+    "MethodCallPanel": "src/panels/MethodCallPanes.tsx",
+    "WorkflowContract": "src/panels/WorkflowContract.tsx",
+
+    "FolderWorkbench": "src/panels/FolderWorkbench.tsx",
+    "RegisterFolder": "src/panels/RegisterFolder.tsx",
+    "FolderActions": "src/panels/RegisteredFolders.tsx",
+    "FolderAbsent": "src/panels/RegisteredFolders.tsx",
+    "WorkbenchFiles": "src/panels/WorkbenchPanes.tsx",
+    "ServeConsole": "src/panels/WorkbenchPanes.tsx",
+
+    "ScratchNodeActor": "src/panels/ScratchNodes.tsx",
+    "ScratchNodeWorkflow": "src/panels/ScratchNodes.tsx",
+    "ScratchNodeDataset": "src/panels/ScratchNodes.tsx",
+    "ScratchNodeNote": "src/panels/ScratchNodes.tsx",
+    "ScratchInspector": "src/panels/ScratchInspector.tsx",
+
+    "SideNav": "src/panels/SideNav.tsx",
+    "StatePill": "src/panels/StatePill.tsx",
+    "WorkerPane": "src/panels/WorkerPane.tsx",
+    "HealthChips": "src/panels/HealthChips.tsx",
+    "DatasetProvenance": "src/panels/DatasetProvenance.tsx",
+
+    "Spark": "src/components/Spark.tsx",
+    "Streak": "src/components/Spark.tsx",
+
+    "ReactFlow": null,
+    "ReactFlowProvider": null,
+    "Background": null,
+    "Controls": null,
+    "MiniMap": null,
+    "ScratchActionsProvider": null,
+    "ScratchPortsProvider": null
+  }
+}

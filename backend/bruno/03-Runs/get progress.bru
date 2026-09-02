@@ -1,0 +1,23 @@
+meta {
+  name: get progress
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseUrl}}/api/runs/{{runId}}/progress
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  Per-node live progress, fed by heartbeats (roadmap platform-x100 #06).
+}

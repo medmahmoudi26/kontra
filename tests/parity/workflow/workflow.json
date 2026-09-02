@@ -1,0 +1,6 @@
+{
+  "entry": "workflow.py",
+  "name": "paritygate",
+  "version": "0.1.0",
+  "workflow": "ParityGate"
+}

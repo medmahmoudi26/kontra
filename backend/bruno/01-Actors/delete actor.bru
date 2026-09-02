@@ -1,0 +1,24 @@
+meta {
+  name: delete actor
+  type: http
+  seq: 6
+}
+
+delete {
+  url: {{baseUrl}}/api/actors/echo@0.1.0
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  Remove a catalog entry. Safe to 404 — this collection is order-independent by design,
+  so a clean run and a re-run both pass.
+}

@@ -1,0 +1,24 @@
+meta {
+  name: dataset runs
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/datasets/runs
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: eq 200
+}
+
+docs {
+  Which runs contributed to which datasets — the join between the execution view and the
+  lake view.
+}

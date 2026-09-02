@@ -1,0 +1,349 @@
+{
+ "why": "Every name an Actor is ADDRESSED by: the task queue its handler serves, the queue its own process polls, the queue one live Session is pinned to, the Nexus endpoint a caller dispatches through, and the tmux session its Worker runs in. All five are derived independently in four languages with no shared code (the decoupling rule), and a drift in any of them has the same failure shape, in the code's own words: the actor registers, polls a queue nobody schedules onto, and reports as a healthy idle Worker while every run hangs to StartToClose.",
+ "measured": "2026-08-28: the queue was derived in EIGHT places, the endpoint in four, the session queue in five, and three hand-copied golden tables held them. The bookkeeping had already drifted — one comment called itself 'a fourth' independent derivation, another 'THE FIFTH', another 'a SIXTH', and none of the three counts was right. Two of the derivations were the same TypeScript function twice (backend actorSession, frontend actorSessionOf), byte-identical including the fallback. This file replaced the count.",
+ "notes": [
+  "A QUEUE NAME IS NOT SANITISED and an ENDPOINT NAME IS. That is the sharpest thing in this corpus and the rows are chosen to prove it: `my actor` and `café` pass through the queue derivations verbatim (Temporal accepts them) and are mangled by the endpoint derivation (the dev server enforces ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$). A derivation that sanitised the queue would route to a queue nobody polls, which is silent.",
+  "THE FALLBACKS ARE PART OF THE CONTRACT. An absent version does NOT give `{name}-`; it gives `{name}-shared`. An empty session id gives NO queue at all, in each language's own idiom. An unnameable tmux session gives `actor` for an Actor's Worker and `fleet` for a Machine with no placement — see `tmux_session.why` for why those two differ on purpose.",
+  "Every driver asserts this file is non-empty and still carries its adversarial inputs. A corpus that silently shrank to nothing passes every case in it."
+ ],
+ "shared": {
+  "why": "The Actor's shared task queue: where its Go handler serves the Nexus operation, the workflow and the blob activities, and what `kontra workers list` and the poller tile describe. `{name}-{version}`, or `{name}-shared` when the version is absent.",
+  "derived_by": [
+   "handler/internal/identity.SharedQueue",
+   "sdk/go/catalog.SharedQueue",
+   "runtime/go/temporalhost.TaskQueue + .SessionTaskQueue (as their stem)",
+   "sdk/python/actorkit/catalog.shared_queue",
+   "runtime/python/internals/temporal/host.task_queue + .session_task_queue (as their stem)",
+   "backend/src/nexusRegistry.ts:sharedQueue",
+   "backend/src/panels/pollers.ts:sharedQueue",
+   "cli/identity.go:sharedQueue"
+  ],
+  "cases": [
+   {
+    "why": "the ordinary case — a dotted version, verbatim, dots and all",
+    "name": "echo",
+    "version": "0.1.0",
+    "expect": "echo-0.1.0"
+   },
+   {
+    "why": "a three-segment version, to pin that nothing truncates or normalises it",
+    "name": "webcrawl",
+    "version": "1.2.3",
+    "expect": "webcrawl-1.2.3"
+   },
+   {
+    "why": "a hyphenated Actor name — the separator is the same character the name already contains, so a parser would be wrong and nothing parses this",
+    "name": "http-fuzzer",
+    "version": "0.1.0",
+    "expect": "http-fuzzer-0.1.0"
+   },
+   {
+    "why": "EMPTY VERSION, the DIY / CLI path: `{name}-shared`, never `{name}-`. A trailing dash is a legal Temporal queue name, so getting this wrong is silent on every side",
+    "name": "probe",
+    "version": "",
+    "expect": "probe-shared"
+   },
+   {
+    "why": "a prerelease version, whose own hyphen sits next to the separator",
+    "name": "crawl4ai",
+    "version": "0.5.0-rc1",
+    "expect": "crawl4ai-0.5.0-rc1"
+   },
+   {
+    "why": "A SPACE PASSES THROUGH. Temporal accepts it, so no derivation may sanitise here — the endpoint rows below mangle the same input, and a side that shared one sanitiser between the two would route to a queue nobody polls",
+    "name": "my actor",
+    "version": "0.1.0",
+    "expect": "my actor-0.1.0"
+   },
+   {
+    "why": "non-ASCII passes through too: no side may ASCII-fold a queue name",
+    "name": "café",
+    "version": "0.1.0",
+    "expect": "café-0.1.0"
+   },
+   {
+    "why": "THE COLLISION THE FLAT NAMESPACE HAS, recorded so nobody 'fixes' it by accident: a version spelled `shared` produces the same queue as no version at all. Known, unguarded, and harmless only because a version string is a manifest field nobody writes that way",
+    "name": "probe",
+    "version": "shared",
+    "expect": "probe-shared"
+   }
+  ]
+ },
+ "sessions": {
+  "why": "The queue THE ACTOR PROCESS ITSELF polls (ADR 0018): it registers RunBatch, Close and OpenSession there while the handler keeps the workflow and the blob activities on the shared queue. Splitting them is what lets the two halves be different languages. `{shared}-sessions`.",
+  "derived_by": [
+   "handler/internal/identity.SessionsQueue + .SessionsQueueOf (which is what handler/workflow.go schedules with)",
+   "sdk/go/catalog.SessionsQueue",
+   "runtime/go/temporalhost.TaskQueue",
+   "sdk/python/actorkit/catalog.sessions_queue",
+   "runtime/python/internals/temporal/host.task_queue"
+  ],
+  "cases": [
+   {
+    "why": "the ordinary case",
+    "name": "echo",
+    "version": "0.1.0",
+    "expect": "echo-0.1.0-sessions"
+   },
+   {
+    "why": "a three-segment version",
+    "name": "webcrawl",
+    "version": "1.2.3",
+    "expect": "webcrawl-1.2.3-sessions"
+   },
+   {
+    "why": "a hyphenated Actor name",
+    "name": "http-fuzzer",
+    "version": "0.1.0",
+    "expect": "http-fuzzer-0.1.0-sessions"
+   },
+   {
+    "why": "EMPTY VERSION: the suffix goes on `{name}-shared`, not on `{name}-`",
+    "name": "echo",
+    "version": "",
+    "expect": "echo-shared-sessions"
+   },
+   {
+    "why": "a space, to pin that this plane is unsanitised exactly like the shared queue under it",
+    "name": "my actor",
+    "version": "0.1.0",
+    "expect": "my actor-0.1.0-sessions"
+   }
+  ]
+ },
+ "session": {
+  "why": "The queue ONE LIVE SESSION is addressed on (ADR 0023 §6): `{shared}-s-{sessionId}`. The singular of `sessions` and a different plane — that one is polled by every worker of the version and is where an OPEN lands, so Temporal's dispatch of the open IS the placement decision; this one is polled by the single worker that answered that open, which is what pins every call of the scope to the process holding the loaded resource. The queue name is the whole addressing scheme: no placement directory, no lease, no idle policy.",
+  "derived_by": [
+   "handler/internal/identity.SessionQueue (from the workflow's OWN task queue plus the dispatched id)",
+   "sdk/go/catalog.SessionQueue",
+   "runtime/go/temporalhost.SessionTaskQueue",
+   "sdk/python/actorkit/catalog.session_queue",
+   "runtime/python/internals/temporal/host.session_task_queue"
+  ],
+  "cases": [
+   {
+    "why": "the ordinary case — a full session id",
+    "name": "crawler",
+    "version": "0.1.0",
+    "session_id": "3f9a2b1c4d5e",
+    "expect": "crawler-0.1.0-s-3f9a2b1c4d5e"
+   },
+   {
+    "why": "a short id, because the id's length is not part of the rule",
+    "name": "webcrawl",
+    "version": "1.2.3",
+    "session_id": "aabb",
+    "expect": "webcrawl-1.2.3-s-aabb"
+   },
+   {
+    "why": "EMPTY VERSION: the `-s-` goes on `{name}-shared`",
+    "name": "echo",
+    "version": "",
+    "session_id": "aabb",
+    "expect": "echo-shared-s-aabb"
+   },
+   {
+    "why": "THE SEPARATOR IS `-s-`, NOT `-sessions`. One word apart and two planes: a scoped call that landed on the plural runs against a process that never activated this Session and holds none of its state, and reports success",
+    "name": "echo",
+    "version": "0.1.0",
+    "session_id": "sessions",
+    "expect": "echo-0.1.0-s-sessions"
+   }
+  ],
+  "refuses_without_a_session_id": {
+   "why": "NO QUEUE AT ALL for an empty session id, on every side. The derivation would otherwise collapse onto `{shared}-s-`, which is a real Temporal queue that every Session of the Actor would share — the pinning gone, nothing failing, and the scope's calls answered by whichever worker happened to poll first. Each language refuses in its own idiom: Python raises ValueError, Go returns the empty string, and the callers guard before they schedule.",
+   "name": "echo",
+   "version": "0.1.0",
+   "session_id": ""
+  }
+ },
+ "endpoint": {
+  "why": "The Nexus endpoint an Actor registers on and a caller dispatches through: `kontra-{name}-{version}` with every non-alphanumeric collapsed to `-`, doubled separators collapsed, and the ends stripped. UNLIKE A QUEUE NAME THIS ONE IS SANITISED, because the cluster enforces ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$ on it. A drift is a caller dispatching to a name nobody created, which presents as a run that never progresses.",
+  "servable": "^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$",
+  "derived_by": [
+   "handler/internal/identity.EndpointName",
+   "sdk/go/catalog.EndpointName",
+   "sdk/python/actorkit/catalog.endpoint_name",
+   "backend/src/nexusRegistry.ts:endpointName"
+  ],
+  "cases": [
+   {
+    "why": "the Go peer's own documented example, and what thirty-one endpoints on this cluster are already called",
+    "name": "echo",
+    "version": "0.1.0",
+    "expect": "kontra-echo-0-1-0"
+   },
+   {
+    "why": "a three-segment version",
+    "name": "webcrawl",
+    "version": "1.2.3",
+    "expect": "kontra-webcrawl-1-2-3"
+   },
+   {
+    "why": "a hyphenated name, whose own hyphens survive while the version's dots become them",
+    "name": "http-fuzzer",
+    "version": "0.1.0",
+    "expect": "kontra-http-fuzzer-0-1-0"
+   },
+   {
+    "why": "EMPTY VERSION: the ends are stripped rather than left as `kontra-echo-`, which the cluster refuses with a message about the name instead of about the missing version",
+    "name": "echo",
+    "version": "",
+    "expect": "kontra-echo"
+   },
+   {
+    "why": "doubles collapse — a name ending in a digit next to a dotted version is the shape every real Actor here has",
+    "name": "crawl4ai-canon",
+    "version": "0.1.0",
+    "expect": "kontra-crawl4ai-canon-0-1-0"
+   },
+   {
+    "why": "a doubled separator already IN the name",
+    "name": "a--b",
+    "version": "1.0",
+    "expect": "kontra-a-b-1-0"
+   },
+   {
+    "why": "underscores are not alphanumeric; leading and trailing ones are stripped rather than kept",
+    "name": "_probe_",
+    "version": "1",
+    "expect": "kontra-probe-1"
+   },
+   {
+    "why": "A SPACE. The same input the shared-queue rows pass through verbatim — this is the row that proves the two rules are different rules",
+    "name": "my actor",
+    "version": "0.1.0",
+    "expect": "kontra-my-actor-0-1-0"
+   },
+   {
+    "why": "a slash, which would otherwise make the endpoint look like a path",
+    "name": "a/b",
+    "version": "1.0.0",
+    "expect": "kontra-a-b-1-0-0"
+   },
+   {
+    "why": "NON-ASCII INSIDE A WORD. One replacement character per rune, so `ï` leaves `na-ve` rather than `na--ve` — the row where Go's rune loop, Python's per-character loop and JavaScript's UTF-16 replace could each have counted differently",
+    "name": "naïve",
+    "version": "1.0.0",
+    "expect": "kontra-na-ve-1-0-0"
+   },
+   {
+    "why": "non-ASCII at the END of a word, where the replacement lands next to the separator and has to collapse into it",
+    "name": "café",
+    "version": "0.1.0",
+    "expect": "kontra-caf-0-1-0"
+   },
+   {
+    "why": "AN EMOJI — one rune, TWO UTF-16 code units. JavaScript's replace writes two dashes here and Go's and Python's loops write one; the collapse is what makes the three agree, and this row is what proves the collapse happens rather than being assumed",
+    "name": "📦",
+    "version": "1.0",
+    "expect": "kontra-1-0"
+   },
+   {
+    "why": "THE FALLBACK: neither half nameable, so nothing is left but the prefix. `kontra`, not `kontra-` and not an empty string",
+    "name": "",
+    "version": "",
+    "expect": "kontra"
+   },
+   {
+    "why": "a name made only of characters that cannot survive — the fallback reached the long way round",
+    "name": "...",
+    "version": "",
+    "expect": "kontra"
+   }
+  ]
+ },
+ "tmux_session": {
+  "why": "The tmux session a Worker's panes live in — how `kontra serve --tmux` names what it starts, how the fleet names a Machine's session, and how the Monitor and the browser find the pane again. tmux's `session_check_name()` rewrites every `.` and `:` to `_` SILENTLY at creation (measured: `tmux new-session -d -s 'nscheck-0.1.0'` stores `nscheck-0_1_0`), so the name is sanitised where it is MINTED and a derivation that forgot draws a Machine whose Worker is running perfectly as one with NO SESSION.",
+  "two_domains": "There are TWO derivations here, not one, and the difference in their fallbacks is INTENDED. `worker` is an ACTOR's Worker: it is given a name and a version and nothing else, and its fallback exists only so the string stays attachable. `machine` is a fleet MACHINE's session: it is given the fleet's tag as well, because a `fleet up` with no Actor placed on it still has Terminals, and its fallback is the word `fleet` because that is what such a Machine IS. Making them agree would name a placement-less Machine's session `actor`, which is a lie about what is running there. Recorded here rather than left as two literals nobody can tell from a typo.",
+  "machine_is_whitelisted": "`machine` additionally refuses a name outside ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ and answers `fleet`, because that string is interpolated into a command run as root on a remote Machine and there is no safe way to repair an unsafe one. `worker` has no such check: its caller validates the Actor name against the same bound before it ever gets here.",
+  "derived_by": [
+   "cli/tmux.go:tmuxSession (worker)",
+   "cli/fleet.go:fleetSessionName (machine)",
+   "backend/src/panels/tmux.ts:actorSession (worker — the ONE TypeScript copy, imported by backend/src/actorControl.ts and by the browser through @core)",
+   "backend/src/panels/discovery.ts:sessionNameFor (machine)"
+  ],
+  "cases": [
+   {
+    "why": "the ordinary case: the dots in the version become underscores because tmux would have done it anyway",
+    "actor": "probe",
+    "version": "0.1.0",
+    "tag": "",
+    "worker": "probe-0_1_0",
+    "machine": "probe-0_1_0"
+   },
+   {
+    "why": "A PLACED MACHINE IGNORES ITS TAG. The Actor and version are what distinguish two builds on one fleet; the tag is the fallback, not a component",
+    "actor": "webcrawl",
+    "version": "0.2.0",
+    "tag": "crawl",
+    "worker": "webcrawl-0_2_0",
+    "machine": "webcrawl-0_2_0"
+   },
+   {
+    "why": "THE VERSION IS THE LOAD-BEARING HALF: two versions of one Actor served side by side must not collide on one name, or the pane shown beside 0.2.0's code is 0.1.0's worker",
+    "actor": "probe",
+    "version": "0.2.0",
+    "tag": "",
+    "worker": "probe-0_2_0",
+    "machine": "probe-0_2_0"
+   },
+   {
+    "why": "no version in the manifest: the session is named after the Actor rather than trailing a bare dash",
+    "actor": "probe",
+    "version": "",
+    "tag": "",
+    "worker": "probe",
+    "machine": "probe"
+   },
+   {
+    "why": "BOTH characters tmux rewrites, in both halves — a `:` in a name would otherwise be read by tmux as a window selector",
+    "actor": "a.b",
+    "version": "1:2",
+    "tag": "",
+    "worker": "a_b-1_2",
+    "machine": "a_b-1_2"
+   },
+   {
+    "why": "THE INTENDED DIFFERENCE. No Actor placed, but the fleet has a tag: a Machine's session is named for what it is, and a Worker's derivation is not given the tag at all and falls back to `actor`. Two answers, on purpose — see `two_domains`",
+    "actor": "",
+    "version": "",
+    "tag": "crawl",
+    "worker": "actor",
+    "machine": "crawl"
+   },
+   {
+    "why": "THE INTENDED DIFFERENCE, with nothing left to name it by: `fleet` for a Machine, `actor` for a Worker. A session called '' cannot be attached to, and a pane looked up by it would match whatever in the inventory happens to have no name",
+    "actor": "",
+    "version": "",
+    "tag": "",
+    "worker": "actor",
+    "machine": "fleet"
+   },
+   {
+    "why": "a name that sanitises to nothing usable — `.` becomes `_`, which is not attachable either, so both sides take their fallback rather than returning it",
+    "actor": ".",
+    "version": "",
+    "tag": "",
+    "worker": "actor",
+    "machine": "fleet"
+   },
+   {
+    "why": "A NAME THAT REACHES A REMOTE COMMAND. `machine` refuses it outright — the whitelist is the guard, and repairing it would put a value nothing validated into a command run as root. `worker` sanitises what tmux sanitises and no more; its caller has already refused this name",
+    "actor": "web crawl; reboot",
+    "version": "0.1.0",
+    "tag": "",
+    "worker": "web crawl; reboot-0_1_0",
+    "machine": "fleet"
+   },
+   {
+    "why": "a tag that is itself unsafe: the fallback is `fleet`, not a sanitised tag",
+    "actor": "",
+    "version": "",
+    "tag": "crawl; reboot",
+    "worker": "actor",
+    "machine": "fleet"
+   }
+  ]
+ }
+}

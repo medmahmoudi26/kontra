@@ -1,0 +1,43 @@
+meta {
+  name: list stacks
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseUrl}}/api/infra/stacks
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{stateToken}}
+}
+
+docs {
+  Every stack the Pulumi DIY backend holds, read straight off the checkpoint.
+
+  READ-ONLY, and a different thing from POST /api/infra/stacks/:fqn/:op — that one starts
+  work, this one describes what exists. Same token: an inventory of live machines and their
+  public addresses is exactly what an attacker would want first.
+
+  Empty `stacks` is the correct answer before anything has ever been converged, not an error.
+}
+
+assert {
+  res.status: lte 404
+}
+
+tests {
+  test("when authenticated, the body is a stacks array", function () {
+    // `lte 404` above, and this test skips itself on 401/503, for the reason the README
+    // gives: `stateToken` is a secret var, so a CLI run without it legitimately gets 401 and
+    // that must not read as a broken endpoint.
+    if (res.getStatus() !== 200) return;
+    expect(res.getBody().stacks).to.be.an("array");
+  });
+}

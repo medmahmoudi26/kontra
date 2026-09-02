@@ -1,0 +1,33 @@
+meta {
+  name: explore
+  type: http
+  seq: 11
+}
+
+get {
+  url: {{baseUrl}}/api/runs/{{runId}}/explore
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{exploreToken}}
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  AUTHENTICATED (`KONTRA_EXPLORE_TOKEN` or `KONTRA_STATE_TOKEN`).
+
+  A FAILED dataset is reported as failed WITH its reason — never as an empty result. That
+  distinction is load-bearing: empty-vs-failed is exactly how silent data loss hides.
+
+  `checkBearer` fails CLOSED with 503 when no token is configured server-side, so a 503
+  here means 'no token set', not 'wrong token'.
+}

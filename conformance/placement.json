@@ -1,0 +1,298 @@
+{
+ "why": "A **Fleet**'s DESIRED STATE — the arguments one converge of the `kontra-fleet` stack carries. It has TWO WRITERS in two languages and ONE READER in a third, joined by nothing but matching string literals: `sdk/python/actorkit/fleet.py` builds it from `hold()`/`place()`/`up()`, `cli/fleet.go` builds it from `kontra fleet up|deploy`, and `backend/src/infra/stacks.ts:coerceFleetArgs` narrows whatever arrives into `FleetArgs` before `programs/fleet.ts` runs it. Nothing imports anything across those three.",
+ "failure": "PULUMI'S DESIRED STATE IS TOTAL, SO EVERY FAILURE HERE IS A CONVERGE THAT SUCCEEDS WHILE REMOVING SOMETHING. A key the reader does not recognise is dropped SILENTLY — no error, no warning, and `--tmux` lived that way for a release, because `coerceFleetArgs` narrows to strings and numbers and the boolean the CLI sent never reached the program. A key a WRITER stops sending is worse: an absent `machines` is `Number(undefined ?? 0)` = 0, the program builds zero Droplets, and the converge DESTROYS every Machine in the Fleet and reports success. An absent `bundleUrl` deletes the `command.remote.Command`, which runs that Worker's teardown and stops it — the co-tenant's Run then dispatches into a queue nobody polls until ScheduleToStart fires. SINCE PACKING (ADR 0037, slice 11) THERE IS A FOURTH AND IT IS THE SAME SENTENCE ONE LEVEL DOWN: a Fleet carries SEVERAL placements, and a `placements` array that names one of two is a request to delete the other — same silence, same success, and now reachable from a writer that merely forgot to send the whole list.",
+ "shape": "Three arms and they are not the same kind of arm. `writer_cases` is driven by the two WRITERS (Python and Go), each producing the converge the case names in its own way and having its KEY SET checked — not its values, which cannot match across a fake resolver and a fake bundle. `reader_cases` is driven by the READER (TypeScript) alone, because coercion is the reader's own behaviour; what makes it a contract rather than a unit test is that `types` below is what the writers are checked against. `from_resolver` is the one list all three touch: TypeScript declares it as `ResolvedBundle`, Python forwards it verbatim into the args, and Go builds the same fields by hand. `placement_keys` is the SECOND key set, one level inside `placements`, and it exists because packing gave this contract a nested object where it had only scalars.",
+ "keys": {
+  "why": "Every key `coerceFleetArgs` keeps, and nothing else. A key outside this list is dropped on arrival; a key inside it that a writer stops sending is a request to remove what it describes.",
+  "sections": {
+   "required_always": {
+    "keys": ["tag", "machines"],
+    "why": "IN EVERY CONVERGE, INCLUDING A PLACEMENT. `tag` names the Machines and `machines` is how many there are — and `machines` is the one whose absence is not a no-op but a teardown. `place()` re-converging with only the placement would delete the Fleet it was placing onto."
+   },
+   "provider": {
+    "keys": ["region", "size", "image", "vpcUuid", "sshKeyIds"],
+    "why": "WHERE the Machines land. Every one of them is OMITTED rather than sent empty when unset: an empty `vpcUuid` asks for a VPC called \"\", and a VPC is regional so the wrong pairing is rejected by the provider — measured as a fleet that landed in sfo3 from an nyc1 controller and hung on ready()."
+   },
+   "from_resolver": {
+    "keys": ["actorName", "actorVersion", "actorEngine", "bundleUrl", "bundleSha", "controller"],
+    "why": "WHAT RUNS on the Machines. TypeScript declares this exact set as `ResolvedBundle` — 'exactly the placement fields FleetArgs takes, so the caller forwards it verbatim' — and Python does forward it verbatim, so a field added to `ResolvedBundle` and not to `FleetArgs` is dropped on arrival and a field removed from it leaves the placement short. `controller` is in this list because it was once NOT: a caller that did not pass `controller=` provisioned Machines and failed a minute later with `controller=\"\" is not safe to place on a Machine`, having already resolved a perfectly good Controller to build `bundleUrl` from."
+   },
+   "density": {
+    "keys": ["maxSessions"],
+    "why": "A NUMBER, and the loop that keeps the string keys would have dropped it — which is exactly how `tmux` was lost. It is also in the remote command's TRIGGERS, so a converge that changes only the density re-runs the install; without that, a scale would be skipped and reported as success while the Fleet kept its old cap."
+   },
+   "packing": {
+    "keys": ["placements"],
+    "why": "AN ARRAY, AND THE ONLY SHAPE IN THIS CONTRACT THAT IS NOT A SCALAR (ADR 0037, slice 11). A Fleet places several Artifacts now, and the whole list rides EVERY converge for the reason `failure` gives — a list naming one of two deletes the other. It is also the ONE key whose absence is not a teardown: absent means 'read the single-placement scalars instead', which is what `kontra fleet deploy` and every stack created before packing send. An EMPTY array is different again and is a real desired state — `fleet.hold()` places nothing — so the reader must not treat `[]` as absent."
+   },
+   "not_in_fleet_args": {
+    "keys": ["credential"],
+    "why": "SENT BY BOTH WRITERS AND DELIBERATELY NOT KEPT BY `coerceFleetArgs`. It is read one level up, by `planFor`, into the plan — never into the program. `FleetArgs` is what reaches `programs/fleet.ts`, the only provider-coupled file, the one that writes cloud-init and the remote install command that runs on every Machine; a credential field on that type would be one careless interpolation away from a token in a world-readable Bundle. So it appears in a writer's output and must NOT appear in the reader's."
+   }
+  }
+ },
+ "placement_keys": {
+  "why": "One entry of `placements` — what ONE Artifact on this Fleet is. Its own key set because the reader narrows entries separately (`coercePlacement`), and because two of these keys exist nowhere at the converge level.",
+  "required": ["actorName", "bundleUrl"],
+  "why_required": "AN ENTRY WITHOUT EITHER IS DROPPED ENTIRELY, not passed on half-built. `bundleUrl` is what a Machine fetches, so an entry without one places a Worker that curls the empty string; `actorName` is what every path on the Machine is named after — its unit, its env file, its root, its metrics target — so an entry without one would write a co-tenant's paths.",
+  "optional": ["actorVersion", "actorEngine", "bundleSha", "controller", "maxSessions", "workers"],
+  "workers": "HOW MANY OF THE FLEET'S MACHINES THIS PLACEMENT LANDS ON, one Worker each. Absent means every Machine, which is what a Fleet did before packing, so an unasked-for placement's wire is byte-identical to the pre-slice-11 one. A count ABOVE the machine count is refused by the program rather than truncated: a placement puts at most ONE Worker on a Machine (two of one actor@version there would share a `KONTRA_WORKER` label, a unit name and a queue), so truncating would leave a caller believing in Workers that were never built. `spread=True` in the caller SDK is exactly `workers == machines` and is NOT a key here — there is no boolean on this wire, and a client-side flag that resolved to a number is the only shape `never_boolean` permits.",
+  "not_here": ["tag", "machines", "region", "size", "image", "vpcUuid", "sshKeyIds", "credential"],
+  "why_not_here": "WHERE the Machines are is the FLEET's, not a placement's. A `region` inside an entry would be a second, disagreeing answer to a question the converge has already answered, and `credential` is refused here for the same structural reason it is refused above: the type that reaches `programs/fleet.ts` has no room for it."
+ },
+ "types": {
+  "why": "What a value may be on the wire. The reader narrows by `typeof`, so this is not documentation — a value of the wrong type is DISCARDED without a word.",
+  "rules": {
+   "string": ["tag", "region", "size", "image", "vpcUuid", "bundleUrl", "bundleSha", "actorName", "actorVersion", "actorEngine", "controller"],
+   "number": ["machines", "maxSessions", "workers"],
+   "string_array": ["sshKeyIds"],
+   "object_array": ["placements"],
+   "never_boolean": "NO KEY IS A BOOLEAN, and this is the rule with a corpse behind it. `--tmux` was sent as one for a release: `coerceFleetArgs` keeps strings and numbers, so it was dropped before the program saw it, and a Machine could deploy 'successfully' and never be viewable. A writer that needs a flag sends a string or a number, or it does not send it. IT IS ALSO WHY `spread=` STOPS AT THE CALLER SDK: it is a boolean at the call site and it resolves to the NUMBER `workers` before anything crosses, because a boolean `spread` on this wire would be dropped and one Worker per Machine would quietly become whatever the default was. WHAT THE READER DOES WITH ONE IS NOT UNIFORM, which is why the arms assert 'never arrives as a boolean' rather than 'is absent'. The string and array keys vanish. The NUMBER keys go through `Number()`, where `true` is 1: a boolean `machines` is a one-Machine Fleet, a boolean `maxSessions` is a cap of one Session and a boolean `workers` is a one-Machine placement, and none of the three is refused anywhere downstream. `tag` is built before the narrowing loop with a hardcoded empty default, so a boolean `tag` becomes `\"\"` — the one case that IS loud, because `validateTag` refuses it."
+  }
+ },
+ "writer_cases": [
+  {
+   "name": "machines_only",
+   "why": "Capacity with nothing on it — `fleet.hold(tag=…, machines=…)` and `kontra fleet up`. The absence of the placement keys is the POINT: this converge says there should be no placement, which is why it is only safe when this scope is the Fleet's only holder.",
+   "keys": ["tag", "machines"],
+   "forbidden": ["actorName", "actorVersion", "actorEngine", "bundleUrl", "bundleSha", "maxSessions"]
+  },
+  {
+   "name": "placed",
+   "why": "An Artifact on the Machines — `f.place(actor, version)`, `fleet.up(...)` and `kontra fleet deploy`. Carries `required_always` AND every `from_resolver` key, because it is one desired state and not a patch on the previous one. THE SCALARS ARE STILL HERE WITH ONE ARTIFACT, deliberately: every stack this repo has converged was created from them, so a Fleet holding one placement sends what it always sent and Pulumi sees no change nobody asked for.",
+   "keys": ["tag", "machines", "actorName", "actorVersion", "actorEngine", "bundleUrl", "bundleSha", "controller"],
+   "forbidden": [],
+   "placements": 1
+  },
+  {
+   "name": "placed_with_density",
+   "why": "The same placement with `sessions=` / `--sessions` set. Its own case because `maxSessions` is the key that the string loop would silently drop, and because a second `place()` differing ONLY here is the SCALE operation (ADR 0037) — so a writer that omitted it would make scaling a no-op reported as success.",
+   "keys": ["tag", "machines", "actorName", "actorVersion", "actorEngine", "bundleUrl", "bundleSha", "controller", "maxSessions"],
+   "forbidden": [],
+   "placements": 1
+  },
+  {
+   "name": "packed",
+   "why": "TWO ARTIFACTS ON ONE FLEET — ADR 0037's other half, and the case that only a WRITER can get wrong. The Workers share their Machine and therefore its egress address. What this case pins is that BOTH placements ride ONE converge: a writer that sent only the one it was placing would delete the other, run its teardown and stop its Worker, and Pulumi would report success. The single-placement SCALARS are FORBIDDEN here, because there is no honest scalar answer for two Artifacts and a first-one-wins answer riding beside the array would be a second, disagreeing desired state.",
+   "keys": ["tag", "machines", "placements"],
+   "forbidden": ["actorName", "actorVersion", "actorEngine", "bundleUrl", "bundleSha", "maxSessions"],
+   "placements": 2
+  },
+  {
+   "name": "spread",
+   "why": "`f.place(actor, version, spread=True)` — one Worker per Machine, on every Machine. It crosses as the NUMBER `workers`, equal to the Fleet's machine count, because `never_boolean` forbids the flag itself; this case is what makes that resolution checkable rather than asserted in a docstring. A writer that dropped `workers` here would place the Artifact on every Machine anyway, which is why the assertion is on the VALUE and not only on the key.",
+   "keys": ["tag", "machines", "placements"],
+   "forbidden": [],
+   "placements": 1,
+   "placement_values": {"workers": 2}
+  }
+ ],
+ "reader_cases": [
+  {
+   "why": "THE ONE THAT DESTROYS A FLEET. An absent `machines` is not 'leave the count alone' — `Number(undefined ?? 0)` is 0, the program builds no Droplets, and Pulumi deletes the ones that are there. This is why `machines` is in `required_always` and why `machines=None` is refused in the SDK rather than implemented as 'take what exists'.",
+   "sent": {
+    "tag": "dns"
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 0
+   }
+  },
+  {
+   "why": "A BOOLEAN IS DROPPED WITHOUT A WORD. This is `--tmux`, reproduced: the writer sent it, the reader narrowed it away, the program never saw it, and nothing failed.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "tmux": true
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2
+   }
+  },
+  {
+   "why": "So is any key the reader was not told about — including one that reads like a command. A caller cannot reach the program through an unknown key.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "evil": "rm -rf /"
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2
+   }
+  },
+  {
+   "why": "JSON off the wire is whatever the client felt like sending, so a numeric STRING is accepted for both number keys. A reader that refused would turn a working CLI into a 400 the day a client stopped being this repo's.",
+   "sent": {
+    "tag": "dns",
+    "machines": "4",
+    "maxSessions": "8"
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 4,
+    "maxSessions": 8
+   }
+  },
+  {
+   "why": "`maxSessions: 0` is DROPPED, and that is not the same as `machines: 0`. Zero density means 'leave the hosts on their own default' — the desired state has nothing to say — whereas zero machines is a real, expressible fleet size. The two numbers read their zero differently on purpose.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "maxSessions": 0
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2
+   }
+  },
+  {
+   "why": "The credential NAME is dropped from `FleetArgs` even though both writers send it. It is read by `planFor` into the plan; the type that reaches a Machine has no room for it. See `keys.not_in_fleet_args`.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "credential": "do-prod"
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2
+   }
+  },
+  {
+   "why": "A PACKED FLEET SURVIVES INTACT, entries and all. This is the row the whole packing half rests on: both Artifacts have to reach the program, because the program builds one `command.remote.Command` per (Machine, placement) and a placement the reader dropped is a Worker that is never started — and, on a re-converge, one that is STOPPED.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": [
+     {"actorName": "nscheck", "actorVersion": "0.1.0", "actorEngine": "py", "bundleUrl": "http://10.124.0.2:5000/v2/bundles/nscheck/blobs/sha256:aaaa", "bundleSha": "aaaa", "controller": "10.124.0.2", "maxSessions": 8},
+     {"actorName": "subfinder", "actorVersion": "0.2.0", "actorEngine": "py", "bundleUrl": "http://10.124.0.2:5000/v2/bundles/subfinder/blobs/sha256:bbbb", "bundleSha": "bbbb", "controller": "10.124.0.2", "workers": 2}
+    ]
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": [
+     {"actorName": "nscheck", "actorVersion": "0.1.0", "actorEngine": "py", "bundleUrl": "http://10.124.0.2:5000/v2/bundles/nscheck/blobs/sha256:aaaa", "bundleSha": "aaaa", "controller": "10.124.0.2", "maxSessions": 8},
+     {"actorName": "subfinder", "actorVersion": "0.2.0", "actorEngine": "py", "bundleUrl": "http://10.124.0.2:5000/v2/bundles/subfinder/blobs/sha256:bbbb", "bundleSha": "bbbb", "controller": "10.124.0.2", "workers": 2}
+    ]
+   }
+  },
+  {
+   "why": "AN ENTRY WITH NOTHING PLACEABLE IN IT IS DROPPED, AND THE REST SURVIVE. A placement with no `bundleUrl` would build a Worker that fetches the empty string; one with no `actorName` would write the co-tenant's unit, env, root and scrape target, because on a Machine every one of those paths is named after the actor. Dropping the entry is the same wordless narrowing `evil` gets one level up — and dropping only the entry is what keeps a malformed one from taking a good one with it.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": [
+     {"actorName": "good", "bundleUrl": "http://c/good"},
+     {"actorName": "no-bundle"},
+     {"bundleUrl": "http://c/no-name"},
+     "not an object",
+     null
+    ]
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": [{"actorName": "good", "bundleUrl": "http://c/good"}]
+   }
+  },
+  {
+   "why": "AND EMPTY IS NOT THE SAME AS MISSING TO A `typeof` CHECK, which is why both required keys are checked for the empty string as well. An empty value is what a writer produces from an UNSET VARIABLE rather than from a forgotten key, so it is the likelier of the two: `bundleUrl: \"\"` places a Worker that fetches the empty string, and `actorName: \"\"` writes `/etc/kontra/worker-.env` and `kontra-actor-.service` — the paths of no Worker, and the paths every OTHER empty-named Worker would also write, so two of them would silently be one.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": [
+     {"actorName": "", "bundleUrl": "http://c/a"},
+     {"actorName": "b", "bundleUrl": ""},
+     {"actorName": "good", "bundleUrl": "http://c/good"}
+    ]
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": [{"actorName": "good", "bundleUrl": "http://c/good"}]
+   }
+  },
+  {
+   "why": "AN EMPTY LIST IS NOT AN ABSENT ONE. `placements: []` says this Fleet places nothing, which is exactly what `fleet.hold()` converges; absent says 'read the single-placement scalars instead'. A reader that treated the two alike would either place nothing on a Fleet that asked for an Artifact, or fold a Machines-only converge's empty scalars into a placement with no Bundle in it.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": []
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": []
+   }
+  },
+  {
+   "why": "A KEY INSIDE AN ENTRY THAT THE READER WAS NOT TOLD ABOUT GOES THE SAME WAY THE OUTER ONES DO — including `region`, which is the Fleet's and would be a second answer to a settled question, and `credential`, which is refused here for the same structural reason it is refused above.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": [{"actorName": "a", "bundleUrl": "http://c/a", "evil": "rm -rf /", "region": "nyc3", "credential": "do-prod"}]
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2,
+    "placements": [{"actorName": "a", "bundleUrl": "http://c/a"}]
+   }
+  },
+  {
+   "why": "`workers` takes a numeric string like every other number on this wire, and reads its zero the way `maxSessions` does: zero of a placement's Workers is not a Fleet size, it is a desired state with nothing to say, so it is dropped and the placement takes every Machine.",
+   "sent": {
+    "tag": "dns",
+    "machines": 4,
+    "placements": [
+     {"actorName": "a", "bundleUrl": "http://c/a", "workers": "2"},
+     {"actorName": "b", "bundleUrl": "http://c/b", "workers": 0}
+    ]
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 4,
+    "placements": [
+     {"actorName": "a", "bundleUrl": "http://c/a", "workers": 2},
+     {"actorName": "b", "bundleUrl": "http://c/b"}
+    ]
+   }
+  },
+  {
+   "why": "A full placement survives intact — the control for every drop above. Without it, a reader that dropped everything would pass all six.",
+   "sent": {
+    "tag": "dns",
+    "machines": 2,
+    "region": "nyc3",
+    "size": "s-1vcpu-2gb",
+    "image": "ubuntu-22-04-x64",
+    "vpcUuid": "9b8c-uuid",
+    "sshKeyIds": ["44333901", "39835074"],
+    "actorName": "nscheck",
+    "actorVersion": "0.1.0",
+    "actorEngine": "py",
+    "bundleUrl": "http://10.124.0.2:5000/v2/bundles/nscheck/blobs/sha256:aaaa",
+    "bundleSha": "aaaa",
+    "controller": "10.124.0.2",
+    "maxSessions": 8
+   },
+   "kept": {
+    "tag": "dns",
+    "machines": 2,
+    "region": "nyc3",
+    "size": "s-1vcpu-2gb",
+    "image": "ubuntu-22-04-x64",
+    "vpcUuid": "9b8c-uuid",
+    "sshKeyIds": ["44333901", "39835074"],
+    "actorName": "nscheck",
+    "actorVersion": "0.1.0",
+    "actorEngine": "py",
+    "bundleUrl": "http://10.124.0.2:5000/v2/bundles/nscheck/blobs/sha256:aaaa",
+    "bundleSha": "aaaa",
+    "controller": "10.124.0.2",
+    "maxSessions": 8
+   }
+  }
+ ]
+}

@@ -1,0 +1,45 @@
+version: v2
+plugins:
+  # Machine proto stubs are COMMITTED (sdk/python/_gen for Python, backend/_gen
+  # for TS — generated code lives in the consuming seam, never under a contract dir) and
+  # drift-checked in CI (`buf generate` + `git diff --exit-code`). Never edited by hand.
+  # Output paths mirror the proto file path (contracts/kontra/v1/* -> _gen/kontra/v1/*).
+  # Pinned to match the venv runtime: temporalio requires protobuf<7, so the gencode must
+  # be 6.x (protoc v33 -> python 6.33; latest emits 7.x and fails).
+  - remote: buf.build/protocolbuffers/python:v33.0
+    out: sdk/python/_gen
+  - remote: buf.build/protocolbuffers/pyi:v33.0
+    out: sdk/python/_gen
+  # TS: TYPES-ONLY (no runtime classes, no encode/decode) so nothing on the hot path
+  # constructs message objects — the envelope stays JSON on the wire (ADR 0002), proto is
+  # only the shared type definition. snakeToCamel=false keeps proto field names snake_case,
+  # matching the Python dataclasses and the deliberately snake_cased TS EntryInput.
+  - remote: buf.build/community/stephenh-ts-proto:v2.6.1
+    out: backend/_gen
+    opt:
+      - onlyTypes=true
+      - snakeToCamel=false
+      - esModuleInterop=true
+      - useExactTypes=false
+  # Go: STRUCTS for the contract-of-record. The Go handler consumes the contract from its
+  # own seam root (handler/_gen, never under contracts/), and a congruence test asserts the
+  # hand-written snake_case wire structs match these generated field sets — the wire stays
+  # JSON (ADR 0002), proto is the type definition. go_package is set per .proto file so this
+  # never perturbs the python/TS gen above.
+  - remote: buf.build/protocolbuffers/go:v1.36.6
+    out: handler/_gen
+    opt:
+      - paths=source_relative
+  # protoc-gen-go-temporal: generates the Go Nexus workflow-run op + typed client/worker for
+  # actor_service.proto (service kontra.actor, op run). The backing "run" workflow is
+  # hand-written in the Go handler. Emits into a nested `...temporal` package next to the Go
+  # structs. Only actor_service.proto has a service, so this is a no-op for the other protos.
+  # Local binary (not on the BSR as a remote plugin): `go install
+  # github.com/cludden/protoc-gen-go-temporal/cmd/protoc-gen-go_temporal`. Needs
+  # `strategy: all` (it reads the whole service at once). Ensure $(go env GOPATH)/bin is on PATH.
+  - local: protoc-gen-go_temporal
+    out: handler/_gen
+    opt:
+      - paths=source_relative
+      - nexus=true          # emit the Nexus service/op/client (kontra.actor:run)
+    strategy: all

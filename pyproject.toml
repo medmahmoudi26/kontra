@@ -1,0 +1,40 @@
+# Monorepo root — repo-level config only. The Python distribution `kontra-sdk` is rooted in the
+# `sdk/python` seam and ships BOTH packages: the `actorkit` author surface that lives beside its
+# pyproject, and the `internals` runtime that lives under `runtime/python` and is reached by a
+# relative package-dir. One install, two seams, one ARROW — runtime imports sdk, never the
+# reverse, asserted by tests/test_sdk_arrow.py. Install it:
+#   pip install -e ./sdk/python[dev,seaweed]
+# The backend/frontend (TS) and the proto contracts live in their own seams.
+
+[tool.pytest.ini_options]
+# `examples/python` is NOT collected here, and cannot be: the actor registry is a process-global
+# singleton (one actor per worker is the production shape), so importing two example actors into
+# one pytest session raises `@actor.method name 'crawl' declared twice`. Each example directory
+# gets its OWN process instead — `make test-examples`, which CI runs.
+#
+# That gap is not theoretical: the ADR 0028 migration to `async def m(self, batch, dataset)` left
+# webcrawl's and crawl4ai's own tests calling the old one-arg signature, and every mandated suite
+# stayed green because nothing ran them. An example actor is the surface an author copies from.
+#
+# `runtime/python` IS collected, and was not. It holds exactly two test files and both are
+# conformance arms — `internals/test_codec_conformance.py` and
+# `internals/test_blobkey_conformance.py` — so with `testpaths = ["tests"]` the Python side of two
+# cross-language corpora had never run in CI, under a workflow header that said "non-e2e pytest,
+# incl. the codec corpus". A corpus arm nobody runs is worse than a missing one: the table in
+# conformance/codec/README.md lists it, so its absence reads as coverage. Found while adding the
+# prefix rows the codec corpus was missing (ADR 0035 §3).
+testpaths = ["tests", "runtime/python"]
+markers = [
+    "e2e: end-to-end tests that start an ephemeral Temporal server (slower; skip with -m 'not e2e')",
+    # A SECOND MARKER, because `e2e` was carrying two unrelated meanings and one of them is a
+    # browser. `examples/python/crawl4ai` and `examples/python/webcrawl` mark their live tests
+    # `e2e` for Playwright's sake — CI deliberately installs no Chromium — while the appliance's
+    # parity leg needs a Temporal address and no browser at all. Selecting `-m e2e` to turn the
+    # second one on turned the first one on too, and the run failed on
+    # `BrowserType.launch: Executable doesn't exist`, which says nothing about the control plane.
+    #
+    # So: `e2e` keeps meaning "this test brings its own heavy runtime", and `control_plane` means
+    # "this test dials a control plane at $KONTRA_ADDRESS and SKIPS when there is none".
+    # `make test-examples E2E=1` selects the second without the first.
+    "control_plane: needs a running kontra control plane at $KONTRA_ADDRESS (skips without one)",
+]

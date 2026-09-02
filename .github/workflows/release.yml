@@ -1,0 +1,161 @@
+name: release
+
+# ONE FILE PER PLATFORM, BUILT ON THE PLATFORM (ADR 0031 §2, issue 17).
+#
+# `appliance.yml` proves the cross-build produces byte-identical bundles, so this workflow could in
+# principle run once on linux and cross-build all four. It does not, and the reason is the same one
+# that makes `cross` worth asserting rather than assuming: an artifact users will download should
+# have been executed by the machine that made it. A native runner unpacks its own release and runs
+# the binary out of it; a linux runner cross-building a macOS release can only look at headers.
+#
+# What ships is the whole appliance for one platform — the binary, its orchestrator bundle and the
+# browser bundle — laid out where `findBundles` already looks, plus a SHA256SUMS covering all four.
+# The installer checks the tarball against that file before it unpacks anything, which is the
+# property `install.sh`'s buf step does not have and this repo has written down as a mistake not to
+# copy: `/releases/latest/download/` with no version and no checksum.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "version to build (no leading v); defaults to `git describe`"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - platform: darwin/amd64
+            runner: macos-13
+          - platform: darwin/arm64
+            runner: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git describe` needs the tags, and a shallow clone has none — a release would then be
+          # named after a commit sha, which is a name nobody can report a bug against.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: handler/go.mod
+          cache-dependency-path: cli/go.sum
+
+      # THE SPA IS THE ONE THING THE RELEASE DOES NOT BUILD ITSELF. `kontra release` archives a
+      # vite output; producing that output is `frontend`'s own toolchain, with its own
+      # lockfile, and folding it into the appliance build would put a browser bundler inside the
+      # thing whose whole claim is that it needs nothing but Go. So it is built here, explicitly,
+      # by the same commands a developer runs.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: build the SPA
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: release this platform
+        working-directory: cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=""
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            args="--version ${{ github.event.inputs.version }}"
+          fi
+          go run . release --repo .. --platform ${{ matrix.platform }} --out "$RUNNER_TEMP/release" $args
+
+      # WHAT WAS BUILT IS UNPACKED AND RUN, on the machine it was built for. `--help` rather than
+      # `up`: starting the appliance would bind ports and write a data directory, and what this
+      # step is asking is the narrow question that a cross-build cannot answer — does this binary
+      # execute here at all.
+      - name: run the released binary out of its own tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/check"
+          tar -xzf "$RUNNER_TEMP"/release/kontra_*.tar.gz -C "$RUNNER_TEMP/check"
+          cd "$RUNNER_TEMP/check"
+          # 2>&1 because `usage()` writes to STDERR on purpose — piped stdout is for JSONL output —
+          # so `| head` on stdout alone would print nothing and check nothing.
+          ./kontra help 2>&1 | head -3
+          ls -la bundles
+          ./kontra bundle verify bundles/kontra-orchestrator-*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/release/kontra_*.tar.gz
+          retention-days: 7
+
+  publish:
+    name: SHA256SUMS and the release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+
+      # ONE SHA256SUMS ACROSS ALL FOUR, written here rather than by each runner, because four files
+      # each containing one line is not a thing `sha256sum -c` can be pointed at — and the whole
+      # point of publishing digests is that checking them is one command.
+      - name: the digests
+        working-directory: release
+        run: |
+          set -euo pipefail
+          ls -la
+          sha256sum kontra_*.tar.gz | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      # A PARTIAL RELEASE IS WORSE THAN A FAILED ONE: the platforms that are there install fine,
+      # and the ones that are not fail at curl with a 404 and no explanation.
+      #
+      # THE LIST COMES OUT OF THIS FILE'S OWN MATRIX, not from a second list written here. A
+      # hard-coded four beside a matrix of four is exactly the drift that lets a platform be added
+      # in one place and silently never released — and `Platforms()` in cli/appliance already has a
+      # test holding the matrix to it, so deriving from the matrix inherits that check for free.
+      - name: a release ships every platform the matrix builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=""
+          while read -r platform; do
+            slug=$(echo "$platform" | tr / _)
+            ls release/kontra_*_"$slug".tar.gz >/dev/null 2>&1 || missing="$missing $platform"
+          done < <(grep -oE '^\s+- platform: \S+' .github/workflows/release.yml | awk '{print $3}')
+          if [ -n "$missing" ]; then
+            echo "::error::the release is missing:$missing"
+            exit 1
+          fi
+          echo "every platform in the matrix has a release file"
+
+      - name: publish
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes release/kontra_*.tar.gz release/SHA256SUMS

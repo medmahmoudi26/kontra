@@ -1,15 +1,120 @@
-# Local development
-.venv/
-node_modules/
-__pycache__/
-*.pyc
-dist/
-build/
+# kontra — the framework. Actors live in kontra-actors, workflows in kontra-workflows.
 
-# The operator's own actors and workflows — never the repo's
+# THE OPERATOR'S OWN WORK, never the repo's: `kontra config` writes actors and
+# caller workflows under .kontra/, and a checkout update must never touch them.
 .kontra/
 
-# Secrets, in every shape they have taken
+# python
+.venv/
+# A worktree usually SYMLINKS .venv to the main checkout's, and `.venv/` matches directories only.
+.venv
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# generated: machine proto stubs (sdk/python/_gen, backend/_gen) are COMMITTED +
+# CI drift-checked (buf generate + git diff --exit-code), so they are NOT ignored.
+# Never edited by hand; their bytecode caches fall under the __pycache__ rule above.
+
+# generated: per-actor build Dockerfiles (synthesized default / author + identity
+# stamp) + the captured image digest (KONTRA_ACTOR_DIGEST, ADR 0011) written by
+# scripts/build.sh
+
+# The examples/ rules that lived here went with the directory (ADR 0038). Actors are in
+# kontra-actors, workflows in kontra-workflows, and the offensive-security tooling that used to
+# sit under examples/private/ — payload construction, probe corpora, detection heuristics — is
+# not in any public repository: publishing it hands defenders a signature to filter on and hands
+# everyone else a working scanner.
+
+# run-actor output dirs (default --output) + scratch
+out/
+tmp/
+tmp.jsonl
+node_modules/
+
+# demo scratch + compiled CLI binary
+.demo/
+cli/cli
+cli/kontra
+/kontra
+
+# Compiled example-actor binaries. `go build ./...` inside a single-main-package module
+# writes the executable into the module dir, so these reappear on every verification run.
+# A 35 MB binary was tracked this way and re-committed by anyone who ran a build.
+# Compiled example binaries — 52 MB each. These were listed one per example, so every
+# NEW example leaked one until somebody noticed. Matched by shape instead: inside an
+# example module, source and config all carry an extension and the binary never does.
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
+.cursor/
+
+# Orchestrator runtime artifacts (SQLite run store + DuckLake dataset catalog) are
+# ignored by backend/.gitignore — kept there so the patterns live in one place.
+
+.scratch/
+# kontra monitor --duckdb materialized files
+kontra-*.duckdb
+
+# Local runtime config — NEVER commit. .env carries live credentials (e.g. the DuckLake
+# Postgres password, which belongs in a secret store, not the repo), and the compose
+# override is per-machine wiring (host ports, network bridges) that must not bind others.
 .env
-*.pem
-*.key
+docker-compose.override.yml
+
+# generated from doctl at fleet-up time
+ansible/inventory/hosts.ini
+ansible/inventory/hosts.json
+ansible/inventory/*.retry
+
+# tofu state + provider plugins
+infra/tofu/.terraform/
+infra/tofu/*.tfstate*
+infra/tofu/.terraform.lock.hcl
+
+# Playwright's own output (ADR 0020's Dashboard specs). Traces are retained on failure only, and a
+# retained trace is a debugging artifact, never a checked-in one.
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+
+# .kontra/ — this installation's own configuration and code, created by `kontra init`
+# (install.sh runs it). Ignored WHOLE, and both halves matter:
+#   config.yaml   live credentials — the DigitalOcean token, the Pulumi passphrase, four tokens
+#   workflows/    an operator's own caller workflows
+#   actors/       an operator's own actors
+# The second half is not a security rule but an ownership one: what lives here is theirs, and a
+# checkout update must never touch it. Examples belong in examples/.
+.kontra/
+
+# design-sync (docs/agents — /design-sync syncs this SPA to claude.ai/design).
+# Committed: .design-sync/{config.json,NOTES.md,conventions.md,previews/,overrides/} — the sync's
+# INPUTS, so a re-sync on any machine reproduces this build. Everything below is machine state:
+#   .ds-sync/            the staged converter + its own node_modules
+#   ds-bundle/           regenerated output, ~10 MB, uploaded not committed
+#   .cache/ .learnings/  per-run verdicts and fan-out scratch
+#   .ds-styles.css       Tailwind compiled for the previews (cfg.buildCmd emits it)
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
+frontend/.ds-styles.css
+
+# Agent worktrees. `EnterWorktree` and `git worktree add` park checkouts here; each is a full
+# working copy of this same repo, so committing one would nest the repo inside itself.
+.claude/worktrees/
+
+# Example-actor build output. `examples/` is source and is tracked; a built actor leaves a
+# `__pycache__` beside its source, and the Go ones leave an extensionless binary named after
+# their directory.
+
+# Camoufox writes its persistent_context here when the `reddit` actor is served from the
+# checkout (the actor sets user_data_dir="./camoufox_profile", so it lands in the CWD).
+# 37 MB of browser profile, regenerated on every serve.
+camoufox_profile/

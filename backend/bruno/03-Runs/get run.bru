@@ -1,0 +1,23 @@
+meta {
+  name: get run
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/api/runs/{{runId}}
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  One run. `runId` is set by `list runs`; run that first, or set it in the environment.
+}

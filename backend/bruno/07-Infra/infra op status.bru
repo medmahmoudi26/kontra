@@ -1,0 +1,30 @@
+meta {
+  name: infra op status
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/infra/ops/kontra-fleet%2Fcampaign-bruno
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{stateToken}}
+}
+
+assert {
+  res.status: lte 502
+}
+
+docs {
+  Poll an operation. Returns `{fqn, status, progress?, result?}` where `progress` is the last
+  heartbeat the engine emitted — which resource it is currently creating.
+
+  `404` means no operation has ever run for this stack.
+}

@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package kontra.v1;
+
+option go_package = "github.com/medmahmoudi26/kontra-local/handler/_gen/kontra/v1;kontrav1";
+
+import "google/protobuf/struct.proto";
+import "kontra/v1/entry.proto"; // BareRef
+
+// The cross-language ACTOR contract: what it means to invoke an actor over ONE batch
+// (one session). THIS is the artifact that binds the Python and Go SDKs — both implement
+// an ActorWorkflow that satisfies it, and the orchestrator dispatches against it.
+//
+// Sharding a node's input into batches and fanning out one run per batch (bounded) is the
+// DISPATCHER's job (orchestrator, DispatchSpec) — the actor never shards. This splits the
+// sharding-conflated EntryInput (entry.proto, being retired, ADR 0012) into the
+// dispatcher's DispatchSpec + this per-batch ActorRunInput. The actor finally has a
+// first-class contract instead of hiding inside EntryInput + a workflow named "run".
+//
+// Wire stays JSON (ADR 0002); proto is the type-of-record, congruence-tested per SDK.
+// BareRef is shared from entry.proto (same package).
+
+// Input to an actor over ONE batch — the single argument to the ActorWorkflow.
+message ActorRunInput {
+  // This batch's units, inline (the CLI/DIY path). Exactly one of units / units_ref
+  // carries the batch.
+  repeated google.protobuf.Value units = 1;
+  // OR the batch as a CAS ref the actor materializes (refs-as-currency, ADR 0007).
+  BareRef units_ref = 2;
+  // Run-wide config -> the author's self.params. NON-secret (params ride history).
+  google.protobuf.Struct params = 3;
+  // Lineage the dispatcher stamps (ADR 0006); surfaced to the author as self.run_id /
+  // self.idempotency_key. tenant is dispatcher bookkeeping. "" = unset (CLI/DIY path).
+  string run_id = 4;
+  string tenant = 5;
+  string idempotency_key = 6;
+  // Content-pinned identity (ADR 0011): the OCI image digest this run was designed
+  // against. The worker self-verifies its running digest and fails fast (non-retryable,
+  // ActorDigestDrift) on drift. "" = unpinned (enforcement off).
+  string expected_digest = 7;
+  // When true the actor returns a BareRef (result_ref) instead of inline results, so the
+  // dispatcher stays ref-only.
+  bool return_ref = 8;
+}
+
+// The result of running an actor over one batch: the {results, failures} envelope, inline
+// or as a CAS ref. Formalizes the envelope that today lives only in each SDK (Python
+// dataclass / TS type / Go struct), never in proto.
+message ActorRunResult {
+  // The arun's output units. Empty when result_ref is set.
+  repeated google.protobuf.Value results = 1;
+  // Per-unit failures isolated within this run (the durability surface).
+  repeated PerUnitFailure failures = 2;
+  // Set when ActorRunInput.return_ref: the {results, failures} envelope content-addressed.
+  BareRef result_ref = 3;
+}
+
+// One isolated unit failure. The full unit is the correlation key (no positional index).
+message PerUnitFailure {
+  google.protobuf.Value unit = 1;
+  ErrorInfo error = 2;
+  // "terminal"  — non-retryable: isolated on the first attempt (author NonRetryable, a
+  //               non_retryable_errors match, or ActorDigestDrift/SessionUnrecoverable).
+  // "exhausted" — retryable: isolated after the activity's retry policy ran out.
+  string category = 3;
+}
+
+message ErrorInfo {
+  // The cross-language error-type name (e.g. SessionLost, ActorDigestDrift, the author's
+  // NonRetryable subclass name) — matched against the activity's non-retryable error types.
+  string type = 1;
+  string message = 2;
+}

@@ -1,0 +1,273 @@
+{
+  "wireFormat": {
+    "marker": "binary/claim-check-v1",
+    "casKeyLayout": "cas/{sha256[:2]}/{sha256}",
+    "thresholdRule": "offload iff len(data) > threshold (<= stays inline)",
+    "base64": "std (not url-safe)",
+    "shaCase": "lower-hex",
+    "metaValueEncoding": "base64-std of the raw metadata VALUE bytes",
+    "refJson": "structure-defined (sha256/size/meta); whitespace is NOT part of the contract. Byte-exact surfaces: marker, casKey, object bytes.",
+    "prefixJoin": "The store prefix (KONTRA_S3_PREFIX) is a PATH SEGMENT, never a string glued to the front of the key. Algorithm, identical in every language: strip leading and trailing '/' from EVERY segment including the prefix, drop the segments that are then empty, join what is left with a single '/'. An empty prefix yields 'cas/<sha[:2]>/<sha>' with no leading slash.",
+    "prefixTrailingSlash": "NOT SIGNIFICANT -- this is the decision prefixCases exists to record. 'p', 'p/', '/p' and '/p/' all name the ONE namespace 'p/cas/...', and a prefix of '/' is an empty prefix. The alternative (a slash is a literal character in the prefix, so 'p/' addresses 'p//cas/...') was what handler/internal/objectstore.Key and backend/src/codec/objectStore.ts:key did before this corpus was extended, and it is rejected: two spellings an operator reads as identical addressing two different namespaces, with no error, is the same defect class as the concatenation these rows were added to catch. Measured against the appliance's own object store, a 'p//cas/...' key is not merely odd -- it is REFUSED, 'object key ... has an empty path segment'."
+  },
+  "prefixNote": "Every row below is the SAME payload as the 'offload-just-over' case ('0123456789abcdefg', 17 bytes, threshold 16, sha 8378b19d...). Only the prefix varies, so a failure names the join and nothing else. Until 2026-08-29 no row in this file carried a prefix at all, and the empty-prefix case is the one input class where concatenation and segment-joining CANNOT differ -- so six green arms said nothing about a live bug in two of them (ADR 0035 finding 1).",
+  "prefixCases": [
+    {
+      "name": "empty-prefix",
+      "why": "the default, and the only class the corpus covered before these rows: no prefix, no leading slash",
+      "prefix": "",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "key": "cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e"
+      }
+    },
+    {
+      "name": "plain-prefix",
+      "why": "THE LIVE BUG. With KONTRA_S3_PREFIX=slice11 a Python-served workflow wrote slice11cas/df/df5b... while the CLI asked for slice11/cas/df/df5b... A concatenating implementation fails on this row and only on this class.",
+      "prefix": "slice11",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "key": "slice11/cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e"
+      }
+    },
+    {
+      "name": "prefix-with-a-trailing-slash",
+      "why": "the decision row (wireFormat.prefixTrailingSlash): same namespace as 'plain-prefix', NOT a second one reached through a double slash. A concatenating implementation passes this row by accident, which is exactly why it cannot be the only prefix row.",
+      "prefix": "slice11/",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "key": "slice11/cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e"
+      }
+    },
+    {
+      "name": "prefix-with-a-leading-slash",
+      "why": "the other edge: a key is relative to the bucket, so a leading slash is a spelling and not an absolute path. No implementation may emit a key beginning with '/'.",
+      "prefix": "/slice11",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "key": "slice11/cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e"
+      }
+    },
+    {
+      "name": "prefix-slashed-both-ends",
+      "why": "both edges at once, so an implementation that trims only one end is caught",
+      "prefix": "/slice11/",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "key": "slice11/cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e"
+      }
+    },
+    {
+      "name": "nested-prefix",
+      "why": "a prefix may itself be several segments (a tenant under a namespace); the INTERIOR slash is content and is never touched",
+      "prefix": "tenants/acme",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "key": "tenants/acme/cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e"
+      }
+    },
+    {
+      "name": "nested-prefix-with-a-trailing-slash",
+      "why": "interior slash kept, edge slash dropped, in one input",
+      "prefix": "tenants/acme/",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "key": "tenants/acme/cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e"
+      }
+    },
+    {
+      "name": "prefix-that-is-only-a-slash",
+      "why": "trimming leaves nothing, so the segment is dropped: '/' is an EMPTY prefix, byte-identical to the default. The degenerate case a total rule has to answer.",
+      "prefix": "/",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "key": "cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "inline-small",
+      "note": "under threshold -> returned unchanged, nothing offloaded",
+      "threshold": 16,
+      "input": {
+        "data_b64": "aGVsbG8=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "action": "inline"
+      }
+    },
+    {
+      "name": "inline-at-threshold",
+      "note": "len == threshold -> inline (offload is STRICTLY > threshold)",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZg==",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "action": "inline"
+      }
+    },
+    {
+      "name": "offload-just-over",
+      "note": "len == threshold+1 -> offloaded",
+      "threshold": 16,
+      "input": {
+        "data_b64": "MDEyMzQ1Njc4OWFiY2RlZmc=",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "action": "offload",
+        "ref": {
+          "sha256": "8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+          "size": 17,
+          "meta": {
+            "encoding": "anNvbi9wbGFpbg=="
+          }
+        },
+        "cas_key": "cas/83/8378b19d693ee89e2ca594b6ec0abfaadc4fe1831eaca2f748f0b71ede38892e",
+        "object_b64": "MDEyMzQ1Njc4OWFiY2RlZmc="
+      }
+    },
+    {
+      "name": "inline-empty",
+      "note": "empty payload -> inline",
+      "threshold": 16,
+      "input": {
+        "data_b64": "",
+        "meta_b64": {
+          "encoding": "YmluYXJ5L251bGw="
+        }
+      },
+      "expect": {
+        "action": "inline"
+      }
+    },
+    {
+      "name": "offload-binary-meta",
+      "note": "non-UTF-8 metadata VALUE is base64-std encoded in ref.meta and restored on decode",
+      "threshold": 8,
+      "input": {
+        "data_b64": "dGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcw==",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg==",
+          "x-bin": "//4AgA=="
+        }
+      },
+      "expect": {
+        "action": "offload",
+        "ref": {
+          "sha256": "8ef42751e88f9040d24bbb1beb89cfdcb24932b6ad5ec9b3986af260b7c6c25a",
+          "size": 25,
+          "meta": {
+            "encoding": "anNvbi9wbGFpbg==",
+            "x-bin": "//4AgA=="
+          }
+        },
+        "cas_key": "cas/8e/8ef42751e88f9040d24bbb1beb89cfdcb24932b6ad5ec9b3986af260b7c6c25a",
+        "object_b64": "dGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcw=="
+      }
+    },
+    {
+      "name": "offload-payload-looks-like-ref",
+      "note": "payload bytes that LOOK like a ref are opaque; only the marker triggers decode",
+      "threshold": 8,
+      "input": {
+        "data_b64": "eyJzaGEyNTYiOiJkZWFkYmVlZiIsInNpemUiOjMsIm1ldGEiOnt9fQ==",
+        "meta_b64": {
+          "encoding": "anNvbi9wbGFpbg=="
+        }
+      },
+      "expect": {
+        "action": "offload",
+        "ref": {
+          "sha256": "d2fd5039d88c73366f6ad43a3ba2360543a62be362af6cc6a6627ce831b5bd0e",
+          "size": 40,
+          "meta": {
+            "encoding": "anNvbi9wbGFpbg=="
+          }
+        },
+        "cas_key": "cas/d2/d2fd5039d88c73366f6ad43a3ba2360543a62be362af6cc6a6627ce831b5bd0e",
+        "object_b64": "eyJzaGEyNTYiOiJkZWFkYmVlZiIsInNpemUiOjMsIm1ldGEiOnt9fQ=="
+      }
+    },
+    {
+      "name": "skip-already-marked",
+      "note": "a payload already marked claim-check is returned UNCHANGED (double-encode guard)",
+      "threshold": 8,
+      "input": {
+        "data_b64": "YWxyZWFkeSBhIGNsYWltLWNoZWNrIHJlZiEh",
+        "meta_b64": {
+          "encoding": "YmluYXJ5L2NsYWltLWNoZWNrLXYx"
+        }
+      },
+      "expect": {
+        "action": "unchanged"
+      }
+    }
+  ]
+}

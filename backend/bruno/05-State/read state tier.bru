@@ -1,0 +1,33 @@
+meta {
+  name: read state tier
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/state/global
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{stateToken}}
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  AUTHENTICATED (`KONTRA_STATE_TOKEN` only — narrower than the explore token).
+
+  Raw state by tier (ADR 0015): `arun`, `session`, `global`, `actor`.
+
+  The actor-scoped tiers are ONE Redis hash per actor id (`kontra-actor:{runId}-{nodeId}`),
+  read whole and filtered by field — so `entity` is mandatory and must be the exact actor id.
+  `global` is the one tier that scans: a key per entry at `kontra-global:{actor}:{key}`.
+}

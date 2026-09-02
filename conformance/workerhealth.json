@@ -1,0 +1,112 @@
+{
+ "why": "The sick-but-not-dead judgement: the two counters both actor hosts export, and the arithmetic the Warden turns them into a verdict with. Three writers and no registration step — `runtime/python/internals/metrics.py` renders the names, `runtime/go/engine/metrics.go` renders them again independently, and `cli/sickworker.go` on a Machine parses whichever it finds and divides one by the other.",
+ "failure": "A drift in the NAMES has no loud failure and no red test on either side: each host renders a correct exposition, the Warden's scrape succeeds, and the series it divides by is simply absent for every Worker of one language. The chip reads `unknown` forever on half a Fleet while both files read correctly on their own. That is the shape ADR 0035 rule two exists for, and this repo has already paid for it once — the Batch content hash was pinned by a hand-copied golden on the one input class where Go and Python could not differ, and the two SDKs hashed the same Batch to different keys for months.",
+ "history": "The check this replaces was `watchdog.sh` in backend/src/infra/programs/machine.ts, which counted `grep -ci 'unit failed\\|SessionLost\\|engine dead'` over `grep -ci 'unit ok\\|committed'` in the actor's journal. Swept 2026-08-30: `unit failed`, `unit ok` and `engine dead` appear NOWHERE in runtime/, sdk/ or handler/, and every `committed` is a comment. The denominator was permanently 0, so with MIN_UNITS=10 the timer could only ever fire on ten stray SessionLost tracebacks, always at 100%. It never once counted the ratio it was written for.",
+
+ "metrics": {
+  "why": "The counter names. They are the contract, not the numbers — a host that renamed one would still render a valid exposition and still pass its own tests.",
+  "loads": "kontra_resource_loads_total",
+  "failures": "kontra_resource_load_failures_total",
+  "labels": ["actor", "version"],
+  "note": "Both are counters and both are rendered unconditionally, including at zero. metrics.py already states why for kontra_isolated_units_total: a series that is absent when the value is zero renders identically to no data, which is the exact ambiguity these metrics exist to remove.",
+  "call_site": "One call, `count_load(ok)` / `countLoad(ok)`, on both paths out of the resource open. Two functions is how kontra_batches_total ended up with no caller in either host while the dashboard divided by it; a single call that always advances the denominator cannot be half-wired."
+ },
+
+ "thresholds": {
+  "why": "The three numbers a verdict needs. Pinned here because the judge RESTARTS a Worker: a threshold that drifts between a doc, a dashboard and a shell script is how this check came to have three different lines drawn in three places (0.5 in the fleet dashboard's red step, 0.8 in watchdog.sh, 0.9 in the incident write-up).",
+  "ratio": 0.8,
+  "ratio_why": "watchdog.sh's own line, kept rather than the dashboard's 0.5. panels/metrics.ts states the asymmetry: 'a chip that only informs can afford to speak earlier than one that reboots something.' The sick Machines ran above 0.9 and every healthy peer sat at 0, so anything between is noise.",
+  "min_loads": 10,
+  "min_loads_why": "watchdog.sh's MIN_UNITS, over a counter that actually moves. A ratio over three loads is one unlucky minute, and restarting a Worker for it costs more than it fixes.",
+  "min_span_seconds": 60,
+  "min_span_why": "A Warden turns every 5s, and a ratio over one turn's delta would restart a Worker for a single failed load. This is the floor on how much time the two samples must span before any verdict but `cannot-tell` is reachable.",
+  "window_seconds": 300,
+  "window_why": "The recorded instance is 81 of 82 in FIVE MINUTES. Samples older than this are dropped, so the span the verdict is computed over never exceeds it."
+ },
+
+ "verdicts": {
+  "why": "Two samples of the two counters, and what the Warden concludes. `sick` stops the Worker (the reconcile loop restarts it on its next turn); `healthy` and `cannot-tell` both do nothing, and only one of them is a claim.",
+  "invariant": "`cannot-tell` is never folded into `healthy`. A health check that silently degrades to always-pass is the failure this whole corpus is the replacement for.",
+  "cases": [
+   {
+    "why": "THE RECORDED INSTANCE. kf-m9 failed 81 of 82 resource loads in five minutes while its process was alive and its poller was live, and the run still reported completed.",
+    "before": {"loads": 400, "failures": 12},
+    "after": {"loads": 482, "failures": 93},
+    "seconds": 300,
+    "expect": "sick",
+    "ratio": 0.9878048780487805
+   },
+   {
+    "why": "THE CONTROL FOR IT: the same 82 loads over the same five minutes with none of them failing. Same denominator, different numerator, opposite verdict — so an implementation that ignored its input cannot pass both this case and the one above.",
+    "before": {"loads": 400, "failures": 12},
+    "after": {"loads": 482, "failures": 12},
+    "seconds": 300,
+    "expect": "healthy",
+    "ratio": 0.0
+   },
+   {
+    "why": "A busy Worker reloading occasionally. maxUnitReloads is 2, so reloads are routine and a fifth of them failing is not a finding.",
+    "before": {"loads": 0, "failures": 0},
+    "after": {"loads": 100, "failures": 20},
+    "seconds": 300,
+    "expect": "healthy",
+    "ratio": 0.2
+   },
+   {
+    "why": "Exactly at the line. A threshold that is exclusive on one side and inclusive on the other is the kind of difference two implementations drift on silently, so it is a case rather than a convention.",
+    "before": {"loads": 0, "failures": 0},
+    "after": {"loads": 100, "failures": 80},
+    "seconds": 300,
+    "expect": "sick",
+    "ratio": 0.8
+   },
+   {
+    "why": "One under the line.",
+    "before": {"loads": 0, "failures": 0},
+    "after": {"loads": 100, "failures": 79},
+    "seconds": 300,
+    "expect": "healthy",
+    "ratio": 0.79
+   },
+   {
+    "why": "THE WINDOW IS REAL. The round-3 ratio exactly, over twenty seconds instead of five minutes. A judge with no span floor would restart this Worker on four failed loads in one turn.",
+    "before": {"loads": 400, "failures": 12},
+    "after": {"loads": 482, "failures": 93},
+    "seconds": 20,
+    "expect": "cannot-tell",
+    "reason": "span"
+   },
+   {
+    "why": "THE DENOMINATOR FLOOR IS REAL. Nine loads, all nine failed, over a full window. 100% of nothing much.",
+    "before": {"loads": 0, "failures": 0},
+    "after": {"loads": 9, "failures": 9},
+    "seconds": 300,
+    "expect": "cannot-tell",
+    "reason": "loads"
+   },
+   {
+    "why": "A quiet Worker: nothing loaded in the whole window. Not healthy — nothing was measured. This is the case that separates `cannot-tell` from `healthy`, and an implementation that divides 0 by 0 into 0 reports it as green.",
+    "before": {"loads": 400, "failures": 12},
+    "after": {"loads": 400, "failures": 12},
+    "seconds": 300,
+    "expect": "cannot-tell",
+    "reason": "loads"
+   },
+   {
+    "why": "THE COUNTERS WENT BACKWARDS, so the Worker restarted between the two samples and the delta is meaningless. Subtracting anyway yields a negative denominator, and the sign of a ratio is not something a threshold comparison notices.",
+    "before": {"loads": 482, "failures": 93},
+    "after": {"loads": 3, "failures": 0},
+    "seconds": 300,
+    "expect": "cannot-tell",
+    "reason": "reset"
+   }
+  ]
+ },
+
+ "exposition": {
+  "why": "A whole rendered scrape, so the READER is driven by the corpus too and not only the two writers. Byte-identical between the hosts by construction — both render the same line format — and this is the text cli/sickworker.go parses.",
+  "sample": "# HELP kontra_isolated_units_total Units permanently dropped after exhausting reloads. NON-ZERO MEANS THE RUN LOST WORK.\n# TYPE kontra_isolated_units_total counter\nkontra_isolated_units_total{actor=\"webcrawl\",version=\"0.2.0\",category=\"exhausted\"} 4\n# HELP kontra_resource_reloads_total Times the actor resource was declared dead and rebuilt.\n# TYPE kontra_resource_reloads_total counter\nkontra_resource_reloads_total{actor=\"webcrawl\",version=\"0.2.0\"} 81\n# HELP kontra_batches_total Unit batches executed by this worker.\n# TYPE kontra_batches_total counter\nkontra_batches_total{actor=\"webcrawl\",version=\"0.2.0\"} 0\n# HELP kontra_resource_loads_total @actor.load attempts. The DENOMINATOR of the sick-worker ratio.\n# TYPE kontra_resource_loads_total counter\nkontra_resource_loads_total{actor=\"webcrawl\",version=\"0.2.0\"} 482\n# HELP kontra_resource_load_failures_total @actor.load attempts that raised. 81 of 82 in five minutes is the round-3 signature.\n# TYPE kontra_resource_load_failures_total counter\nkontra_resource_load_failures_total{actor=\"webcrawl\",version=\"0.2.0\"} 93\n",
+  "expect": {"loads": 482, "failures": 93},
+  "note": "The sample deliberately carries kontra_batches_total at 0 beside a non-zero reload count. That is the state every Worker in this repo is in today — nothing calls countBatch() — and it is why the ratio is computed from these two counters and not from the pair the fleet dashboard plots."
+ }
+}

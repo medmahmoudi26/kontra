@@ -1,0 +1,33 @@
+meta {
+  name: list runs
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/runs
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  var b = res.getBody();
+  test("array-ish", function() { expect(b.runs || b).to.be.an("array"); });
+  var rs = b.runs || b;
+  if (rs.length) bru.setVar("runId", rs[0].runId || rs[0].id);
+}
+
+docs {
+  Runs known to the orchestrator's own store.
+
+  Contrast `list executions`, which asks Temporal. The two answer different questions and
+  can legitimately disagree: a run row can exist with no live execution.
+}

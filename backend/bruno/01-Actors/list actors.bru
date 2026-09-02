@@ -1,0 +1,30 @@
+meta {
+  name: list actors
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/actors
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("is an array", function() { expect(res.getBody()).to.be.an("array"); });
+  bru.setVar("firstActorKey", (res.getBody()[0] || {}).key || "echo@0.1.0");
+}
+
+docs {
+  The catalog. Each entry is a content-pinned `(name, version)` identity (ADR 0004).
+  `digest` is present only when a worker self-registered its OCI image digest (ADR 0011);
+  absent means admission pinning is OFF for that actor.
+}

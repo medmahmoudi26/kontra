@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "kontra.actor.v1",
+  "name": "paritygate",
+  "version": "0.1.0",
+  "targets": {
+    "container": { "memory": "256m", "cpus": 1 }
+  }
+}

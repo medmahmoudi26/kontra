@@ -1,0 +1,39 @@
+meta {
+  name: rejects a malformed fqn
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/api/infra/stacks/only-one-part/up
+  body: json
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{stateToken}}
+}
+
+body:json {
+  {
+    "args": {}
+  }
+}
+
+assert {
+  res.status: gte 400
+}
+
+docs {
+  Expects a CLIENT error, not specifically 400 — because auth is checked BEFORE validation,
+  which is the correct order: an unauthenticated caller must not be able to probe which stack
+  names are well-formed. With no token you get 401; with a valid token this same request is
+  400.
+
+  The fqn becomes both a Temporal workflow id and a directory under the state backend, so it
+  is parsed strictly — `../../etc` and multi-slash forms are refused before anything runs.
+}

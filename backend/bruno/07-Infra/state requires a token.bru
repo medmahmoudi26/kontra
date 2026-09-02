@@ -1,0 +1,30 @@
+meta {
+  name: state requires a token
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/api/infra/stacks
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+docs {
+  The read surface fails closed exactly like the write surface. The rest of this API is
+  unauthenticated (see backend/src/auth.ts), so an ungated infra route would hand anyone
+  who can reach :8088 the public address of every machine in the fleet.
+
+  The /infra DASHBOARD is deliberately not gated — it carries no data, only the code that
+  fetches it, and it asks for the token itself.
+}
+
+tests {
+  test("401 without a token", function () {
+    expect(res.getStatus()).to.equal(401);
+  });
+}

@@ -1,0 +1,31 @@
+meta {
+  name: dataset schema
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/api/datasets/schema
+  body: none
+  auth: bearer
+}
+
+params:query {
+  name: {{datasetName}}
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{exploreToken}}
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  AUTHENTICATED. Column types for one dataset, read straight from Parquet (ADR 0014).
+}

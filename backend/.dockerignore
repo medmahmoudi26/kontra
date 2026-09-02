@@ -1,0 +1,12 @@
+node_modules
+dist
+web/node_modules
+web/dist
+**/*.test.ts
+**/*.testwf.ts
+orchestrator-data.json
+orchestrator.db
+orchestrator.db-wal
+orchestrator.db-shm
+orchestrator-datasets.ducklake*
+.git

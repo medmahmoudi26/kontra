@@ -1,0 +1,25 @@
+meta {
+  name: heartbeats
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{baseUrl}}/api/runs/{{runId}}/heartbeats
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  Raw heartbeat details. Becomes a three-party contract (Go writes, Python writes, this
+  reads) once ADR 0018 lands — and a mismatch is SILENT, showing as no progress rather
+  than an error. Pin it with fixtures before the first migrated actor ships.
+}

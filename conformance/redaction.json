@@ -1,0 +1,155 @@
+{
+ "why": "The three redaction rules both SDKs apply before anything reaches Temporal history. A whole-key match for an ask's fields, and two word-in-a-sentence matches for a narration: a secret-shaped assignment, and a bearer/basic credential. The two kinds must NOT be merged with each other — they are different jobs and both implementations argue so in their headers — but the two LANGUAGES must agree exactly.",
+ "why_it_matters": "This is the one parity surface where being wrong is a credential written into workflow history in the clear rather than a formatting difference. The implementations were byte-identical when this corpus was written; the risk is a word added to one side and not the other, which narrate.py's own header already named: 'a word only one of them knows is redacted in one surface and not in the other'. Nothing executable acted on that sentence until now.",
+ "sentence_redacted": "[redacted]",
+ "value_redacted": "[redacted by kontra: an ask travels through history in the clear]",
+ "sentences": [
+  {
+   "why": "an assignment whose key names a secret — the ordinary f-string mistake",
+   "input": "api_key=abc123def456",
+   "expect": "api_key=[redacted]"
+  },
+  {
+   "why": "the same with spaces and a colon, which authors write more often than `=`",
+   "input": "token: sk-live-0123456789abcd",
+   "expect": "token: [redacted]"
+  },
+  {
+   "why": "a bearer header, which is a value with no key beside it",
+   "input": "Authorization: Bearer abcdefghijklmnop",
+   "expect": "Authorization: Bearer [redacted]"
+  },
+  {
+   "why": "basic auth, the bearer rule's other word",
+   "input": "sent basic YWxhZGRpbjpvcGVuc2VzYW1l",
+   "expect": "sent basic [redacted]"
+  },
+  {
+   "why": "UPPERCASE key — the rule is case-insensitive",
+   "input": "API_KEY=abc123def456",
+   "expect": "API_KEY=[redacted]"
+  },
+  {
+   "why": "a key that merely STARTS with a secret word must not be redacted",
+   "input": "passwordless login for alice",
+   "expect": "passwordless login for alice"
+  },
+  {
+   "why": "an ordinary sentence with a number, which must survive untouched",
+   "input": "depth 3 on example.com",
+   "expect": "depth 3 on example.com"
+  },
+  {
+   "why": "a sentence carrying two secrets — both go, not just the first",
+   "input": "api_key=abc123def456 and token=zyx987wvu654",
+   "expect": "api_key=[redacted] and token=[redacted]"
+  },
+  {
+   "why": "a secret word with no value after it is not an assignment",
+   "input": "the password policy changed",
+   "expect": "the password policy changed"
+  },
+  {
+   "why": "a short bearer value below the length floor stays, because it is not a credential shape",
+   "input": "Bearer short",
+   "expect": "Bearer short"
+  }
+ ],
+ "values": [
+  {
+   "why": "a secret-shaped key at the top level",
+   "input": {
+    "password": "hunter2"
+   },
+   "expect": {
+    "password": "[redacted by kontra: an ask travels through history in the clear]"
+   }
+  },
+  {
+   "why": "an ordinary key is untouched",
+   "input": {
+    "depth": 3
+   },
+   "expect": {
+    "depth": 3
+   }
+  },
+  {
+   "why": "nested one level down — the rule is recursive",
+   "input": {
+    "nested": {
+     "api_key": "x"
+    }
+   },
+   "expect": {
+    "nested": {
+     "api_key": "[redacted by kontra: an ask travels through history in the clear]"
+    }
+   }
+  },
+  {
+   "why": "UPPERCASE key, since the rule is case-insensitive",
+   "input": {
+    "PASSWORD": "x"
+   },
+   "expect": {
+    "PASSWORD": "[redacted by kontra: an ask travels through history in the clear]"
+   }
+  },
+  {
+   "why": "a key that only PREFIXES a secret word is not one",
+   "input": {
+    "passwordless": "x"
+   },
+   "expect": {
+    "passwordless": "x"
+   }
+  },
+  {
+   "why": "a suffixed key IS one — `db_password` is a password",
+   "input": {
+    "db_password": "x"
+   },
+   "expect": {
+    "db_password": "[redacted by kontra: an ask travels through history in the clear]"
+   }
+  },
+  {
+   "why": "a list of objects, so recursion crosses sequences too",
+   "input": {
+    "items": [
+     {
+      "token": "t"
+     },
+     {
+      "depth": 1
+     }
+    ]
+   },
+   "expect": {
+    "items": [
+     {
+      "token": "[redacted by kontra: an ask travels through history in the clear]"
+     },
+     {
+      "depth": 1
+     }
+    ]
+   }
+  },
+  {
+   "why": "a non-string value under a secret key still goes",
+   "input": {
+    "secret": 12345
+   },
+   "expect": {
+    "secret": "[redacted by kontra: an ask travels through history in the clear]"
+   }
+  },
+  {
+   "why": "an empty object is not an error",
+   "input": {},
+   "expect": {}
+  }
+ ]
+}

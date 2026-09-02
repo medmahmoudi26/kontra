@@ -1,0 +1,140 @@
+{
+ "why": "The Batch content hash — the first half of a committed Unit's key (ADR 0023 §17), and the thing a retry replays against. Both SDKs must derive it identically from [method, units, params]: canonical JSON, sorted keys, no whitespace, RAW UTF-8 WITH NO HTML ESCAPING, sha256, first 16 hex characters.",
+ "measured": "2026-08-27: Go's encoding/json escaped < > & and Python's json.dumps escaped non-ASCII, so the two hashed the same Batch to different keys for every Unit carrying a query string or an accent. The golden that guarded this was pinned on {\"url\":\"a\"} and {\"depth\":2} — plain ASCII with no symbols, the one input class where the two encoders CANNOT differ.",
+ "cases": [
+  {
+   "why": "a query string — the canonical Unit, and where Go's HTML escaping used to diverge",
+   "method": "probe",
+   "units": [
+    "https://acme.com/?a=1&b=2"
+   ],
+   "params": {},
+   "expect": "d8868b6200c19340"
+  },
+  {
+   "why": "an ampersand alone, the character Go escaped and Python did not",
+   "method": "probe",
+   "units": [
+    "a&b"
+   ],
+   "params": {},
+   "expect": "90a09d3f1841778e"
+  },
+  {
+   "why": "angle brackets, Go's other two escapes",
+   "method": "probe",
+   "units": [
+    "<script>"
+   ],
+   "params": {},
+   "expect": "7e16c1cbdab1e24b"
+  },
+  {
+   "why": "non-ASCII — the mirror-image bug, escaped by Python and not by Go",
+   "method": "probe",
+   "units": [
+    "café"
+   ],
+   "params": {},
+   "expect": "d0de34ff30eafbc4"
+  },
+  {
+   "why": "an emoji, which is non-ASCII outside the BMP and takes a surrogate pair when escaped",
+   "method": "probe",
+   "units": [
+    "📦 box"
+   ],
+   "params": {},
+   "expect": "fdf405eb8beec4d9"
+  },
+  {
+   "why": "plain ASCII, which NEITHER encoder ever escaped — this row must never change",
+   "method": "probe",
+   "units": [
+    "plain-ascii"
+   ],
+   "params": {},
+   "expect": "76457373b3bbfe8c"
+  },
+  {
+   "why": "the Method's name is part of the content: same Units, different Method, different Batch",
+   "method": "extract",
+   "units": [
+    "plain-ascii"
+   ],
+   "params": {},
+   "expect": "132d863e64fdcc2d"
+  },
+  {
+   "why": "params are content too: same Units and Method, different params",
+   "method": "probe",
+   "units": [
+    "plain-ascii"
+   ],
+   "params": {
+    "depth": 2
+   },
+   "expect": "c956400e64bf4d13"
+  },
+  {
+   "why": "params key ORDER must not matter — both sides sort",
+   "method": "crawl",
+   "units": [
+    "u"
+   ],
+   "params": {
+    "b": 2,
+    "a": 1
+   },
+   "expect": "8ac2271e1e07bb3a"
+  },
+  {
+   "why": "an empty unit list is a Batch, not an error",
+   "method": "probe",
+   "units": [],
+   "params": {},
+   "expect": "abc9563697b34dca"
+  },
+  {
+   "why": "objects as Units, the shape a real dispatch carries",
+   "method": "crawl",
+   "units": [
+    {
+     "url": "a"
+    },
+    {
+     "url": "b"
+    }
+   ],
+   "params": {
+    "depth": 2
+   },
+   "expect": "e52b49473394dd1d"
+  },
+  {
+   "why": "a Unit object whose VALUE needs escaping, so the escape rule reaches nested strings",
+   "method": "crawl",
+   "units": [
+    {
+     "url": "https://x/?q=1&r=2"
+    }
+   ],
+   "params": {},
+   "expect": "c289c875efd01b2a"
+  },
+  {
+   "why": "nested params, so sorting is recursive rather than top-level only",
+   "method": "crawl",
+   "units": [
+    "u"
+   ],
+   "params": {
+    "outer": {
+     "z": 1,
+     "a": 2
+    }
+   },
+   "expect": "9cd23513ac68d392"
+  }
+ ]
+}

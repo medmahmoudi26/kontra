@@ -1,0 +1,58 @@
+meta {
+  name: register actor
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/actors
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+body:json {
+  {
+    "key": "echo@0.1.0",
+    "name": "echo",
+    "version": "0.1.0",
+    "schemaVersion": "kontra.actor.v1",
+    "operations": [
+      {
+        "name": "run",
+        "description": "Echo each unit back.",
+        "input": { "type": "object", "properties": { "text": { "type": "string" } } }
+      }
+    ]
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("echoes identity", function() { expect(res.getBody().key).to.eql("echo@0.1.0"); });
+}
+
+docs {
+  Upsert a catalog entry — the descriptor a worker pushes when it serves.
+
+  SCREENED, both ways (src/catalog.ts). The body is validated against the descriptor the
+  proto describes: `key` (which must be `{name}@{version}`), `name` and `version` are
+  required, and each operation's `params`/`input`/`output` must be a JSON Schema document —
+  checked against the 2020-12 meta-schema, not read into. A body that does not validate is
+  refused 400 with the reason.
+
+  And a `(name, version)` already catalogued with a DIFFERENT schema is refused 409 (ADR
+  0004: a version is immutable, any input/output/params change bumps it) — see the next
+  request. Re-posting the SAME descriptor is fine and is what a restarting worker does.
+  There is no force flag: a bypass is the silent overwrite under another name.
+
+  `schemaVersion` defaults to `kontra.actor.v1`. `digest` is optional here — the worker
+  closes the identity loop separately via `set digest`, which is NOT gated: a digest
+  declares no schema and is re-registered on every worker start.
+}

@@ -1,0 +1,553 @@
+{
+ "why": "THE ONE ANSWER to 'can this string name an Artifact', and the corpus exists because THREE call sites consult it and each one used to answer for itself. `cli/build.go` names a --push destination, `cli/scale.go` names the image `kontra serve --mode docker` pulls, and `cli/driver_podman.go` names the image a Machine's runtime is handed. `.scratch/warden/issues/15-*` measured what a second answer costs: one error message served two opposite truths — `a/b` was never deployed and deploying fixes it, `café` can never be an image and nothing fixes it — with an identical headline and two remedies, both unreachable for one of them.",
+ "failure": "A drift here has no loud failure at the site that drifts. A site with its own regexp accepts a reference the registry then rejects, or refuses one that works — and either way the operator is told the wrong one of two opposite things about an actor that demonstrably serves. This corpus is what makes 'break it in one place and watch all three change' a test rather than a claim.",
+ "writers": "ONE implementation (cli/ociref.go) and THREE readers, which is a different shape from the two-writer corpora here and is recorded rather than glossed. What it pins is not two languages agreeing; it is that the three readers have not re-derived the grammar, and that the grammar still says what it said. The driver asserts every site against the same rows, so a fourth bespoke message fails a row rather than passing quietly.",
+ "grammar": {
+  "why": "The distribution spec's own rules, transcribed. The asymmetry between host and path is not a mistake in either: a DOMAIN is a hostname and may carry uppercase, a PATH COMPONENT may not.",
+  "path_component": "^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$",
+  "domain": "a hostname with an optional :port",
+  "tag": "^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$",
+  "digest": "^sha256:[0-9a-f]{64}$"
+ },
+ "split": {
+  "why": "A reference taken APART, before anything is judged. Splitting is separate from judging because a refusal has to name WHICH part is wrong — 'invalid reference format' is the answer this whole corpus exists to stop being the answer. Every trap in the split is a place a hand-rolled parser goes wrong.",
+  "cases": [
+   {
+    "why": "the ordinary conventional destination",
+    "ref": "localhost:5000/bundles/nscheck:0.1.0",
+    "domain": "localhost:5000",
+    "path": "bundles/nscheck",
+    "tag": "0.1.0",
+    "tagSet": true,
+    "digest": ""
+   },
+   {
+    "why": "THE PORT IS NOT A TAG. The tag is the last `:` with no `/` after it, which is the rule that keeps `:5000` out of it — a left-to-right split on `:` reads the port as the tag and the host as the whole repository.",
+    "ref": "localhost:5000/nscheck",
+    "domain": "localhost:5000",
+    "path": "nscheck",
+    "tag": "",
+    "tagSet": false,
+    "digest": ""
+   },
+   {
+    "why": "`a/b` IS NOT A HOST. The first component is a domain only if it carries a dot or a port or is literally `localhost`; without that rule `a` is read as a registry and passes a hostname check, which is exactly as wrong as failing it. conformance/queues.json carries this actor name on purpose.",
+    "ref": "a/b:1.0.0",
+    "domain": "",
+    "path": "a/b",
+    "tag": "1.0.0",
+    "tagSet": true,
+    "digest": ""
+   },
+   {
+    "why": "the LOCAL form `kontra serve --mode docker` prefers when the daemon holds it — no registry, two path components. Issue 15's trap is that this and the remote form are different strings for one Actor, so a check aimed at either alone passes and the pull still dies.",
+    "ref": "kontra/nscheck-worker:0.1.0",
+    "domain": "",
+    "path": "kontra/nscheck-worker",
+    "tag": "0.1.0",
+    "tagSet": true,
+    "digest": ""
+   },
+   {
+    "why": "a digest-pinned reference: the digest comes off first, so a tag-shaped `:` inside `sha256:` is never mistaken for a tag",
+    "ref": "localhost:5000/bundles/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "domain": "localhost:5000",
+    "path": "bundles/nscheck",
+    "tag": "",
+    "tagSet": false,
+    "digest": "sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40"
+   },
+   {
+    "why": "a digest that is NOT a sha256 still splits cleanly. The digest is carried verbatim and unjudged here, because whether it is acceptable is two opposite rules at two sites: the podman driver requires one, and a --push destination refuses one.",
+    "ref": "localhost/nscheck@md5:0123456789abcdef0123456789abcdef",
+    "domain": "localhost",
+    "path": "nscheck",
+    "tag": "",
+    "tagSet": false,
+    "digest": "md5:0123456789abcdef0123456789abcdef"
+   },
+   {
+    "why": "a nested path on a real registry — GitLab's group/subgroup/project is three components and must not be collapsed",
+    "ref": "registry.gitlab.com/acme/tools/bundles/nscheck:0.1.0",
+    "domain": "registry.gitlab.com",
+    "path": "acme/tools/bundles/nscheck",
+    "tag": "0.1.0",
+    "tagSet": true,
+    "digest": ""
+   },
+   {
+    "why": "AN EMPTY TAG IS NOT AN ABSENT TAG. `x:` and `x` are different strings and only one of them is a refusal, so the split has to remember that a `:` was written.",
+    "ref": "ghcr.io/acme/nscheck:",
+    "domain": "ghcr.io",
+    "path": "acme/nscheck",
+    "tag": "",
+    "tagSet": true,
+    "digest": ""
+   },
+   {
+    "why": "NO REGISTRY AT ALL is a legal reference and means Docker Hub. It splits fine; refusing it is a decision the push site makes and the pull site does not.",
+    "ref": "nscheck:0.1.0",
+    "domain": "",
+    "path": "nscheck",
+    "tag": "0.1.0",
+    "tagSet": true,
+    "digest": ""
+   },
+   {
+    "why": "an IP with a port is a host; a bare IPv4 without one carries dots and is also a host",
+    "ref": "10.124.0.2:5000/bundles/nscheck:0.1.0",
+    "domain": "10.124.0.2:5000",
+    "path": "bundles/nscheck",
+    "tag": "0.1.0",
+    "tagSet": true,
+    "digest": ""
+   }
+  ]
+ },
+ "verdict": {
+  "why": "The judgement itself: expressible, or not — and when not, WHICH part. `part` is the field the message names, and it is pinned because naming the wrong half of a string is the failure issue 15 measured, not a cosmetic one.",
+  "cases": [
+   {
+    "why": "the conventional destination",
+    "ref": "localhost:5000/bundles/nscheck:0.1.0",
+    "verdict": "ok"
+   },
+   {
+    "why": "ghcr, which is what a customer who owns their registry actually types",
+    "ref": "ghcr.io/acme/bundles/nscheck:0.1.0",
+    "verdict": "ok"
+   },
+   {
+    "why": "GitLab's nested groups",
+    "ref": "registry.gitlab.com/acme/tools/bundles/nscheck:0.1.0",
+    "verdict": "ok"
+   },
+   {
+    "why": "`a/b` IS LEGAL and must stay legal. A slash is a path separator, so this is a good repository whose image merely has not been pushed — a check that refused it would be as wrong as one that accepted `café`. This is the row that keeps 'never deployed' true for the one name it is true for.",
+    "ref": "localhost:5000/a/b:1.0.0",
+    "verdict": "ok"
+   },
+   {
+    "why": "the LOCAL form with no registry — legal, because Docker Hub is a legal place for a reference to point even when it is a terrible place to push to",
+    "ref": "kontra/nscheck-worker:0.1.0",
+    "verdict": "ok"
+   },
+   {
+    "why": "a hyphen and a dot in a tag: both legal, and `0.2.0-rc1` is a version this repo ships",
+    "ref": "localhost:5000/bundles/crawl4ai-canon:0.2.0-rc1",
+    "verdict": "ok"
+   },
+   {
+    "why": "CAFÉ CAN NEVER BE AN IMAGE. conformance/queues.json pins it as an actor name that must keep working, and Temporal takes it verbatim — so this actor serves, polls and is reconciled forever by the `process` driver and can never be placed by any driver that pulls. The refusal names the path component, not the whole string.",
+    "ref": "localhost:5000/café:0.1.0",
+    "verdict": "unrepresentable",
+    "part": "repository path component",
+    "bad": "café"
+   },
+   {
+    "why": "…and the LOCAL form of the same Actor, which is a different string with a different prefix AND suffix. Both forms are in this corpus because a fix that validated one of them would move the failure one step earlier without removing it.",
+    "ref": "kontra/café-worker:0.1.0",
+    "verdict": "unrepresentable",
+    "part": "repository path component",
+    "bad": "café-worker"
+   },
+   {
+    "why": "…and pinned, which is the trap in a check that only looks for a digest: this is perfectly pinned and still cannot be pulled",
+    "ref": "localhost:5000/café@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "unrepresentable",
+    "part": "repository path component",
+    "bad": "café"
+   },
+   {
+    "why": "a space: podman says `invalid reference format`, which names nothing",
+    "ref": "localhost:5000/my actor:1.0",
+    "verdict": "unrepresentable",
+    "part": "repository path component",
+    "bad": "my actor"
+   },
+   {
+    "why": "UPPERCASE IS THE ASYMMETRY. `localhost` is a fine host and `Foo` is not a path component, so the refusal must blame `Foo` — podman's own wording, 'repository name must be lowercase', is the one place its message is better than 'invalid reference format'.",
+    "ref": "localhost:5000/Foo:1.0",
+    "verdict": "unrepresentable",
+    "part": "repository path component",
+    "bad": "Foo"
+   },
+   {
+    "why": "A VERSION IS NOT ALWAYS A TAG. conformance/queues.json carries `1:2` as an adversarial version and Temporal accepts it; `<registry>/bundles/nscheck:1:2` reads back as repository `bundles/nscheck:1` with tag `2`, so the string is refused for the half that actually breaks first.",
+    "ref": "localhost:5000/bundles/nscheck:1:2",
+    "verdict": "unrepresentable",
+    "part": "repository path component",
+    "bad": "nscheck:1"
+   },
+   {
+    "why": "semver build metadata is legal in a version and illegal in a tag — this is the row that blames the TAG, and without a tag rule it would be accepted here and rejected by the registry",
+    "ref": "ghcr.io/acme/nscheck:1.0.0+build.7",
+    "verdict": "unrepresentable",
+    "part": "tag",
+    "bad": "1.0.0+build.7"
+   },
+   {
+    "why": "an empty tag: the `:` was written, so this is a refusal and not an untagged reference",
+    "ref": "ghcr.io/acme/nscheck:",
+    "verdict": "unrepresentable",
+    "part": "tag",
+    "bad": ""
+   },
+   {
+    "why": "a tag may not start with a period — the leading separator is the classic hand-rolled-regexp miss",
+    "ref": "ghcr.io/acme/nscheck:.1.0",
+    "verdict": "unrepresentable",
+    "part": "tag",
+    "bad": ".1.0"
+   },
+   {
+    "why": "an underscore-prefixed host is not a hostname, and the domain is what has to be blamed — blaming the path would send the reader to edit the wrong half",
+    "ref": "_bad_host:5000/nscheck:1.0",
+    "verdict": "unrepresentable",
+    "part": "registry host",
+    "bad": "_bad_host:5000"
+   },
+   {
+    "why": "the empty string names nothing at all",
+    "ref": "",
+    "verdict": "unrepresentable",
+    "part": "repository path",
+    "bad": ""
+   }
+  ]
+ },
+ "pin": {
+  "why": "THE PODMAN DRIVER'S OWN RULE, on top of the grammar: `<repo>@sha256:<64 hex>` and nothing else. A tag is not a weaker pin, it is a different thing — a mutable binding, so two Machines in one Fleet that pull `nscheck:0.1.0` an hour apart can be running different code. The three verdicts are three different sentences and telling an operator the wrong one costs them an afternoon: `unpinned` has a real remedy, `unrepresentable` has none.",
+  "cases": [
+   {
+    "why": "the only thing a podman Worker runs",
+    "ref": "localhost:5000/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "pinned",
+    "digest": "sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40"
+   },
+   {
+    "why": "`a/b` pinned — legal name, legal pin, and this is what stops every assertion here from holding against a function that refuses everything",
+    "ref": "a/b@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "verdict": "pinned",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   {
+    "why": "a tag with a registry, which looks the most legitimate and is the case this rule exists for",
+    "ref": "localhost:5000/nscheck:0.1.0",
+    "verdict": "unpinned"
+   },
+   {
+    "why": "no tag at all is implicitly `:latest`, the worst of them",
+    "ref": "localhost:5000/nscheck",
+    "verdict": "unpinned"
+   },
+   {
+    "why": "`a/b` unpinned reports UNPINNED and not unrepresentable — pinning it is a real remedy, and this row is the sibling of scale.go's 'never deployed', which is true for exactly this name",
+    "ref": "localhost:5000/a/b:1.0.0",
+    "verdict": "unpinned"
+   },
+   {
+    "why": "one hex short: a digest-shaped string that is not a digest is unpinned, not ungrammatical — the repository is fine",
+    "ref": "localhost/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da4",
+    "verdict": "unpinned"
+   },
+   {
+    "why": "a different algorithm. Nothing here resolves it, so it is not a pin.",
+    "ref": "localhost/nscheck@md5:0123456789abcdef0123456789abcdef",
+    "verdict": "unpinned"
+   },
+   {
+    "why": "café pinned is still unrepresentable, and MUST NOT report as unpinned — an operator told to pin it would pin it and fail again identically",
+    "ref": "localhost:5000/café@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "unrepresentable"
+   },
+   {
+    "why": "the local form, same verdict, different string",
+    "ref": "kontra/café-worker:0.1.0",
+    "verdict": "unrepresentable"
+   }
+  ]
+ },
+ "push": {
+  "why": "`kontra build --push <ref>` (ADR 0036: kontra owns no registry). The grammar above is necessary and not sufficient: a DESTINATION has two further rules, and both of them refuse references that are perfectly legal to PULL. `expect` is the reference actually published to, which is how the untagged case is pinned.",
+  "transport": "`plainHTTP` is pinned per case because the default INVERTS relative to the conventional address. kontra's own registry — the Controller's :5000, the appliance's bound port — is plain HTTP by construction and `registryHost` keeps that. A --push destination is somebody else's registry reached over the internet, so it is HTTPS unless the operator wrote `http://` or the host is loopback: defaulting it the other way would silently downgrade every push to ghcr, GitLab or Harbor, on the one request that carries an Artifact out of the box.",
+  "actor": {
+   "name": "nscheck",
+   "version": "0.1.0"
+  },
+  "cases": [
+   {
+    "why": "the single box — `localhost:5000` survives as one configured endpoint among many, which is the whole of what ADR 0036 keeps, and it is the one host with no TLS and no need for any",
+    "ref": "localhost:5000/bundles/nscheck:0.1.0",
+    "verdict": "ok",
+    "expect": "localhost:5000/bundles/nscheck:0.1.0",
+    "plainHTTP": true
+   },
+   {
+    "why": "GitHub Container Registry — a registry the customer owns, which is the point of the slice, and which must never be spoken to in the clear",
+    "ref": "ghcr.io/acme/bundles/nscheck:0.1.0",
+    "verdict": "ok",
+    "expect": "ghcr.io/acme/bundles/nscheck:0.1.0",
+    "plainHTTP": false
+   },
+   {
+    "why": "GitLab, nested groups and all",
+    "ref": "registry.gitlab.com/acme/tools/bundles/nscheck:0.1.0",
+    "verdict": "ok",
+    "expect": "registry.gitlab.com/acme/tools/bundles/nscheck:0.1.0",
+    "plainHTTP": false
+   },
+   {
+    "why": "a Harbor-style host on a private VPC, with a port. A private address is NOT a reason to drop TLS — a heuristic about ranges would be a third rule to be wrong about.",
+    "ref": "harbor.internal:8443/kontra/bundles/nscheck:0.1.0",
+    "verdict": "ok",
+    "expect": "harbor.internal:8443/kontra/bundles/nscheck:0.1.0",
+    "plainHTTP": false
+   },
+   {
+    "why": "…and an operator whose VPC registry really is plain HTTP says so, explicitly",
+    "ref": "http://10.124.0.2:5000/bundles/nscheck:0.1.0",
+    "verdict": "ok",
+    "expect": "10.124.0.2:5000/bundles/nscheck:0.1.0",
+    "plainHTTP": true
+   },
+   {
+    "why": "loopback by address, not only by name",
+    "ref": "127.0.0.1:5000/bundles/nscheck:0.1.0",
+    "verdict": "ok",
+    "expect": "127.0.0.1:5000/bundles/nscheck:0.1.0",
+    "plainHTTP": true
+   },
+   {
+    "why": "AN UNTAGGED REFERENCE TAKES THE ACTOR'S VERSION, never `:latest`. `latest` means 'whatever was pushed last', and a Fleet resolving it would place whichever Artifact won the race.",
+    "ref": "ghcr.io/acme/bundles/nscheck",
+    "verdict": "ok",
+    "expect": "ghcr.io/acme/bundles/nscheck:0.1.0",
+    "plainHTTP": false
+   },
+   {
+    "why": "an https:// scheme is honoured for the transport and STRIPPED from the reference — an OCI reference may not carry one, and `https://mirror/x` parsed whole splits as host `https:`, which is domain-shaped and would pass every check while pushing to a repository called `/mirror/x`",
+    "ref": "https://mirror.internal/bundles/nscheck:0.1.0",
+    "verdict": "ok",
+    "expect": "mirror.internal/bundles/nscheck:0.1.0",
+    "plainHTTP": false
+   },
+   {
+    "why": "NO REGISTRY MEANS DOCKER HUB, and kontra will not make it the default: docker.io rate-limits manifest reads at 100/hour PER IP, so one Fleet pulling one actor exhausts it for every unrelated build on that egress address. Measured on the box this was written on.",
+    "ref": "nscheck:0.1.0",
+    "verdict": "no-registry"
+   },
+   {
+    "why": "…including the form that LOOKS like it names one. `acme/nscheck` is a Docker Hub user called acme, not a registry called acme.",
+    "ref": "acme/bundles/nscheck:0.1.0",
+    "verdict": "no-registry"
+   },
+   {
+    "why": "A HOST WITH NO DOT AND NO PORT IS NOT A HOST, and this row guards the DEFAULT path too: KONTRA_REGISTRY=myregistry would push to a host called myregistry while every reference kontra PRINTS resolves to a Docker Hub user of that name. The invariant is that a reference kontra prints resolves to the place kontra pushed.",
+    "ref": "myregistry/bundles/nscheck:0.1.0",
+    "verdict": "no-registry"
+   },
+   {
+    "why": "A DIGEST IS THE PUSH'S OUTPUT. `sha256:…` addresses content that does not exist until these bytes are uploaded, so a destination carrying one is a copy-paste of a previous build.",
+    "ref": "ghcr.io/acme/bundles/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "digest-pinned"
+   },
+   {
+    "why": "an unnameable actor reaches the push site too, and it is the THIRD site that names an Artifact — the one issue 15 said must not add a fourth bespoke message",
+    "ref": "ghcr.io/acme/bundles/café:0.1.0",
+    "verdict": "unrepresentable"
+   },
+   {
+    "why": "uppercase in the path, which is the mistake a human types rather than one an actor name causes",
+    "ref": "ghcr.io/Acme/bundles/nscheck:0.1.0",
+    "verdict": "unrepresentable"
+   }
+  ]
+ },
+ "allow": {
+  "why": "THE MACHINE'S TRUST POLICY (cli/trustpolicy.go, slice 14): which registries a Warden pulls Workers from, and in what ORDER the refusals happen. It lives in THIS corpus rather than a new one because it is not a new answer to 'what is a legal reference' — it is a question asked of the SAME two fields the grammar produces, `ociRef.Domain` and `ociRef.Path`. A policy that split the reference for itself is not merely inconsistent, it is a bypass: `strings.HasPrefix(ref, \"ghcr.io\")` admits `ghcr.io.evil.example/x` and `strings.Split(ref, \"/\")[0]` admits `a/b` as though `a` were a registry. Both rows are below.",
+  "failure": "A drift here is silent in the direction that matters. A widened match admits an image from a registry nobody allowlisted and the Worker starts, runs and reports healthy; there is no error anywhere. The only thing that goes red is a row.",
+  "coupling": "THIS SECTION IS THE PROOF THAT THE ANSWER IS STILL SHARED, and it is checkable by mutation rather than by reading: widening `ociPathComponent` by one character flips `localhost:5000/café@sha256:…` from `unrepresentable` to `signature` and makes the entry `ghcr.io/café` load; widening `looksLikeRegistryHost` makes the entry `a` load; loosening `ociDomain` makes `_bad_host:5000` load. Each of those already turns the verdict/pin/push sections red, and now it turns policy red in the same run.",
+  "rules": {
+   "why": "AN ALLOWLIST ENTRY IS A REGISTRY, and it is judged by the same three rules the grammar is built from — `looksLikeRegistryHost`, `ociDomain`, `ociPathComponent`. `host` and `path` are what the entry parses to; a refused entry fails the whole list rather than being dropped, because a silently discarded entry is a Machine that refuses a registry the operator believes is allowed.",
+   "cases": [
+    {
+     "why": "the whole registry — and this is the entry that admits every account on it, which is why the signature gate is not optional",
+     "entry": "ghcr.io",
+     "verdict": "ok",
+     "host": "ghcr.io",
+     "path": []
+    },
+    {
+     "why": "…narrowed to one org, which is the thing an operator usually means",
+     "entry": "ghcr.io/acme",
+     "verdict": "ok",
+     "host": "ghcr.io",
+     "path": ["acme"]
+    },
+    {
+     "why": "the single box. A port is part of the host and is compared exactly.",
+     "entry": "localhost:5000",
+     "verdict": "ok",
+     "host": "localhost:5000",
+     "path": []
+    },
+    {
+     "why": "a scheme is stripped by `pushTransport` — the SAME function `kontra build --push` uses — so an operator who wrote `http://` in one place and the other means the same thing in both",
+     "entry": "http://10.124.0.2:5000",
+     "verdict": "ok",
+     "host": "10.124.0.2:5000",
+     "path": []
+    },
+    {
+     "why": "…and https, with a path, and a trailing slash a human would type",
+     "entry": "https://mirror.internal/bundles/",
+     "verdict": "ok",
+     "host": "mirror.internal",
+     "path": ["bundles"]
+    },
+    {
+     "why": "A HOST WITH NO DOT AND NO PORT IS NOT A HOST. `myregistry` names a DOCKER HUB USER — the same trap `pushDestination` refuses for KONTRA_REGISTRY — so an allowlist entry spelled this way would be the widest possible entry wearing the narrowest possible name. Coupled to `looksLikeRegistryHost`.",
+     "entry": "myregistry",
+     "verdict": "refused"
+    },
+    {
+     "why": "…and the one-letter form, which is `a/b`'s first component. conformance/queues.json pins `a/b` as an Actor name that must keep working, and it must never be readable as a registry called `a`.",
+     "entry": "a",
+     "verdict": "refused"
+    },
+    {
+     "why": "an entry whose path cannot be a repository path. Coupled to `ociPathComponent`: widen it and this entry loads.",
+     "entry": "ghcr.io/café",
+     "verdict": "refused"
+    },
+    {
+     "why": "uppercase is legal in a HOST and illegal in a PATH — the asymmetry this corpus already pins, now reaching the allowlist",
+     "entry": "ghcr.io/Acme",
+     "verdict": "refused"
+    },
+    {
+     "why": "an underscore-prefixed host is not a hostname. Coupled to `ociDomain`.",
+     "entry": "_bad_host:5000",
+     "verdict": "refused"
+    },
+    {
+     "why": "an empty entry names no registry, and must not quietly parse to a rule that matches an empty Domain — which is every Docker Hub reference",
+     "entry": "  ",
+     "verdict": "refused"
+    }
+   ]
+  },
+  "why_cases": "THE ORDER IS WHAT THESE ROWS PIN, not just the verdicts. Each row is driven through `trustPolicy.admit` end to end with a verifier that RECORDS whether it was reached, so `registry` and `unpinned` rows assert that nothing was ever asked of the network, and `signature` rows assert that it was — with the repository and digest the container would actually have run. A test that only compared error values could not tell 'refused early' from 'refused after fetching'.",
+  "verdicts": {
+   "ok": "admitted. The matched entry is marked unsigned-accepted, so the verifier must NOT have been called.",
+   "registry": "errRegistryNotAllowed — gate 2. No request was made.",
+   "unpinned": "errImageUnpinned — gate 3. Allowed registry, mutable pointer.",
+   "unrepresentable": "errImageUnrepresentable — gate 1, the shared grammar, before any policy.",
+   "signature": "reached gate 4: the registry was allowed, the reference was pinned, and the verifier was asked."
+  },
+  "cases": [
+   {
+    "why": "the single box, which is the case that must keep working or the first thing anyone does with this feature is turn it off",
+    "allow": ["localhost:5000"],
+    "unsigned": ["localhost:5000"],
+    "ref": "localhost:5000/bundles/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "ok"
+   },
+   {
+    "why": "AN UNSIGNED EXCEPTION DOES NOT LEAK TO THE NEXT ENTRY. Same policy, second registry: `ghcr.io/acme` is allowed and still has to be signed. Without this row, `--trust-unsigned` could be implemented as a global flag and every row above would still pass.",
+    "allow": ["localhost:5000", "ghcr.io/acme"],
+    "unsigned": ["localhost:5000"],
+    "ref": "ghcr.io/acme/bundles/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "signature",
+    "repository": "ghcr.io/acme/bundles/nscheck",
+    "digest": "sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40"
+   },
+   {
+    "why": "THE PREFIX TRAP. `ghcr.io/acme` must not admit `ghcr.io/acme-evil`, which is a repository anyone can create in thirty seconds. A `strings.HasPrefix` on the path passes every other row in this section and fails this one.",
+    "allow": ["ghcr.io/acme"],
+    "ref": "ghcr.io/acme-evil/bundles/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "registry"
+   },
+   {
+    "why": "THE HOST-SUFFIX TRAP, which is the same bug one field over. `ghcr.io.evil.example` is a domain an attacker registers; a prefix or `strings.Contains` match on the host admits it, and the reference reads as ghcr to a human scanning a log.",
+    "allow": ["ghcr.io"],
+    "ref": "ghcr.io.evil.example/acme/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "registry"
+   },
+   {
+    "why": "A DIFFERENT PORT IS A DIFFERENT REGISTRY. The port is part of the Domain the grammar produced and is compared exactly — :5001 on the same box can be somebody else's registry.",
+    "allow": ["localhost:5000"],
+    "ref": "localhost:5001/bundles/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "registry"
+   },
+   {
+    "why": "A HOSTNAME IS CASE-INSENSITIVE and `ociDomain` permits uppercase in it, so `GHCR.IO` is the allowlisted registry and refusing it would be a false refusal. The path is not folded — that is the asymmetry, and `Acme` is refused two rows down.",
+    "allow": ["ghcr.io"],
+    "ref": "GHCR.IO/acme/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "signature",
+    "repository": "GHCR.IO/acme/nscheck",
+    "digest": "sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40"
+   },
+   {
+    "why": "NO REGISTRY IN THE REFERENCE MEANS DOCKER HUB, and NO rule matches it — not even one spelling `docker.io`. Normalising the empty Domain would need docker's own `library/` insertion rule to get the path right, which is a second answer to a question cli/ociref.go deliberately does not answer. So it is refused and the refusal names Docker Hub.",
+    "allow": ["localhost:5000", "docker.io"],
+    "ref": "nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "registry"
+   },
+   {
+    "why": "…including the form that LOOKS like it names one: `a/b` is a legal repository whose first component is not a host. conformance/queues.json pins `a/b` as an Actor name that must keep working, and here it must be refused as Docker Hub rather than admitted as a registry called `a`.",
+    "allow": ["localhost:5000"],
+    "ref": "a/b@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "registry"
+   },
+   {
+    "why": "THE ALLOWLIST IS CHECKED BEFORE THE PIN, and this row is the whole argument for that order. Both gates are free, so cost cannot choose between them — diagnosis can: `errImageUnpinned` offers a remedy that WORKS (pin it), produces a new reference, and fails again identically on the registry. That is `.scratch/warden/issues/15-*`'s finding in a new place.",
+    "allow": ["localhost:5000"],
+    "ref": "ghcr.io/acme/nscheck:0.1.0",
+    "verdict": "registry"
+   },
+   {
+    "why": "…and the converse, without which the row above holds against a function that returns errRegistryNotAllowed for everything unpinned: same reference shape, allowlisted registry, and now the pin is the true complaint.",
+    "allow": ["ghcr.io/acme"],
+    "ref": "ghcr.io/acme/nscheck:0.1.0",
+    "verdict": "unpinned"
+   },
+   {
+    "why": "THE GRAMMAR IS ASKED BEFORE THE POLICY. `café` is pinned and its registry is allowlisted, and it is still refused for the one reason no policy change can fix — which is the refusal an operator can act on. Coupled to `ociPathComponent`: widen it and this row becomes `signature`.",
+    "allow": ["localhost:5000"],
+    "unsigned": ["localhost:5000"],
+    "ref": "localhost:5000/café@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "unrepresentable"
+   },
+   {
+    "why": "`a/b` INSIDE AN ALLOWED REGISTRY IS FINE. A slash is a path separator, so this is a good repository at a good address and the only thing left to ask is who signed it. The row that stops every assertion above from holding against a policy that refuses everything.",
+    "allow": ["localhost:5000"],
+    "ref": "localhost:5000/a/b@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "signature",
+    "repository": "localhost:5000/a/b",
+    "digest": "sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40"
+   },
+   {
+    "why": "AN ENTRY MATCHES ITSELF. `ghcr.io/acme` admits the repository `ghcr.io/acme`, not only things beneath it.",
+    "allow": ["ghcr.io/acme"],
+    "ref": "ghcr.io/acme@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "signature",
+    "repository": "ghcr.io/acme",
+    "digest": "sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40"
+   },
+   {
+    "why": "A REFERENCE SHORTER THAN THE ENTRY IS NOT INSIDE IT. Without the length guard this indexes past the end of the reference's components — a panic in a Warden's reconcile loop, which is the one place this repo has decided a crash may not happen.",
+    "allow": ["ghcr.io/acme/bundles"],
+    "ref": "ghcr.io/acme@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "registry"
+   },
+   {
+    "why": "AN EMPTY POLICY ADMITS NOTHING. `trustPolicy{}` is the value a driver has if a construction site forgot one, and the whole design rests on it being a refusal — `infra/watchdog.sh` degraded to always-healthy for years and looked fine the entire time.",
+    "allow": [],
+    "ref": "localhost:5000/bundles/nscheck@sha256:d216f83bc7887c5dc03bb07853f4dd28c0694a5a72509d575f83386cb602da40",
+    "verdict": "registry"
+   }
+  ]
+ }
+}

@@ -1,0 +1,30 @@
+meta {
+  name: list datasets
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/datasets
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  var b = res.getBody();
+  var ds = b.datasets || b;
+  if (ds && ds.length) bru.setVar("datasetName", ds[0].name);
+}
+
+docs {
+  Operator-visible datasets in the lake. A long-lived run never publishes a NAMED
+  dataset until it completes — absence here does not mean nothing was written.
+}

@@ -1,0 +1,23 @@
+meta {
+  name: hourly summaries
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/summaries/hourly
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}
+
+assert {
+  res.status: eq 200
+}
+
+docs {
+  Hourly rollups.
+}

@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kontra-sdk"
+version = "0.0.0"
+description = "Kontra Python SDK seam: the @actor authoring surface, the meta-workflow skeleton, and the claim-check codec."
+requires-python = ">=3.10"
+dependencies = [
+    # SimplePlugin / temporalio.plugin requires a recent SDK; Nexus serve needs >=1.28.
+    "temporalio>=1.28",
+    "jsonschema>=4.0",
+    # Per-actor I/O schemas are derived from the typed @actor.defn class (actorkit.schema).
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# Actor dependencies (Playwright/Chromium, etc.) are NOT framework extras — they
+# live in the actor's own image (examples/python/<actor>/Dockerfile). The SDK declares none.
+# PyYAML is not the SDK's — it is `tests/test_workflow_paths.py`'s, which parses `.github/workflows`
+# to check that every directory a CI job walks into exists. `dev` is what CI installs to run the
+# repo-root suite, so a test-only import belongs here; it was already present on every machine by
+# accident, which is exactly how a guard gets added and then fails to collect on the one runner
+# that matters.
+dev = ["pytest>=8.0", "PyYAML>=6.0"]
+# Claim-check offload to an S3 store (SeaweedFS S3 gateway locally, S3 in cloud).
+seaweed = ["boto3>=1.28"]
+
+# No console script: a Python actor is run by `python3 actor.py` (actor.serve()), and
+# DISPATCH is the orchestrator's job. Kontra ships no dispatch CLI — a DIY trigger is a
+# few lines on the SDK (see examples/python/wordcount/{dispatch,webhook}.py).
+#
+# ONE DISTRIBUTION, TWO SEAMS, AND THAT IS DELIBERATE. `actorkit` is the author surface and lives
+# beside this file; `internals` is the runtime and lives under `runtime/python/`, reached here by a
+# relative package-dir. They ship together because an actor process needs both — the author's
+# `actor.serve()` hands control to the runtime, and a wheel that carried only half of that would
+# import and then fail to run. What the split buys is the ARROW, not two installs: `runtime/`
+# imports `sdk/`, never the reverse, asserted by tests/test_sdk_arrow.py.
+#
+# THE DIRECTORY IS NAMED AFTER THE PACKAGE on both sides (`sdk/python/actorkit`,
+# `runtime/python/internals`), and that is load-bearing rather than tidy. setuptools' editable
+# install APPENDS its finder to sys.meta_path, i.e. AFTER the ordinary path finder — so any
+# directory on sys.path whose name matches the package wins over the install. The old layout put
+# the package files in `actorkit/python/lib/` under a seam directory called `actorkit/`, which is
+# exactly such a directory, so a checkout resolved `import actorkit` to the SEAM DIR and got a
+# package with no modules in it. The fix was a hand-written `actorkit/__init__.py` at the repo root
+# that re-pointed `__path__` at `python/lib` and re-declared every export — a second copy of the
+# package header, kept in sync by a test.
+#
+# Naming the directory after the package removes the collision instead of compensating for it:
+# there is no `actorkit/` at the repo root to shadow anything, `sdk/python/actorkit/` is a real
+# package directory that both the path finder and the editable finder resolve to, and the Temporal
+# workflow sandbox — which re-imports fresh and path-scans — finds the same files either way. The
+# shim and its duplicate __init__ are gone.
+#
+# `internals.temporal` IS LISTED. It was not, which no editable install ever noticed (the finder
+# maps a directory, so subpackages came along); a built wheel dropped the actor host on the floor.
+[tool.setuptools]
+packages = ["actorkit", "internals", "internals.temporal"]
+
+[tool.setuptools.package-dir]
+actorkit = "actorkit"
+internals = "../../runtime/python/internals"

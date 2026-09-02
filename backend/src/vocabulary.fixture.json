@@ -1,0 +1,245 @@
+{
+  "v": 1,
+  "runId": "nscheck-1786831339",
+  "startedAt": 1786831339151,
+  "closedAt": 1786831619451,
+  "archivedAt": 1786832239151,
+  "history": {
+    "events": [
+      {
+        "id": 1,
+        "type": "WorkflowExecutionStarted",
+        "cat": "workflow",
+        "t": 0.0,
+        "at": 1786831339151,
+        "detail": "workflowType=NsCheck · taskQueue=recon · identity=1@65520c20a6a4",
+        "attempt": 1,
+        "dur": 0
+      },
+      {
+        "id": 2,
+        "type": "WorkflowTaskScheduled",
+        "cat": "task",
+        "t": 0.01,
+        "at": 1786831339161,
+        "detail": "taskQueue=recon",
+        "attempt": 1,
+        "dur": 0
+      },
+      {
+        "id": 3,
+        "type": "WorkflowTaskStarted",
+        "cat": "task",
+        "t": 0.03,
+        "at": 1786831339181,
+        "detail": "identity=1@65520c20a6a4",
+        "attempt": 1,
+        "dur": 0.02
+      },
+      {
+        "id": 4,
+        "type": "WorkflowTaskCompleted",
+        "cat": "task",
+        "t": 0.04,
+        "at": 1786831339191,
+        "detail": "identity=1@65520c20a6a4",
+        "attempt": 1,
+        "dur": 0.01
+      },
+      {
+        "id": 5,
+        "type": "StartChildWorkflowExecutionInitiated",
+        "cat": "child",
+        "t": 0.1,
+        "at": 1786831339251,
+        "detail": "workflowType=stackWorkflow · taskQueue=kontra-infra",
+        "attempt": 1,
+        "dur": 0,
+        "link": {
+          "workflowId": "kontra-fleet/dns",
+          "type": "stackWorkflow",
+          "via": "child"
+        }
+      },
+      {
+        "id": 6,
+        "type": "ChildWorkflowExecutionStarted",
+        "cat": "child",
+        "t": 1.2,
+        "at": 1786831340351,
+        "detail": "workflowType=stackWorkflow",
+        "attempt": 1,
+        "dur": 1.1,
+        "link": {
+          "workflowId": "kontra-fleet/dns",
+          "execId": "01a00772-8296-7c6a-9d3e-2f0a1b5e4c11",
+          "type": "stackWorkflow",
+          "via": "child"
+        }
+      },
+      {
+        "id": 7,
+        "type": "ChildWorkflowExecutionCompleted",
+        "cat": "child",
+        "t": 156.3,
+        "at": 1786831495451,
+        "detail": "workflowType=stackWorkflow",
+        "attempt": 1,
+        "dur": 156.2,
+        "link": {
+          "workflowId": "kontra-fleet/dns",
+          "execId": "01a00772-8296-7c6a-9d3e-2f0a1b5e4c11",
+          "type": "stackWorkflow",
+          "via": "child"
+        }
+      },
+      {
+        "id": 8,
+        "type": "ActivityTaskScheduled",
+        "cat": "activity",
+        "t": 156.4,
+        "at": 1786831495551,
+        "detail": "activityType=pageDataset · taskQueue=kontra-datasets",
+        "attempt": 1,
+        "dur": 0
+      },
+      {
+        "id": 9,
+        "type": "ActivityTaskCompleted",
+        "cat": "activity",
+        "t": 156.65,
+        "at": 1786831495801,
+        "detail": "identity=1@65520c20a6a4",
+        "attempt": 1,
+        "dur": 0.25
+      },
+      {
+        "id": 10,
+        "type": "NexusOperationScheduled",
+        "cat": "child",
+        "t": 156.7,
+        "at": 1786831495851,
+        "detail": "endpoint=kontra-nscheck-0-1-0 · nexus=kontra.actor/run",
+        "attempt": 1,
+        "dur": 0,
+        "link": {
+          "workflowId": "actor-nscheck-nscheck-1786831339-nscheck-60c3bfac",
+          "via": "nexus"
+        }
+      },
+      {
+        "id": 11,
+        "type": "NexusOperationStarted",
+        "cat": "child",
+        "t": 157.1,
+        "at": 1786831496251,
+        "detail": "endpoint=kontra-nscheck-0-1-0",
+        "attempt": 1,
+        "dur": 0.4,
+        "link": {
+          "workflowId": "actor-nscheck-nscheck-1786831339-nscheck-60c3bfac",
+          "via": "nexus"
+        }
+      },
+      {
+        "id": 12,
+        "type": "NexusOperationCompleted",
+        "cat": "child",
+        "t": 159.7,
+        "at": 1786831498851,
+        "detail": "NexusOperationCompleted",
+        "attempt": 1,
+        "dur": 3.0,
+        "link": {
+          "workflowId": "actor-nscheck-nscheck-1786831339-nscheck-60c3bfac",
+          "via": "nexus"
+        }
+      },
+      {
+        "id": 13,
+        "type": "WorkflowExecutionSignaled",
+        "cat": "signal",
+        "t": 159.75,
+        "at": 1786831498901,
+        "detail": "identity=cli",
+        "attempt": 1,
+        "dur": 0
+      },
+      {
+        "id": 14,
+        "type": "ActivityTaskScheduled",
+        "cat": "activity",
+        "t": 159.8,
+        "at": 1786831498951,
+        "detail": "activityType=RunBatch · taskQueue=probe-0.1.0",
+        "attempt": 1,
+        "dur": 0
+      },
+      {
+        "id": 15,
+        "type": "ActivityTaskTimedOut",
+        "cat": "failure",
+        "t": 219.8,
+        "at": 1786831558951,
+        "detail": "activity ScheduleToStart timeout · RETRY_STATE_TIMEOUT",
+        "attempt": 1,
+        "dur": 60.0
+      },
+      {
+        "id": 16,
+        "type": "ActivityTaskScheduled",
+        "cat": "activity",
+        "t": 219.9,
+        "at": 1786831559051,
+        "detail": "activityType=RunBatch · taskQueue=nscheck-0.1.0",
+        "attempt": 1,
+        "dur": 0
+      },
+      {
+        "id": 17,
+        "type": "ActivityTaskStarted",
+        "cat": "activity",
+        "t": 220.1,
+        "at": 1786831559251,
+        "detail": "identity=1@worker-3",
+        "attempt": 4,
+        "dur": 0.2
+      },
+      {
+        "id": 18,
+        "type": "WorkflowTaskScheduled",
+        "cat": "task",
+        "t": 220.2,
+        "at": 1786831559351,
+        "detail": "taskQueue=recon",
+        "attempt": 1,
+        "dur": 0
+      },
+      {
+        "id": 19,
+        "type": "WorkflowTaskTimedOut",
+        "cat": "failure",
+        "t": 280.2,
+        "at": 1786831619351,
+        "detail": "WorkflowTaskTimedOut",
+        "attempt": 1,
+        "dur": 60.0
+      },
+      {
+        "id": 20,
+        "type": "WorkflowExecutionCompleted",
+        "cat": "workflow",
+        "t": 280.3,
+        "at": 1786831619451,
+        "detail": "WorkflowExecutionCompleted",
+        "attempt": 1,
+        "dur": 0
+      }
+    ],
+    "scanned": 20,
+    "elided": 0,
+    "truncated": false,
+    "archived": true,
+    "archivedAt": 1786832239151
+  }
+}

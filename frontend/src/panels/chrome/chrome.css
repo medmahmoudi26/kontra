@@ -1,0 +1,177 @@
+/**
+ * The Dashboard's motion and the few layout rules Tailwind utilities cannot express (slice 7a).
+ *
+ * IMPORTED BY THE CHROME, NOT ADDED TO `src/styles.css`. The global sheet is the app shell's; this is one
+ * page's, it rides in the lazy-loaded Dashboard chunk with xterm, and a build that never opens the
+ * Dashboard never parses it.
+ *
+ * ============================================================================================
+ * WHAT MUST NOT BE ANIMATED HERE, AND WHY. THIS IS THE RULE THIS FILE EXISTS TO STATE.
+ * ============================================================================================
+ *
+ * ADR 0020 decision 12: a Terminal must not live inside a transformed or zoomable container, because
+ * `addon-fit`'s measured cols/rows are what the streamer puts into `stty` before `tmux attach`. So:
+ *
+ *   - NO `scale()` ANYWHERE NEAR A TILE. A scaled tile keeps its `clientWidth` while its cells change
+ *     size on screen, so the measurement stays numerically valid and becomes a lie about the pane's
+ *     shape. This is the one animation everybody reaches for first ("pop the tile in") and it is
+ *     precisely the one the ADR forbids.
+ *   - NO transition on a tile's `width`/`height`. Interpolating a box makes `ResizeObserver` fire ~60
+ *     times, and each of those is a `fit()`; on a LIVE tile each settled measurement is a re-`stty` and
+ *     a re-attach on an `s-1vcpu-2gb` Machine. `TerminalTile`'s `SETTLE_MS` coalesces what does happen,
+ *     but the honest fix is not to animate the box at all: a slot resize snaps, and the CHROME around it
+ *     is what moves.
+ *   - `opacity` and `translate` are fine. Neither changes `clientWidth`/`clientHeight`, so neither can
+ *     make a measurement wrong; a translate moves where the box is drawn, not how big it is.
+ *
+ * The enter animation therefore rises and fades, the leave animation is a ghost that holds no terminal
+ * at all (see `grid/DashboardGrid.tsx`), and a resize moves a border and a ring.
+ *
+ * `prefers-reduced-motion` turns all of it off. A wall of twenty-four tiles each fading in is a real
+ * vestibular load, and the information every animation carries — a tile appeared, a tile left, a slot
+ * resized — is also carried by a `data-` attribute and by the status bar's counts, so nothing is lost.
+ */
+
+/* --- tiles ------------------------------------------------------------------------------------- */
+
+@keyframes kontra-tile-enter {
+  from {
+    opacity: 0;
+    /* 6px, not 20: a tile is 300px tall and a long slide reads as the wall being rebuilt rather than
+       as one Machine joining it. */
+    translate: 0 6px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+.kontra-tile-enter {
+  animation: kontra-tile-enter 180ms ease-out both;
+}
+
+@keyframes kontra-tile-leave {
+  from {
+    opacity: 0.7;
+  }
+  to {
+    opacity: 0;
+    translate: 0 -4px;
+  }
+}
+
+/* The departed-tile ghost. It holds a name and a border and NOTHING ELSE — no xterm, no subscription,
+   nothing to dispose — which is what makes a leave animation safe on this page: the real tile is already
+   unmounted and its stream already given up before this appears. */
+.kontra-tile-ghost {
+  animation: kontra-tile-leave var(--kontra-ghost-ms, 220ms) ease-in both;
+  pointer-events: none;
+}
+
+/* --- slots ------------------------------------------------------------------------------------- */
+
+/* A slot's frame, which is what moves during a resize. Colour and shadow only: see the header. */
+.kontra-slot {
+  transition:
+    border-color 120ms ease-out,
+    box-shadow 120ms ease-out,
+    background-color 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kontra-tile-enter,
+  .kontra-tile-ghost {
+    animation-duration: 1ms;
+  }
+  .kontra-slot {
+    transition: none;
+  }
+}
+
+/* --- reveal ------------------------------------------------------------------------------------ */
+
+/*
+ * What "the sidebar sent me here" looks like.
+ *
+ * A ring that arrives fast and fades slowly, because the sidebar REVEALS a tile — it does not select
+ * one. There is no per-tile selected state on this wall to keep in sync, and a permanent highlight would
+ * imply one. Deliberately NOT a scroll-margin hack or `:target`: the reveal has to work when the tile is
+ * already on screen, where scrolling does nothing and the flash is the entire answer.
+ *
+ * A TRANSITION AND NOT AN ANIMATION, which is not a style preference. `animation` is a single property:
+ * a second `animation` rule on the same element REPLACES the first, so a keyframed reveal would have
+ * cancelled `kontra-tile-enter` on a tile that was both new and revealed — a Machine that just joined the
+ * Fleet and was clicked in the tree would have appeared without its enter animation, which is exactly the
+ * case someone would be watching. A `box-shadow` transition composes with an animation instead of
+ * fighting it.
+ */
+.kontra-tile-frame {
+  border-radius: 6px;
+  transition: box-shadow 700ms ease-out;
+}
+
+.kontra-tile-frame[data-revealed='true'] {
+  box-shadow: 0 0 0 2px var(--primary);
+  /* In fast, out slow: the arrival is the signal and the fade is the courtesy. */
+  transition: box-shadow 80ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kontra-tile-frame {
+    transition: none;
+  }
+}
+
+/* --- sidebar ----------------------------------------------------------------------------------- */
+
+/*
+ * The sidebar is a FLEX SIBLING of the wall, never an overlay, and this rule is load-bearing rather
+ * than stylistic — it is the one thing adopted verbatim from the reference implementation's `Sidebar`.
+ * An overlaid sidebar leaves the wall at full width, so every xterm measures cols for a rectangle that
+ * is partly underneath the sidebar and every line wraps in the wrong place. As a sibling the wall's
+ * container shrinks, `TerminalTile`'s `ResizeObserver` fires, and the tiles re-fit to the width they
+ * actually have.
+ */
+.kontra-sidebar {
+  flex: 0 0 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+/* The tree's own rows. A grid rather than flex so the label column truncates and the counts never do —
+   a row that drops "1 failing" to fit a Machine name is the wrong thing to lose. */
+.kontra-tree-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+}
+
+/* The liveness dot on a tile's banner.
+ *
+ * A PULSE RATHER THAN ONLY A COLOUR, because the two states it separates are "this Terminal holds a
+ * PTY attach on its Machine" and "this Terminal is a snapshot every few seconds" — and on a wall of
+ * near-identical journals a static dot reads as decoration. Motion is the one channel that still
+ * distinguishes them at a glance across twenty-four tiles.
+ *
+ * Reduced motion stops it, and nothing is lost: the state is also the `live`/`snapshot` pill's own
+ * text, immediately to its right. */
+@keyframes kontra-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-testid^='tile-dot-'] {
+    animation: none !important;
+  }
+}

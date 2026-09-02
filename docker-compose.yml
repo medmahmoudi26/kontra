@@ -1,0 +1,804 @@
+# ══ THIS FILE IS NOT THE LOCAL DEVELOPMENT PATH ANY MORE. READ THIS BEFORE ANYTHING ELSE ═════
+#
+# **To run kontra on your machine, the command is `kontra up`.** It is one process: Temporal, the
+# object store, the state store, the payload codec, the OCI registry and the orchestrator, with
+# its own data directory and no containers (ADR 0031, `cli/up.go`). Nothing in this file is
+# needed for it, and `make up` will not give you a control plane.
+#
+# ── SO WHY IS THIS FILE STILL HERE ───────────────────────────────────────────────────────────
+#
+# Because it has a job the appliance deliberately does not do, and that job is not going away.
+# `scripts/parity-gate.sh` is what declared local development migrated; it declared nothing about
+# the cloud.
+#
+#   **The cloud controller.** Every cloud run this repo has executed went through a Controller on
+#   a droplet, and `scripts/provision-controller.sh` still builds one. That deployment needs
+#   `orchestrator-infra` — the Pulumi engine, the fleet SSH key and the cloud credential — which
+#   ADR 0031 §4 and ADR 0034 §1 keep OFF the appliance on purpose: no provider plugins and no
+#   cloud credential in an artifact whose premise is that a stranger curls it onto a laptop. It
+#   also has to stay its OWN process, because Pulumi's Node language host installs process-global
+#   rejection handlers for the length of every inline `up`, so an unrelated rejected promise
+#   elsewhere in the PID fails the in-flight converge (ADR 0019, measured).
+#
+#   **And the 4 GB controller wants the cgroups.** `mem_limit` was half of "placement enforced by
+#   routing rather than by convention". A host process has no cgroup, so the appliance keeps the
+#   DuckDB memory limit and the activity-slot count and loses the hard RSS boundary — the right
+#   trade on a laptop and the wrong one on the box that runs a fleet (ADR 0031 §1).
+#
+# **HALF-EMPTY IS THE FINISHED STATE, NOT AN OVERSIGHT.** Nine services left this file, one slice
+# at a time, and every one of them left a block behind saying where it went and what moved with
+# it. Those blocks are the file's most useful content: they are why `temporal:7233` no longer
+# resolves, why there is no bucket-creating one-shot, and why a `registry-data` volume you can
+# still see in `docker volume ls` is not referenced here. Do not tidy them away.
+#
+# **A `kontra up` running BESIDE this stack must be told so**, or both poll `kontra-infra` and one
+# of them refuses every `fleet.up()` it happens to win:
+#
+#   KONTRA_ORCHESTRATOR_ROLES=api,materializer kontra up --bind 172.17.0.1
+#
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+#
+# The Kontra CONTROL PLANE — the "kontra cluster". This is the CONTROLLER; it runs on the
+# control machine and is INDEPENDENT of the actor images (those live in
+# docker-compose.actors.yml and may run on remote machines that connect back to this
+# cluster's Temporal + S3). See docs/deployment.md for the two-cluster split.
+#
+# Components:
+#   - Temporal      : NOT A SERVICE. It runs in-process inside `kontra up` (ADR 0031); see
+#                     the block where the two `temporal*` services used to be, below.
+#   - orchestrator  : ONE service left, and it is not the control plane (ADR 0031 §1) —
+#       orchestrator-api          : GONE. The API, the SPA and the materializer role are the
+#                                   binary's supervised child now — `kontra up` hydrates the
+#                                   bundle and execs it (issue 14). See the block where the
+#                                   service used to be, below, for what moved where. THE QUEUES
+#                                   DID NOT MERGE when the processes did: `kontra-materializer`
+#                                   and `kontra-datasets` are still two, and `roles.ts` refuses to
+#                                   boot if they collide.
+#       orchestrator-infra        : Pulumi provisioning (ADR 0019), and it STAYS A SEPARATE
+#                                   PROCESS. ADR 0034 §1: cloud provisioning belongs to the compose
+#                                   controller, and ADR 0019's measured hazard is why it cannot
+#                                   share a PID — Pulumi's Node language host installs
+#                                   process-global rejection handlers for the duration of every
+#                                   inline run, so an unrelated rejected promise in the API or a
+#                                   DuckDB decode fails the in-flight `up`. Which is also why a
+#                                   `kontra up` running BESIDE this service must be given
+#                                   `KONTRA_ORCHESTRATOR_ROLES=api,materializer`: the appliance
+#                                   runs all three roles by default because it ships no engine,
+#                                   and two pollers on `kontra-infra` is one refusing every
+#                                   `fleet.up()` it happens to win.
+#   - DuckDB        : NOT a service — it is EMBEDDED (the materializer role uses
+#                     @duckdb/node-api to write S3 parquet; the API role uses it to read
+#                     the lake for the dataset browser and the SQL workbench).
+#
+#   make up                 # start the control plane (detached)
+#   make register           # push managed actors' schemas to the catalog
+#   make down               # stop it
+#
+# The named network `kontra` is what same-host actor workers attach to (external, see
+# docker-compose.actors.yml). NEITHER `temporal:7233` NOR `seaweed:8333` RESOLVES ANY MORE — both
+# left this file for the binary (ADR 0031 §1); a worker container reaches each through the host
+# gateway, the same way the three orchestrator services below do.
+
+# ── WHERE THESE PORTS LISTEN, AND WHY IT IS NOT 0.0.0.0 ──────────────────────────────────────
+#
+# EVERY published port below binds an ADDRESS. Only redis used to, and the rest defaulted to
+# 0.0.0.0 — so a control plane on a public droplet published, to the internet:
+#
+#   7233  Temporal gRPC          anyone can start workflows, poll queues, read history
+#                                — NO LONGER PUBLISHED BY THIS FILE. The measurement stands as a
+#                                record; the port is now the appliance's, and `kontra up` binds
+#                                127.0.0.1 unless told otherwise (ADR 0031 §3).
+#   8088  the orchestrator API   UNAUTHENTICATED by default (see workflowControl.ts's header):
+#                                `serve` runs code from the checkout, and POST /api/infra/... 
+#                                provisions machines. Remote code execution and someone else's bill.
+#                                — NO LONGER PUBLISHED BY THIS FILE: the API is `kontra up`'s
+#                                child. The exposure did NOT move with it. That process still
+#                                binds 0.0.0.0 on --api-port, so the measurement above is the
+#                                posture until the API role takes a bind address of its own.
+#   8333  the S3 gateway         which ran with NO identities config — every Dataset readable
+#                                and writable. NO LONGER PUBLISHED BY THIS FILE either: the store
+#                                is the appliance's now, `kontra up` binds 127.0.0.1 unless told
+#                                otherwise, and the posture is UNCHANGED — signatures are still
+#                                accepted and ignored (ADR 0031 §1a, deliberately Open). The
+#                                measurement stands as a record of what an open bind costs.
+#   8888/9333/8085  filer, master and volume UIs
+#   8090  the panels streamer
+#
+# MEASURED, from a second droplet, against the development controller: ten ports answered.
+#
+# UFW DOES NOT COVER THIS. Docker writes its own rules into the DOCKER-USER chain, which is
+# consulted BEFORE ufw's INPUT chain — a published port stays reachable with ufw "active", so a
+# host firewall reads as protection it is not providing. The binding is the control; the firewall
+# is the second layer, not the first.
+#
+# TWO CLASSES, and the split is exactly "does a fleet Machine dial this":
+#
+#   ${KONTRA_BIND}  8088 — cloud-init hands Machines
+#                   `KONTRA_ORCHESTRATOR_URL=…:8088` (src/infra/programs/machine.ts), so this must
+#                   reach the VPC. `KONTRA_BIND` is derived from `controller:` in
+#                   .kontra/config.yaml.
+#                   7233, 8333 and 6379 are the SAME decision made in the binary instead: a
+#                   Machine is handed `KONTRA_ADDRESS=$CONTROLLER:7233`, `KONTRA_S3_ENDPOINT=…:8333`
+#                   and `KONTRA_REDIS_HOST=$CONTROLLER:6379`, so a fleet needs
+#                   `kontra up --bind <vpc-address>`. One fact, two places to set it now, which is
+#                   the cost of the parity window.
+#   127.0.0.1       everything else. Web UIs and a postgres, for a human at a terminal on this box
+#                   or on the far end of an ssh tunnel. Nothing off-host has business there.
+#
+# THE DEFAULT IS 127.0.0.1, so an installation that has not set `controller:` is closed rather
+# than open. That direction matters more than the convenience: an operator who has not configured
+# a fleet cannot be exposed by a value they never set.
+
+# ── AND ALSO ON LOOPBACK, WHICH COSTS NOTHING AND WAS THOUGHT IMPOSSIBLE ─────────────────────
+#
+# Binding these to `controller:` took `localhost` away from the box they run on. That is not a
+# theoretical loss: `http://localhost:8088` stopped answering, every ssh tunnel whose remote end
+# said `localhost` went dead, and the Dashboard's streamer on 8090 became unreachable to the very
+# browser it serves. It was reported three times.
+#
+# It was left that way because compose cannot omit a list entry, so a second publish looked like it
+# would collide with the first whenever `KONTRA_BIND` is already 127.0.0.1 — the default. MEASURED,
+# and that is wrong: docker DEDUPLICATES identical publish specs. Two entries reading
+# `127.0.0.1:8090:8090` start one listener and no error.
+#
+# So every port below names its address AND loopback. On a default install the two are the same
+# string and collapse to one binding; on a bound install you get the VPC address a Machine dials and
+# `localhost` for the human on the box. It widens nothing — loopback is reachable only from here,
+# which is exactly the property that makes it free.
+
+# ── ONE CONTROL PLANE, WHICHEVER DIRECTORY YOU RUN FROM ──────────────────────────────────────
+#
+# Without this, compose names the project after the invoking directory's basename. That is fine
+# in a single checkout and WRONG the moment a git worktree exists: `kontra infra up` from
+# .claude/worktrees/<branch> would raise a SECOND stack named after the branch, racing the live
+# one for :8088 and :7233, and `kontra infra status` would report "0 containers running" about a
+# project it had just invented. Pinning it makes worktree and main checkout the same cluster.
+name: ${COMPOSE_PROJECT_NAME:-kontra-local}
+
+services:
+  # ---------------------------------------------------------------------------------------
+  # WHOLE-CONTROLLER MEMORY BUDGET (ADR 0017 / plan §4)
+  #
+  # Every service below carries a hard `mem_limit`. Read them as PER-SERVICE BACKSTOPS, not as
+  # a reservation: their sum deliberately oversubscribes a 4 GB host, because no two of them
+  # peak together in the measured workload. What must hold is the MEASURED simultaneous p95 —
+  # under 75% of physical RAM, with at least 1 GB left for the kernel, page cache and spikes.
+  # Budgeting service-by-service without ever measuring the total is exactly how a host OOMs
+  # while every individual limit still looks reasonable.
+  #
+  # THE MATERIALIZER ROLE is the one that should NOT live here in production: it is the largest
+  # consumer and it is trivially relocatable, because it is routed to purely by task queue. Since
+  # ADR 0031 §1 it runs inside the CONTROL PLANE PROCESS, which is `kontra up`'s child and no
+  # longer a service in this file — so relocating it means giving that process
+  # `KONTRA_ORCHESTRATOR_ROLES=api` and running a container of this image with
+  # `KONTRA_ORCHESTRATOR_ROLES: materializer` on the worker host — the queues are unchanged, which
+  # is what makes the move a placement decision and not a code change. See docs/wiki/Deployment.md.
+  #
+  # AND THE CGROUP IS GONE WITH THE CONTAINER. `mem_limit` was half of "enforced by routing rather
+  # than by convention"; a host process has no cgroup, so what survives on the appliance is
+  # KONTRA_DUCKDB_MEMORY_LIMIT and one activity slot. ADR 0031 §1 states the trade and names the
+  # 4 GB controller as the case where it is the wrong one — which is why the cloud job stays here.
+  #
+  # Measure with:  docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}'
+  # ---------------------------------------------------------------------------------------
+  # ── TEMPORAL IS NOT A SERVICE HERE ANY MORE. IT RUNS INSIDE THE BINARY ──────────────────────
+  #
+  # `kontra up` starts `go.temporal.io/server` IN PROCESS (ADR 0031 §1, and cli/appliance). The
+  # library is what the `temporalio/temporal` image ran — `server start-dev` is that library plus
+  # a `main` — so this is a change of who owns the process, not of what the server is. Clients
+  # still dial gRPC at an address; the address is now printed by `kontra up`.
+  #
+  # The two services that used to be here, and where each one went:
+  #
+  #   temporal            → cli/appliance/temporal.go. Its three non-default dynamic-config
+  #                         values moved with it, each with the measurement that chose it. One of
+  #                         them did NOT survive the move intact and that is the point of saying
+  #                         so here: the old command line passed
+  #                         `--dynamic-config-value limit.numPendingNexusOperations=2000`, and no
+  #                         such key is registered by the server. It has been a no-op, so the
+  #                         live pending-Nexus cap was the packaged default all along. The
+  #                         embedded server sets the registered setting
+  #                         (`component.nexusoperations.limit.operation.concurrency`) instead, and
+  #                         a test reads it back through the setting rather than out of our own
+  #                         map, so the next dead key fails a build instead of a run.
+  #
+  #   temporal-data-owner → nowhere, and that is the fix. It existed ONLY to `chown -R 1000:1000`
+  #                         a Docker named volume, because Docker creates one root-owned and
+  #                         `temporalio/temporal` runs as uid 1000 — on the very first `up`, and
+  #                         only then, SQLite could not create /data/temporal.db and reported it
+  #                         as `unable to open database file: out of memory (14)` (error 14 is
+  #                         CANTOPEN; the "out of memory" text is SQLite's generic string for it
+  #                         and a lie about the cause). MEASURED on a fresh 8 GB Ubuntu 24.04
+  #                         droplet with 7.9 GB free. A file the appliance creates in its own data
+  #                         directory, as the user who ran `kontra up`, has no uid to mismatch.
+  #                         The `temporal-data` volume went with it.
+  #
+  # WHAT THIS FILE'S SERVICES NOW DIAL. `KONTRA_TEMPORAL_ADDRESS` defaults to
+  # `host.docker.internal:7233` and every service that needs Temporal takes it, with
+  # `extra_hosts: host-gateway` so the name resolves. The appliance binds 127.0.0.1 by default
+  # (ADR 0031 §3), which a container CANNOT reach — so during the parity window, where these
+  # services are still containers, run `kontra up --bind` on an address the bridge can see:
+  #
+  #   kontra up --bind 172.17.0.1        # the docker0 gateway; nothing off-host
+  #
+  # STILL SAYING `temporal:7233`, AND NOT FIXED BY THIS SLICE — the name no longer resolves on
+  # the `kontra` network, so each of these needs an address from the operator until its own slice
+  # lands: `cli/scale.go:startWorker`'s default for a `--mode docker` worker (pass `--address`),
+  # `docker-compose.actors.yml`, and `kontra.yaml:infra.temporalAddress`.
+
+  # ── THE DUCKLAKE CATALOG'S POSTGRES IS NOT A SERVICE HERE ANY MORE ──────────────────────────
+  #
+  # It evaporated because the TOPOLOGY did, not because the lake changed (ADR 0031 §1b). The
+  # catalog has always defaulted to a local DuckDB file and `KONTRA_DUCKLAKE_CATALOG=postgres:…`
+  # was an OVERRIDE, and this file used to state the one reason it existed, on the
+  # `orchestrator-api` entry: the catalog "MUST match the materializer, so this process (the
+  # lister) reads the catalog that one writes". Two processes, one catalog, therefore a server.
+  # The control plane runs `api,materializer` in ONE process now, so that reason is gone and both
+  # customers — DuckLake's own `ducklake_*` tables and the materialization ledger (ADR 0017's
+  # second authority) — fall back to the files they always could:
+  #
+  #   catalog → ${KONTRA_DATA_DIR}/datasets.ducklake   (backend/src/data/parquet.ts)
+  #   ledger  → ${KONTRA_ORCHESTRATOR_DB}, over node:sqlite, in its own `kontra` tables
+  #
+  # Both land in `KONTRA_DATA_DIR`, which is `kontra up --data-dir` on the HOST now that the
+  # process is not a container — the `orchestrator-data` volume below is what they used to land in. NOTHING ABOUT DUCKLAKE, the ledger's schema, its transitions or ADR 0017's
+  # two-dimensional status changed — this is the removal of an override, not a migration.
+  #
+  # THE SCHEMA IS NOT THE SAME ON BOTH BACKENDS, which is the one thing that does not survive the
+  # switch by itself. A Postgres catalog keeps `ducklake_*` under `public`; a file catalog keeps
+  # them under `main`, and asking for `public` there answers `Catalog Error: … schema "public"
+  # does not exist`. Every reader takes the value from `LakeConfig.metaSchema`.
+  #
+  # A SECOND CONTROL PLANE ON THIS DATA DIRECTORY NOW REFUSES TO START. A file catalog is
+  # single-writer, so `main.ts` takes a lock on it at boot and names it in the refusal
+  # (`backend/src/data/catalogLock.ts`) rather than letting the collision surface as an
+  # activity retrying forever, forty minutes into a run.
+  #
+  # BRING IT BACK IF YOU RE-SPLIT THE PROCESSES, and the setting is deliberately still alive for
+  # that: run a Postgres (`postgres:16-alpine`, a `kontra_ducklake` database owned by `kontra`,
+  # published on 127.0.0.1:5432 so `kontra dataset|db` on the host can reach it) and set BOTH of
+  # the variables this block used to fill — KONTRA_DUCKLAKE_CATALOG on every process that attaches
+  # the lake, and KONTRA_MATERIALIZATION_DB for the ledger. They move together; one without the
+  # other is a lister reading a different catalog from the writer's.
+  #
+  # AN EXISTING `ducklake-pg-data` VOLUME IS NOT DELETED BY REMOVING THIS. It is still there under
+  # whatever name it had (`docker volume ls`), holding the catalog and the ledger of every run
+  # run before this change, and `docker volume rm` is the one command that reclaims it. There is no
+  # migration out of it — the appliance is fresh-start by design (ADR 0031) — so keep it for as
+  # long as those Datasets matter.
+
+  # ── THE ARTIFACT REGISTRY IS NOT A SERVICE HERE ANY MORE ────────────────────────────────────
+  #
+  # `kontra up` serves an OCI registry IN PROCESS on :5000 (ADR 0032, cli/appliance/registry.go).
+  # It is the one collapse that removed a store rather than re-hosting it: an OCI blob is
+  # addressed by sha256 over its own bytes and so is a CAS object, so actor image layers land in
+  # the appliance's shared content-addressed store — the same `<data-dir>/cas/<ab>/<hex>` a
+  # hydrated runtime lives in — instead of inside a `registry-data` volume only `registry:2`
+  # could read. `kontra up` prints both the address and that directory.
+  #
+  # THE SENTENCE THAT WAS STALE IS TRUE AGAIN, AND IT IS WORTH READING TWICE. This block used to
+  # say every fleet Machine pulls from `<controller>:5000`, and that had not been true since ADR
+  # 0019: a Machine fetched a BUNDLE from the object store and ran it natively, so the registry's
+  # only customer was the local `kontra deploy` → `kontra scale` pair. ADR 0036 makes a Bundle an
+  # OCI artifact, so every Machine in every Fleet now pulls its tar.gz from this registry's blob
+  # endpoint — one anonymous `curl` against `/v2/bundles/<actor>/blobs/sha256:<sha>`, no OCI client
+  # on the Machine. A CONTROL PLANE WITHOUT A REGISTRY CANNOT RUN A FLEET RUN.
+  #
+  # `registry-data` still went with the service, because the bytes it held are in the CAS now.
+  #
+  # A CLOUD CONTROLLER STILL RUNS COMPOSE (ADR 0031), and that is where this matters most: the
+  # registry must be reachable at the Controller's VPC address, not only on its loopback. `kontra
+  # up --bind <vpc-ip>` serves both (registry.Start opens a second loopback listener for the
+  # Docker daemon's sake). If a controller needs a registry BEFORE it runs the appliance,
+  # `docker run -d -p 5000:5000 -v <vol>:/var/lib/registry registry:2` is still exactly what this
+  # service was, and `kontra build --registry <host>:5000` points at it.
+  #
+  # AN AIRGAP IS NOW A REGISTRY MIRROR AND NOTHING ELSE. Copy the artifacts in with any OCI tool
+  # (`oras copy`, `skopeo copy`, `crane copy`) and point the Controller at the mirror with
+  # KONTRA_REGISTRY. There is no kontra-specific copy step, because there is no kontra-specific
+  # store left on this path.
+
+  # ── THE OBJECT STORE IS NOT A SERVICE HERE ANY MORE EITHER ──────────────────────────────────
+  #
+  # `kontra up` serves S3 IN PROCESS over its own data directory (ADR 0031 §1a, cli/appliance/s3.go
+  # and objects.go). Unlike Temporal, this one is a REPLACEMENT rather than a re-hosting: it is a
+  # few hundred lines over a directory tree, implementing what kontra uses — GET (with Range), PUT,
+  # DELETE, LIST, multipart upload, copy, and SigV4 presigned GET. Clients still speak S3 to an
+  # address; the address is printed by `kontra up`.
+  #
+  # Two services left with it, and each one's absence fixes a specific bug:
+  #
+  #   seaweed        → cli/appliance/s3.go. The `-volume.max` note that used to be here is worth
+  #                    keeping as a record: it is NOT a size limit, it is a count of volume SLOTS,
+  #                    and reaching it left collections that already had a writable volume working
+  #                    while every write to a NEW one failed with a bare HTTP 500 — the store looked
+  #                    healthy right up until you added a bucket, which is how the `kontra-bundles`
+  #                    bucket failed on its first upload with 15 GB free. A bucket is a directory now, so
+  #                    there is no slot to exhaust; and the store's write path answers a full disk
+  #                    with `507 InsufficientStorage` and the words "no space left on device"
+  #                    rather than a bare 500, which is the half of that bug that actually cost the
+  #                    days.
+  #
+  #   seaweed-bucket → nowhere, and that is the fix. It existed ONLY to `s3.bucket.create` on a
+  #                    fresh install, because a fresh SeaweedFS has no buckets and answers a write
+  #                    into a missing one with `403 Forbidden / AccessDenied` — which reads as a
+  #                    credentials problem and is not. MEASURED on a fresh droplet:
+  #                    `ListAllMyBuckets` returned an empty list and `kontra dataset create` failed
+  #                    at the first parquet write. The appliance creates `kontra` before it opens
+  #                    its listener and creates any other bucket on first write, so the state that
+  #                    produced that 403 cannot exist. (It pre-created a second bucket for fleet
+  #                    Bundles until ADR 0036 moved those to the registry.)
+  #
+  # THE BLOBS DO NOT MIGRATE THEMSELVES, and this is the sentence to read before deleting anything.
+  # Objects written before this change live in the `kontra-local_seaweed-data` Docker volume as
+  # SeaweedFS needles — NOT as files, so there is nothing to copy. Move them through the S3 API
+  # while the old container is still running, then stop it:
+  #
+  #   kontra up --bind 172.17.0.1                       # the appliance, on a bridge-visible address
+  #   aws --endpoint-url http://localhost:8333 s3 sync s3://kontra s3://kontra \
+  #       --source-region us-east-1                     # …old endpoint → new; see docs for the pair
+  #
+  # `docker compose down -v` on the old stack is what destroys them. The `seaweed-data` volume
+  # declaration has been removed from this file, which means compose no longer manages it — the
+  # volume is still there until someone runs `docker volume rm kontra-local_seaweed-data`.
+
+  # THE CODEC SERVER USED TO SIT HERE — Temporal's remote-codec HTTP contract (POST /encode +
+  # /decode) over our claim-check codec, opt-in behind `--profile extras`, published on 18234
+  # because the Web UI calls it FROM THE BROWSER.
+  #
+  # IT IS THE BINARY'S NOW (ADR 0031 §1: "it is an HTTP handler in a container; it becomes an HTTP
+  # handler"). `kontra up` serves it — `handler/codecserver`, on a listener of its own in
+  # `cli/appliance/codec.go` — and prints the address as `Payload codec:`. Nothing here called it
+  # anyway: the `temporal` service that used to carry `--ui-codec-endpoint` left with the block
+  # above, so this one had been running and serving no one.
+  #
+  # WHAT THE FOLD BOUGHT IS ONE SETTING WHERE THERE WERE THREE. The container had a listen port
+  # (`KONTRA_CODEC_ADDR: ":8234"`), a published host port (18234 — deliberately not 8234, which
+  # `logdy` binds on the controller), and `--ui-codec-endpoint http://localhost:18234` on the
+  # `temporal` service, which had to be kept equal to the second BY HAND because a browser cannot
+  # resolve a compose service name. In one process the endpoint is read off the listener that is
+  # actually bound, so there is no second value to keep in step; `kontra up --codec-port` moves
+  # both at once. It defaults to 18234, so a bookmark and a `temporal --codec-endpoint` line
+  # survive the move.
+  #
+  # STILL A CLAIM-CHECK, NOT ENCRYPTION: over 128 KiB is offloaded to the object store, under it
+  # rides inline in workflow history in the clear, for the namespace's whole retention (ADR 0007
+  # §4, ADR 0034 §6).
+  #
+  # `infra/Dockerfile.codec-server` and `handler/cmd/codec-server` went with it.
+
+  # JAEGER USED TO SIT HERE — the single tracing backend, opt-in behind `--profile extras`.
+  #
+  # REMOVED because tracing is an OUTBOUND ENDPOINT, not a service kontra runs (ADR 0031). The
+  # processes that trace — the two orchestrator services and the handler — speak plain OTLP and
+  # are already strictly opt-in: with no endpoint configured they build no exporter at all, so
+  # nothing retries a collector that is not there. Shipping a trace STORE was never the control
+  # plane's job.
+  #
+  # TO GET TRACES LOCALLY, run a collector of your choosing and point kontra at it. Anything that
+  # speaks OTLP works — the receiver is the contract, not the backend:
+  #
+  #     docker run -d --name otlp --network kontra -p 127.0.0.1:16686:16686 \
+  #       jaegertracing/all-in-one:1.60.0
+  #     OTEL_EXPORTER_OTLP_ENDPOINT=http://otlp:4317 docker compose up -d orchestrator-infra
+  #     OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 kontra up
+  #     KONTRA_OTEL_ENDPOINT=otlp:4317 kontra serve --actor <dir> --mode docker --replicas N
+  #
+  # It must share the `kontra` network for the compose services to resolve it by name, and its
+  # 4317 must be reachable from wherever the exporters run — the control plane, the managed worker
+  # containers, and any REMOTE fleet Machine, which needs a routable address rather than a loopback
+  # one. `MEMORY_MAX_TRACES` is worth keeping if you use Jaeger all-in-one: its memory store
+  # defaults to UNBOUNDED, and it was measured at 1.84 GiB — 48% of this 4 GB controller — which is
+  # what drove load to 7.4 during a DuckDB extraction and OOM-killed the report generator.
+  #
+  # docs/wiki/Deployment.md §5 is the operator-facing version of this note.
+
+  # VictoriaMetrics USED TO SIT HERE — the metrics store, opt-in behind `--profile extras`.
+  #
+  # REMOVED because the live signal it was wanted for does not need a store. Temporal's own
+  # `--metrics-port 9091` (see the temporal service above) already exposes 434 series, three of
+  # them labelled by `taskqueue` and worth more than anything VM held:
+  # `approximate_backlog_age_seconds`, `approximate_backlog_count` and `no_poller_tasks` — work
+  # queued with nobody serving it, which is the failure that has bitten this project twice and is
+  # invisible in every other surface. Reading the current value of six series is one HTTP GET; it
+  # does not justify a TSDB, a scrape loop and 149 MiB of RSS on a 2 GB control machine.
+  #
+  # WHAT GOES WITH IT, said plainly rather than discovered later: `panels/metrics.ts` queries
+  # `victoriametrics:8428` for the `loads` chip, and `infra/programs/machine.ts` installs vmagent
+  # on every Machine to remote-write here. Both are LEFT IN PLACE and both already degrade the way
+  # they were designed to — `loads` reports `unknown` (never `ok`, per ADR 0020) and the Machine
+  # install logs `vmagent unavailable; continuing without fleet metrics`. Ripping out the fourth
+  # health signal is an ADR 0020 decision, not a side effect of deleting a container.
+
+  # Grafana and its headless-Chromium renderer used to sit here, 1 GB of cgroup between them,
+  # to draw dashboards over the DuckLake datasets and the metrics above. They are gone: the
+  # kontra Dashboard now owns those surfaces itself (Datasets, Query, Monitor), reading the
+  # orchestrator's own API rather than a second query engine with its own plugin ABI, its own
+  # provisioning dialect, and its own datasource credentials. Two ways to ask the same question
+  # is one too many, and the one built from a pinned-and-checksummed glibc plugin was the
+  # expensive one — it also rebuilt on every `make up-d`.
+  #
+  # VictoriaMetrics stays. It is not Grafana's store, it is the fleet's: every Machine's vmagent
+  # remote-writes to :8428 whether or not anything is drawing graphs, and dropping it would make
+  # a fleet's metrics vanish silently rather than visibly.
+
+  # THE SHARED STATE STORE IS IN THE BINARY NOW — the `redis` service and its `redis-data`
+  # volume are gone (ADR 0031, issue 06). `kontra up` serves the same wire protocol on the same
+  # port from cli/appliance/kv.go, over an append-only file in its own data directory.
+  #
+  # WHAT IT STILL IS. All three tiers (ADR 0015, ADR 0018), unchanged: the per-actor hash
+  # `kontra-actor:<actorId>` (tiers 1+2, 24 h TTL — runtime/python/internals/statekv.py) and the
+  # ETag keys `kontra-global:<actor>:<key>` (tier 3, NO TTL). One store for the whole fleet, which
+  # is the point: before it was shared, every worker started its OWN bundled redis and
+  # `global_state` — meant to be cross-session and cross-fleet — was silently per-worker.
+  #
+  # WHAT IT DELIBERATELY IS NOT. It implements the ~20 commands kontra's own clients issue and
+  # REFUSES everything else by name. `GET` on a global key would have answered nil in real Redis
+  # and been read as "no state"; here it is an error that says what happened. Run
+  # `redis-cli -p 6379 info kontra` against it for the list it serves.
+  #
+  # THE TWO OPERATIONAL SETTINGS CARRIED FROM THE `command:` LINE THAT USED TO BE HERE:
+  #   --appendonly yes    is now DataDir/kv/keyspace.log, replayed at boot. `redis-data` was a
+  #                       named volume so this tier survived a recreate; the appliance's data
+  #                       directory is what survives now, and `kontra up` owns it.
+  #   --maxmemory 512mb   is KVOptions.MaxBytes, with the same volatile-only eviction rule and
+  #     --maxmemory-policy the same reason for it: the per-actor hash carries a 24 h TTL and may be
+  #                       evicted under pressure, but global_state has NO TTL, and evicting a
+  #                       dedupe set or a counter would silently corrupt correctness rather than
+  #                       slow anything down. When only TTL-less keys are left the write is
+  #                       REFUSED. There is no cgroup to sit above it any more — the dataset bound
+  #                       and the process are in one binary with Temporal and the object store.
+  #
+  # WHAT THIS FILE'S SERVICES NOW DIAL. `KONTRA_KV_APPLIANCE_HOST` defaults to
+  # `host.docker.internal:6379`, the same move `KONTRA_TEMPORAL_ADDRESS` and
+  # `KONTRA_S3_APPLIANCE_ENDPOINT` make, with `extra_hosts: host-gateway` so the name resolves.
+  # The appliance binds 127.0.0.1 by default (ADR 0031 §3), which a container CANNOT reach, so
+  # during the parity window run `kontra up --bind 172.17.0.1` — the docker0 gateway.
+  #
+  # STILL SAYING `redis:6379`, AND NOT FIXED BY THIS SLICE — the name no longer resolves on the
+  # `kontra` network, so each of these needs an address from the operator until its own slice
+  # lands: `cli/scale.go`'s default for a `--mode docker` worker, `docker-compose.actors.yml`, and
+  # the `/etc/kontra/worker.env` a fleet Machine is handed
+  # (backend/src/infra/programs/machine.ts writes `KONTRA_REDIS_HOST=$CONTROLLER:6379`, which
+  # is correct as long as `kontra up --bind <vpc-address>` is what runs on the Controller).
+
+
+  # The orchestrator — one Node image, several roles. It hosts NO actor code and, since ADR
+  # 0023 §12, routes nothing either: the graph interpreter and its `orchestrator-worker`
+  # service are gone, and a Run is one execution of a caller's own workflow. What remains is
+  # the API, the infra worker (which forks the Dashboard streamer) and the materializer.
+  # The ISOLATED MATERIALIZER (ADR 0017). Decodes each node's claim-checked output into typed
+  # DuckLake rows, and nothing else — no workflows, no graph interpretation.
+  #
+  # PLACEMENT: in production this service runs OFF the controller, on a worker host. It is
+  # defined here for the single-host developer stack and for `kontra infra up`; on a fleet it is
+  # deployed to a worker (see docs/wiki/Deployment.md). The controller is a 4 GB box already
+  # running seven other services — production materialization does not belong on it.
+  #
+  # THE BOUNDARIES, in order of how hard they bite:
+  #   1. mem_limit is the HARD RSS boundary. DuckDB's own memory_limit bounds its buffer
+  #      manager, not the process; a setting alone has never stopped an OOM kill.
+  #   2. KONTRA_DUCKDB_MEMORY_LIMIT sits UNDER it, so DuckDB spills to disk before the kernel
+  #      reaches for the OOM killer.
+  #   3. The spill directory is a size-capped tmpfs, so a runaway sort fills its own volume
+  #      instead of the host's disk.
+  #   4. ONE activity slot. Concurrency here multiplies peak RSS directly.
+  # The fourth orchestrator role (ADR 0019): Pulumi's engine, and the ONLY process holding a
+  # cloud credential.
+  #
+  # A separate process rather than a module in the control plane because Pulumi's Node language
+  # host installs PROCESS-GLOBAL unhandledRejection/uncaughtException handlers for the duration
+  # of every inline run — an unrelated rejected promise elsewhere in the process fails the
+  # in-flight `up`. The control plane serves the SPA and runs DuckDB; co-locating them is a
+  # correctness problem, not a tuning one.
+  orchestrator-infra:
+    image: kontra-orchestrator:latest
+    command: ["node", "dist/src/infra.js"]
+    # host.docker.internal is not a Linux default; host-gateway is what defines it. Needed by
+    # every service that dials the embedded Temporal above.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # The embedded Temporal (ADR 0031 §1): a HOST process, not a compose service, so this is
+      # the host gateway rather than a service name. `kontra up --bind 172.17.0.1` is what makes
+      # it reachable from here — the appliance binds loopback by default and a container cannot
+      # reach that. Override with KONTRA_TEMPORAL_ADDRESS to point at any other server.
+      KONTRA_ADDRESS: "${KONTRA_TEMPORAL_ADDRESS:-host.docker.internal:7233}"
+      KONTRA_INFRA_QUEUE: kontra-infra
+      # file://, NOT s3:// — Pulumi's DIY S3 backend did not work against the SeaweedFS this
+      # control plane used to run, and the appliance's store has not been tested against it: the first
+      # state write succeeds and every subsequent one fails while reads keep working, so the
+      # backend looks healthy while unwritable. Measured; see .scratch/pulumi-migration/D5-FINDINGS.md.
+      KONTRA_PULUMI_STATE_DIR: /data/pulumi-state
+      KONTRA_PULUMI_WORK_DIR: /data/pulumi
+      # A DIY backend forbids the default secrets provider. Left empty here ON PURPOSE: the
+      # guard belongs in the process (infra.ts asserts it at boot and refuses to start), not in
+      # compose interpolation — a `?` required-variable here fails EVERY compose command,
+      # including `ps` and `logs` on unrelated services.
+      PULUMI_CONFIG_PASSPHRASE: "${PULUMI_CONFIG_PASSPHRASE:-}"
+      # --- the cloud credential (ADR 0034 §4) --------------------------------------------------
+      #
+      # IT IS A NAME NOW, NOT A VALUE. This process resolves the credential from the SECRET STORE
+      # at the last hop — inside the activity about to converge — so what crosses every boundary
+      # above it is a name. That is why the store directory is mounted below: it is the same
+      # directory the control plane writes to when an operator creates or rotates a secret, and
+      # sharing it is what makes "rotate, start a fleet, the new value is used" true with no
+      # restart of anything. Two services, one store; the value still reaches no other process,
+      # because only this one ever calls `resolve`.
+      KONTRA_SECRETS_DIR: ${KONTRA_CHECKOUT:-/root/kontra-local}/.kontra/secrets
+      # What this control plane calls its cloud credential when a caller names none — `kontra
+      # fleet up|down` has no `--credential` flag, so a teardown has to be able to find it. A NAME
+      # is not a secret, which is why this one may live here while the value may not.
+      KONTRA_CLOUD_CREDENTIAL: "${KONTRA_CLOUD_CREDENTIAL:-}"
+      # THE ONE-TIME MIGRATION, and the ONLY remaining reason this variable exists. At boot,
+      # `infra.ts` writes it into the store under the name above — once, never overwriting — so an
+      # installation upgrading into ADR 0034 does not discover the change when `kontra fleet down`
+      # cannot find a credential and leaves Droplets billing. After that it is READ NOWHERE:
+      # editing it and restarting changes nothing, and the boot log says so. Delete it once the
+      # secret is in the store.
+      DIGITALOCEAN_TOKEN: "${DIGITALOCEAN_TOKEN:-}"
+      # WHERE A FLEET LANDS. Every one is empty-means-keep-the-default, so an installation that
+      # sets none behaves exactly as it did before they existed — and one that sets a region gets
+      # Machines in ITS OWN region, which is what a control plane outside sfo3 needs to work at
+      # all. `region` and `vpc` are a pair: a VPC is regional, and an unset vpc means "that
+      # region's default" rather than the sfo3 one this repo was developed against. See
+      # src/infra/programs/fleet.ts:fleetDefaults.
+      KONTRA_FLEET_REGION: "${KONTRA_FLEET_REGION:-}"
+      KONTRA_FLEET_VPC: "${KONTRA_FLEET_VPC:-}"
+      KONTRA_FLEET_SIZE: "${KONTRA_FLEET_SIZE:-}"
+      KONTRA_FLEET_IMAGE: "${KONTRA_FLEET_IMAGE:-}"
+      KONTRA_FLEET_SSH_KEY_IDS: "${KONTRA_FLEET_SSH_KEY_IDS:-}"
+      # The key the Controller uses to reach its Machines, for the remote commands that place
+      # an actor. Read from disk at converge time and never written to Pulumi state: a private
+      # key in state is a private key in every backup of that state.
+      KONTRA_SSH_KEY: /run/secrets/fleet_key
+      # Where fleet Machines call home. The VPC address, never localhost — a Machine that
+      # cannot name the Controller starts, registers nothing, and looks idle.
+      KONTRA_CONTROLLER: "${KONTRA_CONTROLLER:-10.124.0.2}"
+      # --- the Dashboard streamer (ADR 0020) --------------------------------------------------
+      #
+      # It runs in THIS container, as a forked child (dist/src/panels.js), and in its own PID. The
+      # same hazard that put the Pulumi engine here keeps the streamer out of this process: an
+      # unhandled rejection anywhere in the PID running an inline `up` makes that `up` throw while
+      # the process survives — so a co-located streamer would fail `kontra fleet deploy`, blame
+      # panel code, and leave this service reporting healthy. Not the control plane either: that one
+      # binds 0.0.0.0, is host-published, and is unauthenticated on most routes, and it must not
+      # hold the key that reaches every Machine in the run.
+      #
+      # Mints the WebSocket tickets, and nothing else. Deliberately NOT KONTRA_STATE_TOKEN: that
+      # token also authorises POST /api/infra/stacks/:fqn/:op, and a credential a browser holds must
+      # not be able to spend money. UNSET means every panel route answers 503 and serves nothing —
+      # the fail-closed default auth.ts already uses, not a fault.
+      KONTRA_PANEL_TOKEN: "${KONTRA_PANEL_TOKEN:-}"
+      # `KONTRA_HOST_NAME` USED TO SIT HERE, AND IT WENT WITH THE TOPOLOGY THAT NEEDED IT.
+      #
+      # It carried the HOST's hostname into this container because the panels health check
+      # compares a Worker's Temporal identity against a LOCAL pane's node name, and
+      # `os.hostname()` inside a container is the container id (`242b5de62fa4`) rather than
+      # `main-droplet`. Every local pane on the wall reported `poller: NONE — its
+      # kontra-handler.service is probably down` about a handler that was up and polling, and
+      # `kontra infra up` injected the variable to fix it.
+      #
+      # THE CASE IT FIXED WAS "A CONTAINERISED STREAMER BESIDE HOST-RUN LOCAL WORKERS", which is
+      # exactly the local-development topology `kontra up` replaced (ADR 0031's consequences say
+      # so in one line: "A host process starting a host process needs none of it"). Local panes
+      # are the appliance's case — ADR 0031 §4 calls them "exactly the case the appliance serves
+      # best" — and there the streamer IS a host process, so `os.hostname()` is simply right.
+      # What this container still streams is FLEET panes, whose health does not consult the host's
+      # own name at all.
+      #
+      # SO THE RESIDUAL CASE, STATED RATHER THAN LEFT TO BE REDISCOVERED: run `kontra serve
+      # --tmux` on the same box as THIS container and its local pane will read `poller: NONE`
+      # again. The fix for that is to run the appliance, which is what serves local panes now.
+      # The SPA is served by the control plane on 8088 and the socket comes from here, so the browser
+      # sees two origins. Comma-separated allow-list, narrow by default.
+      #
+      # BOTH ORIGINS, because binding the API to `controller:` made one of them wrong. The SPA is
+      # reached at `http://<controller>:8088` on any install that set one — never at localhost, which
+      # has no listener there — so an allow-list of just localhost rejected the very page it was
+      # written for, and every pane reported "the pane socket failed … is this origin in
+      # KONTRA_PANEL_ORIGIN?". Loopback is kept for a tunnel; the bind address is what a browser on
+      # the VPC actually sends. Same fix as the ports below, one layer up.
+      KONTRA_PANEL_ORIGIN: "${KONTRA_PANEL_ORIGIN:-http://localhost:8088,http://${KONTRA_BIND:-127.0.0.1}:8088}"
+      # Snapshot cadence per Machine. One `capture-pane` exec covers every window of that Machine,
+      # so this is a per-Machine cost, not a per-tile one.
+      KONTRA_PANEL_SNAPSHOT_MS: "${KONTRA_PANEL_SNAPSHOT_MS:-3000}"
+    ports:
+      # The streamer's own port. Published because the browser connects to it DIRECTLY: panel bytes
+      # never touch the event loop that serves the CLI's DuckDB queries.
+      #
+      # `${KONTRA_BIND}`, NOT hard loopback. The browser dials this itself, so on an install whose
+      # SPA is at `http://<controller>:8088` a loopback-only streamer is unreachable and every pane
+      # is permanently blank. It was missed when the other ports were bound because it is the one
+      # port no CLI and no Machine uses — only a browser — so nothing in the test suite noticed.
+      - "${KONTRA_BIND:-127.0.0.1}:8090:8090"   # Dashboard — read-only Terminals over the Fleet's tmux
+      - "127.0.0.1:8090:8090"   # …and from this box, whatever the bind is
+    volumes:
+      # Its OWN named volume. State on a volume a `compose down -v` removes would orphan every
+      # machine we own — a billing event and an OPSEC one.
+      - pulumi-state:/data
+      - ${KONTRA_FLEET_SSH_KEY:-~/.ssh/axiom_rsa}:/run/secrets/fleet_key:ro
+      # The secret store, at the SAME path the control plane knows it by (its KONTRA_HOME points at
+      # the mounted checkout's `.kontra`). NOT read-only: the boot-time migration above writes into
+      # it once. Bind-mounted rather than a named volume so the operator's `~/.kontra` remains the
+      # single place credentials rest — a second copy of a credential store is a second thing to
+      # back up and a second thing to leak.
+      - ${KONTRA_CHECKOUT:-/root/kontra-local}/.kontra:${KONTRA_CHECKOUT:-/root/kontra-local}/.kontra
+      # The host's tmux socket, for the LOCAL half of the Dashboard's inventory (panels/local.ts,
+      # ADR 0020). The streamer is the forked child of THIS service, so this is the container that
+      # needs it — and without it the local half is not merely empty, it is silently empty: a
+      # served worker creates `kontra-wf-<queue>` on the host, `kontra workflow serve` prints the
+      # attach line, and the wall shows nothing. The Fleet half still works over ssh, which is what
+      # makes the gap easy to read as "no local sessions" rather than "cannot see any".
+      #
+      # NOT :ro — a tmux client writes to its socket to do anything at all, `capture-pane`
+      # included.
+      #
+      # BRING THE STACK UP WITH `make up`, NOT `docker compose up`. `/tmp` is cleared on reboot, so
+      # this bind source is routinely MISSING — and docker then creates it itself, as root and mode
+      # 0755. tmux refuses a socket directory that is not 0700, so the next `tmux` on the host fails
+      # with a permissions error that names nothing to do with compose. `make up`'s `tmux-dir`
+      # target creates it 0700 first (and fixes the mode if docker got there already).
+      - ${TMUX_TMPDIR:-/tmp}/tmux-0:${TMUX_TMPDIR:-/tmp}/tmux-0
+    # The engine forks a `pulumi` CLI child plus one per provider (~164 MB per concurrent
+    # update measured), and one op runs at a time by design.
+    #
+    # 1g -> 1.5g for the streamer child (ADR 0020): an `ssh` per watched Machine (~5 MB) plus a 1 MB
+    # scrollback ring per live Terminal, in a process that shares this limit with an apply. The
+    # headroom is the point — a wall of tiles must not OOM a `pulumi up`, which is how a DIY-backend
+    # lock gets wedged with no TTL and no compare-and-swap to recover from.
+    mem_limit: 1.5g
+    # THE ONLY SERVICE THAT OWNS THE CLOUD CREDENTIAL IS THE ONE A REBOOT USED TO REMOVE. Every
+    # other container on a controller carries a restart policy — including orphaned ACTOR
+    # containers, which come back for no reason — and this one carried none, so a host reboot left
+    # a control plane that starts, serves the UI and answers Temporal while every `fleet.up()`
+    # hangs on `resolveBatch` with nothing in any log saying the infra worker is missing. Measured
+    # on this box 2026-08-30: probe, api, materializer, redis, seaweed and temporal all returned
+    # after a reboot; `orchestrator-infra` alone stayed `Exited (255)`.
+    restart: unless-stopped
+
+  # ── THE ACTOR PROBE'S WORKER (ADR 0033 §3) ──────────────────────────────────────────────────
+  #
+  # ONE PROCESS, ONE QUEUE, ONE WORKFLOW TYPE. The Actors page calls a Method by starting a
+  # kontra-owned one-shot workflow that makes exactly ONE Method call over the Batch the form
+  # collected. Something has to schedule that Nexus operation, and a Nexus operation is scheduled by
+  # a WORKFLOW command in every SDK we have — so a workflow must exist. Making the OPERATOR host it
+  # means making them run a process to answer a question about somebody else's Actor, which is the
+  # errand ADR 0033 removed.
+  #
+  # WHY IT IS PYTHON AND NOT ONE MORE ROLE ON THE NODE IMAGE. TypeScript has no caller half to reuse
+  # (ADR 0023 §22); hosting the probe there would mean a third independent wire encoder and a sixth
+  # endpoint-name derivation in the one language with no peer to pin either against. So it runs
+  # actorkit's own caller half — `catalog.actor(name, version).<method>(batch, out)` — which is also
+  # what makes the source shown beside the Run button honest: the code on screen is the code that
+  # runs. The cost is this service, and ADR 0033 §3 prices it explicitly rather than discovering it.
+  #
+  # IT DISPATCHES ONLY; IT NEVER SERVES AN ACTOR and holds no per-actor code. A kontra queue serving
+  # ARBITRARY caller workflows would be the general execution queue ADR 0023 §12 deleted, rebuilt
+  # under a different name — a second workflow type on `kontra-probe` is a reviewable event.
+  #
+  # NOT BEHIND `--profile extras`. Without it the Actors page's Call button refuses with a sentence
+  # naming this service (`backend/src/probe.ts`) rather than starting a Run that sits at
+  # `scheduled` forever — but a refusal is still a feature that does not work, and this is one small
+  # Python process, not a debugging aid.
+  orchestrator-probe:
+    build:
+      # The canonical Python host image: actorkit on PYTHONPATH + temporalio + boto3. The same one
+      # `kontra deploy` builds for actor workers — this service carries NO actor, only the caller
+      # half, which is why it needs nothing added to it.
+      context: .
+      dockerfile: infra/Dockerfile.pyworker
+    # THE TAG IS SHARED WITH `kontra deploy` ON PURPOSE (`cli/deploy.go:baseImage`), and it is the
+    # same Dockerfile and the same context, so whichever builds it first is right. Compose only
+    # builds when the daemon lacks the tag and `deploy`'s `ensureBase` does the same, so an
+    # installation that has ever deployed an actor already has this image and this service costs it
+    # no build. Named rather than left to compose's derived `<project>-orchestrator-probe`, because a
+    # second copy of the base image on a 4 GB controller is a few hundred MiB for nothing.
+    image: kontra-host:1
+    command: ["python3", "-m", "actorkit.probe"]
+    # host.docker.internal is not a Linux default; host-gateway is what defines it. Needed by
+    # every service that dials the embedded Temporal above.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      KONTRA_ADDRESS: "${KONTRA_TEMPORAL_ADDRESS:-host.docker.internal:7233}"
+      # THE CLAIM-CHECK CODEC IS NOT OPTIONAL HERE. A Method result over 128 KiB comes back as a
+      # ref, and a client without the converter fails with `Unknown payload encoding
+      # binary/claim-check-v1`, retried to exhaustion — the failure that passes on a small Batch and
+      # dies on a real one. `catalog.serve` builds it from this variable; without it the probe works
+      # for two Units and not for two hundred.
+      KONTRA_S3_ENDPOINT: "${KONTRA_S3_APPLIANCE_ENDPOINT:-http://host.docker.internal:8333}"
+      # Where `catalog.serve` pushes its workflow descriptor. Best-effort by design — a catalog
+      # nobody can reach never stops a worker serving.
+      #
+      # THE HOST GATEWAY, NOT A SERVICE NAME, and for the same reason KONTRA_ADDRESS above uses
+      # one: the API is `kontra up`'s child on the HOST now (ADR 0031 §1, issue 14). It needs the
+      # same `kontra up --bind` an address the bridge can see, or this stays best-effort and the
+      # Actors page's Call button describes a workflow the catalog never heard of.
+      KONTRA_ORCHESTRATOR_URL: "${KONTRA_ORCHESTRATOR_URL:-http://host.docker.internal:8088}"
+      # Moves BOTH halves at once: `backend/src/queues.ts` reads the same variable, and
+      # `tests/test_actor_probe.py` pins the default against it. A queue named here and nowhere
+      # else is a probe that refuses with the name of a queue this worker is not polling.
+      KONTRA_PROBE_QUEUE: "${KONTRA_PROBE_QUEUE:-kontra-probe}"
+    # It holds one workflow at a time and no DuckDB. The floor is the interpreter and the SDK.
+    mem_limit: 256m
+    restart: unless-stopped
+
+  # ── `orchestrator-api` USED TO SIT HERE. IT IS THE BINARY'S CHILD NOW ────────────────────────
+  #
+  # REMOVED because the control plane stopped being a container (ADR 0031 §1, issue 14). `kontra
+  # up` hydrates a content-addressed bundle — a pinned Node runtime, the compiled orchestrator and
+  # its native addons — out of its own CAS and execs `node dist/src/main.js` as a SUPERVISED
+  # CHILD: its stdout and stderr are the binary's log stream, a crash ends `kontra up` with the
+  # exit status, and a shutdown signals the child's whole process group so nothing is left holding
+  # port 8088, a Temporal connection or the DuckLake catalog lock.
+  #
+  # This is the LAST control-plane service to go. What is left in this file is the cloud job that
+  # ADR 0034 §1 deliberately keeps on compose (`orchestrator-infra`, which holds the Pulumi engine)
+  # and the actor probe.
+  #
+  # WHAT MOVED WHERE, so that nothing here is merely deleted:
+  #
+  #   command: node dist/src/main.js     -> the bundle's manifest entrypoint (cli/appliance/
+  #                                         orchestratorbundle.go), exec'd by cli/orchestrator.go
+  #   KONTRA_ORCHESTRATOR_ROLES          -> `api,materializer,infra` in the appliance, which may
+  #                                         hold the third role because it ships no Pulumi engine.
+  #                                         A deployment that keeps THIS file's orchestrator-infra
+  #                                         beside `kontra up` must set the variable back to
+  #                                         `api,materializer` (ADR 0034 §1) — the appliance leaves
+  #                                         an inherited value alone, precisely for that case.
+  #   KONTRA_ADDRESS / _S3_ENDPOINT /    -> not settings any more. They are where THIS PROCESS
+  #     KONTRA_REDIS_HOST / _DATA_DIR       bound its own listeners, so `kontra up` overrides them
+  #                                         in the child's environment and prints what it replaced.
+  #   ports: 8088                        -> `kontra up --api-port` (the API still binds 0.0.0.0
+  #                                         inside the process; ADR 0031 §3's loopback posture is
+  #                                         the appliance's other five services today).
+  #   volumes: orchestrator-data:/data   -> `kontra up --data-dir` on the HOST. The volume below
+  #                                         is not deleted and still holds every pre-appliance
+  #                                         run record and catalog.
+  #   the SPA build args                 -> `kontra bundle spa`, a second content-addressed
+  #                                         artifact hydrated beside the orchestrator. ADR 0031 §3
+  #                                         is why `VITE_KONTRA_EXPLORE_TOKEN` did not travel with
+  #                                         it: on loopback there is no browser credential to bake.
+  #   the tmux / checkout / kontra       -> nothing to mount. The binary IS on the host, so a
+  #     mounts                              `serve` it starts is already the host's tmux server's.
+  #
+  # THE IMAGE IS STILL BUILT, by `orchestrator-infra` above, which runs out of the same
+  # `kontra-orchestrator:latest`. `make api` and `make ui` still hot-copy into THAT container; the
+  # appliance's equivalent is `--orchestrator=local`, which runs the checkout's own
+  # `backend/dist` and says on every start which of the two it chose.
+
+
+# Name the control plane's network `kontra` so same-host actor workers can attach to it
+# by name (docker-compose.actors.yml references it as external).
+networks:
+  default:
+    name: kontra
+
+volumes:
+  # `registry-data` LEFT WITH THE `registry` SERVICE (ADR 0032). Actor image layers are content
+  # -addressed, so they live in the appliance's shared CAS under its data directory, where `du`,
+  # `tar` and `sha256sum` all work on them — not in a volume whose layout only `registry:2` knew.
+  #
+  # AN EXISTING VOLUME IS NOT DELETED BY REMOVING THIS. It is still there under whatever name it
+  # had (`docker volume ls`), holding whatever was pushed before the move, and `docker volume rm`
+  # is the one command that reclaims it — after a `kontra deploy` has re-pushed anything still
+  # wanted, since nothing reads it now.
+  # `ducklake-pg-data` LEFT WITH THE `ducklake-postgres` SERVICE (ADR 0031 §1b). The catalog and
+  # the materialization ledger it held are two files under KONTRA_DATA_DIR now, which is the
+  # volume on the next line — so what used to be two volumes and a server is one volume.
+  #
+  # AN EXISTING VOLUME IS NOT DELETED BY REMOVING THIS, and nothing reads it: it still holds every
+  # pre-appliance run's catalog, and there is no migration out of it. `docker volume rm` is
+  # the one command that reclaims it.
+  # `orchestrator-data` IS NO LONGER MOUNTED BY ANYTHING IN THIS FILE (ADR 0031 §1, issue 14).
+  # The service that held it is the binary's child now and keeps the same three things —  run
+  # records, the DuckLake catalog and the materialization ledger — under `kontra up --data-dir` on
+  # the host instead.
+  #
+  # IT IS DECLARED, NOT DELETED, and that is the point: it still holds every pre-appliance run
+  # record and catalog, and `docker compose down -v` on a file that no longer declares it would
+  # leave an operator believing the stack was cleaned up while this volume sat there. There is no
+  # migration out of it; `docker volume rm` is what reclaims it once nothing is wanted.
+  orchestrator-data:  # the run records, the DuckLake catalog and the ledger (ADR 0017)
+  pulumi-state: # Pulumi stack state (ADR 0019). NEVER removed by a teardown path.

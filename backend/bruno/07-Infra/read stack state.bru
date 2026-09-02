@@ -1,0 +1,42 @@
+meta {
+  name: read stack state
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseUrl}}/api/infra/stacks/kontra-fleet%2Fdoes-not-exist/state
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{stateToken}}
+}
+
+docs {
+  One stack's resources and outputs — what Pulumi's own web console would show, sourced from
+  the checkpoint because the console cannot read a file:// backend at all (it is a client of
+  the licensed Cloud API service).
+
+  A stack that has never been converged is a 404, NOT an empty 200: "no fleet yet" and "a
+  fleet with no machines" are different facts, and a destroyed-but-existing stack really does
+  return an empty resource list.
+}
+
+assert {
+  res.status: lte 404
+}
+
+tests {
+  test("a stack that was never converged is 404, not an empty 200", function () {
+    // Skipped on 401/503 — see the README: `stateToken` is a secret var and an unauthenticated
+    // CLI run legitimately cannot reach this route.
+    if (res.getStatus() === 401 || res.getStatus() === 403 || res.getStatus() === 503) return;
+    expect(res.getStatus()).to.equal(404);
+  });
+}

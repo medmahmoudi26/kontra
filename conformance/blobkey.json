@@ -1,0 +1,86 @@
+{
+ "dt": "2026-08-02",
+ "cases": [
+  {
+   "why": "ordinary key",
+   "actor": "cachebuster",
+   "run": "run-abc",
+   "node": "n7",
+   "unit": 11,
+   "sha": "deadbeef",
+   "expect": "units/run=run-abc/dt=2026-08-02/actor=cachebuster/shard=0007/unit=00011/deadbeef.json"
+  },
+  {
+   "why": "empty fields must still be valid",
+   "actor": "",
+   "run": "",
+   "node": "",
+   "unit": 0,
+   "sha": "sha",
+   "expect": "units/run=run/dt=2026-08-02/actor=unknown/shard=node/unit=00000/sha.json"
+  },
+  {
+   "why": "n10 must not prefix-collide n1",
+   "actor": "crawl4ai-canon",
+   "run": "r1",
+   "node": "n10",
+   "unit": 1,
+   "sha": "aa",
+   "expect": "units/run=r1/dt=2026-08-02/actor=crawl4ai-canon/shard=0010/unit=00001/aa.json"
+  },
+  {
+   "why": "n1 (the collision victim)",
+   "actor": "crawl4ai-canon",
+   "run": "r1",
+   "node": "n1",
+   "unit": 1,
+   "sha": "aa",
+   "expect": "units/run=r1/dt=2026-08-02/actor=crawl4ai-canon/shard=0001/unit=00001/aa.json"
+  },
+  {
+   "why": "graph node ids are not numeric",
+   "actor": "x",
+   "run": "r",
+   "node": "crawl",
+   "unit": 2,
+   "sha": "bb",
+   "expect": "units/run=r/dt=2026-08-02/actor=x/shard=crawl/unit=00002/bb.json"
+  },
+  {
+   "why": "path/glob injection is neutered",
+   "actor": "a/b=c",
+   "run": "r 2",
+   "node": "n*3",
+   "unit": 3,
+   "sha": "cc",
+   "expect": "units/run=r_2/dt=2026-08-02/actor=a_b_c/shard=n_3/unit=00003/cc.json"
+  },
+  {
+   "why": "chunked numeric shard keeps its padding",
+   "actor": "cachebuster",
+   "run": "r",
+   "node": "n1.2",
+   "unit": 4,
+   "sha": "dd",
+   "expect": "units/run=r/dt=2026-08-02/actor=cachebuster/shard=0001.2/unit=00004/dd.json"
+  },
+  {
+   "why": "chunked n10 must not collide with chunked n1",
+   "actor": "cachebuster",
+   "run": "r",
+   "node": "n10.2",
+   "unit": 4,
+   "sha": "dd",
+   "expect": "units/run=r/dt=2026-08-02/actor=cachebuster/shard=0010.2/unit=00004/dd.json"
+  },
+  {
+   "why": "chunked named shard",
+   "actor": "cachebuster",
+   "run": "r",
+   "node": "crawl.3",
+   "unit": 4,
+   "sha": "dd",
+   "expect": "units/run=r/dt=2026-08-02/actor=cachebuster/shard=crawl.3/unit=00004/dd.json"
+  }
+ ]
+}

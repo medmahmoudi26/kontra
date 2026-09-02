@@ -1,0 +1,32 @@
+meta {
+  name: export dataset
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseUrl}}/api/datasets/export
+  body: none
+  auth: bearer
+}
+
+params:query {
+  name: {{datasetName}}
+  format: json
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: {{exploreToken}}
+}
+
+assert {
+  res.status: lte 404
+}
+
+docs {
+  AUTHENTICATED. Full extract of one dataset.
+}
