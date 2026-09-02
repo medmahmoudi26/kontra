@@ -12,7 +12,7 @@ import (
 // for the same reason: there is no shared code across this boundary and a drift has no loud failure
 // mode. Weaker because a golden copied by hand only holds while somebody keeps copying it; the
 // queue derivations have a corpus both sides execute, and this one does not yet. A Go dispatch whose Summary
-// drifted would put a line into history that `backend/src/transcript.ts` reads as a dispatch
+// drifted would put a line into history that `control/orchestrator/src/transcript.ts` reads as a dispatch
 // that named no Method, on a surface whose whole job is saying which Method ran.
 
 func TestADispatchNamesItsActorVersionAndMethod(t *testing.T) {

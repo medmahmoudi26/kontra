@@ -2,7 +2,7 @@
 //
 // This side is a WRITER, and it is the SECOND one: `sdk/python/actorkit/fleet.py` builds the same
 // Fleet desired state out of `hold()`/`place()`/`up()`, `cli/fleet.go` builds it out of
-// `kontra fleet up|deploy`, and `backend/src/infra/stacks.ts:coerceFleetArgs` is the only reader.
+// `kontra fleet up|deploy`, and `control/orchestrator/src/infra/stacks.ts:coerceFleetArgs` is the only reader.
 // Nothing imports anything across the three, and the reader DISCARDS WITHOUT A WORD every key it
 // does not recognise — which is how `--tmux` rode as a boolean for a release, narrowed away before
 // the program saw it, letting a Machine deploy "successfully" and never be viewable.

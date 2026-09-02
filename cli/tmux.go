@@ -67,7 +67,7 @@ func tmuxSession(actor, version string) string {
 // SESSION — the exact thing ADR 0020 says a tile may never say.
 //
 // Sanitised where the name is MINTED, so what kontra prints, what it looks for, and what tmux holds
-// are the same string. `backend/src/panels/tmux.ts:tmuxSafeName` is the peer.
+// are the same string. `control/orchestrator/src/panels/tmux.ts:tmuxSafeName` is the peer.
 func tmuxSafeName(name string) string {
 	return strings.NewReplacer(".", "_", ":", "_").Replace(name)
 }

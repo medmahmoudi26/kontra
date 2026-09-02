@@ -79,7 +79,7 @@ func TestPushAndRegistryAreTwoAnswersToOneQuestion(t *testing.T) {
 
 // TestDefaultDestinationIsTheConventionalOne — with no `--push`, the address is the rung ladder
 // `bundleRegistry` owns and the repository is `bundles/<name>`, which is the only address
-// `backend/src/activities/fleet.ts:resolveBundle` can derive. Changing this silently makes every
+// `control/orchestrator/src/activities/fleet.ts:resolveBundle` can derive. Changing this silently makes every
 // build publish somewhere a Fleet placement then 404s on.
 func TestDefaultDestinationIsTheConventionalOne(t *testing.T) {
 	t.Setenv("KONTRA_HOME", t.TempDir())
@@ -137,7 +137,7 @@ func TestEveryDocumentedBuildFlagExists(t *testing.T) {
 		"../.github/actions/build-actor/action.yml",
 		"../.gitlab/kontra-build-actor.yml",
 		"../README.md",
-		"../infra/README.md",
+		"../control/images/README.md",
 		"main.go",
 		"build.go",
 	} {

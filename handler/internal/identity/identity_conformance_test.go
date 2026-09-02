@@ -14,7 +14,7 @@ import (
 // hand-copied golden tables held them, each one keeping itself "in sync" with the others by
 // somebody remembering. The bookkeeping had already drifted before the code did: this file's
 // comment said one thing, sdk/go/catalog said "a SIXTH independent derivation",
-// backend/src/panels/pollers.ts said "a fourth", and none of the three was right.
+// control/orchestrator/src/panels/pollers.ts said "a fourth", and none of the three was right.
 //
 // A drift has no loud failure mode. The actor registers, polls a queue nobody schedules onto, and
 // reports as a healthy idle Worker while every run hangs to StartToClose.

@@ -449,12 +449,12 @@ func stageNode(opts BuildOptions, pin Pin, m *Manifest, p func(string, ...any)) 
 
 // stageOrchestrator compiles `orchestrator/` into the staging tree.
 //
-// INTO STAGING, NOT INTO backend/dist. The checkout is somebody's working tree — on this box
+// INTO STAGING, NOT INTO control/orchestrator/dist. The checkout is somebody's working tree — on this box
 // three containers are running out of it — and a build tool that overwrites `dist` as a side
 // effect of producing an artifact is a build tool that loses somebody's afternoon. `--outDir` is
 // the whole difference and it costs nothing.
 //
-// tsc IS THE PROJECT'S OWN, from `backend/node_modules`, run by the pinned Node. Not a tsc
+// tsc IS THE PROJECT'S OWN, from `control/orchestrator/node_modules`, run by the pinned Node. Not a tsc
 // from PATH: `package.json` pins the version, the version decides the emitted JavaScript, and the
 // emitted JavaScript is what the digest is over.
 //
@@ -464,13 +464,13 @@ func stageNode(opts BuildOptions, pin Pin, m *Manifest, p func(string, ...any)) 
 // dependency tree. See {@link bootstrapOrchestratorModules} for why writing node_modules into the
 // checkout is allowed where writing `dist` is not.
 func stageOrchestrator(opts BuildOptions, tc *toolchain, m *Manifest, p func(string, ...any)) error {
-	src := filepath.Join(opts.RepoRoot, "backend")
+	src := filepath.Join(opts.RepoRoot, "control", "orchestrator")
 	if err := bootstrapOrchestratorModules(src, tc, p); err != nil {
 		return err
 	}
 	tsc := filepath.Join(src, "node_modules", "typescript", "bin", "tsc")
 	if _, err := os.Stat(tsc); err != nil {
-		return fmt.Errorf("backend/node_modules/typescript is missing, so there is nothing to compile with: %w", err)
+		return fmt.Errorf("control/orchestrator/node_modules/typescript is missing, so there is nothing to compile with: %w", err)
 	}
 	nodeExe := tc.Node
 
@@ -511,7 +511,7 @@ func stageOrchestrator(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 		TreeSHA256: tree,
 		Files:      files,
 		Bytes:      bytes,
-		Note:       "tsc output for backend/tsconfig.json; the SPA is a separate artifact and is not here",
+		Note:       "tsc output for control/orchestrator/tsconfig.json; the SPA is a separate artifact and is not here",
 	})
 	return nil
 }
@@ -562,7 +562,7 @@ func stageOrchestrator(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 // own sha256 is a component of the manifest and why `--frozen-lockfile` is not optional. Drop the
 // flag and the pins stop being pins.
 func stageDependencies(opts BuildOptions, tc *toolchain, m *Manifest, p func(string, ...any)) error {
-	src := filepath.Join(opts.RepoRoot, "backend")
+	src := filepath.Join(opts.RepoRoot, "control", "orchestrator")
 	dst := filepath.Join(opts.StageDir, "orchestrator")
 
 	lock := filepath.Join(src, "pnpm-lock.yaml")
@@ -621,7 +621,7 @@ func stageDependencies(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 		// INSIDE THE ARCHIVE, WHICH IS NOT WHERE THE REPO KEEPS IT. Every `Path` on a Component is
 		// relative to the extracted bundle, and the bundle's layout is a published contract — the
 		// `run it:` line tells people to exec `orchestrator/dist/src/main.js`. The repo's own copy
-		// moved to `backend/` in ADR 0035; this did not, and must not. It read `backend/node_modules`
+		// moved to `backend/` in ADR 0035; this did not, and must not. It read `control/orchestrator/node_modules`
 		// for one commit because that string IS the right answer twice elsewhere in this file (the
 		// tsc lookup and the install probe, both genuinely repo-relative), so a rewrite that checked
 		// its work locally looked correct. The neighbouring component two lines down still said
@@ -759,8 +759,8 @@ func (o BuildOptions) resolve() (BuildOptions, error) {
 		return o, err
 	}
 	o.RepoRoot = abs
-	if _, err := os.Stat(filepath.Join(o.RepoRoot, "backend", "package.json")); err != nil {
-		return o, fmt.Errorf("%s does not look like the kontra checkout (no backend/package.json)", o.RepoRoot)
+	if _, err := os.Stat(filepath.Join(o.RepoRoot, "control", "orchestrator", "package.json")); err != nil {
+		return o, fmt.Errorf("%s does not look like the kontra checkout (no control/orchestrator/package.json)", o.RepoRoot)
 	}
 	if o.OutDir == "" {
 		o.OutDir = filepath.Join(o.RepoRoot, "build", "bundles")

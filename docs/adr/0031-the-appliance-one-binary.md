@@ -50,7 +50,7 @@ contradict the shape the PRD assumed.
    different hosts; only a shared database can carry that." Two customers, one reason, and the reason
    is process separation.
 
-3. **Three workflows share the infra queue, not two.** `backend/src/workflows/infra.ts` exports
+3. **Three workflows share the infra queue, not two.** `control/orchestrator/src/workflows/infra.ts` exports
    `stackWorkflow`, `tmuxSessionWorkflow` **and** `sweepDatasetsWorkflow`. `infra.ts:119` says why
    the bundle exists: "`stackWorkflow` and `tmuxSessionWorkflow` share this queue because both need
    the cloud credential or the fleet key, and neither may run anywhere else." The sweep was added on
@@ -103,7 +103,7 @@ contradict the shape the PRD assumed.
 | `temporal-data-owner` | **evaporates** | It exists to `chown` a Docker named volume to uid 1000. No container, no volume, no uid mismatch. |
 | `seaweed` | **in-process** | Replaced by a minimal S3 over the appliance's data directory. See §1a — this is the one replacement, not a re-hosting. |
 | `seaweed-bucket` | **evaporates** | A bucket that the store creates on open cannot be missing. This one-shot is a workaround for a store that is not ours. |
-| `redis` | **in-process** | An embedded KV speaking enough RESP that `statekv.py`, `internals/redis_kv.py`, `runtime/go/*` and `backend/src/state.ts` are all unchanged. The two key shapes (`kontra-actor:<entity>` hash, `kontra-global:<actor>:<key>`) are the contract; RESP is the transport. |
+| `redis` | **in-process** | An embedded KV speaking enough RESP that `statekv.py`, `internals/redis_kv.py`, `runtime/go/*` and `control/orchestrator/src/state.ts` are all unchanged. The two key shapes (`kontra-actor:<entity>` hash, `kontra-global:<actor>:<key>`) are the contract; RESP is the transport. |
 | `registry` | **in-process** | `distribution` is a library. It becomes the second customer of the CAS (§2). This also fixes finding 1: the registry stops being opt-in for a path that is not. |
 | `codec-server` | **in-process** | Already Go, already in `handler/`, already `CGO_ENABLED=0` (`infra/Dockerfile.codec-server`). It is an HTTP handler in a container; it becomes an HTTP handler. |
 | `jaeger` | **evaporates as a service** | It is an OTLP endpoint. The binary exports to whatever `OTEL_EXPORTER_OTLP_ENDPOINT` names, and shipping a trace *store* was never the control plane's job. |
@@ -139,7 +139,7 @@ about who is watching. Finding 8: the SPA stopped range-reading parquet. Three c
 require real S3 and none of them is the browser —
 
 - **The three SDKs' object stores** (`handler/internal/objectstore`, `sdk/python`,
-  `backend/src/codec/objectStore.ts`) speak SigV4 against an endpoint, and the golden blob-key
+  `control/orchestrator/src/codec/objectStore.ts`) speak SigV4 against an endpoint, and the golden blob-key
   fixture pins their key layout byte-for-byte across all three.
 - **Remote fleet workers** reach the controller's S3 over the VPC — an address, not a filesystem
   path.

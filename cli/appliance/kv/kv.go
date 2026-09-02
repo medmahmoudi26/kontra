@@ -3,7 +3,7 @@
 // wire and the refusal.
 //
 // WHY IT SPEAKS RESP INSTEAD OF BEING AN INTERFACE. The orchestrator stays a Node child process
-// and `backend/src/stateStore.ts` talks to this tier through `ioredis` — with a `lazyConnect`
+// and `control/orchestrator/src/stateStore.ts` talks to this tier through `ioredis` — with a `lazyConnect`
 // dance, `enableOfflineQueue: false`, a `retryStrategy`, and an `'error'` listener that exists
 // because an unhandled EventEmitter error kills the API. Two SDKs reach the same tier from
 // actor processes that may not even be on this machine (actorkit's statekv and rediskv, in Python
@@ -16,7 +16,7 @@
 // Every command below has a caller in this repository, and the list was taken from those callers
 // rather than from Redis's command table:
 //
-//	HGET HGETALL TTL SCAN              backend/src/stateStore.ts (the operator's read path)
+//	HGET HGETALL TTL SCAN              control/orchestrator/src/stateStore.ts (the operator's read path)
 //	HGET HSET HDEL HEXISTS EXPIRE DEL   actorkit statekv.py / statekv.go (tiers 1+2)
 //	HMGET EVALSHA EVAL SCRIPT LOAD      actorkit redis_kv.py / rediskv.go (tier 3's ETag CAS)
 //	EXISTS TYPE                         the SDKs' cross-language layout suites, which assert the

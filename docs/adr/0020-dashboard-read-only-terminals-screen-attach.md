@@ -4,7 +4,7 @@
 
 **Accepted.** Extends ADR 0019: session existence on a Machine becomes a Temporal operation on the
 same `kontra-infra` queue, and the process-isolation finding that ADR 0019 recorded as a comment is
-here re-measured and made load-bearing. Revises `backend/src/infra/programs/machine.ts` — the
+here re-measured and made load-bearing. Revises `control/orchestrator/src/infra/programs/machine.ts` — the
 `--tmux` systemd unit it installs is removed and replaced by a converge. Adds **Terminal** and
 **Dashboard** to the Execution glossary. Supersedes no ADR.
 

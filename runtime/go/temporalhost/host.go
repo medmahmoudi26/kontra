@@ -62,7 +62,7 @@ func TaskQueue(name, version string) string {
 //
 // On the fleet it is the Droplet's name (`kf-dns-01`): a Worker is a pair of systemd units ON the
 // Machine, not a container, so nothing stands between the two
-// (backend/src/infra/programs/machine.ts). Empty when the lookup fails, which reads
+// (control/orchestrator/src/infra/programs/machine.ts). Empty when the lookup fails, which reads
 // downstream as unrecorded — the one honest answer to "which Machine" when the OS will not say.
 var Machine = func() string {
 	h, err := os.Hostname()
@@ -160,7 +160,7 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 
 	a := h.s.get(req.ActorID)
 	// Beat per committed unit. The field names are a cross-language contract with
-	// backend/src/heartbeat.ts, where every field is optional and defaults to 0 — so a
+	// control/orchestrator/src/heartbeat.ts, where every field is optional and defaults to 0 — so a
 	// wrong name reports 0/0 forever rather than erroring. Peer of _beat in engine.py.
 	a.SetHeartbeat(func(done, total, isolated int) {
 		activity.RecordHeartbeat(ctx, map[string]any{

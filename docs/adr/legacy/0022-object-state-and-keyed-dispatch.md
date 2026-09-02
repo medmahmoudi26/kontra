@@ -126,7 +126,7 @@ guard on the read path cannot be skipped.
   engine halves that diverge. Consistent with ADR 0021 leaving the caller's side Python-only, and
   it should not stay that way.
 - **A new field appears in the operator state projection.** `batch-owner` lands in the default tier
-  of `backend/src/state.ts` `fieldInTier`, so it renders beside the `u{i}` commit markers. It
+  of `control/orchestrator/src/state.ts` `fieldInTier`, so it renders beside the `u{i}` commit markers. It
   is left there on purpose: which batch owns this state is worth seeing, not worth hiding.
 - **Shared read-only handlers remain unimplemented.** Restate's concurrent `@Shared` reads have no
   peer here — every dispatch is a write batch and takes the key exclusively. Nothing needs them

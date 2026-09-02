@@ -15,8 +15,8 @@ Every failure this file guards against is silent:
   * a shared Fleet's saga leg still armed — my failed `up` tearing down your Machines;
   * an adopted Fleet dropping its own Lease — the handoff destroying the thing it was handing off.
 
-The server-side halves are `backend/src/workflows/lease.test.ts` (the **Lease** workflow against a real
-Temporal) and `backend/src/activities/lease.test.ts` (the real activities). This file pins the
+The server-side halves are `control/orchestrator/src/workflows/lease.test.ts` (the **Lease** workflow against a real
+Temporal) and `control/orchestrator/src/activities/lease.test.ts` (the real activities). This file pins the
 CALLER's half: the shape of the scope.
 """
 

@@ -8,7 +8,7 @@ package main
 //
 // ═══ THE CHECK THIS REPLACES NEVER FIRED FOR ITS STATED REASON ═══
 //
-// `backend/src/infra/programs/machine.ts` installed `watchdog.sh` on every **Machine**, on a
+// `control/orchestrator/src/infra/programs/machine.ts` installed `watchdog.sh` on every **Machine**, on a
 // five-minute systemd timer, and its header called it "the one that matters": the round-3 run,
 // where one Machine failed **81 of 82 resource loads** and another 19 of 20 while their peers sat at
 // zero, each silently eating about an eighth of a sweep, and the runs still reported `completed`.
@@ -71,7 +71,7 @@ package main
 //	reset     the counters went backwards, so the Worker restarted between the readings
 //
 // None of them restarts anything, and all of them ride out to the pane's `loads` chip as `unknown`
-// with the sentence attached — the same rule `backend/src/panels/metrics.ts` argues for at length:
+// with the sentence attached — the same rule `control/orchestrator/src/panels/metrics.ts` argues for at length:
 // "a green chip derived from a counter nothing increments would be worse than no chip".
 //
 // ═══ A MEASURED BLIND SPOT, RECORDED RATHER THAN PAPERED OVER ═══

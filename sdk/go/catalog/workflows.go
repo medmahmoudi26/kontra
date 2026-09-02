@@ -523,7 +523,7 @@ func (h *ActorHandle) dispatch(
 		ScheduleToCloseTimeout: o.timeout,
 		// METADATA, NOT PAYLOAD — the Method name is in `entry` too, but `entry` is a payload and
 		// may be a claim-check ref, so this is the copy a reader can afford. Built by the same
-		// rules as Python's, because `backend/src/transcript.ts` recovers the Method from the
+		// rules as Python's, because `control/orchestrator/src/transcript.ts` recovers the Method from the
 		// FIRST FIELD of this line: a Go dispatch with a format of its own put a Method name into
 		// history that the transcript then reported as no Method at all.
 		//

@@ -33,7 +33,7 @@ draw as *declares no fields* rather than as an empty table. `nscheck` now names 
 still `dict` — one workflow that carries both readings at once, which is exactly the pair slices 02
 and 03 need to be visible instead of a correct no-op.
 
-The peer on the reading side is backend/src/catalog.test.ts (what the route refuses) and
+The peer on the reading side is control/orchestrator/src/catalog.test.ts (what the route refuses) and
 frontend/src/panels/workflowContract.test.ts (how the three answers are drawn).
 """
 

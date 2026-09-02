@@ -128,7 +128,7 @@ There is exactly **one** `RunBatch` call per Batch. It runs to completion:
   records must be **content-deterministic** — no timestamps, no random ids.
 - **Heartbeat per unit** — the actor calls `RecordHeartbeat` with `{node, done, total, isolated}`
   as each Unit's outcome lands (`_beat` in `internals/engine.py`, `SetHeartbeat` in the Go host),
-  decoded by `backend/src/heartbeat.ts`. Every field there is optional and defaults to `0`,
+  decoded by `control/orchestrator/src/heartbeat.ts`. Every field there is optional and defaults to `0`,
   so a renamed field does not error — it reports `0/0` forever.
 
 ### Why one activity, not a loop of turns
@@ -205,7 +205,7 @@ retried automatically — re-dispatching a drop is a decision, and
 A Batch's records may **mix** inline units and `{"$ref": {key, size, sha256}}` entries. The actor
 side resolves them on ingest (bounded at 16 concurrent fetches, `_resolve_refs` in
 `internals/engine.py`) so a Method's author never sees a ref; the orchestrator resolves them in
-`backend/src/data/parquet.ts` — sha-verified, spliced back in order — so materialization and
+`control/orchestrator/src/data/parquet.ts` — sha-verified, spliced back in order — so materialization and
 datasets see plain units. See [[Query-Surface]].
 
 ## The durable unit

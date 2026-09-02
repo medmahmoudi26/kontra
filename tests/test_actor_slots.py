@@ -4,7 +4,7 @@ Against a REAL HTTP server for `test_actor_secrets.py`'s reason: what is worth p
 wire — the path, the bearer identity, the actor VERSION that rides with the ask (a slot is declared
 per version), and what each refusal status means to an author reading a traceback.
 
-THE PEER IS `backend/src/secrets/slotRoutes.test.ts`, which pins the same path and the same
+THE PEER IS `control/orchestrator/src/secrets/slotRoutes.test.ts`, which pins the same path and the same
 statuses from the other side. Neither process can see the other, so the contract is written twice
 on purpose — if one moves, the other fails.
 """

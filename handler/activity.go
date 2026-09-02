@@ -43,7 +43,7 @@ type RunBatchInput struct {
 // forward so each turn's activity could resume the progress count. The turn loop is gone (one
 // activity per batch), and the actor now owns both counters for the whole batch and reports
 // them on its OWN heartbeat — see _beat in runtime/python/internals/engine.py, decoded by
-// backend/src/heartbeat.ts. Nothing was lost; the accounting moved to the process that
+// control/orchestrator/src/heartbeat.ts. Nothing was lost; the accounting moved to the process that
 // actually has the numbers.
 
 // handlerActorName is the actor this worker serves (KONTRA_ACTOR_NAME), snapshotted at

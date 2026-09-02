@@ -22,7 +22,7 @@ Consequences; it just did not follow the concession to its conclusion.
 
 **"A large correctness surface."** The Dapr state-manager seam is four methods, and the test
 double standing in for the whole of it is **14 lines** (`tests/test_dapr_host.py:20-34`).
-`backend/src/stateStore.ts:95-123` already bypasses Dapr and reads the same Redis keys
+`control/orchestrator/src/stateStore.ts:95-123` already bypasses Dapr and reads the same Redis keys
 directly with ioredis — it even encodes that Dapr writes a HASH rather than a string. The
 substantial correctness code (turn loop, windowing, commit-by-identity, per-unit isolation,
 streaming sub-units) is ours already and is untouched by removal.
@@ -104,7 +104,7 @@ than the approximate count of `workflow.go:172`, and `arun_state` rides the same
 >
 > The decisive mechanism is the third one below: **a lost commit does not degrade, it
 > DUPLICATES.** `runtime/python/internals/dapr/unitstore.py:49` ends the blob key with
-> `sha256(data)`, and `backend/src/activities/mapAndRoute.ts:250-266` hands the downstream
+> `sha256(data)`, and `control/orchestrator/src/activities/mapAndRoute.ts:250-266` hands the downstream
 > node every key it has not seen. So a re-run whose records are not byte-identical writes a
 > SECOND blob under the same `unit=` prefix and the child processes both. The docstring at
 > `unitstore.py:6-8` — *"Deterministic keys (not content-addressed) on purpose: a re-run
@@ -169,7 +169,7 @@ change. `sdk/python/actorkit/actor.py` and `sdk/go/kontra.go` already import no 
   component" and "Dapr has no TTL-touch primitive" now read as direct Redis, and `ActorStateTTL`
   becomes Redis `EXPIRE`. ADR 0017 §6 cites 0016 for a property that is Temporal's, not Dapr's —
   the cross-reference moves here; the claim is unaffected.
-- **`backend/src/state.ts` and `stateStore.ts` must change.** They parse Dapr's composite
+- **`control/orchestrator/src/state.ts` and `stateStore.ts` must change.** They parse Dapr's composite
   key and HASH encoding to power the raw-state endpoints; the per-Unit tier leaves Redis
   entirely and becomes visible in Temporal instead.
 - **BOTH actor hosts become Temporal clients and therefore need the claim-check codec.** The
@@ -241,14 +241,14 @@ What landed, and where it lives now:
 Three things are worth recording because they were NOT foreseen above:
 
 - **The operator state projection broke silently and was not caught by its own tests.**
-  `backend/src/state.ts` kept scanning Dapr's `kontra-<app>||<type>||<id>||<key>` composite
+  `control/orchestrator/src/state.ts` kept scanning Dapr's `kontra-<app>||<type>||<id>||<key>` composite
   after the layout moved, so every state tier returned an empty result — indistinguishable from
   an actor with no state, which is the failure mode that file's own comments warn about. Its
   tests passed throughout, because they pinned the glob rather than the writer. They now assert
   against `statekv.py`/`redis_kv.py` by name.
 
 - **Live progress broke the same way, in two places.** The actor emitted `{committed, total}`
-  while `backend/src/heartbeat.ts` decodes `{node, done, total, isolated}` (every field
+  while `control/orchestrator/src/heartbeat.ts` decodes `{node, done, total, isolated}` (every field
   optional, defaulting to 0), and `temporalClient.ts` still filtered pending activities on the
   old activity name `RunBatchOnDapr`. Either alone yields an empty progress map. Both are fixed
   and pinned on the emitting side.

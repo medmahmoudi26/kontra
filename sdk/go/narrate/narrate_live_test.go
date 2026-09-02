@@ -112,7 +112,7 @@ func runLive(t *testing.T, c client.Client, wf any, arg ...any) []*historypb.His
 }
 
 // THE ONE THING THAT MATTERS: the sentence is ON the event, in the field the reduced log reads. A
-// Summary that did not survive the round trip would leave `backend/src/history.ts` with nothing
+// Summary that did not survive the round trip would leave `control/orchestrator/src/history.ts` with nothing
 // to put in the transcript, and every narration would render as a bare timer.
 func TestLiveASentenceLandsOnTimerStartedAsUserMetadata(t *testing.T) {
 	srv := devServer(t)

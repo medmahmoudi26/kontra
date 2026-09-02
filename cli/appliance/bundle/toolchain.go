@@ -6,7 +6,7 @@
 // existed the build asked for a Node and a pnpm it did not name.
 //
 // The old shape looked pinned and was not. `stageDependencies` began with `exec.LookPath("pnpm")`
-// and `stageOrchestrator` began with a `stat` of `backend/node_modules/typescript` — so the
+// and `stageOrchestrator` began with a `stat` of `control/orchestrator/node_modules/typescript` — so the
 // two programs that decide what the bundle CONTAINS (pnpm resolves 330 MB of dependencies, tsc
 // emits every byte of the JavaScript) arrived from whatever the operator happened to have. The
 // manifest recorded their versions afterwards, which is the wrong way round: recording the version
@@ -231,7 +231,7 @@ func bootstrapOrchestratorModules(src string, tc *toolchain, p func(string, ...a
 	if _, err := os.Stat(filepath.Join(src, "node_modules", "typescript", "bin", "tsc")); err == nil {
 		return nil
 	}
-	p("no backend/node_modules in this checkout — installing it (pnpm install --frozen-lockfile)")
+	p("no control/orchestrator/node_modules in this checkout — installing it (pnpm install --frozen-lockfile)")
 	cmd := tc.pnpmCmd(src, "install", "--frozen-lockfile", "--config.confirmModulesPurge=false")
 	if combined, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("pnpm install failed in %s: %w\n%s", src, err, indent(string(combined)))

@@ -43,7 +43,7 @@ func New(backing Backing, prefix string) *Store {
 
 // Key joins parts under the prefix. VERBATIM algorithm, pinned by the `prefixCases` rows of
 // shared/conformance/codec/fixtures.json and shared with runtime/go/codec.objectKey,
-// runtime/python/internals/casstore.object_key and backend/src/codec/objectStore.ts:key: strip
+// runtime/python/internals/casstore.object_key and control/orchestrator/src/codec/objectStore.ts:key: strip
 // leading/trailing '/' from EVERY segment, the prefix included; drop the segments that are then
 // empty; join what is left with a single '/'. No leading slash when the prefix is empty.
 //

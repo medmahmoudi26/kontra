@@ -323,7 +323,7 @@ def _envelope(
 ) -> dict[str, Any]:
     """One ask as the memo carries it — and as `GET /api/runs/:id/asks` serves it back.
 
-    ONE SHAPE, NOT TWO. The field names are `backend/src/transcript.ts`'s `Ask` verbatim, so
+    ONE SHAPE, NOT TWO. The field names are `control/orchestrator/src/transcript.ts`'s `Ask` verbatim, so
     nothing between here and the transcript translates: a rename on either side is a missing field
     a test catches, rather than a silent mapping layer that drops one.
     """

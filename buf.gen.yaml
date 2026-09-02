@@ -1,6 +1,6 @@
 version: v2
 plugins:
-  # Machine proto stubs are COMMITTED (sdk/python/_gen for Python, backend/_gen
+  # Machine proto stubs are COMMITTED (sdk/python/_gen for Python, control/orchestrator/_gen
   # for TS — generated code lives in the consuming seam, never under a contract dir) and
   # drift-checked in CI (`buf generate` + `git diff --exit-code`). Never edited by hand.
   # Output paths mirror the proto file path (shared/contracts/kontra/v1/* -> _gen/kontra/v1/*).
@@ -15,7 +15,7 @@ plugins:
   # only the shared type definition. snakeToCamel=false keeps proto field names snake_case,
   # matching the Python dataclasses and the deliberately snake_cased TS EntryInput.
   - remote: buf.build/community/stephenh-ts-proto:v2.6.1
-    out: backend/_gen
+    out: control/orchestrator/_gen
     opt:
       - onlyTypes=true
       - snakeToCamel=false

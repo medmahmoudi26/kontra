@@ -101,7 +101,7 @@ func lakeCatalog(override string) (string, error) {
 		"    --catalog 'postgres:dbname=kontra_ducklake host=localhost port=5432 user=kontra password=…'")
 }
 
-// applianceCatalog is the file catalog `backend/src/data/parquet.ts:defaultCatalogPath`
+// applianceCatalog is the file catalog `control/orchestrator/src/data/parquet.ts:defaultCatalogPath`
 // resolves — the same directory, the same name, so the CLI and the control plane cannot disagree
 // about which lake they are talking about.
 //
@@ -129,7 +129,7 @@ func applianceCatalog() string {
 }
 
 // lakeMetaSchema is the schema DuckLake keeps its `ducklake_*` tables in, by BACKEND — the Go twin
-// of `backend/src/data/parquet.ts:metaSchemaFor`, and it must stay its twin.
+// of `control/orchestrator/src/data/parquet.ts:metaSchemaFor`, and it must stay its twin.
 //
 // A Postgres catalog puts them in `public`; a file catalog puts them in `main`. There is no schema
 // both answer to: measured on DuckLake 1.5.4, `__ducklake_metadata_lake.public.ducklake_table`

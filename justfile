@@ -1,6 +1,6 @@
 # Kontra repo task runner. The seams: sdk/python/ (the `actorkit` author surface) +
 # runtime/python/ (the `internals` engine, shipped by the same distribution `kontra-sdk`),
-# backend/ + core/ (the TS orchestrator and the shared kernel the console imports;
+# control/orchestrator/ + shared/core/ (the TS orchestrator and the shared kernel the console imports;
 # the console itself is the kontra-console repository),
 # contracts/ (buf-owned proto envelope). Control-plane infra still lives in the Makefile
 # (make up = control plane); this justfile is the dev/test/CI surface.
@@ -52,7 +52,7 @@ buf-build:
     {{buf}} build
 
 # Regenerate the COMMITTED stubs: Python (sdk/python/_gen) + TS types-only
-# (backend/_gen). CI runs this then `git diff --exit-code` to fail on drift, so
+# (control/orchestrator/_gen). CI runs this then `git diff --exit-code` to fail on drift, so
 # run it after editing any .proto and commit the result.
 buf-generate:
     {{buf}} generate
@@ -71,7 +71,7 @@ proto-check:
 
 # Orchestrator vitest run (src/codec/conformance.test.ts is the TS conformance gate).
 ts-test:
-    cd backend && pnpm test
+    cd control/orchestrator && pnpm test
 
 # --- go seams (handler + cli; two modules under the root go.work) -----------
 

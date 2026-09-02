@@ -290,7 +290,7 @@ type wardenDecision struct {
 // The Summary grammar, and the one cross-language literal in this slice.
 //
 // A DECISION REACHES THE TRANSCRIPT AS A TEMPORAL USER-METADATA SUMMARY, ≤200 bytes, set on the
-// event that arms the NEXT watch. `backend/src/vocabulary.ts` reads it back and names it, which is
+// event that arms the NEXT watch. `control/orchestrator/src/vocabulary.ts` reads it back and names it, which is
 // how a **Machine**'s lifecycle appears in an operator's account of a run with no component
 // anywhere knowing what a Warden is. The prefix and the five kind spellings are written out on both
 // sides — the house rule for a literal two languages share — and `vocabulary.test.ts` reads THIS

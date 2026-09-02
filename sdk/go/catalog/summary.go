@@ -22,7 +22,7 @@ const summarySep = " · "
 //
 // 200 bytes renders on a Temporal bar label without eliding and is some 650× under the codec's
 // 128 KiB offload threshold, which is what keeps a Summary inline and readable without a fetch —
-// `summaryOf` in backend/src/history.ts REFUSES a claim-checked Summary rather than
+// `summaryOf` in control/orchestrator/src/history.ts REFUSES a claim-checked Summary rather than
 // dereferencing it.
 const SummaryBudget = 200
 
@@ -43,7 +43,7 @@ const (
 //
 // THE PEER OF PYTHON'S `catalog.dispatch_summary`, byte for byte, and pinned against its goldens in
 // summary_test.go. Not shared code and not translatable to "roughly the same": the reader on the
-// other side (`backend/src/transcript.ts`, `methodOf`) recovers the METHOD by taking the first
+// other side (`control/orchestrator/src/transcript.ts`, `methodOf`) recovers the METHOD by taking the first
 // field and testing its shape, so a Go dispatch that wrote its own format would put a Method name
 // nothing reads into a transcript that then says the run named none.
 //

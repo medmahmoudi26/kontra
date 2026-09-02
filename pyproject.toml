@@ -4,7 +4,7 @@
 # relative package-dir. One install, two seams, one ARROW — runtime imports sdk, never the
 # reverse, asserted by tests/test_sdk_arrow.py. Install it:
 #   pip install -e ./sdk/python[dev,seaweed]
-# The backend/frontend (TS) and the proto contracts live in their own seams.
+# The orchestrator and the console (TS) and the proto contracts live in their own seams.
 
 [tool.pytest.ini_options]
 # `examples/python` is NOT collected here, and cannot be: the actor registry is a process-global

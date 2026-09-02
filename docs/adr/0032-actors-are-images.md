@@ -39,7 +39,7 @@ Seven things were established against this checkout before deciding anything.
 
 3. **Both SDKs already self-register a digest, and nothing anywhere supplies one.**
    `runtime/go/registrar/registrar.go:102` and `runtime/python/internals/catalog.py:61`
-   read `KONTRA_ACTOR_DIGEST`; `backend/src/catalog.ts` preserves it on re-registration
+   read `KONTRA_ACTOR_DIGEST`; `control/orchestrator/src/catalog.ts` preserves it on re-registration
    (`a.digest ?? prev.digest`), and the three-way conformance fixture pins absent-versus-empty
    because an empty string would unpin on every restart. The producer **0011** named — a
    `scripts/build.sh` writing a per-actor `.digest.env` — is not in the tree; `.gitignore:17` still
@@ -84,7 +84,7 @@ Seven things were established against this checkout before deciding anything.
    stale.** `docker-compose.yml` says *"every fleet Machine pulls it from `<controller>:5000`, so a
    control plane without a registry cannot run a fleet campaign at all"* — and then gives the
    service `profiles: ["extras"]`, so `docker compose up -d` does not start it. The sentence has
-   also not been true since 0019: nothing under `backend/src/infra/` mentions a registry, a
+   also not been true since 0019: nothing under `control/orchestrator/src/infra/` mentions a registry, a
    port 5000 or Docker, because a **Machine** fetches a **Bundle** from the Controller's object
    store. Meanwhile `cli/deploy.go` defaults to `localhost:5000`, refuses to build when `/v2/` does
    not answer, and prints a `docker run … registry:2` telling the operator to hand-start the
@@ -162,7 +162,7 @@ discovered:
 
 | `legacy/0019` clause | Fate |
 |---|---|
-| Pulumi replaces OpenTofu; programs are inline Automation API TypeScript under `backend/src/infra/programs/` | **Kept**, untouched here |
+| Pulumi replaces OpenTofu; programs are inline Automation API TypeScript under `control/orchestrator/src/infra/programs/` | **Kept**, untouched here |
 | The engine runs in its own `orchestrator-infra` process, never `orchestrator-api` | **Kept**; where it runs after the appliance is **0031**'s |
 | A Temporal Entity Workflow keyed by the stack fqn is the mutex | **Kept** |
 | `DIGITALOCEAN_TOKEN` in `orchestrator-infra`'s environment only; `/api/infra/*` `checkBearer`-gated | **Kept**; **0031** restates where the credential lives |

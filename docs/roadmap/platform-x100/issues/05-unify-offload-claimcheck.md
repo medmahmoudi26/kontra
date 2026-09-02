@@ -5,9 +5,9 @@ Status: needs-triage
 
 ## Problem
 There are **two** overlapping offload mechanisms that fight each other:
-1. the Temporal claim-check **codec** (`handler/internal/codec`, `backend/src/codec/claimCheck.ts`)
+1. the Temporal claim-check **codec** (`handler/internal/codec`, `control/orchestrator/src/codec/claimCheck.ts`)
    at the Temporal-payload layer, and
-2. the orchestrator's own blob-threshold offload in `backend/src/data/parquet.ts`
+2. the orchestrator's own blob-threshold offload in `control/orchestrator/src/data/parquet.ts`
    (`DEFAULT_BLOB_THRESHOLD`, `KONTRA_S3_THRESHOLD`) plus the raised Temporal blob limits in
    `docker-compose.yml` and the `!rootOffloaded` gate in `interpreter.ts` that **disables streaming
    when the root is offloaded**.
@@ -28,8 +28,8 @@ The Temporal DataConverter/codec is the sanctioned single place to transform pay
   `parquet.ts` threshold (or reduce it to the codec's threshold).
 
 ## Files
-- `backend/src/workflows/interpreter.ts`, `backend/src/data/parquet.ts`,
-  `backend/src/codec/claimCheck.ts`, `handler/internal/codec/codec.go`, `docker-compose.yml`
+- `control/orchestrator/src/workflows/interpreter.ts`, `control/orchestrator/src/data/parquet.ts`,
+  `control/orchestrator/src/codec/claimCheck.ts`, `handler/internal/codec/codec.go`, `docker-compose.yml`
 
 ## Verify (local, no fleet)
 - A run with a >128KB root input **streams** (chunks distribute) instead of falling back.

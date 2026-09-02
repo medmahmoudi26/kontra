@@ -18,7 +18,7 @@ import (
 // Go actor was the one row on the Actors page with no way back to its code. Every suite was green.
 //
 // The peers assert the SAME file: tests/test_catalog_conformance.py and
-// backend/src/catalog.conformance.test.ts.
+// control/orchestrator/src/catalog.conformance.test.ts.
 
 // The fixture's Actor, in Go types. The field names and JSON types come FROM the fixture — its
 // `expect.operations[].input.properties` is what these must reflect to — so declaring `hostname`

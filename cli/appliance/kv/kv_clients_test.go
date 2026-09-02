@@ -17,14 +17,14 @@ import (
 //
 // Everything in kv_test.go asserts bytes against a client written in the same file, which proves
 // the store does what this package thinks it does. It cannot prove the thing that matters: that
-// the three clients kontra actually ships — ioredis under `backend/src/stateStore.ts`,
+// the three clients kontra actually ships — ioredis under `control/orchestrator/src/stateStore.ts`,
 // go-redis under runtime/go, redis-py under runtime/python — connect, negotiate, and get right
 // answers. Each of those libraries has a handshake this store never sees in a hand-written test,
 // and two of them default to RESP3.
 //
 // So the tests below run the REAL clients, against unmodified source:
 //
-//  1. TestRealStateStoreReadsThisStore compiles `backend/src/stateStore.ts` as-is and drives
+//  1. TestRealStateStoreReadsThisStore compiles `control/orchestrator/src/stateStore.ts` as-is and drives
 //     its `createStateReader` through ioredis. Nothing in stateStore.ts is stubbed, patched, or
 //     re-implemented — esbuild transpiles the file the API serves from.
 //
@@ -71,9 +71,9 @@ func TestRealStateStoreReadsThisStore(t *testing.T) {
 	// ARGUMENT — nothing matching `orchestrator/` was here to rewrite. The result was worse than a
 	// red test: `root/orchestrator` does not exist, so this skipped unconditionally and forever,
 	// under a message that already said `backend/`. A test that cannot fail is not a test.
-	backend := filepath.Join(root, "backend")
+	backend := filepath.Join(root, "control", "orchestrator")
 	if _, err := os.Stat(filepath.Join(backend, "node_modules", "ioredis")); err != nil {
-		t.Skip("backend/node_modules/ioredis is not installed (pnpm install)")
+		t.Skip("control/orchestrator/node_modules/ioredis is not installed (pnpm install)")
 	}
 
 	tmp := t.TempDir()
@@ -269,10 +269,10 @@ func (w *testWriter) Write(p []byte) (int, error) {
 // no longer running.
 func findEsbuild(t *testing.T, root string) string {
 	t.Helper()
-	matches, _ := filepath.Glob(filepath.Join(root, "backend", "node_modules", ".pnpm",
+	matches, _ := filepath.Glob(filepath.Join(root, "control", "orchestrator", "node_modules", ".pnpm",
 		"esbuild@*", "node_modules", "esbuild", "bin", "esbuild"))
 	if len(matches) == 0 {
-		t.Skip("no esbuild under backend/node_modules (pnpm install)")
+		t.Skip("no esbuild under control/orchestrator/node_modules (pnpm install)")
 	}
 	return matches[0]
 }

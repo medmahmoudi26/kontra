@@ -31,7 +31,7 @@ package main
 // ═══ THE FRAME IS A RECTANGLE OF KNOWN SIZE, AND IT IS tmux.go's SIZE ═══
 //
 // TWO GEOMETRIES ALREADY EXIST IN THIS REPO AND ONLY ONE OF THEM IS ARGUED FOR.
-// `backend/src/panels/converge.ts` pins a fleet tmux session at 200×50, "what makes a snapshot a
+// `control/orchestrator/src/panels/converge.ts` pins a fleet tmux session at 200×50, "what makes a snapshot a
 // rectangle of known size instead of whatever the last client happened to be". `cli/tmux.go` then
 // measured the consequence and chose differently for the panes it creates: a tile scales type so the
 // whole pane fits (`fitSourceWidth` in TerminalTile.tsx), and "200 columns in a default ~794px tile
@@ -80,7 +80,7 @@ const (
 
 // paneReport is one Machine's whole statement about itself. Pinned by
 // `shared/conformance/workerhealth.json`, because the reader is TypeScript
-// (`backend/src/panels/warden.ts`) and a field renamed on one side of that boundary has no failure
+// (`control/orchestrator/src/panels/warden.ts`) and a field renamed on one side of that boundary has no failure
 // mode louder than a pane that never appears.
 type paneReport struct {
 	Warden  string `json:"warden"`
@@ -120,7 +120,7 @@ type paneWorker struct {
 
 // paneHealth is a `workerVerdict` on the wire. Verdict and Reason are the machine-readable pair the
 // corpus pins; Detail is the sentence an operator acts on. All three travel, for the reason
-// `backend/src/panels/types.ts` gives about its own health block: a verdict whose only explanation
+// `control/orchestrator/src/panels/types.ts` gives about its own health block: a verdict whose only explanation
 // is prose is one nothing can assert on, and a verdict with no prose is one nobody can act on.
 type paneHealth struct {
 	Verdict     string  `json:"verdict"`
@@ -412,7 +412,7 @@ func (r *paneReporter) httpPost(ctx context.Context, url string, body []byte) er
 
 // readTelemetry reads what /proc will tell us.
 //
-// EVERY FIELD IS OPTIONAL AND A MISSING ONE IS ABSENT, NOT ZERO. `backend/src/panels/types.ts`
+// EVERY FIELD IS OPTIONAL AND A MISSING ONE IS ABSENT, NOT ZERO. `control/orchestrator/src/panels/types.ts`
 // states the rule this follows: "`unknown` is a value, never a shrug" — a Machine whose /proc could
 // not be read is not a Machine that is idle, and a tile rendering 0% CPU for it would be the
 // friendliest possible lie.

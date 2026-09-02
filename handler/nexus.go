@@ -82,7 +82,7 @@ func joinNonEmpty(parts ...string) string {
 //     task queues nobody polls, indistinguishable in the endpoint list from real actors.
 //   - You could not declare that an actor exists here without also running it.
 //
-// `kontra actor register` owns it now (backend/src/nexusRegistry.ts), and forgetting the
+// `kontra actor register` owns it now (control/orchestrator/src/nexusRegistry.ts), and forgetting the
 // registration removes it. This call stays because a worker can be started outside that control
 // plane — `kontra serve --actor` on a fleet Machine, a container someone runs by hand — and a
 // worker polling a queue no endpoint addresses is a silent failure of exactly the kind the

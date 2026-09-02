@@ -9,7 +9,7 @@ Only the bare token below is shared; each call site keeps its own prefix+separat
 
 NOT shared with the buf-owned proto package `kontra.v1` (governed by buf), nor with
 the deliberately-independent copies in shared/conformance/codec/build_fixtures.py,
-backend/src/codec/claimCheck.ts, and the orchestrator TS schemaVersion sites —
+control/orchestrator/src/codec/claimCheck.ts, and the orchestrator TS schemaVersion sites —
 those are the cross-language/cross-tool checks and must NOT import this constant.
 """
 

@@ -2,7 +2,7 @@
 
 This side is a WRITER. `actorkit.fleet` builds a **Fleet**'s desired state out of `hold()`,
 `place()` and `up()`; `cli/fleet.go` builds the same thing out of `kontra fleet up|deploy`; and
-`backend/src/infra/stacks.ts:coerceFleetArgs` is the only reader. Nothing joins the three but
+`control/orchestrator/src/infra/stacks.ts:coerceFleetArgs` is the only reader. Nothing joins the three but
 matching string literals, and the reader DISCARDS WITHOUT A WORD anything it does not recognise.
 
 WHY A KEY SET AND NOT A GOLDEN. The two writers cannot produce byte-identical desired states in a

@@ -4,7 +4,7 @@ Against a REAL HTTP server rather than a patched `urlopen`, because the things w
 are on the wire: the path, the bearer header carrying the worker's identity, and what each refusal
 status means. A monkeypatched transport would assert that the code calls the function it calls.
 
-THE PEER IS `backend/src/secrets/routes.test.ts`, which pins the same path and the same four
+THE PEER IS `control/orchestrator/src/secrets/routes.test.ts`, which pins the same path and the same four
 statuses from the other side. Neither test can see the other's process, so the contract is written
 twice on purpose — if one moves, the other fails.
 """

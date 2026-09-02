@@ -53,7 +53,7 @@ const (
 )
 
 // DatasetQueue is where the orchestrator serves dataset paging. Mirrors
-// backend/src/queues.ts and sdk/python/actorkit/catalog.py.
+// control/orchestrator/src/queues.ts and sdk/python/actorkit/catalog.py.
 const DatasetQueue = "kontra-datasets"
 
 // SharedQueue is the actor's own task queue, where its handler serves the workflow and the blob

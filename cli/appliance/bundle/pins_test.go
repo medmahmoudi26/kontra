@@ -249,7 +249,7 @@ func TestBumpingPnpmWithoutItsDigestFails(t *testing.T) {
 	}
 }
 
-// THE THIRD PLACE ONE PNPM VERSION IS WRITTEN DOWN. `backend/package.json`'s `packageManager`
+// THE THIRD PLACE ONE PNPM VERSION IS WRITTEN DOWN. `control/orchestrator/package.json`'s `packageManager`
 // field is what corepack resolves when a developer types `pnpm`; {@link PnpmVersion} is what the
 // BUILD runs. Two mechanisms reading two files is how a bundle gets resolved by a pnpm nobody
 // chose — and the symptom is a lockfile-shaped diff appearing under an install that "should have

@@ -41,7 +41,7 @@ Three findings shaped the mechanism and would otherwise be re-discovered painful
 ## Decision
 
 - **Pulumi replaces OpenTofu.** `infra/tofu/` is deleted. Pulumi programs are ordinary
-  orchestrator TypeScript under `backend/src/infra/programs/`, written as **inline**
+  orchestrator TypeScript under `control/orchestrator/src/infra/programs/`, written as **inline**
   Automation API programs so they can closure-capture a parsed `actor.json` rather than
   round-trip it through stack config as strings.
 - **The engine runs in its own process**, `orchestrator-infra` — a fourth orchestrator role on
@@ -73,7 +73,7 @@ boundary.
   previously required `DIGITALOCEAN_TOKEN` in an operator's shell; `infra/tofu/main.tf` kept it
   out of shell history, `ps` and state, and both `cli/fleet.go` and `cli/mcp_fleet_db.go`
   refused to read any provider credential at all. It now requires reaching a port on the
-  Controller — where 26 of 31 existing routes are unauthenticated, a gap `backend/src/auth.ts`
+  Controller — where 26 of 31 existing routes are unauthenticated, a gap `control/orchestrator/src/auth.ts`
   records in its own words. `checkBearer` on `/api/infra/*` is part of this decision, not a
   follow-up. `checkBearer` already fails closed with 503 when no token is configured.
 - **The invariant that does not move:** the credential never reaches a worker machine, and

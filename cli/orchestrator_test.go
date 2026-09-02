@@ -176,8 +176,8 @@ func fakeCheckout(t *testing.T, compiled bool) string {
 		return root
 	}
 	for _, rel := range []string{
-		"backend/dist/src/main.js",
-		"backend/node_modules/.keep",
+		"control/orchestrator/dist/src/main.js",
+		"control/orchestrator/node_modules/.keep",
 		"frontend/dist/index.html",
 	} {
 		path := filepath.Join(root, filepath.FromSlash(rel))
@@ -207,7 +207,7 @@ func writeBundle(t *testing.T, path string, files map[string]string) {
 		"schema":     "kontra.appliance.bundle/v1",
 		"bundle":     "orchestrator",
 		"platform":   runtime.GOOS + "/" + runtime.GOARCH,
-		"entrypoint": []string{"node/bin/node", "backend/dist/src/main.js"},
+		"entrypoint": []string{"node/bin/node", "orchestrator/dist/src/main.js"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func writeBundle(t *testing.T, path string, files map[string]string) {
 func bundleFiles() map[string]string {
 	return map[string]string{
 		"node/bin/node":                 "#!/bin/sh\necho fake node\n",
-		"backend/dist/src/main.js": "console.log('bundle');\n",
+		"orchestrator/dist/src/main.js": "console.log('bundle');\n",
 	}
 }
 
@@ -283,7 +283,7 @@ func TestResolveOrchestratorPrefersALocalBuildAndSaysWhatItSkipped(t *testing.T)
 	if !strings.Contains(src.Instead, bundle) || !strings.Contains(src.Instead, "--orchestrator=bundle") {
 		t.Errorf("the choice does not say what it skipped or how to pick it: %q", src.Instead)
 	}
-	if src.Entry != filepath.Join(repo, "backend", "dist", "src", "main.js") {
+	if src.Entry != filepath.Join(repo, "control", "orchestrator", "dist", "src", "main.js") {
 		t.Errorf("the wrong entrypoint: %s", src.Entry)
 	}
 	// The SPA a local build serves is the checkout's own — nothing hydrated, nothing pointed at.
@@ -387,13 +387,13 @@ func TestResolveOrchestratorTakesADirectoryAsALocalBuild(t *testing.T) {
 	}
 	repo := fakeCheckout(t, true)
 	src, err := resolveOrchestrator(context.Background(), orchestratorOptions{
-		Mode:    filepath.Join(repo, "backend"),
+		Mode:    filepath.Join(repo, "control", "orchestrator"),
 		DataDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if src.Kind != "local" || src.Entry != filepath.Join(repo, "backend", "dist", "src", "main.js") {
+	if src.Kind != "local" || src.Entry != filepath.Join(repo, "control", "orchestrator", "dist", "src", "main.js") {
 		t.Fatalf("a directory was not read as a local build: %+v", src)
 	}
 }
@@ -486,8 +486,8 @@ func TestResolveOrchestratorFindsTheConsoleInASiblingCheckout(t *testing.T) {
 	parent := t.TempDir()
 	repo := filepath.Join(parent, "kontra")
 	for _, rel := range []string{
-		"kontra/backend/dist/src/main.js",
-		"kontra/backend/node_modules/.keep",
+		"kontra/control/orchestrator/dist/src/main.js",
+		"kontra/control/orchestrator/node_modules/.keep",
 		"kontra-console/dist/index.html",
 	} {
 		path := filepath.Join(parent, filepath.FromSlash(rel))

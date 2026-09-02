@@ -105,7 +105,7 @@ ui:
 
 # THE SERVER, WITHOUT THE IMAGE BUILD EITHER — the `ui` target's twin.
 #
-# `tsc` writes plain JS into backend/dist, which is exactly what the containers run, so a
+# `tsc` writes plain JS into control/orchestrator/dist, which is exactly what the containers run, so a
 # backend change reaches a live stack by copying files and restarting a node process. Every
 # container gets the whole tree because they run DIFFERENT code out of it: HTTP routes and the
 # dataset/fleet activities are orchestrator-api's — API and materializer are two ROLES of one
@@ -130,12 +130,12 @@ ui:
 #
 # ONE OF THE TWO IS NOT A CONTAINER ANY MORE (ADR 0031 §1, issue 14). `orchestrator-api` left
 # docker-compose.yml, and on the appliance the `tsc` above is the whole deploy: `kontra up
-# --orchestrator=local` runs `backend/dist` out of the checkout and prints on every start
+# --orchestrator=local` runs `control/orchestrator/dist` out of the checkout and prints on every start
 # which orchestrator it chose. So a missing api container is REPORTED and skipped rather than
 # failing the target — a recipe that exits 1 naming a service this file no longer defines is the
 # same silent-mismatch trap that `kontra infra up` reverting a hot-copied container was.
 api:
-	cd backend && pnpm exec tsc
+	cd control/orchestrator && pnpm exec tsc
 	@for svc in orchestrator-api orchestrator-infra; do \
 	  cid=$$(docker ps -q --filter label=com.docker.compose.service=$$svc | head -1); \
 	  if [ -z "$$cid" ]; then \
@@ -147,11 +147,11 @@ api:
 	    fi; \
 	    echo "no running $$svc container — start the stack with 'make up-d' first"; exit 1; \
 	  fi; \
-	  docker cp backend/dist/. "$$cid":/app/dist/ && docker restart "$$cid" >/dev/null && echo "deployed and restarted $$svc ($$cid)"; \
+	  docker cp control/orchestrator/dist/. "$$cid":/app/dist/ && docker restart "$$cid" >/dev/null && echo "deployed and restarted $$svc ($$cid)"; \
 	done
 	@old=$$(docker ps -q --filter label=com.docker.compose.service=orchestrator-materializer | head -1); \
 	  test -z "$$old" || { \
-	    docker cp backend/dist/. "$$old":/app/dist/ && docker restart "$$old" >/dev/null; \
+	    docker cp control/orchestrator/dist/. "$$old":/app/dist/ && docker restart "$$old" >/dev/null; \
 	    echo "also refreshed orchestrator-materializer ($$old) — a PRE-MERGE container this compose"; \
 	    echo "  file no longer defines. It is polling kontra-materializer beside orchestrator-api's"; \
 	    echo "  own materializer role; recreate the stack ('make up-d') to be rid of it."; \

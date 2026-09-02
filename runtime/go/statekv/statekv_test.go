@@ -13,7 +13,7 @@ import (
 // TestKeyMatchesThePythonPeer pins the ONE string three systems agree on.
 //
 // runtime/python/internals/statekv.py writes `kontra-actor:{actor_id}`, and
-// backend/src/state.ts reads it to project the operator-facing state tiers. A drift here
+// control/orchestrator/src/state.ts reads it to project the operator-facing state tiers. A drift here
 // does not error: the dashboard and `kontra runs --state` return an empty result, which is
 // indistinguishable from an actor that simply has no state. That exact failure has happened once
 // already, when the layout moved and the reader kept scanning for the previous key shape.

@@ -7,7 +7,7 @@ envelope, Apicurio owns author I/O"), and replaces its row in **0024** §"What v
 
 The buf half of 0008 survives unchanged and is now actually run from the repo (`make proto-check`
 → `scripts/proto-check.sh`, and the `proto` job in CI). The Apicurio half is deleted: the code, the
-tests, the configuration, the fleet env var and the claims. `backend/src/catalog.ts` — the
+tests, the configuration, the fleet env var and the claims. `control/orchestrator/src/catalog.ts` — the
 descriptor gate at `POST /api/actors`, landed in `d272abe` — is what owns per-actor I/O now.
 
 This record exists because an ADR whose subject has been deleted without a word is worse than no
@@ -20,7 +20,7 @@ and named the files: `actorkit/schema_registry.py` pushing input schemas under a
 and output schemas under **FORWARD**, `scripts/register_schemas.py` running it, `make register`
 driving that, an HTTP 409 → `SchemaIncompatible` as the gate. `kontra.yaml` carried it as an
 `infra.apicurio` block with an endpoint and an `endpointEnv`, plus a `schemas:` profile whose
-`requires:` edge named it. `backend/src/infra/programs/machine.ts` wrote
+`requires:` edge named it. `control/orchestrator/src/infra/programs/machine.ts` wrote
 `KONTRA_APICURIO_ENDPOINT=http://$CONTROLLER:8081` into `/etc/kontra/worker.env` on **every
 Machine of every Fleet**. The `Makefile` header, `infra/README.md`, `docs/wiki/Deployment.md`'s
 control-plane diagram and its port table all listed it as part of the control plane.
@@ -75,7 +75,7 @@ promise does not change".
    green tests for code nothing imports, exercising a protocol nothing speaks. A passing suite that
    covers a deleted component is worse than no coverage, because it is *evidence* of health.
 
-3. **Per-actor I/O compat is owned at the registration route**, `backend/src/catalog.ts`,
+3. **Per-actor I/O compat is owned at the registration route**, `control/orchestrator/src/catalog.ts`,
    covered by `catalog.test.ts` and `server.test.ts`. It is not optional, not env-gated and has no
    force flag. `kontra.yaml`'s `contracts.actorIO` now records that owner, and records what it does
    and does not check, rather than an owner and two variance rules nobody ran.
@@ -130,9 +130,9 @@ promise does not change".
 - **§4's gap is CLOSED, and `kontra.yaml` now records `crossVersionCompat: structural-report`.**
   The gap was written into the facts file rather than left as a paragraph here — because a
   paragraph in an ADR is exactly how it was covered up last time — with the note that the field is
-  what someone comes back and changes. This is that change. `backend/src/compat.ts` compares a
+  what someone comes back and changes. This is that change. `control/orchestrator/src/compat.ts` compares a
   registration's per-Method schemas against the version immediately preceding it (by the same
-  ordering the palette folds versions with, now shared as `backend/src/versions.ts`), under
+  ordering the palette folds versions with, now shared as `control/orchestrator/src/versions.ts`), under
   0008's own direction rule: **input is BACKWARD** — a new *required* field breaks a producer shaped
   for the old schema, an added optional one does not — and **output is FORWARD** — a removed field
   breaks a consumer, an added one does not.
@@ -169,7 +169,7 @@ promise does not change".
     `0.1.0`, and a version registered out of order afterwards does not recompute an earlier
     finding — which is why a stored finding names the version it was compared against.
 - **`shared/contracts/kontra/v1/catalog.proto` and `run.proto` no longer name an external owner**, and the
-  generated stubs (`handler/_gen`, `backend/_gen`) were regenerated with `buf generate` rather
+  generated stubs (`handler/_gen`, `control/orchestrator/_gen`) were regenerated with `buf generate` rather
   than hand-edited.
 - **`docs/adr/` is no longer gitignored, and three documents still say it is.** 0024's last
   consequence, `docs/wiki/ADRs.md` and this issue all warn that a new record needs `git add -f` or

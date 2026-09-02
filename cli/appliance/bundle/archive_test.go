@@ -216,8 +216,11 @@ func TestVerifyBundleSaysAnEmptyTreeIsAWrongPathNotAChangedTree(t *testing.T) {
 		Components: []Component{{
 			Name: "orchestrator-dependencies",
 			Kind: "dependencies",
-			// The repo's spelling since ADR 0035. The BUNDLE has never used it.
-			Path:       "backend/node_modules",
+			// THE REPO'S SPELLING, WHICH THE BUNDLE HAS NEVER USED. That is the whole point of the
+			// fixture: a Path that looks plausible and is not where the archive keeps anything. It
+			// tracks the repo, so it became `control/orchestrator/…` with ADR 0042's restructure —
+			// a stale `backend/` here would still pass and would stop being the confusable value.
+			Path:       "control/orchestrator/node_modules",
 			TreeSHA256: strings.Repeat("cd", 32),
 		}},
 	}

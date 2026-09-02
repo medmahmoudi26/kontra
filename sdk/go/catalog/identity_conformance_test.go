@@ -12,7 +12,7 @@ import (
 // WHAT THIS REPLACED. A table of goldens "taken verbatim from the Python peer", kept correct by
 // somebody copying them across a language boundary and remembering to do it again. Its own header
 // called this package "a SIXTH independent derivation"; the peer comments in
-// backend/src/panels/pollers.ts and backend/src/nexusRegistry.ts said "a fourth" and "THE FIFTH".
+// control/orchestrator/src/panels/pollers.ts and control/orchestrator/src/nexusRegistry.ts said "a fourth" and "THE FIFTH".
 // Three counts of one thing, none of them right, and nothing that could ever fail because of it.
 //
 // A drift here does not error anywhere. The dispatch goes to a task queue nobody polls and the

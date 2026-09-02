@@ -15,7 +15,7 @@
  *
  * IT IS NO LONGER AN ERRAND, AND IT IS NO LONGER THE DISPATCH (ADR 0033 §6). The Actors page calls
  * the Method now: a kontra-owned one-shot workflow performs exactly one Method call over the Batch
- * the form collected, through the same Nexus operation production uses (`backend/src/probe.ts`,
+ * the form collected, through the same Nexus operation production uses (`control/orchestrator/src/probe.ts`,
  * `sdk/python/actorkit/probe.py`). What survives here is the half that TEACHES — the page shows this
  * source read-only beside the Run button, regenerating as the form changes, and there is nowhere to
  * write it to any more.

@@ -6,7 +6,7 @@
 // them is the browser — the SPA stopped range-reading parquet (ADR 0031, finding 8):
 //
 //   - The three SDK object stores (handler/internal/objectstore, sdk/python's casstore and
-//     unitstore, backend/src/codec/objectStore.ts) all speak SigV4 to an endpoint. Their key
+//     unitstore, control/orchestrator/src/codec/objectStore.ts) all speak SigV4 to an endpoint. Their key
 //     layout is pinned across languages by shared/conformance/blobkey.json, so the store has to
 //     be the thing those clients already talk to, byte for byte.
 //   - Remote fleet workers reach the controller over the VPC. `KONTRA_S3_ENDPOINT=http://$CONTROLLER:8333`

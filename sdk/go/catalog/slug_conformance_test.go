@@ -18,11 +18,11 @@ import (
 // asserted against a transcription of it. ADR 0035 rule two: a contract with two writers gets a
 // corpus, not a hand-copied golden and not a source scrape.
 //
-// THE THIRD WRITER is the orchestrator's `backend/src/data/parquet.ts:safeName`, which sanitises
+// THE THIRD WRITER is the orchestrator's `control/orchestrator/src/data/parquet.ts:safeName`, which sanitises
 // the composed name again. tempSlug's own comment claimed it applies "the same rule"; it does not,
 // and the corpus's `measured` field records the three places it differs and why none of them is
 // live. The `safe_name` column is that side's answer, asserted by
-// backend/src/data/slug.conformance.test.ts.
+// control/orchestrator/src/data/slug.conformance.test.ts.
 
 type slugCase struct {
 	Why      string `json:"why"`

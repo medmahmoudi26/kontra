@@ -4,7 +4,7 @@ Kontra binds a TypeScript orchestrator, a Python SDK, and a Go SDK. Two kinds of
 
 ## Layout rule
 
-Contracts live **only** in the root `contracts/` directory. `buf generate` writes the committed, drift-checked stubs into the *consuming* seam (`sdk/python/_gen/`, `backend/_gen/`, `handler/_gen/`) — generated code never lives under a contract dir.
+Contracts live **only** in the root `contracts/` directory. `buf generate` writes the committed, drift-checked stubs into the *consuming* seam (`sdk/python/_gen/`, `control/orchestrator/_gen/`, `handler/_gen/`) — generated code never lives under a contract dir.
 
 ## The protos
 
@@ -34,7 +34,7 @@ Shapes agreeing isn't enough — behavior has to match too. A JSON corpus is run
 Two owners, cleanly split — both inside this repo:
 
 - **buf** owns the **envelope** — the shared proto types above; `buf lint` + `buf breaking` against the fork point, run by `make proto-check` and by CI.
-- **the catalog's registration gate** owns **author I/O** — each actor's derived input/output/params JSON Schemas, checked at `POST /api/actors` (`backend/src/catalog.ts`). A re-registration of a `(name, version)` the catalog already holds whose schema differs is refused with **409**, naming the Method that moved. This is why identity is content-pinned (ADR 0004/0011): `(name, version)` is immutable, so a rebuilt-but-not-bumped image is caught (the worker self-verifies its OCI digest against the catalog's pin, and the call fails rather than running unknown code).
+- **the catalog's registration gate** owns **author I/O** — each actor's derived input/output/params JSON Schemas, checked at `POST /api/actors` (`control/orchestrator/src/catalog.ts`). A re-registration of a `(name, version)` the catalog already holds whose schema differs is refused with **409**, naming the Method that moved. This is why identity is content-pinned (ADR 0004/0011): `(name, version)` is immutable, so a rebuilt-but-not-bumped image is caught (the worker self-verifies its OCI digest against the catalog's pin, and the call fails rather than running unknown code).
 
 **What is NOT checked, and used to be claimed:** compatibility *across* versions. Nothing compares `myactor@0.2.0`'s input schema to `0.1.0`'s, so a bump whose new schema an existing caller cannot satisfy registers cleanly. `legacy/0008` assigned that check to an external schema registry that never ran, so the check was never run either — the gap is real and is now written down (ADR 0027) rather than covered by a claim.
 

@@ -55,7 +55,7 @@ type leaseSet struct {
 	Destroyed bool `json:"destroyed"`
 }
 
-// leaseSeparator divides a holder from its nonce. `backend/src/lease.ts` and `actorkit.fleet`
+// leaseSeparator divides a holder from its nonce. `control/orchestrator/src/lease.ts` and `actorkit.fleet`
 // declare the same character; `shared/conformance/lease.json` §names is what keeps the three equal.
 const leaseSeparator = "#"
 

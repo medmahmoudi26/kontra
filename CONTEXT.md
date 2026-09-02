@@ -81,7 +81,7 @@ identity**, and a **Run** with no such record falls back to the producing **Acto
 RENDERED, never STORED and never indexed — a name→path registry was deliberately deleted, and
 reintroducing a lookup table walks that back. The run-id part is a DIGEST, not a prefix: run ids are
 `<type>-<unixseconds>`, so the first six characters are the workflow name and carry no run entropy.
-One function spells it (`backend/src/data/datasetName.ts`); every surface renders what that
+One function spells it (`control/orchestrator/src/data/datasetName.ts`); every surface renders what that
 function returns, so the string cannot drift between the CLI, the page and the API. The **Run** it
 names comes from whichever authority knows it — the ledger, a **temporary Dataset**'s owner, or the
 row's own **contributing Run** when there is exactly one — and its datetime from the row's `dt`
@@ -92,7 +92,7 @@ _Avoid_: label (a **tag** is the label), path, id
 
 **Run's workflow identity**:
 The caller workflow's manifest `name` and `version`, SNAPSHOTTED when a **Run** starts and keyed by
-its `runId` (**ADR 0029** §2, `backend/src/data/runWorkflows.ts`). It exists because the
+its `runId` (**ADR 0029** §2, `control/orchestrator/src/data/runWorkflows.ts`). It exists because the
 **derived name** renders the workflow and nothing durable knows it: the materialization ledger
 carries the **Actor**'s identity, and Temporal forgets the execution's type after retention — so
 naming from the ledger alone labelled a **Run**'s output after whichever **Actor** wrote it. EVERY
@@ -150,7 +150,7 @@ _Avoid_: garbage collection, TTL expiry (the TTL is one input), cleanup (that is
 
 **row tail**:
 The live count of a **Run**'s rows as they land, read from the ONE durable path while its **Dataset**
-is still **open** (`backend/src/rowTail.ts`). A **Method** pushes each record to its own blob
+is still **open** (`control/orchestrator/src/rowTail.ts`). A **Method** pushes each record to its own blob
 under `units/run=<id>/` the moment it produces it, and the caller does not publish those into a named
 **Dataset** until the call returns — so during a long call the catalog SUM is flat while the durable
 path fills. The tail LISTs that path and reports the OBJECT COUNT (one blob is one pushed record), so
@@ -268,7 +268,7 @@ _Avoid_: pointer, handle, claim check (that names the mechanism, not the value)
 - **"worker" meant three things.** This glossary called a **Worker** a *machine*, `cli/scale.go`
   used it for a *container*, and the provisioning resource was named `worker` for a cloud
   instance. Resolved 2026-08-10: a **Worker** is a *process*; the hardware is a **Machine** and
-  belongs to [Fleet](./infra/CONTEXT.md). One **Machine** may run several **Workers**, and on the
+  belongs to [Fleet](./control/orchestrator/src/infra/CONTEXT.md). One **Machine** may run several **Workers**, and on the
   fleet it runs exactly one, because each needs its own egress address.
 
 - **"the record" was ambiguous across three stores.** Resolved by role, not by store: a

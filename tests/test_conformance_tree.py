@@ -13,9 +13,9 @@ sweep for the old directory matches nothing and every fragment reads correctly o
   * `cd backend` … `cd web` across two lines of one CI script. Nothing in that file ever contained
     the string `orchestrator/web`, so the rename was a no-op there; the parity gate died after a
     five-minute install. `tests/test_workflow_paths.py` is the guard for that one.
-  * `Component.Path "backend/node_modules"` in the bundle manifest — the reverse case, where the
+  * `Component.Path "control/orchestrator/node_modules"` in the bundle manifest — the reverse case, where the
     rewrite was WRONG because that path describes the extracted artifact and not the repo, and
-    `backend/node_modules` is the right answer twice elsewhere in the same file. Eight appliance
+    `control/orchestrator/node_modules` is the right answer twice elsewhere in the same file. Eight appliance
     jobs each built a correct bundle to report a hash.
 
 A missing corpus is the worst of the three, because a driver that cannot read its fixture is one

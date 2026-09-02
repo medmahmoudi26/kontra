@@ -142,7 +142,7 @@ type apiClient struct {
 	http *http.Client
 	// bearer is sent as `Authorization: Bearer …` when set. Only the token-gated read
 	// surfaces need it (explore presigns URLs, raw state exposes actor state); the rest of
-	// this API predates admission control and is unauthenticated — see backend/src/auth.ts.
+	// this API predates admission control and is unauthenticated — see control/orchestrator/src/auth.ts.
 	bearer string
 }
 

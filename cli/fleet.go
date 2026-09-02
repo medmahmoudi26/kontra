@@ -15,7 +15,7 @@ package main
 // converge is visible in the Temporal UI beside the runs it exists to serve.
 //
 // The layering that made the old design portable is intact and is now one file instead of a
-// directory: backend/src/infra/programs/fleet.ts is the only provider-coupled code.
+// directory: control/orchestrator/src/infra/programs/fleet.ts is the only provider-coupled code.
 
 import (
 	"context"

@@ -69,7 +69,7 @@ from actorkit import catalog
 #: same variable), for a second control plane sharing one cluster.
 #:
 #: THE DEFAULT IS A CROSS-LANGUAGE LITERAL, derived independently here and in
-#: `backend/src/queues.ts:PROBE_QUEUE`, so `tests/test_actor_probe.py` pins the pair the way
+#: `control/orchestrator/src/queues.ts:PROBE_QUEUE`, so `tests/test_actor_probe.py` pins the pair the way
 #: `test_queue_congruence.py` pins the others. A drift is not silent here — the orchestrator
 #: refuses a start when nothing polls the queue it named — but the refusal would name a queue that
 #: IS being polled, under the other spelling, which is the confusing half of the same failure.
@@ -329,7 +329,7 @@ def serve() -> None:
     the three things a hand-rolled worker gets wrong once each. It also pushes a descriptor to the
     catalog, which is right: a probe worker that is not running is the difference between a Run and
     a request that sits on a queue nobody polls, and the orchestrator refuses the start rather than
-    hanging (`backend/src/probe.ts`).
+    hanging (`control/orchestrator/src/probe.ts`).
     """
     catalog.serve([ActorProbe], task_queue=PROBE_QUEUE)
 

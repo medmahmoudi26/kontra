@@ -393,7 +393,7 @@ func printApplianceReady(w *os.File, srv *temporalsrv.Server, store *objstore.Se
 // are there, resolved by the same three-answer rule in kontraRoot, and the orchestrator resolves
 // the identical path from TypeScript. A second location for the same installation is a second
 // thing to find, back up and get wrong.
-// KONTRA_DATA_DIR is the SAME variable `backend/src/data/dataDir.ts` reads, and it is what
+// KONTRA_DATA_DIR is the SAME variable `control/orchestrator/src/data/dataDir.ts` reads, and it is what
 // keeps the two halves of one installation pointing at one directory: the binary hands it to the
 // orchestrator child, and docker-compose.yml sets it to the container path of the volume. A
 // second spelling of "where does this installation keep its things" is the trap `sources.ts`

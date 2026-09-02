@@ -7,7 +7,7 @@
   // anything builds a Workflow bundle. Which is to say: it fails in the orchestrator, at runtime.
   //
   // THIS IS THE CommonJS HALF OF A DUAL BUILD; `tsconfig.esm.json` is the other. Both consumers are
-  // real and they disagree: the orchestrator is CommonJS (`backend/package.json` has no `type`) and
+  // real and they disagree: the orchestrator is CommonJS (`control/orchestrator/package.json` has no `type`) and
   // `require`s this, while kontra-console is bundled by rollup, which reads a CJS module as a
   // single default export and fails with `"workflowScratchId" is not exported by
   // dist/scratch.js` — an error naming a symbol that is plainly exported.

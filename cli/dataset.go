@@ -22,7 +22,7 @@
 // this process loading three DuckDB extensions and attaching the catalog, twice. That is a
 // deliberate move away from the plan's "controller query RAM is zero": the server executes it
 // inside a read-only, filesystem-less sandbox with a memory ceiling it cannot spill past
-// (backend/src/data/queryEngine.ts). `--local` runs DuckDB here instead, and an unreachable
+// (control/orchestrator/src/data/queryEngine.ts). `--local` runs DuckDB here instead, and an unreachable
 // orchestrator falls back to it automatically.
 //
 // The old split between `kontra db` (standalone) and `kontra runs --query` (output) is gone:

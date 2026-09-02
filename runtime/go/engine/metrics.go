@@ -45,7 +45,7 @@ var (
 //
 // ONE FUNCTION, BOTH COUNTERS, and that is the lesson from the two beside it. `countBatch` has had
 // no production caller since it was written, so `rate(reloads)/rate(batches)` — the expression the
-// fleet dashboard plots and `backend/src/panels/metrics.ts` refuses to trust — divides by a
+// fleet dashboard plots and `control/orchestrator/src/panels/metrics.ts` refuses to trust — divides by a
 // permanent zero. Two functions is how one of them gets wired and the other does not; a single call
 // that always advances the denominator cannot be half-wired.
 //

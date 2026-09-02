@@ -10,7 +10,7 @@ package main
 // ═══ WHY A KEY AND NOT A TOKEN ═══
 //
 // Everything authenticated in this repo today is a static bearer token read from the environment
-// (`backend/src/auth.ts`, and `cli/config.go` writes four of them into a compose stack). That model
+// (`control/orchestrator/src/auth.ts`, and `cli/config.go` writes four of them into a compose stack). That model
 // has one property that does not survive a **Fleet** of **Machines** running code kontra did not
 // write: THE CREDENTIAL IS THE SAME BYTES ON EVERY HOLDER. To give a **Machine** a bearer token is
 // to give it a copy of a secret that already exists somewhere else, and a compromised Machine hands

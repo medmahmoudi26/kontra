@@ -79,7 +79,7 @@ import (
 
 // NodeVersion is the Node the carried orchestrator runs on.
 //
-// `backend/package.json` says `engines.node: ">=22.13.0"`. The appliance ships an EXACT
+// `control/orchestrator/package.json` says `engines.node: ">=22.13.0"`. The appliance ships an EXACT
 // version, because ">=" is a constraint on somebody else's machine and this is our machine — and
 // because a bundle whose runtime floats is a bundle whose digest describes nothing.
 const NodeVersion = "22.13.0"
@@ -109,7 +109,7 @@ var nodePlatform = map[string]string{
 
 // PnpmVersion is the package manager the dependency tree is resolved by.
 //
-// IT IS ALSO `backend/package.json`'s `packageManager` FIELD, and a test holds the two
+// IT IS ALSO `control/orchestrator/package.json`'s `packageManager` FIELD, and a test holds the two
 // together. Corepack resolves that field to decide which pnpm a developer's `pnpm` really runs;
 // this constant decides which pnpm the BUILD runs. Two different mechanisms reading two different
 // files is how a bundle gets resolved by a pnpm nobody chose — so they are checked against each

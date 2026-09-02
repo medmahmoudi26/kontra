@@ -20,7 +20,7 @@ func fakeCheckout(t *testing.T, spa map[string]string) string {
 			t.Fatal(err)
 		}
 	}
-	write("backend/package.json", `{"name":"orchestrator","version":"0.1.0"}`)
+	write("control/orchestrator/package.json", `{"name":"orchestrator","version":"0.1.0"}`)
 	write("frontend/package.json", `{"name":"kontra-web","version":"0.2.0"}`)
 	for rel, body := range spa {
 		write("frontend/dist/"+rel, body)

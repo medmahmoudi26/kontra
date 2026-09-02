@@ -44,7 +44,7 @@ func FromEnv(ctx context.Context) (*Store, error) {
 	// same. NOT the CAS rule: `runtime/go/codec.objectKey` joins the prefix as a path segment
 	// because a claim-check key is DERIVED from a digest independently on both sides, so the two
 	// derivations have to agree. A sub-unit key is CARRIED, in the `{"$ref": {key,…}}` entry the
-	// reader is handed (`backend/src/activities/datasets.ts` resolveBatch, Python's get_subunit),
+	// reader is handed (`control/orchestrator/src/activities/datasets.ts` resolveBatch, Python's get_subunit),
 	// so the writer's spelling round-trips whatever it is and nothing re-derives it. Changing this
 	// one is a separate decision with a separate blast radius — `data/parquet.ts` builds its blob
 	// URI as `s3://<bucket>/` + the carried key, on exactly that assumption — and it belongs with

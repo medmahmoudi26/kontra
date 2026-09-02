@@ -617,7 +617,7 @@ func TestScavengeStaleExploreDirs(t *testing.T) {
 	stale := filepath.Join(root, exploreDirPrefix+"old")
 	fresh := filepath.Join(root, exploreDirPrefix+"new")
 	other := filepath.Join(root, "not-ours")
-	// Same prefix, NOT our workspace: backend/src/exploreRoutes.test.ts mkdtemps
+	// Same prefix, NOT our workspace: control/orchestrator/src/exploreRoutes.test.ts mkdtemps
 	// `kontra-explore-*` into the very same TMPDIR. Sweeping by name would eat it.
 	lookalike := filepath.Join(root, exploreDirPrefix+"AbC123")
 	for _, d := range []string{stale, fresh, other, lookalike} {

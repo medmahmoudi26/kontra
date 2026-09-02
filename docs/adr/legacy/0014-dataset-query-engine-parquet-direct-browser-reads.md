@@ -84,7 +84,7 @@ and what it deliberately does not:
   presigned plain-parquet file — DuckLake is not in that path.
 - **Local-first catalog.** The catalog metadata is a local DuckDB file (`KONTRA_DUCKLAKE_CATALOG`);
   data files live under `datasets/` on S3 (or a local `KONTRA_DUCKLAKE_DATA_PATH` for tests). See
-  `backend/src/data/parquet.ts` + `datasets.ts` and https://ducklake.select/docs.
+  `control/orchestrator/src/data/parquet.ts` + `datasets.ts` and https://ducklake.select/docs.
 
 ## Consequences
 

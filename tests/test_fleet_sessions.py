@@ -1,7 +1,7 @@
 """A Fleet raised by a Run gets tmux sessions, and never fails because it did not.
 
 THE BUG THIS CLOSES. ADR 0020 made session existence a Temporal converge rather than an argument on
-the provision, and `backend/src/infra/programs/fleet.ts` says so where somebody would reach for it:
+the provision, and `control/orchestrator/src/infra/programs/fleet.ts` says so where somebody would reach for it:
 *"There is deliberately no `tmux` arg"*. The consequence went unwritten for a release —
 `kontra fleet up --tmux` could create a session and `fleet.up()` structurally could not, so every
 workflow-raised Machine drew "no session on kf-… — Converge session" on the Monitor forever. It read
@@ -101,8 +101,8 @@ def test_refusals_are_reported_and_still_not_fatal() -> None:
 def test_the_activity_name_is_the_one_the_worker_registers(name: str) -> None:
     """THE NAME IS THE CONTRACT, and nothing type-checks it across the two languages.
 
-    `backend/src/infra.ts` registers `...infraActivities` by their EXPORTED NAME, so this string and
-    the function name in `backend/src/activities/infra.ts` are joined by nothing but agreement. A
+    `control/orchestrator/src/infra.ts` registers `...infraActivities` by their EXPORTED NAME, so this string and
+    the function name in `control/orchestrator/src/activities/infra.ts` are joined by nothing but agreement. A
     drift here is an activity that retries to its timeout against a worker that has no such handler
     — and because the scope swallows that failure by design, it would be invisible.
     """

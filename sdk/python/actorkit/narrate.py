@@ -27,7 +27,7 @@ IS the sentence. Four properties made that the only shape that works here.
   • METADATA, NOT PAYLOAD — the same route the Method name takes (`catalog.dispatch_summary`). A
     payload on this deployment may be a claim-check ref (ADR 0007), so a sentence carried in one
     would cost a blob GET per turn to read, and reading a 623-unit sweep would fan out into the
-    object store. A Summary is read straight off the event by `backend/src/history.ts`, and
+    object store. A Summary is read straight off the event by `control/orchestrator/src/history.ts`, and
     Temporal's own UI renders it on the timer's bar label — so both surfaces say the same
     sentence rather than diverging.
   • IT REACHES THE ARCHIVE. The reduced log is what ADR 0025 stores, and a Summary is part of a
@@ -123,7 +123,7 @@ from temporalio.exceptions import ApplicationError
 # an author's sentence — is the same kind of thing in the same place, and 200 bytes is already the
 # number with the reasoning attached: it renders on a Temporal bar label without eliding, and it is
 # some 650× under the codec's 128 KiB offload threshold, which is what keeps a Summary inline and
-# therefore readable without a fetch (`summaryOf` in backend/src/history.ts REFUSES a
+# therefore readable without a fetch (`summaryOf` in control/orchestrator/src/history.ts REFUSES a
 # claim-checked Summary rather than dereferencing it, so a sentence over that threshold would not
 # be shortened — it would be gone).
 from actorkit.catalog import SUMMARY_BUDGET

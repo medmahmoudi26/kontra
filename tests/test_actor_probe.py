@@ -17,7 +17,7 @@ Three properties are worth a test each, and only one of them is the happy path:
 
 NO CLUSTER, AND THE SEAM IS AS DEEP AS IT GOES. What is substituted is the NEXUS CLIENT itself —
 `workflow.create_nexus_client` — not `dispatch_ref` above it, which is what
-`backend/src/actorControl.test.ts` stubs to run the generated caller. The difference matters
+`control/orchestrator/src/actorControl.test.ts` stubs to run the generated caller. The difference matters
 for exactly one assertion in this file: `idempotency_key` is derived INSIDE `dispatch_ref`
 (`idem = idempotency_key or self.key`), so stubbing that method would have tested the stub's idea
 of an unkeyed dispatch rather than the SDK's. Everything above the client is the real code — the
@@ -395,10 +395,10 @@ def test_the_probe_endpoint_is_the_actors_registered_one(wire):
 
 def test_the_queue_and_the_workflow_type_match_the_orchestrators_copy():
     """The cross-language pin, in the spirit of `test_queue_congruence.py`. Both names are written
-    independently in `backend/src/queues.ts`; the orchestrator refuses a start onto a queue
+    independently in `control/orchestrator/src/queues.ts`; the orchestrator refuses a start onto a queue
     nobody polls, but under a drift that refusal names a queue that IS being polled — under the
     other spelling."""
-    queues = (ROOT / "backend" / "src" / "queues.ts").read_text()
+    queues = (ROOT / "control" / "orchestrator" / "src" / "queues.ts").read_text()
     assert f"export const PROBE_QUEUE = '{probe.PROBE_QUEUE}'" in queues
     assert f"export const PROBE_WORKFLOW = '{probe.PROBE_WORKFLOW}'" in queues
 

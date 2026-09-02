@@ -4,7 +4,7 @@
 //
 // The CROSS-LANGUAGE half of this file is not here. `sharedQueue` is driven against
 // shared/conformance/queues.json by queues_conformance_test.go, and the folder digest is pinned against
-// backend/src/sources.test.ts by the shared fixture below. What is here is the local half: the
+// control/orchestrator/src/sources.test.ts by the shared fixture below. What is here is the local half: the
 // collision the `wf-` prefix exists to prevent, the refusals, and the one-file-one-worker rule.
 package main
 
@@ -54,7 +54,7 @@ func TestWorkflowQueueIsDerivedAndCannotCollideWithAnActor(t *testing.T) {
 
 // The queue is derived from the folder as it is on disk — the manifest names it, the CONTENT
 // digests it, and there is no override to pass. The shared fixture pins Go's digest byte-for-byte
-// against the TS peer in backend/src/sources.test.ts.
+// against the TS peer in control/orchestrator/src/sources.test.ts.
 func TestQueueForWorkflowIsDerivedFromFolderContent(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
@@ -89,7 +89,7 @@ func TestQueueForWorkflowIsDerivedFromFolderContent(t *testing.T) {
 
 // writeFixture lays down the SHARED cross-language digest fixture: two files plus a nested one, so
 // the walk's per-directory sort and its separators are all exercised. Its digest is pinned in this
-// suite and in backend/src/sources.test.ts; the two MUST agree or a served worker lands on a
+// suite and in control/orchestrator/src/sources.test.ts; the two MUST agree or a served worker lands on a
 // queue the orchestrator reports differently.
 func writeFixture(t *testing.T, dir string) {
 	t.Helper()

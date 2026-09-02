@@ -35,16 +35,16 @@ on:
       - "cli/appliance/**"
       - "cli/bundlecmd.go"
       - "cli/release.go"
-      - "backend/package.json"
-      - "backend/pnpm-lock.yaml"
+      - "control/orchestrator/package.json"
+      - "control/orchestrator/pnpm-lock.yaml"
       - ".github/workflows/appliance.yml"
   pull_request:
     paths:
       - "cli/appliance/**"
       - "cli/bundlecmd.go"
       - "cli/release.go"
-      - "backend/package.json"
-      - "backend/pnpm-lock.yaml"
+      - "control/orchestrator/package.json"
+      - "control/orchestrator/pnpm-lock.yaml"
       - ".github/workflows/appliance.yml"
   workflow_dispatch:
 
@@ -237,7 +237,7 @@ jobs:
   # build has, it fetches and checksums itself.
   #
   # It exists because the promise was FALSE when issue 13 shipped and looked true: the build began
-  # with `exec.LookPath("pnpm")` and a `stat` of `backend/node_modules/typescript`, both of
+  # with `exec.LookPath("pnpm")` and a `stat` of `control/orchestrator/node_modules/typescript`, both of
   # which are always satisfied on a developer's machine and on any CI job that ran `pnpm install`
   # first. A claim about a clean machine can only be checked on a clean machine.
   clean-checkout:

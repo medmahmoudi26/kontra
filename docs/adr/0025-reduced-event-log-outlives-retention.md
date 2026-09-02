@@ -5,8 +5,8 @@
 **Accepted.** Extends **0007** — the claim-check blob plane grows a second named, non-content-addressed
 object, alongside the one **0023** §11 already put there. Does not touch **0023** §1: the archive is
 explicitly **not** a **Dataset**, and the reason is that ADR's own definition of who publishes one.
-Supersedes nothing. Implemented by `backend/src/historyArchive.ts` over the reducer in
-`backend/src/history.ts`.
+Supersedes nothing. Implemented by `control/orchestrator/src/historyArchive.ts` over the reducer in
+`control/orchestrator/src/history.ts`.
 
 ## Context
 
@@ -57,7 +57,7 @@ Temporal **Server 1.31.0** (`temporal server start-dev`), namespace `default`, 2
 And one property of the existing store that decided *where*: the blob plane **already holds named,
 non-content-addressed objects**. `datasetStateKey(name)` → `datasets/<name>/_state.json` is written
 with a plain `store.put` by `publishBatch`/`closeDataset` and read back by `datasetState`
-(`backend/src/data/datasets.ts`, `backend/src/activities/datasets.ts`). It sits in the
+(`control/orchestrator/src/data/datasets.ts`, `control/orchestrator/src/activities/datasets.ts`). It sits in the
 same bucket as `cas/` and `units/`. Verified in the code before it was written down here, because
 the issue's own framing — "invents a second class of thing stored there that is not
 content-addressed" — is only a real cost if that class does not already exist. It does.
@@ -212,7 +212,7 @@ content-addressed" — is only a real cost if that class does not already exist.
   so, instead of sitting on "reading the history…" forever, which is what it did before.
 
 - **`archived` is now part of the history contract** in three places with no shared code:
-  `RunHistory` in `backend/src/history.ts`, the same interface in
+  `RunHistory` in `control/orchestrator/src/history.ts`, the same interface in
   `frontend/src/run/api.ts`, and the label in the console's `EventLog`. It is optional
   everywhere and absent means live, so a server older than this ADR reads as live rather than as
   broken — which is the correct default, since it *is* live.

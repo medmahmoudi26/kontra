@@ -1,5 +1,5 @@
 {
- "why": "one Actor, three SDKs, ONE descriptor — the JSON every SDK must emit for POST /api/actors and the orchestrator must store without loss. Each side asserts this file: runtime/go/registrar/conformance_test.go, tests/test_catalog_conformance.py, backend/src/catalog.conformance.test.ts",
+ "why": "one Actor, three SDKs, ONE descriptor — the JSON every SDK must emit for POST /api/actors and the orchestrator must store without loss. Each side asserts this file: runtime/go/registrar/conformance_test.go, tests/test_catalog_conformance.py, control/orchestrator/src/catalog.conformance.test.ts",
  "schemas": "the input/output/params documents here are the DIALECT-NEUTRAL CORE of what each SDK derives — type, properties (each reduced to its own core) and required. Pydantic brands every schema with `title`, invopop's reflector with `$schema`/`$id`/`additionalProperties`, and neither branding is a contract: what the catalog reads is the property names and their JSON types. Each SDK's test projects its real emission down to this before comparing, and `required` is sorted because it is a set — its order is whichever order that language's author declared the fields in.",
  "covers": {
   "multi-method": "fetch/title/probe — ONE OPERATION PER METHOD (ADR 0023 §9), in declaration order",

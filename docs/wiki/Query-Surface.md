@@ -24,7 +24,7 @@ Two questions this page keeps apart, because different places answer them:
 | `standalone/<name>/…parquet` | `standalone` | a list **you** loaded — scope, seeds, targets. An **INPUT**. |
 | `output/<actor>/version=<v>/dt=<YYYY-MM-DDTHH-MM-SS>/…parquet` | `output` | what an actor **produced**. A **RESULT**. |
 
-Nothing derives a path by string-building, and there is no `datasets/` middle segment whose only job was to hold hashed table names (`backend/src/data/parquet.ts`).
+Nothing derives a path by string-building, and there is no `datasets/` middle segment whose only job was to hold hashed table names (`control/orchestrator/src/data/parquet.ts`).
 
 Two more prefixes share the bucket and are **not** datasets — they are the internal data plane, and no query surface addresses them: `cas/` (the claim-check store, reclaimed by mark-and-sweep only) and `units/` (the raw per-unit blobs the materializer decodes into the tables above, aged out by the 90-day sweep). See [[Data-Plane]] §1–2.
 
@@ -246,7 +246,7 @@ An **actor name is the address**. A raw run id still works (a leading `orch-` is
 
 Needs `KONTRA_EXPLORE_TOKEN` (falling back to `KONTRA_STATE_TOKEN`, the same order the server uses). The endpoint mints presigned URLs, so it **fails closed**.
 
-What happens (`cli/explore.go` + `backend/src/data/explore.ts`):
+What happens (`cli/explore.go` + `control/orchestrator/src/data/explore.ts`):
 
 - `GET /api/datasets/runs?actor=…&version=…&dt=…` resolves the name to a dispatch. `GET /api/runs/:runId/explore` then returns per-actor state, **column schemas**, and presigned GET URLs for **that dispatch's `version=…/dt=…` files only**. Default lifetime 900 s.
 - The CLI writes the init script into a private `0600` workspace, removes it on exit, and passes it as `-init <file>` — never in argv, because `/proc/<pid>/cmdline` is world-readable and the URLs in it are the credential. Leftovers from a crashed session are swept on the next start.
@@ -302,7 +302,7 @@ Poll `lifecycle` when you care that the **output** is ready. `GET /api/runs/:id/
 
 Three properties make the exact-dispatch scope real:
 
-1. **Physical exclusivity** — output is partitioned by `(version, dt)` and `dt` is the dispatch time to the second, so every parquet file lives under exactly one `version=…/dt=…/` directory, and only files under the requested one are presigned. Compaction re-checks that after every pass and **never merges across dispatches** (`backend/src/data/maintenance.ts`).
+1. **Physical exclusivity** — output is partitioned by `(version, dt)` and `dt` is the dispatch time to the second, so every parquet file lives under exactly one `version=…/dt=…/` directory, and only files under the requested one are presigned. Compaction re-checks that after every pass and **never merges across dispatches** (`control/orchestrator/src/data/maintenance.ts`).
 2. **Short expiry is the boundary** — the URL, not the file, is the secret. Deleting the init script is hygiene; the 15-minute lifetime is the guarantee.
 3. **No durable credential leaves the server** — the workstation gets URLs, never object-store keys and never the catalog connstring.
 

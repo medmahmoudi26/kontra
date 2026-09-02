@@ -173,7 +173,7 @@ func (l *liveWatch) events(t *testing.T) []string {
 }
 
 // summaries is every Temporal user-metadata Summary in this history, in order — which is exactly what
-// `backend/src/transcript.ts` reads and what an operator sees as a row's label.
+// `control/orchestrator/src/transcript.ts` reads and what an operator sees as a row's label.
 func (l *liveWatch) summaries(t *testing.T) []string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -481,8 +481,8 @@ func TestTheWatcherStartsNoTimer(t *testing.T) {
 
 // A MACHINE'S LIFECYCLE READS AS SENTENCES, and this is the half of "visible in the Transcript" that
 // can be proved from Go. Each decision arrives as a Temporal user-metadata Summary — the same channel
-// an author's `speak` line rides — so `backend/src/transcript.ts` folds it onto a turn and
-// `backend/src/vocabulary.ts` names it, with no component knowing what a Warden is.
+// an author's `speak` line rides — so `control/orchestrator/src/transcript.ts` folds it onto a turn and
+// `control/orchestrator/src/vocabulary.ts` names it, with no component knowing what a Warden is.
 //
 // The other half is over there: `vocabulary.test.ts` reads THIS PACKAGE'S BYTES for the five kind
 // spellings, so a rename here fails a test in TypeScript rather than dropping a Fleet out of the

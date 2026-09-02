@@ -128,13 +128,13 @@ func queueForWorkflow(file string) (string, error) {
 // --- what a workflow IS ------------------------------------------------------------------------
 
 // workflowMarker is the file that makes a FOLDER a workflow, and the peer of
-// `backend/src/sources.ts:MARKER.workflow` — written independently on this side like every
+// `control/orchestrator/src/sources.ts:MARKER.workflow` — written independently on this side like every
 // other cross-language literal in this repo. A workflow is a folder holding this file and its
 // description.md, the same shape an actor already has with actor.json + actor.py.
 const workflowMarker = "workflow.py"
 
 // flatFileVersion is what a manifest-less `.py` workflow carries where a folder carries its
-// manifest version — the peer of `backend/src/workflowControl.ts:FLAT_FILE_VERSION`.
+// manifest version — the peer of `control/orchestrator/src/workflowControl.ts:FLAT_FILE_VERSION`.
 const flatFileVersion = "0.0.0"
 
 // workflowFileOf resolves what an operator typed to the FILE python will be handed.
@@ -176,7 +176,7 @@ func workflowFileOf(target string) (string, error) {
 }
 
 // workflowManifest is `workflow.json` — the peer of actorManifest, and of MANIFEST in
-// backend/src/sources.ts.
+// control/orchestrator/src/sources.ts.
 type workflowManifest struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
@@ -245,7 +245,7 @@ func workflowSession(file string) string {
 
 // --- the content digests the workflow queue is built on ------------------------------------------
 
-// notCodeDigest is the byte-identical peer of backend/src/sources.ts:NOT_CODE — directories
+// notCodeDigest is the byte-identical peer of control/orchestrator/src/sources.ts:NOT_CODE — directories
 // that are not the folder's code and must not move its digest. `__pycache__` is the one that forces
 // it to exist: Python writes it into whatever directory it imports from, so merely SERVING a
 // workflow would otherwise change the folder's digest and hand every run a new queue.
@@ -255,7 +255,7 @@ var notCodeDigest = map[string]bool{
 }
 
 // folderDigest is `sha256:<hex>` over a folder's own files — the byte-identical peer of
-// backend/src/sources.ts:folderDigest, written independently on this side like every other
+// control/orchestrator/src/sources.ts:folderDigest, written independently on this side like every other
 // cross-language literal in this repo. It MUST agree with the TS one: the orchestrator stores this
 // at registration and the CLI derives the served queue from it, and a drift would put the worker on
 // a queue the page reports differently — a run dispatched to a queue nobody serves.

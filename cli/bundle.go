@@ -284,7 +284,7 @@ func buildGoActorBinary(actorDir, name string) (string, error) {
 // nothing verified it, while the tarball beside it was verified on arrival — so the engine, the
 // single field a listing could not supply, was the one field a Machine took on trust. A pointer
 // saying `py` for a Go actor produced a Machine that installed cleanly, started nothing, and
-// reported a successful deploy (`backend/src/activities/fleet.ts` says the same thing from the
+// reported a successful deploy (`control/orchestrator/src/activities/fleet.ts` says the same thing from the
 // reading side). In a manifest the engine is one of the bytes the manifest digest is computed
 // over, so that lie is now a digest mismatch rather than a silent misplacement.
 //
@@ -445,7 +445,7 @@ func (d bundleDest) blobURL(sha string) string {
 // `<registry>/bundles/<name>:<version>`.
 //
 // THE CONVENTION IS NOT DEAD AND MUST NOT BE, because it is the only address the control plane can
-// resolve without being told: `backend/src/activities/fleet.ts:resolveBundle` builds
+// resolve without being told: `control/orchestrator/src/activities/fleet.ts:resolveBundle` builds
 // `<registry>/v2/bundles/<actor>/manifests/<version>` from the actor and the version alone, and
 // `shared/conformance/bundleref.json` pins that on both sides. A `--push` to some other repository
 // publishes an Artifact that a Fleet placement cannot find — see `cmdBuild`, which prints that

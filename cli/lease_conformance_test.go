@@ -1,6 +1,6 @@
 // lease_conformance_test.go — THE GO ARM of shared/conformance/lease.json.
 //
-// This side is the **Lease** workflow wire's READER. `backend/src/lease.ts` is the writer, and the two are
+// This side is the **Lease** workflow wire's READER. `control/orchestrator/src/lease.ts` is the writer, and the two are
 // joined by nothing but a matching set of string literals — no code generation, no shared schema, no
 // import in either direction. `encoding/json` does not complain about a key it was not told about
 // and does not complain about a field it was not given, so the whole failure mode is silent by

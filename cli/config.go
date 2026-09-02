@@ -1,7 +1,7 @@
 package main
 
 // config.go — `.kontra/`: where this installation's own configuration and code live. `~/.kontra`,
-// or wherever KONTRA_HOME points; `backend/src/sources.ts:kontraHome` is the peer that must
+// or wherever KONTRA_HOME points; `control/orchestrator/src/sources.ts:kontraHome` is the peer that must
 // answer the same, and kontraRoot below says what it cost when it did not.
 //
 // Everything kontra needs from an operator used to be environment variables in a gitignored
@@ -129,7 +129,7 @@ func (c *Config) envFor() map[string]string {
 		"DIGITALOCEAN_TOKEN":          c.Fleet.DigitalOceanToken,
 		"PULUMI_CONFIG_PASSPHRASE":    c.Fleet.PulumiPassphrase,
 		"KONTRA_FLEET_SSH_KEY":        c.Fleet.SSHKey,
-		// Where a fleet lands. Read by backend/src/infra/programs/fleet.ts:fleetDefaults;
+		// Where a fleet lands. Read by control/orchestrator/src/infra/programs/fleet.ts:fleetDefaults;
 		// every one of these is empty-means-keep-the-default, so an installation that sets none
 		// behaves exactly as it did before they existed.
 		"KONTRA_FLEET_REGION":         c.Fleet.Region,
@@ -152,7 +152,7 @@ func (c *Config) envFor() map[string]string {
 // what reconciles them.
 //
 // It used to be the checkout alone (findRepoRoot). That made ONE variable with TWO answers across
-// languages: `backend/src/sources.ts:kontraHome` resolves `~/.kontra` when KONTRA_HOME is
+// languages: `control/orchestrator/src/sources.ts:kontraHome` resolves `~/.kontra` when KONTRA_HOME is
 // unset — what the register form prefills and what a registration RECORDS — while this side
 // answered `<checkout>/.kontra`. Worse, the orchestrator spawns this CLI with `cwd` set to the
 // REGISTERED FOLDER (`actorControl.ts`), so for a folder under `~/.kontra/actors` the walk found

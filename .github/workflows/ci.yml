@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: backend
+        working-directory: control/orchestrator
     steps:
       - uses: actions/checkout@v4
 
@@ -307,7 +307,7 @@ jobs:
           github_token: ${{ github.token }}
           # PIN the buf CLI. Every codegen plugin in buf.gen.yaml is already version-pinned,
           # but the well-known types (google/protobuf/*.proto) ship INSIDE the buf binary —
-          # so an unpinned CLI regenerates `backend/_gen/google/protobuf/descriptor.ts`
+          # so an unpinned CLI regenerates `control/orchestrator/_gen/google/protobuf/descriptor.ts`
           # from a different descriptor.proto than the committed stubs were built from, and
           # the drift check fails on vendored WKT churn that no one authored. 1.70.0 is the
           # version that reproduces the committed stubs byte-for-byte.
@@ -371,7 +371,7 @@ jobs:
           PROTO_BASELINE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
         run: make proto-check
 
-      # The generated stubs are committed (sdk/python/_gen + backend/_gen +
+      # The generated stubs are committed (sdk/python/_gen + control/orchestrator/_gen +
       # handler/_gen); regenerate and fail if anything drifts from what's checked in.
       # `if: !cancelled()` so a FAILING proto gate cannot mask this: the two answer independent
       # questions (is the contract change compatible? vs are the committed stubs in sync?), and an
@@ -381,7 +381,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           buf generate
-          git diff --exit-code -- sdk/python/_gen backend/_gen handler/_gen \
+          git diff --exit-code -- sdk/python/_gen control/orchestrator/_gen handler/_gen \
             || { echo "::error::generated proto stubs are stale — run 'just buf-generate' and commit"; exit 1; }
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -445,7 +445,7 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
 
       # THE ORCHESTRATOR FROM THE CHECKOUT, not from a bundle. `kontra up --orchestrator=local`
-      # runs `backend/dist` directly, which is what makes this job about THIS commit's control
+      # runs `control/orchestrator/dist` directly, which is what makes this job about THIS commit's control
       # plane; `--orchestrator=bundle` would resolve a 330 MB dependency tree and build a
       # content-addressed artifact, which `.github/workflows/appliance.yml` already gates four
       # platforms of. Two different questions, two different jobs.

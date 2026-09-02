@@ -48,7 +48,7 @@ is tracking is worse than a failure.
 
 WHAT THE EXIT DOES IS DROP A **LEASE**, NOT DESTROY A FLEET (ADR 0037). A **Fleet** is capacity, and
 several runs may hold one at once; its **Machines** are destroyed when the LAST claim drops, by a
-**Lease** workflow (`backend/src/workflows/lease.ts`) rather than by whichever scope happened to finish first.
+**Lease** workflow (`control/orchestrator/src/workflows/lease.ts`) rather than by whichever scope happened to finish first.
 For a run that is alone on its fleet — every example in this repo — nothing observable changes. For
 two runs on one fleet, it is the difference between capacity and a race.
 
@@ -140,8 +140,8 @@ from datetime import timedelta
 from types import ModuleType
 from typing import Any, Mapping
 
-# The stack workflow and the queue it is served on — `backend/src/infra.ts:INFRA_QUEUE` and
-# `backend/src/workflows/stack.ts`. Written independently on this side, like every other
+# The stack workflow and the queue it is served on — `control/orchestrator/src/infra.ts:INFRA_QUEUE` and
+# `control/orchestrator/src/workflows/stack.ts`. Written independently on this side, like every other
 # cross-language literal in the SDK, so `tests/test_fleet_client.py` pins the table.
 INFRA_QUEUE = "kontra-infra"
 STACK_WORKFLOW = "stackWorkflow"
@@ -149,18 +149,18 @@ STACK_WORKFLOW = "stackWorkflow"
 CONVERGE_SESSIONS_ACTIVITY = "convergeFleetSessions"
 
 #: The two **Lease** calls (ADR 0037), on the caller queue beside the two reads above —
-#: `backend/src/activities/lease.ts`. Written independently here, like everything else that crosses.
+#: `control/orchestrator/src/activities/lease.ts`. Written independently here, like everything else that crosses.
 HOLD_LEASE_ACTIVITY = "holdFleetLease"
 DROP_LEASE_ACTIVITY = "dropFleetLease"
 
-#: What separates a holder from its nonce in a **Lease** id. `backend/src/lease.ts:leaseId` builds
+#: What separates a holder from its nonce in a **Lease** id. `control/orchestrator/src/lease.ts:leaseId` builds
 #: the same string and `parseLeaseId` reads it back; `shared/conformance/lease.json` is what keeps the two
 #: one grammar. A **Lease** held under one spelling and dropped under another is a **Lease** that is
 #: never dropped, which is **Machines** billing with nothing left that knows about them — and neither
 #: side raises, so nothing but a corpus catches it.
 LEASE_SEPARATOR = "#"
 
-# The one project the infra dispatch table knows (`backend/src/infra/stacks.ts`). A stack
+# The one project the infra dispatch table knows (`control/orchestrator/src/infra/stacks.ts`). A stack
 # outside it is refused server-side; naming it here makes the fqn derivable without a round trip.
 FLEET_PROJECT = "kontra-fleet"
 
@@ -188,13 +188,13 @@ CALLER_QUEUE = "kontra-datasets"
 RESOLVE_BUNDLE_ACTIVITY = "resolveBundle"
 QUEUE_POLLERS_ACTIVITY = "queuePollers"
 
-#: `backend/src/infra/programs/fleet.ts:TAG_RE`, character for character. Validated on this
+#: `control/orchestrator/src/infra/programs/fleet.ts:TAG_RE`, character for character. Validated on this
 #: side TOO, not instead: the tag becomes a DigitalOcean tag, an inventory group and part of every
 #: machine name, and a caller should learn it is malformed from its own workflow rather than from
 #: a Pulumi error several minutes into a converge. `tests/test_fleet_client.py` pins the pair.
 TAG_RE = re.compile(r"^[a-z][a-z0-9-]{1,15}$")
 
-#: `backend/src/secrets/store.ts:SECRET_NAME_RE`, character for character. A credential NAME is
+#: `control/orchestrator/src/secrets/store.ts:SECRET_NAME_RE`, character for character. A credential NAME is
 #: bounded to the same small alphabet on both sides so `DO_TOKEN` and `do-token` cannot be two
 #: different secrets, and so a caller learns a name is malformed in its own workflow rather than
 #: from a refusal a minute later. `tests/test_fleet_client.py` pins the pair.
@@ -218,7 +218,7 @@ CREDENTIAL_LOOKS_LIKE_A_TOKEN = ("dop_v1_", "doo_v1_", "dor_v1_")
 #: The name a fleet's cloud credential has when a caller does not choose one.
 #:
 #: EMPTY, AND THAT IS THE POINT. An empty credential means "whatever THIS control plane calls its
-#: cloud credential" — resolved server-side by `backend/src/infra/credential.ts:
+#: cloud credential" — resolved server-side by `control/orchestrator/src/infra/credential.ts:
 #: defaultCloudCredential`, which reads `KONTRA_CLOUD_CREDENTIAL` and falls back to `do-token`. A
 #: literal default on this side would be a name baked into every caller's history that a controller
 #: whose secret is called `do-prod` could not honour. Name it here when you want the guarantee.
@@ -368,7 +368,7 @@ def _hold_retry():
 
 
 def lease_id(holder: str, nonce: str) -> str:
-    """A **Lease** id: the holder, a `#`, and a nonce. `backend/src/lease.ts:leaseId`'s peer.
+    """A **Lease** id: the holder, a `#`, and a nonce. `control/orchestrator/src/lease.ts:leaseId`'s peer.
 
     THE HOLDER IS IN THE ID ON PURPOSE. A **Lease** is the only thing between a shared **Fleet** and
     its teardown, so the first question about a **Fleet** that will not die is who is holding it, and
@@ -487,7 +487,7 @@ class Fleet:
         self.destroy_on_exit = destroy_on_exit
         self.timeout = timeout
         #: How long this scope's **Lease** survives without renewal. None takes the control plane's
-        #: default (`backend/src/lease.ts:LEASE_TTL_MS`, an hour) — the same "empty means whatever
+        #: default (`control/orchestrator/src/lease.ts:LEASE_TTL_MS`, an hour) — the same "empty means whatever
         #: THIS control plane says" arrangement `credential` has, and for the same reason: a number
         #: baked in here is one every caller's history carries and no operator can move.
         self.lease_ttl = lease_ttl
@@ -759,7 +759,7 @@ class Fleet:
                 task_queue=CALLER_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
                 # RETRIED, AND NOT ONLY FOR NETWORKS. A hold that arrives while the **Lease** workflow is
-                # tearing the **Fleet** down is refused, on purpose (`backend/src/workflows/lease.ts`);
+                # tearing the **Fleet** down is refused, on purpose (`control/orchestrator/src/workflows/lease.ts`);
                 # the retry is what opens a fresh **Lease** workflow once the old one has closed. Ten attempts
                 # rather than the default's unbounded, so a **Fleet** that can never be held fails
                 # the run instead of hanging it.
@@ -1628,7 +1628,7 @@ def _fleet(
             # count, and there is no read of it a workflow can reach. The naive implementation is
             # worse than missing — Pulumi's desired state is total and the orchestrator coerces an
             # absent `machines` to 0, so a converge that "left the count alone" would DESTROY every
-            # Droplet in the Fleet (`backend/src/infra/stacks.ts:coerceFleetArgs`). Refusing is the
+            # Droplet in the Fleet (`control/orchestrator/src/infra/stacks.ts:coerceFleetArgs`). Refusing is the
             # only honest answer until that read exists.
             raise ValueError(
                 "machines= is required: say how many Machines this fleet places, or pass a provider "

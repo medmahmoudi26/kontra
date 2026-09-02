@@ -8,7 +8,7 @@ option go_package = "github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kont
 //
 // >>> What dispatch ACTUALLY does today: the TS interpreter starts the Python
 // >>> EntryWorkflow as a Temporal CHILD WORKFLOW (executeChild('run', [EntryInput]),
-// >>> see backend/src/workflows/interpreter.ts) passing `EntryInput` (entry.proto).
+// >>> see control/orchestrator/src/workflows/interpreter.ts) passing `EntryInput` (entry.proto).
 // >>> There is NO Nexus operation and NO RunEnvelope on any wire. Nothing references
 // >>> this message in code.
 //

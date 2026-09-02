@@ -284,7 +284,7 @@ func TestTheCLIRefusesAMarkedPayloadThatIsNotARef(t *testing.T) {
 // only under a non-default prefix, only on a payload over 128 KiB, and only at `--wait` time.
 //
 // WHICH SIDE IS RIGHT, measured rather than assumed: `handler/internal/objectstore.Key` and
-// `backend/src/codec/objectStore.ts:key` both drop the prefix in as a SEGMENT joined with `/`,
+// `control/orchestrator/src/codec/objectStore.ts:key` both drop the prefix in as a SEGMENT joined with `/`,
 // while `runtime/python/internals/casstore.py` AND `runtime/go/codec/s3.go` both concatenated —
 // three against two, not three against one. Both SDKs join now, and the prefix is no longer a
 // value this test types: the rows come out of `prefixCases`, which is where a derivation with four

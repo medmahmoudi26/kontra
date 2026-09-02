@@ -4,7 +4,7 @@
 
 **Accepted.** Answers the question **0023** §12 left open when it removed the canvas. Does not
 reverse it: the interpreter stays gone, a **Run** is still one execution of a caller's workflow, and
-nothing in a Scratch runs. Implemented by `backend/src/scratch.ts`, stored in its own table by
+nothing in a Scratch runs. Implemented by `control/orchestrator/src/scratch.ts`, stored in its own table by
 `db/repo.ts`, drawn by `web/src/panels/ScratchPage.tsx`, and read back by the `get_scratch` MCP
 tool. Retires the Catalog surface.
 

@@ -8,7 +8,7 @@ Depends on **0038**, which makes a separate actors repository the reason this ma
 
 ## Context
 
-1. **A push to a registry you own produces something kontra cannot run.** `backend/src/activities/fleet.ts:resolveBundle` re-derives the address on every run:
+1. **A push to a registry you own produces something kontra cannot run.** `control/orchestrator/src/activities/fleet.ts:resolveBundle` re-derives the address on every run:
 
    ```
    <registry>/v2/bundles/<actor>/manifests/<version>
@@ -18,7 +18,7 @@ Depends on **0038**, which makes a separate actors repository the reason this ma
 
 2. **Building requires the checkout.** `cli/bundle.go` calls `findRepoRoot("")` and refuses with *"building a Bundle needs the checkout (handler/ + sdk/ + runtime/)"*, because the handler is cross-compiled from source — measured at 3m21s cold, almost all of it that compile. A fork of `kontra-actors` has no `handler/`.
 
-3. **There is already a place to write a digest, and it is unauthenticated.** `backend/src/routes/catalog.ts:77` serves `POST /api/actors/:key/digest` with no auth guard. `backend/src/catalog.ts:27` records that this is deliberate: a worker self-registering its own image digest is not on the catalog's registration path.
+3. **There is already a place to write a digest, and it is unauthenticated.** `control/orchestrator/src/routes/catalog.ts:77` serves `POST /api/actors/:key/digest` with no auth guard. `control/orchestrator/src/catalog.ts:27` records that this is deliberate: a worker self-registering its own image digest is not on the catalog's registration path.
 
    Today that is tolerable **because the address is derived**: the digest is advisory and placement does not consult it. The moment a stored reference drives placement, that endpoint decides which bytes run on every Machine in a Fleet.
 

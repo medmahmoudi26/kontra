@@ -37,7 +37,7 @@ Every implementation runs the **same** [`fixtures.json`](./fixtures.json):
 | Go (appliance, over HTTP) | [`cli/appliance/codec/codec_test.go`](../../cli/appliance/codec/codec_test.go) | `go test ./appliance/codec/` in `cli/` |
 | Go (the `kontra` binary) | [`cli/claimcheck_test.go`](../../cli/claimcheck_test.go) | `go test .` in `cli/` |
 | Python (actorkit) | [`runtime/python/internals/test_codec_conformance.py`](../../runtime/python/internals/test_codec_conformance.py) | `pytest` |
-| TypeScript | [`backend/src/codec/conformance.test.ts`](../../backend/src/codec/conformance.test.ts) | `vitest` (`pnpm test` in `orchestrator/`) |
+| TypeScript | [`control/orchestrator/src/codec/conformance.test.ts`](../../backend/src/codec/conformance.test.ts) | `vitest` (`pnpm test` in `orchestrator/`) |
 
 The two `cli/` arms were added in 2026-08 and are **decode-side**. The appliance's runs every case
 through the served `POST /encode` + `/decode` endpoint a browser calls. The `kontra` binary's runs

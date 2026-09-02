@@ -11,7 +11,7 @@
  * what came here so their own callers did not have to move.
  *
  * WHY IT IS A PACKAGE RATHER THAN A DIRECTORY. The console lives in its own repository
- * (kontra-console) and used to reach these through a `@core/*` path alias into `backend/src` —
+ * (kontra-console) and used to reach these through a `@core/*` path alias into `control/orchestrator/src` —
  * which typechecked only on a machine that had the orchestrator's node_modules, and failed in CI
  * with eight `TS2307`s that no developer could reproduce.
  *

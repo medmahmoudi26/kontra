@@ -61,7 +61,7 @@ class UnitStore:
         # independently on both sides. A sub-unit key is CARRIED — it rides in the `$ref` below
         # and the reader (get_subunit, the orchestrator's resolveBatch) uses it verbatim — so the
         # writer's spelling round-trips whatever it is. Changing it is a separate decision with a
-        # separate blast radius (backend/src/data/parquet.ts builds `s3://<bucket>/` + this key)
+        # separate blast radius (control/orchestrator/src/data/parquet.ts builds `s3://<bucket>/` + this key)
         # and it belongs with prefix rows in shared/conformance/blobkey.json, which has none either.
         key = self.prefix + blob_key(run_date, _actor_name(), run_id, node_id, i, sha)
         self._s3.put_object(Bucket=self.bucket, Key=key, Body=data,

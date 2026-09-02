@@ -8,7 +8,7 @@ was: this side of the contract had NOTHING asserting it, while the Go peer
 nobody ran. One phantom citation and one hand-copied golden, guarding a derivation with three
 writers. ADR 0035 rule two: a contract with two writers gets a corpus.
 
-THE THIRD WRITER IS THE ORCHESTRATOR. `backend/src/data/parquet.ts:safeName` sanitises the name
+THE THIRD WRITER IS THE ORCHESTRATOR. `control/orchestrator/src/data/parquet.ts:safeName` sanitises the name
 again on its way to a DuckLake table and an object key, and both SDK comments claimed it applies
 "the same rule". It does not — see the corpus's `measured` field for the three places it differs
 and for why none of them is live. What this arm pins is the half that is genuinely this file's: the

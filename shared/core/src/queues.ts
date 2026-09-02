@@ -1,7 +1,7 @@
 /**
  * Queue names and poller freshness — the pure half of `panels/pollers.ts`.
  *
- * NOT `backend/src/queues.ts`, WHICH IS A DIFFERENT FILE WITH THE SAME NAME. That one holds the
+ * NOT `control/orchestrator/src/queues.ts`, WHICH IS A DIFFERENT FILE WITH THE SAME NAME. That one holds the
  * orchestrator's INTERNAL routing constants — which of its own processes serves which queue. This
  * one derives the queue an ACTOR's Worker polls, from the actor's name and version, and it is a
  * cross-language contract. Adding an actor queue to the other file, or a role queue to this one,

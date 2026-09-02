@@ -84,7 +84,7 @@ def _summary(event: Any) -> Optional[str]:
     """The sentence off one event's user metadata, or `None`.
 
     A SIBLING OF THE ATTRIBUTE BAG — `user_metadata` hangs off the `HistoryEvent` itself, which is
-    the same shape `backend/src/history.ts` reads on the other side. The bytes are a JSON
+    the same shape `control/orchestrator/src/history.ts` reads on the other side. The bytes are a JSON
     string because every SDK's default converter writes a `str` that way, and that is exactly the
     case `summaryOf` decodes.
     """

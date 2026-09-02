@@ -210,7 +210,7 @@ image on any droplet (pointed at the controller) and it self-registers + shows u
 
 ## 3. The materializer — routed by task queue, placed off the controller
 
-Typed-output materialization runs in its **own process** (`backend/src/materializer.ts` →
+Typed-output materialization runs in its **own process** (`control/orchestrator/src/materializer.ts` →
 `dist/src/materializer.js`, the same image as the API and the interpreter worker), and
 in production on its **own host**. Embedded DuckDB is the largest memory consumer in the system,
 and the controller is a 4 GB box already running Temporal, SeaweedFS and Postgres —
@@ -315,7 +315,7 @@ Both processes reach the control plane **outbound only** — and both speak Temp
 
 ### On a fleet Machine
 
-`backend/src/infra/programs/machine.ts` renders **two units per Worker** and **one per Machine**:
+`control/orchestrator/src/infra/programs/machine.ts` renders **two units per Worker** and **one per Machine**:
 `kontra-actor-<actor>` and `kontra-handler-<actor>` (the pair — the handler `Requires=` the actor, so
 a handler never accepts workflows whose `RunBatch` nothing is polling for), plus `kontra-vmagent`
 (scrapes localhost and remote-writes to the Controller, because a fleet Machine accepts no inbound

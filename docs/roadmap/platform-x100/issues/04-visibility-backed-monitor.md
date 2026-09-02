@@ -4,7 +4,7 @@ Status: ready-for-agent
 **Tier:** 2 | **Effort:** L | **Depends on:** —
 
 ## Problem
-`kontra monitor list`/`--state` and `backend/src/db/repo.ts` (`listRuns`) maintain a **SQLite**
+`kontra monitor list`/`--state` and `control/orchestrator/src/db/repo.ts` (`listRuns`) maintain a **SQLite**
 run table that duplicates what Temporal already tracks for every workflow (status, timestamps,
 type). Two sources of truth that drift; the SQLite one is the weaker copy.
 
@@ -28,7 +28,7 @@ no Elasticsearch required. Query with `ListWorkflowExecutions` + a SQL-like filt
 - `handler/workflow.go` (or interpreter) — upsert SAs
 - orchestrator: bootstrap SA registration + a visibility proxy endpoint
 - `cli/monitor.go` — exec views over the visibility endpoint
-- `backend/src/db/repo.ts` — trim to non-duplicated state
+- `control/orchestrator/src/db/repo.ts` — trim to non-duplicated state
 
 ## Verify (local, no fleet)
 - Dispatch runs across two tenants/actors.

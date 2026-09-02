@@ -8,7 +8,7 @@ importers:
 
   .: {}
 
-  backend:
+  control/orchestrator:
     dependencies:
       '@aws-sdk/client-s3':
         specifier: ^3.600.0
@@ -27,7 +27,7 @@ importers:
         version: 8.3.0
       '@kontra/core':
         specifier: workspace:*
-        version: link:../shared/core
+        version: link:../../shared/core
       '@opentelemetry/api':
         specifier: ^1.9.0
         version: 1.9.1

@@ -15,7 +15,7 @@
 //
 // WHICH SIDE IS RIGHT, MEASURED AND NOT ASSUMED, because the obvious sentence here ("every other
 // implementation joins with a slash") is false. `handler/internal/objectstore.Key` and
-// `backend/src/codec/objectStore.ts:key` drop the prefix in as a SEGMENT;
+// `control/orchestrator/src/codec/objectStore.ts:key` drop the prefix in as a SEGMENT;
 // `runtime/python/internals/casstore.py` does `self._prefix + key`, which is this same bug on the
 // Python worker's WRITE path. Executed against the live control plane with KONTRA_S3_PREFIX=slice11:
 // the Python-served workflow wrote `slice11cas/df/df5b…` and this CLI asked for

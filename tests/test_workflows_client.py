@@ -335,7 +335,7 @@ def test_a_dataset_handle_carries_its_partition_scope():
 
 def test_the_pager_targets_its_own_queue():
     """A page read must not queue behind a 40-minute materialization; the constant has to match
-    backend/src/queues.ts or the activity sits until ScheduleToStart."""
+    control/orchestrator/src/queues.ts or the activity sits until ScheduleToStart."""
     assert catalog.DATASET_QUEUE == "kontra-datasets"
     assert catalog.PAGE_DATASET_ACTIVITY == "pageDataset"
 

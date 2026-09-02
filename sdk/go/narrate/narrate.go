@@ -22,7 +22,7 @@
 //   - METADATA, NOT PAYLOAD — the same route the Method name takes (`catalog.DispatchSummary`). A
 //     payload on this deployment may be a claim-check ref (ADR 0007), so a sentence carried in one
 //     would cost a blob GET per turn to read. A Summary is read straight off the event by
-//     `backend/src/history.ts`, and Temporal's own UI renders it on the timer's bar label.
+//     `control/orchestrator/src/history.ts`, and Temporal's own UI renders it on the timer's bar label.
 //   - IT REACHES THE ARCHIVE. The reduced log is what ADR 0025 stores, and a Summary is part of a
 //     reduced event — so an author's sentences are still there when Temporal's 24-hour retention
 //     has dropped the history they came from. That is the requirement that rules out a memo, which

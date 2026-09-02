@@ -1,6 +1,6 @@
 """THE PYTHON ARM of shared/conformance/lease.json.
 
-This side is the lease-id grammar's WRITER. `backend/src/lease.ts` reads it back — that is what
+This side is the lease-id grammar's WRITER. `control/orchestrator/src/lease.ts` reads it back — that is what
 answers "who is holding this Fleet" on the one screen an operator looks at when a Fleet will not
 die — and the two are joined by nothing but a matching separator character.
 
@@ -26,7 +26,7 @@ from actorkit import fleet
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = json.loads((ROOT / "shared" / "conformance" / "lease.json").read_text(encoding="utf-8"))
-BACKEND = ROOT / "backend" / "src"
+BACKEND = ROOT / "control" / "orchestrator" / "src"
 
 
 def _names() -> dict[str, dict]:

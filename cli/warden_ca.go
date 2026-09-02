@@ -5,7 +5,7 @@ package main
 //
 // ═══ WHY THIS IS IN GO AND NOT IN THE ORCHESTRATOR ═══
 //
-// Every other control-plane surface in this repo is a Fastify route in `backend/src`, and the first
+// Every other control-plane surface in this repo is a Fastify route in `control/orchestrator/src`, and the first
 // instinct was to add two more there. Three facts moved it here, in this order:
 //
 //  1. NODE CANNOT ISSUE AN X.509 CERTIFICATE. `node:crypto` parses one (`X509Certificate`) and signs

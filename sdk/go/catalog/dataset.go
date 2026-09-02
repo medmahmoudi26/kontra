@@ -100,7 +100,7 @@ const (
 )
 
 // KontraTagAttribute is the Temporal search attribute an in-workflow tag MIRRORS to (ADR 0029 §4),
-// registered by the orchestrator (backend/src/visibility.ts). It is a PROJECTION over the live
+// registered by the orchestrator (control/orchestrator/src/visibility.ts). It is a PROJECTION over the live
 // window, never read as truth — the Dataset record is the authority.
 const KontraTagAttribute = "KontraTag"
 
@@ -174,7 +174,7 @@ const tempSlugMax = 64
 // stores would be two different strings for one Dataset.
 //
 // A THREE-WRITER DERIVATION, PINNED BY shared/conformance/slug.json. This, Python's `_slug`, and the
-// orchestrator's `backend/src/data/parquet.ts:safeName`. This comment used to say all three apply
+// orchestrator's `control/orchestrator/src/data/parquet.ts:safeName`. This comment used to say all three apply
 // "the same rule"; they do not — safeName never truncates, its empty fallback is `unnamed`, and it
 // prefixes `a` to a leading digit. The corpus records those and the reason none of them is live
 // (the orchestrator only ever sees `tmp_<slug>_<hex8>`), which is a thing that had to be measured

@@ -384,7 +384,7 @@ export function tmuxSafeName(name: string): string {
 /**
  * The tmux session an Actor's Worker runs in: `<actor>-<version>`, sanitised.
  *
- * THE ONLY TYPESCRIPT COPY, and it is here because it was two. `backend/src/actorControl.ts`
+ * THE ONLY TYPESCRIPT COPY, and it is here because it was two. `control/orchestrator/src/actorControl.ts`
  * minted the name when the Serve button started a worker and `frontend/src/panels/actorSession.ts`
  * derived it again in the browser — byte-identical, fallback and all, one calling
  * {@link tmuxSafeName} and the other re-inlining `.replace(/[.:]/g, '_')`. Two writers on the same

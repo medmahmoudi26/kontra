@@ -452,15 +452,15 @@ func TestExtractMemberTakesOneFileAndRefusesWhenItIsAbsent(t *testing.T) {
 
 func TestBuildRefusesSomethingThatIsNotTheCheckout(t *testing.T) {
 	_, err := BuildOrchestrator(BuildOptions{RepoRoot: t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "backend/package.json") {
+	if err == nil || !strings.Contains(err.Error(), "control/orchestrator/package.json") {
 		t.Errorf("a directory with no orchestrator was accepted as the checkout: %v", err)
 	}
 }
 
 func TestBuildOptionsDefaultToTheHostAndTheCheckout(t *testing.T) {
 	root := t.TempDir()
-	mkdir(t, filepath.Join(root, "backend"))
-	write(t, filepath.Join(root, "backend", "package.json"), `{"version":"0.1.0"}`, 0o644)
+	mkdir(t, filepath.Join(root, "control", "orchestrator"))
+	write(t, filepath.Join(root, "control", "orchestrator", "package.json"), `{"version":"0.1.0"}`, 0o644)
 
 	got, err := BuildOptions{RepoRoot: root}.resolve()
 	if err != nil {
@@ -487,8 +487,8 @@ func TestBuildOptionsDefaultToTheHostAndTheCheckout(t *testing.T) {
 // it would refuse every build with a message naming nothing.
 func TestMachinePathsAreAbsoluteAndNonEmpty(t *testing.T) {
 	root := t.TempDir()
-	mkdir(t, filepath.Join(root, "backend"))
-	write(t, filepath.Join(root, "backend", "package.json"), `{"version":"0.1.0"}`, 0o644)
+	mkdir(t, filepath.Join(root, "control", "orchestrator"))
+	write(t, filepath.Join(root, "control", "orchestrator", "package.json"), `{"version":"0.1.0"}`, 0o644)
 	opts, err := BuildOptions{RepoRoot: root}.resolve()
 	if err != nil {
 		t.Fatal(err)

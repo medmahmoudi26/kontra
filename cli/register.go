@@ -149,7 +149,7 @@ func cmdRegister(kind string, args []string) error {
 	return nil
 }
 
-// manifestFile is the file registration reads for a kind. Peer of backend/src/sources.ts's
+// manifestFile is the file registration reads for a kind. Peer of control/orchestrator/src/sources.ts's
 // MANIFEST — two derivations of one contract, and a drift here is a CLI that writes a starter file
 // the server does not look for.
 func manifestFile(kind string) string {

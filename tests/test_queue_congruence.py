@@ -6,9 +6,9 @@ handler/internal/identity/identity_test.go — keep the table in sync." Three su
 each keeping itself in sync with the others by somebody remembering, across four languages and
 eight derivations of one string. The bookkeeping had already drifted before the code did: the
 comment in `sdk/go/catalog` called itself "a SIXTH independent derivation", the one in
-`backend/src/panels/pollers.ts` "a fourth", the one in `backend/src/nexusRegistry.ts` "THE FIFTH",
+`control/orchestrator/src/panels/pollers.ts` "a fourth", the one in `control/orchestrator/src/nexusRegistry.ts` "THE FIFTH",
 and no two of them were counting the same set. One of them named a peer file
-(`backend/src/workflows/nexusService.ts`) that is not in the tree at all.
+(`control/orchestrator/src/workflows/nexusService.ts`) that is not in the tree at all.
 
 THE FAILURE MODE IS THIS FILE'S ORIGINAL SENTENCE and it has not changed: the actor registers,
 polls a queue nobody schedules onto, and reports as a healthy idle Worker while every run hangs

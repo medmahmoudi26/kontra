@@ -315,7 +315,7 @@ func TestDecisionsLostWhileNobodyWasListeningAreCountedIntoTheNextOne(t *testing
 
 // --- the sentence that reaches the Transcript ------------------------------------------------------
 
-// THE SUMMARY IS THE ONLY THING A SURFACE EVER SEES. `backend/src/vocabulary.ts` reads it back; the
+// THE SUMMARY IS THE ONLY THING A SURFACE EVER SEES. `control/orchestrator/src/vocabulary.ts` reads it back; the
 // activity's RESULT is a payload and ADR 0007 is that payloads are never decoded. So the grammar has
 // to survive the two things that break a wire format: a field that is too long, and a field that is
 // empty.

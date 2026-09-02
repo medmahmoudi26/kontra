@@ -1,5 +1,5 @@
 {
- "why": "A **Lease** (ADR 0037) is written by one language and read by two others, with no registration step between them. `sdk/python/actorkit/fleet.py` BUILDS a lease id and schedules the two activities by name; `backend/src/lease.ts` parses that id back and serialises the **Lease** workflow; `cli/lease.go` decodes the **Lease** workflow off the HTTP surface. Nothing joins the three but matching string literals.",
+ "why": "A **Lease** (ADR 0037) is written by one language and read by two others, with no registration step between them. `sdk/python/actorkit/fleet.py` BUILDS a lease id and schedules the two activities by name; `control/orchestrator/src/lease.ts` parses that id back and serialises the **Lease** workflow; `cli/lease.go` decodes the **Lease** workflow off the HTTP surface. Nothing joins the three but matching string literals.",
 
  "failure": "A LEASE HELD UNDER ONE SPELLING AND DROPPED UNDER ANOTHER IS A LEASE THAT IS NEVER DROPPED, and a Lease that is never dropped is Machines that bill until a human notices. There is no loud failure anywhere on the path: the hold succeeds, the drop succeeds against an id the **Lease** workflow is not holding, `Map.delete` of an absent key returns quietly, and the **Lease** workflow keeps a claim whose holder nothing can find. Every side stays green — Python asserts the Python spelling, TypeScript asserts the TypeScript one — and the only observable is a cloud bill. The **Lease** workflow's clock bounds the damage to one TTL, which is exactly why the TTL exists and is not a reason to let the spellings drift.",
 
@@ -11,7 +11,7 @@
    {
     "name": "hold_activity",
     "value": "holdFleetLease",
-    "why": "The activity a Run calls to claim a Fleet. Declared as `HOLD_ACTIVITY` in `backend/src/lease.ts` and as `HOLD_LEASE_ACTIVITY` in `actorkit.fleet`, and it must equal the EXPORTED FUNCTION NAME in `backend/src/activities/lease.ts` — that is what Temporal registers it under."
+    "why": "The activity a Run calls to claim a Fleet. Declared as `HOLD_ACTIVITY` in `control/orchestrator/src/lease.ts` and as `HOLD_LEASE_ACTIVITY` in `actorkit.fleet`, and it must equal the EXPORTED FUNCTION NAME in `control/orchestrator/src/activities/lease.ts` — that is what Temporal registers it under."
    },
    {
     "name": "drop_activity",
@@ -70,7 +70,7 @@
  },
 
  "lease_set_wire": {
-  "why": "The JSON `GET /api/infra/stacks/:fqn/leases` returns. `backend/src/lease.ts` declares the shape the orchestrator serialises and `cli/lease.go` declares a Go struct whose `json:\"...\"` tags decode it. Neither imports the other. This is `terminal.json`'s contract in a second place, written knowing what the first one cost: a `campaign` key the streamer had renamed years earlier, blanking a column in `kontra panels` on every Fleet, with both languages green throughout.",
+  "why": "The JSON `GET /api/infra/stacks/:fqn/leases` returns. `control/orchestrator/src/lease.ts` declares the shape the orchestrator serialises and `cli/lease.go` declares a Go struct whose `json:\"...\"` tags decode it. Neither imports the other. This is `terminal.json`'s contract in a second place, written knowing what the first one cost: a `campaign` key the streamer had renamed years earlier, blanking a column in `kontra panels` on every Fleet, with both languages green throughout.",
   "keys": {
    "envelope": {
     "required": ["fleet", "leases"],

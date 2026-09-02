@@ -25,7 +25,7 @@ And the one ADR 0037 names outright: **`place()` can fail after `hold()` succeed
 window in which **Machines** are up with nothing on them. `up()` cannot reach it and hold/place can,
 which is the price of the split. `test_the_window_up_cannot_reach` measures exactly that difference.
 
-The server-side halves are `backend/src/workflows/lease.test.ts` and `backend/src/infra/fleet.test.ts`;
+The server-side halves are `control/orchestrator/src/workflows/lease.test.ts` and `control/orchestrator/src/infra/fleet.test.ts`;
 the wire between the two writers of a desired state is `shared/conformance/placement.json`.
 """
 

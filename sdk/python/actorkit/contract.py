@@ -14,7 +14,7 @@ here is not a type error, it is a call to an endpoint that answers nothing.
 
 The payload types are `TypedDict`s on purpose. They give the caller real static checking of the
 field set while staying **plain dicts at runtime**, so the bytes on the wire are byte-identical
-to what `backend/src/workflows/interpreter.ts` sends — which is the property that lets an
+to what `control/orchestrator/src/workflows/interpreter.ts` sends — which is the property that lets an
 actor deployed a month ago be called today. A dataclass would have serialized differently
 (`params: null` where the interpreter omits the key), and "differently" across a contract like
 this one is how a namespace boundary silently drops data.

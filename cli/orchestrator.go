@@ -7,7 +7,7 @@ package main
 // and says nothing, which silently undoes a locally built API; the equivalent here would be a
 // binary that hydrates a bundle over a developer's working orchestrator, or — the same mistake
 // from the other side — one that runs a two-week-old bundle while a freshly compiled
-// `backend/dist` sits in the checkout it was started from. Both are the same bug: the
+// `control/orchestrator/dist` sits in the checkout it was started from. Both are the same bug: the
 // process is healthy, the surfaces are up, and the code running is not the code you changed.
 //
 // SO THE CHOICE IS EXPLICIT, IT PREFERS WHAT YOU BUILT, AND IT ALWAYS SAYS WHICH. In a checkout
@@ -172,7 +172,7 @@ func resolveLocal(opts orchestratorOptions, repo, chose string) (*orchestratorSo
 	if repo == "" {
 		return nil, errors.New("no checkout here")
 	}
-	dir := filepath.Join(repo, "backend")
+	dir := filepath.Join(repo, "control", "orchestrator")
 	entry := filepath.Join(dir, "dist", "src", "main.js")
 	if _, err := os.Stat(entry); err != nil {
 		return nil, fmt.Errorf("%s is not compiled (no dist/src/main.js; run `pnpm --dir %s exec tsc`)", dir, dir)
@@ -300,8 +300,11 @@ func repoOfOrchestratorDir(path string) string {
 	if err != nil {
 		return path
 	}
-	if filepath.Base(abs) == "backend" {
-		return filepath.Dir(abs)
+	// `control/orchestrator`, so the repo root is TWO segments up rather than one. It was
+	// `backend` (one), and before that `orchestrator` at the root (zero) — which is why this
+	// climbs by matching the tail rather than by a fixed count.
+	if filepath.Base(abs) == "orchestrator" && filepath.Base(filepath.Dir(abs)) == "control" {
+		return filepath.Dir(filepath.Dir(abs))
 	}
 	return abs
 }

@@ -9,7 +9,7 @@ registered an unpinned descriptor through every path there is while the field, t
 endpoint all existed.
 
 The peers assert the SAME file: runtime/go/registrar/conformance_test.go and
-backend/src/catalog.conformance.test.ts.
+control/orchestrator/src/catalog.conformance.test.ts.
 
 It lives in `tests/` rather than beside the emitter because `testpaths = ["tests"]` — a
 conformance test outside that tree is collected by nobody, which is the state

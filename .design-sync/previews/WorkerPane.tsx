@@ -19,7 +19,7 @@ function Frame({ children }: { children: React.ReactNode }) {
  * So the two panel reads are answered from a fixture, and NOTHING ELSE IS FAKED. The terminals
  * response is a real inventory: four Terminals, three of them answering to the session name
  * `probe-0_2_0`, which is the situation `paneForSession` was written for. The ticket read answers
- * with the exact 503 `backend/src/server.ts` sends when `KONTRA_PANEL_TOKEN` is unset — the
+ * with the exact 503 `control/orchestrator/src/server.ts` sends when `KONTRA_PANEL_TOKEN` is unset — the
  * most common reason a freshly brought-up console cannot stream — so the error strip below carries
  * the product's own sentence rather than a story-server 404.
  *
@@ -92,7 +92,7 @@ const TERMINALS = [
   },
 ];
 
-/** Verbatim from `backend/src/server.ts` — what an unconfigured API answers, fail-closed. */
+/** Verbatim from `control/orchestrator/src/server.ts` — what an unconfigured API answers, fail-closed. */
 const TICKET_DISABLED =
   '{"error":"disabled: set KONTRA_PANEL_TOKEN on orchestrator-api to mint Dashboard tickets"}';
 

@@ -15,7 +15,7 @@ build/
 dist/
 .pytest_cache/
 
-# generated: machine proto stubs (sdk/python/_gen, backend/_gen) are COMMITTED +
+# generated: machine proto stubs (sdk/python/_gen, control/orchestrator/_gen) are COMMITTED +
 # CI drift-checked (buf generate + git diff --exit-code), so they are NOT ignored.
 # Never edited by hand; their bytecode caches fall under the __pycache__ rule above.
 
@@ -55,7 +55,7 @@ cli/kontra
 .cursor/
 
 # Orchestrator runtime artifacts (SQLite run store + DuckLake dataset catalog) are
-# ignored by backend/.gitignore — kept there so the patterns live in one place.
+# ignored by control/orchestrator/.gitignore — kept there so the patterns live in one place.
 
 .scratch/
 # kontra monitor --duckdb materialized files

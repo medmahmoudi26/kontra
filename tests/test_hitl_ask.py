@@ -573,7 +573,7 @@ def test_an_oversized_context_leaves_an_answerable_question_rather_than_killing_
 
 
 def test_the_envelope_is_the_transcripts_ask_field_for_field(wf: Fake) -> None:
-    """ONE SHAPE, WRITTEN TWICE — the house decoupling rule. `backend/src/transcript.ts`
+    """ONE SHAPE, WRITTEN TWICE — the house decoupling rule. `control/orchestrator/src/transcript.ts`
     declares what a reader of an ask expects; this module emits it. Nothing translates between
     them, so a rename on either side has to be a test failure here rather than a field that
     silently arrives as `undefined` in a rendered form.

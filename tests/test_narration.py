@@ -11,7 +11,7 @@ really is accepted and really fires, and that its user metadata really lands on 
 Both are Temporal's own guarantees. `test_narration_live.py` next door asserts them anyway,
 because "the SDK writes a Summary nothing can read" is exactly the failure this file cannot see.
 
-The reader's half is `backend/src/transcript.test.ts`, which pins the same shape from the
+The reader's half is `control/orchestrator/src/transcript.test.ts`, which pins the same shape from the
 other side. There is no shared code between them, by design, so both sides must be pinned.
 """
 
@@ -245,7 +245,7 @@ def test_a_value_passed_where_a_sentence_belongs_is_refused(wf: Fake) -> None:
 
 
 def test_an_empty_sentence_writes_nothing_rather_than_a_blank_turn(wf: Fake) -> None:
-    """`summaryOf` in backend/src/history.ts reads an empty Summary as NO Summary, so an
+    """`summaryOf` in control/orchestrator/src/history.ts reads an empty Summary as NO Summary, so an
     empty sentence would land as a bare timer with no text on it — a row in the transcript where a
     sentence was meant to be, which reads as a bug in the reader rather than as an empty f-string
     in the workflow. Nothing is strictly better."""

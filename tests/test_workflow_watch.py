@@ -18,7 +18,7 @@ Python side that actually derives:
     onto this worker's queue. Both wrote a record for a workflow the edited file never defined, which
     is a start that routes to a queue nothing serves it on and reports running forever.
 
-The reading side is backend/src/catalog.test.ts (the route accepts `error`), orchestrator's repo
+The reading side is control/orchestrator/src/catalog.test.ts (the route accepts `error`), orchestrator's repo
 test (the store round-trips it) and frontend/src/panels/workflowContract.test.ts (the panel
 draws it). The wire body is pinned against catalog.proto in test_workflow_catalog.py.
 """
@@ -387,7 +387,7 @@ class Delta:
 class _Catalog:
     """The catalog with the socket removed, plus the `workflows` table as the store writes it.
 
-    `Repo.upsertWorkflow` (backend/src/db/repo.ts) is `ON CONFLICT(name) DO UPDATE SET` over
+    `Repo.upsertWorkflow` (control/orchestrator/src/db/repo.ts) is `ON CONFLICT(name) DO UPDATE SET` over
     EVERY column, so a re-registration REPLACES the row: a field the worker omits is written NULL,
     not left alone. That is why a wrongly-addressed post is not a harmless duplicate — it is what
     turns a healthy workflow's schemas into NULL and moves its queue.

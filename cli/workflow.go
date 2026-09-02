@@ -327,7 +327,7 @@ func workflowServe(args []string) error {
 	//
 	// The same gesture `kontra serve --tmux` makes for an actor's Worker, for the same reason — and
 	// with one more consequence here. A local `kontra-*` session IS the Dashboard's inventory
-	// (`backend/src/panels/local.ts`), so serving this way is also what makes the workflow
+	// (`control/orchestrator/src/panels/local.ts`), so serving this way is also what makes the workflow
 	// worker appear as a Terminal without anything else being registered.
 	//
 	if *useTmux {

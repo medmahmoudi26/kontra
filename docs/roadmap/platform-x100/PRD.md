@@ -36,7 +36,7 @@ how Dapr is wired. That concentrates our effort where we are actually differenti
 ## What is already solid (do not touch)
 
 - **The claim-check codec is real and cross-SDK** — `handler/internal/codec/codec.go` +
-  `backend/src/codec/claimCheck.ts`, wired into the Temporal `DataConverter`
+  `control/orchestrator/src/codec/claimCheck.ts`, wired into the Temporal `DataConverter`
   (`handler/main.go:46`), with a conformance test. This is the correct pattern; items 01/05 build
   *on* it, they do not replace it.
 - **Self-contained worker image**, **streaming sub-unit blobs with `$ref` commits**, and

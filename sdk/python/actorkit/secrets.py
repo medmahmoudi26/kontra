@@ -18,13 +18,13 @@ caller could hand over.
 
 So the value never crosses Temporal at all. The actor asks the orchestrator directly, over HTTP,
 and gets back one secret: its own. The `owner` recorded when the operator created it is what makes
-"its own" mean something (`backend/src/secrets/store.ts`) — an actor cannot fetch an operator
+"its own" mean something (`control/orchestrator/src/secrets/store.ts`) — an actor cannot fetch an operator
 secret, and cannot fetch another actor's.
 
 ── WHO THIS WORKER IS ─────────────────────────────────────────────────────────────────────────
 
 `KONTRA_ACTOR_TOKEN`, set in the worker's environment by whoever served it. The console mints one
-when it serves an actor (`backend/src/actorControl.ts`); a worker started by hand gets one
+when it serves an actor (`control/orchestrator/src/actorControl.ts`); a worker started by hand gets one
 from `POST /api/secrets/identity`. It is signed by the orchestrator and names ONE actor, so it
 cannot be edited into somebody else's identity — and it is not itself a credential: it resolves
 what this actor owns and nothing more.
@@ -60,7 +60,7 @@ from actorkit.retry import NonRetryableError
 __all__ = ["get", "get_sync", "slot", "slot_sync", "SecretUnavailable"]
 
 #: The worker's identity, set by whoever served this actor. Named once, here and in
-#: `backend/src/secrets/identity.ts:ACTOR_TOKEN_VAR`.
+#: `control/orchestrator/src/secrets/identity.ts:ACTOR_TOKEN_VAR`.
 ACTOR_TOKEN_VAR = "KONTRA_ACTOR_TOKEN"
 
 

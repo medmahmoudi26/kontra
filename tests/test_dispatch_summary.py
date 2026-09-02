@@ -5,14 +5,14 @@ wire, and that copy is the one the Actor resolves against — but it is a PAYLOA
 deployment a payload may be a claim-check ref (ADR 0007). A surface that wanted to say which
 Method a run called would pay a blob GET per dispatch. So the same name is written a second time
 as a Temporal user-metadata Summary: metadata, ~200 bytes, on the scheduling event, where both
-kontra's transcript (`backend/src/transcript.ts`) and Temporal's own UI read it for free.
+kontra's transcript (`control/orchestrator/src/transcript.ts`) and Temporal's own UI read it for free.
 
 THE FAILURE MODE THIS FILE EXISTS FOR IS SILENT. Past the byte cap the line is cut with nothing
 said about it, so a Summary composed first and trimmed afterwards loses whichever field happened
 to be last — on exactly the dispatches worth reading, and without an error anywhere. Every test
 below is about spending the budget instead of overrunning it.
 
-The reader's half is `backend/src/transcript.test.ts`, which pins the same shape from the
+The reader's half is `control/orchestrator/src/transcript.test.ts`, which pins the same shape from the
 other side; there is no shared code between them by design, so both must be pinned.
 """
 

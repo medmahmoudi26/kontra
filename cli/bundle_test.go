@@ -261,7 +261,7 @@ func TestPublishingTheSameBundleTwiceProducesTheSameDigest(t *testing.T) {
 	}
 }
 
-// resolveTag is the read `backend/src/activities/fleet.ts:resolveBundle` makes: GET the manifest
+// resolveTag is the read `control/orchestrator/src/activities/fleet.ts:resolveBundle` makes: GET the manifest
 // by TAG and take the digest the registry reports for it.
 func resolveTag(t *testing.T, srv *registry.Server, name, tag string) ([]byte, ocispec.Manifest, string) {
 	t.Helper()

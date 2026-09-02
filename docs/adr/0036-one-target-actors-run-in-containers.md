@@ -47,7 +47,7 @@ Seven things were established against this checkout before deciding anything.
    `install-appliance.sh` reads and nothing pins (see issue 21).
 
 4. **A **Machine** runs four systemd units from that Bundle** — `kontra-actor`, `kontra-handler`,
-   `kontra-vmagent`, `kontra-watchdog` (`backend/src/infra/programs/machine.ts`). Three of the four
+   `kontra-vmagent`, `kontra-watchdog` (`control/orchestrator/src/infra/programs/machine.ts`). Three of the four
    exist to compensate for there being no runtime: install code, restart it when sick, ship its
    metrics.
 

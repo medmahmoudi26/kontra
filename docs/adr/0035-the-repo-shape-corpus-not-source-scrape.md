@@ -69,8 +69,8 @@ worse than no test, because it is the reason nobody writes the one that would.
 
 ### 2. The retention TTL guard is one literal deep, and the browser's copy is not guarded at all
 
-Executed against `backend/src/data/retention.ts`. Changing `DATASET_RETENTION_TTL_MS` from
-`24 * 60 * 60 * 1000` to 48 hours fails **exactly one test** — `backend/src/data/retention.test.ts:82`,
+Executed against `control/orchestrator/src/data/retention.ts`. Changing `DATASET_RETENTION_TTL_MS` from
+`24 * 60 * 60 * 1000` to 48 hours fails **exactly one test** — `control/orchestrator/src/data/retention.test.ts:82`,
 `expect(DATASET_RETENTION_TTL_MS).toBe(24 * HOUR)` — out of 28 in that file. Every other assertion
 in the suite derives its expectations from the constant, so all 27 of them follow the edit wherever
 it goes.
@@ -107,7 +107,7 @@ It is testing the directory — and §1 has five more directory moves to make.
 
 `cli/appliance/kv_clients_test.go:68` still builds `filepath.Join(root, "orchestrator")` and stats
 `orchestrator/node_modules/ioredis`; the skip message on the next line already reads
-"`backend/node_modules/ioredis` is not installed (pnpm install)". `TestRealStateStoreReadsThisStore`
+"`control/orchestrator/node_modules/ioredis` is not installed (pnpm install)". `TestRealStateStoreReadsThisStore`
 therefore skips unconditionally and forever, and the esbuild invocation below it targets
 `orchestrator/src/stateStore.ts`, which no longer exists. It is green in CI. Fifteen loud failures
 are a morning's work; one silent permanent skip is a guarantee nobody knows they lost, on the one
@@ -120,14 +120,14 @@ sides execute* rather than text one side reads:
 
 | Corpus | Runners |
 |---|---|
-| `shared/conformance/codec/fixtures.json` | `actorkit/python/internals/test_codec_conformance.py`, `backend/src/codec/conformance.test.ts`, `actorkit/go/internal/codec/conformance_test.go`, `handler/internal/codec/conformance_test.go`, `cli/appliance/codec_test.go` — five runners, three languages |
-| `actorkit/conformance/catalog.json` | `tests/test_catalog_conformance.py`, `backend/src/catalog.conformance.test.ts` (against the real Fastify server), `actorkit/go/internal/registrar/conformance_test.go` |
-| `actorkit/conformance/blobkey.json` | `actorkit/python/internals/test_blobkey_conformance.py`, `backend/src/codec/shard.test.ts`, `actorkit/go/internal/unitstore/conformance_test.go`, `cli/appliance/s3_test.go` |
+| `shared/conformance/codec/fixtures.json` | `actorkit/python/internals/test_codec_conformance.py`, `control/orchestrator/src/codec/conformance.test.ts`, `actorkit/go/internal/codec/conformance_test.go`, `handler/internal/codec/conformance_test.go`, `cli/appliance/codec_test.go` — five runners, three languages |
+| `actorkit/conformance/catalog.json` | `tests/test_catalog_conformance.py`, `control/orchestrator/src/catalog.conformance.test.ts` (against the real Fastify server), `actorkit/go/internal/registrar/conformance_test.go` |
+| `actorkit/conformance/blobkey.json` | `actorkit/python/internals/test_blobkey_conformance.py`, `control/orchestrator/src/codec/shard.test.ts`, `actorkit/go/internal/unitstore/conformance_test.go`, `cli/appliance/s3_test.go` |
 | `actorkit/conformance/output_dataset.json` | `tests/test_output_dataset_conformance.py`, `actorkit/go/internal/engine/output_dataset_conformance_test.go` — **Python and Go only; there is no TypeScript arm** |
 
 Against those four sit roughly **twenty tests that assert on the literal text of another language's
 source file** — 15 Python-greps-TypeScript (finding 3), 2 Python-greps-Go, 2 TypeScript-greps-Python
-(`backend/src/transcript.test.ts`, `backend/src/hitl.test.ts`, both reading
+(`control/orchestrator/src/transcript.test.ts`, `control/orchestrator/src/hitl.test.ts`, both reading
 `actorkit/python/lib/hitl.py` for `ASK_MEMO_PREFIX`), and 1 Go-greps-Python
 (`cli/appliance/kv_test.go:TestScriptDigestsMatchBothSDKSources`, which extracts the Lua bodies out
 of `redis_kv.py` and `rediskv.go` by string-slicing between delimiters and byte-compares them). Plus
@@ -251,7 +251,7 @@ replaces it is decided by what the test was actually trying to know:
 - **A behaviour one side must have** — "`Serve` dials with the claim-check codec". Execute it. A test
   that greps `host.go` for `DataConverter:` passes on a commented-out line and fails on an equivalent
   refactor; a test that boots the host and inspects the client's converter answers the question that
-  was asked. `backend/src/secrets/actorFetch.conformance.test.ts` and `slotFetch.conformance.test.ts`
+  was asked. `control/orchestrator/src/secrets/actorFetch.conformance.test.ts` and `slotFetch.conformance.test.ts`
   already do the harder version of this — they boot the real Fastify server and shell out to the real
   `actorkit.secrets` under `.venv/bin/python` — so "execute the peer" is also a pattern this repo has
   rather than one it needs.
@@ -261,7 +261,7 @@ replaces it is decided by what the test was actually trying to know:
 **A security invariant that no type can express may be pinned by reading source, and nothing else
 may.**
 
-The exemplar is `backend/src/panels/readonly.test.ts`, and it is the exception because it argues its
+The exemplar is `control/orchestrator/src/panels/readonly.test.ts`, and it is the exception because it argues its
 own case in the header rather than assuming it:
 
 > ADR 0020's finding (3) is the reason this test exists rather than a comment: through a **read-only**
@@ -286,12 +286,12 @@ Three things earn it, and a future scrape must carry all three or it is a findin
    thing somebody feared, and it is written down where the next reader meets it.
 
 `frontend/src/panels/widgets/untrusted.test.ts` (no raw HTML, no fetch, mermaid only behind the lazy
-import) and `backend/src/panels/attach.test.ts` (no writable stdin to a **Machine**) are the same
+import) and `control/orchestrator/src/panels/attach.test.ts` (no writable stdin to a **Machine**) are the same
 class and are kept on the same terms. Everything else in finding 5 is not.
 
 One correction while the exception is being written down: the header's closing line, "`cli/fleet.go`'s
 own suite pins its program the same way, by reading the source", names the wrong file. `cli/fleet_test.go`
-reads no source at all; the suite it describes is `backend/src/infra/fleet.test.ts`. A stale citation
+reads no source at all; the suite it describes is `control/orchestrator/src/infra/fleet.test.ts`. A stale citation
 inside the record of the one legitimate exception is the smallest possible instance of this ADR's
 whole subject, and it is left standing here as a citation rather than fixed silently in a document
 that changes no code.
@@ -305,7 +305,7 @@ names and Docker labels**, not paths, and nothing about §1 touches them:
   and `scale.go:389` names the whole compose plane by those hostnames — a worker on the fleet resolves
   that string over the VPC.
 - `cli/db.go:240` finds the running container by `label=com.docker.compose.service=orchestrator-api`.
-- `backend/src/queues.ts` and `backend/src/main.ts` describe the three roles by those names, and
+- `control/orchestrator/src/queues.ts` and `control/orchestrator/src/main.ts` describe the three roles by those names, and
   **0031** §1's collapse table is keyed on them.
 - `orchestrator-infra` and `orchestrator-probe` are live services in `docker-compose.yml`;
   `orchestrator-api` is the appliance's supervised child since **0031** §1 and is still the name in
@@ -343,7 +343,7 @@ Anyone tempted to "finish the rename" inside `cli/appliance/` should read this s
   architecture. The order in the program is deliberate: the rules land with the moves, not after
   them.
 - **Fifteen currently-red tests are not fixed by repointing them.** Finding 3's tests fail on a path.
-  Repointing `orchestrator/src` to `backend/src` makes them green in an afternoon and reinstates
+  Repointing `orchestrator/src` to `control/orchestrator/src` makes them green in an afternoon and reinstates
   exactly the coupling that broke them, one directory move before the next one. Each is triaged into
   §3's three buckets — a `contract/` import, a corpus row, or an executed assertion — and the ones
   that turn out to pin a value with a single writer simply disappear, which is the correct outcome
@@ -373,7 +373,7 @@ Anyone tempted to "finish the rename" inside `cli/appliance/` should read this s
 
 - **Keep `orchestrator/` and add the two rules.** This was available and it is the smaller change.
   Rejected because `orchestrator/` holding both the server and the browser is what let
-  `frontend/src/datasets/expiry.ts` and `backend/src/data/retention.ts` be "the same package" in
+  `frontend/src/datasets/expiry.ts` and `control/orchestrator/src/data/retention.ts` be "the same package" in
   everyone's head while being two deployment artifacts in fact — which is finding 2's precondition,
   not merely its setting.
 - **Repoint the fifteen scrapes at `backend/` and move on.** Rejected above and worth restating as a

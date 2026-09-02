@@ -3,7 +3,7 @@
 //
 // The Go peer of runtime/python/internals/statekv.py, and deliberately a BYTE-COMPATIBLE one:
 // both SDKs write the same hash, with the same field names and the same TTL, so the operator
-// projection (backend/src/state.ts) reads a Go actor's state exactly as it reads a Python
+// projection (control/orchestrator/src/state.ts) reads a Go actor's state exactly as it reads a Python
 // actor's. The key SCHEMES inside the hash still differ by SDK on purpose — Python `u{i}`, Go
 // `s{si}-u{i}` for the step pipeline — and the congruence contract is the `-ckpt` suffix and the
 // `s-` prefix, not the whole string (see the congruence tests on both sides).

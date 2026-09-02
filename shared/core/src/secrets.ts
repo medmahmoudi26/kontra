@@ -1,10 +1,10 @@
 /**
  * What a secret may be CALLED — the rule, in the one place both halves can reach.
  *
- * IT IS HERE BECAUSE IT HAD TWO COPIES. `backend/src/secrets/store.ts` declared it and refused
+ * IT IS HERE BECAUSE IT HAD TWO COPIES. `control/orchestrator/src/secrets/store.ts` declared it and refused
  * anything else; `kontra-console`'s `panels/secrets.ts` declared it again, byte-identical, under a
  * header that said "MIRRORS the server, which is the authority — the copy exists because
- * `backend/src` is a Node package this bundle does not depend on". A test then read the server's
+ * `control/orchestrator/src` is a Node package this bundle does not depend on". A test then read the server's
  * SOURCE and compared the two regex literals as strings, which worked and was a symptom: the only
  * reason to compare two declarations is that there are two.
  *

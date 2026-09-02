@@ -44,21 +44,21 @@ contracts:
       - RetryPolicy                     # step.proto — mirrors temporalio RetryPolicy
       - RunEnvelope                     # run.proto — FUTURE Nexus dispatch envelope; NOT wired (see run.proto)
   # Per-actor I/O compat is owned IN-PROCESS by the catalog's registration gate
-  # (backend/src/catalog.ts): Draft 2020-12 JSON Schema, carried per (name,
+  # (control/orchestrator/src/catalog.ts): Draft 2020-12 JSON Schema, carried per (name,
   # version), and a re-registration whose input/output/params schema differs from the
   # stored one is refused with 409 (ADR 0004 — the version is immutable and a schema
   # change bumps it). A NEW version IS compared against the one immediately before it
-  # (backend/src/compat.ts): input BACKWARD, output FORWARD. That half REPORTS and
+  # (control/orchestrator/src/compat.ts): input BACKWARD, output FORWARD. That half REPORTS and
   # never refuses — a breaking change in a new version is what versions are for — and the
   # finding is stored on the actor row and shown on the Actors page (ADR 0027 §4, closed).
   actorIO:
-    owner: catalog-registration-gate      # backend/src/catalog.ts, POST /api/actors
+    owner: catalog-registration-gate      # control/orchestrator/src/catalog.ts, POST /api/actors
     schema: json-schema-draft-2020-12
     sameVersionChange: refused            # 409 VersionImmutable, naming the Method that moved
     # STRUCTURAL only: top-level properties/required/declared type. A narrowed bound, a changed
     # meaning and a dropped Method read clean; `params` is not compared; and unknown (a first
     # version, a Method new in this one, a schema with no properties) is never called compatible.
-    crossVersionCompat: structural-report  # backend/src/compat.ts — 200 + a stored finding, never a refusal
+    crossVersionCompat: structural-report  # control/orchestrator/src/compat.ts — 200 + a stored finding, never a refusal
     # References are the only payloads that flow through workflow code. Outputs are
     # offloaded and returned as {ref, unitCount}; payloads strip run-scoped fields
     # so identical content content-addresses to the same CAS object across runs.

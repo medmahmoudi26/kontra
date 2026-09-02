@@ -34,7 +34,7 @@ package main
 // ═══ WHAT IT PRINTS, AND THE ONE THING THE PRINT HAS TO ADMIT ═══
 //
 // A **Fleet** placement resolves a Bundle by CONVENTION and not from a stored reference:
-// `backend/src/activities/fleet.ts:resolveBundle` builds `<registry>/v2/bundles/<actor>/manifests/
+// `control/orchestrator/src/activities/fleet.ts:resolveBundle` builds `<registry>/v2/bundles/<actor>/manifests/
 // <version>` out of the actor and the version alone, pinned on both sides by
 // `shared/conformance/bundleref.json`. A `--push` to any other repository therefore publishes an Artifact
 // that is perfectly good, perfectly mirrorable, and NOT findable by `kontra fleet deploy`. That is a

@@ -3,7 +3,7 @@
 
 The corpus pins the claim-check WIRE CONTRACT that every codec implementation must
 reproduce: the Go handler (handler/internal/codec) and the TS orchestrator
-(backend/src/codec/claimCheck.ts). Each language's test runs its REAL codec against
+(control/orchestrator/src/codec/claimCheck.ts). Each language's test runs its REAL codec against
 this one fixtures.json -- that is what keeps the encoders byte-compatible.
 
 What is byte-exact (the actual interop contract):
@@ -193,7 +193,7 @@ def build() -> None:
                                    "prefix. The alternative (a slash is a literal character in "
                                    "the prefix, so 'p/' addresses 'p//cas/...') was what "
                                    "handler/internal/objectstore.Key and "
-                                   "backend/src/codec/objectStore.ts:key did before this corpus "
+                                   "control/orchestrator/src/codec/objectStore.ts:key did before this corpus "
                                    "was extended, and it is rejected: two spellings an operator "
                                    "reads as identical addressing two different namespaces, "
                                    "with no error, is the same defect class as the "

@@ -20,7 +20,7 @@ import (
 // WHAT IT REPLACES. Put and Get spelled the address `s.prefix + key`, plain concatenation, under
 // a comment that read "raw; every SDK concatenates it verbatim" — and that comment was the
 // defect, not a description of one. It was true of Python's casstore and of nothing
-// else: `handler/internal/objectstore.Key` and `backend/src/codec/objectStore.ts:key`
+// else: `handler/internal/objectstore.Key` and `control/orchestrator/src/codec/objectStore.ts:key`
 // both join, so with KONTRA_S3_PREFIX=`slice11` a Go actor wrote `slice11cas/df/df5b…` while the
 // handler, the orchestrator and the CLI asked for `slice11/cas/df/df5b…`. actorkit and the
 // handler are separate modules and never import each other, so what holds the four

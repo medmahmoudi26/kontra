@@ -112,7 +112,7 @@ type terminal struct {
 	//
 	// A DEAD COLUMN UNTIL 2026-08-30, and the two ways this struct was wrong are worth keeping:
 	//
-	//   * this key was `campaign` long after `backend/src/panels/types.ts` renamed it to `fleet`,
+	//   * this key was `campaign` long after `control/orchestrator/src/panels/types.ts` renamed it to `fleet`,
 	//     so it decoded nothing and `dashIfEmpty` printed `-` for every Terminal on every Fleet —
 	//     a blank that reads as "this Machine has no Fleet" rather than as a wire mismatch;
 	//   * a `Role string `json:"role"`` sat below it. The streamer has never sent `role` (its key
@@ -198,7 +198,7 @@ func panelError(base string, err error) error {
 				"  not an empty Fleet.")
 		case 503:
 			return fmt.Errorf("the panels streamer has panels DISABLED (503): KONTRA_PANEL_TOKEN is unset in ITS environment.\n" +
-				"  It fails closed by design (backend/src/auth.ts) and serves NOTHING rather than exposing the\n" +
+				"  It fails closed by design (control/orchestrator/src/auth.ts) and serves NOTHING rather than exposing the\n" +
 				"  Fleet's terminals unauthenticated. Set KONTRA_PANEL_TOKEN for the orchestrator-infra service and\n" +
 				"  restart it (`kontra infra up`), then set the same value here.")
 		case 404:

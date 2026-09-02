@@ -86,7 +86,7 @@ _SESSION_SLOTS = 4
 #:
 #: On the fleet it is the Droplet's name (`kf-dns-01`): a Worker is a pair of systemd units ON
 #: the Machine, not a container, so there is no container id standing between the two
-#: (backend/src/infra/programs/machine.ts).
+#: (control/orchestrator/src/infra/programs/machine.ts).
 MACHINE = socket.gethostname()
 
 

@@ -40,7 +40,7 @@ func TestTmuxSessionIsTheActorAndItsVersion(t *testing.T) {
 	}
 }
 
-// The `@kontra` values are a cross-language contract with `backend/src/panels/tmux.ts`, which
+// The `@kontra` values are a cross-language contract with `control/orchestrator/src/panels/tmux.ts`, which
 // derives them independently — and a drift has the worst failure shape there is: the Worker starts
 // and runs perfectly, and the Monitor never shows it.
 func TestTheSessionTagSaysWhatKindOfSessionItIs(t *testing.T) {
@@ -123,7 +123,7 @@ func TestTmuxHoldRunsUnderEVERYShellTmuxMightPick(t *testing.T) {
 // wrapped command in its own process group, so tmux reports the hold shell (`zsh`) for a pane whose
 // Worker is running AND for one whose Worker is over. Measured on this box, both directions. So the
 // status is written into a pane option the Monitor's existing `list-panes` probe returns, and
-// `backend/src/panels/tmux.ts:KONTRA_EXIT_OPTION` is the peer that reads it.
+// `control/orchestrator/src/panels/tmux.ts:KONTRA_EXIT_OPTION` is the peer that reads it.
 func TestTheHoldRecordsItsExitStatusForTheMonitor(t *testing.T) {
 	if kontraExitOption != "@kontra_exit" {
 		t.Errorf("the option name is a cross-language contract: %q", kontraExitOption)

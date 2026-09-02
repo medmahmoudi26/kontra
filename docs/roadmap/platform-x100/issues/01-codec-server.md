@@ -5,7 +5,7 @@ Status: ready-for-agent
 
 ## Problem
 We already offload large Temporal payloads to S3 via a claim-check codec
-(`handler/internal/codec/codec.go`, `backend/src/codec/claimCheck.ts`, wired at
+(`handler/internal/codec/codec.go`, `control/orchestrator/src/codec/claimCheck.ts`, wired at
 `handler/main.go:46-47`). But there is **no codec server**, so the Temporal Web UI (:8233) and
 `temporal workflow show` display offloaded inputs/outputs as opaque `$ref` blobs. Half the point of
 the claim-check pattern — being able to *read* payloads in the native UI — is unrealized.

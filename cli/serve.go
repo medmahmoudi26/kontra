@@ -163,7 +163,7 @@ func cmdServe(args []string) error {
 	// ran `python <dir>/actor.py` against a directory that has never held one — and the failure is
 	// `can't open file …/actor.py`, which reads as a missing file rather than as the wrong engine.
 	// The Actors page's Serve button passes no engine at all (there is no control for it, on
-	// purpose — see backend/src/actorControl.ts), so under the old default that button could
+	// purpose — see control/orchestrator/src/actorControl.ts), so under the old default that button could
 	// only ever serve Python actors, and it reported a Python error for every Go one.
 	engine := fs.String("engine", "", "actor engine: py|go (default: detected from the folder)")
 	// NOT localhost by default: compose publishes Redis on the VPC address, and the actor's

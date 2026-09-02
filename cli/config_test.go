@@ -250,7 +250,7 @@ func TestTheTemplateParsesAsItsOwnConfig(t *testing.T) {
 	}
 }
 
-// ONE VARIABLE, ONE ANSWER, IN BOTH LANGUAGES. `backend/src/sources.ts:kontraHome` resolves
+// ONE VARIABLE, ONE ANSWER, IN BOTH LANGUAGES. `control/orchestrator/src/sources.ts:kontraHome` resolves
 // `~/.kontra` when KONTRA_HOME is unset — that is what the register form prefills and what a
 // registration records — and this side used to walk up to the checkout's `.kontra/` instead.
 //

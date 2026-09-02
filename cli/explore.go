@@ -8,7 +8,7 @@
 //	kontra explore --catalog                  # cross-run, READ-ONLY, separately provisioned creds
 //
 // The orchestrator returns short-lived presigned GET URLs for THIS RUN'S parquet files only
-// (backend/src/data/explore.ts). Those URLs ARE the credential — object-level, not
+// (control/orchestrator/src/data/explore.ts). Those URLs ARE the credential — object-level, not
 // row-level, and time-boxed. So the generated init script is written 0600, removed on exit,
 // and passed to DuckDB as a FILE and never inlined into argv: /proc/<pid>/cmdline is
 // world-readable and would undo both.
@@ -51,7 +51,7 @@ const (
 	exploreSpillDir = "duckdb-temp"
 )
 
-// --- wire types (backend/src/data/explore.ts names, verbatim) ---
+// --- wire types (control/orchestrator/src/data/explore.ts names, verbatim) ---
 
 type exploreColumn struct {
 	Name string `json:"name"`
@@ -328,7 +328,7 @@ var errNoExploreToken = errors.New(
 		"  the endpoint mints presigned URLs for a run's output, so it is token-gated and fails closed")
 
 // exploreToken reads the token the endpoint expects, preferring KONTRA_EXPLORE_TOKEN and
-// falling back to KONTRA_STATE_TOKEN — the same order as the server (backend/src/auth.ts).
+// falling back to KONTRA_STATE_TOKEN — the same order as the server (control/orchestrator/src/auth.ts).
 func exploreToken() string {
 	if t := envOr("KONTRA_EXPLORE_TOKEN", os.Getenv("KONTRA_STATE_TOKEN")); t != "" {
 		return t
@@ -781,7 +781,7 @@ func (w *exploreWorkspace) cleanup() { _ = os.RemoveAll(w.dir) }
 // Best-effort by design: an unreadable TMPDIR must never block an explore.
 //
 // A dir is only removed once it is IDENTIFIED as ours by the spill dir every workspace is
-// born with. The prefix alone is not enough — backend/src/exploreRoutes.test.ts already
+// born with. The prefix alone is not enough — control/orchestrator/src/exploreRoutes.test.ts already
 // mkdtemps `kontra-explore-*` into the same TMPDIR, and a sweeper that deletes by name guess
 // eventually deletes something it did not create.
 func scavengeExploreDirs(root string, maxAge time.Duration) {

@@ -44,20 +44,20 @@ const (
 // the wire stays JSON (ADR 0002). Each SDK hand-emits that JSON — Go in
 // runtime/go/registrar, Python in runtime/python/internals/catalog.py — and the
 // orchestrator reads it in POST /api/actors and persists it as ActorRecord
-// (backend/src/db/repo.ts). Nothing makes those three agree except one check per side,
+// (control/orchestrator/src/db/repo.ts). Nothing makes those three agree except one check per side,
 // each written where that side lives and sharing no code with the others:
 // handler/internal/wire/wire_congruence_test.go reads the generated descriptor back through
 // protoreflect, tests/test_method_types.py holds the posted Python body to it, and
-// backend/catalog.contract.ts makes a field this file defines and the store cannot hold
+// control/orchestrator/catalog.contract.ts makes a field this file defines and the store cannot hold
 // a compile error.
 //
 // THOSE THREE CHECK EACH SIDE AGAINST THIS FILE, WHICH IS NOT THE SAME AS THE SIDES AGREEING.
 // `source` was congruent with this file, present in the `actors` table and emitted by Python,
 // and simply absent from the Go emitter — every check above stayed green while a catalogued Go
 // actor had no way back to its code. What holds the emitters to EACH OTHER is one golden
-// descriptor, conformance/catalog.json, that all three compare their real emission to:
+// descriptor, shared/conformance/catalog.json, that all three compare their real emission to:
 // runtime/go/registrar/conformance_test.go, tests/test_catalog_conformance.py and
-// backend/src/catalog.conformance.test.ts.
+// control/orchestrator/src/catalog.conformance.test.ts.
 type ActorDescriptor struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"` // "{name}@{version}" — the catalog primary key

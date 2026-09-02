@@ -41,7 +41,7 @@ def object_key(prefix: str, *parts: str) -> str:
     including a second Python worker reading through any other implementation's key.
 
     The peers are `handler/internal/objectstore.Key`, `runtime/go/codec.objectKey` and
-    `backend/src/codec/objectStore.ts:key`. Nothing imports across those boundaries, so what
+    `control/orchestrator/src/codec/objectStore.ts:key`. Nothing imports across those boundaries, so what
     holds the four to one answer is the `prefixCases` rows of shared/conformance/codec/fixtures.json —
     which did not exist until this bug did, because every row carried the empty prefix, the one
     input class where concatenation and segment-joining CANNOT differ (ADR 0035 finding 1).

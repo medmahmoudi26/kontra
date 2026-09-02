@@ -27,7 +27,7 @@ Node is **not** needed to run kontra, and the reason changed with v2: the orches
 from a container, and now it is a supervised child of the `kontra` process, hydrated from a bundle
 that already carries its own Node (ADR 0031). The appliance build fetches and checksums that Node
 itself, which is why building a release needs Go and nothing else. Node 22 + `corepack enable` for
-pnpm is needed to work on `backend/` or `core/`. The console is the separate
+pnpm is needed to work on `control/orchestrator/` or `shared/core/`. The console is the separate
 [kontra-console](https://github.com/medmahmoudi26/kontra-console) repository since ADR 0038; a
 release needs its built `dist`, which `kontra release` deliberately does not build for you —
 clone it as a sibling and `pnpm run build`, or point at a build you have with

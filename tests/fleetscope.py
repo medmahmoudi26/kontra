@@ -15,8 +15,8 @@ which reads as the test being wrong rather than as the code being untested.
 
 It is deliberately NOT a Temporal test environment. What it pins is the SHAPE of the scope — what it
 schedules and what it does not — and the shape is a property of this file's code, not of a server.
-The server-side half of the same contract is `backend/src/workflows/lease.test.ts`, which runs
-against a real Temporal, and `backend/src/activities/lease.test.ts`, which runs the real activities.
+The server-side half of the same contract is `control/orchestrator/src/workflows/lease.test.ts`, which runs
+against a real Temporal, and `control/orchestrator/src/activities/lease.test.ts`, which runs the real activities.
 
 THE ONE THING IT MUST NOT DO IS SUCCEED QUIETLY WHEN NOTHING RAN. `run()` asserts that the scope
 actually entered and exited, so a harness that patched the wrong name fails here instead of leaving
@@ -186,7 +186,7 @@ class FleetScope:
             if name == fleet.RESOLVE_BUNDLE_ACTIVITY:
                 if self.resolve_fails:
                     raise RuntimeError(self.resolve_fails)
-                # EXACTLY `ResolvedBundle` (`backend/src/activities/fleet.ts`), all five fields.
+                # EXACTLY `ResolvedBundle` (`control/orchestrator/src/activities/fleet.ts`), all five fields.
                 # The SDK spreads this straight into the stack args, so a fake missing a field is a
                 # fake that cannot see a placement key going missing — which is the whole class of
                 # bug `shared/conformance/placement.json` exists for. `test_placement_conformance.py`

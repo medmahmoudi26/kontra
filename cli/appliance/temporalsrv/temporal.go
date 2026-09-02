@@ -416,7 +416,7 @@ func serverConfig(opts Options, dbPath string) (*config.Config, error) {
 // — three layers away from a namespace setting. The handler's log is the only place the real
 // sentence appears, and on a worker container that log is inside the container.
 //
-// THEY USED TO BE REGISTERED BY THE ORCHESTRATOR AND ONLY BY IT (`backend/src/visibility.ts`,
+// THEY USED TO BE REGISTERED BY THE ORCHESTRATOR AND ONLY BY IT (`control/orchestrator/src/visibility.ts`,
 // called from `temporalClient.ts` at boot), which was fine while the orchestrator was the only way
 // anything reached Temporal. It is not fine now: `kontra up --orchestrator=none` describes itself
 // as "serving its five embedded services only", and what it actually served was a control plane on
@@ -426,7 +426,7 @@ func serverConfig(opts Options, dbPath string) (*config.Config, error) {
 // Registering here does not replace the orchestrator's call and must not: an appliance pointed at
 // someone else's Temporal still needs that one, and adding an attribute that already exists is a
 // no-op on both paths. The names are the contract — they are spelled identically in
-// `backend/src/visibility.ts` and in `handler/`, and a fifth one added there needs a line
+// `control/orchestrator/src/visibility.ts` and in `handler/`, and a fifth one added there needs a line
 // here.
 func kontraSearchAttributes() map[string]enumspb.IndexedValueType {
 	return map[string]enumspb.IndexedValueType{

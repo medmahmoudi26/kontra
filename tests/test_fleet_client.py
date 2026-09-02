@@ -27,7 +27,7 @@ from actorkit import fleet
 from fleetscope import FleetScope
 
 ROOT = Path(__file__).resolve().parent.parent
-BACKEND = ROOT / "backend" / "src"
+BACKEND = ROOT / "control" / "orchestrator" / "src"
 #: The shared kernel (ADR 0041). Declarations both the orchestrator and the console read live here.
 CORE = ROOT / "shared" / "core" / "src"
 
@@ -43,7 +43,7 @@ def _read(rel: str) -> str:
 
 
 def test_the_infra_queue_matches_the_orchestrator():
-    """`backend/src/infra.ts` — the queue `stackWorkflow` is served on. A drift here is a
+    """`control/orchestrator/src/infra.ts` — the queue `stackWorkflow` is served on. A drift here is a
     child workflow that starts and is never picked up."""
     # THE DEFINITION MOVED, THE PROPERTY DID NOT. `infra.ts` used to inline the env read; since the
     # roles were merged into one process it calls `queues.ts:infraQueue()`, which is where the
@@ -528,7 +528,7 @@ def test_the_credential_name_pattern_matches_the_secret_store():
     somebody makes at 3am with a production credential.
 
     THE AUTHORITY MOVED, AND READING ITS SOURCE IS STILL THE ONLY MECHANISM HERE. It was
-    `backend/src/secrets/store.ts`; ADR 0041 moved the declaration to `@kontra/core` because the
+    `control/orchestrator/src/secrets/store.ts`; ADR 0041 moved the declaration to `@kontra/core` because the
     console had a second copy of it. THIS side cannot be fixed the same way — the SDK is Python and
     cannot import a TypeScript constant — so this really is a contract with two writers, and it is
     pinned by reading the one that decides. The console's copy is gone; this one is not a copy, it

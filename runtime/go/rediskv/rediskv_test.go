@@ -210,7 +210,7 @@ func TestCrossSDKKeyLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The exact key, the exact hash fields — this is what redis_kv.py writes and what
-	// backend/src/state.ts reads for the global tier.
+	// control/orchestrator/src/state.ts reads for the global tier.
 	if n, _ := c.Exists(ctx, want).Result(); n != 1 {
 		t.Fatalf("global_state key is not %q", want)
 	}

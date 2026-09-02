@@ -245,9 +245,9 @@ func TestSessionsIsSentOnlyWhenAskedFor(t *testing.T) {
 
 // `TestBundlePointerKeyIsTheContract` STOOD HERE, and it is deleted rather than translated.
 //
-// It pinned `<name>/<version>/latest.json` against a literal, while `backend/src/activities/
+// It pinned `<name>/<version>/latest.json` against a literal, while `control/orchestrator/src/activities/
 // fleet.test.ts` pinned the same layout against a second literal that did not know about it —
 // the hand-copied golden `shared/conformance/README.md` describes. The contract survives and is
 // stronger, because it now covers the whole address on both sides at once:
 // `shared/conformance/bundleref.json`, driven from `cli/bundleref_conformance_test.go` here and
-// `backend/src/activities/bundleref.conformance.test.ts` there.
+// `control/orchestrator/src/activities/bundleref.conformance.test.ts` there.

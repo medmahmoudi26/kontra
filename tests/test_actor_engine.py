@@ -843,7 +843,7 @@ def test_a_batch_finishes_in_one_call():
 def test_heartbeat_speaks_the_orchestrator_s_field_names():
     """The heartbeat payload is a cross-language wire contract, and a silent one.
 
-    `backend/src/heartbeat.ts` decodes {node, done, total, isolated} off the pending
+    `control/orchestrator/src/heartbeat.ts` decodes {node, done, total, isolated} off the pending
     activity and every field is optional with a 0 default — so a renamed field does not error,
     it reports 0/0 forever, which renders exactly like a node that has done nothing. This drifted
     once already: the engine emitted {committed, total} after ADR 0018 and live progress went

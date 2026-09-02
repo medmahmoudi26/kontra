@@ -31,7 +31,7 @@ Six things were established against the local controller before deciding anythin
    Dataset is live; the gap is only that nothing names or streams it.
 
 2. **Identity is the path, and a name→path registry was deliberately deleted.**
-   `backend/src/data/datasets.ts` opens with it: `output/<actor>/version=<v>/dt=<dispatch>/`,
+   `control/orchestrator/src/data/datasets.ts` opens with it: `output/<actor>/version=<v>/dt=<dispatch>/`,
    and the previous scheme's `_kontra_dataset` registry — "whose only purpose was translating that
    hash back into a name" — is gone. Any naming design that reintroduces a lookup table walks that
    back.
@@ -76,7 +76,7 @@ costs no storage and needs no index — it is a *rendering* of facts the ledger 
 keeps finding 2 intact. Three constraints on it:
 
 - **Derived from the manifest's name and version, not the task queue string.** They are spelled the
-  same (`workflowQueue()` in `cli/workflow.go` and `backend/src/workflowControl.ts`), but
+  same (`workflowQueue()` in `cli/workflow.go` and `control/orchestrator/src/workflowControl.ts`), but
   `--queue` can be overridden at start: the queue is transport, the manifest is identity.
 - **UTC, via `dtPartition`.** Two controllers exist (sfo3, nyc1); a local-time name would denote two
   different instants depending on which box wrote it. The UI renders local.

@@ -10,7 +10,7 @@ Actor still runs one Batch and the caller still shards.
 ## Context
 
 The Nexus op has had exactly one caller since it existed:
-`backend/src/workflows/interpreter.ts:401`. Everything a **Run** could ever be had to be
+`control/orchestrator/src/workflows/interpreter.ts:401`. Everything a **Run** could ever be had to be
 expressible as a saved graph, because the graph interpreter was the only thing that knew how to
 speak to a deployed actor. That is a real constraint on what work is possible, not a stylistic
 one, and it shows up in three places.

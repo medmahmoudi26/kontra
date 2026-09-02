@@ -1,7 +1,7 @@
 {
   "name": "kontra-workspace",
   "private": true,
-  "description": "pnpm workspace root. The publishable package here is core/ (@kontra/core); backend/ is the orchestrator and is never published.",
+  "description": "pnpm workspace root. The publishable package here is shared/core (@kontra/core); control/orchestrator is never published.",
   "scripts": {
     "build": "pnpm --filter @kontra/core run build && pnpm --filter @kontra/backend run build",
     "typecheck": "pnpm --filter @kontra/core run build && pnpm --filter @kontra/backend run typecheck",

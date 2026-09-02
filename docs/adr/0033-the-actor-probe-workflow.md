@@ -3,7 +3,7 @@
 ## Status
 
 **Accepted.** Reverses the *generate-and-hand-it-over* half of the call flow shipped under **0023**
-§12 (`backend/src/actorControl.ts:callerFor`, `frontend/src/panels/MethodCall.tsx`) and
+§12 (`control/orchestrator/src/actorControl.ts:callerFor`, `frontend/src/panels/MethodCall.tsx`) and
 keeps the half that teaches — the generated caller survives as a read-only artefact, in the same
 spirit **0030** kept a code editor's legibility while dropping its write.
 
@@ -37,8 +37,8 @@ before deciding anything.
    written out as source they have to host themselves.
 
 2. **`POST /api/runs` does not 404, and has not since the day after the interpreter was removed.**
-   This matters because five comments in this repo say it does — `backend/src/server.ts:782`,
-   `backend/src/actorControl.ts:147`, `frontend/src/panels/ActorsPage.tsx:51`,
+   This matters because five comments in this repo say it does — `control/orchestrator/src/server.ts:782`,
+   `control/orchestrator/src/actorControl.ts:147`, `frontend/src/panels/ActorsPage.tsx:51`,
    `panels/methodCall.ts:7`, `panels/methodCall.render.test.ts:13` — and that sentence is the load-
    bearing premise of the flow this ADR reverses. What `4a69b27` (2026-08-14) removed was the route
    that **took a graph** and started the interpreter, along with the server-minted run id, the durable
@@ -76,15 +76,15 @@ before deciding anything.
    first's rows. Nothing anywhere downstream could tell those apart. See Decision §2.
 
 4. **There is no orchestrator execution queue any more, and that was §12's doing.**
-   `backend/src/queues.ts` opens by saying so: the queue "carried the graph interpreter and its
+   `control/orchestrator/src/queues.ts` opens by saying so: the queue "carried the graph interpreter and its
    data-routing activities", and what survives is placement-driven work only (`kontra-materializer`,
    `kontra-datasets`). kontra does still own and serve workflows — `kontra-infra` runs the Pulumi
-   stack, the tmux session and **0029** §3's own retention sweep (`backend/src/infra.ts:123`,
+   stack, the tmux session and **0029** §3's own retention sweep (`control/orchestrator/src/infra.ts:123`,
    `workflows/infra.ts`) — so a kontra-owned workflow is not a new category. A kontra-owned *general*
    execution queue would be.
 
 5. **The TypeScript Nexus caller was deleted with the interpreter, and its own docstring says why.**
-   `backend/src/workflows/nexusService.ts` went in `4a69b27`; only a stale build artefact is
+   `control/orchestrator/src/workflows/nexusService.ts` went in `4a69b27`; only a stale build artefact is
    left, and it reads: *"The Nexus service **the interpreter** calls to dispatch an actor node."*
    TypeScript has no caller half at all — **0023** §22 gave the caller's side to Python and (on
    reversal) to Go, and left it there. Restoring that file to host the probe would put a third,
@@ -156,7 +156,7 @@ Nexus artefact was deleted for being the interpreter's.
 ### 4. The probe goes through the production Nexus operation
 
 The probe dispatches through `kontra.actor:run` on the Actor's registered endpoint
-(`kontra-<name>-<version>`, owned by registration — `backend/src/nexusRegistry.ts`), exactly as a
+(`kontra-<name>-<version>`, owned by registration — `control/orchestrator/src/nexusRegistry.ts`), exactly as a
 caller's workflow does. It does **not** schedule `RunBatch` onto the Actor's queue directly.
 
 The direct route is genuinely simpler and it is genuinely wrong. It skips the backing workflow, which

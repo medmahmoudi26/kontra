@@ -660,7 +660,7 @@ def build_session_factory(registry, *, store="env"):
             raises must not fail a unit that already committed.
 
             THE FIELD NAMES ARE A CONTRACT, not a local choice. The orchestrator decodes this
-            payload off the pending activity (`backend/src/heartbeat.ts`, HeartbeatDetail)
+            payload off the pending activity (`control/orchestrator/src/heartbeat.ts`, HeartbeatDetail)
             and it is what `kontra monitor` renders as live per-node progress. Every field there
             is optional and defaults to 0, so a wrong name does not error — it reports 0/0
             forever, which reads exactly like a node that has done nothing.

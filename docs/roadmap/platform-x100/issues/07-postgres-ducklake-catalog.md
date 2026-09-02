@@ -23,7 +23,7 @@ share one catalog.
 - Backfill/verify existing materialized datasets appear in `listDatasets`.
 
 ## Files
-- `backend/src/data/parquet.ts` (+ wherever `listDatasets`/`linkDataset` live), orchestrator
+- `control/orchestrator/src/data/parquet.ts` (+ wherever `listDatasets`/`linkDataset` live), orchestrator
   config/env, `docker-compose.yml` (Postgres reuse/creds via secrets — see issue 08)
 
 ## Verify (local, no fleet)

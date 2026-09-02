@@ -1,6 +1,6 @@
 // panels_conformance_test.go — THE GO ARM of shared/conformance/terminal.json.
 //
-// This side is the wire's READER. `backend/src/panels/types.ts` is the writer, and the two are
+// This side is the wire's READER. `control/orchestrator/src/panels/types.ts` is the writer, and the two are
 // joined by nothing but a matching set of string literals: no code generation, no shared schema, no
 // import in either direction. `encoding/json` does not complain about a key it was not told about
 // and does not complain about a field it was not given, so the whole failure mode is silent by
@@ -119,10 +119,10 @@ func TestThisReaderDeclaresNoKeyTheStreamerDoesNotSend(t *testing.T) {
 		t.Errorf("this struct decodes %v, which shared/conformance/terminal.json says nobody sends.\n"+
 			"  A key no writer emits is not a harmless extra field: it decodes to the zero value on\n"+
 			"  every response, and a blank cell reads as data. `campaign` sat here in exactly this\n"+
-			"  state after backend/src/panels/types.ts renamed it to `fleet`, and every Terminal on\n"+
+			"  state after control/orchestrator/src/panels/types.ts renamed it to `fleet`, and every Terminal on\n"+
 			"  every Fleet printed `-` in that column with no test red on either side.\n"+
 			"  If the streamer really did gain this key, add it to the corpus and to\n"+
-			"  backend/src/panels/types.ts in this same commit.", phantom)
+			"  control/orchestrator/src/panels/types.ts in this same commit.", phantom)
 	}
 	// AND THE ONE KEY THIS COMMAND ACTUALLY PRINTS IS PRESENT. The containment above is satisfied
 	// vacuously by a struct that declares nothing at all, which would also print an empty table.

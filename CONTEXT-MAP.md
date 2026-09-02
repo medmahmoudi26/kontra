@@ -10,7 +10,7 @@ lifecycles, different failure modes, and different trust boundaries.
   back. The repo's core context: the orchestrator, the handler and actorkit all speak this language.
   (It used to read "turns a saved graph into work that runs"; ADR 0023 §12 deleted the graph
   interpreter and made a **Run** one execution of a caller's workflow.)
-- [Fleet](./infra/CONTEXT.md) — brings into existence, repairs, and destroys the machines that
+- [Fleet](./control/orchestrator/src/infra/CONTEXT.md) — brings into existence, repairs, and destroys the machines that
   Execution dispatches to.
 
 ## Relationships

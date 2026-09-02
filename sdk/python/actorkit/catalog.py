@@ -150,7 +150,7 @@ CLOSE_SESSION_ACTIVITY = "CloseSession"
 # WHAT HOLDS THEM TO ONE ANSWER IS shared/conformance/queues.json, which every language executes
 # (tests/test_queue_congruence.py is this module's arm). Deliberately not a comment counting the
 # peers or naming their files: the three comments that did — here, in sdk/go/catalog and in
-# backend/src/panels/pollers.ts — gave three different counts, and one of the files named here
+# control/orchestrator/src/panels/pollers.ts — gave three different counts, and one of the files named here
 # had been renamed out of the tree.
 # ---------------------------------------------------------------------------------------------
 
@@ -276,7 +276,7 @@ def entry_input(
 # (handler/nexus.go): it is a label nothing parses, and a label that names the wrong thing is
 # worse than no label at all.
 #
-# The reader is `methodOf` in backend/src/transcript.ts, which takes the FIRST field of the
+# The reader is `methodOf` in control/orchestrator/src/transcript.ts, which takes the FIRST field of the
 # line as the Method name when it has the shape of one. Like the identity block above this is a
 # two-writer contract with no registration step to catch a drift — and like it, the failure mode
 # was chosen: a line the reader does not recognise leaves the transcript with NO Method name,
@@ -1244,7 +1244,7 @@ async def _resolved_ref(batch: "Batch") -> Mapping[str, Any]:
 # ---------------------------------------------------------------------------------------------
 
 #: Where the pager runs. The materializer host serves it on its own queue, so a caller's page
-#: read never queues behind a long decode. Mirrors backend/src/queues.ts.
+#: read never queues behind a long decode. Mirrors control/orchestrator/src/queues.ts.
 DATASET_QUEUE = "kontra-datasets"
 PAGE_DATASET_ACTIVITY = "pageDataset"
 SPLIT_BATCH_ACTIVITY = "splitBatch"
@@ -1264,7 +1264,7 @@ PROMOTE_DATASET_ACTIVITY = "promoteDataset"
 TAG_DATASET_ACTIVITY = "tagDataset"
 
 #: The Temporal search attribute an in-workflow tag MIRRORS to (ADR 0029 §4). Registered by the
-#: orchestrator (`backend/src/visibility.ts`). It is a PROJECTION over the live window, never
+#: orchestrator (`control/orchestrator/src/visibility.ts`). It is a PROJECTION over the live window, never
 #: read as truth — the Dataset record is the authority.
 KONTRA_TAG_ATTRIBUTE = "KontraTag"
 
@@ -1515,7 +1515,7 @@ _SLUG_MAX = 64
 def _slug(run_id: str) -> str:
     """A Run id as ONE path segment and ONE SQL identifier.
 
-    `backend/src/data/parquet.ts:safeName` maps everything outside `[A-Za-z0-9_.-]` to `_`
+    `control/orchestrator/src/data/parquet.ts:safeName` maps everything outside `[A-Za-z0-9_.-]` to `_`
     before a name becomes a table or a key, and `datasetStateKey`/`datasetOwnerKey` do it again for
     the object store. Doing it HERE too is not redundancy: without it the name a caller reads in
     `kontra dataset ls` (this one) and the name the lake stores (the sanitized one) would be two
@@ -1601,7 +1601,7 @@ class TempDataset(DatasetWriter):
         #   • BACKWARD-COMPATIBLE, with nothing to migrate — a temp written under the older
         #     `tmp_<uuid8>` spelling is read by exactly the same code, because NOTHING derives
         #     temp-ness or ownership from the name: the listing, the delete route and the retention
-        #     sweep all read the `_owner.json` marker (`backend/src/data/datasets.ts`), and the
+        #     sweep all read the `_owner.json` marker (`control/orchestrator/src/data/datasets.ts`), and the
         #     name is storage only. Old temps keep their names, keep their rows, keep listing as
         #     temporary, and now ALSO render a run-grain name — from that same marker.
         #   • PATH-SAFE — the name becomes a DuckLake table name and an object-store key segment,

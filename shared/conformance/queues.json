@@ -14,8 +14,8 @@
    "runtime/go/temporalhost.TaskQueue + .SessionTaskQueue (as their stem)",
    "sdk/python/actorkit/catalog.shared_queue",
    "runtime/python/internals/temporal/host.task_queue + .session_task_queue (as their stem)",
-   "backend/src/nexusRegistry.ts:sharedQueue",
-   "backend/src/panels/pollers.ts:sharedQueue",
+   "control/orchestrator/src/nexusRegistry.ts:sharedQueue",
+   "control/orchestrator/src/panels/pollers.ts:sharedQueue",
    "cli/identity.go:sharedQueue"
   ],
   "cases": [
@@ -164,7 +164,7 @@
    "handler/internal/identity.EndpointName",
    "sdk/go/catalog.EndpointName",
    "sdk/python/actorkit/catalog.endpoint_name",
-   "backend/src/nexusRegistry.ts:endpointName"
+   "control/orchestrator/src/nexusRegistry.ts:endpointName"
   ],
   "cases": [
    {
@@ -260,8 +260,8 @@
   "derived_by": [
    "cli/tmux.go:tmuxSession (worker)",
    "cli/fleet.go:fleetSessionName (machine)",
-   "backend/src/panels/tmux.ts:actorSession (worker — the ONE TypeScript copy, imported by backend/src/actorControl.ts and by the browser through @core)",
-   "backend/src/panels/discovery.ts:sessionNameFor (machine)"
+   "control/orchestrator/src/panels/tmux.ts:actorSession (worker — the ONE TypeScript copy, imported by control/orchestrator/src/actorControl.ts and by the browser through @core)",
+   "control/orchestrator/src/panels/discovery.ts:sessionNameFor (machine)"
   ],
   "cases": [
    {

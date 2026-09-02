@@ -11,7 +11,7 @@ import (
 //
 // THIS BINARY IS THE WRITER AND IT HAS NEVER BEEN THE TESTED ONE. The address a Bundle is
 // published to is assembled here out of four separate arguments (`bundleRepoPrefix`, the actor's
-// name, the version, the layer sha) and re-assembled in `backend/src/activities/fleet.ts` out of
+// name, the version, the layer sha) and re-assembled in `control/orchestrator/src/activities/fleet.ts` out of
 // the same four — and, before this corpus, the two were pinned by a Go test asserting one literal
 // and a vitest asserting another, neither aware of the other. That is precisely the arrangement
 // `shared/conformance/README.md` calls a hand-copied golden, and the object-store layout it replaces

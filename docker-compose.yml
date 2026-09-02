@@ -237,7 +237,7 @@ services:
   # customers — DuckLake's own `ducklake_*` tables and the materialization ledger (ADR 0017's
   # second authority) — fall back to the files they always could:
   #
-  #   catalog → ${KONTRA_DATA_DIR}/datasets.ducklake   (backend/src/data/parquet.ts)
+  #   catalog → ${KONTRA_DATA_DIR}/datasets.ducklake   (control/orchestrator/src/data/parquet.ts)
   #   ledger  → ${KONTRA_ORCHESTRATOR_DB}, over node:sqlite, in its own `kontra` tables
   #
   # Both land in `KONTRA_DATA_DIR`, which is `kontra up --data-dir` on the HOST now that the
@@ -251,7 +251,7 @@ services:
   #
   # A SECOND CONTROL PLANE ON THIS DATA DIRECTORY NOW REFUSES TO START. A file catalog is
   # single-writer, so `main.ts` takes a lock on it at boot and names it in the refusal
-  # (`backend/src/data/catalogLock.ts`) rather than letting the collision surface as an
+  # (`control/orchestrator/src/data/catalogLock.ts`) rather than letting the collision surface as an
   # activity retrying forever, forty minutes into a run.
   #
   # BRING IT BACK IF YOU RE-SPLIT THE PROCESSES, and the setting is deliberately still alive for
@@ -459,7 +459,7 @@ services:
   # `kontra` network, so each of these needs an address from the operator until its own slice
   # lands: `cli/scale.go`'s default for a `--mode docker` worker, `docker-compose.actors.yml`, and
   # the `/etc/kontra/worker.env` a fleet Machine is handed
-  # (backend/src/infra/programs/machine.ts writes `KONTRA_REDIS_HOST=$CONTROLLER:6379`, which
+  # (control/orchestrator/src/infra/programs/machine.ts writes `KONTRA_REDIS_HOST=$CONTROLLER:6379`, which
   # is correct as long as `kontra up --bind <vpc-address>` is what runs on the Controller).
 
 
@@ -678,7 +678,7 @@ services:
   # under a different name — a second workflow type on `kontra-probe` is a reviewable event.
   #
   # NOT BEHIND `--profile extras`. Without it the Actors page's Call button refuses with a sentence
-  # naming this service (`backend/src/probe.ts`) rather than starting a Run that sits at
+  # naming this service (`control/orchestrator/src/probe.ts`) rather than starting a Run that sits at
   # `scheduled` forever — but a refusal is still a feature that does not work, and this is one small
   # Python process, not a debugging aid.
   orchestrator-probe:
@@ -687,7 +687,7 @@ services:
       # `kontra deploy` builds for actor workers — this service carries NO actor, only the caller
       # half, which is why it needs nothing added to it.
       context: .
-      dockerfile: infra/Dockerfile.pyworker
+      dockerfile: control/images/Dockerfile.pyworker
     # THE TAG IS SHARED WITH `kontra deploy` ON PURPOSE (`cli/deploy.go:baseImage`), and it is the
     # same Dockerfile and the same context, so whichever builds it first is right. Compose only
     # builds when the daemon lacks the tag and `deploy`'s `ensureBase` does the same, so an
@@ -716,7 +716,7 @@ services:
       # same `kontra up --bind` an address the bridge can see, or this stays best-effort and the
       # Actors page's Call button describes a workflow the catalog never heard of.
       KONTRA_ORCHESTRATOR_URL: "${KONTRA_ORCHESTRATOR_URL:-http://host.docker.internal:8088}"
-      # Moves BOTH halves at once: `backend/src/queues.ts` reads the same variable, and
+      # Moves BOTH halves at once: `control/orchestrator/src/queues.ts` reads the same variable, and
       # `tests/test_actor_probe.py` pins the default against it. A queue named here and nowhere
       # else is a probe that refuses with the name of a queue this worker is not polling.
       KONTRA_PROBE_QUEUE: "${KONTRA_PROBE_QUEUE:-kontra-probe}"
@@ -766,7 +766,7 @@ services:
   # THE IMAGE IS STILL BUILT, by `orchestrator-infra` above, which runs out of the same
   # `kontra-orchestrator:latest`. `make api` and `make ui` still hot-copy into THAT container; the
   # appliance's equivalent is `--orchestrator=local`, which runs the checkout's own
-  # `backend/dist` and says on every start which of the two it chose.
+  # `control/orchestrator/dist` and says on every start which of the two it chose.
 
 
 # Name the control plane's network `kontra` so same-host actor workers can attach to it

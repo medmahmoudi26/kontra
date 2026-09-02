@@ -12,7 +12,7 @@ import "fmt"
 // Not computed from a download somebody happened to have: a checksum taken from the file
 // you already fetched checks the copy, not the artifact.
 
-// NodeVersion is the Node the carried orchestrator runs on. backend/package.json says
+// NodeVersion is the Node the carried orchestrator runs on. control/orchestrator/package.json says
 // `engines.node: >=22.13.0`; the appliance ships an exact version, because ">=" is a
 // constraint on somebody else's machine and this is our machine.
 const NodeVersion = "22.13.0"

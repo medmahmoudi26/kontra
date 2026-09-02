@@ -61,7 +61,7 @@ One command, one process: Temporal, the object store, the state store, the paylo
 
 ## Concepts
 
-The vocabulary is small and load-bearing. Full definitions live in [`CONTEXT.md`](CONTEXT.md) and [`infra/CONTEXT.md`](infra/CONTEXT.md).
+The vocabulary is small and load-bearing. Full definitions live in [`CONTEXT.md`](CONTEXT.md) and [`control/orchestrator/src/infra/CONTEXT.md`](control/orchestrator/src/infra/CONTEXT.md).
 
 | | |
 |---|---|

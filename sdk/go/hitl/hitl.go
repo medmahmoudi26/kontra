@@ -32,7 +32,7 @@
 // ── ONE ARCHIVE, TWO SDKS ──────────────────────────────────────────────────────────────────────
 //
 // Every literal below is the Python peer's, and the envelope is field-for-field the `Ask` interface
-// in `backend/src/transcript.ts` and the `RunAsk` in `backend/src/hitl.ts`. Nothing
+// in `control/orchestrator/src/transcript.ts` and the `RunAsk` in `control/orchestrator/src/hitl.ts`. Nothing
 // between here and the transcript translates, so a Go run and a Python run are the same rows in the
 // same route with the same reduced log behind them. Reaching the same outcome by another mechanism —
 // a query, an aggregate memo key, a signal that carried its id in the payload — would give the two
@@ -403,7 +403,7 @@ func Pending(ctx workflow.Context) []map[string]any {
 
 // envelope is one ask as the memo carries it — and as `GET /api/runs/:id/asks` serves it back.
 //
-// ONE SHAPE, NOT TWO. The field names are `backend/src/transcript.ts`'s `Ask` verbatim, so
+// ONE SHAPE, NOT TWO. The field names are `control/orchestrator/src/transcript.ts`'s `Ask` verbatim, so
 // nothing between here and the transcript translates: a rename on either side is a missing field a
 // test catches, rather than a silent mapping layer that drops one.
 func envelope(id, prompt string, doc map[string]any, context any, askedAt, deadlineAt int64) map[string]any {

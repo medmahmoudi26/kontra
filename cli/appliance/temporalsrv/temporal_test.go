@@ -248,7 +248,7 @@ func freeTestPort(t *testing.T) int {
 // `kontra up --orchestrator=none`, which until this was a control plane that could not run
 // anything.
 //
-// The names are the contract with `backend/src/visibility.ts` and with `handler/`. This test
+// The names are the contract with `control/orchestrator/src/visibility.ts` and with `handler/`. This test
 // is a table, not a behaviour: it exists so that removing one is a failing build rather than a
 // run that hangs.
 func TestKontraSearchAttributesCoverWhatTheHandlerStamps(t *testing.T) {
@@ -262,7 +262,7 @@ func TestKontraSearchAttributesCoverWhatTheHandlerStamps(t *testing.T) {
 		// KEYWORD, not TEXT: `visibility.ts` defines all four as keywords and a type mismatch is
 		// its own `BadSearchAttributes`, with the same invisible failure mode.
 		if typ != enumspb.INDEXED_VALUE_TYPE_KEYWORD {
-			t.Errorf("%s = %v, want KEYWORD (the type backend/src/visibility.ts defines)", name, typ)
+			t.Errorf("%s = %v, want KEYWORD (the type control/orchestrator/src/visibility.ts defines)", name, typ)
 		}
 	}
 	if len(got) != 4 {
