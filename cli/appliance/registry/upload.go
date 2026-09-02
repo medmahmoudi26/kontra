@@ -37,7 +37,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/medmahmoudi26/kontra/handler/casstore"
+	"github.com/medmahmoudi26/kontra/runtime/handler/casstore"
 )
 
 // uploadSession is one in-flight blob upload: a file being appended to, and the mutex that keeps

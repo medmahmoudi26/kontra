@@ -807,7 +807,7 @@ func TestTwoTenantsRunTheSameActorWithoutTouchingEachOther(t *testing.T) {
 // THE WORKERS ARE WHAT POLL, SO THE NAMESPACE HAS TO REACH THEM.
 //
 // A **Warden** whose own watcher is correctly in tenant A's namespace, starting **Workers** that poll
-// in `default`, has separated the ledger and not the work. `handler/main.go:65`,
+// in `default`, has separated the ledger and not the work. `runtime/handler/main.go:65`,
 // `runtime/go/temporalhost/host.go:230` and `runtime/python/internals/temporal/host.py:340` each read
 // `KONTRA_NAMESPACE` and each default it to `"default"` — so an assignment that does not set it puts
 // every tenant's Workers on one queue in one namespace, which is ADR 0036 §6's collision surviving

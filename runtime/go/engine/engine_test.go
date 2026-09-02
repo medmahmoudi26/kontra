@@ -389,7 +389,7 @@ func TestAPanicInAMethodIsolatesTheUnitRatherThanKillingTheWorker(t *testing.T) 
 }
 
 // The dispatch payload is a CROSS-LANGUAGE contract: the Go handler writes RunBatchInput
-// (handler/activity.go) and this struct reads it. `method` in particular is new in v2 and is what
+// (runtime/handler/activity.go) and this struct reads it. `method` in particular is new in v2 and is what
 // selects the Method — a rename on either side does not error, it silently runs the sole Method
 // or refuses a multi-Method actor, which reads as an actor bug rather than a lost field.
 // Peer of handler/runbatch_test.go::TestTheMethodNameReachesTheActor.

@@ -158,7 +158,7 @@ fi
 # the `go install` line as a comment for as long as it has been local; a comment is not an
 # install step.
 #
-# AT THE VERSION THE MODULE GRAPH ALREADY PINS, not @latest: `handler/go.mod` requires
+# AT THE VERSION THE MODULE GRAPH ALREADY PINS, not @latest: `runtime/handler/go.mod` requires
 # protoc-gen-go-temporal v1.24.0, and generated code that drifts from the module compiled against
 # it is a drift-check failure in CI (`buf generate` + `git diff --exit-code`) that reads as
 # somebody hand-editing generated files. `go install` inside the module resolves that pin.
@@ -197,7 +197,7 @@ fi
 echo "==> protoc-gen-go_temporal (the one local buf plugin)"
 export PATH="$(go env GOPATH)/bin:$PATH"
 if ! command -v protoc-gen-go_temporal >/dev/null 2>&1; then
-  # `pkg@version`, NOT a bare `go install` inside handler/. The handler requires this module for
+  # `pkg@version`, NOT a bare `go install` inside runtime/handler/. The handler requires this module for
   # the runtime package it generates against, so its go.sum carries only what the HANDLER
   # compiles — building the plugin BINARY pulls sprig, protopatch, jennifer, durafmt and pflag,
   # none of which are in there, and the failure is seven `missing go.sum entry` lines that read
@@ -205,8 +205,8 @@ if ! command -v protoc-gen-go_temporal >/dev/null 2>&1; then
   #
   # The version is READ from the pin rather than written here twice: a second copy of "v1.24.0"
   # in this file is a copy that will be wrong the first time somebody bumps the module.
-  plugin_ver="$( cd handler && GOWORK=off go list -m -f '{{.Version}}' "$PLUGIN_MOD" )"
-  echo "    $PLUGIN_MOD@$plugin_ver (pinned by handler/go.mod)"
+  plugin_ver="$( cd runtime/handler && GOWORK=off go list -m -f '{{.Version}}' "$PLUGIN_MOD" )"
+  echo "    $PLUGIN_MOD@$plugin_ver (pinned by runtime/handler/go.mod)"
   GOWORK=off go install "${PLUGIN_MOD}/cmd/protoc-gen-go_temporal@${plugin_ver}"
 fi
 

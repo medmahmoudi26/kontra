@@ -50,9 +50,9 @@
 // computed from a tarball somebody already had on disk: a checksum taken from the file you
 // already fetched checks the copy, not the artifact.
 //
-// SECOND HOME FOR THE SAME PIN, deliberately and with a test. `handler/internal/hydrate` pins the
+// SECOND HOME FOR THE SAME PIN, deliberately and with a test. `runtime/handler/internal/hydrate` pins the
 // Node runtime for the appliance's fetch path and cannot be imported from here — it is under
-// `handler/internal/`, so Go's own visibility rule stops the cli module reading it. Two files
+// `runtime/handler/internal/`, so Go's own visibility rule stops the cli module reading it. Two files
 // therefore name one Node version, and `pins_test.go` reads the other one off disk and fails if
 // they have drifted. Two Nodes in one appliance is the failure that test exists to make
 // impossible: the binary hydrates one and the bundle carries the other, and nothing says so.
@@ -478,7 +478,7 @@ func fetchPinned(pin Pin, cacheDir string, p func(string, ...any)) (string, erro
 
 	// Downloaded to a temporary name and renamed only after the digest matches, so a killed build
 	// leaves a leftover and never a wrong artifact wearing the right name — the same rule
-	// `handler/internal/hydrate` follows, for the same reason.
+	// `runtime/handler/internal/hydrate` follows, for the same reason.
 	tmp, err := os.CreateTemp(dir, ".fetching-")
 	if err != nil {
 		return "", err

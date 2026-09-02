@@ -33,7 +33,7 @@ package catalog
 import "strings"
 
 // The Nexus service every deployed actor serves, and its one operation. Re-declared here rather
-// than imported: `handler/internal/identity` is in another module and the decoupling rule
+// than imported: `runtime/handler/internal/identity` is in another module and the decoupling rule
 // forbids reaching into it, the same rule `runtime/go/registrar` states for the callee side.
 const (
 	ServiceName  = "kontra.actor"

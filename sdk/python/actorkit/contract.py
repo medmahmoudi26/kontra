@@ -33,7 +33,7 @@ from typing import Any, TypedDict
 import nexusrpc
 
 #: The one Nexus service every actor serves (ADR 0001 — one op, one way in). VERBATIM the peer
-#: of handler/internal/identity.NexusServiceName and orchestrator nexusService.SERVICE_NAME.
+#: of runtime/handler/internal/identity.NexusServiceName and orchestrator nexusService.SERVICE_NAME.
 SERVICE_NAME = "kontra.actor"
 
 

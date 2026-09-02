@@ -31,7 +31,7 @@ which is `asyncio.run(worker.run())` — it boots the callee and blocks forever.
 actor do a batch" because there was no caller to need one.
 
 **The seam was already named for a module that did not exist.**
-`handler/internal/identity/identity.go` documents its queue derivations as having a Python peer
+`runtime/handler/internal/identity/identity.go` documents its queue derivations as having a Python peer
 at `actorkit.workflows.shared_queue`. The comment was written against the shape the system was
 going to have; nothing at that path had been built.
 
@@ -66,7 +66,7 @@ flow and `flow.serve()` starting a process that waits to be given work.
 `ActorHandle.dispatch` builds the same `EntryInput` and calls the same Nexus op (`kontra.actor` /
 `run`) on the same derived endpoint, then dereferences the returned `BareRef` through
 `kontra.fetch_blob` — an activity already registered on every deployed actor's shared queue
-(`handler/main.go`). **Nothing new is deployed for a caller to exist**: the endpoint an actor
+(`runtime/handler/main.go`). **Nothing new is deployed for a caller to exist**: the endpoint an actor
 registers on boot is the endpoint you call, and an actor deployed a month ago is callable today.
 
 The caller reaches it through a **shared service definition** (`sdk/python/actorkit/contract.py`:

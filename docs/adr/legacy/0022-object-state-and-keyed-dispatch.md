@@ -5,7 +5,7 @@
 **Accepted.** Extends **ADR 0015** with a fourth state tier — it does not revise the three, and
 their scopes are unchanged. Extends **ADR 0021** with `handle[key]` on the caller's side. Nothing
 here changes the wire, the handler, or any deployed image; the identity machinery it exposes has
-been in `handler/workflow.go` since ADR 0018.
+been in `runtime/handler/workflow.go` since ADR 0018.
 
 ## Context
 

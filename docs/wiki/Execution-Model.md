@@ -81,7 +81,7 @@ API is `sdk/python/actorkit/catalog.py`; the Go peer is `sdk/go/catalog`. See
 4. **Return** — `kontra.store_blob` the pushed records and return a small `BareRef`.
 
 The workflow and the two blob activities are all the handler registers; `RunBatch` and `Close`
-live in the actor's process (`handler/main.go`).
+live in the actor's process (`runtime/handler/main.go`).
 
 ### What the returned ref addresses
 

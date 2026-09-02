@@ -13,7 +13,7 @@
  *
  * The bundle's shape is the other half and has never moved: a hydrated appliance bundle puts the
  * SPA at `orchestrator/web/dist` beside `orchestrator/dist/src`, an artifact contract that
- * `handler/internal/hydrate` writes. So every shape has to resolve, from any depth.
+ * `runtime/handler/internal/hydrate` writes. So every shape has to resolve, from any depth.
  */
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

@@ -5,7 +5,7 @@
 // move and it is wrong, because three consumers need an ADDRESS rather than a path, and none of
 // them is the browser — the SPA stopped range-reading parquet (ADR 0031, finding 8):
 //
-//   - The three SDK object stores (handler/internal/objectstore, sdk/python's casstore and
+//   - The three SDK object stores (runtime/handler/internal/objectstore, sdk/python's casstore and
 //     unitstore, control/orchestrator/src/codec/objectStore.ts) all speak SigV4 to an endpoint. Their key
 //     layout is pinned across languages by shared/conformance/blobkey.json, so the store has to
 //     be the thing those clients already talk to, byte for byte.

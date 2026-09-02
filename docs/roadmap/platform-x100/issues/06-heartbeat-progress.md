@@ -15,7 +15,7 @@ the details are visible in the Web UI and readable via `DescribeWorkflowExecutio
 details survive as resume state.
 
 ## Approach
-- In the handler's `RunBatch` activity (`handler/activity.go`), call `RecordActivityHeartbeat` with
+- In the handler's `RunBatch` activity (`runtime/handler/activity.go`), call `RecordActivityHeartbeat` with
   `{done, total, node}` as units complete (throttle to ~1/sec).
 - Set `HeartbeatTimeout` on the activity options so a wedged `RunBatch` (cf. crawl4ai hangs) fails
   fast and retries instead of silently stalling.
@@ -23,7 +23,7 @@ details survive as resume state.
   `DescribeWorkflowExecution`) instead of / in addition to S3 blob counts.
 
 ## Files
-- `handler/activity.go` (heartbeat), `handler/workflow.go` (HeartbeatTimeout on activity opts),
+- `runtime/handler/activity.go` (heartbeat), `runtime/handler/workflow.go` (HeartbeatTimeout on activity opts),
   orchestrator endpoint, `cli/monitor.go`
 
 ## Verify (local, no fleet)
@@ -32,7 +32,7 @@ details survive as resume state.
 - Simulate a hang → `HeartbeatTimeout` fires and the activity retries.
 
 ## Risks
-- Heartbeat frequency vs. Temporal server load — throttle. Coordinate `handler/workflow.go` edits
+- Heartbeat frequency vs. Temporal server load — throttle. Coordinate `runtime/handler/workflow.go` edits
   with issue 04 (same file).
 
 ## Comments

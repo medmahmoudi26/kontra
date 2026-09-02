@@ -5,7 +5,7 @@ import { heartbeatRow } from './heartbeat';
  * Regression cover for the heartbeat row build.
  *
  * The bug this pins: `isolated` travelled the whole way from the handler
- * (handler/activity.go:135 puts it in the heartbeat payload) to the CLI
+ * (runtime/handler/activity.go:135 puts it in the heartbeat payload) to the CLI
  * (cli/monitor.go:57 declares it, isolatedCol renders "N !" for it) — and the orchestrator
  * dropped it in the middle, because HeartbeatDetail simply did not declare the field. Every
  * live node therefore reported ZERO isolated units no matter how many it had actually thrown

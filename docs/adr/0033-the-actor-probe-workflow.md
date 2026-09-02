@@ -56,11 +56,11 @@ before deciding anything.
 
 3. **The backing workflow is not a formality, and its id deliberately does not name the Method.**
    `handler/nexus.go:26` wires the op with `temporalnexus.NewWorkflowRunOperation`, whose backing
-   workflow is `handler/workflow.go:19`. That workflow rehydrates a Batch that arrived as a ref
+   workflow is `runtime/handler/workflow.go:19`. That workflow rehydrates a Batch that arrived as a ref
    (ADR 0007), derives the actor id from key → Session → run/node and **fails loudly rather than
    defaulting**, upserts `KontraRunId`/`KontraActor` so the run is discoverable at all, schedules
    `RunBatch` onto the *Session-aware* queue with the retry/heartbeat pairing that makes
-   resume-from-committed real (`runActivityOptions`, `handler/workflow.go:239` —
+   resume-from-committed real (`runActivityOptions`, `runtime/handler/workflow.go:239` —
    `MaximumAttempts: 10`, `HeartbeatTimeout: 2m`, against a commit map keyed on Batch hash + index
    that skips committed Units, `sdk/python/actorkit/actor.py:81`), drives `Close` on **every** exit
    path unless the call was scoped, and stores results *and* dropped Units as CAS objects with
@@ -243,7 +243,7 @@ outright rather than left as a surface with no caller.
 - **Isolated Units are the probe's most useful output and must be drawn.** `(results, dropped)` and the
   ref's `isolated` meta are the whole reason **0028** §4 made the tuple undestructurable-around; a
   probe UI that shows only `results` reproduces the failure mode that let a 15,814-target run report
-  `completed` in seven minutes having scanned almost nothing (`handler/workflow.go:267`).
+  `completed` in seven minutes having scanned almost nothing (`runtime/handler/workflow.go:267`).
 
 - **The five stale "404s on purpose" comments are wrong and should be corrected in the change that
   lands this**, to the invariant that is actually true: the orchestrator starts workflows and does not

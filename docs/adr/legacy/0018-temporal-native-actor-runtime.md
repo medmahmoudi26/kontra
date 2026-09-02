@@ -16,7 +16,7 @@ providing it. Every worker runs its own placement (`infra/worker-entrypoint.sh:1
 shared Redis (`:67`). Two workers can therefore host the same actor id simultaneously, each the
 sole member of its own cluster, both writing to the same state. What actually serializes turns
 is Temporal: one backing workflow per actor id (`handler/nexus.go:44-53` derived from the same
-base as `handler/workflow.go:33-36`), and a turn loop that blocks on
+base as `runtime/handler/workflow.go:33-36`), and a turn loop that blocks on
 `ExecuteActivity(...).Get()` (`workflow.go:137`). ADR 0016 concedes this in its own
 Consequences; it just did not follow the concession to its conclusion.
 
@@ -61,14 +61,14 @@ across languages by design. Actor identity becomes the workflow id it already is
 per-process `{actorID → instance, lock}` registry replaces daprd's activation.
 
 Deleted outright: daprd, placement, three component manifests, ports 3001/3500/9090/9091, the
-~110 LOC of sidecar PUT in `handler/activity.go`, the envelope validation, and the `actorType`
-derivation triplicated across `handler/main.go:157`, `actorkit/go/internal/dapr/host.go:50` and
+~110 LOC of sidecar PUT in `runtime/handler/activity.go`, the envelope validation, and the `actorType`
+derivation triplicated across `runtime/handler/main.go:157`, `actorkit/go/internal/dapr/host.go:50` and
 `runtime/python/internals/dapr/__init__.py:8` with three hand-synced test tables.
 
 ### 3. One activity per Batch — the multi-turn protocol is dropped
 
 The turn protocol existed only because the handler could not observe the actor.
-`handler/workflow.go:82-84` is explicit: *"HeartbeatTimeout can't do this — the keepalive ticker
+`runtime/handler/workflow.go:82-84` is explicit: *"HeartbeatTimeout can't do this — the keepalive ticker
 beats even while the PUT hangs."* Once the actor heartbeats for itself, a wedged unit simply
 stops heartbeating and `HeartbeatTimeout` becomes a true liveness check. `StartToClose` stops
 being a guillotine.
@@ -85,7 +85,7 @@ worker Sessions are **Go-only** and two of our three languages could not have us
 > Go host, pre-parity) omits 'done'"*.
 >
 > Which means **Go is exposed to the guillotine today.** A Go `RunBatch` exceeding
-> `StartToCloseTimeout` (10 min, `handler/workflow.go:97`) is killed and retried up to ten times
+> `StartToCloseTimeout` (10 min, `runtime/handler/workflow.go:97`) is killed and retried up to ten times
 > (`:105`) with no cooperative escape — structurally the same failure that killed
 > `registry-watch`, live in Go right now, for any actor whose batch takes over ten minutes. The
 > Go half of this migration is therefore **additive** (heartbeating, which it has never had),
@@ -113,7 +113,7 @@ than the approximate count of `workflow.go:172`, and `arun_state` rides the same
 >
 > Also: the set is not small. `dapr_actor.py:295` stores the **whole unit** in each failure
 > record (`{"unit": unit, "error": …}`), matched at `dapr_actor.go:788-790`, so the
-> catastrophic-isolation path (`handler/workflow.go:177-179`, a 15,814-target run) would carry
+> catastrophic-isolation path (`runtime/handler/workflow.go:177-179`, a 15,814-target run) would carry
 > the entire batch through a heartbeat.
 >
 > **Consequence: Dapr removal becomes a runtime swap plus a client swap with ZERO state-lifetime
@@ -174,10 +174,10 @@ change. `sdk/python/actorkit/actor.py` and `sdk/go/kontra.go` already import no 
   entirely and becomes visible in Temporal instead.
 - **BOTH actor hosts become Temporal clients and therefore need the claim-check codec.** The
   original wording named only Python; that was wrong. The activity *argument* is encoded by the
-  handler's claim-check converter (`handler/main.go:48-49`), so a Go actor worker without the
+  handler's claim-check converter (`runtime/handler/main.go:48-49`), so a Go actor worker without the
   codec receives an unreadable ref payload — and `actorkit/go/go.mod` has **no** `go.temporal.io`
   dependency at all today. There is no Python codec module either, despite
-  `handler/internal/codec/codec.go:3` calling itself "the Go peer of python actorkit.codec".
+  `runtime/handler/internal/codec/codec.go:3` calling itself "the Go peer of python actorkit.codec".
   `shared/conformance/codec/README.md:8` ("the Python actor host does NOT codec") stops being true for
   both. This forces a deliberate choice the ADR did not anticipate: **duplicate the Go codec into
   actorkit** — a third byte-exact implementation, and `fixtures.json` exists precisely because

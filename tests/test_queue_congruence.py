@@ -2,7 +2,7 @@
 
 WHY THE CORPUS REPLACED THE TABLE THAT WAS HERE. This file used to hold a hand-copied dict of
 `(name, version) -> queue` under the instruction "The Go peer is
-handler/internal/identity/identity_test.go — keep the table in sync." Three such tables existed,
+runtime/handler/internal/identity/identity_test.go — keep the table in sync." Three such tables existed,
 each keeping itself in sync with the others by somebody remembering, across four languages and
 eight derivations of one string. The bookkeeping had already drifted before the code did: the
 comment in `sdk/go/catalog` called itself "a SIXTH independent derivation", the one in
@@ -140,7 +140,7 @@ def test_a_queue_name_is_not_sanitised_and_an_endpoint_name_is() -> None:
 
 
 def test_a_key_is_the_actor_a_session_activates_and_a_bare_scope_is_private() -> None:
-    """Congruent with handler/workflow.go's actor-id derivation for a scoped dispatch: the
+    """Congruent with runtime/handler/workflow.go's actor-id derivation for a scoped dispatch: the
     idempotency key first (ADR 0022 — that is what makes `object_state` addressable and shared),
     then the Session id, which gives an unkeyed scope a private identity of its own. Keying is a
     claim on a shared identity, never a tax on an ordinary dispatch (ADR 0023 §10).

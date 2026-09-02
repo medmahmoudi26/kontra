@@ -34,7 +34,7 @@ CLOSE = timedelta(seconds=5)
 async def _whoami(session_id: str, i: int, key: str = "") -> dict:
     """One Method call inside an open scope — the handler's leg, written out.
 
-    `actor_id` is the handler's derivation (handler/workflow.go): the key if the scope claimed
+    `actor_id` is the handler's derivation (runtime/handler/workflow.go): the key if the scope claimed
     one, else the Session id. Pinned on the Go side by runbatch_test.go and on the host side by
     tests/test_queue_congruence.py; written here because this stands in for that leg.
     """

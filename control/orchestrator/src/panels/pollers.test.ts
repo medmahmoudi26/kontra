@@ -48,7 +48,7 @@ function fakeDescriber(
 }
 
 const goPoller = (host: string, pid = 42, queue = 'webcrawl-0.2.0'): PollerInfo => ({
-  // The Go SDK default, verbatim: `<pid>@<hostname>@<taskqueue>`. handler/main.go passes no
+  // The Go SDK default, verbatim: `<pid>@<hostname>@<taskqueue>`. runtime/handler/main.go passes no
   // Identity to client.Dial, so this is what Temporal sees.
   identity: `${pid}@${host}@${queue}`,
   lastAccess: 1_700_000_000_000,

@@ -138,7 +138,7 @@ compose keeps the cloud job (§5).
 about who is watching. Finding 8: the SPA stopped range-reading parquet. Three consumers still
 require real S3 and none of them is the browser —
 
-- **The three SDKs' object stores** (`handler/internal/objectstore`, `sdk/python`,
+- **The three SDKs' object stores** (`runtime/handler/internal/objectstore`, `sdk/python`,
   `control/orchestrator/src/codec/objectStore.ts`) speak SigV4 against an endpoint, and the golden blob-key
   fixture pins their key layout byte-for-byte across all three.
 - **Remote fleet workers** reach the controller's S3 over the VPC — an address, not a filesystem
@@ -180,7 +180,7 @@ alive and unset, not deleted.
 
 ### 2. One CAS with two customers, and **copy-on-write is not a security boundary**
 
-`handler/internal/cas` is already the protocol as one deep module: `sha256` → store-if-absent on
+`runtime/handler/internal/cas` is already the protocol as one deep module: `sha256` → store-if-absent on
 write → fetch-and-integrity-check on read, with the caller supplying only an error noun. Two
 customers use it in the appliance:
 

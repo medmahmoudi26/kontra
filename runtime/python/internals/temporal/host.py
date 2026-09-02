@@ -138,7 +138,7 @@ def session_actor_id(session_id: str, key: str = "") -> str:
     Keys are optional (ADR 0023 §10). A key is a claim on a shared identity — it carries durable
     `object_state` across scopes and across Runs (ADR 0022) — while a bare handle is a private
     anonymous Session whose state begins empty and dies with it. Congruent with the actor id the
-    handler derives for a scoped dispatch (`handler/workflow.go`); the two are written
+    handler derives for a scoped dispatch (`runtime/handler/workflow.go`); the two are written
     independently, and tests/test_queue_congruence.py pins that pair directly — it is a rule
     about ONE dispatch's identity, not a name two processes have to spell the same, so it is not
     in shared/conformance/queues.json.

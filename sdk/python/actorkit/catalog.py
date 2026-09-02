@@ -255,7 +255,7 @@ def entry_input(
         entry["params"] = dict(params)
     if input_ref:
         # `units` stays PRESENT AND EMPTY, never dropped: the handler keys the ref path off
-        # `len(units) == 0 && in.InputRef != nil` (handler/workflow.go), so removing the key
+        # `len(units) == 0 && in.InputRef != nil` (runtime/handler/workflow.go), so removing the key
         # would not select it — it would just send an id-less batch of nothing.
         entry["input_ref"] = dict(input_ref)
     return entry
@@ -787,7 +787,7 @@ class ActorHandle:
         """Bind a KEY — `crawler["acme.com"]` — making this actor a virtual object.
 
         The key becomes the dispatch's `idempotency_key`, which is what the handler derives the
-        actor id from (`handler/workflow.go`) and what the backing workflow is named after
+        actor id from (`runtime/handler/workflow.go`) and what the backing workflow is named after
         (`handler/nexus.go:backingWorkflowID`). Three things follow, and all three are the point:
 
           • **One at a time per key.** The backing workflow id is unique server-side, so two
@@ -1208,7 +1208,7 @@ async def _resolved_ref(batch: "Batch") -> Mapping[str, Any]:
     WHY A CHAINED DISPATCH NEEDS THIS. An actor host with an object store configured commits each
     emitted record to its own blob and returns a list of `{"$ref": …}` entries (ADR 0007's blob
     plane — it is why a 10,000-unit result costs a history nothing). Nothing downstream
-    dereferences them: `handler/workflow.go` fetches the ref and passes the list to `RunBatch`
+    dereferences them: `runtime/handler/workflow.go` fetches the ref and passes the list to `RunBatch`
     verbatim, so the next Method's `unit.Str("domain")` reads a `$ref` object and returns "".
 
     MEASURED, on four Machines: a 400-domain sweep returned `{"pairs": 623, "checked": 0,

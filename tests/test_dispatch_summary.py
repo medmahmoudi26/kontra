@@ -189,7 +189,7 @@ def test_the_backing_workflow_id_is_not_where_the_method_went():
     Summary exists precisely so the id did not have to change, so a change to it here is a change
     to the wrong thing.
     """
-    nexus_go = (ROOT / "handler" / "nexus.go").read_text()
+    nexus_go = (ROOT / "runtime" / "handler" / "nexus.go").read_text()
     assert 'return "actor-" + os.Getenv("KONTRA_ACTOR_NAME") + "-" + base' in nexus_go
     # Nothing about a Method reaches the id derivation.
     body = nexus_go.split("func backingWorkflowID(")[1].split("\nfunc ")[0]

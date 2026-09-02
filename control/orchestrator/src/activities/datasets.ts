@@ -194,7 +194,7 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
      * configured commits every emitted record to its OWN blob and puts a `{"$ref": {...}}` entry
      * in the result — that is ADR 0007's per-unit blob plane, and it is why a 10,000-unit result
      * costs a workflow history nothing. But the next Method's units are that list, verbatim:
-     * `handler/workflow.go` fetches the ref and hands it to `RunBatch` without dereferencing,
+     * `runtime/handler/workflow.go` fetches the ref and hands it to `RunBatch` without dereferencing,
      * and `Unit.Str("domain")` on a `{"$ref": …}` object returns `""`. So the second Method in
      * any chain sees every field empty.
      *

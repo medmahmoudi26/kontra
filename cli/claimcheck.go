@@ -14,7 +14,7 @@
 // only on a payload over 128 KiB, and only at `--wait` time.
 //
 // WHICH SIDE IS RIGHT, MEASURED AND NOT ASSUMED, because the obvious sentence here ("every other
-// implementation joins with a slash") is false. `handler/internal/objectstore.Key` and
+// implementation joins with a slash") is false. `runtime/handler/internal/objectstore.Key` and
 // `control/orchestrator/src/codec/objectStore.ts:key` drop the prefix in as a SEGMENT;
 // `runtime/python/internals/casstore.py` does `self._prefix + key`, which is this same bug on the
 // Python worker's WRITE path. Executed against the live control plane with KONTRA_S3_PREFIX=slice11:
@@ -34,7 +34,7 @@
 // and reaches the store unsigned over plain HTTP — the same assumption `kontra runs --query` makes
 // with DuckDB — so it brings a `claimcheck.Backing` and nothing else. The marker, the ref shape,
 // the metadata decoding, the integrity check and the key layout come from
-// handler/claimcheck, reached the way casstore and hydratestore already are.
+// runtime/handler/claimcheck, reached the way casstore and hydratestore already are.
 //
 // DECODE-ONLY, ON PURPOSE. A workflow's result comes back offloaded whenever it exceeds 128 KiB,
 // and without the codec the SDK fails on `Unknown payload encoding binary/claim-check-v1` — so
@@ -57,7 +57,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 
-	"github.com/medmahmoudi26/kontra/handler/claimcheck"
+	"github.com/medmahmoudi26/kontra/runtime/handler/claimcheck"
 )
 
 // casOverHTTP is a claimcheck.Backing that GETs an object out of the store over unsigned HTTP,
@@ -114,7 +114,7 @@ func (casOverHTTP) Delete(context.Context, string) error         { return errCAS
 
 // decodeOnlyCodec is the handler's codec with Encode disarmed. It EMBEDS rather than reimplements,
 // so Decode — the marker check, the ref parse, the metadata base64, the digest verification — is
-// the one in handler/internal/codec and cannot drift from it.
+// the one in runtime/handler/internal/codec and cannot drift from it.
 type decodeOnlyCodec struct{ *claimcheck.Codec }
 
 func (decodeOnlyCodec) Encode(payloads []*commonpb.Payload) ([]*commonpb.Payload, error) {

@@ -42,7 +42,7 @@ const RUN_WORKFLOW_TYPE = 'kontra.v1.ActorService.Run';
 
 /** The activity the ACTOR registers and the workflow schedules by name (ADR 0018). Byte-identical
  *  to `@activity.defn(name=...)` in runtime/python/internals/temporal/host.py and to the literal
- *  in handler/workflow.go — three independent spellings of one string, per the decoupling rule. */
+ *  in runtime/handler/workflow.go — three independent spellings of one string, per the decoupling rule. */
 const RUN_BATCH_ACTIVITY = 'RunBatch';
 
 /** How many distinct runs one list may return. It used to bound a describe-per-run fan-out as

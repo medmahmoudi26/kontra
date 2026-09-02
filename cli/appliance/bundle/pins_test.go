@@ -81,7 +81,7 @@ func TestEveryPinnedPlatformResolves(t *testing.T) {
 
 // TWO FILES PIN ONE NODE, so this reads the other one.
 //
-// `handler/internal/hydrate/artifacts.go` is under `internal/`, which is Go's own way of saying
+// `runtime/handler/internal/hydrate/artifacts.go` is under `internal/`, which is Go's own way of saying
 // the cli module may not import it — so the pin is duplicated, and a duplicated pin drifts. What
 // drift COSTS here is specific: the binary would hydrate one Node and the bundle would carry
 // another, both correctly checksummed, with nothing anywhere reporting two runtimes.

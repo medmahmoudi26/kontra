@@ -50,7 +50,7 @@ Seven things were established against this checkout before deciding anything.
 
 4. **The enforcement half of 0011 went with the interpreter, and the field stayed — still
    describing the check.** `expected_digest` is `entry.proto:76`, `ActorRunInput` field 7 in
-   `actor.proto`, and `handler/internal/wire/wire.go:33`, and the proto comment states that "the
+   `actor.proto`, and `runtime/handler/internal/wire/wire.go:33`, and the proto comment states that "the
    worker self-verifies its running digest and fails fast (non-retryable, ActorDigestDrift) on
    drift". Nothing in `handler/` reads the field; neither SDK verifies it; `_verify_actor_digest`
    and `ActorDigestDrift` do not exist anywhere in the tree. A wire field with no gate behind it is

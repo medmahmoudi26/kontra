@@ -142,9 +142,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: |
-            handler/go.sum
+            runtime/handler/go.sum
             cli/go.sum
             sdk/go/go.sum
             runtime/go/go.sum
@@ -177,7 +177,7 @@ jobs:
           go test ./...
 
       - name: handler (build + vet + test)
-        working-directory: handler
+        working-directory: runtime/handler
         run: |
           go build ./...
           go vet ./...
@@ -238,9 +238,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: |
-            handler/go.sum
+            runtime/handler/go.sum
             cli/go.sum
 
       - name: install kontra
@@ -317,7 +317,7 @@ jobs:
       # invokes for actor_service.proto's Nexus op — install it so `buf generate` succeeds.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
 
       #
       # RETRIED, BECAUSE THIS STEP'S ONLY FAILURE MODE IS SOMEBODY ELSE'S NETWORK. `go install` of a
@@ -372,7 +372,7 @@ jobs:
         run: make proto-check
 
       # The generated stubs are committed (sdk/python/_gen + control/orchestrator/_gen +
-      # handler/_gen); regenerate and fail if anything drifts from what's checked in.
+      # runtime/handler/_gen); regenerate and fail if anything drifts from what's checked in.
       # `if: !cancelled()` so a FAILING proto gate cannot mask this: the two answer independent
       # questions (is the contract change compatible? vs are the committed stubs in sync?), and an
       # unguarded step would simply never run on the day the gate goes red — which is precisely a
@@ -381,7 +381,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           buf generate
-          git diff --exit-code -- sdk/python/_gen control/orchestrator/_gen handler/_gen \
+          git diff --exit-code -- sdk/python/_gen control/orchestrator/_gen runtime/handler/_gen \
             || { echo "::error::generated proto stubs are stale — run 'just buf-generate' and commit"; exit 1; }
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -418,10 +418,10 @@ jobs:
 
       # THE GO TOOLCHAIN BUILDS TWO THINGS HERE, and the second is easy to forget: the CLI, and —
       # through `kontra serve --mode local`, which the e2e leg needs a Worker from — `go run .`
-      # inside handler/. Both modules are under the root go.work.
+      # inside runtime/handler/. Both modules are under the root go.work.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: cli/go.sum
 
       - uses: actions/setup-python@v5

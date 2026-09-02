@@ -52,7 +52,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: cli/go.sum
 
       # THE SPA IS THE ONE THING THE RELEASE DOES NOT BUILD ITSELF. `kontra release` archives a

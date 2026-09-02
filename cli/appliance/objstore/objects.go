@@ -75,7 +75,7 @@ type objectStore struct {
 // AWS docs say so.
 //
 // NOTHING IN KONTRA CHECKS INTEGRITY THROUGH THE ETag. The CAS addresses objects by sha256 and
-// verifies that hash on read (handler/internal/cas), which is the property `sha256sum <file>`
+// verifies that hash on read (runtime/handler/internal/cas), which is the property `sha256sum <file>`
 // checks against a key on disk. If some future consumer ever needs ETag==MD5, it needs a stored
 // digest, not a recomputation — that is the change to make, not this one.
 func etagFor(key string, size int64, mod time.Time) string {

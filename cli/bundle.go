@@ -232,7 +232,7 @@ func buildHandler(root string) (string, error) {
 	}
 	bin := filepath.Join(out, "handler")
 	cmd := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
-	cmd.Dir = filepath.Join(root, "handler")
+	cmd.Dir = filepath.Join(root, "runtime", "handler")
 	cmd.Env = append(os.Environ(), "GOWORK=off", "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
 	if b, err := cmd.CombinedOutput(); err != nil {
 		os.RemoveAll(out)

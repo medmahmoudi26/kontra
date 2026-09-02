@@ -64,7 +64,7 @@ export function endpointName(name: string, version: string): string {
  * The task queue the endpoint points at: the actor's SHARED queue, `<name>-<version>`.
  *
  * NOT the sessions queue. The handler serves its Nexus operation on the shared queue and polls
- * `-sessions` for RunBatch/Close (`handler/internal/identity`), so an endpoint aimed at the latter
+ * `-sessions` for RunBatch/Close (`runtime/handler/internal/identity`), so an endpoint aimed at the latter
  * routes operations to a queue that does not serve them.
  */
 export function sharedQueue(name: string, version: string): string {

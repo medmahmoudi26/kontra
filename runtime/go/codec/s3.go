@@ -20,7 +20,7 @@ import (
 // WHAT IT REPLACES. Put and Get spelled the address `s.prefix + key`, plain concatenation, under
 // a comment that read "raw; every SDK concatenates it verbatim" — and that comment was the
 // defect, not a description of one. It was true of Python's casstore and of nothing
-// else: `handler/internal/objectstore.Key` and `control/orchestrator/src/codec/objectStore.ts:key`
+// else: `runtime/handler/internal/objectstore.Key` and `control/orchestrator/src/codec/objectStore.ts:key`
 // both join, so with KONTRA_S3_PREFIX=`slice11` a Go actor wrote `slice11cas/df/df5b…` while the
 // handler, the orchestrator and the CLI asked for `slice11/cas/df/df5b…`. actorkit and the
 // handler are separate modules and never import each other, so what holds the four
@@ -40,7 +40,7 @@ func objectKey(prefix string, parts ...string) string {
 
 // prefixed addresses another Store under a key prefix.
 //
-// THE TRANSPORT IS ONE THING AND THE ADDRESS IS ANOTHER — the split handler/claimcheck's header
+// THE TRANSPORT IS ONE THING AND THE ADDRESS IS ANOTHER — the split runtime/handler/claimcheck's header
 // argues for, made here for the same reason: a backing knows how to move bytes to a bucket, and
 // where in that bucket they land is a contract with three other languages. It is also what lets
 // the conformance arm drive the real join over an in-memory store, with no AWS client and no S3.

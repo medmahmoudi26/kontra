@@ -219,7 +219,7 @@ def test_a_method_with_no_docstring_carries_NO_description():
 
 
 # ---------------------------------------------------------------------------------------------
-# Congruence with catalog.proto. The peers are handler/internal/wire/wire_congruence_test.go and
+# Congruence with catalog.proto. The peers are runtime/handler/internal/wire/wire_congruence_test.go and
 # the compile-time guard orchestrator/catalog.contract.ts.
 #
 # This body is HAND-WRITTEN JSON (ADR 0002 — the wire is JSON, proto is only the shared type

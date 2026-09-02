@@ -22,12 +22,12 @@ plugins:
       - esModuleInterop=true
       - useExactTypes=false
   # Go: STRUCTS for the contract-of-record. The Go handler consumes the contract from its
-  # own seam root (handler/_gen, never under contracts/), and a congruence test asserts the
+  # own seam root (runtime/handler/_gen, never under contracts/), and a congruence test asserts the
   # hand-written snake_case wire structs match these generated field sets — the wire stays
   # JSON (ADR 0002), proto is the type definition. go_package is set per .proto file so this
   # never perturbs the python/TS gen above.
   - remote: buf.build/protocolbuffers/go:v1.36.6
-    out: handler/_gen
+    out: runtime/handler/_gen
     opt:
       - paths=source_relative
   # protoc-gen-go-temporal: generates the Go Nexus workflow-run op + typed client/worker for
@@ -38,7 +38,7 @@ plugins:
   # github.com/cludden/protoc-gen-go-temporal/cmd/protoc-gen-go_temporal`. Needs
   # `strategy: all` (it reads the whole service at once). Ensure $(go env GOPATH)/bin is on PATH.
   - local: protoc-gen-go_temporal
-    out: handler/_gen
+    out: runtime/handler/_gen
     opt:
       - paths=source_relative
       - nexus=true          # emit the Nexus service/op/client (kontra.actor:run)

@@ -4,5 +4,5 @@ use (
 	./sdk/go
 	./runtime/go
 	./cli
-	./handler
+	./runtime/handler
 )

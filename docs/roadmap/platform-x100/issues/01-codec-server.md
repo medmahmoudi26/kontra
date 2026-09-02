@@ -5,8 +5,8 @@ Status: ready-for-agent
 
 ## Problem
 We already offload large Temporal payloads to S3 via a claim-check codec
-(`handler/internal/codec/codec.go`, `control/orchestrator/src/codec/claimCheck.ts`, wired at
-`handler/main.go:46-47`). But there is **no codec server**, so the Temporal Web UI (:8233) and
+(`runtime/handler/internal/codec/codec.go`, `control/orchestrator/src/codec/claimCheck.ts`, wired at
+`runtime/handler/main.go:46-47`). But there is **no codec server**, so the Temporal Web UI (:8233) and
 `temporal workflow show` display offloaded inputs/outputs as opaque `$ref` blobs. Half the point of
 the claim-check pattern — being able to *read* payloads in the native UI — is unrealized.
 
@@ -16,18 +16,18 @@ Temporal **Remote Data Encoder / Codec Server**: an HTTP service exposing `POST 
 pattern; we only need to expose our existing decode logic over that contract.
 
 ## Approach
-- New Go binary `handler/cmd/codec-server/` that reuses `handler/internal/codec` to implement the
+- New Go binary `runtime/handler/cmd/codec-server/` that reuses `runtime/handler/internal/codec` to implement the
   remote-codec HTTP contract: body `{ "payloads": [ <Payload>... ] }` → same shape transformed.
   Honor the `X-Namespace` header; set permissive CORS (`Access-Control-Allow-Origin` for the UI
   origin, allow `X-Namespace`, `Content-Type`) so the browser UI can call it.
-- Reuse the object-store client construction already in `handler/main.go` (`ThresholdFromEnv`,
+- Reuse the object-store client construction already in `runtime/handler/main.go` (`ThresholdFromEnv`,
   `codec.New(store, …)`) so encode/decode is byte-identical to the workers'.
 - docker-compose: add a `codec-server` service on the control plane; set the Temporal UI's codec
   endpoint (`TEMPORAL_UI_CODEC_ENDPOINT` / dynamic UI config) to it. Keep it on the private network.
 
 ## Files
-- new `handler/cmd/codec-server/main.go`
-- `handler/main.go` (optional: extract shared store/codec construction into a helper)
+- new `runtime/handler/cmd/codec-server/main.go`
+- `runtime/handler/main.go` (optional: extract shared store/codec construction into a helper)
 - `docker-compose.yml` (+`codec-server` service, Temporal UI codec env)
 
 ## Verify (local, no fleet)

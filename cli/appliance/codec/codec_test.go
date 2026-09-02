@@ -19,7 +19,7 @@ import (
 	"go.temporal.io/sdk/converter"
 
 	"github.com/medmahmoudi26/kontra/cli/appliance/objstore"
-	"github.com/medmahmoudi26/kontra/handler/codecserver"
+	"github.com/medmahmoudi26/kontra/runtime/handler/codecserver"
 )
 
 // startTestS3 brings up the object store this codec reads, on its own temp directory and a free
@@ -88,7 +88,7 @@ func remoteCodec(t *testing.T, srv *Server) converter.PayloadCodec {
 }
 
 // codecFixtures is shared/conformance/codec/fixtures.json — the SAME corpus the Python and TypeScript
-// codecs are held to, and the Go codec's own suite in handler/internal/codec. Kept in this shape
+// codecs are held to, and the Go codec's own suite in runtime/handler/internal/codec. Kept in this shape
 // (and not shared) because that file is the contract; a struct that could not read it verbatim
 // would be a second contract.
 type codecFixtures struct {

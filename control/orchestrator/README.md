@@ -94,7 +94,7 @@ scheduled-graph-run workflow; all three are gone.
 
 An Actor's bulk output never enters this process. The codec port
 ([src/codec/claimCheck.ts](src/codec/claimCheck.ts)) is **byte-compatible** with the Go handler's
-(handler/internal/codec) — marker `binary/claim-check-v1`, ref `{sha256,size,meta}`, sha256
+(runtime/handler/internal/codec) — marker `binary/claim-check-v1`, ref `{sha256,size,meta}`, sha256
 integrity check — so both read and write the same `cas/<sha[:2]>/<sha>` objects. The materializer
 resolves an output envelope by its `sha256` and reads it with DuckDB, page by page, without the
 payload ever crossing into Node.

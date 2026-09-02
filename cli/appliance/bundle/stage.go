@@ -41,7 +41,7 @@
 // Prebuilds} keeps the one this platform will ask for and the manifest records the four it
 // dropped by name — so the statement is exact, and a reader can see that it was a choice.
 //
-// WHAT IS DELIBERATELY NOT IN IT: the built SPA. `handler/internal/hydrate` lists it as its own
+// WHAT IS DELIBERATELY NOT IN IT: the built SPA. `runtime/handler/internal/hydrate` lists it as its own
 // pinned artifact, and the API degrades to serving no static files when it is absent
 // (`defaultWebRoot` returns undefined) rather than failing to boot. Two artifacts because the SPA
 // changes on a different clock from the server, and shipping them as one means a CSS fix rebuilds

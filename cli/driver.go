@@ -22,7 +22,7 @@ package main
 //
 //  1. ADR 0036 makes the binding structural, not conventional: "the handler stays one process per
 //     actor version", because a handler serving several actors would put several tenants'
-//     credentials in one process. `handler/main.go` reads KONTRA_ACTOR_NAME/VERSION from its
+//     credentials in one process. `runtime/handler/main.go` reads KONTRA_ACTOR_NAME/VERSION from its
 //     environment and registers ONE worker on ONE queue. There is no such thing as half a Worker to
 //     schedule, so a seam whose unit is a process makes an unschedulable thing expressible and
 //     leaves every driver to re-derive the 1:1 rule.

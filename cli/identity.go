@@ -12,7 +12,7 @@
 //
 // AND THE `wf-` PREFIX IS WHY THEY HAVE TO BE READ TOGETHER. This repo ships an Actor and a
 // Workflow both called `nscheck`. The Actor's handler polls its shared queue for WORKFLOW tasks
-// too (`handler/main.go` registers RunWorkflow on it) while knowing only its own type, so a
+// too (`runtime/handler/main.go` registers RunWorkflow on it) while knowing only its own type, so a
 // `NsCheck` task landing there fails and retries forever. The prefix is the only thing keeping
 // those two derivations apart, and a prefix that guards a collision with a function in another
 // file is a guard nobody can see.

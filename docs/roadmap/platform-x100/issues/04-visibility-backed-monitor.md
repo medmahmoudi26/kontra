@@ -16,7 +16,7 @@ no Elasticsearch required. Query with `ListWorkflowExecutions` + a SQL-like filt
 ## Approach
 - Register search attributes on the namespace at bootstrap: `KontraTenant`, `KontraActor`,
   `KontraGraph`, `KontraRunId` (+ rely on built-in `ExecutionStatus`, `StartTime`).
-- Upsert them from the workflow (`handler/workflow.go` / interpreter) via
+- Upsert them from the workflow (`runtime/handler/workflow.go` / interpreter) via
   `UpsertSearchAttributes` / `UpsertTypedSearchAttributes`.
 - Add an orchestrator endpoint that proxies `ListWorkflowExecutions` (filter by tenant/actor/status)
   so the CLI/UI don't need Temporal creds directly.
@@ -25,7 +25,7 @@ no Elasticsearch required. Query with `ListWorkflowExecutions` + a SQL-like filt
 - Keep SQLite only for what Temporal does not model (e.g. idempotency keys), or retire it.
 
 ## Files
-- `handler/workflow.go` (or interpreter) — upsert SAs
+- `runtime/handler/workflow.go` (or interpreter) — upsert SAs
 - orchestrator: bootstrap SA registration + a visibility proxy endpoint
 - `cli/monitor.go` — exec views over the visibility endpoint
 - `control/orchestrator/src/db/repo.ts` — trim to non-duplicated state
@@ -38,6 +38,6 @@ no Elasticsearch required. Query with `ListWorkflowExecutions` + a SQL-like filt
 
 ## Risks
 - Search-attribute registration differs slightly between `start-dev` and a full server — pin the
-  path we use. Coordinate `handler/workflow.go` edits with issue 06 (same file).
+  path we use. Coordinate `runtime/handler/workflow.go` edits with issue 06 (same file).
 
 ## Comments

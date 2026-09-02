@@ -9,7 +9,7 @@
  "shared": {
   "why": "The Actor's shared task queue: where its Go handler serves the Nexus operation, the workflow and the blob activities, and what `kontra workers list` and the poller tile describe. `{name}-{version}`, or `{name}-shared` when the version is absent.",
   "derived_by": [
-   "handler/internal/identity.SharedQueue",
+   "runtime/handler/internal/identity.SharedQueue",
    "sdk/go/catalog.SharedQueue",
    "runtime/go/temporalhost.TaskQueue + .SessionTaskQueue (as their stem)",
    "sdk/python/actorkit/catalog.shared_queue",
@@ -72,7 +72,7 @@
  "sessions": {
   "why": "The queue THE ACTOR PROCESS ITSELF polls (ADR 0018): it registers RunBatch, Close and OpenSession there while the handler keeps the workflow and the blob activities on the shared queue. Splitting them is what lets the two halves be different languages. `{shared}-sessions`.",
   "derived_by": [
-   "handler/internal/identity.SessionsQueue + .SessionsQueueOf (which is what handler/workflow.go schedules with)",
+   "runtime/handler/internal/identity.SessionsQueue + .SessionsQueueOf (which is what runtime/handler/workflow.go schedules with)",
    "sdk/go/catalog.SessionsQueue",
    "runtime/go/temporalhost.TaskQueue",
    "sdk/python/actorkit/catalog.sessions_queue",
@@ -114,7 +114,7 @@
  "session": {
   "why": "The queue ONE LIVE SESSION is addressed on (ADR 0023 §6): `{shared}-s-{sessionId}`. The singular of `sessions` and a different plane — that one is polled by every worker of the version and is where an OPEN lands, so Temporal's dispatch of the open IS the placement decision; this one is polled by the single worker that answered that open, which is what pins every call of the scope to the process holding the loaded resource. The queue name is the whole addressing scheme: no placement directory, no lease, no idle policy.",
   "derived_by": [
-   "handler/internal/identity.SessionQueue (from the workflow's OWN task queue plus the dispatched id)",
+   "runtime/handler/internal/identity.SessionQueue (from the workflow's OWN task queue plus the dispatched id)",
    "sdk/go/catalog.SessionQueue",
    "runtime/go/temporalhost.SessionTaskQueue",
    "sdk/python/actorkit/catalog.session_queue",
@@ -161,7 +161,7 @@
   "why": "The Nexus endpoint an Actor registers on and a caller dispatches through: `kontra-{name}-{version}` with every non-alphanumeric collapsed to `-`, doubled separators collapsed, and the ends stripped. UNLIKE A QUEUE NAME THIS ONE IS SANITISED, because the cluster enforces ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$ on it. A drift is a caller dispatching to a name nobody created, which presents as a run that never progresses.",
   "servable": "^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$",
   "derived_by": [
-   "handler/internal/identity.EndpointName",
+   "runtime/handler/internal/identity.EndpointName",
    "sdk/go/catalog.EndpointName",
    "sdk/python/actorkit/catalog.endpoint_name",
    "control/orchestrator/src/nexusRegistry.ts:endpointName"

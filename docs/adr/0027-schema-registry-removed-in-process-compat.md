@@ -169,7 +169,7 @@ promise does not change".
     `0.1.0`, and a version registered out of order afterwards does not recompute an earlier
     finding — which is why a stored finding names the version it was compared against.
 - **`shared/contracts/kontra/v1/catalog.proto` and `run.proto` no longer name an external owner**, and the
-  generated stubs (`handler/_gen`, `control/orchestrator/_gen`) were regenerated with `buf generate` rather
+  generated stubs (`runtime/handler/_gen`, `control/orchestrator/_gen`) were regenerated with `buf generate` rather
   than hand-edited.
 - **`docs/adr/` is no longer gitignored, and three documents still say it is.** 0024's last
   consequence, `docs/wiki/ADRs.md` and this issue all warn that a new record needs `git add -f` or

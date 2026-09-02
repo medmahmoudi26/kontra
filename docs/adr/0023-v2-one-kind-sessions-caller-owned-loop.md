@@ -41,7 +41,7 @@ the table of v1 invariants v2 still honours. This ADR and 0024 are the whole of 
 concept had no implementation left to supersede: `@actor.step` had been renamed to `@actor.arun`,
 `a.Step` had zero callers, and `step.proto`'s `StepOptions` and `kontra.v1.RetryPolicy` were read
 by no SDK in any language — so 0009's "author-declared retry, implemented" described a contract
-nothing wired, while the real retry was `MaximumAttempts: 3` hardcoded in `handler/workflow.go`.
+nothing wired, while the real retry was `MaximumAttempts: 3` hardcoded in `runtime/handler/workflow.go`.
 Both kept reading as live design and kept sending agents to build a pipeline that does not exist.
 Older ADRs still cite them; `docs/adr/legacy/README.md` carries the tombstone that explains why the
 link is dead.
@@ -243,7 +243,7 @@ Twelve forks, resolved in one session. Numbered because later ones depend on ear
     honest peer of Python's raising `async for`.
 
     What this costs, stated: a **sixth** independent derivation of the session-queue name, since
-    `handler/internal/identity` is unimportable by the decoupling rule. A drift there does not
+    `runtime/handler/internal/identity` is unimportable by the decoupling rule. A drift there does not
     raise — it dispatches into a queue nobody polls and hangs until `ScheduleToStart`. The
     derivations are pinned against each other by test.
 23. **Go gets the Batch too — full parity on the author's loop.** `func(s *Session, b Batch) error`

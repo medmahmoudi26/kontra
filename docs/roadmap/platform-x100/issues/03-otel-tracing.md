@@ -22,14 +22,14 @@ Both platforms emit OpenTelemetry natively:
 
 ## Approach
 - Add a `tracing` stanza to `infra/dapr/config.yaml` (samplingRate, otel endpoint → collector).
-- `handler/main.go`: install the OTel tracing interceptor on the Temporal `client.Options` and
+- `runtime/handler/main.go`: install the OTel tracing interceptor on the Temporal `client.Options` and
   `worker.Options`; init a tracer provider pointing at the collector (endpoint from env).
 - Orchestrator worker (TS): add the OTel interceptor to its Temporal `Worker`/`Connection`.
 - docker-compose: add `jaeger` (or otel-collector + Jaeger UI); expose the Jaeger UI on a private
   port; pass the OTLP endpoint to daprd/handler/orchestrator via env.
 
 ## Files
-- `infra/dapr/config.yaml`, `handler/main.go`, orchestrator worker bootstrap (TS),
+- `infra/dapr/config.yaml`, `runtime/handler/main.go`, orchestrator worker bootstrap (TS),
   `docker-compose.yml`, `infra/worker-entrypoint.sh` (OTLP endpoint env for daprd/handler)
 
 ## Verify (local, no fleet)

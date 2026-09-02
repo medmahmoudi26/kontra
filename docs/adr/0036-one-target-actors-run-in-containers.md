@@ -51,7 +51,7 @@ Seven things were established against this checkout before deciding anything.
    exist to compensate for there being no runtime: install code, restart it when sick, ship its
    metrics.
 
-5. **A handler is bound to one actor version, by construction.** `handler/main.go:31-32` reads
+5. **A handler is bound to one actor version, by construction.** `runtime/handler/main.go:31-32` reads
    `KONTRA_ACTOR_NAME` and `KONTRA_ACTOR_VERSION` from the environment; `:83` derives one
    `identity.SharedQueue(name, version)` and registers one worker on it. Nothing about it is
    multi-actor, and nothing about this decision makes it so.
@@ -93,7 +93,7 @@ Seven things were established against this checkout before deciding anything.
   in any of the four languages moves. A **Warden**'s enrolment mints credentials scoped to one
   namespace, so a compromised **Machine** cannot address another tenant's queues at all.
 
-- **The handler stays one process per actor version.** `handler/main.go` is not modified. A single
+- **The handler stays one process per actor version.** `runtime/handler/main.go` is not modified. A single
   handler serving several actors would put several tenants' credentials in one process — a
   co-tenancy leak inside the component with the most authority on the box. The cost is a container
   and ~30 MB per actor, paid deliberately.

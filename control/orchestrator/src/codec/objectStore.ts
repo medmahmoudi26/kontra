@@ -144,7 +144,7 @@ export class ObjectStore {
    * key('cas', '12', '12ab...') -> 'prefix/cas/12/12ab...', with no leading slash when
    * the prefix is empty.
    *
-   * The algorithm is the contract, not a convenience: `handler/internal/objectstore.Key`,
+   * The algorithm is the contract, not a convenience: `runtime/handler/internal/objectstore.Key`,
    * `runtime/go/codec.objectKey` and `runtime/python/internals/casstore.object_key` must
    * produce the same bytes, and the `prefixCases` rows of shared/conformance/codec/fixtures.json
    * are what hold the four of them to it.

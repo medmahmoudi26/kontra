@@ -347,7 +347,7 @@ services:
   # because the Web UI calls it FROM THE BROWSER.
   #
   # IT IS THE BINARY'S NOW (ADR 0031 §1: "it is an HTTP handler in a container; it becomes an HTTP
-  # handler"). `kontra up` serves it — `handler/codecserver`, on a listener of its own in
+  # handler"). `kontra up` serves it — `runtime/handler/codecserver`, on a listener of its own in
   # `cli/appliance/codec.go` — and prints the address as `Payload codec:`. Nothing here called it
   # anyway: the `temporal` service that used to carry `--ui-codec-endpoint` left with the block
   # above, so this one had been running and serving no one.
@@ -365,7 +365,7 @@ services:
   # rides inline in workflow history in the clear, for the namespace's whole retention (ADR 0007
   # §4, ADR 0034 §6).
   #
-  # `infra/Dockerfile.codec-server` and `handler/cmd/codec-server` went with it.
+  # `infra/Dockerfile.codec-server` and `runtime/handler/cmd/codec-server` went with it.
 
   # JAEGER USED TO SIT HERE — the single tracing backend, opt-in behind `--profile extras`.
   #

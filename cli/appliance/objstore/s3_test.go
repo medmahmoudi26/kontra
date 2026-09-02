@@ -50,7 +50,7 @@ func startTestS3(t *testing.T, opts ...func(*Options)) *Server {
 }
 
 // client builds the S3 client THE WAY KONTRA BUILDS IT. The construction is copied from
-// handler/internal/objectstore.go's FromEnv — static credentials, an explicit BaseEndpoint, and
+// runtime/handler/internal/objectstore.go's FromEnv — static credentials, an explicit BaseEndpoint, and
 // path-style addressing — because that, and not a convenient client, is what has to work. The
 // Python (boto3, `endpoint_url=`) and TypeScript (`forcePathStyle: true`) stores are configured
 // identically; there is one wire contract and this is a Go-side witness to it.

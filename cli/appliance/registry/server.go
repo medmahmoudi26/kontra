@@ -3,7 +3,7 @@
 // removes `registry` and `registry-data` from docker-compose.yml.
 //
 // WHY THE LAYERS AND THE STORE ARE THE SAME THING. An OCI blob is addressed by
-// `sha256:<hex>` over its own bytes, and `handler/internal/cas` addresses an object by sha256
+// `sha256:<hex>` over its own bytes, and `runtime/handler/internal/cas` addresses an object by sha256
 // over its own bytes. They are not two stores that happen to agree; they are one address. So a
 // layer PUT lands at `<data-dir>/cas/<ab>/<hex>` — the file the hydrator would have fetched, the
 // file `sha256sum` confirms — and a push of an image whose layers are already there transfers
@@ -58,7 +58,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/handler/casstore"
+	"github.com/medmahmoudi26/kontra/runtime/handler/casstore"
 )
 
 // DefaultPort is the port actor images are pushed to and pulled from.

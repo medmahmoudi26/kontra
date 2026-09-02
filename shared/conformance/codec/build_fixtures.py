@@ -2,7 +2,7 @@
 """Generate the language-neutral claim-check conformance corpus (fixtures.json).
 
 The corpus pins the claim-check WIRE CONTRACT that every codec implementation must
-reproduce: the Go handler (handler/internal/codec) and the TS orchestrator
+reproduce: the Go handler (runtime/handler/internal/codec) and the TS orchestrator
 (control/orchestrator/src/codec/claimCheck.ts). Each language's test runs its REAL codec against
 this one fixtures.json -- that is what keeps the encoders byte-compatible.
 
@@ -192,7 +192,7 @@ def build() -> None:
                                    "namespace 'p/cas/...', and a prefix of '/' is an empty "
                                    "prefix. The alternative (a slash is a literal character in "
                                    "the prefix, so 'p/' addresses 'p//cas/...') was what "
-                                   "handler/internal/objectstore.Key and "
+                                   "runtime/handler/internal/objectstore.Key and "
                                    "control/orchestrator/src/codec/objectStore.ts:key did before this corpus "
                                    "was extended, and it is rejected: two spellings an operator "
                                    "reads as identical addressing two different namespaces, "

@@ -10,7 +10,7 @@ import (
 // The CLI ARM of shared/conformance/queues.json — and it is the arm that did not exist.
 //
 // `sharedQueue` in api.go carried the comment "byte-for-byte the peer of
-// handler/internal/identity.SharedQueue and orchestrator taskQueue()", and nothing in this suite
+// runtime/handler/internal/identity.SharedQueue and orchestrator taskQueue()", and nothing in this suite
 // ever ran it against either. Its ONE appearance was the contrast half of an assertion about
 // workflow queues (`workflowQueue(...) == sharedQueue(...)` must be false), which proves the two
 // differ and says nothing about whether this one is right. So the eight-way contract was a

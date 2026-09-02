@@ -94,22 +94,41 @@ The **[wiki](../../wiki)** is the manual — start at [Getting Started](../../wi
 
 ## Repo layout
 
+**A directory says where its contents run.** That is the organising rule, and there are only three
+answers: the control plane, a Machine, or neither — material both halves have to agree on.
+
 ```
-cli/          the kontra binary — up, build, serve, fleet, warden, dataset, workflow
-handler/      the Go Temporal handler: one per actor, owns the backing workflow
-sdk/          the authoring surface you import          (Apache-2.0)
-  go/         actor + caller
-  python/     actor + caller + fleet
-runtime/      the hosts that run an actor                (AGPL-3.0)
-backend/      the orchestrator: catalog, datasets, fleet, panels  (TypeScript)
-core/         @kontra/core — the shared kernel the console imports  (Apache-2.0)
-infra/        Pulumi programs; machines, and what is written on them
-conformance/  the corpora — one contract, every implementation drives it
-testdata/     the fixture actor kontra's own tests dispatch to
-docs/         ADRs and the wiki source
+sdk/            WHAT AN ACTOR AUTHOR IMPORTS               (Apache-2.0)
+  go/  python/    actor + caller (+ fleet, in Python)
+
+runtime/        WHAT RUNS ON A MACHINE, beside the actor   (AGPL-3.0)
+  go/  python/    the hosts that load and drive an actor
+  handler/        the Go Temporal handler — one per actor, owns the backing workflow
+
+control/        WHAT RUNS WHERE `kontra up` RUNS           (AGPL-3.0)
+  orchestrator/   catalog, datasets, fleet, panels — three roles, one build (TypeScript)
+  images/         the container definitions for it
+
+cli/            THE ONE BINARY, WHICH IS BOTH
+  appliance/      the embedded services `kontra up` supervises   (control plane)
+  warden*.go      the Machine agent and its container drivers    (a Machine)
+
+shared/         NEITHER — what more than one implementation must agree on
+  core/           @kontra/core, the kernel the console imports too  (Apache-2.0)
+  contracts/      the .proto envelope
+  conformance/    the corpora — one contract, every implementation drives it
+
+testdata/       the fixture actor kontra's own tests dispatch to
+docs/           ADRs and the wiki source
 ```
 
-**The console is not here.** It lives in [kontra-console](https://github.com/medmahmoudi26/kontra-console) and depends on `@kontra/core` — this repository's `core/` — so the two halves read a Run through one set of declarations rather than two (ADR 0041). It ships as a content-addressed artifact the release pins by digest, which is why building kontra does not need it.
+**`sdk/` and `runtime/` cannot move**, which is a fact about Go rather than a preference: an actor
+imports `github.com/medmahmoudi26/kontra/runtime/go` and `…/sdk/go` BY PATH, and that path is also
+the git tag prefix that publishes them. Their directory *is* their API. It is why there is no
+`machine/` directory — a Machine's side of the system is split between a published surface that is
+frozen and a binary that is also the operator's.
+
+**The console is not here.** It lives in [kontra-console](https://github.com/medmahmoudi26/kontra-console) and depends on `@kontra/core` — this repository's `shared/core/` — so the two halves read a Run through one set of declarations rather than two (ADR 0041). It ships as a content-addressed artifact the release pins by digest, which is why building kontra does not need it.
 
 ### The conformance corpora
 

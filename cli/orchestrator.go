@@ -35,7 +35,7 @@ import (
 	"strings"
 
 	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
-	"github.com/medmahmoudi26/kontra/handler/hydratestore"
+	"github.com/medmahmoudi26/kontra/runtime/handler/hydratestore"
 )
 
 // DefaultOrchestratorPort is the API's port, and it is 8088 because that is the number in every

@@ -40,7 +40,7 @@ def object_key(prefix: str, *parts: str) -> str:
     written by a Python actor under a non-empty prefix could not be read back by anything else,
     including a second Python worker reading through any other implementation's key.
 
-    The peers are `handler/internal/objectstore.Key`, `runtime/go/codec.objectKey` and
+    The peers are `runtime/handler/internal/objectstore.Key`, `runtime/go/codec.objectKey` and
     `control/orchestrator/src/codec/objectStore.ts:key`. Nothing imports across those boundaries, so what
     holds the four to one answer is the `prefixCases` rows of shared/conformance/codec/fixtures.json —
     which did not exist until this bug did, because every row carried the empty prefix, the one
@@ -61,7 +61,7 @@ class PrefixedStore:
     """A `codec.BlobStore` that addresses another one under a store prefix.
 
     THE TRANSPORT IS ONE THING AND THE ADDRESS IS ANOTHER, which is the split
-    `handler/claimcheck` already argues for in Go: a backing knows how to move bytes to a
+    `runtime/handler/claimcheck` already argues for in Go: a backing knows how to move bytes to a
     bucket, and where in that bucket they go is the codec's contract with three other
     languages. Keeping the join here rather than inside `S3CasStore.put` is also what makes it
     testable — the conformance arm wraps an in-memory store and drives the real join, with no
@@ -131,7 +131,7 @@ def data_converter():
     """The DataConverter an actor's Temporal client must use.
 
     Byte-identical in effect to the handler's `converter.NewCodecDataConverter(default, codec)`
-    (handler/main.go): same threshold, same `cas/<sha[:2]>/<sha>` key, same marker — all three
+    (runtime/handler/main.go): same threshold, same `cas/<sha[:2]>/<sha>` key, same marker — all three
     pinned by the shared corpus in `shared/conformance/codec/`.
     """
     import dataclasses

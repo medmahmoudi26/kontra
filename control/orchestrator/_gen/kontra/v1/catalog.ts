@@ -33,7 +33,7 @@ export const protobufPackage = "kontra.v1";
  * orchestrator reads it in POST /api/actors and persists it as ActorRecord
  * (control/orchestrator/src/db/repo.ts). Nothing makes those three agree except one check per side,
  * each written where that side lives and sharing no code with the others:
- * handler/internal/wire/wire_congruence_test.go reads the generated descriptor back through
+ * runtime/handler/internal/wire/wire_congruence_test.go reads the generated descriptor back through
  * protoreflect, tests/test_method_types.py holds the posted Python body to it, and
  * control/orchestrator/catalog.contract.ts makes a field this file defines and the store cannot hold
  * a compile error.

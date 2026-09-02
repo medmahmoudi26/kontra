@@ -241,7 +241,7 @@ class Actor:
 
     A Method returns PLAIN JSON; there is no author-managed artifact API. The batch's
     input and result cross the handler boundary via a claim-check codec when large
-    (handler/internal/codec), so authors never touch the object store directly."""
+    (runtime/handler/internal/codec), so authors never touch the object store directly."""
 
     def __init__(self) -> None:
         # Run-wide config from the dispatcher (reaches the author as self.params). The

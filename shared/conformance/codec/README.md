@@ -17,7 +17,7 @@ exhaustion — loud, but only once a batch was big enough, so small runs passed.
 the ref shape, the metadata decoding and the CAS key so that `kontra workflow start --wait` could
 read an offloaded result — an implementation of this contract whose header cited this corpus and
 whose tests never opened it. It is gone: the CLI reaches the handler's codec through
-`handler/claimcheck`, the way the appliance already reached the handler's store types through
+`runtime/handler/claimcheck`, the way the appliance already reached the handler's store types through
 `casstore` and `hydratestore`, and what is left in the CLI is a transport (one unsigned HTTP GET)
 rather than a copy of this contract.
 
@@ -32,7 +32,7 @@ Every implementation runs the **same** [`fixtures.json`](./fixtures.json):
 
 | Language | Test | Runner |
 |----------|------|--------|
-| Go (handler) | [`handler/internal/codec/conformance_test.go`](../../handler/internal/codec/conformance_test.go) | `go test ./internal/codec/` in `handler/` |
+| Go (handler) | [`runtime/handler/internal/codec/conformance_test.go`](../../handler/internal/codec/conformance_test.go) | `go test ./internal/codec/` in `handler/` |
 | Go (runtime) | [`runtime/go/codec/conformance_test.go`](../../runtime/go/codec/conformance_test.go) | `go test ./codec/` in `runtime/go/` |
 | Go (appliance, over HTTP) | [`cli/appliance/codec/codec_test.go`](../../cli/appliance/codec/codec_test.go) | `go test ./appliance/codec/` in `cli/` |
 | Go (the `kontra` binary) | [`cli/claimcheck_test.go`](../../cli/claimcheck_test.go) | `go test .` in `cli/` |

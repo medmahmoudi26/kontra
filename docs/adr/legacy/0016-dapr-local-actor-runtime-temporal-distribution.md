@@ -31,12 +31,12 @@ placement distributes work across workers). Both are wrong, and the code says wh
 - **Actor invocation is ALWAYS local.** The handler drives the actor by PUTting to its **local**
   sidecar — `KONTRA_DAPR_SIDECAR`, default `http://127.0.0.1:3500` — at
   `/v1.0/actors/<type>/<id>/method/RunBatch` and `/method/Close`
-  (`handler/activity.go:86,119,167`); the worker sets `KONTRA_DAPR_SIDECAR=http://127.0.0.1:3500`.
+  (`runtime/handler/activity.go:86,119,167`); the worker sets `KONTRA_DAPR_SIDECAR=http://127.0.0.1:3500`.
   The actor call never leaves the container. daprd resolves the actor id against its LOCAL placement
   — whose only member is this very worker — and invokes the co-located host.
 - **Distribution is Temporal, not Dapr.** Every worker of an actor binds the **shared** Temporal
   task queue `SharedQueue = "{actor}-{version}"` (plus a `-sessions` queue)
-  (`handler/internal/identity/identity.go:19-24`); Temporal fans units/chunks across whichever
+  (`runtime/handler/internal/identity/identity.go:19-24`); Temporal fans units/chunks across whichever
   workers poll it (the per-step-queue pattern of ADR 0013; actor-as-Nexus-operation of ADR 0001).
   Dapr placement never routes cross-worker — it cannot, because no worker's daprd knows about any
   other worker's placement.

@@ -412,7 +412,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
  *   `web/dist`              THE BUNDLE. Inside a hydrated appliance bundle the SPA is a CHILD of
  *                           the server: `orchestrator/dist/src/main.js` beside
  *                           `orchestrator/web/dist`. That layout is an artifact contract
- *                           `handler/internal/hydrate` writes and reads, and it did not move.
+ *                           `runtime/handler/internal/hydrate` writes and reads, and it did not move.
  *   `../kontra-console/dist` THE CHECKOUT. The console is a separate REPOSITORY since ADR 0038, so
  *                           the checkout shape is a sibling directory rather than a sibling
  *                           package. This was `../frontend/dist`; `frontend/` no longer exists.

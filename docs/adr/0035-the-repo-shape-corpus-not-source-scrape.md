@@ -120,7 +120,7 @@ sides execute* rather than text one side reads:
 
 | Corpus | Runners |
 |---|---|
-| `shared/conformance/codec/fixtures.json` | `actorkit/python/internals/test_codec_conformance.py`, `control/orchestrator/src/codec/conformance.test.ts`, `actorkit/go/internal/codec/conformance_test.go`, `handler/internal/codec/conformance_test.go`, `cli/appliance/codec_test.go` — five runners, three languages |
+| `shared/conformance/codec/fixtures.json` | `actorkit/python/internals/test_codec_conformance.py`, `control/orchestrator/src/codec/conformance.test.ts`, `actorkit/go/internal/codec/conformance_test.go`, `runtime/handler/internal/codec/conformance_test.go`, `cli/appliance/codec_test.go` — five runners, three languages |
 | `actorkit/conformance/catalog.json` | `tests/test_catalog_conformance.py`, `control/orchestrator/src/catalog.conformance.test.ts` (against the real Fastify server), `actorkit/go/internal/registrar/conformance_test.go` |
 | `actorkit/conformance/blobkey.json` | `actorkit/python/internals/test_blobkey_conformance.py`, `control/orchestrator/src/codec/shard.test.ts`, `actorkit/go/internal/unitstore/conformance_test.go`, `cli/appliance/s3_test.go` |
 | `actorkit/conformance/output_dataset.json` | `tests/test_output_dataset_conformance.py`, `actorkit/go/internal/engine/output_dataset_conformance_test.go` — **Python and Go only; there is no TypeScript arm** |
@@ -321,8 +321,8 @@ The staged tree is `<stage>/orchestrator/dist`. The hydrated tree is `<data>/orc
 The manifest says `Bundle: "orchestrator"` and `Entrypoint: ["node/bin/node", "orchestrator/dist/src/main.js"]`.
 The SPA lands at `<root>/orchestrator/web/dist`. None of it moves.
 
-**This is a deployment artifact contract, not a directory.** `handler/internal/hydrate` reads the
-manifest back and lays the tree down from it (`handler/internal/hydrate/integrity_test.go:327` builds
+**This is a deployment artifact contract, not a directory.** `runtime/handler/internal/hydrate` reads the
+manifest back and lays the tree down from it (`runtime/handler/internal/hydrate/integrity_test.go:327` builds
 `dest/orchestrator/web/dist`); `cli/appliance/bundle/hydrate.go:141` roots the hydrated tree at
 `<data>/orchestrator/<digest>` precisely so that "which bundle is this" is answered by a path.
 **0031** §2 makes the digest the identity and makes a mismatch re-hydrate rather than proceed — so
@@ -389,7 +389,7 @@ Anyone tempted to "finish the rename" inside `cli/appliance/` should read this s
   and Python has no manifest that constrains a function-scoped import. A test per language is the
   only mechanism all three have.
 - **Rename the appliance bundle's internal layout to match `backend/`.** Rejected in §5. Every bundle
-  digest changes, every hydrated tree on every machine is invalidated, `handler/internal/hydrate` has
+  digest changes, every hydrated tree on every machine is invalidated, `runtime/handler/internal/hydrate` has
   to be versioned across the change, and the name being replaced is not wrong.
 - **Rename the compose services to match the directories.** Rejected in §4. They are addresses a
   remote worker resolves and labels a CLI filters on; the blast radius is the fleet and the reward is

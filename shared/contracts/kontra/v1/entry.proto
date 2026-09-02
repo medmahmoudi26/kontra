@@ -2,19 +2,19 @@ syntax = "proto3";
 
 package kontra.v1;
 
-option go_package = "github.com/medmahmoudi26/kontra/handler/_gen/kontra/v1;kontrav1";
+option go_package = "github.com/medmahmoudi26/kontra/runtime/handler/_gen/kontra/v1;kontrav1";
 
 import "google/protobuf/struct.proto";
 
 // The TWO genuinely cross-language boundary types. Three seams write their own copy: the
 // TS orchestrator (control/orchestrator/src/workflows/interpreter.ts), the Python caller SDK
 // (sdk/python/actorkit/workflows.py) and the Go handler that decodes them
-// (handler/internal/wire/wire.go). Per ADR 0002 the payload stays JSON on the wire — this
+// (runtime/handler/internal/wire/wire.go). Per ADR 0002 the payload stays JSON on the wire — this
 // proto is the single TYPE DEFINITION those seams are checked against, NOT a binary
 // converter: TS imports the generated interface, while the Python TypedDict
 // (sdk/python/actorkit/contract.py) and the Go struct stay hand-written under
 // field-congruence tests — tests/test_workflows_client.py,
-// handler/internal/wire/wire_congruence_test.go, and control/orchestrator/entry.contract.ts,
+// runtime/handler/internal/wire/wire_congruence_test.go, and control/orchestrator/entry.contract.ts,
 // which is a compile-time guard rather than a test run.
 //
 // THIS is the dispatch contract actually in use: an EntryInput is the argument to the one
@@ -29,7 +29,7 @@ import "google/protobuf/struct.proto";
 // A bare claim-check ref: {sha256, size, meta}. The content-addressed shape the
 // codec/blob layer trades in. Shared by the TS BareRef / ClaimCheckRef /
 // NodeResultRef.claimcheck arm and the handler's blob activities — kontra.store_blob
-// returns it, kontra.fetch_blob accepts it (handler/activity.go), and a Python caller
+// returns it, kontra.fetch_blob accepts it (runtime/handler/activity.go), and a Python caller
 // dereferences a result through the same pair.
 message BareRef {
   string sha256 = 1;

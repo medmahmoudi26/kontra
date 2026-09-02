@@ -16,8 +16,8 @@ import (
 // what pins every call of the scope to the process holding the loaded resource.
 //
 // Derived independently in four languages — here, python `internals.temporal.host`, the caller
-// (`actorkit.catalog.session_queue`, which closes on it) and `handler/internal/identity`
-// .SessionQueue, which dispatches onto it. handler/internal is not importable from this module
+// (`actorkit.catalog.session_queue`, which closes on it) and `runtime/handler/internal/identity`
+// .SessionQueue, which dispatches onto it. runtime/handler/internal is not importable from this module
 // (a different module, and internal to handler), so the decoupling rule leaves this a
 // re-derivation and shared/conformance/queues.json §session is what holds them to one answer. Not a
 // count in a comment: the three comments that carried one disagreed with each other.
@@ -220,7 +220,7 @@ func (h *Activities) OpenSession(ctx context.Context, req map[string]any) (*Open
 }
 
 // sessionActorID is which actor instance a Session activates: its key if it claimed one, else the
-// Session id. Congruent with the actor id handler/workflow.go derives for a scoped dispatch, and
+// Session id. Congruent with the actor id runtime/handler/workflow.go derives for a scoped dispatch, and
 // with python's internals.temporal.host.session_actor_id.
 //
 // Keys are optional (ADR 0023 §10). A key is a claim on a shared identity — it carries durable

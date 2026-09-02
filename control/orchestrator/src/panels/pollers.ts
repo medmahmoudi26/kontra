@@ -19,7 +19,7 @@
  * MACHINE, and every Machine placed with the same actor and version polls ONE shared queue. So a
  * queue-level `live` painted on every tile is exactly the round-3 shape ADR 0020 exists to catch:
  * nine healthy handlers would render the tenth, whose `kontra-handler.service` is dead, green.
- * Attribution comes from the poller identity, which neither `handler/main.go` (`client.Dial` with no
+ * Attribution comes from the poller identity, which neither `runtime/handler/main.go` (`client.Dial` with no
  * `Identity`) nor the Python host overrides, so both SDK defaults apply and both carry the host:
  * Go `<pid>@<hostname>@<queue>`, Python `<pid>@<hostname>`. When an identity cannot be parsed we
  * report `unknown` rather than guessing in either direction.

@@ -12,7 +12,7 @@ export const protobufPackage = "kontra.v1";
  * A bare claim-check ref: {sha256, size, meta}. The content-addressed shape the
  * codec/blob layer trades in. Shared by the TS BareRef / ClaimCheckRef /
  * NodeResultRef.claimcheck arm and the handler's blob activities — kontra.store_blob
- * returns it, kontra.fetch_blob accepts it (handler/activity.go), and a Python caller
+ * returns it, kontra.fetch_blob accepts it (runtime/handler/activity.go), and a Python caller
  * dereferences a result through the same pair.
  */
 export interface BareRef {

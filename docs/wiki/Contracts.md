@@ -4,7 +4,7 @@ Kontra binds a TypeScript orchestrator, a Python SDK, and a Go SDK. Two kinds of
 
 ## Layout rule
 
-Contracts live **only** in the root `contracts/` directory. `buf generate` writes the committed, drift-checked stubs into the *consuming* seam (`sdk/python/_gen/`, `control/orchestrator/_gen/`, `handler/_gen/`) — generated code never lives under a contract dir.
+Contracts live **only** in the root `contracts/` directory. `buf generate` writes the committed, drift-checked stubs into the *consuming* seam (`sdk/python/_gen/`, `control/orchestrator/_gen/`, `runtime/handler/_gen/`) — generated code never lives under a contract dir.
 
 ## The protos
 
@@ -16,7 +16,7 @@ Contracts live **only** in the root `contracts/` directory. `buf generate` write
 | `catalog.proto` | `ActorDescriptor` — identity + operation schemas for catalog registration | orchestrator ↔ workers |
 | `run.proto` | `RunEnvelope` — the future Nexus envelope (cross-namespace routing metadata); unused today | — |
 
-**Congruence tests** hold each hand-written wire struct to its proto field set: `tests/test_workflows_client.py` (Python), `handler/internal/wire/wire_congruence_test.go` (Go), `backend/entry.contract.ts` (a compile-time TS guard). Change the proto → the tests fail until every seam matches.
+**Congruence tests** hold each hand-written wire struct to its proto field set: `tests/test_workflows_client.py` (Python), `runtime/handler/internal/wire/wire_congruence_test.go` (Go), `backend/entry.contract.ts` (a compile-time TS guard). Change the proto → the tests fail until every seam matches.
 
 ### `parallel_sessions` and the reserved field
 
@@ -40,7 +40,7 @@ Two owners, cleanly split — both inside this repo:
 
 ## Identity strings (one derivation per side)
 
-The Go handler derives the Temporal routing strings from `(name, version)` in one place (`handler/internal/identity`); each actor host derives the queue it polls the same way (`runtime/python/internals/temporal/host.py` `task_queue`, `runtime/go/temporalhost` `TaskQueue`), so no caller invents a third encoding:
+The Go handler derives the Temporal routing strings from `(name, version)` in one place (`runtime/handler/internal/identity`); each actor host derives the queue it polls the same way (`runtime/python/internals/temporal/host.py` `task_queue`, `runtime/go/temporalhost` `TaskQueue`), so no caller invents a third encoding:
 
 | String | Value |
 |---|---|

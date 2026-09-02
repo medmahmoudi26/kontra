@@ -21,7 +21,7 @@ export interface NodeHeartbeat {
  * The decoded `RunBatch` heartbeat payload.
  *
  * The emitter is the ACTOR, not the handler (ADR 0018): `_beat` in
- * runtime/python/internals/engine.py. It used to be a Go struct in handler/activity.go, back
+ * runtime/python/internals/engine.py. It used to be a Go struct in runtime/handler/activity.go, back
  * when the handler drove the actor through a sidecar and beat on its behalf.
  *
  * Every field is optional because the wire is another process's build, which may predate any

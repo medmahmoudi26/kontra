@@ -239,8 +239,8 @@ def test_the_machine_the_handler_stamps_is_the_key_the_batch_reads():
     assert 'out["machine"]' in src("runtime", "python", "internals", "temporal", "host.py")
     assert '`json:"machine,omitempty"`' in src("runtime", "go", "engine", "engine.go")
     # The handler copies it from the envelope onto the ref's meta, under the SAME key…
-    assert 'result["machine"]' in src("handler", "workflow.go")
-    assert 'ref.Meta["machine"]' in src("handler", "workflow.go")
+    assert 'result["machine"]' in src("runtime", "handler", "workflow.go")
+    assert 'ref.Meta["machine"]' in src("runtime", "handler", "workflow.go")
     # …which is the key both callers' Batch reads back.
     assert 'meta.get("machine")' in src("sdk", "python", "actorkit", "catalog.py")
     assert 'ref.Meta["machine"]' in src("sdk", "go", "catalog", "workflows.go")
@@ -1323,7 +1323,7 @@ def test_getitem_does_not_mutate_the_shared_handle():
 
 
 def test_a_bound_key_becomes_the_idempotency_key():
-    """The handler derives the actor id from idempotency_key FIRST (handler/workflow.go:33), so
+    """The handler derives the actor id from idempotency_key FIRST (runtime/handler/workflow.go:33), so
     this field — not node_id — is what pins the dispatch to one virtual object."""
     entry = catalog.entry_input(
         [1, 2], run_id="r", node_id="n", idempotency_key=catalog.actor("c", "1")["k"].key

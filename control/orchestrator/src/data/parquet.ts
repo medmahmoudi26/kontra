@@ -448,7 +448,7 @@ export interface MaterializeSelector {
    *
    * THE COLUMN IS CALLED `node` AND USED TO MEAN SOMETHING ELSE. In the v1 wire contract
    * `node_id` is documented as "which graph node produced this dispatch" — a position in the
-   * graph interpreter (`handler/_gen/kontra/v1/run.pb.go`). v2 deleted graphs (ADR 0023 §12
+   * graph interpreter (`runtime/handler/_gen/kontra/v1/run.pb.go`). v2 deleted graphs (ADR 0023 §12
    * retires **Node** outright), so the dimension stopped existing and every row landed the
    * literal `'w'` the publish activity substituted for the missing value. Nor is the column fed
    * from that field any more: `node_id` survives on the wire as a per-DISPATCH id that keys the

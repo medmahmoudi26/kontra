@@ -4,6 +4,8 @@
 
 **Accepted.** Extends **0038**, which split the code into repositories and left the console inside `kontra` as `frontend/`. This is the decision that lets the console leave.
 
+**Amended by 0042**, which moved the directories this ADR names: `core/` is `shared/core/`, `backend/` is `control/orchestrator/`, and the console's dependency reads `link:../kontra/shared/core`. The reasoning below is unchanged — only the paths are.
+
 ## Context
 
 `kontra-console` is a third repository, and the console had been reaching into the orchestrator's source directly:

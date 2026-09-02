@@ -5,7 +5,7 @@
 // THIS PACKAGE KEEPS EXACTLY ONE THING, AND THIS IS IT: Endpoint() reads the address the UI is
 // told to call OFF THE LISTENER THAT IS BOUND, instead of it being configured beside the bind.
 // That is the whole reason there is a package here rather than eight lines in `kontra up`. The
-// algorithm is not ours — it lives in `handler/codecserver` over `handler/internal/codec`, which
+// algorithm is not ours — it lives in `runtime/handler/codecserver` over `runtime/handler/internal/codec`, which
 // is where the Go Worker's own codec comes from, so there is one implementation and no second
 // threshold to disagree about.
 //
@@ -44,7 +44,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/handler/codecserver"
+	"github.com/medmahmoudi26/kontra/runtime/handler/codecserver"
 )
 
 // DefaultPort is the port the codec listens on.

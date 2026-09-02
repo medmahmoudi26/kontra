@@ -39,7 +39,7 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/appliance/objstore"
 	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
 	"github.com/medmahmoudi26/kontra/cli/appliance/temporalsrv"
-	"github.com/medmahmoudi26/kontra/handler/hydratestore"
+	"github.com/medmahmoudi26/kontra/runtime/handler/hydratestore"
 )
 
 func cmdUp(args []string) error {

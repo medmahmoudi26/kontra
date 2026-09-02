@@ -54,7 +54,7 @@ policy, and "a step processes one unit". Unlike everything above, they had no im
 preserve: `@actor.step` had been renamed, `a.Step` had zero callers, and `step.proto`'s
 `StepOptions` and `kontra.v1.RetryPolicy` were read by no SDK in any language — so 0009's
 "author-declared retry, implemented" described a contract nothing wired. The real retry is
-`MaximumAttempts: 3`, hardcoded in `handler/workflow.go`. Records above still cite them; those links
+`MaximumAttempts: 3`, hardcoded in `runtime/handler/workflow.go`. Records above still cite them; those links
 are dead on purpose.
 
 **17 and 20 are in the repo, and `docs/adr/` is not gitignored any more.** Both halves of what this

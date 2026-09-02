@@ -27,7 +27,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/converter"
 
-	"github.com/medmahmoudi26/kontra/handler/claimcheck"
+	"github.com/medmahmoudi26/kontra/runtime/handler/claimcheck"
 )
 
 type codecCorpus struct {
@@ -283,7 +283,7 @@ func TestTheCLIRefusesAMarkedPayloadThatIsNotARef(t *testing.T) {
 // `/kontra/runscas/83/8378…` where the key is `/kontra/runs/cas/83/8378…`. The divergence appears
 // only under a non-default prefix, only on a payload over 128 KiB, and only at `--wait` time.
 //
-// WHICH SIDE IS RIGHT, measured rather than assumed: `handler/internal/objectstore.Key` and
+// WHICH SIDE IS RIGHT, measured rather than assumed: `runtime/handler/internal/objectstore.Key` and
 // `control/orchestrator/src/codec/objectStore.ts:key` both drop the prefix in as a SEGMENT joined with `/`,
 // while `runtime/python/internals/casstore.py` AND `runtime/go/codec/s3.go` both concatenated —
 // three against two, not three against one. Both SDKs join now, and the prefix is no longer a
@@ -409,7 +409,7 @@ func TestTheCLIRefusesTamperedBytes(t *testing.T) {
 // on a string that may not have two characters. Measured during the fold: a ref carrying
 // `"sha256":"a"` panicked with `slice bounds out of range [:2] with length 1`, where the CLI's
 // own implementation had answered "claim-check ref has no usable sha256". The guard went into
-// handler/internal/codec, where every Go arm gets it; this pins that the CLI kept the behaviour
+// runtime/handler/internal/codec, where every Go arm gets it; this pins that the CLI kept the behaviour
 // it had.
 func TestAnUnusableRefIsRefusedRatherThanCrashing(t *testing.T) {
 	fx := loadCodecCorpus(t)

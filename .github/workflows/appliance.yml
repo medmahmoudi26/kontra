@@ -86,7 +86,7 @@ jobs:
       # and a workflow that installed them would be testing a machine no user has.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: cli/go.sum
 
       - name: build the bundle for this platform
@@ -149,7 +149,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: cli/go.sum
 
       # SEQUENTIAL, NOT PARALLEL, and the build does it that way on purpose: a staged tree is
@@ -249,7 +249,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: cli/go.sum
 
       # THE PROOF THAT THE JOB IS WHAT IT SAYS. If a future edit adds a `setup-node` step above,
@@ -320,7 +320,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: cli/go.sum
 
       - name: build, then build again
@@ -356,7 +356,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: handler/go.mod
+          go-version-file: runtime/handler/go.mod
           cache-dependency-path: cli/go.sum
 
       - name: bump NodeVersion and nothing else

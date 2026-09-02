@@ -526,7 +526,7 @@ def build_session_factory(registry, *, store="env"):
             # so every worker on one run agrees on the `dt=` partition. Dropping it — as this did
             # until 2026-08-14 — silently keys blobs by the WORKER's clock, which splits a run
             # across two partitions at midnight and reads as data loss. Go has always sent and
-            # honoured it (handler/workflow.go:104, runtime/go/engine/engine.go:148).
+            # honoured it (runtime/handler/workflow.go:104, runtime/go/engine/engine.go:148).
             run_date = payload.get("run_date", "") or ""
             # Named by the dispatch, or the sole Method when the actor has only one. Resolving
             # here (not at boot) is what lets one loaded session serve several Methods.
@@ -559,7 +559,7 @@ def build_session_factory(registry, *, store="env"):
             # session and would otherwise read as this batch's own.
             #
             # Cleaning up in close() would be simpler and is not enough — the handler's Close is
-            # best-effort (bounded retry, error discarded in handler/workflow.go), so a batch
+            # best-effort (bounded retry, error discarded in runtime/handler/workflow.go), so a batch
             # whose close never landed would poison the next one. A guard here cannot be skipped.
             #
             # Tiers 3/4 live in another store and are untouched — object_state surviving this is

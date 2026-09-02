@@ -743,7 +743,7 @@ def test_non_ref_units_pass_through_the_resolver_untouched():
 
 def test_run_date_comes_from_the_handler_not_the_worker():
     """The `dt=` partition is the RUN's date, stamped by the handler from the workflow's start
-    time (handler/workflow.go:104) — never this worker's clock.
+    time (runtime/handler/workflow.go:104) — never this worker's clock.
 
     Go has asserted this since it shipped (TestRunDateComesFromTheWorkflowNotTheWorker); Python
     dropped the field on the floor until 2026-08-14, so a Python run crossing midnight split its

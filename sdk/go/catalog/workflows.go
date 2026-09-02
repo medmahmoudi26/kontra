@@ -11,7 +11,7 @@ import (
 )
 
 // BareRef is the claim-check ref the wire trades in. Hand-written with SNAKE_CASE tags to match
-// `handler/internal/wire`, NOT the generated protobuf type: the generated Nexus client lives in
+// `runtime/handler/internal/wire`, NOT the generated protobuf type: the generated Nexus client lives in
 // the handler module (unimportable here) and protojson would emit camelCase against a decoder
 // expecting snake_case — the exact trap `handler/nexus.go` hand-wires its own operation to avoid.
 type BareRef struct {
@@ -21,7 +21,7 @@ type BareRef struct {
 }
 
 // EntryInput is the kontra.actor:run operation's input. Field-for-field the peer of
-// `handler/internal/wire.EntryInput` and Python's `entry_input`.
+// `runtime/handler/internal/wire.EntryInput` and Python's `entry_input`.
 type EntryInput struct {
 	Units          []any          `json:"units"`
 	InputRef       *BareRef       `json:"input_ref,omitempty"`

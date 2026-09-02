@@ -675,14 +675,14 @@ func (a assignedWorker) spec(namespace string) workerSpec {
 // ADDED HERE and not left to the assignment … Derived from the Worker's own identity, they cannot do
 // either." The function merged two maps and added nothing. So both failures it claimed to prevent
 // were reachable from a JSON file the whole time — an assignment that OMITS them starts a pair that
-// polls nothing (`handler/main.go:31-32` reads exactly those two to pick its queue), and one that
+// polls nothing (`runtime/handler/main.go:31-32` reads exactly those two to pick its queue), and one that
 // CONTRADICTS them starts a Worker whose `KONTRA_WORKER` label says one thing and whose queue says
 // another, which the reconcile loop then cannot see and restarts every five seconds.
 //
 // ═══ AND KONTRA_NAMESPACE IS THE ONE THIS SLICE HAD TO ADD ═══
 //
 // A **Warden** being scoped to one namespace is worth nothing if the **Workers** it starts are not:
-// they are the processes that actually poll. `handler/main.go:65`, `runtime/go/temporalhost:230` and
+// they are the processes that actually poll. `runtime/handler/main.go:65`, `runtime/go/temporalhost:230` and
 // `runtime/python/internals/temporal/host.py:340` all read `KONTRA_NAMESPACE` and all default it to
 // `"default"` — so without this line, every tenant's Workers poll `nscheck-0.1.0` in ONE namespace
 // and ADR 0036 §6's collision survives the whole slice, with the Warden's own watcher correctly

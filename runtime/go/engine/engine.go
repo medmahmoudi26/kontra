@@ -141,7 +141,7 @@ type RunBatchReq struct {
 //
 // The field names are the envelope the handler stores and the orchestrator reads, so they must
 // match the Python engine's return dict exactly — `failures` in particular is what
-// handler/workflow.go counts to surface permanently dropped Units.
+// runtime/handler/workflow.go counts to surface permanently dropped Units.
 type RunBatchResp struct {
 	// Done reports that every Unit is accounted for (committed or isolated).
 	Done     bool             `json:"done"`

@@ -63,7 +63,7 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/appliance/bundle"
 	"github.com/medmahmoudi26/kontra/cli/appliance/codec"
 	"github.com/medmahmoudi26/kontra/cli/appliance/temporalsrv"
-	"github.com/medmahmoudi26/kontra/handler/hydratestore"
+	"github.com/medmahmoudi26/kontra/runtime/handler/hydratestore"
 )
 
 // DefaultTemporalUIPort is 8233, which is where `temporal server start-dev` serves its UI.

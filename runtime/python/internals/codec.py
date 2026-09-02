@@ -1,4 +1,4 @@
-"""Claim-check payload codec — the Python peer of handler/internal/codec and the
+"""Claim-check payload codec — the Python peer of runtime/handler/internal/codec and the
 orchestrator's claimCheck.ts.
 
 Payloads over a threshold are offloaded to the CAS and replaced by a small ref payload,
