@@ -83,14 +83,23 @@ MKDIR = re.compile(r"^\s*mkdir\s+(.*)$")
 def _makes(step: dict) -> set[str]:
     """Directories this step creates, which later steps may therefore walk into.
 
-    Two producers, because both appear in these workflows: `actions/download-artifact`, whose
-    `path:` is materialised by the action, and a plain `mkdir` in a script. Without this the guard
-    would demand `release/` from the checkout — a false positive that would make it noise, and a
-    guard nobody trusts is worse than none.
+    Three producers, because all three appear in these workflows: `actions/download-artifact`,
+    whose `path:` is materialised by the action; `actions/checkout` with a `path:`, which is how
+    ANOTHER REPOSITORY arrives since ADR 0038; and a plain `mkdir` in a script. Without this the
+    guard would demand `release/` from the checkout — a false positive that would make it noise,
+    and a guard nobody trusts is worse than none.
+
+    THE CHECKOUT CASE WAS ADDED RATHER THAN WORKED AROUND, and it is worth being exact about what
+    that buys. A directory another repository is checked out into cannot be VERIFIED from this
+    checkout — no rule here can — so this is recognition, not proof. What it avoids is the shortcut:
+    writing the hop as `cd $GITHUB_WORKSPACE/_sibling/kontra-console` would have satisfied
+    `UNRESOLVABLE`, and `_walk` ABANDONS A SCRIPT at the first unresolvable `cd` — so every later
+    hop in that step would have gone unchecked too, silently. A literal path keeps the walk going,
+    and ties the name to the one step that declares it.
     """
     made: set[str] = set()
     uses = str(step.get("uses") or "")
-    if "download-artifact" in uses:
+    if "download-artifact" in uses or "actions/checkout" in uses:
         target = str((step.get("with") or {}).get("path") or "").strip()
         if target and not UNRESOLVABLE.search(target):
             made.add(os.path.normpath(target))

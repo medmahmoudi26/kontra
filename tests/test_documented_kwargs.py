@@ -43,9 +43,12 @@ REPO = Path(__file__).resolve().parent.parent
 DOC_GLOBS = (
     "README.md",
     "docs/wiki/*.md",
-    "examples/*/*/README.md",
-    "examples/*/workflows/*/description.md",
-    "examples/*/workflows/*/workflow.py",
+    # `examples/` LEFT THIS REPOSITORY (ADR 0038) and three globs pointed into it. They matched
+    # nothing, which `test_the_examples_still_parse` caught only because it counts what it parsed —
+    # the `>= 5` guard below was already satisfied by README.md and the wiki, so the sweep would
+    # otherwise have gone on reporting success over a shrinking set of files.
+    "testdata/workflows/*/description.md",
+    "testdata/workflows/*/workflow.py",
     ".kontra/workflows/*/workflow.py",
 )
 
@@ -165,6 +168,26 @@ def test_every_documented_keyword_argument_exists() -> None:
         "no documented keyword argument was found in any file — the call or kwarg pattern has "
         "stopped matching and this test is now asserting nothing"
     )
+    # ADR 0040 IS ACCEPTED AND NOT YET CARRIED OUT, which is the one case where documentation
+    # legitimately runs ahead of the signature. It renames the three axes to
+    # `machines`/`containers`/`workers` — `f.place(containers=3, workers=8)` is its own example —
+    # and its consequences say why it has not landed: the rename moves the `KONTRA_WORKER` label
+    # and the `<name>-<version>-sessions` task queue, so a Fleet must be DRAINED before upgrading
+    # or a Warden starts duplicates it cannot see.
+    #
+    # LISTED, NOT SUPPRESSED, and the list is checked in both directions. An entry that starts
+    # existing must be deleted from here — otherwise this file would keep excusing a keyword that
+    # is now real, and the next genuine drift behind the same name would be invisible.
+    pending = {("f.place", "containers")}
+    for call, kw in sorted(pending):
+        accepted = _accepted(call)
+        assert accepted is None or kw not in accepted, (
+            f"{call}({kw}=…) exists now, so ADR 0040 has landed — delete it from `pending` here, "
+            "which is what keeps this test honest about everything else."
+        )
+    excused = [d for d in dead if any(f"{c}({k}=" in d for c, k in pending)]
+    dead = [d for d in dead if d not in excused]
+
     assert not dead, (
         "documentation names keyword arguments that do not exist:\n  "
         + "\n  ".join(dead)

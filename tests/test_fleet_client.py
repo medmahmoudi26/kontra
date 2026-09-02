@@ -28,6 +28,8 @@ from fleetscope import FleetScope
 
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "backend" / "src"
+#: The shared kernel (ADR 0041). Declarations both the orchestrator and the console read live here.
+CORE = ROOT / "core" / "src"
 
 
 def _read(rel: str) -> str:
@@ -521,13 +523,21 @@ def test_a_zero_machine_hold_is_ready_before_it_asks_about_a_placement(gate):
 
 
 def test_the_credential_name_pattern_matches_the_secret_store():
-    """`backend/src/secrets/store.ts:SECRET_NAME_RE`, character for character. The alphabet is
-    bounded on both sides so `DO_TOKEN` and `do-token` cannot become two different secrets — the
-    mistake somebody makes at 3am with a production credential."""
+    """`core/src/secrets.ts:SECRET_NAME_RE`, character for character. The alphabet is bounded on
+    both sides so `DO_TOKEN` and `do-token` cannot become two different secrets — the mistake
+    somebody makes at 3am with a production credential.
+
+    THE AUTHORITY MOVED, AND READING ITS SOURCE IS STILL THE ONLY MECHANISM HERE. It was
+    `backend/src/secrets/store.ts`; ADR 0041 moved the declaration to `@kontra/core` because the
+    console had a second copy of it. THIS side cannot be fixed the same way — the SDK is Python and
+    cannot import a TypeScript constant — so this really is a contract with two writers, and it is
+    pinned by reading the one that decides. The console's copy is gone; this one is not a copy, it
+    is another language.
+    """
     m = re.search(
-        r"SECRET_NAME_RE\s*=\s*/([^/]+)/", (BACKEND / "secrets" / "store.ts").read_text(encoding="utf-8")
+        r"SECRET_NAME_RE\s*=\s*/([^/]+)/", (CORE / "secrets.ts").read_text(encoding="utf-8")
     )
-    assert m, "could not find SECRET_NAME_RE in store.ts"
+    assert m, "could not find SECRET_NAME_RE in core/src/secrets.ts"
     assert fleet.SECRET_NAME_RE.pattern == m.group(1)
 
 

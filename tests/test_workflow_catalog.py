@@ -6,17 +6,25 @@ exists and nothing about its contract — while the answer was already written i
 the two properties that make registration safe to have: it never blocks serving, and one workflow's
 failure never costs another its registration.
 
-THE TWO WORKFLOWS THIS REPO SHIPS ARE THE FIXTURE.
-`examples/python/workflows/{ping,nscheck}/workflow.py` are imported and described here rather than
-mimicked, because a hand-written class that happens to match the emitter proves the emitter agrees
-with itself.
+REAL WORKFLOWS ARE THE FIXTURE. `testdata/workflows/{ping,nscheck}/workflow.py` are imported and
+described here rather than mimicked, because a hand-written class that happens to match the emitter
+proves only that the emitter agrees with itself.
 
-THEY HAVE TO BE IN THE REPO FOR THAT SENTENCE TO BE TRUE, and they were not: this read
-`.kontra/workflows/` — the OPERATOR's directory, gitignored on purpose because what lives there is
-theirs. It resolves on any machine that has run the thing and on no fresh checkout, so the suite
-passed locally for everyone who wrote it and failed the first time CI ever saw it, eleven tests at
-once, on a FileNotFoundError that says nothing about workflows. A fixture that is not shipped is
-not a fixture.
+THEY HAVE TO BE SHIPPED IN THIS REPO FOR THAT SENTENCE TO BE TRUE, and this has now been got wrong
+twice in opposite directions. First they were read from `.kontra/workflows/` — the OPERATOR's
+directory, gitignored on purpose because what lives there is theirs — which resolves on any machine
+that has run the thing and on no fresh checkout, so the suite passed locally for everyone who wrote
+it and failed the first time CI saw it, eleven tests at once, on a FileNotFoundError that says
+nothing about workflows. Then they were read from `examples/python/workflows/`, and ADR 0038 moved
+that tree to the kontra-workflows repository, which is the same failure with a different path.
+
+SO THEY ARE COPIES NOW, AND THAT COSTS SOMETHING WORTH NAMING. `testdata/workflows/` holds a copy
+of each, taken from kontra-workflows `python/`. Nothing checks that they are still current — if
+`nscheck` changes there, this suite keeps passing against the old shape. What it still proves is
+that the DERIVATION works on workflow source with the structure real workflows have, which is what
+these tests are about; what it no longer proves is that the shipped examples themselves stay
+describable. The same trade was made for the fixture actor (ADR 0038) and for kontra-console's
+`workflowSource.test.ts`, for the same reason: a unit suite cannot require a second checkout.
 
 BOTH READINGS ARE NOW OBSERVABLE FROM THE SHIPPED WORKFLOWS. `ping` still annotates `dict` on both
 slots, which derives a schema with NO properties — "any object" — and that is what the console must
@@ -41,7 +49,7 @@ from temporalio import workflow
 import internals.catalog as C
 
 ROOT = Path(__file__).resolve().parent.parent
-SHIPPED = ROOT / "examples" / "python" / "workflows"
+SHIPPED = ROOT / "testdata" / "workflows"
 
 
 def load_module(path: Path, name: str):

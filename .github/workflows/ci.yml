@@ -77,7 +77,7 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
-          cache-dependency-path: backend/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile
@@ -116,54 +116,23 @@ jobs:
       - name: vitest (incl. TS conformance test)
         run: pnpm test
 
-  # frontend is a SEPARATE pnpm project with its own lockfile and its own vitest, and it
-  # had no CI job at all — which is how two real UI regressions rode a fully green branch in
-  # August 2026: `workflowSource.ts` stopped recognising a promoted Dataset as a write, so the
-  # Workflows page under-reported a workflow's outputs, and a generated-caller test broke. Every
-  # gated suite was green the whole time. ~1100 tests were running only when someone remembered.
-  web:
-    name: frontend
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
-      # THE PARENT'S DEPENDENCIES, AND WHY THIS JOB NEEDS THEM.
-      #
-      # `frontend` is its own package, but its typecheck is NOT self-contained: the SPA
-      # imports shared modules through the `@core/*` alias (`@core/scratch`, `@core/actorControl`,
-      # `@core/panels/pollers`, ...) which resolve to `backend/src`, and tsc follows those
-      # imports into the server's own dependency graph — `@temporalio/client`, `@opentelemetry/*`.
-      # It also finds `@types/node` there, since TypeScript walks `node_modules/@types` upward.
-      #
-      # None of that is in `frontend/node_modules`, so with only the web install this job
-      # failed on eight `TS2307: Cannot find module` errors that no developer could reproduce —
-      # locally the parent install always exists, so the typecheck passed on every machine and
-      # only ever failed here.
-      - name: pnpm install (orchestrator — the SPA typechecks through @core/* into it)
-        working-directory: backend
-        run: pnpm install --frozen-lockfile
-
-      - name: pnpm install
-        run: pnpm install --frozen-lockfile
-
-      - name: typecheck (tsc --noEmit)
-        run: pnpm run typecheck
-
-      - name: vitest
-        run: pnpm test
+  # THE CONSOLE'S SUITE MOVED TO kontra-console (ADR 0038).
+  #
+  # There was a `web` job here running ~1100 tests, and it was added because their absence let two
+  # real UI regressions ride a fully green branch in August 2026 — `workflowSource.ts` stopped
+  # recognising a promoted Dataset as a write, and the Workflows page under-reported a workflow's
+  # outputs, while every gated suite stayed green. That job is now kontra-console's own CI, where
+  # the source is.
+  #
+  # It needed a step this repository can no longer provide: `pnpm install` in `backend/`, because
+  # the SPA typechecked through `@core/*` path aliases into the ORCHESTRATOR'S OWN dependency graph
+  # — `@temporalio/client`, `@opentelemetry/*` — and failed here on eight `TS2307`s no developer
+  # could reproduce. ADR 0041 replaced the aliases with a dependency on `@kontra/core`, which is a
+  # bounded surface rather than the whole server.
+  #
+  # THAT IS NOT YET THE SAME AS SELF-CONTAINED. `@kontra/core` is unpublished, so kontra-console
+  # depends on it as `link:../kontra/core` and its CI checks THIS repository out as a sibling to
+  # build the package. That checkout goes away when the package is published to npm, and not before.
 
   go:
     name: handler + cli
@@ -216,10 +185,19 @@ jobs:
 
       - name: cli (build + vet + test)
         working-directory: cli
+        # `-timeout 30m`, AND IT IS NOT PADDING. MEASURED on the development box: this package's
+        # tests take 610s, and `go test` defaults to a 600-second panic timeout — so the plain
+        # command fails here with `panic: test timed out after 10m0s`, naming whichever test was
+        # merely UNLUCKY ENOUGH to be running at the deadline rather than anything slow. It is the
+        # appliance tests that cost it: each boots a real Temporal server and hydrates bundles.
+        #
+        # A runner is not this box, so the honest statement is that the margin was ten seconds and
+        # the default is not a budget anyone chose. If this starts timing out at 30m, something is
+        # hanging — that is a real failure and the number should not move again.
         run: |
           go build ./...
           go vet ./...
-          go test ./...
+          go test -timeout 30m ./...
 
       # THE SEVEN-STANDALONE-MODULES GATE MOVED TO kontra-actors, IT DID NOT GO AWAY.
       #
@@ -464,24 +442,51 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
-          cache-dependency-path: backend/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       # THE ORCHESTRATOR FROM THE CHECKOUT, not from a bundle. `kontra up --orchestrator=local`
       # runs `backend/dist` directly, which is what makes this job about THIS commit's control
       # plane; `--orchestrator=bundle` would resolve a 330 MB dependency tree and build a
       # content-addressed artifact, which `.github/workflows/appliance.yml` already gates four
       # platforms of. Two different questions, two different jobs.
-      # THE SPA IS A SIBLING NOW, NOT A CHILD. It was `cd web` from inside the orchestrator, and the
-      # rename that made `orchestrator/` into `backend/` + `frontend/` could not see that: the path
-      # this step walks is not spelled anywhere, it is ACCUMULATED across two `cd`s, so a sweep for
-      # `orchestrator/web` matched nothing and the second hop kept pointing at a directory that had
-      # stopped existing. `tests/test_workflow_paths.py` now resolves these the way the shell does.
+      # THE SPA IS ANOTHER REPOSITORY NOW, and this step has been broken by every previous move of
+      # it — which is the reason for the paragraph rather than a line of yaml.
+      #
+      # It was `cd web` from inside the orchestrator; the rename to `backend/` + `frontend/` could
+      # not see that, because the path this step walks is not SPELLED anywhere, it is ACCUMULATED
+      # across two `cd`s. A sweep for `orchestrator/web` matched nothing and the second hop kept
+      # pointing at a directory that had stopped existing. `tests/test_workflow_paths.py` resolves
+      # these the way the shell does, for exactly that reason.
+      #
+      # ADR 0038 moved it out of the repository altogether, so the hop is a checkout. That needs
+      # `KONTRA_CONSOLE_TOKEN` — a token with read access to kontra-console — for as long as that
+      # repository is private; a missing secret fails this step with a 404 on a repository that
+      # exists, which is worth knowing before reading it as a typo.
+      # NESTED UNDER `_sibling/`, WHICH LOOKS ODD AND IS THE POINT. kontra-console depends on
+      # `@kontra/core` as `link:../kontra/core` — an unpublished package resolved through the
+      # filesystem — so the console needs a directory literally named `kontra` beside it. This
+      # checkout is at the workspace ROOT, so `kontra-console/` alone would put `../kontra` at
+      # `$GITHUB_WORKSPACE/kontra`, which does not exist. One level down, with a symlink, both
+      # names are where the dependency says they are.
+      - name: check out the console (the SPA is another repository since ADR 0038)
+        uses: actions/checkout@v4
+        with:
+          repository: medmahmoudi26/kontra-console
+          path: _sibling/kontra-console
+          token: ${{ secrets.KONTRA_CONSOLE_TOKEN }}
+
+      - name: put this checkout where `link:../kontra/core` expects it
+        run: ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/_sibling/kontra"
+
+      # `@kontra/core` FIRST, and it is not belt-and-braces: the console links it out of this
+      # checkout, so a console built against a stale `core/dist` disagrees with the orchestrator it
+      # is about to be served beside.
       - name: build the orchestrator and the SPA
         run: |
-          cd backend
           pnpm install --frozen-lockfile
-          pnpm exec tsc
-          cd ../frontend
+          pnpm --filter @kontra/core run build
+          pnpm --filter @kontra/backend exec tsc
+          cd _sibling/kontra-console
           pnpm install --frozen-lockfile
           pnpm run build
 

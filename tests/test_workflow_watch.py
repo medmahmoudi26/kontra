@@ -38,7 +38,7 @@ import internals.wfwatch as W
 from internals.temporal import wfhost as H
 
 ROOT = Path(__file__).resolve().parent.parent
-SHIPPED = ROOT / "examples" / "python" / "workflows"
+SHIPPED = ROOT / "testdata" / "workflows"
 
 
 def load_module(path: Path, name: str):

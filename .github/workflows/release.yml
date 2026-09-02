@@ -56,10 +56,24 @@ jobs:
           cache-dependency-path: cli/go.sum
 
       # THE SPA IS THE ONE THING THE RELEASE DOES NOT BUILD ITSELF. `kontra release` archives a
-      # vite output; producing that output is `frontend`'s own toolchain, with its own
-      # lockfile, and folding it into the appliance build would put a browser bundler inside the
-      # thing whose whole claim is that it needs nothing but Go. So it is built here, explicitly,
-      # by the same commands a developer runs.
+      # vite output; producing that output is the console's own toolchain, with its own lockfile,
+      # and folding it into the appliance build would put a browser bundler inside the thing whose
+      # whole claim is that it needs nothing but Go. So it is built here, explicitly, by the same
+      # commands a developer runs.
+      #
+      # AND IT IS ANOTHER REPOSITORY SINCE ADR 0038. The nesting under `_sibling/` is not decoration:
+      # kontra-console resolves `@kontra/core` as `link:../kontra/core`, so it needs a directory
+      # named `kontra` beside it, and this checkout is at the workspace root. `kontra release` finds
+      # the result through `bundle.ConsoleDist`, which is why `KONTRA_CONSOLE_DIST` is set rather
+      # than the path being assumed twice.
+      - name: check out the console
+        uses: actions/checkout@v4
+        with:
+          repository: medmahmoudi26/kontra-console
+          path: _sibling/kontra-console
+          token: ${{ secrets.KONTRA_CONSOLE_TOKEN }}
+      - name: put this checkout where `link:../kontra/core` expects it
+        run: ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/_sibling/kontra"
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -67,12 +81,18 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
+      - name: build @kontra/core (the console links it out of this checkout)
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @kontra/core run build
       - name: build the SPA
-        working-directory: frontend
+        working-directory: _sibling/kontra-console
         run: |
           pnpm install --frozen-lockfile
           pnpm run build
+      - name: point the release at the console's dist
+        run: echo "KONTRA_CONSOLE_DIST=$GITHUB_WORKSPACE/_sibling/kontra-console/dist" >> "$GITHUB_ENV"
 
       - name: release this platform
         working-directory: cli

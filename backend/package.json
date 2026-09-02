@@ -9,9 +9,9 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "build": "pnpm --filter @kontra/core run build && tsc",
+    "typecheck": "pnpm --filter @kontra/core run build && tsc --noEmit",
+    "test": "pnpm --filter @kontra/core run build && vitest run",
     "start": "node dist/src/main.js",
     "serve": "node dist/src/server.js",
     "materializer": "node dist/src/materializer.js",

@@ -1,6 +1,12 @@
 /**
  * Queue names and poller freshness — the pure half of `panels/pollers.ts`.
  *
+ * NOT `backend/src/queues.ts`, WHICH IS A DIFFERENT FILE WITH THE SAME NAME. That one holds the
+ * orchestrator's INTERNAL routing constants — which of its own processes serves which queue. This
+ * one derives the queue an ACTOR's Worker polls, from the actor's name and version, and it is a
+ * cross-language contract. Adding an actor queue to the other file, or a role queue to this one,
+ * would look right in both places.
+ *
  * IT IS HERE BECAUSE THE CONSOLE NEEDS IT AND `pollers.ts` CANNOT MOVE. That module reaches
  * `panels/discovery`, which reaches `infra/stacks` and `infra/state` — Pulumi, a filesystem and a
  * server. None of that belongs in a browser bundle. These three exports have no dependencies at all.
