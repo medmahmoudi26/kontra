@@ -1,5 +1,10 @@
 {
   "compilerOptions": {
+    /* NO `paths` ENTRY FOR @kontra/core, deliberately. It resolves through node_modules like any
+       other dependency, because a `paths` mapping is believed by tsc and by nothing else: the
+       extraction first went green on `tsc --noEmit` and red on 54 vitest files, then red on five
+       more that build a Temporal Workflow bundle. Build core (`pnpm --filter @kontra/core build`)
+       and every tool agrees; the workspace root's scripts do that first for exactly this reason. */
     "target": "ES2021",
     "module": "CommonJS",
     "moduleResolution": "Node",

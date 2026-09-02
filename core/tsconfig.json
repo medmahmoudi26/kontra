@@ -1,0 +1,36 @@
+{
+  // THIS PACKAGE EMITS JAVASCRIPT, and that is not a style choice. Temporal's Workflow bundler
+  // (`@temporalio/worker/src/workflow/bundler.ts`) registers swc-loader as
+  // `{ test: /\.ts$/, exclude: /node_modules/ }` — so a package whose entry point is TypeScript is
+  // resolved and then never transpiled. Pointing `exports` at `src/*.ts` typechecks, passes
+  // vitest, and fails five suites with `Can't resolve '@kontra/core/panels/ids'` the moment
+  // anything builds a Workflow bundle. Which is to say: it fails in the orchestrator, at runtime.
+  //
+  // THIS IS THE CommonJS HALF OF A DUAL BUILD; `tsconfig.esm.json` is the other. Both consumers are
+  // real and they disagree: the orchestrator is CommonJS (`backend/package.json` has no `type`) and
+  // `require`s this, while kontra-console is bundled by rollup, which reads a CJS module as a
+  // single default export and fails with `"workflowScratchId" is not exported by
+  // dist/scratch.js` — an error naming a symbol that is plainly exported.
+  //
+  // Types are emitted from THIS pass only. The two outputs are the same TypeScript.
+  "compilerOptions": {
+    "target": "ES2021",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2021"],
+    "types": ["node"],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist/cjs",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+}

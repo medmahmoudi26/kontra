@@ -102,12 +102,14 @@ sdk/          the authoring surface you import          (Apache-2.0)
   python/     actor + caller + fleet
 runtime/      the hosts that run an actor                (AGPL-3.0)
 backend/      the orchestrator: catalog, datasets, fleet, panels  (TypeScript)
-frontend/     the console — Workflows, Actors, Monitor, Datasets
+core/         @kontra/core — the shared kernel the console imports  (Apache-2.0)
 infra/        Pulumi programs; machines, and what is written on them
 conformance/  the corpora — one contract, every implementation drives it
 testdata/     the fixture actor kontra's own tests dispatch to
 docs/         ADRs and the wiki source
 ```
+
+**The console is not here.** It lives in [kontra-console](https://github.com/medmahmoudi26/kontra-console) and depends on `@kontra/core` — this repository's `core/` — so the two halves read a Run through one set of declarations rather than two (ADR 0041). It ships as a content-addressed artifact the release pins by digest, which is why building kontra does not need it.
 
 ### The conformance corpora
 

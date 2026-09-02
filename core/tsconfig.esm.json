@@ -1,0 +1,22 @@
+{
+  // THE ESM HALF. Same source, emitted for bundlers — rollup (kontra-console) and Temporal's
+  // webpack both prefer the `import` condition, and rollup cannot read named exports out of the
+  // CommonJS half at all.
+  //
+  // `moduleResolution: "Bundler"` IS DELIBERATE AND IS A LIMIT. The source writes relative imports
+  // without a `.js` extension (`from './contract/types'`), which is legal for CommonJS and for
+  // every bundler, and is NOT legal for Node's own ESM loader. So this output is for bundlers; a
+  // consumer running it through raw `node --input-type=module` would need extensions added at the
+  // source. Nothing does that today, and the CommonJS half is what Node consumers get.
+  //
+  // No `declaration`: the types come from the CommonJS pass, and two copies of the same .d.ts is a
+  // way for them to disagree.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ES2020",
+    "moduleResolution": "Bundler",
+    "outDir": "dist/esm",
+    "declaration": false,
+    "declarationMap": false
+  }
+}

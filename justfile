@@ -1,6 +1,7 @@
 # Kontra repo task runner. The seams: sdk/python/ (the `actorkit` author surface) +
 # runtime/python/ (the `internals` engine, shipped by the same distribution `kontra-sdk`),
-# backend/ + frontend/ (TS Temporal worker + React Flow),
+# backend/ + core/ (the TS orchestrator and the shared kernel the console imports;
+# the console itself is the kontra-console repository),
 # contracts/ (buf-owned proto envelope). Control-plane infra still lives in the Makefile
 # (make up = control plane); this justfile is the dev/test/CI surface.
 #

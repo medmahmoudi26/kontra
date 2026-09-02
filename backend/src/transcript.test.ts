@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe as test, expect, it } from 'vitest';
 
 import { MemoryStore, ObjectStore } from './codec/objectStore';
-import { categorize, mapHistory, type RawHistoryEvent } from './history';
+import { categorize, mapHistory, type RawHistoryEvent } from '@kontra/core/history';
 import { ASK_MEMO_PREFIX as SERVER_ASK_MEMO_PREFIX } from './hitl';
 import { HistoryArchive } from './historyArchive';
 import {
@@ -23,7 +23,7 @@ import {
   type StartedTurn,
   type TranscriptEvent,
   type Turn,
-} from './transcript';
+} from '@kontra/core/transcript';
 
 /**
  * THE READER NEVER SEES A PAYLOAD, AND THESE FIXTURES ARE THE PROOF.

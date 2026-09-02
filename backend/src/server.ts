@@ -409,25 +409,37 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
  * A marker search rather than a fixed relative path, because this file runs at two DEPTHS —
  * `src/` under vitest and `dist/src/` compiled — and now in two SHAPES as well:
  *
- *   `web/dist`         THE BUNDLE. Inside a hydrated appliance bundle the SPA is a CHILD of the
- *                      server: `orchestrator/dist/src/main.js` beside `orchestrator/web/dist`.
- *                      That layout is an artifact contract `handler/internal/hydrate` writes and
- *                      reads, and it did not move (ADR 0035).
- *   `../frontend/dist` THE CHECKOUT. `frontend/` is a SIBLING of `backend/` since the two packages
- *                      stopped being nested, so walking up from `backend/dist/src` never reaches a
- *                      `web/dist` again.
+ *   `web/dist`              THE BUNDLE. Inside a hydrated appliance bundle the SPA is a CHILD of
+ *                           the server: `orchestrator/dist/src/main.js` beside
+ *                           `orchestrator/web/dist`. That layout is an artifact contract
+ *                           `handler/internal/hydrate` writes and reads, and it did not move.
+ *   `../kontra-console/dist` THE CHECKOUT. The console is a separate REPOSITORY since ADR 0038, so
+ *                           the checkout shape is a sibling directory rather than a sibling
+ *                           package. This was `../frontend/dist`; `frontend/` no longer exists.
  *
  * BOTH, AT EVERY LEVEL, because the walk cannot know which shape it is in. Checking only the first
  * would serve no SPA from a local checkout — a console that boots, answers its API and renders
  * nothing, which is exactly the failure `kontra up --orchestrator=local` exists to avoid.
  *
+ * `KONTRA_CONSOLE_DIST` OVERRIDES BOTH, and is the answer for a console checked out somewhere the
+ * walk will never look. A path that is set and wrong returns undefined rather than falling through
+ * to a search — an operator who named a directory wants to hear that it had no `index.html`, not
+ * to be quietly served a different SPA.
+ *
  * Returns undefined when the SPA is not built, which is not an error: `defaultWebRoot` returning
  * nothing degrades the API to serving no static files rather than failing to boot.
  */
 export function defaultWebRoot(from: string = __dirname): string | undefined {
+  const override = process.env.KONTRA_CONSOLE_DIST;
+  if (override) {
+    return existsSync(path.join(override, 'index.html')) ? path.resolve(override) : undefined;
+  }
   let dir = from;
   for (let i = 0; i < 8; i += 1) {
-    for (const candidate of [path.join(dir, 'web', 'dist'), path.join(dir, '..', 'frontend', 'dist')]) {
+    for (const candidate of [
+      path.join(dir, 'web', 'dist'),
+      path.join(dir, '..', 'kontra-console', 'dist'),
+    ]) {
       if (existsSync(path.join(candidate, 'index.html'))) return path.resolve(candidate);
     }
     const parent = path.dirname(dir);

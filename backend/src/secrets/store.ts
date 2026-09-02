@@ -41,8 +41,13 @@ import { mintActorToken, verifyActorToken, type MintedIdentity } from './identit
 import { secretsDir } from './keyring';
 
 /** Lowercase, and it may not start with punctuation. Bounded so a name is safe in a URL, a task
- *  queue and a filename without anybody having to escape it. */
-export const SECRET_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+ *  queue and a filename without anybody having to escape it.
+ *
+ *  DECLARED IN `@kontra/core` because the console's name field applies the same rule, and it used
+ *  to do so from a second copy — see that module's header. Re-exported here so this file is still
+ *  the one a reader of the store looks at. */
+export { SECRET_NAME_RE } from '@kontra/core/secrets';
+import { SECRET_NAME_RE } from '@kontra/core/secrets';
 
 /** Same bound as `actorControl.ts:ACTOR_RE`, so an owner is a name that can really reach a worker. */
 const ACTOR_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;

@@ -34,8 +34,8 @@ import (
 	"sort"
 	"strings"
 
-	applbundle "github.com/medmahmoudi26/kontra-local/cli/appliance/bundle"
-	"github.com/medmahmoudi26/kontra-local/handler/hydratestore"
+	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
+	"github.com/medmahmoudi26/kontra/handler/hydratestore"
 )
 
 // DefaultOrchestratorPort is the API's port, and it is 8088 because that is the number in every
@@ -185,14 +185,14 @@ func resolveLocal(opts orchestratorOptions, repo, chose string) (*orchestratorSo
 		return nil, fmt.Errorf("no `node` on PATH to run %s with", entry)
 	}
 	src := &orchestratorSource{Kind: "local", Node: node, Entry: entry, Dir: dir, Chose: chose}
-	// The SPA a local build serves is the one in the checkout — `server.ts:defaultWebRoot` finds
-	// `frontend/dist` by walking up from `dist/src`, which is the same directory `pnpm
-	// --dir frontend run build` writes. Nothing to hydrate and nothing to point at.
-	// THE SPA IS A SIBLING OF THE SERVER NOW, NOT A CHILD: `frontend/` left `orchestrator/web` when
-	// the two packages stopped being nested (ADR 0035). Both the probe and the answer move together
-	// — a stat of the old child path with the new sibling as its answer reports no SPA on a
-	// checkout that has one, which is a console that boots and serves nothing.
-	if spa := filepath.Join(repo, "frontend", "dist"); statOK(filepath.Join(spa, "index.html")) {
+	// The SPA a local build serves is a built console on disk — `server.ts:defaultWebRoot` looks in
+	// the same places this does, and the two must agree: a probe that answers "no SPA" about a
+	// checkout that has one is a console that boots, serves its API and renders nothing.
+	//
+	// THE SPA IS IN ANOTHER REPOSITORY NOW (ADR 0038). It was `frontend/dist` here, and before that
+	// `orchestrator/web` — each move broke this line, so the candidates live in one function
+	// (`applbundle.ConsoleDist`) rather than being spelled out at each site.
+	if spa, _ := applbundle.ConsoleDist(repo); spa != "" {
 		src.SPARoot = spa
 	}
 	return src, nil

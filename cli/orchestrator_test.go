@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	applbundle "github.com/medmahmoudi26/kontra-local/cli/appliance/bundle"
+	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
 )
 
 // --- what the child is told -------------------------------------------------------------------
@@ -473,5 +473,75 @@ func TestOrchestratorEnvPresignHostFollowsFlagThenEnvironmentThenTheBinding(t *t
 	}
 	if len(replaced) != 1 || !strings.Contains(replaced[0], "workstation.lan") {
 		t.Errorf("the override of an inherited presign host was not reported: %v", replaced)
+	}
+}
+
+// THE SIBLING CHECKOUT, which is where the console actually is (ADR 0038).
+//
+// The test above pins `frontend/dist` — the LEGACY candidate, kept only so a bundle built from an
+// older checkout still resolves. It would keep passing if the sibling lookup were deleted, which
+// is the whole failure mode: the layout every developer has would be the one nothing covers.
+func TestResolveOrchestratorFindsTheConsoleInASiblingCheckout(t *testing.T) {
+	// `repo` is a child of a temp dir, so `../kontra-console` is inside the sandbox.
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "kontra")
+	for _, rel := range []string{
+		"kontra/backend/dist/src/main.js",
+		"kontra/backend/node_modules/.keep",
+		"kontra-console/dist/index.html",
+	} {
+		path := filepath.Join(parent, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("//\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src, err := resolveOrchestrator(context.Background(), orchestratorOptions{
+		Mode: "local", RepoRoot: repo, DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(repo, "..", "kontra-console", "dist")
+	if src.SPARoot != want {
+		t.Errorf("the sibling console was not found: got %q, want %q", src.SPARoot, want)
+	}
+}
+
+// A console named explicitly wins, and a WRONG name is an answer rather than a fallback.
+//
+// Falling through to the search would hand an operator who mistyped a path a different SPA than
+// the one they asked for, and report success — the class of failure `kontra up` prints digests to
+// make visible in the first place.
+func TestConsoleDistOverrideIsTheOnlyCandidateWhenItIsSet(t *testing.T) {
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "kontra")
+	// A sibling console that WOULD be found, so the assertion is about precedence, not absence.
+	for _, rel := range []string{"kontra-console/dist/index.html", "elsewhere/index.html"} {
+		path := filepath.Join(parent, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("<html>\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	named := filepath.Join(parent, "elsewhere")
+	t.Setenv("KONTRA_CONSOLE_DIST", named)
+	if got, _ := applbundle.ConsoleDist(repo); got != named {
+		t.Errorf("the named console did not win: got %q, want %q", got, named)
+	}
+
+	t.Setenv("KONTRA_CONSOLE_DIST", filepath.Join(parent, "typo"))
+	got, tried := applbundle.ConsoleDist(repo)
+	if got != "" {
+		t.Errorf("a wrong KONTRA_CONSOLE_DIST fell through to %q instead of failing", got)
+	}
+	if len(tried) != 1 || !strings.Contains(tried[0], "KONTRA_CONSOLE_DIST") {
+		t.Errorf("the refusal does not name the variable the operator set: %v", tried)
 	}
 }

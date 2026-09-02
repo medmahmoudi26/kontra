@@ -99,7 +99,16 @@ func TestSPABundleRefusesWithTheBuildCommandWhenThereIsNothingToShip(t *testing.
 	if err == nil {
 		t.Fatal("a checkout with no built SPA produced a bundle")
 	}
-	if !strings.Contains(err.Error(), "pnpm --dir frontend run build") {
-		t.Errorf("the refusal does not say how to fix it: %v", err)
+	// THE COMMAND, AND WHERE THE SOURCE WENT. `frontend/` is not in this repository any more
+	// (ADR 0038), so a refusal naming only a build command sends the reader to a directory that
+	// does not exist. It has to name the repository too.
+	for _, want := range []string{"pnpm --dir ../kontra-console run build", "kontra-console"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say how to fix it (missing %q): %v", want, err)
+		}
+	}
+	// AND WHERE IT LOOKED. Three candidates now, so "not found" without the list is a guess.
+	if !strings.Contains(err.Error(), "Looked in:") {
+		t.Errorf("the refusal does not say where it looked: %v", err)
 	}
 }

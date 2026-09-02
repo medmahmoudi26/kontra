@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import { describe as test, expect, it } from 'vitest';
 
-import { categorize, type EventCategory, type RunHistory } from './history';
+import { categorize, type EventCategory, type RunHistory } from '@kontra/core/history';
 import { expand, readTranscript, type DispatchTurn, type TranscriptEvent, type Turn } from './transcript';
 import {
   DOMAINS,
@@ -17,7 +17,7 @@ import {
   TERMS,
   type Term,
   type Vocabulary,
-} from './vocabulary';
+} from '@kontra/core/vocabulary';
 import { KONTRA_INTERNAL_WORKFLOW_TYPES } from './visibility';
 
 /**

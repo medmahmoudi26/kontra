@@ -1,7 +1,0 @@
-/* design-sync Tailwind entry — generated input, not part of the app build.
-   The app compiles src/styles.css through the Vite plugin, which scans only the
-   app's own source. Preview cards additionally use utilities from the authored
-   previews, so those are declared as an extra @source here. */
-@import './src/styles.css';
-@source "./src";
-@source "../../.design-sync/previews";

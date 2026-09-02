@@ -1,0 +1,21 @@
+# @kontra/core is a package, not a directory, because kontra-console imports it from another
+# repository. Inside this repo it resolves through the workspace so tsc, vite, vitest and
+# Temporal's workflow bundler all find it the same way — a tsconfig `paths` entry satisfies only
+# the first of those, which is how the extraction first went green on typecheck and red on 54
+# test files.
+packages:
+  - backend
+  - core
+# Which dependencies may run install scripts. The three that may are the three kontra-local ran —
+# each ships a native binary its JS half is useless without, and pnpm's default is to skip them:
+# @swc/core is what Temporal's Workflow bundler loads TypeScript through, esbuild is vite's, and
+# protobufjs builds the descriptor readers.
+#
+# @pulumi/command is deliberately false. Its script downloads a provider plugin at install time;
+# kontra-local never ran it either, and `kontra infra` works — Pulumi fetches what it needs when a
+# stack runs. Flipping it to true buys a slower install and a network dependency, not a fix.
+allowBuilds:
+  '@pulumi/command': false
+  '@swc/core': true
+  esbuild: true
+  protobufjs: true

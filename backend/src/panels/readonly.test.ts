@@ -20,12 +20,23 @@ import { describe, expect, it } from 'vitest';
  */
 const HERE = __dirname;
 
+/**
+ * `ids.ts`, `tmux.ts` and `types.ts` now live in `@kontra/core` and what is left beside this file
+ * is a one-line re-export of each. THE SWEEP HAS TO FOLLOW THEM: reading only this directory still
+ * finds files, still greps them, and still passes — while examining three re-export lines instead
+ * of the code the invariant is about. That is the failure this suite exists to prevent, arriving
+ * as a refactor rather than as a `send-keys`.
+ */
+const CORE_PANELS = path.join(HERE, '..', '..', '..', 'core', 'src', 'panels');
+
 function panelSources(): Array<{ file: string; source: string }> {
   const out: Array<{ file: string; source: string }> = [];
   const add = (file: string): void => out.push({ file, source: readFileSync(file, 'utf8') });
-  for (const entry of readdirSync(HERE)) {
-    if (entry.endsWith('.test.ts')) continue;
-    if (entry.endsWith('.ts')) add(path.join(HERE, entry));
+  for (const dir of [HERE, CORE_PANELS]) {
+    for (const entry of readdirSync(dir)) {
+      if (entry.endsWith('.test.ts')) continue;
+      if (entry.endsWith('.ts')) add(path.join(dir, entry));
+    }
   }
   add(path.join(HERE, '..', 'panels.ts'));
   add(path.join(HERE, '..', 'activities', 'panels.ts'));
@@ -87,9 +98,14 @@ describe('nothing can write to a session (ADR 0020, finding 3)', () => {
   it('accepts no client message that carries a payload', () => {
     // The client→server union in types.ts is the whole surface a browser can reach. If a message
     // ever grows a `data` or `bytes` field, this fails — which is the moment to re-read finding (3).
-    const types = readFileSync(path.join(HERE, 'types.ts'), 'utf8');
-    const clientBlock = types.slice(types.indexOf('export type ClientMessage'));
-    const union = clientBlock.slice(0, clientBlock.indexOf(';'));
+    const types = readFileSync(path.join(CORE_PANELS, 'types.ts'), 'utf8');
+    const at = types.indexOf('export type ClientMessage');
+    // FOUND, BEFORE ANYTHING IS CONCLUDED FROM IT. `indexOf` returns -1 when the declaration moves,
+    // `slice(-1)` then yields one character and the two negative assertions below pass against it —
+    // a green test reporting on a file it did not read. This is how the extraction to @kontra/core
+    // first went: `union` was the empty string.
+    expect(at, 'ClientMessage union not found in core/src/panels/types.ts').toBeGreaterThan(-1);
+    const union = types.slice(at, types.indexOf(';', at));
     expect(union).toContain("t: 'subscribe'");
     expect(union).not.toMatch(/\bdata\b|\bbytes\b|\bkeys\b|\binput\b|\bwrite\b/);
   });

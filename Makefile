@@ -74,9 +74,25 @@ up-d: tmux-dir
 # `frontend/dist` straight out of the checkout — so the absence of a container is a
 # SUCCESS to report, not a failure to exit on. It used to `exit 1` with a sentence naming a
 # service this file no longer defines, which is the trap this slice was told not to reproduce.
+# THE SOURCE IS IN ANOTHER REPOSITORY NOW (ADR 0038/0041). `frontend/` moved to kontra-console, so
+# this target builds from a SIBLING CHECKOUT and says so plainly when there is not one — the failure
+# it replaces was `cd: frontend: No such file or directory`, which names neither the cause nor
+# where the code went. Override with `make ui CONSOLE=/path/to/kontra-console`.
+#
+# `@kontra/core` IS BUILT FIRST, and that is not belt-and-braces: the console links it from this
+# checkout, so a console built against a stale `core/dist` is a console that disagrees with the
+# orchestrator it is about to be deployed next to.
+CONSOLE ?= ../kontra-console
+
 ui:
 	@test -f .env || { echo "no .env at the repo root — the SPA would build with an EMPTY explore token"; exit 1; }
-	cd frontend && VITE_KONTRA_EXPLORE_TOKEN="$$(grep '^KONTRA_EXPLORE_TOKEN=' ../.env | cut -d= -f2-)" pnpm run build
+	@test -d "$(CONSOLE)" || { \
+	  echo "no console checkout at $(CONSOLE) — the SPA lives in kontra-console since ADR 0038."; \
+	  echo "  git clone https://github.com/medmahmoudi26/kontra-console $(CONSOLE)"; \
+	  echo "  or:  make ui CONSOLE=/path/to/kontra-console"; \
+	  exit 1; }
+	pnpm --filter @kontra/core run build
+	cd "$(CONSOLE)" && VITE_KONTRA_EXPLORE_TOKEN="$$(grep '^KONTRA_EXPLORE_TOKEN=' "$(CURDIR)/.env" | cut -d= -f2-)" pnpm run build
 	@api=$$(docker ps -q --filter label=com.docker.compose.service=orchestrator-api | head -1); \
 	  if [ -z "$$api" ]; then \
 	    echo "no orchestrator-api container (it left docker-compose.yml — ADR 0031 §1)."; \
@@ -85,7 +101,7 @@ ui:
 	    exit 0; \
 	  fi; \
 	  docker exec "$$api" rm -rf /app/web/dist/assets; \
-	  docker cp frontend/dist/. "$$api":/app/web/dist/ && echo "deployed the SPA to $$api"
+	  docker cp "$(CONSOLE)"/dist/. "$$api":/app/web/dist/ && echo "deployed the SPA to $$api"
 
 # THE SERVER, WITHOUT THE IMAGE BUILD EITHER — the `ui` target's twin.
 #

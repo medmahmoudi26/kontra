@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // SPAName is what `kontra bundle spa` writes and `kontra up` looks for. No version and no
@@ -35,11 +36,44 @@ const SPAName = "kontra-spa"
 // — but a bundle that publishes its own manifest at `/manifest.json` is a surface nobody designed.
 const SPARootInBundle = "web/dist"
 
+// ConsoleDist finds the built console, and returns every path it looked in when it does not.
+//
+// THE CONSOLE IS ANOTHER REPOSITORY (ADR 0038), so there is no path inside this checkout that can
+// be assumed. Three candidates, in the order an operator means them:
+//
+//	$KONTRA_CONSOLE_DIST   named explicitly, and then it is the ONLY one tried — someone who names
+//	                       a directory wants to hear that it was empty, not to be silently handed a
+//	                       different SPA from two directories up.
+//	../kontra-console/dist the sibling checkout, which is the documented layout.
+//	frontend/dist          what this repository had before the split. Kept because a bundle built
+//	                       from an older checkout is still a thing an operator may have on disk.
+//
+// The second return value exists so the CALLER can name what it tried. A "no SPA found" that does
+// not say where it looked is the same unhelpful failure for all three of these.
+func ConsoleDist(repoRoot string) (string, []string) {
+	if named := os.Getenv("KONTRA_CONSOLE_DIST"); named != "" {
+		if _, err := os.Stat(filepath.Join(named, "index.html")); err == nil {
+			return named, []string{named}
+		}
+		return "", []string{named + "  ($KONTRA_CONSOLE_DIST)"}
+	}
+	tried := []string{
+		filepath.Join(repoRoot, "..", "kontra-console", "dist"),
+		filepath.Join(repoRoot, "frontend", "dist"),
+	}
+	for _, c := range tried {
+		if _, err := os.Stat(filepath.Join(c, "index.html")); err == nil {
+			return c, tried
+		}
+	}
+	return "", tried
+}
+
 // BuildSPA archives the built SPA with a manifest.
 //
-// IT DOES NOT RUN VITE. The build is `pnpm run build` in `frontend`, it needs that
+// IT DOES NOT RUN VITE. The build is `pnpm run build` in the console repository, it needs that
 // package's dev dependencies, and it is a 30-second job whose output an operator often already
-// has — so this reads `web/dist` and refuses with the command to run when it is not there. The
+// has — so this reads a built `dist` and refuses with the command to run when it is not there. The
 // same rule `stageOrchestrator` follows for `pnpm install`: this file archives what a toolchain
 // produced, it does not become the toolchain.
 func BuildSPA(opts BuildOptions) (*BuildResult, error) {
@@ -52,10 +86,14 @@ func BuildSPA(opts BuildOptions) (*BuildResult, error) {
 	opts.StageDir = filepath.Join(opts.OutDir, ".stage-spa")
 	p := progress(opts.Progress)
 
-	src := filepath.Join(opts.RepoRoot, "frontend", "dist")
-	if _, err := os.Stat(filepath.Join(src, "index.html")); err != nil {
-		return nil, fmt.Errorf("no built SPA at %s (index.html is missing).\n"+
-			"  build it first:  pnpm --dir frontend run build", src)
+	src, tried := ConsoleDist(opts.RepoRoot)
+	if src == "" {
+		return nil, fmt.Errorf("no built SPA (index.html is missing). Looked in:\n  %s\n\n"+
+			"the console is a separate repository since ADR 0038:\n"+
+			"  git clone https://github.com/medmahmoudi26/kontra-console ../kontra-console\n"+
+			"  pnpm --dir ../kontra-console run build\n"+
+			"or point at one you already have:  KONTRA_CONSOLE_DIST=/path/to/dist",
+			strings.Join(tried, "\n  "))
 	}
 
 	if err := os.RemoveAll(opts.StageDir); err != nil {
@@ -75,7 +113,11 @@ func BuildSPA(opts BuildOptions) (*BuildResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	version, err := packageVersion(filepath.Join(opts.RepoRoot, "frontend", "package.json"))
+	// BESIDE THE `dist` THAT WAS ACTUALLY STAGED, not at a path assembled from RepoRoot. Those are
+	// the same directory only in the pre-split layout; with the console in a sibling checkout — or
+	// named by KONTRA_CONSOLE_DIST — a RepoRoot-relative guess reads a package.json belonging to a
+	// different build, or none, and stamps the artifact with someone else's version.
+	version, err := packageVersion(filepath.Join(filepath.Dir(src), "package.json"))
 	if err != nil {
 		// A missing version is not worth failing a build over; the digest is the identity.
 		version = "unknown"
@@ -98,7 +140,7 @@ func BuildSPA(opts BuildOptions) (*BuildResult, error) {
 			TreeSHA256: tree,
 			Files:      files,
 			Bytes:      bytes,
-			Note:       "vite output for frontend; served by the API role at its own port",
+			Note:       "vite output from kontra-console; served by the API role at its own port",
 		}},
 	}
 

@@ -1,0 +1,44 @@
+{
+  "name": "@kontra/core",
+  "version": "0.1.0",
+  "description": "The shared kernel: how a Run is read. Imported by the orchestrator and by kontra-console.",
+  "license": "Apache-2.0",
+  "main": "./dist/cjs/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "scripts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/cjs/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./conformance/*": "./dist/conformance/*",
+    "./package.json": "./package.json",
+    "./*": {
+      "types": "./dist/cjs/*.d.ts",
+      "import": "./dist/esm/*.js",
+      "require": "./dist/cjs/*.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "*": [
+        "./dist/cjs/*.d.ts"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.esm.json && node scripts/bundle-conformance.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc && tsc -p tsconfig.esm.json && node scripts/bundle-conformance.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.5.0"
+  },
+  "module": "./dist/esm/index.js"
+}
