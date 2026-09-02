@@ -98,7 +98,7 @@ than showing green beside red chips. It is green only when there is nothing to r
 it has no banner.
 
 A snapshot pane **fills its tile** — the type scales, so nothing wraps and no column is dead. Panes
-are pinned at 120×40 (`cli/tmux.go`), down from 200×50; a viewer never resizes the Worker it is only
+are pinned at 120×40 (`cli/internal/tmux/tmux.go`), down from 200×50; a viewer never resizes the Worker it is only
 looking at.
 
 ## Hiding a pane, and scrollback

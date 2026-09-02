@@ -40,7 +40,7 @@ export interface SessionWindow {
  * server, which destroys every session on the socket. Because fleet panes hold only journals, a
  * viewer that crashes tmux costs the view and nothing else — systemd still supervises the Worker,
  * and the **Warden** that judges it sick but not dead still restarts it (ADR 0037; the on-machine
- * watchdog this sentence used to name retired into it, and `cli/sickworker.go` records why it had
+ * watchdog this sentence used to name retired into it, and `cli/warden/sickworker.go` records why it had
  * never actually counted the 81-of-82 ratio it was written for).
  */
 export const DEFAULT_WINDOWS: readonly SessionWindow[] = [

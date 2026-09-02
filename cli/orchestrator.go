@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 	"github.com/medmahmoudi26/kontra/runtime/handler/hydratestore"
 )
 
@@ -86,7 +87,7 @@ type orchestratorOptions struct {
 func resolveOrchestrator(ctx context.Context, opts orchestratorOptions) (*orchestratorSource, error) {
 	mode := strings.TrimSpace(opts.Mode)
 	if mode == "" {
-		mode = envOr("KONTRA_ORCHESTRATOR", "")
+		mode = cliutil.EnvOr("KONTRA_ORCHESTRATOR", "")
 	}
 
 	switch mode {
@@ -280,7 +281,7 @@ func bundleSearchPath(repo string) []string {
 	if repo != "" {
 		dirs = append(dirs, filepath.Join(repo, "build", "bundles"))
 	}
-	if root, err := kontraRoot(); err == nil {
+	if root, err := cliutil.KontraRoot(); err == nil {
 		dirs = append(dirs, filepath.Join(root, "bundles"))
 	}
 	return dirs

@@ -14,22 +14,20 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 )
 
 // Env knobs — the single source of connection defaults; every command reads these.
 const (
-	defaultAPI       = "http://localhost:8088"
-	defaultTemporal  = "localhost:7233"
-	defaultS3        = "http://localhost:8333"
-	defaultNamespace = "default"
+	defaultAPI = "http://localhost:8088"
+	defaultS3  = "http://localhost:8333"
 )
 
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
+// THE TEMPORAL ADDRESS AND NAMESPACE DEFAULTS ARE IN `internal/config`, because both halves of the
+// CLI answer with them: every control-plane command dials them, and the Warden's `ca` subcommands
+// take them as flag defaults. Two copies would be two answers to "what does an unconfigured
+// installation talk to".
 
 /**
  * The control plane's address, when this installation has said where that is.
@@ -51,35 +49,18 @@ func envOr(key, def string) string {
  * installation's control plane lives.
  *
  * Config read failures fall through to localhost rather than erroring: a CI box or a container
- * with no `.kontra/` is environment-only by design (see `loadConfig`), and a connection default is
+ * with no `.kontra/` is environment-only by design (see `config.LoadConfig`), and a connection default is
  * not the place to start refusing to run.
  */
-func configuredController() string {
-	cfg, err := loadConfig()
-	if err != nil || cfg == nil {
-		return ""
-	}
-	return strings.TrimSpace(cfg.Controller)
-}
 
 func orchestratorURL() string {
 	if v := os.Getenv("KONTRA_ORCHESTRATOR_URL"); v != "" {
 		return v
 	}
-	if host := configuredController(); host != "" {
+	if host := config.Controller(); host != "" {
 		return "http://" + host + ":8088"
 	}
 	return defaultAPI
-}
-
-func temporalAddress() string {
-	if v := os.Getenv("KONTRA_ADDRESS"); v != "" {
-		return v
-	}
-	if host := configuredController(); host != "" {
-		return host + ":7233"
-	}
-	return defaultTemporal
 }
 
 // s3Endpoint is the object store, resolved the same way and for the same reason. `kontra build
@@ -95,22 +76,19 @@ func s3Endpoint() string {
 	if v := os.Getenv("KONTRA_S3_ENDPOINT"); v != "" {
 		return v
 	}
-	if host := configuredController(); host != "" {
+	if host := config.Controller(); host != "" {
 		return "http://" + host + ":8333"
 	}
 	return defaultS3
 }
 
-func temporalNamespace() string { return envOr("KONTRA_NAMESPACE", defaultNamespace) }
+// stdout/stderr/stdin MOVED TO `internal/cliio`, and every use is now `stdout` and friends.
+//
+// They were `var stdout io.Writer = os.Stdout` here, which works while there is one package. The
+// Warden is its own package now and writes to the same streams; two copies would mean a test that
+// captures output sees one of them and silently misses the other.
 
-// stdout/stderr/stdin as vars so tests capture output and feed '-' input without pipes.
-var (
-	stdout io.Writer = os.Stdout
-	stderr io.Writer = os.Stderr
-	stdin  io.Reader = os.Stdin
-)
-
-// sharedQueue moved to identity.go, beside workflowQueue: an Actor's queue and a Workflow's are
+// queues.Shared moved to identity.go, beside workflowQueue: an Actor's queue and a Workflow's are
 // the two answers to one question, and the `wf-` prefix that keeps them from colliding is only
 // legible when both derivations are in view.
 

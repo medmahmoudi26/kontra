@@ -44,6 +44,8 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // lastDuckJSON returns the LAST top-level JSON array in duckdb -json output.
@@ -241,7 +243,7 @@ func datasetListViaAPI(apiURL string) error {
 		}
 		return err
 	}
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "KIND\tNAME\tVERSION\tDT\tROWS\tSTATE\tRUN\tRUN-GRAIN-NAME\tTAGS")
 	for _, d := range infos {
 		kind := d.Kind
@@ -346,7 +348,7 @@ func datasetDeleteViaAPI(apiURL, name string) error {
 		}
 		return err
 	}
-	fmt.Fprintf(stdout, "deleted temporary dataset %s (owner %s) — freed %d row%s, %s\n",
+	fmt.Fprintf(cliio.Stdout, "deleted temporary dataset %s (owner %s) — freed %d row%s, %s\n",
 		res.Name, res.Owner, res.Rows, plural(int(res.Rows)), humanBytes(res.Bytes))
 	return nil
 }
@@ -504,7 +506,7 @@ func printDeviation(name, runID string, dev datasetDeviationDTO) {
 	if dev.RenamedTo != "" {
 		rename = fmt.Sprintf(", renamed to %q", dev.RenamedTo)
 	}
-	fmt.Fprintf(stdout, "%s (run %s): tags [%s]%s\n", name, runID, tags, rename)
+	fmt.Fprintf(cliio.Stdout, "%s (run %s): tags [%s]%s\n", name, runID, tags, rename)
 }
 
 // unwrapAPIError turns the orchestrator's `{"error":"…"}` body into a plain error, so a 400 (an
@@ -584,7 +586,7 @@ func datasetQueryCmd(args []string) error {
 		if fi, statErr := os.Stat(*export); statErr == nil {
 			size = fi.Size()
 		}
-		fmt.Fprintf(stdout, "wrote %s (%s)\n", *export, humanBytes(size))
+		fmt.Fprintf(cliio.Stdout, "wrote %s (%s)\n", *export, humanBytes(size))
 		return nil
 	}
 	return duckdbDisplay(prelude, strings.TrimRight(q, "; ")+";")
@@ -729,7 +731,7 @@ func datasetQueryViaAPI(apiURL, name, q string, sel datasetSel, export string) e
 	if res.Truncated {
 		note += " · capped — use --export for the whole result"
 	}
-	fmt.Fprintln(stdout, note)
+	fmt.Fprintln(cliio.Stdout, note)
 	return nil
 }
 
@@ -769,7 +771,7 @@ func exportViaAPI(apiURL, token, name, q string, sel datasetSel, export string) 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "wrote %s (%s)\n", export, humanBytes(n))
+	fmt.Fprintf(cliio.Stdout, "wrote %s (%s)\n", export, humanBytes(n))
 	return nil
 }
 
@@ -810,7 +812,7 @@ func plural(n int) string {
 // printRows renders a result as an aligned table — the same shape DuckDB's own box output has,
 // without needing DuckDB here to draw it.
 func printRows(cols []string, rows [][]any) {
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, strings.Join(cols, "\t"))
 	sep := make([]string, len(cols))
 	for i, c := range cols {

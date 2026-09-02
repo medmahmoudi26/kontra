@@ -564,7 +564,7 @@ describe('the multiplexed stream', () => {
     expect(before).toMatchObject({ t: 'state', mode: 'snapshot' });
     expect((before as { health: { process: string } }).health.process).toBe('unknown');
 
-    // The Worker exits. `cli/tmux.go`'s hold keeps the window, so the SESSION stays present and the
+    // The Worker exits. `cli/internal/tmux/tmux.go`'s hold keeps the window, so the SESSION stays present and the
     // only thing that changes is what the screen says.
     screen = 'a traceback\n[exited 1] press any key to close this window\n';
     await client.until(

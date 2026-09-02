@@ -248,7 +248,7 @@ describe('POST /api/sources/actor/:id/serve', () => {
   it('answers with the session the workbench then looks for a pane by', async () => {
     // `true` stands in for the CLI — the route's contract is what it returns, not what `kontra serve
     // --actor` does. The session is `<name>-<version>` with tmux's own rewriting applied, which is
-    // the string `cli/tmux.go`, `cli/fleet.go` and `panels/discovery.ts` also mint.
+    // the string `cli/internal/tmux/tmux.go`, `cli/fleet.go` and `panels/discovery.ts` also mint.
     process.env.KONTRA_BIN = 'true';
     const { id } = (await register('actor', actorFolder('probe'))).json() as { id: string };
     const res = await serve(id);

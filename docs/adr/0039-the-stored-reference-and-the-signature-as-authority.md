@@ -54,6 +54,6 @@ Depends on **0038**, which makes a separate actors repository the reason this ma
 
 - **The trust policy is local and therefore rewritable by root on the Machine.** It bounds a substituted registry and a control plane asking for the wrong image. The change that would fix it is delivering the policy *inside* the enrolment credential signed by the Fleet CA — 0036 mints such a credential and it does not carry this. Recorded as unsettled rather than implied.
 
-- **One shared answer, not four.** Three call sites already name an **Artifact** — `build`, the pull in `scale.go`, and the podman driver — and a fourth was found in `deploy`'s push half. They consult one grammar in `cli/ociref.go`, pinned by `shared/conformance/ociref.json`, and the trust policy extends it rather than adding a fifth. That coupling is the point: **a second derivation of "which registry is this" is a bypass, not an inconsistency.**
+- **One shared answer, not four.** Three call sites already name an **Artifact** — `build`, the pull in `scale.go`, and the podman driver — and a fourth was found in `deploy`'s push half. They consult one grammar in `cli/internal/ociref/ociref.go`, pinned by `shared/conformance/ociref.json`, and the trust policy extends it rather than adding a fifth. That coupling is the point: **a second derivation of "which registry is this" is a bypass, not an inconsistency.**
 
 - **Until both halves land, `kontra-actors` is a place to keep actors, not a place to build them.** A fork can hold source and CI configuration; it cannot produce a placeable Artifact.

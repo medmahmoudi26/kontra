@@ -27,6 +27,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
+	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 )
 
 // codecEnv is the environment the claim-check codec reads, forwarded to a served worker.
@@ -52,8 +56,8 @@ var codecEnv = []string{
 // Batch that returns is the one over the line.
 func serveEnvDelta(root, queue string) []string {
 	delta := []string{
-		"KONTRA_ADDRESS=" + temporalAddress(),
-		"KONTRA_NAMESPACE=" + temporalNamespace(),
+		"KONTRA_ADDRESS=" + config.TemporalAddress(),
+		"KONTRA_NAMESPACE=" + config.TemporalNamespace(),
 		// WHERE TO REGISTER — the same line `kontra serve` passes an actor, and for the same
 		// reason. A workflow worker self-registers what each of its `@workflow.defn` classes
 		// takes, returns and is for (`internals/catalog.py:publish_workflow_catalog`), and that
@@ -112,7 +116,7 @@ func pythonFor(root, override string) string {
 	if v := strings.TrimSpace(os.Getenv("KONTRA_PYTHON")); v != "" {
 		return v
 	}
-	if cand := filepath.Join(root, ".venv", "bin", "python"); fileExists(cand) {
+	if cand := filepath.Join(root, ".venv", "bin", "python"); cliutil.FileExists(cand) {
 		return cand
 	}
 	return "python3"
@@ -120,20 +124,20 @@ func pythonFor(root, override string) string {
 
 // confirmTmuxWorker turns a worker that died on boot into an error, instead of a success.
 //
-// `startTmux` succeeding means tmux CREATED the session, which is not the same claim as "the
+// `tmux.Start` succeeding means tmux CREATED the session, which is not the same claim as "the
 // worker is running" — the gap between them is every import error, every missing dependency, every
 // wrong interpreter. Without this the two are indistinguishable from outside: the command prints
 // the attach line for a session that no longer exists, and whatever python wrote on its way out is
 // gone with it.
 //
-// The window is held open by tmuxHold, so a dead worker leaves `[exited N]` on screen and that
+// The window is held open by tmux.Hold, so a dead worker leaves `[exited N]` on screen and that
 // text is the report. The session is killed on the way out so the next attempt is not refused for
 // already existing — the operator is fixing the cause, not clearing the wreckage.
 func confirmTmuxWorker(session, window, interpreter string) error {
 	const grace = 2500 * time.Millisecond
 	deadline := time.Now().Add(grace)
 	for {
-		if !tmuxHasSession(session) {
+		if !tmux.HasSession(session) {
 			return fmt.Errorf("worker vanished immediately: tmux session %q is gone.\n"+
 				"  the interpreter was %s — if that is not where temporalio is installed, set "+
 				"KONTRA_PYTHON or pass --python", session, interpreter)

@@ -34,7 +34,7 @@
  *
  * ═══ COST ═══
  *
- * BLOCKED, LIKE THE WARDEN, and for the same reason (`cli/warden_workflow.go`): a workflow waiting
+ * BLOCKED, LIKE THE WARDEN, and for the same reason (`cli/warden/warden_workflow.go`): a workflow waiting
  * on a condition writes nothing while it waits. There is exactly one timer in flight — the earliest
  * expiry — and it is re-armed only when the **Lease** workflow changes. MEASURED by `lease.test.ts`, which
  * prints every number it asserts:

@@ -27,7 +27,7 @@ package main
 // Container Registry, GitLab, Harbor, ECR, a mirror in an airgap, or the appliance's own port on
 // loopback. There is no kontra registry, no kontra versioning scheme and no kontra deployment store
 // to be inside of. `pushDestination` (cli/bundle.go) is where the reference is resolved and judged,
-// and cli/ociref.go is the grammar it consults — the same one the pull site and the podman driver
+// and cli/internal/ociref/ociref.go is the grammar it consults — the same one the pull site and the podman driver
 // consult, which is `.scratch/warden/issues/15-*`'s requirement for the third site that names an
 // **Artifact**.
 //
@@ -55,6 +55,8 @@ import (
 	"flag"
 	"fmt"
 	"strings"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // buildOutput is what `--json` prints: one document, on stdout, with nothing else on that channel.
@@ -143,9 +145,9 @@ func cmdBuild(args []string) error {
 	// CI wrapper that had to strip build noise out of the channel it parses is a wrapper that breaks
 	// the first time the build prints something new — which is the shape of the "source scrape" that
 	// shared/conformance/README.md names as one of the two things this repo already paid for.
-	progress := stdout
+	progress := cliio.Stdout
 	if *asJSON {
-		progress = stderr
+		progress = cliio.Stderr
 	}
 
 	b, err := buildBundle(*actorDir, progress)
@@ -165,7 +167,7 @@ func cmdBuild(args []string) error {
 	placeable := art.Repo == bundleRepo(b.Name) && art.Tag == b.Version
 
 	if *asJSON {
-		return json.NewEncoder(stdout).Encode(buildOutput{
+		return json.NewEncoder(cliio.Stdout).Encode(buildOutput{
 			Actor: b.Name, Version: b.Version, Engine: b.Engine,
 			Reference: art.ref(), Pinned: art.pinned(), Repository: art.Repo,
 			Digest: art.Digest, SHA256: art.LayerSHA, Blob: dest.blobURL(art.LayerSHA),
@@ -173,20 +175,20 @@ func cmdBuild(args []string) error {
 		})
 	}
 
-	fmt.Fprintf(stdout, "\nartifact: %s\n  digest %s\n  sha256 %s (the bytes a Machine verifies)\n  fetched from %s\n",
+	fmt.Fprintf(cliio.Stdout, "\nartifact: %s\n  digest %s\n  sha256 %s (the bytes a Machine verifies)\n  fetched from %s\n",
 		art.ref(), art.Digest, art.LayerSHA, dest.blobURL(art.LayerSHA))
 	// THE PINNED REFERENCE, because it is the one that means the same thing tomorrow, and because an
 	// airgap is now a registry mirror with no kontra-specific step in it: this line is copy-pasteable
 	// into `oras`, `skopeo` or `crane` and there is nothing else to sync for this Artifact. See
 	// infra/README.md for what else a mirror needs.
-	fmt.Fprintf(stdout, "\nmirror it:\n  oras copy %s <mirror>/%s\n", art.pinned(), art.Repo)
+	fmt.Fprintf(cliio.Stdout, "\nmirror it:\n  oras copy %s <mirror>/%s\n", art.pinned(), art.Repo)
 
 	if placeable {
-		fmt.Fprintf(stdout, "\nplace it:\n  kontra fleet deploy --tag <t> --actor %s\n", *actorDir)
+		fmt.Fprintf(cliio.Stdout, "\nplace it:\n  kontra fleet deploy --tag <t> --actor %s\n", *actorDir)
 	} else {
 		// See this file's header: the resolver derives the address, so a custom repository is
 		// publishable and not placeable. Said here, once, at the moment the choice is made.
-		fmt.Fprintf(stdout, "\nnote: a Fleet placement resolves %s:%s at its own registry, not %s.\n"+
+		fmt.Fprintf(cliio.Stdout, "\nnote: a Fleet placement resolves %s:%s at its own registry, not %s.\n"+
 			"  This Artifact is published and mirrorable; `kontra fleet deploy` will not find it until\n"+
 			"  it is also copied there.\n",
 			bundleRepo(b.Name), b.Version, art.ref())

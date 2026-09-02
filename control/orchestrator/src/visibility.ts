@@ -100,7 +100,7 @@ export const KONTRA_INTERNAL_WORKFLOW_TYPES = [
   /**
    * ONE PER **MACHINE**, AND IT NEVER CLOSES — the shape this list's failure direction was written
    * for, arriving at the worst possible scale. A **Warden**'s watcher (ADR 0037,
-   * `cli/warden_workflow.go`) is started by the Machine itself and blocks for that Machine's whole
+   * `cli/warden/warden_workflow.go`) is started by the Machine itself and blocks for that Machine's whole
    * life, so a ten-Machine Fleet is ten permanently-Running executions. Left out of this list they
    * would be ten rows on the Runs page that never finish, per Fleet, for ever.
    *

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // A dispatch mid-finalization, covering every way a DATASET can present itself. A dataset is
@@ -140,8 +142,8 @@ func printInit(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	t.Setenv("TMPDIR", t.TempDir())
 	var buf bytes.Buffer
-	defer swap[io.Writer](&stdout, &buf)()
-	defer swap[io.Writer](&stderr, io.Discard)()
+	defer swap[io.Writer](&cliio.Stdout, &buf)()
+	defer swap[io.Writer](&cliio.Stderr, io.Discard)()
 	err := cmdExplore(append(args, "--print-init"))
 	return buf.String(), err
 }
@@ -602,8 +604,8 @@ func TestExploreCommandLeavesNothingBehind(t *testing.T) {
 	t.Setenv("KONTRA_STATE_TOKEN", "")
 
 	var buf bytes.Buffer
-	defer swap[io.Writer](&stdout, &buf)()
-	defer swap[io.Writer](&stderr, io.Discard)()
+	defer swap[io.Writer](&cliio.Stdout, &buf)()
+	defer swap[io.Writer](&cliio.Stderr, io.Discard)()
 	if err := cmdExplore([]string{fixtureRunID, "--api", srv.URL, "--print-init"}); err != nil {
 		t.Fatalf("print-init: %v", err)
 	}
@@ -789,8 +791,8 @@ func TestExploreSQLQueriesTheRunsOutput(t *testing.T) {
 	t.Setenv("KONTRA_EXPLORE_TOKEN", "tok")
 	t.Setenv("KONTRA_STATE_TOKEN", "")
 	var buf bytes.Buffer
-	defer swap[io.Writer](&stdout, &buf)()
-	defer swap[io.Writer](&stderr, io.Discard)()
+	defer swap[io.Writer](&cliio.Stdout, &buf)()
+	defer swap[io.Writer](&cliio.Stderr, io.Discard)()
 
 	// crawl4ai's two shards, both the 2-row fixture → 4 rows through the ONE generated view.
 	if err := cmdExplore([]string{"crawl4ai", "--api", srv.URL,

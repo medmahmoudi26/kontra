@@ -31,6 +31,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // leaseView is one entry in the **Lease** workflow. Tags are `shared/conformance/lease.json` §lease_set_wire.lease.
@@ -111,7 +113,7 @@ func printLeases(led *leaseSet, now time.Time) error {
 	if led.Destroyed {
 		// A **Lease** workflow only reaches this at zero Leases, so it is also the answer to "was this Fleet
 		// destroyed by the last one out, or by a hand?".
-		fmt.Fprintf(stdout, "%s: destroyed — the last Lease dropped and its Machines are gone\n", led.Fleet)
+		fmt.Fprintf(cliio.Stdout, "%s: destroyed — the last Lease dropped and its Machines are gone\n", led.Fleet)
 		return nil
 	}
 	if len(led.Leases) == 0 {
@@ -119,12 +121,12 @@ func printLeases(led *leaseSet, now time.Time) error {
 		// by hand — `kontra fleet up` takes no Lease, deliberately, because it is not a Run — or one
 		// that has already been collected. Both are worth saying in words rather than as an empty
 		// table somebody has to interpret.
-		fmt.Fprintf(stdout, "%s: no Leases — nothing is holding this Fleet\n", led.Fleet)
-		fmt.Fprintf(stdout, "  (a Fleet with no Lease is never collected on its own: `kontra fleet down` ends it)\n")
+		fmt.Fprintf(cliio.Stdout, "%s: no Leases — nothing is holding this Fleet\n", led.Fleet)
+		fmt.Fprintf(cliio.Stdout, "  (a Fleet with no Lease is never collected on its own: `kontra fleet down` ends it)\n")
 		return nil
 	}
-	fmt.Fprintf(stdout, "%s: %d Lease(s)\n", led.Fleet, len(led.Leases))
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	fmt.Fprintf(cliio.Stdout, "%s: %d Lease(s)\n", led.Fleet, len(led.Leases))
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "LEASE\tHOLDER\tEXPIRES IN")
 	for _, l := range led.Leases {
 		holder := l.Holder
@@ -138,7 +140,7 @@ func printLeases(led *leaseSet, now time.Time) error {
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "\nMachines are destroyed when the LAST Lease drops. A Lease whose holder is\n"+
+	fmt.Fprintf(cliio.Stdout, "\nMachines are destroyed when the LAST Lease drops. A Lease whose holder is\n"+
 		"still running is renewed at every deadline, so `EXPIRES IN` is how long this Fleet\n"+
 		"survives a holder nobody can account for — not a limit on how long a Run may take.\n")
 	return nil
@@ -183,7 +185,7 @@ func refuseIfHeld(api *apiClient, fqn string, force bool) error {
 			// --force means "destroy it anyway", and that has to include "even though I could not
 			// find out who holds it" — otherwise an operator whose control plane is half up cannot
 			// clean up at all, which is the situation that produces leaked Machines by hand.
-			fmt.Fprintf(stdout, "warning: %v\n", err)
+			fmt.Fprintf(cliio.Stdout, "warning: %v\n", err)
 			return nil
 		}
 		return err
@@ -192,9 +194,9 @@ func refuseIfHeld(api *apiClient, fqn string, force bool) error {
 		return nil
 	}
 	if force {
-		fmt.Fprintf(stdout, "warning: %d Lease(s) still hold %s — destroying anyway (--force)\n", len(held), fqn)
+		fmt.Fprintf(cliio.Stdout, "warning: %d Lease(s) still hold %s — destroying anyway (--force)\n", len(held), fqn)
 		for _, l := range held {
-			fmt.Fprintf(stdout, "  %s\n", l.Lease)
+			fmt.Fprintf(cliio.Stdout, "  %s\n", l.Lease)
 		}
 		return nil
 	}

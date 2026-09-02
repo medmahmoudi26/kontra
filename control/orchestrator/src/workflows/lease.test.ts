@@ -580,7 +580,7 @@ describe('the teardown the last drop fires', () => {
 describe('what a Lease workflow costs', () => {
   it('writes NOTHING while it holds, and six events per hold and per drop', async () => {
     /**
-     * The Warden's standard (`cli/warden_workflow.go`): "0 events/hour at rest, 6 per real change",
+     * The Warden's standard (`cli/warden/warden_workflow.go`): "0 events/hour at rest, 6 per real change",
      * with controls in both directions so that "it did not grow" is a statement about the design and
      * not about something that was never running.
      *

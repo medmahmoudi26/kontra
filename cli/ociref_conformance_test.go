@@ -6,14 +6,14 @@ package main
 // The acceptance criterion in `.scratch/warden/issues/15-*` is not "there is a shared function". It
 // is: *"One shared answer, consulted by build, pull and the driver — proven by breaking it in one
 // place and watching all three change."* `TestOneAnswerReachesAllThreeSitesThatNameAnArtifact` is
-// that proof: it drives `cli/build.go`, `cli/scale.go` and `cli/driver_podman.go` over the same
+// that proof: it drives `cli/build.go`, `cli/scale.go` and `cli/warden/driver_podman.go` over the same
 // corpus rows and asserts each one carries the shared sentence. Editing the grammar in
-// `cli/ociref.go` moves all three; adding a fourth bespoke message fails the row rather than passing
+// `cli/internal/ociref/ociref.go` moves all three; adding a fourth bespoke message fails the row rather than passing
 // quietly.
 //
 // MEASURED RED, each of the four drivers below, by breaking exactly one thing:
 //
-//	ociPathComponent widened to allow `é`      → verdict, pin, push AND the three-sites test fail
+//	ociref.PathComponent widened to allow `é`      → verdict, pin, push AND the three-sites test fail
 //	the tag rule deleted                        → the `1.0.0+build.7` and `:` rows fail
 //	pullFailure's check removed                 → the three-sites test fails on the pull site alone,
 //	                                              with `café` told to re-run `kontra deploy` again
@@ -36,6 +36,8 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/image"
+	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
+	"github.com/medmahmoudi26/kontra/cli/internal/trustpolicy"
 )
 
 type ociRefCorpus struct {
@@ -81,7 +83,7 @@ type ociRefCorpus struct {
 			PlainHTTP bool   `json:"plainHTTP"`
 		} `json:"cases"`
 	} `json:"push"`
-	// Allow is slice 14's section: the Machine's trust policy, asked of the SAME `ociRef` fields the
+	// Allow is slice 14's section: the Machine's trust policy, asked of the SAME `ociref.Ref` fields the
 	// grammar above produces. It is here rather than in a corpus of its own because a second split of
 	// a reference is not an inconsistency, it is a bypass — see the section's own `why`.
 	Allow struct {
@@ -203,10 +205,10 @@ func TestOCIRefCorpusStillHoldsTheInterestingInputs(t *testing.T) {
 func TestOCIRefSplitMatchesTheCorpus(t *testing.T) {
 	c := loadOCIRefCorpus(t)
 	for _, k := range c.Split.Cases {
-		got := splitOCIRef(k.Ref)
+		got := ociref.Split(k.Ref)
 		if got.Domain != k.Domain || got.Path != k.Path || got.Tag != k.Tag ||
 			got.TagSet != k.TagSet || got.Digest != k.Digest {
-			t.Errorf("splitOCIRef(%q) =\n  domain %q path %q tag %q tagSet %v digest %q\nwant\n"+
+			t.Errorf("ociref.Split(%q) =\n  domain %q path %q tag %q tagSet %v digest %q\nwant\n"+
 				"  domain %q path %q tag %q tagSet %v digest %q\n  (%s)",
 				k.Ref, got.Domain, got.Path, got.Tag, got.TagSet, got.Digest,
 				k.Domain, k.Path, k.Tag, k.TagSet, k.Digest, k.Why)
@@ -218,24 +220,24 @@ func TestOCIRefSplitMatchesTheCorpus(t *testing.T) {
 func TestOCIRefVerdictMatchesTheCorpus(t *testing.T) {
 	c := loadOCIRefCorpus(t)
 	for _, k := range c.Verdict.Cases {
-		err := checkOCIRef(k.Ref)
+		err := ociref.Check(k.Ref)
 		switch k.Verdict {
 		case "ok":
 			if err != nil {
-				t.Errorf("checkOCIRef(%q) refused a legal reference: %v\n  (%s)", k.Ref, err, k.Why)
+				t.Errorf("ociref.Check(%q) refused a legal reference: %v\n  (%s)", k.Ref, err, k.Why)
 			}
 		case "unrepresentable":
-			if !errors.Is(err, errImageUnrepresentable) {
-				t.Errorf("checkOCIRef(%q) = %v, want errImageUnrepresentable\n  (%s)", k.Ref, err, k.Why)
+			if !errors.Is(err, ociref.ErrImageUnrepresentable) {
+				t.Errorf("ociref.Check(%q) = %v, want ociref.ErrImageUnrepresentable\n  (%s)", k.Ref, err, k.Why)
 				continue
 			}
 			// THE PART, because naming the wrong half of a string is the failure issue 15 measured.
 			// An operator told the tag is bad when the path is bad edits the wrong thing.
 			if !strings.Contains(err.Error(), k.Part) {
-				t.Errorf("checkOCIRef(%q) does not blame the %s:\n%v\n  (%s)", k.Ref, k.Part, err, k.Why)
+				t.Errorf("ociref.Check(%q) does not blame the %s:\n%v\n  (%s)", k.Ref, k.Part, err, k.Why)
 			}
 			if k.Bad != "" && !strings.Contains(err.Error(), k.Bad) {
-				t.Errorf("checkOCIRef(%q) does not quote the offending %q:\n%v", k.Ref, k.Bad, err)
+				t.Errorf("ociref.Check(%q) does not quote the offending %q:\n%v", k.Ref, k.Bad, err)
 			}
 		default:
 			t.Fatalf("case %q has verdict %q, which this driver does not implement", k.Ref, k.Verdict)
@@ -248,30 +250,30 @@ func TestOCIRefVerdictMatchesTheCorpus(t *testing.T) {
 func TestOCIRefPinMatchesTheCorpus(t *testing.T) {
 	c := loadOCIRefCorpus(t)
 	for _, k := range c.Pin.Cases {
-		digest, err := imageDigest(k.Ref)
+		digest, err := ociref.ImageDigest(k.Ref)
 		switch k.Verdict {
 		case "pinned":
 			if err != nil {
-				t.Errorf("imageDigest(%q) refused a pinned reference: %v\n  (%s)", k.Ref, err, k.Why)
+				t.Errorf("ociref.ImageDigest(%q) refused a pinned reference: %v\n  (%s)", k.Ref, err, k.Why)
 				continue
 			}
 			if digest != k.Digest {
-				t.Errorf("imageDigest(%q) = %q, want %q", k.Ref, digest, k.Digest)
+				t.Errorf("ociref.ImageDigest(%q) = %q, want %q", k.Ref, digest, k.Digest)
 			}
 		case "unpinned":
-			if !errors.Is(err, errImageUnpinned) {
-				t.Errorf("imageDigest(%q) = %v, want errImageUnpinned\n  (%s)", k.Ref, err, k.Why)
+			if !errors.Is(err, ociref.ErrImageUnpinned) {
+				t.Errorf("ociref.ImageDigest(%q) = %v, want ociref.ErrImageUnpinned\n  (%s)", k.Ref, err, k.Why)
 			}
-			if errors.Is(err, errImageUnrepresentable) {
-				t.Errorf("imageDigest(%q) told the operator their Actor can never run, when all it "+
+			if errors.Is(err, ociref.ErrImageUnrepresentable) {
+				t.Errorf("ociref.ImageDigest(%q) told the operator their Actor can never run, when all it "+
 					"needs is a digest", k.Ref)
 			}
 		case "unrepresentable":
-			if !errors.Is(err, errImageUnrepresentable) {
-				t.Errorf("imageDigest(%q) = %v, want errImageUnrepresentable\n  (%s)", k.Ref, err, k.Why)
+			if !errors.Is(err, ociref.ErrImageUnrepresentable) {
+				t.Errorf("ociref.ImageDigest(%q) = %v, want ociref.ErrImageUnrepresentable\n  (%s)", k.Ref, err, k.Why)
 			}
-			if errors.Is(err, errImageUnpinned) {
-				t.Errorf("imageDigest(%q) reported BOTH refusals, so a caller cannot tell them apart", k.Ref)
+			if errors.Is(err, ociref.ErrImageUnpinned) {
+				t.Errorf("ociref.ImageDigest(%q) reported BOTH refusals, so a caller cannot tell them apart", k.Ref)
 			}
 		default:
 			t.Fatalf("case %q has verdict %q, which this driver does not implement", k.Ref, k.Verdict)
@@ -292,7 +294,7 @@ func TestOCIRefPushMatchesTheCorpus(t *testing.T) {
 				t.Errorf("pushDestination(%q) refused a destination: %v\n  (%s)", k.Ref, err, k.Why)
 				continue
 			}
-			if got := dest.tagged(); got != k.Expect {
+			if got := dest.Tagged(); got != k.Expect {
 				t.Errorf("pushDestination(%q) = %q, want %q\n  (%s)", k.Ref, got, k.Expect, k.Why)
 			}
 			if dest.PlainHTTP != k.PlainHTTP {
@@ -300,8 +302,8 @@ func TestOCIRefPushMatchesTheCorpus(t *testing.T) {
 					"Artifact and a credential in the clear\n  (%s)", k.Ref, dest.PlainHTTP, k.PlainHTTP, k.Why)
 			}
 		case "unrepresentable":
-			if !errors.Is(err, errImageUnrepresentable) {
-				t.Errorf("pushDestination(%q) = %v, want errImageUnrepresentable — this is the THIRD site "+
+			if !errors.Is(err, ociref.ErrImageUnrepresentable) {
+				t.Errorf("pushDestination(%q) = %v, want ociref.ErrImageUnrepresentable — this is the THIRD site "+
 					"that names an Artifact and it must not answer for itself\n  (%s)", k.Ref, err, k.Why)
 			}
 		case "no-registry":
@@ -337,7 +339,7 @@ func TestOCIRefPushMatchesTheCorpus(t *testing.T) {
 // and watching all three change." This is that test. It takes every `unrepresentable` row in the
 // corpus and asks every site, and it asserts three things of each answer:
 //
-//  1. it is errImageUnrepresentable, so a caller can BRANCH on it;
+//  1. it is ociref.ErrImageUnrepresentable, so a caller can BRANCH on it;
 //  2. it carries the shared sentence, which is what makes "one place" checkable — a site that
 //     wrote its own message would pass (1) and fail here; and
 //  3. it does NOT offer a remedy that cannot work. That is the actual bug: `café` was told to
@@ -354,7 +356,7 @@ func TestOCIRefPushMatchesTheCorpus(t *testing.T) {
 func TestOneAnswerReachesEverySiteThatNamesAnArtifact(t *testing.T) {
 	c := loadOCIRefCorpus(t)
 
-	// The sentence that proves the answer came from cli/ociref.go and not from a copy. Two fragments,
+	// The sentence that proves the answer came from cli/internal/ociref/ociref.go and not from a copy. Two fragments,
 	// not one, so a site that happened to quote the grammar cannot pass by accident.
 	shared := []string{"shared/conformance/queues.json", "NO REBUILD, REDEPLOY OR PIN CHANGES THIS"}
 
@@ -370,11 +372,11 @@ func TestOneAnswerReachesEverySiteThatNamesAnArtifact(t *testing.T) {
 
 		// Every site, each given the exact string ITS runtime would receive.
 		sites := map[string]error{
-			"driver (cli/driver_podman.go)": secondOf(imageDigest(k.Ref)),
-			"pull   (cli/scale.go)":         pullFailure("127.0.0.1:1", "café", "0.1.0", k.Ref, errors.New("invalid reference format")),
-			"build  (cli/build.go)":         destErr(pushDestination(k.Ref, "", "", "café", "0.1.0")),
+			"driver (cli/warden/driver_podman.go)": secondOf(ociref.ImageDigest(k.Ref)),
+			"pull   (cli/scale.go)":                pullFailure("127.0.0.1:1", "café", "0.1.0", k.Ref, errors.New("invalid reference format")),
+			"build  (cli/build.go)":                destErr(pushDestination(k.Ref, "", "", "café", "0.1.0")),
 		}
-		// deploy's push half is driven THROUGH runDeploy rather than by calling checkOCIRef here — a
+		// deploy's push half is driven THROUGH runDeploy rather than by calling ociref.Check here — a
 		// row that asserted the shared function about itself would be the vacuous half of this test.
 		// It runs only for rows this site can actually EXPRESS (see deployableRow); a row it cannot
 		// express is SKIPPED rather than approximated, because an approximated row is a row that
@@ -384,8 +386,8 @@ func TestOneAnswerReachesEverySiteThatNamesAnArtifact(t *testing.T) {
 			sites["deploy (cli/deploy.go)"] = deployRefusal(t, k.Ref)
 		}
 		for site, err := range sites {
-			if !errors.Is(err, errImageUnrepresentable) {
-				t.Errorf("%s: %q = %v\n  want errImageUnrepresentable — this is a class of Actor, not a "+
+			if !errors.Is(err, ociref.ErrImageUnrepresentable) {
+				t.Errorf("%s: %q = %v\n  want ociref.ErrImageUnrepresentable — this is a class of Actor, not a "+
 					"typo, and a site that cannot say so sends the operator to fix something else",
 					site, k.Ref, err)
 				continue
@@ -393,7 +395,7 @@ func TestOneAnswerReachesEverySiteThatNamesAnArtifact(t *testing.T) {
 			for _, want := range shared {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("%s: %q does not carry the shared answer (%q missing), so this site has its "+
-						"OWN message and cli/ociref.go is not the one place:\n%v", site, k.Ref, want, err)
+						"OWN message and cli/internal/ociref/ociref.go is not the one place:\n%v", site, k.Ref, want, err)
 				}
 			}
 			for _, no := range unreachable {
@@ -424,7 +426,7 @@ func TestTheOtherTruthSurvives(t *testing.T) {
 	if err == nil {
 		t.Fatal("a pull of an undeployed image was not a failure")
 	}
-	if errors.Is(err, errImageUnrepresentable) {
+	if errors.Is(err, ociref.ErrImageUnrepresentable) {
 		t.Fatalf("`a/b` was told its name can never be an image; a slash is a legal path separator "+
 			"and deploying really does fix this:\n%v", err)
 	}
@@ -444,22 +446,22 @@ func TestTheOtherTruthSurvives(t *testing.T) {
 func TestTrustRulesMatchTheCorpus(t *testing.T) {
 	c := loadOCIRefCorpus(t)
 	for _, k := range c.Allow.Rules.Cases {
-		got, err := parseTrustRule(k.Entry)
+		got, err := trustpolicy.ParseRule(k.Entry)
 		switch k.Verdict {
 		case "ok":
 			if err != nil {
-				t.Errorf("parseTrustRule(%q) refused a legal entry: %v\n  (%s)", k.Entry, err, k.Why)
+				t.Errorf("trustpolicy.ParseRule(%q) refused a legal entry: %v\n  (%s)", k.Entry, err, k.Why)
 				continue
 			}
 			if got.Host != k.Host {
-				t.Errorf("parseTrustRule(%q).Host = %q, want %q\n  (%s)", k.Entry, got.Host, k.Host, k.Why)
+				t.Errorf("trustpolicy.ParseRule(%q).Host = %q, want %q\n  (%s)", k.Entry, got.Host, k.Host, k.Why)
 			}
 			if strings.Join(got.Path, "/") != strings.Join(k.Path, "/") {
-				t.Errorf("parseTrustRule(%q).Path = %v, want %v\n  (%s)", k.Entry, got.Path, k.Path, k.Why)
+				t.Errorf("trustpolicy.ParseRule(%q).Path = %v, want %v\n  (%s)", k.Entry, got.Path, k.Path, k.Why)
 			}
 		case "refused":
 			if err == nil {
-				t.Errorf("parseTrustRule(%q) accepted an entry that does not name a registry (%v)\n  (%s)",
+				t.Errorf("trustpolicy.ParseRule(%q) accepted an entry that does not name a registry (%v)\n  (%s)",
 					k.Entry, got, k.Why)
 			}
 		default:
@@ -468,11 +470,11 @@ func TestTrustRulesMatchTheCorpus(t *testing.T) {
 	}
 }
 
-// TestTrustPolicyAdmitMatchesTheCorpus drives `trustPolicy.admit` — the ONE gate a container driver
+// TestTrustPolicyAdmitMatchesTheCorpus drives `trustpolicy.Policy.admit` — the ONE gate a container driver
 // calls before it pulls.
 //
 // IT ASSERTS THE ORDER AND NOT ONLY THE VERDICT, which is the whole reason the recording verifier
-// exists. `errRegistryNotAllowed` returned AFTER a signature fetch would be the same error value and
+// exists. `trustpolicy.ErrRegistryNotAllowed` returned AFTER a signature fetch would be the same error value and
 // a materially different program: the refused registry would have learned this Machine's address, its
 // clock and the fact that something told it to go there. So every row that should be refused early
 // also asserts that nothing was ever asked of the network, and every row that reaches the verifier
@@ -481,10 +483,10 @@ func TestTrustPolicyAdmitMatchesTheCorpus(t *testing.T) {
 	c := loadOCIRefCorpus(t)
 	for _, k := range c.Allow.Cases {
 		v := &recordingVerifier{}
-		p, err := loadTrustPolicy(trustOptions{
+		p, err := trustpolicy.Load(trustpolicy.Options{
 			Registries: strings.Join(k.Allow, ","),
 			Unsigned:   strings.Join(k.Unsigned, ","),
-			// A key is named so `loadTrustPolicy` has a root to build a verifier from; it is replaced
+			// A key is named so `trustpolicy.Load` has a root to build a verifier from; it is replaced
 			// below, because what these rows test is the policy and not cosign.
 			Key: "/dev/null",
 		})
@@ -494,7 +496,7 @@ func TestTrustPolicyAdmitMatchesTheCorpus(t *testing.T) {
 		}
 		p.Verifier = v
 
-		digest, err := p.admit(context.Background(), k.Ref)
+		digest, err := p.Admit(context.Background(), k.Ref)
 		switch k.Verdict {
 		case "ok":
 			if err != nil {
@@ -506,8 +508,8 @@ func TestTrustPolicyAdmitMatchesTheCorpus(t *testing.T) {
 					"--trust-unsigned, so the exception does nothing\n  (%s)", k.Ref, k.Why)
 			}
 		case "registry":
-			if !errors.Is(err, errRegistryNotAllowed) {
-				t.Errorf("admit(%q) = %v, want errRegistryNotAllowed\n  (%s)", k.Ref, err, k.Why)
+			if !errors.Is(err, trustpolicy.ErrRegistryNotAllowed) {
+				t.Errorf("admit(%q) = %v, want trustpolicy.ErrRegistryNotAllowed\n  (%s)", k.Ref, err, k.Why)
 			}
 			if v.calls != 0 {
 				t.Errorf("admit(%q) contacted the registry before deciding it was not allowed — the "+
@@ -515,27 +517,27 @@ func TestTrustPolicyAdmitMatchesTheCorpus(t *testing.T) {
 					"exists\n  (%s)", k.Ref, k.Why)
 			}
 		case "unpinned":
-			if !errors.Is(err, errImageUnpinned) {
-				t.Errorf("admit(%q) = %v, want errImageUnpinned\n  (%s)", k.Ref, err, k.Why)
+			if !errors.Is(err, ociref.ErrImageUnpinned) {
+				t.Errorf("admit(%q) = %v, want ociref.ErrImageUnpinned\n  (%s)", k.Ref, err, k.Why)
 			}
 			if v.calls != 0 {
 				t.Errorf("admit(%q) fetched a signature for a reference it was going to refuse for free\n  (%s)",
 					k.Ref, k.Why)
 			}
 		case "unrepresentable":
-			if !errors.Is(err, errImageUnrepresentable) {
-				t.Errorf("admit(%q) = %v, want errImageUnrepresentable — the shared grammar is asked "+
+			if !errors.Is(err, ociref.ErrImageUnrepresentable) {
+				t.Errorf("admit(%q) = %v, want ociref.ErrImageUnrepresentable — the shared grammar is asked "+
 					"before any policy\n  (%s)", k.Ref, err, k.Why)
 			}
 			// The shared sentence, so the policy path cannot become a fifth site with its own message.
 			for _, want := range []string{"shared/conformance/queues.json", "NO REBUILD, REDEPLOY OR PIN CHANGES THIS"} {
 				if err != nil && !strings.Contains(err.Error(), want) {
-					t.Errorf("admit(%q) does not carry the shared answer (%q missing), so cli/ociref.go is "+
+					t.Errorf("admit(%q) does not carry the shared answer (%q missing), so cli/internal/ociref/ociref.go is "+
 						"not the one place:\n%v", k.Ref, want, err)
 				}
 			}
 		case "signature":
-			if !errors.Is(err, errImageUnsigned) {
+			if !errors.Is(err, trustpolicy.ErrUnsigned) {
 				t.Errorf("admit(%q) = %v, want the verifier's refusal — this reference is legal, "+
 					"allowlisted and pinned, so the only question left is who signed it\n  (%s)",
 					k.Ref, err, k.Why)
@@ -566,13 +568,13 @@ type recordingVerifier struct {
 	repo, digest string
 }
 
-func (v *recordingVerifier) verify(_ context.Context, repo, digest string) error {
+func (v *recordingVerifier) Verify(_ context.Context, repo, digest string) error {
 	v.calls++
 	v.repo, v.digest = repo, digest
-	return fmt.Errorf("%w: %s@%s (the corpus's verifier, which signs nothing)", errImageUnsigned, repo, digest)
+	return fmt.Errorf("%w: %s@%s (the corpus's verifier, which signs nothing)", trustpolicy.ErrUnsigned, repo, digest)
 }
 
-func (v *recordingVerifier) root() string { return "a test verifier" }
+func (v *recordingVerifier) Root() string { return "a test verifier" }
 
 // secondOf drops a two-value call's first result, so the three sites can be written as one map.
 func secondOf(_ string, err error) error { return err }
@@ -597,14 +599,14 @@ func destErr(_ bundleDest, err error) error { return err }
 //     anonymous `GET https://ghcr.io/v2/` (401, no credential, nothing published) from this box.
 //     A red run stays on this machine.
 func deployableRow(ref string) bool {
-	r := splitOCIRef(ref)
+	r := ociref.Split(ref)
 	if r.Domain == "" || r.Digest != "" || !r.TagSet || r.Tag == "" || r.Path == "" {
 		return false
 	}
 	if r.Domain+"/"+r.Path+":"+r.Tag != ref {
 		return false
 	}
-	return loopbackHost(r.Domain)
+	return ociref.LoopbackHost(r.Domain)
 }
 
 // deployRefusal drives `runDeploy` for an actor whose Artifact reference is EXACTLY `ref`, and
@@ -616,7 +618,7 @@ func deployableRow(ref string) bool {
 // "it errors eventually" is the behaviour this replaced.
 func deployRefusal(t *testing.T, ref string) error {
 	t.Helper()
-	r := splitOCIRef(ref)
+	r := ociref.Split(ref)
 	t.Setenv("KONTRA_REGISTRY", r.Domain)
 
 	dir := t.TempDir()

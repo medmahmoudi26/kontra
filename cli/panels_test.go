@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // The Fleet this suite renders, deliberately UNSORTED and deliberately mixed:
@@ -97,8 +99,8 @@ func listPanels(t *testing.T, base string, args ...string) (string, error) {
 	t.Helper()
 	t.Setenv("KONTRA_PANEL_TOKEN", "panel-tok")
 	var buf bytes.Buffer
-	defer swap[io.Writer](&stdout, &buf)()
-	defer swap[io.Writer](&stderr, io.Discard)()
+	defer swap[io.Writer](&cliio.Stdout, &buf)()
+	defer swap[io.Writer](&cliio.Stderr, io.Discard)()
 	err := cmdPanels(append([]string{"list", "--url", base}, args...))
 	return buf.String(), err
 }
@@ -480,8 +482,8 @@ func TestPanelsWithoutATokenMakesNoRequest(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	var buf bytes.Buffer
-	defer swap[io.Writer](&stdout, &buf)()
-	defer swap[io.Writer](&stderr, io.Discard)()
+	defer swap[io.Writer](&cliio.Stdout, &buf)()
+	defer swap[io.Writer](&cliio.Stderr, io.Discard)()
 	err := cmdPanels([]string{"list", "--url", srv.URL})
 	if err == nil {
 		t.Fatal("a missing token must be an error, not a silent unauthenticated attempt")

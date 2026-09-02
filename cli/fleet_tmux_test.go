@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // captureStdout runs `body` with the package writer redirected, on top of dispatch_test.go's
@@ -15,7 +17,7 @@ import (
 func captureStdout(t *testing.T, body func()) string {
 	t.Helper()
 	var buf bytes.Buffer
-	defer swap[io.Writer](&stdout, &buf)()
+	defer swap[io.Writer](&cliio.Stdout, &buf)()
 	body()
 	return buf.String()
 }

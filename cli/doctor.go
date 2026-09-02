@@ -14,6 +14,10 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 )
 
 // Local-dev host-mapped ports (docker-compose.yml). Local-first scope: these are the
@@ -66,11 +70,11 @@ func cmdDoctor(args []string) error {
 	}
 	api := newAPI(*apiURL)
 	orchHost := hostOf(*apiURL)
-	tempHost := hostOf(temporalAddress())
+	tempHost := hostOf(config.TemporalAddress())
 
 	// --- control-plane compose count (best-effort; docker/compose may be absent) ---
 	composeOK, composeStat := false, "docker compose unavailable"
-	if root, err := findRepoRoot(""); err == nil {
+	if root, err := cliutil.FindRepoRoot(""); err == nil {
 		if out, perr := dockerOut(root, "compose", "ps", "-q", "--status", "running"); perr == nil {
 			n := 0
 			if out != "" {
@@ -86,14 +90,14 @@ func cmdDoctor(args []string) error {
 	// `--api` does not quietly probe the operator's laptop. An explicit KONTRA_PANEL_URL still wins.
 	panelsURL := panelURL()
 	if os.Getenv("KONTRA_PANEL_URL") == "" && orchHost != "localhost" {
-		panelsURL = ui(orchHost, envOr("KONTRA_PANEL_PORT", defaultPanelPort))
+		panelsURL = ui(orchHost, cliutil.EnvOr("KONTRA_PANEL_PORT", defaultPanelPort))
 	}
 	panelsOK, panelsStat := panelsHealth(panelsURL)
 
 	services := []svcRow{
 		{"control plane", "docker compose containers", "-", composeOK, composeStat},
 		{"orchestrator", "catalog + run/dataset API, web UI", *apiURL, httpOK(*apiURL + "/api/health"), ""},
-		{"temporal", "workflow engine (gRPC)", temporalAddress(), tcpUp(temporalAddress()), ""},
+		{"temporal", "workflow engine (gRPC)", config.TemporalAddress(), tcpUp(config.TemporalAddress()), ""},
 		{"seaweedfs", "S3 object store", ui(orchHost, portSeaweedS3), httpAnswers(ui(orchHost, portSeaweedS3)), ""},
 		{"panels", "Dashboard streamer (forked child of orchestrator-infra)", panelsURL, panelsOK, panelsStat},
 	}
@@ -115,20 +119,20 @@ func cmdDoctor(args []string) error {
 	// --- actors (best-effort; a down orchestrator just skips this block) ---
 	var actors []actorRecord
 	if err := api.getJSON("/api/actors", &actors); err != nil {
-		fmt.Fprintf(stdout, "\n%s actors: orchestrator unreachable (%s)\n", paint("1;31", "✗"), *apiURL)
+		fmt.Fprintf(cliio.Stdout, "\n%s actors: orchestrator unreachable (%s)\n", paint("1;31", "✗"), *apiURL)
 		return nil
 	}
-	fmt.Fprintf(stdout, "\n%s\n", paint("1", "Actors"))
+	fmt.Fprintf(cliio.Stdout, "\n%s\n", paint("1", "Actors"))
 	if len(actors) == 0 {
-		fmt.Fprintln(stdout, "  none registered — deploy one, then `kontra workers list`")
+		fmt.Fprintln(cliio.Stdout, "  none registered — deploy one, then `kontra workers list`")
 		return nil
 	}
 	refs := make([]string, len(actors))
 	for i, a := range actors {
 		refs[i] = a.Name + "@" + a.Version
 	}
-	fmt.Fprintf(stdout, "  %d registered: %s\n", len(actors), strings.Join(refs, ", "))
-	fmt.Fprintln(stdout, "  run `kontra workers list` to see live Temporal workers per actor")
+	fmt.Fprintf(cliio.Stdout, "  %d registered: %s\n", len(actors), strings.Join(refs, ", "))
+	fmt.Fprintln(cliio.Stdout, "  run `kontra workers list` to see live Temporal workers per actor")
 	return nil
 }
 
@@ -144,7 +148,7 @@ func panelsHealth(base string) (bool, string) {
 	resp, err := statusHTTP.Get(base + "/api/panels/health")
 	if err != nil {
 		// The port is named from panels.go's constant, not spelled again here.
-		return false, "DOWN (is " + envOr("KONTRA_PANEL_PORT", defaultPanelPort) + " published?)"
+		return false, "DOWN (is " + cliutil.EnvOr("KONTRA_PANEL_PORT", defaultPanelPort) + " published?)"
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
@@ -159,8 +163,8 @@ func panelsHealth(base string) (bool, string) {
 
 // renderDoctor prints the Services table and the Web-consoles table.
 func renderDoctor(services []svcRow, consoles []uiRow) {
-	fmt.Fprintf(stdout, "%s\n", paint("1", "Services"))
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	fmt.Fprintf(cliio.Stdout, "%s\n", paint("1", "Services"))
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "  COMPONENT\tROLE\tENDPOINT\tSTATUS")
 	fmt.Fprintln(w, "  ---------\t----\t--------\t------")
 	for _, s := range services {
@@ -168,8 +172,8 @@ func renderDoctor(services []svcRow, consoles []uiRow) {
 	}
 	w.Flush()
 
-	fmt.Fprintf(stdout, "\n%s\n", paint("1", "Web consoles (open in a browser)"))
-	uw := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	fmt.Fprintf(cliio.Stdout, "\n%s\n", paint("1", "Web consoles (open in a browser)"))
+	uw := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	for _, u := range consoles {
 		fmt.Fprintf(uw, "  %s\t%s\t%s\n", u.name, u.url, u.desc)
 	}

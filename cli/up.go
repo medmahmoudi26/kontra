@@ -39,6 +39,8 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/appliance/objstore"
 	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
 	"github.com/medmahmoudi26/kontra/cli/appliance/temporalsrv"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"github.com/medmahmoudi26/kontra/runtime/handler/hydratestore"
 )
 
@@ -152,7 +154,7 @@ func cmdUp(args []string) error {
 		Store:    claims,
 		BindIP:   *bind,
 		Port:     *codecPort,
-		Prefix:   envOr("KONTRA_S3_PREFIX", ""),
+		Prefix:   cliutil.EnvOr("KONTRA_S3_PREFIX", ""),
 		UIOrigin: uiOrigin,
 	})
 	if err != nil {
@@ -242,7 +244,7 @@ func cmdUp(args []string) error {
 		// HANDED THE SERVER, NOT AN ADDRESS. There is no second place to spell the codec's
 		// endpoint, so there is nothing left for the two of them to disagree about.
 		Codec:     codec,
-		Namespace: temporalNamespace(),
+		Namespace: config.TemporalNamespace(),
 		Store:     artifacts,
 		Progress:  os.Stdout,
 		Log:       os.Stdout,
@@ -257,7 +259,7 @@ func cmdUp(args []string) error {
 		reportTemporalUIExit(os.Stderr, ui)
 	}
 
-	repo, _ := findRepoRoot("")
+	repo, _ := cliutil.FindRepoRoot("")
 	src, err := resolveOrchestrator(context.Background(), orchestratorOptions{
 		Mode:     *orchestrator,
 		DataDir:  dir,
@@ -272,7 +274,7 @@ func cmdUp(args []string) error {
 
 	var child *appliance.Child
 	if src.Kind != "none" {
-		home, _ := kontraRoot()
+		home, _ := cliutil.KontraRoot()
 		env, replaced := orchestratorEnv(os.Environ(), orchestratorEnvOptions{
 			TemporalAddress: srv.Address(),
 			S3Endpoint:      store.Endpoint(),
@@ -390,7 +392,7 @@ func printApplianceReady(w *os.File, srv *temporalsrv.Server, store *objstore.Se
 //
 // `$KONTRA_HOME/data` rather than a sibling of the checkout, because KONTRA_HOME is already THE
 // answer to "where does this installation keep its things" — config.yaml, workflows/ and actors/
-// are there, resolved by the same three-answer rule in kontraRoot, and the orchestrator resolves
+// are there, resolved by the same three-answer rule in cliutil.KontraRoot, and the orchestrator resolves
 // the identical path from TypeScript. A second location for the same installation is a second
 // thing to find, back up and get wrong.
 // KONTRA_DATA_DIR is the SAME variable `control/orchestrator/src/data/dataDir.ts` reads, and it is what
@@ -409,7 +411,7 @@ func applianceDataDir(override string) (string, error) {
 		}
 		return abs, nil
 	}
-	root, err := kontraRoot()
+	root, err := cliutil.KontraRoot()
 	if err != nil {
 		return "", errors.New("no data directory: " + err.Error() + " (or pass --data-dir)")
 	}

@@ -16,7 +16,7 @@
  * the volume that survives a recreate.
  *
  * KONTRA_DATA_DIR IS THE FIRST RULE ON BOTH SIDES, AND THAT IS LOAD-BEARING RATHER THAN TIDY. The
- * FALLBACKS do not agree and never have: `cli/config.go:kontraRoot` prefers a checkout's
+ * FALLBACKS do not agree and never have: `cli/internal/config/config.go:kontraRoot` prefers a checkout's
  * `.kontra/config.yaml` over `~/.kontra`, while `sources.ts:kontraHome` — which is what this
  * builds on — knows only `KONTRA_HOME || ~/.kontra`, and says in its own header that it is an
  * approximation of the CLI's rule kept deliberately. So a binary started inside a checkout with no

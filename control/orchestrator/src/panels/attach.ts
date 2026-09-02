@@ -92,7 +92,7 @@ export const KILL_TIMEOUT_MS = 10_000;
  * huge cell grid to show almost nothing.
  *
  * kontra's own sessions are additionally pinned with `window-size manual` when they are created
- * (`cli/tmux.go`), which makes them immune. This floor is what protects a session kontra did not
+ * (`cli/internal/tmux/tmux.go`), which makes them immune. This floor is what protects a session kontra did not
  * create — an operator's own tmux, attached to the wall.
  *
  * 40x10 is not a guess at a nice size; it is the point below which a terminal stops being one.

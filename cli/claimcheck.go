@@ -57,6 +57,8 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"github.com/medmahmoudi26/kontra/runtime/handler/claimcheck"
 )
 
@@ -128,7 +130,7 @@ var _ converter.PayloadCodec = decodeOnlyCodec{}
 func cliClaimCheckCodec() converter.PayloadCodec {
 	return decodeOnlyCodec{claimcheck.New(
 		casOverHTTP{endpoint: "http://" + s3HostPort(), bucket: s3Bucket()},
-		envOr("KONTRA_S3_PREFIX", ""),
+		cliutil.EnvOr("KONTRA_S3_PREFIX", ""),
 		claimcheck.ThresholdFromEnv(),
 	)}
 }
@@ -136,8 +138,8 @@ func cliClaimCheckCodec() converter.PayloadCodec {
 // dialWithClaimCheck dials Temporal with the codec above installed.
 func dialWithClaimCheck() (client.Client, error) {
 	return client.Dial(client.Options{
-		HostPort:      temporalAddress(),
-		Namespace:     temporalNamespace(),
+		HostPort:      config.TemporalAddress(),
+		Namespace:     config.TemporalNamespace(),
 		DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), cliClaimCheckCodec()),
 	})
 }

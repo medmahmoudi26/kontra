@@ -783,7 +783,7 @@ test('what collapsing refuses to fold', () => {
   // A SUMMARY ON A RAW TURN IS A SENTENCE, AND SENTENCES DO NOT FOLD. The narration rule two cases
   // up already says this for the turns this module names; it has to be true of the ones it does not,
   // because a workflow whose whole account is carried on repeated events of ONE type is a real shape
-  // — `cli/warden_workflow.go` puts a Machine's lifecycle on one `ActivityTaskScheduled` per
+  // — `cli/warden/warden_workflow.go` puts a Machine's lifecycle on one `ActivityTaskScheduled` per
   // decision, forever.
   //
   // THE ORDERING IS THE SHARPER HALF. A group is anchored at its FIRST member within a barrier-free

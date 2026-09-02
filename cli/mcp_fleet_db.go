@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // MCP parity for `kontra fleet` and `kontra db`.
@@ -25,10 +27,10 @@ import (
 // captureCLI runs a CLI subcommand with stdout redirected into a buffer, so an MCP caller gets
 // exactly what a human would read in a terminal instead of a bare exit code.
 func captureCLI(fn func([]string) error, args ...string) (string, error) {
-	old := stdout
+	old := cliio.Stdout
 	var buf bytes.Buffer
-	stdout = &buf
-	defer func() { stdout = old }()
+	cliio.Stdout = &buf
+	defer func() { cliio.Stdout = old }()
 	err := fn(args)
 	return buf.String(), err
 }
@@ -110,31 +112,31 @@ func mcpFleetDown(fleet string) (string, error) {
 	return captureCLI(fleetDown, args...)
 }
 
-// mcpDBList reuses the CLI's dbList by capturing stdout — the DuckLake datasets, which are a
+// mcpDBList reuses the CLI's dbList by capturing cliio.Stdout — the DuckLake datasets, which are a
 // different thing from list_datasets' per-run output.
 func mcpDBList(catalog, dataPath string) (string, error) {
-	old := stdout
+	old := cliio.Stdout
 	var buf bytes.Buffer
-	stdout = &buf
-	defer func() { stdout = old }()
+	cliio.Stdout = &buf
+	defer func() { cliio.Stdout = old }()
 	err := dbList(catalog, dataPath)
 	return buf.String(), err
 }
 
 func mcpDBIngest(catalog, dataPath, file, name string, anew bool) (string, error) {
-	old := stdout
+	old := cliio.Stdout
 	var buf bytes.Buffer
-	stdout = &buf
-	defer func() { stdout = old }()
+	cliio.Stdout = &buf
+	defer func() { cliio.Stdout = old }()
 	err := dbIngest(catalog, dataPath, file, name, anew)
 	return buf.String(), err
 }
 
 func mcpDBDelete(catalog, dataPath, name string) (string, error) {
-	old := stdout
+	old := cliio.Stdout
 	var buf bytes.Buffer
-	stdout = &buf
-	defer func() { stdout = old }()
+	cliio.Stdout = &buf
+	defer func() { cliio.Stdout = old }()
 	err := dbDelete(catalog, dataPath, name)
 	return buf.String(), err
 }

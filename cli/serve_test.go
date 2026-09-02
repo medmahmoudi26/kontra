@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 // WHICH ENGINE AN ACTOR FOLDER RUNS UNDER, which defaulted to "py" and so served every Go actor by
@@ -189,8 +191,8 @@ func TestServeRefusesFleetWithTheTwoCommandsThatDoIt(t *testing.T) {
 func TestDeriveDoesNotShareABackingArray(t *testing.T) {
 	base := append(make([]string, 0, 8), "A=1", "B=2") // spare capacity, as os.Environ() has
 
-	first := derive(base, "PYTHONPATH=/checkout")
-	second := derive(base, "GOWORK=off")
+	first := cliutil.Derive(base, "PYTHONPATH=/checkout")
+	second := cliutil.Derive(base, "GOWORK=off")
 
 	if !has(first, "PYTHONPATH=/checkout") {
 		t.Errorf("the first derivation lost its own entry: %v", first)
@@ -207,9 +209,9 @@ func TestDeriveDoesNotShareABackingArray(t *testing.T) {
 }
 
 func TestDeriveKeepsTheBaseEnvironment(t *testing.T) {
-	got := derive([]string{"A=1"}, "B=2", "C=3")
+	got := cliutil.Derive([]string{"A=1"}, "B=2", "C=3")
 	if strings.Join(got, " ") != "A=1 B=2 C=3" {
-		t.Errorf("derive lost or reordered entries: %v", got)
+		t.Errorf("cliutil.Derive lost or reordered entries: %v", got)
 	}
 }
 

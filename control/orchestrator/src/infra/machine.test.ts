@@ -381,7 +381,7 @@ describe('teardown', () => {
    * VMAGENT IS PER-MACHINE AND IS THEREFORE NOT A WORKER'S TO STOP. It was in this list, correctly,
    * while a teardown meant "this Machine is finished". On a packed Machine stopping it would end the
    * co-tenant's metrics — and metrics are how the **Warden** tells a Worker that is running from one
-   * that is working (cli/sickworker.go), so the co-tenant would go on running and become unjudgeable.
+   * that is working (cli/warden/sickworker.go), so the co-tenant would go on running and become unjudgeable.
    * What leaves with a Worker is its scrape TARGET, which is the file asserted above.
    */
   it('leaves the Machine-wide metrics agent alone', () => {
@@ -528,7 +528,7 @@ describe('packing', () => {
 
   /**
    * A MACHINE PLACED BEFORE THIS CHANGE CARRIES THE SINGLETON UNITS, and leaving them armed beside
-   * the namespaced pair is TWO pollers on one queue — the failure `cli/driver.go`'s seam exists to
+   * the namespaced pair is TWO pollers on one queue — the failure `cli/warden/driver.go`'s seam exists to
    * prevent. Disarmed at install time so the transition does not depend on Pulumi's ordering between
    * creating the new resource and deleting the old one.
    */

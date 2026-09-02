@@ -227,7 +227,7 @@ describe.skipIf(!runnable)('mode local against a real tmux (private socket)', ()
    *
    * This is the test that stops the obvious implementation from shipping. The obvious one reads
    * `pane_current_command`: a bare shell means the Worker exited. MEASURED here, it does not — the
-   * pane below reports `sh`/`zsh` while its `sleep` is running, because `cli/tmux.go`'s hold shell
+   * pane below reports `sh`/`zsh` while its `sleep` is running, because `cli/internal/tmux/tmux.go`'s hold shell
    * keeps the pane's foreground process group. On this host every kontra session reported `zsh` with
    * its Worker up, so that implementation would have called the whole fleet dead.
    *
@@ -237,7 +237,7 @@ describe.skipIf(!runnable)('mode local against a real tmux (private socket)', ()
   it(
     'reports a finished pane as exited — and a running one under the same shell as not',
     async () => {
-      // The wrapper `cli/tmux.go` really uses, including the pane option it records the status in.
+      // The wrapper `cli/internal/tmux/tmux.go` really uses, including the pane option it records the status in.
       const hold =
         `trap ':' INT; sleep 120; kontra_status=$?; ` +
         `[ -n "$TMUX" ] && tmux -L ${SOCKET} set-option -p -t "$TMUX_PANE" @kontra_exit ` +

@@ -460,7 +460,7 @@ def test_workers_refuses_a_count_that_is_not_one(bad):
 
 def test_more_workers_than_machines_is_refused_naming_the_density_knob():
     """A placement puts at most ONE Worker on a Machine — two of one `<actor>@<version>` there
-    would share a `KONTRA_WORKER` label, a unit name and a queue, and `cli/warden.go:reconcile`
+    would share a `KONTRA_WORKER` label, a unit name and a queue, and `cli/warden/warden.go:reconcile`
     already refuses the duplicate out loud. Truncating would leave a caller believing in four
     Workers that were never built, permanently, because the converge succeeds."""
     import asyncio

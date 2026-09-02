@@ -92,7 +92,7 @@ SEVERAL placements, so several **Workers** share a **Machine** and share its egr
     **Machine** share its source address — is the thing to know before making it.
   • A PLACEMENT PUTS AT MOST ONE **WORKER** ON ANY ONE **MACHINE**. Two of one `<actor>@<version>`
     there would carry the same `KONTRA_WORKER` label, write the same units and poll the same queue,
-    so nothing could tell them apart (`cli/driver.go`, and `cli/warden.go:reconcile` already refuses
+    so nothing could tell them apart (`cli/warden/driver.go`, and `cli/warden/warden.go:reconcile` already refuses
     the duplicate out loud). More concurrency for ONE Artifact on ONE **Machine** is `sessions=`,
     which is density and is the axis ADR 0037 §6 says packing does not replace.
   • `workers=N` IS HOW MANY **MACHINES** THIS PLACEMENT LANDS ON, one **Worker** each. Unset means
@@ -1113,7 +1113,7 @@ class Fleet:
             )
         if workers is not None and workers > self.machines:
             # A PLACEMENT PUTS AT MOST ONE WORKER ON A MACHINE — see this method's docstring and
-            # `cli/driver.go`'s label. Truncating would leave the caller believing in Workers that
+            # `cli/warden/driver.go`'s label. Truncating would leave the caller believing in Workers that
             # were never built, which is the shape of failure this repo keeps paying for.
             raise ValueError(
                 f"workers={workers} on {self.fqn}, which has {self.machines} Machine(s): a placement "

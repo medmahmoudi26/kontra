@@ -46,6 +46,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
+	"github.com/medmahmoudi26/kontra/cli/internal/queues"
+	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
+	"github.com/medmahmoudi26/kontra/cli/warden"
 )
 
 // The three modes, spelled the same here, in the streamer's Terminal ids and in
@@ -99,7 +106,7 @@ func runElsewhere(mode, actorDir string, m actorManifest, replicas int, network 
 	// passed through would point it at its own loopback rather than at this box's.
 	//
 	// `fs.Visit` and NOT a comparison against the default: `--redis`'s default is
-	// `envOr("KONTRA_REDIS_HOST", "127.0.0.1:6379")`, so an operator who typed the default value
+	// `cliutil.EnvOr("KONTRA_REDIS_HOST", "127.0.0.1:6379")`, so an operator who typed the default value
 	// EXPLICITLY would have been ignored by a value comparison — measured, and it started a container
 	// while looking like it had refused. Visit reports what was typed, which is the actual question.
 	var localOnly []string
@@ -125,26 +132,26 @@ func runElsewhere(mode, actorDir string, m actorManifest, replicas int, network 
 			"  the image comes from `kontra deploy --actor %s` (local `kontra/%s-worker:%s`, else the registry)",
 			m.Name, m.Version, err, actorDir, m.Name, m.Version)
 	}
-	fmt.Fprintf(stdout, "%s@%s — %d worker container(s) on %s (image %s)\n",
+	fmt.Fprintf(cliio.Stdout, "%s@%s — %d worker container(s) on %s (image %s)\n",
 		res.Actor, res.Version, res.Running, res.Network, res.Image)
 	// WHICH CONTROL PLANE, printed on every scale. A worker pointed at the wrong one looks
 	// identical to a healthy one everywhere else — it runs, it restarts, and it polls a queue
 	// nobody dispatches to — so the address it was given is output, not a debug detail.
-	fmt.Fprintf(stdout, "  polling:  %s   (%s)\n", res.ControlPlane, res.Source)
+	fmt.Fprintf(cliio.Stdout, "  polling:  %s   (%s)\n", res.ControlPlane, res.Source)
 	for _, w := range res.Workers {
-		fmt.Fprintf(stdout, "  %s\n", w)
+		fmt.Fprintf(cliio.Stdout, "  %s\n", w)
 	}
 	if len(res.Stopped) > 0 {
-		fmt.Fprintf(stdout, "  stopped: %s\n", strings.Join(res.Stopped, ", "))
+		fmt.Fprintf(cliio.Stdout, "  stopped: %s\n", strings.Join(res.Stopped, ", "))
 	}
-	fmt.Fprintf(stdout, "\n  logs:     docker logs -f %s\n", firstOr(res.Workers, "<container>"))
-	fmt.Fprintf(stdout, "  workers:  kontra workers list\n")
-	fmt.Fprintf(stdout, "  stop:     kontra serve --actor %s --mode docker --replicas 0\n", actorDir)
+	fmt.Fprintf(cliio.Stdout, "\n  logs:     docker logs -f %s\n", firstOr(res.Workers, "<container>"))
+	fmt.Fprintf(cliio.Stdout, "  workers:  kontra workers list\n")
+	fmt.Fprintf(cliio.Stdout, "  stop:     kontra serve --actor %s --mode docker --replicas 0\n", actorDir)
 	// A container carries no tmux session, so it has no Terminal to watch yet — said here rather
 	// than left for someone to discover from an empty wall.
-	fmt.Fprintf(stdout, "\n  A worker container has no tmux session, so `kontra panels list` shows it with SESSION=NO-TMUX:\n")
-	fmt.Fprintf(stdout, "  nothing creates one inside the image. `--mode local --tmux` is the mode with live Terminals today.\n")
-	fmt.Fprintf(stdout, "\ndispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
+	fmt.Fprintf(cliio.Stdout, "\n  A worker container has no tmux session, so `kontra panels list` shows it with SESSION=NO-TMUX:\n")
+	fmt.Fprintf(cliio.Stdout, "  nothing creates one inside the image. `--mode local --tmux` is the mode with live Terminals today.\n")
+	fmt.Fprintf(cliio.Stdout, "\ndispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
 	return nil
 }
 
@@ -168,7 +175,7 @@ func cmdServe(args []string) error {
 	engine := fs.String("engine", "", "actor engine: py|go (default: detected from the folder)")
 	// NOT localhost by default: compose publishes Redis on the VPC address, and the actor's
 	// durable state (the commit map, session_state) lives there.
-	redis := fs.String("redis", envOr("KONTRA_REDIS_HOST", "127.0.0.1:6379"),
+	redis := fs.String("redis", cliutil.EnvOr("KONTRA_REDIS_HOST", "127.0.0.1:6379"),
 		"host:port of the Redis holding actor state")
 	useTmux := fs.Bool("tmux", false,
 		"run the worker in a detached tmux session (one window per process) instead of the foreground")
@@ -222,7 +229,7 @@ func cmdServe(args []string) error {
 	if *mode != modeLocal {
 		return runElsewhere(*mode, *actorDir, m, *replicas, *network, fs)
 	}
-	root, err := findRepoRoot("")
+	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
 		return fmt.Errorf("kontra serve needs the checkout (it runs handler/ from source): %w", err)
 	}
@@ -250,8 +257,8 @@ func cmdServe(args []string) error {
 	env := append(os.Environ(),
 		"KONTRA_ACTOR_NAME="+m.Name,
 		"KONTRA_ACTOR_VERSION="+m.Version,
-		"KONTRA_ADDRESS="+temporalAddress(),
-		"KONTRA_NAMESPACE="+temporalNamespace(),
+		"KONTRA_ADDRESS="+config.TemporalAddress(),
+		"KONTRA_NAMESPACE="+config.TemporalNamespace(),
 		"KONTRA_REDIS_HOST="+*redis,
 		// WHERE TO REGISTER. `publish_catalog` returns immediately when this is unset, so an actor
 		// run locally never told the catalog anything — and the failure is silent by design (a
@@ -282,19 +289,19 @@ func cmdServe(args []string) error {
 	// Mirrors the Bundle's PYTHONPATH so an author's `from actorkit import actor` resolves to
 	// the checkout, not to whatever happens to be pip-installed.
 	//
-	// derive(), not append(env, …), and that is not style. Two appends onto one slice with spare
+	// cliutil.Derive(), not append(env, …), and that is not style. Two appends onto one slice with spare
 	// capacity write the SAME index: `handlerEnv := append(env, "GOWORK=off")` silently replaced
 	// the PYTHONPATH this line had just added, so the actor process was started without it. It
 	// went unnoticed because the repo venv has the SDK pip-installed, which makes PYTHONPATH
 	// redundant exactly where it was being lost — it only surfaces on an interpreter that
 	// doesn't (a bare python3, a fresh checkout, a worktree).
-	actorEnv := derive(env,
+	actorEnv := cliutil.Derive(env,
 		"PYTHONPATH="+filepath.Join(root, "sdk", "python")+":"+
 			filepath.Join(root, "runtime", "python")+":"+
 			filepath.Join(root, "sdk", "python", "_gen"))
 	handlerArgv := []string{"go", "run", "."}
 	handlerDir := filepath.Join(root, "handler")
-	handlerEnv := derive(env, "GOWORK=off")
+	handlerEnv := cliutil.Derive(env, "GOWORK=off")
 
 	// THE DRIVER, AND WHY THERE IS ONE. Everything above is `--mode local`'s ARGUMENT — which
 	// interpreter, which environment, which two argvs — and everything below is running it. ADR 0036
@@ -305,49 +312,49 @@ func cmdServe(args []string) error {
 	//
 	// The `--tmux` choice belongs to the DRIVER and not to the spec: the same actor and the same
 	// handler run either way, and the only difference is who is their parent.
-	drv := &processDriver{out: stdout, err: os.Stderr, tmux: *useTmux}
-	spec := workerSpec{
+	drv := warden.NewProcessDriver(cliio.Stdout, os.Stderr, *useTmux)
+	spec := warden.Spec{
 		Name:    m.Name,
 		Version: m.Version,
 		// the actor — a Temporal activity worker. It self-registers to the catalog on boot.
-		Actor: procSpec{Dir: root, Argv: actorArgv, Env: actorEnv},
+		Actor: warden.ProcSpec{Dir: root, Argv: actorArgv, Env: actorEnv},
 		// the handler — the workflow half. This is what `kontra workers list` counts on the shared
 		// queue; the actor counts on its own.
 		//
 		// `go run .` from inside handler/, not `go run ./handler` from the root: handler/ is its own
 		// module and the repo root has no go.mod, so the root form only works when the workspace is
 		// active — and GOWORK=off above is what makes the build reproducible.
-		Handler: procSpec{Dir: handlerDir, Argv: handlerArgv, Env: handlerEnv},
+		Handler: warden.ProcSpec{Dir: handlerDir, Argv: handlerArgv, Env: handlerEnv},
 	}
-	h, err := drv.start(ctx, spec)
+	h, err := drv.Start(ctx, spec)
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(stdout, "%s@%s — actor on %s-sessions, handler on %s (temporal %s)\n",
-		m.Name, m.Version, sharedQueue(m.Name, m.Version), sharedQueue(m.Name, m.Version),
-		temporalAddress())
+	fmt.Fprintf(cliio.Stdout, "%s@%s — actor on %s-sessions, handler on %s (temporal %s)\n",
+		m.Name, m.Version, queues.Shared(m.Name, m.Version), queues.Shared(m.Name, m.Version),
+		config.TemporalAddress())
 	if *useTmux {
-		printTmuxHelp(stdout, tmuxSession(m.Name, m.Version), []string{"actor", "handler"})
-		fmt.Fprintf(stdout, "\ndispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
+		tmux.PrintHelp(cliio.Stdout, tmux.Session(m.Name, m.Version), []string{"actor", "handler"})
+		fmt.Fprintf(cliio.Stdout, "\ndispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
 		return nil
 	}
-	fmt.Fprintf(stdout, "dispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
+	fmt.Fprintf(cliio.Stdout, "dispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
 
 	select {
-	case err := <-drv.exited(h):
+	case err := <-drv.Exited(h):
 		// A half that ended ends the command, and the OTHER half goes with it immediately — no
 		// drain, because the pair is already broken and a lingering handler holds its Temporal lease
 		// while units time out one by one (this file's header).
 		stop()
-		_ = drv.stop(context.Background(), h, 0)
+		_ = drv.Stop(context.Background(), h, 0)
 		return err
 	case <-ctx.Done():
-		fmt.Fprintln(stdout, "\nstopping…")
+		fmt.Fprintln(cliio.Stdout, "\nstopping…")
 		// The exit code belongs to the WORKER: Ctrl-C on a healthy pair is a successful stop, so a
 		// teardown that goes wrong is reported and does not become this command's status.
-		if err := drv.stop(context.Background(), h, serveDrain); err != nil {
-			fmt.Fprintf(stderr, "note: %v\n", err)
+		if err := drv.Stop(context.Background(), h, serveDrain); err != nil {
+			fmt.Fprintf(cliio.Stderr, "note: %v\n", err)
 		}
 		return nil
 	}
@@ -360,11 +367,3 @@ func cmdServe(args []string) error {
 // was written. What this covers is the case that had no cover before — a half that ignores the
 // signal, which used to leave the command waiting on it forever with the terminal already gone.
 const serveDrain = 10 * time.Second
-
-// derive returns base + extra as a FRESH slice, so two derivations of one environment cannot
-// overwrite each other through a shared backing array.
-func derive(base []string, extra ...string) []string {
-	out := make([]string, 0, len(base)+len(extra))
-	out = append(out, base...)
-	return append(out, extra...)
-}

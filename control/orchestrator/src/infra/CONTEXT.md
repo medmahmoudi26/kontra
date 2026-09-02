@@ -289,7 +289,7 @@ security policy (egress policy is also one and they are enforced in different pl
 
   THREE SITES NAME AN **ARTIFACT**, AND THEY NOW GIVE ONE ANSWER. Resolved 2026-08-30 with slice 07,
   which added the third (`kontra build --push`) and could not add a third bespoke message: the
-  grammar, both refusal sentinels and the sentence itself live in `cli/ociref.go`, consulted by
+  grammar, both refusal sentinels and the sentence itself live in `cli/internal/ociref/ociref.go`, consulted by
   `kontra build`, by `cli/scale.go`'s pull diagnosis and by the podman driver.
   `shared/conformance/ociref.json` drives all three over the same rows, so breaking the grammar in one
   place turns all three red — which is what makes "one shared answer" checkable rather than claimed.
@@ -311,7 +311,7 @@ security policy (egress policy is also one and they are enforced in different pl
   "Which registry is this?" is the same field `ociRef` already answers, and answering it again is
   worse than an inconsistency — a hand-rolled `strings.HasPrefix(ref, "ghcr.io")` admits
   `ghcr.io.evil.example/x` and a `strings.Split(ref, "/")[0]` admits `a/b` as though `a` were a
-  registry, and both look right. So `cli/trustpolicy.go` matches on `ociRef.Domain` and
+  registry, and both look right. So `cli/internal/trustpolicy/trustpolicy.go` matches on `ociRef.Domain` and
   `ociRef.Path` and judges an allowlist ENTRY with the same three rules the grammar is built from.
   `shared/conformance/ociref.json`'s `allow` section is the coupling made checkable: widening
   `ociPathComponent` or `looksLikeRegistryHost` turns grammar and policy red in the same run.

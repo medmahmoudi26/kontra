@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // leaseServer stands in for the orchestrator's infra surface. It answers the **Lease** workflow route and
@@ -208,9 +210,9 @@ func TestADestroyedLedgerSaysTheMachinesAreGone(t *testing.T) {
 func captureLeaseOutput(t *testing.T, led *leaseSet, now time.Time) string {
 	t.Helper()
 	var buf strings.Builder
-	saved := stdout
-	stdout = &buf
-	t.Cleanup(func() { stdout = saved })
+	saved := cliio.Stdout
+	cliio.Stdout = &buf
+	t.Cleanup(func() { cliio.Stdout = saved })
 	if err := printLeases(led, now); err != nil {
 		t.Fatalf("printLeases: %v", err)
 	}

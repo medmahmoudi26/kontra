@@ -27,6 +27,9 @@ import (
 	"github.com/docker/docker/pkg/archive"
 
 	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
 
 // baseImage is the canonical Python host (infra/Dockerfile.pyworker) every
@@ -137,8 +140,8 @@ func engineFor(dir, flagValue string, m actorManifest) (string, error) {
 		return v, nil
 	}
 	entry := m.entryFile()
-	hasGo := fileExists(filepath.Join(dir, "go.mod"))
-	hasPy := fileExists(filepath.Join(dir, entry))
+	hasGo := cliutil.FileExists(filepath.Join(dir, "go.mod"))
+	hasPy := cliutil.FileExists(filepath.Join(dir, entry))
 	switch {
 	case hasGo && hasPy:
 		// THE ONE CASE WORTH REFUSING. Both present means the folder would serve different code
@@ -196,7 +199,7 @@ func cmdDeploy(args []string) error {
 		return errors.New("deploy needs --actor <dir>")
 	}
 	// The CLI streams docker build/push progress straight to stdout.
-	res, err := runDeploy(context.Background(), stdout, deployOpts{
+	res, err := runDeploy(context.Background(), cliio.Stdout, deployOpts{
 		actorDir: *actorDir, engine: *engine, registry: *registry,
 		hostOnly: *hostOnly, override: *override,
 	})
@@ -204,7 +207,7 @@ func cmdDeploy(args []string) error {
 		return err
 	}
 	if res.Image == "" { // --host-only: just the host tag, no worker/push/summary
-		fmt.Fprintln(stdout, res.HostImage)
+		fmt.Fprintln(cliio.Stdout, res.HostImage)
 		return nil
 	}
 	printDeploySummary(actorManifest{Name: res.Name, Version: res.Version}, res.Image, res.Digest, controllerHost(*controller))
@@ -241,7 +244,7 @@ type deployResult struct {
 
 // runDeploy builds the actor's HOST image and (unless hostOnly) the self-contained WORKER
 // image, then tags + pushes it to the registry. Docker build/push progress is written to
-// `progress` — stdout for the CLI, io.Discard for the MCP server (whose stdout is the
+// `progress` — stdout for the CLI, io.Discard for the MCP server (whose cliio.Stdout is the
 // JSON-RPC channel and must never carry build noise). Returns the structured outcome.
 func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployResult, error) {
 	if o.actorDir == "" {
@@ -269,16 +272,16 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 	remote := fmt.Sprintf("%s/%s:%s", reg, m.Name, m.Version)
 	if !o.hostOnly {
 		// A FOURTH SITE NAMES AN ARTIFACT, and it is checked here for the same reason the other three
-		// are (cli/ociref.go). `.scratch/warden/issues/15-*` counted three — build, pull, and the
+		// are (cli/internal/ociref/ociref.go). `.scratch/warden/issues/15-*` counted three — build, pull, and the
 		// driver — and this is the push half of `deploy`, which the issue folded into "deploy/pull".
 		// It is not the same string as the pull site's: this one is built here, from the registry and
 		// the manifest, and an actor whose name the OCI grammar cannot express would otherwise spend a
 		// full image build and then fail on docker's own wording at ImageTag.
 		//
-		// It deliberately does NOT re-derive anything. The count of sites is not written down anywhere
+		// It deliberately does NOT re-cliutil.Derive anything. The count of sites is not written down anywhere
 		// — shared/conformance/README.md names a count in a comment as "the least reliable kind of
 		// documentation there is" — the corpus drives whichever sites its driver lists.
-		if err := checkOCIRef(remote); err != nil {
+		if err := ociref.Check(remote); err != nil {
 			return nil, fmt.Errorf("%s@%s cannot be deployed as an Image.\n%w\n"+
 				"  `kontra serve` and every queue derivation take the Actor's name verbatim, so it serves\n"+
 				"  fine and only its ARTIFACT is unnameable. Rename it in actor.json.", m.Name, m.Version, err)
@@ -451,7 +454,7 @@ func ensureWorkerBase(ctx context.Context, d imageAPI, progress io.Writer) error
 	if len(sums) > 0 {
 		return nil
 	}
-	root, err := findRepoRoot("")
+	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
 		return fmt.Errorf("worker base %s missing and no repo root to build it (handler/ + infra/): %w", workerBaseImage, err)
 	}
@@ -519,7 +522,7 @@ ENTRYPOINT ["/kontra/entrypoint.sh"]
 // module tree (both SDK seams + the actor) must be in the context. The
 // actor's repo-relative path is computed so the Dockerfile can `cd` into it to build.
 func buildGoActor(ctx context.Context, d imageAPI, progress io.Writer, actorDir, name, tag string) error {
-	root, err := findRepoRoot("")
+	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
 		return fmt.Errorf("go actor build needs the repo root (sdk/go + runtime/go + the actor): %w", err)
 	}
@@ -647,29 +650,29 @@ func controllerHost(flagVal string) string {
 // printDeploySummary prints the "actor deployed" block: the image address, the pull
 // command, and the run command that turns a pulled image into a live worker.
 func printDeploySummary(m actorManifest, image, digest, ctrl string) {
-	fmt.Fprintf(stdout, "\nactor deployed: %s@%s\n", m.Name, m.Version)
-	fmt.Fprintf(stdout, "  image:  %s\n", image)
+	fmt.Fprintf(cliio.Stdout, "\nactor deployed: %s@%s\n", m.Name, m.Version)
+	fmt.Fprintf(cliio.Stdout, "  image:  %s\n", image)
 	// THE DIGEST IS THE IDENTITY (ADR 0032); the tag above is the convenience. It is printed
 	// beside the tag rather than instead of it because both are true — the tag is what an
 	// operator types and the digest is what a run records — and because a tag that has moved is
 	// only visible when the digest beside it changed.
 	if digest != "" {
-		fmt.Fprintf(stdout, "  digest: %s\n", digest)
+		fmt.Fprintf(cliio.Stdout, "  digest: %s\n", digest)
 	}
-	fmt.Fprintf(stdout, "  pull:   docker pull %s\n", image)
-	fmt.Fprintf(stdout, "  run:    docker run -d --name kontra-%s \\\n", m.Name)
-	fmt.Fprintf(stdout, "            -e KONTRA_ADDRESS=%s:7233 \\\n", ctrl)
-	fmt.Fprintf(stdout, "            -e KONTRA_ORCHESTRATOR_URL=http://%s:8088 \\\n", ctrl)
-	fmt.Fprintf(stdout, "            -e KONTRA_S3_ENDPOINT=http://%s:8333 \\\n", ctrl)
+	fmt.Fprintf(cliio.Stdout, "  pull:   docker pull %s\n", image)
+	fmt.Fprintf(cliio.Stdout, "  run:    docker run -d --name kontra-%s \\\n", m.Name)
+	fmt.Fprintf(cliio.Stdout, "            -e KONTRA_ADDRESS=%s:7233 \\\n", ctrl)
+	fmt.Fprintf(cliio.Stdout, "            -e KONTRA_ORCHESTRATOR_URL=http://%s:8088 \\\n", ctrl)
+	fmt.Fprintf(cliio.Stdout, "            -e KONTRA_S3_ENDPOINT=http://%s:8333 \\\n", ctrl)
 	// Redis is REQUIRED, not an upgrade. The worker used to bundle its own, which made each
 	// container an island of state; ADR 0018 removed it along with the sidecar, so the actor's
 	// durable state (the commit map, unit_state, object_state, global_state) lives on the
 	// Controller. A
 	// worker started without this points at a localhost Redis that is not there.
-	fmt.Fprintf(stdout, "            -e KONTRA_REDIS_HOST=%s:6379 \\\n", ctrl)
-	fmt.Fprintf(stdout, "            %s\n", image)
-	fmt.Fprintln(stdout, "  creds:  append  -e KONTRA_S3_ACCESS_KEY=… -e KONTRA_S3_SECRET_KEY=…  if the object store is not anonymous")
-	fmt.Fprintln(stdout, "  then:   kontra workers list   # the worker appears, wherever it runs")
+	fmt.Fprintf(cliio.Stdout, "            -e KONTRA_REDIS_HOST=%s:6379 \\\n", ctrl)
+	fmt.Fprintf(cliio.Stdout, "            %s\n", image)
+	fmt.Fprintln(cliio.Stdout, "  creds:  append  -e KONTRA_S3_ACCESS_KEY=… -e KONTRA_S3_SECRET_KEY=…  if the object store is not anonymous")
+	fmt.Fprintln(cliio.Stdout, "  then:   kontra workers list   # the worker appears, wherever it runs")
 }
 
 func readManifest(dir string) (actorManifest, error) {
@@ -713,7 +716,7 @@ func ensureBase(ctx context.Context, d imageAPI, progress io.Writer) error {
 	if len(sums) > 0 {
 		return nil
 	}
-	root, err := findRepoRoot("")
+	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
 		return fmt.Errorf("base image %s missing and no repo root to build it from: %w", baseImage, err)
 	}

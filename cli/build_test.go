@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
 
 // TestTargetIsRetiredAndSaysWhereItWent — a retired flag is not a typo and must not read as one.
@@ -79,7 +81,7 @@ func TestPushAndRegistryAreTwoAnswersToOneQuestion(t *testing.T) {
 
 // TestDefaultDestinationIsTheConventionalOne — with no `--push`, the address is the rung ladder
 // `bundleRegistry` owns and the repository is `bundles/<name>`, which is the only address
-// `control/orchestrator/src/activities/fleet.ts:resolveBundle` can derive. Changing this silently makes every
+// `control/orchestrator/src/activities/fleet.ts:resolveBundle` can cliutil.Derive. Changing this silently makes every
 // build publish somewhere a Fleet placement then 404s on.
 func TestDefaultDestinationIsTheConventionalOne(t *testing.T) {
 	t.Setenv("KONTRA_HOME", t.TempDir())
@@ -90,7 +92,7 @@ func TestDefaultDestinationIsTheConventionalOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the conventional destination was refused: %v", err)
 	}
-	if got, want := dest.tagged(), "10.124.0.2:5000/bundles/nscheck:0.1.0"; got != want {
+	if got, want := dest.Tagged(), "10.124.0.2:5000/bundles/nscheck:0.1.0"; got != want {
 		t.Errorf("default destination = %q, want %q", got, want)
 	}
 	if !dest.PlainHTTP {
@@ -100,14 +102,14 @@ func TestDefaultDestinationIsTheConventionalOne(t *testing.T) {
 
 	// AN ACTOR WHOSE NAME CANNOT BE A REPOSITORY IS REFUSED ON THE DEFAULT PATH TOO, and with the
 	// shared answer rather than a fourth message. This is the path every doc example takes.
-	if _, err := pushDestination("", "", "10.124.0.2", "café", "0.1.0"); !errors.Is(err, errImageUnrepresentable) {
-		t.Errorf("the default destination for `café` = %v, want errImageUnrepresentable", err)
+	if _, err := pushDestination("", "", "10.124.0.2", "café", "0.1.0"); !errors.Is(err, ociref.ErrImageUnrepresentable) {
+		t.Errorf("the default destination for `café` = %v, want ociref.ErrImageUnrepresentable", err)
 	}
 
 	// A VERSION IS NOT ALWAYS A TAG — shared/conformance/queues.json carries `1:2`, which Temporal takes
 	// verbatim. Without the tag rule this builds a reference the registry rejects after the push.
-	if _, err := pushDestination("", "", "10.124.0.2", "nscheck", "1:2"); !errors.Is(err, errImageUnrepresentable) {
-		t.Errorf("version `1:2` = %v, want errImageUnrepresentable", err)
+	if _, err := pushDestination("", "", "10.124.0.2", "nscheck", "1:2"); !errors.Is(err, ociref.ErrImageUnrepresentable) {
+		t.Errorf("version `1:2` = %v, want ociref.ErrImageUnrepresentable", err)
 	}
 }
 

@@ -39,7 +39,7 @@
  * The ingest is gated by `KONTRA_PANEL_TOKEN`, exactly like every other route on this server, and
  * that is WEAKER than what ADR 0037 describes: it says the Controller "derives it from the key the
  * handshake proved this Machine holds", so that "a Warden cannot ask for another Warden's assignment
- * even by trying". That derivation lives on the mTLS enrolment server (`cli/warden_ca.go`), and
+ * even by trying". That derivation lives on the mTLS enrolment server (`cli/warden/warden_ca.go`), and
  * until the ingest is mounted there too, anything holding the panel token can file a report naming
  * any Machine. The panel token is not a public credential — `routes/panels.ts` keeps it out of the
  * browser bundle deliberately — but it is one credential for a whole Fleet rather than one identity
@@ -55,7 +55,7 @@ import type { MachineTelemetry } from './types';
 /**
  * How long a report is believed.
  *
- * A Warden posts every 3 s (`cli/panereport.go:reportInterval`), so this is forty missed reports.
+ * A Warden posts every 3 s (`cli/warden/panereport.go:reportInterval`), so this is forty missed reports.
  * Wide on purpose: the cost of being late is a stale pane for two minutes, and the cost of being
  * early is a Machine that drops off the wall every time its Controller has a slow minute — and the
  * whole reason this path exists rather than a workflow's is that it is allowed to lose a message.
@@ -84,7 +84,7 @@ export interface WardenPane {
   frame: string;
 }
 
-/** A `workerVerdict` from `cli/sickworker.go`, on the wire. */
+/** A `workerVerdict` from `cli/warden/sickworker.go`, on the wire. */
 export interface WardenHealth {
   verdict: 'sick' | 'healthy' | 'cannot-tell' | string;
   reason: string;

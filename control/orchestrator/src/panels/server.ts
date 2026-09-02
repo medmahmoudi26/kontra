@@ -702,7 +702,7 @@ export class PanelServer {
     ring.reset(payload);
     if (t) t.lastSnapshotAt = this.now();
 
-    // WHAT THE PANE SAYS ABOUT ITSELF. `cli/tmux.go`'s hold prints `[exited <n>] press any key…` and
+    // WHAT THE PANE SAYS ABOUT ITSELF. `cli/internal/tmux/tmux.go`'s hold prints `[exited <n>] press any key…` and
     // then blocks on `read`, so this line on the screen is the pane reporting that its command is
     // over — the only evidence available for a Worker started before `@kontra_exit` existed, which
     // on this host is every Worker currently running. Read here because this is where a screen
@@ -877,7 +877,7 @@ export class PanelServer {
    * Read one report off the wire.
    *
    * BOUNDED, because this is the one route on this server whose body a stranger writes. A report is
-   * a handful of KiB — `cli/panereport.go` caps each frame at a screen — and 1 MiB is two orders of
+   * a handful of KiB — `cli/warden/panereport.go` caps each frame at a screen — and 1 MiB is two orders of
    * magnitude of headroom over that. The stream is destroyed rather than drained past the cap: a
    * client that keeps sending after being told to stop is not one to keep reading.
    *
@@ -1294,7 +1294,7 @@ export class PanelServer {
     //
     // Not an omission and not a gap to fill later. On a Machine, converging creates a session whose
     // panes hold `journalctl -fu` — the Worker itself is under systemd, so the converge starts
-    // nothing. In `local` mode the panes hold the REAL actor and handler processes (`cli/tmux.go`), so
+    // nothing. In `local` mode the panes hold the REAL actor and handler processes (`cli/internal/tmux/tmux.go`), so
     // the same gesture would mean STARTING A WORKER from a browser: money, a Temporal lease, and a
     // credential-free HTTP surface deciding to run code. In `docker` mode nothing creates a session
     // inside a worker container at all. So both are refused with the command that owns session

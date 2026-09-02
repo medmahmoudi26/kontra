@@ -33,6 +33,9 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 // Local posture for the operator's workstation (plan §3). memoryLimit bounds DuckDB's buffer
@@ -164,14 +167,14 @@ func resolveSelector(api *apiClient, selector, dt string) (*actorRun, error) {
 	// Newest first from the server. Ambiguity is reported, never silently resolved: picking
 	// one of several runs and not saying so is how an operator reads yesterday's data.
 	if len(out.Runs) > 1 {
-		fmt.Fprintf(stderr, "%d runs match %s — using the newest (%s). Narrow with --dt:\n",
+		fmt.Fprintf(cliio.Stderr, "%d runs match %s — using the newest (%s). Narrow with --dt:\n",
 			len(out.Runs), selector, out.Runs[0].Dt)
 		for i, r := range out.Runs {
 			if i >= 5 {
-				fmt.Fprintf(stderr, "  … and %d older\n", len(out.Runs)-5)
+				fmt.Fprintf(cliio.Stderr, "  … and %d older\n", len(out.Runs)-5)
 				break
 			}
-			fmt.Fprintf(stderr, "  %s@%s  --dt %s\n", r.Actor, r.Version, r.Dt)
+			fmt.Fprintf(cliio.Stderr, "  %s@%s  --dt %s\n", r.Actor, r.Version, r.Dt)
 		}
 	}
 	return &out.Runs[0], nil
@@ -191,12 +194,12 @@ func exploreList(api *apiClient, dt string) error {
 		return err
 	}
 	if len(out.Runs) == 0 {
-		fmt.Fprintln(stdout, "no materialized output yet")
+		fmt.Fprintln(cliio.Stdout, "no materialized output yet")
 		return nil
 	}
-	fmt.Fprintf(stdout, "  %-28s %-10s %-16s %s\n", "ACTOR", "VERSION", "WHEN (dt)", "OPEN IT WITH")
+	fmt.Fprintf(cliio.Stdout, "  %-28s %-10s %-16s %s\n", "ACTOR", "VERSION", "WHEN (dt)", "OPEN IT WITH")
 	for _, r := range out.Runs {
-		fmt.Fprintf(stdout, "  %-28s %-10s %-16s kontra explore %s@%s --dt %s\n",
+		fmt.Fprintf(cliio.Stdout, "  %-28s %-10s %-16s kontra explore %s@%s --dt %s\n",
 			r.Actor, r.Version, r.Dt, r.Actor, r.Version, r.Dt)
 	}
 	return nil
@@ -234,9 +237,9 @@ func cmdExplore(args []string) error {
 
 	// --print-init and --sql make stdout a PAYLOAD (a script, a result set) that gets piped or
 	// redirected; their notices go to stderr so the pipe stays clean. Same rule as the banner.
-	notices := stdout
+	notices := cliio.Stdout
 	if *printInit || *query != "" {
-		notices = stderr
+		notices = cliio.Stderr
 	}
 
 	// Resolve everything that can fail BEFORE creating a workspace: a missing token or a
@@ -295,7 +298,7 @@ func cmdExplore(args []string) error {
 	}
 
 	if *printInit {
-		fmt.Fprint(stdout, script)
+		fmt.Fprint(cliio.Stdout, script)
 		return nil
 	}
 	if manifest != nil {
@@ -310,7 +313,7 @@ func cmdExplore(args []string) error {
 	case *webUI:
 		// Loud, because the default path deliberately makes no network call beyond the
 		// presigned object GETs and this one breaks that property.
-		fmt.Fprintln(stderr, "warning: --ui loads DuckDB's `ui` extension, which fetches its frontend assets from ui.duckdb.org at runtime — the default shell does not")
+		fmt.Fprintln(cliio.Stderr, "warning: --ui loads DuckDB's `ui` extension, which fetches its frontend assets from ui.duckdb.org at runtime — the default shell does not")
 		fmt.Fprintln(notices, "opening the DuckDB UI → http://localhost:4213/   (ctrl-c to stop it)")
 		return duckdbWithInit(ws.initPath, "-ui")
 	default:
@@ -330,7 +333,7 @@ var errNoExploreToken = errors.New(
 // exploreToken reads the token the endpoint expects, preferring KONTRA_EXPLORE_TOKEN and
 // falling back to KONTRA_STATE_TOKEN — the same order as the server (control/orchestrator/src/auth.ts).
 func exploreToken() string {
-	if t := envOr("KONTRA_EXPLORE_TOKEN", os.Getenv("KONTRA_STATE_TOKEN")); t != "" {
+	if t := cliutil.EnvOr("KONTRA_EXPLORE_TOKEN", os.Getenv("KONTRA_STATE_TOKEN")); t != "" {
 		return t
 	}
 	// Same reasoning as the catalog DSN: the value is already in the checkout's .env, and
@@ -735,12 +738,12 @@ func ducklakeCatalogDSN(dsn string) string {
 	return "postgres:" + dsn
 }
 
-func catalogRegion() string { return envOr("KONTRA_S3_REGION", "us-east-1") }
+func catalogRegion() string { return cliutil.EnvOr("KONTRA_S3_REGION", "us-east-1") }
 
 // s3UseSSL follows the configured endpoint's scheme; SeaweedFS in this deployment is plain
 // HTTP and an https:// endpoint must not be downgraded to match it.
 func s3UseSSL() bool {
-	return strings.HasPrefix(envOr("KONTRA_S3_PUBLIC_ENDPOINT", envOr("KONTRA_S3_ENDPOINT", "")), "https://")
+	return strings.HasPrefix(cliutil.EnvOr("KONTRA_S3_PUBLIC_ENDPOINT", cliutil.EnvOr("KONTRA_S3_ENDPOINT", "")), "https://")
 }
 
 // --- the workspace (0600, swept) ---
@@ -819,6 +822,6 @@ func duckdbWithInit(initPath string, args ...string) error {
 		return err
 	}
 	cmd := exec.Command(bin, append([]string{"-init", initPath}, args...)...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, os.Stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, cliio.Stdout, os.Stderr
 	return cmd.Run()
 }

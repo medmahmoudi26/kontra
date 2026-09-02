@@ -2,7 +2,7 @@
 the **Warden** divides to decide a **Worker** is sick but not dead.
 
 WHY A CORPUS FOR TWO COUNTER NAMES. The names are spelled independently here and in
-`runtime/go/engine/metrics.go`, and read a third time on a **Machine** by `cli/sickworker.go`. A
+`runtime/go/engine/metrics.go`, and read a third time on a **Machine** by `cli/warden/sickworker.go`. A
 drift between them has no loud failure and no red test on either side: each host renders a
 perfectly valid exposition and passes its own assertions, and the only symptom is a Warden dividing
 by an absent series on every Worker of one language — which surfaces as a `loads` chip stuck on

@@ -19,6 +19,10 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 )
 
 func cmdInfra(args []string) error {
@@ -31,7 +35,7 @@ func cmdInfra(args []string) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	root, err := findRepoRoot(*repo)
+	root, err := cliutil.FindRepoRoot(*repo)
 	if err != nil {
 		return err
 	}
@@ -47,31 +51,6 @@ func cmdInfra(args []string) error {
 		return infraStatus(root)
 	default:
 		return fmt.Errorf("unknown infra subcommand %q (want up|down|status)", sub)
-	}
-}
-
-// findRepoRoot walks up from CWD until it sees docker-compose.yml (the control-plane
-// contract); --repo overrides. Also used by deploy to locate the base-image context.
-func findRepoRoot(override string) (string, error) {
-	if override != "" {
-		if _, err := os.Stat(filepath.Join(override, "docker-compose.yml")); err != nil {
-			return "", fmt.Errorf("--repo %s: no docker-compose.yml there", override)
-		}
-		return override, nil
-	}
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "docker-compose.yml")); err == nil {
-			return dir, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", errors.New("no docker-compose.yml found walking up from CWD (pass --repo <dir>)")
-		}
-		dir = parent
 	}
 }
 
@@ -156,11 +135,11 @@ func infraStatus(root string) error {
 	checks := []check{
 		{"compose", psErr == nil && running > 0, composeDetail},
 		{"orchestrator", httpOK(orchestratorURL() + "/api/health"), orchestratorURL() + "/api/health"},
-		{"temporal", tcpUp(temporalAddress()), "tcp " + temporalAddress()},
+		{"temporal", tcpUp(config.TemporalAddress()), "tcp " + config.TemporalAddress()},
 		{"seaweed", httpAnswers(seaweedURL), seaweedURL},
 	}
 
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "COMPONENT\tSTATUS\tDETAIL")
 	allOK := true
 	for _, c := range checks {

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 )
 
 func TestTmuxSessionIsTheActorAndItsVersion(t *testing.T) {
@@ -27,16 +29,16 @@ func TestTmuxSessionIsTheActorAndItsVersion(t *testing.T) {
 	// Unsanitised, `tmux attach -t webcrawl-0.2.0` fails against a session that is right there, and
 	// the Monitor's probe looks for a name `list-panes` never reports — drawing a Machine whose
 	// Worker is running perfectly as one with no session.
-	if got := tmuxSession("webcrawl", "0.2.0"); got != "webcrawl-0_2_0" {
-		t.Errorf("tmuxSession = %q, want webcrawl-0_2_0", got)
+	if got := tmux.Session("webcrawl", "0.2.0"); got != "webcrawl-0_2_0" {
+		t.Errorf("tmux.Session = %q, want webcrawl-0_2_0", got)
 	}
-	if got := tmuxSafeName("a.b:c"); got != "a_b_c" {
-		t.Errorf("tmuxSafeName = %q, want a_b_c", got)
+	if got := tmux.SafeName("a.b:c"); got != "a_b_c" {
+		t.Errorf("tmux.SafeName = %q, want a_b_c", got)
 	}
 	// An actor with no version in its manifest names the session after itself rather than trailing
 	// a bare dash.
-	if got := tmuxSession("webcrawl", ""); got != "webcrawl" {
-		t.Errorf("tmuxSession = %q, want webcrawl", got)
+	if got := tmux.Session("webcrawl", ""); got != "webcrawl" {
+		t.Errorf("tmux.Session = %q, want webcrawl", got)
 	}
 }
 
@@ -44,25 +46,25 @@ func TestTmuxSessionIsTheActorAndItsVersion(t *testing.T) {
 // derives them independently — and a drift has the worst failure shape there is: the Worker starts
 // and runs perfectly, and the Monitor never shows it.
 func TestTheSessionTagSaysWhatKindOfSessionItIs(t *testing.T) {
-	if got := kontraSessionTag("webcrawl", "0.2.0"); got != "actor:webcrawl:0.2.0" {
-		t.Errorf("kontraSessionTag = %q", got)
+	if got := tmux.KontraSessionTag("webcrawl", "0.2.0"); got != "actor:webcrawl:0.2.0" {
+		t.Errorf("tmux.KontraSessionTag = %q", got)
 	}
-	if got := kontraWorkflowTag("enumerate_scope"); got != "workflow:enumerate_scope" {
-		t.Errorf("kontraWorkflowTag = %q", got)
+	if got := tmux.KontraWorkflowTag("enumerate_scope"); got != "workflow:enumerate_scope" {
+		t.Errorf("tmux.KontraWorkflowTag = %q", got)
 	}
-	if kontraOption != "@kontra" {
-		t.Errorf("the option name is a contract: %q", kontraOption)
+	if tmux.KontraOption != "@kontra" {
+		t.Errorf("the option name is a contract: %q", tmux.KontraOption)
 	}
 }
 
 func TestShellJoinQuotesEveryArgument(t *testing.T) {
 	// Paths come from the actor dir and the repo root; either may contain spaces, and an
 	// unquoted one silently becomes two arguments — the actor would start with the wrong file.
-	got := shellJoin([]string{"/opt/my dir/python3", "/opt/my dir/actor.py"})
+	got := tmux.ShellJoin([]string{"/opt/my dir/python3", "/opt/my dir/actor.py"})
 	if got != `'/opt/my dir/python3' '/opt/my dir/actor.py'` {
-		t.Errorf("shellJoin = %s", got)
+		t.Errorf("tmux.ShellJoin = %s", got)
 	}
-	if q := shellJoin([]string{"it's"}); q != `'it'\''s'` {
+	if q := tmux.ShellJoin([]string{"it's"}); q != `'it'\''s'` {
 		t.Errorf("single quote not escaped: %s", q)
 	}
 }
@@ -70,7 +72,7 @@ func TestShellJoinQuotesEveryArgument(t *testing.T) {
 func TestTmuxHoldKeepsTheWindowAfterAnExit(t *testing.T) {
 	// A window that vanishes is the worst possible report of a crash-on-boot — which is exactly
 	// the failure this flag exists to make visible.
-	h := tmuxHold([]string{"/bin/false"})
+	h := tmux.Hold([]string{"/bin/false"})
 	if !strings.Contains(h, "'/bin/false'") {
 		t.Errorf("command missing: %s", h)
 	}
@@ -90,9 +92,9 @@ func TestTmuxHoldRunsUnderEVERYShellTmuxMightPick(t *testing.T) {
 	// bash the identical string is fine, which is why nothing caught it.
 	//
 	// So the assertion is behavioural: run the wrapper for real, under each shell present, and
-	// require the exit line to actually come out. stdin is /dev/null so `read` sees EOF and
+	// require the exit line to actually come out. cliio.Stdin is /dev/null so `read` sees EOF and
 	// returns rather than blocking — by then the interesting part has already happened.
-	h := tmuxHold([]string{"/bin/false"})
+	h := tmux.Hold([]string{"/bin/false"})
 	ran := 0
 	for _, sh := range []string{"sh", "dash", "bash", "zsh"} {
 		bin, err := exec.LookPath(sh)
@@ -125,10 +127,10 @@ func TestTmuxHoldRunsUnderEVERYShellTmuxMightPick(t *testing.T) {
 // status is written into a pane option the Monitor's existing `list-panes` probe returns, and
 // `control/orchestrator/src/panels/tmux.ts:KONTRA_EXIT_OPTION` is the peer that reads it.
 func TestTheHoldRecordsItsExitStatusForTheMonitor(t *testing.T) {
-	if kontraExitOption != "@kontra_exit" {
-		t.Errorf("the option name is a cross-language contract: %q", kontraExitOption)
+	if tmux.KontraExitOption != "@kontra_exit" {
+		t.Errorf("the option name is a cross-language contract: %q", tmux.KontraExitOption)
 	}
-	got := tmuxHold([]string{"/bin/false"})
+	got := tmux.Hold([]string{"/bin/false"})
 	if !strings.Contains(got, `tmux set-option -p -t "$TMUX_PANE" @kontra_exit "$kontra_status"`) {
 		t.Errorf("the exit status is not recorded where the Monitor can read it:\n%s", got)
 	}
@@ -137,7 +139,7 @@ func TestTheHoldRecordsItsExitStatusForTheMonitor(t *testing.T) {
 	// would then label a stranger's Worker as exited. The guard is what makes the wrapper safe to run
 	// anywhere, including in this suite.
 	if !strings.Contains(got, `[ -n "$TMUX" ] &&`) {
-		t.Errorf("the pane option is not guarded by $TMUX — outside tmux it would mark another pane:\n%s", got)
+		t.Errorf("the pane option is not guarded by $TMUX — outside tmux it would mark another Pane:\n%s", got)
 	}
 	// The status still has to be CAPTURED before anything else runs, or the option records tmux's
 	// exit code rather than the Worker's.
@@ -148,7 +150,7 @@ func TestTheHoldRecordsItsExitStatusForTheMonitor(t *testing.T) {
 
 func TestPrintTmuxHelpNamesTheSession(t *testing.T) {
 	var b bytes.Buffer
-	printTmuxHelp(&b, "kontra-webcrawl", []string{"actor", "handler"})
+	tmux.PrintHelp(&b, "kontra-webcrawl", []string{"actor", "handler"})
 	out := b.String()
 	for _, want := range []string{"tmux attach -t kontra-webcrawl", "kill-session -t kontra-webcrawl", "Ctrl-b d"} {
 		if !strings.Contains(out, want) {
@@ -171,7 +173,7 @@ func TestPrintTmuxHelpNamesTheSession(t *testing.T) {
 // that exists to PAUSE a worker killed it instead. An operator pressing Ctrl-C in an attached
 // session lost the traceback they had just produced, for the same reason.
 func TestTheHoldSurvivesAnInterrupt(t *testing.T) {
-	got := tmuxHold([]string{"python3", "actor.py"})
+	got := tmux.Hold([]string{"python3", "actor.py"})
 	if !strings.HasPrefix(got, "trap ':' INT; ") {
 		t.Fatalf("no INT trap — Ctrl-C will take the window with it:\n%s", got)
 	}

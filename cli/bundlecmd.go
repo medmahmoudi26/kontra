@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 
 	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 func cmdBundle(args []string) error {
@@ -64,7 +66,7 @@ func cmdBundleOrchestrator(args []string) error {
 		return err
 	}
 
-	root, err := findRepoRoot(*repo)
+	root, err := cliutil.FindRepoRoot(*repo)
 	if err != nil {
 		return err
 	}
@@ -73,18 +75,18 @@ func cmdBundleOrchestrator(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(stdout, "building the orchestrator bundle from %s for %s\n", root, describePlatforms(targets))
+	fmt.Fprintf(cliio.Stdout, "building the orchestrator bundle from %s for %s\n", root, describePlatforms(targets))
 	results := make([]*applbundle.BuildResult, 0, len(targets))
 	for _, target := range targets {
 		if len(targets) > 1 {
-			fmt.Fprintf(stdout, "\n=== %s ===\n", target)
+			fmt.Fprintf(cliio.Stdout, "\n=== %s ===\n", target)
 		}
 		res, err := applbundle.BuildOrchestrator(applbundle.BuildOptions{
 			RepoRoot:  root,
 			OutDir:    *out,
 			CacheDir:  *cache,
 			Platform:  target,
-			Progress:  stdout,
+			Progress:  cliio.Stdout,
 			KeepStage: *keepStage,
 		})
 		if err != nil {
@@ -98,9 +100,9 @@ func cmdBundleOrchestrator(args []string) error {
 	// of progress is four digests somebody has to scroll back for, and the digests are the whole
 	// output of this command.
 	if len(results) > 1 {
-		fmt.Fprintf(stdout, "\n%d bundles\n", len(results))
+		fmt.Fprintf(cliio.Stdout, "\n%d bundles\n", len(results))
 		for _, res := range results {
-			fmt.Fprintf(stdout, "  %-14s %s  %s\n", res.Manifest.Platform, res.SHA256, filepath.Base(res.BundlePath))
+			fmt.Fprintf(cliio.Stdout, "  %-14s %s  %s\n", res.Manifest.Platform, res.SHA256, filepath.Base(res.BundlePath))
 		}
 	}
 	return nil
@@ -108,30 +110,30 @@ func cmdBundleOrchestrator(args []string) error {
 
 func printBundle(res *applbundle.BuildResult) {
 	m := res.Manifest
-	fmt.Fprintf(stdout, "\n%s\n", res.BundlePath)
-	fmt.Fprintf(stdout, "  sha256    %s\n", res.SHA256)
-	fmt.Fprintf(stdout, "  size      %s over %d files\n", humanSize(res.Bytes), m.Tree.Files)
-	fmt.Fprintf(stdout, "  platform  %s\n", m.Platform)
-	fmt.Fprintf(stdout, "  manifest  %s\n", res.ManifestPath)
-	fmt.Fprintf(stdout, "\ncomponents\n")
+	fmt.Fprintf(cliio.Stdout, "\n%s\n", res.BundlePath)
+	fmt.Fprintf(cliio.Stdout, "  sha256    %s\n", res.SHA256)
+	fmt.Fprintf(cliio.Stdout, "  size      %s over %d files\n", humanSize(res.Bytes), m.Tree.Files)
+	fmt.Fprintf(cliio.Stdout, "  platform  %s\n", m.Platform)
+	fmt.Fprintf(cliio.Stdout, "  manifest  %s\n", res.ManifestPath)
+	fmt.Fprintf(cliio.Stdout, "\ncomponents\n")
 	for _, c := range m.Components {
-		fmt.Fprintf(stdout, "  %-26s %-22s %s\n", c.Name, c.Version, c.Path)
+		fmt.Fprintf(cliio.Stdout, "  %-26s %-22s %s\n", c.Name, c.Version, c.Path)
 	}
 	// THE ADDONS GET THEIR OWN BLOCK because they are what makes this artifact per-platform, and
 	// "which addon build, which digest" is the question a bundle is supposed to answer without
 	// anybody unpacking it.
-	fmt.Fprintf(stdout, "\nnative addons (%s)\n", m.Platform)
+	fmt.Fprintf(cliio.Stdout, "\nnative addons (%s)\n", m.Platform)
 	for _, a := range m.NativeAddons {
 		build := a.Build
 		if build == "" {
 			build = "-"
 		}
-		fmt.Fprintf(stdout, "  %-38s %-20s %10s  %s\n", a.Package, build, humanSize(a.Bytes), a.SHA256[:16])
+		fmt.Fprintf(cliio.Stdout, "  %-38s %-20s %10s  %s\n", a.Package, build, humanSize(a.Bytes), a.SHA256[:16])
 		if len(a.ExcludedBuilds) > 0 {
-			fmt.Fprintf(stdout, "  %-38s dropped: %v\n", "", a.ExcludedBuilds)
+			fmt.Fprintf(cliio.Stdout, "  %-38s dropped: %v\n", "", a.ExcludedBuilds)
 		}
 	}
-	fmt.Fprintf(stdout, "\nrun it:\n  tar -xzf %s -C <dir> && cd <dir> && %s %s\n",
+	fmt.Fprintf(cliio.Stdout, "\nrun it:\n  tar -xzf %s -C <dir> && cd <dir> && %s %s\n",
 		filepath.Base(res.BundlePath), m.Entrypoint[0], m.Entrypoint[1])
 }
 
@@ -148,26 +150,26 @@ func cmdBundleSPA(args []string) error {
 		return err
 	}
 
-	root, err := findRepoRoot(*repo)
+	root, err := cliutil.FindRepoRoot(*repo)
 	if err != nil {
 		return err
 	}
 	res, err := applbundle.BuildSPA(applbundle.BuildOptions{
 		RepoRoot:  root,
 		OutDir:    *out,
-		Progress:  stdout,
+		Progress:  cliio.Stdout,
 		KeepStage: *keepStage,
 	})
 	if err != nil {
 		return err
 	}
 	c := res.Manifest.Components[0]
-	fmt.Fprintf(stdout, "\n%s\n", res.BundlePath)
-	fmt.Fprintf(stdout, "  sha256    %s\n", res.SHA256)
-	fmt.Fprintf(stdout, "  size      %s over %d files\n", humanSize(res.Bytes), c.Files)
-	fmt.Fprintf(stdout, "  version   %s\n", c.Version)
-	fmt.Fprintf(stdout, "  manifest  %s\n", res.ManifestPath)
-	fmt.Fprintf(stdout, "\n`kontra up` hydrates this beside the orchestrator bundle and serves it.\n")
+	fmt.Fprintf(cliio.Stdout, "\n%s\n", res.BundlePath)
+	fmt.Fprintf(cliio.Stdout, "  sha256    %s\n", res.SHA256)
+	fmt.Fprintf(cliio.Stdout, "  size      %s over %d files\n", humanSize(res.Bytes), c.Files)
+	fmt.Fprintf(cliio.Stdout, "  version   %s\n", c.Version)
+	fmt.Fprintf(cliio.Stdout, "  manifest  %s\n", res.ManifestPath)
+	fmt.Fprintf(cliio.Stdout, "\n`kontra up` hydrates this beside the orchestrator bundle and serves it.\n")
 	return nil
 }
 
@@ -197,22 +199,22 @@ func cmdBundleVerify(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(stdout, "%s\n", path)
-	fmt.Fprintf(stdout, "  sha256    %s\n", sum)
-	fmt.Fprintf(stdout, "  size      %s\n", humanSize(st.Size()))
-	fmt.Fprintf(stdout, "  schema    %s\n", m.Schema)
-	fmt.Fprintf(stdout, "  platform  %s\n", m.Platform)
+	fmt.Fprintf(cliio.Stdout, "%s\n", path)
+	fmt.Fprintf(cliio.Stdout, "  sha256    %s\n", sum)
+	fmt.Fprintf(cliio.Stdout, "  size      %s\n", humanSize(st.Size()))
+	fmt.Fprintf(cliio.Stdout, "  schema    %s\n", m.Schema)
+	fmt.Fprintf(cliio.Stdout, "  platform  %s\n", m.Platform)
 	for _, c := range m.Components {
 		digest := c.SHA256
 		if digest == "" {
 			digest = c.TreeSHA256 + " (tree)"
 		}
-		fmt.Fprintf(stdout, "\n  %s %s\n    %s\n    %s\n", c.Name, c.Version, c.Path, digest)
+		fmt.Fprintf(cliio.Stdout, "\n  %s %s\n    %s\n    %s\n", c.Name, c.Version, c.Path, digest)
 		if c.Upstream != nil {
-			fmt.Fprintf(stdout, "    from %s\n    pinned sha256 %s\n", c.Upstream.URL, c.Upstream.Digest)
+			fmt.Fprintf(cliio.Stdout, "    from %s\n    pinned sha256 %s\n", c.Upstream.URL, c.Upstream.Digest)
 		}
 	}
-	fmt.Fprintf(stdout, "\n  %d native addons, every recorded digest re-derived from the archive and matching\n", len(m.NativeAddons))
+	fmt.Fprintf(cliio.Stdout, "\n  %d native addons, every recorded digest re-derived from the archive and matching\n", len(m.NativeAddons))
 	return nil
 }
 

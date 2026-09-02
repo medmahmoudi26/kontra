@@ -28,6 +28,9 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 // monRun mirrors one row of GET /api/runs — every caller workflow execution Temporal holds.
@@ -156,7 +159,7 @@ func monitorList(api *apiClient, filter execFilter) error {
 		stages[d.RunID] = appendUniq(stages[d.RunID], fmt.Sprintf("%s@%s", d.Actor, d.Version))
 	}
 
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "RUN-ID\tTYPE\tSTATUS\tSTARTED\tCLOSED\tDISPATCHES\tSTAGES (actor@ver/node)\tOUTPUT (S3)")
 	for _, r := range runs {
 		st := strings.Join(stages[r.RunID], ", ")
@@ -170,15 +173,15 @@ func monitorList(api *apiClient, filter execFilter) error {
 		return err
 	}
 	if len(runs) == 0 {
-		fmt.Fprintln(stdout, "(no runs yet)")
+		fmt.Fprintln(cliio.Stdout, "(no runs yet)")
 	}
-	fmt.Fprintln(stdout, "\ntips:")
+	fmt.Fprintln(cliio.Stdout, "\ntips:")
 	// One view per run, named `run`, with shard/actor as columns — not a view per node. The old
 	// advice ("FROM bust") named a graph node that may or may not hold the actor you assume.
-	fmt.Fprintln(stdout, "  kontra runs --run-id <id> --query \"SELECT * FROM run LIMIT 20\"    # SQL over output")
-	fmt.Fprintln(stdout, "     one view per RUN; shard and actor are columns:  ... FROM run WHERE shard = '0007'")
-	fmt.Fprintln(stdout, "  kontra runs --run-id <id> --duckdb                                 # open in DuckDB UI")
-	fmt.Fprintln(stdout, "  kontra runs --state                                                # live states")
+	fmt.Fprintln(cliio.Stdout, "  kontra runs --run-id <id> --query \"SELECT * FROM run LIMIT 20\"    # SQL over output")
+	fmt.Fprintln(cliio.Stdout, "     one view per RUN; shard and actor are columns:  ... FROM run WHERE shard = '0007'")
+	fmt.Fprintln(cliio.Stdout, "  kontra runs --run-id <id> --duckdb                                 # open in DuckDB UI")
+	fmt.Fprintln(cliio.Stdout, "  kontra runs --state                                                # live states")
 	return nil
 }
 
@@ -196,11 +199,11 @@ func monitorDetail(api *apiClient, runID string) error {
 	if statusErr != nil {
 		overall = "(status unavailable — reading S3 only)"
 	}
-	fmt.Fprintf(stdout, "run %s  status=%s\n", runID, overall)
+	fmt.Fprintf(cliio.Stdout, "run %s  status=%s\n", runID, overall)
 
 	names := unionNodeKeys(status.Nodes, counts, hbs)
 	lost := 0
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "  NODE\tSTATE\tPROGRESS\tATTEMPT\tLAST-BEAT\tISOLATED\tOUTPUT BLOBS")
 	for _, n := range names {
 		st := status.Nodes[n]
@@ -219,16 +222,16 @@ func monitorDetail(api *apiClient, runID string) error {
 	// `completed, having discarded everything` were indistinguishable, and that is how a
 	// 15,814-target run was reported as finished in ~7 minutes.
 	if lost > 0 {
-		fmt.Fprintf(stdout, "\n!! %d unit(s) PERMANENTLY DROPPED — this run lost work; status %q is not the whole story\n", lost, overall)
+		fmt.Fprintf(cliio.Stdout, "\n!! %d unit(s) PERMANENTLY DROPPED — this run lost work; status %q is not the whole story\n", lost, overall)
 	}
 	// A run written before the layout change lives under the bare-run prefix instead; print
 	// whichever actually holds this run's blobs rather than a path that may not exist.
 	if lay, lerr := runLayout(runID); lerr == nil && lay.legacy && !lay.hive {
-		fmt.Fprintf(stdout, "\noutput (S3): units/%s/   (legacy layout)\n", runID)
+		fmt.Fprintf(cliio.Stdout, "\noutput (S3): units/%s/   (legacy layout)\n", runID)
 	} else {
-		fmt.Fprintf(stdout, "\noutput (S3): units/run=%s/\n", runID)
+		fmt.Fprintf(cliio.Stdout, "\noutput (S3): units/run=%s/\n", runID)
 	}
-	fmt.Fprintf(stdout, "  kontra runs --run-id %s --query \"SELECT ...\"   |   --duckdb   |   --state\n", runID)
+	fmt.Fprintf(cliio.Stdout, "  kontra runs --run-id %s --query \"SELECT ...\"   |   --duckdb   |   --state\n", runID)
 	return nil
 }
 
@@ -260,11 +263,11 @@ func monitorQuery(runID, query, export string) error {
 		if fi, err := os.Stat(export); err == nil {
 			sz = fi.Size()
 		}
-		fmt.Fprintf(stdout, "exported → %s (%s)\n", export, humanBytes(sz))
+		fmt.Fprintf(cliio.Stdout, "exported → %s (%s)\n", export, humanBytes(sz))
 		return nil
 	}
 
-	fmt.Fprintf(stdout, "# run %s   view: run   (columns: shard, actor%s)\n", runID, layoutNote(lay))
+	fmt.Fprintf(cliio.Stdout, "# run %s   view: run   (columns: shard, actor%s)\n", runID, layoutNote(lay))
 	return duckdbDisplay(prelude, query)
 }
 
@@ -286,17 +289,17 @@ func monitorOpenUI(runID string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "materializing run %s%s → %s ...\n", runID, layoutNote(lay), dbfile)
+	fmt.Fprintf(cliio.Stdout, "materializing run %s%s → %s ...\n", runID, layoutNote(lay), dbfile)
 	build := exec.Command(bin, dbfile, "-c", s3SetupSQL()+runViewSQL(s3Bucket(), runID, lay, "TABLE"))
-	build.Stdout, build.Stderr = stdout, os.Stderr
+	build.Stdout, build.Stderr = cliio.Stdout, os.Stderr
 	if err := build.Run(); err != nil {
 		return fmt.Errorf("materialize failed: %w", err)
 	}
 	abs, _ := filepath.Abs(dbfile)
-	fmt.Fprintf(stdout, "opening DuckDB UI → http://localhost:4213/   (db: %s)\n", abs)
-	fmt.Fprintf(stdout, "table: run   —   ctrl-c to stop the UI\n")
+	fmt.Fprintf(cliio.Stdout, "opening DuckDB UI → http://localhost:4213/   (db: %s)\n", abs)
+	fmt.Fprintf(cliio.Stdout, "table: run   —   ctrl-c to stop the UI\n")
 	ui := exec.Command(bin, "-ui", dbfile)
-	ui.Stdin, ui.Stdout, ui.Stderr = os.Stdin, stdout, os.Stderr
+	ui.Stdin, ui.Stdout, ui.Stderr = os.Stdin, cliio.Stdout, os.Stderr
 	return ui.Run()
 }
 
@@ -308,8 +311,8 @@ func monitorState(api *apiClient, runID string, interval time.Duration, filter e
 		interval = 250 * time.Millisecond
 	}
 	for {
-		fmt.Fprint(stdout, "\033[H\033[2J") // home + clear
-		fmt.Fprintf(stdout, "kontra runs --state   %s   (refresh %s · ctrl-c to exit)\n\n",
+		fmt.Fprint(cliio.Stdout, "\033[H\033[2J") // home + clear
+		fmt.Fprintf(cliio.Stdout, "kontra runs --state   %s   (refresh %s · ctrl-c to exit)\n\n",
 			time.Now().Format("15:04:05"), interval)
 		if runID != "" {
 			renderRunState(api, runID)
@@ -333,8 +336,8 @@ func renderRunState(api *apiClient, runID string) {
 	if statusErr != nil {
 		overall = "(status unavailable — S3 only)"
 	}
-	fmt.Fprintf(stdout, "run %s   status=%s\n\n", runID, overall)
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	fmt.Fprintf(cliio.Stdout, "run %s   status=%s\n\n", runID, overall)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "NODE\tSTATE\tPROGRESS\tATTEMPT\tLAST-BEAT\tISOLATED\tOUTPUT BLOBS")
 	for _, n := range unionNodeKeys(status.Nodes, counts, hbs) {
 		st := status.Nodes[n]
@@ -350,10 +353,10 @@ func renderRunState(api *apiClient, runID string) {
 func renderAllRuns(api *apiClient, filter execFilter) {
 	var runs []monRun
 	if err := api.getJSON("/api/runs"+filter.query(), &runs); err != nil {
-		fmt.Fprintf(stdout, "GET /api/runs failed: %v\n", err)
+		fmt.Fprintf(cliio.Stdout, "GET /api/runs failed: %v\n", err)
 		return
 	}
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "RUN-ID\tTYPE\tSTATUS\tSTARTED\tCLOSED\tDISPATCHES")
 	for _, r := range runs {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\n",
@@ -361,7 +364,7 @@ func renderAllRuns(api *apiClient, filter execFilter) {
 	}
 	w.Flush()
 	if len(runs) == 0 {
-		fmt.Fprintln(stdout, "(no runs yet)")
+		fmt.Fprintln(cliio.Stdout, "(no runs yet)")
 	}
 }
 
@@ -611,7 +614,7 @@ func duckdbDisplay(prelude, query string) error {
 		return err
 	}
 	cmd := exec.Command(bin, "-c", ".output /dev/null", "-c", prelude, "-c", ".output", "-c", query)
-	cmd.Stdout, cmd.Stderr = stdout, os.Stderr
+	cmd.Stdout, cmd.Stderr = cliio.Stdout, os.Stderr
 	return cmd.Run()
 }
 
@@ -702,15 +705,15 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-// s3HostPort / s3Bucket derive the object-store address DuckDB should hit — the browser/host-facing
+// s3HostPort / s3Bucket cliutil.Derive the object-store address DuckDB should hit — the browser/host-facing
 // endpoint, defaulting to the local control plane.
 func s3HostPort() string {
-	e := envOr("KONTRA_S3_PUBLIC_ENDPOINT", envOr("KONTRA_S3_ENDPOINT", "http://localhost:8333"))
+	e := cliutil.EnvOr("KONTRA_S3_PUBLIC_ENDPOINT", cliutil.EnvOr("KONTRA_S3_ENDPOINT", "http://localhost:8333"))
 	e = strings.TrimPrefix(strings.TrimPrefix(e, "http://"), "https://")
 	return strings.TrimRight(e, "/")
 }
 
-func s3Bucket() string { return envOr("KONTRA_S3_BUCKET", "kontra") }
+func s3Bucket() string { return cliutil.EnvOr("KONTRA_S3_BUCKET", "kontra") }
 
 func tsShort(ms int64) string {
 	if ms == 0 {

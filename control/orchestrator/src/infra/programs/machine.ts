@@ -104,10 +104,10 @@ export interface MachineActor {
    * by reading the host: `runtime/python/internals/metrics.py:serve` catches the bind failure, prints
    * one line to the actor's own journal and CARRIES ON — *"a metrics listener must never take the
    * actor down"*. So a second packed **Worker** would run perfectly, serve nothing, and be judged by
-   * the **Warden** as `cannot tell` for ever (`cli/sickworker.go`), with the round-3 failure this
+   * the **Warden** as `cannot tell` for ever (`cli/warden/sickworker.go`), with the round-3 failure this
    * repo already paid for invisible on exactly the Machines carrying the most work.
    *
-   * `cli/sickworker.go:metricsAddress` states the same fact from the other side for the `process`
+   * `cli/warden/sickworker.go:metricsAddress` states the same fact from the other side for the `process`
    * driver: *"every Worker on the Machine would serve :9110 on the same loopback and the first one to
    * bind wins … `KONTRA_METRICS_ADDR` in the Worker's own environment is the one thing that makes it
    * answerable"*. This is that variable, chosen by the thing that knows how many Workers a Machine
@@ -316,7 +316,7 @@ WantedBy=multi-user.target`,
  * health authority for as long as it existed.
  *
  * The duty is the **Warden's** now, for the reason 0037 gives — "the thing that decides a Worker is
- * sick should be the thing that can restart it" — and `cli/sickworker.go` is the first version of
+ * sick should be the thing that can restart it" — and `cli/warden/sickworker.go` is the first version of
  * this check that can produce the number in its name: it differences two readings of the Worker's
  * own `kontra_resource_loads_total` / `kontra_resource_load_failures_total` counters, so the window
  * is a fact about the Warden's clock rather than a hope about a log's retention. The counter names
@@ -407,7 +407,7 @@ fi
 #
 #    ADR 0036 collapses the Target axis to one and it is a container, so a Machine that cannot run
 #    one cannot hold a Worker. ADR 0037 gives that runtime its only caller: the Warden, which
-#    reconciles the Workers on this Machine through the podman driver (cli/driver_podman.go).
+#    reconciles the Workers on this Machine through the podman driver (cli/warden/driver_podman.go).
 #
 #    THE SUBUID ALLOCATION IS THE PART THAT IS EASY TO MISS AND IMPOSSIBLE TO WORK AROUND. Rootful
 #    podman is asked for --userns=auto, which allocates a DISTINCT range per pod out of the
@@ -443,7 +443,7 @@ done
 #
 #     ADR 0036 names egress as the exposure it does not close — "renting the platform to scan a
 #     third party from kontra's addresses" — and hands it to the Warden, which installs an
-#     nftables ruleset in this Machine's OWN network namespace (cli/warden_egress.go). Two things
+#     nftables ruleset in this Machine's OWN network namespace (cli/warden/warden_egress.go). Two things
 #     have to be true on the Machine for that to work, and neither is the Warden's to arrange.
 #     (No backticks in any of this. The whole script is a TypeScript template literal and one of
 #     those ends it mid-sentence — the same trap driver_podman_test.go's fixture records.)
@@ -473,7 +473,7 @@ grep -q '^br_netfilter$' /etc/modules-load.d/kontra-warden.conf 2>/dev/null \
   || echo br_netfilter > /etc/modules-load.d/kontra-warden.conf
 cat > /etc/sysctl.d/99-kontra-warden.conf <<'SYSCTL'
 # The Warden's egress policy is an nftables ruleset on the ip forward hook; without these two,
-# traffic between containers on one bridge never reaches it. See cli/warden_egress.go.
+# traffic between containers on one bridge never reaches it. See cli/warden/warden_egress.go.
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 SYSCTL

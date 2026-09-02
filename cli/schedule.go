@@ -24,12 +24,14 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"go.temporal.io/sdk/client"
 )
 
 // newScheduleClient is a func var so tests never dial anything.
 var newScheduleClient = func() (client.Client, error) {
-	return client.Dial(client.Options{HostPort: temporalAddress(), Namespace: temporalNamespace()})
+	return client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace()})
 }
 
 func cmdSchedule(args []string) error {
@@ -56,7 +58,7 @@ func scheduleList(args []string) error {
 	}
 	c, err := newScheduleClient()
 	if err != nil {
-		return fmt.Errorf("dial temporal at %s: %w", temporalAddress(), err)
+		return fmt.Errorf("dial temporal at %s: %w", config.TemporalAddress(), err)
 	}
 	defer c.Close()
 
@@ -67,7 +69,7 @@ func scheduleList(args []string) error {
 	if err != nil {
 		return err
 	}
-	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "SCHEDULE\tSTATE\tRECENT ACTIONS\tNEXT")
 	n := 0
 	for iter.HasNext() {
@@ -103,7 +105,7 @@ func scheduleDescribe(args []string) error {
 	}
 	c, err := newScheduleClient()
 	if err != nil {
-		return fmt.Errorf("dial temporal at %s: %w", temporalAddress(), err)
+		return fmt.Errorf("dial temporal at %s: %w", config.TemporalAddress(), err)
 	}
 	defer c.Close()
 
@@ -114,27 +116,27 @@ func scheduleDescribe(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "schedule %s\n", *id)
-	fmt.Fprintf(stdout, "  paused    %v\n", d.Schedule.State.Paused)
+	fmt.Fprintf(cliio.Stdout, "schedule %s\n", *id)
+	fmt.Fprintf(cliio.Stdout, "  paused    %v\n", d.Schedule.State.Paused)
 	if d.Schedule.State.Note != "" {
-		fmt.Fprintf(stdout, "  note      %s\n", d.Schedule.State.Note)
+		fmt.Fprintf(cliio.Stdout, "  note      %s\n", d.Schedule.State.Note)
 	}
 	if len(d.Schedule.Spec.Intervals) > 0 {
-		fmt.Fprintf(stdout, "  every     %s\n", d.Schedule.Spec.Intervals[0].Every)
+		fmt.Fprintf(cliio.Stdout, "  every     %s\n", d.Schedule.Spec.Intervals[0].Every)
 	}
 	for _, cr := range d.Schedule.Spec.CronExpressions {
-		fmt.Fprintf(stdout, "  cron      %s\n", cr)
+		fmt.Fprintf(cliio.Stdout, "  cron      %s\n", cr)
 	}
-	fmt.Fprintf(stdout, "  overlap   %s\n", d.Schedule.Policy.Overlap)
+	fmt.Fprintf(cliio.Stdout, "  overlap   %s\n", d.Schedule.Policy.Overlap)
 	if a, ok := d.Schedule.Action.(*client.ScheduleWorkflowAction); ok {
-		fmt.Fprintf(stdout, "  starts    %s on %s\n", a.Workflow, a.TaskQueue)
+		fmt.Fprintf(cliio.Stdout, "  starts    %s on %s\n", a.Workflow, a.TaskQueue)
 		for _, arg := range a.Args {
-			fmt.Fprintf(stdout, "  args      %v\n", arg)
+			fmt.Fprintf(cliio.Stdout, "  args      %v\n", arg)
 		}
 	}
-	fmt.Fprintf(stdout, "  running   %d\n", len(d.Info.RunningWorkflows))
+	fmt.Fprintf(cliio.Stdout, "  running   %d\n", len(d.Info.RunningWorkflows))
 	for _, r := range d.Info.RunningWorkflows {
-		fmt.Fprintf(stdout, "    %s\n", r.WorkflowID)
+		fmt.Fprintf(cliio.Stdout, "    %s\n", r.WorkflowID)
 	}
 	// Most recent first: what actually fired is the question this command gets opened for.
 	acts := d.Info.RecentActions
@@ -144,10 +146,10 @@ func scheduleDescribe(args []string) error {
 		if a.StartWorkflowResult != nil {
 			started = a.StartWorkflowResult.WorkflowID
 		}
-		fmt.Fprintf(stdout, "  fired     %s -> %s\n", a.ActualTime.Local().Format("15:04:05"), started)
+		fmt.Fprintf(cliio.Stdout, "  fired     %s -> %s\n", a.ActualTime.Local().Format("15:04:05"), started)
 	}
 	if len(acts) == 0 {
-		fmt.Fprintf(stdout, "  fired     (nothing yet)\n")
+		fmt.Fprintf(cliio.Stdout, "  fired     (nothing yet)\n")
 	}
 	return nil
 }
@@ -164,7 +166,7 @@ func scheduleAct(action string, args []string) error {
 	}
 	c, err := newScheduleClient()
 	if err != nil {
-		return fmt.Errorf("dial temporal at %s: %w", temporalAddress(), err)
+		return fmt.Errorf("dial temporal at %s: %w", config.TemporalAddress(), err)
 	}
 	defer c.Close()
 
@@ -179,25 +181,25 @@ func scheduleAct(action string, args []string) error {
 		if err := h.Delete(ctx); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "deleted schedule %s\n", *id)
-		fmt.Fprintf(stdout, "  runs it already started keep going — `kontra runs list` to see them\n")
+		fmt.Fprintf(cliio.Stdout, "deleted schedule %s\n", *id)
+		fmt.Fprintf(cliio.Stdout, "  runs it already started keep going — `kontra runs list` to see them\n")
 	case "pause":
 		if err := h.Pause(ctx, client.SchedulePauseOptions{Note: *note}); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "paused %s\n", *id)
+		fmt.Fprintf(cliio.Stdout, "paused %s\n", *id)
 	case "resume":
 		if err := h.Unpause(ctx, client.ScheduleUnpauseOptions{Note: *note}); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "resumed %s\n", *id)
+		fmt.Fprintf(cliio.Stdout, "resumed %s\n", *id)
 	case "trigger":
 		// Manual firing obeys the schedule's own overlap policy, so triggering a SKIP schedule
 		// while its run is alive is a no-op rather than a duplicate.
 		if err := h.Trigger(ctx, client.ScheduleTriggerOptions{}); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "triggered %s (subject to its overlap policy)\n", *id)
+		fmt.Fprintf(cliio.Stdout, "triggered %s (subject to its overlap policy)\n", *id)
 	}
 	return nil
 }

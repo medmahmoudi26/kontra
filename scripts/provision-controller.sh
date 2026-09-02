@@ -7,7 +7,7 @@
 #
 # WHAT IT DELIBERATELY DOES NOT DO — each of these cost a real debugging session:
 #
-#   * It never copies `.env`. It never copies `.kontra/config.yaml`. `cli/config.go:envFor` maps
+#   * It never copies `.env`. It never copies `.kontra/config.yaml`. `cli/internal/config/config.go:envFor` maps
 #     EVERY variable the stack needs out of config.yaml, so a fresh controller needs no .env at
 #     all — and the .env on the dev host carries `KONTRA_DUCKLAKE_PG_HOST=safedeps-postgres`, a
 #     container from an unrelated stack. That value crash-loops the materializer on EAI_AGAIN,
@@ -201,7 +201,7 @@ say "config.yaml"
 $SSH "PRIVATE_IP='$PRIVATE_IP' VPC_ID='$VPC_ID' REGION='$REGION' KEY_ID='$KEY_ID' \
       DO_TOKEN='$DIGITALOCEAN_TOKEN' CHECKOUT='$REMOTE_CHECKOUT' bash -s" <<'REMOTE'
 set -euo pipefail
-# WHERE `kontra init` ACTUALLY WROTE. `cli/config.go:kontraRoot` resolves KONTRA_HOME, else a
+# WHERE `kontra init` ACTUALLY WROTE. `cli/internal/config/config.go:kontraRoot` resolves KONTRA_HOME, else a
 # `.kontra/` that ALREADY EXISTS in the checkout you are standing in, else ~/.kontra. On a fresh
 # box the second never matches, so init writes ~/.kontra — and this script assumed the checkout
 # path purely because the dev host happens to have one. Probe in the CLI's own order rather than
@@ -211,7 +211,7 @@ cfg="$CHECKOUT/.kontra/config.yaml"
 [ -f "$cfg" ] || { echo "error: kontra init wrote neither $CHECKOUT/.kontra/ nor $HOME/.kontra/" >&2; exit 1; }
 echo "  config: $cfg"
 
-# base64url, matching cli/config.go:mintToken (256 bits, RawURLEncoding).
+# base64url, matching cli/internal/config/config.go:mintToken (256 bits, RawURLEncoding).
 mint() { openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'; }
 PANEL="$(mint)"; PASSPHRASE="$(mint)"; PGPASS="$(mint)"
 

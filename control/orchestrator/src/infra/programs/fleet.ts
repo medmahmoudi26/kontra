@@ -106,8 +106,8 @@ export interface FleetArgs {
  *
  * A PLACEMENT PUTS AT MOST ONE WORKER ON ANY ONE MACHINE, and that is structural rather than a
  * policy. Two Workers of one `<actor>@<version>` on one Machine would carry the same
- * `KONTRA_WORKER` label (`cli/driver.go`), write the same two systemd units, and poll the same
- * queue — so `list()` could not tell them apart and `cli/warden.go:reconcile` already refuses the
+ * `KONTRA_WORKER` label (`cli/warden/driver.go`), write the same two systemd units, and poll the same
+ * queue — so `list()` could not tell them apart and `cli/warden/warden.go:reconcile` already refuses the
  * duplicate out loud. More concurrency for ONE Artifact on ONE Machine is `maxSessions`, which is
  * density and is the axis ADR 0037 §6 says packing does not replace.
  */

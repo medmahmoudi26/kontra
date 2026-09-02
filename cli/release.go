@@ -43,6 +43,8 @@ import (
 	"strings"
 
 	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 func cmdRelease(args []string) error {
@@ -57,7 +59,7 @@ func cmdRelease(args []string) error {
 		return err
 	}
 
-	root, err := findRepoRoot(*repo)
+	root, err := cliutil.FindRepoRoot(*repo)
 	if err != nil {
 		return err
 	}
@@ -80,7 +82,7 @@ func cmdRelease(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(stdout, "releasing kontra %s for %s\n", tag, describePlatforms(targets))
+	fmt.Fprintf(cliio.Stdout, "releasing kontra %s for %s\n", tag, describePlatforms(targets))
 
 	// THE SPA ONCE, BEFORE THE LOOP. It is a vite output — the same bytes on every platform — and
 	// rebuilding it four times would produce four identical files and four chances for one of them
@@ -90,7 +92,7 @@ func cmdRelease(args []string) error {
 		res, err := applbundle.BuildSPA(applbundle.BuildOptions{
 			RepoRoot: root,
 			OutDir:   filepath.Join(outDir, ".artifacts"),
-			Progress: stdout,
+			Progress: cliio.Stdout,
 		})
 		if err != nil {
 			return fmt.Errorf("the browser bundle: %w\n"+
@@ -101,7 +103,7 @@ func cmdRelease(args []string) error {
 
 	var files []string
 	for _, target := range targets {
-		fmt.Fprintf(stdout, "\n=== %s ===\n", target)
+		fmt.Fprintf(cliio.Stdout, "\n=== %s ===\n", target)
 		path, err := releaseOnePlatform(root, outDir, tag, target, *cache, spa)
 		if err != nil {
 			return fmt.Errorf("%s: %w", target, err)
@@ -124,16 +126,16 @@ func cmdRelease(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(stdout, "\n%s\n", outDir)
+	fmt.Fprintf(cliio.Stdout, "\n%s\n", outDir)
 	for _, f := range files {
 		st, err := os.Stat(f)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "  %-44s %10s\n", filepath.Base(f), humanSize(st.Size()))
+		fmt.Fprintf(cliio.Stdout, "  %-44s %10s\n", filepath.Base(f), humanSize(st.Size()))
 	}
-	fmt.Fprintf(stdout, "  %-44s %10s\n", filepath.Base(sums), "digests")
-	fmt.Fprintf(stdout, "\nverify a downloaded one:\n  sha256sum -c --ignore-missing SHA256SUMS\n")
+	fmt.Fprintf(cliio.Stdout, "  %-44s %10s\n", filepath.Base(sums), "digests")
+	fmt.Fprintf(cliio.Stdout, "\nverify a downloaded one:\n  sha256sum -c --ignore-missing SHA256SUMS\n")
 	return nil
 }
 
@@ -152,7 +154,7 @@ func releaseOnePlatform(root, outDir, tag string, target applbundle.Platform, ca
 	if err := os.MkdirAll(stage, 0o755); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(stdout, "building the kontra binary for %s\n", target)
+	fmt.Fprintf(cliio.Stdout, "building the kontra binary for %s\n", target)
 	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-s -w", "-o", exe, ".")
 	build.Dir = filepath.Join(root, "cli")
 	build.Env = append(os.Environ(), "GOOS="+target.OS, "GOARCH="+target.Arch, "CGO_ENABLED=0")
@@ -168,7 +170,7 @@ func releaseOnePlatform(root, outDir, tag string, target applbundle.Platform, ca
 		OutDir:   artifacts,
 		CacheDir: cache,
 		Platform: target,
-		Progress: stdout,
+		Progress: cliio.Stdout,
 	})
 	if err != nil {
 		return "", err
@@ -194,10 +196,10 @@ func releaseOnePlatform(root, outDir, tag string, target applbundle.Platform, ca
 		if err := copyInto(spa, bundles); err != nil {
 			return "", err
 		}
-		// fileExists (dispatch.go), not a looser "anything is there": this is a sidecar the next
+		// cliutil.FileExists (dispatch.go), not a looser "anything is there": this is a sidecar the next
 		// line COPIES, and a directory wearing that name would pass a permissive check and fail
 		// two statements later with "is a directory".
-		if m := strings.TrimSuffix(spa, ".tar.gz") + ".manifest.json"; fileExists(m) {
+		if m := strings.TrimSuffix(spa, ".tar.gz") + ".manifest.json"; cliutil.FileExists(m) {
 			if err := copyInto(m, manifests); err != nil {
 				return "", err
 			}
@@ -218,7 +220,7 @@ func releaseOnePlatform(root, outDir, tag string, target applbundle.Platform, ca
 		_ = os.Remove(path)
 		return "", err
 	}
-	fmt.Fprintf(stdout, "%s\n  sha256 %s\n", name, digest)
+	fmt.Fprintf(cliio.Stdout, "%s\n  sha256 %s\n", name, digest)
 	return path, nil
 }
 

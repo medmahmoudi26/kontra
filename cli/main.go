@@ -11,9 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
+	"github.com/medmahmoudi26/kontra/cli/warden"
 )
 
-// Hand-drawn on purpose. Printed to stderr so piped stdout (JSONL output) stays clean.
+// Hand-drawn on purpose. Printed to cliio.Stderr so piped cliio.Stdout (JSONL output) stays clean.
 const banner = `
  _  _____  _  _ _____ ___    _
 | |/ / _ \| \| |_   _| _ \  /_\
@@ -23,11 +26,11 @@ const banner = `
 
 func usage() { fmt.Fprint(os.Stderr, usageText) }
 
-// printBanner writes the banner to stderr, and ONLY when stderr is a terminal.
+// printBanner writes the banner to cliio.Stderr, and ONLY when cliio.Stderr is a terminal.
 //
-// Two gates, for two different readers. stderr is the stream so that piped stdout (JSONL output)
+// Two gates, for two different readers. cliio.Stderr is the stream so that piped cliio.Stdout (JSONL output)
 // stays clean; the terminal check is for the process nobody is watching as a terminal at all.
-// `kontra mcp` holds stdio open for a whole agent session and the agent keeps stderr as that
+// `kontra mcp` holds stdio open for a whole agent session and the agent keeps cliio.Stderr as that
 // server's log, where four lines of ASCII art per session are noise it has to read past — and a
 // redirect, a cron line or a CI step buy the same nothing. The banner is decoration for a human,
 // so it is printed when there is one.
@@ -100,7 +103,7 @@ const usageText = `kontra — local control surface
                #   Fleet exhausts for every other build on that address.
                # with no --push: <registry>/bundles/<name>:<version>, which is the address
                #   a Fleet placement resolves. --registry names only that first component.
-               # --json: one document on stdout (the digest is a field, not a line to grep)
+               # --json: one document on cliio.Stdout (the digest is a field, not a line to grep)
   kontra bundle orchestrator [--out <dir>] [--platform goos/goarch|list|all]
                # THE APPLIANCE BUNDLE (ADR 0031 §2): a pinned Node runtime, the compiled
                # orchestrator and its native addons, as one content-addressed tar.gz with
@@ -112,7 +115,7 @@ const usageText = `kontra — local control surface
   kontra bundle spa [--out <dir>]                  # the built SPA as its own content-addressed
                # tar.gz. Separate from the orchestrator bundle because it is platform-neutral
                # and changes when a page does; kontra up hydrates both and prints both digests.
-  kontra bundle verify <bundle.tar.gz>             # re-derive every digest the manifest claims
+  kontra bundle verify <bundle.tar.gz>             # re-cliutil.Derive every digest the manifest claims
   kontra release [--version <v>] [--platform goos/goarch|list|all] [--out <dir>]
                # ONE FILE PER PLATFORM: the kontra binary, the orchestrator bundle for that
                # platform and the browser bundle, packed where an installed binary already
@@ -199,7 +202,7 @@ func main() {
 	// `.kontra/config.yaml` fills gaps in the environment, and never overrides it — so this is
 	// safe to do before dispatch, for every command, including the ones that need nothing.
 	// Best-effort: a malformed config must fail the command that needs a value, not `kontra help`.
-	loadAndApplyConfig()
+	config.LoadAndApplyConfig()
 
 	err := dispatch(args)
 	// A WORD THIS CLI DOES NOT HAVE exits 2 and prints the whole usage; a command that ran and
@@ -226,7 +229,7 @@ func dispatch(args []string) error {
 	var err error
 	switch args[0] {
 	case "init":
-		err = cmdInit(args[1:])
+		err = config.CmdInit(args[1:])
 	case "doctor":
 		err = cmdDoctor(args[1:])
 	case "up":
@@ -260,7 +263,7 @@ func dispatch(args []string) error {
 		// The Machine's own process (ADR 0037), and the Controller's half of its enrolment. Both
 		// under one word because they are two ends of ONE protocol, and a reader who finds one has
 		// to be able to find the other.
-		err = cmdWarden(args[1:])
+		err = warden.Command(args[1:])
 	case "panels":
 		err = cmdPanels(args[1:])
 	case "dataset", "ds":

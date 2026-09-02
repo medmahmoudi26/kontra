@@ -14,6 +14,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
+	"github.com/medmahmoudi26/kontra/cli/internal/queues"
 	enumspb "go.temporal.io/api/enums/v1"
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -36,11 +39,11 @@ type queueDescriber interface {
 // newDescriber dials Temporal ($KONTRA_ADDRESS / $KONTRA_NAMESPACE); a func var so
 // tests (and pollerCount fakes) can swap it out.
 var newDescriber = func() (queueDescriber, error) {
-	c, err := client.Dial(client.Options{HostPort: temporalAddress(), Namespace: temporalNamespace()})
+	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace()})
 	if err != nil {
 		return nil, err
 	}
-	return &temporalDescriber{c: c, ns: temporalNamespace()}, nil
+	return &temporalDescriber{c: c, ns: config.TemporalNamespace()}, nil
 }
 
 type temporalDescriber struct {
@@ -79,14 +82,14 @@ func cmdWorkers(args []string) error {
 	d, err := newDescriber()
 	if err != nil {
 		// A dial failure is NOT "no workers" — fail loudly instead of printing (none).
-		return fmt.Errorf("cannot reach temporal at %s: %w", temporalAddress(), err)
+		return fmt.Errorf("cannot reach temporal at %s: %w", config.TemporalAddress(), err)
 	}
 	defer d.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	rows := collectWorkers(ctx, actors, d)
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "ACTOR\tVERSION\tQUEUE\tWORKERS\tLAST-POLL")
 	for _, r := range rows {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Actor, r.Version, r.Queue, r.workersText(), r.lastText())
@@ -116,7 +119,7 @@ func collectWorkers(ctx context.Context, actors []actorRecord, d queueDescriber)
 	sort.Slice(actors, func(i, j int) bool { return actors[i].Key < actors[j].Key })
 	rows := make([]workerRow, 0, len(actors)+1)
 	for _, a := range actors {
-		rows = append(rows, describeQueue(ctx, d, a.Name, a.Version, sharedQueue(a.Name, a.Version)))
+		rows = append(rows, describeQueue(ctx, d, a.Name, a.Version, queues.Shared(a.Name, a.Version)))
 	}
 	rows = append(rows, describeQueue(ctx, d, "(orchestrator)", "-", orchestratorQueue))
 	return rows

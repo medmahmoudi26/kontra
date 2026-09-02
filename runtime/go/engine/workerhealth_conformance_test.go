@@ -23,7 +23,7 @@ import (
 // exposition format wearing an incident's clothes.
 //
 // The difference here is that the corpus is shared. A rename in this file breaks
-// `cli/sickworker_conformance_test.go` and `tests/test_worker_health_conformance.py` in the same
+// `cli/warden/sickworker_conformance_test.go` and `tests/test_worker_health_conformance.py` in the same
 // run, which is the only arrangement that catches the failure that has no other symptom: this host
 // renders `_failure_total`, the Python host renders `_failures_total`, both files read correctly,
 // and the Warden divides by an absent series on every Go Worker in the Fleet.

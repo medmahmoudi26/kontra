@@ -21,7 +21,7 @@ Measured before the split: **10 orchestrator modules, 72 import sites, 40 files*
 
 Four facts shaped the answer.
 
-1. **Some of it must not be copied.** `vocabulary.test.ts` reads `cli/warden_workflow.go`'s **bytes** to pin the Warden's five kind spellings — a rename in Go is a red test in TypeScript. `sharedQueue` is one of four arms of `shared/conformance/queues.json`, executed by Go, Python, the CLI and the orchestrator; the console's `actorSession` is a fifth. Duplicating any of it is what those tests exist to prevent.
+1. **Some of it must not be copied.** `vocabulary.test.ts` reads `cli/warden/warden_workflow.go`'s **bytes** to pin the Warden's five kind spellings — a rename in Go is a red test in TypeScript. `sharedQueue` is one of four arms of `shared/conformance/queues.json`, executed by Go, Python, the CLI and the orchestrator; the console's `actorSession` is a fifth. Duplicating any of it is what those tests exist to prevent.
 
 2. **The duplication had already started, and nothing failed.** `control/orchestrator/contract/types.ts` and a copy of it were **byte-identical** — one edit from an API whose two halves disagree with nothing going red. `SECRET_NAME_RE` was declared twice, kept honest by a test that read the server's source and compared two regex literals as strings. `DatasetState` was declared in the contract *and* in the console, under a test asserting "widening it is a compile error on both sides" that checked a file which never declared it — passing vacuously for its whole life.
 
@@ -49,7 +49,7 @@ Four facts shaped the answer.
 
 **Copy the shared modules into the console.** Rejected on fact (1) and demonstrated by fact (2): the two duplications already present were both invisible, and one of the tests guarding against a third was passing without checking anything.
 
-**A third repository for the kernel.** Rejected: `vocabulary`'s test reads `cli/warden_workflow.go`, so the kernel would need kontra checked out beside it — the same problem, moved.
+**A third repository for the kernel.** Rejected: `vocabulary`'s test reads `cli/warden/warden_workflow.go`, so the kernel would need kontra checked out beside it — the same problem, moved.
 
 **Publish TypeScript source and let consumers transpile.** Rejected on measurement, not taste. Temporal's Workflow bundler registers its loader as `{ test: /\.ts$/, exclude: /node_modules/ }`, so a package with a `.ts` entry point resolves and is then never transpiled. It typechecks, passes vitest, and fails five suites the moment anything builds a Workflow bundle — which is to say, it fails in the orchestrator at runtime.
 

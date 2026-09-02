@@ -25,7 +25,7 @@ export interface TerminalHealth {
   /**
    * Is anything still RUNNING in the pane? The fifth signal, and it is not the second one again.
    *
-   * A session can be perfectly present while the Worker inside it has exited — `cli/tmux.go`'s hold
+   * A session can be perfectly present while the Worker inside it has exited — `cli/internal/tmux/tmux.go`'s hold
    * keeps the window open on purpose so the exit status stays readable, so "finished" looks exactly
    * like "running" from every other angle: the session is there, the screen is full of output, the
    * tile paints. That is the case this signal exists for, and it is the one that bit us.
@@ -43,7 +43,7 @@ export interface TerminalHealth {
    *
    * TWO SOURCES, ONE CHIP. Where the **Machine's Warden** reports (ADR 0037), this is its verdict:
    * the ratio of failed to attempted `@actor.load`s over a window the Warden owns, from counters
-   * both actor hosts increment (`cli/sickworker.go`). Otherwise it is the VictoriaMetrics reading
+   * both actor hosts increment (`cli/warden/sickworker.go`). Otherwise it is the VictoriaMetrics reading
    * `metrics.ts` computes — which that file records at length as unable to reach `ok` today, since
    * `kontra_batches_total` is incremented nowhere.
    *
@@ -103,7 +103,7 @@ export interface Terminal {
    * The PANE's own geometry, from `list-panes`.
    *
    * Not the browser tile's measurement — those are two different numbers, and since sessions are
-   * pinned with `window-size manual` (at 120x40; see `paneCols`/`paneRows` in `cli/tmux.go`, which
+   * pinned with `window-size manual` (at 120x40; see `paneCols`/`paneRows` in `cli/internal/tmux/tmux.go`, which
    * is the authority for the value) they no longer track each other at all. A tile that showed one
    * labelled as the other would be claiming the operator's pane is whatever shape the browser
    * happens to be.
@@ -139,7 +139,7 @@ export interface Terminal {
 export interface MachineTelemetry {
   /** Fraction of the last interval not idle, across all cores. 0..1. iowait counts as idle. */
   cpu?: number;
-  /** used/total, from MemAvailable rather than MemFree — see `cli/panereport.go` for why. 0..1. */
+  /** used/total, from MemAvailable rather than MemFree — see `cli/warden/panereport.go` for why. 0..1. */
   memory?: number;
   /** The kernel's own one-minute run-queue average. Beside `cpu`, never instead of it: a Machine at
    *  100% CPU with a load of 1 is working, and the same CPU at a load of 40 is thrashing. */

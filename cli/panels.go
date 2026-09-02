@@ -34,6 +34,9 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 const (
@@ -48,7 +51,7 @@ func panelURL() string {
 	if u := os.Getenv("KONTRA_PANEL_URL"); u != "" {
 		return u
 	}
-	return "http://localhost:" + envOr("KONTRA_PANEL_PORT", defaultPanelPort)
+	return "http://localhost:" + cliutil.EnvOr("KONTRA_PANEL_PORT", defaultPanelPort)
 }
 
 // panelToken resolves the bearer the panel routes accept — KONTRA_PANEL_TOKEN and only that.
@@ -172,7 +175,7 @@ func panelsList(args []string) error {
 		return err
 	}
 	sortTerminals(ts)
-	return renderTerminals(stdout, *base, ts)
+	return renderTerminals(cliio.Stdout, *base, ts)
 }
 
 func fetchTerminals(base, token string) ([]terminal, error) {

@@ -20,7 +20,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -83,11 +82,4 @@ func cmdActor(args []string) error {
 				"See examples/python/workflows/ for two that dispatch a Method over a Batch.", args[0])
 	}
 	return errors.New("usage: kontra actor register <dir> [--init] [--json]")
-}
-
-// fileExists reports whether path is an existing regular file. False for a directory, which is
-// the distinction `kontra workflow` leans on when a folder and a file are both plausible.
-func fileExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && !fi.IsDir()
 }

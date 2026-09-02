@@ -41,7 +41,9 @@ Three specifics made it worse than untidy.
 
 - **`backend/` becomes `control/orchestrator/`,** which also ends the disagreement with the bundle: both are `orchestrator` now.
 
-- **The Warden becomes `cli/warden/`, a package rather than a file-naming convention** — so a control-plane command cannot reach into a container driver by accident.
+- **The Warden becomes `cli/warden/`, a package rather than a file-naming convention** — so a control-plane command cannot reach into a container driver by accident. 26 files, ~16,000 lines, and `package main` reaches it at exactly two call sites: `main.go` registers the command, `serve.go` runs a Worker in the foreground.
+
+- **Eight `cli/internal/` packages hold what both halves genuinely share.** They were not planned; they are what the extraction FOUND, one compile error at a time. `cliio` (the three streams, as variables, so a test captures both halves' output rather than one of two copies), `cliutil`, `config`, `corpus`, `ociref`, `queues`, `tmux`, `trustpolicy`. Each earned its place by being reached from two packages that must not import each other.
 
 ## The constraint that shaped this, and it is not a preference
 
@@ -79,3 +81,9 @@ That is why there is **no `machine/` directory**, however symmetrical it would l
 - **`Dockerfile.orchestrator` was deleted rather than moved.** Nothing had built it since `orchestrator-api` left `docker-compose.yml`, and it could not have: it copies a `web/` that stopped existing when the console became a sibling package.
 
 - **kontra-console follows twice.** Its `link:` target and its e2e harness's imports both name paths in this repository. That is the cost of an unpublished package and a harness that constructs a real `PanelServer`; publishing `@kontra/core` removes the first.
+
+- **The extraction reclassified three files, and the compiler is what said so.** `lease.go` looked machine-side and is not: it builds a fleet flag set and dials the infra API, so it stayed in `package main`. `panereport.go` and `sickworker.go` looked shared and are not: both reach `workerHandle`, `podmanDriver` and `workerSpec`, so they went INTO the Warden and export the little the control plane reads. A layering guess is cheap to make and cheap to check — `go build` names every symbol that crosses.
+
+- **`cli`'s own suite went from 615s to 54s.** The Warden's tests moved with it, and two packages test in parallel where one did not. That also removes the reason `go test` needed `-timeout 30m` on this package, though the flag stays: it costs nothing and the 10-minute default is not a budget anyone chose.
+
+- **A `boundary_test.go` in the Warden lists the internal packages it may import, with a reason each.** The compiler already forbids importing `package main`; what it does not forbid is a NEW `cli/internal/…` that only the control plane needs. The list fails on an import that is not on it, and fails again on an entry nothing imports — so it cannot rot into a description of a dependency that is gone.

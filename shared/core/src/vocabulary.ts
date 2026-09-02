@@ -620,7 +620,7 @@ function nameRaw(turn: RawTurn, vocab?: Vocabulary): Naming {
  * How a **Warden** spells a decision about its **Machine**, and the second cross-language literal in
  * this module.
  *
- * `cli/warden_workflow.go` writes `kontra.machine · <kind> · <subject> · <detail>` as a Temporal
+ * `cli/warden/warden_workflow.go` writes `kontra.machine · <kind> · <subject> · <detail>` as a Temporal
  * user-metadata Summary on the event that arms the next watch. There is no import to make: that side
  * is Go, this side is bundled into the browser, and the house rule for a shared literal is to write
  * it on each side and pin it with a test — which is what `transcript.ts` already does for the ask's

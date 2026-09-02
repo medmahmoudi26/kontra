@@ -2,7 +2,7 @@
 // content digests the second is built on, and the resolution from what an operator typed to the
 // file all of them are derived from.
 //
-// The CROSS-LANGUAGE half of this file is not here. `sharedQueue` is driven against
+// The CROSS-LANGUAGE half of this file is not here. `queues.Shared` is driven against
 // shared/conformance/queues.json by queues_conformance_test.go, and the folder digest is pinned against
 // control/orchestrator/src/sources.test.ts by the shared fixture below. What is here is the local half: the
 // collision the `wf-` prefix exists to prevent, the refusals, and the one-file-one-worker rule.
@@ -13,6 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/queues"
+	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 )
 
 // THE QUEUE IS DERIVED, AND IT MUST NOT COLLIDE WITH AN ACTOR'S.
@@ -37,7 +40,7 @@ func TestWorkflowQueueIsDerivedAndCannotCollideWithAnActor(t *testing.T) {
 
 	// The collision this prefix exists for, spelled out: same name, two kinds. An actor's shared
 	// queue can never wear the `wf-` prefix, so no digest value can make the two collide.
-	if workflowQueue("nscheck", digest12) == sharedQueue("nscheck", "0.1.0") {
+	if workflowQueue("nscheck", digest12) == queues.Shared("nscheck", "0.1.0") {
 		t.Fatal("a workflow and an actor of the same name resolved to ONE queue — " +
 			"the actor's handler polls that queue for workflow tasks and knows only its own type, " +
 			"so every run of this workflow would fail its task and retry forever")
@@ -220,13 +223,13 @@ func TestWorkflowSessionIsTheContract(t *testing.T) {
 	// A workflow and an actor CAN now share a session name, and that is fine: they are told apart
 	// by `@kontra`, which carries the kind. The old `wf-` prefix existed only because a name was
 	// the only signal there was.
-	if kontraWorkflowTag("nscheck") == kontraSessionTag("nscheck", "0.1.0") {
+	if tmux.KontraWorkflowTag("nscheck") == tmux.KontraSessionTag("nscheck", "0.1.0") {
 		t.Error("a workflow tag is indistinguishable from an actor tag")
 	}
 }
 
 // TestWorkflowFileOfResolvesAFolder covers what an operator may hand `serve` and `resume` now that
-// a workflow is a folder. A directory reached `fileExists`, which is false for one, so serving a
+// a workflow is a folder. A directory reached `cliutil.FileExists`, which is false for one, so serving a
 // registered folder failed with "no such file" about a path that is right there.
 func TestWorkflowFileOfResolvesAFolder(t *testing.T) {
 	root := t.TempDir()

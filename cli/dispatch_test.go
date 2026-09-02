@@ -1,4 +1,4 @@
-// dispatch_test.go — httptest fakes of the orchestrator API; stdout is swapped so no test
+// dispatch_test.go — httptest fakes of the orchestrator API; cliio.Stdout is swapped so no test
 // dials Temporal or Docker.
 package main
 
@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // swap replaces a package var for the test and returns the restore func. Used across most of
@@ -30,9 +32,9 @@ func jsonHandler(body string) http.HandlerFunc {
 func withStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer
-	old := stdout
-	stdout = &buf
-	defer func() { stdout = old }()
+	old := cliio.Stdout
+	cliio.Stdout = &buf
+	defer func() { cliio.Stdout = old }()
 	fn()
 	return buf.String()
 }

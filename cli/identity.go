@@ -7,7 +7,7 @@
 // it polling, and why is nothing there") meant reading two files and holding the difference in
 // your head. The difference is the interesting part and it is now visible in one place:
 //
-//	sharedQueue("nscheck", "0.1.0")  ->  nscheck-0.1.0        NAMED   — a free string on a manifest
+//	queues.Shared("nscheck", "0.1.0")  ->  nscheck-0.1.0        NAMED   — a free string on a manifest
 //	queueForWorkflow("nscheck/…")    ->  wf-nscheck-0f89cbf6  DERIVED — a hash of the bytes
 //
 // AND THE `wf-` PREFIX IS WHY THEY HAVE TO BE READ TOGETHER. This repo ships an Actor and a
@@ -32,23 +32,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 )
 
 // --- the actor's queue -------------------------------------------------------------------------
-
-// sharedQueue is the (name, version) → task-queue contract: "{name}-{version}", or
-// "{name}-shared" when version is empty.
-//
-// UNTIL 2026-08-28 THIS DERIVATION HAD NO CONGRUENCE TEST AT ALL. It appeared in the suite once,
-// in workflow_test.go, as the CONTRAST half of an assertion about something else — so the eight
-// places that must agree on this string were seven places and a comment. queues_conformance_test.go
-// is the CLI's arm of shared/conformance/queues.json now.
-func sharedQueue(name, version string) string {
-	if version != "" {
-		return name + "-" + version
-	}
-	return name + "-shared"
-}
 
 // --- the workflow's queue ----------------------------------------------------------------------
 
@@ -112,7 +101,7 @@ func queueForWorkflow(file string) (string, error) {
 			return q, nil
 		}
 		return "", fmt.Errorf(
-			"%s/%s needs both \"name\" and \"version\" to derive a queue — run `kontra workflow register %s --init`",
+			"%s/%s needs both \"name\" and \"version\" to cliutil.Derive a queue — run `kontra workflow register %s --init`",
 			dir, manifestFile("workflow"), dir)
 	}
 	// FLAT FILE: no manifest, so its stem names it and it carries the stated flat-file version.
@@ -122,7 +111,7 @@ func queueForWorkflow(file string) (string, error) {
 	if q := workflowQueue(name, flatFileVersion); q != "" {
 		return q, nil
 	}
-	return "", fmt.Errorf("%s could not be read to derive a queue from", file)
+	return "", fmt.Errorf("%s could not be read to cliutil.Derive a queue from", file)
 }
 
 // --- what a workflow IS ------------------------------------------------------------------------
@@ -140,7 +129,7 @@ const flatFileVersion = "0.0.0"
 // workflowFileOf resolves what an operator typed to the FILE python will be handed.
 //
 // A FOLDER IS A WORKFLOW NOW, so `serve nscheck` and `serve nscheck/workflow.py` name the same
-// thing. Without this a folder reached `fileExists`, which is false for a directory, and the
+// thing. Without this a folder reached `cliutil.FileExists`, which is false for a directory, and the
 // command answered "no such file" about a path that is right there — naming the folder rather than
 // the file it was missing.
 //
@@ -157,16 +146,16 @@ func workflowFileOf(target string) (string, error) {
 	}
 	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
 		marker := filepath.Join(abs, workflowMarker)
-		if !fileExists(marker) {
+		if !cliutil.FileExists(marker) {
 			return "", fmt.Errorf("%s has no %s — that is what makes a folder a workflow", abs, workflowMarker)
 		}
 		return marker, nil
 	}
-	if !fileExists(abs) {
+	if !cliutil.FileExists(abs) {
 		// Only when the flat file is NOT there: a real `nscheck.py` sitting beside a `nscheck/`
 		// folder is two workflows, and the one that was named is the one that exists.
 		if folder := strings.TrimSuffix(abs, ".py"); folder != abs {
-			if fi, err := os.Stat(folder); err == nil && fi.IsDir() && fileExists(filepath.Join(folder, workflowMarker)) {
+			if fi, err := os.Stat(folder); err == nil && fi.IsDir() && cliutil.FileExists(filepath.Join(folder, workflowMarker)) {
 				return filepath.Join(folder, workflowMarker), nil
 			}
 		}
@@ -202,7 +191,7 @@ func readWorkflowManifest(file string) workflowManifest {
 // from the file it is served from — `enumerate_scope.py` runs in `enumerate_scope`.
 //
 // IT IS HERE, BESIDE THE QUEUE, AND NOT IN tmux.go, because it is derived from the same resolved
-// file the queue is and shares `workflowMarker` with it. `tmuxSession` is an ACTOR's session and
+// file the queue is and shares `workflowMarker` with it. `tmux.Session` is an ACTOR's session and
 // lives with the tmux mechanics; the two are held together by shared/conformance/queues.json §tmux_session
 // rather than by being adjacent.
 //
@@ -236,7 +225,7 @@ func workflowSession(file string) string {
 		}
 	}
 	// tmux rewrites `.` and `:` to `_` at creation, and a name can carry either — `my.workflow.py`.
-	base = tmuxSafeName(base)
+	base = tmux.SafeName(base)
 	if base == "" || base == "_" {
 		return "workflow"
 	}

@@ -258,7 +258,7 @@
   "two_domains": "There are TWO derivations here, not one, and the difference in their fallbacks is INTENDED. `worker` is an ACTOR's Worker: it is given a name and a version and nothing else, and its fallback exists only so the string stays attachable. `machine` is a fleet MACHINE's session: it is given the fleet's tag as well, because a `fleet up` with no Actor placed on it still has Terminals, and its fallback is the word `fleet` because that is what such a Machine IS. Making them agree would name a placement-less Machine's session `actor`, which is a lie about what is running there. Recorded here rather than left as two literals nobody can tell from a typo.",
   "machine_is_whitelisted": "`machine` additionally refuses a name outside ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ and answers `fleet`, because that string is interpolated into a command run as root on a remote Machine and there is no safe way to repair an unsafe one. `worker` has no such check: its caller validates the Actor name against the same bound before it ever gets here.",
   "derived_by": [
-   "cli/tmux.go:tmuxSession (worker)",
+   "cli/internal/tmux/tmux.go:tmuxSession (worker)",
    "cli/fleet.go:fleetSessionName (machine)",
    "control/orchestrator/src/panels/tmux.ts:actorSession (worker — the ONE TypeScript copy, imported by control/orchestrator/src/actorControl.ts and by the browser through @core)",
    "control/orchestrator/src/panels/discovery.ts:sessionNameFor (machine)"

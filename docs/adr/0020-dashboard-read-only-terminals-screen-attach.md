@@ -219,7 +219,7 @@ a design that looks obviously correct on paper; the probes are described in
 
 - **The signals are FIVE, and the fifth one exists because a present session is not a running
   Worker.** The decision above says four, and four was one short in the way that matters: a session
-  can be perfectly present while the process inside it has exited. `cli/tmux.go`'s hold keeps the
+  can be perfectly present while the process inside it has exited. `cli/internal/tmux/tmux.go`'s hold keeps the
   window alive after the command returns — deliberately, so the exit status stays readable — so a
   finished Worker leaves a present session, a full screen, a tile that paints, and four green-ish
   chips. On this host, every kontra session was in exactly that state while the wall reported

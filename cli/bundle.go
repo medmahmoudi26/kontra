@@ -42,6 +42,8 @@ import (
 	"oras.land/oras-go/v2/registry/remote"
 
 	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
 
 type bundle struct {
@@ -60,7 +62,7 @@ func buildBundle(actorDir string, progress io.Writer) (*bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := findRepoRoot("")
+	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
 		return nil, fmt.Errorf("building a Bundle needs the checkout (handler/ + sdk/ + runtime/): %w", err)
 	}
@@ -362,7 +364,7 @@ func bundleBlobURL(reg, name, sha string) string {
 	return conventionalBundleDest(reg, name, "").blobURL(sha)
 }
 
-// bundleConfig is the artifact's config blob: what a resolver needs and cannot derive from a
+// bundleConfig is the artifact's config blob: what a resolver needs and cannot cliutil.Derive from a
 // listing, now inside the digest instead of beside it.
 //
 // The engine is the reason it exists. A tag already answers "which Bundle is `0.1.0` today", but
@@ -418,9 +420,9 @@ var bundleCreated = time.Unix(0, 0).UTC().Format(time.RFC3339)
 // the only expressible answer: the whole point is that an Artifact lands in a registry the customer
 // owns, under whatever name their CI already uses.
 type bundleDest struct {
-	ociRef
+	ociref.Ref
 	// PlainHTTP is a property of the ADDRESS and not of the reference, which is why it is not on
-	// ociRef: an OCI reference may not carry a scheme, and `registryHost` is the one place that
+	// ociref.Ref: an OCI reference may not carry a scheme, and `registryHost` is the one place that
 	// reads the operator's scheme and strips it.
 	PlainHTTP bool
 }
@@ -453,56 +455,14 @@ func (d bundleDest) blobURL(sha string) string {
 func conventionalBundleDest(reg, name, version string) bundleDest {
 	host, plain := registryHost(reg)
 	return bundleDest{
-		ociRef:    ociRef{Domain: host, Path: bundleRepo(name), Tag: version, TagSet: true},
+		Ref:       ociref.Ref{Domain: host, Path: bundleRepo(name), Tag: version, TagSet: true},
 		PlainHTTP: plain,
 	}
 }
 
-// pushTransport takes the scheme off a `--push` reference and decides whether the registry is spoken
-// to over plain HTTP, returning the decision as a function of the host so the caller can apply it
-// once the host is known.
-//
-// ═══ A --push DESTINATION IS HTTPS BY DEFAULT, AND registryHost'S IS NOT ═══
-//
-// The asymmetry is deliberate and it is the day `registryHost`'s comment was written for: "an
-// explicit `https://` is honoured, because the day a Bundle is pushed to somebody else's registry is
-// slice 07's." Two different addresses, two different defaults:
-//
-//	the CONVENTIONAL address    kontra's own registry — the Controller's :5000, the appliance's bound
-//	                            port. Plain HTTP by construction, anonymous on the VPC, and it is what
-//	                            every address in this system has always been. registryHost keeps that.
-//	a --push DESTINATION        somebody else's, reached over the internet. Defaulting it to plain HTTP
-//	                            would silently downgrade every push to ghcr, GitLab or Harbor — and a
-//	                            downgrade on the ONE request that carries an Artifact out of the box is
-//	                            not a convenience, it is a credential and an artifact in the clear.
-//
-// LOOPBACK IS THE EXCEPTION AND IS NAMED RATHER THAN GUESSED. `localhost:5000` is the single-box
-// convenience ADR 0036 explicitly keeps, and there is no TLS on it; a private-range heuristic would
-// be a third rule to be wrong about, so an operator with a plain-HTTP registry on a VPC writes
-// `http://` and says so.
-func pushTransport(ref string) (bare string, plain func(domain string) bool) {
-	switch {
-	case strings.HasPrefix(ref, "https://"):
-		return strings.TrimPrefix(ref, "https://"), func(string) bool { return false }
-	case strings.HasPrefix(ref, "http://"):
-		return strings.TrimPrefix(ref, "http://"), func(string) bool { return true }
-	default:
-		return ref, loopbackHost
-	}
-}
-
-// loopbackHost is "this box", for the one case that has no TLS and needs none.
-func loopbackHost(domain string) bool {
-	h := domain
-	if i := strings.LastIndex(h, ":"); i >= 0 {
-		h = h[:i]
-	}
-	return h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "[::1]" || strings.HasPrefix(h, "127.")
-}
-
 // pushDestination resolves and JUDGES where `kontra build` publishes, and it is the third site that
 // names an **Artifact** — the one `.scratch/warden/issues/15-*` warned must not add a fourth
-// bespoke message. The grammar comes from cli/ociref.go; what is added here is the two refusals that
+// bespoke message. The grammar comes from cli/internal/ociref/ociref.go; what is added here is the two refusals that
 // are true of a DESTINATION and of nothing else.
 //
 //	--push AND --registry        two answers to one question. `--push` is the whole reference and
@@ -541,8 +501,8 @@ func pushDestination(pushFlag, registryFlag, controllerFlag, name, version strin
 		// The scheme comes off before the reference is parsed, because an OCI reference may not carry
 		// one and `https://mirror/x:1` would otherwise split as host `https:` — a domain-shaped string,
 		// so it would pass every check and push to a repository called `/mirror/x`.
-		bare, plain := pushTransport(push)
-		r, err := parseOCIRef(bare)
+		bare, plain := ociref.PushTransport(push)
+		r, err := ociref.Parse(bare)
 		if err != nil {
 			return dest, fmt.Errorf("--push %q is not a destination.\n%w\n"+
 				"  Nothing about the Artifact changes this: the reference is the string, and a registry\n"+
@@ -551,23 +511,23 @@ func pushDestination(pushFlag, registryFlag, controllerFlag, name, version strin
 		if r.Digest != "" {
 			return dest, fmt.Errorf("--push %q names a digest, and a digest is what this push COMPUTES: "+
 				"`sha256:…` addresses content that does not exist until these bytes are uploaded.\n"+
-				"  Push to `%s:%s` and read the pinned reference off the output", push, r.repository(), version)
+				"  Push to `%s:%s` and read the pinned reference off the output", push, r.Repository(), version)
 		}
 		// AN UNTAGGED REFERENCE TAKES THE ACTOR'S VERSION rather than `:latest`. `latest` is the one
 		// tag whose meaning is "whatever was pushed last", and a Fleet that resolved it would place
 		// whichever Artifact won the race.
 		if !r.TagSet {
 			r.Tag, r.TagSet = version, true
-			if err := r.check(r.tagged()); err != nil {
+			if err := r.Check(r.Tagged()); err != nil {
 				return dest, fmt.Errorf("--push %q has no tag, so the Artifact's own version would be one, "+
 					"and it cannot be.\n%w\n  Fix the version in actor.json, or name a tag on --push", push, err)
 			}
 		}
-		dest = bundleDest{ociRef: r, PlainHTTP: plain(r.Domain)}
+		dest = bundleDest{Ref: r, PlainHTTP: plain(r.Domain)}
 
 	default:
 		dest = conventionalBundleDest(bundleRegistry(regFlag, controllerFlag), name, version)
-		if err := dest.check(dest.tagged()); err != nil {
+		if err := dest.Check(dest.Tagged()); err != nil {
 			return dest, fmt.Errorf("this Actor cannot be published as a Bundle.\n%w\n"+
 				"  A task queue accepts far more than an OCI repository does (shared/conformance/queues.json), so\n"+
 				"  %s@%s serves fine and only its ARTIFACT is unnameable. Rename it in actor.json",
@@ -577,7 +537,7 @@ func pushDestination(pushFlag, registryFlag, controllerFlag, name, version strin
 
 	// THE REGISTRY MUST BE ONE, and it must be one that a reader of the printed reference resolves
 	// to the same place. See this function's header for the two ways to get here.
-	if dest.Domain == "" || !looksLikeRegistryHost(dest.Domain) {
+	if dest.Domain == "" || !ociref.LooksLikeRegistryHost(dest.Domain) {
 		named := dest.Domain
 		if named == "" {
 			named = "(none)"
@@ -591,7 +551,7 @@ func pushDestination(pushFlag, registryFlag, controllerFlag, name, version strin
 			"  for the single box (`kontra up` serves one on :%d).\n"+
 			"  A host with no dot and no port is not one — `myregistry/x` is a Docker Hub user called\n"+
 			"  `myregistry`, which is what a reference this command PRINTS would resolve to.",
-			dest.tagged(), named, bundleRepo(name), version, registry.DefaultPort)
+			dest.Tagged(), named, bundleRepo(name), version, registry.DefaultPort)
 	}
 	return dest, nil
 }
@@ -622,9 +582,9 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 	// It is HERE because this is the funnel. `pushDestination` guards `kontra build`, but `kontra
 	// fleet deploy` reaches `pushBundle` directly and would otherwise get oras's own `invalid
 	// repository "bundles/my actor"` — accurate, and unreadable by the person who chose the name. The
-	// judgement itself is cli/ociref.go's, shared with the pull site and the podman driver; what is
+	// judgement itself is cli/internal/ociref/ociref.go's, shared with the pull site and the podman driver; what is
 	// added is the sentence oras cannot write: which actor, and that actor.json is where the fix goes.
-	if err := dest.check(dest.tagged()); err != nil {
+	if err := dest.Check(dest.Tagged()); err != nil {
 		return nil, fmt.Errorf("actor %q cannot be published as a Bundle.\n%w\n"+
 			"  Task queues accept far more than an OCI repository does (shared/conformance/queues.json), so this\n"+
 			"  actor serves fine and only its ARTIFACT is unnameable. Rename it in actor.json.",
@@ -667,11 +627,11 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 	}
 
 	// The reference has already been judged above, so this error is the parser disagreeing with
-	// cli/ociref.go — which would be a real finding and not an operator's problem.
-	repo, err := remote.NewRepository(dest.repository())
+	// cli/internal/ociref/ociref.go — which would be a real finding and not an operator's problem.
+	repo, err := remote.NewRepository(dest.Repository())
 	if err != nil {
-		return nil, fmt.Errorf("oras refuses %q, which cli/ociref.go accepted — the two grammars have "+
-			"drifted and shared/conformance/ociref.json is where that gets pinned: %w", dest.repository(), err)
+		return nil, fmt.Errorf("oras refuses %q, which cli/internal/ociref/ociref.go accepted — the two grammars have "+
+			"drifted and shared/conformance/ociref.json is where that gets pinned: %w", dest.Repository(), err)
 	}
 	repo.PlainHTTP = dest.PlainHTTP
 
@@ -687,14 +647,14 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 	fmt.Fprintf(progress, "pushing %.1f MiB to %s\n", float64(len(b.Bytes))/(1<<20), art.ref())
 	if _, err := oras.Copy(ctx, store, dest.Tag, repo, dest.Tag, oras.DefaultCopyOptions); err != nil {
 		// THE TRANSPORT HINT IS HERE AND NOT IN A RETRY. `--push <host>/…` is https unless the host is
-		// loopback (pushTransport), which is right for ghcr and wrong for a plain-HTTP registry on a
+		// loopback (ociref.PushTransport), which is right for ghcr and wrong for a plain-HTTP registry on a
 		// VPC — and the failure for that is a TLS error nobody reads as "add a scheme". Retrying over
 		// plain HTTP on a handshake failure would be the alternative, and that is a downgrade this
 		// process performed on its own, on the one request that leaves the box.
 		hint := ""
 		if !dest.PlainHTTP {
 			hint = fmt.Sprintf("\n  this pushed over HTTPS because %s is not loopback; if that registry speaks "+
-				"plain HTTP, say so:\n    --push http://%s", dest.Domain, dest.tagged())
+				"plain HTTP, say so:\n    --push http://%s", dest.Domain, dest.Tagged())
 		}
 		return nil, fmt.Errorf("pushing %s: %w\n  a Bundle needs an OCI registry the Machines can also reach; "+
 			"`kontra up` serves one on :%d, and --push <ref> names another%s",

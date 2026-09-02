@@ -56,7 +56,7 @@ export const CLEAR_HOME = '\x1b[H\x1b[2J';
 export const KONTRA_SESSION_OPTION = '@kontra';
 
 /**
- * The tmux PANE option `cli/tmux.go`'s hold writes the wrapped command's exit status into.
+ * The tmux PANE option `cli/internal/tmux/tmux.go`'s hold writes the wrapped command's exit status into.
  *
  * IT EXISTS BECAUSE `pane_current_command` CANNOT ANSWER THE QUESTION, and that was measured rather
  * than assumed — see {@link paneProcess}. A pane option is per pane (verified on tmux 3.3a: setting
@@ -154,7 +154,7 @@ export interface PaneRow {
   cols: number;
   rows: number;
   /** `#{pane_dead}` — the pane's process exited and tmux is holding the window open
-   *  (`remain-on-exit`). False for every pane kontra creates: `cli/tmux.go` holds with a SHELL
+   *  (`remain-on-exit`). False for every pane kontra creates: `cli/internal/tmux/tmux.go` holds with a SHELL
    *  instead, so that the exit status is printed rather than only flagged. */
   dead: boolean;
   /** `#{pane_current_command}`. What tmux believes is in the foreground of the pane's tty — read
@@ -262,7 +262,7 @@ export interface PaneVerdict {
  *     $ ps -o pid,stat,comm --ppid 3535711
  *     3535713 Sl+  nscheck                      # the Worker, running
  *
- * `cli/tmux.go:tmuxHold` runs the Worker from a shell (`<cmd>; kontra_status=$?; … read -r _`) so
+ * `cli/internal/tmux/tmux.go:tmuxHold` runs the Worker from a shell (`<cmd>; kontra_status=$?; … read -r _`) so
  * that a crash leaves its output and its exit code ON SCREEN. That shell does not put the child in
  * its own process group, so the pane's foreground pgid stays the SHELL's — and tmux reports the
  * shell whether the Worker is running or finished. Every kontra session on this host reported `zsh`
@@ -296,7 +296,7 @@ export function paneProcess(row: Pick<PaneRow, 'dead' | 'command' | 'exitStatus'
       exitStatus: row.exitStatus,
       detail:
         `the command in this pane exited with status ${row.exitStatus}; the window is being held ` +
-        'open by the shell so its output stays readable (`cli/tmux.go`) — nothing is running here now',
+        'open by the shell so its output stays readable (`cli/internal/tmux/tmux.go`) — nothing is running here now',
     };
   }
   if (command !== '' && !SHELL_COMMANDS.has(command)) {
@@ -318,7 +318,7 @@ export function paneProcess(row: Pick<PaneRow, 'dead' | 'command' | 'exitStatus'
  * The exit status the hold shell PRINTS, read back off a screen — '' when it is not there.
  *
  * The second half of the answer {@link paneProcess} cannot give, and the half that works on a Worker
- * that was started before `@kontra_exit` existed. `cli/tmux.go` prints exactly this line and then
+ * that was started before `@kontra_exit` existed. `cli/internal/tmux/tmux.go` prints exactly this line and then
  * blocks on `read`, so once it is on screen nothing else can be printed after it — which is why only
  * the LAST non-empty line is looked at, and why a pane that prints this line and keeps going is not
  * mistaken for a finished one for longer than one snapshot.
@@ -375,7 +375,7 @@ export function workflowSessionTag(name: string): string {
  * perfectly as one with NO SESSION — which is the exact thing ADR 0020 says a tile may never say.
  *
  * So the name is sanitised where it is MINTED, not where it is read: what kontra prints, what it
- * looks for, and what tmux holds are then the same string. `cli/tmux.go:tmuxSafeName` is the peer.
+ * looks for, and what tmux holds are then the same string. `cli/internal/tmux/tmux.go:tmuxSafeName` is the peer.
  */
 export function tmuxSafeName(name: string): string {
   return name.replace(/[.:]/g, '_');
@@ -390,7 +390,7 @@ export function tmuxSafeName(name: string): string {
  * {@link tmuxSafeName} and the other re-inlining `.replace(/[.:]/g, '_')`. Two writers on the same
  * side of a language boundary is not a contract, it is a copy: the browser imports this through
  * `@core/panels/tmux`, the same alias it already uses for `@core/panels/pollers` and
- * `@core/panels/ids`. What crosses a real boundary — this and `cli/tmux.go:tmuxSession` — is held
+ * `@core/panels/ids`. What crosses a real boundary — this and `cli/internal/tmux/tmux.go:tmuxSession` — is held
  * by `shared/conformance/queues.json` §tmux_session, which every side executes.
  *
  * WHY THE BROWSER DERIVES IT AT ALL rather than being told. The serve call answers with the

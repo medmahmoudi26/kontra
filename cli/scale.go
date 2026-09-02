@@ -28,6 +28,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/medmahmoudi26/kontra/cli/appliance"
+	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
 
 // controlPlaneNetwork is the compose network the control plane runs on; a same-host worker
@@ -255,13 +256,13 @@ func resolveWorkerImage(ctx context.Context, d containerAPI, o scaleOpts) (img s
 // Actor, the local `kontra/<name>-worker:<version>` and the remote `<registry>/<name>:<version>`,
 // differing in both prefix and suffix, so a check aimed at the actor's NAME or at either form alone
 // would pass and let the pull die later on docker's wording — the same bug moved one step earlier.
-// The answer itself is cli/ociref.go, shared with `kontra build --push` and the podman driver.
+// The answer itself is cli/internal/ociref/ociref.go, shared with `kontra build --push` and the podman driver.
 //
 // IT IS STILL AFTER THE PULL, and the paragraph above about diagnosing afterwards still holds: this
 // costs one string parse on a path that has already failed. A gate before the pull would also have
 // to be right about the cases a gate cannot see.
 func pullFailure(reg, name, version, img string, cause error) error {
-	if err := checkOCIRef(img); err != nil {
+	if err := ociref.Check(img); err != nil {
 		return fmt.Errorf("cannot pull %s.\n%w\n"+
 			"  This is not about the registry at %s and no deploy reaches it: `kontra serve` (process\n"+
 			"  mode) and every queue derivation take the Actor's name verbatim, so %s@%s serves fine and\n"+

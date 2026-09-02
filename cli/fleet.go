@@ -32,6 +32,10 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
+	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 )
@@ -68,7 +72,7 @@ func cmdFleet(args []string) error {
 }
 
 func fleetUsage() {
-	fmt.Fprint(stdout, `kontra fleet — provision Machines and place actors on them, through Pulumi
+	fmt.Fprint(cliio.Stdout, `kontra fleet — provision Machines and place actors on them, through Pulumi
 
   kontra fleet up --count 2 --actor <dir>            # Machines only; --actor sizes and NAMES them
   kontra fleet deploy --actor <dir> [--image <ref>]  # place the Artifact
@@ -179,7 +183,7 @@ func (f *fleetFlags) spec() (*actorTargets, error) {
 // that destroys it, with nothing to keep in agreement.
 //
 // There is no default of last resort. A Machines-only fleet (`--count 2` with no actor) has
-// nothing to derive a name from, and inventing one is how an operator ends up owning a stack they
+// nothing to cliutil.Derive a name from, and inventing one is how an operator ends up owning a stack they
 // cannot find again.
 func (f *fleetFlags) resolvedName() (string, error) {
 	if *f.fleet != "" {
@@ -228,8 +232,6 @@ func (f *fleetFlags) fqn() string {
 	}
 	return fleetProject + "/" + name
 }
-
-
 
 // args assembles the DESIRED STATE of the fleet stack. Every converge sends the whole thing:
 // Pulumi is declarative, so an omitted field is a request to remove what it describes, not a
@@ -446,7 +448,7 @@ func controllerAddress(flagVal string) string {
 	if flagVal != "" {
 		return flagVal
 	}
-	return envOr("KONTRA_CONTROLLER", "10.124.0.2")
+	return cliutil.EnvOr("KONTRA_CONTROLLER", "10.124.0.2")
 }
 
 // b32 shortens a content hash for a log line; the full value is in the stack outputs.
@@ -609,7 +611,7 @@ func watchOp(api *apiClient, fqn string, timeout time.Duration) (*stackOpStatus,
 			return nil, err
 		}
 		if line := progressLine(st.Progress); line != "" && line != lastLine {
-			fmt.Fprintf(stdout, "  %s\n", line)
+			fmt.Fprintf(cliio.Stdout, "  %s\n", line)
 			lastLine = line
 		}
 		switch st.Status {
@@ -758,7 +760,7 @@ func tmuxSessionTargets(outputs map[string]any) []tmuxSessionInput {
 // names and `tmux attach -t kontra-webcrawl` was ambiguous the moment a deploy was in flight.
 //
 // Falls back to the fleet's tag for a Machine with no placement, and to `fleet` for one with
-// neither. THAT FALLBACK DIFFERS FROM tmuxSession's `actor` ON PURPOSE and the difference is
+// neither. THAT FALLBACK DIFFERS FROM tmux.Session's `actor` ON PURPOSE and the difference is
 // recorded in shared/conformance/queues.json §tmux_session rather than left as two literals nobody can
 // tell from a typo: this names a MACHINE, which still has Terminals when no Actor is placed on
 // it, and calling such a session `actor` would be a lie about what is running there.
@@ -770,16 +772,16 @@ func tmuxSessionTargets(outputs map[string]any) []tmuxSessionInput {
 // `fleet` there, for the same Machine, so the converge threw on a name the Monitor had already
 // decided was `fleet`.
 func fleetSessionName(actor, version, tag string) string {
-	// tmuxSafeName because tmux rewrites `.` and `:` to `_` at creation — see its comment for what
+	// tmux.SafeName because tmux rewrites `.` and `:` to `_` at creation — see its comment for what
 	// an unsanitised `<actor>-<version>` costs.
 	base := "fleet"
 	switch {
 	case actor != "" && version != "":
-		base = tmuxSafeName(actor + "-" + version)
+		base = tmux.SafeName(actor + "-" + version)
 	case actor != "":
-		base = tmuxSafeName(actor)
+		base = tmux.SafeName(actor)
 	case tag != "":
-		base = tmuxSafeName(tag)
+		base = tmux.SafeName(tag)
 	}
 	if !safeSessionName.MatchString(base) {
 		return "fleet"
@@ -801,11 +803,11 @@ type tmuxConverger interface {
 // newTmuxConverger dials Temporal ($KONTRA_ADDRESS / $KONTRA_NAMESPACE); a func var so tests can
 // swap it out.
 var newTmuxConverger = func() (tmuxConverger, error) {
-	c, err := client.Dial(client.Options{HostPort: temporalAddress(), Namespace: temporalNamespace()})
+	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace()})
 	if err != nil {
 		return nil, err
 	}
-	return &temporalTmuxConverger{c: c, queue: envOr("KONTRA_INFRA_QUEUE", "kontra-infra")}, nil
+	return &temporalTmuxConverger{c: c, queue: cliutil.EnvOr("KONTRA_INFRA_QUEUE", "kontra-infra")}, nil
 }
 
 type temporalTmuxConverger struct {
@@ -845,12 +847,12 @@ func convergeSessions(st *stackOpStatus, timeout time.Duration) error {
 	}
 	targets := tmuxSessionTargets(st.Result.Outputs)
 	if len(targets) == 0 {
-		fmt.Fprintln(stdout, "--tmux: no machines in the inventory, nothing to converge")
+		fmt.Fprintln(cliio.Stdout, "--tmux: no machines in the inventory, nothing to converge")
 		return nil
 	}
 	d, err := newTmuxConverger()
 	if err != nil {
-		return fmt.Errorf("--tmux: cannot reach temporal at %s: %w", temporalAddress(), err)
+		return fmt.Errorf("--tmux: cannot reach temporal at %s: %w", config.TemporalAddress(), err)
 	}
 	defer d.Close()
 
@@ -861,17 +863,17 @@ func convergeSessions(st *stackOpStatus, timeout time.Duration) error {
 		res, err := d.Converge(ctx, in)
 		if err != nil {
 			failed++
-			fmt.Fprintf(stdout, "  %s: session converge FAILED: %v\n", in.Machine, err)
+			fmt.Fprintf(cliio.Stdout, "  %s: session converge FAILED: %v\n", in.Machine, err)
 			continue
 		}
 		verb := "already had"
 		if res.Created {
 			verb = "created"
 		}
-		fmt.Fprintf(stdout, "  %s: %s session %s [%s]\n", in.Machine, verb, res.Session,
+		fmt.Fprintf(cliio.Stdout, "  %s: %s session %s [%s]\n", in.Machine, verb, res.Session,
 			strings.Join(res.Windows, " "))
 	}
-	fmt.Fprintf(stdout, "--tmux: %d/%d machines have an attachable session — `tmux attach -t %s` on the "+
+	fmt.Fprintf(cliio.Stdout, "--tmux: %d/%d machines have an attachable session — `tmux attach -t %s` on the "+
 		"Machine, or the Dashboard in the orchestrator UI\n", len(targets)-failed, len(targets), targets[0].Session)
 	return nil
 }
@@ -901,7 +903,7 @@ func fleetUp(args []string) error {
 	{
 		if prev, err := readOp(api, f.fqn()); err == nil && prev.Result != nil {
 			if line := inheritPlacement(a, prev.Result.Outputs, *f.sessions); line != "" {
-				fmt.Fprintln(stdout, line)
+				fmt.Fprintln(cliio.Stdout, line)
 			}
 		}
 	}
@@ -909,7 +911,7 @@ func fleetUp(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "converging %s → %d %s machine(s)\n", f.fqn(), *f.count, tag)
+	fmt.Fprintf(cliio.Stdout, "converging %s → %d %s machine(s)\n", f.fqn(), *f.count, tag)
 	if _, err := startOp(api, f.fqn(), "up", a); err != nil {
 		return err
 	}
@@ -950,18 +952,18 @@ func fleetDeployCmd(args []string) error {
 	if *f.actor == "" {
 		return errors.New("nothing to place: pass --actor <dir>")
 	}
-	art, err := buildBundle(*f.actor, stdout)
+	art, err := buildBundle(*f.actor, cliio.Stdout)
 	if err != nil {
 		return err
 	}
-	if _, err := pushBundle(context.Background(), f.registryAddr(), art, stdout); err != nil {
+	if _, err := pushBundle(context.Background(), f.registryAddr(), art, cliio.Stdout); err != nil {
 		return err
 	}
 	a, err := f.args(art)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "placing %v@%v (bundle %s…) on %d machine(s) in %s\n",
+	fmt.Fprintf(cliio.Stdout, "placing %v@%v (bundle %s…) on %d machine(s) in %s\n",
 		a["actorName"], a["actorVersion"], b32(a["bundleSha"].(string)), *f.count, f.fqn())
 	if _, err := startOp(api, f.fqn(), "up", a); err != nil {
 		return err
@@ -1003,7 +1005,7 @@ func fleetPreview(args []string) error {
 	}
 	if st.Result != nil {
 		b, _ := json.MarshalIndent(st.Result.Changes, "", "  ")
-		fmt.Fprintf(stdout, "would change: %s\n", b)
+		fmt.Fprintf(cliio.Stdout, "would change: %s\n", b)
 	}
 	return nil
 }
@@ -1021,17 +1023,17 @@ func fleetStatus(args []string) error {
 	if err != nil {
 		var he *httpError
 		if errors.As(err, &he) && he.status == 404 {
-			fmt.Fprintf(stdout, "no fleet %s — nothing has ever been converged under this name\n", f.fqn())
+			fmt.Fprintf(cliio.Stdout, "no fleet %s — nothing has ever been converged under this name\n", f.fqn())
 			return nil
 		}
 		return err
 	}
-	fmt.Fprintf(stdout, "%s  %s\n", st.FQN, st.Status)
+	fmt.Fprintf(cliio.Stdout, "%s  %s\n", st.FQN, st.Status)
 	if st.Status == "RUNNING" {
 		// Rejoining a converge somebody else started is the normal case now, so say so
 		// rather than printing a stale inventory.
 		if line := progressLine(st.Progress); line != "" {
-			fmt.Fprintf(stdout, "  in flight: %s\n", line)
+			fmt.Fprintf(cliio.Stdout, "  in flight: %s\n", line)
 		}
 		return watchAndPrint(api, f.fqn(), *f.timeout)
 	}
@@ -1067,7 +1069,7 @@ func fleetDown(args []string) error {
 	if err := refuseIfHeld(api, f.fqn(), *f.force); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "destroying %s\n", f.fqn())
+	fmt.Fprintf(cliio.Stdout, "destroying %s\n", f.fqn())
 	// destroy needs no args: it tears down whatever the state says exists. Sending a desired
 	// state here would be the one way to destroy the WRONG thing.
 	if _, err := startOp(api, f.fqn(), "destroy", map[string]any{"tag": tag, "machines": 0}); err != nil {
@@ -1079,7 +1081,7 @@ func fleetDown(args []string) error {
 	}
 	if st.Result != nil {
 		b, _ := json.Marshal(st.Result.Changes)
-		fmt.Fprintf(stdout, "destroyed: %s\n", b)
+		fmt.Fprintf(cliio.Stdout, "destroyed: %s\n", b)
 	}
 	return nil
 }
@@ -1088,7 +1090,7 @@ func fleetDown(args []string) error {
 // Execution, so this is the whole interface between the two.
 func printFleet(st *stackOpStatus) error {
 	if st.Result == nil {
-		fmt.Fprintf(stdout, "%s: %s (no outputs yet)\n", st.FQN, st.Status)
+		fmt.Fprintf(cliio.Stdout, "%s: %s (no outputs yet)\n", st.FQN, st.Status)
 		return nil
 	}
 	// EVERY PLACEMENT, ONE LINE EACH, because a Fleet holds several since ADR 0037's other half.
@@ -1118,11 +1120,11 @@ func printFleet(st *stackOpStatus) error {
 			if n, ok := p["workers"].(int); ok && n > 0 {
 				where = fmt.Sprintf("%d machine(s)", n)
 			}
-			fmt.Fprintf(stdout, "actor: %v@%v  bundle %v  sessions/worker %s  on %s\n",
+			fmt.Fprintf(cliio.Stdout, "actor: %v@%v  bundle %v  sessions/worker %s  on %s\n",
 				p["actorName"], p["actorVersion"], p["bundleSha"], density, where)
 		}
 		if len(placed) > 1 {
-			fmt.Fprintf(stdout, "  %d actors are PACKED onto these machines and share their egress "+
+			fmt.Fprintf(cliio.Stdout, "  %d actors are PACKED onto these machines and share their egress "+
 				"addresses (ADR 0037)\n", len(placed))
 		}
 	}
@@ -1134,10 +1136,10 @@ func printFleet(st *stackOpStatus) error {
 		Role     string `json:"role"`
 	}
 	if err := json.Unmarshal(raw, &inv); err != nil || len(inv) == 0 {
-		fmt.Fprintln(stdout, "no machines")
+		fmt.Fprintln(cliio.Stdout, "no machines")
 		return nil
 	}
-	w := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
+	w := tabwriter.NewWriter(cliio.Stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(w, "MACHINE\tROLE\tPRIVATE\tPUBLIC")
 	for _, name := range sortedKeys(inv) {
 		m := inv[name]

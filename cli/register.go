@@ -36,6 +36,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
 // registerResult is what `POST /api/sources/:kind` answers with. `endpointState` and
@@ -102,7 +104,7 @@ func cmdRegister(kind string, args []string) error {
 			return err
 		}
 		if written != "" {
-			fmt.Fprintf(stdout, "wrote %s\n", written)
+			fmt.Fprintf(cliio.Stdout, "wrote %s\n", written)
 		}
 	}
 
@@ -113,7 +115,7 @@ func cmdRegister(kind string, args []string) error {
 	}
 
 	if *jsonOut {
-		enc := json.NewEncoder(stdout)
+		enc := json.NewEncoder(cliio.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(got)
 	}
@@ -122,29 +124,29 @@ func cmdRegister(kind string, args []string) error {
 	if got.Version != "" {
 		label += "@" + got.Version
 	}
-	fmt.Fprintf(stdout, "registered %s %s\n", kind, label)
-	fmt.Fprintf(stdout, "  path    %s\n", got.Path)
+	fmt.Fprintf(cliio.Stdout, "registered %s %s\n", kind, label)
+	fmt.Fprintf(cliio.Stdout, "  path    %s\n", got.Path)
 	if got.Digest != "" {
-		fmt.Fprintf(stdout, "  digest  %s\n", got.Digest)
+		fmt.Fprintf(cliio.Stdout, "  digest  %s\n", got.Digest)
 	}
 	switch {
 	case got.EndpointError != "":
 		// THE REGISTRATION STOOD. Saying so in the same breath as the failure is the difference
 		// between "run this again" and "your folder is not registered" — and only the first is true.
-		fmt.Fprintf(stdout, "  nexus   NOT created: %s\n", got.EndpointError)
-		fmt.Fprintf(stdout, "          the folder IS registered; re-run this command to create it\n")
+		fmt.Fprintf(cliio.Stdout, "  nexus   NOT created: %s\n", got.EndpointError)
+		fmt.Fprintf(cliio.Stdout, "          the folder IS registered; re-run this command to create it\n")
 	case got.Endpoint != "":
-		fmt.Fprintf(stdout, "  nexus   %s (%s)\n", got.Endpoint, got.EndpointState)
+		fmt.Fprintf(cliio.Stdout, "  nexus   %s (%s)\n", got.Endpoint, got.EndpointState)
 	case kind == "workflow":
 		// Said rather than silently absent: an operator who knows Actors get an endpoint will look
 		// for the workflow's, and "there isn't one" is the answer, not an omission.
-		fmt.Fprintf(stdout, "  nexus   none — a workflow dispatches, nothing dispatches to it\n")
+		fmt.Fprintf(cliio.Stdout, "  nexus   none — a workflow dispatches, nothing dispatches to it\n")
 	}
-	fmt.Fprintf(stdout, "\nit is NOT running. Start it with:\n")
+	fmt.Fprintf(cliio.Stdout, "\nit is NOT running. Start it with:\n")
 	if kind == "actor" {
-		fmt.Fprintf(stdout, "  kontra serve --actor %s\n", got.Path)
+		fmt.Fprintf(cliio.Stdout, "  kontra serve --actor %s\n", got.Path)
 	} else {
-		fmt.Fprintf(stdout, "  kontra workflow serve %s\n", got.Name)
+		fmt.Fprintf(cliio.Stdout, "  kontra workflow serve %s\n", got.Name)
 	}
 	return nil
 }

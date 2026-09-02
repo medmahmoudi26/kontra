@@ -20,7 +20,7 @@
  * THE STAKES ARE HIGHER HERE THAN ON THE FLEET, and that must reach the operator rather than a
  * comment. ADR 0020's finding (2) measured a stalled viewer SEGFAULTING a tmux server, which
  * destroys every session on that socket. A fleet pane holds `journalctl -fu`, so that costs the view;
- * a local pane holds the REAL actor and handler processes (`cli/tmux.go`), so there it costs a
+ * a local pane holds the REAL actor and handler processes (`cli/internal/tmux/tmux.go`), so there it costs a
  * running Worker. Same logic, different stakes — hence `Terminal.mode` on the wire, so a tile can say
  * which it is.
  */

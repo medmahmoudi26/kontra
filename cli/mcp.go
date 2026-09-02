@@ -26,6 +26,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 )
 
 const mcpProtocolVersion = "2024-11-05"
@@ -69,7 +72,7 @@ func cmdMCP(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return (&mcpServer{api: newAPI(*api)}).serve(stdin, stdout)
+	return (&mcpServer{api: newAPI(*api)}).serve(cliio.Stdin, cliio.Stdout)
 }
 
 // serve runs the stdio JSON-RPC loop: one request per line, one response per line (Encoder
@@ -314,7 +317,7 @@ func (s *mcpServer) invoke(name string, argsRaw json.RawMessage) (string, error)
 		}
 		d, err := newDescriber()
 		if err != nil {
-			return "", fmt.Errorf("cannot reach temporal at %s: %w", temporalAddress(), err)
+			return "", fmt.Errorf("cannot reach temporal at %s: %w", config.TemporalAddress(), err)
 		}
 		defer d.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -23,7 +23,7 @@
  * `tsc --noEmit` on the package itself.
  *
  * `vocabulary` STAYS IN THIS REPOSITORY WHATEVER ELSE MOVES: its test reads
- * `cli/warden_workflow.go`'s BYTES to pin the Warden's five kind spellings, so a rename in Go is a
+ * `cli/warden/warden_workflow.go`'s BYTES to pin the Warden's five kind spellings, so a rename in Go is a
  * red test here. That contract cannot cross a repository boundary.
  */
 

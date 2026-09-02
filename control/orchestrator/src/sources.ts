@@ -145,7 +145,7 @@ function refuseMissing(ok: boolean, message: string): asserts ok {
  *
  * THERE WERE TWO OF THESE AND THEY DISAGREED. This one answered `~/.kontra`;
  * `workflowControl.ts` had its own, answering `<cwd>/.kontra` — an approximation of the CLI's rule
- * (`cli/config.go:kontraRoot`, which walks up to the checkout's `.kontra/`). Each default was
+ * (`cli/internal/config/config.go:kontraRoot`, which walks up to the checkout's `.kontra/`). Each default was
  * locally sensible: registration should default under the home the operator was told about and the
  * register form prefills, and `serve` should be confined to the checkout it was started from. Read
  * together they were a trap. With KONTRA_HOME unset — every test, and any run started from another

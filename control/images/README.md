@@ -43,7 +43,7 @@ remote machines that connect back to the controller (full guide:
   units until ADR 0037 retired the watchdog into the **Warden**. That last one is not a move of
   working code: the watchdog counted log lines that no actor host has ever emitted (`unit failed`,
   `unit ok`, `engine dead` match nothing in this repo), so its denominator was permanently zero and
-  it could never compute the 81-of-82 ratio it was written for. `cli/sickworker.go` is the first
+  it could never compute the 81-of-82 ratio it was written for. `cli/warden/sickworker.go` is the first
   version of that check that can, and it is installed by `kontra warden join` rather than by a
   placement — so a **Machine** that has not enrolled has no health authority of its own, which is
   what its `loads` chip then says.

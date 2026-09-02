@@ -19,6 +19,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 // A Go actor's Bundle must carry the actor as an EXECUTABLE, because the Machine's systemd unit
@@ -32,7 +33,7 @@ func TestGoBundleCarriesACompiledActor(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("no go toolchain")
 	}
-	root, err := findRepoRoot("")
+	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
 		t.Skip("not in a checkout")
 	}

@@ -111,7 +111,8 @@ control/        WHAT RUNS WHERE `kontra up` RUNS           (AGPL-3.0)
 
 cli/            THE ONE BINARY, WHICH IS BOTH
   appliance/      the embedded services `kontra up` supervises   (control plane)
-  warden*.go      the Machine agent and its container drivers    (a Machine)
+  warden/         the Machine agent and its container drivers    (a Machine)
+  internal/       what both halves share, and nothing else
 
 shared/         NEITHER — what more than one implementation must agree on
   core/           @kontra/core, the kernel the console imports too  (Apache-2.0)

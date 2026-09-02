@@ -36,6 +36,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 )
@@ -159,14 +162,14 @@ func workflowStop(args []string, escalate bool) error {
 	if err := client.postJSON("/api/runs/"+url.PathEscape(runID)+"/stop", body, &out); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "%s: %s\n", out.RunID, out.Outcome)
+	fmt.Fprintf(cliio.Stdout, "%s: %s\n", out.RunID, out.Outcome)
 	// Only when there was a wait worth reporting. `--force` sends no cancel at all, and a run that
 	// was already closed is answered from one describe — "waited 0.0s for the cancel to land"
 	// describes a cancel that never happened.
 	if out.WaitedMs >= 500 {
-		fmt.Fprintf(stdout, "  waited %.1fs for the cancel to land\n", float64(out.WaitedMs)/1000)
+		fmt.Fprintf(cliio.Stdout, "  waited %.1fs for the cancel to land\n", float64(out.WaitedMs)/1000)
 	}
-	fmt.Fprintf(stdout, "  %s\n", out.Detail)
+	fmt.Fprintf(cliio.Stdout, "  %s\n", out.Detail)
 	return nil
 }
 
@@ -203,7 +206,7 @@ func workflowPause(args []string) error {
 		return errors.New("usage: kontra workflow pause <file.py|session>")
 	}
 	session := workflowSession(name)
-	if !tmuxHasSession(session) {
+	if !tmux.HasSession(session) {
 		return fmt.Errorf("no served worker in tmux session %q — `kontra workflow serve %s --tmux` starts one", session, name)
 	}
 	// C-c, to the WINDOW the serve command created. Not the session: a session's "current window"
@@ -211,11 +214,11 @@ func workflowPause(args []string) error {
 	if out, err := exec.Command("tmux", "send-keys", "-t", session+":workflow", "C-c").CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux send-keys: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	fmt.Fprintf(stdout, "paused %s — the worker stopped polling; the run makes no progress and resumes from history.\n", session)
-	fmt.Fprint(stdout, "  activities already dispatched KEEP RUNNING, and ScheduleToStart/StartToClose timers keep\n"+
+	fmt.Fprintf(cliio.Stdout, "paused %s — the worker stopped polling; the run makes no progress and resumes from history.\n", session)
+	fmt.Fprint(cliio.Stdout, "  activities already dispatched KEEP RUNNING, and ScheduleToStart/StartToClose timers keep\n"+
 		"  ticking — a long pause fails a run rather than holding it.\n")
-	fmt.Fprintf(stdout, "  resume:  kontra workflow resume %s\n", name)
-	fmt.Fprintf(stdout, "  watch:   tmux attach -t %s\n", session)
+	fmt.Fprintf(cliio.Stdout, "  resume:  kontra workflow resume %s\n", name)
+	fmt.Fprintf(cliio.Stdout, "  watch:   tmux attach -t %s\n", session)
 	return nil
 }
 
@@ -242,21 +245,21 @@ func workflowResume(args []string) error {
 		return fmt.Errorf("%w — resume needs the workflow serve was given", err)
 	}
 	session := workflowSession(file)
-	if !tmuxHasSession(session) {
+	if !tmux.HasSession(session) {
 		return fmt.Errorf("no session %q to resume — `kontra workflow serve %s --tmux` starts one", session, name)
 	}
 
-	root, err := findRepoRoot("")
+	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
 		return fmt.Errorf("kontra workflow resume needs the checkout (it puts actorkit on PYTHONPATH): %w", err)
 	}
 	py := pythonFor(root, *python)
 
-	// RESPAWN, not send-keys. After a C-c the pane is sitting in `tmuxHold`'s trailing `read`, so
+	// RESPAWN, not send-keys. After a C-c the pane is sitting in `tmux.Hold`'s trailing `read`, so
 	// typing the command back into it would run it inside that wrapper and lose the hold. `-k` kills
 	// what is in the pane and starts the command fresh, in the same window, keeping the scrollback
 	// an operator paused in order to read.
-	argv := tmuxHold([]string{py, file})
+	argv := tmux.Hold([]string{py, file})
 	cmd := []string{"respawn-pane", "-k", "-t", session + ":workflow"}
 	// The SAME derivation serve uses. A resume that recomputed the queue differently would respawn
 	// the pane onto another queue and leave the run it was resuming unserved. Editing the folder
@@ -271,10 +274,10 @@ func workflowResume(args []string) error {
 	}
 	cmd = append(cmd, argv)
 	if out, err := exec.Command("tmux", cmd...).CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux respawn-pane: %v: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("tmux respawn-Pane: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	fmt.Fprintf(stdout, "resumed %s — the worker is polling again and the run continues from history.\n", session)
-	fmt.Fprintf(stdout, "  watch:   tmux attach -t %s\n", session)
+	fmt.Fprintf(cliio.Stdout, "resumed %s — the worker is polling again and the run continues from history.\n", session)
+	fmt.Fprintf(cliio.Stdout, "  watch:   tmux attach -t %s\n", session)
 	return nil
 }
 
@@ -303,7 +306,7 @@ func workflowServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	root, err := findRepoRoot("")
+	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
 		return fmt.Errorf("kontra workflow serve needs the checkout (it puts actorkit on PYTHONPATH): %w", err)
 	}
@@ -332,7 +335,7 @@ func workflowServe(args []string) error {
 	//
 	if *useTmux {
 		session := workflowSession(file)
-		if err := startTmux(session, kontraWorkflowTag(session), []tmuxProc{{
+		if err := tmux.Start(session, tmux.KontraWorkflowTag(session), []tmux.Proc{{
 			Window: "workflow",
 			Dir:    root,
 			Env:    delta,
@@ -343,16 +346,16 @@ func workflowServe(args []string) error {
 		if err := confirmTmuxWorker(session, "workflow", py); err != nil {
 			return err
 		}
-		printTmuxHelp(stdout, session, []string{"workflow"})
+		tmux.PrintHelp(cliio.Stdout, session, []string{"workflow"})
 		// `start` TAKES THE FOLDER, never the queue. It re-derives the same queue from the same
 		// folder and refuses if this code is not the one being served, so the queue below is a FACT
 		// to read (a check that serve and start agree), not a string anybody pastes into a flag.
 		if m := readWorkflowManifest(file); m.Workflow != "" {
-			fmt.Fprintf(stdout, "\nstart one:  kontra workflow start %s\n", target)
+			fmt.Fprintf(cliio.Stdout, "\nstart one:  kontra workflow start %s\n", target)
 		} else {
-			fmt.Fprintf(stdout, "\nstart one:  register the folder (kontra workflow register --init) so start can derive its queue\n")
+			fmt.Fprintf(cliio.Stdout, "\nstart one:  register the folder (kontra workflow register --init) so start can cliutil.Derive its queue\n")
 		}
-		fmt.Fprintf(stdout, "queue:      %s\n", serveQueue)
+		fmt.Fprintf(cliio.Stdout, "queue:      %s\n", serveQueue)
 		return nil
 	}
 
@@ -361,7 +364,7 @@ func workflowServe(args []string) error {
 
 	cmd := exec.CommandContext(ctx, py, file)
 	cmd.Dir = root
-	cmd.Stdout, cmd.Stderr = stdout, os.Stderr
+	cmd.Stdout, cmd.Stderr = cliio.Stdout, os.Stderr
 	cmd.Env = env
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting %s: %w", file, err)
@@ -375,7 +378,7 @@ func workflowServe(args []string) error {
 		}
 		return nil
 	case <-ctx.Done():
-		fmt.Fprintln(stdout, "\nstopping…")
+		fmt.Fprintln(cliio.Stdout, "\nstopping…")
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		<-done
 		return nil
@@ -471,7 +474,7 @@ func workflowStart(args []string) error {
 	if err != nil {
 		return fmt.Errorf("start %s: %w", wfType, err)
 	}
-	fmt.Fprintf(stdout, "started %s\n  id:  %s\n  run: %s\n", wfType, run.GetID(), run.GetRunID())
+	fmt.Fprintf(cliio.Stdout, "started %s\n  id:  %s\n  run: %s\n", wfType, run.GetID(), run.GetRunID())
 
 	// SNAPSHOT THE CALLER'S IDENTITY, so this Run's Datasets can be named after the WORKFLOW rather
 	// than after whichever Actor happened to write a table (ADR 0029 §2). Temporal forgets the
@@ -485,12 +488,12 @@ func workflowStart(args []string) error {
 	// Dataset renders an Actor-grain name instead. Said out loud rather than swallowed, because
 	// "why is my Dataset called wf-crawl4ai-… and not wf-recon-…" is otherwise unanswerable.
 	if err := recordRunWorkflow(newAuthAPI(*api, os.Getenv("KONTRA_RUN_TOKEN")), run.GetID(), manifest); err != nil {
-		fmt.Fprintf(stderr, "note: could not record this run's workflow identity (%v)\n"+
+		fmt.Fprintf(cliio.Stderr, "note: could not record this run's workflow identity (%v)\n"+
 			"  the run is fine; its Datasets will be named after the Actor that wrote them, not %q.\n",
 			err, manifest.Name)
 	}
 	if !*wait {
-		fmt.Fprintf(stdout, "  wait: kontra workflow start … --wait   (or: temporal workflow show -w %s)\n", run.GetID())
+		fmt.Fprintf(cliio.Stdout, "  wait: kontra workflow start … --wait   (or: temporal workflow show -w %s)\n", run.GetID())
 		return nil
 	}
 
@@ -504,10 +507,10 @@ func workflowStart(args []string) error {
 	}
 	out, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
-		fmt.Fprintf(stdout, "%v\n", result)
+		fmt.Fprintf(cliio.Stdout, "%v\n", result)
 		return nil
 	}
-	fmt.Fprintln(stdout, string(out))
+	fmt.Fprintln(cliio.Stdout, string(out))
 	return nil
 }
 

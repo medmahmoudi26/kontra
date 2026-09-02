@@ -31,7 +31,7 @@ import {
   type WardenReport,
 } from './warden';
 
-/** A report shaped exactly as `cli/panereport.go` marshals one. */
+/** A report shaped exactly as `cli/warden/panereport.go` marshals one. */
 function report(over: Partial<WardenReport> = {}): WardenReport {
   return {
     warden: 'w-abc',

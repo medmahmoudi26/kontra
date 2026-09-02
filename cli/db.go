@@ -25,6 +25,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 // lakeSchema is where operator-loaded lists live (scope, seeds) — the `standalone/` top-level
@@ -122,7 +125,7 @@ func applianceCatalog() string {
 		return ""
 	}
 	path := filepath.Join(dir, "datasets.ducklake")
-	if !fileExists(path) {
+	if !cliutil.FileExists(path) {
 		return ""
 	}
 	return path
@@ -313,8 +316,8 @@ func attachSQL(dsn, dataPath string) string {
 // SeaweedFS in this deployment accepts anonymous reads, but DuckLake WRITES need a credential
 // pair present; the dev default is kontra/kontra, matching the KONTRA_S3_* fallback the actors
 // use.
-func s3AccessKey() string { return envOr("KONTRA_S3_ACCESS_KEY", "kontra") }
-func s3SecretKey() string { return envOr("KONTRA_S3_SECRET_KEY", "kontra") }
+func s3AccessKey() string { return cliutil.EnvOr("KONTRA_S3_ACCESS_KEY", "kontra") }
+func s3SecretKey() string { return cliutil.EnvOr("KONTRA_S3_SECRET_KEY", "kontra") }
 
 // readerFor maps a file extension to the DuckDB reader that parses it. Explicit rather than
 // read_auto: a jsonl file of one-key objects is otherwise easy to mis-sniff as CSV.
@@ -393,7 +396,7 @@ func dbList(catalog, dataPath string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(stdout, out)
+	fmt.Fprint(cliio.Stdout, out)
 	return nil
 }
 
@@ -422,7 +425,7 @@ func dbIngest(catalog, dataPath, file, name string, anew bool) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "created dataset %s from %s\n%s", tbl, file, out)
+		fmt.Fprintf(cliio.Stdout, "created dataset %s from %s\n%s", tbl, file, out)
 		return nil
 	}
 
@@ -439,7 +442,7 @@ func dbIngest(catalog, dataPath, file, name string, anew bool) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "anew %s <- %s\n%s", tbl, file, out)
+	fmt.Fprintf(cliio.Stdout, "anew %s <- %s\n%s", tbl, file, out)
 	return nil
 }
 
@@ -457,6 +460,6 @@ func dbDelete(catalog, dataPath, name string) error {
 	if _, err := runDuck(sql); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "deleted dataset %s\n", tbl)
+	fmt.Fprintf(cliio.Stdout, "deleted dataset %s\n", tbl)
 	return nil
 }

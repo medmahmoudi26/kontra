@@ -698,7 +698,7 @@ test('a narration carries the author\'s words, not a description of the carrier'
 /**
  * A MACHINE'S LIFECYCLE, IN THE ACCOUNT RATHER THAN IN THE LOG.
  *
- * `cli/warden_workflow.go` runs one blocked workflow per **Machine** and writes each decision as a
+ * `cli/warden/warden_workflow.go` runs one blocked workflow per **Machine** and writes each decision as a
  * Temporal user-metadata Summary on the event that arms the next watch. Nothing about that reaches a
  * component: `transcript.ts` already folds a Summary onto its turn as `label`, and what this release
  * adds is a WORD for it — which is precisely the change {@link nameTranscript} was built to absorb
@@ -813,8 +813,8 @@ test("a Machine's lifecycle reads as an account, not as ActivityTaskScheduled", 
    * literal on each side and read the other side's BYTES. A rename in `warden_workflow.go` is a red
    * test here rather than a Fleet that silently stops appearing in anybody's account.
    */
-  it('spells every kind the way cli/warden_workflow.go spells it', () => {
-    const go = readFileSync(join(__dirname, '..', '..', '..', 'cli', 'warden_workflow.go'), 'utf8');
+  it('spells every kind the way cli/warden/warden_workflow.go spells it', () => {
+    const go = readFileSync(join(__dirname, '..', '..', '..', 'cli', 'warden', 'warden_workflow.go'), 'utf8');
     expect(go).toContain('wardenSummaryPrefix = "kontra.machine"');
     expect(go).toContain('wardenSummarySep = " · "');
     for (const kind of [
