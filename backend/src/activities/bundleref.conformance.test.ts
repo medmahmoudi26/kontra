@@ -1,10 +1,10 @@
 /**
- * The TYPESCRIPT ARM of `conformance/bundleref.json` — where a Bundle lives once it is an OCI
+ * The TYPESCRIPT ARM of `shared/conformance/bundleref.json` — where a Bundle lives once it is an OCI
  * artifact (ADR 0036).
  *
  * THIS SIDE IS THE READER AND THE CLI IS THE WRITER, and until this corpus existed the two were
  * pinned by a Go test asserting one literal and a vitest in this directory asserting another,
- * neither aware of the other. That is the hand-copied golden `conformance/README.md` opens with,
+ * neither aware of the other. That is the hand-copied golden `shared/conformance/README.md` opens with,
  * and the object-store layout it replaces had already drifted that way once.
  *
  * WHAT A DRIFT COSTS, in `resolveBundle`'s own words: it 404s on a Bundle that was published
@@ -42,7 +42,7 @@ type UrlCase = {
   blob: string;
 };
 
-const raw = readFileSync(join(__dirname, '../../../conformance/bundleref.json'), 'utf8');
+const raw = readFileSync(join(__dirname, '../../../shared/conformance/bundleref.json'), 'utf8');
 const corpus = JSON.parse(raw) as {
   repo: { cases: RepoCase[] };
   reference: { cases: RefCase[] };

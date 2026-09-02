@@ -42,7 +42,7 @@ jobs:
       # Lint is advisory for now (no ruff config committed yet) — surface findings
       # without failing the gate. Remove `|| true` once a ruff config lands.
       - name: ruff check
-        run: ruff check sdk/python runtime/python conformance tests || true
+        run: ruff check sdk/python runtime/python shared/conformance tests || true
 
       # Fast suite: everything except the e2e marker (which boots a Temporal server).
       - name: pytest (non-e2e)
@@ -475,7 +475,7 @@ jobs:
           path: _sibling/kontra-console
           token: ${{ secrets.KONTRA_CONSOLE_TOKEN }}
 
-      - name: put this checkout where `link:../kontra/core` expects it
+      - name: put this checkout where `link:../kontra/shared/core` expects it
         run: ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/_sibling/kontra"
 
       # `@kontra/core` FIRST, and it is not belt-and-braces: the console links it out of this

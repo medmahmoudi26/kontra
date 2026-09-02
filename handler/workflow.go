@@ -256,7 +256,7 @@ func runActivityOptions(queue, sessionID string) workflow.ActivityOptions {
 	}
 	if sessionID != "" {
 		// The Session's own queue (ADR 0023 §6) — `{shared}-s-{sessionId}`, which the caller and
-		// the actor host derive independently in three other languages. conformance/queues.json
+		// the actor host derive independently in three other languages. shared/conformance/queues.json
 		// §session is what holds the four to one answer.
 		opts.TaskQueue = identity.SessionQueue(queue, sessionID)
 		opts.ScheduleToStartTimeout = sessionScheduleToStart

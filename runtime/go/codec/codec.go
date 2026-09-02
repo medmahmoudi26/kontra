@@ -5,7 +5,7 @@
 // It is an INDEPENDENT implementation of the same wire format as handler/runtime/go/codec, the
 // Python actorkit internals/codec.py and the orchestrator's claimCheck.ts — deliberately, per the
 // decoupling rule: actorkit and the handler are separate modules and never import each other.
-// What keeps four implementations honest is the shared corpus in conformance/codec/, because any
+// What keeps four implementations honest is the shared corpus in shared/conformance/codec/, because any
 // byte disagreement here silently drops data across a language boundary.
 //
 // # Why the actor needs this — do not remove it

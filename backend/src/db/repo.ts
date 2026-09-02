@@ -95,7 +95,7 @@ export interface ActorRecord {
 
 /**
  * A CALLER WORKFLOW as the catalog stores it — `WorkflowDescriptor` in
- * `contracts/kontra/v1/catalog.proto`, field for field, plus the store's own `savedAt`.
+ * `shared/contracts/kontra/v1/catalog.proto`, field for field, plus the store's own `savedAt`.
  *
  * KEYED BY THE TYPE, not by a file. `name` is the `@workflow.defn` type a caller starts
  * (`NsCheck`), which is what Temporal routes on and what `kontra workflow start` names; two
@@ -606,7 +606,7 @@ CREATE TABLE IF NOT EXISTS actors (
   incompatibilities TEXT,
   saved_at       INTEGER NOT NULL
 );
--- A caller workflow as its worker described it on serve (contracts/kontra/v1/catalog.proto's
+-- A caller workflow as its worker described it on serve (shared/contracts/kontra/v1/catalog.proto's
 -- WorkflowDescriptor). Keyed by the @workflow.defn TYPE — see WorkflowRecord for why that is not
 -- the filename. The schemas are JSON text and NULL when the author declared none.
 CREATE TABLE IF NOT EXISTS workflows (

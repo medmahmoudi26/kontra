@@ -11,10 +11,10 @@ import (
 // missing. They have already drifted once — the isolation counters shipped Go-only, leaving the
 // crawler (the actor that actually lost ~1,400 seeds) uninstrumented.
 //
-// Both suites assert against conformance/blobkey.json, so a divergence is a failing
+// Both suites assert against shared/conformance/blobkey.json, so a divergence is a failing
 // test rather than something discovered months later in production data.
 func TestBlobKeyMatchesCrossSDKFixture(t *testing.T) {
-	b, err := os.ReadFile("../../../conformance/blobkey.json")
+	b, err := os.ReadFile("../../../shared/conformance/blobkey.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

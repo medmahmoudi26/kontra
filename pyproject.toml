@@ -21,7 +21,7 @@
 # `internals/test_blobkey_conformance.py` — so with `testpaths = ["tests"]` the Python side of two
 # cross-language corpora had never run in CI, under a workflow header that said "non-e2e pytest,
 # incl. the codec corpus". A corpus arm nobody runs is worse than a missing one: the table in
-# conformance/codec/README.md lists it, so its absence reads as coverage. Found while adding the
+# shared/conformance/codec/README.md lists it, so its absence reads as coverage. Found while adding the
 # prefix rows the codec corpus was missing (ADR 0035 §3).
 testpaths = ["tests", "runtime/python"]
 markers = [

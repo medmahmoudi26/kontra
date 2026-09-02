@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The GO ACTOR-HOST ARM of conformance/queues.json.
+// The GO ACTOR-HOST ARM of shared/conformance/queues.json.
 //
 // THIS IS THE DERIVATION THE FAILURE MODE IS NAMED AFTER. The host binds TaskQueue and polls it;
 // the handler builds the same string from its workflow's OWN task queue, because workflow code
@@ -38,10 +38,10 @@ type queueCorpus struct {
 	} `json:"session"`
 }
 
-// ../../../conformance/queues.json — temporalhost -> go -> runtime -> <repo root>.
+// ../../../shared/conformance/queues.json — temporalhost -> go -> runtime -> <repo root>.
 func loadQueueCorpus(t *testing.T) *queueCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../../../conformance/queues.json")
+	raw, err := os.ReadFile("../../../shared/conformance/queues.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

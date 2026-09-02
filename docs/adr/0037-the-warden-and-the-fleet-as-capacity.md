@@ -154,7 +154,7 @@ async with fleet.hold(tag="dns", machines=4) as f:      # capacity + Lease
   "Take what exists" needs a read of the current count, and no workflow can reach one: `readStack` is
   a file read in the infra worker's state directory, behind a queue that serves one activity at a
   time behind 60-minute converges. So `fleet.hold(machines=None)` refuses, with an error naming that,
-  and `conformance/placement.json`'s first reader case pins the refusal. BYOC is still the right
+  and `shared/conformance/placement.json`'s first reader case pins the refusal. BYOC is still the right
   direction and is now an open design question rather than a settled one-liner.
 
 ## Consequences

@@ -56,7 +56,7 @@ Seven things were established against this checkout before deciding anything.
    `identity.SharedQueue(name, version)` and registers one worker on it. Nothing about it is
    multi-actor, and nothing about this decision makes it so.
 
-6. **No queue name carries a tenant.** `conformance/queues.json` pins five derivations —
+6. **No queue name carries a tenant.** `shared/conformance/queues.json` pins five derivations —
    `shared`, `sessions`, `session`, `endpoint`, `tmux_session` — across eight modules in four
    languages, and every one is a function of `(name, version)` alone. Two customers who both ship
    an actor called `nscheck` at `0.1.0` do not merely see each other: they land on **one task
@@ -88,7 +88,7 @@ Seven things were established against this checkout before deciding anything.
   single-box case and becomes one configured endpoint among many. What kontra keeps is *meaning* —
   which digest a version currently names — not storage or transport.
 
-- **A tenant is a Temporal namespace.** Queue names stay exactly as `conformance/queues.json` pins
+- **A tenant is a Temporal namespace.** Queue names stay exactly as `shared/conformance/queues.json` pins
   them, because they were always namespace-relative; the corpus needs no change and no derivation
   in any of the four languages moves. A **Warden**'s enrolment mints credentials scoped to one
   namespace, so a compromised **Machine** cannot address another tenant's queues at all.
@@ -121,7 +121,7 @@ Seven things were established against this checkout before deciding anything.
   **Warden**.
 
 - **ONE TARGET IS NOT THE SAME AS "ANY ACTOR RUNS ANYWHERE", and the gap is a class of Worker.**
-  Found by executing it, not by review: `conformance/queues.json` states that a queue name is not
+  Found by executing it, not by review: `shared/conformance/queues.json` states that a queue name is not
   sanitised and carries `a/b`, `my actor` and `café` as adversarial cases, and both were served
   against live Temporal on this checkout — polling, and visible to the driver's `list()`. But the
   OCI grammar refuses names kontra accepts. So an actor called `café` can be served, listed,

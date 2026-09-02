@@ -1054,7 +1054,7 @@ func serviceSection(t *testing.T, unit, name string) []string {
 // — and both are reachable from a JSON file the Machine did not write.
 //
 // THE CONTROLS ARE THE FIRST TWO ASSERTIONS. `a/b` must still be accepted, because
-// `conformance/queues.json` carries it as an actor name that must keep working and a refusal aimed at
+// `shared/conformance/queues.json` carries it as an actor name that must keep working and a refusal aimed at
 // the separator rather than at the round trip would break it; and a well-formed neighbour must still
 // start, or "it did not crash" would be indistinguishable from "it did nothing".
 func TestWardenRefusesAnAssignmentEntryThatWouldCrashOrDuplicate(t *testing.T) {

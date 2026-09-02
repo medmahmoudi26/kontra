@@ -315,7 +315,7 @@ func (f *fleetFlags) args(art *bundle) (map[string]any, error) {
 // remain for a stack converged before packing existed.
 //
 // A FUNCTION RATHER THAN A BLOCK INSIDE `fleetUp`, because it is the only way this repo's SECOND
-// writer of a packed converge can be driven by `conformance/placement.json` — the corpus that exists
+// writer of a packed converge can be driven by `shared/conformance/placement.json` — the corpus that exists
 // precisely because nothing joins the two writers and the reader but matching string literals.
 func inheritPlacement(a map[string]any, outputs map[string]any, sessions int) string {
 	if placed, ok := placementsOutput(outputs); ok {
@@ -759,7 +759,7 @@ func tmuxSessionTargets(outputs map[string]any) []tmuxSessionInput {
 //
 // Falls back to the fleet's tag for a Machine with no placement, and to `fleet` for one with
 // neither. THAT FALLBACK DIFFERS FROM tmuxSession's `actor` ON PURPOSE and the difference is
-// recorded in conformance/queues.json §tmux_session rather than left as two literals nobody can
+// recorded in shared/conformance/queues.json §tmux_session rather than left as two literals nobody can
 // tell from a typo: this names a MACHINE, which still has Terminals when no Actor is placed on
 // it, and calling such a session `actor` would be a lie about what is running there.
 //

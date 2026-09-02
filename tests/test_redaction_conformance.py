@@ -1,4 +1,4 @@
-"""The PYTHON ARM of the redaction contract (conformance/redaction.json).
+"""The PYTHON ARM of the redaction contract (shared/conformance/redaction.json).
 
 THE ONE PARITY SURFACE WHERE BEING WRONG IS A CREDENTIAL. Everything else these two SDKs must agree
 about is a key, a name or a hash — getting it wrong loses work. Getting redaction wrong writes a
@@ -24,7 +24,7 @@ import pytest
 from actorkit.hitl import redact as redact_value
 from actorkit.narrate import redact as redact_sentence
 
-FIXTURE = Path(__file__).resolve().parents[1] / "conformance" / "redaction.json"
+FIXTURE = Path(__file__).resolve().parents[1] / "shared" / "conformance" / "redaction.json"
 DOC = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 

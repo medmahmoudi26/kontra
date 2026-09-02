@@ -48,7 +48,7 @@ func FromEnv(ctx context.Context) (*Store, error) {
 	// so the writer's spelling round-trips whatever it is and nothing re-derives it. Changing this
 	// one is a separate decision with a separate blast radius — `data/parquet.ts` builds its blob
 	// URI as `s3://<bucket>/` + the carried key, on exactly that assumption — and it belongs with
-	// prefix rows in conformance/blobkey.json, which has none either.
+	// prefix rows in shared/conformance/blobkey.json, which has none either.
 	prefix := os.Getenv("KONTRA_S3_PREFIX")
 
 	awsCfg, err := config.LoadDefaultConfig(ctx,

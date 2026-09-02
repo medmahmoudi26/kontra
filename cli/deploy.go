@@ -276,7 +276,7 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 		// full image build and then fail on docker's own wording at ImageTag.
 		//
 		// It deliberately does NOT re-derive anything. The count of sites is not written down anywhere
-		// — conformance/README.md names a count in a comment as "the least reliable kind of
+		// — shared/conformance/README.md names a count in a comment as "the least reliable kind of
 		// documentation there is" — the corpus drives whichever sites its driver lists.
 		if err := checkOCIRef(remote); err != nil {
 			return nil, fmt.Errorf("%s@%s cannot be deployed as an Image.\n%w\n"+

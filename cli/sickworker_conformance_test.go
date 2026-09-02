@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// The READER's arm of conformance/workerhealth.json.
+// The READER's arm of shared/conformance/workerhealth.json.
 //
 // Three arms, not two, and this is the odd one. The corpus's usual shape is N implementations of one
 // computation; here two actor hosts WRITE the two series (`tests/test_worker_health_conformance.py`,
@@ -65,7 +65,7 @@ type workerHealthCorpus struct {
 
 func loadWorkerHealthCorpus(t *testing.T) workerHealthCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../conformance/workerhealth.json")
+	raw, err := os.ReadFile("../shared/conformance/workerhealth.json")
 	if err != nil {
 		t.Fatalf("reading the corpus: %v", err)
 	}
@@ -78,7 +78,7 @@ func loadWorkerHealthCorpus(t *testing.T) workerHealthCorpus {
 
 // A corpus that shrank to its easy half passes every judge, including one that returns `healthy`
 // unconditionally. So the interesting rows are asserted PRESENT before anything is asserted about
-// them — conformance/README.md rule 3, and the discipline five vacuous guards in this program have
+// them — shared/conformance/README.md rule 3, and the discipline five vacuous guards in this program have
 // earned.
 func TestWorkerHealthCorpusStillCarriesTheCasesThatMatter(t *testing.T) {
 	doc := loadWorkerHealthCorpus(t)

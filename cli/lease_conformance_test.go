@@ -1,4 +1,4 @@
-// lease_conformance_test.go — THE GO ARM of conformance/lease.json.
+// lease_conformance_test.go — THE GO ARM of shared/conformance/lease.json.
 //
 // This side is the **Lease** workflow wire's READER. `backend/src/lease.ts` is the writer, and the two are
 // joined by nothing but a matching set of string literals — no code generation, no shared schema, no
@@ -56,17 +56,17 @@ type leaseCorpus struct {
 
 func loadLeaseCorpus(t *testing.T) leaseCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../conformance/lease.json")
+	raw, err := os.ReadFile("../shared/conformance/lease.json")
 	if err != nil {
 		t.Fatalf("the corpus is the contract and it is unreadable: %v", err)
 	}
 	var c leaseCorpus
 	if err := json.Unmarshal(raw, &c); err != nil {
-		t.Fatalf("conformance/lease.json does not parse: %v", err)
+		t.Fatalf("shared/conformance/lease.json does not parse: %v", err)
 	}
 	// THE GUARDS THAT KEEP THIS FILE FROM PASSING VACUOUSLY. Every assertion below is a loop, and a
 	// loop over an empty slice is a test that reports success for having found nothing — which is
-	// the shape `conformance/README.md` names as the failure mode of half the guards it replaced.
+	// the shape `shared/conformance/README.md` names as the failure mode of half the guards it replaced.
 	if len(c.LeaseSetWire.Keys.Envelope.Required) == 0 {
 		t.Fatal("the corpus names no required Lease workflow keys — every containment check below is vacuous")
 	}
@@ -109,7 +109,7 @@ func jsonTagsOf(v any) []string {
 }
 
 // TestTheReaderDeclaresNoKeyNobodySends is the containment rule, and it runs in one direction on
-// purpose (`conformance/lease.json` §lease_set_wire.keys.containment).
+// purpose (`shared/conformance/lease.json` §lease_set_wire.keys.containment).
 //
 // A reader IGNORING a key is correct and common. A reader DECLARING a key nobody sends is the silent
 // bug: `encoding/json` leaves it at the zero value on every response, and for `holder` the zero
@@ -245,7 +245,7 @@ func TestTheHolderSplitMatchesTheCorpus(t *testing.T) {
 	}
 	// THE CORPUS STILL CONTAINS ITS INTERESTING INPUT. A corpus that quietly lost the embedded-
 	// separator row would leave this test passing on the easy cases only, which is exactly the
-	// failure `conformance/README.md` step 3 exists to prevent.
+	// failure `shared/conformance/README.md` step 3 exists to prevent.
 	if !sawEmbeddedSeparator {
 		t.Fatal("the corpus no longer carries a holder containing the separator — without that row\n" +
 			"a first-separator split passes every remaining case")

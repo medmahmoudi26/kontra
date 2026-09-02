@@ -179,7 +179,7 @@ func newPodmanDriver(ctx context.Context, trust trustPolicy) (*podmanDriver, err
 //	errImageUnrepresentable  the reference is not an OCI reference AT ALL. Nothing fixes it.
 //
 // THE SECOND IS NOT A TYPO, IT IS A CLASS OF ACTOR. kontra names **Actors** more freely than OCI names
-// repositories — `conformance/queues.json` pins `a/b`, `my actor` and `café` as names that must keep
+// repositories — `shared/conformance/queues.json` pins `a/b`, `my actor` and `café` as names that must keep
 // working, and states why: "A QUEUE NAME IS NOT SANITISED… A derivation that sanitised the queue would
 // route to a queue nobody polls, which is silent." Temporal accepts all three. The OCI grammar accepts
 // one of them. So there is a set of Actors that serve forever under `process` — which runs from source

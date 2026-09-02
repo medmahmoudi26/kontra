@@ -227,7 +227,7 @@ func TestListReportsOneHalfPerProcessTree(t *testing.T) {
 }
 
 // AN ACTOR WHOSE NAME HOLDS THE LABEL'S SEPARATOR IS STILL A WORKER, and the parse is the only thing
-// standing between it and invisibility. `conformance/queues.json` carries `a/b` as an adversarial
+// standing between it and invisibility. `shared/conformance/queues.json` carries `a/b` as an adversarial
 // actor name and pins that every queue derivation passes it through verbatim, so this is a Worker
 // that starts, serves and polls perfectly — and a `list` that split the label left-to-right would
 // never report it again. An invisible Worker arriving THROUGH the seam built to prevent invisible
@@ -281,7 +281,7 @@ func TestStopEndsBothHalvesOfThePair(t *testing.T) {
 // THE LABEL IS THE ONE PLACE AN ARBITRARY PROCESS GETS TO CLAIM IT IS OURS, so the parse is strict —
 // a lenient one turns a stranger's `KONTRA_WORKER=x` into a Worker the Warden then tries to stop.
 func TestWorkerLabelRoundTripsAndRefusesEverythingElse(t *testing.T) {
-	// THE NAMES ARE THE CORPUS'S, not invented here. conformance/queues.json states that "A QUEUE
+	// THE NAMES ARE THE CORPUS'S, not invented here. shared/conformance/queues.json states that "A QUEUE
 	// NAME IS NOT SANITISED" and carries these to prove it — `a/b` is the one that matters, because
 	// it holds the label's own separator and a left-to-right parse refuses it.
 	for _, id := range []struct{ name, version string }{

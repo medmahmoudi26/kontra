@@ -62,7 +62,7 @@ class UnitStore:
         # and the reader (get_subunit, the orchestrator's resolveBatch) uses it verbatim — so the
         # writer's spelling round-trips whatever it is. Changing it is a separate decision with a
         # separate blast radius (backend/src/data/parquet.ts builds `s3://<bucket>/` + this key)
-        # and it belongs with prefix rows in conformance/blobkey.json, which has none either.
+        # and it belongs with prefix rows in shared/conformance/blobkey.json, which has none either.
         key = self.prefix + blob_key(run_date, _actor_name(), run_id, node_id, i, sha)
         self._s3.put_object(Bucket=self.bucket, Key=key, Body=data,
                             ContentType="application/json")
@@ -142,7 +142,7 @@ def blob_key(run_date: str, actor: str, run_id: str, node_id: str, unit: int, sh
     This is a CROSS-SDK contract (ADR 0015): the Go and Python hosts must produce the same key
     for the same inputs, or the reader sees two different layouts. They have already drifted
     once (isolation counters shipped Go-only), so both are pinned to one golden fixture —
-    conformance/blobkey.json, asserted by each SDK's own suite.
+    shared/conformance/blobkey.json, asserted by each SDK's own suite.
     """
     return (
         f"units/run={_part_safe(run_id or 'run')}"

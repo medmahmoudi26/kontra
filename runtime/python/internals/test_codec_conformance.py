@@ -1,4 +1,4 @@
-"""The Python codec against conformance/codec/fixtures.json — the SAME corpus the Go codec
+"""The Python codec against shared/conformance/codec/fixtures.json — the SAME corpus the Go codec
 and the orchestrator's claimCheck.ts must pass.
 
 This file is the reason the three implementations can be trusted to agree. It asserts the
@@ -20,7 +20,7 @@ from internals.codec import MARKER, cas_key, decode_payload, encode_payload
 
 # parents[3] is the repo root: internals/ -> python/ -> runtime/ -> <root>, the same depth the
 # old actorkit/python/internals was.
-FIXTURES = Path(__file__).resolve().parents[3] / "conformance" / "codec" / "fixtures.json"
+FIXTURES = Path(__file__).resolve().parents[3] / "shared" / "conformance" / "codec" / "fixtures.json"
 
 
 class MemStore:

@@ -28,7 +28,7 @@ func TestTheCommitKeyIsTheBatchHashPlusTheIndex(t *testing.T) {
 // THE HASH GOLDEN THAT USED TO SIT HERE IS GONE. It asserted two digests over plain-ASCII
 // inputs and claimed "a drift in either encoder shows up here", which was false: plain ASCII is
 // the one input class where Go's HTML escaping and Python's non-ASCII escaping cannot differ.
-// conformance/batchid.json replaced it, driven from both SDKs — see batchid_conformance_test.go.
+// shared/conformance/batchid.json replaced it, driven from both SDKs — see batchid_conformance_test.go.
 
 // §17's two properties, stated as behaviour rather than as a string: the same Batch hashes the
 // same on every attempt (which is what makes a retry a resume), and any difference in what was

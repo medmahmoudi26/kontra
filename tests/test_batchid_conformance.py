@@ -1,4 +1,4 @@
-"""The PYTHON ARM of the Batch content-hash contract (conformance/batchid.json).
+"""The PYTHON ARM of the Batch content-hash contract (shared/conformance/batchid.json).
 
 WHY THIS CORPUS EXISTS, and why the test it replaces did not do its job. Both SDKs key a committed
 Unit by the Batch's content hash (ADR 0023 §17), and the hash is a canonical JSON encoding of
@@ -34,7 +34,7 @@ import pytest
 from internals.engine import batch_id
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "conformance" / "batchid.json"
+FIXTURE = ROOT / "shared" / "conformance" / "batchid.json"
 
 CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
 

@@ -119,7 +119,7 @@ function str(v: unknown): string {
  * `fleet` RATHER THAN `actor`, WHICH IS WHAT {@link actorSession} ANSWERS, and the difference is
  * intended rather than a drift: this names a MACHINE, which still has Terminals when no Actor is
  * placed on it, so calling its session `actor` would be a lie about what is running there. The two
- * fallbacks and the reason they differ are rows in `conformance/queues.json` §tmux_session, which
+ * fallbacks and the reason they differ are rows in `shared/conformance/queues.json` §tmux_session, which
  * `cli/fleet.go:fleetSessionName` executes as well — a difference that is not written down is one
  * nobody can tell from a typo when it goes red.
  */

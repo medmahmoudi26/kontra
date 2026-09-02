@@ -582,7 +582,7 @@ def test_the_envelope_is_the_transcripts_ask_field_for_field(wf: Fake) -> None:
     derives pending/expired from `answeredAt` and `deadlineAt` against a clock it was handed, while
     the RUN knows which of the four endings actually happened. Extra is safe; missing is not.
     """
-    declared = (ROOT / "core" / "src" / "transcript.ts").read_text()
+    declared = (ROOT / "shared" / "core" / "src" / "transcript.ts").read_text()
     block = declared.split("export interface Ask {", 1)[1].split("\n}", 1)[0]
     ts_fields = set(re.findall(r"^\s{2}(\w+)\??:", block, re.MULTILINE))
     assert ts_fields == {"id", "prompt", "askedAt", "schema", "context", "deadlineAt", "answeredAt", "by"}

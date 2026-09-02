@@ -5,7 +5,7 @@ package main
 //
 // ═══ WHY THIS FILE EXISTS AND IS NOT THREE REGEXPS ═══
 //
-// kontra names **Actors** more freely than OCI names repositories. `conformance/queues.json` pins
+// kontra names **Actors** more freely than OCI names repositories. `shared/conformance/queues.json` pins
 // `a/b`, `my actor` and `café` as names that must keep working and states why — "A QUEUE NAME IS
 // NOT SANITISED… A derivation that sanitised the queue would route to a queue nobody polls, which
 // is silent." Temporal accepts all three; the OCI grammar accepts one. So the set of nameable
@@ -31,7 +31,7 @@ package main
 //
 // The issue counted three and there were four: the push half of `deploy` had been folded into
 // "deploy/pull" and had the same bug, refusing `café` only after a full image build and then as a
-// "push/pull address mismatch". No total is written down anywhere — conformance/README.md calls a
+// "push/pull address mismatch". No total is written down anywhere — shared/conformance/README.md calls a
 // count in a comment "the least reliable kind of documentation there is" — the corpus driver's list
 // is the truth.
 //
@@ -86,7 +86,7 @@ var (
 // is a hostname and may carry uppercase, a PATH COMPONENT may not — which is why
 // `localhost:5000/Foo` fails on `Foo` and not on `localhost`.
 //
-// The TAG is the one this file added, and it is not decoration: `conformance/queues.json` carries
+// The TAG is the one this file added, and it is not decoration: `shared/conformance/queues.json` carries
 // `1:2` as an adversarial VERSION, which Temporal accepts verbatim and which cannot be a tag at all
 // — `<registry>/bundles/nscheck:1:2` reads back as repository `bundles/nscheck:1`, tag `2`, so
 // without this rule the refusal would blame the wrong half of the string.
@@ -226,7 +226,7 @@ func checkOCIRef(ref string) error {
 // refusal.
 func ociRefRefusal(part, bad, ref string) error {
 	return fmt.Errorf("%w: %s %q in %q.\n"+
-		"  kontra names Actors more freely than OCI names repositories — conformance/queues.json pins\n"+
+		"  kontra names Actors more freely than OCI names repositories — shared/conformance/queues.json pins\n"+
 		"  `a/b`, `my actor` and `café` as names that must keep working, and Temporal accepts all three.\n"+
 		"  An OCI path component is lowercase alphanumeric separated by `.`, `_` or `-`; a tag is\n"+
 		"  [A-Za-z0-9_][A-Za-z0-9._-]{0,127}; a registry host is a hostname with an optional :port.\n"+

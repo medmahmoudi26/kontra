@@ -19,7 +19,7 @@ import (
 // (`actorkit.catalog.session_queue`, which closes on it) and `handler/internal/identity`
 // .SessionQueue, which dispatches onto it. handler/internal is not importable from this module
 // (a different module, and internal to handler), so the decoupling rule leaves this a
-// re-derivation and conformance/queues.json §session is what holds them to one answer. Not a
+// re-derivation and shared/conformance/queues.json §session is what holds them to one answer. Not a
 // count in a comment: the three comments that carried one disagreed with each other.
 //
 // NO ID, NO QUEUE. An empty session id would derive `{shared}-s-`, a real queue every Session of

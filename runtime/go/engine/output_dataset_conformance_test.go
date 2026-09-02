@@ -9,7 +9,7 @@ import (
 	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
-// The GO ARM of the output-Dataset author-surface contract (conformance/output_dataset.json).
+// The GO ARM of the output-Dataset author-surface contract (shared/conformance/output_dataset.json).
 //
 // A per-SDK check against its own docs is not the same as the two SDKs agreeing, and this repo has
 // been bitten by exactly that (a field reached the proto and three consumers but not the Go
@@ -87,8 +87,8 @@ func bodyFor(t *testing.T, name string) core.MethodFunc {
 }
 
 func TestOutputDatasetSurfaceMatchesTheFixture(t *testing.T) {
-	// ../../../conformance/output_dataset.json — engine -> go -> runtime -> <repo root>.
-	raw, err := os.ReadFile("../../../conformance/output_dataset.json")
+	// ../../../shared/conformance/output_dataset.json — engine -> go -> runtime -> <repo root>.
+	raw, err := os.ReadFile("../../../shared/conformance/output_dataset.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

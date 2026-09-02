@@ -168,7 +168,7 @@ promise does not change".
   - It compares against **one** version, at registration: `0.3.0` against `0.2.0`, never against
     `0.1.0`, and a version registered out of order afterwards does not recompute an earlier
     finding — which is why a stored finding names the version it was compared against.
-- **`contracts/kontra/v1/catalog.proto` and `run.proto` no longer name an external owner**, and the
+- **`shared/contracts/kontra/v1/catalog.proto` and `run.proto` no longer name an external owner**, and the
   generated stubs (`handler/_gen`, `backend/_gen`) were regenerated with `buf generate` rather
   than hand-edited.
 - **`docs/adr/` is no longer gitignored, and three documents still say it is.** 0024's last

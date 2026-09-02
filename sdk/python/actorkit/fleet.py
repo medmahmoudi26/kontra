@@ -154,7 +154,7 @@ HOLD_LEASE_ACTIVITY = "holdFleetLease"
 DROP_LEASE_ACTIVITY = "dropFleetLease"
 
 #: What separates a holder from its nonce in a **Lease** id. `backend/src/lease.ts:leaseId` builds
-#: the same string and `parseLeaseId` reads it back; `conformance/lease.json` is what keeps the two
+#: the same string and `parseLeaseId` reads it back; `shared/conformance/lease.json` is what keeps the two
 #: one grammar. A **Lease** held under one spelling and dropped under another is a **Lease** that is
 #: never dropped, which is **Machines** billing with nothing left that knows about them — and neither
 #: side raises, so nothing but a corpus catches it.
@@ -171,7 +171,7 @@ FLEET_PROJECT = "kontra-fleet"
 #: per-Artifact, and `coerceFleetArgs` has no converge-level rule for it — so a `workers` sent up
 #: here is narrowed away without a word, which is the `--tmux` failure exactly. The list is written
 #: out rather than derived from the entry so that adding a per-placement key does not silently
-#: acquire a converge-level spelling it has no reader for. `conformance/placement.json` pins it.
+#: acquire a converge-level spelling it has no reader for. `shared/conformance/placement.json` pins it.
 LEGACY_PLACEMENT_KEYS = (
     "actorName",
     "actorVersion",
@@ -886,7 +886,7 @@ class Fleet:
             # spelling of it, because it is per-Artifact — so copying the whole entry up put a
             # `workers` at the top level that `coerceFleetArgs` narrows away without a word. Harmless
             # today because the array wins, and exactly the shape of `--tmux`: a key a writer sends,
-            # a reader discards, and nothing anywhere reports. Caught by `conformance/placement.json`.
+            # a reader discards, and nothing anywhere reports. Caught by `shared/conformance/placement.json`.
             if len(entries) == 1:
                 for legacy in LEGACY_PLACEMENT_KEYS:
                     if legacy in entries[0]:

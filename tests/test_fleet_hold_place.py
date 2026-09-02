@@ -26,7 +26,7 @@ window in which **Machines** are up with nothing on them. `up()` cannot reach it
 which is the price of the split. `test_the_window_up_cannot_reach` measures exactly that difference.
 
 The server-side halves are `backend/src/workflows/lease.test.ts` and `backend/src/infra/fleet.test.ts`;
-the wire between the two writers of a desired state is `conformance/placement.json`.
+the wire between the two writers of a desired state is `shared/conformance/placement.json`.
 """
 
 from __future__ import annotations
@@ -419,7 +419,7 @@ def test_a_fleet_with_one_placement_does_not_claim_to_pack():
 
 
 def test_spread_true_crosses_as_the_machine_count_and_not_as_a_flag():
-    """`conformance/placement.json:never_boolean` — `coerceFleetArgs` narrows to strings and
+    """`shared/conformance/placement.json:never_boolean` — `coerceFleetArgs` narrows to strings and
     numbers, so a boolean `spread` would be DROPPED before the program saw it and one Worker per
     Machine would quietly become whatever the default was. That is how `--tmux` rode a release. So
     the flag resolves to a number on this side, and this is the assertion that says so."""

@@ -176,7 +176,7 @@ const (
 // Renaming either would fix neither. What fixes both is that two tenants' Machines are in two
 // namespaces, which is the only authorisation boundary Temporal has (ADR 0036 §7). All three names
 // below stay exactly as they are — they are namespace-RELATIVE, which is the same reason
-// `conformance/queues.json` needed no change for this slice.
+// `shared/conformance/queues.json` needed no change for this slice.
 func wardenWorkflowID(wardenID string) string   { return wardenWorkflowIDPrefix + wardenID }
 func wardenMachineQueue(wardenID string) string { return wardenMachineQueuePrefix + wardenID }
 
@@ -979,7 +979,7 @@ func wardenPlaneWorkerOn(c client.Client, queue string) worker.Worker {
 // ═══ WHY IT CANNOT BE ONE WORKER ═══
 //
 // `wardenPlaneQueue` is `kontra-wardens` in EVERY namespace, because a queue name is
-// namespace-relative and this slice changed none of them (`conformance/queues.json`). A Temporal
+// namespace-relative and this slice changed none of them (`shared/conformance/queues.json`). A Temporal
 // client is bound to one namespace at dial time, so "poll kontra-wardens" is a different queue in
 // each tenant and one worker reaches exactly one of them. A Controller that kept slice 04's single
 // worker would answer every enrolment successfully and execute the watchers of one tenant, leaving

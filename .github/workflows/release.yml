@@ -72,7 +72,7 @@ jobs:
           repository: medmahmoudi26/kontra-console
           path: _sibling/kontra-console
           token: ${{ secrets.KONTRA_CONSOLE_TOKEN }}
-      - name: put this checkout where `link:../kontra/core` expects it
+      - name: put this checkout where `link:../kontra/shared/core` expects it
         run: ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/_sibling/kontra"
       - uses: pnpm/action-setup@v4
         with:

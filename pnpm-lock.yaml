@@ -27,7 +27,7 @@ importers:
         version: 8.3.0
       '@kontra/core':
         specifier: workspace:*
-        version: link:../core
+        version: link:../shared/core
       '@opentelemetry/api':
         specifier: ^1.9.0
         version: 1.9.1
@@ -111,7 +111,7 @@ importers:
         specifier: ^2.0.0
         version: 2.1.9(@types/node@22.20.1)(supports-color@8.1.1)(terser@5.48.0)
 
-  core:
+  shared/core:
     devDependencies:
       '@types/node':
         specifier: ^22.10.0

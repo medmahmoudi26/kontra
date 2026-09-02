@@ -8,7 +8,7 @@
 // MODULE, and a codec the sharer cannot import is not shared: `cli/claimcheck.go` held a FIFTH
 // implementation of this wire format — its own marker constant, its own `{sha256,size,meta}`
 // struct, its own base64 metadata decode and its own `cas/<ab>/<sha>` string — and cited
-// conformance/codec/fixtures.json in a comment while no test of it ever opened the file.
+// shared/conformance/codec/fixtures.json in a comment while no test of it ever opened the file.
 //
 // TYPE ALIASES AND A CONSTRUCTOR, NOT A WRAPPER, for the reason `casstore` gives: a wrapper would
 // be a second implementation of the one thing that must exist exactly once. `= codec.Codec` makes

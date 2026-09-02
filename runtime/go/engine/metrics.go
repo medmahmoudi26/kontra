@@ -41,7 +41,7 @@ var (
 )
 
 // countLoad records one Load attempt and whether it returned. Peer of `count_load` in
-// internals/metrics.py; the NAMES it renders are pinned by conformance/workerhealth.json.
+// internals/metrics.py; the NAMES it renders are pinned by shared/conformance/workerhealth.json.
 //
 // ONE FUNCTION, BOTH COUNTERS, and that is the lesson from the two beside it. `countBatch` has had
 // no production caller since it was written, so `rate(reloads)/rate(batches)` — the expression the
@@ -136,7 +136,7 @@ func writeMetrics(w http.ResponseWriter, actor, version string) {
 	fmt.Fprintf(&b, "kontra_batches_total{%s} %g\n", base, snapBatches)
 
 	// The sick-worker ratio's two halves, byte-identical to the Python host's rendering. The names
-	// are pinned by conformance/workerhealth.json rather than by these two literals: a
+	// are pinned by shared/conformance/workerhealth.json rather than by these two literals: a
 	// `_failures_total` here against a `_failure_total` there would leave the Warden dividing by an
 	// absent series on every Go Worker in a Fleet, and the only symptom would be a chip that says
 	// `unknown` forever while both files read correctly on their own.

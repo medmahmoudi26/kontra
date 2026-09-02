@@ -24,7 +24,7 @@ import (
 // both join, so with KONTRA_S3_PREFIX=`slice11` a Go actor wrote `slice11cas/df/df5b…` while the
 // handler, the orchestrator and the CLI asked for `slice11/cas/df/df5b…`. actorkit and the
 // handler are separate modules and never import each other, so what holds the four
-// implementations to one answer is the `prefixCases` rows of conformance/codec/fixtures.json.
+// implementations to one answer is the `prefixCases` rows of shared/conformance/codec/fixtures.json.
 func objectKey(prefix string, parts ...string) string {
 	var bits []string
 	if p := strings.Trim(prefix, "/"); p != "" {

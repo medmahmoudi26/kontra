@@ -79,7 +79,7 @@ const (
 // --- the wire ------------------------------------------------------------------------------------
 
 // paneReport is one Machine's whole statement about itself. Pinned by
-// `conformance/workerhealth.json`, because the reader is TypeScript
+// `shared/conformance/workerhealth.json`, because the reader is TypeScript
 // (`backend/src/panels/warden.ts`) and a field renamed on one side of that boundary has no failure
 // mode louder than a pane that never appears.
 type paneReport struct {

@@ -376,5 +376,5 @@ func TestAnExplicitlyVersionedWriterStillWins(t *testing.T) {
 // "runs_2026-08-19T14_49_20_00_00_sweep" with the comment "want the same mapping Python's _slug
 // makes", which was a value hand-copied out of an implementation nothing ran — _slug's own
 // docstring cited a `tests/test_temp_dataset.py` that does not exist. It is
-// conformance/slug.json now, driven from slug_conformance_test.go here, tests/test_slug_conformance.py
+// shared/conformance/slug.json now, driven from slug_conformance_test.go here, tests/test_slug_conformance.py
 // in Python and backend/src/data/slug.conformance.test.ts in the orchestrator (ADR 0035 rule two).

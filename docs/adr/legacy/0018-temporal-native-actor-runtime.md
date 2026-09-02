@@ -178,7 +178,7 @@ change. `sdk/python/actorkit/actor.py` and `sdk/go/kontra.go` already import no 
   codec receives an unreadable ref payload — and `actorkit/go/go.mod` has **no** `go.temporal.io`
   dependency at all today. There is no Python codec module either, despite
   `handler/internal/codec/codec.go:3` calling itself "the Go peer of python actorkit.codec".
-  `conformance/codec/README.md:8` ("the Python actor host does NOT codec") stops being true for
+  `shared/conformance/codec/README.md:8` ("the Python actor host does NOT codec") stops being true for
   both. This forces a deliberate choice the ADR did not anticipate: **duplicate the Go codec into
   actorkit** — a third byte-exact implementation, and `fixtures.json` exists precisely because
   that drift has already happened once (`README.md:42-45`) — **or extract `codec`+`cas`+

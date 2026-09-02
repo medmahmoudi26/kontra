@@ -74,7 +74,7 @@ export interface FleetArgs {
    * that stops appearing in this array is a request to DELETE its `command.remote.Command`, which
    * runs `machineTeardown` and stops that Worker. So a writer that sends one placement onto a Fleet
    * carrying two has not "updated one of them" — it has removed the other, successfully, with
-   * nothing raising on either side. `conformance/placement.json` is the corpus that keeps the two
+   * nothing raising on either side. `shared/conformance/placement.json` is the corpus that keeps the two
    * writers honest about it.
    *
    * The single-placement keys BELOW are the pre-slice-11 spelling and still work: `coerceFleetArgs`

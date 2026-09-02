@@ -328,7 +328,7 @@ const bundleRepoPrefix = "bundles"
 
 // bundleRepo is the OCI repository a Bundle is published to.
 //
-// A PURE DERIVATION AND NOT A GUARD, because `conformance/bundleref.json` drives it from two
+// A PURE DERIVATION AND NOT A GUARD, because `shared/conformance/bundleref.json` drives it from two
 // languages and a validating version would have to be validated identically in both. The grammar
 // is checked exactly once, by the OCI reference parser inside `pushBundle` — see the refusal
 // there for why an actor name that serves fine cannot always be published.
@@ -353,7 +353,7 @@ func bundleRepo(name string) string { return bundleRepoPrefix + "/" + name }
 // destination, whose repository may not be `bundles/<name>` at all. Those are two callers with two
 // inputs and ONE question, and this repo's own habit is to name what a second answer costs: the
 // pointer and the tarball that disagreed, the push address and the fetch address that disagreed.
-// `conformance/bundleref.json` drives this side, so a divergence would only ever have been caught
+// `shared/conformance/bundleref.json` drives this side, so a divergence would only ever have been caught
 // on the path the corpus does not cover.
 // The version is passed empty because a BLOB is addressed by its digest and never by a tag — that
 // is the whole property `bundleref.json` calls the pairing invariant. Nothing downstream of here
@@ -447,7 +447,7 @@ func (d bundleDest) blobURL(sha string) string {
 // THE CONVENTION IS NOT DEAD AND MUST NOT BE, because it is the only address the control plane can
 // resolve without being told: `backend/src/activities/fleet.ts:resolveBundle` builds
 // `<registry>/v2/bundles/<actor>/manifests/<version>` from the actor and the version alone, and
-// `conformance/bundleref.json` pins that on both sides. A `--push` to some other repository
+// `shared/conformance/bundleref.json` pins that on both sides. A `--push` to some other repository
 // publishes an Artifact that a Fleet placement cannot find — see `cmdBuild`, which prints that
 // rather than leaving it to be discovered.
 func conventionalBundleDest(reg, name, version string) bundleDest {
@@ -569,7 +569,7 @@ func pushDestination(pushFlag, registryFlag, controllerFlag, name, version strin
 		dest = conventionalBundleDest(bundleRegistry(regFlag, controllerFlag), name, version)
 		if err := dest.check(dest.tagged()); err != nil {
 			return dest, fmt.Errorf("this Actor cannot be published as a Bundle.\n%w\n"+
-				"  A task queue accepts far more than an OCI repository does (conformance/queues.json), so\n"+
+				"  A task queue accepts far more than an OCI repository does (shared/conformance/queues.json), so\n"+
 				"  %s@%s serves fine and only its ARTIFACT is unnameable. Rename it in actor.json",
 				err, name, version)
 		}
@@ -613,7 +613,7 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 	// ═══ THE GRAMMAR IS ASKED HERE AND NOT ONLY IN pushDestination ═══
 	//
 	// A QUEUE NAME IS NOT SANITISED AND AN OCI REPOSITORY NAME IS, and the two vocabularies genuinely
-	// differ — so an actor that serves perfectly can fail to publish. `conformance/queues.json` carries
+	// differ — so an actor that serves perfectly can fail to publish. `shared/conformance/queues.json` carries
 	// `my actor`, `café` and `a/b` as adversarial cases precisely because Temporal accepts them; the
 	// OCI grammar accepts only the third, so `a/b` publishes to `bundles/a/b` (unambiguous, because a
 	// TAG is delimited by `:` and not by a slash count) while the other two are refused before any
@@ -626,7 +626,7 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 	// added is the sentence oras cannot write: which actor, and that actor.json is where the fix goes.
 	if err := dest.check(dest.tagged()); err != nil {
 		return nil, fmt.Errorf("actor %q cannot be published as a Bundle.\n%w\n"+
-			"  Task queues accept far more than an OCI repository does (conformance/queues.json), so this\n"+
+			"  Task queues accept far more than an OCI repository does (shared/conformance/queues.json), so this\n"+
 			"  actor serves fine and only its ARTIFACT is unnameable. Rename it in actor.json.",
 			b.Name, err)
 	}
@@ -671,7 +671,7 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 	repo, err := remote.NewRepository(dest.repository())
 	if err != nil {
 		return nil, fmt.Errorf("oras refuses %q, which cli/ociref.go accepted — the two grammars have "+
-			"drifted and conformance/ociref.json is where that gets pinned: %w", dest.repository(), err)
+			"drifted and shared/conformance/ociref.json is where that gets pinned: %w", dest.repository(), err)
 	}
 	repo.PlainHTTP = dest.PlainHTTP
 

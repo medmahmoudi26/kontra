@@ -1,5 +1,5 @@
 /**
- * The TYPESCRIPT ARM of `conformance/terminal.json` — and this side is the wire's WRITER.
+ * The TYPESCRIPT ARM of `shared/conformance/terminal.json` — and this side is the wire's WRITER.
  *
  * WHY A FIXTURE AND NOT A SOURCE SCRAPE. A TypeScript interface is erased at runtime, so there is
  * nothing to reflect over: `Object.keys(Terminal)` does not exist. The two ways to pin it are to
@@ -9,7 +9,7 @@
  * the assertions below make vitest reject it if the corpus and the fixture disagree. A rename in
  * `types.ts` therefore has to break something twice before it can reach a reader.
  *
- * THE ASYMMETRY WITH THE GO ARM IS DELIBERATE, and `conformance/terminal.json` states it under
+ * THE ASYMMETRY WITH THE GO ARM IS DELIBERATE, and `shared/conformance/terminal.json` states it under
  * `keys.containment`: the writer's key set is pinned EXACTLY, the reader's only has to be a subset.
  * A reader that ignores `paneCols` is right. A writer that quietly stops sending `fleet` is how
  * `kontra panels` printed `-` in that column on every Fleet for as long as the rename was live.
@@ -23,7 +23,7 @@ import { describe, expect, it } from 'vitest';
 import type { Terminal } from './types';
 
 const corpus = JSON.parse(
-  readFileSync(join(__dirname, '..', '..', '..', 'conformance', 'terminal.json'), 'utf8'),
+  readFileSync(join(__dirname, '..', '..', '..', 'shared', 'conformance', 'terminal.json'), 'utf8'),
 ) as {
   keys: { required: string[]; optional: string[] };
   goldens: { terminal: Record<string, unknown> };

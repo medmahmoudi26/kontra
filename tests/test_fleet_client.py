@@ -29,7 +29,7 @@ from fleetscope import FleetScope
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "backend" / "src"
 #: The shared kernel (ADR 0041). Declarations both the orchestrator and the console read live here.
-CORE = ROOT / "core" / "src"
+CORE = ROOT / "shared" / "core" / "src"
 
 
 def _read(rel: str) -> str:
@@ -523,7 +523,7 @@ def test_a_zero_machine_hold_is_ready_before_it_asks_about_a_placement(gate):
 
 
 def test_the_credential_name_pattern_matches_the_secret_store():
-    """`core/src/secrets.ts:SECRET_NAME_RE`, character for character. The alphabet is bounded on
+    """`shared/core/src/secrets.ts:SECRET_NAME_RE`, character for character. The alphabet is bounded on
     both sides so `DO_TOKEN` and `do-token` cannot become two different secrets — the mistake
     somebody makes at 3am with a production credential.
 
@@ -537,7 +537,7 @@ def test_the_credential_name_pattern_matches_the_secret_store():
     m = re.search(
         r"SECRET_NAME_RE\s*=\s*/([^/]+)/", (CORE / "secrets.ts").read_text(encoding="utf-8")
     )
-    assert m, "could not find SECRET_NAME_RE in core/src/secrets.ts"
+    assert m, "could not find SECRET_NAME_RE in shared/core/src/secrets.ts"
     assert fleet.SECRET_NAME_RE.pattern == m.group(1)
 
 

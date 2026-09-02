@@ -1,6 +1,6 @@
 version: v2
 modules:
-  - path: contracts
+  - path: shared/contracts
 deps:
   # protoc-gen-go-temporal annotation options (temporal/v1/temporal.proto) — the Go Nexus
   # handler's workflow/activity/nexus code is generated from actor_service.proto.

@@ -55,7 +55,7 @@ const goPoller = (host: string, pid = 42, queue = 'webcrawl-0.2.0'): PollerInfo 
 });
 
 describe('which queue a Machine is asked about', () => {
-  // THE NAME ITSELF is pinned by conformance/queues.json (queues.conformance.test.ts), because it
+  // THE NAME ITSELF is pinned by shared/conformance/queues.json (queues.conformance.test.ts), because it
   // is one string eight derivations in four languages have to spell the same way. What is this
   // file's own is the question above it: which Machines HAVE a queue to describe.
   it('has no queue for a Machine with no placement', () => {

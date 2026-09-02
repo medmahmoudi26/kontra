@@ -2,7 +2,7 @@
 
 ## Status
 
-Settled; **implemented** (Phase 1). Protos under `contracts/kontra/v1/`
+Settled; **implemented** (Phase 1). Protos under `shared/contracts/kontra/v1/`
 (`run.proto`, `step.proto`, `entry.proto`) with buf codegen wired and drift-checked in CI;
 the cross-language boundary types are generated + committed. Per-actor I/O is validated as
 JSON Schema (Draft 2020-12) on the execution path (ADR 0003) **and** compat-checked in

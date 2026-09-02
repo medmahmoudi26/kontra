@@ -1,4 +1,4 @@
-// placement_conformance_test.go — THE GO ARM of conformance/placement.json.
+// placement_conformance_test.go — THE GO ARM of shared/conformance/placement.json.
 //
 // This side is a WRITER, and it is the SECOND one: `sdk/python/actorkit/fleet.py` builds the same
 // Fleet desired state out of `hold()`/`place()`/`up()`, `cli/fleet.go` builds it out of
@@ -63,7 +63,7 @@ type placementCorpus struct {
 
 func loadPlacementCorpus(t *testing.T) placementCorpus {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "conformance", "placement.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "shared", "conformance", "placement.json"))
 	if err != nil {
 		t.Fatalf("read corpus: %v", err)
 	}
@@ -71,7 +71,7 @@ func loadPlacementCorpus(t *testing.T) placementCorpus {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		t.Fatalf("parse corpus: %v", err)
 	}
-	// A CORPUS THAT SILENTLY SHRANK TO NOTHING PASSES EVERYTHING (conformance/README.md §3).
+	// A CORPUS THAT SILENTLY SHRANK TO NOTHING PASSES EVERYTHING (shared/conformance/README.md §3).
 	if len(c.WriterCases) != 5 {
 		t.Fatalf("writer_cases = %d, want the five this arm drives", len(c.WriterCases))
 	}

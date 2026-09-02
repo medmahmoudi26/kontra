@@ -27,7 +27,7 @@ const HERE = __dirname;
  * of the code the invariant is about. That is the failure this suite exists to prevent, arriving
  * as a refactor rather than as a `send-keys`.
  */
-const CORE_PANELS = path.join(HERE, '..', '..', '..', 'core', 'src', 'panels');
+const CORE_PANELS = path.join(HERE, '..', '..', '..', 'shared', 'core', 'src', 'panels');
 
 function panelSources(): Array<{ file: string; source: string }> {
   const out: Array<{ file: string; source: string }> = [];
@@ -104,7 +104,7 @@ describe('nothing can write to a session (ADR 0020, finding 3)', () => {
     // `slice(-1)` then yields one character and the two negative assertions below pass against it —
     // a green test reporting on a file it did not read. This is how the extraction to @kontra/core
     // first went: `union` was the empty string.
-    expect(at, 'ClientMessage union not found in core/src/panels/types.ts').toBeGreaterThan(-1);
+    expect(at, 'ClientMessage union not found in shared/core/src/panels/types.ts').toBeGreaterThan(-1);
     const union = types.slice(at, types.indexOf(';', at));
     expect(union).toContain("t: 'subscribe'");
     expect(union).not.toMatch(/\bdata\b|\bbytes\b|\bkeys\b|\binput\b|\bwrite\b/);

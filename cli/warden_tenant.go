@@ -2,7 +2,7 @@ package main
 
 // warden_tenant.go — a tenant is a Temporal namespace, and a **Warden**'s certificate says which one.
 //
-// ADR 0036: "A tenant is a Temporal namespace. Queue names stay exactly as `conformance/queues.json`
+// ADR 0036: "A tenant is a Temporal namespace. Queue names stay exactly as `shared/conformance/queues.json`
 // pins them, because they were always namespace-relative … A **Warden**'s enrolment mints credentials
 // scoped to one namespace, so a compromised **Machine** cannot address another tenant's queues at
 // all."
@@ -32,7 +32,7 @@ package main
 //
 // The obvious shape is a tenant NAME plus a rule that turns it into a namespace — `kontra-<tenant>`,
 // say. That rule would be a second thing to get right in every surface that has to reach a tenant's
-// work, and this repo's own record (`conformance/README.md`) is that a derivation with more than one
+// work, and this repo's own record (`shared/conformance/README.md`) is that a derivation with more than one
 // writer drifts silently. So the tenant IS the namespace: one string, no mapping, nothing to keep in
 // step. `--tenant` is the flag because that is the operator's word for it; the value is a namespace
 // because that is the only boundary Temporal has.

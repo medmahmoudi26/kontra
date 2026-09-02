@@ -281,7 +281,7 @@ Three rules, each of which has a failure behind it:
 
 **Three implementations, one fixture.** Go and Python write these keys; the TypeScript
 orchestrator derives `shard=` to drive the streaming cursor. All three assert
-`conformance/blobkey.json` in their own suites. This is not ceremony — the SDKs have
+`shared/conformance/blobkey.json` in their own suites. This is not ceremony — the SDKs have
 drifted before (isolation counters shipped Go-only), and the fixture caught a TS drift on its
 first run. A drift here does not throw: the cursor matches nothing and the child node completes
 **empty**.

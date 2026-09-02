@@ -1,4 +1,4 @@
-"""THE PYTHON ARM of `conformance/placement.json`.
+"""THE PYTHON ARM of `shared/conformance/placement.json`.
 
 This side is a WRITER. `actorkit.fleet` builds a **Fleet**'s desired state out of `hold()`,
 `place()` and `up()`; `cli/fleet.go` builds the same thing out of `kontra fleet up|deploy`; and
@@ -30,7 +30,7 @@ from actorkit import fleet
 from fleetscope import FleetScope
 
 CORPUS = json.loads(
-    (Path(__file__).resolve().parent.parent / "conformance" / "placement.json").read_text("utf-8")
+    (Path(__file__).resolve().parent.parent / "shared" / "conformance" / "placement.json").read_text("utf-8")
 )
 
 DO = fleet.do_fleet(machines=2, region="nyc3")
@@ -70,7 +70,7 @@ def _cases() -> dict[str, dict]:
 
 
 def test_the_corpus_still_has_the_cases_this_arm_exists_for():
-    """A corpus that silently shrank to nothing passes everything (conformance/README.md §3)."""
+    """A corpus that silently shrank to nothing passes everything (shared/conformance/README.md §3)."""
     names = [c["name"] for c in CORPUS["writer_cases"]]
     assert names == ["machines_only", "placed", "placed_with_density", "packed", "spread"], names
     assert "machines" in CORPUS["keys"]["sections"]["required_always"]["keys"]

@@ -880,7 +880,7 @@ func TestPodmanRefusesAnImageThatIsNotDigestPinned(t *testing.T) {
 
 // TWO REFUSALS FOR TWO OPPOSITE TRUTHS, AND THEY MUST NOT BE THE SAME MESSAGE.
 //
-// kontra names **Actors** more freely than OCI names repositories. `conformance/queues.json` pins
+// kontra names **Actors** more freely than OCI names repositories. `shared/conformance/queues.json` pins
 // `a/b`, `my actor` and `café` as names that must keep working — "A QUEUE NAME IS NOT SANITISED" — and
 // Temporal accepts all three, so they serve happily under `process`, which runs from source and never
 // produces an **Artifact**. The OCI grammar accepts one of the three. The other two name a class of

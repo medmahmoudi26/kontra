@@ -110,7 +110,7 @@ describe('discovery from the Fleet inventory', () => {
   });
 
   it('names a session after the ACTOR AND ITS VERSION, with no prefix', () => {
-    // THE TABLE OF ANSWERS moved to conformance/queues.json §tmux_session, which `cli/fleet.go`
+    // THE TABLE OF ANSWERS moved to shared/conformance/queues.json §tmux_session, which `cli/fleet.go`
     // executes too — this Machine's session name is minted on both sides and a drift draws a
     // Machine whose Worker is running perfectly as one with NO SESSION. What stays here is the
     // sentence a reader of THIS file needs: the version is the substantive half. `kontra-webcrawl`

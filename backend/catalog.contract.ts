@@ -6,7 +6,7 @@
  *
  * WHAT WENT WRONG WITHOUT IT. `description` (what a Method is for) and `source` (where the
  * worker loaded the actor from) were added to the wire, to `POST /api/actors` and to the
- * `actors` table, and neither ever reached contracts/kontra/v1/catalog.proto. Nothing outside
+ * `actors` table, and neither ever reached shared/contracts/kontra/v1/catalog.proto. Nothing outside
  * `_gen/` imports ActorDescriptor, so the file that is supposed to BE the shared type
  * definition could sit two fields behind the thing it defines with every suite green. This
  * makes that distance a compile error instead of a discovery.

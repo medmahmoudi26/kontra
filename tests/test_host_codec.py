@@ -12,7 +12,7 @@ throughout, which is why nothing caught it — the tests, the suites and a 6-see
 under the threshold.
 
 These are cheap structural checks on purpose. The wire format itself is already pinned by the
-cross-language corpus (`conformance/codec/fixtures.json`); what was missing was anything
+cross-language corpus (`shared/conformance/codec/fixtures.json`); what was missing was anything
 asserting the codec is actually WIRED IN.
 """
 

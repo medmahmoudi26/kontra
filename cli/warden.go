@@ -557,7 +557,7 @@ func (w *warden) start(spec workerSpec) {
 //
 //     The check is the round trip itself rather than a character class, because the round trip is the
 //     question that matters and a character class would be a second, drifting copy of the parse. It
-//     also passes `a/b`, which `conformance/queues.json` carries as an adversarial actor name that
+//     also passes `a/b`, which `shared/conformance/queues.json` carries as an adversarial actor name that
 //     must keep working — a slash in the NAME round-trips; a slash in the VERSION does not.
 //
 //  2. A HALF WITH NO COMMAND IS A PANIC IN THE PROCESS DRIVER. `driver_process.go:start` indexes

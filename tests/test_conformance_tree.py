@@ -32,7 +32,7 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CORPUS_DIR = ROOT / "conformance"
+CORPUS_DIR = ROOT / "shared" / "conformance"
 
 #: Where a driver could live. `node_modules` and build output are not source.
 SKIP = {".git", "node_modules", "dist", "__pycache__", "build", "tmp", ".claude", "_gen"}
@@ -40,6 +40,11 @@ SKIP = {".git", "node_modules", "dist", "__pycache__", "build", "tmp", ".claude"
 #: `conformance/<name>.json`, in any of the spellings a driver uses — a slash path, a pathlib
 #: chain, or a filepath.Join argument list.
 REFERENCE = re.compile(r"""conformance["'/\s,)\]]{1,12}?([a-z_]+\.json)""")
+
+#: A LITERAL relative path to a corpus, as Go and TypeScript spell it:
+#: `"../../../shared/conformance/queues.json"`. Resolvable from the file that contains it, which is
+#: what makes it checkable — unlike a pathlib chain rooted at `parents[N]`.
+RELATIVE_PATH = re.compile(r"""["'](\.\.(?:/\.\.)*/[\w/-]*conformance/[\w/]+\.json)["']""")
 
 
 def _sources() -> list[pathlib.Path]:
@@ -75,8 +80,45 @@ def test_the_walk_finds_the_tree_it_is_walking() -> None:
     assert "identity.go" in names and "catalog.py" in names and "pollers.ts" in names
 
 
+def test_every_relative_corpus_path_resolves() -> None:
+    """A driver whose ASSEMBLED path does not reach the corpus tree.
+
+    THE GAP THIS CLOSES, found by walking into it. `test_every_corpus_reference_resolves` below
+    checks that the corpus a driver NAMES exists — under `CORPUS_DIR`, which this file computes
+    for itself. It never checks that the driver's own path arrives there. So when the tree moved
+    from `conformance/` to `shared/conformance/`, this module passed while ten Python drivers and
+    seventeen Go ones opened a file that was no longer at the end of their `../../../` climb.
+
+    That is the module header's own first bullet — a path that is ASSEMBLED, where every fragment
+    reads correctly — and the guard written for it was checking the wrong half.
+
+    Only literal relative paths are resolvable from here: a `parents[1] / "shared" / "conformance"`
+    chain depends on the file's own location and is checked by the driver failing to import. What
+    IS checkable is every `"../…/conformance/<name>.json"` string, which is the spelling Go uses
+    throughout and the one that broke silently.
+    """
+    broken: list[str] = []
+    for src in _sources():
+        # NOT THIS FILE. Its docstring above quotes an example path, and a guard that fails on its
+        # own prose is a guard people delete.
+        if src.resolve() == pathlib.Path(__file__).resolve():
+            continue
+        text = src.read_text(encoding="utf-8", errors="replace")
+        for m in RELATIVE_PATH.finditer(text):
+            rel = m.group(1)
+            if not (src.parent / rel).resolve().exists():
+                broken.append(
+                    f"{src.relative_to(ROOT)} opens {rel!r}, which resolves to "
+                    f"{(src.parent / rel).resolve()} and is not there"
+                )
+    assert broken == [], "a driver's relative path no longer reaches the corpus:\n  " + "\n  ".join(broken)
+
+
 def test_every_corpus_reference_resolves() -> None:
-    """A driver naming a corpus that is not there."""
+    """A driver naming a corpus that is not there.
+
+    NAME ONLY — see `test_every_relative_corpus_path_resolves` for why that is not enough.
+    """
     missing: list[str] = []
     for src in _sources():
         text = src.read_text(encoding="utf-8", errors="replace")
@@ -91,7 +133,7 @@ def test_every_corpus_is_driven() -> None:
     """A corpus nobody asserts. Counted per file, and the count is named in the failure.
 
     Not a claim about HOW MANY arms a corpus has — `output_dataset.json` has two of three today and
-    `conformance/README.md` records that on purpose. The claim is only that it has one.
+    `shared/conformance/README.md` records that on purpose. The claim is only that it has one.
     """
     corpora = sorted(p.name for p in CORPUS_DIR.glob("*.json"))
     assert corpora, "the corpus tree is empty, so every other assertion here is vacuous"

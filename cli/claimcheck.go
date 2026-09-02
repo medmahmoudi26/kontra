@@ -4,7 +4,7 @@
 // ref, so this file carried a fifth implementation of the wire format: its own copy of the
 // `binary/claim-check-v1` marker, its own `{sha256,size,meta}` struct, its own base64 metadata
 // round-trip, its own sha256 verification, and its own `cas/<sha[:2]>/<sha>` key built with a
-// Sprintf. Its header cited conformance/codec/fixtures.json as the thing that pins all of it. No
+// Sprintf. Its header cited shared/conformance/codec/fixtures.json as the thing that pins all of it. No
 // test in this package had ever opened that file.
 //
 // It was also WRONG, in the one place a copy of an address is always eventually wrong. The key was
@@ -20,13 +20,13 @@
 // Python worker's WRITE path. Executed against the live control plane with KONTRA_S3_PREFIX=slice11:
 // the Python-served workflow wrote `slice11cas/df/df5b…` and this CLI asked for
 // `slice11/cas/df/df5b…`. So the address had two writers spelling it each way, no row in
-// conformance/codec/fixtures.json carries a prefix to catch it, and this change puts the CLI on the
+// shared/conformance/codec/fixtures.json carries a prefix to catch it, and this change puts the CLI on the
 // side objectstore.Key defines. The Python one is a separate bug and is not fixed here.
 //
 // SINCE FIXED, AND THE SPLIT WAS WORSE THAN THIS PARAGRAPH SAYS. `runtime/go/codec/s3.go`
 // concatenated too, under a comment reading "raw; every SDK concatenates it verbatim" — so it was
 // three joiners (handler, orchestrator, this CLI) against two concatenators (both actor SDKs), not
-// three against one. Both SDKs now join, and `conformance/codec/fixtures.json` grew the
+// three against one. Both SDKs now join, and `shared/conformance/codec/fixtures.json` grew the
 // `prefixCases` rows that hold all six arms to it; see `wireFormat.prefixTrailingSlash` there for
 // what a slash-terminated prefix means and why the joiners changed with them.
 //

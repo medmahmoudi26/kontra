@@ -1,6 +1,6 @@
 """Python half of the cross-SDK blob-key contract.
 
-The Go host asserts the SAME fixture (conformance/blobkey.json). A divergence between
+The Go host asserts the SAME fixture (shared/conformance/blobkey.json). A divergence between
 the two implementations means the reader sees two layouts and silently loses half the data —
 and these two have already drifted once, so this is checked rather than reviewed.
 """
@@ -12,9 +12,9 @@ import pathlib
 # parents[3] is the repo root: internals/ -> python/ -> runtime/ -> <root>. Count carefully: a
 # wrong depth resolves to a path OUTSIDE the checkout and the fixture silently disappears. The
 # DEPTH SURVIVED the sdk/runtime split (actorkit/python/internals was three deep too) — the
-# FIXTURE moved, to the one conformance/ tree, and only that.
+# FIXTURE moved, to the one shared/conformance/ tree, and only that.
 ROOT = pathlib.Path(__file__).resolve().parents[3]
-FIXTURE = ROOT / "conformance" / "blobkey.json"
+FIXTURE = ROOT / "shared" / "conformance" / "blobkey.json"
 
 
 def _mod():

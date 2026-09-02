@@ -15,7 +15,7 @@ import (
 	"github.com/medmahmoudi26/kontra/handler/internal/objectstore"
 )
 
-// The cross-language gate: the Go codec must pass the SAME conformance/codec/fixtures.json
+// The cross-language gate: the Go codec must pass the SAME shared/conformance/codec/fixtures.json
 // the Python and TS codecs pass. Threshold is per-case, not the 128 KiB default.
 
 type fixtures struct {
@@ -85,7 +85,7 @@ func b64d(t *testing.T, s string) []byte {
 }
 
 func TestCodecConformance(t *testing.T) {
-	raw, err := os.ReadFile("../../../conformance/codec/fixtures.json")
+	raw, err := os.ReadFile("../../../shared/conformance/codec/fixtures.json")
 	if err != nil {
 		t.Fatalf("read fixtures: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestCodecConformance(t *testing.T) {
 // segment, so KONTRA_S3_PREFIX=`p/` addressed `p//cas/…` — a second namespace, reached by a
 // spelling an operator reads as identical to `p`. See wireFormat.prefixTrailingSlash.
 func TestStorePrefixIsAPathSegment(t *testing.T) {
-	raw, err := os.ReadFile("../../../conformance/codec/fixtures.json")
+	raw, err := os.ReadFile("../../../shared/conformance/codec/fixtures.json")
 	if err != nil {
 		t.Fatalf("read fixtures: %v", err)
 	}

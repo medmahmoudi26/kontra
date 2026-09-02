@@ -109,7 +109,7 @@ func TestAWardenScopeSurvivesACertificateVerbatim(t *testing.T) {
 }
 
 // A NAME THIS FLEET CANNOT CARRY IS REFUSED AT THE COMMAND A HUMAN IS TYPING. The grammar is narrower
-// than the one an ACTOR is named by on purpose — `conformance/queues.json` carries `a/b`, `my actor`
+// than the one an ACTOR is named by on purpose — `shared/conformance/queues.json` carries `a/b`, `my actor`
 // and `café` as actor names that must keep working, and every one of them is a tenant name that would
 // either escape a URI or become two path components under `assignments/`.
 func TestATenantNameThisFleetCannotCarryIsRefusedAtMint(t *testing.T) {
@@ -707,7 +707,7 @@ func TestEveryTenantGetsItsOwnPlaneWorker(t *testing.T) {
 // ADR 0036 §6: "Two customers who both ship an actor called `nscheck` at `0.1.0` do not merely see
 // each other: they land on ONE task queue, and one tenant's Batches are executed by the other's
 // Workers." This test asserts that collision is still there, deliberately — the queue derivation is
-// driven from `conformance/queues.json`, which slice 08 did not change and must not, because queue
+// driven from `shared/conformance/queues.json`, which slice 08 did not change and must not, because queue
 // names were always namespace-relative — and then asserts that the two Machines are nonetheless
 // separated, by the only thing that can separate them.
 //
@@ -742,7 +742,7 @@ func TestTwoTenantsRunTheSameActorWithoutTouchingEachOther(t *testing.T) {
 		t.Fatalf("the queue derivation is not a function of (name, version) any more: %q vs %q", qa, qb)
 	}
 	if qa != actor+"-"+version {
-		t.Fatalf("sharedQueue(%q,%q) = %q; conformance/queues.json says %q-%q", actor, version, qa, actor, version)
+		t.Fatalf("sharedQueue(%q,%q) = %q; shared/conformance/queues.json says %q-%q", actor, version, qa, actor, version)
 	}
 	// …and the corpus still carries a row for exactly this shape, so the literal above is checked
 	// against the contract rather than against itself.

@@ -21,7 +21,7 @@
  * A **Lease** held under one spelling and dropped under another is a **Lease** that is never dropped,
  * and a **Lease** that is never dropped is **Machines** that bill until a human notices. There is no
  * loud failure: the hold succeeds, the drop succeeds, and the **Lease** workflow keeps a holder nobody can find.
- * `conformance/lease.json` is what stops the two spellings drifting, and {@link parseLeaseId} exists
+ * `shared/conformance/lease.json` is what stops the two spellings drifting, and {@link parseLeaseId} exists
  * so that this side READS the grammar the caller SDK writes rather than merely storing it.
  */
 

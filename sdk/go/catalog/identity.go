@@ -63,7 +63,7 @@ const DatasetQueue = "kontra-datasets"
 // a drift in any of them has no loud failure mode: the call goes to a queue nobody polls and the
 // workflow waits until ScheduleToStart fires.
 //
-// WHAT HOLDS THEM TO ONE ANSWER IS conformance/queues.json, which every language executes —
+// WHAT HOLDS THEM TO ONE ANSWER IS shared/conformance/queues.json, which every language executes —
 // identity_conformance_test.go is this package's arm. It is deliberately NOT a comment counting
 // the peers: the count in this file said "a SIXTH", the one in pollers.ts said "a fourth", the
 // one in nexusRegistry.ts said "THE FIFTH", and all three were wrong at the same time.
@@ -93,7 +93,7 @@ func SessionsQueue(name, version string) string {
 // ScheduleToStart timeout rather than a silent re-activation somewhere else.
 //
 // NO ID, NO QUEUE: the empty string rather than `{shared}-s-`, which is a real queue every
-// Session of this actor would share. conformance/queues.json §session records that refusal and
+// Session of this actor would share. shared/conformance/queues.json §session records that refusal and
 // what each language's idiom for it is.
 func SessionQueue(name, version, sessionID string) string {
 	if sessionID == "" {

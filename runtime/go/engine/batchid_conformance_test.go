@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The GO ARM of the Batch content-hash contract (conformance/batchid.json). The Python arm is
+// The GO ARM of the Batch content-hash contract (shared/conformance/batchid.json). The Python arm is
 // tests/test_batchid_conformance.py and asserts the same file.
 //
 // WHY A CORPUS REPLACED A GOLDEN. Both SDKs key a committed Unit by the Batch's content hash
@@ -38,8 +38,8 @@ type batchIDCase struct {
 
 func loadBatchIDCorpus(t *testing.T) []batchIDCase {
 	t.Helper()
-	// ../../../conformance/batchid.json — engine -> go -> runtime -> <repo root>.
-	b, err := os.ReadFile("../../../conformance/batchid.json")
+	// ../../../shared/conformance/batchid.json — engine -> go -> runtime -> <repo root>.
+	b, err := os.ReadFile("../../../shared/conformance/batchid.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

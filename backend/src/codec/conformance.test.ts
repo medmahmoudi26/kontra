@@ -2,10 +2,10 @@
  * TS side of the language-neutral codec conformance corpus.
  *
  * Runs the REAL orchestrator ClaimCheckCodec against the SAME
- * conformance/codec/fixtures.json the Python harness uses. If this and the Python
+ * shared/conformance/codec/fixtures.json the Python harness uses. If this and the Python
  * harness both pass, the two encoders are wire-compatible on every pinned case —
  * which is the only thing that keeps cross-language claim-check (and a future Go
- * port) honest. See conformance/codec/README.md for the contract.
+ * port) honest. See shared/conformance/codec/README.md for the contract.
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -42,7 +42,7 @@ interface Fixture {
       };
 }
 
-const CORPUS = path.resolve(__dirname, '../../../conformance/codec/fixtures.json');
+const CORPUS = path.resolve(__dirname, '../../../shared/conformance/codec/fixtures.json');
 const doc = JSON.parse(readFileSync(CORPUS, 'utf8')) as {
   wireFormat: { marker: string };
   cases: Fixture[];

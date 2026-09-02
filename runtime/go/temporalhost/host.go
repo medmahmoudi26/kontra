@@ -40,7 +40,7 @@ import (
 // The handler builds the same string from its workflow's OWN task queue — it cannot read env,
 // because workflow code must stay deterministic — so a mismatch here means an actor that
 // registers, polls nothing, and looks like a healthy idle Worker while every run hangs to
-// StartToClose. conformance/queues.json §sessions is what holds the two to one answer;
+// StartToClose. shared/conformance/queues.json §sessions is what holds the two to one answer;
 // host_conformance_test.go is this package's arm.
 func TaskQueue(name, version string) string {
 	base := name + "-shared"

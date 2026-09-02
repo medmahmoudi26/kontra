@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The GO CALLER-SIDE ARM of conformance/queues.json.
+// The GO CALLER-SIDE ARM of shared/conformance/queues.json.
 //
 // WHAT THIS REPLACED. A table of goldens "taken verbatim from the Python peer", kept correct by
 // somebody copying them across a language boundary and remembering to do it again. Its own header
@@ -44,12 +44,12 @@ type queueCorpus struct {
 	} `json:"endpoint"`
 }
 
-// ../../../conformance/queues.json — catalog -> go -> sdk -> <repo root>. One string, not a
+// ../../../shared/conformance/queues.json — catalog -> go -> sdk -> <repo root>. One string, not a
 // filepath.Join argument list: a path built from separate arguments is invisible to a regex sweep,
 // which is how three drivers in this restructure quietly stopped finding their fixture.
 func loadQueueCorpus(t *testing.T) *queueCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../../../conformance/queues.json")
+	raw, err := os.ReadFile("../../../shared/conformance/queues.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

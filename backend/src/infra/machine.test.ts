@@ -268,7 +268,7 @@ describe('the install script', () => {
    * checked that the SCRIPT was installed, which is a fact about this file, and never that the
    * script could count, which is a fact about the actor hosts. The replacement lives where the
    * counting does — `cli/sickworker_test.go` drives the real reconcile loop with the real 81-of-82
-   * ratio against real processes, and `conformance/workerhealth.json` pins the two counters and the
+   * ratio against real processes, and `shared/conformance/workerhealth.json` pins the two counters and the
    * three thresholds across all three languages that touch them.
    */
   it('installs no watchdog, and disables one a previous placement left armed', () => {

@@ -1,4 +1,4 @@
-// claimcheck_test.go — THE CLI'S ARM OF conformance/codec/fixtures.json, and the arm that did
+// claimcheck_test.go — THE CLI'S ARM OF shared/conformance/codec/fixtures.json, and the arm that did
 // not exist.
 //
 // The codec's own README calls that corpus "an executable gate" and lists the implementations
@@ -72,10 +72,10 @@ type codecCorpus struct {
 	} `json:"prefixCases"`
 }
 
-// ../conformance/codec/fixtures.json — cli -> <repo root>.
+// ../shared/conformance/codec/fixtures.json — cli -> <repo root>.
 func loadCodecCorpus(t *testing.T) *codecCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../conformance/codec/fixtures.json")
+	raw, err := os.ReadFile("../shared/conformance/codec/fixtures.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

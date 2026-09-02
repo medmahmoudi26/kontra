@@ -97,7 +97,16 @@ base=$(git merge-base HEAD "$ref" 2>/dev/null) ||
 # from before the protos existed, buf 1.70 fails with `Module "path: "contracts"" had no .proto
 # files` — which does not say whether the empty side was the baseline or the working tree, and is
 # a buf behaviour this repo does not control. Said here it names the commit.
-paths=$(sed -n 's/^[[:space:]]*-[[:space:]]*path:[[:space:]]*//p' buf.yaml)
+# THE BASELINE'S OWN buf.yaml, NOT THE WORKING TREE'S. These are different files whenever the
+# module MOVES, and reading the wrong one turns a rename into a hard failure that blames the
+# baseline: `shared/contracts` was `contracts` until ADR 0041's restructure, so this check looked
+# for the new path in a commit that has the old one and refused every ref in history. buf itself
+# was never confused — it checks out the baseline WITH its buf.yaml, which is self-consistent —
+# so the gate was failing on its own pre-flight and not on the contract.
+paths=$(git show "$base:buf.yaml" 2>/dev/null | sed -n 's/^[[:space:]]*-[[:space:]]*path:[[:space:]]*//p')
+# No buf.yaml at the baseline at all: fall back to the working tree's, which is the pre-buf.yaml
+# case the original line assumed.
+[ -n "$paths" ] || paths=$(sed -n 's/^[[:space:]]*-[[:space:]]*path:[[:space:]]*//p' buf.yaml)
 [ -n "$paths" ] || paths="."
 # shellcheck disable=SC2086 -- $paths is a list of module paths and must word-split
 if ! git ls-tree -r --name-only "$base" -- $paths | grep -q '\.proto$'; then

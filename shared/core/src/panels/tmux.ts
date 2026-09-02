@@ -391,7 +391,7 @@ export function tmuxSafeName(name: string): string {
  * side of a language boundary is not a contract, it is a copy: the browser imports this through
  * `@core/panels/tmux`, the same alias it already uses for `@core/panels/pollers` and
  * `@core/panels/ids`. What crosses a real boundary — this and `cli/tmux.go:tmuxSession` — is held
- * by `conformance/queues.json` §tmux_session, which every side executes.
+ * by `shared/conformance/queues.json` §tmux_session, which every side executes.
  *
  * WHY THE BROWSER DERIVES IT AT ALL rather than being told. The serve call answers with the
  * session it just created, but only for a serve THIS visit performed. An Actor served an hour ago,

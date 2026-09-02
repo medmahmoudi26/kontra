@@ -235,7 +235,7 @@ export async function stackDestroy(input: StackOpInput): Promise<StackOpResult> 
  * **Machines** exist.
  *
  * THE SESSION NAME IS NOT DERIVED HERE, and that is the whole reason this is an activity rather than
- * three lines in the SDK. `conformance/queues.json` pins the tmux session name across four languages
+ * three lines in the SDK. `shared/conformance/queues.json` pins the tmux session name across four languages
  * and warns in its own words that a drift draws "a Machine whose Worker is running perfectly as one
  * with NO SESSION". Python has no arm of that corpus, so deriving it there would have been a FIFTH
  * implementation of a rule that already has four. `machinesFromStack` is the existing one.

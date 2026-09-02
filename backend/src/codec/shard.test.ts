@@ -5,7 +5,7 @@
  * cursor. If the three disagree on how a graph node id becomes a `shard=` segment, the cursor
  * matches nothing and the child node completes EMPTY rather than failing — silent data loss.
  *
- * All three assert the same file: conformance/blobkey.json. TypeScript does not build
+ * All three assert the same file: shared/conformance/blobkey.json. TypeScript does not build
  * whole keys, so what it must honour is narrower and asserted directly — that the shard it
  * derives is the shard actually present in the key the writers produce.
  */
@@ -18,7 +18,7 @@ import { legacyRunPrefix, runPrefix, shardOf } from './shard';
 
 type Case = { why: string; node: string; run: string; expect: string };
 const fixture = JSON.parse(
-  readFileSync(join(__dirname, '../../../conformance/blobkey.json'), 'utf8'),
+  readFileSync(join(__dirname, '../../../shared/conformance/blobkey.json'), 'utf8'),
 ) as { dt: string; cases: Case[] };
 
 describe('shardOf matches the cross-SDK fixture', () => {

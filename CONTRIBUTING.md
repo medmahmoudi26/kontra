@@ -24,7 +24,7 @@ This codebase has some unusual habits, and they are load-bearing rather than dec
   shipped several guards that could never have fired.
 - **A guard that sweeps must assert it found something.** A walk over zero files reports success.
 - **A contract with two implementations gets a corpus**, not two string literals. See
-  `conformance/README.md`.
+  `shared/conformance/README.md`.
 - **Measure, don't assert.** If a change claims a cost, put the number in the commit message and
   the test that produced it in the tree.
 

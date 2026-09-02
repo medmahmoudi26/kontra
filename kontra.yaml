@@ -37,7 +37,7 @@ contracts:
   envelope:
     owner: buf
     scope: control-plane-only          # StepOptions + (future) RunEnvelope; per-actor I/O is NOT here
-    package: kontra.v1                  # buf package path (contracts/kontra/v1/)
+    package: kontra.v1                  # buf package path (shared/contracts/kontra/v1/)
     messages:
       - EntryInput                      # entry.proto — the LIVE dispatch input (child-workflow `run`)
       - StepOptions                     # step.proto — per-step scheduling + author-declared retry
@@ -73,7 +73,7 @@ codec:
   base64: YmluYXJ5L2NsYWltLWNoZWNrLXYx             # std (not url-safe) base64 of the marker, as it appears in the corpus
   casKeyLayout: cas/{sha256[:2]}/{sha256}          # codec.py cas_key(); single content-addressed layout under the store prefix
   shaCase: lower-hex                               # hashlib.sha256(...).hexdigest()
-  conformanceCorpus: conformance/codec/fixtures.json   # the source of truth both harnesses are checked against
+  conformanceCorpus: shared/conformance/codec/fixtures.json   # the source of truth both harnesses are checked against
 
 # Local infrastructure endpoints, mirrored from docker-compose.yml. Cloud swaps the
 # endpoints, not the shape. Iceberg is env-GATED (not wired locally yet).

@@ -6,7 +6,7 @@ the caller depends on the contract and never on the callee's code. That is exact
 situation — the handler is Go, the caller is Python, and they meet only at a wire — so this is
 that class rather than a bag of strings at the call site.
 
-The Go side declares the same shape from `contracts/kontra/v1/actor_service.proto` via
+The Go side declares the same shape from `shared/contracts/kontra/v1/actor_service.proto` via
 `protoc-gen-go-temporal`; there is no code sharing between them and there cannot be. So the two
 literals below — the service name and the operation name — are a cross-language contract in the
 same sense as the task-queue derivations, and they are pinned by test on both sides. A drift

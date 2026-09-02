@@ -320,7 +320,7 @@ WantedBy=multi-user.target`,
  * this check that can produce the number in its name: it differences two readings of the Worker's
  * own `kontra_resource_loads_total` / `kontra_resource_load_failures_total` counters, so the window
  * is a fact about the Warden's clock rather than a hope about a log's retention. The counter names
- * are pinned by `conformance/workerhealth.json`; the verdict is three-valued and `cannot tell`
+ * are pinned by `shared/conformance/workerhealth.json`; the verdict is three-valued and `cannot tell`
  * restarts nothing.
  *
  * WHAT A MACHINE PLACED BY THIS SCRIPT NOW HAS is no health authority of its own — step 8 disables

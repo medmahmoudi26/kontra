@@ -1,4 +1,4 @@
-"""The PYTHON ARM of the Run-id slug contract (conformance/slug.json).
+"""The PYTHON ARM of the Run-id slug contract (shared/conformance/slug.json).
 
 WHAT THIS REPLACES, AND WHY THE THING IT REPLACES WAS NOT A TEST. `actorkit.catalog._slug`'s
 docstring said "`tests/test_temp_dataset.py` pins the pair". There is no such file, and there never
@@ -24,7 +24,7 @@ import pytest
 from actorkit.catalog import _SLUG_MAX, _slug
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "conformance" / "slug.json"
+FIXTURE = ROOT / "shared" / "conformance" / "slug.json"
 
 DOC = json.loads(FIXTURE.read_text(encoding="utf-8"))
 CASES = DOC["cases"]

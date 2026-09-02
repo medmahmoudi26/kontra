@@ -42,7 +42,7 @@ def object_key(prefix: str, *parts: str) -> str:
 
     The peers are `handler/internal/objectstore.Key`, `runtime/go/codec.objectKey` and
     `backend/src/codec/objectStore.ts:key`. Nothing imports across those boundaries, so what
-    holds the four to one answer is the `prefixCases` rows of conformance/codec/fixtures.json —
+    holds the four to one answer is the `prefixCases` rows of shared/conformance/codec/fixtures.json —
     which did not exist until this bug did, because every row carried the empty prefix, the one
     input class where concatenation and segment-joining CANNOT differ (ADR 0035 finding 1).
     """
@@ -132,7 +132,7 @@ def data_converter():
 
     Byte-identical in effect to the handler's `converter.NewCodecDataConverter(default, codec)`
     (handler/main.go): same threshold, same `cas/<sha[:2]>/<sha>` key, same marker — all three
-    pinned by the shared corpus in `conformance/codec/`.
+    pinned by the shared corpus in `shared/conformance/codec/`.
     """
     import dataclasses
 

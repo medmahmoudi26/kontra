@@ -31,7 +31,7 @@
 // the same program. The access it needs is written down as `objstore.Backing` rather than taken
 // from an unexported field, which is what this split changed: four whole-object operations
 // against one bucket. The KEY LAYOUT is what makes it safe to say — cas/<sha[:2]>/<sha> is pinned
-// across all three SDKs by conformance/codec/fixtures.json and by objectstore.Store.CasKey.
+// across all three SDKs by shared/conformance/codec/fixtures.json and by objectstore.Store.CasKey.
 package codec
 
 import (

@@ -161,7 +161,7 @@ was minted and never taken from anything the **Machine** says.
 _Avoid_: customer, org, account, workspace, project (each names a billing or UI grouping somewhere
 and would invite a **Tenant** that spans two namespaces, which is a **Tenant** that is not one);
 "namespace prefix" and "queue prefix" (both describe the thing this word replaced — queue names
-are namespace-RELATIVE and `conformance/queues.json` pins them unchanged)
+are namespace-RELATIVE and `shared/conformance/queues.json` pins them unchanged)
 
 ### Getting an actor onto them
 
@@ -265,7 +265,7 @@ security policy (egress policy is also one and they are enforced in different pl
   a **Target**.
 
 - **An Actor's name and its Artifact's name obey different grammars, and the wider one is the
-  Actor's.** `conformance/queues.json` records that a queue name is NOT sanitised — `my actor` and
+  Actor's.** `shared/conformance/queues.json` records that a queue name is NOT sanitised — `my actor` and
   `café` reach Temporal verbatim, and `a/b` is carried there as an adversarial case. An OCI
   repository name is lowercase alphanumerics with `.`/`_`/`-` separators in `/`-joined components,
   so the set of nameable **Actors** is strictly larger than the set of nameable **Artifacts**.
@@ -275,7 +275,7 @@ security policy (egress policy is also one and they are enforced in different pl
   quietly mangle and is now a refusal before any **Machine** exists.
 
   A **VERSION** IS SUBJECT TO THE SAME GAP, which slice 07 found by measuring:
-  `conformance/queues.json` carries `1:2` as an adversarial version and Temporal takes it verbatim,
+  `shared/conformance/queues.json` carries `1:2` as an adversarial version and Temporal takes it verbatim,
   while an OCI tag may not hold a colon — `<registry>/bundles/nscheck:1:2` reads back as repository
   `bundles/nscheck:1`. So the set of publishable **Artifacts** is bounded by the version as well as
   by the name.
@@ -291,7 +291,7 @@ security policy (egress policy is also one and they are enforced in different pl
   which added the third (`kontra build --push`) and could not add a third bespoke message: the
   grammar, both refusal sentinels and the sentence itself live in `cli/ociref.go`, consulted by
   `kontra build`, by `cli/scale.go`'s pull diagnosis and by the podman driver.
-  `conformance/ociref.json` drives all three over the same rows, so breaking the grammar in one
+  `shared/conformance/ociref.json` drives all three over the same rows, so breaking the grammar in one
   place turns all three red — which is what makes "one shared answer" checkable rather than claimed.
 
   What that fixed: `cli/scale.go` gave `café` and `a/b` the same headline — "the registry answered,
@@ -313,14 +313,14 @@ security policy (egress policy is also one and they are enforced in different pl
   `ghcr.io.evil.example/x` and a `strings.Split(ref, "/")[0]` admits `a/b` as though `a` were a
   registry, and both look right. So `cli/trustpolicy.go` matches on `ociRef.Domain` and
   `ociRef.Path` and judges an allowlist ENTRY with the same three rules the grammar is built from.
-  `conformance/ociref.json`'s `allow` section is the coupling made checkable: widening
+  `shared/conformance/ociref.json`'s `allow` section is the coupling made checkable: widening
   `ociPathComponent` or `looksLikeRegistryHost` turns grammar and policy red in the same run.
 
 - **"Where a Bundle lives" was assembled, never spelled.** The old object key
   `kontra-bundles/<actor>/<version>/<sha>.tar.gz` was built out of separate arguments in Go and
   rebuilt out of separate arguments in TypeScript, so no sweep could find it and a drift showed up
   as a resolver that 404s on a Bundle that published perfectly well. Resolved 2026-08-30:
-  `conformance/bundleref.json` pins the OCI address on both sides.
+  `shared/conformance/bundleref.json` pins the OCI address on both sides.
 
 ## Retired terms
 

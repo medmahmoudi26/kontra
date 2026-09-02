@@ -1,5 +1,5 @@
 /**
- * The ORCHESTRATOR ARM of the Run-id slug contract (conformance/slug.json).
+ * The ORCHESTRATOR ARM of the Run-id slug contract (shared/conformance/slug.json).
  *
  * The other two arms are `tests/test_slug_conformance.py` and
  * `sdk/go/catalog/slug_conformance_test.go`, which assert that the two SDKs derive the same slug
@@ -34,7 +34,7 @@ interface SlugCase {
   safe_name: string;
 }
 
-const CORPUS = path.resolve(__dirname, '../../../conformance/slug.json');
+const CORPUS = path.resolve(__dirname, '../../../shared/conformance/slug.json');
 const doc = JSON.parse(readFileSync(CORPUS, 'utf8')) as {
   bound: number;
   empty: string;

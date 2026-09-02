@@ -1,20 +1,24 @@
 /**
- * Where the console's SPA is found, in both shapes it can sit in.
+ * Where the console's SPA is found, in every shape it can sit in.
  *
- * THE MOVE THAT MADE THIS A TEST: `frontend/` used to be `orchestrator/web`, a CHILD of the server
- * package, so walking up from the compiled `dist/src` reached `web/dist`. It is a SIBLING of
- * `backend/` now and that walk never finds it again — which is not a failure anything reports. The
- * API still boots, still answers, and serves an empty page. Nothing in either suite caught it,
- * because both run against a server told its web root explicitly.
+ * THE MOVE THAT MADE THIS A TEST, AND IT HAS NOW HAPPENED THREE TIMES. `frontend/` was
+ * `orchestrator/web` — a CHILD of the server package, so walking up from the compiled `dist/src`
+ * reached `web/dist`. Then it was a SIBLING of `backend/`. Then ADR 0038 moved it out of the
+ * repository entirely, into a `kontra-console` checkout beside this one.
  *
- * The bundle's shape is the other half and did not move: a hydrated appliance bundle puts the SPA
- * at `orchestrator/web/dist` beside `orchestrator/dist/src`, an artifact contract that
- * `handler/internal/hydrate` writes. So both shapes have to resolve, from any depth.
+ * NONE OF THOSE FAILS LOUDLY. The API still boots, still answers, and serves an empty page —
+ * neither suite noticed, because both run against a server told its web root explicitly. That is
+ * what this file is for, and it caught the third move only because it was already here: the
+ * candidate list in `defaultWebRoot` was edited and this suite was not re-run.
+ *
+ * The bundle's shape is the other half and has never moved: a hydrated appliance bundle puts the
+ * SPA at `orchestrator/web/dist` beside `orchestrator/dist/src`, an artifact contract that
+ * `handler/internal/hydrate` writes. So every shape has to resolve, from any depth.
  */
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { defaultWebRoot } from './server';
 
@@ -28,10 +32,11 @@ function spaAt(rel: string): { root: string; spa: string } {
 }
 
 describe('defaultWebRoot finds the SPA in both shapes', () => {
-  it('finds the CHECKOUT shape — frontend/ beside backend/', () => {
-    const { root, spa } = spaAt('frontend/dist');
-    // Where the compiled server actually runs from in a checkout.
-    const from = path.join(root, 'backend', 'dist', 'src');
+  it('finds the CHECKOUT shape — a kontra-console checkout beside this one', () => {
+    // `<parent>/kontra-console/dist`, with the server running from `<parent>/kontra/backend/…`.
+    // The walk reaches `<parent>/kontra` and looks at its sibling from there.
+    const { root, spa } = spaAt('kontra-console/dist');
+    const from = path.join(root, 'kontra', 'backend', 'dist', 'src');
     mkdirSync(from, { recursive: true });
     expect(defaultWebRoot(from)).toBe(path.resolve(spa));
   });
@@ -44,9 +49,31 @@ describe('defaultWebRoot finds the SPA in both shapes', () => {
   });
 
   it('finds it from the UNCOMPILED depth too — vitest runs this file from src/', () => {
-    const { root, spa } = spaAt('frontend/dist');
-    const from = path.join(root, 'backend', 'src');
+    const { root, spa } = spaAt('kontra-console/dist');
+    const from = path.join(root, 'kontra', 'backend', 'src');
     mkdirSync(from, { recursive: true });
+    expect(defaultWebRoot(from)).toBe(path.resolve(spa));
+  });
+
+  it('KONTRA_CONSOLE_DIST wins, and a wrong one is an ANSWER rather than a fallback', () => {
+    // A console checked out somewhere the walk will never look. Both exist here, so this is about
+    // precedence and not about absence.
+    const { root, spa } = spaAt('kontra-console/dist');
+    const elsewhere = spaAt('somewhere-else/dist');
+    const from = path.join(root, 'kontra', 'backend', 'dist', 'src');
+    mkdirSync(from, { recursive: true });
+
+    vi.stubEnv('KONTRA_CONSOLE_DIST', elsewhere.spa);
+    expect(defaultWebRoot(from)).toBe(path.resolve(elsewhere.spa));
+
+    // A NAMED DIRECTORY THAT IS EMPTY MUST NOT FALL THROUGH. Serving the sibling would hand an
+    // operator who mistyped a path a different SPA than the one they asked for, and report success.
+    vi.stubEnv('KONTRA_CONSOLE_DIST', path.join(root, 'typo'));
+    expect(defaultWebRoot(from)).toBeUndefined();
+    vi.unstubAllEnvs();
+
+    // …and with the variable gone, the sibling is found again — so the check above proved the
+    // override, not a broken fixture.
     expect(defaultWebRoot(from)).toBe(path.resolve(spa));
   });
 

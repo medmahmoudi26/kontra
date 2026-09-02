@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The HANDLER ARM of conformance/queues.json.
+// The HANDLER ARM of shared/conformance/queues.json.
 //
 // WHY A CORPUS REPLACED THE TABLE THAT WAS HERE. The Actor's task queue was derived in eight
 // places across four languages, the endpoint in four, the session queue in five — and three
@@ -48,15 +48,15 @@ type queueCorpus struct {
 	} `json:"endpoint"`
 }
 
-// loadQueueCorpus reads conformance/queues.json and refuses a corpus that shrank.
+// loadQueueCorpus reads shared/conformance/queues.json and refuses a corpus that shrank.
 //
-// The path is ../../../conformance/queues.json — identity -> internal -> handler -> <repo root>.
+// The path is ../../../shared/conformance/queues.json — identity -> internal -> handler -> <repo root>.
 // Built as ONE string on purpose: a path assembled from separate arguments is invisible to a
 // regex sweep, which is how three drivers in this restructure quietly stopped finding their
 // fixture. tests/test_conformance_tree.py checks both directions of that.
 func loadQueueCorpus(t *testing.T) *queueCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../../../conformance/queues.json")
+	raw, err := os.ReadFile("../../../shared/conformance/queues.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

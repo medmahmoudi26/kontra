@@ -15,7 +15,7 @@
 // Controller and this binary never dials Temporal for it: one binary addresses either control plane
 // (ADR 0034 §1), and the route is `GET /api/infra/stacks/<fqn>/leases`.
 //
-// THE WIRE IS PINNED BY A CORPUS. `conformance/lease.json` §lease_set_wire holds the key set on both
+// THE WIRE IS PINNED BY A CORPUS. `shared/conformance/lease.json` §lease_set_wire holds the key set on both
 // sides, because this is `terminal.json`'s contract in a second place and that one cost a blank
 // column in `kontra panels` on every Fleet for months, with both languages green throughout. The
 // asymmetry there applies here: the writer's keys are pinned exactly, this reader's must be a
@@ -33,7 +33,7 @@ import (
 	"time"
 )
 
-// leaseView is one entry in the **Lease** workflow. Tags are `conformance/lease.json` §lease_set_wire.lease.
+// leaseView is one entry in the **Lease** workflow. Tags are `shared/conformance/lease.json` §lease_set_wire.lease.
 type leaseView struct {
 	// Lease is the full id — `<holder>#<nonce>` — exactly as it was held and exactly as it must be
 	// dropped. Printed verbatim: it is the only handle anything has on a single claim.
@@ -56,7 +56,7 @@ type leaseSet struct {
 }
 
 // leaseSeparator divides a holder from its nonce. `backend/src/lease.ts` and `actorkit.fleet`
-// declare the same character; `conformance/lease.json` §names is what keeps the three equal.
+// declare the same character; `shared/conformance/lease.json` §names is what keeps the three equal.
 const leaseSeparator = "#"
 
 // leaseHolder is the holder half of a Lease id, for a reader that has the id and not the **Lease** workflow.

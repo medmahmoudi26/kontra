@@ -13,7 +13,7 @@ import {
 import * as leaseActivities from './activities/lease';
 
 /**
- * THE TYPESCRIPT ARM of `conformance/lease.json`.
+ * THE TYPESCRIPT ARM of `shared/conformance/lease.json`.
  *
  * This side is two things at once, which is why it drives two of the corpus's three sections:
  *
@@ -43,12 +43,12 @@ interface Corpus {
 }
 
 const corpus = JSON.parse(
-  readFileSync(path.join(__dirname, '..', '..', 'conformance', 'lease.json'), 'utf8')
+  readFileSync(path.join(__dirname, '..', '..', 'shared', 'conformance', 'lease.json'), 'utf8')
 ) as Corpus;
 
 /**
  * THE GUARD THAT KEEPS THIS FILE FROM PASSING VACUOUSLY. Every describe below loops, and a loop over
- * an empty array reports success for having found nothing — the shape `conformance/README.md` step 3
+ * an empty array reports success for having found nothing — the shape `shared/conformance/README.md` step 3
  * exists to prevent, and the shape half the guards it replaced actually had.
  */
 describe('the corpus itself', () => {

@@ -1,6 +1,6 @@
 package main
 
-// ociref_conformance_test.go — `conformance/ociref.json`, driven from the ONE implementation and
+// ociref_conformance_test.go — `shared/conformance/ociref.json`, driven from the ONE implementation and
 // from all THREE sites that consult it.
 //
 // The acceptance criterion in `.scratch/warden/issues/15-*` is not "there is a shared function". It
@@ -18,7 +18,7 @@ package main
 //	pullFailure's check removed                 → the three-sites test fails on the pull site alone,
 //	                                              with `café` told to re-run `kontra deploy` again
 //
-// See conformance/README.md §"Adding one" for the rules this driver obeys: every case carries a
+// See shared/conformance/README.md §"Adding one" for the rules this driver obeys: every case carries a
 // `why`, the inputs that BREAK are in the corpus rather than only the easy ones, and the driver
 // asserts the corpus is not empty and still holds its interesting inputs.
 
@@ -108,7 +108,7 @@ type ociRefCorpus struct {
 
 func loadOCIRefCorpus(t *testing.T) ociRefCorpus {
 	t.Helper()
-	b, err := os.ReadFile("../conformance/ociref.json")
+	b, err := os.ReadFile("../shared/conformance/ociref.json")
 	if err != nil {
 		t.Fatalf("reading the corpus: %v", err)
 	}
@@ -117,7 +117,7 @@ func loadOCIRefCorpus(t *testing.T) ociRefCorpus {
 		t.Fatalf("parsing the corpus: %v", err)
 	}
 
-	// A CORPUS THAT SILENTLY SHRANK TO NOTHING PASSES (conformance/README.md, rule 3). Every loop
+	// A CORPUS THAT SILENTLY SHRANK TO NOTHING PASSES (shared/conformance/README.md, rule 3). Every loop
 	// below is over a slice out of this file, so an empty one — a renamed key, a bad merge, a JSON
 	// shape that stopped matching these structs — would report success over zero assertions.
 	if n := len(c.Split.Cases); n < 8 {
@@ -146,7 +146,7 @@ func loadOCIRefCorpus(t *testing.T) ociRefCorpus {
 
 // TestOCIRefCorpusStillHoldsTheInterestingInputs is the guard on the guard. A corpus of the easy
 // cases is "the shape of every guard in this list that failed to guard anything"
-// (conformance/README.md), and the three names below are the ones the whole thing exists for:
+// (shared/conformance/README.md), and the three names below are the ones the whole thing exists for:
 // `café` cannot be an Artifact, `a/b` can and must stay legal, and `1:2` is a VERSION that cannot be
 // a tag. Losing any of them leaves a corpus that passes while the bug is back.
 func TestOCIRefCorpusStillHoldsTheInterestingInputs(t *testing.T) {
@@ -163,7 +163,7 @@ func TestOCIRefCorpusStillHoldsTheInterestingInputs(t *testing.T) {
 	}
 	for _, want := range []string{"café", "a/b", "1:2", "my actor", "Foo", "+build"} {
 		if !strings.Contains(all, want) {
-			t.Errorf("the corpus no longer carries %q — conformance/queues.json's adversarial names are "+
+			t.Errorf("the corpus no longer carries %q — shared/conformance/queues.json's adversarial names are "+
 				"the reason this file exists, and a corpus without them proves nothing", want)
 		}
 	}
@@ -347,7 +347,7 @@ func TestOCIRefPushMatchesTheCorpus(t *testing.T) {
 // deployed" at the pull site, because for `a/b` that is true.
 // THE COUNT IS NOT WRITTEN DOWN, and that is deliberate. The issue said three; slice 07 found FOUR,
 // because `kontra deploy` names an Artifact on the PUSH side with a string it builds itself, and the
-// issue had folded that into "deploy/pull". conformance/README.md names a count in a comment as "the
+// issue had folded that into "deploy/pull". shared/conformance/README.md names a count in a comment as "the
 // least reliable kind of documentation there is" — three comments in this repo once told the reader
 // how many peers a derivation had and none of them counted the same set. So the list below is the
 // truth and no sentence anywhere claims a total.
@@ -356,7 +356,7 @@ func TestOneAnswerReachesEverySiteThatNamesAnArtifact(t *testing.T) {
 
 	// The sentence that proves the answer came from cli/ociref.go and not from a copy. Two fragments,
 	// not one, so a site that happened to quote the grammar cannot pass by accident.
-	shared := []string{"conformance/queues.json", "NO REBUILD, REDEPLOY OR PIN CHANGES THIS"}
+	shared := []string{"shared/conformance/queues.json", "NO REBUILD, REDEPLOY OR PIN CHANGES THIS"}
 
 	// The remedies each site used to offer, none of which reaches this class of reference.
 	unreachable := []string{"was never deployed", "kontra deploy --actor", "kontra build --push"}
@@ -528,7 +528,7 @@ func TestTrustPolicyAdmitMatchesTheCorpus(t *testing.T) {
 					"before any policy\n  (%s)", k.Ref, err, k.Why)
 			}
 			// The shared sentence, so the policy path cannot become a fifth site with its own message.
-			for _, want := range []string{"conformance/queues.json", "NO REBUILD, REDEPLOY OR PIN CHANGES THIS"} {
+			for _, want := range []string{"shared/conformance/queues.json", "NO REBUILD, REDEPLOY OR PIN CHANGES THIS"} {
 				if err != nil && !strings.Contains(err.Error(), want) {
 					t.Errorf("admit(%q) does not carry the shared answer (%q missing), so cli/ociref.go is "+
 						"not the one place:\n%v", k.Ref, want, err)

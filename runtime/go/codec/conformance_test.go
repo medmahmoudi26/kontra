@@ -14,7 +14,7 @@ import (
 	"go.temporal.io/sdk/converter"
 )
 
-// The cross-language gate: this codec must pass the SAME conformance/codec/fixtures.json the
+// The cross-language gate: this codec must pass the SAME shared/conformance/codec/fixtures.json the
 // handler's Go codec, the Python codec and the TS codec pass.
 //
 // Four independent implementations is not an accident — actorkit and the handler are separate
@@ -93,7 +93,7 @@ func b64d(t *testing.T, s string) []byte {
 }
 
 func TestCodecConformance(t *testing.T) {
-	raw, err := os.ReadFile("../../../conformance/codec/fixtures.json")
+	raw, err := os.ReadFile("../../../shared/conformance/codec/fixtures.json")
 	if err != nil {
 		t.Fatalf("read fixtures: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestCodecConformance(t *testing.T) {
 // implementations CANNOT differ (ADR 0035 finding 1). Under KONTRA_S3_PREFIX=slice11 this store
 // wrote `slice11cas/df/df5b…` while the handler and the orchestrator read `slice11/cas/df/df5b…`.
 func TestStorePrefixIsAPathSegment(t *testing.T) {
-	raw, err := os.ReadFile("../../../conformance/codec/fixtures.json")
+	raw, err := os.ReadFile("../../../shared/conformance/codec/fixtures.json")
 	if err != nil {
 		t.Fatalf("read fixtures: %v", err)
 	}

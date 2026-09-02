@@ -3,7 +3,7 @@
 // file all of them are derived from.
 //
 // The CROSS-LANGUAGE half of this file is not here. `sharedQueue` is driven against
-// conformance/queues.json by queues_conformance_test.go, and the folder digest is pinned against
+// shared/conformance/queues.json by queues_conformance_test.go, and the folder digest is pinned against
 // backend/src/sources.test.ts by the shared fixture below. What is here is the local half: the
 // collision the `wf-` prefix exists to prevent, the refusals, and the one-file-one-worker rule.
 package main

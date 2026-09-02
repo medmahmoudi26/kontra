@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The GO ARM of the Run-id slug contract (conformance/slug.json). The Python arm is
+// The GO ARM of the Run-id slug contract (shared/conformance/slug.json). The Python arm is
 // tests/test_slug_conformance.py and asserts the same file.
 //
 // WHAT THIS REPLACES. TestTempSlugKeepsARunIDOutOfThePath asserted
@@ -40,8 +40,8 @@ type slugCorpus struct {
 
 func loadSlugCorpus(t *testing.T) slugCorpus {
 	t.Helper()
-	// ../../../conformance/slug.json — catalog -> go -> sdk -> <repo root>.
-	b, err := os.ReadFile("../../../conformance/slug.json")
+	// ../../../shared/conformance/slug.json — catalog -> go -> sdk -> <repo root>.
+	b, err := os.ReadFile("../../../shared/conformance/slug.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

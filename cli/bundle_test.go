@@ -356,7 +356,7 @@ func TestTheBundleRegistryIsTheControllerTheMachinesWillFetchFrom(t *testing.T) 
 // AN ACTOR NAME THAT SERVES IS NOT ALWAYS AN ACTOR NAME THAT PUBLISHES, and this test is driven
 // from the OTHER corpus on purpose.
 //
-// `conformance/queues.json` states that a queue name is NOT sanitised — `my actor` and `café` reach
+// `shared/conformance/queues.json` states that a queue name is NOT sanitised — `my actor` and `café` reach
 // Temporal verbatim, and it carries `a/b` as an adversarial case — so the set of nameable Actors is
 // strictly larger than the set of nameable OCI repositories. Asserting that here, against the very
 // names that corpus already thought were dangerous, is what stops this from being a guard written

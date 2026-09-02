@@ -1,4 +1,4 @@
-"""The PYTHON ARMS of conformance/queues.json — the caller's SDK and the actor host, both of them.
+"""The PYTHON ARMS of shared/conformance/queues.json — the caller's SDK and the actor host, both of them.
 
 WHY THE CORPUS REPLACED THE TABLE THAT WAS HERE. This file used to hold a hand-copied dict of
 `(name, version) -> queue` under the instruction "The Go peer is
@@ -31,7 +31,7 @@ from actorkit import catalog
 from internals.temporal.host import session_actor_id, session_task_queue, task_queue
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "conformance" / "queues.json"
+FIXTURE = ROOT / "shared" / "conformance" / "queues.json"
 
 CORPUS = json.loads(FIXTURE.read_text(encoding="utf-8"))
 SHARED = CORPUS["shared"]["cases"]

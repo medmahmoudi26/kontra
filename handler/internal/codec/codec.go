@@ -1,7 +1,7 @@
 // Package codec is the claim-check Temporal PayloadCodec: payloads over a threshold are
 // offloaded to the CAS and replaced by a small ref payload, transparently rehydrated on
 // decode. It is the Go peer of python actorkit.codec + orchestrator claimCheck.ts and
-// must pass the SAME conformance/codec/fixtures.json — any byte disagreement silently
+// must pass the SAME shared/conformance/codec/fixtures.json — any byte disagreement silently
 // drops data across the namespace boundary. It uses the deep cas module for the
 // store/verify protocol and owns only the Temporal-Payload concerns (threshold, marker,
 // meta base64 round-trip, the double-encode guard).

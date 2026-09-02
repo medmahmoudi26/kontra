@@ -20,7 +20,7 @@ Why Nexus over a plain `executeChild` in one namespace (the question the arch re
 - Each actor becomes a Temporal **Nexus operation** (workflow-backed / async, one actor per worker/image) at build time.
 - Dispatch is routed by `(name, version)` to a `{name}-{version}` task queue / Nexus endpoint.
 - Production tenancy is **namespace-per-AUTHOR**. Locally there is a single namespace, with the tenant field carried as `"default"`.
-- `RunEnvelope.tenant` (`contracts/kontra/v1/run.proto`, field 4) selects the **namespace**. It does **not** scope the CAS key.
+- `RunEnvelope.tenant` (`shared/contracts/kontra/v1/run.proto`, field 4) selects the **namespace**. It does **not** scope the CAS key.
 - **CAS is global content-addressed, by deliberate choice.** `cas_key(digest)` is a pure content hash (`cas/<sha[:2]>/<sha>`) with no tenant component, so dedup is **cross-run AND cross-tenant** — identical bytes collapse to one object regardless of who produced them (ADR 0007). This is a feature: it is the property that makes re-runs and shared inputs free. CAS holds opaque, integrity-checked content, not the tenant isolation boundary; that boundary is the Temporal namespace above.
 - **If hard tenant isolation of stored bytes is ever required** (e.g. a tenant must not even share physical objects), it comes via a separate reserved bucket or key-prefix per tenant — a tenant-scoped store, not a tenant component mixed into the content hash. Design noted; **not built**, and not needed while namespace isolation is the boundary.
 

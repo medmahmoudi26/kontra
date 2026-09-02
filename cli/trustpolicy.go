@@ -100,7 +100,7 @@ package main
 // Both look right. So nothing here splits a reference: `ociRef.Domain` and `ociRef.Path` are the only
 // inputs to the match, and the ALLOWLIST ENTRY is checked against the same `looksLikeRegistryHost`,
 // `ociDomain` and `ociPathComponent` the grammar is built from. Widening any of those three moves
-// this file's verdicts too — `conformance/ociref.json`'s `allow` section is where that is a test
+// this file's verdicts too — `shared/conformance/ociref.json`'s `allow` section is where that is a test
 // rather than a claim.
 
 import (
@@ -196,7 +196,7 @@ type signatureVerifier interface {
 // repository path, correctly, because that string IS a tagged Docker Hub reference when it appears
 // where a reference is expected. What is shared is the three rules the grammar is made of —
 // `looksLikeRegistryHost`, `ociDomain`, `ociPathComponent` — so widening any of them widens this too,
-// which `conformance/ociref.json`'s `allow` section pins.
+// which `shared/conformance/ociref.json`'s `allow` section pins.
 //
 // A HOST WITH NO DOT AND NO PORT IS NOT A HOST, and refusing it here is the same rule
 // `pushDestination` applies to `KONTRA_REGISTRY=myregistry`: `myregistry` names a Docker Hub USER.

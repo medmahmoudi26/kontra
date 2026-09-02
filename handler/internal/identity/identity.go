@@ -3,7 +3,7 @@
 // activity names. handler and the SDKs derive these independently (the decoupling rule), so
 // every literal here is part of the cross-language contract.
 //
-// WHAT HOLDS IT: conformance/queues.json, which every language executes. Not a count of peers
+// WHAT HOLDS IT: shared/conformance/queues.json, which every language executes. Not a count of peers
 // written into a comment — that count was wrong in three files at once before the corpus
 // existed, and a comment cannot fail. identity_conformance_test.go is this package's arm.
 package identity
@@ -43,7 +43,7 @@ func SharedQueue(actor, version string) string {
 // of a batch; an open frees its slot as soon as the Session's worker is up, so the cap is now a
 // count of live Sessions held by the actor process itself.
 //
-// VERBATIM: "{SharedQueue}-sessions". conformance/queues.json §sessions.
+// VERBATIM: "{SharedQueue}-sessions". shared/conformance/queues.json §sessions.
 func SessionsQueue(actor, version string) string {
 	return SessionsQueueOf(SharedQueue(actor, version))
 }
@@ -71,7 +71,7 @@ func SessionsQueueOf(sharedQueue string) string {
 //
 // It takes the shared queue rather than (actor, version) because the only caller is workflow
 // code, which reads its own task queue from the workflow context — it cannot read env and stay
-// deterministic. conformance/queues.json §session.
+// deterministic. shared/conformance/queues.json §session.
 //
 // NO ID, NO QUEUE. An empty session id would otherwise derive "{shared}-s-", a real queue that
 // every Session of this actor would share: the pinning gone, nothing failing, and the scope's
@@ -94,7 +94,7 @@ const NexusServiceName = "kontra.actor"
 // (the running dev server enforces ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$, so it wants '-', not the
 // proto .pyi's '_'), doubles collapsed, ends stripped (echo 0.1.0 -> "kontra-echo-0-1-0").
 //
-// THE ONE DERIVATION HERE THAT SANITISES. conformance/queues.json §endpoint runs the same
+// THE ONE DERIVATION HERE THAT SANITISES. shared/conformance/queues.json §endpoint runs the same
 // inputs through this and through §shared, which passes them verbatim: a space is legal in a
 // queue name and illegal in an endpoint name, and the two rules must not be shared.
 func EndpointName(name, version string) string {

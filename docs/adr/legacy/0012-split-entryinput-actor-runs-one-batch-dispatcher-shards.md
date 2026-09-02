@@ -3,7 +3,7 @@
 ## Status
 
 **Accepted — staged migration; Phase C complete both SDKs.**
-- **Phase A (contract) — done:** `contracts/kontra/v1/actor.proto`
+- **Phase A (contract) — done:** `shared/contracts/kontra/v1/actor.proto`
   (`ActorRunInput` / `ActorRunResult` / `PerUnitFailure` / `ErrorInfo`), Go codegen + wire-congruence,
   and the behavioral corpus at `conformance/execution/`.
 - **Phase C (Go) — done:** `actorkit/go` has `ActorWorkflow` (one batch, no sharding) with **SessionLost

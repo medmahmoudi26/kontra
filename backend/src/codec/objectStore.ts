@@ -121,7 +121,7 @@ export class ObjectStore {
     // NORMALISED ONCE, HERE. `prefix` is read by {@link key} and by callers that build a path by
     // hand (`data/parquet.ts`'s DuckLake DATA_PATH), so a spelling stripped inside `key()` alone
     // would still leak out of the field. Slashes at the edges are not part of a prefix — see
-    // `wireFormat.prefixTrailingSlash` in conformance/codec/fixtures.json.
+    // `wireFormat.prefixTrailingSlash` in shared/conformance/codec/fixtures.json.
     this.prefix = stripSlashes(opts.prefix ?? env.KONTRA_S3_PREFIX ?? '');
     this.region = opts.region ?? env.KONTRA_S3_REGION ?? 'us-east-1';
     this.accessKey = opts.accessKey ?? env.KONTRA_S3_ACCESS_KEY ?? 'kontra';
@@ -146,7 +146,7 @@ export class ObjectStore {
    *
    * The algorithm is the contract, not a convenience: `handler/internal/objectstore.Key`,
    * `runtime/go/codec.objectKey` and `runtime/python/internals/casstore.object_key` must
-   * produce the same bytes, and the `prefixCases` rows of conformance/codec/fixtures.json
+   * produce the same bytes, and the `prefixCases` rows of shared/conformance/codec/fixtures.json
    * are what hold the four of them to it.
    */
   key(...parts: unknown[]): string {

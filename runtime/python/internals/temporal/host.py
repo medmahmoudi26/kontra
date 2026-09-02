@@ -105,7 +105,7 @@ def task_queue(name: str, version: str) -> str:
     workflow code must stay deterministic), so a mismatch here means an actor that registers,
     polls nothing, and looks idle.
 
-    conformance/queues.json §sessions is what holds the five derivations of this to one answer;
+    shared/conformance/queues.json §sessions is what holds the five derivations of this to one answer;
     tests/test_queue_congruence.py is this module's arm.
     """
     base = f"{name}-{version}" if version else f"{name}-shared"
@@ -122,7 +122,7 @@ def session_task_queue(name: str, version: str, session_id: str) -> str:
     Derived independently in four languages with no shared code — here, the caller
     (`actorkit.catalog.session_queue`, which closes on it), the Go actor host, and the handler,
     which dispatches onto it from its own task queue. A drift has no loud failure mode, so
-    conformance/queues.json §session is what holds them to one answer.
+    shared/conformance/queues.json §session is what holds them to one answer.
 
     NO ID, NO QUEUE: `{shared}-s-` is a real queue every Session of this actor would share.
     """
@@ -141,7 +141,7 @@ def session_actor_id(session_id: str, key: str = "") -> str:
     handler derives for a scoped dispatch (`handler/workflow.go`); the two are written
     independently, and tests/test_queue_congruence.py pins that pair directly — it is a rule
     about ONE dispatch's identity, not a name two processes have to spell the same, so it is not
-    in conformance/queues.json.
+    in shared/conformance/queues.json.
     """
     return key or session_id
 

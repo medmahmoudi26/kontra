@@ -11,7 +11,7 @@
  * `panels/discovery`, which reaches `infra/stacks` and `infra/state` — Pulumi, a filesystem and a
  * server. None of that belongs in a browser bundle. These three exports have no dependencies at all.
  *
- * `sharedQueue` IS ONE OF FOUR ARMS OF `conformance/queues.json`, and it stays inside the kontra
+ * `sharedQueue` IS ONE OF FOUR ARMS OF `shared/conformance/queues.json`, and it stays inside the kontra
  * repository for that reason: the corpus is what keeps this derivation equal to the Go, Python and
  * CLI ones, and a copy in another repo would be a fifth implementation of a rule that has four. The
  * corpus names the failure — "the actor registers, polls a queue nobody schedules onto, and reports
@@ -23,7 +23,7 @@
  * version.
  *
  * ONE OF THE CROSS-LANGUAGE DERIVATIONS of this string, held to one answer by
- * `conformance/queues.json` §shared, which every language executes — `queues.conformance.test.ts`
+ * `shared/conformance/queues.json` §shared, which every language executes — `queues.conformance.test.ts`
  * is this package's arm. The comment that stood here called this "a fourth derivation" and told
  * the reader to keep it in step with three named files by hand; two other files carried the same
  * instruction with different counts, and one named a file that had been renamed out of the tree.

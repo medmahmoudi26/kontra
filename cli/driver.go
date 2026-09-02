@@ -208,7 +208,7 @@ const workerLabelVar = "KONTRA_WORKER"
 // workerLabelSep separates the three fields of a label.
 //
 // NOTHING FORBIDS IT IN A NAME, and assuming otherwise was this file's one real bug.
-// `conformance/queues.json` carries an actor called `a/b` on purpose and states the rule the whole
+// `shared/conformance/queues.json` carries an actor called `a/b` on purpose and states the rule the whole
 // corpus is built to prove: "A QUEUE NAME IS NOT SANITISED" — `my actor` and `café` reach Temporal
 // verbatim, and so does a slash. So the separator is not a constraint on the name, and the parse
 // below reads the fields from the RIGHT rather than pretending it is one.

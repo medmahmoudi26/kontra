@@ -6,7 +6,7 @@ endpoint nobody serves, which just hangs) and the EntryInput field set (a key th
 reads, which runs the batch with the wrong id and looks fine). Both are testable with no
 infrastructure, and both are where a drift has no loud failure mode.
 
-The identity strings themselves are pinned by conformance/queues.json, which every language
+The identity strings themselves are pinned by shared/conformance/queues.json, which every language
 executes; what stays here is the wire shape, which only this SDK writes.
 """
 
@@ -18,7 +18,7 @@ from actorkit import catalog
 
 # ---------------------------------------------------------------------------------------------
 # Identity. The queue, session-queue and endpoint derivations that used to be pinned here by a
-# hand-copied table are pinned by conformance/queues.json now — every language executes it, and
+# hand-copied table are pinned by shared/conformance/queues.json now — every language executes it, and
 # tests/test_queue_congruence.py is this package's arm. The table that stood here was the third
 # copy of one contract, kept correct by somebody remembering to update all three.
 #

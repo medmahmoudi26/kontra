@@ -743,13 +743,13 @@ func (w uiLogWriter) Write(p []byte) (int, error) {
 // "restated here rather than imported so a drift in the moved code shows up as a failing test and
 // not as a test that agrees with the bug — which is also why it is restated in
 // appliance/codec/codec_test.go rather than shared with this file". Two copies of one string, each
-// justified by the other. conformance/codec/fixtures.json is where that string is defined for
+// justified by the other. shared/conformance/codec/fixtures.json is where that string is defined for
 // every implementation of this codec, so reading it keeps the whole of the drift-detection — this
 // test still fails if the served codec stops stamping the marker — and leaves nothing to keep in
 // step (ADR 0035 §3).
 func claimCheckMarker(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile("../../conformance/codec/fixtures.json")
+	raw, err := os.ReadFile("../../shared/conformance/codec/fixtures.json")
 	if err != nil {
 		t.Fatalf("read the codec corpus: %v", err)
 	}

@@ -43,7 +43,7 @@ import { getConnection } from './temporalClient';
  * `kontra-<name>-<version>`, non-alphanumerics collapsed to `-`.
  *
  * A CROSS-LANGUAGE DERIVATION with no shared code and no loud failure mode for a drift — a caller
- * dispatches to a name nobody created and waits. `conformance/queues.json` §endpoint is what holds
+ * dispatches to a name nobody created and waits. `shared/conformance/queues.json` §endpoint is what holds
  * the four sides to one answer, and `queues.conformance.test.ts` is this package's arm.
  *
  * NOT a comment counting the peers: this one said "THE FIFTH", `panels/pollers.ts` said "a

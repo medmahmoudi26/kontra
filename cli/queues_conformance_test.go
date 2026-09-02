@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The CLI ARM of conformance/queues.json — and it is the arm that did not exist.
+// The CLI ARM of shared/conformance/queues.json — and it is the arm that did not exist.
 //
 // `sharedQueue` in api.go carried the comment "byte-for-byte the peer of
 // handler/internal/identity.SharedQueue and orchestrator taskQueue()", and nothing in this suite
@@ -47,10 +47,10 @@ type queueCorpus struct {
 	} `json:"tmux_session"`
 }
 
-// ../conformance/queues.json — cli -> <repo root>.
+// ../shared/conformance/queues.json — cli -> <repo root>.
 func loadQueueCorpus(t *testing.T) *queueCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../conformance/queues.json")
+	raw, err := os.ReadFile("../shared/conformance/queues.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

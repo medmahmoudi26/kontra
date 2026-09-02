@@ -10,7 +10,7 @@
 // IT IS STILL NOT THE S3 API, and that is the point the codec's header makes at length: the
 // container fetched claim-checks with a signed HTTP GET through the host gateway, and in-process
 // the two are the same program. Same bytes, same key layout (cas/<sha[:2]>/<sha>, pinned across
-// all three SDKs by conformance/codec/fixtures.json), one fewer network hop, no SigV4 round trip
+// all three SDKs by shared/conformance/codec/fixtures.json), one fewer network hop, no SigV4 round trip
 // against ourselves.
 //
 // NOTHING HERE NAMES THE CODEC. The four methods happen to satisfy `codecserver.Backing`

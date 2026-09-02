@@ -104,7 +104,7 @@ func TestDefaultDestinationIsTheConventionalOne(t *testing.T) {
 		t.Errorf("the default destination for `café` = %v, want errImageUnrepresentable", err)
 	}
 
-	// A VERSION IS NOT ALWAYS A TAG — conformance/queues.json carries `1:2`, which Temporal takes
+	// A VERSION IS NOT ALWAYS A TAG — shared/conformance/queues.json carries `1:2`, which Temporal takes
 	// verbatim. Without the tag rule this builds a reference the registry rejects after the push.
 	if _, err := pushDestination("", "", "10.124.0.2", "nscheck", "1:2"); !errors.Is(err, errImageUnrepresentable) {
 		t.Errorf("version `1:2` = %v, want errImageUnrepresentable", err)

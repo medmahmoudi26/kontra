@@ -7,7 +7,7 @@
 //
 //   - The three SDK object stores (handler/internal/objectstore, sdk/python's casstore and
 //     unitstore, backend/src/codec/objectStore.ts) all speak SigV4 to an endpoint. Their key
-//     layout is pinned across languages by conformance/blobkey.json, so the store has to
+//     layout is pinned across languages by shared/conformance/blobkey.json, so the store has to
 //     be the thing those clients already talk to, byte for byte.
 //   - Remote fleet workers reach the controller over the VPC. `KONTRA_S3_ENDPOINT=http://$CONTROLLER:8333`
 //     is handed to every Machine by cloud-init; a filesystem path means nothing on another host.

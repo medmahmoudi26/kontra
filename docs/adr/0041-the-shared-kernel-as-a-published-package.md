@@ -19,7 +19,7 @@ Measured before the split: **10 orchestrator modules, 72 import sites, 40 files*
 
 Four facts shaped the answer.
 
-1. **Some of it must not be copied.** `vocabulary.test.ts` reads `cli/warden_workflow.go`'s **bytes** to pin the Warden's five kind spellings — a rename in Go is a red test in TypeScript. `sharedQueue` is one of four arms of `conformance/queues.json`, executed by Go, Python, the CLI and the orchestrator; the console's `actorSession` is a fifth. Duplicating any of it is what those tests exist to prevent.
+1. **Some of it must not be copied.** `vocabulary.test.ts` reads `cli/warden_workflow.go`'s **bytes** to pin the Warden's five kind spellings — a rename in Go is a red test in TypeScript. `sharedQueue` is one of four arms of `shared/conformance/queues.json`, executed by Go, Python, the CLI and the orchestrator; the console's `actorSession` is a fifth. Duplicating any of it is what those tests exist to prevent.
 
 2. **The duplication had already started, and nothing failed.** `backend/contract/types.ts` and a copy of it were **byte-identical** — one edit from an API whose two halves disagree with nothing going red. `SECRET_NAME_RE` was declared twice, kept honest by a test that read the server's source and compared two regex literals as strings. `DatasetState` was declared in the contract *and* in the console, under a test asserting "widening it is a compile error on both sides" that checked a file which never declared it — passing vacuously for its whole life.
 

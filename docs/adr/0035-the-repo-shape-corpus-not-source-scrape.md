@@ -120,7 +120,7 @@ sides execute* rather than text one side reads:
 
 | Corpus | Runners |
 |---|---|
-| `conformance/codec/fixtures.json` | `actorkit/python/internals/test_codec_conformance.py`, `backend/src/codec/conformance.test.ts`, `actorkit/go/internal/codec/conformance_test.go`, `handler/internal/codec/conformance_test.go`, `cli/appliance/codec_test.go` — five runners, three languages |
+| `shared/conformance/codec/fixtures.json` | `actorkit/python/internals/test_codec_conformance.py`, `backend/src/codec/conformance.test.ts`, `actorkit/go/internal/codec/conformance_test.go`, `handler/internal/codec/conformance_test.go`, `cli/appliance/codec_test.go` — five runners, three languages |
 | `actorkit/conformance/catalog.json` | `tests/test_catalog_conformance.py`, `backend/src/catalog.conformance.test.ts` (against the real Fastify server), `actorkit/go/internal/registrar/conformance_test.go` |
 | `actorkit/conformance/blobkey.json` | `actorkit/python/internals/test_blobkey_conformance.py`, `backend/src/codec/shard.test.ts`, `actorkit/go/internal/unitstore/conformance_test.go`, `cli/appliance/s3_test.go` |
 | `actorkit/conformance/output_dataset.json` | `tests/test_output_dataset_conformance.py`, `actorkit/go/internal/engine/output_dataset_conformance_test.go` — **Python and Go only; there is no TypeScript arm** |
@@ -140,7 +140,7 @@ Two of these deserve naming, because they are the ones where the corpus is not m
 `EVALSHA` — a fixture holding those bytes is strictly better than a string-slice between
 `_CAS_LUA = """` and `"""`. And the claim-check codec, whose installation `host_test.go` greps its
 own source for, is the single most conformance-covered thing in this repo: five runners over
-`conformance/codec/fixtures.json`. The test's own comment says so ("The format is already pinned by
+`shared/conformance/codec/fixtures.json`. The test's own comment says so ("The format is already pinned by
 the cross-language corpus"), and then reaches for `strings.Contains` anyway, because what it wants
 to know — did `Serve` dial with the converter — was easier to grep than to dial.
 
@@ -178,7 +178,7 @@ checks, in a comment, in the file that violates it.
 | `handler/` | the Go **Actor** host, the codec server, the CAS | unchanged |
 | `cli/` | the `kontra` binary and the appliance sub-packages (`kv`, `objstore`, `registry`, `bundle`, `temporalsrv`) | unchanged |
 | `proto/` | the `.proto` files buf owns | `contracts/kontra` |
-| `conformance/` | **the one cross-language gate** — every corpus, in one place | `conformance/codec` plus `actorkit/conformance`, today split |
+| `conformance/` | **the one cross-language gate** — every corpus, in one place | `shared/conformance/codec` plus `actorkit/conformance`, today split |
 | `examples/ docs/ scripts/ infra/ tests/` | unchanged | unchanged |
 
 `build/`, `tmp/` and `node_modules/` are gitignored, and already are (`.gitignore:8`, `:32`, `:34`).
@@ -190,7 +190,7 @@ contract with two writers, it is a constant, and it needs no corpus and no scrap
 — **0024**'s oldest carried-forward debt, "both wire strings remain independent literals" — is the
 first thing that belongs there, and the retention TTL of finding 2 is the second within one language.
 **`conformance/` is one directory because it is one gate**: the corpora are split across
-`conformance/codec/` and `actorkit/conformance/` today, and a contributor who has to know which of
+`shared/conformance/codec/` and `actorkit/conformance/` today, and a contributor who has to know which of
 two trees holds the fixtures is a contributor who writes a scrape instead.
 
 ### 2. Rule one: `runtime/` may import `sdk/`. `sdk/` may import nothing of `runtime/`.

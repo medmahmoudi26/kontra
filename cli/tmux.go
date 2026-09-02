@@ -39,7 +39,7 @@ import (
 // or '_' cannot be attached to, and a pane looked up by it matches whatever in the inventory
 // happens to have no name — so it is `actor`, which is what `panels/tmux.ts:actorSession` answers
 // on the other side of the language boundary. This function used to return the unusable string;
-// conformance/queues.json §tmux_session is what found it and what holds the two together now.
+// shared/conformance/queues.json §tmux_session is what found it and what holds the two together now.
 // The `fleet` fallback in fleetSessionName is a DIFFERENT domain, and the corpus says why.
 func tmuxSession(actor, version string) string {
 	name := tmuxSafeName(actor)

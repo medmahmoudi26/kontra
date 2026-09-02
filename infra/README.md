@@ -66,11 +66,11 @@ TWO RULES A DESTINATION HAS AND A PULL DOES NOT, both refused before the build i
 
 An operator's `--push` is HTTPS unless they write `http://` or the host is loopback. That inverts
 the default for kontra's own conventional address, which is plain HTTP by construction — see
-`cli/bundle.go:pushTransport`, and `conformance/ociref.json` for the pinned table.
+`cli/bundle.go:pushTransport`, and `shared/conformance/ociref.json` for the pinned table.
 
 WITH NO `--push`, the address is `<registry>/bundles/<name>:<version>` at the Controller's own
 registry, and **that is the only address a Fleet placement can resolve**: `resolveBundle` derives it
-from the actor and the version alone (`conformance/bundleref.json`). An Artifact pushed anywhere
+from the actor and the version alone (`shared/conformance/bundleref.json`). An Artifact pushed anywhere
 else is publishable and mirrorable and is not placeable until it is copied there; `kontra build`
 prints that rather than leaving it to be found as a 404 three minutes into a run.
 
@@ -92,7 +92,7 @@ what a tag resolves to and what `@sha256:…` pins. The **layer digest** is the 
 and is what a Machine checks; it is a Bundle's identity in ADR 0032's sense, and it is the value
 that ADR assigns to `KONTRA_ACTOR_DIGEST` for a **Bundle** — unchanged by this move, since it is
 the same hash of the same bytes. (Nothing writes that variable yet: 0032's enforcement half is
-still unimplemented on both **Targets**.) `conformance/bundleref.json` pins every address derived
+still unimplemented on both **Targets**.) `shared/conformance/bundleref.json` pins every address derived
 from the two digests, in Go and in TypeScript.
 
 ### Airgap

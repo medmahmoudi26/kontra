@@ -1,5 +1,5 @@
 /**
- * The TYPESCRIPT ARM of `conformance/queues.json` — all four derivations this package owns.
+ * The TYPESCRIPT ARM of `shared/conformance/queues.json` — all four derivations this package owns.
  *
  * WHY ONE FILE AND NOT FOUR. The Actor's task queue, its Nexus endpoint and its tmux session name
  * are three rules with three different answers to the same question ("what is this Actor called
@@ -37,7 +37,7 @@ type TmuxCase = {
 };
 
 const corpus = JSON.parse(
-  readFileSync(join(__dirname, '../../conformance/queues.json'), 'utf8')
+  readFileSync(join(__dirname, '../../shared/conformance/queues.json'), 'utf8')
 ) as {
   shared: { cases: QueueCase[] };
   endpoint: { servable: string; cases: QueueCase[] };
@@ -125,7 +125,7 @@ describe('the tmux session name', () => {
 
   it('records a reason for every row where the two answers differ', () => {
     // A case whose reason is not written down is one nobody can tell from a typo when it goes red
-    // (conformance/README.md). These are the rows that would read as a bug on sight.
+    // (shared/conformance/README.md). These are the rows that would read as a bug on sight.
     const differ = corpus.tmux_session.cases.filter((c) => c.worker !== c.machine);
     expect(differ.length).toBeGreaterThan(0);
     for (const c of differ) expect(c.why.length).toBeGreaterThan(30);

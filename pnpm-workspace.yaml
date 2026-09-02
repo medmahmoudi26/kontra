@@ -5,7 +5,7 @@
 # test files.
 packages:
   - backend
-  - core
+  - shared/core
 # Which dependencies may run install scripts. The three that may are the three kontra-local ran —
 # each ships a native binary its JS half is useless without, and pnpm's default is to skip them:
 # @swc/core is what Temporal's Workflow bundler loads TypeScript through, esbuild is vite's, and

@@ -63,7 +63,7 @@ export const DEFAULT_METRICS_TIMEOUT_MS = 2000;
  *
  * Wide on purpose and the width is measured: the sick Machines ran above 0.9 and every healthy peer
  * sat at 0, so anything in between is noise. The **Warden** draws its own line at 0.8 before it
- * restarts a Worker (`conformance/workerhealth.json`, inherited from the retired watchdog's
+ * restarts a Worker (`shared/conformance/workerhealth.json`, inherited from the retired watchdog's
  * threshold) — a chip that only informs can afford to speak earlier than one that reboots
  * something.
  */

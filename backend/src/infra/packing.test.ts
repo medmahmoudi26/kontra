@@ -272,7 +272,7 @@ describe('two Actors on one Fleet', () => {
 describe('workers and spread, on the Machines themselves', () => {
   /**
    * `spread=True` in the caller SDK is `workers == machines` on the wire — there is no boolean on
-   * this wire (`conformance/placement.json:never_boolean`). What it buys is what this asserts: one
+   * this wire (`shared/conformance/placement.json:never_boolean`). What it buys is what this asserts: one
    * Worker of this placement on EVERY Machine, which is `subfinder`'s operating rule.
    */
   it('spread puts one Worker of the placement on every Machine', async () => {

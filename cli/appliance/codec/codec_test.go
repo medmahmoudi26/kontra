@@ -87,7 +87,7 @@ func remoteCodec(t *testing.T, srv *Server) converter.PayloadCodec {
 	return converter.NewRemotePayloadCodec(converter.RemotePayloadCodecOptions{Endpoint: srv.Endpoint()})
 }
 
-// codecFixtures is conformance/codec/fixtures.json — the SAME corpus the Python and TypeScript
+// codecFixtures is shared/conformance/codec/fixtures.json — the SAME corpus the Python and TypeScript
 // codecs are held to, and the Go codec's own suite in handler/internal/codec. Kept in this shape
 // (and not shared) because that file is the contract; a struct that could not read it verbatim
 // would be a second contract.
@@ -130,7 +130,7 @@ type codecFixtures struct {
 // TestCodecConformanceThroughTheAppliance cannot end up looking at different files.
 func loadCodecFixtures(t *testing.T) codecFixtures {
 	t.Helper()
-	raw, err := os.ReadFile("../../../conformance/codec/fixtures.json")
+	raw, err := os.ReadFile("../../../shared/conformance/codec/fixtures.json")
 	if err != nil {
 		t.Fatalf("read fixtures: %v", err)
 	}
@@ -150,7 +150,7 @@ func loadCodecFixtures(t *testing.T) codecFixtures {
 // appliance/temporalui_test.go, each under a header arguing that restating it was deliberate: "so
 // a drift in the moved code shows up as a failing test and not as a test that agrees with the
 // bug". That argument is right about IMPORTING and wrong about the alternative. The value is
-// defined for all of the implementations in conformance/codec/fixtures.json, so reading it keeps
+// defined for all of the implementations in shared/conformance/codec/fixtures.json, so reading it keeps
 // every bit of the drift-detection — this test still fails if the code moves — while removing a
 // copy that had to be kept in step by hand (ADR 0035 §3).
 func claimCheckMarker(t *testing.T) string {

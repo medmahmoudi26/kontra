@@ -59,7 +59,7 @@ export type Descriptor = Omit<ActorRecord, 'savedAt' | 'incompatibilities'>;
 const ajv = new Ajv2020({ strict: false, allErrors: true });
 
 /**
- * The descriptor, as `contracts/kontra/v1/catalog.proto` describes it — the runtime half of what
+ * The descriptor, as `shared/contracts/kontra/v1/catalog.proto` describes it — the runtime half of what
  * `catalog.contract.ts` pins at compile time.
  *
  * `params`/`input`/`output` are `type: 'object'` and nothing more. They are JSON Schema documents
@@ -190,7 +190,7 @@ export function parseDescriptor(body: unknown): Descriptor {
 export type WorkflowDescriptor = Omit<WorkflowRecord, 'savedAt'>;
 
 /**
- * The workflow descriptor, as `contracts/kontra/v1/catalog.proto` describes it.
+ * The workflow descriptor, as `shared/contracts/kontra/v1/catalog.proto` describes it.
  *
  * SCREENED FOR THE SAME REASON `POST /api/actors` IS. That route checked three strings and cast,
  * and `{"operations":[1,2,3]}` registered with a 200 — the first code to look inside was the first

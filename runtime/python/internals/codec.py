@@ -3,8 +3,8 @@ orchestrator's claimCheck.ts.
 
 Payloads over a threshold are offloaded to the CAS and replaced by a small ref payload,
 transparently rehydrated on decode. All three implementations MUST agree byte-for-byte:
-`conformance/codec/fixtures.json` is the oracle, and any disagreement silently drops data
-across the namespace boundary (see conformance/codec/README.md — that drift has happened
+`shared/conformance/codec/fixtures.json` is the oracle, and any disagreement silently drops data
+across the namespace boundary (see shared/conformance/codec/README.md — that drift has happened
 once already).
 
 This module owns only the Payload-level concerns: the threshold rule, the marker, the

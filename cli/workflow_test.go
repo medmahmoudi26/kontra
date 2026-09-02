@@ -7,7 +7,7 @@
 //
 //	identity_test.go        the queues and the digests
 //	workflowworker_test.go  the launch profile a served worker gets
-//	claimcheck_test.go      the CLI's arm of conformance/codec/fixtures.json
+//	claimcheck_test.go      the CLI's arm of shared/conformance/codec/fixtures.json
 package main
 
 import (

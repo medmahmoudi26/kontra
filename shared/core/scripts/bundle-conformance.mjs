@@ -4,7 +4,7 @@
  * WHY THIS EXISTS. `conformance/*.json` is the cross-language contract: Go, Python, the CLI and the
  * orchestrator each drive the same file, and ADR 0035's second rule is that a contract with two
  * writers gets a corpus rather than two string literals. kontra-console is one of those writers —
- * `src/panels/actorSession.test.ts` calls itself "the BROWSER ARM of conformance/queues.json
+ * `src/panels/actorSession.test.ts` calls itself "the BROWSER ARM of shared/conformance/queues.json
  * §tmux_session" — and after ADR 0038 it is no longer in this repository and cannot read the file.
  *
  * The alternative was for the console to keep its own copy of the corpus. That is the precise thing

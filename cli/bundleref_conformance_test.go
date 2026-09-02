@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-// The CLI ARM of conformance/bundleref.json — where a Bundle lives once it is an OCI artifact.
+// The CLI ARM of shared/conformance/bundleref.json — where a Bundle lives once it is an OCI artifact.
 //
 // THIS BINARY IS THE WRITER AND IT HAS NEVER BEEN THE TESTED ONE. The address a Bundle is
 // published to is assembled here out of four separate arguments (`bundleRepoPrefix`, the actor's
 // name, the version, the layer sha) and re-assembled in `backend/src/activities/fleet.ts` out of
 // the same four — and, before this corpus, the two were pinned by a Go test asserting one literal
 // and a vitest asserting another, neither aware of the other. That is precisely the arrangement
-// `conformance/README.md` calls a hand-copied golden, and the object-store layout it replaces
+// `shared/conformance/README.md` calls a hand-copied golden, and the object-store layout it replaces
 // drifted exactly that way once already.
 //
 // The manifest URL has ONE implementation and it is TypeScript's: only the control plane resolves
@@ -65,10 +65,10 @@ type bundleRefCorpus struct {
 	} `json:"media_types"`
 }
 
-// ../conformance/bundleref.json — cli -> <repo root>.
+// ../shared/conformance/bundleref.json — cli -> <repo root>.
 func loadBundleRefCorpus(t *testing.T) *bundleRefCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../conformance/bundleref.json")
+	raw, err := os.ReadFile("../shared/conformance/bundleref.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

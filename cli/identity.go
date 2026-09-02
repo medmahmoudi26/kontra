@@ -42,7 +42,7 @@ import (
 // UNTIL 2026-08-28 THIS DERIVATION HAD NO CONGRUENCE TEST AT ALL. It appeared in the suite once,
 // in workflow_test.go, as the CONTRAST half of an assertion about something else — so the eight
 // places that must agree on this string were seven places and a comment. queues_conformance_test.go
-// is the CLI's arm of conformance/queues.json now.
+// is the CLI's arm of shared/conformance/queues.json now.
 func sharedQueue(name, version string) string {
 	if version != "" {
 		return name + "-" + version
@@ -203,7 +203,7 @@ func readWorkflowManifest(file string) workflowManifest {
 //
 // IT IS HERE, BESIDE THE QUEUE, AND NOT IN tmux.go, because it is derived from the same resolved
 // file the queue is and shares `workflowMarker` with it. `tmuxSession` is an ACTOR's session and
-// lives with the tmux mechanics; the two are held together by conformance/queues.json §tmux_session
+// lives with the tmux mechanics; the two are held together by shared/conformance/queues.json §tmux_session
 // rather than by being adjacent.
 //
 // IT USED TO BE `kontra-wf-<queue>`, and both halves of that were compensating for the same thing.

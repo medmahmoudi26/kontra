@@ -1,5 +1,5 @@
 /**
- * The TYPESCRIPT arm of the cross-SDK catalog contract (conformance/catalog.json).
+ * The TYPESCRIPT arm of the cross-SDK catalog contract (shared/conformance/catalog.json).
  *
  * Go and Python WRITE this descriptor — two hand-written JSON emitters that share no code with
  * each other or with this reader (ADR 0002: the wire is JSON, the proto is only the shared type
@@ -43,7 +43,7 @@ type Descriptor = {
 };
 
 const fixture = JSON.parse(
-  readFileSync(join(__dirname, '../../conformance/catalog.json'), 'utf8'),
+  readFileSync(join(__dirname, '../../shared/conformance/catalog.json'), 'utf8'),
 ) as { expect: Descriptor; unsetDigest: { why: string; absent: string[] } };
 
 describe('the catalog stores the golden descriptor without loss', () => {

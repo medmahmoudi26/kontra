@@ -100,7 +100,7 @@ def render(actor: str, version: str) -> str:
         "# HELP kontra_batches_total Unit batches executed by this worker.",
         "# TYPE kontra_batches_total counter",
         f"kontra_batches_total{{{base}}} {bat:g}",
-        # The sick-worker ratio's two halves. Names pinned by conformance/workerhealth.json,
+        # The sick-worker ratio's two halves. Names pinned by shared/conformance/workerhealth.json,
         # because the Go host spells them independently and a `_failures_total` against a
         # `_failure_total` would leave the Warden dividing by an absent series on half a Fleet —
         # visible as a permanently `unknown` chip and as nothing else.

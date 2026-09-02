@@ -121,7 +121,7 @@ type terminal struct {
 	// Nothing failed on either side, because each side's tests were built from that side's own
 	// declaration: the TypeScript tests assert the TypeScript spelling, the Go tests built their
 	// fixtures from this struct. ADR 0035 rule two — a contract with two writers gets a corpus, not
-	// two independent string literals. `conformance/terminal.json` is that corpus and
+	// two independent string literals. `shared/conformance/terminal.json` is that corpus and
 	// `panels_conformance_test.go` is this side's arm of it.
 	Fleet          string         `json:"fleet"`
 	Actor          string         `json:"actor"`   // '' when the stack carries no placement

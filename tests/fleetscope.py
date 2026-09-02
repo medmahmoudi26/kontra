@@ -189,7 +189,7 @@ class FleetScope:
                 # EXACTLY `ResolvedBundle` (`backend/src/activities/fleet.ts`), all five fields.
                 # The SDK spreads this straight into the stack args, so a fake missing a field is a
                 # fake that cannot see a placement key going missing — which is the whole class of
-                # bug `conformance/placement.json` exists for. `test_placement_conformance.py`
+                # bug `shared/conformance/placement.json` exists for. `test_placement_conformance.py`
                 # checks this dict against the corpus's `from_resolver` list, so it cannot drift.
                 return {
                     "actorName": (arg or {}).get("actor", "nscheck"),

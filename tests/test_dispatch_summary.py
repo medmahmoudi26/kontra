@@ -200,7 +200,7 @@ def test_the_reader_on_the_other_side_pins_the_same_shape():
     """A TWO-WRITER CONTRACT WITH NO REGISTRATION STEP, like the queue and endpoint derivations.
     Nothing fails loudly on a drift — the transcript would simply stop naming Methods — so the
     separator and the reader's own guard are pinned from this side too."""
-    reader = (ROOT / "core" / "src" / "transcript.ts").read_text()
+    reader = (ROOT / "shared" / "core" / "src" / "transcript.ts").read_text()
     assert f"const SUMMARY_SEP = '{catalog.SUMMARY_SEP}';" in reader
     # The guard is what keeps a line this reader does not recognise from becoming a wrong name.
     assert "const METHOD_NAME = " in reader

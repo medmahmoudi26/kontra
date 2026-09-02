@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { coerceFleetArgs } from './infra/stacks';
 
 /**
- * THE TYPESCRIPT ARM of `conformance/placement.json`.
+ * THE TYPESCRIPT ARM of `shared/conformance/placement.json`.
  *
  * This side is the READER — the only one. `sdk/python/actorkit/fleet.py` and `cli/fleet.go` both
  * build a **Fleet**'s desired state and neither imports anything from here; `coerceFleetArgs`
@@ -26,7 +26,7 @@ import { coerceFleetArgs } from './infra/stacks';
  * The writer arms are `tests/test_placement_conformance.py` and `cli/placement_conformance_test.go`.
  */
 
-const CORPUS = path.resolve(__dirname, '../../conformance/placement.json');
+const CORPUS = path.resolve(__dirname, '../../shared/conformance/placement.json');
 
 interface Corpus {
   keys: { why: string; sections: Record<string, { keys: string[]; why: string }> };
@@ -40,7 +40,7 @@ interface Corpus {
 
 const corpus = JSON.parse(readFileSync(CORPUS, 'utf8')) as Corpus;
 
-describe('conformance/placement.json — the reader', () => {
+describe('shared/conformance/placement.json — the reader', () => {
   it('still contains the inputs it exists for', () => {
     // A CORPUS THAT SILENTLY SHRANK TO NOTHING PASSES EVERYTHING. These are the rows whose loss
     // would take the guard with them, named individually rather than counted.

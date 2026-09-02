@@ -12,7 +12,7 @@ import (
 	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
-// The GO HOST's arm of conformance/workerhealth.json — one of two WRITERS of the two series the
+// The GO HOST's arm of shared/conformance/workerhealth.json — one of two WRITERS of the two series the
 // Warden divides.
 //
 // WHY THIS IS NOT `metrics_test.go`'s job. That file already has a test named
@@ -38,7 +38,7 @@ type workerHealthNames struct {
 
 func loadWorkerHealthNames(t *testing.T) workerHealthNames {
 	t.Helper()
-	raw, err := os.ReadFile("../../../conformance/workerhealth.json")
+	raw, err := os.ReadFile("../../../shared/conformance/workerhealth.json")
 	if err != nil {
 		t.Fatalf("reading the corpus: %v", err)
 	}

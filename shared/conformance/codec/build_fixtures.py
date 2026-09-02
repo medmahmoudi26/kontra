@@ -16,7 +16,7 @@ What is structure-exact, NOT byte-exact:
     whitespace, but both parse identically and the object is addressed by the
     DATA sha, not the ref bytes -- so the ref is defined by its parsed structure.
 
-Run: python conformance/codec/build_fixtures.py   (writes fixtures.json)
+Run: python shared/conformance/codec/build_fixtures.py   (writes fixtures.json)
 """
 from __future__ import annotations
 

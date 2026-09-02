@@ -295,7 +295,7 @@ func TestAFrameIsTheLastScreenful(t *testing.T) {
 	}
 }
 
-// TRUNCATED BY RUNE, NOT BY BYTE. `conformance/queues.json` carries `café` as an adversarial actor
+// TRUNCATED BY RUNE, NOT BY BYTE. `shared/conformance/queues.json` carries `café` as an adversarial actor
 // name on purpose, and a Worker's output is arbitrary UTF-8; half a rune is a replacement character
 // on the wall and an escaping problem on the way there.
 func TestAFrameIsCutOnRuneBoundaries(t *testing.T) {

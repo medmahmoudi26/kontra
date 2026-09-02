@@ -22,7 +22,7 @@ whose tests never opened it. It is gone: the CLI reaches the handler's codec thr
 rather than a copy of this contract.
 
 The sentence that used to open this file said how many implementations there were, and the number
-was wrong for as long as that fifth one existed. `conformance/README.md` names that failure mode —
+was wrong for as long as that fifth one existed. `shared/conformance/README.md` names that failure mode —
 a count is a fact about the repo that only a human can check and only a human can update — so the
 number is gone from here too. **The table below is the list.** An implementation not in it is a
 finding, not a gap in the prose.
@@ -115,7 +115,7 @@ store and replaced by a tiny content-addressed reference.
 [`build_fixtures.py`](./build_fixtures.py) and regenerate:
 
 ```bash
-python conformance/codec/build_fixtures.py
+python shared/conformance/codec/build_fixtures.py
 ```
 
 Then run both harnesses. A change here is a change to the wire contract — it must

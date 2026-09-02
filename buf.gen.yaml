@@ -3,7 +3,7 @@ plugins:
   # Machine proto stubs are COMMITTED (sdk/python/_gen for Python, backend/_gen
   # for TS — generated code lives in the consuming seam, never under a contract dir) and
   # drift-checked in CI (`buf generate` + `git diff --exit-code`). Never edited by hand.
-  # Output paths mirror the proto file path (contracts/kontra/v1/* -> _gen/kontra/v1/*).
+  # Output paths mirror the proto file path (shared/contracts/kontra/v1/* -> _gen/kontra/v1/*).
   # Pinned to match the venv runtime: temporalio requires protobuf<7, so the gencode must
   # be 6.x (protoc v33 -> python 6.33; latest emits 7.x and fails).
   - remote: buf.build/protocolbuffers/python:v33.0

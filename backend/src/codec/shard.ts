@@ -11,7 +11,7 @@
  * silent wrong answer, not an error.
  *
  * The three have drifted before (isolation counters shipped Go-only), so all three are pinned to
- * one golden fixture: conformance/blobkey.json, asserted by each language's own suite.
+ * one golden fixture: shared/conformance/blobkey.json, asserted by each language's own suite.
  *
  * NOTHING IN TYPESCRIPT READS A UNIT BLOB TODAY. The reader was the interpreter's streaming
  * cursor, which is gone (ADR 0023 §12); the lake surfaces read Parquet, not `units/`. This arm

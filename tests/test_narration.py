@@ -408,7 +408,7 @@ def test_the_reader_pins_the_same_carrier(wf: Fake) -> None:
     """A TWO-WRITER CONTRACT WITH NO REGISTRATION STEP, like the Method Summary next door. Nothing
     fails loudly on a drift — the transcript would simply stop having narration in it, and every
     sentence would render as a raw timer — so the carrier is pinned from this side too."""
-    reader = (ROOT / "core" / "src" / "transcript.ts").read_text()
+    reader = (ROOT / "shared" / "core" / "src" / "transcript.ts").read_text()
     # The event a sentence rides on, and the field it rides in.
     assert "if (e.type.startsWith('Timer'))" in reader
     assert "e.type === 'TimerStarted' && e.summary" in reader
@@ -431,7 +431,7 @@ def test_the_reader_still_reads_a_sentence_carried_some_other_way() -> None:
     reader deciding in advance which SDK may narrate, which is the drift this test exists to catch
     and the one a bare substring match on the old line could not tell apart from a rename.
     """
-    reader = (ROOT / "core" / "src" / "transcript.ts").read_text()
+    reader = (ROOT / "shared" / "core" / "src" / "transcript.ts").read_text()
     generic = reader.split("// ── an author's own sentence, written some other way ──")[1]
     guard = generic.split("turns.push(rawTurn(e));")[0]
     opened = re.search(r"^\s*if \(e\.summary(?P<rest>.*)\) \{$", guard, re.M)

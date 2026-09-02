@@ -147,7 +147,7 @@ CLOSE_SESSION_ACTIVITY = "CloseSession"
 # by design. A drift has NO loud failure mode: the call goes to a queue or endpoint nobody serves
 # and the workflow simply waits.
 #
-# WHAT HOLDS THEM TO ONE ANSWER IS conformance/queues.json, which every language executes
+# WHAT HOLDS THEM TO ONE ANSWER IS shared/conformance/queues.json, which every language executes
 # (tests/test_queue_congruence.py is this module's arm). Deliberately not a comment counting the
 # peers or naming their files: the three comments that did — here, in sdk/go/catalog and in
 # backend/src/panels/pollers.ts — gave three different counts, and one of the files named here
@@ -160,7 +160,7 @@ def shared_queue(name: str, version: str = "") -> str:
     activities. `{name}-{version}`, or `{name}-shared` when a version is absent (the DIY path).
 
     NOT SANITISED. Temporal accepts a space and a non-ASCII rune in a queue name, and
-    conformance/queues.json carries both as rows: a derivation that cleaned this up would route
+    shared/conformance/queues.json carries both as rows: a derivation that cleaned this up would route
     to a queue nobody polls. `endpoint_name` below is the one that sanitises.
     """
     return f"{name}-{version}" if version else f"{name}-shared"
@@ -184,7 +184,7 @@ def session_queue(name: str, version: str = "", session_id: str = "") -> str:
     than a silent re-activation somewhere else.
 
     Derived independently by the handler (from its own task queue and the dispatch's session id)
-    and by the actor host, under the decoupling rule; conformance/queues.json §session holds the
+    and by the actor host, under the decoupling rule; shared/conformance/queues.json §session holds the
     five derivations to one answer.
 
     NO ID, NO QUEUE. Raising is Python's idiom for the refusal the Go sides express by returning
@@ -203,7 +203,7 @@ def endpoint_name(name: str, version: str = "") -> str:
 
     THE ONE DERIVATION IN THIS MODULE THAT SANITISES, because the cluster enforces
     ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$ on an endpoint name and enforces nothing on a queue name.
-    conformance/queues.json runs the same inputs through both rules for exactly that reason.
+    shared/conformance/queues.json runs the same inputs through both rules for exactly that reason.
     """
     raw = f"kontra-{name}-{version}"
     safe = "".join(c if (c.isascii() and (c.isalnum() or c == "-")) else "-" for c in raw)
@@ -1522,7 +1522,7 @@ def _slug(run_id: str) -> str:
     different strings for one Dataset, which is exactly the class of drift a run-derived name exists
     to remove.
 
-    A THREE-WRITER DERIVATION, PINNED BY ``conformance/slug.json``. This, Go's ``tempSlug``, and
+    A THREE-WRITER DERIVATION, PINNED BY ``shared/conformance/slug.json``. This, Go's ``tempSlug``, and
     ``safeName``. This docstring used to end "``tests/test_temp_dataset.py`` pins the pair"; there
     is no such file and there never was, so this side was asserted by nothing while the Go peer was
     asserted against a value hand-copied out of it. The corpus also records the three places

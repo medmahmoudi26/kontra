@@ -36,7 +36,7 @@ package main
 // A **Fleet** placement resolves a Bundle by CONVENTION and not from a stored reference:
 // `backend/src/activities/fleet.ts:resolveBundle` builds `<registry>/v2/bundles/<actor>/manifests/
 // <version>` out of the actor and the version alone, pinned on both sides by
-// `conformance/bundleref.json`. A `--push` to any other repository therefore publishes an Artifact
+// `shared/conformance/bundleref.json`. A `--push` to any other repository therefore publishes an Artifact
 // that is perfectly good, perfectly mirrorable, and NOT findable by `kontra fleet deploy`. That is a
 // real gap and the output says so rather than leaving it to be discovered as a 404 three minutes
 // into a run — which is precisely the failure `bundleref.json` was written after.
@@ -61,13 +61,13 @@ import (
 //
 // IT EXISTS SO A CI WRAPPER DOES NOT GREP. `kontra/build-actor` (the GitHub Action) and the GitLab
 // template both need exactly one value out of a build — the digest — and the alternative is a `sed`
-// against a human sentence, which is the "source scrape" conformance/README.md records as one of the
+// against a human sentence, which is the "source scrape" shared/conformance/README.md records as one of the
 // two drift shapes this repo has already paid for: "They break on any refactor that preserves
 // behaviour, and they pass while the values drift."
 //
 // `placeable` is the field that is not about the Artifact but about what can be done with it: a
 // Fleet placement resolves `bundles/<name>` at its own registry by convention
-// (`conformance/bundleref.json`), so an Artifact pushed anywhere else is publishable, mirrorable and
+// (`shared/conformance/bundleref.json`), so an Artifact pushed anywhere else is publishable, mirrorable and
 // not placeable. A wrapper that wants to gate on that can, instead of reading a note meant for a
 // human.
 type buildOutput struct {
@@ -142,7 +142,7 @@ func cmdBuild(args []string) error {
 	// PROGRESS GOES TO STDERR UNDER --json, and stdout carries one JSON document and nothing else. A
 	// CI wrapper that had to strip build noise out of the channel it parses is a wrapper that breaks
 	// the first time the build prints something new — which is the shape of the "source scrape" that
-	// conformance/README.md names as one of the two things this repo already paid for.
+	// shared/conformance/README.md names as one of the two things this repo already paid for.
 	progress := stdout
 	if *asJSON {
 		progress = stderr

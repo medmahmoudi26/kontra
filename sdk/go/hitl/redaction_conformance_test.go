@@ -11,7 +11,7 @@ import (
 	"github.com/medmahmoudi26/kontra/sdk/go/narrate"
 )
 
-// The GO ARM of the redaction contract (conformance/redaction.json). The Python arm is
+// The GO ARM of the redaction contract (shared/conformance/redaction.json). The Python arm is
 // tests/test_redaction_conformance.py and asserts the same file.
 //
 // THE ONE PARITY SURFACE WHERE BEING WRONG IS A CREDENTIAL. Everything else these two SDKs must
@@ -45,8 +45,8 @@ type redactionDoc struct {
 
 func loadRedaction(t *testing.T) redactionDoc {
 	t.Helper()
-	// ../../../conformance/redaction.json — hitl -> go -> sdk -> <repo root>.
-	b, err := os.ReadFile("../../../conformance/redaction.json")
+	// ../../../shared/conformance/redaction.json — hitl -> go -> sdk -> <repo root>.
+	b, err := os.ReadFile("../../../shared/conformance/redaction.json")
 	if err != nil {
 		t.Fatalf("read the corpus: %v", err)
 	}

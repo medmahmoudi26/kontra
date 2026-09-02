@@ -247,7 +247,7 @@ func TestSessionsIsSentOnlyWhenAskedFor(t *testing.T) {
 //
 // It pinned `<name>/<version>/latest.json` against a literal, while `backend/src/activities/
 // fleet.test.ts` pinned the same layout against a second literal that did not know about it —
-// the hand-copied golden `conformance/README.md` describes. The contract survives and is
+// the hand-copied golden `shared/conformance/README.md` describes. The contract survives and is
 // stronger, because it now covers the whole address on both sides at once:
-// `conformance/bundleref.json`, driven from `cli/bundleref_conformance_test.go` here and
+// `shared/conformance/bundleref.json`, driven from `cli/bundleref_conformance_test.go` here and
 // `backend/src/activities/bundleref.conformance.test.ts` there.

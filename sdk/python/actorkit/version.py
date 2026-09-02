@@ -8,7 +8,7 @@ must stay byte-identical to today:
 Only the bare token below is shared; each call site keeps its own prefix+separator.
 
 NOT shared with the buf-owned proto package `kontra.v1` (governed by buf), nor with
-the deliberately-independent copies in conformance/codec/build_fixtures.py,
+the deliberately-independent copies in shared/conformance/codec/build_fixtures.py,
 backend/src/codec/claimCheck.ts, and the orchestrator TS schemaVersion sites —
 those are the cross-language/cross-tool checks and must NOT import this constant.
 """

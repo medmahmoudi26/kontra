@@ -37,9 +37,9 @@ test-engine:
     {{pytest}} tests/test_actor_engine.py -q
 
 # Language-neutral claim-check codec conformance corpus (Python side of the
-# byte-compatible wire contract pinned by conformance/codec/fixtures.json).
+# byte-compatible wire contract pinned by shared/conformance/codec/fixtures.json).
 conformance:
-    {{py}} conformance/codec/harness.py
+    {{py}} shared/conformance/codec/harness.py
 
 # --- proto envelope (buf-owned) --------------------------------------------
 

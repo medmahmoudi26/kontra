@@ -38,7 +38,7 @@ import { describeQueue, sharedQueue, temporalQueueDescriber, type QueueDescriber
 export const REGISTRY_PORT = 5000;
 
 /** The OCI repository an actor's Bundle lives in — `cli/bundle.go:bundleRepo`. Pinned across the
- * language boundary by `conformance/bundleref.json`. */
+ * language boundary by `shared/conformance/bundleref.json`. */
 export function bundleRepo(actor: string): string {
   return `bundles/${actor}`;
 }
@@ -233,7 +233,7 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
     actorEngine: engine,
     // The MACHINE's view of the registry, which is not necessarily this process's: a Machine
     // resolving `localhost:5000` means its own loopback. `cli/bundle.go:bundleBlobURL` builds the
-    // same string, and `conformance/bundleref.json` is what keeps them one string.
+    // same string, and `shared/conformance/bundleref.json` is what keeps them one string.
     bundleUrl: bundleBlobUrl(registry, input.actor, sha),
     bundleSha: sha,
     controller,

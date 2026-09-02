@@ -1,4 +1,4 @@
-"""The PYTHON HOST's arm of conformance/workerhealth.json — one of two WRITERS of the two series
+"""The PYTHON HOST's arm of shared/conformance/workerhealth.json — one of two WRITERS of the two series
 the **Warden** divides to decide a **Worker** is sick but not dead.
 
 WHY A CORPUS FOR TWO COUNTER NAMES. The names are spelled independently here and in
@@ -28,7 +28,7 @@ import pytest
 
 from internals import metrics
 
-FIXTURE = Path(__file__).resolve().parents[1] / "conformance" / "workerhealth.json"
+FIXTURE = Path(__file__).resolve().parents[1] / "shared" / "conformance" / "workerhealth.json"
 DOC = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 

@@ -1,4 +1,4 @@
-"""THE PYTHON ARM of conformance/lease.json.
+"""THE PYTHON ARM of shared/conformance/lease.json.
 
 This side is the lease-id grammar's WRITER. `backend/src/lease.ts` reads it back — that is what
 answers "who is holding this Fleet" on the one screen an operator looks at when a Fleet will not
@@ -25,7 +25,7 @@ from pathlib import Path
 from actorkit import fleet
 
 ROOT = Path(__file__).resolve().parent.parent
-CORPUS = json.loads((ROOT / "conformance" / "lease.json").read_text(encoding="utf-8"))
+CORPUS = json.loads((ROOT / "shared" / "conformance" / "lease.json").read_text(encoding="utf-8"))
 BACKEND = ROOT / "backend" / "src"
 
 
@@ -35,7 +35,7 @@ def _names() -> dict[str, dict]:
 
 def test_the_corpus_still_carries_the_inputs_that_break_a_naive_implementation():
     """THE GUARD ON THIS FILE. Every test below loops over the corpus, and a loop over an empty list
-    reports success for having found nothing — the shape `conformance/README.md` step 3 exists to
+    reports success for having found nothing — the shape `shared/conformance/README.md` step 3 exists to
     prevent, and the shape half the guards it replaced actually had."""
     cases = CORPUS["lease_id"]["cases"]
     assert cases, "the corpus has no lease_id cases; every assertion below is vacuous"

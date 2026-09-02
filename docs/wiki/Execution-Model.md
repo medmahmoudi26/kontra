@@ -24,7 +24,7 @@ YOUR workflow (Python or Go, anywhere): actorkit `catalog`, ADR 0021 / ADR 0023
 ```
 
 The workflow side is ONE Go **handler** (the service shape comes from
-`contracts/kontra/v1/actor_service.proto` via `protoc-gen-go-temporal`), run per-actor. The actor
+`shared/contracts/kontra/v1/actor_service.proto` via `protoc-gen-go-temporal`), run per-actor. The actor
 process is itself a **Temporal activity worker**: it registers `RunBatch` and `Close` and polls
 its queues directly (`runtime/python/internals/temporal/host.py`,
 `runtime/go/temporalhost`). Temporal splits workflow and activity across languages by
@@ -121,7 +121,7 @@ There is exactly **one** `RunBatch` call per Batch. It runs to completion:
   only `{"$ref": {key, size, sha256}}`. Blob write **first**, then the ref commit, so a committed
   ref always points at written bytes. `run=` leads for a measured reason (8.4s → 0.17s to locate
   one run on a 188k-object bucket) and both SDKs are pinned to one golden fixture,
-  `conformance/blobkey.json`. Store unset ⇒ inline commits (dev/test). See [[Data-Plane]].
+  `shared/conformance/blobkey.json`. Store unset ⇒ inline commits (dev/test). See [[Data-Plane]].
 - **1 → N is just pushing twice** — a Unit that pushes six records commits six sub-unit blobs; the
   Unit's done-marker is written only after the Method finishes with it, so a death mid-Unit
   re-runs it with already-pushed records overwritten idempotently by content sha. Which is why

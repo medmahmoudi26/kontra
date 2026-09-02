@@ -9,7 +9,7 @@ import (
 	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
-// The GO ARM of the cross-SDK catalog contract (conformance/catalog.json).
+// The GO ARM of the cross-SDK catalog contract (shared/conformance/catalog.json).
 //
 // Three hand-written emitters produce the descriptor `POST /api/actors` accepts — this file,
 // Python's internals/catalog.py, and whatever the design tool uploads — and they share no code.
@@ -47,8 +47,8 @@ type catalogFixture struct {
 
 func readCatalogFixture(t *testing.T) catalogFixture {
 	t.Helper()
-	// ../../../conformance/catalog.json — registrar -> go -> runtime -> <repo root>.
-	b, err := os.ReadFile("../../../conformance/catalog.json")
+	// ../../../shared/conformance/catalog.json — registrar -> go -> runtime -> <repo root>.
+	b, err := os.ReadFile("../../../shared/conformance/catalog.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

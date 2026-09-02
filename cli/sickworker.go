@@ -52,7 +52,7 @@ package main
 // actually stated in — `kontra_resource_loads_total` and `kontra_resource_load_failures_total`,
 // incremented by a single call on both paths out of the resource open. Their NAMES are a contract
 // with two independent writers and no registration step, so they live in
-// `conformance/workerhealth.json` rather than as string literals here (ADR 0035 rule two).
+// `shared/conformance/workerhealth.json` rather than as string literals here (ADR 0035 rule two).
 //
 // The Warden scrapes that listener on its own turn and DIFFERENCES TWO SAMPLES. That is the whole
 // reason this works where the journal grep could not: the window is a fact about the Warden's clock,
@@ -101,7 +101,7 @@ import (
 // --- the contract with the actor hosts -------------------------------------------------------
 
 // The two series names. Spelled here once, and asserted against
-// `conformance/workerhealth.json` by sickworker_conformance_test.go together with both hosts'
+// `shared/conformance/workerhealth.json` by sickworker_conformance_test.go together with both hosts'
 // renderings — three arms, because this file is the READER and the two hosts are the writers.
 const (
 	metricLoadsTotal    = "kontra_resource_loads_total"
@@ -192,7 +192,7 @@ type loadSample struct {
 
 // judgeSamples turns a Worker's readings into a verdict.
 //
-// PURE, AND THE CORPUS DRIVES IT. Every branch below is a row in `conformance/workerhealth.json`
+// PURE, AND THE CORPUS DRIVES IT. Every branch below is a row in `shared/conformance/workerhealth.json`
 // with a `why`, including the ones that refuse to answer — the corpus's own invariant is that
 // `cannot-tell` is never folded into `healthy`, and the case that proves it is a quiet Worker whose
 // counters did not move: an implementation that divides 0 by 0 into 0 reports that one as green.

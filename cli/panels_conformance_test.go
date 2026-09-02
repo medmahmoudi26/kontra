@@ -1,4 +1,4 @@
-// panels_conformance_test.go — THE GO ARM of conformance/terminal.json.
+// panels_conformance_test.go — THE GO ARM of shared/conformance/terminal.json.
 //
 // This side is the wire's READER. `backend/src/panels/types.ts` is the writer, and the two are
 // joined by nothing but a matching set of string literals: no code generation, no shared schema, no
@@ -38,13 +38,13 @@ type terminalCorpus struct {
 
 func loadTerminalCorpus(t *testing.T) terminalCorpus {
 	t.Helper()
-	raw, err := os.ReadFile("../conformance/terminal.json")
+	raw, err := os.ReadFile("../shared/conformance/terminal.json")
 	if err != nil {
 		t.Fatalf("the corpus is the contract and it is unreadable: %v", err)
 	}
 	var c terminalCorpus
 	if err := json.Unmarshal(raw, &c); err != nil {
-		t.Fatalf("conformance/terminal.json does not parse: %v", err)
+		t.Fatalf("shared/conformance/terminal.json does not parse: %v", err)
 	}
 	// THE GUARD THAT KEEPS THIS FILE FROM PASSING VACUOUSLY. A corpus that parsed to an empty
 	// `required` would make every assertion below a loop over nothing, and this file would go green
@@ -116,7 +116,7 @@ func TestThisReaderDeclaresNoKeyTheStreamerDoesNotSend(t *testing.T) {
 		}
 	}
 	if len(phantom) > 0 {
-		t.Errorf("this struct decodes %v, which conformance/terminal.json says nobody sends.\n"+
+		t.Errorf("this struct decodes %v, which shared/conformance/terminal.json says nobody sends.\n"+
 			"  A key no writer emits is not a harmless extra field: it decodes to the zero value on\n"+
 			"  every response, and a blank cell reads as data. `campaign` sat here in exactly this\n"+
 			"  state after backend/src/panels/types.ts renamed it to `fleet`, and every Terminal on\n"+

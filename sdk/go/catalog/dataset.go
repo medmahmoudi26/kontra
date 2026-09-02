@@ -173,7 +173,7 @@ const tempSlugMax = 64
 // redundancy: without it the name a caller reads in `kontra dataset ls` and the name the lake
 // stores would be two different strings for one Dataset.
 //
-// A THREE-WRITER DERIVATION, PINNED BY conformance/slug.json. This, Python's `_slug`, and the
+// A THREE-WRITER DERIVATION, PINNED BY shared/conformance/slug.json. This, Python's `_slug`, and the
 // orchestrator's `backend/src/data/parquet.ts:safeName`. This comment used to say all three apply
 // "the same rule"; they do not — safeName never truncates, its empty fallback is `unnamed`, and it
 // prefixes `a` to a leading digit. The corpus records those and the reason none of them is live

@@ -33,7 +33,7 @@
 
   One set of requirements, because there is one Target. `size`, `region` and `image` leave `actor.json` entirely and belong to the provider constructor.
 
-- **`needs` rides the config blob, not annotations.** The artifact already carries `bundleConfig{Name, Version, Engine}` under `application/vnd.kontra.bundle.config.v1+json`, and `conformance/bundleref.json` already pins that media type with the reason: *"the config type is what makes the engine part of the digest rather than a mutable file beside it."* The same argument carries `needs`: **what an actor requires becomes part of what it is.** Annotations would have been readable one round trip sooner — ~20 ms against a 65 MiB pull — in exchange for flattening structured data into strings with no media type to version.
+- **`needs` rides the config blob, not annotations.** The artifact already carries `bundleConfig{Name, Version, Engine}` under `application/vnd.kontra.bundle.config.v1+json`, and `shared/conformance/bundleref.json` already pins that media type with the reason: *"the config type is what makes the engine part of the digest rather than a mutable file beside it."* The same argument carries `needs`: **what an actor requires becomes part of what it is.** Annotations would have been readable one round trip sooner — ~20 ms against a 65 MiB pull — in exchange for flattening structured data into strings with no media type to version.
 
 - **It is called `actor.json`.** No abstract noun. `manifest` belongs to OCI; `identity` belongs to the Warden. A filename cannot collide, which is what the last three collisions cost.
 
@@ -69,7 +69,7 @@
 
 - **A Fleet must be drained before upgrading.** `KONTRA_WORKER` is what the `/proc` scan and `podman ps` parse to answer "what is running here". A Warden that has learned the new label cannot see containers started under the old one, so it will start duplicates — which is exactly what driver rule 3 ("what is running comes from `list()`, never from a file") exists to prevent. A version bump is not sufficient; a documented drain-first procedure is.
 
-- **The task queue suffix moves**, `<name>-<version>-sessions` → `<name>-<version>-workers`. It is derived independently in four languages and pinned by `conformance/queues.json`, whose own header names the failure: *"the actor registers, polls a queue nobody schedules onto, and reports as a healthy idle Worker while every run hangs to StartToClose."* The corpus is what makes this survivable — a one-sided rename fails a test in another language.
+- **The task queue suffix moves**, `<name>-<version>-sessions` → `<name>-<version>-workers`. It is derived independently in four languages and pinned by `shared/conformance/queues.json`, whose own header names the failure: *"the actor registers, polls a queue nobody schedules onto, and reports as a healthy idle Worker while every run hangs to StartToClose."* The corpus is what makes this survivable — a one-sided rename fails a test in another language.
 
 - **The glossary changes rung.** What was a **Worker** is a **Container**; what was a **Session** is a **Worker**. `CONTEXT.md`'s `_Avoid_` line currently reads *"worker (a **Worker** is a process, not code)"* and must be rewritten rather than deleted. **Target** is already retired in favour of **Driver** — a property of the Machine's environment, not of the actor.
 

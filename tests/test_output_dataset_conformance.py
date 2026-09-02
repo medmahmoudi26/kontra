@@ -1,4 +1,4 @@
-"""The PYTHON arm of the output-Dataset author-surface contract (conformance/output_dataset.json).
+"""The PYTHON arm of the output-Dataset author-surface contract (shared/conformance/output_dataset.json).
 
 A per-SDK check against its own docs is not the two SDKs agreeing, and this repo has been bitten by
 exactly that. So the granularities ADR 0028 §1 promises — one record per Unit, N per Unit, one per
@@ -20,7 +20,7 @@ import pytest
 from test_actor_engine import make_host
 
 FIXTURE = (
-    pathlib.Path(__file__).resolve().parents[1] / "conformance" / "output_dataset.json"
+    pathlib.Path(__file__).resolve().parents[1] / "shared" / "conformance" / "output_dataset.json"
 )
 
 

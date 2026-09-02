@@ -1,4 +1,4 @@
-"""The PYTHON arm of the cross-SDK catalog contract (conformance/catalog.json).
+"""The PYTHON arm of the cross-SDK catalog contract (shared/conformance/catalog.json).
 
 Three hand-written emitters produce the descriptor `POST /api/actors` accepts — this SDK's
 `internals/catalog.py`, the Go SDK's `internal/registrar`, and whatever the design tool uploads —
@@ -27,7 +27,7 @@ import internals.catalog as C
 from actorkit import ActorRegistry
 
 # parents[1] is the repo root: tests/ -> <root>.
-FIXTURE = pathlib.Path(__file__).resolve().parents[1] / "conformance" / "catalog.json"
+FIXTURE = pathlib.Path(__file__).resolve().parents[1] / "shared" / "conformance" / "catalog.json"
 FX = json.loads(FIXTURE.read_text())
 EXPECT = FX["expect"]
 

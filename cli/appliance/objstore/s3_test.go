@@ -73,7 +73,7 @@ func ctx(t *testing.T) context.Context {
 
 // TestGoldenBlobKeysRoundTripThroughTheSDK is the acceptance test for this store.
 //
-// conformance/blobkey.json is the ONE fixture that pins the object layout across the Go,
+// shared/conformance/blobkey.json is the ONE fixture that pins the object layout across the Go,
 // Python and TypeScript hosts (ADR 0015): the same inputs must produce the same key in all three,
 // or a reader silently sees two layouts and half a run's data goes missing. The fixture
 // itself only checks key CONSTRUCTION; this checks that the store the appliance ships can hold
