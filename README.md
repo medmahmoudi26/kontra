@@ -24,9 +24,14 @@ That teardown is a replayable step in a program Temporal finishes whether or not
 
 ---
 
-## Where the actors are
+## Where the actors and workflows are
 
-**This repository contains no actors.** They live in **[kontra-actors](https://github.com/medmahmoudi26/kontra-actors)** — fork it to write your own, or use it as a reference.
+**This repository contains no actors and no workflows.** They live in two repositories of their own:
+
+- **[kontra-actors](https://github.com/medmahmoudi26/kontra-actors)** — the capabilities
+- **[kontra-workflows](https://github.com/medmahmoudi26/kontra-workflows)** — the programs that call them
+
+Fork either to write your own.
 
 The only actor here is `testdata/fixtureactor/`, which exists so kontra's own test suite has something to dispatch to. It is deliberately boring and is not a template.
 

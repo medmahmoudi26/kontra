@@ -1,6 +1,14 @@
 # Examples
 
-**Actors live in a separate repository: [kontra-actors](https://github.com/medmahmoudi26/kontra-actors).**
+**Actors and workflows each live in their own repository.**
+
+| | |
+|---|---|
+| [kontra-actors](https://github.com/medmahmoudi26/kontra-actors) | actors — the capabilities |
+| [kontra-workflows](https://github.com/medmahmoudi26/kontra-workflows) | workflows — the programs that call them |
+
+An Actor is a capability someone publishes; a workflow is a program someone runs. Different authors,
+different lifecycles — a client writes workflows against actors they did not write.
 
 This repository ships no actors. That is deliberate — an actor is *your* code, and kontra is the thing that runs it. Keeping them apart means you fork a repo of actors and point it at your own registry, rather than carrying a framework's examples around forever.
 
@@ -10,7 +18,7 @@ This repository ships no actors. That is deliberate — an actor is *your* code,
 |---|---|
 | **[python/probe](https://github.com/medmahmoudi26/kontra-actors/tree/main/python/probe)** | the smallest complete actor — one Method, no dependencies, ~100 lines |
 | **[go/nscheck](https://github.com/medmahmoudi26/kontra-actors/tree/main/go/nscheck)** | two Methods on one Actor, where the first fans one input out into many Units for the second |
-| **[workflows/](https://github.com/medmahmoudi26/kontra-actors/tree/main/workflows)** | the caller side — the workflows that page a Dataset and drive those Methods |
+| **[kontra-workflows](https://github.com/medmahmoudi26/kontra-workflows)** | the caller side — the programs that page a Dataset and drive those Methods |
 
 And the two guides that answer the questions this page used to:
 
