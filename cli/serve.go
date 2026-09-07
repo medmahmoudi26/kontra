@@ -300,7 +300,10 @@ func cmdServe(args []string) error {
 			filepath.Join(root, "runtime", "python")+":"+
 			filepath.Join(root, "sdk", "python", "_gen"))
 	handlerArgv := []string{"go", "run", "."}
-	handlerDir := filepath.Join(root, "handler")
+	// runtime/handler, not handler/ — the handler moved and this call site was missed when
+	// bundle.go:237 was updated. A stale path here fails at `kontra serve`, which is the verb
+	// the README calls "the one you use ninety percent of the time".
+	handlerDir := filepath.Join(root, "runtime", "handler")
 	handlerEnv := cliutil.Derive(env, "GOWORK=off")
 
 	// THE DRIVER, AND WHY THERE IS ONE. Everything above is `--mode local`'s ARGUMENT — which
