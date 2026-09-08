@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from actorkit import ActorRegistry, MethodRegistration
+from kontra import ActorRegistry, MethodRegistration
 from internals.engine import batch_id, build_session_factory, unit_slot
 
 
@@ -359,7 +359,7 @@ def test_a_dead_resource_ends_the_session_rather_than_reloading_it():
     Reloading in place rebuilds `self.*` under a running author — the silent reset §7 rejected
     for host loss. So the scope ends, and it stays ended: a second call cannot re-activate it.
     """
-    from actorkit.retry import SessionLost
+    from kontra.retry import SessionLost
 
     opens = []
 
@@ -396,7 +396,7 @@ def test_a_resource_that_dies_on_the_beat_ends_the_session_too(monkeypatch):
     otherwise hand back a Batch that committed nothing and reads as finished. A dead resource
     ends the Session either way (ADR 0023 §20)."""
     import internals.engine as engine
-    from actorkit.retry import SessionLost
+    from kontra.retry import SessionLost
 
     monkeypatch.setattr(engine, "_BEAT_S", 0.01)   # the beat interval, not a behaviour knob
     alive = [True]
@@ -441,7 +441,7 @@ def test_a_reopened_scope_resumes_from_the_commit_map():
     """ADR 0023 §7 + §17. Losing the resource costs at most the Batch in flight: the caller
     opens a new scope against the same key and the Units that committed before the death do not
     run again, because a content hash does not know its scope died."""
-    from actorkit.retry import SessionLost
+    from kontra.retry import SessionLost
 
     ran, died = [], []
 
@@ -479,7 +479,7 @@ def test_a_unit_that_kills_scope_after_scope_is_isolated_and_skipped():
     the poison Unit, die again — so the framework counts the scopes a Unit has killed and drops
     it. The counter is durable and hangs off the Unit's commit slot, which is what lets it
     survive the scope it just killed."""
-    from actorkit.retry import SessionLost
+    from kontra.retry import SessionLost
 
     async def load(self):
         self.alive = True
@@ -511,8 +511,8 @@ def test_unit_state_resumes_mid_unit_and_clears_on_commit():
     """A fat unit (multi-page crawl) snapshots its resume scratch per page; a death mid-unit
     resumes from the snapshot — pages before it are NOT re-fetched — and the slot dies with
     the commit. (unit_state is the ADR-0015 name for the per-unit resume scratch.)"""
-    from actorkit import unit_state
-    from actorkit.retry import SessionLost
+    from kontra import unit_state
+    from kontra.retry import SessionLost
 
     fetched = []  # every page fetch across all attempts — replay shows up here
     died = []
@@ -548,7 +548,7 @@ def test_unit_state_resumes_mid_unit_and_clears_on_commit():
 def test_each_unit_gets_its_own_unit_state_slot():
     """One Unit's resume scratch is never another's: the slot follows the Unit the iterator
     handed out, so a key written under one Unit reads back as nothing under the next."""
-    from actorkit import unit_state
+    from kontra import unit_state
 
     async def method(self, batch, dataset):
         async for unit in batch:
@@ -564,8 +564,8 @@ def test_each_unit_gets_its_own_unit_state_slot():
 def test_unit_state_multiple_keys_share_one_blob_delete_and_clear():
     """Keyed unit_state (ADR 0015): several keys on one unit share ONE u{i}-ckpt blob; delete
     drops just its key; clear-on-commit drops the WHOLE blob (every key)."""
-    from actorkit import unit_state
-    from actorkit.retry import SessionLost
+    from kontra import unit_state
+    from kontra.retry import SessionLost
 
     died = []
 
@@ -646,7 +646,7 @@ def test_a_resumed_unit_repushes_by_content_sha():
     """A death mid-unit leaves the unit UNCOMMITTED (so it re-runs); on the retry the Method
     resumes from unit_state and the pushed records land under the same unit prefix — the S3
     prefix (what a streaming cursor reads) ends up holding every record, keyed by content sha."""
-    from actorkit.retry import SessionLost
+    from kontra.retry import SessionLost
 
     store = FakeUnitStore()
     died = []
@@ -925,7 +925,7 @@ def test_object_state_is_keyed_by_the_actor_id_and_outlives_the_batch():
     """object_state (ADR 0022 tier 4) is what makes a keyed dispatch a virtual object: written
     in one batch, still there in the NEXT batch of the same actor id — the lifetime `self.*`
     does not have, since a Session's memory dies with its scope."""
-    from actorkit import object_state
+    from kontra import object_state
 
     from test_global_state import FakeEtagKV
 
@@ -952,7 +952,7 @@ def test_object_state_is_keyed_by_the_actor_id_and_outlives_the_batch():
 def test_the_two_cross_session_tiers_do_not_share_a_namespace():
     """Same class, same store, same author-facing ops — only the prefix separates them. If the
     host bound one store to both contextvars, every key-scoped write would leak to every key."""
-    from actorkit import global_state, object_state
+    from kontra import global_state, object_state
 
     from test_global_state import FakeEtagKV
 

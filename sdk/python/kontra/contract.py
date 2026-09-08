@@ -20,10 +20,10 @@ actor deployed a month ago be called today. A dataclass would have serialized di
 this one is how a namespace boundary silently drops data.
 
 `nexusrpc` is imported at module scope here, which is why this module is imported LAZILY from
-`workflows.py`: `import actorkit` must stay free of a Temporal dependency, the same rule
+`workflows.py`: `import kontra` must stay free of a Temporal dependency, the same rule
 `lib/actor.py` follows. Import it directly when you want the types:
 
-    from actorkit.contract import KontraActorService, EntryInput, BareRef
+    from kontra.contract import KontraActorService, EntryInput, BareRef
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class EntryInput(TypedDict, total=False):
     set: no session or chunk sharding knobs.
 
     `total=False` because the wire omits unset optionals rather than sending nulls, matching the
-    interpreter. Build one with `actorkit.catalog.entry_input()` rather than by hand — the
+    interpreter. Build one with `kontra.catalog.entry_input()` rather than by hand — the
     omission rule is part of the contract and lives there.
     """
 

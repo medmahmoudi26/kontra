@@ -1,6 +1,6 @@
 """Park a workflow on a question a human has to answer — the author's half of HITL.
 
-    from actorkit import hitl
+    from kontra import hitl
 
     answer = await hitl.ask(
         "Approve these 12 hosts?",
@@ -9,7 +9,7 @@
         deadline=timedelta(hours=4),          # or None to wait indefinitely
     )
 
-{@link ask} IS ALSO A TOP-LEVEL VERB — `from actorkit import ask, speak` reaches this exact
+{@link ask} IS ALSO A TOP-LEVEL VERB — `from kontra import ask, speak` reaches this exact
 function, beside `narrate.speak`, because the two are a pair: one reports and returns, the other
 stops the run until a person moves it. Same function, either spelling; nothing here is a second
 implementation and no existing `hitl.ask` caller changed.
@@ -87,8 +87,8 @@ from typing import Any, Mapping, Optional
 # exemption `lib/contract.py` takes for `nexusrpc`, and for the same reason. This module is only
 # ever imported from INSIDE a `@workflow.defn`, where temporalio is present by definition, and
 # `AskExpired` must subclass `ApplicationError` at class-definition time to fail the workflow rather
-# than its task. `actorkit/__init__.py` therefore does NOT import it, so `import actorkit` stays
-# free of a Temporal dependency; authors reach it as `from actorkit import hitl`.
+# than its task. `kontra/__init__.py` therefore does NOT import it, so `import kontra` stays
+# free of a Temporal dependency; authors reach it as `from kontra import hitl`.
 from temporalio import workflow
 from temporalio.exceptions import ApplicationError
 
@@ -136,7 +136,7 @@ SECRET_KEY_RE = re.compile(
 #: recurse forever inside a workflow task.
 _MAX_DEPTH = 8
 
-#: Where per-run ask state hangs. ON THE WORKFLOW INSTANCE, not in a module global: `actorkit` is a
+#: Where per-run ask state hangs. ON THE WORKFLOW INSTANCE, not in a module global: `kontra` is a
 #: sandbox PASSTHROUGH module (`internals/temporal/wfhost.py`), so a module-level dict here would be
 #: shared by every workflow instance in the worker process and two runs asking at once would read
 #: each other's answers.
@@ -261,7 +261,7 @@ def _schema_of(takes: Any) -> Optional[dict[str, Any]]:
     """The JSON Schema the answer is validated against and the form is rendered from.
 
     A DICT PASSES STRAIGHT THROUGH, so an author who wants a schema this SDK cannot derive writes
-    one. A type goes through the same `actorkit.schema` pydantic derivation the actor catalog uses
+    one. A type goes through the same `kontra.schema` pydantic derivation the actor catalog uses
     — one derivation, so an ask's form and a Method's form cannot disagree about the same class.
 
     The import is PASSED THROUGH the workflow sandbox explicitly. pydantic under the sandbox's
@@ -273,7 +273,7 @@ def _schema_of(takes: Any) -> Optional[dict[str, Any]]:
     if isinstance(takes, Mapping):
         return dict(takes)
     with workflow.unsafe.imports_passed_through():
-        from actorkit.schema import schema_of
+        from kontra.schema import schema_of
 
     return schema_of(takes)
 
@@ -289,7 +289,7 @@ def _coerce(takes: Any, value: Any) -> Any:
     if takes is None or isinstance(takes, Mapping):
         return value
     with workflow.unsafe.imports_passed_through():
-        from actorkit.schema import coerce
+        from kontra.schema import coerce
     try:
         return coerce(takes, value)
     except Exception:  # noqa: BLE001 — see the docstring; the plain value is the safe answer
@@ -352,12 +352,12 @@ async def ask(
 ) -> Any:
     """Park this workflow on a question, and return what a human answered.
 
-        from actorkit import ask, speak
+        from kontra import ask, speak
 
         answer = await ask("Approve these 12 hosts?", takes=Approval, context={"n": 12})
 
     THE PAIR, AND WHY THERE ARE TWO. `speak` and `ask` are the two things a workflow says out
-    loud. {@link actorkit.narrate.speak} costs history and RETURNS IMMEDIATELY; `ask` costs
+    loud. {@link kontra.narrate.speak} costs history and RETURNS IMMEDIATELY; `ask` costs
     history AND STOPS THE RUN, until a human answers or the deadline expires. Reaching for this
     one where a progress line was meant does not produce a chattier transcript — it produces a
     stalled run, waiting on a person nobody told to look. Say what a run is doing with

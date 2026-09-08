@@ -308,7 +308,7 @@ describe('what a probe refuses before it dispatches', () => {
       describer: pollers({ 'probe-0.1.0': { n: 1 }, [PROBE_QUEUE]: { n: 0 } }),
     });
     await expect(startProbe(input(), deps)).rejects.toThrow(/the probe worker is not running/);
-    await expect(startProbe(input(), deps)).rejects.toThrow(/python3 -m actorkit\.probe/);
+    await expect(startProbe(input(), deps)).rejects.toThrow(/python3 -m kontra\.probe/);
     expect(deps.started).toEqual([]);
   });
 });

@@ -37,7 +37,7 @@ const APPROVAL = {
   required: ['approve'],
 };
 
-/** One memo entry as `actorkit.hitl` writes it. */
+/** One memo entry as `kontra.hitl` writes it. */
 function askMemo(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     [`${ASK_MEMO_PREFIX}${id}`]: {

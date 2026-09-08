@@ -34,7 +34,7 @@ import socket
 from datetime import timedelta
 from typing import Any, Dict
 
-from actorkit.retry import NonRetryableError, SessionLost
+from kontra.retry import NonRetryableError, SessionLost
 
 from internals.catalog import publish_catalog
 from internals.engine import build_session_factory
@@ -121,7 +121,7 @@ def session_task_queue(name: str, version: str, session_id: str) -> str:
     that answered the open, which is what pins the scope's calls to one process.
 
     Derived independently in four languages with no shared code — here, the caller
-    (`actorkit.catalog.session_queue`, which closes on it), the Go actor host, and the handler,
+    (`kontra.catalog.session_queue`, which closes on it), the Go actor host, and the handler,
     which dispatches onto it from its own task queue. A drift has no loud failure mode, so
     shared/conformance/queues.json §session is what holds them to one answer.
 

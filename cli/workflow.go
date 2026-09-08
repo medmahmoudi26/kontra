@@ -285,7 +285,7 @@ func workflowResume(args []string) error {
 
 // workflowServe runs the author's workflow module as a local worker. It is `python file.py`
 // with the two things that are easy to get wrong done for you: the checkout's PYTHONPATH (so
-// `from actorkit import workflows` resolves to THIS tree, not to whatever is pip-installed) and
+// `from kontra import workflows` resolves to THIS tree, not to whatever is pip-installed) and
 // the Temporal/S3 env the codec reads. The module itself calls workflows.serve().
 func workflowServe(args []string) error {
 	fs := flag.NewFlagSet("workflow serve", flag.ContinueOnError)

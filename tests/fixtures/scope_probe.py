@@ -21,7 +21,7 @@ from datetime import timedelta
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
-    from actorkit import catalog
+    from kontra import catalog
 
 ACTOR = "session-probe"
 VERSION = "0.1.0"

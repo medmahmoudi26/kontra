@@ -72,7 +72,7 @@ describe('the Run-id slug corpus, from the orchestrator side', () => {
   });
 
   it('is a no-op on the composed name, which is the only shape it is ever handed', () => {
-    // `tmp_<slug>_<hex8>` — the name both SDKs build (actorkit/catalog.py:TempDataset,
+    // `tmp_<slug>_<hex8>` — the name both SDKs build (kontra/catalog.py:TempDataset,
     // sdk/go/catalog/dataset.go:TempDataset). This is the whole reason the divergences above are
     // recorded rather than fixed: `tmp_` in front makes every one of them unreachable.
     for (const c of doc.cases) {

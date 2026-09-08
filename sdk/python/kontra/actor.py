@@ -2,7 +2,7 @@
 
 Authors write plain async functions and decorate them:
 
-    from actorkit import actor
+    from kontra import actor
 
     @actor.load
     async def open_resource(self):
@@ -33,7 +33,7 @@ way, and tests/test_sdk_arrow.py fails the build on a module-scope `internals` i
 under sdk/. `serve()` is the exception, because serve() IS the handoff — the line where an author
 stops writing code and gives the process to the engine. It is spelled as a DEFERRED import, inside
 the method body (search `from internals.temporal.host import serve` below), so the edge exists only
-once control has already been handed over: `import actorkit` still reaches no runtime module, no
+once control has already been handed over: `import kontra` still reaches no runtime module, no
 Temporal, no Redis and no object store.
 """
 
@@ -330,14 +330,14 @@ class Slot:
 
     async def get(self, *, run: str = "", timeout: float = 5.0) -> str:
         """This slot's value, from whatever the operator bound to it. Raises `SecretUnavailable`
-        (a `NonRetryableError`) when it cannot have it — see `actorkit.secrets`."""
-        from actorkit import secrets
+        (a `NonRetryableError`) when it cannot have it — see `kontra.secrets`."""
+        from kontra import secrets
 
         return await secrets.slot(self.name, version=self.version, run=run, timeout=timeout)
 
     def get_sync(self, *, run: str = "", timeout: float = 5.0) -> str:
         """The blocking form, for an actor whose load is not async. Same rules, same failures."""
-        from actorkit import secrets
+        from kontra import secrets
 
         return secrets.slot_sync(self.name, version=self.version, run=run, timeout=timeout)
 
@@ -380,7 +380,7 @@ class ActorRegistry:
         # the back-compat `{actor}-shared`.
         self.version: str = ""
         # Typed I/O declared on the @actor.defn class. The JSON Schemas the catalog stores
-        # and the UI ports read are DERIVED from these (actorkit.schema), so there is no
+        # and the UI ports read are DERIVED from these (kontra.schema), so there is no
         # hand-written ActorInput.json. None -> undeclared (DIY actor).
         self.input_type: Optional[type] = None
         self.output_type: Optional[type] = None
@@ -658,7 +658,7 @@ class ActorRegistry:
         warnings.warn(
             "actor.run() is renamed to actor.serve() — it starts a worker, it does not run "
             "your code. To make a deployed actor do a batch, that is a Method call, "
-            "actorkit.catalog.actor(name, version).method(units) from a workflow.",
+            "kontra.catalog.actor(name, version).method(units) from a workflow.",
             DeprecationWarning, stacklevel=2,
         )
         self.serve()

@@ -65,7 +65,7 @@ Run it:
 from temporalio import workflow
 from typing_extensions import TypedDict
 
-from actorkit import catalog, fleet, speak
+from kontra import catalog, fleet, speak
 
 
 class NsCheckInput(TypedDict, total=False):

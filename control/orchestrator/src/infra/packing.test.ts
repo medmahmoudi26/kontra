@@ -162,7 +162,7 @@ describe('two Actors on one Fleet', () => {
    * turns "a converge that mentions one must not delete the other" from a sentence into a diff:
    * the two names present are `subfinder`'s, so `nscheck`'s two are the ones that would go.
    *
-   * IT IS A REAL FAILURE MODE AND NOT A THEORETICAL ONE. `actorkit.fleet` is what must never send
+   * IT IS A REAL FAILURE MODE AND NOT A THEORETICAL ONE. `kontra.fleet` is what must never send
    * this shape, and `tests/test_fleet_hold_place.py` holds it there; `cli/fleet.go` is the other
    * writer and `placementsOutput` is what stops IT sending this shape on a plain `--count` change.
    */

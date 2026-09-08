@@ -253,7 +253,7 @@ describe('listDatasets', () => {
   // Which Run wrote a row is a fact the ROWS have always carried, and the catalog keeps per-file
   // min/max for `run_id` — so the listing can say it without opening a data file. This is the only
   // authority that answers for a v2 Run at all: the materialization ledger holds no dispatch for
-  // one (measured on the local controller: 50 dispatches, none from the actorkit path).
+  // one (measured on the local controller: 50 dispatches, none from the SDK path).
   it('names every Run that contributed rows to a partition, from catalog statistics alone', async () => {
     // One name, one partition, two Runs — the shape a durable Dataset reaches by being promoted
     // into twice. `dt` is the partition, so both writes are aimed at the same one.

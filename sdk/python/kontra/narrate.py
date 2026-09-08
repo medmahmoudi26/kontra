@@ -1,13 +1,13 @@
 """An author's own sentence about their own run — the `say` half of the transcript.
 
-    from actorkit import narrate
+    from kontra import narrate
 
     await narrate.say(f"{len(apexes)} apexes in scope from the paid-programs list")
     ...
     await narrate.say(f"{live} of {len(apexes)} resolve; dispatching the crawler")
 
 TWO NAMES, ONE SENTENCE. {@link speak} is this same call under the name the top level exposes —
-`from actorkit import ask, speak` — because `speak` and `ask` are the two things a workflow says
+`from kontra import ask, speak` — because `speak` and `ask` are the two things a workflow says
 out loud and an author reaches for them together. It delegates here rather than reimplementing
 anything, so there is one budget, one redaction and one shape of turn however it was spelled;
 `say` is the older name, every existing caller of it is untouched, and both remain correct.
@@ -101,10 +101,10 @@ says what it found.
 ── A WORKFLOW THAT NARRATES NOTHING IS UNCHANGED ──────────────────────────────────────────────
 
 Nothing in this module runs unless `say` is called: no state on the instance, no command, no
-event, no import from any workflow that does not reach for it. `actorkit/__init__.py` therefore
+event, no import from any workflow that does not reach for it. `kontra/__init__.py` therefore
 does not import it — the same exemption `hitl` takes, and for the same reason (temporalio at
 module scope, so that {@link NarrationRefused} can subclass `ApplicationError` at class-definition
-time). Authors reach it as `from actorkit import narrate`.
+time). Authors reach it as `from kontra import narrate`.
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ from temporalio.exceptions import ApplicationError
 # therefore readable without a fetch (`summaryOf` in control/orchestrator/src/history.ts REFUSES a
 # claim-checked Summary rather than dereferencing it, so a sentence over that threshold would not
 # be shortened — it would be gone).
-from actorkit.catalog import SUMMARY_BUDGET
+from kontra.catalog import SUMMARY_BUDGET
 
 #: How many UTF-8 BYTES one sentence may take.
 #:
@@ -184,7 +184,7 @@ SECRET_ASSIGNMENT_RE = re.compile(
 BEARER_RE = re.compile(r"\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]{12,})", re.IGNORECASE)
 
 #: Where the per-run narration count hangs. ON THE WORKFLOW INSTANCE, never in a module global:
-#: `actorkit` is a sandbox PASSTHROUGH module (`internals/temporal/wfhost.py`), so a module-level
+#: `kontra` is a sandbox PASSTHROUGH module (`internals/temporal/wfhost.py`), so a module-level
 #: counter would be shared by every workflow instance in the worker process and one talkative run
 #: would silence every other run on the same host.
 _STATE_ATTR = "__kontra_narration__"
@@ -361,7 +361,7 @@ async def say(sentence: str) -> None:
 async def speak(sentence: str) -> None:
     """Tell the operator where this run has got to. One sentence, and it RETURNS IMMEDIATELY.
 
-        from actorkit import ask, speak
+        from kontra import ask, speak
 
         for i, wave in enumerate(waves, 1):
             await speak(f"batch {i} of {n}")          # a line per PHASE, never one per Unit
@@ -374,7 +374,7 @@ async def speak(sentence: str) -> None:
 
       • `speak` COSTS HISTORY AND RETURNS IMMEDIATELY. Five events and about a second, then the
         run carries on. Nobody has to be watching, and nothing is waiting for anyone.
-      • {@link actorkit.hitl.ask} COSTS HISTORY AND STOPS THE RUN, until a human answers it or
+      • {@link kontra.hitl.ask} COSTS HISTORY AND STOPS THE RUN, until a human answers it or
         its deadline expires.
 
     Reaching for the wrong one turns a progress line into a stalled run — a run sitting at

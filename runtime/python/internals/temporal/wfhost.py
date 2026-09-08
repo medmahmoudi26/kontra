@@ -40,7 +40,7 @@ log = logging.getLogger("kontra.wfhost")
 # Passed through the workflow sandbox by default: the SDK seam itself. Everything else stays
 # sandboxed, which is the point of the sandbox — this is the one module we know is safe because
 # we wrote it and it holds no mutable global state.
-DEFAULT_PASSTHROUGH = ("actorkit",)
+DEFAULT_PASSTHROUGH = ("kontra", "actorkit")
 
 
 def _configure_logging() -> None:

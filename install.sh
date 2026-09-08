@@ -2,7 +2,7 @@
 # Auto-install + codegen for kontra-local.
 #   - creates .venv and installs the package (editable, default finder mode)
 #   - fetches the buf binary into .venv/bin
-#   - generates proto stubs (sdk/python/_gen/ + control/orchestrator/_gen/)
+#   - generates proto stubs (sdk/python/kontra/v1/ + control/orchestrator/_gen/)
 set -euo pipefail
 cd "$(dirname "$0")"
 

@@ -42,7 +42,7 @@ is what makes the artefact honest instead of merely illustrative.
 
 Served by ONE process, on ONE queue, serving exactly ONE workflow type (ADR 0033 §3):
 
-    python3 -m actorkit.probe            # or: docker compose up -d orchestrator-probe
+    python3 -m kontra.probe            # or: docker compose up -d orchestrator-probe
 
 A kontra queue that served ARBITRARY caller workflows would be the general execution queue ADR 0023
 §12 deleted, rebuilt under a new name. A second workflow type on this queue is a reviewable event.
@@ -57,12 +57,12 @@ from typing import Any, Mapping
 
 # Temporal AT MODULE SCOPE, which `lib/actor.py` and `lib/catalog.py` deliberately avoid — the same
 # exemption `lib/hitl.py` takes, and for the same two reasons. This module is only ever imported by
-# the probe worker and by a test, never by `import actorkit`; and `ProbeRefused` must subclass
+# the probe worker and by a test, never by `import kontra`; and `ProbeRefused` must subclass
 # `ApplicationError` at class-definition time (see its own docstring).
 from temporalio import workflow
 from temporalio.exceptions import ApplicationError
 
-from actorkit import catalog
+from kontra import catalog
 
 #: The kontra-owned task queue the probe worker polls. ONE workflow type lives here — see the
 #: module docstring. `KONTRA_PROBE_QUEUE` moves both halves at once (the orchestrator reads the
@@ -323,7 +323,7 @@ def probe_result(ask: ProbeRequest, results: Any, dropped: Any) -> dict:
 def serve() -> None:
     """Run the probe worker: one process, one queue, one workflow type (ADR 0033 §3).
 
-        python3 -m actorkit.probe
+        python3 -m kontra.probe
 
     `catalog.serve` is what wires the claim-check codec, the sandbox passthrough and the logging —
     the three things a hand-rolled worker gets wrong once each. It also pushes a descriptor to the

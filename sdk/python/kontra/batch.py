@@ -137,7 +137,7 @@ class Unit:
         if self._takes is None:
             return self._raw
         if self._typed is _UNSET:
-            from actorkit.schema import coerce
+            from kontra.schema import coerce
 
             self._typed = coerce(self._takes, self._raw)
         return self._typed
@@ -197,7 +197,7 @@ class Dataset:
         self._collected: List[Any] = []
 
     async def push(self, record: Any, key: Optional[str] = None) -> None:
-        from actorkit.schema import to_jsonable
+        from kontra.schema import to_jsonable
 
         rec = to_jsonable(record)
         if self._batch is None:

@@ -35,7 +35,7 @@ from pathlib import Path
 import pytest
 from temporalio import workflow as _wf
 
-from actorkit import catalog, probe
+from kontra import catalog, probe
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -432,7 +432,7 @@ def test_a_refusal_fails_the_workflow_rather_than_its_task():
     An uncaught PLAIN exception fails the WORKFLOW TASK in Python's SDK and retries it forever, so
     a request naming two Methods would not be refused at all: the Run would sit at `running` with
     nothing moving and no sentence anywhere — which is exactly the failure the refusal exists to
-    prevent, produced by the refusal itself. `sdk/python/actorkit/hitl.py:AskExpired` carries the same
+    prevent, produced by the refusal itself. `sdk/python/kontra/hitl.py:AskExpired` carries the same
     note for the same reason.
 
     NON-RETRYABLE, because a request does not become a probe by being tried again.

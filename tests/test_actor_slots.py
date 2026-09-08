@@ -18,9 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from actorkit import secrets
-from actorkit.actor import ActorRegistry, Slot
-from actorkit.retry import NonRetryableError
+from kontra import secrets
+from kontra.actor import ActorRegistry, Slot
+from kontra.retry import NonRetryableError
 
 SENTINEL = "sk_live_SENTINEL_never_in_a_traceback_71c4"
 

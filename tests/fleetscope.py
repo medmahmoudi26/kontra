@@ -6,7 +6,7 @@ not tidiness: "`up()` is sugar over `hold` + `place`" is a claim about what the 
 two harnesses would let the two doors be compared by two different instruments — which is how a
 claim like that stays true in a comment and false in the code.
 
-WHY A HARNESS RATHER THAN A MONKEYPATCH PER TEST. `actorkit.fleet`'s scope now makes FOUR kinds of
+WHY A HARNESS RATHER THAN A MONKEYPATCH PER TEST. `kontra.fleet`'s scope now makes FOUR kinds of
 Temporal call — an activity to resolve the Bundle, an activity to HOLD a **Lease**, a child workflow
 to converge, and an activity to DROP — and the questions worth asking are all about which of them
 happened, in what order, and with what. Five tests each re-patching five names is five chances to
@@ -30,7 +30,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from actorkit import fleet
+from kontra import fleet
 
 
 @dataclass
@@ -47,7 +47,7 @@ class FleetScope:
     """Run one `async with fleet.up(...)` against fakes, and remember everything it did.
 
     `leases` is what the **Lease** workflow reports back on the hold — 1 means this **Run** is alone on the
-    **Fleet**, more means it is shared, and `actorkit.fleet` branches on exactly that to decide
+    **Fleet**, more means it is shared, and `kontra.fleet` branches on exactly that to decide
     whether its own failure may tear the **Fleet** down.
     """
 

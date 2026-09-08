@@ -144,7 +144,7 @@ export function dtPartition(runStartedAt: number): string {
  * `parquet.test.ts` pins the round trip in both directions, so the pair is one fact.
  *
  * WHO NEEDS IT. A partition value is the ONLY record of a **Run**'s start that survives for a
- * **Dataset** the materialization ledger never saw — every Run the actorkit path produces, whose
+ * **Dataset** the materialization ledger never saw — every Run the SDK path produces, whose
  * rows are written by `publishBatch` and leave no ledger record at all. `withDatasetNames` renders
  * the derived name's datetime from the row's own `dt` for that reason; feeding it back through
  * `dtPartition` returns the identical string, which is what makes the rendering one rule rather

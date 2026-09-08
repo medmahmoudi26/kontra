@@ -188,7 +188,7 @@ type Registry struct {
 	ParamsType any
 }
 
-// --- Author error signals (the Go peers of actorkit.retry's NonRetryableError /
+// --- Author error signals (the Go peers of kontra.retry's NonRetryableError /
 // SessionLost). Go has no exception subclassing, so a marker-interface lets an author's
 // own error type opt into non-retryable handling, mirroring Python's isinstance check.
 

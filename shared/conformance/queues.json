@@ -12,7 +12,7 @@
    "runtime/handler/internal/identity.SharedQueue",
    "sdk/go/catalog.SharedQueue",
    "runtime/go/temporalhost.TaskQueue + .SessionTaskQueue (as their stem)",
-   "sdk/python/actorkit/catalog.shared_queue",
+   "sdk/python/kontra/catalog.shared_queue",
    "runtime/python/internals/temporal/host.task_queue + .session_task_queue (as their stem)",
    "control/orchestrator/src/nexusRegistry.ts:sharedQueue",
    "control/orchestrator/src/panels/pollers.ts:sharedQueue",
@@ -75,7 +75,7 @@
    "runtime/handler/internal/identity.SessionsQueue + .SessionsQueueOf (which is what runtime/handler/workflow.go schedules with)",
    "sdk/go/catalog.SessionsQueue",
    "runtime/go/temporalhost.TaskQueue",
-   "sdk/python/actorkit/catalog.sessions_queue",
+   "sdk/python/kontra/catalog.sessions_queue",
    "runtime/python/internals/temporal/host.task_queue"
   ],
   "cases": [
@@ -117,7 +117,7 @@
    "runtime/handler/internal/identity.SessionQueue (from the workflow's OWN task queue plus the dispatched id)",
    "sdk/go/catalog.SessionQueue",
    "runtime/go/temporalhost.SessionTaskQueue",
-   "sdk/python/actorkit/catalog.session_queue",
+   "sdk/python/kontra/catalog.session_queue",
    "runtime/python/internals/temporal/host.session_task_queue"
   ],
   "cases": [
@@ -163,7 +163,7 @@
   "derived_by": [
    "runtime/handler/internal/identity.EndpointName",
    "sdk/go/catalog.EndpointName",
-   "sdk/python/actorkit/catalog.endpoint_name",
+   "sdk/python/kontra/catalog.endpoint_name",
    "control/orchestrator/src/nexusRegistry.ts:endpointName"
   ],
   "cases": [

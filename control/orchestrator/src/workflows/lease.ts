@@ -4,7 +4,7 @@
  *
  * ═══ WHAT IT REPLACES ═══
  *
- * Until this slice, teardown was the caller's `async with` exit: `actorkit.fleet`'s scope started a
+ * Until this slice, teardown was the caller's `async with` exit: `kontra.fleet`'s scope started a
  * `stackWorkflow destroy` as a child of the **Run** that provisioned it. That works, and `nscheck`'s
  * header says why — *"a script that provisions ten machines and then dies leaves ten machines; this
  * cannot, because the teardown is a replayable step in a program Temporal finishes whether or not
@@ -343,7 +343,7 @@ export async function fleetLeaseWorkflow(input: FleetLeaseInput): Promise<FleetL
    *
    * ABANDON, not the default TERMINATE: if this **Lease** workflow is terminated while the destroy is in
    * flight, TERMINATE would kill the teardown and leave the **Machines** billing — which is
-   * `actorkit.fleet`'s own reason for the same flag, and it is the failure this slice exists to
+   * `kontra.fleet`'s own reason for the same flag, and it is the failure this slice exists to
    * prevent, so it may not be reintroduced one indirection lower.
    */
   async function destroy(): Promise<void> {

@@ -6,11 +6,11 @@ An actor is a directory with two files. **`actor.json`** names it and states wha
 { "schemaVersion": "kontra.actor.v1", "name": "echo", "version": "0.1.0" }
 ```
 
-Everything else lives in **`actor.py`**: typed I/O classes and a decorated lifecycle. The public package is `actorkit` (the flat files under `sdk/python/actorkit/`); `internals`, under `runtime/python/`, is the private runtime — and the import arrow runs one way only, runtime to sdk.
+Everything else lives in **`actor.py`**: typed I/O classes and a decorated lifecycle. The public package is `actorkit` (the flat files under `sdk/python/kontra/`); `internals`, under `runtime/python/`, is the private runtime — and the import arrow runs one way only, runtime to sdk.
 
 ```python
 from dataclasses import dataclass
-from actorkit import actor
+from kontra import actor
 
 @dataclass
 class EchoInput:
@@ -82,7 +82,7 @@ Unit to blame. That is the honest price of owning the window, and it is the only
 ## Failure signals (both optional)
 
 ```python
-from actorkit import NonRetryableError, SessionLost
+from kontra import NonRetryableError, SessionLost
 
 raise NonRetryableError("permanently bad unit")   # skip retries → isolate immediately
 raise SessionLost("the browser died")             # END the Session; the caller's scope raises
@@ -284,7 +284,7 @@ heartbeats and isolation. When the work is just a function, none of that machine
 anything you have to think about: write the Method and skip `@actor.load`.
 
 ```python
-from actorkit import actor
+from kontra import actor
 
 @actor.method(takes=Host, emits=Probe)
 async def http_probe(self, batch, dataset):

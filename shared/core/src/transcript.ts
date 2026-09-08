@@ -304,7 +304,7 @@ export interface DispatchTurn extends TurnBase {
  * Actor, which Method, how many machines, what failed. None of that can say what the run MEANT by
  * any of it, because that is not in the log. A narration is the author putting it there.
  *
- * IT ARRIVES AS A SUMMARY ON A TIMER (`sdk/python/actorkit/narrate.py` writes it as
+ * IT ARRIVES AS A SUMMARY ON A TIMER (`sdk/python/kontra/narrate.py` writes it as
  * `workflow.sleep(0, summary=…)`), because a timer is the only command a workflow can issue that
  * carries user metadata and runs nothing. That is a writer's detail and this reader does not
  * depend on it: what makes a narration is a Summary on an event that is not about anything else,
@@ -497,7 +497,7 @@ const CHILD_CLOSES: Record<string, 'ready' | 'failed' | 'cancelled'> = {
  * The activity names the SDK schedules against the lake, and what each one is doing.
  *
  * THE SIXTH SPELLING OF EACH, and the failure mode is the house one: a rename in
- * `sdk/python/actorkit/catalog.py` makes the turn read as a raw activity rather than as a wrong
+ * `sdk/python/kontra/catalog.py` makes the turn read as a raw activity rather than as a wrong
  * one. `datasetState` is deliberately NOT here — reading a Dataset's state is bookkeeping the
  * workflow does, not a thing that happened to the Dataset.
  */
@@ -522,7 +522,7 @@ const PLUMBING_ACTIVITIES = new Set(['resolveBatch', 'splitBatch', 'kontra.fetch
  * How the ask route spells ITSELF in the reduced log, in the two places it reaches one.
  *
  * BOTH ARE THE ASK TALKING ABOUT ITS OWN MACHINERY, and neither is an author's sentence. A park is
- * `upsert_memo({'kontra.ask.<id>': …})` (`sdk/python/actorkit/hitl.py`), which is one
+ * `upsert_memo({'kontra.ask.<id>': …})` (`sdk/python/kontra/hitl.py`), which is one
  * `WorkflowPropertiesModified` whose `detail` names the memo KEY and never its value (`history.ts`);
  * and where the author declared a deadline, the wait that follows carries
  * `timeout_summary='kontra.ask/<id>'` so Temporal's own UI labels the timer bar with the question it
@@ -632,7 +632,7 @@ export function actorOfQueue(queue: string): { actor: string; version: string } 
 }
 
 /** What a Summary joins its fields with. The writer is `SUMMARY_SEP` in
- *  `sdk/python/actorkit/catalog.py`; the same separator the reduced log already puts between the
+ *  `sdk/python/kontra/catalog.py`; the same separator the reduced log already puts between the
  *  `key=value` pairs of a `detail` line. */
 const SUMMARY_SEP = ' · ';
 

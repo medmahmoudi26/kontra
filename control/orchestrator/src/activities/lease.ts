@@ -53,7 +53,7 @@ export interface HoldFleetLeaseOutput {
   lease: string;
   /**
    * HOW MANY **LEASES** ARE ON THIS **FLEET**, INCLUDING THIS ONE. One means the caller is alone on
-   * it; more means the **Fleet** is shared, and `actorkit.fleet` uses exactly that to decide whether
+   * it; more means the **Fleet** is shared, and `kontra.fleet` uses exactly that to decide whether
    * its own failure may tear the **Fleet** down. A saga leg is only yours while the **Fleet** is.
    */
   leases: number;

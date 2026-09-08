@@ -215,7 +215,7 @@ answer only for a **temporary Dataset** (which has exactly one owner) or a singl
 partition. The listing carries both, never merged (**ADR 0017**): the plural set, and the singular
 `runId` that is filled ONLY when the set has one member and is the key a **tag** or **rename**
 addresses. Read from the LAKE's own per-file `run_id` statistics, which cost catalog metadata and
-no scan — not from the materialization ledger, which has no record of any **Run** the actorkit path
+no scan — not from the materialization ledger, which has no record of any **Run** the SDK path
 starts. Where a data file spans several **Runs** the statistics give a min and a max, so the set
 becomes a BOUND and the surface says "at least N" rather than N.
 _Avoid_: owner (that is the **temporary Dataset**'s one recorded **Run**, and it answers before any

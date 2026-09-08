@@ -227,7 +227,7 @@ PYTHON ?= $(shell command -v python || command -v python3)
 # `E2E=1` IS WHAT MAKES THIS A GATE ON THE BINARY (ADR 0031 §5, issue 18).
 #
 # The default run deselects `e2e` and every example actor runs in-process against
-# `actorkit.testing`'s stubs — so it is a real gate on the actor-facing API and, in the ADR's own
+# `kontra.testing`'s stubs — so it is a real gate on the actor-facing API and, in the ADR's own
 # words, "it would go green against a binary that never started". `E2E=1` stops deselecting, which
 # turns on the tests that dial a control plane at `$$KONTRA_ADDRESS` and dispatch a real Batch to
 # a real Worker.
@@ -243,7 +243,7 @@ PYTHON ?= $(shell command -v python || command -v python3)
 # TWO MARKERS, NOT ONE, and the second exists because the first meant two things.
 #
 #   default    -m 'not e2e and not control_plane'   the SDK-side contract: every example actor
-#                                                   in-process against actorkit.testing's stubs,
+#                                                   in-process against kontra.testing's stubs,
 #                                                   no browser, no control plane
 #   E2E=1      -m 'not e2e'                          the same set PLUS the tests that dial a real
 #                                                   control plane at $$KONTRA_ADDRESS

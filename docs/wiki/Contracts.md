@@ -4,7 +4,7 @@ Kontra binds a TypeScript orchestrator, a Python SDK, and a Go SDK. Two kinds of
 
 ## Layout rule
 
-Contracts live **only** in the root `contracts/` directory. `buf generate` writes the committed, drift-checked stubs into the *consuming* seam (`sdk/python/_gen/`, `control/orchestrator/_gen/`, `runtime/handler/_gen/`) — generated code never lives under a contract dir.
+Contracts live **only** in the root `contracts/` directory. `buf generate` writes the committed, drift-checked stubs into the *consuming* seam (`sdk/python/kontra/v1/`, `control/orchestrator/_gen/`, `runtime/handler/_gen/`) — generated code never lives under a contract dir.
 
 ## The protos
 

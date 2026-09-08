@@ -1,6 +1,6 @@
 """Fetch this actor's OWN secret, at load, authenticated as itself.
 
-    from actorkit import secrets
+    from kontra import secrets
 
     @actor.load
     async def load(self):
@@ -55,7 +55,7 @@ import os
 import urllib.error
 import urllib.request
 
-from actorkit.retry import NonRetryableError
+from kontra.retry import NonRetryableError
 
 __all__ = ["get", "get_sync", "slot", "slot_sync", "SecretUnavailable"]
 

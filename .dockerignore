@@ -20,7 +20,7 @@ __pycache__
 build
 dist
 out
-sdk/python/_gen
+sdk/python/kontra/v1
 # the example actors live in the seam but are NOT runtime — keep them out of the
 # kontra-host base (its build context is the repo root; the per-actor images build
 # from their own context under examples/python/<name>, unaffected by this).

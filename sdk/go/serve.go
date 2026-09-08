@@ -5,7 +5,7 @@ package kontra
 // Serve() is by definition where an author stops writing code and hands control to the engine —
 // the one place the author surface has any business naming the runtime at all. Python spells that
 // handoff as a DEFERRED import (`from internals.temporal.host import serve`, inside the function),
-// which costs the arrow nothing: `import actorkit` never reaches the runtime.
+// which costs the arrow nothing: `import kontra` never reaches the runtime.
 //
 // Go has no deferred import. A `runtime/go/temporalhost` in this file's import block would be a
 // module-graph edge sdk -> runtime, and since runtime/go must import sdk/go/core (Unit, Batch,

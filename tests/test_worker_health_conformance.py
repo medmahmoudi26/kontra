@@ -141,7 +141,7 @@ def _make_host(method, load=None):  # noqa: ANN001, ANN202
 
     Duplicated rather than imported because importing a private fixture out of another test
     module makes two files fail for one reason, and this one is about the counters."""
-    from actorkit import ActorRegistry, MethodRegistration  # noqa: PLC0415
+    from kontra import ActorRegistry, MethodRegistration  # noqa: PLC0415
     from internals.engine import build_session_factory  # noqa: PLC0415
 
     class FakeKV:

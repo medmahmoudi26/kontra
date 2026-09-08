@@ -286,7 +286,7 @@ func cmdServe(args []string) error {
 	if eng != "go" {
 		actorArgv = []string{py, filepath.Join(absActor, "actor.py")}
 	}
-	// Mirrors the Bundle's PYTHONPATH so an author's `from actorkit import actor` resolves to
+	// Mirrors the Bundle's PYTHONPATH so an author's `from kontra import actor` resolves to
 	// the checkout, not to whatever happens to be pip-installed.
 	//
 	// cliutil.Derive(), not append(env, …), and that is not style. Two appends onto one slice with spare

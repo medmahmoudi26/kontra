@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from actorkit import fleet
+from kontra import fleet
 
 from fleetscope import FleetScope
 

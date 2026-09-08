@@ -6,7 +6,7 @@
 //   - `kontra-actor:<actorId>` — ONE HASH per actor id, one field per state key, with a 24 h TTL
 //     on the hash (runtime/{python/internals,go}/statekv). Tiers 1 and 2.
 //   - `kontra-global:<actor>:<key>` — one hash per entry, fields `data` and `ver`, NO TTL
-//     (actorkit's redis_kv.py / rediskv.go). Tier 3, and `ver` is the ETag the compare-and-set
+//     (the SDK's redis_kv.py / rediskv.go). Tier 3, and `ver` is the ETag the compare-and-set
 //     turns on.
 //
 // Two shapes, and both of them are hashes. There are no strings, no lists, no sets and no sorted
@@ -384,7 +384,7 @@ func (k *keyspace) expire(key string, seconds int64) (bool, error) {
 
 // --- global_state's two atomics ----------------------------------------------------------
 //
-// These are the Go bodies of the Lua scripts both actorkit SDKs send (see kv.go's allowlist).
+// These are the Go bodies of the Lua scripts both kontra SDKs send (see kv.go's allowlist).
 // They are methods on the keyspace, and not helpers over hget/hset, for the one property the
 // scripts exist to provide: they run under the SAME lock every other command takes, so no other
 // connection can interleave between the read of `ver` and the write that depends on it. A

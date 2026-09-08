@@ -4,9 +4,9 @@ How kontra brings into existence, repairs, and destroys the machines that
 [Execution](../CONTEXT.md) dispatches to, and how an actor's code gets onto them. This is the
 language of `infra/` and the fleet half of the CLI.
 
-A **Run** may now ask for a Fleet — `actorkit.fleet.hold()` claims capacity and `f.place()` says what
+A **Run** may now ask for a Fleet — `kontra.fleet.hold()` claims capacity and `f.place()` says what
 runs on it, both starting `stackWorkflow` as a child workflow on the infra queue; the scope's exit
-drops the **Lease**. `actorkit.fleet.up()` is SUGAR for the pair with the placement staged before the
+drops the **Lease**. `kontra.fleet.up()` is SUGAR for the pair with the placement staged before the
 scope opens, so it still costs one converge and still names its **Fleet** `<actor>-<version>`. That
 is the *only* door — one door with two spellings — and it does not merge
 the two languages: the request crosses in Fleet's vocabulary, on Fleet's worker, and the cloud

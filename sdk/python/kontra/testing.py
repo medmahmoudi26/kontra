@@ -5,7 +5,7 @@ caller hands over — which is exactly what makes the body testable in isolation
 is the input the caller passes first; `collecting_dataset()` is the destination it passes second,
 here backed by a list rather than the lake; `.records` is what the body pushed.
 
-    from actorkit.testing import stub_batch, collecting_dataset
+    from kontra.testing import stub_batch, collecting_dataset
 
     ds = collecting_dataset()
     await ask(inst, stub_batch([{"host": "a"}], takes=Pair), ds)
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Optional
 
-from actorkit.batch import Batch, Dataset
+from kontra.batch import Batch, Dataset
 
 
 class _NullSink:

@@ -58,7 +58,7 @@ export type DatasetKind = 'output' | 'standalone';
  * VISIBLY unfinished Dataset rather than a short one that reads as done.
  *
  * THE WORDS ARE THE CONTRACT, and they are spelled the same in four places with no shared code:
- * here, `frontend/src/datasets/state.ts` (the badge), `actorkit.catalog.DatasetWriter`
+ * here, `frontend/src/datasets/state.ts` (the badge), `kontra.catalog.DatasetWriter`
  * and `sdk/go/catalog`. A rename on one side does not fail — the reader falls back to
  * `open` — so a finished Dataset would silently render as one still being written.
  *
@@ -178,7 +178,7 @@ export interface DatasetInfo {
    *
    * WHY THE LAKE AND NOT THE LEDGER. The materialization ledger answers this for the graph
    * interpreter's dispatches and for nothing else: measured on this box, `/api/datasets/runs`
-   * holds 50 dispatches and not one of them is a **Run** the actorkit path produced, because
+   * holds 50 dispatches and not one of them is a **Run** the SDK path produced, because
    * `publishBatch` writes lake rows and no ledger record. Every **Dataset** a v2 **Run** writes —
    * every temp, and every durable **Dataset** promoted into — is therefore invisible to
    * {@link withDatasetNames}' ledger join, which is why `lame_demo` and `tmp_…` listed with no
@@ -478,7 +478,7 @@ function parseRunList(raw: unknown): string[] | undefined {
  *      OWNERSHIP fact rather than a fact about rows.
  *   3. THE LAKE's own `run_id` statistics ({@link DatasetInfo.contributingRuns}), and ONLY when
  *      they name exactly one Run. This is the one that matters now: measured on this box, the
- *      ledger holds no dispatch for any Run the actorkit path started, so 1 resolves nothing for
+ *      ledger holds no dispatch for any Run the SDK path started, so 1 resolves nothing for
  *      a v2 Run and `lame_demo` — 430 rows promoted out of one Run's temp — listed with no name
  *      and no run at all. The rows knew the whole time.
  *

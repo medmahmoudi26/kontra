@@ -15,7 +15,7 @@ build/
 dist/
 .pytest_cache/
 
-# generated: machine proto stubs (sdk/python/_gen, control/orchestrator/_gen) are COMMITTED +
+# generated: machine proto stubs (sdk/python/kontra/v1, control/orchestrator/_gen) are COMMITTED +
 # CI drift-checked (buf generate + git diff --exit-code), so they are NOT ignored.
 # Never edited by hand; their bytecode caches fall under the __pycache__ rule above.
 

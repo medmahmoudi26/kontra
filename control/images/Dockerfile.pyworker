@@ -1,7 +1,7 @@
 # Canonical "global" Kontra image — the unit of truth, identical in local and
 # cloud (only routing differs). One actor per image is the boundary everywhere.
 #
-# Contains ONLY the actor-host runtime: the `actorkit` author surface and the
+# Contains ONLY the actor-host runtime: the `kontra` author surface and the
 # `internals` engine (as source on PYTHONPATH, mirroring the repo layout — BOTH
 # seams, since `actor.serve()` hands control from the first to the second) +
 # temporalio (the actor IS a Temporal
@@ -33,7 +33,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir \
        temporalio redis boto3 pydantic
 
-ENV PYTHONPATH=/app/sdk/python:/app/runtime/python:/app/sdk/python/_gen
+ENV PYTHONPATH=/app/sdk/python:/app/runtime/python
 
 # Runtime interface version. Per-actor images can be checked for ABI compatibility
 # against the base (org.kontra.interface) without rebuilding the world on a patch.

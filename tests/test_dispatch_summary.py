@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from actorkit import catalog
-from actorkit.catalog import SUMMARY_BUDGET, dispatch_summary
+from kontra import catalog
+from kontra.catalog import SUMMARY_BUDGET, dispatch_summary
 
 ROOT = Path(__file__).resolve().parent.parent
 

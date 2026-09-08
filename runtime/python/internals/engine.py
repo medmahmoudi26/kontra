@@ -35,10 +35,10 @@ import os
 import urllib.request
 
 
-from actorkit import param
-from actorkit.retry import NonRetryableError, SessionLost
+from kontra import param
+from kontra.retry import NonRetryableError, SessionLost
 
-from actorkit.batch import Batch, Dataset
+from kontra.batch import Batch, Dataset
 from internals.globalstore import GlobalStore, object_prefix
 from internals.redis_kv import redis_kv_from_env
 from internals.statekv import STATE_TTL_S, ActorStateKV, state_kv
@@ -46,7 +46,7 @@ from internals.unitstore import from_env as unitstore_from_env, unit_ref
 from internals import metrics
 
 # the SAME module instance `param` uses, so setting _run_params actually feeds param.get()
-_lib = importlib.import_module(type(param).__module__)  # actorkit.actor
+_lib = importlib.import_module(type(param).__module__)  # kontra.actor
 _run_params = _lib._run_params
 _ckpt_io = _lib._ckpt_io
 _global_io = _lib._global_io

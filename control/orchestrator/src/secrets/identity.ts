@@ -124,5 +124,5 @@ function b64url(buf: Buffer): string {
 
 /** The environment variable an actor's worker reads its identity from. Named here because two
  *  places set it (`actorControl.ts` when the console serves an actor, a deploy when it does not)
- *  and one reads it (`sdk/python/actorkit/secrets.py`). */
+ *  and one reads it (`sdk/python/kontra/secrets.py`). */
 export const ACTOR_TOKEN_VAR = 'KONTRA_ACTOR_TOKEN';

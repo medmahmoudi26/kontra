@@ -63,12 +63,12 @@ DOC_GLOBS = (
 #: it that was special to module-level callables. The attribute is dotted so the resolution follows
 #: the class rather than a second copy of the signature.
 CALLS = {
-    "fleet.up": ("actorkit.fleet", "up"),
-    "fleet.hold": ("actorkit.fleet", "hold"),
-    "f.place": ("actorkit.fleet", "Fleet.place"),
-    "f.ready": ("actorkit.fleet", "Fleet.ready"),
-    "catalog.actor": ("actorkit.catalog", "actor"),
-    "catalog.dataset": ("actorkit.catalog", "dataset"),
+    "fleet.up": ("kontra.fleet", "up"),
+    "fleet.hold": ("kontra.fleet", "hold"),
+    "f.place": ("kontra.fleet", "Fleet.place"),
+    "f.ready": ("kontra.fleet", "Fleet.ready"),
+    "catalog.actor": ("kontra.catalog", "actor"),
+    "catalog.dataset": ("kontra.catalog", "dataset"),
 }
 
 KWARG = re.compile(r"\b([a-z_][a-z0-9_]*)\s*=")

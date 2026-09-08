@@ -547,7 +547,7 @@ KONTRA_S3_ENDPOINT=http://$CONTROLLER:8333
 KONTRA_REDIS_HOST=$CONTROLLER:6379
 KONTRA_CONTROLLER=$CONTROLLER
 KONTRA_TAG=\${TAG}
-${sessionCap}${metricsAddr}PYTHONPATH=$ROOT/sdk/python:$ROOT/runtime/python:$ROOT/sdk/python/_gen
+${sessionCap}${metricsAddr}PYTHONPATH=$ROOT/sdk/python:$ROOT/runtime/python
 PYTHONUNBUFFERED=1
 PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ENV_EOF

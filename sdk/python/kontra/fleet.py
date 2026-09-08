@@ -1,9 +1,9 @@
 """Provision the machines your run needs, FROM the workflow that needs them.
 
-`actorkit.catalog` calls Actors that are already deployed. This module is the step before that:
+`kontra.catalog` calls Actors that are already deployed. This module is the step before that:
 it makes them exist, for exactly as long as the work does.
 
-    from actorkit import catalog, fleet
+    from kontra import catalog, fleet
     from temporalio import workflow
 
     @workflow.defn
@@ -347,7 +347,7 @@ def do_fleet(**kwargs: Any) -> DigitalOcean:
 def _hold_retry():
     """The retry policy on `holdFleetLease`.
 
-    IMPORTED LAZILY, like every other `temporalio` name in this module: `actorkit.fleet` is imported
+    IMPORTED LAZILY, like every other `temporalio` name in this module: `kontra.fleet` is imported
     by ordinary caller code as well as by workflow code, and a module-scope SDK import would make the
     former depend on the latter.
 
@@ -611,7 +611,7 @@ class Fleet:
 
     def queue_for(self, placement: Placement) -> str:
         """The shared queue one placement's Workers poll."""
-        from actorkit.catalog import shared_queue
+        from kontra.catalog import shared_queue
 
         return shared_queue(placement.actor, placement.version)
 
@@ -956,7 +956,7 @@ class Fleet:
         scope regardless of what happens next.
         """
         # Imported HERE, like every other Temporal reference in this file: the module is resolved
-        # inside the workflow sandbox at call time, and a top-level import would make `actorkit`
+        # inside the workflow sandbox at call time, and a top-level import would make `kontra`
         # unimportable outside one.
         from temporalio import workflow
         from temporalio.common import RetryPolicy
@@ -1674,7 +1674,7 @@ class _FleetModule(ModuleType):
 
     A module has no `__getitem__` and cannot be given one directly, so this module's own object is
     re-classed to this subclass at the bottom of the file — the standard way (PEP 562 gives modules
-    `__getattr__`; the `__class__` assignment is what covers everything else). `actorkit` is a
+    `__getattr__`; the `__class__` assignment is what covers everything else). `kontra` is a
     passthrough module in the workflow sandbox (`internals/temporal/wfhost.py:DEFAULT_PASSTHROUGH`),
     so a workflow sees this same object rather than a re-imported copy.
     """

@@ -1,5 +1,5 @@
 # Monorepo root — repo-level config only. The Python distribution `kontra-sdk` is rooted in the
-# `sdk/python` seam and ships BOTH packages: the `actorkit` author surface that lives beside its
+# `sdk/python` seam and ships BOTH packages: the `kontra` author surface that lives beside its
 # pyproject, and the `internals` runtime that lives under `runtime/python` and is reached by a
 # relative package-dir. One install, two seams, one ARROW — runtime imports sdk, never the
 # reverse, asserted by tests/test_sdk_arrow.py. Install it:

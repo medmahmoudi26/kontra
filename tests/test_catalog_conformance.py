@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import internals.catalog as C
-from actorkit import ActorRegistry
+from kontra import ActorRegistry
 
 # parents[1] is the repo root: tests/ -> <root>.
 FIXTURE = pathlib.Path(__file__).resolve().parents[1] / "shared" / "conformance" / "catalog.json"

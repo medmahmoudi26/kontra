@@ -1,11 +1,11 @@
 """Call deployed kontra code FROM your own Temporal workflow — the client half of the SDK.
 
-Everything else in actorkit is the CALLEE: `@actor.method` + `actor.serve()` make a process that
+Everything else in kontra is the CALLEE: `@actor.method` + `actor.serve()` make a process that
 serves work. This module is the other side, and since v2 removed the graph interpreter it is the
 ONLY side that calls one. You write a plain Temporal workflow — yours, on your laptop, in your
 own task queue — and orchestrate deployed Actors from it with ordinary Python control flow:
 
-    from actorkit import catalog
+    from kontra import catalog
     from temporalio import workflow
 
     subfinder = catalog.actor("subfinder", "0.1.0")
@@ -109,7 +109,7 @@ imports the author's vocabulary, never the reverse, and tests/test_sdk_arrow.py 
 module-scope `internals` import anywhere under sdk/. `serve_workflows()` is the exception, for the
 same reason `actor.serve()` is: it IS the handoff, the line where an author stops writing workflow
 code and gives the process to the workflow host. It is a DEFERRED import inside the function
-(`from internals.temporal.wfhost import serve_workflows`), so `from actorkit import catalog` — what
+(`from internals.temporal.wfhost import serve_workflows`), so `from kontra import catalog` — what
 a workflow module does, inside the Temporal sandbox — still reaches no runtime module.
 """
 
@@ -123,7 +123,7 @@ from datetime import timedelta
 from typing import Any, AsyncIterator, Callable, Iterable, Mapping, Sequence
 
 # The Nexus service every actor serves — ADR 0001, one operation, one way in. The typed contract
-# is `actorkit.contract.KontraActorService` (imported lazily, since it needs nexusrpc); these
+# is `kontra.contract.KontraActorService` (imported lazily, since it needs nexusrpc); these
 # names are re-exported here because they are the cross-language literals, and because the
 # congruence tests read them from one place.
 SERVICE_NAME = "kontra.actor"
@@ -440,7 +440,7 @@ class Batch:
     this type exists to prevent, and it would fail as a size problem in production rather than
     a type error in a test. Use `await batch.rows()` when you genuinely want the records.
 
-    Distinct from `actorkit.batch.Batch`, which is the CALLEE's view — the thing a Method's
+    Distinct from `kontra.batch.Batch`, which is the CALLEE's view — the thing a Method's
     author loops over. Same word, opposite ends of the call; an author writing both halves
     imports both.
     """
@@ -967,8 +967,8 @@ class ActorHandle:
         # The shared service definition, not a pair of strings — Temporal's own pattern for
         # calling across a boundary, and the reason the operation name is declared once instead
         # of typed at every call site. Imported here rather than at module scope so
-        # `import actorkit` stays free of a Temporal dependency.
-        from actorkit.contract import KontraActorService
+        # `import kontra` stays free of a Temporal dependency.
+        from kontra.contract import KontraActorService
 
         client = workflow.create_nexus_client(
             service=KontraActorService, endpoint=self.endpoint

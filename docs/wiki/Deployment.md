@@ -43,7 +43,7 @@ Temporal activity worker.
 | What it is for | local development, and any install that runs no cloud fleet | the deployment that runs **cloud runs** |
 | What it is | one process, one data directory | `orchestrator-infra` (Pulumi, the fleet key, the cloud credential) + `orchestrator-probe`, beside a `kontra up` |
 | Start it with | `kontra up` | `kontra infra up` (or `make up-d`) |
-| Cloud fleet | **no.** `actorkit.fleet.up()` fails legibly: this control plane has no provisioner | yes — ADR 0034 §1 keeps provisioning here |
+| Cloud fleet | **no.** `kontra.fleet.up()` fails legibly: this control plane has no provisioner | yes — ADR 0034 §1 keeps provisioning here |
 | Exposure | binds `127.0.0.1` by default; nothing published (ADR 0031 §3) | published ports, each naming an address; GitHub #19 §2 is still open there |
 | Memory bounds | `KONTRA_DUCKDB_MEMORY_LIMIT` + the activity-slot count | those **plus** per-service `mem_limit` cgroups (ADR 0031 §1) |
 

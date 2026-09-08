@@ -6,7 +6,7 @@
  * the reader has no worker, no cluster and no clock it was not handed, so every state of a parked
  * run can be asserted from a literal object.
  *
- * The two literals this module shares with `sdk/python/actorkit/hitl.py` are pinned against that
+ * The two literals this module shares with `sdk/python/kontra/hitl.py` are pinned against that
  * file's own bytes below. A drift there is not a type error — it is a run that publishes an ask
  * nothing reads, and an answer signalled to a name nothing handles.
  */
@@ -261,7 +261,7 @@ describe('the literals the two SDKs share', () => {
    */
   it('spells the memo prefix and the answer signal exactly as actorkit does', () => {
     const py = readFileSync(
-      path.join(__dirname, '..', '..', '..', 'sdk', 'python', 'actorkit', 'hitl.py'),
+      path.join(__dirname, '..', '..', '..', 'sdk', 'python', 'kontra', 'hitl.py'),
       'utf8'
     );
     expect(py).toContain(`ASK_MEMO_PREFIX = "${ASK_MEMO_PREFIX}"`);
@@ -275,7 +275,7 @@ describe('what the archived reduced log records about an ask', () => {
    * Temporal's retention (ADR 0025), and it is payload-free by construction — so what it can say
    * about an ask has to come from event METADATA. Two fields carry it: the KEYS of a memo upsert
    * (a map's keys are structure, its values are the payloads nothing here decodes), and a signal's
-   * NAME, which `actorkit.hitl` builds to carry the ask id for exactly this reason.
+   * NAME, which `kontra.hitl` builds to carry the ask id for exactly this reason.
    */
   it('names the ask a memo upsert published, without decoding its value', () => {
     const detail = describeEvent('WorkflowPropertiesModified', {

@@ -3,7 +3,7 @@
 THE WORKFLOW SEAM IS FAKED, not a cluster. What is under test is the DECISION shape — what an ask
 puts in the memo (which is what every reader outside the run sees), which signal answers it, what a
 deadline does when it passes, and what never reaches history — and every one of those is a property
-of `actorkit.hitl` rather than of Temporal. The fake below is the same monkeypatch-the-module seam
+of `kontra.hitl` rather than of Temporal. The fake below is the same monkeypatch-the-module seam
 `test_workflows_client.py` uses for the caller SDK, extended with a virtual clock so a 24-hour
 deadline expires in a test without anybody waiting for it.
 
@@ -27,7 +27,7 @@ import pytest
 from temporalio import workflow as temporal_workflow
 from temporalio.exceptions import ApplicationError
 
-from actorkit import hitl
+from kontra import hitl
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -226,7 +226,7 @@ def test_an_ask_publishes_its_own_question_before_anybody_answers(wf: Fake) -> N
         assert entry["deadlineAt"] == ms(T0 + timedelta(hours=4))
         assert entry["context"] == {"dataset": "live", "n": 12}
         # The schema the form renders from and the answer is validated against — derived from the
-        # declared type through the same `actorkit.schema` the actor catalog uses.
+        # declared type through the same `kontra.schema` the actor catalog uses.
         assert entry["schema"]["properties"]["approve"]["type"] == "boolean"
         assert entry["schema"]["required"] == ["approve"]
         assert not task.done()
@@ -531,7 +531,7 @@ def test_an_answer_is_a_plain_value_and_never_becomes_a_batch(wf: Fake) -> None:
     """A Batch is content-addressed into the blob plane and materialized into the lake. An answer
     that became one would be a permanent, queryable copy of a human's judgement. The `wf` fixture
     fails any activity schedule, which is how an accidental publish would show up here."""
-    from actorkit.batch import Batch
+    from kontra.batch import Batch
 
     async def scenario() -> None:
         task = await _parked(wf, hitl.ask("Go?", deadline=None))

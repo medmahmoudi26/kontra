@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import pytest
 
-from actorkit import fleet
+from kontra import fleet
 from fleetscope import FleetScope
 
 DO = fleet.do_fleet(machines=2, region="nyc3")

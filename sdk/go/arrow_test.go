@@ -64,7 +64,7 @@ func TestTheSDKImportsNothingOfTheRuntime(t *testing.T) {
 // surface: their whole content is workflow.ExecuteActivity, workflow.Await and
 // temporal.NewApplicationError. Temporal is the substrate an author writes against there, not an
 // implementation detail leaking upward — Python draws the identical line, which is why
-// `import actorkit` costs no temporalio while `from actorkit import ask` does.
+// `import kontra` costs no temporalio while `from kontra import ask` does.
 func TestTheSDKCarriesNoInfrastructureClient(t *testing.T) {
 	banned := map[string]string{
 		"github.com/redis/go-redis":    "a Redis client (the durable state tiers are the runtime's)",

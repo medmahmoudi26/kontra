@@ -695,7 +695,7 @@ services:
     # no build. Named rather than left to compose's derived `<project>-orchestrator-probe`, because a
     # second copy of the base image on a 4 GB controller is a few hundred MiB for nothing.
     image: kontra-host:1
-    command: ["python3", "-m", "actorkit.probe"]
+    command: ["python3", "-m", "kontra.probe"]
     # host.docker.internal is not a Linux default; host-gateway is what defines it. Needed by
     # every service that dials the embedded Temporal above.
     extra_hosts:

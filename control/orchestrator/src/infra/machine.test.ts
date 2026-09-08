@@ -199,7 +199,7 @@ describe('the install script', () => {
   });
 
   it('writes the session cap, which is the only thing that makes density reachable', () => {
-    // The gap `actorkit.fleet` forced closed. Both hosts read KONTRA_MAX_PARALLEL_SESSIONS and
+    // The gap `kontra.fleet` forced closed. Both hosts read KONTRA_MAX_PARALLEL_SESSIONS and
     // both default to 4; nothing wrote it here, so every fleet ever placed ran at 4 — and the
     // failure is silent, because a host at its cap REFUSES an open retryably. The task goes back
     // to the shared queue and another Machine takes it, so asking for more concurrency than 4×N

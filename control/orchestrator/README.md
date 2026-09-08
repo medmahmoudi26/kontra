@@ -10,7 +10,7 @@ on. It never imports or runs actor code, and it executes no Batch on their behal
 > policy, materialization and a streaming cursor. ADR 0023 §12 removed THAT — the interpreter and
 > the arbitrary GRAPH it took, not the verb. A **Run** is now one execution of a **caller's**
 > workflow — the caller's own code, on the caller's own task queue, dispatching **Method** calls
-> on **Actors** with ordinary control flow (`actorkit.catalog` on the Python side). That
+> on **Actors** with ordinary control flow (`kontra.catalog` on the Python side). That
 > removed the graph, and with it Node, Chunk and Manifest as words.
 >
 > **`POST /api/runs` is not a 404**, and has not been since 2026-08-15: it starts one execution of

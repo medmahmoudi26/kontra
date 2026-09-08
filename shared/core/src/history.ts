@@ -482,7 +482,7 @@ export function describe(type: string, attrs: Record<string, unknown>): string {
   if (str(attrs.timerId)) bits.push(`timerId=${str(attrs.timerId)}`);
   if (str(attrs.markerName)) bits.push(`marker=${str(attrs.markerName)}`);
   // THE NAME OF A SIGNAL IS METADATA; its payload is not. Reading the name costs no blob GET, and
-  // it is what pairs an answer with the question it answers: `sdk/python/actorkit/hitl.py` puts
+  // it is what pairs an answer with the question it answers: `sdk/python/kontra/hitl.py` puts
   // the ask's id IN the signal name (`kontra.answer/ask-1`) precisely so this line can.
   if (str(attrs.signalName)) bits.push(`signal=${str(attrs.signalName)}`);
   // A MEMO UPSERT NAMES ITS KEYS WITHOUT DECODING ITS VALUES — the fields are a map, and a map's
@@ -523,7 +523,7 @@ function keysOf(raw: unknown): string[] {
  *
  * IT IS A PAYLOAD, AND READING IT IS STILL NOT A PAYLOAD READ. The rule this module keeps is that
  * nothing here may fan out into the blob store, and a Summary cannot: the writer builds it to fit
- * 200 bytes (`SUMMARY_BUDGET` in `sdk/python/actorkit/catalog.py`), some 650× under the codec's
+ * 200 bytes (`SUMMARY_BUDGET` in `sdk/python/kontra/catalog.py`), some 650× under the codec's
  * 128 KiB offload threshold, so it is always stored inline. That bound is what makes this safe —
  * which is why the writer builds the line to fit rather than trimming it, and why the one case it
  * could not hold for is REFUSED below rather than guessed at.
