@@ -29,7 +29,14 @@ import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 import { SAFE, type ExecutionMode } from './ids';
 import { captureChild, type CommandRunner, type ExecResult, type ExecTarget } from './transport';
-import { LIST_PANES_COMMAND, parseListPanes, type PaneRow } from './tmux';
+import {
+  isKnownSessionKind,
+  kontraSessionKind,
+  LIST_PANES_COMMAND,
+  parseListPanes,
+  SESSION_KINDS,
+  type PaneRow,
+} from './tmux';
 import type { MachineTarget } from './discovery';
 
 /**
@@ -44,11 +51,70 @@ import type { MachineTarget } from './discovery';
  */
 export const LOCAL_SESSION_PREFIX = 'kontra-';
 
-/** Does this pane belong to a session kontra created? The tag first, the legacy prefix second.
- *  `kontra` is read defensively because a PaneRow can be built by hand and by a peer that predates
- *  the field — an undefined here would throw inside a discovery loop and empty the whole wall. */
+/**
+ * Does this pane belong to a session the wall may show? The tag first, the legacy prefix second.
+ *
+ * A TAG MUST CLAIM A KIND THIS BUILD KNOWS — ADR 0043, and it is the whole of the change. This used
+ * to be `(row.kontra ?? '') !== ''`: any non-empty value admitted a session, and `tmux.ts`'s own
+ * header warned that an operator "may have set `@kontra` on a session of their own, with anything in
+ * it". So one `tmux set-option` put a session holding anything at all onto a wall whose read-only
+ * guarantee says nothing about what the pane CONTAINS, and the grammar that would have refused it
+ * (`SAFE.command`, which admits only a journal) runs on the converge path and nowhere else.
+ *
+ * The three kinds are in `SESSION_KINDS`. Two are kontra's own; `watch:` is the one a human types,
+ * and what it asserts is the ADR's rule — the panes hold nothing that exists only there.
+ *
+ * THE LEGACY PREFIX IS UNCHANGED AND IS A NARROWER DOOR. A session named `kontra-*` with no tag is
+ * still admitted, because a Worker that was already running when the tag landed has exactly that
+ * shape and a wall that dropped it would report a live Worker as absent — the one thing ADR 0020
+ * says a tile may never do. It is a smaller hole than the old one: it needs kontra's own name
+ * prefix rather than any value in any option.
+ *
+ * `kontra` is read defensively because a PaneRow can be built by hand and by a peer that predates
+ * the field — an undefined here would throw inside a discovery loop and empty the whole wall.
+ */
 export function isKontraSession(row: { session: string; kontra?: string }): boolean {
-  return (row.kontra ?? '') !== '' || row.session.startsWith(LOCAL_SESSION_PREFIX);
+  const tag = row.kontra ?? '';
+  if (tag !== '') return isKnownSessionKind(tag);
+  return row.session.startsWith(LOCAL_SESSION_PREFIX);
+}
+
+/** One session discovery declined to show, and why — the sentence an operator needs. */
+export interface RefusedSession {
+  session: string;
+  tag: string;
+  reason: string;
+}
+
+/**
+ * Sessions on this host that carry a tag of an unknown kind.
+ *
+ * PURE, and separate from {@link localSessionsFromPanes} so that function stays pure too: this
+ * returns what to say and the caller decides whether to say it. A refusal that is silent is
+ * indistinguishable from a session that is not there, and an operator who cannot tell those apart
+ * concludes the Monitor is unreliable and stops trusting the tiles that are correct.
+ *
+ * Only TAGGED sessions appear here. An untagged one that fails the prefix was never claiming to be
+ * kontra's, and reporting every unrelated tmux session on an operator's laptop would be noise that
+ * buries the one line that matters.
+ */
+export function refusedSessions(rows: readonly PaneRow[]): RefusedSession[] {
+  const seen = new Map<string, RefusedSession>();
+  for (const row of rows) {
+    const tag = row.kontra ?? '';
+    if (tag === '' || isKnownSessionKind(tag)) continue;
+    if (seen.has(row.session)) continue;
+    seen.set(row.session, {
+      session: row.session,
+      tag,
+      reason:
+        `@kontra claims kind ${JSON.stringify(kontraSessionKind(tag))}, which this build does not ` +
+        `know (${SESSION_KINDS.join(', ')}). A session kontra did not create is shown only when it ` +
+        `is tagged watch:<label>, which asserts its panes hold nothing that exists only there — ` +
+        `see ADR 0043. To watch something interactive, supervise it and tail its journal.`,
+    });
+  }
+  return [...seen.values()];
 }
 
 /**
@@ -226,7 +292,14 @@ export async function discoverLocalSessions(
   // not running a Worker has nothing to show, and inventing a tile for it would put a converge
   // affordance in front of an operator that would have to START A WORKER to satisfy it.
   if (res.code !== 0) return [];
-  return localSessionsFromPanes(parseListPanes(res.stdout), host);
+  const rows = parseListPanes(res.stdout);
+  // SAY WHAT WAS REFUSED, once per poll and only for a session that CLAIMED to be kontra's. ADR
+  // 0043's refusal is deliberate and an operator who tagged a session is owed the reason — without
+  // this the session simply is not there, which reads as a broken Monitor rather than as a rule.
+  for (const refused of refusedSessions(rows)) {
+    console.warn(`panels: not showing tmux session ${JSON.stringify(refused.session)} — ${refused.reason}`);
+  }
+  return localSessionsFromPanes(rows, host);
 }
 
 /** Which mode this file implements. Exported so `modes.ts` cannot wire it under the wrong one. */

@@ -1,9 +1,9 @@
 {
  "why": "Every name an Actor is ADDRESSED by: the task queue its handler serves, the queue its own process polls, the queue one live Session is pinned to, the Nexus endpoint a caller dispatches through, and the tmux session its Worker runs in. All five are derived independently in four languages with no shared code (the decoupling rule), and a drift in any of them has the same failure shape, in the code's own words: the actor registers, polls a queue nobody schedules onto, and reports as a healthy idle Worker while every run hangs to StartToClose.",
- "measured": "2026-08-28: the queue was derived in EIGHT places, the endpoint in four, the session queue in five, and three hand-copied golden tables held them. The bookkeeping had already drifted — one comment called itself 'a fourth' independent derivation, another 'THE FIFTH', another 'a SIXTH', and none of the three counts was right. Two of the derivations were the same TypeScript function twice (backend actorSession, frontend actorSessionOf), byte-identical including the fallback. This file replaced the count.",
+ "measured": "2026-08-28: the queue was derived in EIGHT places, the endpoint in four, the session queue in five, and three hand-copied golden tables held them. The bookkeeping had already drifted \u2014 one comment called itself 'a fourth' independent derivation, another 'THE FIFTH', another 'a SIXTH', and none of the three counts was right. Two of the derivations were the same TypeScript function twice (backend actorSession, frontend actorSessionOf), byte-identical including the fallback. This file replaced the count.",
  "notes": [
-  "A QUEUE NAME IS NOT SANITISED and an ENDPOINT NAME IS. That is the sharpest thing in this corpus and the rows are chosen to prove it: `my actor` and `café` pass through the queue derivations verbatim (Temporal accepts them) and are mangled by the endpoint derivation (the dev server enforces ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$). A derivation that sanitised the queue would route to a queue nobody polls, which is silent.",
-  "THE FALLBACKS ARE PART OF THE CONTRACT. An absent version does NOT give `{name}-`; it gives `{name}-shared`. An empty session id gives NO queue at all, in each language's own idiom. An unnameable tmux session gives `actor` for an Actor's Worker and `fleet` for a Machine with no placement — see `tmux_session.why` for why those two differ on purpose.",
+  "A QUEUE NAME IS NOT SANITISED and an ENDPOINT NAME IS. That is the sharpest thing in this corpus and the rows are chosen to prove it: `my actor` and `caf\u00e9` pass through the queue derivations verbatim (Temporal accepts them) and are mangled by the endpoint derivation (the dev server enforces ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$). A derivation that sanitised the queue would route to a queue nobody polls, which is silent.",
+  "THE FALLBACKS ARE PART OF THE CONTRACT. An absent version does NOT give `{name}-`; it gives `{name}-shared`. An empty session id gives NO queue at all, in each language's own idiom. An unnameable tmux session gives `actor` for an Actor's Worker and `fleet` for a Machine with no placement \u2014 see `tmux_session.why` for why those two differ on purpose.",
   "Every driver asserts this file is non-empty and still carries its adversarial inputs. A corpus that silently shrank to nothing passes every case in it."
  ],
  "shared": {
@@ -20,7 +20,7 @@
   ],
   "cases": [
    {
-    "why": "the ordinary case — a dotted version, verbatim, dots and all",
+    "why": "the ordinary case \u2014 a dotted version, verbatim, dots and all",
     "name": "echo",
     "version": "0.1.0",
     "expect": "echo-0.1.0"
@@ -32,7 +32,7 @@
     "expect": "webcrawl-1.2.3"
    },
    {
-    "why": "a hyphenated Actor name — the separator is the same character the name already contains, so a parser would be wrong and nothing parses this",
+    "why": "a hyphenated Actor name \u2014 the separator is the same character the name already contains, so a parser would be wrong and nothing parses this",
     "name": "http-fuzzer",
     "version": "0.1.0",
     "expect": "http-fuzzer-0.1.0"
@@ -50,16 +50,16 @@
     "expect": "crawl4ai-0.5.0-rc1"
    },
    {
-    "why": "A SPACE PASSES THROUGH. Temporal accepts it, so no derivation may sanitise here — the endpoint rows below mangle the same input, and a side that shared one sanitiser between the two would route to a queue nobody polls",
+    "why": "A SPACE PASSES THROUGH. Temporal accepts it, so no derivation may sanitise here \u2014 the endpoint rows below mangle the same input, and a side that shared one sanitiser between the two would route to a queue nobody polls",
     "name": "my actor",
     "version": "0.1.0",
     "expect": "my actor-0.1.0"
    },
    {
     "why": "non-ASCII passes through too: no side may ASCII-fold a queue name",
-    "name": "café",
+    "name": "caf\u00e9",
     "version": "0.1.0",
-    "expect": "café-0.1.0"
+    "expect": "caf\u00e9-0.1.0"
    },
    {
     "why": "THE COLLISION THE FLAT NAMESPACE HAS, recorded so nobody 'fixes' it by accident: a version spelled `shared` produces the same queue as no version at all. Known, unguarded, and harmless only because a version string is a manifest field nobody writes that way",
@@ -112,7 +112,7 @@
   ]
  },
  "session": {
-  "why": "The queue ONE LIVE SESSION is addressed on (ADR 0023 §6): `{shared}-s-{sessionId}`. The singular of `sessions` and a different plane — that one is polled by every worker of the version and is where an OPEN lands, so Temporal's dispatch of the open IS the placement decision; this one is polled by the single worker that answered that open, which is what pins every call of the scope to the process holding the loaded resource. The queue name is the whole addressing scheme: no placement directory, no lease, no idle policy.",
+  "why": "The queue ONE LIVE SESSION is addressed on (ADR 0023 \u00a76): `{shared}-s-{sessionId}`. The singular of `sessions` and a different plane \u2014 that one is polled by every worker of the version and is where an OPEN lands, so Temporal's dispatch of the open IS the placement decision; this one is polled by the single worker that answered that open, which is what pins every call of the scope to the process holding the loaded resource. The queue name is the whole addressing scheme: no placement directory, no lease, no idle policy.",
   "derived_by": [
    "runtime/handler/internal/identity.SessionQueue (from the workflow's OWN task queue plus the dispatched id)",
    "sdk/go/catalog.SessionQueue",
@@ -122,7 +122,7 @@
   ],
   "cases": [
    {
-    "why": "the ordinary case — a full session id",
+    "why": "the ordinary case \u2014 a full session id",
     "name": "crawler",
     "version": "0.1.0",
     "session_id": "3f9a2b1c4d5e",
@@ -151,7 +151,7 @@
    }
   ],
   "refuses_without_a_session_id": {
-   "why": "NO QUEUE AT ALL for an empty session id, on every side. The derivation would otherwise collapse onto `{shared}-s-`, which is a real Temporal queue that every Session of the Actor would share — the pinning gone, nothing failing, and the scope's calls answered by whichever worker happened to poll first. Each language refuses in its own idiom: Python raises ValueError, Go returns the empty string, and the callers guard before they schedule.",
+   "why": "NO QUEUE AT ALL for an empty session id, on every side. The derivation would otherwise collapse onto `{shared}-s-`, which is a real Temporal queue that every Session of the Actor would share \u2014 the pinning gone, nothing failing, and the scope's calls answered by whichever worker happened to poll first. Each language refuses in its own idiom: Python raises ValueError, Go returns the empty string, and the callers guard before they schedule.",
    "name": "echo",
    "version": "0.1.0",
    "session_id": ""
@@ -192,7 +192,7 @@
     "expect": "kontra-echo"
    },
    {
-    "why": "doubles collapse — a name ending in a digit next to a dotted version is the shape every real Actor here has",
+    "why": "doubles collapse \u2014 a name ending in a digit next to a dotted version is the shape every real Actor here has",
     "name": "crawl4ai-canon",
     "version": "0.1.0",
     "expect": "kontra-crawl4ai-canon-0-1-0"
@@ -210,7 +210,7 @@
     "expect": "kontra-probe-1"
    },
    {
-    "why": "A SPACE. The same input the shared-queue rows pass through verbatim — this is the row that proves the two rules are different rules",
+    "why": "A SPACE. The same input the shared-queue rows pass through verbatim \u2014 this is the row that proves the two rules are different rules",
     "name": "my actor",
     "version": "0.1.0",
     "expect": "kontra-my-actor-0-1-0"
@@ -222,20 +222,20 @@
     "expect": "kontra-a-b-1-0-0"
    },
    {
-    "why": "NON-ASCII INSIDE A WORD. One replacement character per rune, so `ï` leaves `na-ve` rather than `na--ve` — the row where Go's rune loop, Python's per-character loop and JavaScript's UTF-16 replace could each have counted differently",
-    "name": "naïve",
+    "why": "NON-ASCII INSIDE A WORD. One replacement character per rune, so `\u00ef` leaves `na-ve` rather than `na--ve` \u2014 the row where Go's rune loop, Python's per-character loop and JavaScript's UTF-16 replace could each have counted differently",
+    "name": "na\u00efve",
     "version": "1.0.0",
     "expect": "kontra-na-ve-1-0-0"
    },
    {
     "why": "non-ASCII at the END of a word, where the replacement lands next to the separator and has to collapse into it",
-    "name": "café",
+    "name": "caf\u00e9",
     "version": "0.1.0",
     "expect": "kontra-caf-0-1-0"
    },
    {
-    "why": "AN EMOJI — one rune, TWO UTF-16 code units. JavaScript's replace writes two dashes here and Go's and Python's loops write one; the collapse is what makes the three agree, and this row is what proves the collapse happens rather than being assumed",
-    "name": "📦",
+    "why": "AN EMOJI \u2014 one rune, TWO UTF-16 code units. JavaScript's replace writes two dashes here and Go's and Python's loops write one; the collapse is what makes the three agree, and this row is what proves the collapse happens rather than being assumed",
+    "name": "\ud83d\udce6",
     "version": "1.0",
     "expect": "kontra-1-0"
    },
@@ -246,7 +246,7 @@
     "expect": "kontra"
    },
    {
-    "why": "a name made only of characters that cannot survive — the fallback reached the long way round",
+    "why": "a name made only of characters that cannot survive \u2014 the fallback reached the long way round",
     "name": "...",
     "version": "",
     "expect": "kontra"
@@ -254,13 +254,13 @@
   ]
  },
  "tmux_session": {
-  "why": "The tmux session a Worker's panes live in — how `kontra serve --tmux` names what it starts, how the fleet names a Machine's session, and how the Monitor and the browser find the pane again. tmux's `session_check_name()` rewrites every `.` and `:` to `_` SILENTLY at creation (measured: `tmux new-session -d -s 'nscheck-0.1.0'` stores `nscheck-0_1_0`), so the name is sanitised where it is MINTED and a derivation that forgot draws a Machine whose Worker is running perfectly as one with NO SESSION.",
+  "why": "The tmux session a Worker's panes live in \u2014 how `kontra serve --tmux` names what it starts, how the fleet names a Machine's session, and how the Monitor and the browser find the pane again. tmux's `session_check_name()` rewrites every `.` and `:` to `_` SILENTLY at creation (measured: `tmux new-session -d -s 'nscheck-0.1.0'` stores `nscheck-0_1_0`), so the name is sanitised where it is MINTED and a derivation that forgot draws a Machine whose Worker is running perfectly as one with NO SESSION.",
   "two_domains": "There are TWO derivations here, not one, and the difference in their fallbacks is INTENDED. `worker` is an ACTOR's Worker: it is given a name and a version and nothing else, and its fallback exists only so the string stays attachable. `machine` is a fleet MACHINE's session: it is given the fleet's tag as well, because a `fleet up` with no Actor placed on it still has Terminals, and its fallback is the word `fleet` because that is what such a Machine IS. Making them agree would name a placement-less Machine's session `actor`, which is a lie about what is running there. Recorded here rather than left as two literals nobody can tell from a typo.",
   "machine_is_whitelisted": "`machine` additionally refuses a name outside ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ and answers `fleet`, because that string is interpolated into a command run as root on a remote Machine and there is no safe way to repair an unsafe one. `worker` has no such check: its caller validates the Actor name against the same bound before it ever gets here.",
   "derived_by": [
    "cli/internal/tmux/tmux.go:tmuxSession (worker)",
    "cli/fleet.go:fleetSessionName (machine)",
-   "control/orchestrator/src/panels/tmux.ts:actorSession (worker — the ONE TypeScript copy, imported by control/orchestrator/src/actorControl.ts and by the browser through @core)",
+   "control/orchestrator/src/panels/tmux.ts:actorSession (worker \u2014 the ONE TypeScript copy, imported by control/orchestrator/src/actorControl.ts and by the browser through @core)",
    "control/orchestrator/src/panels/discovery.ts:sessionNameFor (machine)"
   ],
   "cases": [
@@ -297,7 +297,7 @@
     "machine": "probe"
    },
    {
-    "why": "BOTH characters tmux rewrites, in both halves — a `:` in a name would otherwise be read by tmux as a window selector",
+    "why": "BOTH characters tmux rewrites, in both halves \u2014 a `:` in a name would otherwise be read by tmux as a window selector",
     "actor": "a.b",
     "version": "1:2",
     "tag": "",
@@ -305,7 +305,7 @@
     "machine": "a_b-1_2"
    },
    {
-    "why": "THE INTENDED DIFFERENCE. No Actor placed, but the fleet has a tag: a Machine's session is named for what it is, and a Worker's derivation is not given the tag at all and falls back to `actor`. Two answers, on purpose — see `two_domains`",
+    "why": "THE INTENDED DIFFERENCE. No Actor placed, but the fleet has a tag: a Machine's session is named for what it is, and a Worker's derivation is not given the tag at all and falls back to `actor`. Two answers, on purpose \u2014 see `two_domains`",
     "actor": "",
     "version": "",
     "tag": "crawl",
@@ -321,7 +321,7 @@
     "machine": "fleet"
    },
    {
-    "why": "a name that sanitises to nothing usable — `.` becomes `_`, which is not attachable either, so both sides take their fallback rather than returning it",
+    "why": "a name that sanitises to nothing usable \u2014 `.` becomes `_`, which is not attachable either, so both sides take their fallback rather than returning it",
     "actor": ".",
     "version": "",
     "tag": "",
@@ -329,7 +329,7 @@
     "machine": "fleet"
    },
    {
-    "why": "A NAME THAT REACHES A REMOTE COMMAND. `machine` refuses it outright — the whitelist is the guard, and repairing it would put a value nothing validated into a command run as root. `worker` sanitises what tmux sanitises and no more; its caller has already refused this name",
+    "why": "A NAME THAT REACHES A REMOTE COMMAND. `machine` refuses it outright \u2014 the whitelist is the guard, and repairing it would put a value nothing validated into a command run as root. `worker` sanitises what tmux sanitises and no more; its caller has already refused this name",
     "actor": "web crawl; reboot",
     "version": "0.1.0",
     "tag": "",
@@ -343,6 +343,72 @@
     "tag": "crawl; reboot",
     "worker": "actor",
     "machine": "fleet"
+   }
+  ]
+ },
+ "session_kind": {
+  "why": "Which tmux sessions the Monitor will show, and the vocabulary both sides admit them by (ADR 0043). A session carries its claim in the `@kontra` USER OPTION as `<kind>:<rest>`; discovery admits a tag only when its kind is one of these. Before 0043 there was no vocabulary at all \u2014 any non-empty value admitted a session, so one `tmux set-option` put a session holding anything onto the wall, while the grammar that would have refused it (`SAFE.command`, which permits only a journal) ran on the converge path and nowhere else. kontra controlled tightly what it CREATED and admitted whatever it FOUND.",
+  "closed_set": "A closed set rather than a pattern, because adding a kind should be a decision rather than a typo that happens to work. `actor` and `workflow` are written by kontra; `watch` is the only one a human types, and writing it ASSERTS the ADR's rule: the panes hold nothing that exists only there. A Worker's pane satisfies that (the Run is in Temporal, the rows are in the lake) and so does a Machine's (machine.ts puts journals in panes and journald is the record). An interactive session \u2014 an agent, a REPL, a debugger \u2014 does not, and the supported way to watch one is to supervise it and tail its journal.",
+  "untagged_is_not_a_kind": "'' is NOT a known kind. An untagged session reaches the wall, if at all, through the legacy `kontra-` NAME prefix, which is kept because a Worker that was already running when tagging landed has exactly that shape and a wall that dropped it would report a live Worker as absent \u2014 the one thing ADR 0020 says a tile may never do. It is a narrower door than the old one: it needs kontra's own name prefix rather than any value in any option.",
+  "derived_by": [
+   "cli/internal/tmux/tmux.go:SessionKinds + IsKnownSessionKind + SessionKind (writer side)",
+   "shared/core/src/panels/tmux.ts:SESSION_KINDS + isKnownSessionKind + kontraSessionKind (reader side)",
+   "control/orchestrator/src/panels/local.ts:isKontraSession (the gate that consumes it)"
+  ],
+  "cases": [
+   {
+    "why": "an Actor's Worker, written by kontra",
+    "tag": "actor:probe:0.1.0",
+    "kind": "actor",
+    "known": true
+   },
+   {
+    "why": "a served caller workflow, written by kontra",
+    "tag": "workflow:hunt",
+    "kind": "workflow",
+    "known": true
+   },
+   {
+    "why": "the operator's own session, explicitly offered \u2014 the only kind a human types",
+    "tag": "watch:repl",
+    "kind": "watch",
+    "known": true
+   },
+   {
+    "why": "THE CASE 0043 EXISTS FOR: a session tagged with anything at all used to be admitted",
+    "tag": "anything",
+    "kind": "anything",
+    "known": false
+   },
+   {
+    "why": "a plausible-looking kind that is still not one of ours \u2014 refused rather than guessed at",
+    "tag": "agent:claude",
+    "kind": "agent",
+    "known": false
+   },
+   {
+    "why": "untagged is not a kind; the legacy NAME prefix is what admits such a session, not this",
+    "tag": "",
+    "kind": "",
+    "known": false
+   },
+   {
+    "why": "a kind is the part before the FIRST colon, so a rest containing colons does not change it",
+    "tag": "actor:my:actor:1.0.0",
+    "kind": "actor",
+    "known": true
+   },
+   {
+    "why": "case matters \u2014 a closed set is compared literally, never folded",
+    "tag": "Actor:probe:0.1.0",
+    "kind": "Actor",
+    "known": false
+   },
+   {
+    "why": "a bare colon claims the empty kind, which is not in the set",
+    "tag": ":probe",
+    "kind": "",
+    "known": false
    }
   ]
  }
