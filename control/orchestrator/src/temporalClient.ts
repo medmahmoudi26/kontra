@@ -31,6 +31,7 @@ import {
   buildRunDiscoveryQuery,
   registerSearchAttributes,
 } from './visibility';
+import { temporalConnectOptions } from './temporalTls';
 
 const NAMESPACE = process.env.KONTRA_NAMESPACE ?? 'default';
 
@@ -62,9 +63,7 @@ export async function getClient(): Promise<Client> {
   if (!clientPromise) {
     clientPromise = (async () => {
       startTracing();
-      const connection = await Connection.connect({
-        address: process.env.KONTRA_ADDRESS ?? 'localhost:7233',
-      });
+      const connection = await Connection.connect(temporalConnectOptions());
       const client = new Client({
         connection,
         namespace: NAMESPACE,

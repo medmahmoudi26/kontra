@@ -33,6 +33,7 @@ import inspect
 import logging
 import os
 from typing import Any, Sequence
+from internals.temporal.tlsconfig import connect_tls
 
 log = logging.getLogger("kontra.wfhost")
 
@@ -157,8 +158,9 @@ async def serve_workflows_async(
     address = address or os.environ.get("KONTRA_ADDRESS", "localhost:7233")
     namespace = namespace or os.environ.get("KONTRA_NAMESPACE", "default")
 
+    tls = connect_tls()  # see `internals/temporal/tlsconfig.py`
     client = await Client.connect(
-        address, namespace=namespace, data_converter=casstore.data_converter()
+        address, namespace=namespace, data_converter=casstore.data_converter(), tls=tls
     )
 
     # SELF-REGISTRATION, exactly where the actor host does it (`internals/temporal/host.py`).

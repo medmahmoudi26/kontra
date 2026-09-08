@@ -27,11 +27,17 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"go.temporal.io/sdk/client"
+
+	"github.com/medmahmoudi26/kontra/runtime/handler/temporaltls"
 )
 
 // newScheduleClient is a func var so tests never dial anything.
 var newScheduleClient = func() (client.Client, error) {
-	return client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace()})
+	conn, err := temporaltls.ConnectionOptions(nil)
+	if err != nil {
+		return nil, err
+	}
+	return client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace(), ConnectionOptions: conn})
 }
 
 func cmdSchedule(args []string) error {

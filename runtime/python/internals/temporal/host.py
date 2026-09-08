@@ -47,6 +47,7 @@ log = logging.getLogger("kontra.host")
 # workflow's pane behaving the same way, which is the property that makes either of them worth
 # looking at.
 from internals.temporal.wfhost import _configure_logging  # noqa: E402
+from internals.temporal.tlsconfig import connect_tls
 
 # Per-process activation. Keyed by actor id, which is the run/node the handler derives — so two
 # nodes of one run get two instances (two browsers), and a retry of the SAME node reuses the
@@ -346,8 +347,12 @@ async def serve_async(registry, *, address: str = "", namespace: str = "") -> No
     # without the matching codec every over-threshold batch dies on "Unknown payload encoding",
     # retried to exhaustion. It passes through when KONTRA_S3_ENDPOINT is unset, exactly as the
     # handler's does, so a local no-S3 run is unaffected.
+    # TLS from the environment, in one place for every client in this repository — see
+    # `internals/temporal/tlsconfig.py`. `False` when nothing is configured, which is what the
+    # SDK means by no TLS and what this call passed before.
+    tls = connect_tls()
     client = await Client.connect(
-        address, namespace=namespace, data_converter=casstore.data_converter()
+        address, namespace=namespace, data_converter=casstore.data_converter(), tls=tls
     )
     metrics.serve(registry.actor_name, version)  # /metrics on its own port
     publish_catalog(registry)                    # self-register so the actor is dispatchable

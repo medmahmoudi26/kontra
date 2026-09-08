@@ -228,6 +228,22 @@ tokens:
 data:
   # The DuckLake catalog's Postgres password, shared by the API and the materializer.
   ducklake_password: ""
+
+# TEMPORAL TLS IS ENVIRONMENT-ONLY, and deliberately has no key here. The same five variables are
+# read by the orchestrator (TypeScript), both Python hosts and every Go binary — eighteen call
+# sites — and a value that lived in this file as well would be a second policy that agrees today
+# and drifts later. It is documented here because this file's job is to answer "what does this
+# installation need", and leaving it out would answer that incompletely:
+#
+#   KONTRA_TEMPORAL_TLS              1|true|yes|on — TLS with the system trust store
+#   KONTRA_TEMPORAL_TLS_CA           PEM path: the server's root CA, for a private CA
+#   KONTRA_TEMPORAL_TLS_CERT         PEM path: this client's certificate   ] both, or neither
+#   KONTRA_TEMPORAL_TLS_KEY          PEM path: this client's private key   ]
+#   KONTRA_TEMPORAL_TLS_SERVER_NAME  SNI override, for a proxy in front of the server
+#
+# Unset is plaintext, which is what a local install wants. ANY ONE of them turns TLS on, so a CA
+# with no switch does not silently connect in the clear. A file that cannot be read is a refusal
+# and never a fall back. See runtime/handler/temporaltls and shared/conformance/temporal_tls.json.
 `
 
 // FreshConfig is CONFIG_TEMPLATE with the state token MINTED.

@@ -47,6 +47,7 @@ import { ObjectStore } from './codec/objectStore';
 import { materializationStore } from './data/materializationStore';
 import { startTracing, tracingEnabled } from './otel';
 import { datasetQueue, materializerQueue } from './queues';
+import { temporalConnectOptions } from './temporalTls';
 
 /** One decode at a time by default — concurrency here multiplies peak RSS directly. */
 const DEFAULT_SLOTS = 1;
@@ -76,9 +77,7 @@ export async function runMaterializer(): Promise<void> {
   // it would decode successfully and leave every run stuck in `finalizing`.
   await status.ensureSchema();
 
-  const connection = await NativeConnection.connect({
-    address: process.env.KONTRA_ADDRESS ?? 'localhost:7233',
-  });
+  const connection = await NativeConnection.connect(temporalConnectOptions());
   try {
     const worker = await Worker.create({
       connection,

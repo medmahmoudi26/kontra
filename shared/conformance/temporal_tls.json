@@ -1,0 +1,143 @@
+{
+ "why": "How every Temporal client in this repository is told to use TLS. The contract is ENVIRONMENT, and it is shared by three languages and eighteen call sites: the orchestrator (TypeScript), the handler and the Go host, both Python hosts, and six CLI commands. Before this, none of them could connect to a secured Temporal at all — every site spelled `connect({address})` and stopped — so a self-hoster who put Temporal behind mTLS, the ordinary thing to do with a server holding every Run's history, had no way to point kontra at it.",
+ "why_a_corpus": "Eighteen sites is the whole difficulty. A change reaching fourteen of them does not fail loudly: it produces a deployment that mostly works and has one process talking plaintext to a server that accepts both — the worst of the three outcomes, because it looks like the good one. Three independent implementations of one env contract is exactly the shape ADR 0035 rule two says gets a corpus rather than three tables of literals.",
+ "the_two_invariants": [
+  "PLAINTEXT IS THE DEFAULT. With none of these set, every implementation must produce exactly what it produced before this existed. An existing deployment cannot be broken by the feature arriving.",
+  "ANY ONE SETTING TURNS TLS ON. Setting a CA and forgetting the switch would otherwise read the certificate, build nothing from it, and connect in the clear — a silent downgrade produced by configuration that looks complete."
+ ],
+ "refusals": "A misconfiguration is a REFUSAL and never a fall back to plaintext: an unreadable file, or a client certificate without its key. A security setting that degrades to off when it cannot be satisfied is the failure `watchdog.sh` shipped for years in this repository and the shape ADR 0039 refuses for cosign. The error names the VARIABLE and the PATH — an operator needs to know which setting pointed where, and a path is a filesystem location. It never contains key material or a passphrase.",
+ "truthy": [
+  "1",
+  "true",
+  "TRUE",
+  "yes",
+  "on",
+  " on "
+ ],
+ "falsy": [
+  "0",
+  "false",
+  "no",
+  "off",
+  ""
+ ],
+ "derived_by": [
+  "control/orchestrator/src/temporalTls.ts:temporalConnectOptions",
+  "runtime/handler/temporaltls/temporaltls.go:ConnectionOptions",
+  "runtime/python/internals/temporal/tlsconfig.py:connect_tls"
+ ],
+ "cases": [
+  {
+   "why": "nothing set: plaintext, and byte-identical to what every call site passed before",
+   "env": {},
+   "tls": false
+  },
+  {
+   "why": "the switch alone: TLS with the system trust store, no private CA, no client pair",
+   "env": {
+    "KONTRA_TEMPORAL_TLS": "1"
+   },
+   "tls": true,
+   "ca": false,
+   "client_pair": false,
+   "server_name": ""
+  },
+  {
+   "why": "THE SILENT DOWNGRADE THIS CLOSES: a CA with no switch must still turn TLS on",
+   "env": {
+    "KONTRA_TEMPORAL_TLS_CA": "@ca"
+   },
+   "tls": true,
+   "ca": true,
+   "client_pair": false,
+   "server_name": ""
+  },
+  {
+   "why": "a client pair with no switch turns TLS on too, for the same reason",
+   "env": {
+    "KONTRA_TEMPORAL_TLS_CERT": "@crt",
+    "KONTRA_TEMPORAL_TLS_KEY": "@key"
+   },
+   "tls": true,
+   "ca": false,
+   "client_pair": true,
+   "server_name": ""
+  },
+  {
+   "why": "an SNI override alone turns TLS on — it is meaningless without it",
+   "env": {
+    "KONTRA_TEMPORAL_TLS_SERVER_NAME": "temporal.internal"
+   },
+   "tls": true,
+   "ca": false,
+   "client_pair": false,
+   "server_name": "temporal.internal"
+  },
+  {
+   "why": "the full mTLS shape: private CA, client pair and an SNI override for a proxy in front",
+   "env": {
+    "KONTRA_TEMPORAL_TLS": "1",
+    "KONTRA_TEMPORAL_TLS_CA": "@ca",
+    "KONTRA_TEMPORAL_TLS_CERT": "@crt",
+    "KONTRA_TEMPORAL_TLS_KEY": "@key",
+    "KONTRA_TEMPORAL_TLS_SERVER_NAME": "temporal.internal"
+   },
+   "tls": true,
+   "ca": true,
+   "client_pair": true,
+   "server_name": "temporal.internal"
+  },
+  {
+   "why": "the switch explicitly off, with nothing else set, is plaintext",
+   "env": {
+    "KONTRA_TEMPORAL_TLS": "false"
+   },
+   "tls": false
+  },
+  {
+   "why": "OFF DOES NOT OVERRIDE A CA. The switch turns TLS ON; it is not a master disable, and a reading where it silently discards a configured certificate is the downgrade again",
+   "env": {
+    "KONTRA_TEMPORAL_TLS": "false",
+    "KONTRA_TEMPORAL_TLS_CA": "@ca"
+   },
+   "tls": true,
+   "ca": true,
+   "client_pair": false,
+   "server_name": ""
+  }
+ ],
+ "refusal_cases": [
+  {
+   "why": "a certificate without its key cannot authenticate; the server would refuse the handshake without naming either variable",
+   "env": {
+    "KONTRA_TEMPORAL_TLS_CERT": "@crt"
+   },
+   "names": [
+    "KONTRA_TEMPORAL_TLS_KEY"
+   ]
+  },
+  {
+   "why": "and the other way round",
+   "env": {
+    "KONTRA_TEMPORAL_TLS_KEY": "@key"
+   },
+   "names": [
+    "KONTRA_TEMPORAL_TLS_CERT"
+   ]
+  },
+  {
+   "why": "an unreadable CA is a refusal, naming the variable and the path — never plaintext",
+   "env": {
+    "KONTRA_TEMPORAL_TLS_CA": "/nope/missing-ca.pem"
+   },
+   "names": [
+    "KONTRA_TEMPORAL_TLS_CA",
+    "/nope/missing-ca.pem"
+   ]
+  }
+ ],
+ "notes": [
+  "`@ca`, `@crt` and `@key` are placeholders: a driver writes temporary PEM files and substitutes the paths. They must be a REAL, self-signed pair rather than arbitrary bytes — the Go implementation calls tls.X509KeyPair at configuration time so that an unusable pair is refused there rather than surfacing later as a handshake failure that names nothing. Generating one per run is a few lines in each language and is why the corpus carries no key material: a fixture holding a private key is a fixture nobody should commit, even a throwaway one.",
+  "The implementations differ in HOW MUCH they validate and that is deliberate, not drift. Go parses the pair and the CA pool because crypto/tls gives it those checks for free; TypeScript hands the bytes to the Temporal SDK, which validates at connect. What the corpus pins is the DECISION — TLS on or off, which material is present, and which misconfigurations are refusals — because that is the part an operator configures and the part that must not disagree across eighteen call sites."
+ ]
+}

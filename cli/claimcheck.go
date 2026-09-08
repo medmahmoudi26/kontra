@@ -55,6 +55,8 @@ import (
 
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/client"
+
+	"github.com/medmahmoudi26/kontra/runtime/handler/temporaltls"
 	"go.temporal.io/sdk/converter"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
@@ -137,9 +139,14 @@ func cliClaimCheckCodec() converter.PayloadCodec {
 
 // dialWithClaimCheck dials Temporal with the codec above installed.
 func dialWithClaimCheck() (client.Client, error) {
+	conn, err := temporaltls.ConnectionOptions(nil)
+	if err != nil {
+		return nil, err
+	}
 	return client.Dial(client.Options{
-		HostPort:      config.TemporalAddress(),
-		Namespace:     config.TemporalNamespace(),
-		DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), cliClaimCheckCodec()),
+		HostPort:          config.TemporalAddress(),
+		Namespace:         config.TemporalNamespace(),
+		DataConverter:     converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), cliClaimCheckCodec()),
+		ConnectionOptions: conn,
 	})
 }

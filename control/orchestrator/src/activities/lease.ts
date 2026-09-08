@@ -31,6 +31,7 @@ import {
   type FleetLeaseSet,
 } from '../lease';
 import { datasetQueue, infraQueue } from '../queues';
+import { temporalConnectOptions } from '../temporalTls';
 
 export interface HoldFleetLeaseInput {
   /** The stack being held — `kontra-fleet/<actor>-<version>`. The **Lease** workflow's id derives from it. */
@@ -112,7 +113,7 @@ async function withClient<T>(
   if (injected) return fn(injected);
   const address = process.env.KONTRA_ADDRESS ?? 'localhost:7233';
   const namespace = process.env.KONTRA_NAMESPACE ?? 'default';
-  const connection = await Connection.connect({ address });
+  const connection = await Connection.connect(temporalConnectOptions({ address }));
   try {
     return await fn(new Client({ connection, namespace, dataConverter }));
   } finally {

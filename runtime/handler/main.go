@@ -12,6 +12,8 @@ import (
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
+
+	"github.com/medmahmoudi26/kontra/runtime/handler/temporaltls"
 	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/interceptor"
@@ -63,11 +65,18 @@ func main() {
 	}
 
 	namespace := getenv("KONTRA_NAMESPACE", "default")
+	address := getenv("KONTRA_ADDRESS", "localhost:7233")
+	conn, err := temporaltls.ConnectionOptions(nil)
+	if err != nil {
+		log.Fatalf("temporal TLS: %v", err)
+	}
+	log.Printf("temporal: %s", temporaltls.Describe(address, conn))
 	c, err := client.Dial(client.Options{
-		HostPort:      getenv("KONTRA_ADDRESS", "localhost:7233"),
-		Namespace:     namespace,
-		DataConverter: dc,
-		Interceptors:  []interceptor.ClientInterceptor{tracingInterceptor},
+		HostPort:          address,
+		Namespace:         namespace,
+		DataConverter:     dc,
+		Interceptors:      []interceptor.ClientInterceptor{tracingInterceptor},
+		ConnectionOptions: conn,
 	})
 	if err != nil {
 		log.Fatalf("temporal dial: %v", err)
