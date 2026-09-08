@@ -158,8 +158,11 @@ One party whose work is separated from every other party's. **A Tenant IS a Temp
 the only authorisation boundary there is, so anything else is a convention rather than a boundary.
 A **Warden**'s enrolment mints a certificate scoped to exactly one, chosen when its one-time token
 was minted and never taken from anything the **Machine** says.
-_Avoid_: customer, org, account, workspace, project (each names a billing or UI grouping somewhere
-and would invite a **Tenant** that spans two namespaces, which is a **Tenant** that is not one);
+_Avoid_: customer, org, account, project (each names a billing or UI grouping somewhere and would
+invite a **Tenant** that spans two namespaces, which is a **Tenant** that is not one); **workspace**
+— which is now a DEFINED term (`CONTEXT.md`) and still not this one: a Workspace is the directory an
+operator keeps their config, actors and workflows in, bounded by file permissions and by nothing at
+runtime. Two Workspaces on one Tenant see each other's every Run. Separation is a second Tenant;
 "namespace prefix" and "queue prefix" (both describe the thing this word replaced — queue names
 are namespace-RELATIVE and `shared/conformance/queues.json` pins them unchanged)
 

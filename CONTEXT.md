@@ -46,6 +46,29 @@ internal representation. Distinguished from **Dataset** by cost: a **Batch** is 
 cheaper to carry in history.
 _Avoid_: page (a **Dataset** is read in **Batches**; there is no second word for the same set)
 
+**Workspace**:
+The DIRECTORY this installation keeps its own things in: `~/.kontra/` — `config.yaml`, `workflows/`
+and `actors/`, or wherever `$KONTRA_HOME` points. It is where an operator's code and credentials
+LIVE. It is not where anything RUNS.
+_Avoid_: project, folder (both name a directory without saying whose), and any reading in which a
+Workspace isolates work — see below
+
+**A Workspace is not a Tenant, and the difference is the whole reason the word is allowed.**
+A **Tenant** IS a Temporal namespace: the only authorisation boundary Temporal has, what a
+**Warden**'s certificate is scoped to, and what actually separates one party's work from another's.
+A Workspace is a directory; its boundary is Unix file permissions, and those bound who may EDIT the
+code and read the credentials — nothing at runtime.
+
+So two Workspaces on one **Tenant** see each other's **Runs**, **Datasets** and queues completely.
+That is the intended arrangement for two engineers sharing one instance and it is fine, but it has
+to be said out loud, because the intuition runs the other way: the word looks like an isolation
+boundary and is not one. **When separation is actually wanted, the answer is a second Tenant, never
+a second Workspace.**
+
+`infra/CONTEXT.md` lists `workspace` among the words **Tenant** avoids, and that stands for the
+namespace it names. This entry is the other thing the word can mean, defined here so the two cannot
+be confused rather than left for someone to conflate.
+
 **Run**:
 One execution of a caller's workflow, identified by that workflow's id — which is why it
 survives continue-as-new and why every attempt writes to one partition.

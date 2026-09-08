@@ -33,6 +33,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
@@ -219,10 +220,13 @@ tokens:
   state: ""
   # The query workbench's presigned reads. Falls back to the state token when empty.
   explore: ""
-  # Mints Dashboard WebSocket tickets, and nothing else.
+  # Mints Dashboard WebSocket tickets, and nothing else. GENERATED at install: blank means every
+  # panel route answers 503 and the Dashboard is a blank rectangle. Nothing has to present it —
+  # the browser never holds it and the socket carries only a minted ticket.
   panel: ""
-  # EMPTY MEANS OPEN: serve and run admit anyone who can reach the API. Set it to require a
-  # bearer token on both — they can start a workflow that provisions machines.
+  # GENERATED at install, because EMPTY MEANS OPEN: serve, start, stop and a Dataset's tag and
+  # rename admit anyone who can reach the API. They can start a workflow that provisions machines.
+  # Blank it deliberately if you want that surface open; it will not be filled in again.
   run: ""
 
 data:
@@ -263,18 +267,39 @@ data:
 // crypto/rand — an operator who wants their own value still just edits the file, and an existing
 // config is never rewritten (writeIfAbsent), so this only ever affects a genuinely new install.
 //
-// Only `state`. `explore` deliberately stays blank: it falls back to the state token, and the
-// SPA bakes VITE_KONTRA_EXPLORE_TOKEN at IMAGE BUILD time — minting one here would hand a
-// prebuilt bundle a token the server no longer expects, and the Datasets console would 401 into
-// an empty grid.
+// THREE OF THE FOUR ARE MINTED, and which three is the whole of this function.
+//
+//	state   the reason above: blank fails CLOSED, and a fleet was stranded by that.
+//	panel   blank means every panel route answers 503 `disabled: set KONTRA_PANEL_TOKEN` and the
+//	        Dashboard is a blank rectangle on a fresh install. Nothing has to PRESENT it — the
+//	        browser never holds it, `routes/panels.ts` proxies with the value from its own
+//	        environment and the socket carries only a minted ticket — so generating it costs an
+//	        operator nothing and buys them a working wall.
+//	run     blank means OPEN: serve, start, stop, a Dataset's tag and rename all admit anyone who
+//	        can reach the API. That is the asymmetry this file already warns about in capitals, and
+//	        an open default on an instance two people share is the wrong way round.
+//
+// `explore` STAYS BLANK, and it is not an oversight. It falls back to the state token, and the SPA
+// bakes VITE_KONTRA_EXPLORE_TOKEN at IMAGE BUILD time — minting one here would hand a prebuilt
+// bundle a token the server no longer expects, and the Datasets console would 401 into an empty grid.
+//
+// MINTING `run` CLOSES A DOOR THE CLI WALKS THROUGH, so `cli/dataset.go`'s tag and rename now send
+// it. Those were the only two CLI call sites on a run-gated route; everything else gated by it is
+// the console's, and the console gets the token from the orchestrator's environment rather than
+// holding one. Checked route by route rather than assumed.
 func FreshConfig() string {
-	tok, err := mintToken()
-	if err != nil {
-		// A config with a blank state token is the old behaviour: usable, with the infra routes
-		// off. Better than refusing to initialise because the machine has no entropy to spare.
-		return CONFIG_TEMPLATE
+	out := CONFIG_TEMPLATE
+	// Each independently: a machine that runs out of entropy midway should still get the tokens it
+	// managed to mint rather than none. A blank one is the old behaviour for that key, which is
+	// documented above and survivable — refusing to initialise is not.
+	for _, key := range []string{"state", "panel", "run"} {
+		tok, err := mintToken()
+		if err != nil {
+			continue
+		}
+		out = strings.Replace(out, `  `+key+`: ""`, `  `+key+`: "`+tok+`"`, 1)
 	}
-	return strings.Replace(CONFIG_TEMPLATE, `  state: ""`, `  state: "`+tok+`"`, 1)
+	return out
 }
 
 // mintToken returns 256 bits of randomness, URL-safe so it can travel in a header or a query
@@ -389,6 +414,56 @@ func CmdInit(args []string) error {
 	return InitKontra(cliio.Stdout)
 }
 
+// refuseIfReadableByOthers is the check SSH has and this file did not.
+//
+// The config is CREATED 0600 and the directory 0700, and until now nothing looked at either again.
+// A mode is not a property of a file's contents: `cp -r` without `-p`, an editor that rewrites
+// through a temp file under a loose umask, a restore from backup, a `docker` bind-mount, an
+// extracted tarball — every one of those can land this file at 0644, and it holds the DigitalOcean
+// token, the Pulumi passphrase, the fleet SSH key and four service tokens.
+//
+// That matters exactly when kontra is being used the way it is meant to be used: two engineers
+// sharing one instance, each with their own account on the box. `ssh` refuses a key in this state
+// and says so; there is no reason for a file holding strictly more to be quieter about it.
+//
+// GROUP AND WORLD ONLY. The owner's bits are their business, and an 0400 config is a legitimate
+// thing to want. Windows reports modes that do not mean what they do on Unix, so this is skipped
+// there rather than guessed at.
+//
+// A MISSING FILE IS NOT AN ERROR HERE — that is LoadConfig's contract (an installation configured
+// entirely by environment is a legitimate one, and every container is), so a Stat failure of any
+// kind falls through to the read, which knows what to do with it.
+func refuseIfReadableByOthers(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil // missing, or unreadable for a reason ReadFile will report better
+	}
+	if bad := info.Mode().Perm() & 0o077; bad != 0 {
+		return fmt.Errorf(
+			"%s is mode %04o — it holds live credentials and is readable by %s. kontra refuses to "+
+				"read it rather than use a secret somebody else can see. Fix it with:\n\n"+
+				"    chmod 600 %s\n",
+			path, info.Mode().Perm(), whoElse(bad), path)
+	}
+	return nil
+}
+
+// whoElse names the audience, because "mode 0644" is not a sentence most people parse under time
+// pressure and "your group" is.
+func whoElse(bad os.FileMode) string {
+	switch {
+	case bad&0o070 != 0 && bad&0o007 != 0:
+		return "your group and every other user on this machine"
+	case bad&0o070 != 0:
+		return "your group"
+	default:
+		return "every other user on this machine"
+	}
+}
+
 // LoadConfig reads `.kontra/config.yaml`. A MISSING file is not an error — an installation
 // configured entirely by environment is a legitimate one (every container is), so the zero value
 // is the honest answer rather than a failure.
@@ -397,7 +472,11 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return &Config{}, nil // no home to read: environment-only, which is what CI and containers are
 	}
-	body, err := os.ReadFile(cliutil.ConfigPath(root))
+	path := cliutil.ConfigPath(root)
+	if err := refuseIfReadableByOthers(path); err != nil {
+		return nil, err
+	}
+	body, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return &Config{}, nil
 	}
