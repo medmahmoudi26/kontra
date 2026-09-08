@@ -27,7 +27,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 
-	"github.com/medmahmoudi26/kontra/runtime/handler/temporaltls"
+	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/medmahmoudi26/kontra/runtime/go/codec"

@@ -39,7 +39,7 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 
-	"github.com/medmahmoudi26/kontra/runtime/handler/temporaltls"
+	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 )
 
 // fleetProject is the Pulumi project the orchestrator's dispatch table knows. A stack outside

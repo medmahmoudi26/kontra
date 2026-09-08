@@ -28,7 +28,7 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"go.temporal.io/sdk/client"
 
-	"github.com/medmahmoudi26/kontra/runtime/handler/temporaltls"
+	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 )
 
 // newScheduleClient is a func var so tests never dial anything.

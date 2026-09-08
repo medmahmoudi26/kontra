@@ -7,10 +7,17 @@
 // ordinary thing to do with a server holding every Run's history, had no way to point kontra at it.
 // That is a gap in the open product and it is closed here rather than anywhere commercial.
 //
-// WHY THIS MODULE. `cli` already requires `runtime/handler` and imports `casstore`, `claimcheck` and
-// `codecserver` from it, so this is the module the Go tools already share. `runtime/go` requires it
-// for this package alone, which keeps ONE implementation rather than two agreeing copies — the thing
-// a corpus exists to detect and not the thing it exists to permit.
+// WHY sdk/go, WHICH IS NOT WHERE IT STARTED. It was in `runtime/handler`, which `cli` already
+// requires — and that broke every Go actor. Actors import `runtime/go` through a sibling `replace`
+// in their own go.mod, and a replace does NOT apply transitively: adding `runtime/go` ->
+// `runtime/handler` left `go build` in kontra-actors demanding a version of a module the actor's
+// go.mod says nothing about. Measured, by building an actor after the change.
+//
+// `sdk/go` is the ONE module all three Go consumers reach without a new downstream edge, because an
+// actor already replaces it. It is not a knob an author sets — the HOST dials Temporal, not the
+// actor — but the alternative was two agreeing copies, which is the thing a corpus exists to detect
+// rather than to permit, or a `replace` line in every actor's go.mod for a module they never import.
+// Placement here costs an author nothing and costs a maintainer one paragraph.
 //
 // THE CONTRACT IS SHARED WITH TWO OTHER LANGUAGES and lives in shared/conformance/temporal_tls.json,
 // which this package's test executes. Sixteen client connections is the whole difficulty: a change reaching

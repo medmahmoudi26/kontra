@@ -22,7 +22,7 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 
-	"github.com/medmahmoudi26/kontra/runtime/handler/temporaltls"
+	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 )
 
 const orchestratorQueue = "kontra-orchestrator"

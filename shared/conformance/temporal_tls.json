@@ -23,7 +23,7 @@
  ],
  "derived_by": [
   "control/orchestrator/src/temporalTls.ts:temporalConnectOptions",
-  "runtime/handler/temporaltls/temporaltls.go:ConnectionOptions",
+  "sdk/go/temporaltls/temporaltls.go:ConnectionOptions",
   "runtime/python/internals/temporal/tlsconfig.py:connect_tls"
  ],
  "cases": [

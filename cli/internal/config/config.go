@@ -243,7 +243,7 @@ data:
 #
 # Unset is plaintext, which is what a local install wants. ANY ONE of them turns TLS on, so a CA
 # with no switch does not silently connect in the clear. A file that cannot be read is a refusal
-# and never a fall back. See runtime/handler/temporaltls and shared/conformance/temporal_tls.json.
+# and never a fall back. See sdk/go/temporaltls and shared/conformance/temporal_tls.json.
 `
 
 // FreshConfig is CONFIG_TEMPLATE with the state token MINTED.
