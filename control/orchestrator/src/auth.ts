@@ -14,6 +14,7 @@
  */
 
 import { timingSafeEqual } from 'node:crypto';
+import { bearerOf, sessions } from './auth/session';
 
 /** Env vars consulted for the explore/presign surface, in order of preference. */
 export const EXPLORE_TOKEN_VARS = ['KONTRA_EXPLORE_TOKEN', 'KONTRA_STATE_TOKEN'] as const;
@@ -58,6 +59,15 @@ export function checkBearer(
   authorization: string | undefined,
   vars: readonly string[]
 ): AuthFailure | null {
+  // A CONSOLE SESSION ADMITS EVERYTHING THE CONSOLE DOES, and is checked FIRST because a browser
+  // has nothing else to send. Signing in against the credential in `~/.kontra/config.yaml` is where
+  // that token comes from; it replaced a bearer BAKED INTO THE BUNDLE at build time, which is a
+  // credential in a build artifact and broke on every rotation.
+  //
+  // A session is NOT a service token and the distinction is what makes this safe: `KONTRA_STATE_TOKEN`
+  // admits the infra routes and can spend money, while a session is minted per sign-in, expires, and
+  // dies with the process.
+  if (sessions.verify(bearerOf(authorization))) return null;
   const token = configuredToken(vars);
   if (!token) {
     return {
@@ -91,6 +101,7 @@ export function checkOptionalBearer(
   authorization: string | undefined,
   vars: readonly string[]
 ): AuthFailure | null {
+  if (sessions.verify(bearerOf(authorization))) return null;
   const token = configuredToken(vars);
   if (!token) return null;
   if (!timingSafeEqualStr(authorization ?? '', `Bearer ${token}`)) {

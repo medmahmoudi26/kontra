@@ -230,6 +230,14 @@ func dispatch(args []string) error {
 	switch args[0] {
 	case "init":
 		err = config.CmdInit(args[1:])
+	case "user":
+		// `kontra user add <name>` — a second console login, for the second engineer. The login
+		// itself is ADR 0045; this is the only way to make another after install.
+		if len(args) < 2 || args[1] != "add" {
+			err = fmt.Errorf("usage: kontra user add <name>")
+		} else {
+			err = config.CmdUserAdd(os.Stdout, args[2:])
+		}
 	case "doctor":
 		err = cmdDoctor(args[1:])
 	case "up":

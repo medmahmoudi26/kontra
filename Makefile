@@ -92,7 +92,7 @@ ui:
 	  echo "  or:  make ui CONSOLE=/path/to/kontra-console"; \
 	  exit 1; }
 	pnpm --filter @kontra/core run build
-	cd "$(CONSOLE)" && VITE_KONTRA_EXPLORE_TOKEN="$$(grep '^KONTRA_EXPLORE_TOKEN=' "$(CURDIR)/.env" | cut -d= -f2-)" pnpm run build
+	cd "$(CONSOLE)" && pnpm run build
 	@api=$$(docker ps -q --filter label=com.docker.compose.service=orchestrator-api | head -1); \
 	  if [ -z "$$api" ]; then \
 	    echo "no orchestrator-api container (it left docker-compose.yml — ADR 0031 §1)."; \

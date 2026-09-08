@@ -168,6 +168,10 @@ func TestEveryConfigFieldReachesEnv(t *testing.T) {
 		},
 		Tokens: TokensConfig{State: "e", Explore: "f", Panel: "g", Run: "h"},
 		Data:   DataConfig{DuckLakePassword: "i"},
+		// The console login. `Auth.Users` is a SLICE, so `leafFields` counts it as one setting and
+		// `envFor` collapses it into one base64 value — which is why the two agree here even though
+		// the shape differs from every other section.
+		Auth: AuthConfig{Users: []AuthUser{{Name: "admin", PasswordHash: "scrypt$1$1$1$AA$BB"}}},
 	}
 	mapped := full.EnvFor()
 

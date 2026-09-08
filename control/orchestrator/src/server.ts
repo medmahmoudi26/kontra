@@ -86,6 +86,7 @@ import { registerExploreRoutes } from './routes/explore';
 import { registerFleetRoutes } from './routes/fleet';
 import { registerHistoryRoutes } from './routes/history';
 import { registerHitlRoutes } from './routes/hitl';
+import { registerLoginRoutes } from './routes/login';
 import { registerPanelRoutes } from './routes/panels';
 import { registerPollerRoutes } from './routes/pollers';
 import { registerProbeRoutes } from './routes/probe';
@@ -278,6 +279,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // parameterised one regardless of which module registered which first, and a duplicate path
   // throws at registration rather than shadowing silently. So these read top-down as the API does.
   registerPulseRoutes(app, opts.pulse);
+  // THE LOGIN, FIRST, because everything else can be reached with what it hands out. It is where
+  // the console's `Authorization` token comes from — a browser cannot read `~/.kontra/config.yaml`
+  // the way the CLI does, and the alternative was a bearer baked into the bundle at build time.
+  registerLoginRoutes(app);
   registerPanelRoutes(app);
   registerCatalogRoutes(app, repo);
   registerScratchRoutes(app, repo);
