@@ -7,8 +7,8 @@ Run's history — had no way to point kontra at it. That is a gap in the OPEN pr
 is closed here and not in anything commercial.
 
 THE CONTRACT IS SHARED WITH TWO OTHER LANGUAGES and lives in `shared/conformance/temporal_tls.json`,
-which `tests/test_temporal_tls.py` executes against this module. Eighteen call sites is the whole
-difficulty: a change reaching fourteen of them does not fail loudly, it produces a deployment that
+which `tests/test_temporal_tls.py` executes against this module. Sixteen client connections is the whole
+difficulty: a change reaching twelve of them does not fail loudly, it produces a deployment that
 mostly works and has one process talking plaintext to a server that accepts both — the worst of the
 three outcomes, because it looks like the good one.
 

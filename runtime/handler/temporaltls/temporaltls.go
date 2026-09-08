@@ -13,8 +13,8 @@
 // a corpus exists to detect and not the thing it exists to permit.
 //
 // THE CONTRACT IS SHARED WITH TWO OTHER LANGUAGES and lives in shared/conformance/temporal_tls.json,
-// which this package's test executes. Eighteen call sites is the whole difficulty: a change reaching
-// fourteen of them does not fail loudly, it produces a deployment that mostly works and has one
+// which this package's test executes. Sixteen client connections is the whole difficulty: a change reaching
+// twelve of them does not fail loudly, it produces a deployment that mostly works and has one
 // process talking plaintext to a server that accepts both.
 //
 //	KONTRA_TEMPORAL_TLS              1|true|yes|on — TLS with the system trust store

@@ -101,18 +101,43 @@ func TestEveryTemporalClientGoesThroughThisPackage(t *testing.T) {
 	}
 }
 
+// A READ, not a mention. `Getenv("X")`, `LookupEnv("X")` or a helper like `EnvOr("X", …)`.
+//
+// IT WAS `strings.Contains` AND THAT WAS WRONG, which this guard proved on itself: the
+// `.kontra/config.yaml` template documents these five variables so the file can answer "what does
+// this installation need", and a guard forbidding the DOCUMENTATION of an environment variable is a
+// guard that makes the codebase worse to satisfy. What must not exist is a second READING — a call
+// site that resolves the value itself and becomes a second policy agreeing today and drifting later.
+var envRead = regexp.MustCompile(`(?:Getenv|LookupEnv|EnvOr)\(\s*"(KONTRA_TEMPORAL_TLS[A-Z_]*)"`)
+
+func TestTheReadPatternCanSeeARead(t *testing.T) {
+	// The guard on the guard. A regex that matched nothing would make the sweep below pass over a
+	// codebase full of second readings — success reported by looking at nothing, again.
+	for _, spelling := range []string{
+		`os.Getenv("KONTRA_TEMPORAL_TLS")`,
+		`os.LookupEnv("KONTRA_TEMPORAL_TLS_CA")`,
+		`cliutil.EnvOr("KONTRA_TEMPORAL_TLS_CERT", "")`,
+	} {
+		if !envRead.MatchString(spelling) {
+			t.Errorf("envRead does not match %q", spelling)
+		}
+	}
+	// …and does NOT match the template's prose, which is the case that made it exist.
+	if envRead.MatchString(`#   KONTRA_TEMPORAL_TLS   1|true|yes|on — TLS with the system trust store`) {
+		t.Error("envRead matches documentation, which is what it was narrowed to stop")
+	}
+}
+
 func TestNothingElseReadsTheTlsEnvironment(t *testing.T) {
-	// One function, one reading. A call site that consulted KONTRA_TEMPORAL_TLS_* itself would be a
-	// second policy that agrees today and drifts later.
+	// One function, one reading. A call site that RESOLVED KONTRA_TEMPORAL_TLS_* itself would be a
+	// second policy that agrees today and drifts later. Documenting the names is fine and wanted.
 	var offenders []string
 	for rel, body := range goSources(t) {
 		if strings.HasPrefix(rel, filepath.Join("runtime", "handler", "temporaltls")) {
 			continue
 		}
-		for _, v := range Vars {
-			if strings.Contains(body, v) {
-				offenders = append(offenders, rel+" reads "+v)
-			}
+		for _, m := range envRead.FindAllStringSubmatch(body, -1) {
+			offenders = append(offenders, rel+" reads "+m[1])
 		}
 	}
 	if len(offenders) > 0 {

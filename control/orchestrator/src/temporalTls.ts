@@ -7,8 +7,8 @@
  * the ordinary thing to do with a server that holds every Run's history — had no way to point kontra
  * at it. That is a gap in the open product, independent of anyone's hosting plans.
  *
- * WHY ONE FUNCTION AND A TEST THAT COUNTS. Eighteen sites is the whole difficulty. A change that
- * reaches fourteen of them does not fail loudly: it produces a deployment that mostly works and has
+ * WHY ONE FUNCTION AND A TEST THAT COUNTS. Sixteen sites is the whole difficulty. A change that
+ * reaches twelve of them does not fail loudly: it produces a deployment that mostly works and has
  * one process talking plaintext to a server that accepts both, which is the worst of the three
  * possible outcomes because it looks like the good one. So the options are built here, every site
  * calls this, and `temporalTls.test.ts` fails when a `connect(` appears that does not — a guard

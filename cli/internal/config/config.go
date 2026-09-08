@@ -230,7 +230,7 @@ data:
   ducklake_password: ""
 
 # TEMPORAL TLS IS ENVIRONMENT-ONLY, and deliberately has no key here. The same five variables are
-# read by the orchestrator (TypeScript), both Python hosts and every Go binary — eighteen call
+# read by the orchestrator (TypeScript), both Python hosts and every Go binary — sixteen call
 # sites — and a value that lived in this file as well would be a second policy that agrees today
 # and drifts later. It is documented here because this file's job is to answer "what does this
 # installation need", and leaving it out would answer that incompletely:

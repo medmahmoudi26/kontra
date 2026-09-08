@@ -1,6 +1,6 @@
 // The GO ARM of shared/conformance/temporal_tls.json.
 //
-// Three languages derive one environment contract across eighteen call sites. What the corpus pins
+// Three languages derive one environment contract across sixteen client connections. What the corpus pins
 // is the DECISION — TLS on or off, which material is present, and which misconfigurations are
 // refusals — because that is what an operator configures and what must not disagree between the
 // orchestrator, the hosts and the CLI. A deployment where one process reads the contract differently

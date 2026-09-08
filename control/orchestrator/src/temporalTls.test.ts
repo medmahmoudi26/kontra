@@ -3,7 +3,7 @@
  *
  * Two halves, and the second is the one that matters. The first asserts the options are built
  * correctly; the second walks this package's sources and fails when a `connect(` appears that does
- * not go through {@link temporalConnectOptions}. Eighteen call sites across three languages is the
+ * not go through {@link temporalConnectOptions}. Sixteen client connections across three languages is the
  * whole difficulty of this change: a version that reaches most of them produces a deployment which
  * mostly works and has one process talking plaintext to a server that accepts both — the worst
  * outcome, because it looks like the good one.
@@ -177,22 +177,29 @@ describe('every connection in this package goes through one function', () => {
   });
 
   it('leaves no second reading of the TLS environment', () => {
-    // One function, one reading. A call site that consulted `KONTRA_TEMPORAL_TLS_*` itself would be
-    // a second policy that agrees today and drifts later.
+    // A READ, not a mention. One function, one reading: a call site that RESOLVED
+    // `KONTRA_TEMPORAL_TLS_*` itself would be a second policy that agrees today and drifts later.
+    // Naming the variables in documentation is fine and wanted — the Go arm's version of this guard
+    // was `includes()` and failed on the `.kontra/config.yaml` template that documents them, which
+    // is a guard making the codebase worse in order to be satisfied.
+    const READ = /process\.env(?:\.|\[')(KONTRA_TEMPORAL_TLS[A-Z_]*)/g;
     const offenders: string[] = [];
     for (const file of files) {
       if (file.endsWith('temporalTls.ts')) continue;
       const text = readFileSync(file, 'utf8');
-      for (const v of TLS_VARS) if (text.includes(v)) offenders.push(`${file} reads ${v}`);
+      for (const m of text.matchAll(READ)) offenders.push(`${file} reads ${m[1]}`);
     }
     expect(offenders).toEqual([]);
+    // NON-VACUOUS: the pattern must match a real read, or the sweep above proves nothing.
+    expect("process.env.KONTRA_TEMPORAL_TLS_CA".match(READ)).not.toBeNull();
+    expect(TLS_VARS.length).toBeGreaterThan(0);
   });
 });
 
 describe('the shared contract, executed from shared/conformance/temporal_tls.json', () => {
   // THE THIRD ARM. Go and Python drive the same rows; what the corpus pins is the DECISION — TLS on
   // or off, which material is present, which misconfigurations are refusals — because that is what
-  // an operator configures and what must not disagree across eighteen call sites.
+  // an operator configures and what must not disagree across sixteen client connections.
   type Case = {
     why: string;
     env: Record<string, string>;

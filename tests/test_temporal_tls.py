@@ -1,6 +1,6 @@
 """The PYTHON ARM of `shared/conformance/temporal_tls.json`, and the sweep that keeps it honest.
 
-Three languages derive one environment contract across eighteen call sites. What the corpus pins is
+Three languages derive one environment contract across sixteen client connections. What the corpus pins is
 the DECISION — TLS on or off, which material is present, and which misconfigurations are refusals —
 because that is what an operator configures and what must not disagree between the orchestrator, the
 hosts and the CLI. A deployment where one process reads the contract differently is one process
@@ -168,14 +168,27 @@ def test_every_python_temporal_client_goes_through_one_module() -> None:
     assert bare == [], "a Temporal client that bypasses connect_tls:\n  " + "\n  ".join(bare)
 
 
+#: A READ, not a mention — `os.environ["X"]`, `os.environ.get("X")`, `os.getenv("X")`. Naming the
+#: variables in documentation is fine and wanted; what must not exist is a SECOND RESOLUTION, which
+#: would be a second policy agreeing today and drifting later. The Go arm's version of this guard
+#: was a substring check and failed on the config template that documents these five names.
+ENV_READ = re.compile(r"""environ(?:\.get)?\[?\(?\s*["'](KONTRA_TEMPORAL_TLS[A-Z_]*)["']|getenv\(\s*["'](KONTRA_TEMPORAL_TLS[A-Z_]*)["']""")
+
+
+def test_the_read_pattern_can_see_a_read() -> None:
+    # The guard on the guard: a pattern matching nothing makes the sweep below pass over anything.
+    for spelling in ('os.environ["KONTRA_TEMPORAL_TLS"]', 'os.environ.get("KONTRA_TEMPORAL_TLS_CA")',
+                     'os.getenv("KONTRA_TEMPORAL_TLS_CERT")'):
+        assert ENV_READ.search(spelling), spelling
+    assert not ENV_READ.search("#   KONTRA_TEMPORAL_TLS   1|true|yes|on — the switch")
+
+
 def test_nothing_else_reads_the_tls_environment() -> None:
-    # One module, one reading. A call site consulting KONTRA_TEMPORAL_TLS_* itself would be a second
-    # policy that agrees today and drifts later.
+    # One module, one reading.
     offenders = [
-        f"{rel} reads {var}"
+        f"{rel} reads {m.group(1) or m.group(2)}"
         for rel, body in _python_sources().items()
         if not rel.startswith("tests/") and "tlsconfig.py" not in rel
-        for var in TLS_VARS
-        if var in body
+        for m in ENV_READ.finditer(body)
     ]
     assert offenders == [], "the TLS environment is read outside tlsconfig:\n  " + "\n  ".join(offenders)
