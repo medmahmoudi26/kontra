@@ -34,6 +34,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -737,4 +738,143 @@ func appendUser(body, name, hash string) (string, error) {
 	}
 	return "", fmt.Errorf("config has no `auth.users` list to add to — `kontra init` writes one; " +
 		"add it by hand if this file predates that")
+}
+
+// tokenEffect is what FILLING each key changes, in the words the operator needs to decide.
+//
+// THE KEYS ARE NOT SYMMETRIC and that asymmetry is the whole reason this command exists. A blank
+// `run` means the Run surface is OPEN; a blank `state` or `panel` means a surface is DISABLED. So
+// minting `run` closes a door and minting the others opens one, and a message that said "minted"
+// for both would hide the only thing worth knowing.
+var tokenEffect = map[string]string{
+	"state": "the infra routes and raw actor state stop answering 503 `disabled` — they now require this bearer.\n" +
+		"    That surface can SPEND MONEY: it is what `kontra fleet down` calls to destroy Droplets.",
+	"explore": "the query workbench's presigned reads stop falling back to the state token and take this instead.",
+	"panel":   "the Dashboard's panel routes stop answering 503 `disabled` and can mint WebSocket tickets.",
+	"run": "THE RUN SURFACE IS NOW CLOSED. serve, start, stop and a Dataset's tag and rename stop\n" +
+		"    admitting anyone who can reach the API, and require this bearer instead.",
+}
+
+// TokenKeys is every key under `tokens:`, in the order the template writes them.
+var TokenKeys = []string{"state", "explore", "panel", "run"}
+
+// CmdTokenMint fills a BLANK key under `tokens:` in an EXISTING config.
+//
+// WHY THIS IS A COMMAND AND NOT SOMETHING `kontra init` DOES FOR YOU. `FreshConfig` mints three of
+// these, but `InitKontra` writes the file with `writeIfAbsent` — so it only ever affects a
+// genuinely new install, and the template says so out loud about `run`: *"Blank it deliberately if
+// you want that surface open; it will not be filled in again."* That promise is worth keeping. A
+// backfill that ran on its own could not tell an operator who chose an open Run surface from an
+// installation that predates the key, and it would quietly overrule the first to repair the second.
+//
+// WHAT WAS ACTUALLY MISSING was any way to accept the offer. Every blank here has a remedy written
+// beside it — `describeExposure()` ends with "Set KONTRA_RUN_TOKEN to gate them", the infra routes
+// 503 with "set one of KONTRA_STATE_TOKEN" — and NONE of them named a command, because there was
+// none. The remedy was to hand-edit YAML and restart the control plane, which is precisely the
+// recovery `FreshConfig`'s comment records as the cost of a stranded fleet: *"Recovering them meant
+// hand-editing this file and restarting the control plane."* This is that edit, done by the tool
+// that knows the file's shape.
+//
+// IT NEVER ROTATES. A key that already has a value is refused rather than replaced — same posture
+// as `kontra user add` refusing to overwrite a login. Overwriting a live token is how the console
+// and the CLI end up holding different ones, and a command that can do it by accident will.
+func CmdTokenMint(w io.Writer, args []string) error {
+	if len(args) != 1 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("usage: kontra token mint <%s>", strings.Join(TokenKeys, "|"))
+	}
+	key := args[0]
+	if _, ok := tokenEffect[key]; !ok {
+		return fmt.Errorf("unknown token %q — it is one of: %s", key, strings.Join(TokenKeys, ", "))
+	}
+
+	root, err := cliutil.KontraRoot()
+	if err != nil {
+		return err
+	}
+	path := cliutil.ConfigPath(root)
+	if err := refuseIfReadableByOthers(path); err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s (run `kontra init` first): %w", path, err)
+	}
+
+	token, err := mintToken()
+	if err != nil {
+		return fmt.Errorf("minting a token: %w", err)
+	}
+	// EDITED AS TEXT, for the reason `appendUser` gives: a round trip through the YAML marshaller
+	// would drop every comment in this file, and the comments are most of what makes it readable.
+	updated, err := setBlankToken(string(raw), key, token, path)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+
+	fmt.Fprintf(w, "minted tokens.%s in %s\n\n", key, path)
+	fmt.Fprintf(w, "    %s\n\n", token)
+	fmt.Fprintf(w, "%s\n\n", tokenEffect[key])
+	// THE VALUE IS PRINTED BECAUSE THE ORCHESTRATOR MAY NOT READ THIS FILE. `ApplyConfig` exports it
+	// for anything the CLI launches, but a container gets its environment from `docker-compose.yml`
+	// and `.env` — and this file's own header says the environment WINS. An operator running the
+	// control plane in a container has to carry the value across, and telling them to `cat` the
+	// config to find it would be a worse version of printing it here.
+	fmt.Fprintf(w, "Restart the orchestrator for it to take effect. If it runs in a container it reads\n")
+	fmt.Fprintf(w, "its environment rather than this file — set KONTRA_%s_TOKEN there too.\n", strings.ToUpper(key))
+	return nil
+}
+
+// setBlankToken replaces one blank key inside the `tokens:` block, and nothing else in the file.
+//
+// SCOPED TO THE BLOCK RATHER THAN THE FILE, because a bare `strings.Replace` of `run: ""` is the
+// kind of edit that is correct until some other section grows a key of the same name. The scan ends
+// at the first line in column zero, which is where a YAML block ends.
+//
+// A COMMENTED-OUT KEY IS NOT A KEY: the pattern requires the name immediately after the
+// indentation, so `# run: ""` cannot match and cannot be "filled in" into a line that is still a
+// comment — which would look like it worked and change nothing.
+func setBlankToken(body, key, value, path string) (string, error) {
+	lines := strings.Split(body, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.TrimRight(line, " \t") == "tokens:" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return "", fmt.Errorf("%s has no `tokens:` block — `kontra init` writes one; add it by hand "+
+			"if this file predates that", path)
+	}
+
+	keyRe := regexp.MustCompile(`^([ \t]+)` + regexp.QuoteMeta(key) + `:[ \t]*(.*)$`)
+	for i := start + 1; i < len(lines); i++ {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// Column zero ends the block. Anything indented is still inside it, comments included.
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			break
+		}
+		m := keyRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		// `""`, `''` and a bare `key:` are all blank. ANYTHING ELSE IS A VALUE, including something
+		// this does not recognise — refusing to touch what it cannot read is the safe direction.
+		switch strings.TrimSpace(m[2]) {
+		case "", `""`, `''`:
+			lines[i] = m[1] + key + `: "` + value + `"`
+			return strings.Join(lines, "\n"), nil
+		}
+		return "", fmt.Errorf("tokens.%s already has a value in %s — this command fills a blank and "+
+			"never rotates, so that a live token is not replaced by accident. Change it by hand if "+
+			"you meant to rotate it", key, path)
+	}
+	return "", fmt.Errorf("%s has no `tokens.%s` key to fill — add it under `tokens:` by hand if "+
+		"this file predates it", path, key)
 }

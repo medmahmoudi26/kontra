@@ -68,6 +68,19 @@ func isTTY(f *os.File) bool {
 // not this block advertises a word that now only answers with a redirect.
 const usageText = `kontra — local control surface
 
+  kontra init                                      # create ~/.kontra/: config.yaml, workflows/, actors/
+                                                   # GENERATES the console login and prints it ONCE
+  kontra user add <name>                           # a second console login; only the hash is stored
+  kontra token mint <state|explore|panel|run>      # fill a BLANK token in an EXISTING config
+                                                   # run blank means the Run surface is OPEN: serve,
+                                                   #   start, stop and a Dataset's tag/rename admit
+                                                   #   anyone who can reach the API
+                                                   # state/panel blank means that surface is DISABLED
+                                                   #   and answers 503 — this is the fleet-stranding
+                                                   #   recovery, without hand-editing YAML
+                                                   # init mints these on a NEW install only, so this
+                                                   #   is how an older installation closes the gap
+
   kontra doctor [--api <url>]                      # infra state: services, web consoles, actors
   kontra up [--data-dir <dir>] [--bind <ip>] [--temporal-port 7233] [--s3-port 8333]
                [--kv-port 6379] [--codec-port 18234] [--registry-port 5000]
@@ -237,6 +250,17 @@ func dispatch(args []string) error {
 			err = fmt.Errorf("usage: kontra user add <name>")
 		} else {
 			err = config.CmdUserAdd(os.Stdout, args[2:])
+		}
+	case "token":
+		// `kontra token mint <key>` — fill a BLANK token in an existing config. The one thing
+		// `kontra init` cannot do, because it writes the file only when it is absent: an install
+		// made before a key was minted keeps the blank, and for `run` a blank means the Run surface
+		// is OPEN. Every message that reports one of these blanks ("Set KONTRA_RUN_TOKEN to gate
+		// them", "set one of KONTRA_STATE_TOKEN") named no command until this one.
+		if len(args) < 2 || args[1] != "mint" {
+			err = fmt.Errorf("usage: kontra token mint <state|explore|panel|run>")
+		} else {
+			err = config.CmdTokenMint(os.Stdout, args[2:])
 		}
 	case "doctor":
 		err = cmdDoctor(args[1:])
