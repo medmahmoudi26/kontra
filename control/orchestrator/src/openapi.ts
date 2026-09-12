@@ -131,6 +131,7 @@ function cap(s: string): string {
   return s
     .split(/\s+/)
     .filter(Boolean)
-    .map((w) => w[0].toUpperCase() + w.slice(1))
+    // `w[0]` is `string | undefined` under noUncheckedIndexedAccess even after `filter(Boolean)`.
+    .map((w) => (w[0] ?? '').toUpperCase() + w.slice(1))
     .join('');
 }
