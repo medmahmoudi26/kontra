@@ -161,6 +161,15 @@ const usageText = `kontra — local control surface
   kontra workflow pause | resume <file.py>         # stop / restart the SERVED WORKER, in its pane
                # the run makes no progress and resumes from history; dispatched activities keep
                # running, and its timeouts keep ticking — a long pause fails a run, it does not hold one
+  kontra workflow history <run-id> [-o FILE]       # save a run's history as JSON (shareable, replayable)
+  kontra workflow replay <workflow.py> (--run-id ID | --history FILE) [--json]
+               # REPLAY a recorded history against the code on disk. NO CLOCK: no heartbeat, no
+               #   StartToClose, nothing times out while you sit on a breakpoint — unlike attaching
+               #   to a live activity, which gets ~2 minutes.
+               # Post-mortem: a run that failed on a fleet days ago, stepped through on a laptop.
+               # ACTIVITY CODE IS NOT RUN — a Method's results come from the history as values, so
+               #   this covers the CALLER's decisions (splitting, chaining, branching), not a Method.
+               # exit 0 clean · 1 non-deterministic against this history · 2 could not run
   kontra workflow cancel <run-id>                  # graceful: scope exits run, so a fleet is DESTROYED
   kontra workflow terminate <run-id> [--force]     # cancel, then terminate if it does not settle
                # terminating alone skips scope exits, so a fleet it held would keep billing

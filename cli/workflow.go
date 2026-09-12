@@ -81,7 +81,7 @@ func leadingPositional(args []string) (string, []string) {
 
 func cmdWorkflow(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: kontra workflow <register|serve|start> …")
+		return errors.New("usage: kontra workflow <register|serve|start|replay|history> …")
 	}
 	switch args[0] {
 	case "register":
@@ -101,8 +101,14 @@ func cmdWorkflow(args []string) error {
 		return workflowStop(args[1:], false)
 	case "terminate":
 		return workflowStop(args[1:], true)
+	case "replay":
+		// Post-mortem debugging: a recorded history, replayed against the code on disk, with no
+		// clock. See workflowreplay.go for what it does and does not cover.
+		return workflowReplay(args[1:])
+	case "history":
+		return workflowHistory(args[1:])
 	default:
-		return fmt.Errorf("unknown workflow subcommand %q (want register|serve|start|pause|resume|cancel|terminate)", args[0])
+		return fmt.Errorf("unknown workflow subcommand %q (want register|serve|start|pause|resume|cancel|terminate|replay|history)", args[0])
 	}
 }
 
