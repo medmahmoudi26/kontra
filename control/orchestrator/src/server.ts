@@ -220,6 +220,19 @@ export interface ServerOptions {
  * `runApi` below is what boots. The lazily-built queue describer is the sharp edge of that rule and
  * is the reason it is a getter rather than a value.
  */
+/** One route this server registers: the method and the path Fastify itself recorded. */
+export interface RegisteredRoute {
+  method: string;
+  url: string;
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** Every route registered on this instance, collected by an `onRoute` hook. */
+    kontraRoutes: RegisteredRoute[];
+  }
+}
+
 export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   const repo = opts.repo ?? new Repo(process.env.KONTRA_ORCHESTRATOR_DB ?? 'orchestrator.db');
   // The object store: SHARED by the dataset browser, the workbench, the explore manifest, the row
@@ -266,6 +279,24 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // 32 MiB body limit (Fastify defaults to 1 MiB): a saved design document carries the whole
   // editor canvas, and the default rejected the larger ones with a broken pipe.
   const app = Fastify({ bodyLimit: 33_554_432, logger: opts.logger ?? false });
+
+  // THE ROUTE INVENTORY, DERIVED RATHER THAN MAINTAINED.
+  //
+  // `onRoute` fires for every route as it is registered, so this list is the routes that EXIST —
+  // not a second list somebody has to remember to update. `docs/openapi.json` is generated from it
+  // and `openapi.test.ts` fails when the two disagree, which is what makes a route that quietly
+  // moved a red build rather than a 404 nobody sees until a panel is empty.
+  //
+  // Registered FIRST, before any route is added, because the hook only sees what comes after it.
+  const routes: RegisteredRoute[] = [];
+  app.addHook('onRoute', (r) => {
+    for (const method of Array.isArray(r.method) ? r.method : [r.method]) {
+      // HEAD is Fastify's own doubling of every GET and describes nothing a caller chooses.
+      if (method === 'HEAD' || method === 'OPTIONS') continue;
+      routes.push({ method, url: r.url });
+    }
+  });
+  app.decorate('kontraRoutes', routes);
 
   // Compress everything worth compressing. The SPA bundle and the JSON of a dataset preview are
   // both highly repetitive text; served raw they were several times larger than they need to be.
