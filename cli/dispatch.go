@@ -67,6 +67,12 @@ func cmdActor(args []string) error {
 	if len(args) >= 1 && args[0] == "register" {
 		return cmdRegister("actor", args[1:])
 	}
+	// `schema` sits beside `register` for the same reason, and is checked here rather than under
+	// the `<ref> <verb>` grammar because it addresses a DIRECTORY, not a registered Actor — the
+	// whole point is that it answers for code that has never been registered at all.
+	if len(args) >= 1 && args[0] == "schema" {
+		return cmdActorSchema(args[1:])
+	}
 	// A REDIRECT, not a 404, for the one word that used to be here. `dispatch` was this CLI's
 	// way in for long enough to be muscle memory, and an operator who types it is asking a
 	// question ("how do I run this actor?") that has an answer — it just is not a subcommand any
@@ -81,5 +87,6 @@ func cmdActor(args []string) error {
 				"  kontra workflow start <your_workflow_folder> --wait --input '…'\n"+
 				"See examples/python/workflows/ for two that dispatch a Method over a Batch.", args[0])
 	}
-	return errors.New("usage: kontra actor register <dir> [--init] [--json]")
+	return errors.New("usage: kontra actor register <dir> [--init] [--json]\n" +
+		"       kontra actor schema <dir> [--method NAME]")
 }

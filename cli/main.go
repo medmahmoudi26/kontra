@@ -141,6 +141,10 @@ const usageText = `kontra — local control surface
                [--controller <host>] [--host-only] [--override]   # the container-Image spelling
   kontra workers list
   kontra actor register <dir> [--init] [--json]
+  kontra actor schema <dir> [--method NAME]        # what each Method TAKES and EMITS, as JSON Schema,
+               # derived from the code ON DISK — no orchestrator, no registration, no deploy.
+               # The same derivation the catalog publishes (kontra.schema.schema_of), so a form
+               # built from this cannot disagree with what the Method will accept.
   kontra workflow register <dir> [--init] [--workflow <Class>] [--json]
                # DECLARE it, without serving or running it: records the path, the manifest,
                # the version and a content digest, and creates the Actor's Nexus endpoint
