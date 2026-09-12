@@ -131,9 +131,29 @@ type EntryInput struct {
 	// its Methods, and closes it; the id is what binds those calls to the ONE activated actor,
 	// so it rides EVERY dispatch inside the scope and not only the one that opened it. "" = no
 	// scope was opened, the pre-v2 path where each dispatch stands alone.
-	SessionId     string `protobuf:"bytes,14,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SessionId string `protobuf:"bytes,14,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// HOW LONG A UNIT MAY GO SILENT before Temporal calls the attempt dead, in seconds. 0 = the
+	// handler's production default (two minutes), which is what every ordinary dispatch sends.
+	//
+	// IT IS A DISPATCH FIELD AND NOT AN ENVIRONMENT VARIABLE, and that is the whole reason it is
+	// here rather than read where it is used. `HeartbeatTimeout` is set in WORKFLOW code, and
+	// workflow code must be deterministic on replay — `runtime/handler/workflow.go` already states
+	// the rule ("derived from this workflow's own task queue rather than from env"). A value read
+	// from the environment would replay differently on a worker whose environment differs, which
+	// corrupts the history of every run that used it. Riding the input means it is RECORDED, so a
+	// replay sees exactly the number the original attempt saw.
+	//
+	// WHAT IT IS FOR: a debugger. The actor heartbeats once per committed Unit, so a breakpoint
+	// inside a Unit emits nothing and two minutes later Temporal retries the attempt — while you are
+	// still paused, onto the same queue, up to ten times. Raising this is how a local debugging
+	// session survives thinking.
+	//
+	// NOT FOR PRODUCTION. A long heartbeat reinstates the wedge the two-minute default exists to
+	// catch: a genuinely stuck Unit then holds its lease for the relaxed duration instead. The CLI
+	// refuses to set it outside `--mode local`.
+	DebugHeartbeatSeconds int32 `protobuf:"varint,15,opt,name=debug_heartbeat_seconds,json=debugHeartbeatSeconds,proto3" json:"debug_heartbeat_seconds,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *EntryInput) Reset() {
@@ -236,6 +256,13 @@ func (x *EntryInput) GetSessionId() string {
 	return ""
 }
 
+func (x *EntryInput) GetDebugHeartbeatSeconds() int32 {
+	if x != nil {
+		return x.DebugHeartbeatSeconds
+	}
+	return 0
+}
+
 var File_kontra_v1_entry_proto protoreflect.FileDescriptor
 
 const file_kontra_v1_entry_proto_rawDesc = "" +
@@ -247,7 +274,7 @@ const file_kontra_v1_entry_proto_rawDesc = "" +
 	"\x04meta\x18\x03 \x03(\v2\x1c.kontra.v1.BareRef.MetaEntryR\x04meta\x1a7\n" +
 	"\tMetaEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbf\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xf7\x03\n" +
 	"\n" +
 	"EntryInput\x12,\n" +
 	"\x05units\x18\x01 \x03(\v2\x16.google.protobuf.ValueR\x05units\x12/\n" +
@@ -262,7 +289,8 @@ const file_kontra_v1_entry_proto_rawDesc = "" +
 	"\x06params\x18\v \x01(\v2\x17.google.protobuf.StructR\x06params\x12\x16\n" +
 	"\x06method\x18\r \x01(\tR\x06method\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x0e \x01(\tR\tsessionIdJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\b\x10\tR\n" +
+	"session_id\x18\x0e \x01(\tR\tsessionId\x126\n" +
+	"\x17debug_heartbeat_seconds\x18\x0f \x01(\x05R\x15debugHeartbeatSecondsJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\b\x10\tR\n" +
 	"output_uriR\x11parallel_sessionsR\n" +
 	"chunk_sizeR\x06tenantBIZGgithub.com/medmahmoudi26/kontra/runtime/handler/_gen/kontra/v1;kontrav1b\x06proto3"
 

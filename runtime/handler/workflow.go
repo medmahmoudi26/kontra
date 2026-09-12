@@ -112,7 +112,7 @@ func (a *Activities) RunWorkflow(ctx workflow.Context, in wire.EntryInput) (*wir
 	//    once per committed unit — so HeartbeatTimeout is a true liveness check and
 	//    StartToClose stops being a guillotine. A resource therefore loads exactly ONCE per
 	//    batch, by construction.
-	opts := runActivityOptions(workflow.GetInfo(ctx).TaskQueueName, in.SessionID)
+	opts := runActivityOptions(workflow.GetInfo(ctx).TaskQueueName, in.SessionID, in.DebugHeartbeatSeconds)
 	runAO := workflow.WithActivityOptions(ctx, opts)
 	batch := RunBatchInput{
 		ActorID: actorID,
@@ -236,7 +236,36 @@ const sessionScheduleToStart = time.Minute
 // Split out of the workflow because the addressing IS the decision and a wrong queue has no
 // loud failure mode: a scoped call that lands on the shared queue runs, against a process that
 // never activated this Session and holds none of its state, and reports success.
-func runActivityOptions(queue, sessionID string) workflow.ActivityOptions {
+// defaultHeartbeat is the production liveness bound, and the number the whole design rests on: the
+// actor beats once per committed Unit, so silence for this long means stuck, not busy.
+//
+// A TEST PINS IT so a debugging convenience cannot quietly become the default.
+const defaultHeartbeat = 2 * time.Minute
+
+// heartbeatFor turns a dispatch's requested debug heartbeat into the timeout to use.
+//
+// BOUNDED IN BOTH DIRECTIONS, because this value arrives from a caller. Below the default it is
+// ignored — nothing is made MORE fragile from outside — and above StartToClose it is capped, since
+// a heartbeat longer than the activity's own deadline can never fire and would read as "liveness
+// checking is off" while claiming a number.
+func heartbeatFor(requested int32) time.Duration {
+	if requested <= 0 {
+		return defaultHeartbeat
+	}
+	d := time.Duration(requested) * time.Second
+	if d < defaultHeartbeat {
+		return defaultHeartbeat
+	}
+	if d > runStartToClose {
+		return runStartToClose
+	}
+	return d
+}
+
+// runStartToClose is generous because it is no longer what catches a wedge — the heartbeat is.
+const runStartToClose = time.Hour
+
+func runActivityOptions(queue, sessionID string, debugHeartbeatSeconds int32) workflow.ActivityOptions {
 	opts := workflow.ActivityOptions{
 		// The actor's sessions queue: every worker of this version polls it, so a batch waiting
 		// here is waiting for capacity and must not be bounded by ScheduleToStart. Derived
@@ -245,10 +274,15 @@ func runActivityOptions(queue, sessionID string) workflow.ActivityOptions {
 		// Generous, because it is no longer the thing that catches a wedge — the heartbeat is.
 		// A legitimately long batch (a slow crawl of a big seed set) must not be killed for
 		// taking its time while it is visibly making progress.
-		StartToCloseTimeout: time.Hour,
+		StartToCloseTimeout: runStartToClose,
 		// Tight, because it is now a REAL liveness signal. The actor beats per committed unit,
 		// so silence for two minutes means stuck, not busy.
-		HeartbeatTimeout: 2 * time.Minute,
+		//
+		// A DISPATCH MAY RELAX IT, for a debugger: a breakpoint inside a Unit emits no heartbeat,
+		// so two minutes later Temporal retries the attempt while you are still paused. The value
+		// rides the INPUT (never the environment) because this is workflow code and must replay
+		// identically. See `heartbeatFor` for the bounds.
+		HeartbeatTimeout: heartbeatFor(debugHeartbeatSeconds),
 		RetryPolicy: &temporal.RetryPolicy{
 			MaximumAttempts: 10,
 			InitialInterval: time.Second,

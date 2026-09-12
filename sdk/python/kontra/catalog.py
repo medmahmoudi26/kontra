@@ -223,6 +223,7 @@ def entry_input(
     method: str = "",
     session_id: str = "",
     input_ref: Mapping[str, Any] | None = None,
+    debug_heartbeat_seconds: int = 0,
 ) -> dict:
     """Build the `EntryInput` the actor's Nexus op takes — the one wire shape in this module.
 
@@ -253,6 +254,17 @@ def entry_input(
     }
     if params:
         entry["params"] = dict(params)
+    if debug_heartbeat_seconds:
+        # OMITTED WHEN UNSET, like every other optional here: 0 means "the handler's production
+        # default" and sending it explicitly would make an ordinary dispatch's bytes differ from
+        # every other caller's for no reason.
+        #
+        # This is how a DEBUGGING dispatch buys time to think. The actor heartbeats once per
+        # committed Unit, so a breakpoint inside one emits nothing and the two-minute default
+        # retries the attempt while you are still paused. It rides the INPUT and never the
+        # environment, because the value is consumed by workflow code, which must replay
+        # identically — see runtime/handler/workflow.go:heartbeatFor for the bounds.
+        entry["debug_heartbeat_seconds"] = int(debug_heartbeat_seconds)
     if input_ref:
         # `units` stays PRESENT AND EMPTY, never dropped: the handler keys the ref path off
         # `len(units) == 0 && in.InputRef != nil` (runtime/handler/workflow.go), so removing the key

@@ -359,14 +359,14 @@ func TestAnOrphanedSessionQueueIsBoundedByScheduleToStart(t *testing.T) {
 	// accident is this bound: the Session's queue has exactly one poller, so when that process
 	// dies the queue is orphaned and the call would otherwise sit there until StartToClose — an
 	// hour of a caller's Run spent waiting on a worker that is never coming back.
-	scoped := runActivityOptions("crawler-0.1.0", "3f9a")
+	scoped := runActivityOptions("crawler-0.1.0", "3f9a", 0)
 	require.Equal(t, "crawler-0.1.0-s-3f9a", scoped.TaskQueue)
 	require.Positive(t, scoped.ScheduleToStartTimeout, "an orphaned session queue would hang")
 
 	// The shared queue is a different case and takes no such bound: every worker of the actor
 	// polls it, and a batch queued while the fleet scales up is waiting for capacity, not for a
 	// dead process.
-	shared := runActivityOptions("crawler-0.1.0", "")
+	shared := runActivityOptions("crawler-0.1.0", "", 0)
 	require.Equal(t, "crawler-0.1.0-sessions", shared.TaskQueue)
 	require.Zero(t, shared.ScheduleToStartTimeout)
 }

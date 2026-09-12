@@ -94,4 +94,26 @@ export interface EntryInput {
    * scope was opened, the pre-v2 path where each dispatch stands alone.
    */
   session_id: string;
+  /**
+   * HOW LONG A UNIT MAY GO SILENT before Temporal calls the attempt dead, in seconds. 0 = the
+   * handler's production default (two minutes), which is what every ordinary dispatch sends.
+   *
+   * IT IS A DISPATCH FIELD AND NOT AN ENVIRONMENT VARIABLE, and that is the whole reason it is
+   * here rather than read where it is used. `HeartbeatTimeout` is set in WORKFLOW code, and
+   * workflow code must be deterministic on replay — `runtime/handler/workflow.go` already states
+   * the rule ("derived from this workflow's own task queue rather than from env"). A value read
+   * from the environment would replay differently on a worker whose environment differs, which
+   * corrupts the history of every run that used it. Riding the input means it is RECORDED, so a
+   * replay sees exactly the number the original attempt saw.
+   *
+   * WHAT IT IS FOR: a debugger. The actor heartbeats once per committed Unit, so a breakpoint
+   * inside a Unit emits nothing and two minutes later Temporal retries the attempt — while you are
+   * still paused, onto the same queue, up to ten times. Raising this is how a local debugging
+   * session survives thinking.
+   *
+   * NOT FOR PRODUCTION. A long heartbeat reinstates the wedge the two-minute default exists to
+   * catch: a genuinely stuck Unit then holds its lease for the relaxed duration instead. The CLI
+   * refuses to set it outside `--mode local`.
+   */
+  debug_heartbeat_seconds: number;
 }

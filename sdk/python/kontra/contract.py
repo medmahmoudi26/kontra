@@ -71,6 +71,12 @@ class EntryInput(TypedDict, total=False):
     params: dict[str, Any]
     method: str
     session_id: str
+    # How long a Unit may go silent before Temporal calls the attempt dead, in seconds.
+    # 0 = the handler's production default (two minutes). Set only for a DEBUGGING dispatch: a
+    # breakpoint inside a Unit emits no heartbeat, so the default retries the attempt while you are
+    # still paused. It rides the input rather than the environment because workflow code consumes
+    # it and must replay identically.
+    debug_heartbeat_seconds: int
 
 
 @nexusrpc.service(name=SERVICE_NAME)

@@ -36,6 +36,7 @@ class EntryInput(_message.Message):
     PARAMS_FIELD_NUMBER: _ClassVar[int]
     METHOD_FIELD_NUMBER: _ClassVar[int]
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    DEBUG_HEARTBEAT_SECONDS_FIELD_NUMBER: _ClassVar[int]
     units: _containers.RepeatedCompositeFieldContainer[_struct_pb2.Value]
     input_ref: BareRef
     return_ref: bool
@@ -46,4 +47,5 @@ class EntryInput(_message.Message):
     params: _struct_pb2.Struct
     method: str
     session_id: str
-    def __init__(self, units: _Optional[_Iterable[_Union[_struct_pb2.Value, _Mapping]]] = ..., input_ref: _Optional[_Union[BareRef, _Mapping]] = ..., return_ref: _Optional[bool] = ..., run_id: _Optional[str] = ..., idempotency_key: _Optional[str] = ..., node_id: _Optional[str] = ..., expected_digest: _Optional[str] = ..., params: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ..., method: _Optional[str] = ..., session_id: _Optional[str] = ...) -> None: ...
+    debug_heartbeat_seconds: int
+    def __init__(self, units: _Optional[_Iterable[_Union[_struct_pb2.Value, _Mapping]]] = ..., input_ref: _Optional[_Union[BareRef, _Mapping]] = ..., return_ref: _Optional[bool] = ..., run_id: _Optional[str] = ..., idempotency_key: _Optional[str] = ..., node_id: _Optional[str] = ..., expected_digest: _Optional[str] = ..., params: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ..., method: _Optional[str] = ..., session_id: _Optional[str] = ..., debug_heartbeat_seconds: _Optional[int] = ...) -> None: ...
