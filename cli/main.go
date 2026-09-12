@@ -102,8 +102,12 @@ const usageText = `kontra — local control surface
                #   cannot yet show. Its codec address is derived, never configured.
   kontra infra up|down|status [--repo <dir>]       # the compose control plane (the other topology)
   kontra serve --actor <dir> [--mode local|docker] [--engine py|go] [--python <bin>]
-               [--redis <host:port>] [--tmux] [--replicas N] [--network <name>]
+               [--redis <host:port>] [--tmux] [--replicas N] [--network <name>] [--watch]
                # serve the actor HERE (actor + handler), no image build — it waits for a dispatch
+               # --watch: RE-EXEC the pair on save. Nothing builds and nothing uploads — local mode
+               #   runs python <dir>/actor.py from the directory, the Go handler is generic, and the
+               #   queue is <name>-<version> off the manifest so an edit does not move it. In-flight
+               #   Units are DRAINED before the swap. Foreground only (not with --tmux).
                # --tmux: detached tmux session, one window per process (attach to watch)
                # --mode docker: N managed worker CONTAINERS, wired to whichever control plane
                #   this box runs (kontra up's bound addresses, else the compose service names)

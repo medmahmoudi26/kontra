@@ -182,6 +182,8 @@ func cmdServe(args []string) error {
 	mode := fs.String("mode", modeLocal,
 		"where to run the worker: local (this machine) | docker (a managed worker container) | fleet (a Machine)")
 	replicas := fs.Int("replicas", 1, "--mode docker only: how many worker containers to run (0 stops them)")
+	watch := fs.Bool("watch", false,
+		"--mode local only: re-exec the Worker when a file in the actor directory changes")
 	// THE NETWORK, AND WHY A FLAG RATHER THAN A DEFAULT THAT ALWAYS WORKS. `resolveWorkerPlane`
 	// picks `bridge` against a running appliance and the compose `kontra` network otherwise, and
 	// that is right on a machine whose firewall lets a container reach the host. MEASURED on a box
@@ -227,6 +229,13 @@ func cmdServe(args []string) error {
 	// and nothing else, and `findRepoRoot` below is a local-mode requirement (it runs handler/ from
 	// source) that would otherwise fail for a mode that never touches this checkout's handler.
 	if *mode != modeLocal {
+		// REFUSED RATHER THAN IGNORED. `--watch` re-execs a pair this process supervises; docker and
+		// fleet hand the worker to something else, so honouring it would mean watching files here
+		// and reloading nothing. A flag that is silently a no-op is worse than one that is absent.
+		if *watch {
+			return fmt.Errorf("--watch applies to --mode local only; %s runs the Worker elsewhere, "+
+				"so nothing here could re-exec it", *mode)
+		}
 		return runElsewhere(*mode, *actorDir, m, *replicas, *network, fs)
 	}
 	root, err := cliutil.FindRepoRoot("")
@@ -329,14 +338,32 @@ func cmdServe(args []string) error {
 		// active — and GOWORK=off above is what makes the build reproducible.
 		Handler: warden.ProcSpec{Dir: handlerDir, Argv: handlerArgv, Env: handlerEnv},
 	}
+	// The banner, as a closure, because `--watch` prints it again after every reload: the queue is
+	// the line that matters there — an operator's next `start` goes to a remembered name, and the
+	// whole loop depends on that name NOT having moved (it is derived from the manifest, not from
+	// the folder's bytes; see `workflowQueue`'s history for what the alternative cost).
+	announce := func() {
+		fmt.Fprintf(cliio.Stdout, "%s@%s — actor on %s-sessions, handler on %s (temporal %s)\n",
+			m.Name, m.Version, queues.Shared(m.Name, m.Version), queues.Shared(m.Name, m.Version),
+			config.TemporalAddress())
+	}
+
+	if *watch {
+		if *useTmux {
+			// `--tmux` detaches and this command RETURNS; there would be no process left to notice a
+			// save. Refused rather than quietly producing a session nobody reloads.
+			return fmt.Errorf("--watch and --tmux are exclusive: --tmux detaches and this command " +
+				"exits, so nothing would be left watching. Run --watch in the foreground")
+		}
+		return serveWatchLoop(ctx, drv, spec, absActor, announce)
+	}
+
 	h, err := drv.Start(ctx, spec)
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(cliio.Stdout, "%s@%s — actor on %s-sessions, handler on %s (temporal %s)\n",
-		m.Name, m.Version, queues.Shared(m.Name, m.Version), queues.Shared(m.Name, m.Version),
-		config.TemporalAddress())
+	announce()
 	if *useTmux {
 		tmux.PrintHelp(cliio.Stdout, tmux.Session(m.Name, m.Version), []string{"actor", "handler"})
 		fmt.Fprintf(cliio.Stdout, "\ndispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
