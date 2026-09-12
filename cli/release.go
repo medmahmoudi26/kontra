@@ -43,6 +43,7 @@ import (
 	"strings"
 
 	applbundle "github.com/medmahmoudi26/kontra/cli/appliance/bundle"
+	"github.com/medmahmoudi26/kontra/cli/internal/buildinfo"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
@@ -155,7 +156,19 @@ func releaseOnePlatform(root, outDir, tag string, target applbundle.Platform, ca
 		return "", err
 	}
 	fmt.Fprintf(cliio.Stdout, "building the kontra binary for %s\n", target)
-	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-s -w", "-o", exe, ".")
+	// THE VERSION IS INJECTED HERE AND NOWHERE ELSE, from the same `tag` that names the tarball —
+	// so the file and the binary inside it cannot disagree about which release this is. Without it
+	// `kontra version` answers `dev` out of a shipped artifact, which is the one place the answer
+	// has to be true.
+	//
+	// It is NOT a constant in a file, which `releaseVersion` below argues against and is still
+	// right about. See `internal/buildinfo`: the symbol is empty in the source and only a linker
+	// fills it.
+	ldflags := "-s -w"
+	if inject := buildinfo.LinkerFlag(tag); inject != "" {
+		ldflags += " " + inject
+	}
+	build := exec.Command("go", "build", "-trimpath", "-ldflags", ldflags, "-o", exe, ".")
 	build.Dir = filepath.Join(root, "cli")
 	build.Env = append(os.Environ(), "GOOS="+target.OS, "GOARCH="+target.Arch, "CGO_ENABLED=0")
 	if combined, err := build.CombinedOutput(); err != nil {

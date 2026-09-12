@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/medmahmoudi26/kontra/cli/internal/buildinfo"
 	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"github.com/medmahmoudi26/kontra/cli/warden"
 )
@@ -68,6 +69,7 @@ func isTTY(f *os.File) bool {
 // not this block advertises a word that now only answers with a redirect.
 const usageText = `kontra — local control surface
 
+  kontra version                                   # which kontra this is; "dev (<rev>)" when unreleased
   kontra init                                      # create ~/.kontra/: config.yaml, workflows/, actors/
                                                    # GENERATES the console login and prints it ONCE
   kontra user add <name>                           # a second console login; only the hash is stored
@@ -241,6 +243,12 @@ var errUsage = errors.New("unknown command")
 func dispatch(args []string) error {
 	var err error
 	switch args[0] {
+	case "version", "--version", "-v":
+		// A VERB AND TWO FLAGS, because all three are what people type and "unknown command" to any
+		// of them is a bad first impression from a tool whose next question is "which version are
+		// you on". They are spelled here rather than parsed elsewhere: `dispatch` is the one place
+		// that decides what a word means.
+		fmt.Fprintln(os.Stdout, buildinfo.Version())
 	case "init":
 		err = config.CmdInit(args[1:])
 	case "user":
