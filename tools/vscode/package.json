@@ -1,0 +1,60 @@
+{
+  "name": "kontra",
+  "displayName": "kontra",
+  "description": "Run an actor's Method from your editor, against the code on disk.",
+  "version": "0.1.0",
+  "publisher": "kontra",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "kontra.openRunner",
+        "title": "kontra: Run this actor"
+      },
+      {
+        "command": "kontra.pin",
+        "title": "kontra: Pin the runner to this file"
+      },
+      {
+        "command": "kontra.unpin",
+        "title": "kontra: Unpin the runner"
+      },
+      {
+        "command": "kontra.connect",
+        "title": "kontra: Connect to an orchestrator"
+      },
+      {
+        "command": "kontra.signOut",
+        "title": "kontra: Forget the stored credential"
+      }
+    ],
+    "configuration": {
+      "title": "kontra",
+      "properties": {
+        "kontra.orchestratorUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8088",
+          "description": "The orchestrator this editor talks to. The runner pane is served from here."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w",
+    "test": "node --experimental-strip-types --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.5.0"
+  }
+}
