@@ -103,12 +103,33 @@ CONSOLE ?= $(abspath $(CURDIR)/../kontra-console)
 PLATFORM ?= linux/amd64
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 
-release:
-	@test -d "$(CONSOLE)/dist" || { \
-	  echo "no built console at $(CONSOLE)/dist — the release archives a vite output it does not build."; \
-	  echo "  cd $(CONSOLE) && pnpm run build      (or: make ui)"; \
-	  echo "  or point at one:  make release CONSOLE=/path/to/kontra-console"; \
+# ── THE SPA, FROM THE SIBLING CHECKOUT — and this is what makes `make image` one command ────────
+#
+# The console is a separate repository (ADR 0038) and the release ARCHIVES a vite output it does not
+# build. That used to mean three commands nobody had been told about, and a fresh clone died on the
+# first of them with a message that assumed the checkout already existed.
+#
+# IT MUST BE A SIBLING NAMED `kontra-console`, AND THIS CHECKOUT MUST BE NAMED `kontra`. The console
+# resolves `@kontra/core` as `link:../kontra/shared/core` — a filesystem path, not a published
+# package — so both names are load-bearing and a clone into `kontra-oss/` fails inside pnpm rather
+# than here.
+#
+# IDEMPOTENT. Both installs are no-ops once done, so `make image` twice costs one build.
+console:
+	@test -d "$(CONSOLE)" || { \
+	  echo "no console checkout at $(CONSOLE) — the SPA lives in kontra-console since ADR 0038."; \
+	  echo ""; \
+	  echo "  git clone https://github.com/medmahmoudi26/kontra-console $(CONSOLE)"; \
+	  echo ""; \
+	  echo "It has to sit BESIDE this checkout and be named kontra-console, because the console"; \
+	  echo "resolves @kontra/core as link:../kontra/shared/core. Or point at one you have:"; \
+	  echo "  make image CONSOLE=/path/to/kontra-console"; \
 	  exit 1; }
+	pnpm install --frozen-lockfile
+	pnpm --filter @kontra/core run build
+	cd "$(CONSOLE)" && pnpm install --frozen-lockfile && pnpm run build
+
+release: console
 	cd cli && KONTRA_CONSOLE_DIST="$(CONSOLE)/dist" go run . release \
 	  --repo .. --platform $(PLATFORM) --version $(VERSION) --out ../build/release
 
@@ -127,15 +148,14 @@ image: release
 	@echo "  docker compose up -d      # the control plane"
 	@echo "  open http://127.0.0.1:8088"
 
-ui:
-	@test -f .env || { echo "no .env at the repo root — the SPA would build with an EMPTY explore token"; exit 1; }
-	@test -d "$(CONSOLE)" || { \
-	  echo "no console checkout at $(CONSOLE) — the SPA lives in kontra-console since ADR 0038."; \
-	  echo "  git clone https://github.com/medmahmoudi26/kontra-console $(CONSOLE)"; \
-	  echo "  or:  make ui CONSOLE=/path/to/kontra-console"; \
-	  exit 1; }
-	pnpm --filter @kontra/core run build
-	cd "$(CONSOLE)" && pnpm run build
+# A `.env` GUARD USED TO BE HERE AND ADR 0045 INVERTED IT. It refused to build without one,
+# because "the SPA would build with an EMPTY explore token" — back when the console authenticated
+# with `VITE_KONTRA_EXPLORE_TOKEN` baked in at build time. The console signs in for a session token
+# at runtime now, and `vite.config.ts` REFUSES to build if that variable is set at all: a token in
+# the artifact cannot rotate, is identical for every operator, and outlives the container in any
+# image that keeps it. So an absent `.env` is the correct state, and the guard was stopping a fresh
+# clone from building for a reason that had become the opposite of true.
+ui: console
 	@api=$$(docker ps -q --filter label=com.docker.compose.service=orchestrator-api | head -1); \
 	  if [ -z "$$api" ]; then \
 	    echo "no orchestrator-api container (it left docker-compose.yml — ADR 0031 §1)."; \
