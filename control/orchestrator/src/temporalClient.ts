@@ -33,7 +33,10 @@ import {
 } from './visibility';
 import { temporalConnectOptions } from './temporalTls';
 
-const NAMESPACE = process.env.KONTRA_NAMESPACE ?? 'default';
+/** EXPORTED so the one place that STARTS a workflow can stamp the tenant with the same value this
+ *  connects to. A second `process.env.KONTRA_NAMESPACE ?? 'default'` elsewhere is how a client and
+ *  the attribute it writes come to disagree about which namespace a run is in. */
+export const NAMESPACE = process.env.KONTRA_NAMESPACE ?? 'default';
 
 /** The handler backing workflow's registered type name (handler main.go registers RunWorkflow
  *  under kontrav1.RunWorkflowName). Every dispatch a run makes starts one, tagged with the

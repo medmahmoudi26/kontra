@@ -55,7 +55,9 @@ import {
   folderDigest,
   readManifest,
 } from './sources';
-import { getClient } from './temporalClient';
+import { TypedSearchAttributes } from '@temporalio/common';
+import { KontraTenant } from './visibility';
+import { NAMESPACE, getClient } from './temporalClient';
 import { toActorRef } from './secrets/slotRoutes';
 import { slotStore } from './secrets/slotStore';
 import type { ActorRef } from './secrets/slots';
@@ -792,6 +794,25 @@ export async function startRun(
     taskQueue: queue,
     workflowId,
     args: input.input === undefined ? [] : [input.input],
+    /* WHOSE RUN THIS IS, STAMPED AT START — ADR 0046's prerequisite.
+     *
+     * `KontraTenant` was registered on the namespace and written by NOTHING. Two readers already
+     * take it (`temporalClient.ts`'s `describeRun` and `listRuns`), so every `tenant` this control
+     * plane has ever reported was the empty string — a field that looked answered and was not.
+     * MEASURED on the live cluster before this: of ten open executions, only the backing
+     * `kontra.v1.ActorService.Run` carried any `Kontra*` attribute at all.
+     *
+     * AT START AND NOT BY UPSERT, because a start is the one moment the value is known and costs
+     * nothing: search attributes on `start` ride in `WorkflowExecutionStarted` and write no extra
+     * event, where an upsert inside the workflow is a command of its own — which is the whole
+     * subject of the audit this comes from.
+     *
+     * THE NAMESPACE IS THE TENANT (CONTEXT.md: a Tenant IS a Temporal namespace), so this records
+     * what it is rather than inventing a second notion of one. On a single-tenant installation it
+     * is `default`, which is a true and useful answer — the alternative, leaving it blank, is what
+     * made every one of those readers silently wrong.
+     */
+    typedSearchAttributes: new TypedSearchAttributes([{ key: KontraTenant, value: NAMESPACE }]),
   });
 
   const workflow = await stampRunWorkflow(handle.workflowId, manifest, recorder);

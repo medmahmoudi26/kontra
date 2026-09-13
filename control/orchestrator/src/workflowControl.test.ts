@@ -15,6 +15,7 @@ import os, { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultRoot, inspectFolder } from './sources';
+import { KontraTenant } from './visibility';
 import {
   cliDetail,
   ControlRefused,
@@ -39,10 +40,21 @@ import {
  * identity (ADR 0029 §2) requires the opposite: a start that succeeds. The stub returns the workflow
  * id it was handed, which is what a real handle does and what a Run IS (ADR 0023 §12).
  */
+/** What `startRun` handed Temporal, captured — so the search attributes can be asserted. */
+const started = vi.hoisted(() => ({ opts: undefined as Record<string, unknown> | undefined }));
+
 vi.mock('./temporalClient', () => ({
+  // `NAMESPACE` IS EXPORTED BY THE REAL MODULE AND MUST BE HERE TOO. A factory that returns only
+  // `getClient` leaves every other binding `undefined`, and the tenant stamp below would write
+  // `value: undefined` — which is the shape of bug a whole-module mock invites and a partial one
+  // would have hidden.
+  NAMESPACE: 'test-namespace',
   getClient: vi.fn(async () => ({
     workflow: {
-      start: async (_type: string, opts: { workflowId: string }) => ({ workflowId: opts.workflowId }),
+      start: async (_type: string, opts: { workflowId: string }) => {
+        started.opts = opts as unknown as Record<string, unknown>;
+        return { workflowId: opts.workflowId };
+      },
     },
   })),
 }));
@@ -569,6 +581,38 @@ describe('serveWorkflow', () => {
 });
 
 describe('startRun', () => {
+
+  /**
+   * ADR 0046's prerequisite: WHOSE run this is, stamped at start.
+   *
+   * `KontraTenant` was registered on the namespace and written by NOTHING — two readers already took
+   * it (`describeRun`, `listRuns`), so every `tenant` this control plane reported was the empty
+   * string. MEASURED on the live cluster before the fix: of ten open executions only the backing
+   * `kontra.v1.ActorService.Run` carried any `Kontra*` attribute at all.
+   */
+  it('stamps the tenant on the start, where it costs no event', async () => {
+    started.opts = undefined;
+    servable('ping', 'Ping');
+    await startRun({ file: 'ping' }, pollers(1));
+
+    expect(started.opts, 'startRun never reached Temporal').toBeDefined();
+    const attrs = started.opts!.typedSearchAttributes as
+      | { get(key: unknown): unknown }
+      | undefined;
+    expect(attrs, 'no search attributes were sent').toBeDefined();
+    expect(attrs!.get(KontraTenant)).toBe('test-namespace');
+  });
+
+  it('takes the namespace it CONNECTS to, not a second reading of the environment', async () => {
+    // A `process.env.KONTRA_NAMESPACE ?? 'default'` written here as well is how a client and the
+    // attribute it writes come to disagree about which namespace a run is in. The mock's namespace
+    // is deliberately not `default`, so a hard-coded fallback fails this.
+    started.opts = undefined;
+    servable('ping2', 'Ping2');
+    await startRun({ file: 'ping2' }, pollers(1));
+    const attrs = started.opts!.typedSearchAttributes as { get(key: unknown): unknown };
+    expect(attrs.get(KontraTenant)).not.toBe('default');
+  });
   /** A folder that can be started: a manifest naming its @workflow.defn class. */
   function servable(name: string, cls = 'NsCheck'): void {
     const dir = path.join(root, name);
