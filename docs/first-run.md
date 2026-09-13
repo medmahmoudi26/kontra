@@ -22,8 +22,14 @@ shown **once** — only a scrypt hash is kept. Lost it?
 `docker compose exec kontra kontra user add <name>`.
 
 No release has been tagged yet, so `make image` is how you get one; it builds the image from a
-release tarball, which is why the container and the eventual download are the same bytes. Once a tag
-exists, the first two lines become two `curl`s — see the README.
+release tarball, which is why the container and the eventual download are the same bytes.
+
+> **`make image` runs on the machine that runs the container.** The image is built, never pulled.
+> Copy these files to a second box, skip it, and compose answers `No such image: kontra:latest` —
+> build it there, or `docker save`/`docker load` it across, or push to a registry you control and
+> set both `KONTRA_IMAGE` and `KONTRA_PULL_POLICY=missing`.
+
+Once a tag exists, the first two lines become two `curl`s — see the README.
 
 > **`docker compose down` keeps every run. `down -v` throws the data away.** The named volume holds
 > Temporal's history, the objects, the lake and `config.yaml`.
@@ -245,3 +251,4 @@ Kept because each one is a thing a second reader will hit, and every one passed 
 | `kontra actor register` → `no such directory` | the quickstart mounted nothing, so the orchestrator could not read the folder it was given |
 | `kontra workflow serve` printed nothing and exited 0 | the file had no `__main__` block; a worker that never started was reported as success |
 | The fleet path of two shipped workflows | `fleet.up` without `actor=`/`version=` — a `TypeError` only the fleet branch reached |
+| `pull access denied … may require 'docker login'` | an unqualified local tag Docker tried to fetch from Hub; an auth error for a missing build |
