@@ -16,7 +16,7 @@
  * IT IS NO LONGER AN ERRAND, AND IT IS NO LONGER THE DISPATCH (ADR 0033 §6). The Actors page calls
  * the Method now: a kontra-owned one-shot workflow performs exactly one Method call over the Batch
  * the form collected, through the same Nexus operation production uses (`control/orchestrator/src/probe.ts`,
- * `sdk/python/actorkit/probe.py`). What survives here is the half that TEACHES — the page shows this
+ * `sdk/python/kontra/probe.py`). What survives here is the half that TEACHES — the page shows this
  * source read-only beside the Run button, regenerating as the form changes, and there is nowhere to
  * write it to any more.
  *
@@ -34,7 +34,7 @@
  *
  * THE DISPATCH IS `handle.<method>(batch)`, RETURNING `(results, dropped)` (ADR 0028 §4). The handle
  * is callable now — a Method name is an attribute on the `ActorHandle` `catalog.actor()` returns
- * (`ActorHandle.__getattr__` in `sdk/python/actorkit/catalog.py`), and awaiting the call hands back
+ * (`ActorHandle.__getattr__` in `sdk/python/kontra/catalog.py`), and awaiting the call hands back
  * a `(results, dropped)` tuple the caller must destructure. This is the SAME spelling the SDK
  * documents and every example uses, so the first file an operator meets teaches the surface the
  * rest of the repo speaks — and it works with or without an `async with`, because a one-shot call
@@ -192,7 +192,7 @@ Both verbs take the FOLDER, never a typed queue: the queue is derived from this 
 (GitHub #15), so serve and start always agree and a pasted nickname cannot route your run wrong.
 """
 
-from actorkit import catalog
+from kontra import catalog
 from temporalio import workflow
 
 ${handle} = catalog.actor(${py(actor)}, ${py(version)})

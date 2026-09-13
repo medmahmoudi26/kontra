@@ -30,7 +30,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 
-from actorkit import catalog
+from kontra import catalog
 
 # Cheap, stateless and safe at module scope: nothing connects and nothing is looked up.
 gate = catalog.actor("paritygate", "0.1.0")

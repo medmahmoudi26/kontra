@@ -1,6 +1,6 @@
 // placement_conformance_test.go — THE GO ARM of shared/conformance/placement.json.
 //
-// This side is a WRITER, and it is the SECOND one: `sdk/python/actorkit/fleet.py` builds the same
+// This side is a WRITER, and it is the SECOND one: `sdk/python/kontra/fleet.py` builds the same
 // Fleet desired state out of `hold()`/`place()`/`up()`, `cli/fleet.go` builds it out of
 // `kontra fleet up|deploy`, and `control/orchestrator/src/infra/stacks.ts:coerceFleetArgs` is the only reader.
 // Nothing imports anything across the three, and the reader DISCARDS WITHOUT A WORD every key it

@@ -38,6 +38,8 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
+
+	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 )
 
 // fleetProject is the Pulumi project the orchestrator's dispatch table knows. A stack outside
@@ -803,7 +805,11 @@ type tmuxConverger interface {
 // newTmuxConverger dials Temporal ($KONTRA_ADDRESS / $KONTRA_NAMESPACE); a func var so tests can
 // swap it out.
 var newTmuxConverger = func() (tmuxConverger, error) {
-	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace()})
+	conn, err := temporaltls.ConnectionOptions(nil)
+	if err != nil {
+		return nil, err
+	}
+	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace(), ConnectionOptions: conn})
 	if err != nil {
 		return nil, err
 	}

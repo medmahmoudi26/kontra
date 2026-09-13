@@ -150,22 +150,58 @@ async function clearStaleLock(input: StackOpInput): Promise<void> {
 
 /** `pulumi up`. Heartbeats per resource so a long provision is observable and a wedged one
  * trips HeartbeatTimeout rather than sitting until StartToClose. */
+/** How often the converge re-asserts liveness while one long resource op is in flight.
+ * Comfortably inside the 2-minute heartbeatTimeout in workflows/stack.ts; the two numbers are a
+ * pair and moving one without the other is what re-opens the bug above. */
+const KEEPALIVE_MS = 30_000;
+
 export async function stackUp(input: StackOpInput): Promise<StackOpResult> {
   const ctx = Context.current();
   if (ctx.info.attempt > 1) await clearStaleLock(input);
 
   const stack = await workspaceFor(input);
-  const res = await stack.up({
-    color: 'never',
-    // Cancellation is a straight wire: Temporal's AbortSignal becomes SIGINT to the engine,
-    // which unwinds, checkpoints, and releases the lock.
-    signal: ctx.cancellationSignal,
-    onEvent: (e) => {
-      const m = e.resourcePreEvent?.metadata;
-      if (m) ctx.heartbeat({ op: m.op, urn: m.urn });
-      else if (e.summaryEvent) ctx.heartbeat({ changes: e.summaryEvent.resourceChanges });
-    },
-  });
+
+  // THE HEARTBEAT IS A LIVENESS CHECK, SO IT CANNOT BE EVENT-DRIVEN ALONE.
+  //
+  // Pulumi emits a resourcePreEvent when a resource op STARTS and nothing again until it ends. A
+  // `command:remote:Command` — which is how every Machine gets its Worker installed — legitimately
+  // runs for many minutes: the install script waits on `cloud-init status --wait` before it may
+  // touch apt at all, and a fresh DO image is still running unattended-upgrades for the first
+  // several. Against a 2-minute heartbeatTimeout that is one pre-event and then silence, so
+  // Temporal kills the activity mid-install and retries — restarting the very install that was
+  // making progress, into the same wall, until maximumAttempts is spent.
+  //
+  // Measured on this checkout, fleet `desync`, 4 Machines in sfo3: attempt 1 timed out at
+  // `kf-desync-02-actor-desync`, attempt 2 timed out on the SAME resource, and the converge only
+  // completed once cloud-init was allowed to finish out of band.
+  //
+  // So the timer reports what the timeout actually asks about — is the engine still there — while
+  // `last` keeps the DETAIL event-driven, so `/api/infra`'s progress line still names the resource
+  // being worked on rather than degrading to a tick.
+  let last: Record<string, unknown> = { phase: 'up' };
+  const keepalive = setInterval(() => ctx.heartbeat(last), KEEPALIVE_MS);
+
+  let res;
+  try {
+    res = await stack.up({
+      color: 'never',
+      // Cancellation is a straight wire: Temporal's AbortSignal becomes SIGINT to the engine,
+      // which unwinds, checkpoints, and releases the lock.
+      signal: ctx.cancellationSignal,
+      onEvent: (e) => {
+        const m = e.resourcePreEvent?.metadata;
+        if (m) last = { op: m.op, urn: m.urn };
+        else if (e.summaryEvent) last = { changes: e.summaryEvent.resourceChanges };
+        else return;
+        ctx.heartbeat(last);
+      },
+    });
+  } finally {
+    // In a finally because a converge that THREW must not leave a timer heartbeating for an
+    // activity that has already failed — the next attempt would inherit a liveness signal from a
+    // dead run.
+    clearInterval(keepalive);
+  }
 
   const outputs: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(res.outputs)) outputs[k] = v.secret ? '[secret]' : v.value;

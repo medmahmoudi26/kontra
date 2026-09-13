@@ -32,7 +32,7 @@ import { partSafe } from './codec/shard';
 import { dtPartition } from './data/parquet';
 import type { RunHistory } from './history';
 import { readAsks, type RunAsk } from './hitl';
-import { fetchRunHistory, listRuns, type RunRow } from './temporalClient';
+import { LIST_LIMIT, fetchRunHistory, listRuns, type RunRow } from './temporalClient';
 
 /** The envelope's version. Bumped only if the STORED shape changes; `RunHistory` growing a field
  *  does not, because every reader of it already treats new fields as optional. */
@@ -112,15 +112,48 @@ export interface ArchiveSweep {
   present: number;
   /** Closed, unarchived, and Temporal no longer holds the history. Too late for this one. */
   gone: number;
+  /**
+   * WHICH runs went, not just how many — issue F5.
+   *
+   * `gone` alone was a number with nothing behind it: events were lost permanently and the only
+   * trace was an integer, so there was no way to reconcile after the fact or even to say what had
+   * been in them. Under per-event billing that is revenue nobody can account for; before that, it
+   * is a run whose whole story is missing and whose id nobody can name.
+   *
+   * BOUNDED, because this rides in a report that is logged. A pass that lost two hundred runs has
+   * a much larger problem than the list, and the count beside it stays exact.
+   */
+  goneIds: string[];
   /** Errored on one run, which must never stop the pass. */
   failed: number;
+  /**
+   * The listing came back FULL, so there may be more runs than this pass considered.
+   *
+   * `listRuns` caps at `LIST_LIMIT` (200). A full page and a complete one are indistinguishable
+   * without this — and silently truncating a sweep that feeds a durable archive is the same class
+   * of bug as reporting a capped event count as a total (F3). Said, not inferred.
+   */
+  capped: boolean;
 }
+
+/** How many `gone` run ids one report carries before it stops listing them. A report is a log line;
+ *  a pass that lost more than this has a bigger problem than the list, and `gone` is still exact. */
+export const GONE_IDS_CAP = 50;
 
 /** The reads a sweep makes, injectable so a test needs neither Temporal nor a clock. */
 export interface ArchiveDeps {
   list?: () => Promise<RunRow[]>;
   read?: (runId: string, execId?: string) => Promise<RunHistory | undefined>;
   now?: () => number;
+  /**
+   * Called with something an operator should know that is NOT a failure.
+   *
+   * SEPARATE FROM `onError` BECAUSE THE AUDIENCE DIFFERS. An unconfigured store, a deliberate
+   * `off`, a run that aged out and a page that came back full are all ordinary states of a
+   * healthy system — routing them through the error channel would train whoever reads it to
+   * ignore the channel, which is how the real failures stop being read too.
+   */
+  onNote?: (note: string) => void;
   /** Called once per failed run and once per failed pass. A sweep that throws into a `setInterval`
    *  would take the API process down with it, so nothing here is allowed to escape. */
   onError?: (err: unknown, runId?: string) => void;
@@ -272,10 +305,22 @@ export async function sweepClosedRuns(
   const list = deps.list ?? (() => listRuns());
   const read = deps.read ?? fetchRunHistory;
   const now = deps.now ?? Date.now;
-  const out: ArchiveSweep = { scanned: 0, closed: 0, archived: 0, present: 0, gone: 0, failed: 0 };
+  const out: ArchiveSweep = {
+    scanned: 0,
+    closed: 0,
+    archived: 0,
+    present: 0,
+    gone: 0,
+    goneIds: [],
+    failed: 0,
+    capped: false,
+  };
 
   const runs = await list();
   out.scanned = runs.length;
+  // A FULL PAGE IS NOT A COMPLETE ONE. `listRuns` caps at `LIST_LIMIT`; at exactly that number this
+  // pass may have considered a prefix of what exists, and nothing downstream could tell.
+  out.capped = runs.length >= LIST_LIMIT;
   for (const run of runs) {
     if (!isArchivable(run)) continue;
     out.closed += 1;
@@ -287,8 +332,10 @@ export async function sweepClosedRuns(
       const history = await read(run.runId);
       if (!history) {
         // Temporal could describe it a moment ago and cannot serve its history now: retention took
-        // it between the two calls, or between this pass and the last. Counted, never inferred.
+        // it between the two calls, or between this pass and the last. Counted, never inferred —
+        // and NAMED, because a number is not something anybody can act on or reconcile against.
         out.gone += 1;
+        if (out.goneIds.length < GONE_IDS_CAP) out.goneIds.push(run.runId);
         continue;
       }
       await archive.write(run, history, now());
@@ -324,7 +371,26 @@ export function startHistoryArchiver(
   deps: ArchiveDeps = {}
 ): () => void {
   const archive = new HistoryArchive(store);
-  if (!archive.enabled || process.env.KONTRA_HISTORY_ARCHIVE === 'off') return () => undefined;
+  /* TWO WAYS TO DO NOTHING, AND THEY WERE THE SAME SILENCE — issue F5.
+     A store nobody configured and an archive somebody switched off are different facts with
+     different fixes, and neither used to reach a log: the sweep simply never ran, and the first
+     anybody knew was a run whose history had aged out with no record of it. `deps.onNote` rather
+     than `onError` because neither is a fault — an installation with no object store is a
+     legitimate one, and `off` is a choice somebody made on purpose. */
+  if (process.env.KONTRA_HISTORY_ARCHIVE === 'off') {
+    deps.onNote?.(
+      'history archive: OFF (KONTRA_HISTORY_ARCHIVE=off). Closed runs will age out of Temporal ' +
+        'with no durable record — this is deliberate, and it is the only warning of it.'
+    );
+    return () => undefined;
+  }
+  if (!archive.enabled) {
+    deps.onNote?.(
+      'history archive: DISABLED — no object store is configured (KONTRA_S3_ENDPOINT). Closed ' +
+        'runs will age out of Temporal with no durable record.'
+    );
+    return () => undefined;
+  }
   const every = Number(process.env.KONTRA_HISTORY_ARCHIVE_MS ?? DEFAULT_INTERVAL_MS);
   const interval = Number.isFinite(every) && every > 0 ? every : DEFAULT_INTERVAL_MS;
 
@@ -335,7 +401,23 @@ export function startHistoryArchiver(
     if (running) return;
     running = true;
     try {
-      await sweepClosedRuns(archive, deps);
+      const report = await sweepClosedRuns(archive, deps);
+      /* NAMED, NOT COUNTED. Events lost to retention are unrecoverable, so the one moment they can
+         be reconciled is now, and an integer is not something anybody can reconcile against. The
+         capped page rides the same line because a sweep that considered a PREFIX of what exists
+         and said nothing is the quieter half of the same failure. */
+      if (report.gone > 0) {
+        deps.onNote?.(
+          `history archive: ${report.gone} run(s) aged out of Temporal before they were archived — ` +
+            `${report.goneIds.join(', ')}${report.gone > report.goneIds.length ? ', …' : ''}`
+        );
+      }
+      if (report.capped) {
+        deps.onNote?.(
+          `history archive: the run listing came back FULL (${report.scanned}) — there may be more ` +
+            'than this pass considered.'
+        );
+      }
     } catch (err) {
       // Temporal down, S3 down, credentials wrong — all ordinary, all transient, and none of them
       // may kill the API process. The next pass tries again.

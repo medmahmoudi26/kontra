@@ -5,7 +5,7 @@ updates, which is exactly what these tests pin."""
 
 import asyncio
 
-from actorkit import global_state
+from kontra import global_state
 from internals.globalstore import GlobalStore
 
 

@@ -31,8 +31,12 @@ import {
   buildRunDiscoveryQuery,
   registerSearchAttributes,
 } from './visibility';
+import { temporalConnectOptions } from './temporalTls';
 
-const NAMESPACE = process.env.KONTRA_NAMESPACE ?? 'default';
+/** EXPORTED so the one place that STARTS a workflow can stamp the tenant with the same value this
+ *  connects to. A second `process.env.KONTRA_NAMESPACE ?? 'default'` elsewhere is how a client and
+ *  the attribute it writes come to disagree about which namespace a run is in. */
+export const NAMESPACE = process.env.KONTRA_NAMESPACE ?? 'default';
 
 /** The handler backing workflow's registered type name (handler main.go registers RunWorkflow
  *  under kontrav1.RunWorkflowName). Every dispatch a run makes starts one, tagged with the
@@ -47,7 +51,9 @@ const RUN_BATCH_ACTIVITY = 'RunBatch';
 
 /** How many distinct runs one list may return. It used to bound a describe-per-run fan-out as
  *  well; listing no longer describes anything, so only the page size survives. */
-const LIST_LIMIT = 200;
+/** EXPORTED so the history sweep can say whether its page came back FULL without restating the
+ *  number — a second `200` written elsewhere is how a cap and the check for it drift apart. */
+export const LIST_LIMIT = 200;
 
 /** How many backing workflows the `dispatches` column may scan before giving up on being exact.
  *  One sweep on this controller produced 225 of them and a busy cluster produces far more; the
@@ -62,9 +68,7 @@ export async function getClient(): Promise<Client> {
   if (!clientPromise) {
     clientPromise = (async () => {
       startTracing();
-      const connection = await Connection.connect({
-        address: process.env.KONTRA_ADDRESS ?? 'localhost:7233',
-      });
+      const connection = await Connection.connect(temporalConnectOptions());
       const client = new Client({
         connection,
         namespace: NAMESPACE,
@@ -352,6 +356,57 @@ export async function listOpenRuns(cap: number): Promise<OpenRunScan> {
   return { runs, capped };
 }
 
+/** One open execution, with the queue it is waiting on. */
+export interface OpenExecution {
+  workflowId: string;
+  execId: string;
+  type: string;
+  queue: string;
+  startedAt: number;
+}
+
+/**
+ * EVERY open execution, internal types INCLUDED — which is what makes it different from
+ * {@link listOpenRuns} and is the whole reason it exists.
+ *
+ * `listRuns` and `listOpenRuns` both subtract `KONTRA_INTERNAL_WORKFLOW_TYPES`, correctly: the Runs
+ * page is about a user's runs and a wall of `wardenWorkflow` rows would bury them. But an audit
+ * found nine open executions wedged on this cluster — five Wardens up to 14 days old, a retention
+ * workflow that never ran a task in 18 days — and EVERY ONE of them was an internal type. A health
+ * check that inherited that exclusion would have been blind to all nine, which is how they sat
+ * unnoticed for a month.
+ *
+ * THE QUEUE IS WHAT MAKES THE ANSWER USEFUL. "Running" is what Temporal says about all of these;
+ * whether anything is POLLING the queue they are parked on is the difference between working and
+ * wedged, and it is the one thing the visibility record carries that says so.
+ *
+ * NO DEDUPE BY WORKFLOW ID, unlike the two above. They collapse a reused id to its newest execution
+ * because a Run IS its workflow id; here a reused id with two open executions is two things that
+ * cannot move, and hiding one of them would be hiding exactly the case worth seeing.
+ */
+export async function listOpenExecutions(
+  cap: number
+): Promise<{ executions: OpenExecution[]; capped: boolean }> {
+  const client = await getClient();
+  const limit = Math.min(Math.max(cap, 1), LIST_LIMIT);
+  const executions: OpenExecution[] = [];
+  let capped = false;
+  for await (const info of client.workflow.list({ query: `ExecutionStatus = "Running"` })) {
+    if (executions.length >= limit) {
+      capped = true;
+      break;
+    }
+    executions.push({
+      workflowId: info.workflowId,
+      execId: info.runId ?? '',
+      type: info.type ?? '',
+      queue: info.taskQueue ?? '',
+      startedAt: info.startTime?.getTime() ?? 0,
+    });
+  }
+  return { executions, capped };
+}
+
 /** The workflow type every Fleet operation runs as (`workflows/stack.ts`). */
 const STACK_WORKFLOW_TYPE = 'stackWorkflow';
 
@@ -470,7 +525,79 @@ export async function fetchRunHistory(
     throw err;
   }
   // The namespace goes in so the reducer can refuse a link that points OUT of it — see mapHistory.
-  return mapHistory(events, truncated, NAMESPACE);
+  // The LENGTH goes in because `scanned` is what this reader fetched, and past the cap above that
+  // is not the same number — see `describeLength`.
+  return mapHistory(events, truncated, NAMESPACE, await describeLength(client, runId, execId));
+}
+
+/**
+ * How long the history ACTUALLY is, from the server — one RPC, no pages, no payloads.
+ *
+ * THIS IS THE WHOLE OF THE FIX FOR A NUMBER THAT WAS WRONG BY UP TO 61%. The pager above stops at
+ * `HISTORY_MAX_PAGES × HISTORY_PAGE` = 20,000 events and sets `truncated`, and `scanned` then
+ * reports what it fetched — which past that point is THE CAP AND NOT THE COUNT. A run between
+ * 20,001 and Temporal's 51,200 ceiling is legal, completes normally, and was recorded as exactly
+ * 20,000. Nothing about that looks wrong on screen; it is only wrong for the largest runs, which
+ * are the ones a meter would charge the most for.
+ *
+ * `DescribeWorkflowExecution` RETURNS IT WITHOUT READING AN EVENT, so this costs one round trip and
+ * no blob GETs — the property that let it be added to a path every browser poll takes.
+ * `historySizeBytes` comes back in the same response and rides along, because a byte-based meter
+ * would otherwise need a second call to ask for it.
+ *
+ * IT NEVER THROWS. The events are already in hand; a describe that fails must cost the caller the
+ * exact count and not the log. Absent then means NOT ESTABLISHED — `scanned` is still there as the
+ * honest floor, and `RunHistory.historyLength` documents that absent is not zero.
+ *
+ * `execId` IS PASSED FOR THE REASON `fetchRunHistory` STATES: a workflow id can be reused, and
+ * asking by id alone answers with whichever execution ran last. A length taken from a different
+ * execution than the events would be worse than no length at all.
+ */
+/**
+ * A count off the raw gRPC decode, as a number — `undefined` when the server did not send one.
+ *
+ * `Number(long)` IS `NaN`, AND A TEST CAUGHT THAT. The raw service returns 64-bit fields as
+ * protobufjs Longs — an object carrying `low`/`high` — and `Number()` on one is not a number at all.
+ * `shared/core/src/history.ts:num` already goes through `toString()` for exactly this reason, on
+ * exactly this wire; this is the same rule, kept local because it answers `undefined` where that one
+ * answers `0`, and here those must not be the same thing.
+ *
+ * ZERO IS A LEGAL COUNT AND `undefined` IS NOT A COUNT. A history really can have zero events —
+ * `kontra-dataset-retention-workflow-…` sat for 18 days without running a task — so collapsing the
+ * two would turn "the server did not say" into "the run did nothing".
+ */
+function longToNumber(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+  const n = Number((raw as { toString(): string }).toString());
+  return Number.isFinite(n) ? n : undefined;
+}
+
+// EXPORTED FOR ITS TEST, and that is the whole reason. `fetchRunHistory` reaches Temporal through a
+// memoized module-level client, so driving this through it means mocking `@temporalio/client` — and
+// a factory that loads the real package to spread it pulls protobufjs into a worker that cannot
+// resolve it. Measured: six cases green alone, six red the moment the file shared a worker. Taking
+// the client as an argument was already true; naming it here is what lets a test hand one over.
+export async function describeLength(
+  client: Awaited<ReturnType<typeof getClient>>,
+  runId: string,
+  execId?: string
+): Promise<{ historyLength?: number; historySizeBytes?: number }> {
+  try {
+    const desc = await client.workflowService.describeWorkflowExecution({
+      namespace: NAMESPACE,
+      execution: { workflowId: runId, ...(execId ? { runId: execId } : {}) },
+    });
+    const info = desc.workflowExecutionInfo;
+    const len = longToNumber(info?.historyLength);
+    const bytes = longToNumber(info?.historySizeBytes);
+    return {
+      ...(len === undefined ? {} : { historyLength: len }),
+      ...(bytes === undefined ? {} : { historySizeBytes: bytes }),
+    };
+  } catch {
+    return {};
+  }
 }
 
 /** The raw service answers a missing workflow with a gRPC NOT_FOUND (code 5) rather than with the

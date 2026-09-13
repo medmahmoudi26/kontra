@@ -46,6 +46,7 @@ import { assertBackend, backendUrl } from './infra/workspace';
 import { superviseChild, type Supervisor } from './panels/supervisor';
 import { infraQueue } from './queues';
 import { armRetentionSchedule } from './retention';
+import { temporalConnectOptions } from './temporalTls';
 
 /**
  * The queue this process serves. It is `queues.ts`'s now — a queue NAME is a routing fact and not
@@ -134,7 +135,7 @@ async function runWorker(): Promise<void> {
   // An explicit connection, not the default. `connection: undefined` silently means
   // localhost:7233 — which is right on a laptop and always wrong in a container, where the
   // failure reads as an unrelated tonic transport error against ::1.
-  const connection = await NativeConnection.connect({ address });
+  const connection = await NativeConnection.connect(temporalConnectOptions({ address }));
 
   const worker = await Worker.create({
     // A BUNDLE, not a single file: `stackWorkflow` and `tmuxSessionWorkflow` share this queue
@@ -188,7 +189,7 @@ async function runWorker(): Promise<void> {
 async function armRetention(address: string, namespace: string): Promise<void> {
   let connection: Connection | undefined;
   try {
-    connection = await Connection.connect({ address });
+    connection = await Connection.connect(temporalConnectOptions({ address }));
     const client = new Client({ connection, namespace, dataConverter });
     await armRetentionSchedule(client.schedule, {
       taskQueue: INFRA_QUEUE,

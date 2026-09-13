@@ -1,15 +1,26 @@
 version: v2
 plugins:
-  # Machine proto stubs are COMMITTED (sdk/python/_gen for Python, control/orchestrator/_gen
+  # Machine proto stubs are COMMITTED (sdk/python/kontra/v1 for Python, control/orchestrator/_gen
   # for TS — generated code lives in the consuming seam, never under a contract dir) and
   # drift-checked in CI (`buf generate` + `git diff --exit-code`). Never edited by hand.
-  # Output paths mirror the proto file path (shared/contracts/kontra/v1/* -> _gen/kontra/v1/*).
+  # Output paths mirror the proto file path (shared/contracts/kontra/v1/* -> kontra/v1/*).
+  #
+  # PYTHON GENERATES INTO THE SDK PACKAGE, NOT BESIDE IT — ADR 0044, and it is forced rather than
+  # chosen. The proto package is `kontra.v1`, so the stubs are a `kontra` package however they are
+  # emitted; the SDK is now also `kontra`, and a REGULAR package (one with `__init__.py`) always
+  # beats a namespace package and does NOT merge with it. Two `kontra` roots on one sys.path means
+  # `import kontra.v1.entry_pb2` raises ModuleNotFoundError while `import kontra` succeeds — which
+  # is how this was found: nine tests, one cause, and `import kontra` working the whole time.
+  #
+  # So there is one `kontra` package and `v1/` is a subpackage of it. Go and TypeScript keep their
+  # `_gen` seams because neither language has this collision — a Go import path is a URL and a TS
+  # one is a file path.
   # Pinned to match the venv runtime: temporalio requires protobuf<7, so the gencode must
   # be 6.x (protoc v33 -> python 6.33; latest emits 7.x and fails).
   - remote: buf.build/protocolbuffers/python:v33.0
-    out: sdk/python/_gen
+    out: sdk/python
   - remote: buf.build/protocolbuffers/pyi:v33.0
-    out: sdk/python/_gen
+    out: sdk/python
   # TS: TYPES-ONLY (no runtime classes, no encode/decode) so nothing on the hot path
   # constructs message objects — the envelope stays JSON on the wire (ADR 0002), proto is
   # only the shared type definition. snakeToCamel=false keeps proto field names snake_case,

@@ -71,8 +71,8 @@ import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
 import { slotStore, type SlotStore } from './secrets/slotStore';
 import { secretStore, type SecretStore } from './secrets/store';
-import { describeExposure } from './workflowControl';
-import { temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
+import { describeExposure, setRegisteredFolders } from './workflowControl';
+import { describeQueue, temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
 import { ObjectStore } from './codec/objectStore';
 import { DatasetRecordStore, datasetRecordStore } from './data/datasetRecords';
 import { RunWorkflowStore, runWorkflowStore } from './data/runWorkflows';
@@ -86,6 +86,7 @@ import { registerExploreRoutes } from './routes/explore';
 import { registerFleetRoutes } from './routes/fleet';
 import { registerHistoryRoutes } from './routes/history';
 import { registerHitlRoutes } from './routes/hitl';
+import { registerLoginRoutes } from './routes/login';
 import { registerPanelRoutes } from './routes/panels';
 import { registerPollerRoutes } from './routes/pollers';
 import { registerProbeRoutes } from './routes/probe';
@@ -97,6 +98,8 @@ import { registerRunRoutes } from './routes/runs';
 import { registerScratchRoutes } from './routes/scratch';
 import { registerSourceRoutes } from './routes/sources';
 import { registerStateRoutes } from './routes/state';
+import { registerUploadRoutes } from './routes/uploads';
+import { registerStuckRoutes } from './routes/stuck';
 import { registerSummaryRoutes } from './routes/summaries';
 import { registerWorkflowRoutes } from './routes/workflows';
 
@@ -110,17 +113,19 @@ import { registerWorkflowRoutes } from './routes/workflows';
  * Matching the FIRST segment is the point: everything after it is an id whose bytes are not ours to
  * predict — a Terminal id carries a colon and, on tmux, a dot, and a dataset name may carry one too.
  *
- * `runs` AND `scratch` ARE RETIRED SURFACES AND ARE STILL SERVED. The app has five surfaces now
- * (a run is reached through the workflow that produced it, and Scratch became a workflow's own
- * tab), but `/runs/<id>` is in somebody's notes and still names a run — the frontend REDIRECTS it.
+ * `runs` AND `scratch` ARE RETIRED SURFACES AND ARE STILL SERVED. A run is reached through the
+ * workflow that produced it and Scratch became a workflow's own tab, but `/runs/<id>` is in
+ * somebody's notes and still names a run — the console REDIRECTS it.
  * A redirect is code, and code has to load: drop either segment here and a cold load of
  * `/runs/sweep-v1.2` 404s on the dot before the shell that would forward it ever runs.
  */
 export const SPA_SURFACES: ReadonlySet<string> = new Set([
+  'catalog',
   'workflows',
   'actors',
   'datasets',
   'monitor',
+  'secrets',
   'settings',
   // retired, still addressable — see above
   'runs',
@@ -219,6 +224,19 @@ export interface ServerOptions {
  * `runApi` below is what boots. The lazily-built queue describer is the sharp edge of that rule and
  * is the reason it is a getter rather than a value.
  */
+/** One route this server registers: the method and the path Fastify itself recorded. */
+export interface RegisteredRoute {
+  method: string;
+  url: string;
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** Every route registered on this instance, collected by an `onRoute` hook. */
+    kontraRoutes: RegisteredRoute[];
+  }
+}
+
 export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   const repo = opts.repo ?? new Repo(process.env.KONTRA_ORCHESTRATOR_DB ?? 'orchestrator.db');
   // The object store: SHARED by the dataset browser, the workbench, the explore manifest, the row
@@ -229,6 +247,24 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // survives a restart the way an actor's catalog entry does. SHARED by the sources and probe
   // surfaces: a probe runs the FOLDER's Actor and version, never a body's.
   const sources = new SourceStore(repo);
+  /* A REGISTERED WORKFLOW FOLDER IS OPENABLE WHEREVER IT LIVES (issue #4). Registration accepts any
+     absolute path and the Workflows list draws what it accepted, but `resolveWorkflowFile` was
+     confined to `~/.kontra/workflows` alone — so a folder registered from a checkout listed, and
+     then failed to open with "no such workflow in …". This is the wiring that closes it, and it is
+     a FUNCTION rather than a snapshot because a folder registered a second ago has to be openable a
+     second later.
+
+     THE RESOLVER IS STILL THE BOUNDARY. This hands it names and paths; it confines inside each one
+     and resolves symlinks exactly as before, and the default root still wins on a collision. */
+  setRegisteredFolders(
+    () =>
+      new Map(
+        sources
+          .list('workflow')
+          .filter((s) => s.absent !== true)
+          .map((s) => [s.name, s.path] as const)
+      )
+  );
   // The materialization ledger (ADR 0017): SHARED by the dataset listing, the retention preview and
   // `RunLifecycle`, which is the second of a Run's two status authorities.
   const materialization = opts.materialization ?? materializationStore();
@@ -266,6 +302,24 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // editor canvas, and the default rejected the larger ones with a broken pipe.
   const app = Fastify({ bodyLimit: 33_554_432, logger: opts.logger ?? false });
 
+  // THE ROUTE INVENTORY, DERIVED RATHER THAN MAINTAINED.
+  //
+  // `onRoute` fires for every route as it is registered, so this list is the routes that EXIST —
+  // not a second list somebody has to remember to update. `docs/openapi.json` is generated from it
+  // and `openapi.test.ts` fails when the two disagree, which is what makes a route that quietly
+  // moved a red build rather than a 404 nobody sees until a panel is empty.
+  //
+  // Registered FIRST, before any route is added, because the hook only sees what comes after it.
+  const routes: RegisteredRoute[] = [];
+  app.addHook('onRoute', (r) => {
+    for (const method of Array.isArray(r.method) ? r.method : [r.method]) {
+      // HEAD is Fastify's own doubling of every GET and describes nothing a caller chooses.
+      if (method === 'HEAD' || method === 'OPTIONS') continue;
+      routes.push({ method, url: r.url });
+    }
+  });
+  app.decorate('kontraRoutes', routes);
+
   // Compress everything worth compressing. The SPA bundle and the JSON of a dataset preview are
   // both highly repetitive text; served raw they were several times larger than they need to be.
   // `global: true` covers the static assets and the API alike, and the plugin only encodes when
@@ -278,6 +332,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // parameterised one regardless of which module registered which first, and a duplicate path
   // throws at registration rather than shadowing silently. So these read top-down as the API does.
   registerPulseRoutes(app, opts.pulse);
+  // THE LOGIN, FIRST, because everything else can be reached with what it hands out. It is where
+  // the console's `Authorization` token comes from — a browser cannot read `~/.kontra/config.yaml`
+  // the way the CLI does, and the alternative was a bearer baked into the bundle at build time.
+  registerLoginRoutes(app);
   registerPanelRoutes(app);
   registerCatalogRoutes(app, repo);
   registerScratchRoutes(app, repo);
@@ -297,6 +355,16 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerExploreRoutes(app, { store, lake, runs });
   registerSummaryRoutes(app, summaries);
   registerStateRoutes(app);
+  // The bytes behind a `File` or `Folder` field on a Method or workflow form. Content-addressed
+  // into the SAME CAS the claim-check codec writes and `kontra.fetch_blob` reads, so an upload is
+  // dereferenceable by every actor in every language with nothing new to configure.
+  registerUploadRoutes(app, store);
+  /* WHAT WILL NEVER MOVE (issue F7). An audit found nine open executions wedged on a
+     `WorkflowTaskScheduled` nobody polls — up to 38 days old, every one an INTERNAL workflow type,
+     and therefore invisible to every surface kontra has. This reports them; `kontra doctor` prints
+     it. It deliberately does not reap: what to do with a two-week-old Warden is an operator's call,
+     not a health check's. */
+  registerStuckRoutes(app, { describeQueue: (q) => describeQueue(queueDescriber(), q) });
 
   // --- secrets (issue 19; ADR 0034 §4) ---------------------------------------------
   //
@@ -480,6 +548,11 @@ export async function runApi(): Promise<FastifyInstance> {
   startHistoryArchiver(new ObjectStore(), {
     onError: (err, runId) =>
       app.log.warn(`history archive: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
+    // NOT A FAILURE, AND THEREFORE NOT `warn`-BY-DEFAULT: an unconfigured store, a deliberate
+    // `off`, a run that aged out and a page that came back full are ordinary states of a healthy
+    // system. They go to `info` so they are READ — routing them through the error channel is how
+    // an operator learns to ignore the error channel (issue F5).
+    onNote: (note) => app.log.info(note),
   });
 
   // AWAITED, where it used to be fire-and-forget. A merged process starts three roles and the

@@ -101,7 +101,7 @@ func TestOneWorkerLeavingAPackedMachineLeavesTheOtherRunning(t *testing.T) {
 // TestTwoWorkersOfOneArtifactOnOneMachineAreNotExpressible is WHY `workers=` cannot exceed the
 // Machine count, measured at the seam that makes it true.
 //
-// `sdk/python/actorkit/fleet.py:place` refuses `workers > machines` and names this as the reason;
+// `sdk/python/kontra/fleet.py:place` refuses `workers > machines` and names this as the reason;
 // `programs/fleet.ts:machinesFor` refuses it again server-side. Both refusals rest on a fact about
 // the label: a Worker is identified by `<name>@<version>`, so two of one Artifact on one Machine are
 // one entry to every reader — `list()` cannot tell them apart and the loop below says so out loud

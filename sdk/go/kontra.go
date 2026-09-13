@@ -193,7 +193,7 @@ func TestBatch(values ...any) *Batch {
 }
 
 // TestDataset builds a collecting output Dataset, for TESTING a Method body with no host, no queue
-// and no object store — the peer of Python's actorkit.testing.collecting_dataset. Hand it to a
+// and no object store — the peer of Python's kontra.testing.collecting_dataset. Hand it to a
 // Method as its third argument and read ds.Records() for what the body pushed, in push order:
 //
 //	ds := kontra.TestDataset()

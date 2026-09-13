@@ -26,6 +26,8 @@ import (
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
+
+	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/medmahmoudi26/kontra/runtime/go/codec"
@@ -225,10 +227,15 @@ func serve(r *core.Registry, stop <-chan interface{}) error {
 		return fmt.Errorf("claim-check store: %w", err)
 	}
 
+	conn, err := temporaltls.ConnectionOptions(nil)
+	if err != nil {
+		return fmt.Errorf("temporal TLS: %w", err)
+	}
 	c, err := client.Dial(client.Options{
-		HostPort:      getenv("KONTRA_ADDRESS", "localhost:7233"),
-		Namespace:     getenv("KONTRA_NAMESPACE", "default"),
-		DataConverter: codec.DataConverter(casStore),
+		HostPort:          getenv("KONTRA_ADDRESS", "localhost:7233"),
+		Namespace:         getenv("KONTRA_NAMESPACE", "default"),
+		DataConverter:     codec.DataConverter(casStore),
+		ConnectionOptions: conn,
 	})
 	if err != nil {
 		return fmt.Errorf("temporal dial: %w", err)

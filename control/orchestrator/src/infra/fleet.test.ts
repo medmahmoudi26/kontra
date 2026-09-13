@@ -392,7 +392,7 @@ describe('coercing placements', () => {
   });
 
   it('prefers the list when both spellings arrive', () => {
-    // A writer that sends both sends them DERIVED from one another (actorkit.fleet does, for one
+    // A writer that sends both sends them DERIVED from one another (kontra.fleet does, for one
     // placement). A reader that merged them would have to decide which wins, and the wrong answer
     // is a Fleet running an Artifact nobody named.
     expect(

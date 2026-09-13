@@ -21,6 +21,8 @@ import (
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
+
+	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 )
 
 const orchestratorQueue = "kontra-orchestrator"
@@ -39,7 +41,11 @@ type queueDescriber interface {
 // newDescriber dials Temporal ($KONTRA_ADDRESS / $KONTRA_NAMESPACE); a func var so
 // tests (and pollerCount fakes) can swap it out.
 var newDescriber = func() (queueDescriber, error) {
-	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace()})
+	conn, err := temporaltls.ConnectionOptions(nil)
+	if err != nil {
+		return nil, err
+	}
+	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace(), ConnectionOptions: conn})
 	if err != nil {
 		return nil, err
 	}

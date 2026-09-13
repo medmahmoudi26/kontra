@@ -34,7 +34,7 @@ Run it the way the gate does:
 
 from dataclasses import dataclass
 
-from actorkit import actor
+from kontra import actor
 
 
 @dataclass

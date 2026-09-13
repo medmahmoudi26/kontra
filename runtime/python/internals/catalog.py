@@ -120,7 +120,7 @@ def operations_of(registry) -> list[dict]:
     `params` is the one thing that stays ACTOR-level (run-wide config, not a signature), so it
     rides on every operation rather than being declared per Method.
     """
-    from actorkit.schema import schema_of
+    from kontra.schema import schema_of
 
     params = schema_of(getattr(registry, "params_type", None))
     ops = []
@@ -223,7 +223,7 @@ def publish_slots(url: str, registry, name: str, version: str) -> None:
     if not slots:
         return
     try:
-        from actorkit import secrets
+        from kontra import secrets
 
         status = secrets.declare(url, name, version, slots)
         print(f"[catalog] {name}@{version} -> POST {url}/api/slots/declare {status} "
@@ -245,7 +245,7 @@ def first_paragraph(doc: str | None) -> str:
     indentation of the `class`/`def` it sits under, and sending that verbatim puts leading
     spaces into a surface that renders it as one line.
 
-    The peer is `MethodRegistration.description` in `sdk/python/actorkit/actor.py`; one rule for
+    The peer is `MethodRegistration.description` in `sdk/python/kontra/actor.py`; one rule for
     what an author's words mean, so a Method and a Workflow are described the same way.
     """
     return inspect.cleandoc(doc or "").split("\n\n", 1)[0].strip()
@@ -302,7 +302,7 @@ def workflow_descriptor(cls, *, queue: str = "") -> dict | None:
     """
     from temporalio import workflow
 
-    from actorkit.schema import schema_of
+    from kontra.schema import schema_of
 
     # None, not a raise, for an ordinary class: `serve()` is handed a list an author wrote, and
     # a helper class in it should be reported and skipped rather than take the whole worker's

@@ -23,8 +23,17 @@ import { describe, expect, it } from 'vitest';
 
 import { endpointName, sharedQueue as endpointQueue } from './nexusRegistry';
 import { sharedQueue as pollerQueue } from './panels/pollers';
-import { actorSession } from './panels/tmux';
+import {
+  actorSession,
+  actorSessionTag,
+  isKnownSessionKind,
+  kontraSessionKind,
+  SESSION_KINDS,
+  watchSessionTag,
+  workflowSessionTag,
+} from './panels/tmux';
 import { sessionNameFor } from './panels/discovery';
+import { isKontraSession } from './panels/local';
 
 type QueueCase = { why: string; name: string; version: string; expect: string };
 type TmuxCase = {
@@ -35,6 +44,7 @@ type TmuxCase = {
   worker: string;
   machine: string;
 };
+type SessionKindCase = { why: string; tag: string; kind: string; known: boolean };
 
 const corpus = JSON.parse(
   readFileSync(join(__dirname, '../../../shared/conformance/queues.json'), 'utf8')
@@ -42,6 +52,7 @@ const corpus = JSON.parse(
   shared: { cases: QueueCase[] };
   endpoint: { servable: string; cases: QueueCase[] };
   tmux_session: { cases: TmuxCase[] };
+  session_kind: { cases: SessionKindCase[] };
 };
 
 describe('the corpus itself', () => {
@@ -52,8 +63,12 @@ describe('the corpus itself', () => {
     expect(corpus.shared.cases.length).toBeGreaterThanOrEqual(6);
     expect(corpus.endpoint.cases.length).toBeGreaterThanOrEqual(10);
     expect(corpus.tmux_session.cases.length).toBeGreaterThanOrEqual(8);
+    expect(corpus.session_kind.cases.length).toBeGreaterThanOrEqual(9);
     const blob = JSON.stringify(corpus);
-    for (const token of ['my actor', 'café', 'naïve', '📦', '-shared', 'fleet', 'actor']) {
+    // `agent:claude` and `Actor:probe` are §session_kind's refusals that LOOK like acceptances. A
+    // corpus that lost them would pass every row it kept while admitting the thing ADR 0043 refuses.
+    for (const token of ['my actor', 'café', 'naïve', '📦', '-shared', 'fleet', 'actor',
+                         'agent:claude', 'Actor:probe', 'watch:repl']) {
       expect(blob, `the corpus no longer exercises ${token}`).toContain(token);
     }
     expect(corpus.shared.cases.some((c) => c.version === '')).toBe(true);
@@ -129,5 +144,57 @@ describe('the tmux session name', () => {
     const differ = corpus.tmux_session.cases.filter((c) => c.worker !== c.machine);
     expect(differ.length).toBeGreaterThan(0);
     for (const c of differ) expect(c.why.length).toBeGreaterThan(30);
+  });
+});
+
+describe('the session kind vocabulary (ADR 0043)', () => {
+  // THE READER'S ARM. The CLI writes `@kontra`; this side decides whether the wall shows what it
+  // finds. A kind one writes and the other does not know is a Worker running perfectly whose tile is
+  // absent — ADR 0020's one forbidden failure — and a kind this side admits that nothing writes is a
+  // door nobody meant to leave open.
+  for (const c of corpus.session_kind.cases) {
+    it(c.why, () => {
+      expect(kontraSessionKind(c.tag)).toBe(c.kind);
+      expect(isKnownSessionKind(c.tag)).toBe(c.known);
+    });
+  }
+
+  it('is the gate discovery actually consults, not a parallel opinion', () => {
+    // `isKnownSessionKind` being right buys nothing if `isKontraSession` does not call it. A tagged
+    // session is admitted EXACTLY when its kind is known; the session NAME is held constant and
+    // deliberately not `kontra-`, so the legacy prefix cannot be what answers.
+    for (const c of corpus.session_kind.cases) {
+      if (c.tag === '') continue; // untagged is the prefix's business, asserted below
+      expect(isKontraSession({ session: 'some-session', kontra: c.tag }), c.tag).toBe(c.known);
+    }
+  });
+
+  it('still admits an untagged legacy Worker by name, and nothing else', () => {
+    // ADR 0020: a live Worker drawn as absent is the one thing a tile may never say. A Worker that
+    // predates tagging has a `kontra-` name and no tag, so the prefix stays — and it is the NARROWER
+    // door, which is the half worth pinning.
+    expect(isKontraSession({ session: 'kontra-webcrawl', kontra: '' })).toBe(true);
+    expect(isKontraSession({ session: 'kontra-webcrawl' })).toBe(true);
+    expect(isKontraSession({ session: 'my-own-session', kontra: '' })).toBe(false);
+    expect(isKontraSession({ session: 'my-own-session' })).toBe(false);
+  });
+
+  it('admits every tag kontra itself writes', () => {
+    // The vocabulary is only useful if the writers stay inside it. These are the TypeScript writers;
+    // `cli/queues_conformance_test.go` holds the Go ones against the same set.
+    const written = [actorSessionTag('probe', '0.1.0'), workflowSessionTag('hunt'), watchSessionTag('repl')];
+    expect(written).toHaveLength(SESSION_KINDS.length);
+    expect(new Set(written.map(kontraSessionKind))).toEqual(new Set(SESSION_KINDS));
+    for (const tag of written) expect(isKnownSessionKind(tag), tag).toBe(true);
+  });
+
+  it('carries the refusals that look like acceptances', () => {
+    // A corpus of only-valid rows passes a function that returns true unconditionally — which is
+    // precisely the pre-0043 behaviour this change removes. These are the rows that catch it.
+    const refused = corpus.session_kind.cases.filter((c) => !c.known).map((c) => c.tag);
+    expect(refused).toContain('agent:claude'); // a plausible kind that is not ours
+    expect(refused).toContain('Actor:probe:0.1.0'); // case-folded
+    expect(refused).toContain('anything'); // no colon at all
+    expect(corpus.session_kind.cases.filter((c) => c.known).length).toBeGreaterThanOrEqual(3);
   });
 });

@@ -1,5 +1,5 @@
 // Package hitl parks a workflow on a question a human has to answer — the author's half of HITL,
-// and the Go peer of `sdk/python/actorkit/hitl.py`.
+// and the Go peer of `sdk/python/kontra/hitl.py`.
 //
 //	ok, err := hitl.Ask[Approval](ctx, "Approve these 12 hosts?",
 //		hitl.Context(map[string]any{"dataset": "live", "n": 12}), // what the operator needs to decide

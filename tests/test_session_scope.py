@@ -167,7 +167,7 @@ class FakeSession:
 
 def host_activities(live, closed=None):
     """The host's four activities, with the Worker and the engine's Session factory injected."""
-    from actorkit import ActorRegistry
+    from kontra import ActorRegistry
     from internals.temporal import host
 
     reg = ActorRegistry()
@@ -261,7 +261,7 @@ class DeadResourceSession:
     under ADR 0023 §20."""
 
     def __init__(self, actor_id, built):
-        from actorkit.retry import SessionLost
+        from kontra.retry import SessionLost
 
         self.actor_id = actor_id
         self._lost = SessionLost
@@ -283,7 +283,7 @@ def test_a_dead_session_is_not_rebuilt_by_the_next_call():
     the host must not answer the next call by CONSTRUCTING a fresh one — that is the reload
     under another name: a new resource welded under a scope whose `self.*` is gone."""
     from temporalio.exceptions import ApplicationError
-    from actorkit import ActorRegistry
+    from kontra import ActorRegistry
     from internals.temporal import host
 
     built: list[str] = []
@@ -309,7 +309,7 @@ def test_a_dead_resource_is_not_retried_into_a_re_activation():
     same Session queue and asks again. Nothing about a dead resource improves by asking twice,
     so the failure is raised NON-RETRYABLE and the caller's scope is what recovers (§7)."""
     from temporalio.exceptions import ApplicationError
-    from actorkit import ActorRegistry
+    from kontra import ActorRegistry
     from internals.temporal import host
 
     live, _ = workers()
@@ -334,7 +334,7 @@ class TerminalLoadSession:
     required param: the errors an author declares terminal because no retry can fix them."""
 
     def __init__(self, actor_id, attempts):
-        from actorkit.retry import NonRetryableError
+        from kontra.retry import NonRetryableError
 
         self.actor_id = actor_id
         self._terminal = NonRetryableError
@@ -360,7 +360,7 @@ def test_a_terminal_error_out_of_the_load_is_not_retried_by_the_activity():
     pays for it.
     """
     from temporalio.exceptions import ApplicationError
-    from actorkit import ActorRegistry
+    from kontra import ActorRegistry
     from internals.temporal import host
 
     attempts: list[int] = []
@@ -397,7 +397,7 @@ def test_the_caller_and_the_host_agree_on_the_two_activity_names():
     a rename on one side is a task nobody can execute, which the scope meets as a timeout."""
     from temporalio.activity import _Definition
 
-    from actorkit import catalog
+    from kontra import catalog
 
     live, _ = workers()
     registered = {_Definition.must_from_callable(f).name for f in host_activities(live).values()}
@@ -411,7 +411,7 @@ def test_a_scope_is_opened_on_the_actors_shared_queue_and_closed_on_its_own():
     queue the host that answered is polling, because only that process holds the resource."""
     import inspect
 
-    from actorkit import catalog
+    from kontra import catalog
 
     opening = inspect.getsource(catalog.Session._open)
     closing = inspect.getsource(catalog.Session._close)
@@ -425,7 +425,7 @@ def test_a_method_call_in_a_scope_carries_the_session_id():
     instance — a Session that silently stopped being one."""
     import inspect
 
-    from actorkit import catalog
+    from kontra import catalog
 
     src = inspect.getsource(catalog.Session._dispatch_batch)
     assert "session_id=self.session_id" in src
@@ -437,7 +437,7 @@ def test_a_method_is_named_by_attribute_on_the_open_session():
     """`browser.crawl(batch)` — the Method name is the attribute, so the call site reads like the
     Actor's own API rather than like a string dispatch. Calling it builds a `MethodCall` bound to
     this scope and that Method (ADR 0023 §8), the object that is both awaitable and iterable."""
-    from actorkit import catalog
+    from kontra import catalog
 
     scope = catalog.actor("crawler", "0.1.0").session()
     scope._id = "3f9a"
@@ -450,7 +450,7 @@ def test_a_method_is_named_by_attribute_on_the_open_session():
 def test_the_scope_refuses_to_dispatch_before_it_is_opened():
     """Outside `async with` there is no Session id, so the call would go to the shared queue and
     run against a fresh instance. Loud, because the wrong version of this is silent."""
-    from actorkit import catalog
+    from kontra import catalog
 
     scope = catalog.actor("crawler", "0.1.0").session()
     with pytest.raises(RuntimeError):
@@ -461,7 +461,7 @@ def test_a_bare_handle_and_a_keyed_one_both_open_a_scope():
     """Keys are optional (ADR 0023 §10): a bare handle is a private anonymous Session, a key is a
     claim on a shared identity. Mandatory keys would mean two independent scans of one host
     silently receiving each other's results."""
-    from actorkit import catalog
+    from kontra import catalog
 
     crawler = catalog.actor("crawler", "0.1.0")
     assert crawler.session().key == ""
@@ -472,7 +472,7 @@ def test_one_handle_will_not_hold_two_anonymous_scopes_at_once():
     """`async with handle` has to pair its exit with an entry, and a module-scope handle entered
     twice concurrently cannot tell which scope is exiting. Refused by name rather than closing
     the wrong Session, and `.session()` is the answer the error gives."""
-    from actorkit import catalog
+    from kontra import catalog
 
     crawler = catalog.actor("crawler", "0.1.0")
 

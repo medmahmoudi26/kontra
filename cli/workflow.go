@@ -81,7 +81,7 @@ func leadingPositional(args []string) (string, []string) {
 
 func cmdWorkflow(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: kontra workflow <register|serve|start> …")
+		return errors.New("usage: kontra workflow <register|serve|start|replay|history> …")
 	}
 	switch args[0] {
 	case "register":
@@ -101,8 +101,14 @@ func cmdWorkflow(args []string) error {
 		return workflowStop(args[1:], false)
 	case "terminate":
 		return workflowStop(args[1:], true)
+	case "replay":
+		// Post-mortem debugging: a recorded history, replayed against the code on disk, with no
+		// clock. See workflowreplay.go for what it does and does not cover.
+		return workflowReplay(args[1:])
+	case "history":
+		return workflowHistory(args[1:])
 	default:
-		return fmt.Errorf("unknown workflow subcommand %q (want register|serve|start|pause|resume|cancel|terminate)", args[0])
+		return fmt.Errorf("unknown workflow subcommand %q (want register|serve|start|pause|resume|cancel|terminate|replay|history)", args[0])
 	}
 }
 
@@ -285,7 +291,7 @@ func workflowResume(args []string) error {
 
 // workflowServe runs the author's workflow module as a local worker. It is `python file.py`
 // with the two things that are easy to get wrong done for you: the checkout's PYTHONPATH (so
-// `from actorkit import workflows` resolves to THIS tree, not to whatever is pip-installed) and
+// `from kontra import workflows` resolves to THIS tree, not to whatever is pip-installed) and
 // the Temporal/S3 env the codec reads. The module itself calls workflows.serve().
 func workflowServe(args []string) error {
 	fs := flag.NewFlagSet("workflow serve", flag.ContinueOnError)

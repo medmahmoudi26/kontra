@@ -2,7 +2,7 @@
 
 `actor.json` carries ONLY identity now — `{schemaVersion, name, version}`. The actor's
 I/O schemas are DERIVED from the typed `input`/`output`/`params` on the `@actor.defn`
-class (see actorkit.schema), not from ActorInput.json/ActorOutput.json files. The
+class (see kontra.schema), not from ActorInput.json/ActorOutput.json files. The
 validators here take a schema DICT (whatever `schema_of(...)` produced), so they're
 agnostic to where the schema came from.
 """
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from actorkit.version import CONTRACT_VERSION
+from kontra.version import CONTRACT_VERSION
 
 MANIFEST_FILENAME = "actor.json"
 # Wire string MUST stay byte-identical: "kontra.actor.v1".
@@ -28,7 +28,7 @@ class ManifestError(Exception):
 @dataclass(frozen=True)
 class ActorManifest:
     """Actor identity from actor.json. Schemas are NOT here — they come from the typed
-    @actor.defn class (actorkit.schema.schema_of)."""
+    @actor.defn class (kontra.schema.schema_of)."""
 
     schema_version: str
     name: str

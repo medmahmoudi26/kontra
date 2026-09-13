@@ -1,0 +1,42 @@
+name: release-please
+
+# WHAT OPENS THE RELEASE, so that `release.yml` has something to fire on.
+#
+# `release.yml` triggers on `push: tags: v*` and nothing in this repository ever created a tag — it
+# had never run once. This workflow is the missing half: it reads Conventional Commits on `main`,
+# maintains a release pull request with the next version and the changelog, and on merge it creates
+# the tag. That tag is what starts the real release build.
+#
+# THE VERSION LIVES IN `version.txt` and is bumped here, never by hand. `cli/release.go` argues
+# against a version constant — "a thing somebody forgets to bump and then two different releases wear
+# one name" — and that objection is answered by automation rather than ignored: no human types a
+# version, and `cli/internal/buildinfo` has no constant to forget.
+#
+# THE TAG FORMAT IS LOAD-BEARING. `include-component-in-tag: false` makes the tag `v0.1.0`, which is
+# what `release.yml`'s `tags: ["v*"]` matches. Those two live in different files and a drift between
+# them is a release that builds nothing, silently — `TestReleaseTriggerMatchesReleasePleaseTag`
+# exists to make that a red build instead of a quiet one.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          # The default GITHUB_TOKEN cannot trigger another workflow from the tag it pushes, which
+          # would leave the tag created and `release.yml` never started — the exact failure this
+          # whole file exists to end. A PAT (or an app token) in KONTRA_RELEASE_TOKEN restores it;
+          # without one, the tag is still correct and `release.yml` can be run manually against it
+          # via workflow_dispatch.
+          token: ${{ secrets.KONTRA_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}

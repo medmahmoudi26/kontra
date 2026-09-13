@@ -7,7 +7,7 @@ lifecycles, different failure modes, and different trust boundaries.
 ## Contexts
 
 - [Execution](./CONTEXT.md) — a caller's workflow, the Actors it calls, and the Datasets that come
-  back. The repo's core context: the orchestrator, the handler and actorkit all speak this language.
+  back. The repo's core context: the orchestrator, the handler and kontra all speak this language.
   (It used to read "turns a saved graph into work that runs"; ADR 0023 §12 deleted the graph
   interpreter and made a **Run** one execution of a caller's workflow.)
 - [Fleet](./control/orchestrator/src/infra/CONTEXT.md) — brings into existence, repairs, and destroys the machines that
@@ -19,8 +19,8 @@ lifecycles, different failure modes, and different trust boundaries.
   handoff is one-way and narrow: Fleet publishes which machines are reachable and what **Role**
   each carries; Execution never learns which cloud it is on.
 - **Execution → Fleet**: a **Run** *may* ask Fleet for machines, and only through one door —
-  `actorkit.fleet.hold()` / `f.place()`, which start Fleet's own `stackWorkflow` as a **child
-  workflow** on the infra queue; `actorkit.fleet.up()` is sugar for the pair. The scope's exit drops
+  `kontra.fleet.hold()` / `f.place()`, which start Fleet's own `stackWorkflow` as a **child
+  workflow** on the infra queue; `kontra.fleet.up()` is sugar for the pair. The scope's exit drops
   the **Lease** and the **Machines** die when the last one goes. This reverses the older "a **Run**
   cannot cause a machine to exist": it can, because a caller's workflow is *durable*, and that is
   precisely what makes it safe. A script that provisions ten Droplets and dies leaves ten Droplets;

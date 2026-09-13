@@ -7,7 +7,7 @@ import { coerceFleetArgs } from './infra/stacks';
 /**
  * THE TYPESCRIPT ARM of `shared/conformance/placement.json`.
  *
- * This side is the READER — the only one. `sdk/python/actorkit/fleet.py` and `cli/fleet.go` both
+ * This side is the READER — the only one. `sdk/python/kontra/fleet.py` and `cli/fleet.go` both
  * build a **Fleet**'s desired state and neither imports anything from here; `coerceFleetArgs`
  * narrows whatever arrives into `FleetArgs` before `programs/fleet.ts` runs it, and everything it
  * does not recognise it DISCARDS WITHOUT A WORD.

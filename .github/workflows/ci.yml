@@ -22,7 +22,7 @@ jobs:
           python-version: "3.11"
 
       # Editable install of the sdk/python seam (distribution `kontra-sdk`,
-      # package `actorkit`) with dev (pytest) + seaweed (boto3) extras, plus ruff.
+      # package `kontra`) with dev (pytest) + seaweed (boto3) extras, plus ruff.
       - name: Install the sdk/python seam
         run: |
           python -m pip install --upgrade pip
@@ -82,7 +82,7 @@ jobs:
       - name: pnpm install
         run: pnpm install --frozen-lockfile
 
-      # A PYTHON THAT CAN `import actorkit`, because part of this suite runs one.
+      # A PYTHON THAT CAN `import kontra`, because part of this suite runs one.
       #
       # `actorControl.test.ts`'s "the generated file, run by Python" block executes the caller this
       # repo GENERATES against the real SDK — the only check that the generated source is not merely
@@ -371,7 +371,7 @@ jobs:
           PROTO_BASELINE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
         run: make proto-check
 
-      # The generated stubs are committed (sdk/python/_gen + control/orchestrator/_gen +
+      # The generated stubs are committed (sdk/python/kontra/v1 + control/orchestrator/_gen +
       # runtime/handler/_gen); regenerate and fail if anything drifts from what's checked in.
       # `if: !cancelled()` so a FAILING proto gate cannot mask this: the two answer independent
       # questions (is the contract change compatible? vs are the committed stubs in sync?), and an
@@ -381,7 +381,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           buf generate
-          git diff --exit-code -- sdk/python/_gen control/orchestrator/_gen runtime/handler/_gen \
+          git diff --exit-code -- sdk/python/kontra/v1 control/orchestrator/_gen runtime/handler/_gen \
             || { echo "::error::generated proto stubs are stale — run 'just buf-generate' and commit"; exit 1; }
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════

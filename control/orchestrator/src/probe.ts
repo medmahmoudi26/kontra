@@ -35,7 +35,7 @@
  * so a dispatch activity is not a cheaper design — it is not a design. And TypeScript has no
  * caller half to reuse (ADR 0023 §22), so hosting the probe here would mean a third independent
  * wire encoder and a sixth endpoint-name derivation in the one language with no peer to pin them
- * against. The workflow is therefore actorkit's (`sdk/python/actorkit/probe.py`), served by a
+ * against. The workflow is therefore the SDK's (`sdk/python/kontra/probe.py`), served by a
  * Python worker on {@link PROBE_QUEUE}, and this module is the START and the four refusals that
  * come before it.
  */
@@ -53,7 +53,7 @@ import { runWorkflowStore, type RunWorkflowStore } from './data/runWorkflows';
  *
  * Everything ADR 0033 §1 lists as refused — a second Method, a second Actor, an output wired to
  * another input, a branch, a condition, a loop, a retry policy, a schedule, a fan-out width — is
- * refused by not being in this list. The peer is `actorkit.probe.PROBE_FIELDS`; both sides refuse,
+ * refused by not being in this list. The peer is `kontra.probe.PROBE_FIELDS`; both sides refuse,
  * because the route is not the only way to reach the workflow (a caller can dial Temporal), and
  * the workflow is not the only place a refusal should cost nothing (a refused request must not
  * start an execution).
@@ -250,11 +250,11 @@ export async function startProbe(input: ProbeInput, deps: ProbeDeps = {}): Promi
         (probeWorkers.error === undefined ? '' : ` (${probeWorkers.error})`) +
         '. It is a separate process because a Nexus dispatch can only be made from a workflow ' +
         "and kontra's own containers are Node-only: start it with `docker compose up -d " +
-        'orchestrator-probe`, or `python3 -m actorkit.probe` from a checkout.'
+        'orchestrator-probe`, or `python3 -m kontra.probe` from a checkout.'
     );
   }
 
-  /* A FRESH RUN ID PER PROBE, AND THAT IS ADR 0033 §2 (see `sdk/python/actorkit/probe.py`).
+  /* A FRESH RUN ID PER PROBE, AND THAT IS ADR 0033 §2 (see `sdk/python/kontra/probe.py`).
      `backingWorkflowID` falls through to `actor-<name>-<runID-nodeID>` when no key is bound, so
      the probe's own workflow id is what keeps two probes apart — and a probe is the one caller
      most likely to be fired twice in ten seconds. A seconds-granular id alone is NOT enough for
@@ -409,7 +409,7 @@ function typeName(value: unknown): string {
 /* ─────────────────────────────── reading one back ─────────────────────────────── */
 
 /**
- * What one probe answered with — the workflow's own return value (`actorkit.probe.probe_result`).
+ * What one probe answered with — the workflow's own return value (`kontra.probe.probe_result`).
  *
  * `isolated` AND `done` ARE HERE BESIDE `results`, and that is ADR 0028 §4 carried through to the
  * surface. A Method that dropped every Unit and one that legitimately found nothing both return

@@ -34,7 +34,7 @@ import socket
 from datetime import timedelta
 from typing import Any, Dict
 
-from actorkit.retry import NonRetryableError, SessionLost
+from kontra.retry import NonRetryableError, SessionLost
 
 from internals.catalog import publish_catalog
 from internals.engine import build_session_factory
@@ -47,6 +47,7 @@ log = logging.getLogger("kontra.host")
 # workflow's pane behaving the same way, which is the property that makes either of them worth
 # looking at.
 from internals.temporal.wfhost import _configure_logging  # noqa: E402
+from internals.temporal.tlsconfig import connect_tls
 
 # Per-process activation. Keyed by actor id, which is the run/node the handler derives — so two
 # nodes of one run get two instances (two browsers), and a retry of the SAME node reuses the
@@ -120,7 +121,7 @@ def session_task_queue(name: str, version: str, session_id: str) -> str:
     that answered the open, which is what pins the scope's calls to one process.
 
     Derived independently in four languages with no shared code — here, the caller
-    (`actorkit.catalog.session_queue`, which closes on it), the Go actor host, and the handler,
+    (`kontra.catalog.session_queue`, which closes on it), the Go actor host, and the handler,
     which dispatches onto it from its own task queue. A drift has no loud failure mode, so
     shared/conformance/queues.json §session is what holds them to one answer.
 
@@ -323,6 +324,43 @@ def _spawn_session_worker(registry):
     return spawn
 
 
+def _install_blob_reader() -> None:
+    """Give `kontra.File.read()` a way to fetch — the runtime half of an SDK-declared type.
+
+    THE ARROW IS RUNTIME → SDK, WHICH IS WHY THIS IS HERE AND NOT THERE. `kontra.blobs` declares
+    `File` and `Folder` and holds a `None` reader; anything that linked an S3 client into the author
+    surface would be importable only by a caller that has one, and `tests/test_sdk_arrow.py` fails
+    the build over it — statically AND by importing every SDK module with `internals` made
+    unimportable. So the side that is allowed to have the store registers the fetch.
+
+    IT IS THE SAME STORE THE CODEC USES, deliberately: `casstore.from_env()` and
+    `codec.cas_key` are what offload a claim-check payload and what the orchestrator's upload route
+    content-addresses into. One derivation of `cas/<sha[:2]>/<sha>`, under one prefix, for the whole
+    system — which is what makes an uploaded file dereferenceable with nothing new to configure.
+
+    NO STORE IS NOT AN ERROR HERE. A local run with `KONTRA_S3_ENDPOINT` unset is legitimate and the
+    codec is passthrough under exactly the same condition; an actor that never takes a File never
+    notices, and one that does gets `File.read()`'s own sentence rather than a failure at startup
+    about a feature it may not use.
+    """
+    from internals import casstore
+    from internals.codec import cas_key
+
+    store = casstore.from_env()
+    if store is None:
+        return
+
+    async def read(sha: str) -> bytes:
+        # BLOCKING boto3 ON A THREAD. A Method body runs on this worker's event loop, and a
+        # synchronous get of a 30 MB object there stalls every other Unit in flight — including the
+        # heartbeats, which is how a healthy worker gets its activity timed out.
+        return await asyncio.to_thread(store.get, cas_key(sha))
+
+    from kontra import blobs
+
+    blobs.set_blob_reader(read)
+
+
 async def serve_async(registry, *, address: str = "", namespace: str = "") -> None:
     # LOGGING FIRST, and for the reason `wfhost._configure_logging` records at length: Python emits
     # nothing until a handler exists, so an actor author's `logging.getLogger(__name__).info(...)`
@@ -346,11 +384,16 @@ async def serve_async(registry, *, address: str = "", namespace: str = "") -> No
     # without the matching codec every over-threshold batch dies on "Unknown payload encoding",
     # retried to exhaustion. It passes through when KONTRA_S3_ENDPOINT is unset, exactly as the
     # handler's does, so a local no-S3 run is unaffected.
+    # TLS from the environment, in one place for every client in this repository — see
+    # `internals/temporal/tlsconfig.py`. `False` when nothing is configured, which is what the
+    # SDK means by no TLS and what this call passed before.
+    tls = connect_tls()
     client = await Client.connect(
-        address, namespace=namespace, data_converter=casstore.data_converter()
+        address, namespace=namespace, data_converter=casstore.data_converter(), tls=tls
     )
     metrics.serve(registry.actor_name, version)  # /metrics on its own port
     publish_catalog(registry)                    # self-register so the actor is dispatchable
+    _install_blob_reader()                       # what `kontra.File.read()` calls
 
     # `max_concurrent_activities` bounds what runs on THIS queue at once, and it is no longer the
     # live-Session cap — an OpenSession frees its slot the moment the Session's worker is up, so

@@ -32,7 +32,7 @@ Each actor runs as **two processes**: the Go **handler** (the workflow half — 
 - **Python 3.10+** with the venv: `./install.sh` (or `just install`) — editable `actorkit` + dev/seaweed extras.
 - **Node 22** for the orchestrator worker (`corepack enable` for pnpm). Host Node 23 breaks the TS worker — run it in Docker if your host is newer. Node is not needed to *use* kontra: the orchestrator serves from its container.
 
-In a repo checkout, `import actorkit` resolves from the editable install, or from `PYTHONPATH=sdk/python:runtime/python:sdk/python/_gen` — one entry per package: `actorkit` (the author surface), `internals` (the runtime) and the generated `kontra.v1` stubs. There is no repo-root shim any more; the package directory is named after the package, so nothing has to point at it.
+In a repo checkout, `import kontra` resolves from the editable install, or from `PYTHONPATH=sdk/python:runtime/python` — one entry per package: `actorkit` (the author surface), `internals` (the runtime) and the generated `kontra.v1` stubs. There is no repo-root shim any more; the package directory is named after the package, so nothing has to point at it.
 
 ## 1. Write the actor
 
@@ -89,7 +89,7 @@ The handler serves its `{name}-{version}` queue and auto-registers the Nexus end
 Manual registration (the catalog, which IS the schema gate), from the repo root:
 
 ```sh
-PYTHONPATH=sdk/python:runtime/python:sdk/python/_gen .venv/bin/python -c \
+PYTHONPATH=sdk/python:runtime/python .venv/bin/python -c \
   "from internals.loader import load_actor; from internals.catalog import operations_of, register_actor_catalog; \
    l = load_actor('python/beacon'); \
    print(register_actor_catalog('http://localhost:8088', l.manifest, operations_of(l.registry)))"

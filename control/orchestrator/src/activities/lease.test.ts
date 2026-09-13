@@ -126,7 +126,7 @@ describe('holdFleetLease', () => {
     );
     expect(a.workflowId).toBe(leaseWorkflowId(fqn));
     expect(a.lease).toBe('run-a#1');
-    // ALONE. `actorkit.fleet` branches on this to decide whether its own failure may tear the
+    // ALONE. `kontra.fleet` branches on this to decide whether its own failure may tear the
     // Fleet down, so the count is a contract and not a decoration.
     expect(a.leases).toBe(1);
     expect(a.expiresAt).toBeGreaterThan(Date.now());

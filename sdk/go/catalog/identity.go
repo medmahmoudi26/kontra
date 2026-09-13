@@ -1,4 +1,4 @@
-// Package catalog is the Go CALLER's side — the peer of Python's `actorkit.catalog`.
+// Package catalog is the Go CALLER's side — the peer of Python's `kontra.catalog`.
 //
 // Everything in `lib/kontra` is the CALLEE: you write an Actor, register Methods, call Serve().
 // This package is the other half. It lets you write a plain Temporal workflow in Go and drive
@@ -53,7 +53,7 @@ const (
 )
 
 // DatasetQueue is where the orchestrator serves dataset paging. Mirrors
-// control/orchestrator/src/queues.ts and sdk/python/actorkit/catalog.py.
+// control/orchestrator/src/queues.ts and sdk/python/kontra/catalog.py.
 const DatasetQueue = "kontra-datasets"
 
 // SharedQueue is the actor's own task queue, where its handler serves the workflow and the blob

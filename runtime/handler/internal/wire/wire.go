@@ -40,4 +40,8 @@ type EntryInput struct {
 	Method string `json:"method"`
 	// Which Session this dispatch belongs to (ADR 0023 §6). "" = no scope was opened.
 	SessionID string `json:"session_id"`
+	// How long a Unit may go silent before Temporal calls the attempt dead, in seconds.
+	// 0 = the production default (see `runActivityOptions`). Carried in the INPUT rather than read
+	// from the environment because it is consumed by WORKFLOW code, which must replay identically.
+	DebugHeartbeatSeconds int32 `json:"debug_heartbeat_seconds,omitempty"`
 }

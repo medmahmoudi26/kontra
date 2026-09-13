@@ -85,6 +85,53 @@ func KontraSessionTag(actor, version string) string {
 // workflowSessionTag`.
 func KontraWorkflowTag(name string) string { return "workflow:" + name }
 
+// KontraWatchTag is the `@kontra` value an OPERATOR writes to offer a session of their own to the
+// wall — ADR 0043, and `panels/tmux.ts:watchSessionTag`.
+//
+// The two above are kontra's; this is the third kind and the only one a human types. What it
+// asserts is the ADR's rule, and tagging IS the assertion: the panes hold nothing that exists only
+// there. A Worker's pane satisfies that (the Run is in Temporal, the rows are in the lake) and so
+// does a Machine's (machine.ts puts journals in panes, and journald is the record). An interactive
+// session — an agent, a REPL, a debugger — does not, and the supported way to watch one is to
+// supervise it and tail its journal.
+func KontraWatchTag(label string) string { return "watch:" + label }
+
+// SessionKinds is the closed set of kinds a `@kontra` tag may claim — `panels/tmux.ts:
+// SESSION_KINDS`, and the discovery side refuses a tag whose kind is not in it.
+//
+// BEFORE ADR 0043 THERE WAS NO VOCABULARY. `isKontraSession` admitted any non-empty value, so one
+// `tmux set-option` put a session holding anything at all onto the wall, while the grammar that
+// would have refused it (`SAFE.command`, which admits only a journal) ran on the converge path and
+// nowhere else. kontra controlled tightly what it CREATED and admitted whatever it FOUND.
+//
+// A closed set rather than a pattern, because adding a kind should be a decision. Pinned against
+// the TypeScript side by shared/conformance/queues.json §session_kind.
+var SessionKinds = []string{"actor", "workflow", "watch"}
+
+// SessionKind is the part of a tag before the first `:` — `panels/tmux.ts:kontraSessionKind`.
+// Empty for an untagged session.
+func SessionKind(tag string) string {
+	if i := strings.Index(tag, ":"); i >= 0 {
+		return tag[:i]
+	}
+	return tag
+}
+
+// IsKnownSessionKind reports whether a tag claims a kind this build knows. An untagged session is
+// NOT a known kind: it is admitted, if at all, by the legacy `kontra-` name prefix and never by this.
+func IsKnownSessionKind(tag string) bool {
+	if tag == "" {
+		return false
+	}
+	kind := SessionKind(tag)
+	for _, k := range SessionKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
 // Available reports whether tmux is on PATH.
 func Available() bool {
 	_, err := exec.LookPath("tmux")

@@ -478,7 +478,7 @@ describe('the teardown the last drop fires', () => {
     // The **Lease** workflow outlives the Run that provisioned, so the last holder out is very often not the one
     // that paid. A teardown against the control plane's default name when the Fleet was brought up
     // under `do-prod` fails to resolve and leaves Droplets billing — strictly worse than a failed
-    // provision, which is why `actorkit.fleet` already carried this on the destroy.
+    // provision, which is why `kontra.fleet` already carried this on the destroy.
     const rec = fresh();
     const fqn = nextFqn();
     const queue = nextQueue();

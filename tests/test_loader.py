@@ -27,7 +27,7 @@ def test_manifest_name_mismatch_fails(tmp_path):
     actor_dir = tmp_path / "demo"
     actor_dir.mkdir()
     (actor_dir / "actor.py").write_text(
-        "from actorkit import actor\n"
+        "from kontra import actor\n"
         "@actor.load\n"
         "async def load(self): ...\n"
         "@actor.method\n"
@@ -48,12 +48,13 @@ def test_a_dev_checkout_imports_the_same_file_a_wheel_ships():
 
     The seam directory is now `sdk/python/` and the package inside it is named after itself, so the
     shadowing is gone and so is the copy. What is left to guard is that it stays gone: a dev
-    checkout must import THE file a wheel contains, at `sdk/python/actorkit/__init__.py`, and there
+    checkout must import THE file a wheel contains, at `sdk/python/kontra/__init__.py`, and there
     must be no second module anywhere claiming the name."""
-    import actorkit
+    import kontra
 
     root = Path(__file__).resolve().parent.parent
-    pkg = root / "sdk" / "python" / "actorkit"
-    assert [Path(p).resolve() for p in actorkit.__path__] == [pkg.resolve()]
-    assert Path(actorkit.__file__).resolve() == (pkg / "__init__.py").resolve()
-    assert not (root / "actorkit").exists(), "the seam directory came back and will shadow the name"
+    pkg = root / "sdk" / "python" / "kontra"
+    assert [Path(p).resolve() for p in kontra.__path__] == [pkg.resolve()]
+    assert Path(kontra.__file__).resolve() == (pkg / "__init__.py").resolve()
+    assert not (root / "kontra").exists(), "a `kontra/` at the repo root would shadow the package"
+    assert not (root / "actorkit").exists(), "the seam directory came back and will shadow the alias"

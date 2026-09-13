@@ -1,7 +1,7 @@
 """The caller-side SDK: the wire shape it sends, and the identity strings it routes on.
 
 Everything here is pure — no Temporal, no server. That is deliberate: the parts of
-`actorkit.catalog` that can silently do the wrong thing are the derived strings (a queue or
+`kontra.catalog` that can silently do the wrong thing are the derived strings (a queue or
 endpoint nobody serves, which just hangs) and the EntryInput field set (a key the handler never
 reads, which runs the batch with the wrong id and looks fine). Both are testable with no
 infrastructure, and both are where a drift has no loud failure mode.
@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from actorkit import catalog
+from kontra import catalog
 
 # ---------------------------------------------------------------------------------------------
 # Identity. The queue, session-queue and endpoint derivations that used to be pinned here by a
@@ -44,7 +44,7 @@ def test_the_service_contract_matches_the_handler_literals():
     between them: the Go side generates its service from actor_service.proto, this class is
     hand-written. Two literals, four writers (Go, TS, this, and identity.go's endpoint).
     """
-    from actorkit.contract import SERVICE_NAME, KontraActorService
+    from kontra.contract import SERVICE_NAME, KontraActorService
 
     assert SERVICE_NAME == catalog.SERVICE_NAME == "kontra.actor"
     assert KontraActorService.run.name == catalog.RUN_OPERATION == "run"
@@ -54,7 +54,7 @@ def test_the_contract_payload_types_stay_dicts_at_runtime():
     """TypedDict, not dataclass, and that is a wire decision rather than a style one: a
     dataclass would serialize `params: null` where interpreter.ts omits the key, and two
     callers must not put different bytes on one contract."""
-    from actorkit.contract import BareRef, EntryInput
+    from kontra.contract import BareRef, EntryInput
 
     entry = catalog.entry_input([1], run_id="r", node_id="n")
     assert isinstance(entry, dict)
@@ -69,7 +69,7 @@ def test_the_contract_type_is_exactly_the_proto_field_set():
     no caller can name without a type error; a TypedDict field the proto lacks is a key the
     handler never reads, which runs the batch with a zero-valued id and looks fine.
     """
-    from actorkit.contract import EntryInput
+    from kontra.contract import EntryInput
     from kontra.v1 import entry_pb2
 
     fields = {f.name for f in entry_pb2.EntryInput.DESCRIPTOR.fields}
@@ -242,7 +242,7 @@ def test_the_machine_the_handler_stamps_is_the_key_the_batch_reads():
     assert 'result["machine"]' in src("runtime", "handler", "workflow.go")
     assert 'ref.Meta["machine"]' in src("runtime", "handler", "workflow.go")
     # …which is the key both callers' Batch reads back.
-    assert 'meta.get("machine")' in src("sdk", "python", "actorkit", "catalog.py")
+    assert 'meta.get("machine")' in src("sdk", "python", "kontra", "catalog.py")
     assert 'ref.Meta["machine"]' in src("sdk", "go", "catalog", "workflows.go")
 
 
@@ -1055,7 +1055,7 @@ def test_an_unknown_method_rides_to_a_polled_queue_and_is_rejected_there(monkeyp
 
     # The callee half, where the rejection actually happens — an unknown name raises rather than
     # resolving to whichever Method was declared first.
-    from actorkit import ActorRegistry
+    from kontra import ActorRegistry
 
     with pytest.raises(TypeError):
         ActorRegistry().resolve_method("not_a_real_method")

@@ -1,379 +1,209 @@
 /**
- * Storage maintenance for the lake: within-dispatch compaction, snapshot expiry, file
- * cleanup and `units/` lifecycle (plan §2, delivery stage 6).
+ * LAKE MAINTENANCE — the two thirds of it that expiry is not.
  *
- * THE ONE RULE THAT IS NOT NEGOTIABLE: never merge files across dispatches.
+ * `data/retention.ts` already owns EXPIRY: untagged Datasets past their TTL, swept on a schedule
+ * armed at every boot, dry-run by default. It is careful, it has an incident behind it, and this
+ * file does not touch it.
  *
- * Exact-dispatch presigned URLs are object-level authorization (see `explore.ts`). A
- * compaction pass that merged dispatch A's rows into the same Parquet file as dispatch B
- * would silently convert every "scoped to A" URL into a cross-dispatch disclosure — with no
- * error, no log line, and no way to notice until someone read data they should not have.
+ * What kontra has never had is the other two, and their absence is silent by construction:
  *
- * That exclusivity is a property of the LAYOUT, not of any call here: output is partitioned
- * by `(version, dt)`, and `dt` is the dispatch time to the SECOND, so every Parquet file
- * lives under exactly one `version=<v>/dt=<dispatch>/` directory. {@link compactTable}
- * re-checks it after every pass rather than assuming it, because the day it stops holding is
- * the day every exact-dispatch presigned URL becomes unsound.
+ *   COMPACTION       a Run that appends in small batches leaves a table made of small files, and
+ *                    every later query pays for it — forever, because nothing ever merges them.
+ *                    Nothing reports this; the table simply reads slower than it should.
+ *   ORPHAN CLEANUP   a failed or superseded write leaves data files no snapshot references. No
+ *                    query can reach them and no expiry removes them; storage grows and the bill
+ *                    with it.
  *
- * Everything is BOUNDED. A maintenance pass that tries to rewrite a whole lake in one go
- * on a 4 GB host is an outage, not housekeeping: files per pass, bytes touched and peak
- * spill are all capped, and every pass reports what it actually did so a silent no-op is
- * distinguishable from a silent truncation.
+ * ── THE ASYMMETRY THAT SHAPES THIS FILE ─────────────────────────────────────────────────────────
+ *
+ * DuckLake gives three of the four operations a `dry_run` parameter and **compaction none**:
+ *
+ *   ducklake_expire_snapshots(catalog, dry_run, versions, older_than)        dry_run ✓
+ *   ducklake_delete_orphaned_files(catalog, dry_run, cleanup_all, older_than) dry_run ✓
+ *   ducklake_cleanup_old_files(catalog, dry_run, cleanup_all, older_than)     dry_run ✓
+ *   ducklake_merge_adjacent_files(catalog, …, min_file_size)                  dry_run ✗
+ *
+ * So a dry run cannot mean one thing across all four. For the three it means "tell DuckLake not to
+ * act"; for compaction there is no such switch, and pretending otherwise would be a preview that
+ * silently rewrote the lake. A compaction preview therefore COUNTS the small files it would merge
+ * and calls nothing — which is honest, and is stated in the result rather than left to be assumed.
  */
 
-import type { ObjectStore } from '../codec/objectStore';
-import { LAKE, META, OUTPUT_SCHEMA, lakeConnection, resolveLakeConfig, type LakeConfig } from './parquet';
+import type { DuckDBConnection } from '@duckdb/node-api';
 
-/** Files rewritten per compaction pass. Small on purpose — see the bounding note above. */
-export const DEFAULT_MAX_FILES_PER_PASS = 10;
+/** The three operations this module performs. Expiry is `data/retention.ts`'s and is not here. */
+export type MaintenanceOp = 'compact' | 'orphans' | 'snapshots';
 
-/** Target compacted file size. DuckLake's own guidance, and what the acceptance bar uses. */
-export const TARGET_FILE_BYTES = 128 * 1024 * 1024;
-
-/** A file at or above this size is already "large enough" for the 80%-of-bytes criterion. */
-export const LARGE_FILE_BYTES = 32 * 1024 * 1024;
-
-/** Default retention for raw per-unit objects under `units/`. */
-export const DEFAULT_UNITS_RETENTION_DAYS = 90;
-
-/** What one compaction pass did to one dispatch partition. */
-export interface PartitionReport {
-  /** `version=<v>/dt=<dispatch>` — the dispatch whose files were compacted. */
-  dispatch: string;
-  filesBefore: number;
-  filesAfter: number;
-  bytesBefore: number;
-  bytesAfter: number;
+export interface MaintenanceOptions {
+  /** Which operations to run. Empty runs nothing — a caller must choose. */
+  ops: readonly MaintenanceOp[];
+  /**
+   * Report without changing anything. THE DEFAULT, and deliberately: every operation here deletes
+   * or rewrites files, and this repo's retention sweep already defaults to a preview for the same
+   * reason.
+   */
+  dryRun?: boolean;
+  /**
+   * Only touch things older than this. Guards against racing a live write — an orphan that is
+   * "orphaned" because its commit has not landed yet is not an orphan.
+   */
+  olderThan?: Date;
 }
 
-export interface CompactionReport {
-  table: string;
-  partitions: PartitionReport[];
-  filesBefore: number;
-  filesAfter: number;
-  bytesBefore: number;
-  bytesAfter: number;
-  /** Set when nothing was done, explaining WHY — a no-op must never look like a success. */
-  skipped?: string;
+export interface MaintenanceResult {
+  op: MaintenanceOp;
+  dryRun: boolean;
+  /** How many things the operation affected, or would affect. */
+  count: number;
+  /**
+   * True when `dryRun` was asked for and the operation CANNOT simulate — compaction. The count is
+   * then an estimate of what a real run would touch, and nothing was called.
+   */
+  estimated?: boolean;
+  detail: string;
+}
+
+/** Anything older than this is fair game by default: a full day behind the newest write. */
+const DEFAULT_OLDER_THAN_MS = 24 * 60 * 60 * 1000;
+
+function olderThanSql(when: Date | undefined): string {
+  const at = when ?? new Date(Date.now() - DEFAULT_OLDER_THAN_MS);
+  return `TIMESTAMPTZ '${at.toISOString()}'`;
 }
 
 /**
- * File-size distribution for one run partition — the measurement behind the acceptance
- * criterion "for partitions >= 64 MB, at least 80% of bytes sit in files >= 32 MB".
- */
-export interface PartitionSizes {
-  files: number;
-  bytes: number;
-  largeFiles: number;
-  largeBytes: number;
-  /** Fraction of bytes in files >= {@link LARGE_FILE_BYTES}; 1 when the partition is empty. */
-  largeByteFraction: number;
-}
-
-function sqlLiteral(v: string): string {
-  return v.replace(/'/g, "''");
-}
-
-/** One data file DuckLake currently holds, and the dispatch it belongs to. */
-interface DataFile {
-  path: string;
-  bytes: number;
-  /** `version=<v>/dt=<dispatch>` derived from the file path — the exclusivity unit. */
-  dispatch: string | null;
-}
-
-/**
- * The dispatch a file belongs to, read from its PATH.
+ * Run the requested maintenance against an attached lake.
  *
- * The path is authoritative — it is what presigning re-roots and hands out — and it is the
- * one place both partition columns appear together. DuckLake stores one
- * `ducklake_file_partition_value` row PER partition column, so a two-column partition would
- * need pivoting to reassemble; the path already has `version=…/dt=…` intact.
+ * `catalog` is the ATTACH alias, not a path — every DuckLake function here takes the alias.
+ *
+ * NOT AN AUTHORIZATION BOUNDARY. This deletes and rewrites files in whatever lake the connection
+ * is attached to, on behalf of whoever asked. The caller MUST have established that they may — the
+ * convention is stated here because a function that mutates on behalf of an identity it did not
+ * check is safe exactly until somebody calls it from somewhere new.
  */
-export function dispatchOfPath(path: string): string | null {
-  const m = /(?:^|\/)(version=[^/]+\/dt=[^/]+)\//.exec(path);
-  return m ? m[1]! : null;
-}
+export async function runMaintenance(
+  conn: DuckDBConnection,
+  catalog: string,
+  opts: MaintenanceOptions
+): Promise<MaintenanceResult[]> {
+  const dryRun = opts.dryRun ?? true;
+  const out: MaintenanceResult[] = [];
 
-/** Live data files for a table, optionally narrowed to one dispatch (`version=…/dt=…`). */
-async function dataFiles(
-  conn: Awaited<ReturnType<typeof lakeConnection>>,
-  metaSchema: string,
-  tbl: string,
-  dispatch?: string
-): Promise<DataFile[]> {
-  const res = await conn.runAndReadAll(
-    `SELECT DISTINCT df.path, df.file_size_bytes
-       FROM ${META}.${metaSchema}.ducklake_data_file df
-       JOIN ${META}.${metaSchema}.ducklake_table t ON t.table_id = df.table_id
-       JOIN ${META}.${metaSchema}.ducklake_schema sc
-         ON sc.schema_id = t.schema_id AND sc.schema_name = '${OUTPUT_SCHEMA}'
-      WHERE t.table_name = '${sqlLiteral(tbl)}' AND t.end_snapshot IS NULL
-        AND df.end_snapshot IS NULL`
-  );
-  const files = res.getRows().map((r) => ({
-    path: String(r[0]),
-    bytes: Number(r[1] ?? 0),
-    dispatch: dispatchOfPath(String(r[0])),
-  }));
-  return dispatch === undefined ? files : files.filter((f) => f.dispatch === dispatch);
-}
-
-export function summarizeSizes(files: Array<{ bytes: number }>): PartitionSizes {
-  const bytes = files.reduce((n, f) => n + f.bytes, 0);
-  const large = files.filter((f) => f.bytes >= LARGE_FILE_BYTES);
-  const largeBytes = large.reduce((n, f) => n + f.bytes, 0);
-  return {
-    files: files.length,
-    bytes,
-    largeFiles: large.length,
-    largeBytes,
-    largeByteFraction: bytes === 0 ? 1 : largeBytes / bytes,
-  };
-}
-
-/** File-size distribution for one run partition, without changing anything. */
-export async function partitionSizes(
-  store: ObjectStore,
-  sel: { table: string; dispatch: string },
-  override: Partial<LakeConfig> = {}
-): Promise<PartitionSizes> {
-  const cfg = resolveLakeConfig(store, override);
-  const conn = await lakeConnection(store, cfg);
-  return summarizeSizes(await dataFiles(conn, cfg.metaSchema, sel.table, sel.dispatch));
-}
-
-/** Group files by their dispatch (`version=…/dt=…`). */
-function byDispatch(files: DataFile[]): Map<string, DataFile[]> {
-  const out = new Map<string, DataFile[]>();
-  for (const f of files) {
-    const key = f.dispatch ?? '';
-    const cur = out.get(key) ?? [];
-    cur.push(f);
-    out.set(key, cur);
+  for (const op of opts.ops) {
+    switch (op) {
+      case 'compact':
+        out.push(await compact(conn, catalog, dryRun));
+        break;
+      case 'orphans':
+        out.push(await orphans(conn, catalog, dryRun, opts.olderThan));
+        break;
+      case 'snapshots':
+        out.push(await snapshots(conn, catalog, dryRun, opts.olderThan));
+        break;
+    }
   }
   return out;
 }
 
+async function rows(conn: DuckDBConnection, sql: string): Promise<Record<string, unknown>[]> {
+  const reader = await conn.runAndReadAll(sql);
+  return reader.getRowObjects() as Record<string, unknown>[];
+}
+
 /**
- * Compact one table's data files.
+ * COMPACTION, and the one operation with no dry run.
  *
- * WHAT THIS ACTUALLY DOES, precisely — because the safety argument depends on it:
- * DuckLake's `ducklake_merge_adjacent_files` merges ADJACENT files WITHIN each partition,
- * across the whole table. It is not scoped to a single run, and there is no DuckLake API
- * that is. Run exclusivity is therefore NOT a property of this call — it is a property of
- * the LAYOUT: output is partitioned by `(version, dt)` and `dt` is dispatch-unique to the
- * second, so every data file lives under exactly one `version=…/dt=…/` directory and a
- * merge has nothing cross-dispatch to merge.
- *
- * Because that invariant is what makes exact-run presigned URLs an authorization boundary,
- * it is CHECKED AT RUNTIME after every pass rather than trusted. A file that came back
- * without a partition value would mean the layout assumption had silently stopped holding,
- * and every presigned URL issued afterwards would be unsound.
- *
- * `maxFiles` bounds what a pass is willing to START on, and `truncated` on each partition
- * report says when work was left behind — silent truncation reads as "covered everything".
+ * A preview counts the files a real call would merge and CALLS NOTHING. The count comes from ONE
+ * query — never a count and a sum from two — because these tables are live: a lake being appended
+ * to between two reads gives a number that was never true at any instant.
  */
-export async function compactTable(
-  store: ObjectStore,
-  sel: { table: string; maxFiles?: number },
-  override: Partial<LakeConfig> = {}
-): Promise<CompactionReport> {
-  const cfg = resolveLakeConfig(store, override);
-  const conn = await lakeConnection(store, cfg);
-  const maxFiles = sel.maxFiles ?? DEFAULT_MAX_FILES_PER_PASS;
-
-  const before = await dataFiles(conn, cfg.metaSchema, sel.table);
-  assertDispatchExclusive(before, sel.table, 'before');
-  const beforeByDispatch = byDispatch(before);
-
-  const totals = (files: DataFile[]) => ({
-    filesBefore: files.length,
-    bytesBefore: files.reduce((n, f) => n + f.bytes, 0),
-  });
-  const base: CompactionReport = {
-    table: sel.table,
-    partitions: [],
-    ...totals(before),
-    filesAfter: before.length,
-    bytesAfter: before.reduce((n, f) => n + f.bytes, 0),
-  };
-
-  // Only small files are worth rewriting; a file already at target size would be rewritten
-  // for no gain and at full I/O cost.
-  const mergeable = [...beforeByDispatch.values()].filter(
-    (files) => files.filter((f) => f.bytes < TARGET_FILE_BYTES).length >= 2
-  );
-  if (mergeable.length === 0) {
-    return { ...base, skipped: 'no partition has two or more files below the target size' };
-  }
-  if (mergeable.some((files) => files.length > maxFiles)) {
+async function compact(conn: DuckDBConnection, catalog: string, dryRun: boolean): Promise<MaintenanceResult> {
+  if (dryRun) {
+    // ONE QUERY, over the PUBLIC `ducklake_table_info` — not the internal
+    // `__ducklake_metadata_<alias>` tables, which are an implementation detail and whose schema is
+    // DuckLake's to change. A count and a sum taken separately would also be two reads of a lake
+    // something may be appending to, giving a pair of numbers that was never true together.
+    //
+    // A table with MORE THAN ONE file is what `ducklake_merge_adjacent_files` can act on; a table
+    // with one file has no adjacent files to merge, whatever their size.
+    const [r] = await rows(
+      conn,
+      `SELECT count(*) FILTER (WHERE file_count > 1)::BIGINT AS tables,
+              coalesce(sum(file_count) FILTER (WHERE file_count > 1), 0)::BIGINT AS files,
+              coalesce(sum(file_size_bytes) FILTER (WHERE file_count > 1), 0)::BIGINT AS bytes
+         FROM ducklake_table_info('${escapeLiteral(catalog)}')`
+    );
+    const files = Number(r?.files ?? 0);
     return {
-      ...base,
-      skipped: `a partition holds more than maxFiles=${maxFiles} files; raise the cap deliberately rather than rewriting an unbounded set in one pass`,
+      op: 'compact',
+      dryRun: true,
+      estimated: true,
+      count: files,
+      detail:
+        `${files} file(s) across ${Number(r?.tables ?? 0)} table(s) are candidates ` +
+        `(${Number(r?.bytes ?? 0)} bytes). DuckLake's merge has no dry run, so nothing was called.`,
     };
   }
+  const merged = await rows(
+    conn,
+    `CALL ducklake_merge_adjacent_files('${escapeLiteral(catalog)}')`
+  );
+  return { op: 'compact', dryRun: false, count: merged.length, detail: `merged ${merged.length} group(s)` };
+}
 
-  await conn.run('BEGIN TRANSACTION');
-  try {
-    // schema := is load-bearing: output tables live in `lake.output.<actor>`, and without it
-    // DuckLake resolves against `main` and throws "table does not exist". datasets.ts's
-    // ducklake_list_files call passes it the same way.
-    await conn.run(
-      `CALL ducklake_merge_adjacent_files('${LAKE}', '${sqlLiteral(sel.table)}', schema := '${OUTPUT_SCHEMA}')`
-    );
-    await conn.run('COMMIT');
-  } catch (err) {
-    await conn.run('ROLLBACK').catch(() => undefined);
-    throw err;
-  }
-
-  const after = await dataFiles(conn, cfg.metaSchema, sel.table);
-  // The post-condition. If this ever fires, presigned exact-dispatch URLs must be considered
-  // unsound until it is explained — hence a throw, not a warning.
-  assertDispatchExclusive(after, sel.table, 'after');
-  const afterByDispatch = byDispatch(after);
-
-  const partitions: PartitionReport[] = [];
-  for (const [dispatch, files] of beforeByDispatch) {
-    const now = afterByDispatch.get(dispatch) ?? [];
-    partitions.push({
-      dispatch,
-      filesBefore: files.length,
-      filesAfter: now.length,
-      bytesBefore: files.reduce((n, f) => n + f.bytes, 0),
-      bytesAfter: now.reduce((n, f) => n + f.bytes, 0),
-    });
-  }
-  partitions.sort((a, b) => a.dispatch.localeCompare(b.dispatch));
-
+/** ORPHANED FILES — referenced by no snapshot, reachable by no query, removed by no expiry. */
+async function orphans(
+  conn: DuckDBConnection,
+  catalog: string,
+  dryRun: boolean,
+  olderThan: Date | undefined
+): Promise<MaintenanceResult> {
+  // `cleanup_all` is deliberately NOT passed. It ignores `older_than`, which is the guard against
+  // deleting a file whose commit simply has not landed yet.
+  const found = await rows(
+    conn,
+    `CALL ducklake_delete_orphaned_files('${escapeLiteral(catalog)}', dry_run => ${dryRun},` +
+      ` older_than => ${olderThanSql(olderThan)})`
+  );
   return {
-    ...base,
-    partitions,
-    filesAfter: after.length,
-    bytesAfter: after.reduce((n, f) => n + f.bytes, 0),
+    op: 'orphans',
+    dryRun,
+    count: found.length,
+    detail: dryRun
+      ? `${found.length} orphaned file(s) would be deleted`
+      : `${found.length} orphaned file(s) deleted`,
   };
 }
 
-/**
- * Every live data file must belong to exactly one dispatch (`version=…/dt=…`). Violating
- * this would mean a single Parquet object contained more than one dispatch, which would make
- * every exact-dispatch presigned URL a cross-dispatch disclosure.
- */
-function assertDispatchExclusive(files: DataFile[], tbl: string, when: string): void {
-  const orphans = files.filter((f) => f.dispatch === null || f.dispatch === '');
-  if (orphans.length > 0) {
-    throw new Error(
-      `dispatch-exclusivity violated ${when} compacting ${tbl}: ${orphans.length} data file(s) carry no ` +
-        `version=/dt= partition (${orphans[0]!.path}). Exact-dispatch presigned URLs are unsound until this is explained.`
-    );
-  }
-}
-
-export interface ExpiryReport {
-  /** Snapshots older than the cutoff that were expired. */
-  snapshotsExpired: number;
-  /** Data files the cleanup then physically removed. */
-  filesDeleted: number;
-}
-
-/**
- * Expire snapshots older than `olderThanMs` and delete the files that expiry orphaned.
- *
- * TWO STEPS, IN THIS ORDER, ALWAYS. Snapshot expiry only SCHEDULES files for deletion;
- * `ducklake_cleanup_old_files` is what removes them. Running cleanup without expiry
- * deletes nothing; deleting objects out-of-band without either one removes files the
- * catalog still references, which turns a readable lake into one that errors on every
- * query touching the missing file.
- */
-export async function expireSnapshots(
-  store: ObjectStore,
-  olderThanMs: number,
-  override: Partial<LakeConfig> = {}
-): Promise<ExpiryReport> {
-  const cfg = resolveLakeConfig(store, override);
-  const conn = await lakeConnection(store, cfg);
-  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-
-  const beforeSnaps = await conn.runAndReadAll(
-    `SELECT count(*) FROM ${META}.${cfg.metaSchema}.ducklake_snapshot`
+/** OLD SNAPSHOTS — the metadata versions time travel can reach. Expiring them is what lets the
+ *  orphan sweep above see their files as unreferenced at all. */
+async function snapshots(
+  conn: DuckDBConnection,
+  catalog: string,
+  dryRun: boolean,
+  olderThan: Date | undefined
+): Promise<MaintenanceResult> {
+  const expired = await rows(
+    conn,
+    `CALL ducklake_expire_snapshots('${escapeLiteral(catalog)}', dry_run => ${dryRun},` +
+      ` older_than => ${olderThanSql(olderThan)})`
   );
-  await conn.run(
-    `CALL ducklake_expire_snapshots('${LAKE}', older_than => TIMESTAMP '${sqlLiteral(cutoff)}')`
-  );
-  const afterSnaps = await conn.runAndReadAll(
-    `SELECT count(*) FROM ${META}.${cfg.metaSchema}.ducklake_snapshot`
-  );
-  const deleted = await conn.runAndReadAll(
-    `CALL ducklake_cleanup_old_files('${LAKE}', cleanup_all => true)`
-  );
-
   return {
-    snapshotsExpired: Number(beforeSnaps.getRows()[0]?.[0] ?? 0) - Number(afterSnaps.getRows()[0]?.[0] ?? 0),
-    filesDeleted: deleted.getRows().length,
+    op: 'snapshots',
+    dryRun,
+    count: expired.length,
+    detail: dryRun
+      ? `${expired.length} snapshot(s) would be expired`
+      : `${expired.length} snapshot(s) expired`,
   };
 }
 
-export interface UnitsSweepReport {
-  scanned: number;
-  deleted: number;
-  /** Keys that were kept because their run is still referenced. */
-  retained: number;
-  dryRun: boolean;
+/** A catalog alias inside a quoted identifier. */
+function quoteIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
 }
 
-/**
- * Age out raw per-unit objects under `units/`.
- *
- * `cas/` IS NEVER TOUCHED BY AGE. Content-addressed objects are deduplicated across runs,
- * so "this blob is 90 days old" says nothing about whether a live run still points at it;
- * deleting by age there would break runs that share a hash with an old one. CAS reclamation
- * needs run-record mark-and-sweep, which is a different operation with a different input.
- *
- * Defaults to a DRY RUN. A sweep that deletes on its first invocation is one typo away
- * from removing a run's raw evidence, and the report is what makes the blast radius
- * inspectable before it happens.
- */
-export async function sweepUnits(
-  store: ObjectStore,
-  opts: { retentionDays?: number; dryRun?: boolean; keepRuns?: ReadonlySet<string> } = {}
-): Promise<UnitsSweepReport> {
-  const retentionDays = opts.retentionDays ?? DEFAULT_UNITS_RETENTION_DAYS;
-  const dryRun = opts.dryRun ?? true;
-  const keep = opts.keepRuns ?? new Set<string>();
-  const cutoff = Date.now() - retentionDays * 24 * 3_600_000;
-
-  const objects = await store.list('units/');
-  let deleted = 0;
-  let retained = 0;
-  for (const o of objects) {
-    const runId = runIdOfUnitKey(o.key);
-    if (runId && keep.has(runId)) {
-      retained += 1;
-      continue;
-    }
-    // No mtime means the backing store did not report one; refuse to guess. Deleting an
-    // object whose age is unknown is exactly the mistake this sweep exists to avoid.
-    if (!o.lastModified || o.lastModified.getTime() >= cutoff) {
-      retained += 1;
-      continue;
-    }
-    if (!dryRun) await store.delete(o.key);
-    deleted += 1;
-  }
-  return { scanned: objects.length, deleted, retained, dryRun };
-}
-
-/**
- * The run id embedded in a unit-blob key, for both layouts:
- *   hive   — `units/run=<id>/dt=…/actor=…/shard=…/unit=…/<sha>.json`
- *   legacy — `units/<id>/<node>/u<i>.json`
- * Returns null when the key matches neither, so an unrecognised key is never swept by
- * accident.
- */
-export function runIdOfUnitKey(key: string): string | null {
-  const hive = /(?:^|\/)units\/run=([^/]+)\//.exec(key);
-  if (hive) return hive[1]!;
-  const legacy = /(?:^|\/)units\/([^/=]+)\//.exec(key);
-  return legacy ? legacy[1]! : null;
+/** A catalog alias inside a single-quoted SQL literal. */
+function escapeLiteral(name: string): string {
+  return name.replace(/'/g, "''");
 }

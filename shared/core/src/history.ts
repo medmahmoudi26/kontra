@@ -109,8 +109,31 @@ export interface RunEvent {
 /** What {@link mapHistory} answers with. */
 export interface RunHistory {
   events: RunEvent[];
-  /** How many raw events were read. Larger than `events.length` when the middle was elided. */
+  /** How many raw events were READ. Larger than `events.length` when the middle was elided, and
+   *  BOUNDED BY THE READER'S CAP — see {@link RunHistory.historyLength}, which is not. */
   scanned: number;
+  /**
+   * How many events the history ACTUALLY has, as the server counts them.
+   *
+   * `scanned` IS NOT THIS, AND THE DIFFERENCE COST A NUMBER THAT WAS WRONG BY UP TO 61%. The reader
+   * stops after `HISTORY_MAX_PAGES × HISTORY_PAGE` = 20,000 events and sets `truncated`; `scanned`
+   * then reports what it fetched, which above that point is THE CAP AND NOT THE COUNT. Any run
+   * between 20,001 and Temporal's 51,200 ceiling is legal, completes normally, and was recorded as
+   * exactly 20,000 — a number that looks plausible and is wrong only for the largest runs, which
+   * are the ones worth the most.
+   *
+   * IT IS FREE. `DescribeWorkflowExecution` answers it in one RPC without reading a single event,
+   * so nothing here pages further to learn it.
+   *
+   * ABSENT WHERE NOBODY ASKED THE SERVER: an archived history (ADR 0025) is a recording, and a
+   * reader built from a literal has no server behind it. Absent is "not established" and must never
+   * be read as zero — `scanned` remains the honest floor.
+   */
+  historyLength?: number;
+  /** What the history WEIGHS, as the server counts it. Rides along with
+   *  {@link RunHistory.historyLength} because `describe` returns both and a byte-based meter wants
+   *  it; absent on the same terms. */
+  historySizeBytes?: number;
   /** Events dropped from the MIDDLE to stay under the cap. Never silently zero — the surface
    *  prints it, because a log with a hole nobody mentions is worse than no log. */
   elided: number;
@@ -163,9 +186,27 @@ const LINKABLE = /^(NexusOperation|ChildWorkflowExecution|StartChildWorkflowExec
  *
  * `home` is the namespace these events were READ from, and is only ever used to refuse a link (see
  * below). Omitting it links everything, which is what a test wants.
+ *
+ * `server` IS WHAT THE SERVER SAID, and it is separate from anything this function can derive.
+ * Everything else here is computed from `raw` — which is exactly why the authoritative length
+ * cannot be: the reader that produced `raw` stopped at a cap, so counting it again would produce
+ * the same wrong number by a second route. It is threaded in, or it is absent.
  */
-export function mapHistory(raw: RawHistoryEvent[], truncated = false, home = ''): RunHistory {
+export function mapHistory(
+  raw: RawHistoryEvent[],
+  truncated = false,
+  home = '',
+  server: { historyLength?: number; historySizeBytes?: number } = {}
+): RunHistory {
   const scanned = raw.length;
+  /* SPREAD, SO ABSENT STAYS ABSENT. `historyLength: undefined` and no `historyLength` at all are
+     the same to a reader in TypeScript and NOT the same over JSON — the first serialises to a key
+     that is missing anyway, but it also defeats `'historyLength' in history`, which is how a caller
+     asks whether the server was consulted. */
+  const fromServer = {
+    ...(server.historyLength === undefined ? {} : { historyLength: server.historyLength }),
+    ...(server.historySizeBytes === undefined ? {} : { historySizeBytes: server.historySizeBytes }),
+  };
   /** Event id → epoch ms, so a closing event can measure back to its opener. */
   const startedAt = new Map<number, number>();
   /** Event id → the event that opened it, so the second pass can inherit a link backwards. */
@@ -264,7 +305,7 @@ export function mapHistory(raw: RawHistoryEvent[], truncated = false, home = '')
     e.link = link;
   }
 
-  if (all.length <= EVENT_CAP) return { events: all, scanned, elided: 0, truncated };
+  if (all.length <= EVENT_CAP) return { events: all, scanned, elided: 0, truncated, ...fromServer };
   // Keep the head and the TAIL. The tail is where a live run is, and the head is what it set out
   // to do; the middle of a 20,000-event sweep is the same twenty lines repeating.
   const tail = all.slice(all.length - (EVENT_CAP - HEAD_KEEP));
@@ -273,6 +314,7 @@ export function mapHistory(raw: RawHistoryEvent[], truncated = false, home = '')
     scanned,
     elided: all.length - EVENT_CAP,
     truncated,
+    ...fromServer,
   };
 }
 
@@ -482,7 +524,7 @@ export function describe(type: string, attrs: Record<string, unknown>): string {
   if (str(attrs.timerId)) bits.push(`timerId=${str(attrs.timerId)}`);
   if (str(attrs.markerName)) bits.push(`marker=${str(attrs.markerName)}`);
   // THE NAME OF A SIGNAL IS METADATA; its payload is not. Reading the name costs no blob GET, and
-  // it is what pairs an answer with the question it answers: `sdk/python/actorkit/hitl.py` puts
+  // it is what pairs an answer with the question it answers: `sdk/python/kontra/hitl.py` puts
   // the ask's id IN the signal name (`kontra.answer/ask-1`) precisely so this line can.
   if (str(attrs.signalName)) bits.push(`signal=${str(attrs.signalName)}`);
   // A MEMO UPSERT NAMES ITS KEYS WITHOUT DECODING ITS VALUES — the fields are a map, and a map's
@@ -523,7 +565,7 @@ function keysOf(raw: unknown): string[] {
  *
  * IT IS A PAYLOAD, AND READING IT IS STILL NOT A PAYLOAD READ. The rule this module keeps is that
  * nothing here may fan out into the blob store, and a Summary cannot: the writer builds it to fit
- * 200 bytes (`SUMMARY_BUDGET` in `sdk/python/actorkit/catalog.py`), some 650× under the codec's
+ * 200 bytes (`SUMMARY_BUDGET` in `sdk/python/kontra/catalog.py`), some 650× under the codec's
  * 128 KiB offload threshold, so it is always stored inline. That bound is what makes this safe —
  * which is why the writer builds the line to fit rather than trimming it, and why the one case it
  * could not hold for is REFUSED below rather than guessed at.

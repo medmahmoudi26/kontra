@@ -16,7 +16,7 @@ import (
 // what pins every call of the scope to the process holding the loaded resource.
 //
 // Derived independently in four languages — here, python `internals.temporal.host`, the caller
-// (`actorkit.catalog.session_queue`, which closes on it) and `runtime/handler/internal/identity`
+// (`kontra.catalog.session_queue`, which closes on it) and `runtime/handler/internal/identity`
 // .SessionQueue, which dispatches onto it. runtime/handler/internal is not importable from this module
 // (a different module, and internal to handler), so the decoupling rule leaves this a
 // re-derivation and shared/conformance/queues.json §session is what holds them to one answer. Not a

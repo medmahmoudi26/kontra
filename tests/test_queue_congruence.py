@@ -16,7 +16,7 @@ until StartToClose. That is strictly worse than a mismatch that fails at activat
 nothing about it looks wrong.
 
 Two modules are asserted here and they are separate on purpose (the decoupling rule): the caller's
-`actorkit.catalog`, which dispatches, and `internals.temporal.host`, which binds. Neither may
+`kontra.catalog`, which dispatches, and `internals.temporal.host`, which binds. Neither may
 import the other, so the corpus is what makes them one contract.
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from actorkit import catalog
+from kontra import catalog
 from internals.temporal.host import session_actor_id, session_task_queue, task_queue
 
 ROOT = Path(__file__).resolve().parents[1]

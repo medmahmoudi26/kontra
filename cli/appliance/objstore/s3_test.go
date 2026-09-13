@@ -91,7 +91,7 @@ func TestGoldenBlobKeysRoundTripThroughTheSDK(t *testing.T) {
 			Expect string `json:"expect"`
 		} `json:"cases"`
 	}
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "conformance", "blobkey.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "shared", "conformance", "blobkey.json"))
 	if err != nil {
 		t.Fatalf("read the cross-SDK fixture: %v", err)
 	}

@@ -1,9 +1,18 @@
-# ══ THIS FILE IS NOT THE LOCAL DEVELOPMENT PATH ANY MORE. READ THIS BEFORE ANYTHING ELSE ═════
+# ══ WHAT THIS FILE IS NOW ════════════════════════════════════════════════════════════════════
 #
-# **To run kontra on your machine, the command is `kontra up`.** It is one process: Temporal, the
-# object store, the state store, the payload codec, the OCI registry and the orchestrator, with
-# its own data directory and no containers (ADR 0031, `cli/up.go`). Nothing in this file is
-# needed for it, and `make up` will not give you a control plane.
+# **`docker compose up -d` gives you a control plane**, and it is the SAME one `kontra up` gives
+# you: the `kontra` service below runs that binary, one process inside the container — Temporal, the
+# object store, the state store, the payload codec, the OCI registry and the orchestrator as its
+# supervised child (ADR 0031, `cli/up.go`). Docker is the supervisor instead of your shell.
+#
+# THIS HEADER USED TO SAY THE OPPOSITE, and the history is worth keeping rather than overwriting:
+# for a long stretch this file could not give you a control plane at all, because nine services had
+# left it and nothing had replaced them. What changed is not that the services came back — see the
+# blocks below, every one of which is still true — but that the appliance became something you can
+# put IN a container without disassembling it.
+#
+# `make image` cuts a release for this platform and builds the image FROM that tarball, so the
+# container and the artifact a user downloads are the same bytes.
 #
 # ── SO WHY IS THIS FILE STILL HERE ───────────────────────────────────────────────────────────
 #
@@ -44,9 +53,12 @@
 # cluster's Temporal + S3). See docs/deployment.md for the two-cluster split.
 #
 # Components:
-#   - Temporal      : NOT A SERVICE. It runs in-process inside `kontra up` (ADR 0031); see
-#                     the block where the two `temporal*` services used to be, below.
-#   - orchestrator  : ONE service left, and it is not the control plane (ADR 0031 §1) —
+#   - kontra        : THE CONTROL PLANE, as one container running `kontra up`. Everything the
+#                     "GONE" notes below describe still lives inside that binary — they moved into
+#                     the process, not out of the file's reach.
+#   - Temporal      : NOT A SERVICE OF ITS OWN. It runs in-process inside `kontra up` (ADR 0031);
+#                     see the block where the two `temporal*` services used to be, below.
+#   - orchestrator  : the infra half only — Pulumi, and not the API (ADR 0031 §1) —
 #       orchestrator-api          : GONE. The API, the SPA and the materializer role are the
 #                                   binary's supervised child now — `kontra up` hydrates the
 #                                   bundle and execs it (issue 14). See the block where the
@@ -156,6 +168,98 @@
 name: ${COMPOSE_PROJECT_NAME:-kontra-local}
 
 services:
+  # ══ THE CONTROL PLANE ══════════════════════════════════════════════════════════════════════
+  #
+  # `docker compose up -d` and you have one. This is `kontra up` with Docker as the supervisor
+  # instead of your shell — ONE PROCESS inside the container: Temporal, the object store, the state
+  # store, the payload codec, the OCI registry and the orchestrator as its supervised child.
+  #
+  # THIS IS NOT THE OLD TOPOLOGY COMING BACK, and the distinction is the whole reason it is safe to
+  # add. Nine services left this file one slice at a time and every departure fixed a bug that is
+  # written down where the service used to be — a `chown` sidecar for a root-owned volume, a one-shot
+  # that created an S3 bucket because a missing one answers `403 AccessDenied`, a dynamic-config key
+  # the server never registered. Re-splitting the appliance would reintroduce all three. Putting the
+  # appliance IN a container reintroduces none of them: inside here it is still one process writing
+  # its own files in its own directory, which is exactly what deleted those sidecars.
+  #
+  # THE IMAGE IS BUILT FROM A RELEASE TARBALL (`control/images/Dockerfile.appliance`), so the
+  # container and the thing a user downloads are the same bytes. That is what makes this path
+  # "verify our builds" rather than a second way to compile.
+  #
+  #   make image        # cut a release for this platform and build the image from it
+  #   docker compose up -d
+  #   open http://127.0.0.1:8088
+  #
+  # THE LOGIN COMES FROM `kontra init` ON THE HOST, and it is mounted read-only below. Generating it
+  # inside the container would print the one-time password into a log nobody was watching.
+  kontra:
+    image: ${KONTRA_IMAGE:-kontra:latest}
+    restart: unless-stopped
+    # EVERY PORT PUBLISHED TO `${KONTRA_BIND}`, WHICH DEFAULTS TO LOOPBACK.
+    #
+    # A published port is DNATed in PREROUTING and accepted in FORWARD — it never traverses
+    # `ufw-user-input`, so a host firewall does NOT protect it. Measured on this project's own
+    # controller: ufw active, ten ports open to the internet anyway. The publish address is the
+    # only control, which is why it is one variable used ten times and documented in `.env.example`
+    # rather than ten literals somebody can widen one at a time.
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"       # the console and the API
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_TEMPORAL_PORT:-7233}:7233"  # Temporal gRPC, for workers
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_S3_PORT:-8333}:8333"        # the object store
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_KV_PORT:-6379}:6379"        # the state store
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_CODEC_PORT:-18234}:18234"   # the payload codec
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"  # the OCI registry
+    environment:
+      # WHO MAY SIGN IN, and the console's other tokens. `kontra init` writes these into
+      # `~/.kontra/config.yaml` on the HOST and `kontra infra up` loads them into its own
+      # environment before running compose, so they arrive here without being copied by hand.
+      # Set in `.env` for a bare `docker compose up`.
+      KONTRA_CONSOLE_USERS: "${KONTRA_CONSOLE_USERS:-}"
+      KONTRA_STATE_TOKEN: "${KONTRA_STATE_TOKEN:-}"
+      KONTRA_RUN_TOKEN: "${KONTRA_RUN_TOKEN:-}"
+      KONTRA_PANEL_TOKEN: "${KONTRA_PANEL_TOKEN:-}"
+      KONTRA_EXPLORE_TOKEN: "${KONTRA_EXPLORE_TOKEN:-}"
+      # A Tenant IS a Temporal namespace. `default` exists already; a second one separates two
+      # customers' history and retention, which is a real boundary and not a label.
+      KONTRA_NAMESPACE: "${KONTRA_NAMESPACE:-default}"
+    volumes:
+      # STATE. Temporal's history, the objects, `global_state` and the lake's catalog all live here;
+      # a container recreated without this volume is a control plane that has forgotten every run.
+      - kontra-data:/var/lib/kontra/data
+      # THE OPERATOR'S OWN CODE AND CONFIG, read-only. An Actor or a workflow is a FOLDER on a disk —
+      # registering one records a path, and the path has to mean the same thing on both sides of the
+      # container boundary or every `serve` reads a directory that is not there. Mounted at the same
+      # path it has on the host for exactly that reason.
+      #
+      # READ-ONLY BECAUSE THE CONTROL PLANE NEVER WRITES YOUR CODE (ADR 0030): the console is a
+      # read-only viewer and editing a workflow is your editor plus a re-serve. The one thing under
+      # `.kontra/` it DOES write is the secret store, which is why that is mounted separately below.
+      - ${KONTRA_HOME_HOST:-~/.kontra}:${KONTRA_HOME_HOST:-~/.kontra}:ro
+      # THE SECRET STORE, writable — the one part of `.kontra/` the control plane owns. Shared with
+      # `orchestrator-infra` below so that rotating a credential and starting a Fleet uses the new
+      # value with no restart of either.
+      - ${KONTRA_HOME_HOST:-~/.kontra}/secrets:/var/lib/kontra/secrets
+    healthcheck:
+      # THE API, NOT THE PROCESS. A container that is "up" with an orchestrator child that failed to
+      # bind is a control plane reporting healthy with no control surface — which is the failure
+      # `server.ts` already awaits its own listener to avoid, said again where compose can see it.
+      #
+      # `kontra runs` AND NOT `kontra doctor`, WHICH WAS THE FIRST ANSWER AND IS A VACUOUS ONE.
+      # MEASURED in this container: `doctor --api http://127.0.0.1:9999` — nothing listening —
+      # prints a table and EXITS 0. It is a report, not an assertion, and a healthcheck built on it
+      # would have said `healthy` forever over a dead control plane. `runs` actually calls the API
+      # and exits 1 when it cannot: 1 against a dead port, 0 against a live one, both checked.
+      #
+      # There is no curl, wget or nc in a debian-slim image, and adding one to ask a question the
+      # binary already answers is a package to keep patched for no gain.
+      test: ["CMD", "kontra", "runs", "--api", "http://127.0.0.1:8088"]
+      interval: 30s
+      timeout: 10s
+      # GENEROUS, because the first boot hydrates the orchestrator bundle out of the CAS before it
+      # can serve anything. A short start period marks a healthy first run as failed.
+      start_period: 120s
+      retries: 3
+
   # ---------------------------------------------------------------------------------------
   # WHOLE-CONTROLLER MEMORY BUDGET (ADR 0017 / plan §4)
   #
@@ -695,7 +799,7 @@ services:
     # no build. Named rather than left to compose's derived `<project>-orchestrator-probe`, because a
     # second copy of the base image on a 4 GB controller is a few hundred MiB for nothing.
     image: kontra-host:1
-    command: ["python3", "-m", "actorkit.probe"]
+    command: ["python3", "-m", "kontra.probe"]
     # host.docker.internal is not a Linux default; host-gateway is what defines it. Needed by
     # every service that dials the embedded Temporal above.
     extra_hosts:
@@ -776,6 +880,11 @@ networks:
     name: kontra
 
 volumes:
+  # THE CONTROL PLANE'S STATE — Temporal history, the objects, `global_state` and the lake's
+  # catalog. A container recreated without it has forgotten every run, which is why it is a NAMED
+  # volume and not a bind: `docker compose down` leaves it alone, and removing it has to be typed.
+  kontra-data:
+
   # `registry-data` LEFT WITH THE `registry` SERVICE (ADR 0032). Actor image layers are content
   # -addressed, so they live in the appliance's shared CAS under its data directory, where `du`,
   # `tar` and `sha256sum` all work on them — not in a volume whose layout only `registry:2` knew.

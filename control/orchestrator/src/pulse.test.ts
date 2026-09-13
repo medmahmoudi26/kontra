@@ -27,7 +27,7 @@ import {
 
 const NOW = 1_800_000_000_000;
 
-/** One memo entry as `actorkit.hitl` writes it. */
+/** One memo entry as `kontra.hitl` writes it. */
 function ask(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     [`${ASK_MEMO_PREFIX}${id}`]: {

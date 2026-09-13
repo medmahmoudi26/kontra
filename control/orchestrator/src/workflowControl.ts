@@ -55,7 +55,9 @@ import {
   folderDigest,
   readManifest,
 } from './sources';
-import { getClient } from './temporalClient';
+import { TypedSearchAttributes } from '@temporalio/common';
+import { KontraTenant } from './visibility';
+import { NAMESPACE, getClient } from './temporalClient';
 import { toActorRef } from './secrets/slotRoutes';
 import { slotStore } from './secrets/slotStore';
 import type { ActorRef } from './secrets/slots';
@@ -282,6 +284,31 @@ export function resolveWorkflowFile(rel: string): string {
   need(typeof rel === 'string' && rel.trim() !== '', 'file is required');
   need(!path.isAbsolute(rel), 'file must be a name inside .kontra/workflows/');
 
+  // A REGISTERED FOLDER IS A WORKFLOW WHEREVER IT LIVES — issue #4. Registration accepts any
+  // absolute path and the Workflows list draws what it accepted, but this resolved only under the
+  // default root, so a folder registered from a checkout LISTED and then failed to open with "no
+  // such workflow in ~/.kontra/workflows". A row you can see and cannot read is worse than a row
+  // that was never offered: the operator has no way to tell which half is wrong.
+  //
+  // THE REGISTRATION IS THE AUTHORISATION. The confinement below exists to stop a caller-supplied
+  // string reaching outside a directory somebody chose; a registered path IS a directory somebody
+  // chose, deliberately, through a route of its own. So it becomes a second root rather than an
+  // exception to the first — matched by NAME (the folder IS the source's path, not a directory of
+  // workflows), and confined inside itself exactly the same way, symlinks resolved.
+  //
+  // THE DEFAULT ROOT STILL WINS. A name that resolves under `~/.kontra/workflows` resolves there
+  // and nowhere else, so nothing about the ordinary case changes and a registration cannot shadow
+  // a workflow already in the conventional place.
+  const registered = registeredFolderFor(rel);
+  if (registered !== undefined && !existsSync(path.resolve(root, rel))) {
+    const marker = path.join(registered, WORKFLOW_MARKER);
+    need(
+      existsSync(marker),
+      `${rel} has no ${WORKFLOW_MARKER} — that is what makes a folder a Workflow`
+    );
+    return confine(registered, path.join(rel, WORKFLOW_MARKER), marker);
+  }
+
   // The path this actually resolves, which is the caller's unless they typed the old flat name of
   // a workflow that has since become a folder. `rel` is still what a refusal reports, because the
   // string an operator can fix is the one they typed.
@@ -302,6 +329,52 @@ export function resolveWorkflowFile(rel: string): string {
   // what it is called. Reported as what the caller typed, which is the string they can fix.
   need(real.endsWith('.py'), `${JSON.stringify(rel)} is not a .py file`);
   return real;
+}
+
+/**
+ * The registered workflow folders, by name — installed by the server, empty until it is.
+ *
+ * A FUNCTION RATHER THAN A LIST, because registrations change while the process runs: a folder
+ * registered a second ago has to be openable a second later, and a snapshot taken at boot would
+ * make the register button work for exactly as long as nobody used it.
+ *
+ * EMPTY IS THE SAFE DEFAULT AND IT IS THE OLD BEHAVIOUR EXACTLY. Nothing here can widen the
+ * boundary on its own — a caller that never installs a provider gets a resolver confined to
+ * `~/.kontra/workflows` and nothing else, which is what this module did before the hole was found.
+ * That is also why this is not read from the database directly: `workflowControl` would then depend
+ * on the store, the store on the repo, and a module whose whole job is a path boundary would be
+ * untestable without a SQLite file.
+ */
+let registeredFolders: () => ReadonlyMap<string, string> = () => new Map();
+
+/**
+ * Teach the resolver which folders an operator has registered. Called once, from `buildServer`.
+ *
+ * IT IS A SETTER AND NOT A CONSTRUCTOR ARGUMENT because `resolveWorkflowFile` is a free function
+ * with a dozen callers inside this file, and threading a store through all of them would put the
+ * boundary's shape in every one of their signatures. `workflowRoot()` reads its root from the
+ * environment for the same reason.
+ */
+export function setRegisteredFolders(provider: () => ReadonlyMap<string, string>): void {
+  registeredFolders = provider;
+}
+
+/** The registered folder named `rel`, or `undefined`. Only an exact name matches: a registration
+ *  is one folder, so there is no path to join and nothing to walk into. */
+function registeredFolderFor(rel: string): string | undefined {
+  if (rel.includes('/') || rel.includes('\\')) return undefined;
+  let folders: ReadonlyMap<string, string>;
+  try {
+    folders = registeredFolders();
+  } catch {
+    // A provider that throws — an unreadable database, a half-open store — must not take the
+    // ordinary path down with it. The default root still resolves, which is where most workflows
+    // are, and the failure surfaces on the listing route that can actually explain it.
+    return undefined;
+  }
+  const found = folders.get(rel);
+  if (found === undefined || !isDirectory(found)) return undefined;
+  return found;
 }
 
 /**
@@ -721,6 +794,25 @@ export async function startRun(
     taskQueue: queue,
     workflowId,
     args: input.input === undefined ? [] : [input.input],
+    /* WHOSE RUN THIS IS, STAMPED AT START — ADR 0046's prerequisite.
+     *
+     * `KontraTenant` was registered on the namespace and written by NOTHING. Two readers already
+     * take it (`temporalClient.ts`'s `describeRun` and `listRuns`), so every `tenant` this control
+     * plane has ever reported was the empty string — a field that looked answered and was not.
+     * MEASURED on the live cluster before this: of ten open executions, only the backing
+     * `kontra.v1.ActorService.Run` carried any `Kontra*` attribute at all.
+     *
+     * AT START AND NOT BY UPSERT, because a start is the one moment the value is known and costs
+     * nothing: search attributes on `start` ride in `WorkflowExecutionStarted` and write no extra
+     * event, where an upsert inside the workflow is a command of its own — which is the whole
+     * subject of the audit this comes from.
+     *
+     * THE NAMESPACE IS THE TENANT (CONTEXT.md: a Tenant IS a Temporal namespace), so this records
+     * what it is rather than inventing a second notion of one. On a single-tenant installation it
+     * is `default`, which is a true and useful answer — the alternative, leaving it blank, is what
+     * made every one of those readers silently wrong.
+     */
+    typedSearchAttributes: new TypedSearchAttributes([{ key: KontraTenant, value: NAMESPACE }]),
   });
 
   const workflow = await stampRunWorkflow(handle.workflowId, manifest, recorder);

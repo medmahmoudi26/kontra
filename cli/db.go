@@ -379,9 +379,58 @@ func runDuck(sql string) (string, error) {
 	cmd := exec.Command(bin, "-c", sql)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("duckdb: %w\n%s", err, strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("duckdb: %w\n%s", err, duckFailure(string(out)))
 	}
 	return string(out), nil
+}
+
+// duckFailure turns duckdb's combined output into the part of it that is about the failure.
+//
+// ── WHY THIS IS NOT JUST `TrimSpace` ────────────────────────────────────────────────────────────
+//
+// It was, and the result read as a contradiction (issue #3). kontra sends several statements in one
+// `-c`, so when the third one fails the combined output still carries the first two's RESULTS — and
+// duckdb renders a successful DDL statement as a box:
+//
+//	error: duckdb: exit status 1
+//	  Could not set lock on file ".../datasets.ducklake": Conflicting lock held in .../node (PID …)
+//	┌─────────┐
+//	│ Success │
+//	│  true   │
+//	└─────────┘
+//
+// The reporter read that as kontra printing `Success: true` after its own error, which is exactly
+// what it looks like. Nothing succeeded that they asked for; a statement they never typed did. So
+// the boxes come out and the error lines stay.
+//
+// ── AND THE LOCK IS NAMED, BECAUSE IT IS THE COMMON ONE AND IT IS ACTIONABLE ────────────────────
+//
+// DuckLake takes an exclusive lock on the catalog, and `kontra up` holds it for as long as the
+// control plane runs. Every `dataset create` on a running installation hits this, and duckdb's own
+// message names a PID and a path — true, and no help at all unless you already know that the PID is
+// your own control plane. One sentence turns a dead end into a next step.
+func duckFailure(out string) string {
+	var kept []string
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// A RESULT BOX, in any of the three rows duckdb draws it with. Matched on the box-drawing
+		// runes rather than on the word `Success`, because the noise is every result table — a
+		// `count(*)` from a statement that ran before the failure is just as misleading.
+		if strings.ContainsAny(trimmed, "┌┐└┘├┤┬┴┼─│") {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	msg := strings.Join(kept, "\n")
+	if strings.Contains(out, "Conflicting lock") && strings.Contains(out, ".ducklake") {
+		msg += "\n\nthe lock is almost certainly your own control plane: DuckLake takes an exclusive" +
+			"\nlock on the catalog and `kontra up` holds it while it runs. Stop it, run this, start it" +
+			"\nagain — or use the API/console, which goes through the process that already holds it."
+	}
+	return msg
 }
 
 func dbList(catalog, dataPath string) error {

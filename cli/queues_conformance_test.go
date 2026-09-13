@@ -61,3 +61,54 @@ func TestEveryMachineSessionNameIsSafeToInterpolate(t *testing.T) {
 		}
 	}
 }
+
+// The Go arm of §session_kind — which `@kontra` tags the Monitor will admit (ADR 0043).
+//
+// THIS SIDE IS THE WRITER AND THE OTHER SIDE IS THE READER, which is exactly why it is a corpus and
+// not two literals. `kontra serve --tmux` sets the option; `panels/local.ts:isKontraSession` decides
+// whether the wall shows what it finds. A kind this binary writes and the streamer does not know is
+// a Worker running perfectly whose tile is absent — ADR 0020's one forbidden failure — and a kind
+// the streamer admits and this binary never writes is a door nobody meant to leave open.
+func TestTheSessionKindVocabularyMatchesTheCorpus(t *testing.T) {
+	for _, c := range corpus.LoadQueues(t).SessionKind.Cases {
+		t.Run(c.Why, func(t *testing.T) {
+			if got := tmux.SessionKind(c.Tag); got != c.Kind {
+				t.Errorf("SessionKind(%q) = %q, corpus says %q", c.Tag, got, c.Kind)
+			}
+			if got := tmux.IsKnownSessionKind(c.Tag); got != c.Known {
+				t.Errorf("IsKnownSessionKind(%q) = %v, corpus says %v", c.Tag, got, c.Known)
+			}
+		})
+	}
+}
+
+// Every tag this binary WRITES must be one the reader will admit.
+//
+// The corpus pins the vocabulary; this pins that the three writers stay inside it. A `KontraWatchTag`
+// that drifted to `watched:` would keep passing every row above — the corpus does not know which
+// function produced a string — while every session the CLI tagged vanished from the wall.
+func TestEveryTagThisBinaryWritesIsAdmissible(t *testing.T) {
+	written := map[string]string{
+		"KontraSessionTag":  tmux.KontraSessionTag("probe", "0.1.0"),
+		"KontraWorkflowTag": tmux.KontraWorkflowTag("hunt"),
+		"KontraWatchTag":    tmux.KontraWatchTag("repl"),
+	}
+	if len(written) != len(tmux.SessionKinds) {
+		t.Fatalf("%d tag writers against %d kinds — a kind with no writer, or a writer with no kind",
+			len(written), len(tmux.SessionKinds))
+	}
+	seen := map[string]bool{}
+	for name, tag := range written {
+		if !tmux.IsKnownSessionKind(tag) {
+			t.Errorf("%s wrote %q, which the reader would refuse", name, tag)
+		}
+		seen[tmux.SessionKind(tag)] = true
+	}
+	// Each writer covers a DIFFERENT kind. Three writers all emitting `actor:` would satisfy the
+	// loop above and leave two kinds unwritten by anything.
+	for _, kind := range tmux.SessionKinds {
+		if !seen[kind] {
+			t.Errorf("kind %q is in SessionKinds and no writer produces it", kind)
+		}
+	}
+}

@@ -1,5 +1,23 @@
 # kontra
 
+## Branches
+
+**Work on `dev`. Never commit to `main`.**
+
+`dev` is the default branch and the base for every pull request. `main` is what has been released —
+it moves only by merging `dev`, and only deliberately.
+
+Branch protection is not available on this repository (it needs GitHub Pro for a private repo), so
+**nothing mechanically stops a push to `main`.** This paragraph is the enforcement. If you find
+yourself on `main`, switch before you commit:
+
+```sh
+git switch dev        # or: git switch -c <topic> dev
+```
+
+Same two branches, same rule, in all five repositories: `kontra`, `kontra-actors`,
+`kontra-workflows`, `kontra-console`, `kontra-cloud`.
+
 ## Agent skills
 
 ### Issue tracker

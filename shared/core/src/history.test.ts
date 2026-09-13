@@ -568,6 +568,73 @@ test('the cap', () => {
   });
 });
 
+/**
+ * `scanned` IS WHAT WAS READ; `historyLength` IS WHAT THERE IS — issue F3.
+ *
+ * The reader stops at 20,000 events and sets `truncated`, and `scanned` then reported the CAP as if
+ * it were the count. Any run between 20,001 and Temporal's 51,200 ceiling was recorded as exactly
+ * 20,000 — an undercount of up to 61%, invisible because the number looks plausible and is only
+ * wrong for the largest runs.
+ *
+ * EVERY CASE HERE ASSERTS THE TWO NUMBERS DISAGREE, and says which is which. "The count is right"
+ * passes if both are wrong together, which is precisely the state this was in.
+ */
+test('what was read, and what there is', () => {
+  const read = Array.from({ length: 3 }, (_, i) =>
+    ev(i + 1, 'activityTaskScheduledEventAttributes', 1000 + i, { activityType: { name: 'RunBatch' } })
+  );
+
+  it('carries the server’s length beside the reader’s count, and they differ', () => {
+    const got = mapHistory(read, true, '', { historyLength: 31_402, historySizeBytes: 9_001_234 });
+    expect(got.scanned).toBe(3);
+    expect(got.historyLength).toBe(31_402);
+    expect(got.historySizeBytes).toBe(9_001_234);
+    // THE ASSERTION THAT MATTERS. A reader that quietly reused `scanned` for both would pass every
+    // "is the length right" check ever written against a history shorter than the cap.
+    expect(got.historyLength).not.toBe(got.scanned);
+  });
+
+  it('is ABSENT, not zero, when nobody asked the server', () => {
+    // An archived history is a recording and a fixture has no server behind it. `0` would be a
+    // claim that the run had no events, which is the one thing it cannot mean.
+    const got = mapHistory(read, true);
+    expect('historyLength' in got).toBe(false);
+    expect(got.historyLength).toBeUndefined();
+    expect(got.scanned).toBe(3);
+  });
+
+  it('is absent per field — a describe that answered one and not the other says so', () => {
+    const got = mapHistory(read, false, '', { historyLength: 12 });
+    expect(got.historyLength).toBe(12);
+    expect('historySizeBytes' in got).toBe(false);
+  });
+
+  it('carries through the ELIDING return too, which is the long-run path', () => {
+    // Two return sites, and the one that matters for a big run is the one that drops the middle.
+    // A field added to only the short path would be absent on exactly the runs it exists for.
+    const long = Array.from({ length: EVENT_CAP + 500 }, (_, i) =>
+      ev(i + 1, 'activityTaskScheduledEventAttributes', 1000 + i, { activityType: { name: 'RunBatch' } })
+    );
+    const got = mapHistory(long, true, '', { historyLength: 48_000 });
+    expect(got.elided).toBe(500);
+    expect(got.scanned).toBe(EVENT_CAP + 500);
+    expect(got.historyLength).toBe(48_000);
+  });
+
+  it('leaves the display path exactly as it was', () => {
+    // The elision is honest and is not what was wrong: head, tail and `elided` are the reader's
+    // contract with the screen. Only the TOTAL was wrong.
+    const long = Array.from({ length: EVENT_CAP + 500 }, (_, i) =>
+      ev(i + 1, 'activityTaskScheduledEventAttributes', 1000 + i, { activityType: { name: 'RunBatch' } })
+    );
+    const without = mapHistory(long, true);
+    const with_ = mapHistory(long, true, '', { historyLength: 48_000 });
+    expect(with_.events).toEqual(without.events);
+    expect(with_.elided).toBe(without.elided);
+    expect(with_.truncated).toBe(without.truncated);
+  });
+});
+
 test('protobufjs Longs', () => {
   // `seconds` and `eventId` arrive as Longs from the raw gRPC decode, not as numbers. Reading
   // them with a bare Number() would yield NaN and every offset would render as "+NaNs".

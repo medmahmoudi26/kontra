@@ -360,6 +360,50 @@ export function workflowSessionTag(name: string): string {
 }
 
 /**
+ * The tag an OPERATOR writes to offer a session of their own to the wall — ADR 0043.
+ *
+ * `actor:` and `workflow:` are kontra's; this is the third kind and the only one a human types.
+ * What it asserts is the ADR's rule, and tagging is how you assert it: **the panes hold nothing
+ * that exists only there.** A Worker's pane satisfies that because the Run is in Temporal and the
+ * rows are in the lake; a Machine's pane satisfies it because `machine.ts` puts journals in panes
+ * and journald is the record. An interactive session — an agent, a REPL, a debugger — does NOT,
+ * and the supported way to watch one is to supervise it and tail its journal.
+ *
+ * It is not a permission. Nothing is prevented by refusing it and nothing is granted by writing
+ * it; what it buys is that putting something irreplaceable on a wall becomes a sentence somebody
+ * typed rather than a side effect of setting a tmux option.
+ *
+ *     tmux set-option -t my-session @kontra 'watch:repl'
+ */
+export function watchSessionTag(label: string): string {
+  return `watch:${label}`;
+}
+
+/**
+ * The kinds a tag may claim, and the whole of the admission vocabulary.
+ *
+ * BEFORE ADR 0043 THERE WAS NO VOCABULARY: `isKontraSession` admitted any non-empty `@kontra`
+ * value, and the header of this file already warned that an operator "may have set `@kontra` on a
+ * session of their own, with anything in it". So a session holding anything at all reached the
+ * wall by setting one option, and the grammar that would have refused it — `SAFE.command`, which
+ * admits only a journal — runs on the converge path and nowhere else. kontra controlled tightly
+ * what it CREATED and admitted whatever it FOUND.
+ *
+ * A closed set rather than a pattern, because the point is that adding a kind is a decision. A tag
+ * whose kind is not here is refused, and the refusal is reported rather than silent: a tile that
+ * vanishes with no sentence is how an operator concludes the Monitor is flaky and stops believing
+ * the tiles that are telling the truth.
+ */
+export const SESSION_KINDS = ['actor', 'workflow', 'watch'] as const;
+export type SessionKind = (typeof SESSION_KINDS)[number];
+
+/** Does this tag claim a kind this build knows? '' (untagged) is NOT a known kind — an untagged
+ *  session is admitted, if at all, by the legacy name prefix and never by this. */
+export function isKnownSessionKind(tag: string): boolean {
+  return (SESSION_KINDS as readonly string[]).includes(kontraSessionKind(tag));
+}
+
+/**
  * A session name as tmux will actually store it.
  *
  * MEASURED, and it is the reason this function exists rather than a comment. tmux's

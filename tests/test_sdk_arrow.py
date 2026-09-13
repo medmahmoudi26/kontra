@@ -13,13 +13,13 @@ So it is asked here, three ways, because each way catches something the others c
      runtime check can see and which is exactly how a type-only edge grows into a real one.
   2. A FRESH INTERPRETER with `internals` made unimportable. Catches what the AST cannot: an
      `importlib.import_module("internals.x")`, a `__getattr__` that reaches, a re-export chain.
-  3. sys.modules AFTER `import actorkit`. Catches the dependency the arrow exists to prevent —
+  3. sys.modules AFTER `import kontra`. Catches the dependency the arrow exists to prevent —
      an author surface that cannot be imported without a Temporal client, a Redis client or an S3
      client in the process.
 
 THE ONE EDGE THAT IS ALLOWED, and only deferred. `actor.serve()` and `catalog.serve()` are the
 entry-point handoff — by definition the line where an author stops writing code and gives
-the process to the engine. Both import the runtime INSIDE the function body, so `import actorkit`
+the process to the engine. Both import the runtime INSIDE the function body, so `import kontra`
 never reaches it. Anything else, at any scope, fails.
 
 The Go half of this is sdk/go/arrow_test.go, which asks `go list -deps` the same question.
@@ -34,7 +34,7 @@ import sys
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SDK = ROOT / "sdk" / "python" / "actorkit"
+SDK = ROOT / "sdk" / "python" / "kontra"
 RUNTIME_PKG = "internals"
 
 #: The entry-point handoffs, as (module file, enclosing function). Deferred imports of the runtime
@@ -49,7 +49,7 @@ ALLOWED_HANDOFFS = {
 #: Infrastructure clients an author surface must not carry. Temporal is deliberately absent: the
 #: workflow-facing half of this package (`catalog`, `hitl`, `narrate`, `contract`) is written
 #: against temporalio's workflow API, which is the substrate an author writes in, not a detail
-#: leaking upward. What the package promises instead is that plain `import actorkit` costs none of
+#: leaking upward. What the package promises instead is that plain `import kontra` costs none of
 #: it — asserted separately below, and the reason the verbs resolve lazily.
 BANNED_MODULES = {
     "redis": "a Redis client (the durable state tiers are the runtime's)",
@@ -58,9 +58,23 @@ BANNED_MODULES = {
 }
 
 
+#: The generated protobuf stubs live INSIDE the package since ADR 0044 — `kontra.v1` had to become a
+#: subpackage of `kontra` because a regular package beats a namespace one and does not merge with it.
+#: They are not the author surface: nobody writes `from kontra.v1 import ...`, they are regenerated
+#: from `shared/contracts/`, and their imports are protobuf's business rather than this arrow's.
+GENERATED = "v1"
+
+
 def _sdk_files() -> list[pathlib.Path]:
-    files = sorted(p for p in SDK.rglob("*.py") if "__pycache__" not in p.parts)
+    files = sorted(
+        p for p in SDK.rglob("*.py")
+        if "__pycache__" not in p.parts and GENERATED not in p.parts
+    )
     assert files, f"no SDK modules found under {SDK} — the layout moved and this test did not"
+    # NON-VACUOUS ON BOTH SIDES: the walk must find the author surface AND must have excluded the
+    # generated tree, or the filter above is silently doing nothing.
+    assert any(p.name == "catalog.py" for p in files), "the walk missed the author surface"
+    assert (SDK / GENERATED).is_dir(), "the generated subpackage moved; this exclusion is now a lie"
     return files
 
 
@@ -103,7 +117,7 @@ def test_no_module_under_sdk_imports_the_runtime_at_module_scope(path: pathlib.P
             pytest.fail(
                 f"{where} imports `{RUNTIME_PKG}` at module scope. The arrow is runtime -> sdk and "
                 f"never the reverse: move what you need into the author surface (Unit/Batch/Dataset "
-                f"live in actorkit.batch, the type derivation in actorkit.schema), or — if this IS "
+                f"live in kontra.batch, the type derivation in kontra.schema), or — if this IS "
                 f"the entry-point handoff — defer it inside the function that hands control over."
             )
         if (path.name, fn) not in ALLOWED_HANDOFFS:
@@ -153,9 +167,9 @@ class Refuse:
 sys.meta_path.insert(0, Refuse())
 sys.modules.pop({RUNTIME_PKG!r}, None)
 
-import actorkit
+import kontra
 for m in {modules!r}:
-    importlib.import_module("actorkit." + m)
+    importlib.import_module("kontra." + m)
 print("ok")
 """
     out = subprocess.run(
@@ -172,7 +186,7 @@ print("ok")
 
 
 def test_import_actorkit_costs_no_temporal_no_redis_and_no_object_store() -> None:
-    """WHAT THE ARROW BUYS, stated as the property an author can rely on: `import actorkit` is the
+    """WHAT THE ARROW BUYS, stated as the property an author can rely on: `import kontra` is the
     vocabulary and nothing else. It is what the Temporal workflow sandbox re-imports per instance,
     what the CLI imports to read a manifest, and what a test imports to build a stub — none of
     which are entitled to a Temporal client, a Redis connection or an S3 session.
@@ -194,7 +208,7 @@ def test_import_actorkit_costs_no_temporal_no_redis_and_no_object_store() -> Non
         check=True,
     )
     assert out.stdout.strip() == "clean", (
-        f"`import actorkit` dragged in {out.stdout.strip()}"
+        f"`import kontra` dragged in {out.stdout.strip()}"
     )
 
 

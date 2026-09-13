@@ -7,7 +7,7 @@ provenance lives inside it. These tests pin the two things that buys:
     one for the whole Batch, or none at all for a Unit (ADR 0028 §1). The question "what
     granularity does emit support?" disappears because push no longer names a Unit.
   • A BODY IS UNIT-TESTABLE by substituting the Dataset — no host, no queue, no object store
-    (`actorkit.testing`). This is the forcing argument for a parameter over a `yield` or a bare
+    (`kontra.testing`). This is the forcing argument for a parameter over a `yield` or a bare
     `emit` callable.
 
 Durability is UNCHANGED here (the mechanism swap is slice 06): a push commits against the Unit the
@@ -194,7 +194,7 @@ def test_a_method_body_is_unit_tested_by_substituting_the_dataset():
     """The criterion that proves the parameter. `stub_batch` is the input the caller passes first,
     `collecting_dataset` the destination it passes second — backed by a list, not the lake. No
     host, no queue, no object store."""
-    from actorkit.testing import collecting_dataset, stub_batch
+    from kontra.testing import collecting_dataset, stub_batch
 
     async def ask(self, batch, dataset):
         async for unit in batch:
@@ -208,7 +208,7 @@ def test_a_method_body_is_unit_tested_by_substituting_the_dataset():
 def test_a_typed_emits_value_and_a_plain_dict_both_push():
     """`push` takes the Method's declared `emits` type OR a plain dict, exactly as emit did — the
     typed value is reduced to JSON at the boundary, so both land as the same record shape."""
-    from actorkit.testing import collecting_dataset, stub_batch
+    from kontra.testing import collecting_dataset, stub_batch
 
     async def m(self, batch, dataset):
         async for unit in batch:
@@ -223,7 +223,7 @@ def test_a_typed_emits_value_and_a_plain_dict_both_push():
 def test_the_declared_takes_type_is_honoured_by_the_stub_batch():
     """A stub Batch coerces to the Method's `takes` just as the host does, so `unit.value.host`
     works in a body under test the same way it works in production."""
-    from actorkit.testing import collecting_dataset, stub_batch
+    from kontra.testing import collecting_dataset, stub_batch
 
     @dataclass
     class Pair:

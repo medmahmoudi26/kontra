@@ -395,7 +395,10 @@ func datasetTag(args []string) error {
 		return err
 	}
 
-	api := newAPI(*apiURL)
+	// RUN-GATED (routes/datasets.ts). Open when KONTRA_RUN_TOKEN is unset, which was every install
+	// until it started being generated — so this sends it and an older config keeps working
+	// unchanged, because an empty bearer is the same request it used to make.
+	api := newAuthAPI(*apiURL, runToken())
 	base := "/api/datasets/runs/" + url.PathEscape(runID) + "/tags"
 	var dev datasetDeviationDTO
 	for _, t := range add {
@@ -438,7 +441,7 @@ func datasetRename(args []string) error {
 		return err
 	}
 
-	api := newAPI(*apiURL)
+	api := newAuthAPI(*apiURL, runToken()) // run-gated, like tag above
 	path := "/api/datasets/runs/" + url.PathEscape(runID) + "/name"
 	var dev datasetDeviationDTO
 	if *reset {
@@ -851,3 +854,15 @@ func cellString(v any) string {
 		return fmt.Sprintf("%v", t)
 	}
 }
+
+// runToken is the bearer for the routes `KONTRA_RUN_TOKEN` gates — serve, start, stop, and a
+// Dataset's tag and rename.
+//
+// `config.LoadAndApplyConfig` has already exported the file's value into this process's environment
+// by the time any command runs (main.go), and the environment wins over the file, so reading it here
+// is one lookup rather than a second precedence order that could disagree with the first.
+//
+// EMPTY IS A LEGITIMATE ANSWER and not an error: those routes are OPEN when the orchestrator has no
+// token either, which is what every install looked like before one was generated. Sending an empty
+// bearer is byte-for-byte the request the CLI used to make.
+func runToken() string { return os.Getenv("KONTRA_RUN_TOKEN") }

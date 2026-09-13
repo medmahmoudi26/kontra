@@ -45,7 +45,7 @@ def load_actor(path_str: str) -> LoadedActor:
         raise SystemExit(f"cannot import actor module at {file}")
     module = importlib.util.module_from_spec(spec)
 
-    from actorkit import actor
+    from kontra import actor
 
     actor.actor_name = "actor"
     actor.actor_dir = None

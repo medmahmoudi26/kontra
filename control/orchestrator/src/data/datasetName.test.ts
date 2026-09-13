@@ -244,7 +244,7 @@ describe('withDatasetNames — the ledger join', () => {
   it('names a promoted durable Dataset from the ROWS, which the ledger never saw', () => {
     // THE DEFECT THIS FIXES, measured on the local controller: `lame_demo` held 430 rows promoted
     // out of one Run's temp and listed with `runId=None, datasetName=None`, because promotion
-    // copies rows and publishes no ledger record — and because the actorkit path writes no ledger
+    // copies rows and publishes no ledger record — and because the SDK path writes no ledger
     // record for ANY Run (50 dispatches in the ledger, not one of them a v2 Run). The rows carried
     // `run_id` the whole time, and the catalog's per-file statistics surface it for free.
     const [out] = withDatasetNames(

@@ -38,6 +38,10 @@ const SESSION = `kontra-slice6-${process.pid}`;
 const TAGGED = `tagged-${process.pid}-0_2_0`;
 /** An operator's own session: no prefix, no tag. It must stay off the wall. */
 const MINE = `not-kontras-${process.pid}`;
+/** A session tagged with a kind this build does not know — ADR 0043 says it stays off the wall
+ *  until an operator re-tags it `watch:`, which is the assertion that its panes hold nothing
+ *  that exists only there. */
+const UNKNOWN_KIND = `unknown-kind-${process.pid}`;
 /** A Worker under the real hold wrapper, so its process can be killed under it. */
 const HELD = `held-${process.pid}-0_1_0`;
 const HOST = 'kontratest-host';
@@ -92,6 +96,7 @@ afterAll(() => {
   tmuxOk('kill-session', '-t', VIEWER);
   tmuxOk('kill-session', '-t', SESSION);
   tmuxOk('kill-session', '-t', TAGGED);
+  tmuxOk('kill-session', '-t', UNKNOWN_KIND);
   tmuxOk('kill-session', '-t', MINE);
   tmuxOk('kill-session', '-t', HELD);
 });
@@ -324,6 +329,49 @@ describe.skipIf(!runnable)('mode local against a real tmux (private socket)', ()
         listCommand: socketize(LIST_PANES_COMMAND),
       });
       expect(after.map((x) => x.session)).not.toContain(MINE);
+    },
+    20_000
+  );
+
+  it(
+    'refuses a tag whose kind it does not know, and admits watch: — ADR 0043, against a real tmux',
+    async () => {
+      // THE CASE 0043 EXISTS FOR, exercised through tmux rather than through a fake PaneRow.
+      // `isKontraSession` used to be `(row.kontra ?? '') !== ''`, so ONE `set-option` with any value
+      // at all put a session on the wall — and `SAFE.command`, the grammar that admits only a
+      // journal, runs on the converge path and never here. An agent's session is the case that
+      // matters: a stalled viewer segfaults the tmux server and destroys every session on the
+      // socket, which journald survives and an in-flight conversation does not.
+      tmux('new-session', '-d', '-s', UNKNOWN_KIND, '-n', 'agent', 'sh -c "while true; do sleep 1; done"');
+      tmux('set-option', '-t', UNKNOWN_KIND, '@kontra', 'agent:claude');
+
+      const refused = await discoverLocalSessions(privateRunner, {
+        host: HOST,
+        listCommand: socketize(LIST_PANES_COMMAND),
+      });
+      expect(
+        refused.map((x) => x.session),
+        'a tag of an unknown kind must not reach the wall'
+      ).not.toContain(UNKNOWN_KIND);
+
+      // AND THE OPT-IN WORKS, or the rule would be a wall with no door. Re-tagging the SAME session
+      // is what an operator does after reading the refusal, so this also proves the refusal is about
+      // the tag and not about anything else on the session.
+      tmux('set-option', '-t', UNKNOWN_KIND, '@kontra', 'watch:agent');
+      const admitted = await discoverLocalSessions(privateRunner, {
+        host: HOST,
+        listCommand: socketize(LIST_PANES_COMMAND),
+      });
+      expect(
+        admitted.map((x) => x.session),
+        'watch: is the explicit opt-in and must be admitted'
+      ).toContain(UNKNOWN_KIND);
+
+      // A `watch:` session carries no Actor. Inventing one would put an operator's own terminal on
+      // the Actors surface and give it a Temporal queue nobody polls.
+      const w = admitted.find((x) => x.session === UNKNOWN_KIND);
+      expect(w?.actor).toBe('');
+      expect(w?.version).toBe('');
     },
     20_000
   );

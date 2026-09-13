@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from actorkit import ActorRegistry, MethodRegistration
+from kontra import ActorRegistry, MethodRegistration
 from internals.engine import build_session_factory
 from test_actor_engine import FakeKV
 

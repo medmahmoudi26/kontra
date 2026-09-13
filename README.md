@@ -39,10 +39,48 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/install.sh | sh
-kontra up
+kontra up                                  # blocks: this IS the control plane
 ```
 
-One command, one process: Temporal, the object store, the state store, the payload codec, an OCI registry and the orchestrator — with its own data directory and no containers. Four platforms are published (linux and macOS, amd64 and arm64); the installer picks yours, checks it against the release's `SHA256SUMS`, and refuses to unpack anything that does not match.
+One command, one process: Temporal, the object store, the state store, the payload codec, an OCI registry and the orchestrator — with its own data directory and **no containers**. Four platforms are published (linux and macOS, amd64 and arm64); the installer picks yours, checks it against the release's `SHA256SUMS`, and refuses to unpack anything that does not match.
+
+> [!NOTE]
+> **No release has been tagged yet**, so the URL above 404s today. Until one is, `install.sh` in a clone is the working path — it sets up a development checkout. See [Getting Started](../../wiki/Getting-Started).
+
+### Or `docker compose`, which runs the same appliance
+
+```bash
+make image                                 # cut a release, build the image FROM it
+docker compose up -d
+open http://127.0.0.1:8088
+```
+
+**It is the same one process**, with Docker as the supervisor instead of your shell. The image is
+built from a release tarball, so the container and the download above are the same bytes — which is
+what makes this path *verify* a build rather than produce a second one.
+
+It is **not** the old multi-service topology. Nine services left `docker-compose.yml` one slice at a
+time, and each departure fixed a bug recorded where the service used to be — a `chown` sidecar for a
+root-owned volume, a one-shot that created an S3 bucket because a missing one answers `403`, a
+dynamic-config key the server never registered. Re-splitting the appliance reintroduces all three;
+putting it in a container reintroduces none, because inside there it is still one process writing
+its own files in its own directory.
+
+The second service is `orchestrator-infra`: the Pulumi engine, the fleet SSH key and the cloud
+credential. [ADR 0031 §4](docs/adr) and [ADR 0034 §1](docs/adr) keep all three **off** the appliance
+deliberately — no provider plugins and no cloud credential in an artifact whose premise is that a
+stranger curls it onto a laptop — and [ADR 0019](docs/adr) is why it cannot share a PID: Pulumi's
+Node language host installs process-global rejection handlers for the length of every inline `up`,
+so an unrelated rejected promise elsewhere fails the in-flight converge. You need it when a workflow
+provisions a **Fleet**, and not before.
+
+Configuration is `.env` (copy `.env.example` — it marks every blank as either **OPEN** or
+**DISABLED**, which are opposites) plus `~/.kontra/config.yaml`, which `kontra init` writes. Every
+port publishes to `${KONTRA_BIND}`, defaulting to loopback: a published port is DNATed in
+`PREROUTING` and never traverses `ufw-user-input`, so **the publish address is the control and a host
+firewall is not**.
+
+**[First Run](../../wiki/First-Run)** walks the whole thing end to end: control plane → actor → Method call → workflow → run → secrets → Fleet, three or four lines a step.
 
 ## The shape of it
 
@@ -82,6 +120,7 @@ The **[wiki](../../wiki)** is the manual — start at [Getting Started](../../wi
 
 | | |
 |---|---|
+| [First Run](../../wiki/First-Run) | nothing → an actor → a workflow → a fleet, one step at a time |
 | [Getting Started](../../wiki/Getting-Started) · [Dev Cycle](../../wiki/Dev-Cycle) | install, run one, iterate |
 | [Writing Actors: Python](../../wiki/Writing-Actors-Python) · [Go](../../wiki/Writing-Actors-Go) | the authoring surface |
 | [Execution Model](../../wiki/Execution-Model) · [Durability](../../wiki/Durability-and-Failures) | what happens when things break |
@@ -89,6 +128,7 @@ The **[wiki](../../wiki)** is the manual — start at [Getting Started](../../wi
 | [Fleet & the Warden](../../wiki/Fleet-and-the-Warden) | machines, Leases, and running code you did not write |
 | [Deployment](../../wiki/Deployment) · [Security Model](../../wiki/Security-Model) | operating it, and what it does and does not isolate |
 | [`docs/adr/`](docs/adr) | every architectural decision, with its trade-offs |
+| [`docs/event-log-audit.md`](docs/event-log-audit.md) | what a Method call costs in Temporal events, measured — and the two workflows on a clock |
 
 **The ADRs are worth reading before the code.** They are unusually candid — several record a decision *and* the measurement that later corrected it.
 

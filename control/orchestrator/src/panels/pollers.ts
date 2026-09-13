@@ -39,6 +39,7 @@ import { sharedQueue, identityHost } from '@kontra/core/queues';
 
 import type { MachineTarget } from './discovery';
 import type { TerminalHealth } from './types';
+import { temporalConnectOptions, type TemporalConnectOptions } from '../temporalTls';
 
 
 /** `temporal.api.enums.v1.TaskQueueType`. WORKFLOW + ACTIVITY, folded; NEXUS (3) is skipped for
@@ -349,9 +350,11 @@ export function temporalQueueDescriber(options?: TemporalDescriberOptions): Queu
       connPromise = (async () => {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const client = require('@temporalio/client') as {
-          Connection: { connect(opts: { address: string }): Promise<Conn> };
+          Connection: { connect(opts: TemporalConnectOptions): Promise<Conn> };
         };
-        const c = await client.Connection.connect({ address });
+        // Through `temporalConnectOptions` like every other site — the require is lazy for module
+        // -graph reasons and says nothing about how the connection is configured.
+        const c = await client.Connection.connect(temporalConnectOptions({ address }));
         conn = c;
         return c;
       })().catch((err: unknown) => {

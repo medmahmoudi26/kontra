@@ -561,11 +561,23 @@ func stageOrchestrator(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 // promise read as this file's: what backs it here is `pnpm-lock.yaml`, which is why the lockfile's
 // own sha256 is a component of the manifest and why `--frozen-lockfile` is not optional. Drop the
 // flag and the pins stop being pins.
+// The orchestrator's package NAME, which is not its directory name and never has been. The
+// directory is `control/orchestrator`; the package is `@kontra/backend`, and `pnpm --filter` takes
+// the package. Spelled once here because getting it wrong deploys NOTHING and says so only as an
+// empty target directory two steps later.
+const orchestratorPackage = "@kontra/backend"
+
 func stageDependencies(opts BuildOptions, tc *toolchain, m *Manifest, p func(string, ...any)) error {
-	src := filepath.Join(opts.RepoRoot, "control", "orchestrator")
 	dst := filepath.Join(opts.StageDir, "orchestrator")
 
-	lock := filepath.Join(src, "pnpm-lock.yaml")
+	// ── THE LOCKFILE IS AT THE WORKSPACE ROOT, AND THIS LOOKED IN THE PACKAGE ──────────────────
+	//
+	// It read `control/orchestrator/pnpm-lock.yaml`, which has not existed since `@kontra/core`
+	// became a workspace package: pnpm keeps ONE lockfile at the root of a workspace, with an
+	// `importers:` entry per package. So `kontra release` failed at this line, every time, with
+	// `no such file or directory` — which is why this repository has zero tags and why
+	// `release.yml` has never executed. The first release is what found it.
+	lock := filepath.Join(opts.RepoRoot, "pnpm-lock.yaml")
 	lockSum, err := sha256File(lock)
 	if err != nil {
 		return fmt.Errorf("the orchestrator's lockfile is what pins the dependency tree: %w", err)
@@ -582,15 +594,67 @@ func stageDependencies(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 		return err
 	}
 
-	args := []string{"install", "--prod", "--frozen-lockfile", "--ignore-scripts",
-		"--node-linker=hoisted", "--config.confirmModulesPurge=false",
-		"--os", npmOS, "--cpu", cpu}
+	// ── `pnpm deploy`, NOT `pnpm install`, AND THE WORKSPACE IS WHY ────────────────────────────
+	//
+	// Copying the lockfile into a bare directory and installing there cannot work in a workspace,
+	// for two reasons that are both fatal and neither of which is about the path:
+	//
+	//   THE IMPORTERS DO NOT MATCH. A workspace lockfile keys its `importers:` by package path
+	//   (`.`, `control/orchestrator`, `shared/core`). A standalone directory is importer `.`, so
+	//   `--frozen-lockfile` refuses with "specifiers in the lockfile don't match specifiers in
+	//   package.json" and lists all 33 — MEASURED, not predicted.
+	//
+	//   AND `@kontra/core` IS `workspace:*`. There is no registry tarball for it; the only thing
+	//   that can resolve it is a workspace. A standalone install would fail on it even if the
+	//   importers lined up.
+	//
+	// `pnpm deploy` is pnpm's own answer: it resolves FROM the workspace and writes a
+	// self-contained tree, with the workspace dependency MATERIALISED rather than symlinked out to
+	// a directory the bundle will not contain. `--legacy` because this workspace does not set
+	// `inject-workspace-packages`.
+	//
+	// DEPLOYED ASIDE, THEN ONLY `node_modules` MOVED IN. `deploy` also copies the package's own
+	// source — `src/`, `contract/`, `bruno/`, the tests — because the orchestrator's package.json
+	// declares no `files`. None of that belongs in a runtime bundle, and adding a `files` field to
+	// satisfy this build would change what publishing means elsewhere. The bundle's layout is a
+	// published contract (`orchestrator/dist/src/main.js`), so it stays exactly as it was and this
+	// takes the one directory it came for.
+	work, err := os.MkdirTemp(filepath.Dir(opts.StageDir), "kontra-deploy-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(work) }()
+	// `deploy` REQUIRES AN EMPTY OR ABSENT TARGET, and MkdirTemp just made the parent.
+	target := filepath.Join(work, "out")
+
+	// ── DEPLOY FROM A THROWAWAY COPY OF THE WORKSPACE, NOT FROM THE CHECKOUT ──────────────────
+	//
+	// `pnpm deploy --prod` run in the repository PRUNES THAT REPOSITORY'S `node_modules` to
+	// production-only as a side effect. MEASURED here, the hard way: after a release build the
+	// orchestrator's own test suite failed with `Cannot find module '@protobufjs/aspromise'` — a
+	// dev dependency the build had quietly removed from the developer's working tree. A release
+	// that breaks the checkout it was cut from is not a release step, it is a trap.
+	//
+	// So the deploy runs against a workspace built for it: the metadata that decides resolution,
+	// and nothing else. Verified to produce the identical 287-package tree while leaving the source
+	// workspace's `node_modules` untouched (0 entries).
+	if err := copyWorkspaceMetadata(opts.RepoRoot, work); err != nil {
+		return err
+	}
+
+	args := []string{"deploy", "--filter", orchestratorPackage, "--prod", "--legacy",
+		"--frozen-lockfile", "--ignore-scripts", "--node-linker=hoisted",
+		"--config.confirmModulesPurge=false", "--os", npmOS, "--cpu", cpu}
 	if libc != "" {
 		args = append(args, "--libc", libc)
 	}
-	p("installing production dependencies for %s (pnpm install --prod --frozen-lockfile --os %s --cpu %s)", opts.Platform, npmOS, cpu)
-	if combined, err := tc.pnpmCmd(dst, args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("pnpm install failed in %s: %w\n%s", dst, err, indent(string(combined)))
+	args = append(args, target)
+	p("deploying production dependencies for %s (pnpm deploy --prod --frozen-lockfile --os %s --cpu %s)", opts.Platform, npmOS, cpu)
+	if combined, err := tc.pnpmCmd(work, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("pnpm deploy failed for %s: %w\n%s", opts.Platform, err, indent(string(combined)))
+	}
+	if err := os.Rename(filepath.Join(target, "node_modules"), filepath.Join(dst, "node_modules")); err != nil {
+		return fmt.Errorf("move the deployed dependencies into the bundle: %w", err)
 	}
 
 	// THE PIN, NOT `pnpm --version`. The version used to be asked of the program on PATH, in the
@@ -608,6 +672,10 @@ func stageDependencies(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 	}
 	excluded, err := pruneForeignPrebuilds(modules, opts.Platform, p)
 	if err != nil {
+		return err
+	}
+	// BEFORE THE DIGEST, like the two prunes above it: what is measured has to be what ships.
+	if _, err := pruneBuildSource(modules, p); err != nil {
 		return err
 	}
 	tree, files, bytes, err := treeDigest(modules)
@@ -630,7 +698,7 @@ func stageDependencies(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 		TreeSHA256: tree,
 		Files:      files,
 		Bytes:      bytes,
-		Note:       "pnpm install --prod --frozen-lockfile --node-linker=hoisted; version is the head of the lockfile's own sha256",
+		Note:       "pnpm deploy --prod --frozen-lockfile --legacy --node-linker=hoisted; version is the head of the lockfile's own sha256",
 	})
 	m.Components = append(m.Components, Component{
 		Name:    "pnpm-lock.yaml",

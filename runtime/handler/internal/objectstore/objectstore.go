@@ -1,7 +1,7 @@
 // Package objectstore is the S3/SeaweedFS object store + the prefix-aware key layout.
 // One bucket holds both the content-addressed cas/ objects (codec offload + the blob
 // plane) and the mutable checkpoints/ files. Config is env-driven, matching the Python
-// actorkit.objectstore byte-for-byte so keys line up across languages.
+// kontra.objectstore byte-for-byte so keys line up across languages.
 package objectstore
 
 import (

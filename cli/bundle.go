@@ -100,14 +100,14 @@ func buildBundle(actorDir string, progress io.Writer) (*bundle, error) {
 		return nil, err
 	}
 	// 2) the two Python seams, mirroring the image's layout so PYTHONPATH is the same in both
-	//    Targets and an author's `from actorkit import actor` resolves identically. BOTH of them,
+	//    Targets and an author's `from kontra import actor` resolves identically. BOTH of them,
 	//    not one: `sdk/python` carries the author surface the actor's own code names, and
 	//    `runtime/python` carries the engine and the Temporal host that `actor.serve()` hands
 	//    control to. A Bundle with only the first imports cleanly and then dies at the handoff.
 	//
 	//    There is no repo-root `actorkit/__init__.py` to ship beside them any more. It was a shim
 	//    that existed only because the old seam directory `actorkit/` shadowed the import name;
-	//    `sdk/python/actorkit/` is a real package directory and needs nothing pointing at it.
+	//    `sdk/python/kontra/` is a real package directory and needs nothing pointing at it.
 	if engine == "py" {
 		skip := func(p string) bool {
 			return strings.Contains(p, "__pycache__") || strings.HasSuffix(p, ".pyc") ||

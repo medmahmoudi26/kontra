@@ -51,7 +51,7 @@ buf-lint:
 buf-build:
     {{buf}} build
 
-# Regenerate the COMMITTED stubs: Python (sdk/python/_gen) + TS types-only
+# Regenerate the COMMITTED stubs: Python (sdk/python/kontra/v1) + TS types-only
 # (control/orchestrator/_gen). CI runs this then `git diff --exit-code` to fail on drift, so
 # run it after editing any .proto and commit the result.
 buf-generate:

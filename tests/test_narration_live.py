@@ -12,7 +12,7 @@ from the Temporal CLI, in memory, with no namespace, no worker fleet and no stat
 MEASURED 2026-08-25, Temporal CLI 1.7.1 / Server 1.31.0, temporalio 1.30.0: a workflow that says
 nothing is 5 events; each sentence adds exactly 5 more — `TimerStarted` carrying it, `TimerFired`,
 and the three-event workflow task the firing wakes. That number is the whole reason
-{@link actorkit.narrate.MAX_SENTENCES} exists, so it is asserted rather than remembered.
+{@link kontra.narrate.MAX_SENTENCES} exists, so it is asserted rather than remembered.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 with workflow.unsafe.imports_passed_through():
-    from actorkit import narrate
+    from kontra import narrate
 
 pytestmark = pytest.mark.e2e
 
