@@ -100,6 +100,7 @@ import { registerSourceRoutes } from './routes/sources';
 import { registerStateRoutes } from './routes/state';
 import { registerUploadRoutes } from './routes/uploads';
 import { registerStuckRoutes } from './routes/stuck';
+import { registerRunStream } from './routes/runStream';
 import { registerSummaryRoutes } from './routes/summaries';
 import { registerWorkflowRoutes } from './routes/workflows';
 
@@ -365,6 +366,29 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
      it. It deliberately does not reap: what to do with a two-week-old Warden is an operator's call,
      not a health check's. */
   registerStuckRoutes(app, { describeQueue: (q) => describeQueue(queueDescriber(), q) });
+  /* THE LIVE RUN STREAM, WHICH WAS WRITTEN AND TESTED AND NEVER CALLED.
+   *
+   * `runStream.ts` and its suite have been in the tree since the slice that added them; nothing
+   * invoked `registerRunStream`, so `/api/runs/:id/stream` 404'd while eleven tests passed over the
+   * loop behind it. That is the same shape as a surface added to a union and left out of the array
+   * that orders it — a finished thing with no way in — and it is why `registeredWorkflows.test.ts`
+   * exists for the other one.
+   *
+   * ONE SOURCE, WHICH IS THE ROUTE'S OWN INVARIANT. `read` is `runs.read` — the function
+   * `GET /api/runs/:runId` returns — so the stream cannot become a fourth reading of a Run that
+   * disagrees with the three kontra already keeps deliberately distinct. `runStream.test.ts` pins
+   * the bytes; this is what makes the production path use the same function.
+   *
+   * TERMINAL IS `closedAt > 0`, the same test `isArchivable` applies: a run Temporal still calls
+   * `running` through a continue-as-new chain has not closed, and ending the stream on it would cut
+   * a client off mid-run. */
+  registerRunStream(app, {
+    read: async (runId) => {
+      const view = await runs.read(runId);
+      if (!view) return { ok: false, body: { error: 'run not found' } };
+      return { ok: true, terminal: view.closedAt > 0, body: view };
+    },
+  });
 
   // --- secrets (issue 19; ADR 0034 §4) ---------------------------------------------
   //
