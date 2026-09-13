@@ -133,7 +133,78 @@ func cmdDoctor(args []string) error {
 	}
 	fmt.Fprintf(cliio.Stdout, "  %d registered: %s\n", len(actors), strings.Join(refs, ", "))
 	fmt.Fprintln(cliio.Stdout, "  run `kontra workers list` to see live Temporal workers per actor")
+
+	reportStuck(api)
 	return nil
+}
+
+// stuckReport mirrors `control/orchestrator/src/routes/stuck.ts`. Only the fields this prints.
+type stuckReport struct {
+	Executions []struct {
+		WorkflowID string `json:"workflowId"`
+		Type       string `json:"type"`
+		Queue      string `json:"queue"`
+		AgeMs      int64  `json:"ageMs"`
+		Pollers    *int   `json:"pollers"`
+		Wedged     bool   `json:"wedged"`
+	} `json:"executions"`
+	Wedged int  `json:"wedged"`
+	Capped bool `json:"capped"`
+}
+
+// reportStuck prints open executions nothing is polling — the ones that will never move.
+//
+// WHY IT IS IN `doctor` AND NOT ON A PAGE: every one of the nine an audit found was an INTERNAL
+// workflow type, which the Runs surface excludes on purpose, so the console could not have shown
+// them without becoming a different page. "Is my installation healthy" is this command's question
+// and these are an answer to it.
+//
+// SILENT WHEN THERE ARE NONE. A resting installation printing "0 wedged" is a line that stops being
+// read, and this section only earns its space when it has something to say.
+//
+// BEST-EFFORT, like the rest of this command: a server too old for the route, or a cluster that
+// cannot be listed, costs the section and not the report.
+func reportStuck(api *apiClient) {
+	var report stuckReport
+	if err := api.getJSON("/api/stuck", &report); err != nil {
+		return
+	}
+	if report.Wedged == 0 {
+		return
+	}
+	fmt.Fprintf(cliio.Stdout, "\n%s\n", paint("1;33", "Wedged"))
+	fmt.Fprintf(cliio.Stdout,
+		"  %d open execution(s) on a task queue nobody is polling — they will not move until a worker\n"+
+			"  returns to their queue, and they will RESUME when one does.\n", report.Wedged)
+	for _, e := range report.Executions {
+		if !e.Wedged {
+			continue
+		}
+		fmt.Fprintf(cliio.Stdout, "    %-46s %-24s queue=%-28s age=%s\n",
+			e.WorkflowID, e.Type, e.Queue, ageWords(e.AgeMs))
+	}
+	if report.Capped {
+		fmt.Fprintln(cliio.Stdout, "    (the listing was capped — there may be more)")
+	}
+	// NOT A COMMAND THIS RUNS FOR YOU. Terminating somebody's execution is a decision: a wedged
+	// Warden may be a Machine that is coming back. The report names them; a person decides.
+	fmt.Fprintln(cliio.Stdout,
+		"  serve the queue to let one finish, or end it deliberately:\n"+
+			"    temporal workflow terminate -w <id> --reason 'wedged, no poller'")
+}
+
+// ageWords is a duration a person reads. Days past a day, because these are measured in days.
+func ageWords(ms int64) string {
+	switch {
+	case ms >= 86_400_000:
+		return fmt.Sprintf("%dd", ms/86_400_000)
+	case ms >= 3_600_000:
+		return fmt.Sprintf("%dh", ms/3_600_000)
+	case ms >= 60_000:
+		return fmt.Sprintf("%dm", ms/60_000)
+	default:
+		return fmt.Sprintf("%ds", ms/1000)
+	}
 }
 
 func ui(host, port string) string { return "http://" + host + ":" + port }

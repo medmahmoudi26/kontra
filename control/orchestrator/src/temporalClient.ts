@@ -353,6 +353,57 @@ export async function listOpenRuns(cap: number): Promise<OpenRunScan> {
   return { runs, capped };
 }
 
+/** One open execution, with the queue it is waiting on. */
+export interface OpenExecution {
+  workflowId: string;
+  execId: string;
+  type: string;
+  queue: string;
+  startedAt: number;
+}
+
+/**
+ * EVERY open execution, internal types INCLUDED — which is what makes it different from
+ * {@link listOpenRuns} and is the whole reason it exists.
+ *
+ * `listRuns` and `listOpenRuns` both subtract `KONTRA_INTERNAL_WORKFLOW_TYPES`, correctly: the Runs
+ * page is about a user's runs and a wall of `wardenWorkflow` rows would bury them. But an audit
+ * found nine open executions wedged on this cluster — five Wardens up to 14 days old, a retention
+ * workflow that never ran a task in 18 days — and EVERY ONE of them was an internal type. A health
+ * check that inherited that exclusion would have been blind to all nine, which is how they sat
+ * unnoticed for a month.
+ *
+ * THE QUEUE IS WHAT MAKES THE ANSWER USEFUL. "Running" is what Temporal says about all of these;
+ * whether anything is POLLING the queue they are parked on is the difference between working and
+ * wedged, and it is the one thing the visibility record carries that says so.
+ *
+ * NO DEDUPE BY WORKFLOW ID, unlike the two above. They collapse a reused id to its newest execution
+ * because a Run IS its workflow id; here a reused id with two open executions is two things that
+ * cannot move, and hiding one of them would be hiding exactly the case worth seeing.
+ */
+export async function listOpenExecutions(
+  cap: number
+): Promise<{ executions: OpenExecution[]; capped: boolean }> {
+  const client = await getClient();
+  const limit = Math.min(Math.max(cap, 1), LIST_LIMIT);
+  const executions: OpenExecution[] = [];
+  let capped = false;
+  for await (const info of client.workflow.list({ query: `ExecutionStatus = "Running"` })) {
+    if (executions.length >= limit) {
+      capped = true;
+      break;
+    }
+    executions.push({
+      workflowId: info.workflowId,
+      execId: info.runId ?? '',
+      type: info.type ?? '',
+      queue: info.taskQueue ?? '',
+      startedAt: info.startTime?.getTime() ?? 0,
+    });
+  }
+  return { executions, capped };
+}
+
 /** The workflow type every Fleet operation runs as (`workflows/stack.ts`). */
 const STACK_WORKFLOW_TYPE = 'stackWorkflow';
 

@@ -1215,6 +1215,18 @@
         "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
       }
     },
+    "/api/stuck": {
+      "get": {
+        "operationId": "getStuck",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
     "/api/summaries/health": {
       "get": {
         "operationId": "getSummariesHealth",

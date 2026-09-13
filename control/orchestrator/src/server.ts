@@ -72,7 +72,7 @@ import { registerSlotRoutes } from './secrets/slotRoutes';
 import { slotStore, type SlotStore } from './secrets/slotStore';
 import { secretStore, type SecretStore } from './secrets/store';
 import { describeExposure, setRegisteredFolders } from './workflowControl';
-import { temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
+import { describeQueue, temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
 import { ObjectStore } from './codec/objectStore';
 import { DatasetRecordStore, datasetRecordStore } from './data/datasetRecords';
 import { RunWorkflowStore, runWorkflowStore } from './data/runWorkflows';
@@ -99,6 +99,7 @@ import { registerScratchRoutes } from './routes/scratch';
 import { registerSourceRoutes } from './routes/sources';
 import { registerStateRoutes } from './routes/state';
 import { registerUploadRoutes } from './routes/uploads';
+import { registerStuckRoutes } from './routes/stuck';
 import { registerSummaryRoutes } from './routes/summaries';
 import { registerWorkflowRoutes } from './routes/workflows';
 
@@ -358,6 +359,12 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // into the SAME CAS the claim-check codec writes and `kontra.fetch_blob` reads, so an upload is
   // dereferenceable by every actor in every language with nothing new to configure.
   registerUploadRoutes(app, store);
+  /* WHAT WILL NEVER MOVE (issue F7). An audit found nine open executions wedged on a
+     `WorkflowTaskScheduled` nobody polls — up to 38 days old, every one an INTERNAL workflow type,
+     and therefore invisible to every surface kontra has. This reports them; `kontra doctor` prints
+     it. It deliberately does not reap: what to do with a two-week-old Warden is an operator's call,
+     not a health check's. */
+  registerStuckRoutes(app, { describeQueue: (q) => describeQueue(queueDescriber(), q) });
 
   // --- secrets (issue 19; ADR 0034 §4) ---------------------------------------------
   //
