@@ -26,6 +26,21 @@ last served — the queue does not move across an edit, so a run just executes t
 To stop **inside** a Method, see `docs/debugging.md`: a `debugpy` shim behind `KONTRA_PYTHON`, an
 attach configuration, and the two-minute heartbeat you will need to raise.
 
+## The form is the console's, including the controls
+
+Because the pane is the console's own `MethodCall`, every control a declared type earns appears here
+with no work in this extension:
+
+    str                     a box
+    Literal["a","b"]        a dropdown — the wrong value is not on the screen
+    bool                    a toggle, with `not set` distinct from `false`
+    kontra.File / Folder    a drop zone that uploads and carries the content-addressed ref
+
+**Use the pane's `choose` button rather than dragging into the editor.** The zone accepts an OS drag
+and the picker always works; a webview's drag surface is the editor's to define, and the picker is
+the path that does not depend on it. Either way the bytes go to the orchestrator's `/api/uploads`
+and the field carries `{name, sha256, size}` — nothing large travels as a workflow argument.
+
 ## Install
 
     npm install && npm run compile
