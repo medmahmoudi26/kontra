@@ -52,11 +52,22 @@ boot and prints the credential to the log, which is the one place a person is al
 `up -d`. It is shown **once** — only a scrypt hash is kept. Lost it?
 `docker compose exec kontra kontra user add <name>`.
 
-`make image` is there because **nothing is published yet**. It cuts a release for this platform and
-builds the image from that tarball, so the container is the same bytes as the artifact. Once a tag
-exists and pushes an image, the first two lines collapse into two `curl`s of
-`docker-compose.quickstart.yml` and `.env.quickstart` and a `KONTRA_IMAGE` pointing at the registry
-— the compose file is written for both and needs no other change.
+`make image` is there because **nothing is published yet**, and it has to run on the machine that
+will run the container — the image is built, never pulled. Skip it and you get
+
+```
+Error response from daemon: No such image: kontra:latest
+```
+
+which is the truth. (Without `pull_policy: never` in that compose file you would instead get
+`pull access denied … may require 'docker login'`, because Docker expands the unqualified
+`kontra:latest` to `docker.io/library/kontra:latest` and Hub answers the same way for "no such
+repository" as for "not yours" — an error that sends you to fix credentials you do not need.)
+
+Once a tag exists and pushes an image, the first two lines collapse into two `curl`s of
+`docker-compose.quickstart.yml` and `.env.quickstart`, plus `KONTRA_IMAGE=<registry ref>` and
+`KONTRA_PULL_POLICY=missing` in `.env`. The compose file is written for both and needs no other
+change.
 
 `docker compose down` stops it and keeps every run; `docker compose down -v` throws the data away.
 `.env` has one line that matters for security and it is `KONTRA_BIND=127.0.0.1` — read the note in

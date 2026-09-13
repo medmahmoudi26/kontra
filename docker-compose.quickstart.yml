@@ -39,6 +39,29 @@ services:
     # A moving `latest` from a registry changes your control plane's version during an unrelated
     # `restart`, which is the hardest kind of surprise to debug.
     image: ${KONTRA_IMAGE:-kontra:latest}
+
+    # NEVER PULL A LOCAL TAG, BECAUSE THE ERROR FOR A MISSING ONE IS A LIE.
+    #
+    # `kontra:latest` is unqualified, so Docker expands it to `docker.io/library/kontra:latest` and
+    # tries to fetch it when the tag is not in this machine's daemon. Docker Hub answers the same
+    # way for "no such repository" and "you may not see it", so the message is:
+    #
+    #   pull access denied for kontra, repository does not exist or may require 'docker login'
+    #
+    # which sends an operator to fix credentials they do not need. MEASURED — it is the first thing
+    # that happens when you copy these two files to a second machine and skip `make image`.
+    #
+    # `never` turns that into `No such image: kontra:latest`, which is the truth: BUILD IT HERE.
+    # The image has to exist on the machine that runs the container, and `make image` from a clone
+    # is what puts it there.
+    #
+    # POINTING AT A REGISTRY TAKES BOTH VARIABLES. This policy applies to whatever `KONTRA_IMAGE`
+    # names, registry host or not — so a registry reference with `never` still left alone would
+    # fail as "no such image" on a machine that has never pulled it. Set both:
+    #
+    #   KONTRA_IMAGE=ghcr.io/medmahmoudi26/kontra:v0.2.0
+    #   KONTRA_PULL_POLICY=missing
+    pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
 
     # HOW LONG THE APPLIANCE GETS TO SHUT DOWN, and the default is not enough.
