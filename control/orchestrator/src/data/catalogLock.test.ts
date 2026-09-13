@@ -7,13 +7,13 @@
  * both ways out — rather than forty minutes later, from an activity retrying forever.
  */
 
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { CatalogLocked, LOCK_SUFFIX, acquireCatalogLock } from './catalogLock';
+import { CatalogLocked, HEARTBEAT_MS, LOCK_SUFFIX, acquireCatalogLock } from './catalogLock';
 
 function dir(): string {
   return mkdtempSync(join(tmpdir(), 'kontra-lock-'));
@@ -136,17 +136,81 @@ describe('acquireCatalogLock', () => {
   });
 
   /**
-   * A PID FROM ANOTHER HOST CANNOT BE ASKED, so it counts as live. Two machines on one data
-   * directory over a network mount is not a supported topology, and guessing "probably dead"
-   * there is how both of them open the catalog.
+   * A PID FROM ANOTHER HOST CANNOT BE ASKED, so the HEARTBEAT answers instead. A file touched
+   * moments ago is held by something that is running, wherever it is running.
    */
-  it('treats a holder on another host as live', () => {
+  it('treats a holder on another host that is still beating as live', () => {
     const catalog = join(dir(), 'datasets.ducklake');
     writeFileSync(
       `${catalog}${LOCK_SUFFIX}`,
       JSON.stringify({ pid: 4_194_304, host: 'some-other-box', since: '' })
     );
     expect(() => acquireCatalogLock(catalog)).toThrow(/some-other-box/);
+  });
+
+  /**
+   * THE BUG THIS FIXES, AND IT BRICKED THE DOCKER INSTALL.
+   *
+   * A container's hostname is its id, so `docker compose up -d --force-recreate` — the ordinary
+   * upgrade — starts a new hostname on the same volume. The old rule answered "another host,
+   * therefore live" and the appliance refused to boot, forever, with `restart: unless-stopped`
+   * retrying the refusal. The way out was to `rm` a file inside a named volume belonging to a
+   * container that was restarting and so could not be `exec`'d into.
+   *
+   * The stale mtime here is what a container that is GONE leaves: nothing is touching the file.
+   */
+  it('takes over a lock from another host that stopped beating', () => {
+    const catalog = join(dir(), 'datasets.ducklake');
+    const path = `${catalog}${LOCK_SUFFIX}`;
+    writeFileSync(
+      path,
+      // A plausible record: a real pid, a container id for a hostname — the shape the recreate left.
+      JSON.stringify({ pid: 20, host: '752f94518051', since: new Date().toISOString() })
+    );
+    // Older than STALE_AFTER_MS. Set rather than waited for: a test that sleeps 45 seconds is a
+    // test somebody deletes.
+    const long_ago = new Date(Date.now() - 10 * 60 * 1000);
+    utimesSync(path, long_ago, long_ago);
+
+    const lock = take(catalog);
+    expect(lock).not.toBeNull();
+    expect((JSON.parse(readFileSync(path, 'utf8')) as { pid: number }).pid).toBe(process.pid);
+  });
+
+  /**
+   * AND THE HOLDER KEEPS ITS OWN LOCK FRESH, which is what makes the rule above safe. Without this
+   * every lock goes stale on its own after {@link STALE_AFTER_MS} and a live control plane can be
+   * displaced by any process that waits long enough.
+   *
+   * ASSERTED BY ADVANCING THE CLOCK, not by waiting: the timer is what is under test, so it is the
+   * timer that gets faked.
+   */
+  it('touches its own lock file on an interval, so a live holder never goes stale', () => {
+    vi.useFakeTimers();
+    try {
+      const catalog = join(dir(), 'datasets.ducklake');
+      const path = `${catalog}${LOCK_SUFFIX}`;
+      const lock = take(catalog);
+      expect(lock).not.toBeNull();
+
+      // Backdate it to well past stale, then let one beat fire.
+      const long_ago = new Date(Date.now() - 10 * 60 * 1000);
+      utimesSync(path, long_ago, long_ago);
+      const before = statSync(path).mtimeMs;
+
+      vi.advanceTimersByTime(HEARTBEAT_MS + 1);
+      expect(statSync(path).mtimeMs).toBeGreaterThan(before);
+
+      // AND RELEASING STOPS IT. A timer left running after release touches a path that now belongs
+      // to somebody else — which would keep a stranger's dead lock looking alive.
+      lock!.release();
+      const gone = existsSync(path);
+      vi.advanceTimersByTime(HEARTBEAT_MS * 3);
+      expect(gone).toBe(false);
+      expect(existsSync(path)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   /**

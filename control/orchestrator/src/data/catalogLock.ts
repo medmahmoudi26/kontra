@@ -21,13 +21,69 @@
  * the moment it can still be fixed, and to name the two ways out.
  */
 
-import { openSync, closeSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, rmSync, statSync, utimesSync, writeSync } from 'node:fs';
 import { hostname } from 'node:os';
 
 import { catalogFilePath, ensureCatalogDir, resolveCatalog } from './parquet';
 
 /** The suffix appended to the catalog path. Named in every refusal, so it is not a secret. */
 export const LOCK_SUFFIX = '.lock';
+
+/**
+ * How often the holder touches its own lock file, and how long a lock may go untouched before
+ * another process may take it.
+ *
+ * ── WHY A HEARTBEAT EXISTS AT ALL: THE CONTAINER THAT COULD NEVER START AGAIN ────────────────────
+ *
+ * `holderAlive` used to answer TRUE for any record written by a different hostname, on the
+ * reasoning that a pid on another machine cannot be asked of this kernel. That reasoning is sound
+ * for two machines over NFS and CATASTROPHIC in a container, because **a container's hostname is
+ * its id and a recreated container gets a new one.** The volume is the same; the identity is not.
+ *
+ * MEASURED on the copy-paste docker install: `docker compose up -d --force-recreate`, the ordinary
+ * shape of an upgrade, left a lock recorded by container `752f94518051` and started container
+ * `78c90931e7aa` on the same volume. The new one refused — correctly, by its own rule — and
+ * `restart: unless-stopped` restarted it to refuse again, forever. The way out was to `rm` a file
+ * inside a named volume, in a container that is restarting and so cannot be `exec`'d into. An
+ * unrecoverable brick, reached by typing the documented upgrade command.
+ *
+ * A heartbeat makes the question answerable without asking another kernel: a holder that is
+ * running touches the file, and one that is gone stops. The hostname stops being the authority.
+ *
+ * ── AND THIS LOCK IS ALLOWED TO BE SLIGHTLY PERMISSIVE ───────────────────────────────────────────
+ *
+ * It is ADVISORY and the header says so: DuckDB's own file lock is what protects the bytes, and it
+ * is kernel-enforced and released on death. This one exists to make the collision LEGIBLE at boot
+ * instead of forty minutes into a run. Being wrong for {@link STALE_AFTER_MS} in the direction of
+ * "take it" costs a clear error at the first attach; being wrong in the direction of "honour it"
+ * cost the whole installation.
+ */
+export const HEARTBEAT_MS = 10_000;
+
+/**
+ * Four and a half missed beats. Long enough that a paused container, a stop-the-world GC or a
+ * loaded host does not lose a lock it still holds; short enough that a recreated container
+ * recovers on its own within a minute rather than needing a person.
+ */
+export const STALE_AFTER_MS = 45_000;
+
+/**
+ * Has the holder touched this file recently enough to still be running?
+ *
+ * A file whose mtime cannot be read is treated as NOT fresh — it was removed between the failed
+ * open and this stat, which means there is no holder.
+ *
+ * A LOCK FROM THE FUTURE IS FRESH. Clock skew between two machines sharing a directory would
+ * otherwise read as "stale by a lot" and hand the catalog to a second writer; `Math.abs` makes the
+ * comparison about distance rather than direction.
+ */
+function heartbeatFresh(path: string, now: number = Date.now()): boolean {
+  try {
+    return Math.abs(now - statSync(path).mtimeMs) < STALE_AFTER_MS;
+  } catch {
+    return false;
+  }
+}
 
 /** What the lock file holds — enough to tell a live holder from a crashed one, and no more. */
 interface LockRecord {
@@ -70,14 +126,27 @@ function readHolder(path: string): LockRecord | null {
 /**
  * Is the recorded holder still running?
  *
- * `kill(pid, 0)` asks the kernel and answers three things: the process exists (no throw), it
- * does not (`ESRCH`), or it exists and belongs to someone else (`EPERM` — still running, so
- * still a holder). A pid from ANOTHER HOST cannot be asked at all, so it is treated as live: two
- * machines sharing one data directory over NFS is not a topology this supports, and guessing
- * "probably dead" there is how both of them open the catalog.
+ * TWO QUESTIONS, AND WHICH ONE APPLIES DEPENDS ON WHETHER THE KERNEL CAN BE ASKED.
+ *
+ * **Same host — ask the kernel.** `kill(pid, 0)` answers three things: the process exists (no
+ * throw), it does not (`ESRCH`), or it exists and belongs to someone else (`EPERM` — still
+ * running, so still a holder). That is exact and instant, so a control plane killed with `kill -9`
+ * on this machine does not wait out a timeout before its successor can start.
+ *
+ * **Another host — read the heartbeat.** A pid on another machine cannot be asked of this kernel,
+ * and this used to return TRUE for that case on the reasoning that guessing "probably dead" is how
+ * two machines both open one catalog. In a container that reasoning inverts: the hostname is the
+ * container id, so EVERY recreate looks like another machine and the lock is never reclaimable.
+ * See {@link HEARTBEAT_MS} for the install this bricked. The heartbeat answers the same question
+ * without guessing — a holder that is running touches its file, and one that is gone stops.
+ *
+ * A HOLDER WRITTEN BY A VERSION WITH NO HEARTBEAT, ON ANOTHER HOST, IS RECLAIMED AFTER
+ * {@link STALE_AFTER_MS}. That is a real behaviour change and it is the right one: the topology it
+ * affects — two machines sharing one data directory over a network filesystem — is stated in the
+ * header as unsupported, and DuckDB's own lock still refuses the second writer.
  */
-function holderAlive(rec: LockRecord): boolean {
-  if (rec.host && rec.host !== hostname()) return true;
+function holderAlive(rec: LockRecord, path: string, now: number = Date.now()): boolean {
+  if (rec.host && rec.host !== hostname()) return heartbeatFresh(path, now);
   if (rec.pid === process.pid) return true;
   try {
     process.kill(rec.pid, 0);
@@ -120,7 +189,7 @@ export function acquireCatalogLock(catalog: string = resolveCatalog()): CatalogL
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       const holder = readHolder(path);
-      if (holder && !holderAlive(holder) && attempt === 0) {
+      if (holder && !holderAlive(holder, path) && attempt === 0) {
         // The holder is gone. Remove ITS file and try once more; a second EEXIST after this
         // means somebody else won the race, and that one is a live holder.
         rmSync(path, { force: true });
@@ -133,6 +202,29 @@ export function acquireCatalogLock(catalog: string = resolveCatalog()): CatalogL
     } finally {
       closeSync(fd);
     }
+
+    /* THE HEARTBEAT. Touching the file is the whole of it — the record's contents never change, so
+       there is nothing to rewrite and nothing a reader can catch half-written. `utimesSync` on a
+       path we hold is two syscalls every ten seconds.
+
+       `unref()` IS LOAD-BEARING: without it this timer keeps the event loop alive and a process
+       that has finished its work never exits, which turns a lock meant to protect shutdown into a
+       reason the process will not shut down.
+
+       A FAILED TOUCH IS SWALLOWED. The lock file can be removed out from under us by an operator
+       following the refusal's own advice; throwing from a timer callback is an unhandled exception
+       that takes down a control plane over housekeeping. The next acquirer sees no file and takes
+       the lock, which is the same outcome the removal asked for. */
+    const beat = setInterval(() => {
+      try {
+        const at = new Date();
+        utimesSync(path, at, at);
+      } catch {
+        /* see above */
+      }
+    }, HEARTBEAT_MS);
+    beat.unref();
+
     let released = false;
     return {
       path,
@@ -140,6 +232,7 @@ export function acquireCatalogLock(catalog: string = resolveCatalog()): CatalogL
       release() {
         if (released) return;
         released = true;
+        clearInterval(beat);
         try {
           // Only if it is still OURS. A stale-lock steal by a later process means this file
           // belongs to that one now, and removing it would unlock a live control plane.
@@ -174,6 +267,9 @@ function refusal(catalog: string, path: string, holder: LockRecord | null): stri
     '(KONTRA_DATA_DIR, or `kontra up --data-dir`).\n' +
     '  Two processes that must share ONE catalog need a server, which is what ' +
     'KONTRA_DUCKLAKE_CATALOG=postgres:… is for (ADR 0031 §1b).\n' +
-    `  If nothing holds it, the holder crashed on another host or the record is unreadable: remove ${path}.`
+    '  A holder on ANOTHER HOST — which includes a container that was recreated, since its hostname ' +
+    `is its id — reclaims itself: the lock is taken automatically once it has gone ${Math.round(STALE_AFTER_MS / 1000)}s ` +
+    'without a heartbeat, so a restart loop here ends on its own rather than needing a person.\n' +
+    `  If it does not, the record is unreadable and is not assumed dead: remove ${path}.`
   );
 }
