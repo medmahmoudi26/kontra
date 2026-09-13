@@ -111,17 +111,19 @@ import { registerWorkflowRoutes } from './routes/workflows';
  * Matching the FIRST segment is the point: everything after it is an id whose bytes are not ours to
  * predict — a Terminal id carries a colon and, on tmux, a dot, and a dataset name may carry one too.
  *
- * `runs` AND `scratch` ARE RETIRED SURFACES AND ARE STILL SERVED. The app has five surfaces now
- * (a run is reached through the workflow that produced it, and Scratch became a workflow's own
- * tab), but `/runs/<id>` is in somebody's notes and still names a run — the frontend REDIRECTS it.
+ * `runs` AND `scratch` ARE RETIRED SURFACES AND ARE STILL SERVED. A run is reached through the
+ * workflow that produced it and Scratch became a workflow's own tab, but `/runs/<id>` is in
+ * somebody's notes and still names a run — the console REDIRECTS it.
  * A redirect is code, and code has to load: drop either segment here and a cold load of
  * `/runs/sweep-v1.2` 404s on the dot before the shell that would forward it ever runs.
  */
 export const SPA_SURFACES: ReadonlySet<string> = new Set([
+  'catalog',
   'workflows',
   'actors',
   'datasets',
   'monitor',
+  'secrets',
   'settings',
   // retired, still addressable — see above
   'runs',
