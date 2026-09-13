@@ -115,7 +115,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.
 # than here.
 #
 # IDEMPOTENT. Both installs are no-ops once done, so `make image` twice costs one build.
-console:
+$(CONSOLE):
 	@test -d "$(CONSOLE)" || { \
 	  echo "no console checkout at $(CONSOLE) — the SPA lives in kontra-console since ADR 0038."; \
 	  echo ""; \
@@ -125,6 +125,10 @@ console:
 	  echo "resolves @kontra/core as link:../kontra/shared/core. Or point at one you have:"; \
 	  echo "  make image CONSOLE=/path/to/kontra-console"; \
 	  exit 1; }
+
+# The HOST-side SPA build. `make image` no longer needs it — it builds the SPA in Docker — but
+# `make ui` (deploy into a running container) and `make image-from-release` still do.
+console: $(CONSOLE)
 	pnpm install --frozen-lockfile
 	pnpm --filter @kontra/core run build
 	cd "$(CONSOLE)" && pnpm install --frozen-lockfile && pnpm run build
@@ -136,7 +140,31 @@ release: console
 # THE TARBALL IS FOUND, NOT NAMED. It carries its version and platform in the filename, and a
 # hard-coded one is how an image quietly keeps shipping last month's binary. Exactly one must match:
 # a `build/release` with two is ambiguous and saying so beats picking.
-image: release
+# ── THE ONE THAT NEEDS ONLY DOCKER ──────────────────────────────────────────────────────────────
+#
+# Everything is built INSIDE the image: both pnpm installs, the SPA, the Go binary and the
+# orchestrator bundle. No Go, no Node, no pnpm on your machine.
+#
+# THAT IS NOT A CONVENIENCE, IT IS THE ONLY WAY THIS BUILDS ON macOS. The console has ten pairs of
+# files whose names differ only in case (`WorkflowThread.tsx` beside `workflowThread.ts`, and nine
+# more). On a case-sensitive filesystem they are two modules; on the case-INSENSITIVE one macOS
+# gives you by default, `tsc` resolves `./WorkflowThread` to both and stops with 102 errors about
+# names that "differ only in casing". Copying the sources onto the image's own layer makes the
+# compiler see what Linux CI sees, and nothing about the console had to change.
+#
+# THE CONTEXT IS THE PARENT DIRECTORY because the console is a separate repository and `link:` is a
+# filesystem path — both checkouts have to be visible to one build.
+image: $(CONSOLE)
+	docker build -f control/images/Dockerfile.selfcontained \
+	  --build-arg VERSION=$(VERSION) \
+	  -t "$${KONTRA_IMAGE:-kontra:latest}" "$(dir $(CURDIR))"
+	@echo
+	@echo "  docker compose -f docker-compose.quickstart.yml up -d"
+	@echo "  open http://127.0.0.1:8088"
+
+# `make image-from-release` — the OLDER path, kept because it is the one that proves the container
+# and the published tarball are the same bytes. It needs the host toolchain; `make image` does not.
+image-from-release: release
 	@set -eu; \
 	  n=$$(ls build/release/kontra_*.tar.gz 2>/dev/null | wc -l); \
 	  [ "$$n" = 1 ] || { echo "expected exactly one tarball in build/release, found $$n"; exit 1; }; \
