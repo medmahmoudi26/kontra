@@ -59,7 +59,7 @@ paging is the caller's loop (ADR 0023 §3, superseding the dispatcher-splits mod
 Nothing extra is deployed for any of this — the endpoint an actor registers on boot is the
 endpoint you call. `catalog.serve([YourWorkflow], task_queue=…)` runs your side with the
 claim-check codec already wired, and `kontra workflow serve|start` drives it from a terminal. The
-API is `sdk/python/actorkit/catalog.py`; the Go peer is `sdk/go/catalog`. See
+API is `sdk/python/kontra/catalog.py`; the Go peer is `sdk/go/catalog`. See
 [[Writing-Actors-Python]] for the callee half.
 
 ## The handler workflow (thin)

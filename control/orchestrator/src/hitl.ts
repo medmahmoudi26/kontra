@@ -10,7 +10,7 @@
  * since `signal` is already a reduced-log category (`history.ts`). An archive holding an answer
  * and not its question is a record of somebody approving something unspecified.
  *
- * SO AN ASK IS THE RUN'S OWN MEMO, written by `sdk/python/actorkit/hitl.py` with `upsert_memo`.
+ * SO AN ASK IS THE RUN'S OWN MEMO, written by `sdk/python/kontra/hitl.py` with `upsert_memo`.
  * That is one `WorkflowPropertiesModified` history event per ask and one per answer, AND it rides
  * on `DescribeWorkflowExecution` and on the visibility listing — so everything below reads a
  * parked run with one RPC, no history scan, and no worker anywhere.
@@ -38,7 +38,7 @@ import type { ErrorObject } from 'ajv';
  * The memo key one ask is filed under, and the signal that answers it.
  *
  * CROSS-LANGUAGE LITERALS, written independently on each side per the house decoupling rule — the
- * Python peer is `sdk/python/actorkit/hitl.py` and the Go one lands with issue 13. `hitl.test.ts`
+ * Python peer is `sdk/python/kontra/hitl.py` and the Go one lands with issue 13. `hitl.test.ts`
  * pins these against that file's bytes, because a drift here is not a type error: it is a run that
  * publishes an ask nothing reads, and an answer signalled to a name nothing handles.
  */

@@ -204,7 +204,7 @@ func (u *Unit) State() UnitState {
 func (u *Unit) BindState(s UnitState) { u.state = s }
 
 // Dataset is where a Method pushes its output (ADR 0028 §2) — the third parameter, and the Go peer
-// of Python's actorkit.batch.Dataset. From inside a Method the destination is indistinguishable
+// of Python's kontra.batch.Dataset. From inside a Method the destination is indistinguishable
 // whether the caller named it or not, which is the asymmetry ADR 0028 exists to remove.
 //
 //	func ask(s *kontra.Session, b *kontra.Batch, ds *kontra.Dataset) error {
@@ -236,7 +236,7 @@ func NewDataset(b *Batch) *Dataset { return &Dataset{batch: b} }
 
 // CollectingDataset builds a Dataset with no backend — a plain collector for testing a Method body
 // with no host, no queue and no object store. Read Records() for what the body pushed, in push
-// order. Peer of Python's actorkit.testing.collecting_dataset.
+// order. Peer of Python's kontra.testing.collecting_dataset.
 func CollectingDataset() *Dataset { return &Dataset{} }
 
 // Push appends one record to the output. It names no Unit and returns nothing: a write failure is

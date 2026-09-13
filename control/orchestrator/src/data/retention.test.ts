@@ -199,7 +199,7 @@ interface RunSpec {
    * interpreter declared every dispatch.
    *
    * FALSE IS THE v2 SHAPE, and it is not a hypothetical: measured on this box, `/api/datasets/runs`
-   * holds 50 dispatches and NONE of them is a Run the actorkit path produced, because `publishBatch`
+   * holds 50 dispatches and NONE of them is a Run the SDK path produced, because `publishBatch`
    * writes lake rows and no ledger record. So a v2 Run's Dataset is resolvable only from the rows'
    * own `run_id` statistics.
    */

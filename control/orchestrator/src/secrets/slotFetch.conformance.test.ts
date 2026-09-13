@@ -78,7 +78,7 @@ async function run(actor: string, body: string[]): Promise<{ ok: boolean; out: s
 /** Declare through the SDK's own publisher, exactly as a worker does when it registers itself. */
 const declareAsWorker = (actor: string, version: string, decls: string): Promise<{ ok: boolean; out: string }> =>
   run(actor, [
-    'from actorkit import secrets',
+    'from kontra import secrets',
     `status = secrets.declare(${JSON.stringify(base)}, ${JSON.stringify(actor)}, ${JSON.stringify(version)}, ${decls})`,
     'print(json.dumps({"ok": True, "out": str(status)}))',
   ]);
@@ -86,7 +86,7 @@ const declareAsWorker = (actor: string, version: string, decls: string): Promise
 /** Resolve through the handle an author actually holds: `actor.slot("…").get_sync(...)`. */
 const resolveAsActor = (actor: string, version: string, slot: string, runId = ''): Promise<{ ok: boolean; out: string }> =>
   run(actor, [
-    'from actorkit.actor import ActorRegistry',
+    'from kontra.actor import ActorRegistry',
     'r = ActorRegistry()',
     `r.actor_name = ${JSON.stringify(actor)}`,
     `r.version = ${JSON.stringify(version)}`,

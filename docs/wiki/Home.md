@@ -13,7 +13,7 @@ Kontra runs a **job over a batch of inputs**. You write the job once — a small
 - **The `kontra` CLI** (`cli/`, Go) — `kontra doctor` (infra state + web consoles), `kontra infra up|down|status`, `kontra deploy --actor <dir>` (builds + pushes a self-contained worker image), `kontra workers list`, `kontra runs list`, `kontra dataset list|query|create|tag|rename`, and `kontra workflow serve|start`: the command-line front door to the stack ([[Dev-Cycle]]).
 - **`kontra dataset`** — the data surface, one noun for both directions. `kontra dataset list` shows the lists you loaded *and* every actor's output; `kontra dataset query <name> --sql "…"` runs on the orchestrator's already-open connection (~50 ms; `--local` runs DuckDB on your workstation instead), and the web **Query** workbench runs the same engine. A Dataset carries a derived, run-grain **name** and a set of **tags** — untagged output expires on a TTL, and a tag is what keeps it ([[Query-Surface]]).
 - **`kontra explore <actor[@version]> --dt <when>`** — one dispatch's typed output (the actor's own columns, nested output kept as `STRUCT`/`LIST`), opened in DuckDB **on your machine** over short-lived presigned URLs scoped to that dispatch. Addressed by actor and time, never by a run UUID ([[Query-Surface]]).
-- **Your own workflows** — the *only* dispatcher, since ADR 0023 §12 deleted the graph interpreter. `actorkit.catalog` lets a Temporal workflow you write and run yourself drive deployed actors (`results, dropped = await dns.addrs(batch, out)` — a Batch in, a Batch out, both refs, with the caller's output **Dataset** as the third parameter). For the shapes a fixed topology cannot hold: a loop, a branch, a fan-out sized from the last result. A run can even provision the machines it needs inside its own scope (`actorkit.fleet.up()`). `kontra workflow serve|start` ([[Execution-Model]], ADR 0021, ADR 0028).
+- **Your own workflows** — the *only* dispatcher, since ADR 0023 §12 deleted the graph interpreter. `kontra.catalog` lets a Temporal workflow you write and run yourself drive deployed actors (`results, dropped = await dns.addrs(batch, out)` — a Batch in, a Batch out, both refs, with the caller's output **Dataset** as the third parameter). For the shapes a fixed topology cannot hold: a loop, a branch, a fan-out sized from the last result. A run can even provision the machines it needs inside its own scope (`kontra.fleet.up()`). `kontra workflow serve|start` ([[Execution-Model]], ADR 0021, ADR 0028).
 - **The per-unit blob plane** — with an object store configured, each unit's output streams to `units/{run_id}/{node_id}/u{i}.json` the moment it completes and the durable commit holds only a small `$ref`; a node's output is an S3 prefix a query engine can scan directly ([[Data-Plane]]).
 
 ## Where to go
@@ -24,7 +24,7 @@ Kontra runs a **job over a batch of inputs**. You write the job once — a small
 | Write a Python actor | [[Writing-Actors-Python]] |
 | Write a Go actor | [[Writing-Actors-Go]] |
 | Understand how a run executes | [[Execution-Model]] |
-| Drive actors from your own workflow | [[Execution-Model]] · `sdk/python/actorkit/catalog.py` |
+| Drive actors from your own workflow | [[Execution-Model]] · `sdk/python/kontra/catalog.py` |
 | Understand failure handling & recovery | [[Durability-and-Failures]] |
 | Drive Actors from your own workflow | [[Execution-Model]] |
 | Understand storage & datasets | [[Data-Plane]] |

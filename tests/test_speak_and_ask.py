@@ -34,12 +34,12 @@ from typing import Any, Callable, Optional
 import pytest
 from temporalio import workflow as temporal_workflow
 
-import actorkit
-from actorkit import ask, hitl, narrate, speak
-from actorkit.narrate import MAX_SENTENCE_BYTES, MAX_SENTENCES, NarrationRefused
+import kontra
+from kontra import ask, hitl, narrate, speak
+from kontra.narrate import MAX_SENTENCE_BYTES, MAX_SENTENCES, NarrationRefused
 
 ROOT = Path(__file__).resolve().parent.parent
-PKG_INIT = ROOT / "sdk" / "python" / "actorkit" / "__init__.py"
+PKG_INIT = ROOT / "sdk" / "python" / "kontra" / "__init__.py"
 
 #: A value that must never be findable in anything the run writes about itself.
 SENTINEL = "kontra-sentinel-9f2a1c-do-not-leak"
@@ -211,16 +211,16 @@ async def parked(fake: Fake, coro: Any) -> asyncio.Task:
 
 
 def test_the_two_verbs_are_importable_side_by_side_from_the_top_level() -> None:
-    """`from actorkit import ask, speak` — the whole point of the slice, in one line.
+    """`from kontra import ask, speak` — the whole point of the slice, in one line.
 
     Both are the SAME OBJECTS the older names reach, not wrappers around them. A wrapper would be a
     second place for the budget, the redaction and the docstring to drift."""
     assert ask is hitl.ask
     assert speak is narrate.speak
-    assert {"ask", "speak"} <= set(actorkit.__all__)
+    assert {"ask", "speak"} <= set(kontra.__all__)
     # `dir()` too, because a lazy attribute is invisible to it by default and a surface an author
     # cannot find from the REPL is a surface they will not use.
-    assert {"ask", "speak"} <= set(dir(actorkit))
+    assert {"ask", "speak"} <= set(dir(kontra))
 
 
 def test_an_unknown_name_is_still_an_attribute_error() -> None:
@@ -228,12 +228,12 @@ def test_an_unknown_name_is_still_an_attribute_error() -> None:
     became an `ImportError`, or a missing module import, would be a worse failure than the one
     Python already gives for a typo."""
     with pytest.raises(AttributeError, match="speaks"):
-        actorkit.speaks  # noqa: B018
+        kontra.speaks  # noqa: B018
 
 
-def test_reaching_the_pair_does_not_put_temporal_behind_import_actorkit() -> None:
+def test_reaching_the_pair_does_not_put_temporal_behind_import_kontra() -> None:
     """THE INVARIANT THE LAZINESS EXISTS FOR, and the reason `narrate`/`hitl` are not imported in
-    `actorkit/__init__.py` in the first place: both import temporalio at module scope, `actorkit`
+    `kontra/__init__.py` in the first place: both import temporalio at module scope, `kontra`
     is what the workflow sandbox re-imports per instance, and every non-workflow caller of this
     package is entitled to import it without a Temporal dependency.
 
@@ -243,9 +243,9 @@ def test_reaching_the_pair_does_not_put_temporal_behind_import_actorkit() -> Non
     from the repo root no longer puts the package on the path by itself.
     """
     probe = (
-        "import sys, actorkit;"
+        "import sys, kontra;"
         "print('bare', 'temporalio' in sys.modules);"
-        "from actorkit import ask, speak;"
+        "from kontra import ask, speak;"
         "print('verbs', 'temporalio' in sys.modules)"
     )
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
@@ -253,20 +253,20 @@ def test_reaching_the_pair_does_not_put_temporal_behind_import_actorkit() -> Non
         [sys.executable, "-c", probe], cwd=ROOT, env=env,
         capture_output=True, text=True, check=True,
     ).stdout.split()
-    assert out[:2] == ["bare", "False"], f"import actorkit dragged in temporalio: {out}"
+    assert out[:2] == ["bare", "False"], f"import kontra dragged in temporalio: {out}"
     # …and naming a verb DOES pay for it, which is the other half of the claim: the cost is paid by
     # the author who reaches for one, inside a workflow, where temporalio is present by definition.
     assert out[2:] == ["verbs", "True"], out
 
 
 def test_the_shipped_package_file_carries_the_lazy_accessor() -> None:
-    """`sdk/python/actorkit/__init__.py` is what a wheel contains AND what a checkout imports —
+    """`sdk/python/kontra/__init__.py` is what a wheel contains AND what a checkout imports —
     there is one file now, where there used to be that file plus a repo-root dev shim whose
     `__all__` a test in test_loader.py compared against it.
 
     This still reads the file from disk rather than the imported module, and that is the point: it
     is the half `__all__` cannot see. `speak`/`ask` are resolved by a module `__getattr__`, so an
-    exports list can agree while the accessor is missing, and `from actorkit import speak` would
+    exports list can agree while the accessor is missing, and `from kontra import speak` would
     then fail on exactly the surface an author uses."""
     ns: dict = {}
     exec(compile(PKG_INIT.read_text(), "pkg-init", "exec"), ns)
@@ -371,7 +371,7 @@ def test_the_distinction_is_stated_where_an_author_reads_it() -> None:
     assert "RETURNS IMMEDIATELY" in spoken and "ask" in spoken
     assert "STOPS THE RUN" in asked and "speak" in asked
     # The package header carries the pair as a pair, which is where an author meets it first.
-    assert "from actorkit import ask, speak" in PKG_INIT.read_text()
+    assert "from kontra import ask, speak" in PKG_INIT.read_text()
 
 
 def test_speak_is_the_same_function_and_not_a_second_implementation() -> None:

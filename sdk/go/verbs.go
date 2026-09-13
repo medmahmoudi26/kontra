@@ -17,7 +17,7 @@ import (
 // it. Confusing them turns a progress line into a stalled run, which is why they are exposed
 // side by side here rather than met separately in two packages.
 //
-// THE SAME PAIR PYTHON EXPOSES, under the same two words: `from actorkit import ask, speak`. One
+// THE SAME PAIR PYTHON EXPOSES, under the same two words: `from kontra import ask, speak`. One
 // vocabulary across the SDKs is not decoration — the transcript is ONE READER over both, and a Go
 // run's turns are indistinguishable from a Python run's because these delegate to the same
 // mechanisms the Python peers use (a Summary-carrying timer; a `kontra.ask.<id>` memo entry) rather

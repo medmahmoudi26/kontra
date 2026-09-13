@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import internals.catalog as C
-from actorkit import ActorRegistry
+from kontra import ActorRegistry
 
 
 @dataclass

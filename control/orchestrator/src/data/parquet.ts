@@ -144,7 +144,7 @@ export function dtPartition(runStartedAt: number): string {
  * `parquet.test.ts` pins the round trip in both directions, so the pair is one fact.
  *
  * WHO NEEDS IT. A partition value is the ONLY record of a **Run**'s start that survives for a
- * **Dataset** the materialization ledger never saw — every Run the actorkit path produces, whose
+ * **Dataset** the materialization ledger never saw — every Run the SDK path produces, whose
  * rows are written by `publishBatch` and leave no ledger record at all. `withDatasetNames` renders
  * the derived name's datetime from the row's own `dt` for that reason; feeding it back through
  * `dtPartition` returns the identical string, which is what makes the rendering one rule rather
@@ -354,6 +354,23 @@ export async function lakeConnection(store: ObjectStore, cfg: LakeConfig): Promi
     // stay off — a materializer must never fetch code at runtime.
     await c.run(`SET memory_limit='${cfg.memoryLimit}'`);
     await c.run(`SET threads=${cfg.threads}`);
+    // INSERTION ORDER IS NOT A PROPERTY OF THIS LAKE, AND PRESERVING IT IS WHAT MADE THE BUFFER
+    // MANAGER UNEVICTABLE.
+    //
+    // With the default (`true`) DuckDB must hold a whole insert's tuples to hand them back in
+    // arrival order, so the buffers are PINNED and the spill directory it was given cannot help.
+    // The signature is unmistakable once you look at more than one run: the publish failed at
+    // 731.7/732.4 MiB under a 768MB limit, at 285.4/286.1 under 300MB, and at 533.8/534.0 under
+    // 560MB — always ~95% of whatever ceiling it was given, because raising a ceiling it cannot
+    // evict under only moves the wall. DuckDB names this exact remedy in the error it raises, in
+    // every one of those messages.
+    //
+    // Safe here in a way it would not be everywhere: rows land in a PARTITIONED DuckLake table
+    // and every reader orders explicitly — `batches()` REQUIRES `order_by` precisely because a
+    // materialized dataset stamps no row id and LIMIT/OFFSET over it has no defined order
+    // anyway. Nothing downstream could have depended on arrival order, so this gives up a
+    // guarantee the schema never made.
+    await c.run('SET preserve_insertion_order=false');
     if (cfg.tempDirectory) await c.run(`SET temp_directory='${sqlLiteral(cfg.tempDirectory)}'`);
     await c.run(`SET max_temp_directory_size='${cfg.maxTempSize}'`);
     if (cfg.s3) await c.run(s3Setup(store));

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -314,7 +315,12 @@ func TestResolveOrchestratorFallsBackToTheBundleAndSaysWhy(t *testing.T) {
 	if !strings.Contains(src.Chose, "hydrated") {
 		t.Errorf("the choice does not say what it did: %q", src.Chose)
 	}
-	if !strings.Contains(src.Instead, "not compiled") {
+	// THE REASON, WHATEVER IT IS — not one specific phrasing of it. `fakeCheckout(t, false)` has
+	// neither node_modules nor dist, and the resolver names the EARLIEST missing prerequisite
+	// (issue #2), so this reads "has no node_modules" now rather than "not compiled". Both are the
+	// same fact for this test's purpose: the bundle was hydrated BECAUSE the local build was not
+	// usable, and the operator is told which command fixes it.
+	if !strings.Contains(src.Instead, "control/orchestrator") || !strings.Contains(src.Instead, "pnpm") {
 		t.Errorf("the choice does not say why the local build was not usable: %q", src.Instead)
 	}
 	if _, err := os.Stat(src.Entry); err != nil {
@@ -361,6 +367,12 @@ func TestResolveOrchestratorNoneRunsNoChild(t *testing.T) {
 
 // Neither one available is the fresh-machine case, and the message has to carry BOTH fixes: an
 // operator on an installed binary and a developer in a checkout have the same symptom.
+//
+// IT ASSERTS `run build` AND NOT `not compiled`, and that is the change issue #2 made. A fresh
+// clone has neither node_modules nor dist, and the resolver names the EARLIEST missing
+// prerequisite — so the developer half of this message is now the install, with the build named
+// after it. Pinning the later phrase was pinning the order that asked for a compile which could
+// not run. What the message must carry is a command that works, which is what this checks.
 func TestResolveOrchestratorWithNothingToRunExplainsBothWaysOut(t *testing.T) {
 	t.Setenv("KONTRA_HOME", t.TempDir())
 	_, err := resolveOrchestrator(context.Background(), orchestratorOptions{
@@ -370,10 +382,13 @@ func TestResolveOrchestratorWithNothingToRunExplainsBothWaysOut(t *testing.T) {
 	if err == nil {
 		t.Fatal("a machine with no orchestrator started one anyway")
 	}
-	for _, want := range []string{"kontra bundle orchestrator", "--orchestrator=none", "not compiled"} {
+	for _, want := range []string{"kontra bundle orchestrator", "--orchestrator=none", "run build"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the failure does not mention %q: %v", want, err)
 		}
+	}
+	if strings.Contains(err.Error(), "exec tsc") {
+		t.Errorf("the failure names `exec tsc`, which fails on a clean checkout: %v", err)
 	}
 }
 
@@ -543,5 +558,84 @@ func TestConsoleDistOverrideIsTheOnlyCandidateWhenItIsSet(t *testing.T) {
 	}
 	if len(tried) != 1 || !strings.Contains(tried[0], "KONTRA_CONSOLE_DIST") {
 		t.Errorf("the refusal does not name the variable the operator set: %v", tried)
+	}
+}
+
+// requireNode skips when there is no interpreter, because `resolveLocal` checks for one FIRST now
+// and would refuse for that reason instead of the one under test.
+func requireNode(t *testing.T, why string) {
+	t.Helper()
+	if _, err := osexec.LookPath("node"); err != nil {
+		t.Skip("no node on this machine; " + why)
+	}
+}
+
+// ── issue #2: every refusal names a command that works, in prerequisite order ──────────────────
+//
+// A FIRST-TIME USER LOST AN EVENING TO THIS. `install.sh` finished clean, printed "run kontra up",
+// and `kontra up` died telling them to run `pnpm exec tsc` — which on a clean checkout fails with
+// about a hundred errors, because `package.json`'s `build` is `pnpm --filter @kontra/core run build
+// && tsc` and the orchestrator imports `@kontra/core`. Bare `tsc` is the second half of a two-step
+// build run without the first.
+//
+// THE ASSERTION IS NEGATIVE AS WELL AS POSITIVE, because "mentions run build" would pass on a
+// message that also still said `exec tsc`, and the wrong half is the one somebody copies.
+
+// notCompiled is a checkout with node_modules but no dist — what you have after `pnpm install`.
+func notCompiled(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "control", "orchestrator", "node_modules")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".keep"), []byte("\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestNotCompiledNamesTheBuildThatWorksAndNotTheOneThatDoesNot(t *testing.T) {
+	requireNode(t, "resolveLocal refuses earlier than the case under test")
+	_, err := resolveLocal(orchestratorOptions{}, notCompiled(t), "")
+	if err == nil {
+		t.Fatal("an uncompiled checkout resolved")
+	}
+	if !strings.Contains(err.Error(), "run build") {
+		t.Errorf("the refusal does not name the command that works: %q", err)
+	}
+	if strings.Contains(err.Error(), "exec tsc") {
+		t.Errorf("the refusal still names `exec tsc`, which fails on a clean checkout: %q", err)
+	}
+}
+
+func TestAFreshCloneIsToldToInstallBeforeItIsToldToBuild(t *testing.T) {
+	requireNode(t, "resolveLocal refuses earlier than the case under test")
+	// A fresh clone has NEITHER node_modules NOR dist. This used to check dist first and so asked
+	// for a compile that could not possibly run — the earliest missing prerequisite is the one to
+	// name.
+	_, err := resolveLocal(orchestratorOptions{}, t.TempDir(), "")
+	if err == nil {
+		t.Fatal("a fresh clone resolved")
+	}
+	if !strings.Contains(err.Error(), "node_modules") {
+		t.Errorf("a fresh clone was not told to install first: %q", err)
+	}
+	// Non-vacuous partner: the install message still points at the build that follows it, so the
+	// two steps are not two separate discoveries.
+	if !strings.Contains(err.Error(), "run build") {
+		t.Errorf("the install message does not say what comes after it: %q", err)
+	}
+}
+
+// The compiled case still resolves — a guard that refused everything would pass both tests above.
+func TestACompiledCheckoutStillResolves(t *testing.T) {
+	requireNode(t, "")
+	src, err := resolveLocal(orchestratorOptions{}, fakeCheckout(t, true), "")
+	if err != nil {
+		t.Fatalf("a compiled checkout was refused: %v", err)
+	}
+	if src.Kind != "local" {
+		t.Errorf("wrong kind: %+v", src)
 	}
 }

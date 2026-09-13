@@ -1,6 +1,6 @@
 """THE PYTHON ARM of `shared/conformance/placement.json`.
 
-This side is a WRITER. `actorkit.fleet` builds a **Fleet**'s desired state out of `hold()`,
+This side is a WRITER. `kontra.fleet` builds a **Fleet**'s desired state out of `hold()`,
 `place()` and `up()`; `cli/fleet.go` builds the same thing out of `kontra fleet up|deploy`; and
 `control/orchestrator/src/infra/stacks.ts:coerceFleetArgs` is the only reader. Nothing joins the three but
 matching string literals, and the reader DISCARDS WITHOUT A WORD anything it does not recognise.
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from actorkit import fleet
+from kontra import fleet
 from fleetscope import FleetScope
 
 CORPUS = json.loads(
@@ -53,7 +53,7 @@ async def _packing(f):
     await f.place("subfinder", "0.2.0")
 
 
-#: `case name` -> the args that case's converge produced, built the way `actorkit.fleet` builds it.
+#: `case name` -> the args that case's converge produced, built the way `kontra.fleet` builds it.
 def _cases() -> dict[str, dict]:
     hold_only = _converges(FleetScope().hold(DO, tag="dns"))
     placed = _converges(FleetScope(machines=2).hold(DO, tag="dns", body=_placing()))
@@ -189,7 +189,7 @@ def test_the_spread_case_crosses_as_the_machine_count():
 def test_the_fake_resolver_is_exactly_the_resolved_bundle_the_sdk_forwards():
     """THE ARM'S OWN VACUITY GUARD, and it is the one that matters most here.
 
-    `actorkit.fleet` spreads `resolveBundle`'s answer straight into the stack args, so what this
+    `kontra.fleet` spreads `resolveBundle`'s answer straight into the stack args, so what this
     file measures as "the placement keys" is really "the keys the fake returned". A fake short of a
     field would make `test_this_writer_produces_the_keys_the_case_names` pass while proving nothing
     about the SDK — the shape of green test this repo has already paid for. So the fake's key set is

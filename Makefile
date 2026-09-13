@@ -6,7 +6,7 @@
 # what proves it, and is the command to run after touching anything on that path.
 #
 #   make up | up-d | down    # the CLOUD CONTROLLER's compose stack — see the note above `up`
-.PHONY: up up-d down logs tmux-dir ui api bundle proto-check
+.PHONY: up up-d down logs tmux-dir ui api bundle proto-check image release
 
 # THE TMUX SOCKET DIRECTORY, MADE BEFORE COMPOSE CAN MAKE IT WRONG.
 #
@@ -84,6 +84,42 @@ up-d: tmux-dir
 # orchestrator it is about to be deployed next to.
 CONSOLE ?= ../kontra-console
 
+# ── THE CONTAINER IMAGE, FROM A RELEASE — the compose install path ─────────────────────────────
+#
+# Two steps and the order is the point: `kontra release` produces exactly what a user downloads,
+# and the image is built FROM that tarball. The container and the download are then the same bytes,
+# which is what makes this "verify our builds" rather than a second way to compile.
+#
+# THE SPA IS THE ONE THING THE RELEASE DOES NOT BUILD ITSELF (its toolchain lives in another
+# repository — ADR 0038), so `KONTRA_CONSOLE_DIST` points at a build you have. `make ui` makes one.
+CONSOLE ?= $(abspath $(CURDIR)/../kontra-console)
+PLATFORM ?= linux/amd64
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
+
+release:
+	@test -d "$(CONSOLE)/dist" || { \
+	  echo "no built console at $(CONSOLE)/dist — the release archives a vite output it does not build."; \
+	  echo "  cd $(CONSOLE) && pnpm run build      (or: make ui)"; \
+	  echo "  or point at one:  make release CONSOLE=/path/to/kontra-console"; \
+	  exit 1; }
+	cd cli && KONTRA_CONSOLE_DIST="$(CONSOLE)/dist" go run . release \
+	  --repo .. --platform $(PLATFORM) --version $(VERSION) --out ../build/release
+
+# THE TARBALL IS FOUND, NOT NAMED. It carries its version and platform in the filename, and a
+# hard-coded one is how an image quietly keeps shipping last month's binary. Exactly one must match:
+# a `build/release` with two is ambiguous and saying so beats picking.
+image: release
+	@set -eu; \
+	  n=$$(ls build/release/kontra_*.tar.gz 2>/dev/null | wc -l); \
+	  [ "$$n" = 1 ] || { echo "expected exactly one tarball in build/release, found $$n"; exit 1; }; \
+	  tarball=$$(ls build/release/kontra_*.tar.gz); \
+	  echo "==> image from $$tarball"; \
+	  docker build -f control/images/Dockerfile.appliance --build-arg TARBALL="$$tarball" \
+	    -t "$${KONTRA_IMAGE:-kontra:latest}" .
+	@echo
+	@echo "  docker compose up -d      # the control plane"
+	@echo "  open http://127.0.0.1:8088"
+
 ui:
 	@test -f .env || { echo "no .env at the repo root — the SPA would build with an EMPTY explore token"; exit 1; }
 	@test -d "$(CONSOLE)" || { \
@@ -92,7 +128,7 @@ ui:
 	  echo "  or:  make ui CONSOLE=/path/to/kontra-console"; \
 	  exit 1; }
 	pnpm --filter @kontra/core run build
-	cd "$(CONSOLE)" && VITE_KONTRA_EXPLORE_TOKEN="$$(grep '^KONTRA_EXPLORE_TOKEN=' "$(CURDIR)/.env" | cut -d= -f2-)" pnpm run build
+	cd "$(CONSOLE)" && pnpm run build
 	@api=$$(docker ps -q --filter label=com.docker.compose.service=orchestrator-api | head -1); \
 	  if [ -z "$$api" ]; then \
 	    echo "no orchestrator-api container (it left docker-compose.yml — ADR 0031 §1)."; \
@@ -227,7 +263,7 @@ PYTHON ?= $(shell command -v python || command -v python3)
 # `E2E=1` IS WHAT MAKES THIS A GATE ON THE BINARY (ADR 0031 §5, issue 18).
 #
 # The default run deselects `e2e` and every example actor runs in-process against
-# `actorkit.testing`'s stubs — so it is a real gate on the actor-facing API and, in the ADR's own
+# `kontra.testing`'s stubs — so it is a real gate on the actor-facing API and, in the ADR's own
 # words, "it would go green against a binary that never started". `E2E=1` stops deselecting, which
 # turns on the tests that dial a control plane at `$$KONTRA_ADDRESS` and dispatch a real Batch to
 # a real Worker.
@@ -243,7 +279,7 @@ PYTHON ?= $(shell command -v python || command -v python3)
 # TWO MARKERS, NOT ONE, and the second exists because the first meant two things.
 #
 #   default    -m 'not e2e and not control_plane'   the SDK-side contract: every example actor
-#                                                   in-process against actorkit.testing's stubs,
+#                                                   in-process against kontra.testing's stubs,
 #                                                   no browser, no control plane
 #   E2E=1      -m 'not e2e'                          the same set PLUS the tests that dial a real
 #                                                   control plane at $$KONTRA_ADDRESS

@@ -130,6 +130,82 @@ const D1 = Date.UTC(2026, 7, 3, 19, 42, 7);
 const D2 = Date.UTC(2026, 7, 3, 19, 58, 30);
 const D3 = Date.UTC(2026, 7, 4, 6, 0, 0);
 
+/**
+ * issue #3 — a table whose rows are all INLINED is still a dataset.
+ *
+ * DUCKLAKE INLINES A SMALL WRITE. Below its threshold there is no Parquet file at all, only a
+ * catalog row — so a table created by `kontra dataset create` with two rows had ZERO entries in
+ * `ducklake_data_file`, and a listing driven by that table could not see it. The reporter watched
+ * `kontra dataset list --local` show their dataset and `/api/datasets` not have it, with
+ * `SELECT count(*)` answering 2 the whole time.
+ *
+ * MEASURED ON A REAL INSTALLATION before the fix: nine of twenty-one live tables had no data file
+ * and every one was missing from the API. Not a standalone quirk — `output/desync` was among them.
+ *
+ * THE TEST WRITES DIRECTLY THROUGH THE LAKE CONNECTION rather than through the materializer,
+ * because the materializer's job is to produce files and this is about what happens when nothing
+ * does. That is exactly the shape `kontra dataset create` has: a `CREATE TABLE AS SELECT` against
+ * the attached catalog, no writer involved.
+ */
+describe('a dataset with no data file', () => {
+  let ctx: Ctx;
+  beforeEach(() => {
+    resetLakeConnections();
+    ctx = lake();
+  });
+
+  /** A table created straight in the catalog — small enough that DuckLake inlines it. */
+  async function inline(name: string, rows: number): Promise<void> {
+    const conn = await lakeConnection(ctx.store, resolveLakeConfig(ctx.store, ctx.cfg));
+    await conn.run(`CREATE SCHEMA IF NOT EXISTS ${LAKE}.${STANDALONE_SCHEMA}`);
+    // ZERO ROWS IS ITS OWN STATEMENT. `VALUES` with nothing in it is a parse error, so an empty
+    // table is a typed `SELECT … LIMIT 0` — which is also how `kontra db anew` creates one.
+    const body =
+      rows === 0
+        ? `SELECT * FROM (VALUES (0, 'x')) AS t(n, host) LIMIT 0`
+        : `SELECT * FROM (VALUES ${Array.from({ length: rows }, (_, i) => `(${i}, 'host${i}')`).join(
+            ', '
+          )}) AS t(n, host)`;
+    await conn.run(`CREATE OR REPLACE TABLE ${LAKE}.${STANDALONE_SCHEMA}."${name}" AS ${body}`);
+  }
+
+  it('is listed, which it was not', async () => {
+    await inline('repro_ds', 2);
+    const got = await listDatasets(ctx.store, {}, ctx.cfg);
+    const hit = got.find((d) => d.name === 'repro_ds');
+    expect(hit, `not listed — got ${got.map((d) => d.name).join(', ')}`).toBeDefined();
+    expect(hit!.kind).toBe('standalone');
+  });
+
+  it('reports its real row count, not zero', async () => {
+    // A dataset that is visibly there and visibly empty is a worse lie than one that is absent:
+    // the operator stops looking for the rows instead of looking for the dataset.
+    await inline('repro_ds', 2);
+    const hit = (await listDatasets(ctx.store, {}, ctx.cfg)).find((d) => d.name === 'repro_ds');
+    expect(hit?.rows).toBe(2);
+  });
+
+  it('is findable by name and by kind, like any other', async () => {
+    await inline('repro_ds', 2);
+    expect((await listDatasets(ctx.store, { name: 'repro_ds' }, ctx.cfg)).map((d) => d.name)).toEqual([
+      'repro_ds',
+    ]);
+    expect(
+      (await listDatasets(ctx.store, { kind: 'standalone' }, ctx.cfg)).map((d) => d.name)
+    ).toContain('repro_ds');
+  });
+
+  it('reports a genuinely empty table as zero rather than hiding it', async () => {
+    // The other half of the same change: a table created and never written is REAL, and `0` is the
+    // honest answer for it. Collapsing the two — absent for empty, absent for inlined — is what
+    // made the bug invisible.
+    await inline('empty_ds', 0);
+    const hit = (await listDatasets(ctx.store, {}, ctx.cfg)).find((d) => d.name === 'empty_ds');
+    expect(hit).toBeDefined();
+    expect(hit?.rows).toBe(0);
+  });
+});
+
 describe('listDatasets', () => {
   let ctx: Ctx;
   beforeEach(() => {
@@ -253,7 +329,7 @@ describe('listDatasets', () => {
   // Which Run wrote a row is a fact the ROWS have always carried, and the catalog keeps per-file
   // min/max for `run_id` — so the listing can say it without opening a data file. This is the only
   // authority that answers for a v2 Run at all: the materialization ledger holds no dispatch for
-  // one (measured on the local controller: 50 dispatches, none from the actorkit path).
+  // one (measured on the local controller: 50 dispatches, none from the SDK path).
   it('names every Run that contributed rows to a partition, from catalog statistics alone', async () => {
     // One name, one partition, two Runs — the shape a durable Dataset reaches by being promoted
     // into twice. `dt` is the partition, so both writes are aimed at the same one.

@@ -1,7 +1,7 @@
 """The fleet scope: the strings it routes on, and the gate it will not open early.
 
 Two kinds of thing are tested here, for the same reason `test_workflows_client.py` exists: both
-of `actorkit.fleet`'s failure modes are silent.
+of `kontra.fleet`'s failure modes are silent.
 
 A DRIFTED LITERAL does not raise. `INFRA_QUEUE`, `stackWorkflow`, `kontra-fleet` and the two
 activity names are each written independently on this side and on the orchestrator's — the
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from actorkit import fleet
+from kontra import fleet
 from fleetscope import FleetScope
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -74,7 +74,7 @@ def test_the_caller_queue_matches_the_queue_the_activities_are_registered_on():
     m = re.search(r"DATASET_QUEUE\s*=\s*'([^']+)'", _read("queues.ts"))
     assert m and fleet.CALLER_QUEUE == m.group(1)
 
-    from actorkit import catalog
+    from kontra import catalog
 
     # And it is literally the same constant the Dataset half uses — if these two ever diverge,
     # one of the two halves of a caller's workflow is talking to a queue nobody serves.
@@ -192,7 +192,7 @@ def test_the_subscript_form_keeps_every_refusal_the_call_form_has():
 def test_the_watched_queue_is_the_actors_shared_queue():
     """Not the sessions queue. The handler polls the shared one, and the handler is what
     `kontra workers list` counts."""
-    from actorkit import catalog
+    from kontra import catalog
 
     f = fleet.up(tag="dns", machines=1, actor="nscheck", version="0.1.0")
     assert f.queue == catalog.shared_queue("nscheck", "0.1.0") == "nscheck-0.1.0"

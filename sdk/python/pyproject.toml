@@ -11,7 +11,7 @@ dependencies = [
     # SimplePlugin / temporalio.plugin requires a recent SDK; Nexus serve needs >=1.28.
     "temporalio>=1.28",
     "jsonschema>=4.0",
-    # Per-actor I/O schemas are derived from the typed @actor.defn class (actorkit.schema).
+    # Per-actor I/O schemas are derived from the typed @actor.defn class (kontra.schema).
     "pydantic>=2.0",
 ]
 
@@ -31,7 +31,7 @@ seaweed = ["boto3>=1.28"]
 # DISPATCH is the orchestrator's job. Kontra ships no dispatch CLI — a DIY trigger is a
 # few lines on the SDK (see examples/python/wordcount/{dispatch,webhook}.py).
 #
-# ONE DISTRIBUTION, TWO SEAMS, AND THAT IS DELIBERATE. `actorkit` is the author surface and lives
+# ONE DISTRIBUTION, TWO SEAMS, AND THAT IS DELIBERATE. `kontra` is the author surface and lives
 # beside this file; `internals` is the runtime and lives under `runtime/python/`, reached here by a
 # relative package-dir. They ship together because an actor process needs both — the author's
 # `actor.serve()` hands control to the runtime, and a wheel that carried only half of that would
@@ -43,22 +43,38 @@ seaweed = ["boto3>=1.28"]
 # install APPENDS its finder to sys.meta_path, i.e. AFTER the ordinary path finder — so any
 # directory on sys.path whose name matches the package wins over the install. The old layout put
 # the package files in `actorkit/python/lib/` under a seam directory called `actorkit/`, which is
-# exactly such a directory, so a checkout resolved `import actorkit` to the SEAM DIR and got a
+# exactly such a directory, so a checkout resolved `import kontra` to the SEAM DIR and got a
 # package with no modules in it. The fix was a hand-written `actorkit/__init__.py` at the repo root
 # that re-pointed `__path__` at `python/lib` and re-declared every export — a second copy of the
 # package header, kept in sync by a test.
 #
 # Naming the directory after the package removes the collision instead of compensating for it:
-# there is no `actorkit/` at the repo root to shadow anything, `sdk/python/actorkit/` is a real
+# there is no `kontra/` inside the checkout to shadow anything, `sdk/python/kontra/` is a real
 # package directory that both the path finder and the editable finder resolve to, and the Temporal
 # workflow sandbox — which re-imports fresh and path-scans — finds the same files either way. The
 # shim and its duplicate __init__ are gone.
 #
+# ADR 0044 REOPENS THAT HAZARD ONE LEVEL UP, and it is recorded here because this file is where the
+# last one was paid for. The REPOSITORY is called `kontra`, so a `sys.path` containing the PARENT of
+# the checkouts resolves `import kontra` to the repo directory as an implicit namespace package:
+#
+#     $ cd /root/oss && python3 -c "import sys; sys.path.insert(0,'.'); import kontra; print(kontra.__path__)"
+#     _NamespacePath(['/root/oss/kontra'])
+#
+# `actorkit` could not collide because nothing was named that. The parent of a checkout is not how
+# anyone runs one, and every project whose package matches its repository has this — but when it does
+# bite, `import kontra` SUCCEEDS and the failure arrives later as a missing attribute, so it is
+# written down rather than left to be rediscovered.
+#
+# `actorkit` IS STILL A PACKAGE, and must stay listed: it is the deprecation alias (ADR 0044), it is
+# what every already-written Actor imports, and a wheel that dropped it would break them at load()
+# on a Machine rather than at install.
+#
 # `internals.temporal` IS LISTED. It was not, which no editable install ever noticed (the finder
 # maps a directory, so subpackages came along); a built wheel dropped the actor host on the floor.
 [tool.setuptools]
-packages = ["actorkit", "internals", "internals.temporal"]
+packages = ["kontra", "kontra", "internals", "internals.temporal"]
 
 [tool.setuptools.package-dir]
-actorkit = "actorkit"
+actorkit = "kontra"
 internals = "../../runtime/python/internals"

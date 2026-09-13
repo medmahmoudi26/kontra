@@ -72,7 +72,7 @@ func shout(s *kontra.Session, b *kontra.Batch, ds *kontra.Dataset) error {
 
 Go has **both** halves. [ADR 0023](../adr/0023-v2-one-kind-sessions-caller-owned-loop.md) §22 originally
 gave Go the callee only and was reversed: `sdk/go/catalog` is the peer of
-`sdk/python/actorkit/catalog.py`, so a Go workflow pages a Dataset and drives a Python actor exactly
+`sdk/python/kontra/catalog.py`, so a Go workflow pages a Dataset and drives a Python actor exactly
 as a Python one drives a Go actor. See [[Execution-Model]].
 
 `a.Serve()` serves the actor as a **Temporal activity worker** — run it directly, exactly like a Python actor: `go run .`, or `kontra serve --actor go/<name> --engine go` for the actor plus its handler in one command (that form executes the compiled binary `<actor-dir>/<name>`, so build it first — with `GOWORK=off`, since example actors are standalone modules). It registers `RunBatch` and `Close` and polls `{name}-{version}-sessions`; there is no sidecar to launch it under, no app port and no actor type name. The batches it serves are scheduled by the actor's Go **handler** ([`/handler`](../../handler)), which owns the workflow on the shared `{name}-{version}` queue — Temporal splits workflow and activity across languages by design, which is what keeps the two halves decoupled.

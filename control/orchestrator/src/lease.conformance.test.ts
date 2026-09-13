@@ -17,7 +17,7 @@ import * as leaseActivities from './activities/lease';
  *
  * This side is two things at once, which is why it drives two of the corpus's three sections:
  *
- *   • the READER of the lease-id grammar `actorkit.fleet` writes. `parseLeaseId` is what answers
+ *   • the READER of the lease-id grammar `kontra.fleet` writes. `parseLeaseId` is what answers
  *     "who is holding this Fleet" out of an id, and a reader that split differently from the writer
  *     would name the wrong Run on the one screen an operator reads when a Fleet will not die.
  *   • the WRITER of the **Lease** workflow wire `cli/lease.go` decodes. Its key set is pinned EXACTLY here,

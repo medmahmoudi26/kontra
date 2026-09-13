@@ -19,8 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from actorkit import secrets
-from actorkit.retry import NonRetryableError
+from kontra import secrets
+from kontra.retry import NonRetryableError
 
 SENTINEL = "dop_v1_SENTINEL_never_in_the_clear_9f3c"
 
@@ -156,7 +156,7 @@ def test_the_value_is_in_no_exception_the_module_can_raise(store):
 
 
 def test_it_is_not_the_stdlib_secrets_module():
-    # `from actorkit import secrets` must not shadow the stdlib for anything else in the process.
+    # `from kontra import secrets` must not shadow the stdlib for anything else in the process.
     import secrets as stdlib_secrets
 
     assert stdlib_secrets is not secrets

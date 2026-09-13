@@ -6,7 +6,7 @@
 // and `control/orchestrator/src/stateStore.ts` talks to this tier through `ioredis` — with a `lazyConnect`
 // dance, `enableOfflineQueue: false`, a `retryStrategy`, and an `'error'` listener that exists
 // because an unhandled EventEmitter error kills the API. Two SDKs reach the same tier from
-// actor processes that may not even be on this machine (actorkit's statekv and rediskv, in Python
+// actor processes that may not even be on this machine (the SDK's statekv and rediskv, in Python
 // and Go). Speaking the protocol leaves all of that untouched, which is what makes this a
 // SUBSTITUTION rather than a rewrite of the global state tier: nothing above the socket changes,
 // so nothing above the socket has to be re-proven.
@@ -17,8 +17,8 @@
 // rather than from Redis's command table:
 //
 //	HGET HGETALL TTL SCAN              control/orchestrator/src/stateStore.ts (the operator's read path)
-//	HGET HSET HDEL HEXISTS EXPIRE DEL   actorkit statekv.py / statekv.go (tiers 1+2)
-//	HMGET EVALSHA EVAL SCRIPT LOAD      actorkit redis_kv.py / rediskv.go (tier 3's ETag CAS)
+//	HGET HSET HDEL HEXISTS EXPIRE DEL   the SDK's statekv.py / statekv.go (tiers 1+2)
+//	HMGET EVALSHA EVAL SCRIPT LOAD      the SDK's redis_kv.py / rediskv.go (tier 3's ETag CAS)
 //	EXISTS TYPE                         the SDKs' cross-language layout suites, which assert the
 //	                                    exact key shape both tiers agree on
 //	HELLO PING QUIT SELECT CLIENT INFO  the client libraries' own handshakes, not kontra's code
@@ -73,7 +73,7 @@ import (
 
 // DefaultPort is Redis's port, and it is deliberately the SAME number the compose service
 // published — for the reason temporalsrv.DefaultPort and objstore.DefaultPort are kept.
-// `KONTRA_REDIS_HOST` defaults to `localhost:6379` in both actorkit SDKs and `redis:6379` in
+// `KONTRA_REDIS_HOST` defaults to `localhost:6379` in both kontra SDKs and `redis:6379` in
 // compose; a store on another port
 // is one every existing client fails to find.
 const DefaultPort = 6379

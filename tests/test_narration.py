@@ -3,7 +3,7 @@
 THE WORKFLOW SEAM IS FAKED, not a cluster — the same monkeypatch-the-module seam
 `test_hitl_ask.py` uses, and for the same reason. What is under test is the DECISION shape: which
 command a narration issues, what reaches history, what is refused and how, and what a run that
-narrates nothing is charged for. Every one of those is a property of `actorkit.narrate` rather
+narrates nothing is charged for. Every one of those is a property of `kontra.narrate` rather
 than of Temporal.
 
 WHAT A CLUSTER WOULD ADD, so nobody mistakes green here for proven: that a zero-duration timer
@@ -27,9 +27,9 @@ from typing import Any, Optional
 import pytest
 from temporalio import workflow as temporal_workflow
 
-from actorkit import narrate
-from actorkit.catalog import SUMMARY_BUDGET
-from actorkit.narrate import MAX_SENTENCE_BYTES, MAX_SENTENCES, NarrationRefused, say
+from kontra import narrate
+from kontra.catalog import SUMMARY_BUDGET
+from kontra.narrate import MAX_SENTENCE_BYTES, MAX_SENTENCES, NarrationRefused, say
 
 ROOT = Path(__file__).resolve().parent.parent
 

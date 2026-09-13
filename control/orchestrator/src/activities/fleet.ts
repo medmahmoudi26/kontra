@@ -1,5 +1,5 @@
 /**
- * The two reads `actorkit.fleet` needs from inside a caller's workflow.
+ * The two reads `kontra.fleet` needs from inside a caller's workflow.
  *
  * Provisioning itself is NOT here — that is `stackWorkflow` on the infra queue, and the caller
  * reaches it as a child workflow so the fleet's lifetime is a durable part of the run. What

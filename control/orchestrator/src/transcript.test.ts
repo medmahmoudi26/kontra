@@ -1089,7 +1089,7 @@ test('the Method a dispatch called, off the event and not out of the payload', (
 /* ───────────────────────────── an author's own sentence ───────────────────────────── */
 
 /**
- * One narration, as `sdk/python/actorkit/narrate.py` actually writes it.
+ * One narration, as `sdk/python/kontra/narrate.py` actually writes it.
  *
  * A ZERO-DURATION TIMER AND ITS FIRING, because a timer is the only command a workflow can issue
  * that carries user metadata and runs nothing. Written in Temporal's own raw shape and put through
@@ -1211,7 +1211,7 @@ const ASK_MEMO_PREFIX = 'kontra.ask.';
 const ASK_TIMER_PREFIX = 'kontra.ask/';
 
 /**
- * The two events a park writes ABOUT ITSELF, as `sdk/python/actorkit/hitl.py` writes them.
+ * The two events a park writes ABOUT ITSELF, as `sdk/python/kontra/hitl.py` writes them.
  *
  * THE SECOND ONE IS THE BUG. `upsert_memo({'kontra.ask.<id>': …})` is one
  * `WorkflowPropertiesModified`, and the wait that follows carries
@@ -1255,7 +1255,7 @@ test('an ask is not a sentence', () => {
   // CROSS-LANGUAGE LITERALS, pinned on both routes. A rename on either side is not a type error:
   // it is an ask that silently reads as a note again, which is what shipped.
   it('spells the ask exactly as the two emitters do', () => {
-    const py = readFileSync(join(__dirname, '..', '..', '..', 'sdk', 'python', 'actorkit', 'hitl.py'), 'utf8');
+    const py = readFileSync(join(__dirname, '..', '..', '..', 'sdk', 'python', 'kontra', 'hitl.py'), 'utf8');
     expect(py).toContain(`ASK_MEMO_PREFIX = "${ASK_MEMO_PREFIX}"`);
     expect(py).toContain(`timeout_summary=f"${ASK_TIMER_PREFIX}{ask_id}"`);
     // And the server's own spelling of the memo prefix, which `hitl.ts` exports for the ask route.

@@ -1,5 +1,5 @@
 // Package narrate is an author's own sentence about their own run — the `say` half of the
-// transcript, and the Go peer of `sdk/python/actorkit/narrate.py`.
+// transcript, and the Go peer of `sdk/python/kontra/narrate.py`.
 //
 //	if err := narrate.Say(ctx, fmt.Sprintf("%d apexes in scope from the paid-programs list", len(apexes))); err != nil {
 //		return out, err
@@ -258,7 +258,7 @@ func Say(ctx workflow.Context, sentence string) error {
 // ── THE PAIR, AND WHY THERE ARE TWO ────────────────────────────────────────────────────────────
 //
 // `Speak` and `Ask` are the two things a workflow says out loud, under the same two words Python
-// uses (`from actorkit import ask, speak`) so the two SDKs keep ONE VOCABULARY and the transcript
+// uses (`from kontra import ask, speak`) so the two SDKs keep ONE VOCABULARY and the transcript
 // stays one reader over both:
 //
 //   - `Speak` COSTS HISTORY AND RETURNS IMMEDIATELY. Five events and about a second, then the run

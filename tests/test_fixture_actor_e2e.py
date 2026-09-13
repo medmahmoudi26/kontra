@@ -33,7 +33,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 with workflow.unsafe.imports_passed_through():
-    from actorkit import catalog
+    from kontra import catalog
     from internals import casstore
 
 pytestmark = pytest.mark.control_plane

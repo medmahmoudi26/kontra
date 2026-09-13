@@ -53,13 +53,13 @@ def test_session_state_is_gone_and_unit_state_is_not():
     because the orchestrator's state projection classified tiers by exactly the `s-` and
     `-ckpt` conventions, and a stale classifier presents an always-empty tier as though it were
     a real but idle one."""
-    import actorkit
+    import kontra
 
     for gone in ("session_state", "checkpoint"):
-        assert not hasattr(actorkit, gone), f"actorkit.{gone} retired with §19"
-    assert hasattr(actorkit, "unit_state"), "unit_state survives — see the §19 amendment"
+        assert not hasattr(kontra, gone), f"kontra.{gone} retired with §19"
+    assert hasattr(kontra, "unit_state"), "unit_state survives — see the §19 amendment"
 
-    inst = actorkit.Actor()
+    inst = kontra.Actor()
     for gone in ("session_state", "checkpoint"):
         assert not hasattr(inst, gone), f"self.{gone} retired with §19"
     assert hasattr(inst, "unit_state")
@@ -96,7 +96,7 @@ class _FakeKV:
 
 
 def _host(method, kv):
-    from actorkit import ActorRegistry, MethodRegistration
+    from kontra import ActorRegistry, MethodRegistration
     from internals.engine import build_session_factory
 
     reg = ActorRegistry()

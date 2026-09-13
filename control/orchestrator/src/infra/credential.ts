@@ -117,7 +117,7 @@ export interface CredentialOptions {
  * What it does is stop the mistake being USED — no converge runs against a name that is a token,
  * and the operator gets a sentence saying to rotate it rather than a provider 404 they will read as
  * a typo. The guard that catches it BEFORE it crosses is on the caller's side
- * (`sdk/python/actorkit/fleet.py:CREDENTIAL_LOOKS_LIKE_A_TOKEN`); this is the same refusal for
+ * (`sdk/python/kontra/fleet.py:CREDENTIAL_LOOKS_LIKE_A_TOKEN`); this is the same refusal for
  * every other door — the CLI, the HTTP route, a second SDK.
  */
 const LOOKS_LIKE_A_TOKEN = ['dop_v1_', 'doo_v1_', 'dor_v1_'];

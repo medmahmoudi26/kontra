@@ -12,7 +12,7 @@
    "runtime/handler/internal/identity.SharedQueue",
    "sdk/go/catalog.SharedQueue",
    "runtime/go/temporalhost.TaskQueue + .SessionTaskQueue (as their stem)",
-   "sdk/python/actorkit/catalog.shared_queue",
+   "sdk/python/kontra/catalog.shared_queue",
    "runtime/python/internals/temporal/host.task_queue + .session_task_queue (as their stem)",
    "control/orchestrator/src/nexusRegistry.ts:sharedQueue",
    "control/orchestrator/src/panels/pollers.ts:sharedQueue",
@@ -75,7 +75,7 @@
    "runtime/handler/internal/identity.SessionsQueue + .SessionsQueueOf (which is what runtime/handler/workflow.go schedules with)",
    "sdk/go/catalog.SessionsQueue",
    "runtime/go/temporalhost.TaskQueue",
-   "sdk/python/actorkit/catalog.sessions_queue",
+   "sdk/python/kontra/catalog.sessions_queue",
    "runtime/python/internals/temporal/host.task_queue"
   ],
   "cases": [
@@ -117,7 +117,7 @@
    "runtime/handler/internal/identity.SessionQueue (from the workflow's OWN task queue plus the dispatched id)",
    "sdk/go/catalog.SessionQueue",
    "runtime/go/temporalhost.SessionTaskQueue",
-   "sdk/python/actorkit/catalog.session_queue",
+   "sdk/python/kontra/catalog.session_queue",
    "runtime/python/internals/temporal/host.session_task_queue"
   ],
   "cases": [
@@ -163,7 +163,7 @@
   "derived_by": [
    "runtime/handler/internal/identity.EndpointName",
    "sdk/go/catalog.EndpointName",
-   "sdk/python/actorkit/catalog.endpoint_name",
+   "sdk/python/kontra/catalog.endpoint_name",
    "control/orchestrator/src/nexusRegistry.ts:endpointName"
   ],
   "cases": [
@@ -343,6 +343,72 @@
     "tag": "crawl; reboot",
     "worker": "actor",
     "machine": "fleet"
+   }
+  ]
+ },
+ "session_kind": {
+  "why": "Which tmux sessions the Monitor will show, and the vocabulary both sides admit them by (ADR 0043). A session carries its claim in the `@kontra` USER OPTION as `<kind>:<rest>`; discovery admits a tag only when its kind is one of these. Before 0043 there was no vocabulary at all — any non-empty value admitted a session, so one `tmux set-option` put a session holding anything onto the wall, while the grammar that would have refused it (`SAFE.command`, which permits only a journal) ran on the converge path and nowhere else. kontra controlled tightly what it CREATED and admitted whatever it FOUND.",
+  "closed_set": "A closed set rather than a pattern, because adding a kind should be a decision rather than a typo that happens to work. `actor` and `workflow` are written by kontra; `watch` is the only one a human types, and writing it ASSERTS the ADR's rule: the panes hold nothing that exists only there. A Worker's pane satisfies that (the Run is in Temporal, the rows are in the lake) and so does a Machine's (machine.ts puts journals in panes and journald is the record). An interactive session — an agent, a REPL, a debugger — does not, and the supported way to watch one is to supervise it and tail its journal.",
+  "untagged_is_not_a_kind": "'' is NOT a known kind. An untagged session reaches the wall, if at all, through the legacy `kontra-` NAME prefix, which is kept because a Worker that was already running when tagging landed has exactly that shape and a wall that dropped it would report a live Worker as absent — the one thing ADR 0020 says a tile may never do. It is a narrower door than the old one: it needs kontra's own name prefix rather than any value in any option.",
+  "derived_by": [
+   "cli/internal/tmux/tmux.go:SessionKinds + IsKnownSessionKind + SessionKind (writer side)",
+   "shared/core/src/panels/tmux.ts:SESSION_KINDS + isKnownSessionKind + kontraSessionKind (reader side)",
+   "control/orchestrator/src/panels/local.ts:isKontraSession (the gate that consumes it)"
+  ],
+  "cases": [
+   {
+    "why": "an Actor's Worker, written by kontra",
+    "tag": "actor:probe:0.1.0",
+    "kind": "actor",
+    "known": true
+   },
+   {
+    "why": "a served caller workflow, written by kontra",
+    "tag": "workflow:hunt",
+    "kind": "workflow",
+    "known": true
+   },
+   {
+    "why": "the operator's own session, explicitly offered — the only kind a human types",
+    "tag": "watch:repl",
+    "kind": "watch",
+    "known": true
+   },
+   {
+    "why": "THE CASE 0043 EXISTS FOR: a session tagged with anything at all used to be admitted",
+    "tag": "anything",
+    "kind": "anything",
+    "known": false
+   },
+   {
+    "why": "a plausible-looking kind that is still not one of ours — refused rather than guessed at",
+    "tag": "agent:claude",
+    "kind": "agent",
+    "known": false
+   },
+   {
+    "why": "untagged is not a kind; the legacy NAME prefix is what admits such a session, not this",
+    "tag": "",
+    "kind": "",
+    "known": false
+   },
+   {
+    "why": "a kind is the part before the FIRST colon, so a rest containing colons does not change it",
+    "tag": "actor:my:actor:1.0.0",
+    "kind": "actor",
+    "known": true
+   },
+   {
+    "why": "case matters — a closed set is compared literally, never folded",
+    "tag": "Actor:probe:0.1.0",
+    "kind": "Actor",
+    "known": false
+   },
+   {
+    "why": "a bare colon claims the empty kind, which is not in the set",
+    "tag": ":probe",
+    "kind": "",
+    "known": false
    }
   ]
  }

@@ -54,7 +54,7 @@ export const LEASE_DROP_SIGNAL = 'kontra.lease.drop';
  */
 export const LEASE_QUERY = 'getLeases';
 
-/** The two activity names the caller SDK schedules by literal. Their peers are in `actorkit.fleet`. */
+/** The two activity names the caller SDK schedules by literal. Their peers are in `kontra.fleet`. */
 export const HOLD_ACTIVITY = 'holdFleetLease';
 export const DROP_ACTIVITY = 'dropFleetLease';
 
@@ -64,7 +64,7 @@ export const DROP_ACTIVITY = 'dropFleetLease';
  * ONE HOUR, AND THE NUMBER IS A TRADE STATED RATHER THAN TUNED. It bounds a leak: a control plane
  * that dies holding a **Fleet** costs at most an hour of **Machines** past the moment a worker polls
  * the infra queue again. It is also the window a `destroy_on_exit=False` handoff has to be picked up
- * in — see `sdk/python/actorkit/fleet.py`, where adopting a **Fleet** now means "for one TTL" rather
+ * in — see `sdk/python/kontra/fleet.py`, where adopting a **Fleet** now means "for one TTL" rather
  * than "for ever", which is what ADR 0037's *"expires on a clock"* costs and buys.
  *
  * A LIVE HOLDER IS NEVER REAPED BY IT. Expiry is a CHECK, not a deadline: when it fires, the **Lease** workflow

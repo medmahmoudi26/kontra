@@ -1,0 +1,1377 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "kontra orchestrator",
+    "version": "0.1.0",
+    "description": "Generated from the routes this server registers. Paths and auth are authoritative; request and response bodies are deliberately absent until routes carry JSON schemas."
+  },
+  "components": {
+    "securitySchemes": {
+      "consoleSession": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A session from POST /api/login."
+      },
+      "stateToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "KONTRA_STATE_TOKEN. Can spend money."
+      },
+      "runToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "KONTRA_RUN_TOKEN. Open when unset."
+      },
+      "exploreToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "KONTRA_EXPLORE_TOKEN, falling back to state."
+      },
+      "actorIdentity": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A signed token naming ONE actor, minted when it is served (KONTRA_ACTOR_TOKEN). It resolves what that actor owns and nothing more — it is not a service token."
+      }
+    }
+  },
+  "paths": {
+    "/api/actors": {
+      "get": {
+        "operationId": "getActors",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "post": {
+        "operationId": "postActors",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/actors/{key}": {
+      "delete": {
+        "operationId": "deleteActorsByKey",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/actors/{key}/digest": {
+      "post": {
+        "operationId": "postActorsByKeyDigest",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/datasets": {
+      "get": {
+        "operationId": "getDatasets",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/datasets/{name}": {
+      "delete": {
+        "operationId": "deleteDatasetsByName",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/datasets/{name}/preview": {
+      "get": {
+        "operationId": "getDatasetsByNamePreview",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/datasets/{name}/provenance": {
+      "get": {
+        "operationId": "getDatasetsByNameProvenance",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/datasets/export": {
+      "get": {
+        "operationId": "getDatasetsExport",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/datasets/query": {
+      "post": {
+        "operationId": "postDatasetsQuery",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/datasets/retention/preview": {
+      "get": {
+        "operationId": "getDatasetsRetentionPreview",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/datasets/rows/stream": {
+      "get": {
+        "operationId": "getDatasetsRowsStream",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/datasets/runs": {
+      "get": {
+        "operationId": "getDatasetsRuns",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/datasets/runs/{runId}/name": {
+      "put": {
+        "operationId": "putDatasetsRunsByRunIdName",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      },
+      "delete": {
+        "operationId": "deleteDatasetsRunsByRunIdName",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/datasets/runs/{runId}/tags": {
+      "post": {
+        "operationId": "postDatasetsRunsByRunIdTags",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/datasets/runs/{runId}/tags/{tag}": {
+      "delete": {
+        "operationId": "deleteDatasetsRunsByRunIdTagsByTag",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/datasets/schema": {
+      "get": {
+        "operationId": "getDatasetsSchema",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/fleet/operations": {
+      "get": {
+        "operationId": "getFleetOperations",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "stateToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/graphs": {
+      "get": {
+        "operationId": "getGraphs",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "post": {
+        "operationId": "postGraphs",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/graphs/{id}": {
+      "get": {
+        "operationId": "getGraphsById",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "delete": {
+        "operationId": "deleteGraphsById",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/infra/ops/{fqn}": {
+      "get": {
+        "operationId": "getInfraOpsByFqn",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "stateToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/infra/stacks": {
+      "get": {
+        "operationId": "getInfraStacks",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "stateToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/infra/stacks/{fqn}/{op}": {
+      "post": {
+        "operationId": "postInfraStacksByFqnByOp",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "stateToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/infra/stacks/{fqn}/leases": {
+      "get": {
+        "operationId": "getInfraStacksByFqnLeases",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "stateToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/infra/stacks/{fqn}/state": {
+      "get": {
+        "operationId": "getInfraStacksByFqnState",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "stateToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/login": {
+      "get": {
+        "operationId": "getLogin",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "post": {
+        "operationId": "postLogin",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/logout": {
+      "post": {
+        "operationId": "postLogout",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/panels/report": {
+      "post": {
+        "operationId": "postPanelsReport",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/panels/terminals": {
+      "get": {
+        "operationId": "getPanelsTerminals",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/panels/ticket": {
+      "post": {
+        "operationId": "postPanelsTicket",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/probes/{runId}": {
+      "get": {
+        "operationId": "getProbesByRunId",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/pulse": {
+      "get": {
+        "operationId": "getPulse",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/queues/{queue}/pollers": {
+      "get": {
+        "operationId": "getQueuesByQueuePollers",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/runs": {
+      "get": {
+        "operationId": "getRuns",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      },
+      "post": {
+        "operationId": "postRuns",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}": {
+      "get": {
+        "operationId": "getRunsByRunId",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/asks": {
+      "get": {
+        "operationId": "getRunsByRunIdAsks",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/asks/{askId}": {
+      "post": {
+        "operationId": "postRunsByRunIdAsksByAskId",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/explore": {
+      "get": {
+        "operationId": "getRunsByRunIdExplore",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/heartbeats": {
+      "get": {
+        "operationId": "getRunsByRunIdHeartbeats",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/history": {
+      "get": {
+        "operationId": "getRunsByRunIdHistory",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/phase": {
+      "get": {
+        "operationId": "getRunsByRunIdPhase",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/progress": {
+      "post": {
+        "operationId": "postRunsByRunIdProgress",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      },
+      "get": {
+        "operationId": "getRunsByRunIdProgress",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/stop": {
+      "post": {
+        "operationId": "postRunsByRunIdStop",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/workflow": {
+      "put": {
+        "operationId": "putRunsByRunIdWorkflow",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/scratch": {
+      "get": {
+        "operationId": "getScratch",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "post": {
+        "operationId": "postScratch",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/scratch/{id}": {
+      "get": {
+        "operationId": "getScratchById",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "delete": {
+        "operationId": "deleteScratchById",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/scratch/{id}/spec": {
+      "get": {
+        "operationId": "getScratchByIdSpec",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/secrets": {
+      "get": {
+        "operationId": "getSecrets",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/secrets/{name}": {
+      "get": {
+        "operationId": "getSecretsByName",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "put": {
+        "operationId": "putSecretsByName",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "delete": {
+        "operationId": "deleteSecretsByName",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/secrets/{name}/versions/{version}/revoke": {
+      "post": {
+        "operationId": "postSecretsByNameVersionsByVersionRevoke",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/secrets/identity": {
+      "post": {
+        "operationId": "postSecretsIdentity",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/secrets/resolve": {
+      "post": {
+        "operationId": "postSecretsResolve",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "actorIdentity": []
+          }
+        ],
+        "description": "Gated by an ACTOR IDENTITY token (KONTRA_ACTOR_TOKEN on the worker) — not a service token, and not a console session."
+      }
+    },
+    "/api/slots": {
+      "get": {
+        "operationId": "getSlots",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/slots/actor/{actor}": {
+      "get": {
+        "operationId": "getSlotsActorByActor",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/slots/actor/{actor}/{slot}": {
+      "put": {
+        "operationId": "putSlotsActorByActorBySlot",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      },
+      "delete": {
+        "operationId": "deleteSlotsActorByActorBySlot",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/slots/audit": {
+      "get": {
+        "operationId": "getSlotsAudit",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/slots/declare": {
+      "post": {
+        "operationId": "postSlotsDeclare",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/slots/preflight": {
+      "post": {
+        "operationId": "postSlotsPreflight",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/slots/resolve": {
+      "post": {
+        "operationId": "postSlotsResolve",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "actorIdentity": []
+          }
+        ],
+        "description": "Gated by an ACTOR IDENTITY token (KONTRA_ACTOR_TOKEN on the worker) — not a service token, and not a console session."
+      }
+    },
+    "/api/sources/{kind}": {
+      "get": {
+        "operationId": "getSourcesByKind",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      },
+      "post": {
+        "operationId": "postSourcesByKind",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/sources/{kind}/{id}": {
+      "delete": {
+        "operationId": "deleteSourcesByKindById",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/sources/{kind}/{id}/file": {
+      "get": {
+        "operationId": "getSourcesByKindByIdFile",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/sources/{kind}/{id}/files": {
+      "get": {
+        "operationId": "getSourcesByKindByIdFiles",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/sources/actor/{id}/caller": {
+      "post": {
+        "operationId": "postSourcesActorByIdCaller",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/sources/actor/{id}/probe": {
+      "post": {
+        "operationId": "postSourcesActorByIdProbe",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/sources/actor/{id}/serve": {
+      "post": {
+        "operationId": "postSourcesActorByIdServe",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/state/{tier}": {
+      "get": {
+        "operationId": "getStateByTier",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/stuck": {
+      "get": {
+        "operationId": "getStuck",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/summaries/health": {
+      "get": {
+        "operationId": "getSummariesHealth",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/summaries/hourly": {
+      "get": {
+        "operationId": "getSummariesHourly",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/summaries/runs/{runId}": {
+      "get": {
+        "operationId": "getSummariesRunsByRunId",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/uploads": {
+      "post": {
+        "operationId": "postUploads",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "stateToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/workflows": {
+      "get": {
+        "operationId": "getWorkflows",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/workflows/catalog": {
+      "post": {
+        "operationId": "postWorkflowsCatalog",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/workflows/exposure": {
+      "get": {
+        "operationId": "getWorkflowsExposure",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/workflows/file/{name}": {
+      "get": {
+        "operationId": "getWorkflowsFileByName",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/workflows/file/{name}/pause": {
+      "post": {
+        "operationId": "postWorkflowsFileByNamePause",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/workflows/file/{name}/resume": {
+      "post": {
+        "operationId": "postWorkflowsFileByNameResume",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [],
+        "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/workflows/serve": {
+      "post": {
+        "operationId": "postWorkflowsServe",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    }
+  }
+}

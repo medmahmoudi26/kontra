@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/api/infra/stacks/kontra-fleet%2Fcampaign-bruno/preview
+  url: {{baseUrl}}/api/infra/stacks/kontra-fleet%2Fprobe-bruno/preview
   body: json
   auth: bearer
 }
@@ -40,6 +40,6 @@ docs {
   route NEVER blocks on Pulumi: a ten-machine `up` takes minutes, longer than any proxy holds a
   connection.
 
-  The stack fqn is URL-encoded (`kontra-fleet%2Fcampaign-bruno`) because it contains a slash.
+  The stack fqn is URL-encoded (`kontra-fleet%2Fprobe-bruno`) because it contains a slash.
   It is also the workflow id — which is what makes two concurrent `up`s on one stack impossible.
 }

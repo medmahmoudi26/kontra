@@ -1,0 +1,50 @@
+{
+ "why": "The console login credential: how the CLI WRITES a password hash at install and how the orchestrator VERIFIES it at `POST /api/login`. Two languages, one format, and a mismatch is a login nobody can pass — which neither suite would notice, because each half is correct on its own.",
+ "why_a_login_exists": "The CLI authenticates by reading `~/.kontra/config.yaml`. A browser cannot, so the console used to get in by having a bearer BAKED INTO ITS BUNDLE at build time (VITE_KONTRA_EXPLORE_TOKEN). That is a credential in a build artifact, it breaks on every rotation, and a build run for an unrelated reason silently replaced the served bundle with a tokenless one that answered `query: unauthorized` for every query. The login is where the browser's token comes from instead.",
+ "scheme": "scrypt, encoded self-describingly as `scrypt$N$r$p$<salt-b64>$<hash-b64>` with RAW (unpadded) standard base64. Chosen because it is the only password KDF both sides have with NO NEW DEPENDENCY — golang.org/x/crypto/scrypt and node:crypto's builtin. bcrypt or argon2 would each add an npm package to the control plane to check one password on a single-instance install.",
+ "cost": {
+  "N": 32768,
+  "r": 8,
+  "p": 1,
+  "key_len": 32,
+  "salt_len": 16
+ },
+ "the_maxmem_trap": "N=32768 needs 128*N*r = 32 MiB per verification, which is exactly Node's DEFAULT `maxmem`. The TypeScript side MUST pass `maxmem` explicitly or scrypt throws — and a default that silently caps the work factor would be worse than throwing. Named here because it is the one thing about this format that is not symmetric between the two languages.",
+ "self_describing": "The cost lives in the string, not in a constant two languages have to change at the same moment. Raising N later keeps every hash already written verifiable; only new ones get the new cost.",
+ "a_malformed_hash_locks": "Verification of an unparseable hash is a FAILURE, never a pass. A config whose hash somebody hand-edited into nonsense must lock the console rather than open it — the shape `watchdog.sh` shipped for years in this repository, and the one ADR 0039 refuses for cosign.",
+ "derived_by": [
+  "cli/internal/creds/creds.go:Hash + Verify (the writer)",
+  "control/orchestrator/src/auth/password.ts:verifyPassword (the reader)"
+ ],
+ "vectors": [
+  {
+   "why": "the ordinary case: an install-generated password",
+   "password": "kontra-test-password",
+   "salt_b64": "AAAAAAAAAAAAAAAAAAAAAA",
+   "encoded": "scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA$xUOhpxeh02N3ya004exq84OCO7/j7T3Ql1AKJNspNNk"
+  },
+  {
+   "why": "a password with a $ in it — the field separator, which must not corrupt the parse",
+   "password": "a$b$c$d",
+   "salt_b64": "BBBBBBBBBBBBBBBBBBBBBB",
+   "encoded": "scrypt$32768$8$1$BBBBBBBBBBBBBBBBBBBBBA$V4vj3jDfyB+jd7zHVs2L1EeB2hAONCh3gVbuWpDCyXA"
+  },
+  {
+   "why": "non-ASCII: a passphrase is bytes, not characters",
+   "password": "café-naïve-📦",
+   "salt_b64": "CCCCCCCCCCCCCCCCCCCCCC",
+   "encoded": "scrypt$32768$8$1$CCCCCCCCCCCCCCCCCCCCCA$RAXXyprLzL9H0dPAhKYz5UeNr7NfIztlx85nZbGRCqo"
+  },
+  {
+   "why": "empty is hashable — refusing it is the caller's rule, not the KDF's",
+   "password": "",
+   "salt_b64": "DDDDDDDDDDDDDDDDDDDDDD",
+   "encoded": "scrypt$32768$8$1$DDDDDDDDDDDDDDDDDDDDDA$g/H65bS4TmA3iyboGY8soMz6Tz6FU7g8bmmqwRDX5Q4"
+  }
+ ],
+ "notes": [
+  "The salts are fixed so the encoded value is reproducible; a real hash uses a fresh random one, and `creds_test.go` asserts two hashes of one password differ.",
+  "`a$b$c$d` is in the corpus because `$` is the field separator: a parser that split on it naively would corrupt the password's own bytes and still look correct on every other row.",
+  "The empty password is hashable on purpose. Refusing it is the CALLER's rule — `kontra init` generates 20 characters — not the KDF's, and pinning that keeps the two layers separate."
+ ]
+}

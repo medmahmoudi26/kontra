@@ -22,7 +22,7 @@ import json
 import re
 from pathlib import Path
 
-from actorkit import fleet
+from kontra import fleet
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = json.loads((ROOT / "shared" / "conformance" / "lease.json").read_text(encoding="utf-8"))

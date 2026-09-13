@@ -7,7 +7,7 @@
  * refuses.
  *
  * WHY THE TYPE IS STILL REGISTERED, which is the whole point of this file. Leaving `stackWorkflow`
- * out does not make `fleet.up()` fail, it makes it HANG: `actorkit.fleet.up()` starts the child on
+ * out does not make `fleet.up()` fail, it makes it HANG: `kontra.fleet.up()` starts the child on
  * this queue, this worker takes the workflow task, finds no such type, and FAILS THE TASK — which
  * Temporal retries, forever. The run shows a workflow that never progresses and no error
  * anywhere, which is exactly the invisible failure ADR 0031 §4 says must not be how the appliance

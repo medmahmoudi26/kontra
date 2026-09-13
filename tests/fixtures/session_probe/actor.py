@@ -8,7 +8,7 @@ silently — a fresh instance answers 1, 1 rather than 1, 2.
 
 import os
 
-from actorkit import actor
+from kontra import actor
 
 
 @actor.defn

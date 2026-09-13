@@ -180,6 +180,35 @@ type ActorHandle struct {
 	Name, Version string
 	endpoint      string
 	key           string
+	// How many Method calls this handle has dispatched, used only to keep two node ids apart
+	// inside ONE workflow task — see {@link nextNodeSeq}. An ordinary field and not shared state:
+	// a handle is created by workflow code, so it belongs to one execution and replays with it.
+	dispatches int64
+}
+
+// nextNodeSeq is a node-id suffix that costs no history event.
+//
+// TWO DETERMINISTIC SOURCES, AND NEITHER IS A MARKER:
+//
+//	the history length   `GetInfo(ctx).GetCurrentHistoryLength()` is the same number at the same
+//	                     point of a replay, and grows as commands are written — so two dispatches
+//	                     separated by any command differ.
+//	this handle's count   a plain field, incremented here. Workflow code re-executes from the top
+//	                     on replay, so the Nth call through one handle is the Nth call again.
+//
+// THE PAIR IS WHAT CLOSES THE COMMON CASE. History length alone is identical for two dispatches
+// issued inside ONE workflow task, which is exactly the collision `workflow.SideEffect(workflow.Now)`
+// also failed to prevent — every call in one task saw the same instant. A loop over one handle is
+// the shape that produces it, and the counter distinguishes those.
+//
+// WHAT IS STILL POSSIBLE, said plainly: two dispatches in one workflow task through two SEPARATE
+// handles, at the same history length, collide. That is no worse than before this change and it is
+// not a state this SDK can rule out without persisting something — which is the event this exists
+// to stop paying. A caller who needs a guaranteed-distinct id passes `WithNodeID`.
+func (h *ActorHandle) nextNodeSeq(ctx workflow.Context) string {
+	h.dispatches++
+	return strconv.FormatInt(int64(workflow.GetInfo(ctx).GetCurrentHistoryLength()), 36) +
+		"-" + strconv.FormatInt(h.dispatches, 36)
 }
 
 // Actor returns a handle on a deployed Actor.
@@ -482,13 +511,35 @@ func (h *ActorHandle) dispatch(
 	}
 	nodeID := o.nodeID
 	if nodeID == "" {
-		var suffix string
-		if err := workflow.SideEffect(ctx, func(workflow.Context) any {
-			return strconv.FormatInt(workflow.Now(ctx).UnixNano(), 36)
-		}).Get(&suffix); err != nil {
-			return nil, err
+		// ── THE MARKER THAT RECORDED A VALUE THAT NEEDED NO RECORDING ────────────────────────
+		//
+		// This was `workflow.SideEffect(… workflow.Now(ctx) …)`, costing a `MarkerRecorded` event
+		// on EVERY dispatch. `workflow.Now` is already replay-deterministic — that is its whole
+		// contract — so the marker persisted something the SDK would have reproduced for free.
+		//
+		// AND IT DID NOT SOLVE THE COLLISION IT LOOKS LIKE IT IS GUARDING. Every call inside one
+		// workflow task sees the SAME instant either way, marker or no marker, so two dispatches
+		// in one task produced the same suffix before this change and would have kept doing so.
+		// A counter is what actually makes them differ, and it is free: an ordinary variable in
+		// workflow code is deterministic on replay because the workflow re-executes from the top.
+		// Python's equivalent path already pays nothing (`workflow.uuid4()`).
+		//
+		// GATED, BECAUSE REMOVING A COMMAND IS A DETERMINISM CHANGE. An execution that is in
+		// flight has a `MarkerRecorded` in its history at this point; replaying it against code
+		// that no longer emits one is a non-determinism failure, not a smaller history. The gate
+		// is the same mechanism `runtime/handler/workflow.go` uses for its search-attribute
+		// upsert, and for the same reason.
+		if workflow.GetVersion(ctx, "kontra-node-id", workflow.DefaultVersion, 1) >= 1 {
+			nodeID = h.Name + "-" + h.nextNodeSeq(ctx)
+		} else {
+			var suffix string
+			if err := workflow.SideEffect(ctx, func(workflow.Context) any {
+				return strconv.FormatInt(workflow.Now(ctx).UnixNano(), 36)
+			}).Get(&suffix); err != nil {
+				return nil, err
+			}
+			nodeID = h.Name + "-" + suffix
 		}
-		nodeID = h.Name + "-" + suffix
 	}
 
 	entry := EntryInput{

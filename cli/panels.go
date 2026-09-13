@@ -451,8 +451,15 @@ func renderTerminals(out io.Writer, base string, ts []terminal) error {
 	var tbl bytes.Buffer
 	w := tabwriter.NewWriter(&tbl, 2, 8, 2, ' ', 0)
 	// ROLE is deliberately not a column: a Machine is named kf-<role>-NN, so the id carries it.
-	// CAMPAIGN is, because the session name in the id does not.
-	header := []string{"  TERMINAL", "CAMPAIGN", "ACTOR"}
+	// FLEET is, because the session name in the id does not.
+	//
+	// IT SAID `CAMPAIGN` UNTIL 2026-09-08, over a cell holding `t.Fleet`. The word was retired on
+	// 2026-08-30 (`control/orchestrator/src/infra/CONTEXT.md` keeps the tombstone) and the struct
+	// field, the wire key and the conformance corpus all moved with it — but a header is a bare
+	// string that nothing derives and no test asserted, so the one place an operator actually READS
+	// the word outlived every place the code says it. `panels_conformance_test.go` exists because
+	// `campaign` survived the rename in the JSON tag; it survived a second time, one line away.
+	header := []string{"  TERMINAL", "FLEET", "ACTOR"}
 	for _, s := range healthSignals {
 		header = append(header, s.column)
 	}

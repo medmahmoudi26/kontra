@@ -76,7 +76,7 @@ class UnitStore:
 
         This is the INGEST half of the blob plane, and it exists so a Method can be handed the
         output of another Method without the payload passing through the caller. The caller has
-        no S3 credentials by design (`actorkit.catalog` promises exactly that), but the actor
+        no S3 credentials by design (`kontra.catalog` promises exactly that), but the actor
         does — it wrote these blobs — so resolution is symmetric with emission and costs the
         caller nothing.
 

@@ -242,7 +242,7 @@ describe('callerFor', () => {
  */
 describe('the generated file, run by Python', () => {
   // THIS checkout's SDK seams, ahead of anything already on the path. They MUST be on PYTHONPATH
-  // or `import actorkit` resolves to the venv's editable install, which on a machine with a
+  // or `import kontra` resolves to the venv's editable install, which on a machine with a
   // leftover worktree points at STALE code — an `ActorHandle` from before the callable handle,
   // whose missing `__getattr__` makes every Method call raise, failing this test on the environment
   // rather than on the generated file. Two entries, not one: `sdk/python` carries `actorkit` and
@@ -268,9 +268,9 @@ describe('the generated file, run by Python', () => {
    * none of them is a BROKEN CHECK, not a passing one, and says so: this repo ships a Python SDK,
    * so an interpreter that imports it exists wherever these tests are meant to run.
    *
-   * THE PROBE IMPORTS temporalio TOO, AND IT HAS TO. `from actorkit import catalog` used to double
+   * THE PROBE IMPORTS temporalio TOO, AND IT HAS TO. `from kontra import catalog` used to double
    * as "the SDK's dependencies are installed here", and it no longer does — deliberately: the
-   * sdk/runtime split makes `import actorkit` provably free of temporalio, Redis and the object
+   * sdk/runtime split makes `import kontra` provably free of temporalio, Redis and the object
    * store, asserted by tests/test_sdk_arrow.py. So a bare `python3` with only PYTHONPATH set now
    * PASSES the old probe and then dies inside the harness on `No module named 'temporalio'` — six
    * failures blaming the generated file for a missing dependency. A probe must ask for what the
@@ -283,7 +283,7 @@ describe('the generated file, run by Python', () => {
       'python3',
     ].filter((c): c is string => Boolean(c));
     for (const bin of candidates) {
-      const probe = spawnSync(bin, ['-c', 'from actorkit import catalog; import temporalio'], {
+      const probe = spawnSync(bin, ['-c', 'from kontra import catalog; import temporalio'], {
         cwd: repoRoot,
         env: pyEnv,
         encoding: 'utf8',
@@ -292,7 +292,7 @@ describe('the generated file, run by Python', () => {
     }
     throw new Error(
       'this check runs the generated caller against the real SDK and needs an interpreter with the ' +
-        'SDK INSTALLED — `import actorkit` alone is not enough, since that costs no temporalio by ' +
+        'SDK INSTALLED — `import kontra` alone is not enough, since that costs no temporalio by ' +
         'design. Set KONTRA_PYTHON, or `pip install -e ./sdk/python[dev]` into the repo venv.'
     );
   }
@@ -311,7 +311,7 @@ describe('the generated file, run by Python', () => {
     const harness = [
       'import sys, json, asyncio, inspect, datetime',
       'src = sys.stdin.read()',
-      'from actorkit import catalog',
+      'from kontra import catalog',
       'from temporalio import workflow as _wf',
       'async def _fake_dispatch_ref(self, units, **kw):',
       '    n = units.n if isinstance(units, catalog.Batch) else len(list(units))',

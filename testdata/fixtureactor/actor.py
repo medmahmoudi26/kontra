@@ -17,7 +17,7 @@ only checked the exit status, and the gate would then be measuring its own plumb
 
 from dataclasses import dataclass
 
-from actorkit import actor
+from kontra import actor
 
 
 @dataclass

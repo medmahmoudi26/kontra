@@ -49,6 +49,7 @@ import { armRetentionSchedule } from './retention';
 import { assertDistinctQueues, queueAssignments, resolveRoles, ROLES_VAR, type Role } from './roles';
 import { runApi } from './server';
 import { getClient } from './temporalClient';
+import { temporalConnectOptions } from './temporalTls';
 
 function log(line: string): void {
   // eslint-disable-next-line no-console
@@ -92,7 +93,7 @@ export async function runInfra(): Promise<void> {
   // An explicit connection, not the default. `connection: undefined` silently means
   // localhost:7233 — right on a laptop and always wrong in a container, where the failure reads as
   // an unrelated tonic transport error against ::1.
-  const connection = await NativeConnection.connect({ address });
+  const connection = await NativeConnection.connect(temporalConnectOptions({ address }));
 
   const worker = await Worker.create({
     // THE APPLIANCE BUNDLE. `stackWorkflow` is in it and refuses; leaving the TYPE out would not

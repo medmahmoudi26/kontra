@@ -14,7 +14,7 @@ Run it:
 """
 from temporalio import workflow
 
-from actorkit import catalog
+from kontra import catalog
 
 
 @workflow.defn

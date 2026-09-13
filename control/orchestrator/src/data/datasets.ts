@@ -58,7 +58,7 @@ export type DatasetKind = 'output' | 'standalone';
  * VISIBLY unfinished Dataset rather than a short one that reads as done.
  *
  * THE WORDS ARE THE CONTRACT, and they are spelled the same in four places with no shared code:
- * here, `frontend/src/datasets/state.ts` (the badge), `actorkit.catalog.DatasetWriter`
+ * here, `frontend/src/datasets/state.ts` (the badge), `kontra.catalog.DatasetWriter`
  * and `sdk/go/catalog`. A rename on one side does not fail — the reader falls back to
  * `open` — so a finished Dataset would silently render as one still being written.
  *
@@ -178,7 +178,7 @@ export interface DatasetInfo {
    *
    * WHY THE LAKE AND NOT THE LEDGER. The materialization ledger answers this for the graph
    * interpreter's dispatches and for nothing else: measured on this box, `/api/datasets/runs`
-   * holds 50 dispatches and not one of them is a **Run** the actorkit path produced, because
+   * holds 50 dispatches and not one of them is a **Run** the SDK path produced, because
    * `publishBatch` writes lake rows and no ledger record. Every **Dataset** a v2 **Run** writes —
    * every temp, and every durable **Dataset** promoted into — is therefore invisible to
    * {@link withDatasetNames}' ledger join, which is why `lame_demo` and `tmp_…` listed with no
@@ -280,6 +280,18 @@ export async function listOutputActors(
  * dataset; `n1/n2/n3` is a per-call label that must not appear in an address. Explore still
  * surfaces them for diagnosis, sourced from the materialization ledger, not from a scan.
  */
+/**
+ * A dataset name as a SQL identifier: sanitised, then quoted.
+ *
+ * BOTH HALVES ARE NEEDED. `safeName` reduces the name to `[A-Za-z0-9_.-]`, which is what makes it
+ * safe to interpolate at all — and leaves `-` and `.` in it, which are not legal in a bare
+ * identifier. `scope-paid` unquoted parses as a subtraction. There can be no `"` left to escape
+ * after the sanitise, which is why this is a wrap and not an escape.
+ */
+function quoteIdent(name: string): string {
+  return `"${safeName(name)}"`;
+}
+
 export async function listDatasets(
   store: ObjectStore,
   sel: { name?: string; version?: string; dt?: string; kind?: DatasetKind } = {},
@@ -348,6 +360,30 @@ export async function listDatasets(
          LEFT JOIN run_stats rst ON rst.data_file_id = df.data_file_id
         WHERE ${where.join(' AND ')}
         GROUP BY ALL
+     ),
+     /* EVERY LIVE TABLE, whether or not it has a data file yet -- issue #3.
+      *
+      * NO BACKTICKS IN THIS COMMENT. It is inside a template literal, and one would end the SQL.
+      *
+      * DUCKLAKE INLINES A SMALL WRITE INTO THE CATALOG. Below its inlining threshold there is no
+      * Parquet file at all, only a ducklake_inlined_data_<table>_<n> row -- so a table written by
+      * 'kontra dataset create' with two rows has ZERO entries in ducklake_data_file, and a listing
+      * that started from that table could not see it. MEASURED on this installation: nine of
+      * twenty-one live tables had no data file, and every one of them was missing from
+      * /api/datasets while SELECT count(*) against it answered fine. Not a standalone quirk
+      * either -- output/desync was among them.
+      *
+      * So the listing is driven by ducklake_table and the per-file aggregate is LEFT JOINED. A
+      * table with only inlined data lists with no partition coordinates and no bytes; its row
+      * count is filled in afterwards by countInlined, because that is the number an operator
+      * reads first. */
+     live AS (
+       SELECT sc.schema_name AS schema_name, t.table_name AS name
+         FROM ${meta}.ducklake_table t
+         JOIN ${meta}.ducklake_schema sc ON sc.schema_id = t.schema_id
+        WHERE t.end_snapshot IS NULL
+          ${sel.name ? `AND t.table_name = ${lit(safeName(sel.name))}` : ''}
+          ${sel.kind ? `AND sc.schema_name = ${lit(schemaOf(sel.kind))}` : ''}
      )
      SELECT schema_name, name, version, dt,
             sum(rows) AS rows, sum(bytes) AS bytes,
@@ -357,7 +393,7 @@ export async function listDatasets(
               || coalesce(list(run_hi) FILTER (WHERE run_hi IS NOT NULL), CAST([] AS VARCHAR[]))
             ))) AS runs,
             coalesce(bool_or(run_lo IS DISTINCT FROM run_hi), false) AS run_span
-       FROM per_file
+       FROM live LEFT JOIN per_file USING (schema_name, name)
       WHERE schema_name IN (${lit(OUTPUT_SCHEMA)}, ${lit(STANDALONE_SCHEMA)})
         ${sel.version ? `AND version = ${lit(sel.version)}` : ''}
         ${sel.dt ? `AND dt LIKE ${lit(sel.dt + '%')}` : ''}
@@ -366,6 +402,46 @@ export async function listDatasets(
   );
 
   const rows = res.getRows();
+
+  /**
+   * ROWS FOR A TABLE WHOSE DATA IS ALL INLINED — issue #3's second half.
+   *
+   * The metadata read above derives rows from data files, which is what keeps the listing cheap on
+   * a real lake. A table below DuckLake's inlining threshold has none, so it would list as "0 rows"
+   * — a dataset that is visibly there and visibly empty, which is a worse lie than being absent.
+   *
+   * COUNTED, AND THE SCAN IS BOUNDED BY THE THING THAT CAUSED IT. Inlined data is small BY
+   * DEFINITION: it is inlined because it fell under the threshold. So this is a count over a
+   * handful of catalog rows, and only for tables the cheap path could not answer for — on this
+   * installation, nine of twenty-one, none of them large.
+   *
+   * ONE QUERY, NOT ONE PER TABLE. A UNION of counts keeps it to a single round trip whatever the
+   * number of tables; zero of them skips it entirely.
+   */
+  const needCount = rows.filter((r) => Number(r[4] ?? 0) === 0);
+  if (needCount.length > 0) {
+    const counted = new Map<string, number>();
+    try {
+      const sql = needCount
+        .map(
+          (r) =>
+            `SELECT ${lit(String(r[0]))} AS s, ${lit(String(r[1]))} AS n, ` +
+            `count(*) AS c FROM lake.${safeName(String(r[0]))}.${quoteIdent(String(r[1]))}`
+        )
+        .join(' UNION ALL ');
+      const got = await conn.runAndReadAll(sql);
+      for (const row of got.getRows()) {
+        counted.set(`${String(row[0])}/${String(row[1])}`, Number(row[2] ?? 0));
+      }
+    } catch {
+      // A count that fails leaves the row at 0 rather than taking the whole listing down. The
+      // dataset is LISTED either way, which is the half of this issue that mattered.
+    }
+    for (const r of needCount) {
+      const hit = counted.get(`${String(r[0])}/${String(r[1])}`);
+      if (hit !== undefined) r[4] = hit;
+    }
+  }
 
   // The lifecycle is keyed by NAME, so one read per distinct name rather than per row: an actor
   // with fifty dispatches is one object, not fifty. Read once here and hand it to every row of
@@ -478,7 +554,7 @@ function parseRunList(raw: unknown): string[] | undefined {
  *      OWNERSHIP fact rather than a fact about rows.
  *   3. THE LAKE's own `run_id` statistics ({@link DatasetInfo.contributingRuns}), and ONLY when
  *      they name exactly one Run. This is the one that matters now: measured on this box, the
- *      ledger holds no dispatch for any Run the actorkit path started, so 1 resolves nothing for
+ *      ledger holds no dispatch for any Run the SDK path started, so 1 resolves nothing for
  *      a v2 Run and `lame_demo` — 430 rows promoted out of one Run's temp — listed with no name
  *      and no run at all. The rows knew the whole time.
  *

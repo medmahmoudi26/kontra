@@ -20,7 +20,7 @@ import asyncio
 
 import pytest
 
-from actorkit.batch import MissingPushKey
+from kontra.batch import MissingPushKey
 from internals.engine import batch_id, unit_slot
 from test_actor_engine import FakeUnitStore, make_host, reopen
 
@@ -287,7 +287,7 @@ def test_a_host_killed_mid_batch_and_retried_produces_the_exact_row_count():
     the caller reopens the scope, and the run produces EXACTLY the expected rows — no duplicate
     (the commit map skips the committed Units), no loss (the in-flight Unit re-runs and re-pushes
     by content sha into the same blob)."""
-    from actorkit.retry import SessionLost
+    from kontra.retry import SessionLost
 
     died = []
 

@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from actorkit.hitl import redact as redact_value
-from actorkit.narrate import redact as redact_sentence
+from kontra.hitl import redact as redact_value
+from kontra.narrate import redact as redact_sentence
 
 FIXTURE = Path(__file__).resolve().parents[1] / "shared" / "conformance" / "redaction.json"
 DOC = json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -55,8 +55,8 @@ def test_the_two_replacement_strings_are_the_ones_the_corpus_recorded() -> None:
     """The marker itself is contract. A side that changed its wording would pass every case above
     only if the corpus were regenerated from it, which is exactly the drift this file exists to
     stop, so the strings are pinned separately from the cases that contain them."""
-    from actorkit.hitl import REDACTED as VALUE_REDACTED
-    from actorkit.narrate import REDACTED as SENTENCE_REDACTED
+    from kontra.hitl import REDACTED as VALUE_REDACTED
+    from kontra.narrate import REDACTED as SENTENCE_REDACTED
 
     assert SENTENCE_REDACTED == DOC["sentence_redacted"]
     assert VALUE_REDACTED == DOC["value_redacted"]

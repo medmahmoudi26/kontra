@@ -9,7 +9,7 @@ None of those raise. They just return someone else's data.
 
 import asyncio
 
-from actorkit import global_state, object_state
+from kontra import global_state, object_state
 from internals.globalstore import GlobalStore, global_prefix, object_prefix
 
 from test_global_state import FakeEtagKV

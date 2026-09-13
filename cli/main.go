@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/medmahmoudi26/kontra/cli/internal/buildinfo"
 	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"github.com/medmahmoudi26/kontra/cli/warden"
 )
@@ -68,6 +69,20 @@ func isTTY(f *os.File) bool {
 // not this block advertises a word that now only answers with a redirect.
 const usageText = `kontra — local control surface
 
+  kontra version                                   # which kontra this is; "dev (<rev>)" when unreleased
+  kontra init                                      # create ~/.kontra/: config.yaml, workflows/, actors/
+                                                   # GENERATES the console login and prints it ONCE
+  kontra user add <name>                           # a second console login; only the hash is stored
+  kontra token mint <state|explore|panel|run>      # fill a BLANK token in an EXISTING config
+                                                   # run blank means the Run surface is OPEN: serve,
+                                                   #   start, stop and a Dataset's tag/rename admit
+                                                   #   anyone who can reach the API
+                                                   # state/panel blank means that surface is DISABLED
+                                                   #   and answers 503 — this is the fleet-stranding
+                                                   #   recovery, without hand-editing YAML
+                                                   # init mints these on a NEW install only, so this
+                                                   #   is how an older installation closes the gap
+
   kontra doctor [--api <url>]                      # infra state: services, web consoles, actors
   kontra up [--data-dir <dir>] [--bind <ip>] [--temporal-port 7233] [--s3-port 8333]
                [--kv-port 6379] [--codec-port 18234] [--registry-port 5000]
@@ -87,8 +102,12 @@ const usageText = `kontra — local control surface
                #   cannot yet show. Its codec address is derived, never configured.
   kontra infra up|down|status [--repo <dir>]       # the compose control plane (the other topology)
   kontra serve --actor <dir> [--mode local|docker] [--engine py|go] [--python <bin>]
-               [--redis <host:port>] [--tmux] [--replicas N] [--network <name>]
+               [--redis <host:port>] [--tmux] [--replicas N] [--network <name>] [--watch]
                # serve the actor HERE (actor + handler), no image build — it waits for a dispatch
+               # --watch: RE-EXEC the pair on save. Nothing builds and nothing uploads — local mode
+               #   runs python <dir>/actor.py from the directory, the Go handler is generic, and the
+               #   queue is <name>-<version> off the manifest so an edit does not move it. In-flight
+               #   Units are DRAINED before the swap. Foreground only (not with --tmux).
                # --tmux: detached tmux session, one window per process (attach to watch)
                # --mode docker: N managed worker CONTAINERS, wired to whichever control plane
                #   this box runs (kontra up's bound addresses, else the compose service names)
@@ -126,6 +145,10 @@ const usageText = `kontra — local control surface
                [--controller <host>] [--host-only] [--override]   # the container-Image spelling
   kontra workers list
   kontra actor register <dir> [--init] [--json]
+  kontra actor schema <dir> [--method NAME]        # what each Method TAKES and EMITS, as JSON Schema,
+               # derived from the code ON DISK — no orchestrator, no registration, no deploy.
+               # The same derivation the catalog publishes (kontra.schema.schema_of), so a form
+               # built from this cannot disagree with what the Method will accept.
   kontra workflow register <dir> [--init] [--workflow <Class>] [--json]
                # DECLARE it, without serving or running it: records the path, the manifest,
                # the version and a content digest, and creates the Actor's Nexus endpoint
@@ -138,6 +161,15 @@ const usageText = `kontra — local control surface
   kontra workflow pause | resume <file.py>         # stop / restart the SERVED WORKER, in its pane
                # the run makes no progress and resumes from history; dispatched activities keep
                # running, and its timeouts keep ticking — a long pause fails a run, it does not hold one
+  kontra workflow history <run-id> [-o FILE]       # save a run's history as JSON (shareable, replayable)
+  kontra workflow replay <workflow.py> (--run-id ID | --history FILE) [--json]
+               # REPLAY a recorded history against the code on disk. NO CLOCK: no heartbeat, no
+               #   StartToClose, nothing times out while you sit on a breakpoint — unlike attaching
+               #   to a live activity, which gets ~2 minutes.
+               # Post-mortem: a run that failed on a fleet days ago, stepped through on a laptop.
+               # ACTIVITY CODE IS NOT RUN — a Method's results come from the history as values, so
+               #   this covers the CALLER's decisions (splitting, chaining, branching), not a Method.
+               # exit 0 clean · 1 non-deterministic against this history · 2 could not run
   kontra workflow cancel <run-id>                  # graceful: scope exits run, so a fleet is DESTROYED
   kontra workflow terminate <run-id> [--force]     # cancel, then terminate if it does not settle
                # terminating alone skips scope exits, so a fleet it held would keep billing
@@ -228,8 +260,33 @@ var errUsage = errors.New("unknown command")
 func dispatch(args []string) error {
 	var err error
 	switch args[0] {
+	case "version", "--version", "-v":
+		// A VERB AND TWO FLAGS, because all three are what people type and "unknown command" to any
+		// of them is a bad first impression from a tool whose next question is "which version are
+		// you on". They are spelled here rather than parsed elsewhere: `dispatch` is the one place
+		// that decides what a word means.
+		fmt.Fprintln(os.Stdout, buildinfo.Version())
 	case "init":
 		err = config.CmdInit(args[1:])
+	case "user":
+		// `kontra user add <name>` — a second console login, for the second engineer. The login
+		// itself is ADR 0045; this is the only way to make another after install.
+		if len(args) < 2 || args[1] != "add" {
+			err = fmt.Errorf("usage: kontra user add <name>")
+		} else {
+			err = config.CmdUserAdd(os.Stdout, args[2:])
+		}
+	case "token":
+		// `kontra token mint <key>` — fill a BLANK token in an existing config. The one thing
+		// `kontra init` cannot do, because it writes the file only when it is absent: an install
+		// made before a key was minted keeps the blank, and for `run` a blank means the Run surface
+		// is OPEN. Every message that reports one of these blanks ("Set KONTRA_RUN_TOKEN to gate
+		// them", "set one of KONTRA_STATE_TOKEN") named no command until this one.
+		if len(args) < 2 || args[1] != "mint" {
+			err = fmt.Errorf("usage: kontra token mint <state|explore|panel|run>")
+		} else {
+			err = config.CmdTokenMint(os.Stdout, args[2:])
+		}
 	case "doctor":
 		err = cmdDoctor(args[1:])
 	case "up":

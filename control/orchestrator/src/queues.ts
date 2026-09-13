@@ -95,10 +95,10 @@ export function infraQueue(): string {
  * It is not served by any process in this repo's Node images. A Nexus operation can only be
  * scheduled by a WORKFLOW command, in every SDK we have, and TypeScript has no caller half to
  * reuse (ADR 0023 §22) — so the probe workflow is actorkit's, in Python
- * (`sdk/python/actorkit/probe.py`), and this orchestrator only STARTS it. What lives here is the
+ * (`sdk/python/kontra/probe.py`), and this orchestrator only STARTS it. What lives here is the
  * routing contract: the queue to start it on and the type to start.
  *
- * THE SECOND INDEPENDENT DERIVATION of both strings; the peer is `actorkit.probe`, and
+ * THE SECOND INDEPENDENT DERIVATION of both strings; the peer is `kontra.probe`, and
  * `tests/test_actor_probe.py` pins the pair the way `test_queue_congruence.py` pins the others.
  * `KONTRA_PROBE_QUEUE` moves both halves at once, for a second control plane on one cluster.
  */

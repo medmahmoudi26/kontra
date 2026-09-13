@@ -46,6 +46,35 @@ REFERENCE = re.compile(r"""conformance["'/\s,)\]]{1,12}?([a-z_]+\.json)""")
 #: what makes it checkable — unlike a pathlib chain rooted at `parents[N]`.
 RELATIVE_PATH = re.compile(r"""["'](\.\.(?:/\.\.)*/[\w/-]*conformance/[\w/]+\.json)["']""")
 
+#: THE SAME PATH, ASSEMBLED FROM SEPARATE ARGUMENTS — `filepath.Join("..", "..", "conformance",
+#: "blobkey.json")`. It is a different regex because it is a different failure: every fragment reads
+#: correctly on its own, so a rename that moves the tree leaves each argument true and the JOIN
+#: wrong, and no grep for the old path finds it.
+#:
+#: MEASURED, WHICH IS WHY IT EXISTS. When `conformance/` became `shared/conformance/`, the guard
+#: above caught every literal spelling and `cli/appliance/objstore/s3_test.go` kept opening
+#: `filepath.Join("..", "..", "..", "conformance", "blobkey.json")` — one directory short, invisible
+#: to a regex looking for slashes, and red only when that one package's tests were run.
+#:
+#: Anchored on a FIRST argument of `".."`, so it matches the cwd-relative form a Go test uses and
+#: skips `filepath.Join(filepath.Dir(self), "..", …)`, which is rooted at the file rather than at
+#: the working directory and is checked by the driver failing to load.
+JOINED_PATH = re.compile(
+    r"""filepath\.Join\(\s*((?:"\.\."\s*,\s*)+(?:"[\w.-]+"\s*,\s*)*?"[\w-]*conformance"\s*,\s*"[\w]+\.json")\s*\)"""
+)
+
+
+def _joined_to_relative(args: str) -> str:
+    """Turn a Join argument list into the path it builds.
+
+    The example is spelled with a REAL corpus name on purpose: `test_every_corpus_reference_resolves`
+    reads this file too, and an invented placeholder name makes that guard fail on this module's own
+    prose — which is how a guard becomes something people delete rather than fix.
+
+        `"..", "..", "conformance", "blobkey.json"`  ->  `../../conformance/blobkey.json`
+    """
+    return "/".join(re.findall(r'"([^"]+)"', args))
+
 
 def _sources() -> list[pathlib.Path]:
     """Every source file under ROOT, minus the directories that are not source.
@@ -104,14 +133,57 @@ def test_every_relative_corpus_path_resolves() -> None:
         if src.resolve() == pathlib.Path(__file__).resolve():
             continue
         text = src.read_text(encoding="utf-8", errors="replace")
-        for m in RELATIVE_PATH.finditer(text):
-            rel = m.group(1)
+        found = [m.group(1) for m in RELATIVE_PATH.finditer(text)]
+        # ASSEMBLED PATHS TOO. `filepath.Join("..", "..", "conformance", "blobkey.json")` is the same path
+        # with every fragment separately correct, which is exactly why a tree move leaves it wrong
+        # and a grep for the old string finds nothing. See JOINED_PATH.
+        found += [_joined_to_relative(m.group(1)) for m in JOINED_PATH.finditer(text)]
+        for rel in found:
             if not (src.parent / rel).resolve().exists():
                 broken.append(
                     f"{src.relative_to(ROOT)} opens {rel!r}, which resolves to "
                     f"{(src.parent / rel).resolve()} and is not there"
                 )
     assert broken == [], "a driver's relative path no longer reaches the corpus:\n  " + "\n  ".join(broken)
+
+
+def test_the_joined_path_guard_can_see_an_assembled_path() -> None:
+    """The guard above is only worth having if `JOINED_PATH` actually matches.
+
+    NON-VACUOUS BY CONSTRUCTION. A regex that matched nothing would make
+    `test_every_relative_corpus_path_resolves` pass exactly as it did while
+    `cli/appliance/objstore/s3_test.go` was opening a file that had not existed since the tree
+    moved — a guard that reports success because it looked at nothing, which is the failure this
+    repository has now hit in three different shapes.
+
+    So: it must match the real spelling, reconstruct it correctly, and NOT match the file-relative
+    form, which is rooted at the source file rather than the working directory.
+    """
+    cwd_relative = 'os.ReadFile(filepath.Join("..", "..", "..", "shared", "conformance", "blobkey.json"))'
+    m = JOINED_PATH.search(cwd_relative)
+    assert m is not None, "JOINED_PATH no longer matches the spelling it was written for"
+    assert _joined_to_relative(m.group(1)) == "../../../shared/conformance/blobkey.json"
+
+    # The broken spelling this guard was written after — one directory short, every fragment true.
+    was_broken = 'filepath.Join("..", "..", "..", "conformance", "blobkey.json")'
+    m2 = JOINED_PATH.search(was_broken)
+    assert m2 is not None, "the exact historical break is no longer matched"
+    assert _joined_to_relative(m2.group(1)) == "../../../conformance/blobkey.json"
+
+    # File-relative: rooted at the source file, not the cwd, so resolving it from `src.parent`
+    # would be wrong. It is checked by the driver failing to load instead.
+    file_relative = 'filepath.Join(filepath.Dir(self), "..", "..", "shared", "conformance", "queues.json")'
+    assert JOINED_PATH.search(file_relative) is None
+
+    # And it is exercised against the tree, not only against these literals: at least one real
+    # source file carries a joined corpus path, or this guard is protecting nothing.
+    joined_in_tree = [
+        src.relative_to(ROOT)
+        for src in _sources()
+        if src.resolve() != pathlib.Path(__file__).resolve()
+        and JOINED_PATH.search(src.read_text(encoding="utf-8", errors="replace"))
+    ]
+    assert joined_in_tree, "no source uses filepath.Join for a corpus path — retire this guard or fix it"
 
 
 def test_every_corpus_reference_resolves() -> None:

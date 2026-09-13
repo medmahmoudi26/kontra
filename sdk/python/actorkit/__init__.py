@@ -1,165 +1,111 @@
-"""Kontra SDK — the `actorkit` package, and the whole of what an author writes against.
+"""`actorkit` is now `kontra` — ADR 0044. This module keeps every existing import working.
 
-IT LIVES IN `sdk/python`, AND IT IMPORTS NOTHING OF `runtime/python` (ADR 0035 §2). The engine,
-the codec, the state tiers and the Temporal hosts are the `internals` package one seam over; the
-arrow runs runtime -> sdk and never back, and `tests/test_sdk_arrow.py` fails the build on a
-module-scope crossing. The one exception is `serve()`, the entry-point handoff, spelled as a
-deferred import inside the function body — so `import actorkit` costs no runtime module, no
-temporalio, no Redis and no object store (157 sys.modules, against 448 once a verb is named).
+    from actorkit import catalog, fleet, speak      # still works, warns once
+    from kontra   import catalog, fleet, speak      # what to write instead
 
-The IMPORT NAME did not move with the directory: an actor written against `import actorkit` is
-untouched by the split. What did move is Unit/Batch/Dataset and the type derivation, out of the
-runtime and into the author surface where their names already were — `actorkit.batch` and
-`actorkit.schema`, not `internals.batch` and `internals.schema`.
+WHY THE NAME CHANGED. `actorkit` described one of the two surfaces it contains — the SDK's own
+header says so — and a workflow, which is the caller, is not an Actor. "Actor" also stopped
+distinguishing anything when ADR 0023 §9 collapsed three deployed kinds into one. The Go SDK's root
+package has been `kontra` since it existed; this is Python catching up.
 
-Two surfaces, one package:
-  • `actor`   — the one deployed kind: an Actor with one or more Methods (ADR 0023 §9)
-  • `catalog` — the CALLER's side: orchestrate deployed Actors from your own workflow
+WHY THIS FILE EXISTS RATHER THAN A CLEAN RENAME. Every Actor anyone has written imports `actorkit`,
+including ones outside these repositories that we cannot edit and do not know about. ADR 0042
+deliberately froze this import name through the repo restructure for exactly that reason. A rename
+without an alias is a silent break in somebody else's code, at `load()`, on a Machine, mid-run.
 
-…and one step before the caller's side: `fleet`, which provisions the Machines a run executes
-on, scoped to the workflow that runs it. It is separate from `catalog` on purpose — placement is
-declarative state, dispatch is a loop you write, and fusing them is the boundary this system
-keeps open.
+THE SUBMODULES ARE THE SAME OBJECTS, NOT COPIES, and that is the whole of the difficulty. `actorkit`
+and `kontra` must not be two registries: an Actor declared through `@actorkit.actor.method` has to be
+the one the runtime finds when it looks at `kontra.actor`, and a `Slot` declared through one has to
+be the instance the other's `secrets` resolves. So this aliases into `sys.modules` rather than
+re-importing — `actorkit.catalog is kontra.catalog` is a property this file guarantees and
+`tests/test_sdk_alias.py` asserts.
 
-There is no second kind. An **Activity** — a function with no loaded resource — is an Actor
-with one Method and no `@actor.load`/`@actor.close`, which costs nothing it did not cost as a
-kind of its own and spares the catalog, the CLI, the queue derivations and both SDKs a fork.
-
-── THE TWO THINGS A WORKFLOW SAYS OUT LOUD ────────────────────────────────────────────────────
-
-    from actorkit import ask, speak
-
-    await speak(f"batch {i} of {n}")                  # tell the operator where you are
-    answer = await ask("Approve these 12 hosts?", takes=Approval, context={"n": 12})
-
-THEY ARE A PAIR, AND THE DIFFERENCE IS THE WHOLE REASON THERE ARE TWO. `speak` costs history and
-RETURNS IMMEDIATELY. `ask` costs history AND STOPS THE RUN until a human moves it. Confusing them
-turns a progress line into a stalled run, so they are exposed side by side here rather than
-buried in two modules an author would meet separately. `speak`'s shape is A SENTENCE PER PHASE,
-never one per Unit — see {@link actorkit.narrate.speak} for the budget that enforces it.
-
-Neither may carry a credential. Both reach history, where the codec is a claim-check and not
-encryption (ADR 0007): under its threshold a value rides inline, in the clear, readable by anyone
-who can read the run. Each has a guard against the ordinary mistake and neither is a boundary.
-
-BOTH ARE RESOLVED LAZILY, by the module `__getattr__` at the bottom of this file, and that is not
-an optimisation — it is what keeps the paragraph below true. `narrate` and `hitl` import temporalio
-at module scope (they must, to subclass `ApplicationError` at class-definition time), so importing
-either here would put a Temporal dependency behind `import actorkit`. The verbs cost nothing until
-an author names one, and naming one is something only a workflow does.
-
-── THE MODULES BEHIND THEM, AND WHAT ELSE IS NOT IMPORTED HERE ─────────────────────────────────
-
-`hitl` is the module `ask` lives in — it parks a workflow on a question a human has to answer, and
-carries `AskExpired`, `pending()` and the memo constants beside it. It is not imported here for the
-reason above — the same exemption `contract` takes. Reach it directly, from inside your workflow:
-
-    from actorkit import hitl
-    answer = await hitl.ask("Approve these 12 hosts?", takes=Approval, context={"n": 12})
-
-A SECOND surface is deliberately not imported here, for a different reason than `hitl`'s:
-`secrets`, which fetches this actor's OWN credential at load, authenticated as itself. It is
-stdlib-only and would import cleanly, but it does network I/O and belongs to the ACTOR's process,
-not to a workflow's — and `actorkit/__init__` is imported inside the Temporal workflow sandbox.
-Reach it from your actor, the same way:
-
-    from actorkit import secrets
-
-    @actor.load
-    async def load(self):
-        self.client = Shodan(await secrets.get("shodan-key"))
-
-`Slot` IS imported here, and that is not a contradiction with the paragraph above:
-`actor.slot("api_key")` DECLARES a credential and does no I/O. Declaring is the half that has to
-happen at import, so the operator can see what an actor will ask for BEFORE it runs; the handle
-imports `secrets` lazily, inside `.get()`, so the network half stays out of the sandbox.
-
-    API_KEY = actor.slot("api_key", "the vendor key this actor calls with")
-
-    @actor.load
-    async def load(self):
-        self.client = Vendor(await API_KEY.get(run=self.run_id))
-
-And a THIRD, on `hitl`'s grounds rather than `secrets`': `narrate`, the module `speak` lives in,
-which writes one sentence of the author's own prose into the run's transcript at the point in the
-run where it was written — derived turns make an untooled workflow readable; narration makes a
-tooled one explain itself. It too imports temporalio at module scope, to subclass
-`ApplicationError`, and it too is reached from inside your workflow:
-
-    from actorkit import narrate
-    await narrate.say(f"{live} of {len(apexes)} apexes resolve; crawling those")
-
-`narrate.say` is `speak` under its older name — one function, either spelling, and every existing
-caller of `say` is untouched.
+Removing this is a separate decision on a separate day. ADR 0044 does not schedule it.
 """
 
-from actorkit import catalog, fleet
-from actorkit.actor import (
-    Actor, ActorRegistry, ParamRef, MethodRegistration, Slot, SlotDeclaration, actor,
-    unit_state, param, global_state, object_state,
-)
-from actorkit.retry import NonRetryableError, SessionLost
-from actorkit.version import CONTRACT_VERSION
+from __future__ import annotations
 
-#: The two verbs a workflow says out loud. RESOLVED ON FIRST USE by `__getattr__` below, never at
-#: import: the modules they live in import temporalio at module scope, and `import actorkit` is
-#: required to stay free of a Temporal dependency (see the header).
-_VERBS = ("speak", "ask")
+import sys
+import warnings
+
+import kontra as _kontra
+
+#: The submodules an author can reach. Every one is aliased into `sys.modules` so that
+#: `from actorkit.catalog import shared_queue` and `import actorkit.fleet` both resolve to the module
+#: `kontra` already loaded, rather than importing a second copy under a second name.
+#:
+#: `hitl`, `narrate` and `secrets` are in this list even though `kontra/__init__.py` deliberately does
+#: NOT import them at module scope — two of them import temporalio at import time and one does network
+#: I/O, and `import kontra` is required to cost neither. Aliasing is not importing: the entry is
+#: created only for a submodule that has ALREADY been loaded, so the cost stays where it was.
+_SUBMODULES = (
+    "actor", "batch", "catalog", "contract", "fleet", "hitl", "narrate",
+    "probe", "retry", "schema", "secrets", "testing", "version",
+)
+
+_WARNED = False
+
+
+def _warn() -> None:
+    """Once per process, and never from inside a workflow's replay.
+
+    A `DeprecationWarning` is invisible by default in many runners, which is why the module docstring
+    says it too — a deprecation nobody can see is a rename with extra steps.
+    """
+    global _WARNED
+    if _WARNED:
+        return
+    _WARNED = True
+    warnings.warn(
+        "`actorkit` is now `kontra` (ADR 0044) — write `from kontra import ...`. "
+        "This alias keeps working and is not scheduled for removal.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 def __getattr__(name: str) -> object:
-    """`from actorkit import ask, speak`, without importing temporalio to find out.
+    """Everything `kontra` exposes, including the two lazily-resolved verbs.
 
-    PEP 562, and the only mechanism that gives BOTH halves of what this package needs: the pair is
-    reachable at the top level where an author looks for it, and `import actorkit` still costs no
-    Temporal import — which is what the workflow sandbox re-imports per instance, and what every
-    non-workflow caller of this package (the CLI, a loader, a test) is entitled to.
-
-    It is a re-export and never a wrapper: `actorkit.ask is hitl.ask`, so there is one function,
-    one docstring and one implementation behind either spelling.
-
-    PLAIN `import` STATEMENTS, NOT `importlib`. This runs INSIDE the Temporal workflow sandbox,
-    where an import statement goes through the sandbox's own import machinery — which passes
-    `actorkit` through by configuration (`internals/temporal/wfhost.py`). `importlib.import_module`
-    reaches around that machinery entirely, which happens to give the same answer for a passthrough
-    module and would quietly stop doing so the day one of these was not passed through.
+    Delegating through `getattr` rather than copying `kontra`'s namespace at import is what keeps
+    `speak` and `ask` lazy: `kontra.__getattr__` imports `narrate`/`hitl` on first use so that
+    `import kontra` costs no temporalio, and a star-import here would have resolved both eagerly and
+    undone it.
     """
-    if name == "speak":
-        from actorkit.narrate import speak
+    _warn()
+    try:
+        value = getattr(_kontra, name)
+    except AttributeError:
+        # A SUBMODULE THAT NOBODY HAS IMPORTED YET IS NOT AN ATTRIBUTE OF ITS PACKAGE, and
+        # `from actorkit import batch` is the spelling that finds out. `kontra/__init__.py` imports
+        # `catalog` and `fleet` at module scope and deliberately leaves the rest — `narrate` and
+        # `hitl` import temporalio, `secrets` does network I/O — so delegating with `getattr` alone
+        # answered for two of thirteen. Import it, then delegate, so the alias forwards the whole
+        # package rather than the part that happened to be loaded.
+        if name in _SUBMODULES:
+            import importlib
 
-        return speak
-    if name == "ask":
-        from actorkit.hitl import ask
-
-        return ask
-    raise AttributeError(f"module 'actorkit' has no attribute {name!r}")
+            value = importlib.import_module(f"kontra.{name}")
+        else:
+            raise AttributeError(f"module 'actorkit' has no attribute {name!r}") from None
+    # A submodule reached as an attribute is also reachable as `actorkit.<name>`; register it so the
+    # two spellings cannot diverge later in the same process.
+    if name in _SUBMODULES:
+        sys.modules.setdefault(f"{__name__}.{name}", value)
+    return value
 
 
 def __dir__() -> list[str]:
-    """`dir(actorkit)` names the verbs too — a lazy attribute is invisible to it otherwise, and a
-    surface an author cannot discover from the REPL is a surface they will not find."""
-    return sorted([*globals(), *_VERBS])
+    return sorted(set(dir(_kontra)) | set(_SUBMODULES))
 
 
-__all__ = [
-    "actor",
-    # THE PAIR, at the top level and side by side, which is what makes it obvious there are two of
-    # them: `speak` reports and returns, `ask` stops the run until a human moves it.
-    "speak",
-    "ask",
-    "catalog",
-    "fleet",
-    "param",
-    "unit_state",
-    "global_state",
-    "object_state",
-    "ParamRef",
-    "Actor",
-    "ActorRegistry",
-    "MethodRegistration",
-    "Slot",
-    "SlotDeclaration",
-    "NonRetryableError",
-    "SessionLost",
-    "CONTRACT_VERSION",
-]
+# Alias every ALREADY-LOADED submodule up front, so `from actorkit.catalog import X` works without
+# anyone having touched `actorkit.catalog` as an attribute first. `kontra/__init__.py` imports
+# `catalog` and `fleet` at module scope; the rest arrive here as they are loaded elsewhere.
+for _name in _SUBMODULES:
+    _loaded = sys.modules.get(f"kontra.{_name}")
+    if _loaded is not None:
+        sys.modules.setdefault(f"{__name__}.{_name}", _loaded)
+del _name, _loaded
+
+__all__ = list(getattr(_kontra, "__all__", ()))

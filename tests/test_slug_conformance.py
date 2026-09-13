@@ -1,6 +1,6 @@
 """The PYTHON ARM of the Run-id slug contract (shared/conformance/slug.json).
 
-WHAT THIS REPLACES, AND WHY THE THING IT REPLACES WAS NOT A TEST. `actorkit.catalog._slug`'s
+WHAT THIS REPLACES, AND WHY THE THING IT REPLACES WAS NOT A TEST. `kontra.catalog._slug`'s
 docstring said "`tests/test_temp_dataset.py` pins the pair". There is no such file, and there never
 was: this side of the contract had NOTHING asserting it, while the Go peer
 (`sdk/go/catalog/dataset_test.go`) asserted `runs_2026-08-19T14_49_20_00_00_sweep` with the comment
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from actorkit.catalog import _SLUG_MAX, _slug
+from kontra.catalog import _SLUG_MAX, _slug
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "shared" / "conformance" / "slug.json"

@@ -19,6 +19,7 @@ import { tmuxWorkflowId } from './ids';
 import { DEFAULT_WINDOWS } from './converge';
 import type { MachineTarget } from './discovery';
 import { sshAddress } from './discovery';
+import { temporalConnectOptions } from '../temporalTls';
 
 /** The workflow's registered type name — its exported function name in `workflows/infra.ts`. A
  * string, not an import: the streamer must not pull workflow code into its bundle. */
@@ -51,7 +52,7 @@ export function temporalConverger(options?: {
   const client = async (): Promise<Client> => {
     if (!clientPromise) {
       clientPromise = (async () => {
-        const conn = await Connection.connect({ address });
+        const conn = await Connection.connect(temporalConnectOptions({ address }));
         connection = conn;
         return new Client({ connection: conn, namespace });
       })().catch((err: unknown) => {

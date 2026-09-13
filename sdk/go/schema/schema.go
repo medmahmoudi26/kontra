@@ -8,7 +8,7 @@
 // refuses, over nothing an author wrote.
 //
 // The Python peer keeps the same rule for the same reason: `lib/hitl._schema_of` calls the same
-// `actorkit.schema.schema_of` the catalog uses.
+// `kontra.schema.schema_of` the catalog uses.
 //
 // INLINE, NOT REFERENCED (`DoNotReference`). A `$ref`/`$defs` document is legal JSON Schema and the
 // form renderers here do not resolve one, so a nested struct would render as an empty field.

@@ -7,7 +7,7 @@ import pytest
 
 from internals.loader import load_actor
 from internals.manifest import ManifestError, validate_units
-from actorkit.schema import schema_of
+from kontra.schema import schema_of
 
 # A small, self-contained fixture actor (not an example) so schema derivation is tested
 # without depending on the examples/ tree.

@@ -15,6 +15,7 @@ import os, { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultRoot, inspectFolder } from './sources';
+import { KontraTenant } from './visibility';
 import {
   cliDetail,
   ControlRefused,
@@ -24,6 +25,7 @@ import {
   readWorkflow,
   resolveWorkflowFile,
   serveWorkflow,
+  setRegisteredFolders,
   startRun,
   workflowQueue,
   workflowRoot,
@@ -38,10 +40,21 @@ import {
  * identity (ADR 0029 §2) requires the opposite: a start that succeeds. The stub returns the workflow
  * id it was handed, which is what a real handle does and what a Run IS (ADR 0023 §12).
  */
+/** What `startRun` handed Temporal, captured — so the search attributes can be asserted. */
+const started = vi.hoisted(() => ({ opts: undefined as Record<string, unknown> | undefined }));
+
 vi.mock('./temporalClient', () => ({
+  // `NAMESPACE` IS EXPORTED BY THE REAL MODULE AND MUST BE HERE TOO. A factory that returns only
+  // `getClient` leaves every other binding `undefined`, and the tenant stamp below would write
+  // `value: undefined` — which is the shape of bug a whole-module mock invites and a partial one
+  // would have hidden.
+  NAMESPACE: 'test-namespace',
   getClient: vi.fn(async () => ({
     workflow: {
-      start: async (_type: string, opts: { workflowId: string }) => ({ workflowId: opts.workflowId }),
+      start: async (_type: string, opts: { workflowId: string }) => {
+        started.opts = opts as unknown as Record<string, unknown>;
+        return { workflowId: opts.workflowId };
+      },
     },
   })),
 }));
@@ -60,9 +73,92 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // THE PROVIDER IS MODULE STATE. Left installed it would widen the boundary for every case after
+  // it, including the traversal refusals — which would then pass for the wrong reason.
+  setRegisteredFolders(() => new Map());
   process.env = { ...saved };
   rmSync(root, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
+});
+
+/**
+ * issue #4 — a registered folder is a workflow wherever it lives.
+ *
+ * THE BUG WAS A ROW YOU COULD SEE AND COULD NOT READ. Registration accepts any absolute path and
+ * the Workflows list draws what it accepted; this resolver looked only under the default root. So a
+ * folder registered from `~/kontra-workflows/python/ping` appeared in the console and then failed
+ * to open with "no such workflow in ~/.kontra/workflows" — and nothing said which of the two halves
+ * was wrong. The reporter's workaround was to copy the folders in, which is the thing registration
+ * exists to avoid.
+ *
+ * THE REFUSALS ABOVE MUST KEEP REFUSING. That is most of what is pinned here: widening a path
+ * boundary is exactly the change that turns a fix into an arbitrary-read, so every case that used
+ * to throw is re-asserted with a provider installed.
+ */
+describe('a workflow folder registered outside the default root', () => {
+  let elsewhere: string;
+
+  beforeEach(() => {
+    elsewhere = mkdtempSync(path.join(tmpdir(), 'kontra-registered-'));
+    mkdirSync(path.join(elsewhere, 'ping'), { recursive: true });
+    writeFileSync(path.join(elsewhere, 'ping', 'workflow.py'), '# registered elsewhere\n');
+    setRegisteredFolders(() => new Map([['ping', path.join(elsewhere, 'ping')]]));
+  });
+
+  afterEach(() => {
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  it('resolves by name to the marker inside it', () => {
+    const got = resolveWorkflowFile('ping');
+    expect(got).toBe(realpathSync(path.join(elsewhere, 'ping', 'workflow.py')));
+  });
+
+  it('is readable, which is the half that failed', () => {
+    expect(readWorkflow('ping')).toContain('registered elsewhere');
+  });
+
+  it('refuses a registered folder with no workflow.py — that is what makes it a Workflow', () => {
+    mkdirSync(path.join(elsewhere, 'empty'), { recursive: true });
+    setRegisteredFolders(() => new Map([['empty', path.join(elsewhere, 'empty')]]));
+    expect(() => resolveWorkflowFile('empty')).toThrow(/has no workflow\.py/);
+  });
+
+  it('does not let a registration shadow a workflow already in the default root', () => {
+    // The ordinary case has to stay exactly as it was: a name that resolves under
+    // `~/.kontra/workflows` resolves there and nowhere else.
+    mkdirSync(path.join(root, 'ping'), { recursive: true });
+    writeFileSync(path.join(root, 'ping', 'workflow.py'), '# the default root one\n');
+    expect(readWorkflow('ping')).toContain('the default root one');
+  });
+
+  it('still refuses to climb out of the registered folder', () => {
+    // The whole boundary, applied to the second root. A name is one segment by construction, but
+    // the confinement is what the test is for — it is the property that must survive the widening.
+    expect(() => resolveWorkflowFile('ping/../../secrets.py')).toThrow(ControlRefused);
+    expect(() => resolveWorkflowFile('../outside/secrets.py')).toThrow(ControlRefused);
+  });
+
+  it('still refuses an absolute path, a symlink out, and an unregistered name', () => {
+    expect(() => resolveWorkflowFile(path.join(elsewhere, 'ping'))).toThrow(ControlRefused);
+    symlinkSync(path.join(outside, 'secrets.py'), path.join(root, 'innocent.py'));
+    expect(() => resolveWorkflowFile('innocent.py')).toThrow(/outside \.kontra\/workflows/);
+    // A name nobody registered is not admitted by the presence of OTHER registrations.
+    expect(() => resolveWorkflowFile('neverregistered')).toThrow(ControlRefused);
+  });
+
+  it('ignores a registration whose folder is gone, rather than resolving into nothing', () => {
+    setRegisteredFolders(() => new Map([['ghost', path.join(elsewhere, 'ghost')]]));
+    expect(() => resolveWorkflowFile('ghost')).toThrow(ControlRefused);
+  });
+
+  it('survives a provider that throws, and still resolves the default root', () => {
+    // An unreadable database must not take the path most workflows are on down with it.
+    setRegisteredFolders(() => {
+      throw new Error('store is closed');
+    });
+    expect(resolveWorkflowFile('examples/python/workflows/nscheck.py')).toContain('nscheck.py');
+  });
 });
 
 describe('resolveWorkflowFile', () => {
@@ -485,6 +581,38 @@ describe('serveWorkflow', () => {
 });
 
 describe('startRun', () => {
+
+  /**
+   * ADR 0046's prerequisite: WHOSE run this is, stamped at start.
+   *
+   * `KontraTenant` was registered on the namespace and written by NOTHING — two readers already took
+   * it (`describeRun`, `listRuns`), so every `tenant` this control plane reported was the empty
+   * string. MEASURED on the live cluster before the fix: of ten open executions only the backing
+   * `kontra.v1.ActorService.Run` carried any `Kontra*` attribute at all.
+   */
+  it('stamps the tenant on the start, where it costs no event', async () => {
+    started.opts = undefined;
+    servable('ping', 'Ping');
+    await startRun({ file: 'ping' }, pollers(1));
+
+    expect(started.opts, 'startRun never reached Temporal').toBeDefined();
+    const attrs = started.opts!.typedSearchAttributes as
+      | { get(key: unknown): unknown }
+      | undefined;
+    expect(attrs, 'no search attributes were sent').toBeDefined();
+    expect(attrs!.get(KontraTenant)).toBe('test-namespace');
+  });
+
+  it('takes the namespace it CONNECTS to, not a second reading of the environment', async () => {
+    // A `process.env.KONTRA_NAMESPACE ?? 'default'` written here as well is how a client and the
+    // attribute it writes come to disagree about which namespace a run is in. The mock's namespace
+    // is deliberately not `default`, so a hard-coded fallback fails this.
+    started.opts = undefined;
+    servable('ping2', 'Ping2');
+    await startRun({ file: 'ping2' }, pollers(1));
+    const attrs = started.opts!.typedSearchAttributes as { get(key: unknown): unknown };
+    expect(attrs.get(KontraTenant)).not.toBe('default');
+  });
   /** A folder that can be started: a manifest naming its @workflow.defn class. */
   function servable(name: string, cls = 'NsCheck'): void {
     const dir = path.join(root, name);

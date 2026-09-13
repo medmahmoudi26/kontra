@@ -5,7 +5,7 @@
  * there — and neither can see the other's process, so each is asserting against its own idea of the
  * contract. That is exactly the shape of gap where a path, a header name or a status code drifts and
  * every suite stays green while a served actor cannot load. This closes it: a real Fastify server on
- * a real port, and the real `actorkit.secrets` module in a real interpreter, talking to each other.
+ * a real port, and the real `kontra.secrets` module in a real interpreter, talking to each other.
  *
  * SKIPS ITSELF when the repo venv is absent, rather than failing: this is a TS suite, and a machine
  * without the Python side is a machine where this proves nothing rather than one where it is broken.
@@ -50,7 +50,7 @@ afterAll(async () => {
 });
 
 /**
- * Run one `actorkit.secrets` call in a real interpreter, as a worker with the given identity.
+ * Run one `kontra.secrets` call in a real interpreter, as a worker with the given identity.
  *
  * ASYNC, AND `spawnSync` IS A TRAP HERE — measured, not guessed. The Fastify server under test runs
  * on THIS event loop, so a synchronous spawn blocks the thread that would accept the connection:
@@ -61,7 +61,7 @@ async function fetchAsActor(actor: string, name: string): Promise<{ ok: boolean;
   const token = store.mintIdentity(actor).token;
   const code = [
     'import json, sys',
-    'from actorkit import secrets',
+    'from kontra import secrets',
     'try:',
     `    print(json.dumps({"ok": True, "out": secrets.get_sync(${JSON.stringify(name)})}))`,
     'except Exception as e:',

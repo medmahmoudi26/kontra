@@ -31,6 +31,7 @@ import {
   type FleetLeaseSet,
 } from '../lease';
 import { datasetQueue, infraQueue } from '../queues';
+import { temporalConnectOptions } from '../temporalTls';
 
 export interface HoldFleetLeaseInput {
   /** The stack being held — `kontra-fleet/<actor>-<version>`. The **Lease** workflow's id derives from it. */
@@ -52,7 +53,7 @@ export interface HoldFleetLeaseOutput {
   lease: string;
   /**
    * HOW MANY **LEASES** ARE ON THIS **FLEET**, INCLUDING THIS ONE. One means the caller is alone on
-   * it; more means the **Fleet** is shared, and `actorkit.fleet` uses exactly that to decide whether
+   * it; more means the **Fleet** is shared, and `kontra.fleet` uses exactly that to decide whether
    * its own failure may tear the **Fleet** down. A saga leg is only yours while the **Fleet** is.
    */
   leases: number;
@@ -112,7 +113,7 @@ async function withClient<T>(
   if (injected) return fn(injected);
   const address = process.env.KONTRA_ADDRESS ?? 'localhost:7233';
   const namespace = process.env.KONTRA_NAMESPACE ?? 'default';
-  const connection = await Connection.connect({ address });
+  const connection = await Connection.connect(temporalConnectOptions({ address }));
   try {
     return await fn(new Client({ connection, namespace, dataConverter }));
   } finally {

@@ -181,7 +181,7 @@ async def _caller(*workflow_types):
         task_queue=queue,
         workflows=list(workflow_types),
         workflow_runner=SandboxedWorkflowRunner(
-            restrictions=SandboxRestrictions.default.with_passthrough_modules("actorkit")
+            restrictions=SandboxRestrictions.default.with_passthrough_modules("kontra", "actorkit")
         ),
     )
     return client, worker, queue

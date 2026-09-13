@@ -130,11 +130,27 @@ describe('a surface address whose id contains a dot', () => {
     // `runs` and `scratch` are RETIRED surfaces and are in the list on purpose: the frontend
     // redirects them, and a redirect is code that has to load first. Serving them is what lets
     // `/runs/sweep-v1.2` — a dot in the id — reach the shell instead of the extension heuristic.
-    for (const surface of ['workflows', 'actors', 'datasets', 'monitor', 'settings', 'runs', 'scratch']) {
+    const surfaces = [
+      'catalog',
+      'workflows',
+      'actors',
+      'datasets',
+      'monitor',
+      'secrets',
+      'settings',
+      'runs',
+      'scratch',
+    ];
+    for (const surface of surfaces) {
       expect(SPA_SURFACES.has(surface), surface).toBe(true);
       const res = await app.inject({ method: 'GET', url: `/${surface}/an.id.with.dots` });
       expect(res.statusCode, surface).toBe(200);
     }
-    expect(SPA_SURFACES.size).toBe(7);
+    // THE SIZE IS THE HALF THAT CATCHES AN OMISSION. Every loop above passes on a list that is
+    // missing a surface — it only ever asserts what it was told to look for — so the count is what
+    // makes a surface added on the console side and forgotten here fail on this side too. It has
+    // already been wrong once: `secrets` shipped in the console and never reached this set.
+    expect(SPA_SURFACES.size).toBe(surfaces.length);
+    expect(SPA_SURFACES.size).toBe(9);
   });
 });
