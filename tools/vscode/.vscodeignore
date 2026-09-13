@@ -1,0 +1,14 @@
+# What does NOT go in the .vsix.
+#
+# Without this file `vsce` packages the whole folder, which means `node_modules/` — and every
+# dependency here is a DEV dependency (TypeScript, the type stubs). The extension ships `out/*.js`
+# and nothing else at runtime: it requires only `vscode`, which the editor provides. So the packaged
+# artifact goes from tens of megabytes of compiler to a few kilobytes of extension.
+
+src/**
+node_modules/**
+tsconfig.json
+package-lock.json
+.vscode/**
+**/*.map
+**/*.test.js
