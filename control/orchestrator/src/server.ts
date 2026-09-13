@@ -541,6 +541,11 @@ export async function runApi(): Promise<FastifyInstance> {
   startHistoryArchiver(new ObjectStore(), {
     onError: (err, runId) =>
       app.log.warn(`history archive: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
+    // NOT A FAILURE, AND THEREFORE NOT `warn`-BY-DEFAULT: an unconfigured store, a deliberate
+    // `off`, a run that aged out and a page that came back full are ordinary states of a healthy
+    // system. They go to `info` so they are READ — routing them through the error channel is how
+    // an operator learns to ignore the error channel (issue F5).
+    onNote: (note) => app.log.info(note),
   });
 
   // AWAITED, where it used to be fire-and-forget. A merged process starts three roles and the

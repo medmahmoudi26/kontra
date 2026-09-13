@@ -18,9 +18,11 @@ import {
   isArchivable,
   readHistoryOrArchive,
   sweepClosedRuns,
+  GONE_IDS_CAP,
+  startHistoryArchiver,
 } from './historyArchive';
 import { EVENT_CAP, HEAD_KEEP, mapHistory, type RawHistoryEvent, type RunHistory } from './history';
-import type { RunRow } from './temporalClient';
+import { LIST_LIMIT, type RunRow } from './temporalClient';
 
 function store(): { store: ObjectStore; backing: MemoryStore } {
   const backing = new MemoryStore();
@@ -288,5 +290,103 @@ describe('the sweep', () => {
     expect(isArchivable({ status: 'running', closedAt: 1 })).toBe(false);
     expect(isArchivable({ status: 'pending', closedAt: 0 })).toBe(false);
     expect(isArchivable({ status: 'completed', closedAt: 0 })).toBe(false);
+  });
+});
+
+/**
+ * issue F5 — a lost run is NAMED, and a pass that did nothing says so.
+ *
+ * `gone` was a count with nothing behind it. Events lost to Temporal's retention are unrecoverable,
+ * so the one moment they can be reconciled is the moment they are noticed — and an integer is not
+ * something anybody can reconcile against, nor act on, nor even use to say what was in them.
+ *
+ * The two silent no-ops belong to the same finding. A store nobody configured and an archive
+ * somebody switched off both produced NO log at all, so the first anybody knew was a run whose
+ * history had aged out with no record of it.
+ */
+describe('what the sweep loses, and what it could not do', () => {
+  it('names the runs that aged out, beside the count', async () => {
+    const { store: s } = store();
+    const archive = new HistoryArchive(s);
+    const report = await sweepClosedRuns(archive, {
+      list: async () => [run({ runId: 'gone-a' }), run({ runId: 'gone-b' }), run({ runId: 'kept' })],
+      read: async (id) => (id === 'kept' ? log(3) : undefined),
+      now: () => 1_786_900_000_000,
+    });
+
+    expect(report.gone).toBe(2);
+    // THE ASSERTION THE ISSUE IS ABOUT. The count was already right; it was the only thing there.
+    expect(report.goneIds).toEqual(['gone-a', 'gone-b']);
+    expect(report.archived).toBe(1);
+  });
+
+  it('keeps the count exact when it stops listing', async () => {
+    // A report is a log line. A pass that lost hundreds has a bigger problem than the list — but
+    // the NUMBER must stay true, or the bound quietly becomes the answer (the F3 mistake again).
+    const { store: s } = store();
+    const archive = new HistoryArchive(s);
+    const many = Array.from({ length: GONE_IDS_CAP + 7 }, (_, i) => run({ runId: `r${i}` }));
+    const report = await sweepClosedRuns(archive, {
+      list: async () => many,
+      read: async () => undefined,
+      now: () => 1_786_900_000_000,
+    });
+
+    expect(report.gone).toBe(GONE_IDS_CAP + 7);
+    expect(report.goneIds).toHaveLength(GONE_IDS_CAP);
+  });
+
+  it('says when the listing came back FULL, because a full page is not a complete one', async () => {
+    const { store: s } = store();
+    const archive = new HistoryArchive(s);
+    const full = Array.from({ length: LIST_LIMIT }, (_, i) => run({ runId: `r${i}` }));
+    const capped = await sweepClosedRuns(archive, {
+      list: async () => full,
+      read: async () => log(2),
+      now: () => 1_786_900_000_000,
+    });
+    expect(capped.capped).toBe(true);
+
+    // Non-vacuous partner: one short of the cap is a complete page and must not claim otherwise.
+    const short = await sweepClosedRuns(archive, {
+      list: async () => full.slice(0, LIST_LIMIT - 1),
+      read: async () => log(2),
+      now: () => 1_786_900_000_000,
+    });
+    expect(short.capped).toBe(false);
+  });
+
+  it('reports an archive that is OFF, and one with no store, as DIFFERENT sentences', async () => {
+    // Two ways to do nothing with two different fixes. Collapsing them is how an operator spends an
+    // afternoon looking for a broken store that was never configured, or for a bug in a feature
+    // somebody switched off on purpose.
+    const notes: string[] = [];
+    const before = process.env.KONTRA_HISTORY_ARCHIVE;
+
+    process.env.KONTRA_HISTORY_ARCHIVE = 'off';
+    startHistoryArchiver(store().store, { onNote: (n) => notes.push(n) })();
+    expect(notes.at(-1), 'an OFF archive said nothing').toMatch(/OFF/);
+
+    delete process.env.KONTRA_HISTORY_ARCHIVE;
+    startHistoryArchiver(new ObjectStore({ endpoint: '' }), { onNote: (n) => notes.push(n) })();
+    expect(notes.at(-1)).toMatch(/DISABLED/);
+    expect(notes.at(-1)).toMatch(/KONTRA_S3_ENDPOINT/);
+    // And they are not the same sentence, which is the whole point.
+    expect(notes.at(-1)).not.toBe(notes.at(-2));
+
+    if (before === undefined) delete process.env.KONTRA_HISTORY_ARCHIVE;
+    else process.env.KONTRA_HISTORY_ARCHIVE = before;
+  });
+
+  it('does not route an ordinary state through the error channel', async () => {
+    // `onError` is for faults. An operator who is told "error" about a deliberate configuration
+    // learns to stop reading the errors.
+    const errors: unknown[] = [];
+    const before = process.env.KONTRA_HISTORY_ARCHIVE;
+    process.env.KONTRA_HISTORY_ARCHIVE = 'off';
+    startHistoryArchiver(store().store, { onError: (e) => errors.push(e) })();
+    expect(errors).toEqual([]);
+    if (before === undefined) delete process.env.KONTRA_HISTORY_ARCHIVE;
+    else process.env.KONTRA_HISTORY_ARCHIVE = before;
   });
 });

@@ -179,3 +179,65 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" --generate-notes release/kontra_*.tar.gz release/SHA256SUMS
+
+  # ── THE CONTAINER IMAGE, FROM THE TARBALL THIS RELEASE JUST BUILT ─────────────────────────────
+  #
+  # `docker compose up -d` is a supported install path (`docker-compose.yml`'s `kontra` service), and
+  # it pulls an image. Building that image FROM the release artifact rather than from source is what
+  # makes the container and the download the same bytes — which is the whole of "verify our builds".
+  # A second build from source would be a second thing to be wrong, tested by nobody.
+  #
+  # LINUX ONLY, AND BOTH ARCHITECTURES. There is no macOS container; the matrix above builds four
+  # platforms because people run the BINARY on four, and two of them have no image to make.
+  #
+  # IT NEEDS THE `publish` JOB'S ARTIFACTS AND NOT ITS RELEASE, so it depends on `build` and
+  # downloads the same way — a manifest list is assembled from two single-arch builds rather than by
+  # asking buildx to cross-compile something that is already compiled.
+  image:
+    name: the container image
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: build/release
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # ONE BUILD PER ARCH, EACH FROM ITS OWN TARBALL, then one manifest over the two. The
+      # Dockerfile takes the artifact as a build arg precisely so the image cannot be built from a
+      # tarball for another architecture — a mistake that produces an image which pulls fine and
+      # `exec format error`s on first run.
+      - name: build and push, per architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          for arch in amd64 arm64; do
+            tarball=$(ls build/release/kontra_*_linux_"$arch".tar.gz)
+            echo "==> $arch from $tarball"
+            docker buildx build \
+              --platform "linux/$arch" \
+              -f control/images/Dockerfile.appliance \
+              --build-arg TARBALL="$tarball" \
+              -t "$image:$version-$arch" \
+              --push .
+          done
+          docker buildx imagetools create \
+            -t "$image:$version" -t "$image:latest" \
+            "$image:$version-amd64" "$image:$version-arm64"
+          docker buildx imagetools inspect "$image:$version"

@@ -6,7 +6,7 @@
 # what proves it, and is the command to run after touching anything on that path.
 #
 #   make up | up-d | down    # the CLOUD CONTROLLER's compose stack — see the note above `up`
-.PHONY: up up-d down logs tmux-dir ui api bundle proto-check
+.PHONY: up up-d down logs tmux-dir ui api bundle proto-check image release
 
 # THE TMUX SOCKET DIRECTORY, MADE BEFORE COMPOSE CAN MAKE IT WRONG.
 #
@@ -83,6 +83,42 @@ up-d: tmux-dir
 # checkout, so a console built against a stale `core/dist` is a console that disagrees with the
 # orchestrator it is about to be deployed next to.
 CONSOLE ?= ../kontra-console
+
+# ── THE CONTAINER IMAGE, FROM A RELEASE — the compose install path ─────────────────────────────
+#
+# Two steps and the order is the point: `kontra release` produces exactly what a user downloads,
+# and the image is built FROM that tarball. The container and the download are then the same bytes,
+# which is what makes this "verify our builds" rather than a second way to compile.
+#
+# THE SPA IS THE ONE THING THE RELEASE DOES NOT BUILD ITSELF (its toolchain lives in another
+# repository — ADR 0038), so `KONTRA_CONSOLE_DIST` points at a build you have. `make ui` makes one.
+CONSOLE ?= $(abspath $(CURDIR)/../kontra-console)
+PLATFORM ?= linux/amd64
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
+
+release:
+	@test -d "$(CONSOLE)/dist" || { \
+	  echo "no built console at $(CONSOLE)/dist — the release archives a vite output it does not build."; \
+	  echo "  cd $(CONSOLE) && pnpm run build      (or: make ui)"; \
+	  echo "  or point at one:  make release CONSOLE=/path/to/kontra-console"; \
+	  exit 1; }
+	cd cli && KONTRA_CONSOLE_DIST="$(CONSOLE)/dist" go run . release \
+	  --repo .. --platform $(PLATFORM) --version $(VERSION) --out ../build/release
+
+# THE TARBALL IS FOUND, NOT NAMED. It carries its version and platform in the filename, and a
+# hard-coded one is how an image quietly keeps shipping last month's binary. Exactly one must match:
+# a `build/release` with two is ambiguous and saying so beats picking.
+image: release
+	@set -eu; \
+	  n=$$(ls build/release/kontra_*.tar.gz 2>/dev/null | wc -l); \
+	  [ "$$n" = 1 ] || { echo "expected exactly one tarball in build/release, found $$n"; exit 1; }; \
+	  tarball=$$(ls build/release/kontra_*.tar.gz); \
+	  echo "==> image from $$tarball"; \
+	  docker build -f control/images/Dockerfile.appliance --build-arg TARBALL="$$tarball" \
+	    -t "$${KONTRA_IMAGE:-kontra:latest}" .
+	@echo
+	@echo "  docker compose up -d      # the control plane"
+	@echo "  open http://127.0.0.1:8088"
 
 ui:
 	@test -f .env || { echo "no .env at the repo root — the SPA would build with an EMPTY explore token"; exit 1; }

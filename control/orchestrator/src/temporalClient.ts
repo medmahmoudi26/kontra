@@ -48,7 +48,9 @@ const RUN_BATCH_ACTIVITY = 'RunBatch';
 
 /** How many distinct runs one list may return. It used to bound a describe-per-run fan-out as
  *  well; listing no longer describes anything, so only the page size survives. */
-const LIST_LIMIT = 200;
+/** EXPORTED so the history sweep can say whether its page came back FULL without restating the
+ *  number — a second `200` written elsewhere is how a cap and the check for it drift apart. */
+export const LIST_LIMIT = 200;
 
 /** How many backing workflows the `dispatches` column may scan before giving up on being exact.
  *  One sweep on this controller produced 225 of them and a busy cluster produces far more; the
@@ -517,7 +519,12 @@ function longToNumber(raw: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-async function describeLength(
+// EXPORTED FOR ITS TEST, and that is the whole reason. `fetchRunHistory` reaches Temporal through a
+// memoized module-level client, so driving this through it means mocking `@temporalio/client` — and
+// a factory that loads the real package to spread it pulls protobufjs into a worker that cannot
+// resolve it. Measured: six cases green alone, six red the moment the file shared a worker. Taking
+// the client as an argument was already true; naming it here is what lets a test hand one over.
+export async function describeLength(
   client: Awaited<ReturnType<typeof getClient>>,
   runId: string,
   execId?: string

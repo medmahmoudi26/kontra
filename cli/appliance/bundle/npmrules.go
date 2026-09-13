@@ -56,6 +56,52 @@ func prunePnpmMetadata(modules string, p func(string, ...any)) error {
 	return nil
 }
 
+// pruneBuildSource removes source trees a dependency ships for BUILDING itself and that nothing
+// loads at runtime.
+//
+// ONE PACKAGE TODAY, AND IT BLOCKED THE FIRST RELEASE. `@temporalio/core-bridge` publishes its
+// whole Rust workspace — `sdk-core/`, 11 MB of crates — beside the prebuilt `.node` files that
+// actually get loaded. `common.js:getPrebuiltPath` resolves `releases/<triple>/index.node` and
+// nothing else; the crates are there so somebody can build the bridge themselves, which is not a
+// thing that happens inside a bundle.
+//
+// IT IS NOT PRIMARILY A SIZE FIX. Inside that tree is
+// `crates/client/tests/testdata/ca.pem`, and `scanStaged` refuses to publish any bundle carrying a
+// `*.pem` — correctly, because it cannot tell a test fixture from a private key and the failure
+// direction of guessing is a credential in a world-readable artifact. So `kontra release` stopped
+// dead here, and the honest fix is to not ship build material rather than to teach the scanner
+// which certificates are harmless.
+//
+// ABSENT IS FINE. A dependency that stops shipping its source is not a problem to report — this
+// removes what is there and says what it removed.
+func pruneBuildSource(modules string, p func(string, ...any)) ([]string, error) {
+	// Package-relative paths, so the rule reads as "this package ships this, and we do not need
+	// it" rather than as a glob that might match something else entirely one day.
+	sources := []string{
+		filepath.Join("@temporalio", "core-bridge", "sdk-core"),
+	}
+	var dropped []string
+	for _, rel := range sources {
+		path := filepath.Join(modules, rel)
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", path, err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		p("dropping build source node_modules/%s (not loaded at runtime)", filepath.ToSlash(rel))
+		if err := os.RemoveAll(path); err != nil {
+			return nil, fmt.Errorf("remove %s: %w", path, err)
+		}
+		dropped = append(dropped, filepath.ToSlash(rel))
+	}
+	return dropped, nil
+}
+
 // pruneForeignPrebuilds keeps the one `@temporalio/core-bridge` prebuild this platform loads and
 // removes the rest, returning what it removed.
 //
@@ -208,4 +254,102 @@ func owningPackage(path, stage string) (string, string) {
 		}
 		dir = parent
 	}
+}
+
+// copyWorkspaceMetadata builds the smallest workspace pnpm needs to resolve the same tree.
+//
+// WHY A COPY AT ALL: `pnpm deploy --prod` prunes the workspace it runs in to production-only. Run
+// against the checkout that is being released, it deletes the developer's dev dependencies —
+// measured, as an orchestrator suite that started failing on `@protobufjs/aspromise` after a
+// release build. The deploy needs the metadata that decides resolution and nothing else, so it gets
+// exactly that, in a directory that is thrown away.
+//
+// WHAT RESOLUTION ACTUALLY NEEDS: the lockfile (which pins every version and integrity hash), the
+// workspace file (which says where the packages are), and one `package.json` per package. Plus
+// `shared/core`'s BUILT OUTPUT, because `@kontra/core` is a `workspace:*` dependency that `deploy`
+// materialises by copying — a package.json alone would copy an empty package and the bundle would
+// fail at its first `require` on a machine nobody is watching.
+func copyWorkspaceMetadata(repo, dst string) error {
+	for _, name := range []string{"pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json"} {
+		if err := copyFile(filepath.Join(repo, name), filepath.Join(dst, name)); err != nil {
+			return fmt.Errorf("the deploy workspace needs %s: %w", name, err)
+		}
+	}
+
+	packages, err := workspacePackages(filepath.Join(repo, "pnpm-workspace.yaml"))
+	if err != nil {
+		return err
+	}
+	// A WORKSPACE WITH NO PACKAGES WOULD DEPLOY NOTHING AND SAY SO ONLY AS AN EMPTY TARGET — the
+	// guard on this guard, because a parser that quietly found none is exactly the shape that
+	// passes every test written against it.
+	if len(packages) == 0 {
+		return fmt.Errorf("no packages found in %s — the deploy workspace would resolve nothing",
+			filepath.Join(repo, "pnpm-workspace.yaml"))
+	}
+
+	for _, rel := range packages {
+		if err := os.MkdirAll(filepath.Join(dst, rel), 0o755); err != nil {
+			return err
+		}
+		if err := copyFile(filepath.Join(repo, rel, "package.json"),
+			filepath.Join(dst, rel, "package.json")); err != nil {
+			return fmt.Errorf("workspace package %s: %w", rel, err)
+		}
+		// The built output of a workspace package that others DEPEND on. `deploy` copies what the
+		// dependency's `files`/directory holds; an unbuilt one copies nothing that can be required.
+		src := filepath.Join(repo, rel, "dist")
+		if info, err := os.Stat(src); err == nil && info.IsDir() {
+			if err := copyTree(src, filepath.Join(dst, rel, "dist")); err != nil {
+				return fmt.Errorf("workspace package %s dist: %w", rel, err)
+			}
+		}
+	}
+	return nil
+}
+
+// workspacePackages reads the `packages:` list out of a pnpm-workspace.yaml.
+//
+// A LINE SCAN AND NOT A YAML PARSER, because the file is four lines of literal paths and adding a
+// YAML dependency to the appliance build — whose whole claim is that it needs nothing but Go — to
+// read them would be the wrong trade. It REFUSES A GLOB rather than trying to expand one: a
+// `packages: - control/*` would silently resolve to nothing here, and a bundle missing a workspace
+// package fails at require time in somebody else's process.
+func workspacePackages(path string) ([]string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read the workspace file: %w", err)
+	}
+	var out []string
+	inPackages := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimRight(line, "\r")
+		if strings.HasPrefix(trimmed, "packages:") {
+			inPackages = true
+			continue
+		}
+		if inPackages && !strings.HasPrefix(trimmed, " ") && !strings.HasPrefix(trimmed, "-") &&
+			strings.TrimSpace(trimmed) != "" {
+			break // a new top-level key ends the list
+		}
+		if !inPackages {
+			continue
+		}
+		item := strings.TrimSpace(trimmed)
+		if !strings.HasPrefix(item, "- ") {
+			continue
+		}
+		item = strings.Trim(strings.TrimSpace(strings.TrimPrefix(item, "- ")), `"'`)
+		if item == "" {
+			continue
+		}
+		if strings.ContainsAny(item, "*?[") {
+			return nil, fmt.Errorf(
+				"%s lists the glob %q; this build copies workspace packages by literal path and "+
+					"would silently miss whatever it matches — expand it, or teach "+
+					"workspacePackages to", path, item)
+		}
+		out = append(out, filepath.FromSlash(item))
+	}
+	return out, nil
 }
