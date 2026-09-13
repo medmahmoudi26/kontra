@@ -3,20 +3,25 @@
 From an empty machine to a **Fleet**, one step at a time. Each step is three or four lines, in
 order, and every command here is real — nothing is elided and nothing is aspirational.
 
-**There are two things and they are not alternatives**, which is the first thing to get right
-because the wrong reading costs an afternoon:
+**Two ways to run the same thing, and one extra piece for Fleets.**
 
-- **`kontra up` IS the control plane.** One process — Temporal, the object store, the state store,
-  the payload codec, the OCI registry and the orchestrator — with its own data directory and no
-  containers (ADR 0031). Steps 1–10 are this and nothing else.
-- **`docker compose` is the fleet half**, and only that. It runs `orchestrator-infra`: the Pulumi
-  engine, the fleet SSH key and the cloud credential, which ADR 0031 §4 keeps deliberately OFF the
-  appliance — no provider plugins and no cloud credential in an artifact whose premise is that a
-  stranger curls it onto a laptop. You need it at step 11 and not before.
+- **`kontra up`** — one process on your host: Temporal, the object store, the state store, the
+  payload codec, the OCI registry and the orchestrator as its supervised child, with its own data
+  directory and no containers (ADR 0031). Nothing is disassembled to fit.
+- **`docker compose up -d`** — the SAME process, with Docker as the supervisor instead of your
+  shell. The image is built from a release tarball, so the container and the download are the same
+  bytes. `make image` cuts one and builds it.
+- **`kontra infra up`** — `orchestrator-infra`, and only that: the Pulumi engine, the fleet SSH key
+  and the cloud credential, which ADR 0031 §4 keeps off the appliance deliberately — no provider
+  plugins and no cloud credential in an artifact whose premise is that a stranger curls it onto a
+  laptop. You need it at step 11 and not before.
 
-`docker-compose.yml` says this in capitals at the top of the file: *"`make up` will not give you a
-control plane."* Nine services left it one at a time and each left a block behind saying where it
-went. See [[Deployment]].
+WHAT COMPOSE IS NOT is the old multi-service topology: nine services left `docker-compose.yml` one
+slice at a time and each departure fixed a bug recorded where the service used to be. Re-splitting
+the appliance reintroduces them; putting it in a container reintroduces none. See [[Deployment]].
+
+This page uses the host path because it is the shortest thing to type. **Every step after step 3 is
+identical either way** — swap `kontra up` for `make image && docker compose up -d` and read on.
 
 ---
 
@@ -289,8 +294,11 @@ draft and are worth naming, because they are the two a walkthrough gets wrong by
 - **A Method receives the whole Batch, not one Unit.** `async def scan(self, batch, dataset)`, and
   you write the `async for`. ADR 0028 §2 — the loop is yours, which is what lets a Method open one
   connection for forty Units instead of forty.
-- **`docker compose` is not the control plane.** `kontra up` is. The compose file carries the fleet
-  half and says so at the top of itself.
+- **`docker compose` WAS not the control plane, and now is.** When this page was written the compose
+  file could not give you one — nine services had left it and nothing had replaced them. It runs the
+  appliance in a container now, built from the release tarball, so both paths are the same process
+  and the same bytes. The sentence is kept rather than deleted because the reason it was true is
+  still true: the services did not come back.
 
 If a command here does not work, that is a bug in this page and not in your install. The CLI's own
 `kontra help` is generated from the same table this was checked against.

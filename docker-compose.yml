@@ -1,9 +1,18 @@
-# ══ THIS FILE IS NOT THE LOCAL DEVELOPMENT PATH ANY MORE. READ THIS BEFORE ANYTHING ELSE ═════
+# ══ WHAT THIS FILE IS NOW ════════════════════════════════════════════════════════════════════
 #
-# **To run kontra on your machine, the command is `kontra up`.** It is one process: Temporal, the
-# object store, the state store, the payload codec, the OCI registry and the orchestrator, with
-# its own data directory and no containers (ADR 0031, `cli/up.go`). Nothing in this file is
-# needed for it, and `make up` will not give you a control plane.
+# **`docker compose up -d` gives you a control plane**, and it is the SAME one `kontra up` gives
+# you: the `kontra` service below runs that binary, one process inside the container — Temporal, the
+# object store, the state store, the payload codec, the OCI registry and the orchestrator as its
+# supervised child (ADR 0031, `cli/up.go`). Docker is the supervisor instead of your shell.
+#
+# THIS HEADER USED TO SAY THE OPPOSITE, and the history is worth keeping rather than overwriting:
+# for a long stretch this file could not give you a control plane at all, because nine services had
+# left it and nothing had replaced them. What changed is not that the services came back — see the
+# blocks below, every one of which is still true — but that the appliance became something you can
+# put IN a container without disassembling it.
+#
+# `make image` cuts a release for this platform and builds the image FROM that tarball, so the
+# container and the artifact a user downloads are the same bytes.
 #
 # ── SO WHY IS THIS FILE STILL HERE ───────────────────────────────────────────────────────────
 #
@@ -44,9 +53,12 @@
 # cluster's Temporal + S3). See docs/deployment.md for the two-cluster split.
 #
 # Components:
-#   - Temporal      : NOT A SERVICE. It runs in-process inside `kontra up` (ADR 0031); see
-#                     the block where the two `temporal*` services used to be, below.
-#   - orchestrator  : ONE service left, and it is not the control plane (ADR 0031 §1) —
+#   - kontra        : THE CONTROL PLANE, as one container running `kontra up`. Everything the
+#                     "GONE" notes below describe still lives inside that binary — they moved into
+#                     the process, not out of the file's reach.
+#   - Temporal      : NOT A SERVICE OF ITS OWN. It runs in-process inside `kontra up` (ADR 0031);
+#                     see the block where the two `temporal*` services used to be, below.
+#   - orchestrator  : the infra half only — Pulumi, and not the API (ADR 0031 §1) —
 #       orchestrator-api          : GONE. The API, the SPA and the materializer role are the
 #                                   binary's supervised child now — `kontra up` hydrates the
 #                                   bundle and execs it (issue 14). See the block where the
