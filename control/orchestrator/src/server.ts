@@ -98,6 +98,7 @@ import { registerRunRoutes } from './routes/runs';
 import { registerScratchRoutes } from './routes/scratch';
 import { registerSourceRoutes } from './routes/sources';
 import { registerStateRoutes } from './routes/state';
+import { registerUploadRoutes } from './routes/uploads';
 import { registerSummaryRoutes } from './routes/summaries';
 import { registerWorkflowRoutes } from './routes/workflows';
 
@@ -335,6 +336,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerExploreRoutes(app, { store, lake, runs });
   registerSummaryRoutes(app, summaries);
   registerStateRoutes(app);
+  // The bytes behind a `File` or `Folder` field on a Method or workflow form. Content-addressed
+  // into the SAME CAS the claim-check codec writes and `kontra.fetch_blob` reads, so an upload is
+  // dereferenceable by every actor in every language with nothing new to configure.
+  registerUploadRoutes(app, store);
 
   // --- secrets (issue 19; ADR 0034 §4) ---------------------------------------------
   //

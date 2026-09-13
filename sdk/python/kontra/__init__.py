@@ -106,6 +106,12 @@ from kontra.version import CONTRACT_VERSION
 #: required to stay free of a Temporal dependency (see the header).
 _VERBS = ("speak", "ask")
 
+#: The two INPUT TYPES an author declares on a Method — `takes=File`. Lazy for the same reason the
+#: verbs are, and a different dependency: `blobs` imports pydantic at module scope, which
+#: `schema.py` already keeps off the workflow sandbox path deliberately. An author who never takes a
+#: file never pays for it.
+_INPUT_TYPES = ("File", "Folder")
+
 
 def __getattr__(name: str) -> object:
     """`from kontra import ask, speak`, without importing temporalio to find out.
@@ -132,13 +138,17 @@ def __getattr__(name: str) -> object:
         from kontra.hitl import ask
 
         return ask
+    if name in _INPUT_TYPES:
+        from kontra import blobs
+
+        return getattr(blobs, name)
     raise AttributeError(f"module 'kontra' has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
     """`dir(kontra)` names the verbs too — a lazy attribute is invisible to it otherwise, and a
     surface an author cannot discover from the REPL is a surface they will not find."""
-    return sorted([*globals(), *_VERBS])
+    return sorted([*globals(), *_VERBS, *_INPUT_TYPES])
 
 
 __all__ = [
@@ -159,6 +169,10 @@ __all__ = [
     "MethodRegistration",
     "Slot",
     "SlotDeclaration",
+    # THE TWO INPUT TYPES A FORM CAN COLLECT BY DRAGGING. Top level beside `Slot`, because they are
+    # things an author DECLARES on a Method, not a module you call into.
+    "File",
+    "Folder",
     "NonRetryableError",
     "SessionLost",
     "CONTRACT_VERSION",

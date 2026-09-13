@@ -324,6 +324,43 @@ def _spawn_session_worker(registry):
     return spawn
 
 
+def _install_blob_reader() -> None:
+    """Give `kontra.File.read()` a way to fetch — the runtime half of an SDK-declared type.
+
+    THE ARROW IS RUNTIME → SDK, WHICH IS WHY THIS IS HERE AND NOT THERE. `kontra.blobs` declares
+    `File` and `Folder` and holds a `None` reader; anything that linked an S3 client into the author
+    surface would be importable only by a caller that has one, and `tests/test_sdk_arrow.py` fails
+    the build over it — statically AND by importing every SDK module with `internals` made
+    unimportable. So the side that is allowed to have the store registers the fetch.
+
+    IT IS THE SAME STORE THE CODEC USES, deliberately: `casstore.from_env()` and
+    `codec.cas_key` are what offload a claim-check payload and what the orchestrator's upload route
+    content-addresses into. One derivation of `cas/<sha[:2]>/<sha>`, under one prefix, for the whole
+    system — which is what makes an uploaded file dereferenceable with nothing new to configure.
+
+    NO STORE IS NOT AN ERROR HERE. A local run with `KONTRA_S3_ENDPOINT` unset is legitimate and the
+    codec is passthrough under exactly the same condition; an actor that never takes a File never
+    notices, and one that does gets `File.read()`'s own sentence rather than a failure at startup
+    about a feature it may not use.
+    """
+    from internals import casstore
+    from internals.codec import cas_key
+
+    store = casstore.from_env()
+    if store is None:
+        return
+
+    async def read(sha: str) -> bytes:
+        # BLOCKING boto3 ON A THREAD. A Method body runs on this worker's event loop, and a
+        # synchronous get of a 30 MB object there stalls every other Unit in flight — including the
+        # heartbeats, which is how a healthy worker gets its activity timed out.
+        return await asyncio.to_thread(store.get, cas_key(sha))
+
+    from kontra import blobs
+
+    blobs.set_blob_reader(read)
+
+
 async def serve_async(registry, *, address: str = "", namespace: str = "") -> None:
     # LOGGING FIRST, and for the reason `wfhost._configure_logging` records at length: Python emits
     # nothing until a handler exists, so an actor author's `logging.getLogger(__name__).info(...)`
@@ -356,6 +393,7 @@ async def serve_async(registry, *, address: str = "", namespace: str = "") -> No
     )
     metrics.serve(registry.actor_name, version)  # /metrics on its own port
     publish_catalog(registry)                    # self-register so the actor is dispatchable
+    _install_blob_reader()                       # what `kontra.File.read()` calls
 
     # `max_concurrent_activities` bounds what runs on THIS queue at once, and it is no longer the
     # live-Session cap — an OpenSession frees its slot the moment the Session's worker is up, so

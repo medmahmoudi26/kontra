@@ -82,6 +82,7 @@ The **[wiki](../../wiki)** is the manual — start at [Getting Started](../../wi
 
 | | |
 |---|---|
+| [First Run](../../wiki/First-Run) | nothing → an actor → a workflow → a fleet, one step at a time |
 | [Getting Started](../../wiki/Getting-Started) · [Dev Cycle](../../wiki/Dev-Cycle) | install, run one, iterate |
 | [Writing Actors: Python](../../wiki/Writing-Actors-Python) · [Go](../../wiki/Writing-Actors-Go) | the authoring surface |
 | [Execution Model](../../wiki/Execution-Model) · [Durability](../../wiki/Durability-and-Failures) | what happens when things break |
