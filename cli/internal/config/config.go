@@ -221,18 +221,36 @@ func workflowsDir(root string) string { return filepath.Join(root, "workflows") 
 func actorsDir(root string) string    { return filepath.Join(root, "actors") }
 
 // ApplyConfig exports config values into this process's environment, WITHOUT overriding anything
-// already set.
+// already set to a VALUE.
 //
 // The precedence is the whole contract: environment first, file second. A container is configured
 // by its environment and must not have that quietly replaced by a file that happened to be
 // mounted; an operator on a laptop has no environment and gets the file. Neither can surprise the
 // other.
+//
+// ── AN EMPTY VARIABLE IS A GAP, NOT A DECISION, AND THAT COST A WORKING INSTALL ─────────────────
+//
+// This used to skip on `LookupEnv` alone, so a variable that was SET TO THE EMPTY STRING blocked
+// the file. That is the normal shape of a compose file: `KONTRA_CONSOLE_USERS: "${KONTRA_CONSOLE_USERS:-}"`
+// passes the variable through when the operator set one and passes an EMPTY STRING when they did
+// not — it is always set. MEASURED on the copy-paste docker install: `kontra init` generated the
+// admin account and wrote it to config.yaml, `kontra up` started, and every sign-in answered
+// `503 disabled: no console user is configured`. A control plane that had just printed a password
+// nobody could use.
+//
+// The symmetry is the argument. Six lines up, an empty value IN THE FILE is skipped for exactly
+// this reason — "not configured" rather than "configured to nothing" — and every consumer reads ""
+// as absent. Reading an empty variable the other way made the two halves of one rule disagree.
+//
+// It is also the safe direction to be wrong in. Filling a blank from the file can only produce the
+// configuration the operator wrote down; honouring the blank produces a control plane whose
+// credentials, tokens and Controller address all silently vanished.
 func ApplyConfig(c *Config) {
 	for key, val := range c.EnvFor() {
 		if val == "" {
 			continue
 		}
-		if _, set := os.LookupEnv(key); set {
+		if cur, set := os.LookupEnv(key); set && cur != "" {
 			continue
 		}
 		_ = os.Setenv(key, val)

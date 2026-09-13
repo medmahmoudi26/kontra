@@ -139,6 +139,39 @@ func TestTheEnvironmentAlwaysWins(t *testing.T) {
 	}
 }
 
+func TestAnEmptyEnvironmentVariableIsAGapTheFileFills(t *testing.T) {
+	// THE BUG THIS EXISTS FOR, and it broke the whole copy-paste docker install.
+	//
+	// A compose file writes `KONTRA_CONSOLE_USERS: "${KONTRA_CONSOLE_USERS:-}"` — which passes the
+	// operator's value through when they set one and an EMPTY STRING when they did not. The
+	// variable is always set. `ApplyConfig` skipped on "is it set" alone, so the account `kontra
+	// init` had just generated never reached the orchestrator and every sign-in answered
+	// `503 disabled: no console user is configured` — with the password printed in the log above it.
+	//
+	// Asserted on KONTRA_CONSOLE_USERS specifically because that is the one where the failure is
+	// total: a blank token gates a surface, a blank Controller is a bad address, a blank login list
+	// is a control plane nobody can enter.
+	t.Setenv("KONTRA_CONSOLE_USERS", "")
+	t.Setenv("KONTRA_RUN_TOKEN", "")
+	t.Setenv("KONTRA_CONTROLLER", "10.0.0.1") // a REAL value still wins, which is the other half
+
+	ApplyConfig(&Config{
+		Controller: "10.9.9.9",
+		Tokens:     TokensConfig{Run: "from-the-file"},
+		Auth:       AuthConfig{Users: []AuthUser{{Name: "admin", PasswordHash: "scrypt$1$2$3$s$h"}}},
+	})
+
+	if got := os.Getenv("KONTRA_CONSOLE_USERS"); got == "" {
+		t.Error("an empty KONTRA_CONSOLE_USERS blocked the file: the console has no account")
+	}
+	if got := os.Getenv("KONTRA_RUN_TOKEN"); got != "from-the-file" {
+		t.Errorf("an empty variable blocked the file: KONTRA_RUN_TOKEN=%q", got)
+	}
+	if got := os.Getenv("KONTRA_CONTROLLER"); got != "10.0.0.1" {
+		t.Errorf("a non-empty variable must still win: KONTRA_CONTROLLER=%q", got)
+	}
+}
+
 func TestAnEmptyConfigValueSetsNothing(t *testing.T) {
 	// An empty string in the file is "not configured", not "configure it to empty". Exporting it
 	// would turn an unset optional into a set-but-blank one — and KONTRA_RUN_TOKEN blank vs unset
