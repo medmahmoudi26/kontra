@@ -24,6 +24,7 @@ import {
   readWorkflow,
   resolveWorkflowFile,
   serveWorkflow,
+  setRegisteredFolders,
   startRun,
   workflowQueue,
   workflowRoot,
@@ -60,9 +61,92 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // THE PROVIDER IS MODULE STATE. Left installed it would widen the boundary for every case after
+  // it, including the traversal refusals — which would then pass for the wrong reason.
+  setRegisteredFolders(() => new Map());
   process.env = { ...saved };
   rmSync(root, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
+});
+
+/**
+ * issue #4 — a registered folder is a workflow wherever it lives.
+ *
+ * THE BUG WAS A ROW YOU COULD SEE AND COULD NOT READ. Registration accepts any absolute path and
+ * the Workflows list draws what it accepted; this resolver looked only under the default root. So a
+ * folder registered from `~/kontra-workflows/python/ping` appeared in the console and then failed
+ * to open with "no such workflow in ~/.kontra/workflows" — and nothing said which of the two halves
+ * was wrong. The reporter's workaround was to copy the folders in, which is the thing registration
+ * exists to avoid.
+ *
+ * THE REFUSALS ABOVE MUST KEEP REFUSING. That is most of what is pinned here: widening a path
+ * boundary is exactly the change that turns a fix into an arbitrary-read, so every case that used
+ * to throw is re-asserted with a provider installed.
+ */
+describe('a workflow folder registered outside the default root', () => {
+  let elsewhere: string;
+
+  beforeEach(() => {
+    elsewhere = mkdtempSync(path.join(tmpdir(), 'kontra-registered-'));
+    mkdirSync(path.join(elsewhere, 'ping'), { recursive: true });
+    writeFileSync(path.join(elsewhere, 'ping', 'workflow.py'), '# registered elsewhere\n');
+    setRegisteredFolders(() => new Map([['ping', path.join(elsewhere, 'ping')]]));
+  });
+
+  afterEach(() => {
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  it('resolves by name to the marker inside it', () => {
+    const got = resolveWorkflowFile('ping');
+    expect(got).toBe(realpathSync(path.join(elsewhere, 'ping', 'workflow.py')));
+  });
+
+  it('is readable, which is the half that failed', () => {
+    expect(readWorkflow('ping')).toContain('registered elsewhere');
+  });
+
+  it('refuses a registered folder with no workflow.py — that is what makes it a Workflow', () => {
+    mkdirSync(path.join(elsewhere, 'empty'), { recursive: true });
+    setRegisteredFolders(() => new Map([['empty', path.join(elsewhere, 'empty')]]));
+    expect(() => resolveWorkflowFile('empty')).toThrow(/has no workflow\.py/);
+  });
+
+  it('does not let a registration shadow a workflow already in the default root', () => {
+    // The ordinary case has to stay exactly as it was: a name that resolves under
+    // `~/.kontra/workflows` resolves there and nowhere else.
+    mkdirSync(path.join(root, 'ping'), { recursive: true });
+    writeFileSync(path.join(root, 'ping', 'workflow.py'), '# the default root one\n');
+    expect(readWorkflow('ping')).toContain('the default root one');
+  });
+
+  it('still refuses to climb out of the registered folder', () => {
+    // The whole boundary, applied to the second root. A name is one segment by construction, but
+    // the confinement is what the test is for — it is the property that must survive the widening.
+    expect(() => resolveWorkflowFile('ping/../../secrets.py')).toThrow(ControlRefused);
+    expect(() => resolveWorkflowFile('../outside/secrets.py')).toThrow(ControlRefused);
+  });
+
+  it('still refuses an absolute path, a symlink out, and an unregistered name', () => {
+    expect(() => resolveWorkflowFile(path.join(elsewhere, 'ping'))).toThrow(ControlRefused);
+    symlinkSync(path.join(outside, 'secrets.py'), path.join(root, 'innocent.py'));
+    expect(() => resolveWorkflowFile('innocent.py')).toThrow(/outside \.kontra\/workflows/);
+    // A name nobody registered is not admitted by the presence of OTHER registrations.
+    expect(() => resolveWorkflowFile('neverregistered')).toThrow(ControlRefused);
+  });
+
+  it('ignores a registration whose folder is gone, rather than resolving into nothing', () => {
+    setRegisteredFolders(() => new Map([['ghost', path.join(elsewhere, 'ghost')]]));
+    expect(() => resolveWorkflowFile('ghost')).toThrow(ControlRefused);
+  });
+
+  it('survives a provider that throws, and still resolves the default root', () => {
+    // An unreadable database must not take the path most workflows are on down with it.
+    setRegisteredFolders(() => {
+      throw new Error('store is closed');
+    });
+    expect(resolveWorkflowFile('examples/python/workflows/nscheck.py')).toContain('nscheck.py');
+  });
 });
 
 describe('resolveWorkflowFile', () => {

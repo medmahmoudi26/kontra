@@ -78,6 +78,10 @@ describe('auth is described, because it is the thing worth reading in one view',
   it('names every scheme the server actually uses', () => {
     const { doc } = live();
     expect(Object.keys(doc.components.securitySchemes).sort()).toEqual([
+      // An ACTOR IDENTITY is the fifth, and it is not a service token: a signed bearer naming one
+      // actor, minted when it is served, admitting only what that actor owns. The two `resolve`
+      // routes take it and nothing else — no console session gets in, which is the point of it.
+      'actorIdentity',
       'consoleSession',
       'exploreToken',
       'runToken',
@@ -133,5 +137,70 @@ describe('operation ids', () => {
     );
     expect(ids.length).toBeGreaterThan(30);
     expect(new Set(ids).size, 'two routes share an operationId; a client would lose one').toBe(ids.length);
+  });
+});
+
+/**
+ * THE SPEC'S AUTH CLAIM, CHECKED AGAINST THE SERVER RATHER THAN AGAINST A TABLE.
+ *
+ * `GATES` is a hand-maintained prefix list, and nothing made adding a gated route add an entry to
+ * it. `/api/uploads` fails closed on the state token and shipped documented as *"Open: no credential
+ * is checked. See auth.ts and THREAT_MODEL.md EP6."* — the exact opposite of what it does, in a
+ * document whose whole job is to be believed, next to a pointer at the threat model.
+ *
+ * THE DIRECTION MATTERS. A route that is open and documented as gated is a reader who sends a
+ * credential they did not need. A route that is GATED and documented as OPEN is a reader who
+ * concludes the surface is unprotected — and a reviewer auditing this file who ticks it off. Only
+ * one of those is worth a test, and it is this one.
+ *
+ * IT DRIVES THE ROUTE. Every path the spec calls open gets a real request with no `authorization`
+ * header; a 401 or a 403 means the spec is lying. Injecting is what makes this a fact about the
+ * server rather than a second copy of the same table.
+ */
+describe('the spec tells the truth about auth', () => {
+  it('every path documented as OPEN actually answers without a credential', async () => {
+    const app = buildServer({});
+    const doc = buildOpenApi(app, '0.1.0');
+
+    const open: Array<{ method: string; path: string }> = [];
+    for (const [path, ops] of Object.entries(doc.paths)) {
+      for (const [method, op] of Object.entries(ops as Record<string, { security?: unknown[] }>)) {
+        if (Array.isArray(op.security) && op.security.length === 0) open.push({ method, path });
+      }
+    }
+    // The guard on the guard: a doc that produced no open paths would pass the loop below trivially.
+    expect(open.length, 'no open paths found — the spec or this reader is wrong').toBeGreaterThan(5);
+
+    const lying: string[] = [];
+    for (const { method, path } of open) {
+      // `{param}` back to something concrete. The value does not matter: a 404 for a missing id is
+      // still proof the request was not refused for want of a credential.
+      const url = path.replace(/\{[^}]+\}/g, 'x');
+      const res = await app.inject({ method: method.toUpperCase() as 'GET', url });
+      if (res.statusCode === 401 || res.statusCode === 403) {
+        lying.push(`${method.toUpperCase()} ${path} answered ${res.statusCode} but is documented open`);
+      }
+    }
+    await app.close();
+    expect(lying, lying.join('\n')).toEqual([]);
+  }, 30_000);
+
+  it('a gated path names the variable that gates it', async () => {
+    const app = buildServer({});
+    const doc = buildOpenApi(app, '0.1.0');
+    await app.close();
+    const gated = Object.entries(doc.paths).flatMap(([path, ops]) =>
+      Object.entries(ops as Record<string, { security?: unknown[]; description?: string }>)
+        .filter(([, op]) => Array.isArray(op.security) && op.security.length > 0)
+        .map(([method, op]) => ({ path, method, description: op.description ?? '' }))
+    );
+    expect(gated.length).toBeGreaterThan(5);
+    for (const g of gated) {
+      // "Gated" with no credential named is unactionable: the reader cannot tell WHICH one. Most
+      // name an environment variable; `/api/secrets/resolve` names an actor identity, which is a
+      // signed token and not a variable an operator sets — so the rule is that SOMETHING is named,
+      // not that a `KONTRA_` variable is.
+      expect(g.description, `${g.method} ${g.path}`).toMatch(/KONTRA_[A-Z_]+|ACTOR IDENTITY/);
+    }
   });
 });

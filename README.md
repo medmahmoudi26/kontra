@@ -39,10 +39,29 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/install.sh | sh
-kontra up
+kontra up                                  # blocks: this IS the control plane
 ```
 
-One command, one process: Temporal, the object store, the state store, the payload codec, an OCI registry and the orchestrator — with its own data directory and no containers. Four platforms are published (linux and macOS, amd64 and arm64); the installer picks yours, checks it against the release's `SHA256SUMS`, and refuses to unpack anything that does not match.
+One command, one process: Temporal, the object store, the state store, the payload codec, an OCI registry and the orchestrator — with its own data directory and **no containers**. Four platforms are published (linux and macOS, amd64 and arm64); the installer picks yours, checks it against the release's `SHA256SUMS`, and refuses to unpack anything that does not match.
+
+> [!NOTE]
+> **No release has been tagged yet**, so the URL above 404s today. Until one is, `install.sh` in a clone is the working path — it sets up a development checkout. See [Getting Started](../../wiki/Getting-Started).
+
+### `docker compose` is not the control plane
+
+This trips people, so it is worth stating before you go looking: **`kontra up` is the control plane.** `docker-compose.yml` is still here and still maintained, and it runs one thing —
+
+```bash
+kontra infra up                            # == docker compose up -d
+```
+
+— `orchestrator-infra`: the Pulumi engine, the fleet SSH key and the cloud credential. [ADR 0031 §4](docs/adr) and [ADR 0034 §1](docs/adr) keep all three **off** the appliance deliberately: no provider plugins and no cloud credential in an artifact whose premise is that a stranger curls it onto a laptop. It also has to stay its own process, because Pulumi's Node language host installs process-global rejection handlers for the length of every inline `up`, so an unrelated rejected promise elsewhere in the PID fails the in-flight converge ([ADR 0019](docs/adr), measured).
+
+So: **`kontra up` to run anything; `kontra infra up` as well, when a workflow provisions a Fleet.** Nine services left that compose file one slice at a time and each left a block behind saying where it went — those blocks are why `temporal:7233` no longer resolves.
+
+Configuration is `.env` (copy `.env.example` — it marks every blank as either **OPEN** or **DISABLED**, which are opposites) plus `~/.kontra/config.yaml`, which `kontra init` writes. `kontra infra up` loads the latter into its own environment before running compose, so the tokens reach the container without being copied by hand.
+
+**[First Run](../../wiki/First-Run)** walks the whole thing end to end: control plane → actor → Method call → workflow → run → secrets → Fleet, three or four lines a step.
 
 ## The shape of it
 
@@ -90,6 +109,7 @@ The **[wiki](../../wiki)** is the manual — start at [Getting Started](../../wi
 | [Fleet & the Warden](../../wiki/Fleet-and-the-Warden) | machines, Leases, and running code you did not write |
 | [Deployment](../../wiki/Deployment) · [Security Model](../../wiki/Security-Model) | operating it, and what it does and does not isolate |
 | [`docs/adr/`](docs/adr) | every architectural decision, with its trade-offs |
+| [`docs/event-log-audit.md`](docs/event-log-audit.md) | what a Method call costs in Temporal events, measured — and the two workflows on a clock |
 
 **The ADRs are worth reading before the code.** They are unusually candid — several record a decision *and* the measurement that later corrected it.
 

@@ -150,3 +150,55 @@ func TestDatasetIdentStillRejectsUnsafeNames(t *testing.T) {
 		}
 	}
 }
+
+// ── issue #3: a failure must not end with a box saying Success ─────────────────────────────────
+//
+// kontra sends several statements in one `-c`, so a failure on the third still carries the first
+// two's RESULTS — and duckdb renders a successful DDL as a box containing the word `Success`. The
+// reporter read `error: … / Success / true` as kontra contradicting itself, which is exactly what it
+// looks like. Nothing they asked for succeeded; a statement they never typed did.
+func TestDuckFailureDropsResultBoxesAndKeepsTheError(t *testing.T) {
+	out := "Could not set lock on file \"/x/datasets.ducklake\": Conflicting lock held in /x/node (PID 42)\n" +
+		"┌─────────┐\n│ Success │\n│  true   │\n└─────────┘\n"
+	got := duckFailure(out)
+	if !strings.Contains(got, "Conflicting lock") {
+		t.Errorf("the error itself was dropped: %q", got)
+	}
+	if strings.Contains(got, "Success") || strings.Contains(got, "┌") {
+		t.Errorf("a result box survived into a failure message: %q", got)
+	}
+}
+
+func TestDuckFailureDropsEveryResultTableNotJustTheSuccessOne(t *testing.T) {
+	// Matched on the box-drawing runes, not on the word: a `count(*)` from a statement that ran
+	// before the failure is just as misleading as `Success`.
+	out := "┌──────┐\n│ rows │\n│  912 │\n└──────┘\nIO Error: could not open file\n"
+	got := duckFailure(out)
+	if strings.Contains(got, "912") {
+		t.Errorf("a count from a statement that ran before the failure survived: %q", got)
+	}
+	if !strings.Contains(got, "IO Error") {
+		t.Errorf("the error itself was dropped: %q", got)
+	}
+}
+
+func TestDuckFailureNamesTheControlPlaneWhenTheCatalogIsLocked(t *testing.T) {
+	// duckdb names a PID and a path — true, and no help unless you already know the PID is your own
+	// control plane.
+	got := duckFailure("Could not set lock on file \"/x/datasets.ducklake\": Conflicting lock held in /x/node (PID 42)\n")
+	if !strings.Contains(got, "kontra up") {
+		t.Errorf("the lock message does not name what holds it: %q", got)
+	}
+}
+
+func TestDuckFailureLeavesAnUnrelatedErrorAlone(t *testing.T) {
+	// Non-vacuous partner: a helper that appended the lock advice to everything would pass the case
+	// above and be wrong about every other failure.
+	got := duckFailure("Parser Error: syntax error at or near \"SLECT\"\n")
+	if strings.Contains(got, "kontra up") {
+		t.Errorf("lock advice was added to an unrelated failure: %q", got)
+	}
+	if !strings.Contains(got, "Parser Error") {
+		t.Errorf("the error itself was dropped: %q", got)
+	}
+}

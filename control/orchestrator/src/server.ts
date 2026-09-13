@@ -71,7 +71,7 @@ import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
 import { slotStore, type SlotStore } from './secrets/slotStore';
 import { secretStore, type SecretStore } from './secrets/store';
-import { describeExposure } from './workflowControl';
+import { describeExposure, setRegisteredFolders } from './workflowControl';
 import { temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
 import { ObjectStore } from './codec/objectStore';
 import { DatasetRecordStore, datasetRecordStore } from './data/datasetRecords';
@@ -246,6 +246,24 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // survives a restart the way an actor's catalog entry does. SHARED by the sources and probe
   // surfaces: a probe runs the FOLDER's Actor and version, never a body's.
   const sources = new SourceStore(repo);
+  /* A REGISTERED WORKFLOW FOLDER IS OPENABLE WHEREVER IT LIVES (issue #4). Registration accepts any
+     absolute path and the Workflows list draws what it accepted, but `resolveWorkflowFile` was
+     confined to `~/.kontra/workflows` alone — so a folder registered from a checkout listed, and
+     then failed to open with "no such workflow in …". This is the wiring that closes it, and it is
+     a FUNCTION rather than a snapshot because a folder registered a second ago has to be openable a
+     second later.
+
+     THE RESOLVER IS STILL THE BOUNDARY. This hands it names and paths; it confines inside each one
+     and resolves symlinks exactly as before, and the default root still wins on a collision. */
+  setRegisteredFolders(
+    () =>
+      new Map(
+        sources
+          .list('workflow')
+          .filter((s) => s.absent !== true)
+          .map((s) => [s.name, s.path] as const)
+      )
+  );
   // The materialization ledger (ADR 0017): SHARED by the dataset listing, the retention preview and
   // `RunLifecycle`, which is the second of a Run's two status authorities.
   const materialization = opts.materialization ?? materializationStore();

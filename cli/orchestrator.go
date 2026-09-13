@@ -165,25 +165,47 @@ func resolveAuto(ctx context.Context, opts orchestratorOptions) (*orchestratorSo
 
 // resolveLocal points at a checkout's compiled output.
 //
-// IT DOES NOT COMPILE ANYTHING. `pnpm exec tsc` is the developer's verb and it belongs in their
+// IT DOES NOT COMPILE ANYTHING. `pnpm run build` is the developer's verb and it belongs in their
 // hands: a `kontra up` that silently rebuilt would be slow, would sometimes fail for reasons that
 // have nothing to do with starting a control plane, and would make "what is running" depend on
 // when you last started it rather than on what you last built.
+//
+// ── EVERY REFUSAL BELOW NAMES A COMMAND THAT WORKS, AND THEY ARE IN PREREQUISITE ORDER ──────────
+//
+// Both properties were broken, and together they cost a first-time user their evening (issue #2).
+//
+//	THE COMMAND WAS WRONG. This said `pnpm exec tsc`, which on a clean checkout fails with about a
+//	hundred errors — because `package.json`'s `build` is `pnpm --filter @kontra/core run build &&
+//	tsc`, and the orchestrator imports `@kontra/core`. Bare `tsc` is the second half of a two-step
+//	build run without the first. `run build` is the whole of it and is what this must say.
+//
+//	THE ORDER WAS BACKWARDS. A fresh clone has no `node_modules` AND no `dist`, and this checked
+//	`dist` first — so the first thing it asked for was a compile that could not possibly run. Each
+//	check is now a prerequisite of the one after it: an interpreter, then its dependencies, then
+//	the build that needs both. Whatever is missing EARLIEST is what gets named.
 func resolveLocal(opts orchestratorOptions, repo, chose string) (*orchestratorSource, error) {
 	if repo == "" {
 		return nil, errors.New("no checkout here")
 	}
 	dir := filepath.Join(repo, "control", "orchestrator")
 	entry := filepath.Join(dir, "dist", "src", "main.js")
-	if _, err := os.Stat(entry); err != nil {
-		return nil, fmt.Errorf("%s is not compiled (no dist/src/main.js; run `pnpm --dir %s exec tsc`)", dir, dir)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "node_modules")); err != nil {
-		return nil, fmt.Errorf("%s has no node_modules (run `pnpm --dir %s install`)", dir, dir)
-	}
 	node, err := exec.LookPath("node")
 	if err != nil {
-		return nil, fmt.Errorf("no `node` on PATH to run %s with", entry)
+		return nil, fmt.Errorf(
+			"no `node` on PATH — the orchestrator is a Node process. Install Node 22 and "+
+				"`corepack enable` for pnpm, then `pnpm --dir %s install && pnpm --dir %s run build`",
+			dir, dir)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "node_modules")); err != nil {
+		return nil, fmt.Errorf(
+			"%s has no node_modules (run `pnpm --dir %s install`, then `pnpm --dir %s run build`)",
+			dir, dir, dir)
+	}
+	if _, err := os.Stat(entry); err != nil {
+		// `run build`, NEVER `exec tsc`. See the header: `tsc` alone is half a two-step build and
+		// fails with about a hundred errors on a checkout where `@kontra/core` is not built.
+		return nil, fmt.Errorf(
+			"%s is not compiled (no dist/src/main.js; run `pnpm --dir %s run build`)", dir, dir)
 	}
 	src := &orchestratorSource{Kind: "local", Node: node, Entry: entry, Dir: dir, Chose: chose}
 	// The SPA a local build serves is a built console on disk — `server.ts:defaultWebRoot` looks in

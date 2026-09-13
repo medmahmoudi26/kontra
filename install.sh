@@ -87,9 +87,28 @@ install_go() {
 SUDO=""
 [ "$(id -u)" = 0 ] || SUDO="sudo"
 
+# NODE IS A PREREQUISITE OF THE CONTROL PLANE, and this script did not know it (issue #2).
+#
+# The orchestrator is a Node process. With no published release there is no bundle to fall back on,
+# so `kontra up` on a clone needs `control/orchestrator/dist` — which needs node and pnpm. Without
+# this check the script finished clean, printed "run kontra up, open :8088", and `kontra up` then
+# died naming a bundle that does not exist and a checkout that was never compiled. Preflight's whole
+# promise is that you learn the WHOLE bill now.
+#
+# `engines.node` is ">=22.13.0" and the appliance pins that exact version
+# (`cli/appliance/bundle/pins.go`), so 22 is the floor rather than a preference.
+NODE_MAJOR_MIN=22
+node_new_enough() {
+  need_cmd node || return 1
+  local major
+  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  [ "$major" -ge "$NODE_MAJOR_MIN" ] 2>/dev/null
+}
+
 missing=()
 venv_works    || missing+=(python3-venv)
 go_new_enough || missing+=(go)
+node_new_enough || missing+=(node)
 need_cmd docker || missing+=(docker)
 
 if [ ${#missing[@]} -gt 0 ]; then
@@ -102,6 +121,8 @@ if [ ${#missing[@]} -gt 0 ]; then
       case "$m" in
         python3-venv) echo "      python3-venv   apt install python3-venv   (Debian/Ubuntu)" ;;
         go)           echo "      go >= $GO_VERSION   https://go.dev/dl/  (the distro package is older)" ;;
+        node)         echo "      node >= $NODE_MAJOR_MIN    https://nodejs.org/  then: corepack enable"
+                      echo "                     (Ubuntu's nodejs is 18; the orchestrator needs 22)" ;;
         docker)       echo "      docker         https://docs.docker.com/engine/install/" ;;
       esac
     done
@@ -118,6 +139,14 @@ if [ ${#missing[@]} -gt 0 ]; then
       # call — does not exist without the plugin.
       docker)       apt_install docker.io docker-compose-v2 ;;
       go)           install_go ;;
+      # NOT APT-INSTALLED, deliberately. `apt install nodejs` on Ubuntu 24.04 gives Node 18, and
+      # the orchestrator's `engines.node` is ">=22.13.0" — so the package manager's answer here is
+      # a build that fails later for a reason that looks nothing like a stale Node. Named, not
+      # guessed at, which is what preflight already does for anything it cannot install.
+      node)         echo "    node >= $NODE_MAJOR_MIN is NOT installed from apt (the distro package is 18)."
+                    echo "      https://nodejs.org/ or nvm, then:  corepack enable"
+                    echo "    the CLI will still build; the CONTROL PLANE will not."
+                    ;;
     esac
   done
 fi
@@ -230,10 +259,59 @@ install -m 0755 cli/kontra "$CLI_DEST"
 echo "==> .kontra/ (config + your workflows and actors)"
 "$CLI_DEST" init
 
+# THE CONTROL PLANE, COMPILED — the step whose absence made this whole script a lie (issue #2).
+#
+# `kontra up` runs `control/orchestrator/dist/src/main.js`. With no published release there is no
+# bundle to hydrate instead, so on a clone that file is the control plane and nothing else built it.
+# The script finished clean, said "run kontra up, open :8088", and `kontra up` died.
+#
+# `run build`, NEVER `exec tsc`. `package.json`'s `build` is `pnpm --filter @kontra/core run build
+# && tsc`, and the orchestrator imports `@kontra/core` — so bare `tsc` is the second half of a
+# two-step build run without the first, and fails with about a hundred errors on a clean checkout.
+# `cli/orchestrator.go` names the same command in its refusal, for the same reason.
+ORCHESTRATOR_BUILT=no
+if node_new_enough; then
+  if ! need_cmd pnpm; then
+    # `corepack` ships WITH node and is the supported way to get pnpm; asking for a global npm
+    # install instead is how two pnpm versions end up on one machine.
+    echo "==> pnpm (via corepack)"
+    corepack enable >/dev/null 2>&1 || $SUDO corepack enable >/dev/null 2>&1 || true
+  fi
+  if need_cmd pnpm; then
+    echo "==> orchestrator (the control plane kontra up runs)"
+    ( cd control/orchestrator && pnpm install --frozen-lockfile >/dev/null && pnpm run build >/dev/null ) \
+      && ORCHESTRATOR_BUILT=yes \
+      || echo "    build FAILED — kontra up will refuse until \`pnpm --dir control/orchestrator run build\` succeeds"
+  else
+    echo "==> orchestrator: SKIPPED — no pnpm (run \`corepack enable\`, then re-run ./install.sh)"
+  fi
+else
+  echo "==> orchestrator: SKIPPED — node >= $NODE_MAJOR_MIN is not installed"
+fi
+
 echo
+# WHAT IT SAYS DEPENDS ON WHAT IT DID. The old text promised `kontra up` unconditionally, which is
+# the sentence that sent somebody to an error message instead of a console.
+if [ "$ORCHESTRATOR_BUILT" = no ]; then
+  echo "done — BUT THE CONTROL PLANE IS NOT BUILT, so \`kontra up\` will refuse."
+  echo "  install node >= $NODE_MAJOR_MIN, then:"
+  echo "    corepack enable && pnpm --dir control/orchestrator install && pnpm --dir control/orchestrator run build"
+  echo
+fi
+# EVERY PATH BELOW HAS TO EXIST. These said `examples/python/beacon` and
+# `examples/python/workflows/nscheck`, and there is no `examples/` directory in this repository —
+# ADR 0038 moved the actors and workflows to repositories of their own, and this text did not move
+# with them. Four commands that cannot run, printed as the last thing a first-time user reads.
 echo "done. an actor is TWO processes — itself (a Temporal activity worker) + the Go handler:"
-echo "  kontra up                                                          # the control plane"
-echo "  kontra serve --actor examples/python/beacon                        # the actor, both halves"
-echo "  kontra workflow serve examples/python/workflows/nscheck              # YOUR caller's loop"
-echo "  kontra workflow start examples/python/workflows/nscheck --wait       # dispatch, from it"
-echo "  open http://localhost:8088                                         # graphs + datasets"
+echo "  kontra up                                     # the control plane. Blocks; leave it running"
+echo "  open http://localhost:8088                    # the console (the login was printed above)"
+echo
+echo "this repository ships NO actors and NO workflows (ADR 0038). Clone one and copy a folder in:"
+echo "  git clone https://github.com/medmahmoudi26/kontra-actors    ~/kontra-actors"
+echo "  git clone https://github.com/medmahmoudi26/kontra-workflows ~/kontra-workflows"
+echo "  cp -r ~/kontra-actors/python/beacon        ~/.kontra/actors/"
+echo "  cp -r ~/kontra-workflows/python/nscheck    ~/.kontra/workflows/"
+echo
+echo "  kontra serve --actor ~/.kontra/actors/beacon  # the actor, both halves"
+echo "  kontra workflow serve nscheck                 # the caller loop, which is YOURS"
+echo "  kontra workflow start nscheck --wait          # dispatch, from it"

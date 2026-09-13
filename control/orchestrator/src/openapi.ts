@@ -39,7 +39,13 @@ export interface OpenApiDoc {
  * The default is `open`, which is the truth about most of this API and is recorded rather than
  * hidden — `auth.ts` says the same thing in prose.
  */
-const GATES: ReadonlyArray<{ prefix: string; scheme: string; vars: readonly string[] }> = [
+const GATES: ReadonlyArray<{
+  prefix: string;
+  scheme: string;
+  vars: readonly string[];
+  /** For a credential that is NOT an environment variable — see `/api/secrets/resolve`. */
+  describe?: string;
+}> = [
   { prefix: '/api/fleet', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
   { prefix: '/api/infra', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
   { prefix: '/api/datasets/query', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
@@ -51,15 +57,45 @@ const GATES: ReadonlyArray<{ prefix: string; scheme: string; vars: readonly stri
   { prefix: '/api/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/probe', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/sources', scheme: 'runToken', vars: RUN_TOKEN_VARS },
+  // WRITES BYTES TO THE OBJECT STORE, so it is fail-closed on the state token like `/api/fleet`
+  // and `/api/infra` — not the run surface's opt-in. It was missing here and the generated spec
+  // therefore published it as "Open: no credential is checked", which was the exact opposite of
+  // what the route does. `everyOpenPathIsActuallyOpen` in the suite is what catches the next one.
+  { prefix: '/api/uploads', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
+  // NOT A SERVICE TOKEN, and that is why it needs its own scheme. An actor resolves its OWN secret
+  // authenticated AS ITSELF: the bearer is a signed identity naming one actor, minted per serve, and
+  // there is no `KONTRA_*` variable behind it. This was documented as "Open: no credential is
+  // checked" over a route that 401s on a missing header — found by `everyOpenPathIsActuallyOpen`,
+  // which is the whole reason that test exists.
+  //
+  // BOTH RESOLVE ROUTES, and they are the pair the test found. An actor resolves its OWN secret and
+  // its OWN slot, authenticated AS ITSELF — a signed identity naming one actor, minted per serve,
+  // with no `KONTRA_*` variable behind it. Both were documented as "Open: no credential is checked"
+  // over routes that 401 on a missing header.
+  {
+    prefix: '/api/secrets/resolve',
+    scheme: 'actorIdentity',
+    vars: [],
+    describe: 'Gated by an ACTOR IDENTITY token (KONTRA_ACTOR_TOKEN on the worker) — not a service token, and not a console session.',
+  },
+  {
+    prefix: '/api/slots/resolve',
+    scheme: 'actorIdentity',
+    vars: [],
+    describe: 'Gated by an ACTOR IDENTITY token (KONTRA_ACTOR_TOKEN on the worker) — not a service token, and not a console session.',
+  },
 ];
 
-function gateFor(url: string): { scheme: string; vars: readonly string[] } | undefined {
-  // Longest prefix wins, so `/api/datasets/query` is not claimed by a shorter `/api/datasets`.
-  let best: { scheme: string; vars: readonly string[] } | undefined;
+function gateFor(
+  url: string
+): { scheme: string; vars: readonly string[]; describe?: string } | undefined {
+  // Longest prefix wins, so `/api/datasets/query` is not claimed by a shorter `/api/datasets` —
+  // and `/api/secrets/resolve` is not claimed by `/api/secrets`.
+  let best: { scheme: string; vars: readonly string[]; describe?: string } | undefined;
   let bestLen = -1;
   for (const g of GATES) {
     if (url.startsWith(g.prefix) && g.prefix.length > bestLen) {
-      best = { scheme: g.scheme, vars: g.vars };
+      best = { scheme: g.scheme, vars: g.vars, ...(g.describe ? { describe: g.describe } : {}) };
       bestLen = g.prefix.length;
     }
   }
@@ -84,8 +120,14 @@ export function buildOpenApi(app: FastifyInstance, version: string): OpenApiDoc 
       responses: { '200': { description: 'ok' } },
       ...(gate
         ? {
-            security: [{ [gate.scheme]: [] }, { consoleSession: [] }],
-            description: `Gated by ${gate.vars.join(' or ')}, or a console session (ADR 0045).`,
+            // A CONSOLE SESSION IS NOT AN ALTERNATIVE TO EVERY GATE. `/api/secrets/resolve` admits
+            // an actor identity and nothing else — offering `consoleSession` there would document
+            // a way in that does not exist.
+            security: gate.describe
+              ? [{ [gate.scheme]: [] }]
+              : [{ [gate.scheme]: [] }, { consoleSession: [] }],
+            description:
+              gate.describe ?? `Gated by ${gate.vars.join(' or ')}, or a console session (ADR 0045).`,
           }
         : {
             security: [],
@@ -109,6 +151,13 @@ export function buildOpenApi(app: FastifyInstance, version: string): OpenApiDoc 
         stateToken: { type: 'http', scheme: 'bearer', description: 'KONTRA_STATE_TOKEN. Can spend money.' },
         runToken: { type: 'http', scheme: 'bearer', description: 'KONTRA_RUN_TOKEN. Open when unset.' },
         exploreToken: { type: 'http', scheme: 'bearer', description: 'KONTRA_EXPLORE_TOKEN, falling back to state.' },
+        actorIdentity: {
+          type: 'http',
+          scheme: 'bearer',
+          description:
+            'A signed token naming ONE actor, minted when it is served (KONTRA_ACTOR_TOKEN). ' +
+            'It resolves what that actor owns and nothing more — it is not a service token.',
+        },
       },
     },
     paths: Object.fromEntries(Object.entries(paths).sort(([a], [b]) => a.localeCompare(b))),
