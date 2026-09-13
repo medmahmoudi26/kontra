@@ -43,10 +43,21 @@ and the field carries `{name, sha256, size}` — nothing large travels as a work
 
 ## Install
 
+It is not on the Marketplace yet, so it is built from the clone:
+
     npm install && npm run compile
+    npm run package                              # -> kontra-0.1.0.vsix
+    code --install-extension kontra-0.1.0.vsix
 
-then load the folder as an extension development host (F5), or package it with `vsce`.
+Or press <kbd>F5</kbd> in this folder to launch an Extension Development Host with it loaded, which
+is the faster loop while you are changing the extension itself.
 
-The orchestrator address is `kontra.orchestratorUrl` (default `http://127.0.0.1:8088`). The session
-token is kept in VS Code's secret storage — never in settings, which sync, and never in the
-workspace, which gets committed.
+Then **kontra: Connect to an orchestrator** and give it the address of the control plane — the same
+one the console is on, whether that came from `kontra up` or from `docker compose up -d`. The
+address is `kontra.orchestratorUrl` (default `http://127.0.0.1:8088`) if you would rather set it in
+settings. The session token is kept in VS Code's secret storage — never in settings, which sync,
+and never in the workspace, which gets committed.
+
+**There is nothing to configure about your code.** The orchestrator already reaches the checkout and
+the Worker is yours: `kontra serve --actor ./myactor --watch` in a terminal is the other half, and
+without it this pane is a viewer attached to whatever was served last.

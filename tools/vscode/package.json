@@ -5,6 +5,11 @@
   "version": "0.1.0",
   "publisher": "kontra",
   "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/medmahmoudi26/kontra.git",
+    "directory": "tools/vscode"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -50,7 +55,8 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -p . -w",
-    "test": "node --experimental-strip-types --test src/*.test.ts"
+    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
