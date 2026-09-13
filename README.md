@@ -37,42 +37,107 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ## Install
 
+### Docker — two files and `up`
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
+docker compose up -d
+docker compose logs kontra | grep -A4 'console login'   # the password, printed exactly once
+```
+
+Open <http://127.0.0.1:8088> and sign in as `admin` with that password. Nothing is cloned, nothing
+is built, and there is no host `kontra` to run first: the container initialises itself on first boot
+and prints the credential to the log, which is the one place a person is already looking after
+`up -d`. Lost it? `docker compose exec kontra kontra user add <name>`.
+
+> [!NOTE]
+> **No release has been tagged yet**, so `ghcr.io/medmahmoudi26/kontra:latest` does not resolve
+> today. Until one is cut, build the image from a clone — `make image` — and set
+> `KONTRA_IMAGE=kontra:latest` in `.env`. Everything else on this page is unchanged by that.
+
+`docker compose down` stops it and keeps every run; `docker compose down -v` throws the data away.
+`.env` has one line that matters for security and it is `KONTRA_BIND=127.0.0.1` — read the note in
+the file before you widen it.
+
+### Or the binary, with no Docker at all
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/install-appliance.sh | sh
+kontra init                                # the console login, printed once
 kontra up                                  # blocks: this IS the control plane
 ```
 
 One command, one process: Temporal, the object store, the state store, the payload codec, an OCI registry and the orchestrator — with its own data directory and **no containers**. Four platforms are published (linux and macOS, amd64 and arm64); the installer picks yours, checks it against the release's `SHA256SUMS`, and refuses to unpack anything that does not match.
 
-> [!NOTE]
-> **No release has been tagged yet**, so the URL above 404s today. Until one is, `install.sh` in a clone is the working path — it sets up a development checkout. See [Getting Started](../../wiki/Getting-Started).
+**The two paths are the same bytes.** The image is built FROM the release tarball rather than from
+source, so the container and the download are one artifact with two supervisors — which is what
+makes the Docker path *verify* a build rather than produce a second one.
 
-### Or `docker compose`, which runs the same appliance
+### Writing an actor needs a worker, and the worker is yours
+
+Neither path puts your code in the control plane. An Actor runs in **your** process, on your
+machine, dialling the Temporal port above — the same shape a Machine uses in production, which is
+why the container has no Python in it for you.
 
 ```bash
-make image                                 # cut a release, build the image FROM it
-docker compose up -d
-open http://127.0.0.1:8088
+pip install kontra-actorkit                      # or: uv pip install kontra-actorkit
+kontra serve --actor ./myactor --watch           # `--watch` re-execs the Worker on save
 ```
 
-**It is the same one process**, with Docker as the supervisor instead of your shell. The image is
-built from a release tarball, so the container and the download above are the same bytes — which is
-what makes this path *verify* a build rather than produce a second one.
+If you took the Docker path and want the `kontra` CLI on your host too, `install-appliance.sh`
+installs the same binary; or run it in place with `docker compose exec kontra kontra <command>`.
 
-It is **not** the old multi-service topology. Nine services left `docker-compose.yml` one slice at a
-time, and each departure fixed a bug recorded where the service used to be — a `chown` sidecar for a
-root-owned volume, a one-shot that created an S3 bucket because a missing one answers `403`, a
-dynamic-config key the server never registered. Re-splitting the appliance reintroduces all three;
-putting it in a container reintroduces none, because inside there it is still one process writing
-its own files in its own directory.
+### The editor extension
 
-The second service is `orchestrator-infra`: the Pulumi engine, the fleet SSH key and the cloud
+`tools/vscode` renders an Actor's Method as a form beside the file you are editing and calls it
+against the code on disk. It is not on the Marketplace yet, so it is built from the clone:
+
+```bash
+cd tools/vscode
+npm install && npm run compile
+npm run package                                   # -> kontra-0.1.0.vsix
+code --install-extension kontra-0.1.0.vsix
+```
+
+Or press <kbd>F5</kbd> in that folder to launch an Extension Development Host with it loaded, which
+is the faster loop while you are changing the extension itself.
+
+Then, in VS Code:
+
+1. **kontra: Connect to an orchestrator** — `http://127.0.0.1:8088`, the same login the log printed.
+   The session token goes to the OS keychain, never to settings (they sync) and never to the
+   workspace (it gets committed). The address is `kontra.orchestratorUrl` if you moved the port.
+2. Open your `actor.py` and run **kontra: Run this actor**. The pane is an `<iframe>` of the
+   console's own `MethodCall` — there is no second form implementation to drift.
+3. **kontra: Pin the runner to this file** holds the pane while you navigate away.
+
+The form derives its controls from your type hints: `Literal[...]` becomes a dropdown, `bool` a
+toggle with `not set` distinct from `false`, and `kontra.File` / `kontra.Folder` a drop zone that
+uploads to `/api/uploads` and passes a content-addressed `{name, sha256, size}` — so a 2 GB input
+never travels as a workflow argument. Use the pane's **choose** button rather than dragging into the
+editor; a webview's drag surface belongs to the editor, the picker always works.
+
+### The development stack
+
+`docker-compose.yml` at the root is a different file for a different reader: it builds its image
+from a release you cut locally, bind-mounts your checkout and your `~/.kontra`, and carries a second
+service. Use it when you are working *on* kontra.
+
+That second service is `orchestrator-infra`: the Pulumi engine, the fleet SSH key and the cloud
 credential. [ADR 0031 §4](docs/adr) and [ADR 0034 §1](docs/adr) keep all three **off** the appliance
 deliberately — no provider plugins and no cloud credential in an artifact whose premise is that a
 stranger curls it onto a laptop — and [ADR 0019](docs/adr) is why it cannot share a PID: Pulumi's
 Node language host installs process-global rejection handlers for the length of every inline `up`,
 so an unrelated rejected promise elsewhere fails the in-flight converge. You need it when a workflow
 provisions a **Fleet**, and not before.
+
+Neither compose file is the old multi-service topology. Nine services left the development one a
+slice at a time, and each departure fixed a bug recorded where the service used to be — a `chown`
+sidecar for a root-owned volume, a one-shot that created an S3 bucket because a missing one answers
+`403`, a dynamic-config key the server never registered. Re-splitting the appliance reintroduces all
+three; putting it in a container reintroduces none, because inside there it is still one process
+writing its own files in its own directory.
 
 Configuration is `.env` (copy `.env.example` — it marks every blank as either **OPEN** or
 **DISABLED**, which are opposites) plus `~/.kontra/config.yaml`, which `kontra init` writes. Every

@@ -1,0 +1,128 @@
+# kontra, in one command. Two files and `docker compose up -d`.
+#
+#   curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
+#   curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
+#   docker compose up -d
+#   docker compose logs kontra | grep -A4 'console login'
+#
+# ── WHY THIS FILE EXISTS BESIDE `docker-compose.yml` ────────────────────────────────────────────
+#
+# The one next door is this repo's DEVELOPMENT stack. It builds its image from a release you cut
+# locally (`make image`), bind-mounts your checkout and your `~/.kontra`, and carries a second
+# service for cloud fleets that is built from source. Every one of those is right for somebody with
+# the repo on disk and wrong for somebody who has never cloned it: a `curl | docker compose up`
+# cannot build an image, has no checkout to mount and has not run `kontra init` on the host.
+#
+# So this one PULLS A PUBLISHED IMAGE, mounts nothing from the host, and initialises itself on first
+# boot. Nothing here needs the repository to exist.
+#
+# ── IT IS STILL ONE PROCESS ─────────────────────────────────────────────────────────────────────
+#
+# One service, and inside it one process: Temporal, the object store, the state store, the payload
+# codec, the OCI registry and the orchestrator as its supervised child (ADR 0031). This is not a
+# stripped-down kontra — it is the whole appliance with Docker as its supervisor. Nine services left
+# the development compose file one at a time and none of them come back here.
+
+name: ${COMPOSE_PROJECT_NAME:-kontra}
+
+services:
+  kontra:
+    # THE PUBLISHED IMAGE, and `latest` is the default because a copy-paste install cannot know
+    # today's version number. Pin it in `.env` — `KONTRA_IMAGE=ghcr.io/medmahmoudi26/kontra:v0.2.0`
+    # — the moment this is anything you depend on, because `latest` moves under you on every pull
+    # and a control plane that changed version during a `restart` is the hardest kind of surprise.
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:latest}
+    restart: unless-stopped
+
+    # HOW LONG THE APPLIANCE GETS TO SHUT DOWN, and the default is not enough.
+    #
+    # Docker's default `stop_grace_period` is 10 SECONDS, and `kontra up`'s own child timeout is
+    # also 10 — so on a plain `docker compose stop` the two expire together and Docker SIGKILLs the
+    # container just as the orchestrator is being asked to exit. MEASURED here: a stop took 13s and
+    # the container's exit code was 137.
+    #
+    # WHAT A SIGKILL COSTS IS NOT ABSTRACT: the DuckLake catalog lock is released on the
+    # orchestrator's exit path, and a container killed before that runs leaves it behind. Since a
+    # container's hostname is its id, the next one is a different host holding the same volume —
+    # which is the state `catalogLock.ts` now reclaims by heartbeat — but only after 45 seconds of
+    # restart-looping that an orderly stop would have avoided entirely. Sixty seconds is room for
+    # that stop; an appliance that is genuinely wedged still gets killed.
+    stop_grace_period: 60s
+
+    # EVERY PORT PUBLISHED TO `${KONTRA_BIND}`, WHICH DEFAULTS TO LOOPBACK — and that default is the
+    # security control, not a convenience.
+    #
+    # A published port is DNATed in `PREROUTING` and accepted in `FORWARD`. It never traverses
+    # `ufw-user-input`, so **a host firewall does not protect it.** Measured on this project's own
+    # controller: `ufw` active and reporting a tight policy, ten ports open to the internet anyway.
+    # Widening this to `0.0.0.0` publishes an unauthenticated Temporal frontend, an object store and
+    # a Redis-protocol state store to whoever can route to you. If you need it reachable, put it
+    # behind a reverse proxy or a VPN and leave this alone.
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"       # the console and the API
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_TEMPORAL_PORT:-7233}:7233"  # Temporal gRPC — your workers dial this
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_S3_PORT:-8333}:8333"        # the object store
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_KV_PORT:-6379}:6379"        # the state store
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_CODEC_PORT:-18234}:18234"   # the payload codec
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"  # the OCI registry
+
+    environment:
+      # A Tenant IS a Temporal namespace. `default` exists already; a second one gives two customers
+      # separate history and separate retention, which is a real boundary rather than a label.
+      KONTRA_NAMESPACE: "${KONTRA_NAMESPACE:-default}"
+      # BLANK ON PURPOSE, AND THE BLANK IS NOT "OPEN". The entrypoint runs `kontra init` on first
+      # boot, which generates the console account and the four service tokens and writes them into
+      # `config.yaml` inside the volume below. `main()` loads that file into the environment before
+      # every command WITHOUT overriding anything already set — so an operator who fills these in
+      # wins, and one who leaves them alone gets generated values rather than no values.
+      KONTRA_CONSOLE_USERS: "${KONTRA_CONSOLE_USERS:-}"
+      KONTRA_STATE_TOKEN: "${KONTRA_STATE_TOKEN:-}"
+      KONTRA_RUN_TOKEN: "${KONTRA_RUN_TOKEN:-}"
+      KONTRA_PANEL_TOKEN: "${KONTRA_PANEL_TOKEN:-}"
+      KONTRA_EXPLORE_TOKEN: "${KONTRA_EXPLORE_TOKEN:-}"
+
+    volumes:
+      # THE WHOLE HOME, NOT JUST `data/`. Temporal's history, the objects, `global_state` and the
+      # lake's catalog live under `data/`; `config.yaml` — the console account and the tokens — is
+      # its SIBLING. A volume one level deeper would rotate the password on every `docker compose
+      # up --force-recreate`, which is to say on every upgrade.
+      #
+      # Docker seeds a fresh named volume from the image's contents, so the orchestrator bundle
+      # baked into the image is copied in on first use and hydrates exactly as it would without a
+      # volume here.
+      - kontra:/var/lib/kontra
+
+    healthcheck:
+      # THE API, NOT THE PROCESS. A container that is "up" with an orchestrator child that never
+      # bound is a control plane reporting healthy with no control surface.
+      #
+      # `kontra runs` AND NOT `kontra doctor`. Measured inside this image: `doctor --api
+      # http://127.0.0.1:9999` — nothing listening at all — prints a table and EXITS 0. It is a
+      # report, not an assertion, and a healthcheck built on it says `healthy` forever over a dead
+      # control plane. `runs` calls the API and exits non-zero when it cannot reach one.
+      test: ["CMD", "kontra", "runs", "--api", "http://127.0.0.1:8088"]
+      interval: 30s
+      timeout: 10s
+      # GENEROUS, because first boot unpacks the orchestrator bundle out of the CAS before it can
+      # serve anything. A short start period marks a healthy first run as failed and `restart:
+      # unless-stopped` then kills it halfway through.
+      start_period: 120s
+      retries: 5
+
+volumes:
+  # NAMED, so `docker compose down` keeps it and `docker compose down -v` is the explicit way to
+  # throw away every run this control plane has ever recorded.
+  kontra:
+
+# ── WHAT IS DELIBERATELY NOT HERE ───────────────────────────────────────────────────────────────
+#
+# **A cloud-fleet service.** Provisioning Machines needs the Pulumi engine, a fleet SSH key and a
+# cloud credential, and ADR 0031 §4 keeps all three OFF the appliance on purpose: no provider
+# plugins and no cloud credential inside an artifact whose premise is that a stranger curls it onto
+# a laptop. When you get to Fleets, clone the repo and use `docker-compose.yml`, which has the
+# `orchestrator-infra` service and the reasoning for why it cannot share a PID with anything else.
+#
+# **A bind mount of your code.** Your Actors run in YOUR worker process, on your machine, dialling
+# the Temporal port above — they are never executed by this container, which has no Python and no
+# Node for you. That is the same shape a Machine uses in production, and it is why nothing here
+# needs to see your checkout.

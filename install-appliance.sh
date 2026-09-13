@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Install the kontra appliance: one command, one file, no Docker (ADR 0031, issue 17).
 #
-#   curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra-local/main/install-appliance.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/install-appliance.sh | sh
 #
 # NOT install.sh. That one sets up a CHECKOUT for development — a venv, an editable SDK, the buf
 # toolchain, proto codegen — and it needs Go, Docker and a clone. This one installs a RELEASE: one
@@ -30,7 +30,11 @@
 # how it is tested, and the test is the reason the variable is here rather than a convenience.
 set -eu
 
-REPO="${KONTRA_REPO:-medmahmoudi26/kontra-local}"
+# THE PUBLIC REPOSITORY, WHICH IS WHERE THE RELEASES ARE. This said `kontra-local` — the private
+# development repository — which has no releases and never will: a stranger who ran the line above
+# got a 404 about a repository they could not have seen existed either way. `KONTRA_REPO` is still
+# here for a mirror or a fork.
+REPO="${KONTRA_REPO:-medmahmoudi26/kontra}"
 KONTRA_HOME="${KONTRA_HOME:-$HOME/.kontra}"
 KONTRA_BIN="${KONTRA_BIN:-/usr/local/bin}"
 
