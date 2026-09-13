@@ -68,11 +68,20 @@ RUN set -eux; \
     rm -rf /tmp/kontra.tar.gz /tmp/unpack; \
     kontra --version
 
-# WHERE STATE LIVES, and it is a VOLUME in compose rather than a layer. Temporal's history, the
-# objects, `global_state` and the lake's catalog are all under here; a container recreated without
-# it is a control plane that has forgotten every run.
+# WHERE STATE LIVES — and the volume is the WHOLE HOME, not just `data/`.
+#
+# Temporal's history, the objects, `global_state` and the lake's catalog are under `data/`; a
+# container recreated without them is a control plane that has forgotten every run. But `config.yaml`
+# is a sibling of `data/`, not a child — it holds the console account and the four service tokens
+# that `kontra init` generates on first boot — and a volume mounted one level deeper would lose it
+# on every recreate, rotating the password out from under whoever wrote it down.
+#
+# MOUNTING THE HOME KEEPS THE BUNDLES TOO. Docker seeds a FRESH named volume from the image's
+# contents, so `bundles/` — unpacked above — is copied in on first use and the orchestrator hydrates
+# from it exactly as it would without a volume. Mounting a sub-path would have been the smaller
+# change and the wrong one.
 ENV KONTRA_DATA_DIR=/var/lib/kontra/data
-VOLUME ["/var/lib/kontra/data"]
+VOLUME ["/var/lib/kontra"]
 
 # ── ROOT, DELIBERATELY, AND THE REASON IS THE SERVICE THAT USED TO DO THIS BY HAND ──────────────
 #
@@ -100,4 +109,10 @@ EXPOSE 8088 7233 8333 6379 18234 5000
 # THIS IS THE TRAP `docker-bypasses-ufw` NAMES: a published port is DNATed in PREROUTING and accepted
 # in FORWARD, so it never traverses `ufw-user-input` and a host firewall will not save you. The
 # publish address is the control. It is in `.env` and it is documented there.
-ENTRYPOINT ["kontra", "up", "--bind", "0.0.0.0"]
+# FIRST BOOT INITIALISES, EVERY BOOT AFTER IT STARTS. `kontra init` generates the console login and
+# prints it ONCE — to the container log, which is where `docker compose logs kontra` looks and the
+# only place it can go in an install nobody is attached to. See the script; it is twenty lines and
+# most of them are why.
+COPY control/images/entrypoint.sh /usr/local/bin/kontra-entrypoint
+RUN chmod +x /usr/local/bin/kontra-entrypoint
+ENTRYPOINT ["/usr/local/bin/kontra-entrypoint"]

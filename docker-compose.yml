@@ -195,6 +195,21 @@ services:
   kontra:
     image: ${KONTRA_IMAGE:-kontra:latest}
     restart: unless-stopped
+
+    # HOW LONG THE APPLIANCE GETS TO SHUT DOWN, and the default is not enough.
+    #
+    # Docker's default `stop_grace_period` is 10 SECONDS, and `kontra up`'s own child timeout is
+    # also 10 — so on a plain `docker compose stop` the two expire together and Docker SIGKILLs the
+    # container just as the orchestrator is being asked to exit. MEASURED here: a stop took 13s and
+    # the container's exit code was 137.
+    #
+    # WHAT A SIGKILL COSTS IS NOT ABSTRACT: the DuckLake catalog lock is released on the
+    # orchestrator's exit path, and a container killed before that runs leaves it behind. Since a
+    # container's hostname is its id, the next one is a different host holding the same volume —
+    # which is the state `catalogLock.ts` now reclaims by heartbeat — but only after 45 seconds of
+    # restart-looping that an orderly stop would have avoided entirely. Sixty seconds is room for
+    # that stop; an appliance that is genuinely wedged still gets killed.
+    stop_grace_period: 60s
     # EVERY PORT PUBLISHED TO `${KONTRA_BIND}`, WHICH DEFAULTS TO LOOPBACK.
     #
     # A published port is DNATed in PREROUTING and accepted in FORWARD — it never traverses

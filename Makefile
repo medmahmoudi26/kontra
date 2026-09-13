@@ -82,7 +82,14 @@ up-d: tmux-dir
 # `@kontra/core` IS BUILT FIRST, and that is not belt-and-braces: the console links it from this
 # checkout, so a console built against a stale `core/dist` is a console that disagrees with the
 # orchestrator it is about to be deployed next to.
-CONSOLE ?= ../kontra-console
+#
+# ABSOLUTE, AND THAT IS A FIX RATHER THAN A STYLE. `release` below runs its compiler from `cli/`,
+# so a relative `../kontra-console` meant two different directories in the same target: the guard
+# checked `<repo>/../kontra-console/dist` and PASSED, and the command that followed looked in
+# `<repo>/cli/../kontra-console/dist` and failed with an unrelated message about a missing SPA. A
+# guard that tests a path its command does not use is worse than no guard — it reports the healthy
+# case and then fails somewhere the operator has no reason to connect to it.
+CONSOLE ?= $(abspath $(CURDIR)/../kontra-console)
 
 # ── THE CONTAINER IMAGE, FROM A RELEASE — the compose install path ─────────────────────────────
 #
@@ -92,7 +99,7 @@ CONSOLE ?= ../kontra-console
 #
 # THE SPA IS THE ONE THING THE RELEASE DOES NOT BUILD ITSELF (its toolchain lives in another
 # repository — ADR 0038), so `KONTRA_CONSOLE_DIST` points at a build you have. `make ui` makes one.
-CONSOLE ?= $(abspath $(CURDIR)/../kontra-console)
+# `CONSOLE` is defined once, above — a second `?=` here was a no-op that read like the definition.
 PLATFORM ?= linux/amd64
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 
