@@ -151,3 +151,32 @@ describe('the stream and the poll agree', () => {
     expect(JSON.stringify(state?.data)).toBe(JSON.stringify(body));
   });
 });
+
+/**
+ * THE ROUTE IS REGISTERED — the half eleven passing tests did not cover.
+ *
+ * `runStream.ts` and the suite above have been in the tree since the slice that added them, and
+ * nothing ever called `registerRunStream`. `/api/runs/:id/stream` answered 404 while every test here
+ * passed over the loop behind it: a finished, tested thing with no way in.
+ *
+ * It is the same shape as a console surface added to a `View` union and left out of the array that
+ * orders it, and the same shape as a workflow resolver taught about registered folders by a setter
+ * nobody called. Three times is a pattern, and the answer each time is a test that drives the
+ * SERVER rather than the piece.
+ */
+describe('the stream is reachable through the server', () => {
+  it('answers an event-stream, not a 404', async () => {
+    const { buildServer } = await import('../server');
+    const { Repo } = await import('../db/repo');
+    const app = buildServer({ repo: new Repo(':memory:') });
+    try {
+      // `inject` waits for a response to END, and an event stream never does — so this asks the
+      // router whether the route EXISTS rather than reading frames from it. A 404 here is the bug;
+      // anything else means `registerRunStream` ran.
+      const found = app.hasRoute({ method: 'GET', url: '/api/runs/:runId/stream' });
+      expect(found, '/api/runs/:runId/stream is not registered').toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+});

@@ -796,6 +796,25 @@
         "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
       }
     },
+    "/api/runs/{runId}/stream": {
+      "get": {
+        "operationId": "getRunsByRunIdStream",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
     "/api/runs/{runId}/workflow": {
       "put": {
         "operationId": "putRunsByRunIdWorkflow",
