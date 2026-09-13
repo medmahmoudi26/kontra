@@ -27,11 +27,18 @@ name: ${COMPOSE_PROJECT_NAME:-kontra}
 
 services:
   kontra:
-    # THE PUBLISHED IMAGE, and `latest` is the default because a copy-paste install cannot know
-    # today's version number. Pin it in `.env` — `KONTRA_IMAGE=ghcr.io/medmahmoudi26/kontra:v0.2.0`
-    # — the moment this is anything you depend on, because `latest` moves under you on every pull
-    # and a control plane that changed version during a `restart` is the hardest kind of surprise.
-    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:latest}
+    # THE IMAGE YOU BUILT, because nothing is published yet and a default that does not resolve is
+    # a blocker dressed up as a convenience. `make image` from a clone cuts a release for this
+    # platform and builds the image FROM that tarball, tagged `kontra:latest` — so the container is
+    # the same bytes as the artifact, which is the whole point of building it that way.
+    #
+    # POINT IT AT A REGISTRY when there is one, and PIN IT when you do:
+    #
+    #   KONTRA_IMAGE=ghcr.io/medmahmoudi26/kontra:v0.2.0
+    #
+    # A moving `latest` from a registry changes your control plane's version during an unrelated
+    # `restart`, which is the hardest kind of surprise to debug.
+    image: ${KONTRA_IMAGE:-kontra:latest}
     restart: unless-stopped
 
     # HOW LONG THE APPLIANCE GETS TO SHUT DOWN, and the default is not enough.
@@ -92,6 +99,23 @@ services:
       # volume here.
       - kontra:/var/lib/kontra
 
+      # YOUR CODE, AT THE SAME PATH ON BOTH SIDES — and the sameness is the whole trick.
+      #
+      # An Actor or a workflow is a FOLDER on a disk. `kontra actor register ./firstactor` sends
+      # the RESOLVED path, and the orchestrator opens it to read the manifest and derive the form
+      # the console draws. Mount it anywhere else and that path means two different things: the
+      # host CLI resolves `/home/you/work/firstactor` and the container answers
+      # `no such directory` — which is what this install did before this line existed.
+      #
+      # `${PWD}` is the directory you ran `docker compose up` in, so the default needs no editing:
+      # put your actors beside these two files. Set `KONTRA_WORKSPACE` to an absolute path to keep
+      # them somewhere else (and on a shell that does not export PWD, such as PowerShell, you must).
+      #
+      # READ-ONLY, BECAUSE THE CONTROL PLANE NEVER WRITES YOUR CODE (ADR 0030). The console is a
+      # viewer; editing a workflow is your editor plus a re-serve. Nothing in here needs to write
+      # to your checkout, and a control plane that could would be one that can change what runs.
+      - ${KONTRA_WORKSPACE:-${PWD}}:${KONTRA_WORKSPACE:-${PWD}}:ro
+
     healthcheck:
       # THE API, NOT THE PROCESS. A container that is "up" with an orchestrator child that never
       # bound is a control plane reporting healthy with no control surface.
@@ -122,7 +146,8 @@ volumes:
 # a laptop. When you get to Fleets, clone the repo and use `docker-compose.yml`, which has the
 # `orchestrator-infra` service and the reasoning for why it cannot share a PID with anything else.
 #
-# **A bind mount of your code.** Your Actors run in YOUR worker process, on your machine, dialling
-# the Temporal port above — they are never executed by this container, which has no Python and no
-# Node for you. That is the same shape a Machine uses in production, and it is why nothing here
-# needs to see your checkout.
+# **A Python or Node runtime for your Actors.** They run in YOUR worker process, on your machine,
+# dialling the Temporal port above — this container never executes one, and has no interpreter for
+# it. That is the same shape a Machine uses in production. The read-only mount above is not an
+# exception to that: the orchestrator READS your folder to derive the form the console draws, and
+# runs nothing out of it.

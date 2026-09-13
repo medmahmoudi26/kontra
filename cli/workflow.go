@@ -377,10 +377,31 @@ func workflowServe(args []string) error {
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	started := time.Now()
 	select {
 	case err := <-done:
 		if err != nil {
 			return fmt.Errorf("worker exited: %w", err)
+		}
+		// A WORKER THAT EXITS 0 IMMEDIATELY DID NOT SERVE, AND SAYING NOTHING IS THE WORST ANSWER.
+		//
+		// `serve` runs the file and blocks on it, so a clean return means the process reached the
+		// end of the module and stopped. The usual cause is the one thing a workflow file cannot
+		// be written without and that nothing checks for: no `if __name__ == "__main__":
+		// catalog.serve([...])`. A file that only DEFINES a workflow defines it and exits.
+		//
+		// MEASURED: `kontra workflow serve <folder>` on such a file printed NOTHING, exited 0, and
+		// left `workflow start` to fail later against a queue nobody polls — which reads as a
+		// broken control plane rather than as four missing lines. The same shape as a healthcheck
+		// that passes over a dead process.
+		if time.Since(started) < 10*time.Second {
+			return fmt.Errorf(
+				"%s exited cleanly after %s without serving — a worker is supposed to block.\n"+
+					"  The usual cause is a missing entry point. A workflow file needs:\n"+
+					"      if __name__ == \"__main__\":\n"+
+					"          catalog.serve([YourWorkflow])\n"+
+					"  without it the module defines its workflow and stops, and nothing ever polls %s",
+				file, time.Since(started).Round(time.Millisecond), serveQueue)
 		}
 		return nil
 	case <-ctx.Done():

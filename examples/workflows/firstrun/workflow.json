@@ -1,0 +1,6 @@
+{
+  "entry": "workflow.py",
+  "name": "firstrun",
+  "version": "0.1.0",
+  "workflow": "FirstRun"
+}

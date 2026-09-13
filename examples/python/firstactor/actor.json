@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "kontra.actor.v1",
+  "name": "firstactor",
+  "version": "0.1.0",
+  "needs": { "memory": "256m", "cpus": 1 }
+}
