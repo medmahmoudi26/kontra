@@ -155,7 +155,7 @@ release: console
 # THE CONTEXT IS THE PARENT DIRECTORY because the console is a separate repository and `link:` is a
 # filesystem path — both checkouts have to be visible to one build.
 image: $(CONSOLE)
-	docker build -f control/images/Dockerfile.selfcontained \
+	DOCKER_BUILDKIT=1 docker build -f control/images/Dockerfile.selfcontained \
 	  --build-arg VERSION=$(VERSION) \
 	  -t "$${KONTRA_IMAGE:-kontra:latest}" "$(dir $(CURDIR))"
 	@echo

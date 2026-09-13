@@ -82,6 +82,13 @@ RUN cd kontra-console && pnpm run build && test -f dist/index.html
 # artifact, so the image and a published tarball remain the same thing.
 FROM golang:1.25-bookworm AS release
 
+# THE ARCHITECTURE IS THE BUILD'S, NOT A LITERAL. `TARGETARCH` is set by the builder — `arm64` on an
+# Apple Silicon Mac, `amd64` on an Intel one or a Linux box — and everything below has to agree with
+# it. This said `linux/amd64` in three places, which on an M-series Mac cross-built an amd64 release
+# and then unpacked it into an arm64 runtime image: a container that pulls fine and answers
+# `exec format error` on first run, if the release check does not refuse it first.
+ARG TARGETARCH
+
 # The repo pins Go 1.26.4 in `go.work`, which no `golang:` tag ships yet. GOTOOLCHAIN makes the
 # toolchain in this image fetch and verify the pinned one — the mechanism Go added for exactly this,
 # and the same version `install.sh` fetches on a bare machine.
@@ -109,8 +116,15 @@ COPY --from=spa /src/kontra-console/dist /src/console-dist
 # `0.0.0-docker` says "built from a working tree", which is what an untagged `latest` actually is.
 # `make image` passes the git describe.
 ARG VERSION=0.0.0-docker
+# TARGETARCH IS A BUILDKIT VARIABLE, so it is empty under the legacy builder — and an empty one
+# would make the tar glob below `kontra_*_linux_.tar.gz` and match nothing, three steps later, with
+# nothing to say why. Refuse here instead, naming the fix.
+RUN test -n "${TARGETARCH}" || { \
+      echo "TARGETARCH is empty — this build needs BuildKit. Run it with DOCKER_BUILDKIT=1, or update Docker."; \
+      exit 1; }
+
 RUN cd cli && KONTRA_CONSOLE_DIST=/src/console-dist \
-      go run . release --repo .. --platform linux/amd64 --version "${VERSION}" --out /out \
+      go run . release --repo .. --platform "linux/${TARGETARCH}" --version "${VERSION}" --out /out \
  && ls -la /out
 
 # ── 3 · WHAT ACTUALLY RUNS ──────────────────────────────────────────────────────────────────────
@@ -120,6 +134,7 @@ RUN cd cli && KONTRA_CONSOLE_DIST=/src/console-dist \
 # bundle carries a glibc Node from nodejs.org — on musl it does not start, and the failure is
 # `no such file or directory` about a file that is plainly there.
 FROM debian:bookworm-slim
+ARG TARGETARCH
 
 # ca-certificates is load-bearing rather than habit: the appliance reaches a registry, an object
 # store and (for a Fleet) a cloud API over TLS, and a container with no root store fails every one
@@ -137,12 +152,12 @@ ENV KONTRA_HOME=/var/lib/kontra
 COPY --from=release /out /rel
 RUN set -eux; \
     mkdir -p /tmp/unpack "${KONTRA_HOME}"; \
-    tar -xzf /rel/kontra_*_linux_amd64.tar.gz -C /tmp/unpack; \
+    tar -xzf /rel/kontra_*_linux_"${TARGETARCH}".tar.gz -C /tmp/unpack; \
     install -m 0755 /tmp/unpack/kontra /usr/local/bin/kontra; \
     cp -r /tmp/unpack/bundles "${KONTRA_HOME}/bundles"; \
     if [ -d /tmp/unpack/manifests ]; then cp -r /tmp/unpack/manifests "${KONTRA_HOME}/manifests"; fi; \
     rm -rf /tmp/unpack /rel; \
-    kontra --version || true
+    kontra --version
 
 # THE WHOLE HOME IS THE VOLUME, not `data/`. `config.yaml` — the console account and the four
 # service tokens `kontra init` generates — is a SIBLING of `data/`, and a volume one level deeper
