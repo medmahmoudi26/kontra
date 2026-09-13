@@ -118,3 +118,17 @@ frontend/.ds-styles.css
 # checkout (the actor sets user_data_dir="./camoufox_profile", so it lands in the CWD).
 # 37 MB of browser profile, regenerated on every serve.
 camoufox_profile/
+
+# THE ORCHESTRATOR'S SQLITE FILE, wherever it lands.
+#
+# `KONTRA_ORCHESTRATOR_DB` defaults to `./backend.db` relative to the WORKING DIRECTORY, so anything
+# that builds a server from the repo root — `scripts/generate-openapi.ts`, a test run from the wrong
+# place — drops one here. Three files, because SQLite's WAL mode writes `-shm` and `-wal` beside it.
+# One was committed once; it is a local database with somebody's runs in it and it belongs to
+# nobody's history.
+orchestrator.db
+orchestrator.db-shm
+orchestrator.db-wal
+backend.db
+backend.db-shm
+backend.db-wal
