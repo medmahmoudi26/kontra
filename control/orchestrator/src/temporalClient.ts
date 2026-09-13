@@ -469,7 +469,74 @@ export async function fetchRunHistory(
     throw err;
   }
   // The namespace goes in so the reducer can refuse a link that points OUT of it — see mapHistory.
-  return mapHistory(events, truncated, NAMESPACE);
+  // The LENGTH goes in because `scanned` is what this reader fetched, and past the cap above that
+  // is not the same number — see `describeLength`.
+  return mapHistory(events, truncated, NAMESPACE, await describeLength(client, runId, execId));
+}
+
+/**
+ * How long the history ACTUALLY is, from the server — one RPC, no pages, no payloads.
+ *
+ * THIS IS THE WHOLE OF THE FIX FOR A NUMBER THAT WAS WRONG BY UP TO 61%. The pager above stops at
+ * `HISTORY_MAX_PAGES × HISTORY_PAGE` = 20,000 events and sets `truncated`, and `scanned` then
+ * reports what it fetched — which past that point is THE CAP AND NOT THE COUNT. A run between
+ * 20,001 and Temporal's 51,200 ceiling is legal, completes normally, and was recorded as exactly
+ * 20,000. Nothing about that looks wrong on screen; it is only wrong for the largest runs, which
+ * are the ones a meter would charge the most for.
+ *
+ * `DescribeWorkflowExecution` RETURNS IT WITHOUT READING AN EVENT, so this costs one round trip and
+ * no blob GETs — the property that let it be added to a path every browser poll takes.
+ * `historySizeBytes` comes back in the same response and rides along, because a byte-based meter
+ * would otherwise need a second call to ask for it.
+ *
+ * IT NEVER THROWS. The events are already in hand; a describe that fails must cost the caller the
+ * exact count and not the log. Absent then means NOT ESTABLISHED — `scanned` is still there as the
+ * honest floor, and `RunHistory.historyLength` documents that absent is not zero.
+ *
+ * `execId` IS PASSED FOR THE REASON `fetchRunHistory` STATES: a workflow id can be reused, and
+ * asking by id alone answers with whichever execution ran last. A length taken from a different
+ * execution than the events would be worse than no length at all.
+ */
+/**
+ * A count off the raw gRPC decode, as a number — `undefined` when the server did not send one.
+ *
+ * `Number(long)` IS `NaN`, AND A TEST CAUGHT THAT. The raw service returns 64-bit fields as
+ * protobufjs Longs — an object carrying `low`/`high` — and `Number()` on one is not a number at all.
+ * `shared/core/src/history.ts:num` already goes through `toString()` for exactly this reason, on
+ * exactly this wire; this is the same rule, kept local because it answers `undefined` where that one
+ * answers `0`, and here those must not be the same thing.
+ *
+ * ZERO IS A LEGAL COUNT AND `undefined` IS NOT A COUNT. A history really can have zero events —
+ * `kontra-dataset-retention-workflow-…` sat for 18 days without running a task — so collapsing the
+ * two would turn "the server did not say" into "the run did nothing".
+ */
+function longToNumber(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+  const n = Number((raw as { toString(): string }).toString());
+  return Number.isFinite(n) ? n : undefined;
+}
+
+async function describeLength(
+  client: Awaited<ReturnType<typeof getClient>>,
+  runId: string,
+  execId?: string
+): Promise<{ historyLength?: number; historySizeBytes?: number }> {
+  try {
+    const desc = await client.workflowService.describeWorkflowExecution({
+      namespace: NAMESPACE,
+      execution: { workflowId: runId, ...(execId ? { runId: execId } : {}) },
+    });
+    const info = desc.workflowExecutionInfo;
+    const len = longToNumber(info?.historyLength);
+    const bytes = longToNumber(info?.historySizeBytes);
+    return {
+      ...(len === undefined ? {} : { historyLength: len }),
+      ...(bytes === undefined ? {} : { historySizeBytes: bytes }),
+    };
+  } catch {
+    return {};
+  }
 }
 
 /** The raw service answers a missing workflow with a gRPC NOT_FOUND (code 5) rather than with the
