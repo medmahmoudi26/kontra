@@ -108,7 +108,17 @@ func cmdRegister(kind string, args []string) error {
 		}
 	}
 
-	api := newAPI(*apiURL)
+	// THE RUN TOKEN, BECAUSE `/api/sources/:kind` IS GATED BY IT.
+	//
+	// This was `newAPI` — no credential at all — and it worked for as long as every installation
+	// had a BLANK run token, which is to say for as long as that surface was open to anyone who
+	// could reach the API. `kontra init` generates one now, so on a fresh install the FIRST
+	// command in the getting-started path answered `401 unauthorized` with nothing to say about
+	// which token was missing. Measured on the docker install.
+	//
+	// `runToken()` reads `KONTRA_RUN_TOKEN`, which `LoadAndApplyConfig` has already filled from
+	// config.yaml — so a local operator needs nothing and a remote one exports one variable.
+	api := newAuthAPI(*apiURL, runToken())
 	var got registerResult
 	if err := api.postJSON("/api/sources/"+kind, map[string]any{"path": abs}, &got); err != nil {
 		return err

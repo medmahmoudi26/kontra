@@ -37,28 +37,33 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ## Install
 
-### Docker — two files and `up`
+### Docker — four lines
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
-docker compose up -d
-docker compose logs kontra | grep -A4 'console login'   # the password, printed exactly once
+git clone https://github.com/medmahmoudi26/kontra && cd kontra
+make image                                              # cut a release, build the image FROM it
+docker compose -f docker-compose.quickstart.yml up -d
+docker compose -f docker-compose.quickstart.yml logs kontra | grep -A4 'console login'
 ```
 
-Open <http://127.0.0.1:8088> and sign in as `admin` with that password. Nothing is cloned, nothing
-is built, and there is no host `kontra` to run first: the container initialises itself on first boot
-and prints the credential to the log, which is the one place a person is already looking after
-`up -d`. Lost it? `docker compose exec kontra kontra user add <name>`.
+Open <http://127.0.0.1:8088> and sign in as `admin` with the password that last line printed. There
+is no host `kontra` to run first and no config to write: the container initialises itself on first
+boot and prints the credential to the log, which is the one place a person is already looking after
+`up -d`. It is shown **once** — only a scrypt hash is kept. Lost it?
+`docker compose exec kontra kontra user add <name>`.
 
-> [!NOTE]
-> **No release has been tagged yet**, so `ghcr.io/medmahmoudi26/kontra:latest` does not resolve
-> today. Until one is cut, build the image from a clone — `make image` — and set
-> `KONTRA_IMAGE=kontra:latest` in `.env`. Everything else on this page is unchanged by that.
+`make image` is there because **nothing is published yet**. It cuts a release for this platform and
+builds the image from that tarball, so the container is the same bytes as the artifact. Once a tag
+exists and pushes an image, the first two lines collapse into two `curl`s of
+`docker-compose.quickstart.yml` and `.env.quickstart` and a `KONTRA_IMAGE` pointing at the registry
+— the compose file is written for both and needs no other change.
 
 `docker compose down` stops it and keeps every run; `docker compose down -v` throws the data away.
 `.env` has one line that matters for security and it is `KONTRA_BIND=127.0.0.1` — read the note in
 the file before you widen it.
+
+**[First run](docs/first-run.md)** takes it from here: actor → Method call → workflow → run →
+secrets → fleet, three or four lines a step, every command run against a fresh install.
 
 ### Or the binary, with no Docker at all
 
@@ -145,7 +150,7 @@ port publishes to `${KONTRA_BIND}`, defaulting to loopback: a published port is 
 `PREROUTING` and never traverses `ufw-user-input`, so **the publish address is the control and a host
 firewall is not**.
 
-**[First Run](../../wiki/First-Run)** walks the whole thing end to end: control plane → actor → Method call → workflow → run → secrets → Fleet, three or four lines a step.
+**[First run](docs/first-run.md)** walks the whole thing end to end: control plane → actor → Method call → workflow → run → secrets → Fleet, three or four lines a step — and ends with the six things that broke while it was written, every one of which passed CI.
 
 ## The shape of it
 
