@@ -2,7 +2,7 @@
 #
 #   (from the parent of this checkout) mkdir -p workspaces.kontra
 #   docker compose --env-file .env.quickstart up -d --wait
-#   docker compose logs cluster-init | grep -A4 'console login'
+#   docker compose logs cli | grep -A4 'console login'
 #
 # Named workspaces live beside kontra/ and kontra-console/ as workspaces.kontra/
 # (default ${PWD}/../workspaces.kontra). Each child is a workspace; .current picks one.
@@ -57,6 +57,7 @@ x-kontra-home: &kontra-home
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: kontra-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: kontra
@@ -64,6 +65,7 @@ services:
       POSTGRES_DB: postgres
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./control/images/postgres-init.sh:/docker-entrypoint-initdb.d/01-ducklake.sh:ro
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_POSTGRES_PORT:-5432}:5432"
     healthcheck:
@@ -77,6 +79,7 @@ services:
   # Written by a one-shot so the install does not need a host-side config file.
   temporal-dynamicconfig:
     image: busybox:1.36
+    container_name: kontra-temporal-config
     volumes:
       - temporal-dynamicconfig:/config
     command:
@@ -97,6 +100,7 @@ services:
 
   temporal:
     image: temporalio/auto-setup:1.27.2
+    container_name: kontra-temporal
     restart: unless-stopped
     depends_on:
       postgres:
@@ -124,6 +128,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    container_name: kontra-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
     volumes:
@@ -138,6 +143,7 @@ services:
 
   registry:
     image: registry:2
+    container_name: kontra-registry
     restart: unless-stopped
     volumes:
       - registry-data:/var/lib/registry
@@ -152,6 +158,7 @@ services:
   # One process: master + volume + filer + S3 (replaces four Seaweed services).
   seaweed:
     image: chrislusf/seaweedfs:3.80
+    container_name: kontra-seaweed
     restart: unless-stopped
     command: "server -dir=/data -ip=seaweed -ip.bind=0.0.0.0 -master.port=9333 -volume.port=8080 -filer -s3 -s3.port=8333"
     volumes:
@@ -165,62 +172,15 @@ services:
       retries: 30
       start_period: 20s
 
-  # One-shot: ducklake DB, S3 bucket, console login (entrypoint), hello workspace seed.
-  cluster-init:
-    image: ${KONTRA_IMAGE:-kontra:latest}
-    pull_policy: ${KONTRA_PULL_POLICY:-never}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      seaweed:
-        condition: service_healthy
-    environment:
-      KONTRA_HOME: /var/lib/kontra
-      KONTRA_WORKSPACES: *workspaces
-      KONTRA_NAMESPACE: ${KONTRA_NAMESPACE:-default}
-      PGPASSWORD: kontra
-    volumes: *kontra-home
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -e
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y -qq postgresql-client >/dev/null
-        psql -h postgres -U kontra -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='kontra_ducklake'" | grep -q 1 \
-          || psql -h postgres -U kontra -d postgres -c "CREATE DATABASE kontra_ducklake"
-        python3 - <<'PY'
-        import time, urllib.error, urllib.request
-        req = urllib.request.Request("http://seaweed:8333/kontra", method="PUT")
-        for attempt in range(30):
-            try:
-                urllib.request.urlopen(req, timeout=10)
-                print("seaweed: created bucket kontra")
-                break
-            except urllib.error.HTTPError as e:
-                if e.code in (409, 500):
-                    print("seaweed: bucket kontra already present")
-                    break
-                if attempt == 29:
-                    raise
-                time.sleep(1)
-            except Exception:
-                if attempt == 29:
-                    raise
-                time.sleep(1)
-        PY
-        kontra init
-        kontra workspace seed
-    restart: "no"
-
   # API + materializer in one process (queues stay distinct). Infra stays separate (Pulumi).
   orchestrator-api:
     image: ${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:latest}
+    container_name: kontra-api
     pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
     depends_on:
-      cluster-init:
-        condition: service_completed_successfully
+      cli:
+        condition: service_started
       temporal:
         condition: service_healthy
       redis:
@@ -252,13 +212,14 @@ services:
 
   orchestrator-infra:
     image: ${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:latest}
+    container_name: kontra-infra
     pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
     depends_on:
       temporal:
         condition: service_healthy
-      cluster-init:
-        condition: service_completed_successfully
+      cli:
+        condition: service_started
     environment:
       <<: *orchestrator-env
       KONTRA_ORCHESTRATOR_ROLES: infra
@@ -282,6 +243,7 @@ services:
 
   orchestrator-probe:
     image: ${KONTRA_HOST_IMAGE:-kontra-host:1}
+    container_name: kontra-probe
     pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
     depends_on:
@@ -304,13 +266,17 @@ services:
       timeout: 5s
       retries: 5
 
-  # Watch + exec target. `docker compose exec cli …` still works while watch is PID 1.
+  # First boot prints the console login, seeds hello/, then watches the current workspace.
+  # `docker compose exec cli …` still works while watch is PID 1.
   cli:
     image: ${KONTRA_IMAGE:-kontra:latest}
+    container_name: kontra-cli
     pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
     depends_on:
-      orchestrator-api:
+      postgres:
+        condition: service_healthy
+      seaweed:
         condition: service_healthy
       temporal:
         condition: service_healthy
@@ -318,7 +284,6 @@ services:
         condition: service_healthy
     environment:
       <<: *orchestrator-env
-      KONTRA_SKIP_INIT: "1"
       KONTRA_SDK_ROOT: /opt/kontra
       KONTRA_ADDRESS: temporal:7233
       KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
@@ -326,7 +291,44 @@ services:
       - kontra-home:/var/lib/kontra
       - ${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}:${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}
       - /var/run/docker.sock:/var/run/docker.sock
-    command: ["kontra", "workspace", "watch"]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        python3 - <<'PY'
+        import time, urllib.error, urllib.request
+        req = urllib.request.Request("http://seaweed:8333/kontra", method="PUT")
+        for attempt in range(30):
+            try:
+                urllib.request.urlopen(req, timeout=10)
+                print("seaweed: created bucket kontra")
+                break
+            except urllib.error.HTTPError as e:
+                if e.code in (409, 500):
+                    print("seaweed: bucket kontra already present")
+                    break
+                if attempt == 29:
+                    raise
+                time.sleep(1)
+            except Exception:
+                if attempt == 29:
+                    raise
+                time.sleep(1)
+        PY
+        kontra workspace seed
+        python3 - <<'PY'
+        import time, urllib.request
+        for attempt in range(120):
+            try:
+                urllib.request.urlopen("http://orchestrator-api:8088/api/health", timeout=2)
+                break
+            except Exception:
+                if attempt == 119:
+                    raise SystemExit("cli: timed out waiting for orchestrator-api")
+                time.sleep(1)
+        PY
+        exec kontra workspace watch
 
 networks:
   default:
