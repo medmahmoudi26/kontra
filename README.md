@@ -26,7 +26,8 @@ That teardown is a replayable step in a program Temporal finishes whether or not
 
 ## Where the actors and workflows are
 
-**This repository contains no actors and no workflows.** They live in two repositories of their own:
+**This repository seeds one actor and one workflow** (`examples/python/hello`, `examples/workflows/hello`)
+so a first-time cluster has something to run. Everything else lives in two repositories of their own:
 
 - **[kontra-actors](https://github.com/medmahmoudi26/kontra-actors)** — the capabilities
 - **[kontra-workflows](https://github.com/medmahmoudi26/kontra-workflows)** — the programs that call them
@@ -37,95 +38,67 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ## Install
 
-Two paths. Both end with a control plane on <http://127.0.0.1:8088>.
-
-### A · Pull the image
+One path. A Compose cluster on <http://127.0.0.1:8088> (ADR 0047). Docker is the only prerequisite.
 
 ```bash
 mkdir -p kontra-run && cd kontra-run
 gh api repos/medmahmoudi26/kontra/contents/docker-compose.quickstart.yml -H "Accept: application/vnd.github.raw" > docker-compose.yml
 gh api repos/medmahmoudi26/kontra/contents/.env.quickstart -H "Accept: application/vnd.github.raw" > .env
+mkdir -p workspace
 echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USER> --password-stdin
-docker compose up -d
-docker compose logs kontra | grep -A4 'console login'
+docker compose up -d --wait
+docker compose logs workspace-init | grep -A4 'console login'
 ```
 
-No clone, nothing compiled.
+No clone, nothing compiled on the host.
 
 **`gh api`, not `curl`, while the repo is private.** `gh auth login` authenticates the CLI and git —
 it does not put credentials into `curl`, so a plain `curl` of `raw.githubusercontent.com` answers
-**404 on every branch**, which reads as "wrong path" and is not. `gh api` uses the login you already
-have. With a classic token carrying `repo` you can use curl instead:
+**404 on every branch**. With a classic token carrying `repo` you can use curl instead:
 `curl -fsSL -H "Authorization: Bearer $TOKEN" …`.
 
-The `docker login` is separate and needs `read:packages` — the package is private too. **Run this in
-an empty directory**: inside a checkout, compose picks up the repo's own `docker-compose.yml`.
+The `docker login` is separate and needs `read:packages`. **Run this in an empty directory**: inside
+a checkout, compose picks up the repo's own `docker-compose.yml`.
 
-### B · Build it
+### Or build the images from a clone
 
 ```bash
 git clone https://github.com/medmahmoudi26/kontra-console.git
 git clone https://github.com/medmahmoudi26/kontra.git
 cd kontra
 make image
-KONTRA_IMAGE=kontra:latest KONTRA_PULL_POLICY=never docker compose -f docker-compose.quickstart.yml up -d
-docker compose -f docker-compose.quickstart.yml logs kontra | grep -A4 'console login'
+docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
+docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
+KONTRA_IMAGE=kontra:latest KONTRA_ORCHESTRATOR_IMAGE=kontra-orchestrator:latest \
+  KONTRA_HOST_IMAGE=kontra-host:1 KONTRA_PULL_POLICY=never \
+  docker compose -f docker-compose.quickstart.yml --env-file .env.quickstart up -d --wait
+docker compose -f docker-compose.quickstart.yml logs workspace-init | grep -A4 'console login'
 ```
-
-Docker is still the only prerequisite — the SPA, the Go binary and the orchestrator bundle are all
-built inside the image. Both clones are needed and both names matter: the console resolves
-`@kontra/core` as `link:../kontra/shared/core`.
-
-**It needs about 10 GB of free Docker disk** — compiling the embedded Temporal server is most of
-it. Both `no space left on device` and kontra's own `only 0 B free … needs about 1.5 GB of working
-space` mean Docker's disk, not your machine's:
-
-```bash
-docker system df                 # what is using it
-docker builder prune -af         # the build caches (largest, and safe)
-docker system prune -af          # unused images and containers too
-```
-
-On Docker Desktop the ceiling is *Settings → Resources → Disk image size*; the default is often
-below what this needs. **Path A avoids all of it.**
 
 ### Either way
 
 Sign in as `admin` with the password that last line printed. It is shown **once**; only a scrypt
-hash is kept. Lost it? `docker compose exec kontra kontra user add <name>`.
+hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.
 
-`docker compose down` keeps every run. `down -v` throws the data away. The one line in `.env` that
-matters for security is `KONTRA_BIND=127.0.0.1` — read the note beside it before widening it.
-
-**[First run](docs/first-run.md)**: actor → Method call → workflow → run → secrets → fleet.
-
-### Or the binary, with no Docker at all
+Serve and start the seeded hello workflow (discovery does not run it for you):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/install-appliance.sh | sh
-kontra init                                # the console login, printed once
-kontra up                                  # blocks: this IS the control plane
+docker compose exec -d cli sh -c 'kontra workflow serve "$KONTRA_WORKSPACE/workflows/hello"'
+docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACE/workflows/hello" --wait'
 ```
 
-One command, one process: Temporal, the object store, the state store, the payload codec, an OCI registry and the orchestrator — with its own data directory and **no containers**. Four platforms are published (linux and macOS, amd64 and arm64); the installer picks yours, checks it against the release's `SHA256SUMS`, and refuses to unpack anything that does not match.
+That Run places `hello@0.1.0` on a one-machine `dockerFleet`, writes `{"message": "hello world"}`
+into Dataset `hello`, and destroys the Fleet on scope exit.
 
-**The two paths are the same bytes.** The image is built FROM the release tarball rather than from
-source, so the container and the download are one artifact with two supervisors — which is what
-makes the Docker path *verify* a build rather than produce a second one.
+`docker compose down` keeps Datasets and Pulumi state. **`down -v` throws both away** — every
+Dataset this control plane recorded, and any local Fleet Pulumi still thought it owned.
 
-### Writing an actor needs a worker, and the worker is yours
+The one line in `.env` that matters for security is `KONTRA_BIND=127.0.0.1` — read the note beside
+it before widening it. `orchestrator-infra` mounts the host Docker socket so `dockerFleet` can
+create Warden containers. That is host-level Docker authority, fine on a single-operator laptop,
+not tenant isolation.
 
-Neither path puts your code in the control plane. An Actor runs in **your** process, on your
-machine, dialling the Temporal port above — the same shape a Machine uses in production, which is
-why the container has no Python in it for you.
-
-```bash
-pip install kontra-actorkit                      # or: uv pip install kontra-actorkit
-kontra serve --actor ./myactor --watch           # `--watch` re-execs the Worker on save
-```
-
-If you took the Docker path and want the `kontra` CLI on your host too, `install-appliance.sh`
-installs the same binary; or run it in place with `docker compose exec kontra kontra <command>`.
+**[First run](docs/first-run.md)**: cluster → hello Dataset → secrets → a cloud fleet if you need one.
 
 ### The editor extension
 
@@ -159,32 +132,20 @@ editor; a webview's drag surface belongs to the editor, the picker always works.
 
 ### The development stack
 
-`docker-compose.yml` at the root is a different file for a different reader: it builds its image
-from a release you cut locally, bind-mounts your checkout and your `~/.kontra`, and carries a second
-service. Use it when you are working *on* kontra.
+`docker-compose.yml` at the root includes the same cluster as the two-file install. Use
+`docker-compose.quickstart.yml` from an empty directory; use this file from a checkout after
+building local image tags. `orchestrator-infra` stays its own PID because Pulumi's Node language
+host installs process-global rejection handlers for every inline `up` ([ADR 0019](docs/adr)) —
+that is why API, materializer, and infra are three containers, not one.
 
-That second service is `orchestrator-infra`: the Pulumi engine, the fleet SSH key and the cloud
-credential. [ADR 0031 §4](docs/adr) and [ADR 0034 §1](docs/adr) keep all three **off** the appliance
-deliberately — no provider plugins and no cloud credential in an artifact whose premise is that a
-stranger curls it onto a laptop — and [ADR 0019](docs/adr) is why it cannot share a PID: Pulumi's
-Node language host installs process-global rejection handlers for the length of every inline `up`,
-so an unrelated rejected promise elsewhere fails the in-flight converge. You need it when a workflow
-provisions a **Fleet**, and not before.
+A DigitalOcean token is optional. Local `docker_fleet()` does not use it. `do_fleet()` does.
 
-Neither compose file is the old multi-service topology. Nine services left the development one a
-slice at a time, and each departure fixed a bug recorded where the service used to be — a `chown`
-sidecar for a root-owned volume, a one-shot that created an S3 bucket because a missing one answers
-`403`, a dynamic-config key the server never registered. Re-splitting the appliance reintroduces all
-three; putting it in a container reintroduces none, because inside there it is still one process
-writing its own files in its own directory.
-
-Configuration is `.env` (copy `.env.example` — it marks every blank as either **OPEN** or
-**DISABLED**, which are opposites) plus `~/.kontra/config.yaml`, which `kontra init` writes. Every
-port publishes to `${KONTRA_BIND}`, defaulting to loopback: a published port is DNATed in
+Every port publishes to `${KONTRA_BIND}`, defaulting to loopback: a published port is DNATed in
 `PREROUTING` and never traverses `ufw-user-input`, so **the publish address is the control and a host
 firewall is not**.
 
-**[First run](docs/first-run.md)** walks the whole thing end to end: control plane → actor → Method call → workflow → run → secrets → Fleet, three or four lines a step — and ends with the six things that broke while it was written, every one of which passed CI.
+**[First run](docs/first-run.md)** walks the cluster, the seeded hello Dataset, then secrets and a
+cloud Fleet if you need one.
 
 ## The shape of it
 
