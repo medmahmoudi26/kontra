@@ -10,29 +10,31 @@ than a nicety, it says so.
 
 ## 1 · A control plane
 
+**Pull it:**
+
 ```bash
-git clone https://github.com/medmahmoudi26/kontra && cd kontra
-make image                                   # cut a release, build the image FROM it
-docker compose -f docker-compose.quickstart.yml up -d
+echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USER> --password-stdin
+curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
+docker compose up -d
+docker compose logs kontra | grep -A4 'console login'
+```
+
+**Or build it:**
+
+```bash
+git clone https://github.com/medmahmoudi26/kontra-console.git
+git clone https://github.com/medmahmoudi26/kontra.git
+cd kontra
+make image
+KONTRA_IMAGE=kontra:latest KONTRA_PULL_POLICY=never docker compose -f docker-compose.quickstart.yml up -d
 docker compose -f docker-compose.quickstart.yml logs kontra | grep -A4 'console login'
 ```
 
-Open <http://127.0.0.1:8088> and sign in as `admin` with the password that last line printed. It is
-shown **once** — only a scrypt hash is kept. Lost it?
-`docker compose exec kontra kontra user add <name>`.
+Sign in at <http://127.0.0.1:8088> as `admin` with the password that last line printed. Shown once;
+only a hash is kept. Lost it? `docker compose exec kontra kontra user add <name>`.
 
-No release has been tagged yet, so `make image` is how you get one; it builds the image from a
-release tarball, which is why the container and the eventual download are the same bytes.
-
-> **`make image` runs on the machine that runs the container.** The image is built, never pulled.
-> Copy these files to a second box, skip it, and compose answers `No such image: kontra:latest` —
-> build it there, or `docker save`/`docker load` it across, or push to a registry you control and
-> set both `KONTRA_IMAGE` and `KONTRA_PULL_POLICY=missing`.
-
-Once a tag exists, the first two lines become two `curl`s — see the README.
-
-> **`docker compose down` keeps every run. `down -v` throws the data away.** The named volume holds
-> Temporal's history, the objects, the lake and `config.yaml`.
+`docker compose down` keeps every run; `down -v` throws the data away.
 
 ### The CLI, and the tokens it needs
 
