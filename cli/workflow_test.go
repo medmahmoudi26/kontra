@@ -195,3 +195,116 @@ func TestRecordRunWorkflowSendsNothingWithoutAManifest(t *testing.T) {
 		t.Error("a workflow with no manifest identity must not stamp a half one")
 	}
 }
+
+// `kontra workflow serve` needs the checkout on PYTHONPATH. Without a --repo override it walks
+// up from CWD looking for docker-compose.yml, which fails when an operator runs the command from
+// inside or beside a workflow folder. --repo must let them name the checkout explicitly, just like
+// `kontra infra` and `kontra release` already do.
+func TestWorkflowServeArgsAcceptsRepoOverride(t *testing.T) {
+	// A checkout root is wherever docker-compose.yml lives AND sdk/python is present.
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "docker-compose.yml"), []byte("services:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "sdk", "python", "kontra"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The workflow folder itself is NOT inside the checkout for this test — we want to prove the
+	// command no longer depends on walking up from CWD.
+	wfDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wfDir, "workflow.py"), []byte("# stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wfDir, "workflow.json"), []byte(`{"name":"x","version":"0.1.0","workflow":"X"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run from a directory with NO docker-compose.yml in any parent.
+	workDir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	// Keep python resolution deterministic: no venv in the fake repo, and no env override.
+	t.Setenv("KONTRA_PYTHON", "")
+
+	_, file, root, _, _, _, err := workflowServeArgs([]string{"--repo", repo, wfDir})
+	if err != nil {
+		t.Fatalf("workflowServeArgs with --repo should find repo root, got: %v", err)
+	}
+	if root != repo {
+		t.Errorf("root = %q, want %q", root, repo)
+	}
+	wantFile := filepath.Join(wfDir, "workflow.py")
+	if file != wantFile {
+		t.Errorf("file = %q, want %q", file, wantFile)
+	}
+}
+
+// Without --repo, the command must still walk up from CWD and find the checkout the way it
+// always has. This guards the refactor: the new helper must not break the existing path.
+func TestWorkflowServeArgsWalksUpFromCWDByDefault(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "docker-compose.yml"), []byte("services:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "sdk", "python", "kontra"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Put the workflow INSIDE the repo so walking up from it finds docker-compose.yml.
+	wfDir := filepath.Join(repo, "examples", "workflows", "firstrun")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wfDir, "workflow.py"), []byte("# stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wfDir, "workflow.json"), []byte(`{"name":"x","version":"0.1.0","workflow":"X"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(wfDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	t.Setenv("KONTRA_PYTHON", "")
+
+	_, file, root, _, _, _, err := workflowServeArgs([]string{"."})
+	if err != nil {
+		t.Fatalf("workflowServeArgs without --repo should walk up from CWD, got: %v", err)
+	}
+	// macOS symlinks /var to /private/var; EvalSymlinks makes the comparison stable.
+	cleanRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanRoot != cleanRepo {
+		t.Errorf("root = %q, want %q", cleanRoot, cleanRepo)
+	}
+	wantFile, err := filepath.EvalSymlinks(filepath.Join(wfDir, "workflow.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanFile, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanFile != wantFile {
+		t.Errorf("file = %q, want %q", cleanFile, wantFile)
+	}
+}

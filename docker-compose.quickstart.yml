@@ -1,176 +1,390 @@
-# kontra, in one command. Two files and `docker compose up -d`.
+# kontra local cluster (ADR 0047). Two files and `docker compose up -d --wait`.
 #
-#   curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
-#   curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
-#   docker compose up -d
-#   docker compose logs kontra | grep -A4 'console login'
+#   gh api repos/medmahmoudi26/kontra/contents/docker-compose.quickstart.yml \
+#     -H "Accept: application/vnd.github.raw" > docker-compose.yml
+#   gh api repos/medmahmoudi26/kontra/contents/.env.quickstart \
+#     -H "Accept: application/vnd.github.raw" > .env
+#   mkdir -p workspace
+#   docker compose up -d --wait
+#   docker compose logs workspace-init | grep -A4 'console login'
 #
-# ── WHY THIS FILE EXISTS BESIDE `docker-compose.yml` ────────────────────────────────────────────
+# Postgres, Temporal, SeaweedFS, Redis, the registry, and the kontra processes are separate
+# services. The appliance (`kontra up` as one process) is not a supported install path.
 #
-# The one next door is this repo's DEVELOPMENT stack. It builds its image from a release you cut
-# locally (`make image`), bind-mounts your checkout and your `~/.kontra`, and carries a second
-# service for cloud fleets that is built from source. Every one of those is right for somebody with
-# the repo on disk and wrong for somebody who has never cloned it: a `curl | docker compose up`
-# cannot build an image, has no checkout to mount and has not run `kontra init` on the host.
+# ── THE DOCKER SOCKET ──────────────────────────────────────────────────────────────────────────
 #
-# So this one PULLS A PUBLISHED IMAGE, mounts nothing from the host, and initialises itself on first
-# boot. Nothing here needs the repository to exist.
+# `orchestrator-infra` and `workspace-watch` mount `/var/run/docker.sock`. A local Fleet's Warden
+# containers (created by Pulumi `dockerFleet`) mount it too. That is host-level Docker authority:
+# anything with the socket can start privileged containers. Acceptable for a single-operator
+# laptop. Not tenant isolation. Do not expose this stack as a shared service.
 #
-# ── IT IS STILL ONE PROCESS ─────────────────────────────────────────────────────────────────────
+# ── LOOPBACK IS THE SECURITY CONTROL ───────────────────────────────────────────────────────────
 #
-# One service, and inside it one process: Temporal, the object store, the state store, the payload
-# codec, the OCI registry and the orchestrator as its supervised child (ADR 0031). This is not a
-# stripped-down kontra — it is the whole appliance with Docker as its supervisor. Nine services left
-# the development compose file one at a time and none of them come back here.
+# Every published port binds `${KONTRA_BIND}`, default `127.0.0.1`. A published Docker port is
+# DNATed in PREROUTING and accepted in FORWARD — a host firewall does not protect it. Do not
+# change KONTRA_BIND to 0.0.0.0 to "make it work from another machine".
 
 name: ${COMPOSE_PROJECT_NAME:-kontra}
 
-services:
-  kontra:
-    # THE IMAGE YOU BUILT, because nothing is published yet and a default that does not resolve is
-    # a blocker dressed up as a convenience. `make image` from a clone cuts a release for this
-    # platform and builds the image FROM that tarball, tagged `kontra:latest` — so the container is
-    # the same bytes as the artifact, which is the whole point of building it that way.
-    #
-    # POINT IT AT A REGISTRY when there is one, and PIN IT when you do:
-    #
-    #   KONTRA_IMAGE=ghcr.io/medmahmoudi26/kontra:v0.2.0
-    #
-    # A moving `latest` from a registry changes your control plane's version during an unrelated
-    # `restart`, which is the hardest kind of surprise to debug.
-    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:latest}
+x-workspace: &workspace ${KONTRA_WORKSPACE:-${PWD}/workspace}
 
-    # NEVER PULL A LOCAL TAG, BECAUSE THE ERROR FOR A MISSING ONE IS A LIE.
-    #
-    # `kontra:latest` is unqualified, so Docker expands it to `docker.io/library/kontra:latest` and
-    # tries to fetch it when the tag is not in this machine's daemon. Docker Hub answers the same
-    # way for "no such repository" and "you may not see it", so the message is:
-    #
-    #   pull access denied for kontra, repository does not exist or may require 'docker login'
-    #
-    # which sends an operator to fix credentials they do not need. MEASURED — it is the first thing
-    # that happens when you copy these two files to a second machine and skip `make image`.
-    #
-    # `never` turns that into `No such image: kontra:latest`, which is the truth: BUILD IT HERE.
-    # The image has to exist on the machine that runs the container, and `make image` from a clone
-    # is what puts it there.
-    #
-    # POINTING AT A REGISTRY TAKES BOTH VARIABLES. This policy applies to whatever `KONTRA_IMAGE`
-    # names, registry host or not — so a registry reference with `never` still left alone would
-    # fail as "no such image" on a machine that has never pulled it. Set both:
-    #
-    #   KONTRA_IMAGE=ghcr.io/medmahmoudi26/kontra:v0.2.0
-    #   KONTRA_PULL_POLICY=missing
+x-orchestrator-env: &orchestrator-env
+  KONTRA_HOME: /var/lib/kontra
+  KONTRA_ADDRESS: temporal:7233
+  KONTRA_NAMESPACE: ${KONTRA_NAMESPACE:-default}
+  KONTRA_S3_ENDPOINT: http://seaweed-s3:8333
+  KONTRA_S3_BUCKET: kontra
+  KONTRA_S3_REGION: us-east-1
+  KONTRA_S3_ACCESS_KEY: kontra
+  KONTRA_S3_SECRET_KEY: kontra
+  KONTRA_REDIS_HOST: redis:6379
+  KONTRA_REGISTRY: registry:5000
+  KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
+  KONTRA_DUCKLAKE_CATALOG: postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra
+  KONTRA_MATERIALIZATION_DB: postgres://kontra:kontra@postgres:5432/kontra_ducklake
+  KONTRA_WORKSPACE: *workspace
+  KONTRA_IMAGE: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:latest}
+  KONTRA_HOST_IMAGE: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:1}
+  KONTRA_TRUST_REGISTRIES: registry:5000
+  KONTRA_TRUST_UNSIGNED: registry:5000
+
+x-kontra-home: &kontra-home
+  - kontra-home:/var/lib/kontra
+  - ${KONTRA_WORKSPACE:-${PWD}/workspace}:${KONTRA_WORKSPACE:-${PWD}/workspace}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kontra
+      POSTGRES_PASSWORD: kontra
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kontra"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres-init:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: kontra
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        psql -h postgres -U kontra -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='kontra_ducklake'" | grep -q 1 \
+          || psql -h postgres -U kontra -d postgres -c "CREATE DATABASE kontra_ducklake"
+    restart: "no"
+
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: kontra
+      POSTGRES_PWD: kontra
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_KV_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  registry:
+    image: registry:2
+    restart: unless-stopped
+    volumes:
+      - registry-data:/var/lib/registry
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  seaweed-master:
+    image: chrislusf/seaweedfs:3.80
+    restart: unless-stopped
+    command: "master -ip=seaweed-master -port=9333 -mdir=/data"
+    volumes:
+      - seaweed-master:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  seaweed-volume:
+    image: chrislusf/seaweedfs:3.80
+    restart: unless-stopped
+    depends_on:
+      seaweed-master:
+        condition: service_healthy
+    command: "volume -mserver=seaweed-master:9333 -ip=seaweed-volume -port=8080 -dir=/data -max=100"
+    volumes:
+      - seaweed-volume:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/status >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  seaweed-filer:
+    image: chrislusf/seaweedfs:3.80
+    restart: unless-stopped
+    depends_on:
+      seaweed-master:
+        condition: service_healthy
+      seaweed-volume:
+        condition: service_healthy
+    command: "filer -master=seaweed-master:9333 -ip=seaweed-filer -port=8888"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8888/ >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  seaweed-s3:
+    image: chrislusf/seaweedfs:3.80
+    restart: unless-stopped
+    depends_on:
+      seaweed-filer:
+        condition: service_healthy
+    command: "s3 -filer=seaweed-filer:8888 -port=8333 -ip.bind=0.0.0.0"
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_S3_PORT:-8333}:8333"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8333/ >/dev/null || wget -q -O- http://127.0.0.1:8333/status >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  seaweed-bucket:
+    image: chrislusf/seaweedfs:3.80
+    depends_on:
+      seaweed-master:
+        condition: service_healthy
+      seaweed-s3:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo 's3.bucket.create -name kontra' | weed shell -master=seaweed-master:9333 || true
+    restart: "no"
+
+  workspace-init:
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:latest}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+    environment:
+      KONTRA_HOME: /var/lib/kontra
+      KONTRA_WORKSPACE: *workspace
+      KONTRA_NAMESPACE: ${KONTRA_NAMESPACE:-default}
+    volumes: *kontra-home
+    command: ["kontra", "workspace", "seed"]
+    restart: "no"
+
+  orchestrator-api:
+    image: ${KONTRA_ORCHESTRATOR_IMAGE:-ghcr.io/medmahmoudi26/kontra-orchestrator:latest}
     pull_policy: ${KONTRA_PULL_POLICY:-missing}
     restart: unless-stopped
-
-    # HOW LONG THE APPLIANCE GETS TO SHUT DOWN, and the default is not enough.
-    #
-    # Docker's default `stop_grace_period` is 10 SECONDS, and `kontra up`'s own child timeout is
-    # also 10 — so on a plain `docker compose stop` the two expire together and Docker SIGKILLs the
-    # container just as the orchestrator is being asked to exit. MEASURED here: a stop took 13s and
-    # the container's exit code was 137.
-    #
-    # WHAT A SIGKILL COSTS IS NOT ABSTRACT: the DuckLake catalog lock is released on the
-    # orchestrator's exit path, and a container killed before that runs leaves it behind. Since a
-    # container's hostname is its id, the next one is a different host holding the same volume —
-    # which is the state `catalogLock.ts` now reclaims by heartbeat — but only after 45 seconds of
-    # restart-looping that an orderly stop would have avoided entirely. Sixty seconds is room for
-    # that stop; an appliance that is genuinely wedged still gets killed.
-    stop_grace_period: 60s
-
-    # EVERY PORT PUBLISHED TO `${KONTRA_BIND}`, WHICH DEFAULTS TO LOOPBACK — and that default is the
-    # security control, not a convenience.
-    #
-    # A published port is DNATed in `PREROUTING` and accepted in `FORWARD`. It never traverses
-    # `ufw-user-input`, so **a host firewall does not protect it.** Measured on this project's own
-    # controller: `ufw` active and reporting a tight policy, ten ports open to the internet anyway.
-    # Widening this to `0.0.0.0` publishes an unauthenticated Temporal frontend, an object store and
-    # a Redis-protocol state store to whoever can route to you. If you need it reachable, put it
-    # behind a reverse proxy or a VPN and leave this alone.
-    ports:
-      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"       # the console and the API
-      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_TEMPORAL_PORT:-7233}:7233"  # Temporal gRPC — your workers dial this
-      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_S3_PORT:-8333}:8333"        # the object store
-      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_KV_PORT:-6379}:6379"        # the state store
-      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_CODEC_PORT:-18234}:18234"   # the payload codec
-      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"  # the OCI registry
-
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seaweed-bucket:
+        condition: service_completed_successfully
+      registry:
+        condition: service_healthy
+      workspace-init:
+        condition: service_completed_successfully
     environment:
-      # A Tenant IS a Temporal namespace. `default` exists already; a second one gives two customers
-      # separate history and separate retention, which is a real boundary rather than a label.
-      KONTRA_NAMESPACE: "${KONTRA_NAMESPACE:-default}"
-      # BLANK ON PURPOSE, AND THE BLANK IS NOT "OPEN". The entrypoint runs `kontra init` on first
-      # boot, which generates the console account and the four service tokens and writes them into
-      # `config.yaml` inside the volume below. `main()` loads that file into the environment before
-      # every command WITHOUT overriding anything already set — so an operator who fills these in
-      # wins, and one who leaves them alone gets generated values rather than no values.
-      KONTRA_CONSOLE_USERS: "${KONTRA_CONSOLE_USERS:-}"
-      KONTRA_STATE_TOKEN: "${KONTRA_STATE_TOKEN:-}"
-      KONTRA_RUN_TOKEN: "${KONTRA_RUN_TOKEN:-}"
-      KONTRA_PANEL_TOKEN: "${KONTRA_PANEL_TOKEN:-}"
-      KONTRA_EXPLORE_TOKEN: "${KONTRA_EXPLORE_TOKEN:-}"
-
+      <<: *orchestrator-env
+      KONTRA_ORCHESTRATOR_ROLES: api
     volumes:
-      # THE WHOLE HOME, NOT JUST `data/`. Temporal's history, the objects, `global_state` and the
-      # lake's catalog live under `data/`; `config.yaml` — the console account and the tokens — is
-      # its SIBLING. A volume one level deeper would rotate the password on every `docker compose
-      # up --force-recreate`, which is to say on every upgrade.
-      #
-      # Docker seeds a fresh named volume from the image's contents, so the orchestrator bundle
-      # baked into the image is copied in on first use and hydrates exactly as it would without a
-      # volume here.
-      - kontra:/var/lib/kontra
-
-      # YOUR CODE, AT THE SAME PATH ON BOTH SIDES — and the sameness is the whole trick.
-      #
-      # An Actor or a workflow is a FOLDER on a disk. `kontra actor register ./firstactor` sends
-      # the RESOLVED path, and the orchestrator opens it to read the manifest and derive the form
-      # the console draws. Mount it anywhere else and that path means two different things: the
-      # host CLI resolves `/home/you/work/firstactor` and the container answers
-      # `no such directory` — which is what this install did before this line existed.
-      #
-      # `${PWD}` is the directory you ran `docker compose up` in, so the default needs no editing:
-      # put your actors beside these two files. Set `KONTRA_WORKSPACE` to an absolute path to keep
-      # them somewhere else (and on a shell that does not export PWD, such as PowerShell, you must).
-      #
-      # READ-ONLY, BECAUSE THE CONTROL PLANE NEVER WRITES YOUR CODE (ADR 0030). The console is a
-      # viewer; editing a workflow is your editor plus a re-serve. Nothing in here needs to write
-      # to your checkout, and a control plane that could would be one that can change what runs.
-      - ${KONTRA_WORKSPACE:-${PWD}}:${KONTRA_WORKSPACE:-${PWD}}:ro
-
+      - kontra-home:/var/lib/kontra:ro
+      - ${KONTRA_WORKSPACE:-${PWD}/workspace}:${KONTRA_WORKSPACE:-${PWD}/workspace}:ro
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"
     healthcheck:
-      # THE API, NOT THE PROCESS. A container that is "up" with an orchestrator child that never
-      # bound is a control plane reporting healthy with no control surface.
-      #
-      # `kontra runs` AND NOT `kontra doctor`. Measured inside this image: `doctor --api
-      # http://127.0.0.1:9999` — nothing listening at all — prints a table and EXITS 0. It is a
-      # report, not an assertion, and a healthcheck built on it says `healthy` forever over a dead
-      # control plane. `runs` calls the API and exits non-zero when it cannot reach one.
-      test: ["CMD", "kontra", "runs", "--api", "http://127.0.0.1:8088"]
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8088/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  orchestrator-materializer:
+    image: ${KONTRA_ORCHESTRATOR_IMAGE:-ghcr.io/medmahmoudi26/kontra-orchestrator:latest}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
+    restart: unless-stopped
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      seaweed-bucket:
+        condition: service_completed_successfully
+      workspace-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *orchestrator-env
+      KONTRA_ORCHESTRATOR_ROLES: materializer
+    volumes:
+      - kontra-home:/var/lib/kontra:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
       interval: 30s
-      timeout: 10s
-      # GENEROUS, because first boot unpacks the orchestrator bundle out of the CAS before it can
-      # serve anything. A short start period marks a healthy first run as failed and `restart:
-      # unless-stopped` then kills it halfway through.
-      start_period: 120s
+      timeout: 5s
       retries: 5
 
-volumes:
-  # NAMED, so `docker compose down` keeps it and `docker compose down -v` is the explicit way to
-  # throw away every run this control plane has ever recorded.
-  kontra:
+  orchestrator-infra:
+    image: ${KONTRA_ORCHESTRATOR_IMAGE:-ghcr.io/medmahmoudi26/kontra-orchestrator:latest}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_healthy
+      workspace-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *orchestrator-env
+      KONTRA_ORCHESTRATOR_ROLES: infra
+      KONTRA_INFRA_QUEUE: kontra-infra
+      KONTRA_PULUMI_STATE_DIR: /data/pulumi-state
+      KONTRA_PULUMI_WORK_DIR: /data/pulumi
+      # Local-only default. A value you set in .env wins. `down -v` destroys this state.
+      PULUMI_CONFIG_PASSPHRASE: ${PULUMI_CONFIG_PASSPHRASE:-local-dev}
+      DIGITALOCEAN_TOKEN: ${DIGITALOCEAN_TOKEN:-}
+      KONTRA_CLOUD_CREDENTIAL: ${KONTRA_CLOUD_CREDENTIAL:-}
+    volumes:
+      - kontra-home:/var/lib/kontra:ro
+      - pulumi-state:/data
+      # Host-level Docker authority — see the file header.
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
-# ── WHAT IS DELIBERATELY NOT HERE ───────────────────────────────────────────────────────────────
-#
-# **A cloud-fleet service.** Provisioning Machines needs the Pulumi engine, a fleet SSH key and a
-# cloud credential, and ADR 0031 §4 keeps all three OFF the appliance on purpose: no provider
-# plugins and no cloud credential inside an artifact whose premise is that a stranger curls it onto
-# a laptop. When you get to Fleets, clone the repo and use `docker-compose.yml`, which has the
-# `orchestrator-infra` service and the reasoning for why it cannot share a PID with anything else.
-#
-# **A Python or Node runtime for your Actors.** They run in YOUR worker process, on your machine,
-# dialling the Temporal port above — this container never executes one, and has no interpreter for
-# it. That is the same shape a Machine uses in production. The read-only mount above is not an
-# exception to that: the orchestrator READS your folder to derive the form the console draws, and
-# runs nothing out of it.
+  orchestrator-probe:
+    image: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:1}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_healthy
+      seaweed-bucket:
+        condition: service_completed_successfully
+      orchestrator-api:
+        condition: service_healthy
+    environment:
+      KONTRA_ADDRESS: temporal:7233
+      KONTRA_S3_ENDPOINT: http://seaweed-s3:8333
+      KONTRA_S3_BUCKET: kontra
+      KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
+      KONTRA_PROBE_QUEUE: ${KONTRA_PROBE_QUEUE:-kontra-probe}
+    command: ["python3", "-m", "kontra.probe"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "raise SystemExit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  workspace-watch:
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:latest}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
+    restart: unless-stopped
+    depends_on:
+      orchestrator-api:
+        condition: service_healthy
+      registry:
+        condition: service_healthy
+    environment:
+      KONTRA_HOME: /var/lib/kontra
+      KONTRA_WORKSPACE: *workspace
+      KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
+      KONTRA_REGISTRY: registry:5000
+      KONTRA_HOST_IMAGE: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:1}
+      KONTRA_SKIP_INIT: "1"
+    volumes:
+      - kontra-home:/var/lib/kontra
+      - ${KONTRA_WORKSPACE:-${PWD}/workspace}:${KONTRA_WORKSPACE:-${PWD}/workspace}
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["kontra", "workspace", "watch"]
+
+  cli:
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:latest}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
+    restart: unless-stopped
+    depends_on:
+      orchestrator-api:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    environment:
+      <<: *orchestrator-env
+      KONTRA_SKIP_INIT: "1"
+      KONTRA_SDK_ROOT: /opt/kontra
+      KONTRA_ADDRESS: temporal:7233
+    volumes:
+      - kontra-home:/var/lib/kontra
+      - ${KONTRA_WORKSPACE:-${PWD}/workspace}:${KONTRA_WORKSPACE:-${PWD}/workspace}
+    command: ["sleep", "infinity"]
+
+networks:
+  default:
+    name: kontra
+
+volumes:
+  postgres-data:
+  redis-data:
+  registry-data:
+  seaweed-master:
+  seaweed-volume:
+  kontra-home:
+  pulumi-state:
+    # `docker compose down` keeps this. `down -v` destroys Pulumi dockerFleet state AND Datasets.
+    # Named so an operator has to type the destructive flag.

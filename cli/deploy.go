@@ -36,6 +36,13 @@ import (
 // Dockerfile-less actor builds FROM. MAJOR tag — see the Dockerfile's comment.
 const baseImage = "kontra-host:1"
 
+func hostImage() string {
+	if v := strings.TrimSpace(os.Getenv("KONTRA_HOST_IMAGE")); v != "" {
+		return v
+	}
+	return baseImage
+}
+
 // defaultRegistry is the last answer to "which registry", used when nothing else says: the
 // appliance's own port on loopback, spelled the way it has always been spelled here. It is a
 // FALLBACK and not the answer — see registryAddress, which prefers the address the running
@@ -708,7 +715,7 @@ func readManifest(dir string) (actorManifest, error) {
 // .dockerignore — the engine API does not read it for us the way the docker CLI does.
 func ensureBase(ctx context.Context, d imageAPI, progress io.Writer) error {
 	sums, err := d.ImageList(ctx, image.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("reference", baseImage)),
+		Filters: filters.NewArgs(filters.Arg("reference", hostImage())),
 	})
 	if err != nil {
 		return err
@@ -718,15 +725,15 @@ func ensureBase(ctx context.Context, d imageAPI, progress io.Writer) error {
 	}
 	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
-		return fmt.Errorf("base image %s missing and no repo root to build it from: %w", baseImage, err)
+		return fmt.Errorf("base image %s missing and no repo root to build it from: %w", hostImage(), err)
 	}
-	fmt.Fprintf(os.Stderr, "base image %s missing — building it from %s\n", baseImage, root)
+	fmt.Fprintf(os.Stderr, "base image %s missing — building it from %s\n", hostImage(), root)
 	tarCtx, err := archive.TarWithOptions(root, &archive.TarOptions{ExcludePatterns: dockerignore(root)})
 	if err != nil {
 		return err
 	}
 	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "infra/Dockerfile.pyworker", baseImage)
+	return buildImage(ctx, d, progress, tarCtx, "control/images/Dockerfile.pyworker", hostImage())
 }
 
 // buildActor builds the per-actor image from the actor dir. A Dockerfile in the dir
@@ -743,7 +750,7 @@ func buildActor(ctx context.Context, d imageAPI, progress io.Writer, dir, name, 
 		return err
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "Dockerfile")); statErr != nil {
-		df := fmt.Sprintf("FROM %s\nCOPY . /actor/%s/\n", baseImage, name)
+		df := fmt.Sprintf("FROM %s\nCOPY . /actor/%s/\n", hostImage(), name)
 		// deploy.sh is the actor's dependency install, and it is the SAME script the machine
 		// Target runs over SSH on a bare Machine. Running it here is what keeps the two
 		// Targets honest: an actor whose deps only exist in a Dockerfile cannot be placed on a

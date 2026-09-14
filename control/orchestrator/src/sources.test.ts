@@ -189,6 +189,11 @@ describe('discover', () => {
     // registered yet" rather than showing an error about a directory nobody asked for.
     expect(discover('workflow', path.join(tmp, 'never'))).toEqual([]);
   });
+
+  it('walks nested folders for a marker, so a workspace layout is found', () => {
+    actorAt(path.join('actors', 'hello'), { name: 'hello', version: '0.1.0' });
+    expect(discover('actor', tmp).map((s) => s.name)).toEqual(['hello']);
+  });
 });
 
 describe('paths an operator types', () => {

@@ -292,6 +292,13 @@ func (w *warden) assignment(ctx context.Context) ([]Spec, error) {
 // halves of the answer — the Workers and the egress policy — and a second fetch for the second half
 // would be a second answer, from a Controller that may have changed its mind between the two.
 func (w *warden) fetchAssignment(ctx context.Context) (wardenAssignment, error) {
+	if raw := strings.TrimSpace(os.Getenv("KONTRA_WARDEN_ASSIGNMENT")); raw != "" {
+		var a wardenAssignment
+		if err := json.Unmarshal([]byte(raw), &a); err != nil {
+			return wardenAssignment{}, fmt.Errorf("KONTRA_WARDEN_ASSIGNMENT is not readable: %w", err)
+		}
+		return a, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimRight(w.id.Record.Controller, "/")+wardenAssignmentPath, nil)
 	if err != nil {
@@ -676,7 +683,7 @@ ON A MACHINE
                # so the secret is never sent to a Controller that cannot prove it holds that CA.
                [--state <dir>]        # default `+wardenStateDefault+`
                [--no-systemd]         # enrol only; print the unit instead of installing it
-  kontra warden serve [--state <dir>] [--driver podman|process] [--interval 5s]
+  kontra warden serve [--state <dir>] [--driver podman|docker|process] [--local] [--interval 5s]
                # the reconcile loop: fetch the assignment, compare it to what the runtime
                # actually holds, start and stop the difference. Outbound only; no listener.
                # Also attaches this Machine's BLOCKED watcher to the control plane its
@@ -938,22 +945,24 @@ func (f wardenTrustFlagSet) value() trustpolicy.Options {
 func wardenServe(args []string) error {
 	fs := flag.NewFlagSet("warden serve", flag.ContinueOnError)
 	state := fs.String("state", "", "where this Machine's identity lives (default "+wardenStateDefault+")")
-	driverName := fs.String("driver", "podman", "which runtime holds the Workers: podman|process")
+	driverName := fs.String("driver", "podman", "which runtime holds the Workers: podman|docker|process")
 	interval := fs.Duration("interval", wardenInterval, "how often the loop turns")
+	local := fs.Bool("local", false, "mint a self-signed identity (dockerFleet only; not production enrolment)")
 	trust := wardenTrustFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	// THE POLICY IS RESOLVED BEFORE THE IDENTITY IS LOADED, because a configuration that cannot mean
-	// what it says — a keyless identity with no issuer, an exception naming a registry that is not on
-	// the allowlist — is a mistake an operator is watching for right now, and it must not be reported
-	// after a network round trip to a Controller.
 	policy, err := trustpolicy.Load(trust.value())
 	if err != nil {
 		return err
 	}
 	dir := wardenState(*state)
-	id, err := loadIdentity(dir)
+	var id *wardenIdentity
+	if *local {
+		id, err = bootstrapLocalIdentity(dir, "", "")
+	} else {
+		id, err = loadIdentity(dir)
+	}
 	if err != nil {
 		if errors.Is(err, errNotEnrolled) {
 			return fmt.Errorf("%w — this Machine has no identity yet:\n"+
@@ -1111,10 +1120,16 @@ func wardenDriver(ctx context.Context, name string, trust trustpolicy.Policy) (w
 				"Install podman, or pass `--driver process` if this is the single-box or airgapped case: %w", err)
 		}
 		return d, nil
+	case "docker":
+		d, err := newDockerDriver(ctx, trust)
+		if err != nil {
+			return nil, err
+		}
+		return d, nil
 	case "process":
 		return &ProcessDriver{out: cliio.Stdout, err: os.Stderr}, nil
 	default:
-		return nil, fmt.Errorf("--driver %q: there are two, `podman` and `process`", name)
+		return nil, fmt.Errorf("--driver %q: there are three, `podman`, `docker` and `process`", name)
 	}
 }
 
