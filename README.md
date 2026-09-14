@@ -44,18 +44,19 @@ Docker is the only host prerequisite.
 ```bash
 git clone https://github.com/medmahmoudi26/kontra-console.git
 git clone https://github.com/medmahmoudi26/kontra.git
+mkdir -p workspaces.kontra
 cd kontra
 make image
 docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
 docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
 docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
-mkdir -p workspaces.kontra
 docker compose --env-file .env.quickstart up -d --wait
 docker compose logs cluster-init | grep -A4 'console login'
 ```
 
-Named workspaces live in `workspaces.kontra/` under the compose directory. Seed creates `hello/`
-when that folder is empty. Pick another workspace in the console rail after login.
+Named workspaces live in `workspaces.kontra/` beside `kontra/` and `kontra-console/` (not inside
+either repo). Seed creates `hello/` when that folder is empty. Pick another workspace in the
+console rail after login.
 
 Sign in as `admin` with the password that last line printed. It is shown **once**; only a scrypt
 hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.

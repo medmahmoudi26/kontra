@@ -54,9 +54,9 @@ not a supported topology after this change.
 ## Workspace
 
 Compose bind-mounts `${KONTRA_WORKSPACES}` at the same absolute path in every service that reads
-code. Blank env defaults to `./workspaces.kontra` under the compose project directory. Using the
-same path preserves the catalog contract: a registered source path means the same file to the CLI,
-discovery process, and orchestrator.
+code. Blank env defaults to `../workspaces.kontra` beside the kontra checkout (sibling of `kontra/`
+and `kontra-console/`). Using the same path preserves the catalog contract: a registered source
+path means the same file to the CLI, discovery process, and orchestrator.
 
 Each child of that parent is a named workspace. `.current` names the active child. On first launch,
 `cluster-init` seeds `hello/` when the parent is empty:
