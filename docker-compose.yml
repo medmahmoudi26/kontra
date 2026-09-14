@@ -1,14 +1,13 @@
 # Development compose — the same cluster as docker-compose.quickstart.yml (ADR 0047).
 #
-# First-time installers should copy the two quickstart files into an empty directory, not use
-# this file. From a checkout:
+# From a checkout (see README Install):
 #
 #   make image
 #   docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
 #   docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
-#   KONTRA_IMAGE=kontra:latest KONTRA_ORCHESTRATOR_IMAGE=kontra-orchestrator:latest \
-#     KONTRA_HOST_IMAGE=kontra-host:1 KONTRA_PULL_POLICY=never \
-#     docker compose -f docker-compose.quickstart.yml --env-file .env.quickstart up -d --wait
+#   docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
+#   mkdir -p workspaces.kontra
+#   docker compose --env-file .env.quickstart up -d --wait
 #
 # DigitalOcean fleets still use orchestrator-infra in that file. Export DIGITALOCEAN_TOKEN
 # (or put the name in the secret store) when you need `do_fleet`.

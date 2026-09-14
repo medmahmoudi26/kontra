@@ -389,24 +389,35 @@ var registryHTTP = &http.Client{Timeout: 10 * time.Second}
 // registryManifestDigest asks a registry what <name>:<ref> resolves to right now, by the digest
 // IT reports. Returns errNotInRegistry when the registry answers and does not hold it.
 func registryManifestDigest(reg, name, ref string) (string, error) {
-	req, err := http.NewRequest(http.MethodHead, registryBase(reg)+"/v2/"+name+"/manifests/"+ref, nil)
-	if err != nil {
-		return "", err
+	var last error
+	for _, base := range registryProbeBases(reg) {
+		req, err := http.NewRequest(http.MethodHead, base+"/v2/"+name+"/manifests/"+ref, nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Accept", manifestAccept)
+		resp, err := registryHTTP.Do(req)
+		if err != nil {
+			last = err
+			continue
+		}
+		digest := resp.Header.Get("Docker-Content-Digest")
+		code := resp.StatusCode
+		status := resp.Status
+		resp.Body.Close()
+		switch code {
+		case http.StatusOK:
+			return digest, nil
+		case http.StatusNotFound:
+			return "", errNotInRegistry
+		default:
+			last = fmt.Errorf("registry %s answered %s for %s:%s", reg, status, name, ref)
+		}
 	}
-	req.Header.Set("Accept", manifestAccept)
-	resp, err := registryHTTP.Do(req)
-	if err != nil {
-		return "", err
+	if last == nil {
+		last = fmt.Errorf("registry %s did not answer", reg)
 	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return resp.Header.Get("Docker-Content-Digest"), nil
-	case http.StatusNotFound:
-		return "", errNotInRegistry
-	default:
-		return "", fmt.Errorf("registry %s answered %s for %s:%s", reg, resp.Status, name, ref)
-	}
+	return "", last
 }
 
 // confirmPushed reconciles what the daemon says it pushed with what the registry says it holds,
@@ -446,6 +457,39 @@ func registryBase(reg string) string {
 	return "http://" + strings.TrimRight(reg, "/")
 }
 
+// registryProbeBases is the HTTP view of a registry from THIS process.
+//
+// `kontra deploy` tags and pushes through the Docker daemon (the mounted socket, so the
+// host). A Compose workspace-watch container's 127.0.0.1 is not that host; the daemon's
+// 127.0.0.1:5000 is. host.docker.internal and the compose service name `registry` reach
+// the same registry from inside the container. Image names stay 127.0.0.1:5000/... so
+// the daemon can push and pull them.
+func registryProbeBases(reg string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(b string) {
+		if b == "" {
+			return
+		}
+		if _, ok := seen[b]; ok {
+			return
+		}
+		seen[b] = struct{}{}
+		out = append(out, b)
+	}
+	add(registryBase(reg))
+	raw := strings.TrimPrefix(strings.TrimPrefix(reg, "http://"), "https://")
+	host, port, ok := strings.Cut(raw, ":")
+	if !ok {
+		host, port = raw, "5000"
+	}
+	if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+		add("http://host.docker.internal:" + port)
+		add("http://registry:" + port)
+	}
+	return out
+}
+
 // ensureWorkerBase builds the actor-AGNOSTIC worker parts image (kontra-worker-base:1) if
 // absent: a golang stage compiles the Go handler ONCE, and the result — handler + entrypoint —
 // is stashed in a slim image the per-actor build COPYs from. This is what makes a re-deploy fast (no handler recompile) and dodges the
@@ -480,13 +524,15 @@ func ensureWorkerBase(ctx context.Context, d imageAPI, progress io.Writer) error
 // worker COPYs from.
 func workerBaseDockerfile() string {
 	return fmt.Sprintf(`FROM golang:1.25 AS handler-build
+ENV GOTOOLCHAIN=go1.26.4
 WORKDIR /src
-COPY handler/ ./handler/
-RUN cd handler && GOWORK=off go build -p=1 -trimpath -o /out/handler .
+COPY sdk/go ./sdk/go
+COPY runtime/handler ./runtime/handler
+RUN cd runtime/handler && GOWORK=off go build -p=1 -trimpath -o /out/handler .
 
 FROM alpine:3
 COPY --from=handler-build /out/handler /kontra/handler
-COPY infra/worker-entrypoint.sh /kontra/entrypoint.sh
+COPY control/images/worker-entrypoint.sh /kontra/entrypoint.sh
 `)
 }
 
@@ -601,24 +647,29 @@ func emptyTarWith(name string, data []byte) io.ReadCloser {
 // versionDeployed reports whether <name>:<version> already exists in the registry (a prior
 // deploy) — the signal `kontra deploy` refuses to overwrite without --override.
 func versionDeployed(reg, name, version string) bool {
-	resp, err := statusHTTP.Get(registryBase(reg) + "/v2/" + name + "/tags/list")
-	if err != nil {
-		return false // can't tell → don't block the deploy
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false // 404 = repo unknown = not deployed
-	}
-	var res struct {
-		Tags []string `json:"tags"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&res) != nil {
-		return false
-	}
-	for _, t := range res.Tags {
-		if t == version {
-			return true
+	for _, base := range registryProbeBases(reg) {
+		resp, err := statusHTTP.Get(base + "/v2/" + name + "/tags/list")
+		if err != nil {
+			continue
 		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			continue
+		}
+		var res struct {
+			Tags []string `json:"tags"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&res)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		for _, t := range res.Tags {
+			if t == version {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
@@ -626,8 +677,10 @@ func versionDeployed(reg, name, version string) bool {
 // registryReachable verifies the registry answers on /v2/ before we tag+push, so a
 // missing registry is a clear message (with the fix) instead of a raw push error.
 func registryReachable(reg string) error {
-	if httpAnswers(registryBase(reg) + "/v2/") {
-		return nil
+	for _, base := range registryProbeBases(reg) {
+		if httpAnswers(base + "/v2/") {
+			return nil
+		}
 	}
 	// THE HINT IS `kontra up`, NOT A `docker run`. The registry is a component of the control
 	// plane and is served from the binary (ADR 0032); telling an operator to hand-start a

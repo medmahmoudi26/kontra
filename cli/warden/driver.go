@@ -205,6 +205,11 @@ type workerDriver interface {
 // a Worker `podman` is holding.
 const workerLabelVar = "KONTRA_WORKER"
 
+// workerPairLabelVar marks a docker container whose image entrypoint already runs both
+// halves. dockerFleet assignments carry empty argv, which means "the image is the spec"
+// (driver_podman.go). Starting two such containers put rival pollers on one queue.
+const workerPairLabelVar = "KONTRA_WORKER_PAIR"
+
 // workerLabelSep separates the three fields of a label.
 //
 // NOTHING FORBIDS IT IN A NAME, and assuming otherwise was this file's one real bug.

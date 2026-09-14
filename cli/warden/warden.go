@@ -246,6 +246,7 @@ func (w *warden) run(ctx context.Context) error {
 	for {
 		if got, err := w.fetchAssignment(ctx); err != nil {
 			if ctx.Err() != nil {
+				w.stopDockerWorkers()
 				return nil
 			}
 			if w.hasDesired {
@@ -269,8 +270,31 @@ func (w *warden) run(ctx context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
+			w.stopDockerWorkers()
 			return nil
 		case <-time.After(w.interval):
+		}
+	}
+}
+
+// stopDockerWorkers tears down sibling containers this Warden started. Docker Workers are not
+// child processes: Pulumi destroying the Warden container would otherwise leave them polling.
+// process and podman keep the systemd leak-on-restart contract (KillMode=process).
+func (w *warden) stopDockerWorkers() {
+	if w.driver == nil || w.driver.driverName() != "docker" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wardenDrain+5*time.Second)
+	defer cancel()
+	hs, err := w.driver.list(ctx)
+	if err != nil {
+		w.logf("could not list Workers on shutdown: %v", err)
+		return
+	}
+	for _, h := range hs {
+		w.logf("stopping %s (this Warden is stopping)", h.id())
+		if err := w.driver.Stop(ctx, h, 0); err != nil {
+			w.logf("could not stop %s: %v", h.id(), err)
 		}
 	}
 }

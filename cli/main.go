@@ -149,9 +149,9 @@ const usageText = `kontra — local control surface
                # derived from the code ON DISK — no orchestrator, no registration, no deploy.
                # The same derivation the catalog publishes (kontra.schema.schema_of), so a form
                # built from this cannot disagree with what the Method will accept.
-  kontra workspace seed|watch [--dir <path>]
-               # seed an empty workspace with hello actor+workflow; watch manifests and
-               # publish actor artifacts. No-op when the workspace already has files.
+  kontra workspace seed|watch|list|use|create [--dir <path>]
+               # named workspaces under KONTRA_WORKSPACES; seed hello on empty parent;
+               # watch the current child and publish actor artifacts.
   kontra workflow register <dir> [--init] [--workflow <Class>] [--json]
                # DECLARE it, without serving or running it: records the path, the manifest,
                # the version and a content digest, and creates the Actor's Nexus endpoint

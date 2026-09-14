@@ -9,6 +9,7 @@ ENV PATH="/root/.pulumi/bin:${PATH}"
 WORKDIR /src
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY shared/core ./shared/core
+COPY shared/conformance ./shared/conformance
 COPY control/orchestrator ./control/orchestrator
 RUN corepack enable \
  && pnpm install --frozen-lockfile \

@@ -34,7 +34,9 @@ sdk/python/kontra/v1
 # the example actors live in the seam but are NOT runtime — keep them out of the
 # kontra-host base (its build context is the repo root; the per-actor images build
 # from their own context under examples/python/<name>, unaffected by this).
+# The appliance/CLI image still needs the seeded hello actor (ADR 0047).
 examples/python
+!examples/python/hello
 
 # Compiled example binaries — 52 MB each, and .gitignore does NOT apply to Docker: a Go
 # actor's build context is the repo root (it needs sdk/go + runtime/go), so every sibling example's

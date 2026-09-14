@@ -51,6 +51,7 @@ export function dockerFleetProgram(args: DockerFleetArgs) {
         {
           name,
           image: wardenImage,
+          hostname: name,
           command: ['kontra', 'warden', 'serve', '--driver', 'docker', '--local'],
           envs: [
             `KONTRA_ADDRESS=${process.env.KONTRA_ADDRESS || 'temporal:7233'}`,
@@ -58,17 +59,20 @@ export function dockerFleetProgram(args: DockerFleetArgs) {
             `KONTRA_REDIS_HOST=${process.env.KONTRA_REDIS_HOST || 'redis:6379'}`,
             `KONTRA_S3_ENDPOINT=${process.env.KONTRA_S3_ENDPOINT || 'http://seaweed-s3:8333'}`,
             `KONTRA_ORCHESTRATOR_URL=${process.env.KONTRA_ORCHESTRATOR_URL || 'http://orchestrator-api:8088'}`,
-            `KONTRA_REGISTRY=${process.env.KONTRA_REGISTRY || 'registry:5000'}`,
+            `KONTRA_REGISTRY=${process.env.KONTRA_REGISTRY || '127.0.0.1:5000'}`,
             `KONTRA_CONTROLLER=${controller}`,
-            `KONTRA_TRUST_REGISTRIES=${process.env.KONTRA_TRUST_REGISTRIES || 'registry:5000'}`,
-            `KONTRA_TRUST_UNSIGNED=${process.env.KONTRA_TRUST_UNSIGNED || 'registry:5000'}`,
+            `KONTRA_TRUST_REGISTRIES=${process.env.KONTRA_TRUST_REGISTRIES || '127.0.0.1:5000'}`,
+            `KONTRA_TRUST_UNSIGNED=${process.env.KONTRA_TRUST_UNSIGNED || '127.0.0.1:5000'}`,
             `KONTRA_DOCKER_NETWORK=${network}`,
             `KONTRA_SKIP_INIT=1`,
             `KONTRA_WARDEN_ASSIGNMENT=${JSON.stringify(assigned)}`,
           ],
           networksAdvanced: [{ name: network }],
           volumes: [{ hostPath: sock, containerPath: '/var/run/docker.sock' }],
-          restart: 'unless-stopped',
+          // Pulumi owns the lifetime. unless-stopped would resurrect a Machine after
+          // `docker stop`/`kill` during destroy and leave sibling Workers behind.
+          restart: 'no',
+          stopTimeout: 20,
         },
         { ignoreChanges: [] }
       );
@@ -125,6 +129,12 @@ export function assignmentFor(
       version: p.actorVersion ?? '0.1.0',
       image,
       env: {
+        KONTRA_ADDRESS: process.env.KONTRA_ADDRESS || 'temporal:7233',
+        KONTRA_NAMESPACE: process.env.KONTRA_NAMESPACE || 'default',
+        KONTRA_REDIS_HOST: process.env.KONTRA_REDIS_HOST || 'redis:6379',
+        KONTRA_S3_ENDPOINT: process.env.KONTRA_S3_ENDPOINT || 'http://seaweed-s3:8333',
+        KONTRA_ORCHESTRATOR_URL:
+          process.env.KONTRA_ORCHESTRATOR_URL || 'http://orchestrator-api:8088',
         ...(p.maxSessions ? { KONTRA_MAX_PARALLEL_SESSIONS: String(p.maxSessions) } : {}),
         ...(p.controller ? { KONTRA_CONTROLLER: p.controller } : {}),
       },

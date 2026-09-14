@@ -541,7 +541,5 @@ function discoverWalk(
   return found;
 }
 
-/** Extra root Compose bind-mounts. Same absolute path on host and in the container. */
-export function workspaceRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return (env.KONTRA_WORKSPACE ?? '').trim();
-}
+/** Extra root Compose bind-mounts. Named workspaces: KONTRA_WORKSPACES + .current child. */
+export { workspaceRoot } from './workspaces';

@@ -53,24 +53,26 @@ not a supported topology after this change.
 
 ## Workspace
 
-Compose bind-mounts `${KONTRA_WORKSPACE:-./workspace}` at the same absolute path in every service
-that reads code. Using the same path preserves the existing catalog contract: a registered source
-path means the same file to the CLI, discovery process, and orchestrator.
+Compose bind-mounts `${KONTRA_WORKSPACES}` at the same absolute path in every service that reads
+code. Blank env defaults to `./workspaces.kontra` under the compose project directory. Using the
+same path preserves the catalog contract: a registered source path means the same file to the CLI,
+discovery process, and orchestrator.
 
-On first launch, an init container checks whether the workspace contains any entry other than
-installation metadata. If it is empty, it copies a versioned starter:
+Each child of that parent is a named workspace. `.current` names the active child. On first launch,
+`cluster-init` seeds `hello/` when the parent is empty:
 
-- `actors/hello/actor.json`
-- `actors/hello/actor.py`
-- `workflows/hello/workflow.json`
-- `workflows/hello/workflow.py`
+- `hello/actors/hello/actor.json`
+- `hello/actors/hello/actor.py`
+- `hello/workflows/hello/workflow.json`
+- `hello/workflows/hello/workflow.py`
 
-It never replaces files in a non-empty workspace.
+It never replaces files in a non-empty parent. The console rail switches the current workspace;
+Datasets and runs stay cluster-wide.
 
-The workspace service scans recursively on startup and watches thereafter. A directory containing
-`actor.json` is an Actor; a directory containing `workflow.json` is a workflow. It handles create,
-change, rename, and delete events idempotently. Invalid manifests appear in status with their exact
-path and error; one invalid entry does not block valid siblings.
+The `cli` service watches the current child thereafter. A directory containing `actor.json` is an
+Actor; a directory containing `workflow.json` is a workflow. It handles create, change, rename, and
+delete events idempotently. Invalid manifests appear in status with their exact path and error; one
+invalid entry does not block valid siblings.
 
 Workflow discovery updates catalog metadata only. The user must explicitly serve and start a
 workflow. Actor discovery updates catalog metadata and builds/publishes the actor artifact needed by
