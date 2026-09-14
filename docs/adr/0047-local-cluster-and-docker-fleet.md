@@ -68,12 +68,12 @@ DigitalOcean.
 ### 3. The workspace is the source of truth, and discovery does not run code
 
 `${KONTRA_WORKSPACES}` is bind-mounted at the same absolute path in every service that
-reads code. Blank env defaults to `./workspaces.kontra` under the compose project directory.
-Each child directory is a named workspace; `.current` picks the active one. An empty parent is
-seeded once with `hello/` containing `actors/hello` and `workflows/hello`. A non-empty parent is
-never overwritten. Recursive discovery registers manifests in the current child only; it does not
-serve or start workflows. Actor discovery builds and publishes a digest-pinned worker image so the
-first-run path has no separate deploy step.
+reads code. Blank env defaults to `../workspaces.kontra` beside the kontra checkout (sibling of
+`kontra/` and `kontra-console/`). Each child directory is a named workspace; `.current` picks the
+active one. An empty parent is seeded once with `hello/` containing `actors/hello` and
+`workflows/hello`. A non-empty parent is never overwritten. Recursive discovery registers
+manifests in the current child only; it does not serve or start workflows. Actor discovery builds
+and publishes a digest-pinned worker image so the first-run path has no separate deploy step.
 
 ### 4. Documented commands are the CI gate
 

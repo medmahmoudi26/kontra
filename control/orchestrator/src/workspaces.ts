@@ -22,7 +22,8 @@ export class WorkspaceRefused extends Error {
 
 /** Parent folder Compose bind-mounts. Empty means no named-workspace layout. */
 export function workspacesParent(env: NodeJS.ProcessEnv = process.env): string {
-  return (env.KONTRA_WORKSPACES ?? '').trim();
+  const raw = (env.KONTRA_WORKSPACES ?? '').trim();
+  return raw ? path.resolve(raw) : '';
 }
 
 /**
@@ -81,7 +82,7 @@ export interface WorkspaceList {
 export function describeWorkspaces(env: NodeJS.ProcessEnv = process.env): WorkspaceList {
   const parent = workspacesParent(env);
   const mountHint =
-    'mkdir -p workspaces.kontra under the compose directory, then docker compose up -d';
+    'mkdir -p workspaces.kontra beside kontra/ and kontra-console/, then docker compose up -d';
   if (!parent) {
     return { parent: '', current: '', names: [], currentPath: '', mountHint };
   }
