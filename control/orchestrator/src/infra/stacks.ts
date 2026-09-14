@@ -21,11 +21,15 @@
 
 import { credentialFrom } from './credential';
 import { fleetProgram, type FleetArgs, type PlacementArgs } from './programs/fleet';
+import { dockerFleetProgram, type DockerFleetArgs } from './programs/dockerFleet';
 import { parseFqn } from './workspace';
 import type { SecretRef } from '../secrets/types';
 
 /** Projects we know how to build. A stack outside these is refused. */
 export const FLEET_PROJECT = 'kontra-fleet';
+
+/** Local Docker fleet — Pulumi `@pulumi/docker`, no cloud credential (ADR 0047). */
+export const DOCKER_FLEET_PROJECT = 'kontra-docker-fleet';
 
 /** The variable the DigitalOcean SDK reads its token from. One line per provider, here, because
  *  this is the file that already knows which cloud a project is. */
@@ -42,12 +46,16 @@ export interface StackInput {
  * The two are produced together, from one parse of one request, so they cannot come apart — a
  * converge that ran the fleet program with some other stack's credential would be a way to
  * provision in an account the caller did not name.
+ *
+ * A local Docker fleet has no cloud credential: `providerEnvVar` is empty and `credential.name`
+ * is empty. The activities skip the secret store for that plan rather than looking up a name
+ * that does not exist.
  */
 export interface StackPlan {
   program: () => Promise<Record<string, unknown> | void>;
-  /** A NAME, and optionally a pinned version. Never a value — see the header. */
+  /** A NAME, and optionally a pinned version. Never a value — see the header. Empty for docker. */
   credential: SecretRef;
-  /** Where that value goes at the last hop, and nowhere before it. */
+  /** Where that value goes at the last hop, and nowhere before it. Empty: no provider env. */
   providerEnvVar: string;
 }
 
@@ -60,9 +68,15 @@ export function planFor(input: { stackFqn: string } & StackInput): StackPlan {
         credential: credentialFrom(input.args),
         providerEnvVar: DO_TOKEN_VAR,
       };
+    case DOCKER_FLEET_PROJECT:
+      return {
+        program: dockerFleetProgram(coerceDockerFleetArgs(input.args ?? {})),
+        credential: { name: '' },
+        providerEnvVar: '',
+      };
     default:
       throw new Error(
-        `unknown infra project ${JSON.stringify(project)}; expected one of: ${FLEET_PROJECT}`
+        `unknown infra project ${JSON.stringify(project)}; expected one of: ${FLEET_PROJECT}, ${DOCKER_FLEET_PROJECT}`
       );
   }
 }
@@ -97,6 +111,7 @@ export function coerceFleetArgs(raw: Record<string, unknown>): FleetArgs {
     'actorVersion',
     'actorEngine',
     'controller',
+    'workerImage',
   ] as const) {
     if (typeof raw[k] === 'string') out[k] = raw[k] as string;
   }
@@ -111,9 +126,10 @@ export function coerceFleetArgs(raw: Record<string, unknown>): FleetArgs {
   //
   // An ARRAY is new here and it is the one shape this reader had no rule for, so it gets the same
   // rule everything else has: entries that are not objects are dropped, and inside each entry only
-  // the keys and types below survive. An entry with no `bundleUrl` is dropped ENTIRELY rather than
-  // passed on as a placement with nothing to place — the program would build a Worker that fetches
-  // "" — and dropping is the same wordless narrowing `evil: 'rm -rf'` gets one level up.
+  // the keys and types below survive. An entry with neither `bundleUrl` nor `workerImage` is
+  // dropped ENTIRELY rather than passed on as a placement with nothing to place — a dockerFleet
+  // Worker needs a digest-pinned image, and a cloud Worker would fetch "" — and dropping is the
+  // same wordless narrowing `evil: 'rm -rf'` gets one level up.
   //
   // AN EMPTY ARRAY IS NOT AN ABSENT ONE, and the difference is a Fleet. `placements: []` says "this
   // Fleet places nothing", which is a real desired state (`fleet.hold()` converges exactly that);
@@ -135,12 +151,15 @@ export function coerceFleetArgs(raw: Record<string, unknown>): FleetArgs {
 function coercePlacement(raw: unknown): PlacementArgs | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const src = raw as Record<string, unknown>;
-  if (typeof src.bundleUrl !== 'string' || src.bundleUrl === '') return undefined;
   if (typeof src.actorName !== 'string' || src.actorName === '') return undefined;
-  const out: PlacementArgs = { actorName: src.actorName, bundleUrl: src.bundleUrl };
+  const bundleUrl = typeof src.bundleUrl === 'string' ? src.bundleUrl : '';
+  const workerImage = typeof src.workerImage === 'string' ? src.workerImage : '';
+  if (bundleUrl === '' && workerImage === '') return undefined;
+  const out: PlacementArgs = { actorName: src.actorName, bundleUrl };
   for (const k of ['actorVersion', 'actorEngine', 'bundleSha', 'controller'] as const) {
     if (typeof src[k] === 'string') out[k] = src[k] as string;
   }
+  if (workerImage !== '') out.workerImage = workerImage;
   const density = countOf(src.maxSessions);
   if (density !== undefined) out.maxSessions = density;
   const workers = countOf(src.workers);
@@ -158,4 +177,24 @@ function countOf(raw: unknown): number | undefined {
   if (raw === undefined || raw === null) return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : undefined;
+}
+
+/**
+ * Narrow untrusted JSON into DockerFleetArgs. Same placement narrowing as {@link coerceFleetArgs};
+ * the extra keys are the Warden image, the Compose network, and the host Docker socket.
+ */
+export function coerceDockerFleetArgs(raw: Record<string, unknown>): DockerFleetArgs {
+  const base = coerceFleetArgs(raw);
+  const out: DockerFleetArgs = { tag: base.tag, machines: base.machines };
+  if (typeof raw.image === 'string' && raw.image) out.image = raw.image;
+  if (typeof raw.network === 'string' && raw.network) out.network = raw.network;
+  if (typeof raw.dockerSock === 'string' && raw.dockerSock) out.dockerSock = raw.dockerSock;
+  if (typeof raw.controller === 'string' && raw.controller) out.controller = raw.controller;
+  if (base.placements) out.placements = base.placements;
+  for (const k of ['bundleUrl', 'bundleSha', 'actorName', 'actorVersion', 'actorEngine'] as const) {
+    if (typeof raw[k] === 'string') (out as FleetArgs)[k] = raw[k] as string;
+  }
+  if (base.maxSessions !== undefined) out.maxSessions = base.maxSessions;
+  if (typeof raw.workerImage === 'string' && raw.workerImage) out.workerImage = raw.workerImage;
+  return out;
 }

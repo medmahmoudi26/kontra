@@ -160,9 +160,14 @@ DROP_LEASE_ACTIVITY = "dropFleetLease"
 #: side raises, so nothing but a corpus catches it.
 LEASE_SEPARATOR = "#"
 
-# The one project the infra dispatch table knows (`control/orchestrator/src/infra/stacks.ts`). A stack
-# outside it is refused server-side; naming it here makes the fqn derivable without a round trip.
+# The DigitalOcean project the infra dispatch table knows (`control/orchestrator/src/infra/stacks.ts`).
+# A stack outside the known projects is refused server-side; naming it here makes the fqn derivable
+# without a round trip. The local Docker sibling is {@link DOCKER_FLEET_PROJECT}.
 FLEET_PROJECT = "kontra-fleet"
+
+#: The Pulumi project for a local Docker fleet (`docker_fleet`). Sibling of {@link FLEET_PROJECT};
+#: same `stackWorkflow`, no cloud credential. Pinned against `stacks.ts` in `tests/test_fleet_client.py`.
+DOCKER_FLEET_PROJECT = "kontra-docker-fleet"
 
 #: The converge-level spelling of ONE placement — `FleetArgs`' pre-packing fields, and every key
 #: `programs/fleet.ts:placementsOf` folds into a placement when `placements` is absent.
@@ -180,6 +185,7 @@ LEGACY_PLACEMENT_KEYS = (
     "bundleSha",
     "controller",
     "maxSessions",
+    "workerImage",
 )
 
 # Where the caller SDK's short reads are served — the same queue `catalog` pages Datasets on.
@@ -277,6 +283,11 @@ class DigitalOcean:
     #: Account-scoped SSH key ids. Empty leaves the controller's default.
     ssh_key_ids: tuple[str, ...] = field(default_factory=tuple)
 
+    @property
+    def project(self) -> str:
+        """Pulumi project this provider converges. The stack fqn is `{project}/{name}`."""
+        return FLEET_PROJECT
+
     def __post_init__(self) -> None:
         if not isinstance(self.machines, int) or isinstance(self.machines, bool) or self.machines < 0:
             raise ValueError(f"machines must be a non-negative integer, got {self.machines!r}")
@@ -337,11 +348,68 @@ def do_fleet(**kwargs: Any) -> DigitalOcean:
     name in its own convention, and this is Python's. It is `DigitalOcean(...)` with a name that
     reads as a verb phrase at a call site, and it is the same object either way.
 
-    THE BARE WORD `fleet` IS NOT A PROVIDER. It is the door — `fleet.up(...)` — and it is reserved
-    for the local Docker case that has not been built. A reader who finds `fleet` meaning
-    "DigitalOcean" is reading pre-0034 code.
+    THE BARE WORD `fleet` IS NOT A PROVIDER. It is the door — `fleet.up(...)`. The local Docker
+    provider is {@link docker_fleet}. A reader who finds `fleet` meaning "DigitalOcean" is reading
+    pre-0034 code.
     """
     return DigitalOcean(**kwargs)
+
+
+@dataclass(frozen=True)
+class Docker:
+    """Where a local Docker fleet lands (Pulumi `@pulumi/docker`, project `kontra-docker-fleet`).
+
+    NO CLOUD CREDENTIAL. The program talks to the engine this process can already reach — the
+    socket Compose mounted into `orchestrator-infra` — and a name in the secret store would be a
+    lie about what pays for these Machines. They cost a container, not a bill.
+
+    THE SOCKET IS HOST AUTHORITY. Each Machine is a Warden container that creates actor Workers as
+    siblings by mounting `/var/run/docker.sock`. That is acceptable for a single-operator laptop
+    and is not tenant isolation; the Compose file and the security docs say so in those words.
+
+    `image` is the Warden image, not an actor Artifact. What runs on the Machine is decided at
+    `place()`, the same way a DigitalOcean fleet does not bake an actor into cloud-init.
+    """
+
+    machines: int = 0
+    #: Warden image. Empty leaves the control plane's default (`KONTRA_IMAGE` / `kontra:latest`).
+    image: str = ""
+    #: Compose network the Machines join so they can dial Temporal/Redis/S3 by service name.
+    network: str = ""
+    #: Host Docker socket, bind-mounted into each Warden. Empty leaves `/var/run/docker.sock`.
+    docker_sock: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.machines, int) or isinstance(self.machines, bool) or self.machines < 0:
+            raise ValueError(f"machines must be a non-negative integer, got {self.machines!r}")
+
+    @property
+    def project(self) -> str:
+        return DOCKER_FLEET_PROJECT
+
+    @property
+    def credential(self) -> str:
+        """Always empty: a local Docker fleet has no cloud secret to name."""
+        return ""
+
+    def args(self) -> dict[str, Any]:
+        """What crosses to `stackWorkflow` — NAMES AND NUMBERS ONLY, no credential."""
+        out: dict[str, Any] = {"machines": self.machines}
+        if self.image:
+            out["image"] = self.image
+        if self.network:
+            out["network"] = self.network
+        if self.docker_sock:
+            out["dockerSock"] = self.docker_sock
+        return out
+
+
+def docker_fleet(**kwargs: Any) -> Docker:
+    """`docker_fleet(machines=1)` — the local Pulumi Docker provider, sibling of {@link do_fleet}.
+
+    Same `hold` / `up` / Lease / `place` surface. Different Pulumi project, no cloud credential.
+    """
+    return Docker(**kwargs)
 
 
 def _hold_retry():
@@ -469,7 +537,7 @@ class Fleet:
         *,
         name: str,
         tag: str,
-        provider: DigitalOcean,
+        provider: DigitalOcean | Docker,
         controller: str,
         destroy_on_exit: bool,
         timeout: timedelta,
@@ -548,7 +616,7 @@ class Fleet:
         It is also what makes a LEAKED fleet recoverable. The id is the only handle a human has,
         and a uuid would name an orphan after something nobody knows.
         """
-        return f"{FLEET_PROJECT}/{self.name}"
+        return f"{self.provider.project}/{self.name}"
 
     @property
     def name(self) -> str:
@@ -1371,7 +1439,7 @@ class Fleet:
 
 
 def hold(
-    provider: DigitalOcean | None = None,
+    provider: DigitalOcean | Docker | None = None,
     /,
     *,
     tag: str,
@@ -1449,7 +1517,7 @@ def hold(
 
 
 def up(
-    provider: DigitalOcean | None = None,
+    provider: DigitalOcean | Docker | None = None,
     /,
     *,
     actor: str,
@@ -1596,7 +1664,7 @@ def up(
 
 
 def _fleet(
-    provider: DigitalOcean | None,
+    provider: DigitalOcean | Docker | None,
     /,
     *,
     name: str,
@@ -1639,18 +1707,21 @@ def _fleet(
         provider = DigitalOcean(
             machines=machines, credential=credential, region=region, size=size
         )
-    elif not isinstance(provider, DigitalOcean):
+    elif not isinstance(provider, (DigitalOcean, Docker)):
         raise TypeError(
-            "a fleet's provider configuration must be a DigitalOcean (do_fleet(...)), got "
-            f"{type(provider).__name__}"
+            "a fleet's provider configuration must be a DigitalOcean (do_fleet(...)) or a Docker "
+            f"(docker_fleet(...)), got {type(provider).__name__}"
         )
     elif named:
         # A REFUSAL RATHER THAN A MERGE. `fleet.up(do_fleet(region="nyc3"), region="sfo3")` has no
         # right answer, and the wrong one puts Machines in a region that cannot reach the
         # Controller — which does not fail, it HANGS on `ready()`. See DigitalOcean's docstring.
+        # The same sentence for docker_fleet: region=/credential= beside it are DigitalOcean knobs
+        # that do not apply, and a silent drop would look like a working local fleet.
+        kind = "docker_fleet" if isinstance(provider, Docker) else "do_fleet"
         raise ValueError(
             f"pass the fleet's configuration once: {', '.join(named)} was given beside a provider "
-            f"object. Put it inside — do_fleet({', '.join(f'{k}=…' for k in named)}, …)"
+            f"object. Put it inside — {kind}({', '.join(f'{k}=…' for k in named)}, …)"
         )
 
     if lease_ttl is not None and lease_ttl.total_seconds() <= 0:
@@ -1728,9 +1799,12 @@ __all__ = [
     "PlacementFailed",
     "DigitalOcean",
     "do_fleet",
+    "Docker",
+    "docker_fleet",
     "inventory_hosts",
     "lease_id",
     "FLEET_PROJECT",
+    "DOCKER_FLEET_PROJECT",
     "INFRA_QUEUE",
 ]
 

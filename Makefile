@@ -1,12 +1,9 @@
 # Kontra's build and infra targets (see docs/wiki/Deployment.md).
 #
-# **THE LOCAL CONTROL PLANE IS `kontra up`, AND IT IS NOT IN THIS FILE.** One process: Temporal,
-# the object store, the state store, the payload codec, the OCI registry, and the orchestrator as
-# a supervised child. No containers, one data directory (ADR 0031). `scripts/parity-gate.sh` is
-# what proves it, and is the command to run after touching anything on that path.
-#
-#   make up | up-d | down    # the CLOUD CONTROLLER's compose stack — see the note above `up`
-.PHONY: up up-d down logs tmux-dir ui api bundle proto-check image release
+# **THE LOCAL CONTROL PLANE IS THE COMPOSE CLUSTER (ADR 0047).** `make up` starts
+# docker-compose.yml, which includes docker-compose.quickstart.yml. `kontra up` remains in the
+# binary and is not a supported install path.
+.PHONY: up up-d down logs tmux-dir ui api bundle proto-check image release worker-base
 
 # THE TMUX SOCKET DIRECTORY, MADE BEFORE COMPOSE CAN MAKE IT WRONG.
 #
@@ -21,21 +18,8 @@
 tmux-dir:
 	@install -d -m 700 "$${TMUX_TMPDIR:-/tmp}/tmux-$$(id -u)"
 
-# THE CLOUD CONTROLLER, NOT THE LOCAL CONTROL PLANE. **For local development the command is
-# `kontra up`** — one process holding Temporal, the object store, the state store, the codec, the
-# OCI registry and the orchestrator, with no containers at all (ADR 0031).
-#
-# What these two targets start is what is LEFT in docker-compose.yml: `orchestrator-infra`, which
-# holds the Pulumi engine, the fleet key and the cloud credential the appliance deliberately does
-# not ship (ADR 0034 §1), and `orchestrator-probe`. That is the deployment that runs cloud
-# runs, and it is why the file survives; its header says so at length.
-#
-# THEY WILL NOT GIVE YOU A CONTROL PLANE. `temporal`, `seaweed` and `redis` are not services here
-# any more, so a `make up-d` on its own leaves you with two containers dialling a
-# `host.docker.internal` that nothing is answering on. Run `kontra up --bind 172.17.0.1` beside
-# them — and tell it to leave the third orchestrator role alone, or both poll `kontra-infra`:
-#
-#   KONTRA_ORCHESTRATOR_ROLES=api,materializer kontra up --bind 172.17.0.1
+# THE COMPOSE CLUSTER (ADR 0047), including orchestrator-infra for dockerFleet and optional
+# DigitalOcean. `kontra up` is not this target.
 up: tmux-dir
 	docker compose up
 
@@ -158,9 +142,13 @@ image: $(CONSOLE)
 	DOCKER_BUILDKIT=1 docker build -f control/images/Dockerfile.selfcontained \
 	  --build-arg VERSION=$(VERSION) \
 	  -t "$${KONTRA_IMAGE:-kontra:latest}" "$(dir $(CURDIR))"
+	$(MAKE) worker-base
 	@echo
 	@echo "  docker compose -f docker-compose.quickstart.yml up -d"
 	@echo "  open http://127.0.0.1:8088"
+
+worker-base:
+	docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
 
 # `make image-from-release` — the OLDER path, kept because it is the one that proves the container
 # and the published tarball are the same bytes. It needs the host toolchain; `make image` does not.

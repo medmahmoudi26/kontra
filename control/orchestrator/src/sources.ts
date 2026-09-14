@@ -500,6 +500,16 @@ export function filesIn(source: Source): SourceFile[] {
  * about a directory the operator never asked for.
  */
 export function discover(kind: SourceKind, root: string): Omit<Source, 'id' | 'registeredAt'>[] {
+  return discoverWalk(kind, root, 0).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+const DISCOVER_MAX_DEPTH = 8;
+
+function discoverWalk(
+  kind: SourceKind,
+  root: string,
+  depth: number
+): Omit<Source, 'id' | 'registeredAt'>[] {
   let entries: string[];
   try {
     entries = readdirSync(root);
@@ -507,12 +517,29 @@ export function discover(kind: SourceKind, root: string): Omit<Source, 'id' | 'r
     return [];
   }
   const found: Omit<Source, 'id' | 'registeredAt'>[] = [];
+  const marker = MANIFEST[kind];
   for (const entry of entries) {
+    if (entry.startsWith('.') || entry === 'node_modules' || entry === '__pycache__') continue;
+    const full = path.join(root, entry);
+    let st;
     try {
-      found.push(inspectFolder(kind, path.join(root, entry)));
+      st = statSync(full);
     } catch {
-      /* not one of these — a stray file, a __pycache__, a folder mid-write */
+      continue;
+    }
+    if (!st.isDirectory()) continue;
+    if (existsSync(path.join(full, marker))) {
+      try {
+        found.push(inspectFolder(kind, full));
+      } catch {
+        /* invalid sibling — reported by the watcher, not dropped from valid ones */
+      }
+    } else if (depth < DISCOVER_MAX_DEPTH) {
+      found.push(...discoverWalk(kind, full, depth + 1));
     }
   }
-  return found.sort((a, b) => a.name.localeCompare(b.name));
+  return found;
 }
+
+/** Extra root Compose bind-mounts. Named workspaces: KONTRA_WORKSPACES + .current child. */
+export { workspaceRoot } from './workspaces';

@@ -134,6 +134,7 @@ describe('resolveBundle', () => {
       'bundleSha',
       'bundleUrl',
       'controller',
+      'workerImage',
     ]);
   });
 

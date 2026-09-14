@@ -64,8 +64,17 @@ def test_the_stack_workflow_type_matches_the_orchestrator():
 def test_the_fleet_project_matches_the_infra_dispatch_table():
     """`infra/stacks.ts` refuses a stack outside its known projects, so an fqn built from a
     different literal is a 500 at converge time rather than a wrong fleet."""
-    m = re.search(r"FLEET_PROJECT\s*=\s*'([^']+)'", _read("infra/stacks.ts"))
+    src = _read("infra/stacks.ts")
+    m = re.search(r"FLEET_PROJECT\s*=\s*'([^']+)'", src)
     assert m and fleet.FLEET_PROJECT == m.group(1)
+
+
+def test_the_docker_fleet_project_matches_the_infra_dispatch_table():
+    """Sibling of FLEET_PROJECT. A drifted literal here is a local fleet that 500s on an
+    unknown infra project instead of converging Warden containers."""
+    src = _read("infra/stacks.ts")
+    m = re.search(r"DOCKER_FLEET_PROJECT\s*=\s*'([^']+)'", src)
+    assert m and fleet.DOCKER_FLEET_PROJECT == m.group(1)
 
 
 def test_the_caller_queue_matches_the_queue_the_activities_are_registered_on():
@@ -152,6 +161,28 @@ def test_the_fleet_is_named_after_what_it_places():
     assert fleet.up(actor="nscheck", version="0.1.0", machines=1, tag="dns").fqn == f.fqn
     # A different VERSION is a different fleet, because it is a different Artifact.
     assert fleet.up(actor="nscheck", version="0.2.0", machines=1).fqn != f.fqn
+
+
+def test_docker_fleet_is_a_sibling_project_with_no_credential():
+    """`docker_fleet` is not DigitalOcean with the cloud knobs stripped: it is a second provider,
+    a second Pulumi project, and a converge that must never ask the secret store for a token."""
+    spec = fleet.docker_fleet(machines=1)
+    assert isinstance(spec, fleet.Docker)
+    assert spec.args() == {"machines": 1}
+    assert "credential" not in spec.args()
+    f = fleet.up(spec, actor="hello", version="0.1.0")
+    assert f.fqn == "kontra-docker-fleet/hello-0.1.0"
+    assert f.provider.project == fleet.DOCKER_FLEET_PROJECT
+    assert f.credential == ""
+    held = fleet.hold(spec, tag="hello", machines=None)
+    assert held.fqn == "kontra-docker-fleet/hello"
+
+
+def test_docker_fleet_refuses_digitalocean_knobs_beside_it():
+    with pytest.raises(ValueError, match="docker_fleet"):
+        fleet.up(fleet.docker_fleet(machines=1), actor="hello", version="0.1.0", region="nyc3")
+    with pytest.raises(ValueError, match="docker_fleet"):
+        fleet.up(fleet.docker_fleet(machines=1), actor="hello", version="0.1.0", credential="do-prod")
 
 
 def test_the_tag_defaults_to_the_actor():

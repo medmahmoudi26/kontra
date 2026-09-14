@@ -2,18 +2,12 @@
 
 ## Install (once)
 
-Two different installs, and picking the wrong one wastes an afternoon:
+The supported path is a Docker Compose cluster (ADR 0047). Clone, build the images, and run
+`docker compose --env-file .env.quickstart up -d --wait` — see the repository README. Docker is the
+only host prerequisite. `kontra up` (the appliance) is not a supported install.
 
-- **`install-appliance.sh`** installs a **release** — the `kontra` binary and the bundles it runs,
-  nothing compiled and nothing cloned. That is what a user wants. It needs a published release, and
-  [no release has been tagged yet](../../README.md#install), so it does not work today.
-- **`install.sh`**, below, sets up a **development checkout** — a venv, the editable SDK, the buf
-  toolchain and proto codegen. It needs Go, Docker and a clone. That is what a contributor wants,
-  and it is the working path right now.
-
-If you only want to *run* kontra on a fresh machine before a release exists, you need neither:
-`git clone`, then `cd cli && go build -o /usr/local/bin/kontra .`, then `kontra up`. Go 1.26.4 is
-the only prerequisite.
+A **development checkout** still uses `install.sh` below: a venv, the editable SDK, the buf
+toolchain and proto codegen. It needs Go, Docker and a clone.
 
 ```bash
 ./install.sh

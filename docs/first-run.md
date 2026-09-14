@@ -1,63 +1,64 @@
 # First run
 
-Control plane → actor → Method call → workflow → run → secrets → fleet. Three or four lines a step.
+Control plane → seeded hello Dataset → (optional) your own actor → secrets → a cloud fleet.
 
-**Every command here was run against a fresh install while this page was written**, and several of
-the notes exist because the step failed the first time. Where something is a prerequisite rather
-than a nicety, it says so.
+**Every command here is the documented install path.** Discovery registers the starter; it does not
+serve or start it.
 
 ---
 
 ## 1 · A control plane
-
-**Pull it:**
-
-```bash
-mkdir -p kontra-run && cd kontra-run          # an EMPTY directory, not a checkout
-gh api repos/medmahmoudi26/kontra/contents/docker-compose.quickstart.yml -H "Accept: application/vnd.github.raw" > docker-compose.yml
-gh api repos/medmahmoudi26/kontra/contents/.env.quickstart -H "Accept: application/vnd.github.raw" > .env
-echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USER> --password-stdin
-docker compose up -d
-docker compose logs kontra | grep -A4 'console login'
-```
-
-**Or build it:**
 
 ```bash
 git clone https://github.com/medmahmoudi26/kontra-console.git
 git clone https://github.com/medmahmoudi26/kontra.git
 cd kontra
 make image
-KONTRA_IMAGE=kontra:latest KONTRA_PULL_POLICY=never docker compose -f docker-compose.quickstart.yml up -d
-docker compose -f docker-compose.quickstart.yml logs kontra | grep -A4 'console login'
+docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
+docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
+docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
+mkdir -p workspaces.kontra
+docker compose --env-file .env.quickstart up -d --wait
+docker compose logs cluster-init | grep -A4 'console login'
 ```
 
 Sign in at <http://127.0.0.1:8088> as `admin` with the password that last line printed. Shown once;
-only a hash is kept. Lost it? `docker compose exec kontra kontra user add <name>`.
+only a hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.
 
-`docker compose down` keeps every run; `down -v` throws the data away.
+`docker compose down` keeps Datasets and Pulumi dockerFleet state. **`down -v` destroys both.**
 
-### The CLI, and the tokens it needs
+Named workspaces live in `workspaces.kontra/` under the compose directory. Seed creates `hello/`
+when that parent is empty. The console rail switches the current workspace; Datasets and runs stay
+cluster-wide.
 
-Everything below can be done from the console, but the CLI is faster to show. Put the binary on your
-path (`install-appliance.sh`, or `go build ./cli`), then point it at the control plane:
+### Serve and start the starter
+
+The empty parent was seeded with `workspaces.kontra/hello` (`actors/hello`, `workflows/hello`).
+Watch has registered them and published the actor image. You still have to serve and start:
+
+```bash
+docker compose exec -d cli sh -c 'kontra workflow serve "$KONTRA_WORKSPACES/hello/workflows/hello"'
+docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACES/hello/workflows/hello" --wait'
+```
+
+The Run writes `{"message": "hello world"}` into Dataset `hello` and tears the local Fleet down when
+the scope exits. Cancel is the same teardown. Do not terminate the walkthrough.
+
+```bash
+docker compose exec -T cli sh -c 'kontra dataset query hello --sql "select message from hello"'
+```
+
+### Tokens the CLI inside the cluster already has
+
+`cluster-init` wrote `config.yaml` into the `kontra-home` volume. The `cli` service mounts that
+volume, so `docker compose exec cli kontra …` needs no extra exports. A CLI on the **host** still
+does:
 
 ```bash
 export KONTRA_ORCHESTRATOR_URL=http://127.0.0.1:8088
 export KONTRA_ADDRESS=127.0.0.1:7233
-# read them out of the volume, then export run / state / explore
-docker compose -f docker-compose.quickstart.yml exec -T kontra \
-  grep -A14 '^tokens:' /var/lib/kontra/config.yaml
+docker compose exec -T cli grep -A14 '^tokens:' /var/lib/kontra/config.yaml
 ```
-
-**`kontra init` generates a run token, and the run-gated commands fail without it.** On a host
-install the CLI reads it from `~/.kontra/config.yaml` and you never see it; against a *container*
-the config is inside the volume, so `KONTRA_RUN_TOKEN` (and `KONTRA_STATE_TOKEN` for datasets) have
-to be exported. A missing one is `401 unauthorized` and says nothing else.
-
-> **Careful if you already have `~/.kontra/config.yaml` on this host.** It fills in any token you
-> did *not* export — so a CLI pointed at a second control plane can send the first one's token and
-> get a 401 that looks like a bug. Export all of them, or none.
 
 ---
 
@@ -254,4 +255,4 @@ Kept because each one is a thing a second reader will hit, and every one passed 
 | `kontra actor register` → `no such directory` | the quickstart mounted nothing, so the orchestrator could not read the folder it was given |
 | `kontra workflow serve` printed nothing and exited 0 | the file had no `__main__` block; a worker that never started was reported as success |
 | The fleet path of two shipped workflows | `fleet.up` without `actor=`/`version=` — a `TypeError` only the fleet branch reached |
-| `pull access denied … may require 'docker login'` | an unqualified local tag Docker tried to fetch from Hub; an auth error for a missing build |
+| `pull access denied … may require 'docker login'` | a local tag was never built (`make image` / orchestrator / host) and Compose tried a registry pull |

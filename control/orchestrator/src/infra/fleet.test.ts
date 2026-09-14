@@ -20,7 +20,7 @@ import {
   placementsOf,
   validateTag,
 } from './programs/fleet';
-import { coerceFleetArgs, programFor, FLEET_PROJECT } from './stacks';
+import { coerceFleetArgs, planFor, programFor, FLEET_PROJECT, DOCKER_FLEET_PROJECT } from './stacks';
 import { fqn, parseFqn } from './workspace';
 
 const SOURCE = readFileSync(join(__dirname, 'programs', 'fleet.ts'), 'utf8');
@@ -84,6 +84,13 @@ describe('stack dispatch', () => {
   it('builds the fleet program for the fleet project', () => {
     expect(programFor({ stackFqn: `${FLEET_PROJECT}/run-1`, args: { tag: 'crawl', machines: 2 } }))
       .toBeTypeOf('function');
+  });
+
+  it('builds the docker fleet program with no cloud credential', () => {
+    const plan = planFor({ stackFqn: `${DOCKER_FLEET_PROJECT}/hello`, args: { tag: 'hello', machines: 1 } });
+    expect(plan.program).toBeTypeOf('function');
+    expect(plan.providerEnvVar).toBe('');
+    expect(plan.credential.name).toBe('');
   });
 });
 

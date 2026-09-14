@@ -115,6 +115,11 @@ export interface ResolvedBundle {
    * makes fetching and registering the same decision rather than two that happen to match.
    */
   controller: string;
+  /**
+   * Digest-pinned Worker image (`host/name@sha256:…`) when `kontra deploy` has published one.
+   * Empty when only the Bundle artifact exists. Docker fleets require it; DigitalOcean ignores it.
+   */
+  workerImage: string;
 }
 
 /** The manifest, narrowed to the three things a resolver reads. */
@@ -158,7 +163,7 @@ interface BundleConfig {
  * run is not the cost worth optimising.
  */
 export async function resolveBundle(input: ResolveBundleInput): Promise<ResolvedBundle> {
-  const controller = input.controller || process.env.KONTRA_CONTROLLER || '';
+  const controller = input.controller || process.env.KONTRA_CONTROLLER || 'orchestrator-api';
   if (!controller) {
     throw new Error(
       'no controller address: a Machine that cannot name the Controller starts, registers ' +
@@ -174,14 +179,29 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
   ).replace(/\/+$/, '');
 
   const url = bundleManifestUrl(registry, input.actor, input.version);
-  const res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT } });
-  if (res.status === 404) {
-    // Name the fix, not just the miss. This is the single most likely first failure of the whole
-    // API — the actor exists in the checkout and has simply never been published.
+  const workerImage = await resolveWorkerImage(registry, input.actor, input.version);
+  let res: Response | undefined;
+  try {
+    res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT } });
+  } catch {
+    res = undefined;
+  }
+  if (!res || res.status === 404) {
+    if (workerImage) {
+      return {
+        actorName: input.actor,
+        actorVersion: input.version,
+        actorEngine: 'py',
+        bundleUrl: '',
+        bundleSha: '',
+        controller,
+        workerImage,
+      };
+    }
     throw new Error(
       `no Bundle published for ${input.actor}@${input.version} (looked for ` +
         `${bundleRepo(input.actor)}:${input.version} in the registry at ${registry}). ` +
-        `Publish it first: kontra build --actor <dir>`
+        `Publish it first: kontra deploy --actor <dir>`
     );
   }
   if (!res.ok) throw new Error(`resolving the Bundle at ${url}: HTTP ${res.status}`);
@@ -231,13 +251,34 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
     actorName: String(cfg.name || input.actor),
     actorVersion: String(cfg.version || input.version),
     actorEngine: engine,
-    // The MACHINE's view of the registry, which is not necessarily this process's: a Machine
-    // resolving `localhost:5000` means its own loopback. `cli/bundle.go:bundleBlobURL` builds the
-    // same string, and `shared/conformance/bundleref.json` is what keeps them one string.
     bundleUrl: bundleBlobUrl(registry, input.actor, sha),
     bundleSha: sha,
     controller,
+    workerImage: await resolveWorkerImage(registry, String(cfg.name || input.actor), String(cfg.version || input.version)),
   };
+}
+
+/** The runnable Worker image `kontra deploy` pushes as `<registry>/<actor>:<version>`. */
+async function resolveWorkerImage(registry: string, actor: string, version: string): Promise<string> {
+  const advertised = registry.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const bases = [registryBase(registry)];
+  if (/^(127\.0\.0\.1|localhost|::1)(:|$)/.test(advertised)) {
+    const port = advertised.includes(':') ? advertised.split(':')[1] : '5000';
+    bases.push(`http://host.docker.internal:${port}`, `http://registry:${port}`);
+  }
+  for (const base of bases) {
+    try {
+      const url = `${base}/v2/${actor}/manifests/${version}`;
+      const res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT } });
+      if (!res.ok) continue;
+      const digest = res.headers.get('docker-content-digest');
+      if (!digest || !/^sha256:[a-f0-9]{64}$/.test(digest)) continue;
+      return `${advertised}/${actor}@${digest}`;
+    } catch {
+      continue;
+    }
+  }
+  return '';
 }
 
 export interface QueuePollersInput {

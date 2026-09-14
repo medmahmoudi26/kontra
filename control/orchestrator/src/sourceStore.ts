@@ -20,6 +20,7 @@ import {
   folderDigest,
   inspectFolder,
   SourceRefused,
+  workspaceRoot,
   type Source,
   type SourceKind,
 } from './sources';
@@ -73,9 +74,15 @@ export class SourceStore {
     for (const found of discover(kind, defaultRoot(kind))) {
       if (seen.has(found.path)) continue;
       seen.add(found.path);
-      // A discovered folder's id is its path. Stable across restarts without being stored, which
-      // is what lets the surfaces address one uniformly with a registered folder.
       out.push({ ...found, id: `at:${found.path}`, registeredAt: 0 });
+    }
+    const workspace = workspaceRoot();
+    if (workspace) {
+      for (const found of discover(kind, workspace)) {
+        if (seen.has(found.path)) continue;
+        seen.add(found.path);
+        out.push({ ...found, id: `at:${found.path}`, registeredAt: 0 });
+      }
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
