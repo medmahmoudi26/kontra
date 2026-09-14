@@ -132,3 +132,6 @@ orchestrator.db-wal
 backend.db
 backend.db-shm
 backend.db-wal
+
+# Never commit operator workspace trees if someone creates them inside the checkout by mistake.
+/workspaces.kontra/
