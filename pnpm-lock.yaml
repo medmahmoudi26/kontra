@@ -45,13 +45,16 @@ importers:
         version: 1.43.0
       '@pulumi/command':
         specifier: ^1.2.1
-        version: 1.2.1(supports-color@8.1.1)(typescript@5.9.3)
+        version: 1.2.1(typescript@5.9.3)
       '@pulumi/digitalocean':
         specifier: ^4.78.1
-        version: 4.78.1(supports-color@8.1.1)(typescript@5.9.3)
+        version: 4.78.1(typescript@5.9.3)
+      '@pulumi/docker':
+        specifier: ^4.11.2
+        version: 4.11.2(typescript@5.9.3)
       '@pulumi/pulumi':
         specifier: ^3.256.0
-        version: 3.256.0(supports-color@8.1.1)(typescript@5.9.3)
+        version: 3.256.0(typescript@5.9.3)
       '@temporalio/activity':
         specifier: ^1.11.0
         version: 1.18.1
@@ -69,7 +72,7 @@ importers:
         version: 1.18.1
       '@temporalio/worker':
         specifier: ^1.11.0
-        version: 1.18.1(esbuild@0.21.5)(postcss@8.5.15)(tslib@2.8.1)
+        version: 1.18.1(tslib@2.8.1)
       '@temporalio/workflow':
         specifier: ^1.11.0
         version: 1.18.1
@@ -81,7 +84,7 @@ importers:
         version: 5.8.5
       ioredis:
         specifier: ^6.0.0
-        version: 6.0.0(supports-color@8.1.1)
+        version: 6.0.0
       nexus-rpc:
         specifier: 0.0.2
         version: 0.0.2
@@ -94,7 +97,7 @@ importers:
         version: 1.18.1
       '@temporalio/testing':
         specifier: ^1.11.0
-        version: 1.18.1(esbuild@0.21.5)(postcss@8.5.15)(tslib@2.8.1)
+        version: 1.18.1(tslib@2.8.1)
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1
@@ -109,7 +112,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.20.1)(supports-color@8.1.1)(terser@5.48.0)
+        version: 2.1.9(@types/node@22.20.1)(terser@5.48.0)
 
   shared/core:
     devDependencies:
@@ -923,6 +926,9 @@ packages:
 
   '@pulumi/digitalocean@4.78.1':
     resolution: {integrity: sha512-adAwo7F6YmvnETfchV+jTULkqlsYpsAowqhbrNsW4+xiQOaDbJwqVa4XKNVR5b2JZqq9Qn8iLsXPYATsBUtBFQ==}
+
+  '@pulumi/docker@4.11.2':
+    resolution: {integrity: sha512-mm8Uscb/3S7OieYyg1E/vvFx3OS4bAkZvtFvi1yTqYda9NbnYOMbJi7a5fU5xB0N0Kd/uliS8olJ/e6nnvVVPg==}
 
   '@pulumi/pulumi@3.256.0':
     resolution: {integrity: sha512-EK1TQieOmxTxbIpX5EKTPpC1WYappH3ASEZzN6Q9gs7rZjuZCATXI9Am8nszmlRdtPlAiVSW8NfQNKCnaNk34A==}
@@ -2284,6 +2290,10 @@ packages:
   secure-json-parse@4.1.0:
     resolution: {integrity: sha512-l4KnYfEyqYJxDwlNVyRfO2E4NTHfMKAWdUuA8J0yve2Dz/E/PdBepY03RvyJpssIpRFwJoCD55wA+mEDs6ByWA==}
 
+  semver@5.7.2:
+    resolution: {integrity: sha512-cBznnQ9KjJqU67B52RMC65CMarK2600WFnbkcaiwWq3xy/5haFJlshgnpjovMVJ+Hff49d8GEn0b87C5pDQ10g==}
+    hasBin: true
+
   semver@7.8.4:
     resolution: {integrity: sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA==}
     engines: {node: '>=10'}
@@ -3276,24 +3286,24 @@ snapshots:
 
   '@lukeed/ms@2.0.2': {}
 
-  '@npmcli/agent@4.0.2(supports-color@8.1.1)':
+  '@npmcli/agent@4.0.2':
     dependencies:
       agent-base: 7.1.4
-      http-proxy-agent: 7.0.2(supports-color@8.1.1)
-      https-proxy-agent: 7.0.6(supports-color@8.1.1)
+      http-proxy-agent: 7.0.2
+      https-proxy-agent: 7.0.6
       lru-cache: 11.5.1
-      socks-proxy-agent: 8.0.5(supports-color@8.1.1)
+      socks-proxy-agent: 8.0.5
     transitivePeerDependencies:
       - supports-color
 
-  '@npmcli/arborist@9.9.1(supports-color@8.1.1)':
+  '@npmcli/arborist@9.9.1':
     dependencies:
       '@gar/promise-retry': 1.0.3
       '@isaacs/string-locale-compare': 1.1.0
       '@npmcli/fs': 5.0.0
       '@npmcli/installed-package-contents': 4.0.0
       '@npmcli/map-workspaces': 5.0.3
-      '@npmcli/metavuln-calculator': 9.0.3(supports-color@8.1.1)
+      '@npmcli/metavuln-calculator': 9.0.3
       '@npmcli/name-from-folder': 4.0.0
       '@npmcli/node-gyp': 5.0.0
       '@npmcli/package-json': 7.0.5
@@ -3311,8 +3321,8 @@ snapshots:
       npm-install-checks: 8.0.0
       npm-package-arg: 13.0.2
       npm-pick-manifest: 11.0.3
-      npm-registry-fetch: 19.1.1(supports-color@8.1.1)
-      pacote: 21.5.1(supports-color@8.1.1)
+      npm-registry-fetch: 19.1.1
+      pacote: 21.5.1
       parse-conflict-json: 5.0.1
       proc-log: 6.1.0
       proggy: 4.0.0
@@ -3352,11 +3362,11 @@ snapshots:
       glob: 13.0.6
       minimatch: 10.2.5
 
-  '@npmcli/metavuln-calculator@9.0.3(supports-color@8.1.1)':
+  '@npmcli/metavuln-calculator@9.0.3':
     dependencies:
       cacache: 20.0.4
       json-parse-even-better-errors: 5.0.0
-      pacote: 21.5.1(supports-color@8.1.1)
+      pacote: 21.5.1
       proc-log: 6.1.0
       semver: 7.8.4
     transitivePeerDependencies:
@@ -3455,20 +3465,20 @@ snapshots:
       '@opentelemetry/sdk-trace': 2.10.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/semantic-conventions': 1.43.0
 
-  '@opentelemetry/instrumentation-grpc@0.220.0(@opentelemetry/api@1.9.1)(supports-color@8.1.1)':
+  '@opentelemetry/instrumentation-grpc@0.220.0(@opentelemetry/api@1.9.1)':
     dependencies:
       '@opentelemetry/api': 1.9.1
-      '@opentelemetry/instrumentation': 0.220.0(@opentelemetry/api@1.9.1)(supports-color@8.1.1)
+      '@opentelemetry/instrumentation': 0.220.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/semantic-conventions': 1.43.0
     transitivePeerDependencies:
       - supports-color
 
-  '@opentelemetry/instrumentation@0.220.0(@opentelemetry/api@1.9.1)(supports-color@8.1.1)':
+  '@opentelemetry/instrumentation@0.220.0(@opentelemetry/api@1.9.1)':
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/api-logs': 0.220.0
       import-in-the-middle: 3.3.3
-      require-in-the-middle: 8.0.1(supports-color@8.1.1)
+      require-in-the-middle: 8.0.1
     transitivePeerDependencies:
       - supports-color
 
@@ -3650,33 +3660,42 @@ snapshots:
 
   '@protobufjs/utf8@1.1.1': {}
 
-  '@pulumi/command@1.2.1(supports-color@8.1.1)(typescript@5.9.3)':
+  '@pulumi/command@1.2.1(typescript@5.9.3)':
     dependencies:
-      '@pulumi/pulumi': 3.256.0(supports-color@8.1.1)(typescript@5.9.3)
+      '@pulumi/pulumi': 3.256.0(typescript@5.9.3)
     transitivePeerDependencies:
       - supports-color
       - ts-node
       - typescript
 
-  '@pulumi/digitalocean@4.78.1(supports-color@8.1.1)(typescript@5.9.3)':
+  '@pulumi/digitalocean@4.78.1(typescript@5.9.3)':
     dependencies:
-      '@pulumi/pulumi': 3.256.0(supports-color@8.1.1)(typescript@5.9.3)
+      '@pulumi/pulumi': 3.256.0(typescript@5.9.3)
     transitivePeerDependencies:
       - supports-color
       - ts-node
       - typescript
 
-  '@pulumi/pulumi@3.256.0(supports-color@8.1.1)(typescript@5.9.3)':
+  '@pulumi/docker@4.11.2(typescript@5.9.3)':
+    dependencies:
+      '@pulumi/pulumi': 3.256.0(typescript@5.9.3)
+      semver: 5.7.2
+    transitivePeerDependencies:
+      - supports-color
+      - ts-node
+      - typescript
+
+  '@pulumi/pulumi@3.256.0(typescript@5.9.3)':
     dependencies:
       '@grpc/grpc-js': 1.14.4
       '@logdna/tail-file': 2.2.0
-      '@npmcli/arborist': 9.9.1(supports-color@8.1.1)
+      '@npmcli/arborist': 9.9.1
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/core': 2.10.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/exporter-trace-otlp-grpc': 0.220.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/exporter-zipkin': 2.10.0(@opentelemetry/api@1.9.1)
-      '@opentelemetry/instrumentation': 0.220.0(@opentelemetry/api@1.9.1)(supports-color@8.1.1)
-      '@opentelemetry/instrumentation-grpc': 0.220.0(@opentelemetry/api@1.9.1)(supports-color@8.1.1)
+      '@opentelemetry/instrumentation': 0.220.0(@opentelemetry/api@1.9.1)
+      '@opentelemetry/instrumentation-grpc': 0.220.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/resources': 2.10.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/sdk-trace-base': 2.10.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/sdk-trace-node': 2.10.0(@opentelemetry/api@1.9.1)
@@ -3781,21 +3800,21 @@ snapshots:
 
   '@sigstore/protobuf-specs@0.5.1': {}
 
-  '@sigstore/sign@4.1.1(supports-color@8.1.1)':
+  '@sigstore/sign@4.1.1':
     dependencies:
       '@gar/promise-retry': 1.0.3
       '@sigstore/bundle': 4.0.0
       '@sigstore/core': 3.2.1
       '@sigstore/protobuf-specs': 0.5.1
-      make-fetch-happen: 15.0.6(supports-color@8.1.1)
+      make-fetch-happen: 15.0.6
       proc-log: 6.1.0
     transitivePeerDependencies:
       - supports-color
 
-  '@sigstore/tuf@4.0.2(supports-color@8.1.1)':
+  '@sigstore/tuf@4.0.2':
     dependencies:
       '@sigstore/protobuf-specs': 0.5.1
-      tuf-js: 4.1.0(supports-color@8.1.1)
+      tuf-js: 4.1.0
     transitivePeerDependencies:
       - supports-color
 
@@ -3966,14 +3985,14 @@ snapshots:
       long: 5.3.2
       protobufjs: 7.5.8
 
-  '@temporalio/testing@1.18.1(esbuild@0.21.5)(postcss@8.5.15)(tslib@2.8.1)':
+  '@temporalio/testing@1.18.1(tslib@2.8.1)':
     dependencies:
       '@temporalio/activity': 1.18.1
       '@temporalio/client': 1.18.1
       '@temporalio/common': 1.18.1
       '@temporalio/core-bridge': 1.18.1
       '@temporalio/proto': 1.18.1
-      '@temporalio/worker': 1.18.1(esbuild@0.21.5)(postcss@8.5.15)(tslib@2.8.1)
+      '@temporalio/worker': 1.18.1(tslib@2.8.1)
       '@temporalio/workflow': 1.18.1
     transitivePeerDependencies:
       - '@minify-html/node'
@@ -3991,7 +4010,7 @@ snapshots:
       - uglify-js
       - webpack-cli
 
-  '@temporalio/worker@1.18.1(esbuild@0.21.5)(postcss@8.5.15)(tslib@2.8.1)':
+  '@temporalio/worker@1.18.1(tslib@2.8.1)':
     dependencies:
       '@grpc/grpc-js': 1.14.4
       '@swc/core': 1.15.41
@@ -4008,11 +4027,11 @@ snapshots:
       protobufjs: 7.6.4
       rxjs: 7.8.2
       source-map: 0.7.6
-      source-map-loader: 5.0.0(webpack@5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15))
+      source-map-loader: 5.0.0(webpack@5.107.2(@swc/core@1.15.41))
       supports-color: 8.1.1
-      swc-loader: 0.2.7(@swc/core@1.15.41)(webpack@5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15))
+      swc-loader: 0.2.7(@swc/core@1.15.41)(webpack@5.107.2(@swc/core@1.15.41))
       unionfs: 4.6.0
-      webpack: 5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)
+      webpack: 5.107.2(@swc/core@1.15.41)
     transitivePeerDependencies:
       - '@minify-html/node'
       - '@swc/css'
@@ -4337,11 +4356,9 @@ snapshots:
 
   cssesc@3.0.0: {}
 
-  debug@4.4.3(supports-color@8.1.1):
+  debug@4.4.3:
     dependencies:
       ms: 2.1.3
-    optionalDependencies:
-      supports-color: 8.1.1
 
   deep-eql@5.0.2: {}
 
@@ -4555,17 +4572,17 @@ snapshots:
       statuses: 2.0.2
       toidentifier: 1.0.1
 
-  http-proxy-agent@7.0.2(supports-color@8.1.1):
+  http-proxy-agent@7.0.2:
     dependencies:
       agent-base: 7.1.4
-      debug: 4.4.3(supports-color@8.1.1)
+      debug: 4.4.3
     transitivePeerDependencies:
       - supports-color
 
-  https-proxy-agent@7.0.6(supports-color@8.1.1):
+  https-proxy-agent@7.0.6:
     dependencies:
       agent-base: 7.1.4
-      debug: 4.4.3(supports-color@8.1.1)
+      debug: 4.4.3
     transitivePeerDependencies:
       - supports-color
 
@@ -4600,11 +4617,11 @@ snapshots:
 
   ini@6.0.0: {}
 
-  ioredis@6.0.0(supports-color@8.1.1):
+  ioredis@6.0.0:
     dependencies:
       '@ioredis/commands': 2.0.0
       cluster-key-slot: 1.1.1
-      debug: 4.4.3(supports-color@8.1.1)
+      debug: 4.4.3
       denque: 2.1.0
       redis-errors: 1.2.0
       standard-as-callback: 2.1.0
@@ -4677,10 +4694,10 @@ snapshots:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  make-fetch-happen@15.0.6(supports-color@8.1.1):
+  make-fetch-happen@15.0.6:
     dependencies:
       '@gar/promise-retry': 1.0.3
-      '@npmcli/agent': 4.0.2(supports-color@8.1.1)
+      '@npmcli/agent': 4.0.2
       '@npmcli/redact': 4.0.0
       cacache: 20.0.4
       http-cache-semantics: 4.2.0
@@ -4829,11 +4846,11 @@ snapshots:
       npm-package-arg: 13.0.2
       semver: 7.8.4
 
-  npm-registry-fetch@19.1.1(supports-color@8.1.1):
+  npm-registry-fetch@19.1.1:
     dependencies:
       '@npmcli/redact': 4.0.0
       jsonparse: 1.3.1
-      make-fetch-happen: 15.0.6(supports-color@8.1.1)
+      make-fetch-happen: 15.0.6
       minipass: 7.1.3
       minipass-fetch: 5.0.2
       minizlib: 3.1.0
@@ -4856,7 +4873,7 @@ snapshots:
 
   package-json-from-dist@1.0.1: {}
 
-  pacote@21.5.1(supports-color@8.1.1):
+  pacote@21.5.1:
     dependencies:
       '@gar/promise-retry': 1.0.3
       '@npmcli/git': 7.0.2
@@ -4870,9 +4887,9 @@ snapshots:
       npm-package-arg: 13.0.2
       npm-packlist: 10.0.4
       npm-pick-manifest: 11.0.3
-      npm-registry-fetch: 19.1.1(supports-color@8.1.1)
+      npm-registry-fetch: 19.1.1
       proc-log: 6.1.0
-      sigstore: 4.1.1(supports-color@8.1.1)
+      sigstore: 4.1.1
       ssri: 13.0.1
       tar: 7.5.22
     transitivePeerDependencies:
@@ -5044,9 +5061,9 @@ snapshots:
 
   require-from-string@2.0.2: {}
 
-  require-in-the-middle@8.0.1(supports-color@8.1.1):
+  require-in-the-middle@8.0.1:
     dependencies:
-      debug: 4.4.3(supports-color@8.1.1)
+      debug: 4.4.3
       module-details-from-path: 1.0.4
     transitivePeerDependencies:
       - supports-color
@@ -5111,6 +5128,8 @@ snapshots:
 
   secure-json-parse@4.1.0: {}
 
+  semver@5.7.2: {}
+
   semver@7.8.4: {}
 
   set-cookie-parser@2.7.2: {}
@@ -5129,23 +5148,23 @@ snapshots:
 
   signal-exit@4.1.0: {}
 
-  sigstore@4.1.1(supports-color@8.1.1):
+  sigstore@4.1.1:
     dependencies:
       '@sigstore/bundle': 4.0.0
       '@sigstore/core': 3.2.1
       '@sigstore/protobuf-specs': 0.5.1
-      '@sigstore/sign': 4.1.1(supports-color@8.1.1)
-      '@sigstore/tuf': 4.0.2(supports-color@8.1.1)
+      '@sigstore/sign': 4.1.1
+      '@sigstore/tuf': 4.0.2
       '@sigstore/verify': 3.1.1
     transitivePeerDependencies:
       - supports-color
 
   smart-buffer@4.2.0: {}
 
-  socks-proxy-agent@8.0.5(supports-color@8.1.1):
+  socks-proxy-agent@8.0.5:
     dependencies:
       agent-base: 7.1.4
-      debug: 4.4.3(supports-color@8.1.1)
+      debug: 4.4.3
       socks: 2.8.9
     transitivePeerDependencies:
       - supports-color
@@ -5161,11 +5180,11 @@ snapshots:
 
   source-map-js@1.2.1: {}
 
-  source-map-loader@5.0.0(webpack@5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)):
+  source-map-loader@5.0.0(webpack@5.107.2(@swc/core@1.15.41)):
     dependencies:
       iconv-lite: 0.6.3
       source-map-js: 1.2.1
-      webpack: 5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)
+      webpack: 5.107.2(@swc/core@1.15.41)
 
   source-map-support@0.5.21:
     dependencies:
@@ -5229,11 +5248,11 @@ snapshots:
     dependencies:
       has-flag: 4.0.0
 
-  swc-loader@0.2.7(@swc/core@1.15.41)(webpack@5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)):
+  swc-loader@0.2.7(@swc/core@1.15.41)(webpack@5.107.2(@swc/core@1.15.41)):
     dependencies:
       '@swc/core': 1.15.41
       '@swc/counter': 0.1.3
-      webpack: 5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)
+      webpack: 5.107.2(@swc/core@1.15.41)
 
   tapable@2.3.3: {}
 
@@ -5245,17 +5264,15 @@ snapshots:
       minizlib: 3.1.0
       yallist: 5.0.0
 
-  terser-webpack-plugin@5.6.1(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)(webpack@5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)):
+  terser-webpack-plugin@5.6.1(@swc/core@1.15.41)(webpack@5.107.2(@swc/core@1.15.41)):
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       jest-worker: 27.5.1
       schema-utils: 4.3.3
       terser: 5.48.0
-      webpack: 5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)
+      webpack: 5.107.2(@swc/core@1.15.41)
     optionalDependencies:
       '@swc/core': 1.15.41
-      esbuild: 0.21.5
-      postcss: 8.5.15
 
   terser@5.48.0:
     dependencies:
@@ -5310,11 +5327,11 @@ snapshots:
 
   tslib@2.8.1: {}
 
-  tuf-js@4.1.0(supports-color@8.1.1):
+  tuf-js@4.1.0:
     dependencies:
       '@tufjs/models': 4.1.0
-      debug: 4.4.3(supports-color@8.1.1)
-      make-fetch-happen: 15.0.6(supports-color@8.1.1)
+      debug: 4.4.3
+      make-fetch-happen: 15.0.6
     transitivePeerDependencies:
       - supports-color
 
@@ -5347,10 +5364,10 @@ snapshots:
 
   validate-npm-package-name@7.0.2: {}
 
-  vite-node@2.1.9(@types/node@22.20.1)(supports-color@8.1.1)(terser@5.48.0):
+  vite-node@2.1.9(@types/node@22.20.1)(terser@5.48.0):
     dependencies:
       cac: 6.7.14
-      debug: 4.4.3(supports-color@8.1.1)
+      debug: 4.4.3
       es-module-lexer: 1.7.0
       pathe: 1.1.2
       vite: 5.4.21(@types/node@22.20.1)(terser@5.48.0)
@@ -5375,7 +5392,7 @@ snapshots:
       fsevents: 2.3.3
       terser: 5.48.0
 
-  vitest@2.1.9(@types/node@22.20.1)(supports-color@8.1.1)(terser@5.48.0):
+  vitest@2.1.9(@types/node@22.20.1)(terser@5.48.0):
     dependencies:
       '@vitest/expect': 2.1.9
       '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@22.20.1)(terser@5.48.0))
@@ -5385,7 +5402,7 @@ snapshots:
       '@vitest/spy': 2.1.9
       '@vitest/utils': 2.1.9
       chai: 5.3.3
-      debug: 4.4.3(supports-color@8.1.1)
+      debug: 4.4.3
       expect-type: 1.3.0
       magic-string: 0.30.21
       pathe: 1.1.2
@@ -5395,7 +5412,7 @@ snapshots:
       tinypool: 1.1.1
       tinyrainbow: 1.2.0
       vite: 5.4.21(@types/node@22.20.1)(terser@5.48.0)
-      vite-node: 2.1.9(@types/node@22.20.1)(supports-color@8.1.1)(terser@5.48.0)
+      vite-node: 2.1.9(@types/node@22.20.1)(terser@5.48.0)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 22.20.1
@@ -5418,7 +5435,7 @@ snapshots:
 
   webpack-sources@3.5.0: {}
 
-  webpack@5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15):
+  webpack@5.107.2(@swc/core@1.15.41):
     dependencies:
       '@types/estree': 1.0.9
       '@types/json-schema': 7.0.15
@@ -5440,7 +5457,7 @@ snapshots:
       neo-async: 2.6.2
       schema-utils: 4.3.3
       tapable: 2.3.3
-      terser-webpack-plugin: 5.6.1(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15)(webpack@5.107.2(@swc/core@1.15.41)(esbuild@0.21.5)(postcss@8.5.15))
+      terser-webpack-plugin: 5.6.1(@swc/core@1.15.41)(webpack@5.107.2(@swc/core@1.15.41))
       watchpack: 2.5.2
       webpack-sources: 3.5.0
     transitivePeerDependencies:

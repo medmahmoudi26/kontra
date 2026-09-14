@@ -14,8 +14,8 @@
     "why": "WHERE the Machines land. Every one of them is OMITTED rather than sent empty when unset: an empty `vpcUuid` asks for a VPC called \"\", and a VPC is regional so the wrong pairing is rejected by the provider — measured as a fleet that landed in sfo3 from an nyc1 controller and hung on ready()."
    },
    "from_resolver": {
-    "keys": ["actorName", "actorVersion", "actorEngine", "bundleUrl", "bundleSha", "controller"],
-    "why": "WHAT RUNS on the Machines. TypeScript declares this exact set as `ResolvedBundle` — 'exactly the placement fields FleetArgs takes, so the caller forwards it verbatim' — and Python does forward it verbatim, so a field added to `ResolvedBundle` and not to `FleetArgs` is dropped on arrival and a field removed from it leaves the placement short. `controller` is in this list because it was once NOT: a caller that did not pass `controller=` provisioned Machines and failed a minute later with `controller=\"\" is not safe to place on a Machine`, having already resolved a perfectly good Controller to build `bundleUrl` from."
+    "keys": ["actorName", "actorVersion", "actorEngine", "bundleUrl", "bundleSha", "controller", "workerImage"],
+    "why": "WHAT RUNS on the Machines. TypeScript declares this exact set as `ResolvedBundle` — 'exactly the placement fields FleetArgs takes, so the caller forwards it verbatim' — and Python does forward it verbatim, so a field added to `ResolvedBundle` and not to `FleetArgs` is dropped on arrival and a field removed from it leaves the placement short. `controller` is in this list because it was once NOT: a caller that did not pass `controller=` provisioned Machines and failed a minute later with `controller=\"\" is not safe to place on a Machine`, having already resolved a perfectly good Controller to build `bundleUrl` from. `workerImage` is the digest-pinned runnable image a Docker Warden pulls; DigitalOcean fleets ignore it and curl `bundleUrl`."
    },
    "density": {
     "keys": ["maxSessions"],
@@ -35,7 +35,7 @@
   "why": "One entry of `placements` — what ONE Artifact on this Fleet is. Its own key set because the reader narrows entries separately (`coercePlacement`), and because two of these keys exist nowhere at the converge level.",
   "required": ["actorName", "bundleUrl"],
   "why_required": "AN ENTRY WITHOUT EITHER IS DROPPED ENTIRELY, not passed on half-built. `bundleUrl` is what a Machine fetches, so an entry without one places a Worker that curls the empty string; `actorName` is what every path on the Machine is named after — its unit, its env file, its root, its metrics target — so an entry without one would write a co-tenant's paths.",
-  "optional": ["actorVersion", "actorEngine", "bundleSha", "controller", "maxSessions", "workers"],
+  "optional": ["actorVersion", "actorEngine", "bundleSha", "controller", "maxSessions", "workers", "workerImage"],
   "workers": "HOW MANY OF THE FLEET'S MACHINES THIS PLACEMENT LANDS ON, one Worker each. Absent means every Machine, which is what a Fleet did before packing, so an unasked-for placement's wire is byte-identical to the pre-slice-11 one. A count ABOVE the machine count is refused by the program rather than truncated: a placement puts at most ONE Worker on a Machine (two of one actor@version there would share a `KONTRA_WORKER` label, a unit name and a queue), so truncating would leave a caller believing in Workers that were never built. `spread=True` in the caller SDK is exactly `workers == machines` and is NOT a key here — there is no boolean on this wire, and a client-side flag that resolved to a number is the only shape `never_boolean` permits.",
   "not_here": ["tag", "machines", "region", "size", "image", "vpcUuid", "sshKeyIds", "credential"],
   "why_not_here": "WHERE the Machines are is the FLEET's, not a placement's. A `region` inside an entry would be a second, disagreeing answer to a question the converge has already answered, and `credential` is refused here for the same structural reason it is refused above: the type that reaches `programs/fleet.ts` has no room for it."
@@ -43,7 +43,7 @@
  "types": {
   "why": "What a value may be on the wire. The reader narrows by `typeof`, so this is not documentation — a value of the wrong type is DISCARDED without a word.",
   "rules": {
-   "string": ["tag", "region", "size", "image", "vpcUuid", "bundleUrl", "bundleSha", "actorName", "actorVersion", "actorEngine", "controller"],
+   "string": ["tag", "region", "size", "image", "vpcUuid", "bundleUrl", "bundleSha", "actorName", "actorVersion", "actorEngine", "controller", "workerImage"],
    "number": ["machines", "maxSessions", "workers"],
    "string_array": ["sshKeyIds"],
    "object_array": ["placements"],

@@ -63,15 +63,17 @@ export interface StackOpInput extends StackInput {
 async function workspaceFor(input: StackOpInput) {
   const plan = planFor(input);
   const args = input.args ?? {};
-  const providerEnv = await resolveProviderEnv({
-    credential: plan.credential,
-    providerEnvVar: plan.providerEnvVar,
-    // The Actor this fleet places, for the **Lease** workflow. A Machines-only converge places none, and the
-    // stack's own name is the honest answer there — it is `<actor>-<version>` by construction.
-    actor: typeof args.actorName === 'string' && args.actorName ? args.actorName : ref(input).stack,
-    version: typeof args.actorVersion === 'string' ? args.actorVersion : '',
-    run: typeof input.run === 'string' ? input.run : '',
-  }).catch(rethrowCredential);
+  const providerEnv = plan.providerEnvVar
+    ? await resolveProviderEnv({
+        credential: plan.credential,
+        providerEnvVar: plan.providerEnvVar,
+        // The Actor this fleet places, for the **Lease** workflow. A Machines-only converge places none, and the
+        // stack's own name is the honest answer there — it is `<actor>-<version>` by construction.
+        actor: typeof args.actorName === 'string' && args.actorName ? args.actorName : ref(input).stack,
+        version: typeof args.actorVersion === 'string' ? args.actorVersion : '',
+        run: typeof input.run === 'string' ? input.run : '',
+      }).catch(rethrowCredential)
+    : {};
   return selectStack(ref(input), plan.program, providerEnv);
 }
 
@@ -105,6 +107,9 @@ export async function checkCloudCredential(
   input: StackOpInput
 ): Promise<{ credential: string; version: number }> {
   const plan = planFor(input);
+  if (!plan.providerEnvVar) {
+    return { credential: '', version: 0 };
+  }
   try {
     return await checkCredential(plan.credential);
   } catch (err) {
