@@ -115,6 +115,11 @@ export interface ResolvedBundle {
    * makes fetching and registering the same decision rather than two that happen to match.
    */
   controller: string;
+  /**
+   * Digest-pinned Worker image (`host/name@sha256:…`) when `kontra deploy` has published one.
+   * Empty when only the Bundle artifact exists. Docker fleets require it; DigitalOcean ignores it.
+   */
+  workerImage: string;
 }
 
 /** The manifest, narrowed to the three things a resolver reads. */
@@ -231,13 +236,26 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
     actorName: String(cfg.name || input.actor),
     actorVersion: String(cfg.version || input.version),
     actorEngine: engine,
-    // The MACHINE's view of the registry, which is not necessarily this process's: a Machine
-    // resolving `localhost:5000` means its own loopback. `cli/bundle.go:bundleBlobURL` builds the
-    // same string, and `shared/conformance/bundleref.json` is what keeps them one string.
     bundleUrl: bundleBlobUrl(registry, input.actor, sha),
     bundleSha: sha,
     controller,
+    workerImage: await resolveWorkerImage(registry, String(cfg.name || input.actor), String(cfg.version || input.version)),
   };
+}
+
+/** The runnable Worker image `kontra deploy` pushes as `<registry>/<actor>:<version>`. */
+async function resolveWorkerImage(registry: string, actor: string, version: string): Promise<string> {
+  const host = registry.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const url = `${registryBase(registry)}/v2/${actor}/manifests/${version}`;
+  try {
+    const res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT } });
+    if (!res.ok) return '';
+    const digest = res.headers.get('docker-content-digest');
+    if (!digest || !/^sha256:[a-f0-9]{64}$/.test(digest)) return '';
+    return `${host}/${actor}@${digest}`;
+  } catch {
+    return '';
+  }
 }
 
 export interface QueuePollersInput {

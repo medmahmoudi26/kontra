@@ -198,6 +198,7 @@ class FleetScope:
                     "bundleUrl": "http://10.124.0.2:5000/b.tgz",
                     "bundleSha": "a" * 64,
                     "controller": self.resolve_controller,
+                    "workerImage": "",
                 }
             if name == fleet.HOLD_LEASE_ACTIVITY:
                 if self.hold_fails:
