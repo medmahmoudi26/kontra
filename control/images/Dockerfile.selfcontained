@@ -141,10 +141,23 @@ RUN test -n "${TARGETARCH}" || { \
 #
 # The trade is that `docker builder prune` is now where that space is reclaimed from, which is also
 # the answer when a machine does run out.
+# `--out` GOES TO A CACHE MOUNT, AND ONLY THE TARBALL IS COPIED OUT.
+#
+# The release needs ~1.5 GB of working space — it stages the orchestrator tree, deploys production
+# dependencies into it and packs it — and writes all of that to `<out>/.artifacts/`. Pointed
+# straight at `/out`, every byte of that scratch lands in this stage's image layer, for a directory
+# the next stage does not read and the final image never sees.
+#
+# So the work happens in a cache mount and the two files that matter — the tarball and its
+# SHA256SUMS — are copied into `/out` afterwards. The layer goes from ~1.7 GB to ~170 MB, and the
+# scratch is reused by the next build instead of being committed and thrown away.
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    --mount=type=cache,target=/work,sharing=locked \
     cd cli && KONTRA_CONSOLE_DIST=/src/console-dist \
-      go run . release --repo .. --platform "linux/${TARGETARCH}" --version "${VERSION}" --out /out \
+      go run . release --repo .. --platform "linux/${TARGETARCH}" --version "${VERSION}" --out /work \
+ && mkdir -p /out \
+ && cp /work/kontra_*_linux_"${TARGETARCH}".tar.gz /work/SHA256SUMS /out/ \
  && ls -la /out
 
 # ── 3 · WHAT ACTUALLY RUNS ──────────────────────────────────────────────────────────────────────
