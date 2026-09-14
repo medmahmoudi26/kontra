@@ -114,5 +114,16 @@ EXPOSE 8088 7233 8333 6379 18234 5000
 # only place it can go in an install nobody is attached to. See the script; it is twenty lines and
 # most of them are why.
 COPY control/images/entrypoint.sh /usr/local/bin/kontra-entrypoint
-RUN chmod +x /usr/local/bin/kontra-entrypoint
+COPY examples/python/hello /opt/kontra/seed/actors/hello
+COPY examples/workflows/hello /opt/kontra/seed/workflows/hello
+COPY sdk/python /opt/kontra/sdk/python
+COPY runtime/python /opt/kontra/runtime/python
+RUN chmod +x /usr/local/bin/kontra-entrypoint \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends docker.io python3 python3-pip python3-venv \
+ && pip3 install --break-system-packages --no-cache-dir temporalio redis boto3 pydantic \
+ && rm -rf /var/lib/apt/lists/*
+ENV PYTHONPATH=/opt/kontra/sdk/python:/opt/kontra/runtime/python
+ENV KONTRA_SDK_ROOT=/opt/kontra
+CMD ["kontra", "version"]
 ENTRYPOINT ["/usr/local/bin/kontra-entrypoint"]

@@ -289,34 +289,70 @@ func workflowResume(args []string) error {
 
 // --- serve -----------------------------------------------------------------------------------
 
-// workflowServe runs the author's workflow module as a local worker. It is `python file.py`
-// with the two things that are easy to get wrong done for you: the checkout's PYTHONPATH (so
-// `from kontra import workflows` resolves to THIS tree, not to whatever is pip-installed) and
-// the Temporal/S3 env the codec reads. The module itself calls workflows.serve().
-func workflowServe(args []string) error {
+// workflowServeArgs parses the command line, resolves the workflow file, and locates the
+// checkout root. It is the pure, testable front half of `workflowServe`: every refusal that
+// can be decided from the filesystem happens here.
+func workflowServeArgs(args []string) (target, file, root, py string, useTmux, watch bool, err error) {
 	fs := flag.NewFlagSet("workflow serve", flag.ContinueOnError)
+	repo := fs.String("repo", "", "repo root containing docker-compose.yml (default: walk up from CWD)")
 	python := fs.String("python", "", "python interpreter (default: .venv/bin/python, else python3)")
-	useTmux := fs.Bool("tmux", false, "run the worker in a DETACHED tmux session and return, instead of holding this terminal")
-	watch := fs.Bool("watch", false, "stay up and RE-REGISTER the contract on every save, so the browser form tracks your editor")
+	useTmuxPtr := fs.Bool("tmux", false, "run the worker in a DETACHED tmux session and return, instead of holding this terminal")
+	watchPtr := fs.Bool("watch", false, "stay up and RE-REGISTER the contract on every save, so the browser form tracks your editor")
+
 	target, rest := leadingPositional(args)
-	if err := fs.Parse(rest); err != nil {
-		return err
+	if err = fs.Parse(rest); err != nil {
+		return "", "", "", "", false, false, err
 	}
 	if target == "" && fs.NArg() == 1 {
 		target = fs.Arg(0)
 	}
 	if target == "" {
-		return errors.New("usage: kontra workflow serve <folder|file.py>")
+		return "", "", "", "", false, false, errors.New("usage: kontra workflow serve <folder|file.py>")
 	}
-	file, err := workflowFileOf(target)
+
+	file, err = workflowFileOf(target)
+	if err != nil {
+		return "", "", "", "", false, false, err
+	}
+	root, err = sdkRootForServe(*repo)
+	if err != nil {
+		return "", "", "", "", false, false, err
+	}
+	py = pythonFor(root, *python)
+	return target, file, root, py, *useTmuxPtr, *watchPtr, nil
+}
+
+func sdkRootForServe(explicit string) (string, error) {
+	if explicit != "" {
+		if hasSDK(explicit) {
+			return explicit, nil
+		}
+		return "", fmt.Errorf("--repo %s has no sdk/python (the workflow worker puts actorkit on PYTHONPATH)", explicit)
+	}
+	if v := strings.TrimSpace(os.Getenv("KONTRA_SDK_ROOT")); v != "" && hasSDK(v) {
+		return v, nil
+	}
+	root, err := cliutil.FindRepoRoot("")
+	if err == nil && hasSDK(root) {
+		return root, nil
+	}
+	return "", fmt.Errorf("kontra workflow serve needs the checkout or KONTRA_SDK_ROOT (it puts actorkit on PYTHONPATH)")
+}
+
+func hasSDK(root string) bool {
+	_, err := os.Stat(filepath.Join(root, "sdk", "python", "kontra"))
+	return err == nil
+}
+
+// workflowServe runs the author's workflow module as a local worker. It is `python file.py`
+// with the two things that are easy to get wrong done for you: the checkout's PYTHONPATH (so
+// `from kontra import workflows` resolves to THIS tree, not to whatever is pip-installed) and
+// the Temporal/S3 env the codec reads. The module itself calls workflows.serve().
+func workflowServe(args []string) error {
+	target, file, root, py, useTmux, watch, err := workflowServeArgs(args)
 	if err != nil {
 		return err
 	}
-	root, err := cliutil.FindRepoRoot("")
-	if err != nil {
-		return fmt.Errorf("kontra workflow serve needs the checkout (it puts actorkit on PYTHONPATH): %w", err)
-	}
-	py := pythonFor(root, *python)
 
 	// DERIVED, NOT TYPED — see workflowQueue in identity.go. Resolved before anything starts, so a
 	// folder with no manifest is a sentence here rather than a worker on the wrong queue an hour later.
@@ -329,7 +365,7 @@ func workflowServe(args []string) error {
 	// because the two paths below need it differently: the foreground child inherits and overrides,
 	// while a tmux pane inherits the tmux SERVER's environment and must be told each variable
 	// explicitly.
-	delta := append(serveEnvDelta(root, serveQueue), watchEnv(*watch)...)
+	delta := append(serveEnvDelta(root, serveQueue), watchEnv(watch)...)
 	env := append(os.Environ(), delta...)
 
 	// --tmux: hand the terminal back, and leave the worker somewhere it can be WATCHED.
@@ -339,7 +375,7 @@ func workflowServe(args []string) error {
 	// (`control/orchestrator/src/panels/local.ts`), so serving this way is also what makes the workflow
 	// worker appear as a Terminal without anything else being registered.
 	//
-	if *useTmux {
+	if useTmux {
 		session := workflowSession(file)
 		if err := tmux.Start(session, tmux.KontraWorkflowTag(session), []tmux.Proc{{
 			Window: "workflow",
