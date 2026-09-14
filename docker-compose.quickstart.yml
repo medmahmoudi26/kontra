@@ -38,7 +38,7 @@ services:
     #
     # A moving `latest` from a registry changes your control plane's version during an unrelated
     # `restart`, which is the hardest kind of surprise to debug.
-    image: ${KONTRA_IMAGE:-kontra:latest}
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:latest}
 
     # NEVER PULL A LOCAL TAG, BECAUSE THE ERROR FOR A MISSING ONE IS A LIE.
     #
@@ -61,7 +61,7 @@ services:
     #
     #   KONTRA_IMAGE=ghcr.io/medmahmoudi26/kontra:v0.2.0
     #   KONTRA_PULL_POLICY=missing
-    pull_policy: ${KONTRA_PULL_POLICY:-never}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
     restart: unless-stopped
 
     # HOW LONG THE APPLIANCE GETS TO SHUT DOWN, and the default is not enough.

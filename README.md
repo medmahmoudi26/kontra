@@ -37,14 +37,19 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ## Install
 
-### Docker — four lines
+### Docker — copy, paste, done
 
 ```bash
-git clone https://github.com/medmahmoudi26/kontra && cd kontra
-make image                                              # cut a release, build the image FROM it
-docker compose -f docker-compose.quickstart.yml up -d
-docker compose -f docker-compose.quickstart.yml logs kontra | grep -A4 'console login'
+echo <YOUR_GITHUB_TOKEN> | docker login ghcr.io -u <YOUR_GITHUB_USER> --password-stdin
+curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
+docker compose up -d
+docker compose logs kontra | grep -A4 'console login'
 ```
+
+**Nothing is compiled on your machine** — no Go, no Node, no pnpm, no clone. The `docker login` is
+there only because the package is private; it goes away if it is ever made public. A classic token
+with `read:packages` is enough to pull.
 
 Open <http://127.0.0.1:8088> and sign in as `admin` with the password that last line printed. There
 is no host `kontra` to run first and no config to write: the container initialises itself on first
@@ -52,22 +57,15 @@ boot and prints the credential to the log, which is the one place a person is al
 `up -d`. It is shown **once** — only a scrypt hash is kept. Lost it?
 `docker compose exec kontra kontra user add <name>`.
 
-`make image` is there because **nothing is published yet**, and it has to run on the machine that
-will run the container — the image is built, never pulled. Skip it and you get
+Prefer to build it yourself? `make image` from a clone builds everything inside Docker — both pnpm
+installs, the SPA, the Go binary and the orchestrator bundle — so Docker is still the only
+prerequisite. Then set `KONTRA_IMAGE=kontra:latest` and `KONTRA_PULL_POLICY=never` in `.env`.
 
-```
-Error response from daemon: No such image: kontra:latest
-```
-
-which is the truth. (Without `pull_policy: never` in that compose file you would instead get
-`pull access denied … may require 'docker login'`, because Docker expands the unqualified
-`kontra:latest` to `docker.io/library/kontra:latest` and Hub answers the same way for "no such
-repository" as for "not yours" — an error that sends you to fix credentials you do not need.)
-
-Once a tag exists and pushes an image, the first two lines collapse into two `curl`s of
-`docker-compose.quickstart.yml` and `.env.quickstart`, plus `KONTRA_IMAGE=<registry ref>` and
-`KONTRA_PULL_POLICY=missing` in `.env`. The compose file is written for both and needs no other
-change.
+That `never` matters: an unqualified name like `kontra:latest` is expanded to
+`docker.io/library/kontra:latest`, and Hub answers the same way for "no such repository" as for
+"not yours" — so a missing local build reports itself as `pull access denied … may require 'docker
+login'` and sends you to fix credentials you do not need. `never` says `No such image` instead,
+which is the truth.
 
 `docker compose down` stops it and keeps every run; `docker compose down -v` throws the data away.
 `.env` has one line that matters for security and it is `KONTRA_BIND=127.0.0.1` — read the note in
