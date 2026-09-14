@@ -2,9 +2,9 @@ package main
 
 // kontra workspace seed|watch|list|use|create — named workspaces under one parent folder.
 //
-// The Compose cluster bind-mounts KONTRA_WORKSPACES (./workspaces.kontra under the compose
-// directory by default). Each child directory is a workspace. .current in the parent names the
-// active one. Discovery, watch, serve and start use only that child. Switching never remounts.
+// The Compose cluster bind-mounts KONTRA_WORKSPACES (../workspaces.kontra beside kontra/ and
+// kontra-console/ by default). Each child directory is a workspace. .current in the parent names
+// the active one. Discovery, watch, serve and start use only that child. Switching never remounts.
 
 import (
 	"bytes"
@@ -56,12 +56,13 @@ func cmdWorkspace(args []string) error {
 // workspacesParent is the bind-mounted folder that holds named workspace children.
 func workspacesParent() string {
 	if v := strings.TrimSpace(os.Getenv("KONTRA_WORKSPACES")); v != "" {
-		return v
+		return filepath.Clean(v)
 	}
 	if wd, err := os.Getwd(); err == nil {
-		return filepath.Join(wd, "workspaces.kontra")
+		// Sibling of the kontra checkout when the env is unset (host CLI).
+		return filepath.Clean(filepath.Join(wd, "..", "workspaces.kontra"))
 	}
-	return "workspaces.kontra"
+	return filepath.Join("..", "workspaces.kontra")
 }
 
 // legacyWorkspaceRoot is the pre-named-workspaces single tree (actors/ + workflows/ at top).
