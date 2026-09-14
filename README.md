@@ -42,15 +42,24 @@ Two paths. Both end with a control plane on <http://127.0.0.1:8088>.
 ### A · Pull the image
 
 ```bash
+mkdir -p kontra-run && cd kontra-run
+gh api repos/medmahmoudi26/kontra/contents/docker-compose.quickstart.yml -H "Accept: application/vnd.github.raw" > docker-compose.yml
+gh api repos/medmahmoudi26/kontra/contents/.env.quickstart -H "Accept: application/vnd.github.raw" > .env
 echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USER> --password-stdin
-curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
 docker compose up -d
 docker compose logs kontra | grep -A4 'console login'
 ```
 
-No clone, nothing compiled. The login is only because the package is private; a classic token with
-`read:packages` is enough.
+No clone, nothing compiled.
+
+**`gh api`, not `curl`, while the repo is private.** `gh auth login` authenticates the CLI and git —
+it does not put credentials into `curl`, so a plain `curl` of `raw.githubusercontent.com` answers
+**404 on every branch**, which reads as "wrong path" and is not. `gh api` uses the login you already
+have. With a classic token carrying `repo` you can use curl instead:
+`curl -fsSL -H "Authorization: Bearer $TOKEN" …`.
+
+The `docker login` is separate and needs `read:packages` — the package is private too. **Run this in
+an empty directory**: inside a checkout, compose picks up the repo's own `docker-compose.yml`.
 
 ### B · Build it
 

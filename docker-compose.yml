@@ -730,8 +730,19 @@ services:
       # SPA is at `http://<controller>:8088` a loopback-only streamer is unreachable and every pane
       # is permanently blank. It was missed when the other ports were bound because it is the one
       # port no CLI and no Machine uses — only a browser — so nothing in the test suite noticed.
+      # ONE MAPPING, AND THE SECOND ONE WAS A BUG. A loopback line used to sit beside this so the
+      # box itself could reach the streamer whatever `KONTRA_BIND` was set to. At the DEFAULT bind
+      # the two resolve to the same string, and compose refuses the whole file:
+      #
+      #   services.orchestrator-infra.ports array items[0,1] must be unique
+      #
+      # So `docker compose up` was broken for everyone who had not set KONTRA_BIND — which is
+      # everyone on a fresh checkout. It went unnoticed because this project's own controller sets
+      # it to a VPC address, where the two lines differ.
+      #
+      # `0.0.0.0` already includes loopback. If you bind a SPECIFIC address and also want 127.0.0.1,
+      # add the second mapping yourself — that is the only case where it was ever needed.
       - "${KONTRA_BIND:-127.0.0.1}:8090:8090"   # Dashboard — read-only Terminals over the Fleet's tmux
-      - "127.0.0.1:8090:8090"   # …and from this box, whatever the bind is
     volumes:
       # Its OWN named volume. State on a volume a `compose down -v` removes would orphan every
       # machine we own — a billing event and an OPSEC one.

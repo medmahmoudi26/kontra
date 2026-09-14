@@ -13,9 +13,10 @@ than a nicety, it says so.
 **Pull it:**
 
 ```bash
+mkdir -p kontra-run && cd kontra-run          # an EMPTY directory, not a checkout
+gh api repos/medmahmoudi26/kontra/contents/docker-compose.quickstart.yml -H "Accept: application/vnd.github.raw" > docker-compose.yml
+gh api repos/medmahmoudi26/kontra/contents/.env.quickstart -H "Accept: application/vnd.github.raw" > .env
 echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USER> --password-stdin
-curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
 docker compose up -d
 docker compose logs kontra | grep -A4 'console login'
 ```
