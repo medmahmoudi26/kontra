@@ -99,6 +99,8 @@ export interface FleetArgs {
   controller?: string;
   /** Live Sessions per Machine — the density knob named in `machines` above. See MachineActor. */
   maxSessions?: number;
+  /** Digest-pinned Worker image; folded into the single placement. Docker fleets only. */
+  workerImage?: string;
 }
 
 /**
@@ -132,6 +134,12 @@ export interface PlacementArgs {
    * to touch. Taking a prefix means a scale-up ADDS Workers and never relocates one.
    */
   workers?: number;
+  /**
+   * Digest-pinned runnable Worker image for a Docker Warden (`registry/name@sha256:…`).
+   * DigitalOcean fleets ignore this: they curl {@link bundleUrl}. Empty means the docker
+   * program must refuse rather than run a tag.
+   */
+  workerImage?: string;
 }
 
 /** The sfo3 VPC this repo was developed against, and the region it belongs to. */
@@ -243,6 +251,7 @@ export function placementsOf(args: FleetArgs): PlacementArgs[] {
               bundleSha: args.bundleSha,
               controller: args.controller,
               maxSessions: args.maxSessions,
+              workerImage: args.workerImage,
             },
           ]
         : [];

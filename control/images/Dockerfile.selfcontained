@@ -154,9 +154,12 @@ RUN test -n "${TARGETARCH}" || { \
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     --mount=type=cache,target=/work,sharing=locked \
-    cd cli && KONTRA_CONSOLE_DIST=/src/console-dist \
+    rm -f /work/kontra_*_linux_"${TARGETARCH}".tar.gz /work/SHA256SUMS \
+ && cd cli && KONTRA_CONSOLE_DIST=/src/console-dist \
       go run . release --repo .. --platform "linux/${TARGETARCH}" --version "${VERSION}" --out /work \
  && mkdir -p /out \
+ && n=$(ls /work/kontra_*_linux_"${TARGETARCH}".tar.gz | wc -l) \
+ && [ "$n" = 1 ] \
  && cp /work/kontra_*_linux_"${TARGETARCH}".tar.gz /work/SHA256SUMS /out/ \
  && ls -la /out
 
@@ -185,6 +188,8 @@ ENV KONTRA_HOME=/var/lib/kontra
 COPY --from=release /out /rel
 RUN set -eux; \
     mkdir -p /tmp/unpack "${KONTRA_HOME}"; \
+    n=$(ls /rel/kontra_*_linux_"${TARGETARCH}".tar.gz | wc -l); \
+    [ "$n" = 1 ]; \
     tar -xzf /rel/kontra_*_linux_"${TARGETARCH}".tar.gz -C /tmp/unpack; \
     install -m 0755 /tmp/unpack/kontra /usr/local/bin/kontra; \
     cp -r /tmp/unpack/bundles "${KONTRA_HOME}/bundles"; \
@@ -205,5 +210,16 @@ EXPOSE 8088 7233 8333 6379 18234 5000
 # container log, which is where `docker compose logs kontra` looks and the only place it can go in
 # an install nobody is attached to.
 COPY kontra/control/images/entrypoint.sh /usr/local/bin/kontra-entrypoint
-RUN chmod +x /usr/local/bin/kontra-entrypoint
+COPY kontra/examples/python/hello /opt/kontra/seed/actors/hello
+COPY kontra/examples/workflows/hello /opt/kontra/seed/workflows/hello
+COPY kontra/sdk/python /opt/kontra/sdk/python
+COPY kontra/runtime/python /opt/kontra/runtime/python
+RUN chmod +x /usr/local/bin/kontra-entrypoint \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends docker.io python3 python3-pip python3-venv \
+ && pip3 install --break-system-packages --no-cache-dir temporalio redis boto3 pydantic \
+ && rm -rf /var/lib/apt/lists/*
+ENV PYTHONPATH=/opt/kontra/sdk/python:/opt/kontra/runtime/python
+ENV KONTRA_SDK_ROOT=/opt/kontra
+CMD ["kontra", "version"]
 ENTRYPOINT ["/usr/local/bin/kontra-entrypoint"]

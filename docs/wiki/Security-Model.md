@@ -27,7 +27,7 @@ Five enforcement points, each a refusal: the tenant is fixed when the enrolment 
 | Machine identity | mTLS, key generated on the Machine, one-time enrolment token carrying the CA fingerprint | **Strong** |
 | Which image runs | digest-pinned pulls; optional cosign verification against an identity configured **on the Machine** | **Strong when signing is enforced** |
 | Where a Container may connect | nftables in the host's initial network namespace, outside the container | **Strong** — the workload's netlink socket cannot address it |
-| Runtime access | rootless podman, `--userns=auto`, runtime socket never exposed | **Meaningful, not a sandbox** |
+| Runtime access | Docker or podman; the Warden holds the runtime socket, Workers never do | **Meaningful on a laptop, not tenant isolation** — local `dockerFleet` mounts the host Docker socket into the Warden. Documented as single-operator only. |
 
 ### On containers
 

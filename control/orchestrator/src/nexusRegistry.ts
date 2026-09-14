@@ -97,6 +97,10 @@ function namespace(): string {
 export async function ensureEndpoint(name: string, version: string): Promise<EndpointResult> {
   const endpoint = endpointName(name, version);
   try {
+    // LIST FIRST. CreateNexusEndpoint is not idempotent on matching: an AlreadyExists is
+    // logged as ERROR and retried by the server interceptor. Workspace watch used to hit
+    // this every three seconds and Nexus operations stayed Scheduled with pollers present.
+    if (await findEndpointId(endpoint)) return { endpoint, state: 'existed' };
     const connection = await getConnection();
     await connection.operatorService.createNexusEndpoint({
       spec: {

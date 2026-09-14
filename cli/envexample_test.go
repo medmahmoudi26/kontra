@@ -44,19 +44,22 @@ func envExampleNames(t *testing.T) map[string]string {
 	return out
 }
 
-// Every variable docker-compose.yml substitutes must be documented here, because those are exactly
-// the ones that arrive from `.env` and are empty-but-silent when they do not.
+// Every variable docker-compose.quickstart.yml substitutes must be documented in
+// .env.quickstart, because those are the two files a first-time install copies.
 func TestEveryComposeVariableIsInEnvExample(t *testing.T) {
-	compose := repoFile(t, "docker-compose.yml")
+	compose := repoFile(t, "docker-compose.quickstart.yml")
 	found := map[string]bool{}
 	for _, m := range composeVar.FindAllStringSubmatch(compose, -1) {
+		if m[1] == "PWD" {
+			continue // compose's own default, not an install setting
+		}
 		found[m[1]] = true
 	}
 	if len(found) == 0 {
-		t.Fatal("no ${VAR} substitutions found in docker-compose.yml — this guard is not looking at the right file")
+		t.Fatal("no ${VAR} substitutions found in docker-compose.quickstart.yml — this guard is not looking at the right file")
 	}
 
-	documented := envExampleNames(t)
+	documented := envFileNames(t, ".env.quickstart")
 	var missing []string
 	for name := range found {
 		if _, ok := documented[name]; !ok {
@@ -64,9 +67,30 @@ func TestEveryComposeVariableIsInEnvExample(t *testing.T) {
 		}
 	}
 	if len(missing) > 0 {
-		t.Errorf("docker-compose.yml substitutes %v, and .env.example does not mention them.\n"+
+		t.Errorf("docker-compose.quickstart.yml substitutes %v, and .env.quickstart does not mention them.\n"+
 			"A variable missing here reaches a fresh install as an empty substitution, silently.", missing)
 	}
+}
+
+func envFileNames(t *testing.T, rel string) map[string]string {
+	t.Helper()
+	body := repoFile(t, rel)
+	out := map[string]string{}
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s declares no variables at all; every assertion below would be vacuous", rel)
+	}
+	return out
 }
 
 // NO CREDENTIAL SHIPS. Anything whose name says secret must be assigned an empty value.

@@ -34,12 +34,20 @@ func TestInitCreatesTheLayout(t *testing.T) {
 	}
 	for _, want := range []string{
 		"config.yaml",
+		"runtime.env",
 		filepath.Join("workflows", "README.md"),
 		filepath.Join("actors", "README.md"),
 	} {
 		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
 			t.Errorf("%s missing after init: %v", want, err)
 		}
+	}
+	runtime, err := os.ReadFile(filepath.Join(dir, "runtime.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(runtime), "KONTRA_CONSOLE_USERS=") {
+		t.Error("runtime.env must export KONTRA_CONSOLE_USERS for the cluster API")
 	}
 
 	// It holds a cloud credential. 0600/0700, not whatever the umask happened to be.
