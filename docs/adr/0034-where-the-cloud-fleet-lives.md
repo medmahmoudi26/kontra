@@ -6,6 +6,13 @@
 discovered separately: which deployment owns cloud provisioning after **0031**, what the word
 `fleet` means once it means more than one cloud, and where the provider credential comes from.
 
+**Amended, 2026-09-14 (ADR 0047).** The local provider reserved in §3 is now implemented as
+`dockerFleet`: Pulumi `@pulumi/docker`, project `kontra-docker-fleet`, no cloud credential. The
+bare word `fleet` remains reserved and still may not name a cloud. §1's statement that the
+appliance ships no Pulumi engine is still true of that binary; it is no longer true of the
+supported local install, which is a Compose cluster that runs `orchestrator-infra` as its own
+PID so both `do_fleet` and `docker_fleet` converge through `stackWorkflow`.
+
 Downstream of **0031** §4, which moved cloud provisioning out of the appliance and kept the infra
 **queue**. This ADR restates that carve-out by quotation rather than paraphrase (§2) and settles the
 questions §4 left implicit. Leans on `legacy/0019` for the shape it does not change — programs are
@@ -142,11 +149,9 @@ carrying neither secret, and nobody needs to re-add the SSH key to make Monitor 
 Per-provider classes — `doFleet`, `awsFleet` — one per provider, each carrying that provider's own
 configuration. The provider appears in the class name and nowhere else.
 
-**`fleet` on its own is RESERVED for the local Docker case.** Reserved is the operative word: this
-ADR does not build a local-Docker fleet and does not define what `fleet.up()` returns on an
-appliance. What it settles is that the bare name is **not available to a provider** — not to
-DigitalOcean, which has it today, and not to whichever cloud is second. A reader who finds `fleet`
-meaning "DigitalOcean" is reading pre-0034 code.
+**`fleet` on its own is RESERVED and may never name a cloud.** The local Docker case **0047**
+builds is `dockerFleet` / `docker_fleet()`, a Pulumi program, not the bare word. A reader who
+finds `fleet` meaning "DigitalOcean" is reading pre-0034 code.
 
 Three rules bound the shape, and each one exists because the alternative has already gone wrong here:
 
