@@ -61,12 +61,14 @@ COPY kontra-console ./kontra-console
 RUN rm -rf kontra/node_modules kontra/*/node_modules kontra/*/*/node_modules \
            kontra-console/node_modules kontra-console/dist
 
-RUN cd kontra && pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/pnpm-store,sharing=locked \
+    cd kontra && pnpm config set store-dir /pnpm-store && pnpm install --frozen-lockfile
 RUN cd kontra && pnpm --filter @kontra/core run build
 
 # THE CONSOLE'S INSTALL NEEDS `../kontra/shared/core/dist` TO EXIST ALREADY, because `link:` is
 # resolved at install time and its types are read by the typecheck immediately after.
-RUN cd kontra-console && pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/pnpm-store,sharing=locked \
+    cd kontra-console && pnpm config set store-dir /pnpm-store && pnpm install --frozen-lockfile
 
 # `pnpm run build` is `tsc --noEmit && vite build`. THE TYPECHECK STAYS. It is the step that fails
 # on a case collision, and dropping it to make this Dockerfile quieter would hide exactly the class
@@ -107,7 +109,9 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 WORKDIR /src/kontra
 COPY kontra ./
 RUN rm -rf node_modules ./*/node_modules ./*/*/node_modules
-RUN pnpm install --frozen-lockfile && pnpm --filter @kontra/core run build
+RUN --mount=type=cache,target=/pnpm-store,sharing=locked \
+    pnpm config set store-dir /pnpm-store && pnpm install --frozen-lockfile \
+ && pnpm --filter @kontra/core run build
 
 # THE SPA COMES FROM STAGE 1, not from the host. A `dist/` that happened to be lying around in the
 # checkout is somebody's older build, and archiving it would put a stale console in a fresh image.
@@ -123,7 +127,23 @@ RUN test -n "${TARGETARCH}" || { \
       echo "TARGETARCH is empty — this build needs BuildKit. Run it with DOCKER_BUILDKIT=1, or update Docker."; \
       exit 1; }
 
-RUN cd cli && KONTRA_CONSOLE_DIST=/src/console-dist \
+# ── CACHE MOUNTS, BECAUSE THE CACHES MUST NOT BECOME LAYERS ─────────────────────────────────────
+#
+# Compiling this pulls ~2.5 GB of Go modules and writes ~3 GB of build cache. Without these mounts
+# every byte of that is written into the container filesystem AND THEN COMMITTED INTO A LAYER — so
+# the build needs roughly twice the disk it should, and the image carries caches nothing at runtime
+# will ever read.
+#
+# MEASURED, twice, on two different machines: `no space left on device` partway through the Temporal
+# server compile — once on a Linux box with 4 GB free, once inside Docker Desktop's VM on a Mac. A
+# cache mount lives in BuildKit's own store instead: not in a layer, and REUSED by the next build,
+# so a second `make image` does not re-download a single module.
+#
+# The trade is that `docker builder prune` is now where that space is reclaimed from, which is also
+# the answer when a machine does run out.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    cd cli && KONTRA_CONSOLE_DIST=/src/console-dist \
       go run . release --repo .. --platform "linux/${TARGETARCH}" --version "${VERSION}" --out /out \
  && ls -la /out
 
