@@ -67,10 +67,18 @@ Docker is still the only prerequisite — the SPA, the Go binary and the orchest
 built inside the image. Both clones are needed and both names matter: the console resolves
 `@kontra/core` as `link:../kontra/shared/core`.
 
-**It needs about 10 GB of free Docker disk.** Compiling the embedded Temporal server is most of it.
-`no space left on device` means Docker's disk, not your machine's — reclaim with
-`docker builder prune -af`, check with `docker system df`, and on Docker Desktop raise
-*Settings → Resources → Disk image size*. Path A avoids this entirely.
+**It needs about 10 GB of free Docker disk** — compiling the embedded Temporal server is most of
+it. Both `no space left on device` and kontra's own `only 0 B free … needs about 1.5 GB of working
+space` mean Docker's disk, not your machine's:
+
+```bash
+docker system df                 # what is using it
+docker builder prune -af         # the build caches (largest, and safe)
+docker system prune -af          # unused images and containers too
+```
+
+On Docker Desktop the ceiling is *Settings → Resources → Disk image size*; the default is often
+below what this needs. **Path A avoids all of it.**
 
 ### Either way
 
