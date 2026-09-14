@@ -37,42 +37,45 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ## Install
 
-### Docker — copy, paste, done
+Two paths. Both end with a control plane on <http://127.0.0.1:8088>.
+
+### A · Pull the image
 
 ```bash
-echo <YOUR_GITHUB_TOKEN> | docker login ghcr.io -u <YOUR_GITHUB_USER> --password-stdin
+echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USER> --password-stdin
 curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/docker-compose.quickstart.yml -o docker-compose.yml
 curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/.env.quickstart -o .env
 docker compose up -d
 docker compose logs kontra | grep -A4 'console login'
 ```
 
-**Nothing is compiled on your machine** — no Go, no Node, no pnpm, no clone. The `docker login` is
-there only because the package is private; it goes away if it is ever made public. A classic token
-with `read:packages` is enough to pull.
+No clone, nothing compiled. The login is only because the package is private; a classic token with
+`read:packages` is enough.
 
-Open <http://127.0.0.1:8088> and sign in as `admin` with the password that last line printed. There
-is no host `kontra` to run first and no config to write: the container initialises itself on first
-boot and prints the credential to the log, which is the one place a person is already looking after
-`up -d`. It is shown **once** — only a scrypt hash is kept. Lost it?
-`docker compose exec kontra kontra user add <name>`.
+### B · Build it
 
-Prefer to build it yourself? `make image` from a clone builds everything inside Docker — both pnpm
-installs, the SPA, the Go binary and the orchestrator bundle — so Docker is still the only
-prerequisite. Then set `KONTRA_IMAGE=kontra:latest` and `KONTRA_PULL_POLICY=never` in `.env`.
+```bash
+git clone https://github.com/medmahmoudi26/kontra-console.git
+git clone https://github.com/medmahmoudi26/kontra.git
+cd kontra
+make image
+KONTRA_IMAGE=kontra:latest KONTRA_PULL_POLICY=never docker compose -f docker-compose.quickstart.yml up -d
+docker compose -f docker-compose.quickstart.yml logs kontra | grep -A4 'console login'
+```
 
-That `never` matters: an unqualified name like `kontra:latest` is expanded to
-`docker.io/library/kontra:latest`, and Hub answers the same way for "no such repository" as for
-"not yours" — so a missing local build reports itself as `pull access denied … may require 'docker
-login'` and sends you to fix credentials you do not need. `never` says `No such image` instead,
-which is the truth.
+Docker is still the only prerequisite — the SPA, the Go binary and the orchestrator bundle are all
+built inside the image. Both clones are needed and both names matter: the console resolves
+`@kontra/core` as `link:../kontra/shared/core`.
 
-`docker compose down` stops it and keeps every run; `docker compose down -v` throws the data away.
-`.env` has one line that matters for security and it is `KONTRA_BIND=127.0.0.1` — read the note in
-the file before you widen it.
+### Either way
 
-**[First run](docs/first-run.md)** takes it from here: actor → Method call → workflow → run →
-secrets → fleet, three or four lines a step, every command run against a fresh install.
+Sign in as `admin` with the password that last line printed. It is shown **once**; only a scrypt
+hash is kept. Lost it? `docker compose exec kontra kontra user add <name>`.
+
+`docker compose down` keeps every run. `down -v` throws the data away. The one line in `.env` that
+matters for security is `KONTRA_BIND=127.0.0.1` — read the note beside it before widening it.
+
+**[First run](docs/first-run.md)**: actor → Method call → workflow → run → secrets → fleet.
 
 ### Or the binary, with no Docker at all
 
