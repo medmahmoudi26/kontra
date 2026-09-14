@@ -59,7 +59,7 @@ and `kontra-console/`). Using the same path preserves the catalog contract: a re
 path means the same file to the CLI, discovery process, and orchestrator.
 
 Each child of that parent is a named workspace. `.current` names the active child. On first launch,
-`cluster-init` seeds `hello/` when the parent is empty:
+`cli` seeds `hello/` when the parent is empty:
 
 - `hello/actors/hello/actor.json`
 - `hello/actors/hello/actor.py`
