@@ -1,0 +1,22 @@
+# What is NOT sent to the daemon for this build.
+#
+# BuildKit reads `<dockerfile>.dockerignore` in preference to the context root's `.dockerignore` —
+# which matters here because the context is the PARENT directory of two checkouts, and no
+# `.dockerignore` in either repo applies to it.
+#
+# Without this the daemon receives both `.git` directories and any `node_modules` a host install
+# left behind: several gigabytes, uploaded before a single instruction runs, on a build that is
+# already tight on disk. The Dockerfile deletes copied `node_modules` anyway; this stops them being
+# transferred in the first place.
+
+**/.git
+**/node_modules
+**/dist
+**/build/release
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.DS_Store
+**/*.vsix
+**/.env
