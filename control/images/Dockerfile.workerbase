@@ -1,0 +1,13 @@
+# Actor-agnostic worker parts: the Go handler plus the two-process entrypoint.
+# `kontra deploy` COPYs these into each actor image. Built once and tagged
+# kontra-worker-base:1 so a cluster install has no checkout to compile from.
+FROM golang:1.25 AS handler-build
+ENV GOTOOLCHAIN=go1.26.4
+WORKDIR /src
+COPY sdk/go ./sdk/go
+COPY runtime/handler ./runtime/handler
+RUN cd runtime/handler && GOWORK=off go build -p=1 -trimpath -o /out/handler .
+
+FROM alpine:3
+COPY --from=handler-build /out/handler /kontra/handler
+COPY control/images/worker-entrypoint.sh /kontra/entrypoint.sh

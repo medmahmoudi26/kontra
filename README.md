@@ -38,29 +38,8 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ## Install
 
-One path. A Compose cluster on <http://127.0.0.1:8088> (ADR 0047). Docker is the only prerequisite.
-
-```bash
-mkdir -p kontra-run && cd kontra-run
-gh api repos/medmahmoudi26/kontra/contents/docker-compose.quickstart.yml -H "Accept: application/vnd.github.raw" > docker-compose.yml
-gh api repos/medmahmoudi26/kontra/contents/.env.quickstart -H "Accept: application/vnd.github.raw" > .env
-mkdir -p workspace
-echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USER> --password-stdin
-docker compose up -d --wait
-docker compose logs workspace-init | grep -A4 'console login'
-```
-
-No clone, nothing compiled on the host.
-
-**`gh api`, not `curl`, while the repo is private.** `gh auth login` authenticates the CLI and git —
-it does not put credentials into `curl`, so a plain `curl` of `raw.githubusercontent.com` answers
-**404 on every branch**. With a classic token carrying `repo` you can use curl instead:
-`curl -fsSL -H "Authorization: Bearer $TOKEN" …`.
-
-The `docker login` is separate and needs `read:packages`. **Run this in an empty directory**: inside
-a checkout, compose picks up the repo's own `docker-compose.yml`.
-
-### Or build the images from a clone
+One path. Clone, build the images, Compose cluster on <http://127.0.0.1:8088> (ADR 0047).
+Docker is the only host prerequisite.
 
 ```bash
 git clone https://github.com/medmahmoudi26/kontra-console.git
@@ -69,13 +48,14 @@ cd kontra
 make image
 docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
 docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
-KONTRA_IMAGE=kontra:latest KONTRA_ORCHESTRATOR_IMAGE=kontra-orchestrator:latest \
-  KONTRA_HOST_IMAGE=kontra-host:1 KONTRA_PULL_POLICY=never \
-  docker compose -f docker-compose.quickstart.yml --env-file .env.quickstart up -d --wait
-docker compose -f docker-compose.quickstart.yml logs workspace-init | grep -A4 'console login'
+docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
+mkdir -p workspaces.kontra
+docker compose --env-file .env.quickstart up -d --wait
+docker compose logs cluster-init | grep -A4 'console login'
 ```
 
-### Either way
+Named workspaces live in `workspaces.kontra/` under the compose directory. Seed creates `hello/`
+when that folder is empty. Pick another workspace in the console rail after login.
 
 Sign in as `admin` with the password that last line printed. It is shown **once**; only a scrypt
 hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.
@@ -83,8 +63,8 @@ hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.
 Serve and start the seeded hello workflow (discovery does not run it for you):
 
 ```bash
-docker compose exec -d cli sh -c 'kontra workflow serve "$KONTRA_WORKSPACE/workflows/hello"'
-docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACE/workflows/hello" --wait'
+docker compose exec -d cli sh -c 'kontra workflow serve "$KONTRA_WORKSPACES/hello/workflows/hello"'
+docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACES/hello/workflows/hello" --wait'
 ```
 
 That Run places `hello@0.1.0` on a one-machine `dockerFleet`, writes `{"message": "hello world"}`
@@ -132,11 +112,11 @@ editor; a webview's drag surface belongs to the editor, the picker always works.
 
 ### The development stack
 
-`docker-compose.yml` at the root includes the same cluster as the two-file install. Use
-`docker-compose.quickstart.yml` from an empty directory; use this file from a checkout after
-building local image tags. `orchestrator-infra` stays its own PID because Pulumi's Node language
-host installs process-global rejection handlers for every inline `up` ([ADR 0019](docs/adr)) —
-that is why API, materializer, and infra are three containers, not one.
+`docker-compose.yml` at the root includes `docker-compose.quickstart.yml`. After the Install image
+builds, `docker compose --env-file .env.quickstart up -d --wait` is the cluster. `orchestrator-infra`
+stays its own PID because Pulumi's Node language host installs process-global rejection handlers for
+every inline `up` ([ADR 0019](docs/adr)) — API and materializer share one process; infra stays
+separate.
 
 A DigitalOcean token is optional. Local `docker_fleet()` does not use it. `do_fleet()` does.
 

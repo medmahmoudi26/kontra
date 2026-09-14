@@ -126,9 +126,10 @@ export function coerceFleetArgs(raw: Record<string, unknown>): FleetArgs {
   //
   // An ARRAY is new here and it is the one shape this reader had no rule for, so it gets the same
   // rule everything else has: entries that are not objects are dropped, and inside each entry only
-  // the keys and types below survive. An entry with no `bundleUrl` is dropped ENTIRELY rather than
-  // passed on as a placement with nothing to place — the program would build a Worker that fetches
-  // "" — and dropping is the same wordless narrowing `evil: 'rm -rf'` gets one level up.
+  // the keys and types below survive. An entry with neither `bundleUrl` nor `workerImage` is
+  // dropped ENTIRELY rather than passed on as a placement with nothing to place — a dockerFleet
+  // Worker needs a digest-pinned image, and a cloud Worker would fetch "" — and dropping is the
+  // same wordless narrowing `evil: 'rm -rf'` gets one level up.
   //
   // AN EMPTY ARRAY IS NOT AN ABSENT ONE, and the difference is a Fleet. `placements: []` says "this
   // Fleet places nothing", which is a real desired state (`fleet.hold()` converges exactly that);
@@ -150,15 +151,15 @@ export function coerceFleetArgs(raw: Record<string, unknown>): FleetArgs {
 function coercePlacement(raw: unknown): PlacementArgs | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const src = raw as Record<string, unknown>;
-  if (typeof src.bundleUrl !== 'string' || src.bundleUrl === '') return undefined;
   if (typeof src.actorName !== 'string' || src.actorName === '') return undefined;
-  const out: PlacementArgs = { actorName: src.actorName, bundleUrl: src.bundleUrl };
+  const bundleUrl = typeof src.bundleUrl === 'string' ? src.bundleUrl : '';
+  const workerImage = typeof src.workerImage === 'string' ? src.workerImage : '';
+  if (bundleUrl === '' && workerImage === '') return undefined;
+  const out: PlacementArgs = { actorName: src.actorName, bundleUrl };
   for (const k of ['actorVersion', 'actorEngine', 'bundleSha', 'controller'] as const) {
     if (typeof src[k] === 'string') out[k] = src[k] as string;
   }
-  if (typeof src.workerImage === 'string' && src.workerImage !== '') {
-    out.workerImage = src.workerImage;
-  }
+  if (workerImage !== '') out.workerImage = workerImage;
   const density = countOf(src.maxSessions);
   if (density !== undefined) out.maxSessions = density;
   const workers = countOf(src.workers);

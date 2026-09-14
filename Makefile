@@ -3,7 +3,7 @@
 # **THE LOCAL CONTROL PLANE IS THE COMPOSE CLUSTER (ADR 0047).** `make up` starts
 # docker-compose.yml, which includes docker-compose.quickstart.yml. `kontra up` remains in the
 # binary and is not a supported install path.
-.PHONY: up up-d down logs tmux-dir ui api bundle proto-check image release
+.PHONY: up up-d down logs tmux-dir ui api bundle proto-check image release worker-base
 
 # THE TMUX SOCKET DIRECTORY, MADE BEFORE COMPOSE CAN MAKE IT WRONG.
 #
@@ -142,9 +142,13 @@ image: $(CONSOLE)
 	DOCKER_BUILDKIT=1 docker build -f control/images/Dockerfile.selfcontained \
 	  --build-arg VERSION=$(VERSION) \
 	  -t "$${KONTRA_IMAGE:-kontra:latest}" "$(dir $(CURDIR))"
+	$(MAKE) worker-base
 	@echo
 	@echo "  docker compose -f docker-compose.quickstart.yml up -d"
 	@echo "  open http://127.0.0.1:8088"
+
+worker-base:
+	docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
 
 # `make image-from-release` — the OLDER path, kept because it is the one that proves the container
 # and the published tarball are the same bytes. It needs the host toolchain; `make image` does not.

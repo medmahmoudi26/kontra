@@ -23,7 +23,7 @@ func TestWorkerBaseDockerfile(t *testing.T) {
 		"FROM golang:1.25 AS handler-build",
 		"go build -p=1 -trimpath -o /out/handler",
 		"COPY --from=handler-build /out/handler /kontra/handler",
-		"COPY infra/worker-entrypoint.sh /kontra/entrypoint.sh",
+		"COPY control/images/worker-entrypoint.sh /kontra/entrypoint.sh",
 	} {
 		if !strings.Contains(df, want) {
 			t.Errorf("worker-base Dockerfile missing %q in:\n%s", want, df)
@@ -99,6 +99,22 @@ func TestControllerHost(t *testing.T) {
 	t.Setenv("KONTRA_ORCHESTRATOR_URL", "http://10.0.0.7:8088")
 	if got := controllerHost(""); got != "10.0.0.7" {
 		t.Errorf("remote host should pass through, got %q", got)
+	}
+}
+
+func TestRegistryProbeBases(t *testing.T) {
+	got := registryProbeBases("127.0.0.1:5000")
+	want := []string{
+		"http://127.0.0.1:5000",
+		"http://host.docker.internal:5000",
+		"http://registry:5000",
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("loopback registry probes: got %v want %v", got, want)
+	}
+	got = registryProbeBases("ghcr.io")
+	if len(got) != 1 || got[0] != "http://ghcr.io" {
+		t.Errorf("remote registry should not grow compose aliases: %v", got)
 	}
 }
 

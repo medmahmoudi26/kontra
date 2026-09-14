@@ -97,6 +97,7 @@ import { registerRowStreamRoute, type RowStreamCaps } from './routes/rowStream';
 import { registerRunRoutes } from './routes/runs';
 import { registerScratchRoutes } from './routes/scratch';
 import { registerSourceRoutes } from './routes/sources';
+import { registerWorkspaceRoutes } from './routes/workspaces';
 import { registerStateRoutes } from './routes/state';
 import { registerUploadRoutes } from './routes/uploads';
 import { registerStuckRoutes } from './routes/stuck';
@@ -347,6 +348,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerWorkflowRoutes(app, repo);
   registerPollerRoutes(app, queueDescriber);
   registerSourceRoutes(app, sources);
+  registerWorkspaceRoutes(app);
   registerProbeRoutes(app, sources);
   registerDatasetRoutes(app, { store, lake, materialization, records, runWorkflows });
   registerRetentionRoutes(app, { store, lake, materialization, records, runWorkflows, summaries });

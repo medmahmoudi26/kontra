@@ -10,13 +10,16 @@ serve or start it.
 ## 1 · A control plane
 
 ```bash
-mkdir -p kontra-run && cd kontra-run          # an EMPTY directory, not a checkout
-gh api repos/medmahmoudi26/kontra/contents/docker-compose.quickstart.yml -H "Accept: application/vnd.github.raw" > docker-compose.yml
-gh api repos/medmahmoudi26/kontra/contents/.env.quickstart -H "Accept: application/vnd.github.raw" > .env
-mkdir -p workspace
-echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USER> --password-stdin
-docker compose up -d --wait
-docker compose logs workspace-init | grep -A4 'console login'
+git clone https://github.com/medmahmoudi26/kontra-console.git
+git clone https://github.com/medmahmoudi26/kontra.git
+cd kontra
+make image
+docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
+docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
+docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
+mkdir -p workspaces.kontra
+docker compose --env-file .env.quickstart up -d --wait
+docker compose logs cluster-init | grep -A4 'console login'
 ```
 
 Sign in at <http://127.0.0.1:8088> as `admin` with the password that last line printed. Shown once;
@@ -24,14 +27,18 @@ only a hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.
 
 `docker compose down` keeps Datasets and Pulumi dockerFleet state. **`down -v` destroys both.**
 
+Named workspaces live in `workspaces.kontra/` under the compose directory. Seed creates `hello/`
+when that parent is empty. The console rail switches the current workspace; Datasets and runs stay
+cluster-wide.
+
 ### Serve and start the starter
 
-The empty workspace was seeded with `actors/hello` and `workflows/hello`. Watch has registered them
-and published the actor image. You still have to serve and start:
+The empty parent was seeded with `workspaces.kontra/hello` (`actors/hello`, `workflows/hello`).
+Watch has registered them and published the actor image. You still have to serve and start:
 
 ```bash
-docker compose exec -d cli sh -c 'kontra workflow serve "$KONTRA_WORKSPACE/workflows/hello"'
-docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACE/workflows/hello" --wait'
+docker compose exec -d cli sh -c 'kontra workflow serve "$KONTRA_WORKSPACES/hello/workflows/hello"'
+docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACES/hello/workflows/hello" --wait'
 ```
 
 The Run writes `{"message": "hello world"}` into Dataset `hello` and tears the local Fleet down when
@@ -43,7 +50,7 @@ docker compose exec -T cli sh -c 'kontra dataset query hello --sql "select messa
 
 ### Tokens the CLI inside the cluster already has
 
-`workspace-init` wrote `config.yaml` into the `kontra-home` volume. The `cli` service mounts that
+`cluster-init` wrote `config.yaml` into the `kontra-home` volume. The `cli` service mounts that
 volume, so `docker compose exec cli kontra …` needs no extra exports. A CLI on the **host** still
 does:
 
@@ -248,4 +255,4 @@ Kept because each one is a thing a second reader will hit, and every one passed 
 | `kontra actor register` → `no such directory` | the quickstart mounted nothing, so the orchestrator could not read the folder it was given |
 | `kontra workflow serve` printed nothing and exited 0 | the file had no `__main__` block; a worker that never started was reported as success |
 | The fleet path of two shipped workflows | `fleet.up` without `actor=`/`version=` — a `TypeError` only the fleet branch reached |
-| `pull access denied … may require 'docker login'` | an unqualified local tag Docker tried to fetch from Hub; an auth error for a missing build |
+| `pull access denied … may require 'docker login'` | a local tag was never built (`make image` / orchestrator / host) and Compose tried a registry pull |

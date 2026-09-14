@@ -36,21 +36,22 @@ it is not a supported install path.
 
 ### 1. One Compose project is the supported local control plane
 
-The documented install copies two files into an empty directory and runs `docker compose up -d
---wait`. Services are separate processes on one private network named `kontra`:
+The documented install clones the repos, builds the local images, and runs `docker compose
+--env-file .env.quickstart up -d --wait`. Services are separate processes on one private network
+named `kontra`:
 
 - Postgres 16 (Temporal auto-setup databases, plus `kontra_ducklake`)
 - Temporal (`temporalio/auto-setup`)
 - SeaweedFS master / volume / filer / s3, with an idempotent bucket create
 - Redis (existing RESP contract)
 - `registry:2`
-- `orchestrator-api`, `orchestrator-materializer`, `orchestrator-infra` as separate PIDs
+- `orchestrator-api` (api + materializer roles), `orchestrator-infra` as separate PIDs
 - `orchestrator-probe`
-- `workspace-init` (once) and `workspace-watch`
+- `cluster-init` (once) and `cli` (workspace watch + exec)
 - `cli` (exec target for serve/start)
 
 Operator ports bind `127.0.0.1` by default. The Docker socket is mounted on `orchestrator-infra`,
-`workspace-watch`, and each local Warden. That is host-level Docker authority, documented as
+`cli`, and each local Warden. That is host-level Docker authority, documented as
 acceptable only for a single-operator laptop.
 
 ### 2. `dockerFleet` is a Pulumi sibling of `do_fleet`
@@ -66,16 +67,18 @@ DigitalOcean.
 
 ### 3. The workspace is the source of truth, and discovery does not run code
 
-`${KONTRA_WORKSPACE:-./workspace}` is bind-mounted at the same absolute path in every service that
-reads code. An empty workspace is seeded once with `actors/hello` and `workflows/hello`. A
-non-empty workspace is never overwritten. Recursive discovery registers manifests; it does not
+`${KONTRA_WORKSPACES}` is bind-mounted at the same absolute path in every service that
+reads code. Blank env defaults to `./workspaces.kontra` under the compose project directory.
+Each child directory is a named workspace; `.current` picks the active one. An empty parent is
+seeded once with `hello/` containing `actors/hello` and `workflows/hello`. A non-empty parent is
+never overwritten. Recursive discovery registers manifests in the current child only; it does not
 serve or start workflows. Actor discovery builds and publishes a digest-pinned worker image so the
 first-run path has no separate deploy step.
 
 ### 4. Documented commands are the CI gate
 
-Ubuntu CI copies the two files into a fresh directory (curl stand-in), points images at tags built
-from this commit, runs the literal `docker compose up -d --wait`, and asserts login, seed-once,
+Ubuntu CI builds the images from this commit, copies the compose files into a fresh directory,
+points image tags at the CI builds, runs `docker compose up -d --wait`, and asserts login, seed-once,
 starter Run, Dataset content, Fleet teardown, restart persistence, and loopback publishes.
 `scripts/install-cluster.macos.sh` is the same path under Docker Desktop.
 

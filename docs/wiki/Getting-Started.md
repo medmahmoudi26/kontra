@@ -2,9 +2,9 @@
 
 ## Install (once)
 
-The supported path is a Docker Compose cluster (ADR 0047). Copy two files into an empty
-directory and run `docker compose up -d --wait` — see the repository README. Docker is the only
-prerequisite. `kontra up` (the appliance) is not a supported install.
+The supported path is a Docker Compose cluster (ADR 0047). Clone, build the images, and run
+`docker compose --env-file .env.quickstart up -d --wait` — see the repository README. Docker is the
+only host prerequisite. `kontra up` (the appliance) is not a supported install.
 
 A **development checkout** still uses `install.sh` below: a venv, the editable SDK, the buf
 toolchain and proto codegen. It needs Go, Docker and a clone.

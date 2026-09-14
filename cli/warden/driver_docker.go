@@ -8,7 +8,6 @@ package warden
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -48,16 +47,23 @@ func dockerContainer(name, version string, part workerPart) string {
 	return dockerNetwork(name, version) + "-" + string(part)
 }
 
+func dockerImageEntrypoint(spec Spec) bool {
+	return len(spec.Actor.Argv) == 0 && len(spec.Handler.Argv) == 0
+}
+
 func (d *dockerDriver) Start(ctx context.Context, spec Spec) (workerHandle, error) {
 	digest, err := d.trust.Admit(ctx, spec.Image)
 	if err != nil {
 		return workerHandle{}, err
 	}
-	net := dockerNetwork(spec.Name, spec.Version)
-	if out, err := exec.CommandContext(ctx, d.bin, "network", "create", net).CombinedOutput(); err != nil {
-		if !strings.Contains(string(out), "already exists") {
-			return workerHandle{}, fmt.Errorf("docker network create %s: %v: %s", net, err, strings.TrimSpace(string(out)))
-		}
+	// Join the Compose network the Warden itself is on. A private per-actor network cannot
+	// resolve `temporal` / `redis` / `seaweed-s3`. ADR 0047: workers are siblings on that net.
+	net := d.net
+	if net == "" {
+		net = "kontra"
+	}
+	if dockerImageEntrypoint(spec) {
+		return d.startImage(ctx, net, spec, digest)
 	}
 	h := workerHandle{Driver: d.driverName(), Name: spec.Name, Version: spec.Version}
 	halves := map[workerPart]ProcSpec{partActor: spec.Actor, partHandler: spec.Handler}
@@ -78,22 +84,86 @@ func (d *dockerDriver) Start(ctx context.Context, spec Spec) (workerHandle, erro
 	return h, nil
 }
 
-func (d *dockerDriver) runArgs(net string, spec Spec, part workerPart, p ProcSpec, digest string) ([]string, error) {
+func (d *dockerDriver) startImage(ctx context.Context, net string, spec Spec, digest string) (workerHandle, error) {
+	args, err := d.runImageArgs(net, spec, digest)
+	if err != nil {
+		return workerHandle{}, err
+	}
+	out, err := exec.CommandContext(ctx, d.bin, args...).CombinedOutput()
+	if err != nil {
+		d.removePair(ctx, spec.Name, spec.Version)
+		return workerHandle{}, fmt.Errorf("docker run: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	ref := cliutil.FirstLine(string(out))
+	return workerHandle{
+		Driver:  d.driverName(),
+		Name:    spec.Name,
+		Version: spec.Version,
+		Halves: []workerHalf{
+			{Part: partActor, Ref: ref},
+			{Part: partHandler, Ref: ref},
+		},
+	}, nil
+}
+
+func (d *dockerDriver) runFlags(net, containerName, label, digest string, extraLabels []string) []string {
 	flags := []string{
-		"run", "--detach",
+		"run", "--detach", "--rm",
 		"--network", net,
-		"--name", dockerContainer(spec.Name, spec.Version, part),
-		"--label", workerLabelVar + "=" + workerLabel(spec.Name, spec.Version, part),
+		"--name", containerName,
+		"--label", workerLabelVar + "=" + label,
 		"--security-opt", "no-new-privileges",
 		"--cap-drop", "ALL",
 		"--env", "KONTRA_ACTOR_DIGEST=" + digest,
 	}
+	for _, l := range extraLabels {
+		flags = append(flags, "--label", l)
+	}
+	// Share the Warden's PID namespace so Pulumi `docker rm -f` (SIGKILL, no
+	// SIGTERM) of the Machine also kills sibling Workers. Docker destroy does
+	// not run the Warden's shutdown hook.
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		flags = append(flags, "--pid", "container:"+host)
+	}
+	return flags
+}
+
+func (d *dockerDriver) withProc(flags []string, p ProcSpec) []string {
 	for _, e := range p.Env {
 		flags = append(flags, "--env", e)
 	}
 	if p.Dir != "" {
 		flags = append(flags, "--workdir", p.Dir)
 	}
+	return flags
+}
+
+func (d *dockerDriver) runImageArgs(net string, spec Spec, digest string) ([]string, error) {
+	p := spec.Actor
+	if len(p.Env) == 0 {
+		p = spec.Handler
+	}
+	flags := d.withProc(d.runFlags(
+		net,
+		dockerNetwork(spec.Name, spec.Version),
+		workerLabel(spec.Name, spec.Version, partActor),
+		digest,
+		[]string{workerPairLabelVar + "=1"},
+	), p)
+	if err := assertNoRuntimeAccess(flags); err != nil {
+		return nil, err
+	}
+	return append(flags, spec.Image), nil
+}
+
+func (d *dockerDriver) runArgs(net string, spec Spec, part workerPart, p ProcSpec, digest string) ([]string, error) {
+	flags := d.withProc(d.runFlags(
+		net,
+		dockerContainer(spec.Name, spec.Version, part),
+		workerLabel(spec.Name, spec.Version, part),
+		digest,
+		nil,
+	), p)
 	if err := assertNoRuntimeAccess(flags); err != nil {
 		return nil, err
 	}
@@ -113,12 +183,7 @@ func (d *dockerDriver) Stop(ctx context.Context, h workerHandle, drain time.Dura
 	if drain > 0 && secs == 0 {
 		secs = 1
 	}
-	for _, part := range workerParts {
-		name := dockerContainer(h.Name, h.Version, part)
-		_, _ = exec.CommandContext(ctx, d.bin, "stop", "--time", fmt.Sprint(secs), name).CombinedOutput()
-		_, _ = exec.CommandContext(ctx, d.bin, "rm", "--force", name).CombinedOutput()
-	}
-	_, _ = exec.CommandContext(ctx, d.bin, "network", "rm", dockerNetwork(h.Name, h.Version)).CombinedOutput()
+	d.stopNames(ctx, secs, h)
 	hs, err := d.list(ctx)
 	if err != nil {
 		return err
@@ -131,22 +196,40 @@ func (d *dockerDriver) Stop(ctx context.Context, h workerHandle, drain time.Dura
 	return nil
 }
 
-func (d *dockerDriver) removePair(ctx context.Context, name, version string) {
-	for _, part := range workerParts {
-		_, _ = exec.CommandContext(ctx, d.bin, "rm", "--force", dockerContainer(name, version, part)).CombinedOutput()
+func (d *dockerDriver) stopNames(ctx context.Context, secs int, h workerHandle) {
+	names := map[string]struct{}{
+		dockerNetwork(h.Name, h.Version):                   {},
+		dockerContainer(h.Name, h.Version, partActor):      {},
+		dockerContainer(h.Name, h.Version, partHandler):    {},
 	}
-	_, _ = exec.CommandContext(ctx, d.bin, "network", "rm", dockerNetwork(name, version)).CombinedOutput()
+	for _, half := range h.Halves {
+		if half.Ref != "" {
+			names[half.Ref] = struct{}{}
+		}
+	}
+	for name := range names {
+		_, _ = exec.CommandContext(ctx, d.bin, "stop", "--time", fmt.Sprint(secs), name).CombinedOutput()
+		_, _ = exec.CommandContext(ctx, d.bin, "rm", "--force", name).CombinedOutput()
+	}
 }
 
-type dockerPS struct {
-	ID     string            `json:"ID"`
-	Labels map[string]string `json:"Labels"`
+func (d *dockerDriver) removePair(ctx context.Context, name, version string) {
+	for _, n := range []string{
+		dockerNetwork(name, version),
+		dockerContainer(name, version, partActor),
+		dockerContainer(name, version, partHandler),
+	} {
+		_, _ = exec.CommandContext(ctx, d.bin, "rm", "--force", n).CombinedOutput()
+	}
 }
 
 func (d *dockerDriver) list(ctx context.Context) ([]workerHandle, error) {
+	// Docker Desktop's `{{json .Labels}}` is a comma-separated STRING, not a JSON object, so
+	// ask for the labels we set. `.Label` is the template function that returns a single value.
+	format := "{{.ID}}\t{{.Label \"" + workerLabelVar + "\"}}\t{{.Label \"" + workerPairLabelVar + "\"}}"
 	out, err := exec.CommandContext(ctx, d.bin, "ps",
 		"--filter", "label="+workerLabelVar,
-		"--format", `{"ID":"{{.ID}}","Labels":{{json .Labels}}}`).Output()
+		"--format", format).Output()
 	if err != nil {
 		return nil, fmt.Errorf("docker ps: %w", err)
 	}
@@ -157,11 +240,11 @@ func (d *dockerDriver) list(ctx context.Context) ([]workerHandle, error) {
 		if line == "" {
 			continue
 		}
-		var row dockerPS
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			return nil, fmt.Errorf("docker ps json: %w", err)
+		id, rest, ok := strings.Cut(line, "\t")
+		if !ok {
+			return nil, fmt.Errorf("docker ps line %q: expected id<tab>label", line)
 		}
-		label := row.Labels[workerLabelVar]
+		label, pair, _ := strings.Cut(rest, "\t")
 		name, version, part, ok := parseWorkerLabel(label)
 		if !ok {
 			continue
@@ -173,13 +256,28 @@ func (d *dockerDriver) list(ctx context.Context) ([]workerHandle, error) {
 			byID[key] = h
 			order = append(order, key)
 		}
-		h.Halves = append(h.Halves, workerHalf{Part: part, Ref: row.ID})
+		h.Halves = append(h.Halves, workerHalf{Part: part, Ref: id})
+		if strings.TrimSpace(pair) != "" && !hasPart(*h, counterpart(part)) {
+			h.Halves = append(h.Halves, workerHalf{Part: counterpart(part), Ref: id})
+		}
 	}
 	outH := make([]workerHandle, 0, len(order))
 	for _, k := range order {
 		outH = append(outH, *byID[k])
 	}
 	return outH, nil
+}
+
+func counterpart(p workerPart) workerPart {
+	if p == partActor {
+		return partHandler
+	}
+	return partActor
+}
+
+func hasPart(h workerHandle, p workerPart) bool {
+	_, ok := h.half(p)
+	return ok
 }
 
 func (d *dockerDriver) logs(ctx context.Context, h workerHandle) (io.ReadCloser, error) {
