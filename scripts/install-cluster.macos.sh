@@ -10,9 +10,10 @@ cleanup() {
   rm -rf "$ws"
 }
 trap cleanup EXIT
-mkdir -p "$ws"
+mkdir -p "$ws" "$tmp/control/images"
 cp "$root/docker-compose.quickstart.yml" "$tmp/docker-compose.yml"
 cp "$root/.env.quickstart" "$tmp/.env"
+cp "$root/control/images/postgres-init.sh" "$tmp/control/images/postgres-init.sh"
 {
   echo "KONTRA_IMAGE=${KONTRA_IMAGE:-kontra:latest}"
   echo "KONTRA_ORCHESTRATOR_IMAGE=${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:latest}"
@@ -23,7 +24,7 @@ cp "$root/.env.quickstart" "$tmp/.env"
 cd "$tmp"
 docker compose up -d --wait
 curl -fsS http://127.0.0.1:8088/api/health | grep -q '"ok":true'
-docker compose logs --no-color cluster-init | grep -q 'console login'
+docker compose logs --no-color cli | grep -q 'console login'
 test -f "$ws/hello/actors/hello/actor.json"
 test -f "$ws/hello/workflows/hello/workflow.py"
 python3 "$root/scripts/assert-loopback-publish.py"

@@ -47,8 +47,7 @@ named `kontra`:
 - `registry:2`
 - `orchestrator-api` (api + materializer roles), `orchestrator-infra` as separate PIDs
 - `orchestrator-probe`
-- `cluster-init` (once) and `cli` (workspace watch + exec)
-- `cli` (exec target for serve/start)
+- `cli` (first-boot init + workspace watch + exec)
 
 Operator ports bind `127.0.0.1` by default. The Docker socket is mounted on `orchestrator-infra`,
 `cli`, and each local Warden. That is host-level Docker authority, documented as

@@ -19,7 +19,7 @@ docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:la
 docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
 docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
 docker compose --env-file .env.quickstart up -d --wait
-docker compose logs cluster-init | grep -A4 'console login'
+docker compose logs cli | grep -A4 'console login'
 ```
 
 Sign in at <http://127.0.0.1:8088> as `admin` with the password that last line printed. Shown once;
@@ -50,7 +50,7 @@ docker compose exec -T cli sh -c 'kontra dataset query hello --sql "select messa
 
 ### Tokens the CLI inside the cluster already has
 
-`cluster-init` wrote `config.yaml` into the `kontra-home` volume. The `cli` service mounts that
+`cli` wrote `config.yaml` into the `kontra-home` volume on first boot. The `cli` service mounts that
 volume, so `docker compose exec cli kontra …` needs no extra exports. A CLI on the **host** still
 does:
 

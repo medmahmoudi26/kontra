@@ -51,7 +51,7 @@ docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:la
 docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
 docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
 docker compose --env-file .env.quickstart up -d --wait
-docker compose logs cluster-init | grep -A4 'console login'
+docker compose logs cli | grep -A4 'console login'
 ```
 
 Named workspaces live in `workspaces.kontra/` beside `kontra/` and `kontra-console/` (not inside

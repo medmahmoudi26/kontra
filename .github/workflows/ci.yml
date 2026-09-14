@@ -547,16 +547,18 @@ jobs:
           echo "==> kontra from $tarball"
           docker build -f control/images/Dockerfile.appliance \
             --build-arg TARBALL="$tarball" -t kontra:ci .
-          docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:ci .
+          docker build -f control/images/Dockerfile.orchestrator \
+            --build-arg SPA_IMAGE=kontra:ci -t kontra-orchestrator:ci .
           docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
           docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
 
       - name: compose files into a fresh install directory
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/install" "$RUNNER_TEMP/workspaces.kontra"
+          mkdir -p "$RUNNER_TEMP/install/control/images" "$RUNNER_TEMP/workspaces.kontra"
           cp docker-compose.quickstart.yml "$RUNNER_TEMP/install/docker-compose.yml"
           cp .env.quickstart "$RUNNER_TEMP/install/.env"
+          cp control/images/postgres-init.sh "$RUNNER_TEMP/install/control/images/postgres-init.sh"
           {
             echo "KONTRA_IMAGE=kontra:ci"
             echo "KONTRA_ORCHESTRATOR_IMAGE=kontra-orchestrator:ci"
@@ -579,7 +581,7 @@ jobs:
         working-directory: ${{ runner.temp }}/install
         run: |
           set -euo pipefail
-          docker compose logs --no-color cluster-init > boot.log
+          docker compose logs --no-color cli > boot.log
           grep -q 'console login' boot.log \
             || { echo "::error title=no console login in the log::"; tail -50 boot.log; exit 1; }
           grep -qE '^\s*password\s+\S{20}' boot.log \
@@ -589,7 +591,7 @@ jobs:
         working-directory: ${{ runner.temp }}/install
         run: |
           set -euo pipefail
-          pw=$(docker compose logs --no-color cluster-init | grep -m1 -E '^\s*password\s+' | awk '{print $NF}')
+          pw=$(docker compose logs --no-color cli | grep -m1 -E '^\s*password\s+' | awk '{print $NF}')
           [ -n "$pw" ] || { echo "::error title=no password scraped from the log::"; exit 1; }
           code=$(curl -s -o resp.json -w '%{http_code}' -X POST http://127.0.0.1:8088/api/login \
                    -H 'content-type: application/json' \
@@ -608,7 +610,7 @@ jobs:
           test -f "$root/hello/actors/hello/actor.json"
           test -f "$root/hello/workflows/hello/workflow.py"
           echo marker > "$root/hello/KEEP"
-          docker compose run --rm --no-deps cluster-init
+          docker compose exec -T cli kontra workspace seed
           test -f "$root/hello/KEEP"
 
       - name: discovery registered the starters
