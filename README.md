@@ -112,8 +112,8 @@ editor; a webview's drag surface belongs to the editor, the picker always works.
 
 ### The development stack
 
-`docker-compose.yml` at the root includes `docker-compose.quickstart.yml`. After the Install image
-builds, `docker compose --env-file .env.quickstart up -d --wait` is the cluster. `orchestrator-infra`
+`docker-compose.yml` is the cluster. After the Install image builds,
+`docker compose --env-file .env.quickstart up -d --wait` brings it up. `orchestrator-infra`
 stays its own PID because Pulumi's Node language host installs process-global rejection handlers for
 every inline `up` ([ADR 0019](docs/adr)) — API and materializer share one process; infra stays
 separate.
