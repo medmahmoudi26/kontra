@@ -162,6 +162,52 @@ func firstOr(list []string, fallback string) string {
 	return fallback
 }
 
+// serveRoot is the tree `--mode local` reads the SDK and the handler out of.
+//
+// THE SAME TWO ANSWERS `workflow serve` ALREADY RESOLVES THROUGH (sdkRootForServe), in the same
+// order: KONTRA_SDK_ROOT is the container's, a checkout is the laptop's. They were NOT the same
+// here — this path went straight to FindRepoRoot — and the difference was the Actors page's Serve
+// button. That button runs inside orchestrator-api, which has no checkout and no shell, and it
+// answered `no docker-compose.yml found walking up from CWD (pass --repo <dir>)`: a sentence about
+// an operator's working directory, produced by a process that has none, naming a flag this command
+// does not have.
+func serveRoot() (string, error) {
+	if v := strings.TrimSpace(os.Getenv("KONTRA_SDK_ROOT")); v != "" && hasSDK(v) {
+		return v, nil
+	}
+	root, err := cliutil.FindRepoRoot("")
+	if err != nil {
+		return "", fmt.Errorf("kontra serve needs the checkout or KONTRA_SDK_ROOT "+
+			"(it runs the handler and puts actorkit on PYTHONPATH): %w", err)
+	}
+	return root, nil
+}
+
+// prebuiltHandler is the compiled handler to run, or "" when the caller should build from source.
+//
+// `<root>/handler` is where a tree that has no `runtime/handler` sources keeps the binary
+// `control/images/Dockerfile.workerbase` builds — the same handler, compiled once at image build
+// instead of on every serve. KONTRA_HANDLER_BIN overrides it, and a value that is set and wrong is
+// a REFUSAL rather than a silent fall back to `go run .`: falling back would answer a typo in a
+// path with an error about a missing Go toolchain.
+func prebuiltHandler(root string) (string, error) {
+	if v := strings.TrimSpace(os.Getenv("KONTRA_HANDLER_BIN")); v != "" {
+		if !isExecutableFile(v) {
+			return "", fmt.Errorf("KONTRA_HANDLER_BIN=%s is not an executable file", v)
+		}
+		return v, nil
+	}
+	if cand := filepath.Join(root, "handler"); isExecutableFile(cand) {
+		return cand, nil
+	}
+	return "", nil
+}
+
+func isExecutableFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	actorDir := fs.String("actor", "", "actor directory (contains actor.json)")
@@ -238,9 +284,9 @@ func cmdServe(args []string) error {
 		}
 		return runElsewhere(*mode, *actorDir, m, *replicas, *network, fs)
 	}
-	root, err := cliutil.FindRepoRoot("")
+	root, err := serveRoot()
 	if err != nil {
-		return fmt.Errorf("kontra serve needs the checkout (it runs handler/ from source): %w", err)
+		return err
 	}
 	absActor, err := filepath.Abs(*actorDir)
 	if err != nil {
@@ -308,11 +354,23 @@ func cmdServe(args []string) error {
 		"PYTHONPATH="+filepath.Join(root, "sdk", "python")+":"+
 			filepath.Join(root, "runtime", "python")+":"+
 			filepath.Join(root, "sdk", "python", "_gen"))
-	handlerArgv := []string{"go", "run", "."}
 	// runtime/handler, not handler/ — the handler moved and this call site was missed when
 	// bundle.go:237 was updated. A stale path here fails at `kontra serve`, which is the verb
 	// the README calls "the one you use ninety percent of the time".
+	handlerArgv := []string{"go", "run", "."}
 	handlerDir := filepath.Join(root, "runtime", "handler")
+	// A COMPILED HANDLER WHEN THE TREE SHIPS ONE, `go run .` only when it does not. See serveRoot:
+	// this command runs in the control plane as well as in a checkout, and a container has no Go
+	// toolchain — `go run .` there fails with `exec: "go": executable file not found`, which reads
+	// as a broken install rather than as a missing build dependency for one code path.
+	prebuilt, err := prebuiltHandler(root)
+	if err != nil {
+		return err
+	}
+	if prebuilt != "" {
+		handlerArgv = []string{prebuilt}
+		handlerDir = root
+	}
 	handlerEnv := cliutil.Derive(env, "GOWORK=off")
 
 	// THE DRIVER, AND WHY THERE IS ONE. Everything above is `--mode local`'s ARGUMENT — which

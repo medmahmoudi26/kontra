@@ -60,10 +60,14 @@ func cmdActorSchema(args []string) error {
 		return fmt.Errorf("no actor at %s: %w", actorDir, err)
 	}
 
-	root, err := cliutil.FindRepoRoot("")
+	// THE SAME ROOT `kontra serve` RESOLVES (serve.go:serveRoot): KONTRA_SDK_ROOT first, a checkout
+	// after it. This asked FindRepoRoot alone, which made the command unusable in exactly the place
+	// it was written for — the control plane, which has the SDK at /opt/kontra and no checkout and
+	// no shell. `kontra actor schema` there answered "no docker-compose.yml found walking up from
+	// CWD", which is a sentence about a working directory, from a process that has none.
+	root, err := serveRoot()
 	if err != nil {
-		return fmt.Errorf("finding the kontra checkout: %w\n"+
-			"  this command reads the SDK's own schema derivation, so it needs the repository", err)
+		return err
 	}
 
 	// The same interpreter rule `kontra serve` uses, through the same function — an actor's schema

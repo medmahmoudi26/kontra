@@ -39,6 +39,22 @@
       {
         "command": "kontra.signOut",
         "title": "kontra: Forget the stored credential"
+      },
+      {
+        "command": "kontra.paste",
+        "title": "kontra: Paste into the runner pane"
+      },
+      {
+        "command": "kontra.showLogs",
+        "title": "kontra: Show logs"
+      },
+      {
+        "command": "kontra.copy",
+        "title": "kontra: Copy from the runner pane"
+      },
+      {
+        "command": "kontra.openInBrowser",
+        "title": "kontra: Open the runner in a browser"
       }
     ],
     "configuration": {
@@ -50,13 +66,27 @@
           "description": "The orchestrator this editor talks to. The runner pane is served from here."
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "kontra.paste",
+        "key": "ctrl+v",
+        "mac": "cmd+v",
+        "when": "activeWebviewPanelId == 'kontra.runner'"
+      },
+      {
+        "command": "kontra.copy",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "activeWebviewPanelId == 'kontra.runner'"
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -p . -w",
     "test": "node --experimental-strip-types --test src/*.test.ts",
-    "package": "vsce package"
+    "package": "npx --yes @vscode/vsce package"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

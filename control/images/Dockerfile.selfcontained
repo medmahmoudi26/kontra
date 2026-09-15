@@ -163,6 +163,18 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
  && cp /work/kontra_*_linux_"${TARGETARCH}".tar.gz /work/SHA256SUMS /out/ \
  && ls -la /out
 
+# THE HANDLER, COMPILED ONCE — the workflow half of a Worker, which `kontra serve --mode local`
+# used to run as `go run .` out of `runtime/handler`. That is right in a checkout and impossible in
+# the control plane: this image has no Go toolchain and no sources, so the Actors page's Serve
+# button (which runs `kontra serve` inside orchestrator-api) could only ever fail. Same build flags
+# as `control/images/Dockerfile.workerbase`, so the handler a locally served actor runs and the one
+# a Machine runs are the same binary.
+#
+# NOT into /out: the runtime stage below unpacks /out and then deletes it.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    cd runtime/handler && GOWORK=off go build -p=1 -trimpath -o /handlerbin/handler .
+
 # ── 3 · WHAT ACTUALLY RUNS ──────────────────────────────────────────────────────────────────────
 #
 # The same runtime half as `Dockerfile.appliance`, deliberately: the two paths must produce the same
@@ -214,6 +226,8 @@ COPY kontra/examples/python/hello /opt/kontra/seed/actors/hello
 COPY kontra/examples/workflows/hello /opt/kontra/seed/workflows/hello
 COPY kontra/sdk/python /opt/kontra/sdk/python
 COPY kontra/runtime/python /opt/kontra/runtime/python
+# `cli/serve.go:prebuiltHandler` looks for exactly this path under KONTRA_SDK_ROOT.
+COPY --from=release /handlerbin/handler /opt/kontra/handler
 RUN chmod +x /usr/local/bin/kontra-entrypoint \
  && apt-get update \
  && apt-get install -y --no-install-recommends docker.io python3 python3-pip python3-venv \
@@ -221,5 +235,6 @@ RUN chmod +x /usr/local/bin/kontra-entrypoint \
  && rm -rf /var/lib/apt/lists/*
 ENV PYTHONPATH=/opt/kontra/sdk/python:/opt/kontra/runtime/python
 ENV KONTRA_SDK_ROOT=/opt/kontra
+RUN test -x /opt/kontra/handler && test -d /opt/kontra/sdk/python/kontra
 CMD ["kontra", "version"]
 ENTRYPOINT ["/usr/local/bin/kontra-entrypoint"]

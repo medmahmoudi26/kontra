@@ -21,6 +21,7 @@ export { callerFor } from '@kontra/core/caller';
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { cliDetail, ControlRefused, kontraBin, serveEnv } from './workflowControl';
 import { ACTOR_TOKEN_VAR } from './secrets/identity';
 import { secretStore } from './secrets/store';
@@ -168,9 +169,74 @@ function run(
   });
 }
 
+/** One Method, as the code on disk declares it — the shape `MethodCall` renders a form from. */
+export interface DiskMethod {
+  name: string;
+  input?: unknown;
+  output?: unknown;
+}
 
+/** What `kontra actor schema` answers: the actor it read, and every Method it found. */
+export interface DiskSchema {
+  actor: { name: string; version: string };
+  dir: string;
+  methods: DiskMethod[];
+  /** What an operator types to serve this folder HERE — see {@link serveCommand}. */
+  serve: string;
+}
 
+/**
+ * The command that actually serves this Actor in THIS deployment.
+ *
+ * IT IS COMPOSED SERVER-SIDE BECAUSE ONLY THE SERVER KNOWS. A browser pane cannot tell whether the
+ * control plane is a container, an appliance or a checkout on the reader's own laptop, and the
+ * answer differs in every one. Guessing produced a command that could not work: the Compose cluster
+ * shows an operator `kontra serve --actor <dir> --watch`, they run it on the host, and the actor
+ * process dies on `import temporalio` — the host has no SDK, and the whole point of this install is
+ * that Docker is the only prerequisite. The path is right, the binary is on their PATH, and it
+ * still cannot work. That is the worst shape an instruction can have.
+ *
+ * `/.dockerenv` is the container test, and the hostname is the container to exec into —
+ * `docker-compose.yml` pins it to `kontra-api` (it has to, for the Monitor's poller identity), so
+ * the name in this string is the name on the operator's machine.
+ */
+function serveCommand(dir: string): string {
+  const local = `kontra serve --actor ${dir} --watch`;
+  if (!existsSync('/.dockerenv')) return local;
+  return `docker exec -it ${hostname()} ${local}`;
+}
 
-
-
-
+/**
+ * The Methods a folder declares RIGHT NOW, read from the files rather than from the catalog.
+ *
+ * ── WHY THE CATALOG IS NOT THE ANSWER HERE ──────────────────────────────────────────────────────
+ *
+ * A catalog entry is published by a WORKER AT BOOT. It is therefore the truth about what is
+ * serving, which is exactly what the Actors grid should show — and exactly the wrong thing to draw
+ * a form from while somebody is editing the file. Add a parameter, save, and the catalog still
+ * describes the code that booted an hour ago; the form beside the editor offers fields that no
+ * longer exist and omits the one just written. The editor pane is the one surface where "what is
+ * on disk" beats "what is running", because the next thing the author does is serve it.
+ *
+ * NOT A SECOND DERIVATION. It shells to `kontra actor schema`, which shells to
+ * `internals.schemadump`, which calls the same `load_actor` + `operations_of` a booting worker
+ * calls — one implementation, held there by `TestActorSchemaMatchesTheCatalogDerivation`. A schema
+ * derived here in TypeScript would be a second answer to "what does this Method accept" and would
+ * drift the first time either was fixed.
+ */
+export async function diskSchema(source: { path: string }): Promise<DiskSchema> {
+  const { code, stdout, stderr } = await run(kontraBin(), ['actor', 'schema', source.path], source.path, serveEnv());
+  if (code !== 0) {
+    const detail = cliDetail(stderr, stdout);
+    throw new ControlRefused(`reading the schema failed (exit ${code}): ${detail || 'no output'}`);
+  }
+  try {
+    // The CLI answers the schema; the command is this process's to add — it is the only party that
+    // knows where "here" is.
+    return { ...(JSON.parse(stdout) as DiskSchema), serve: serveCommand(source.path) };
+  } catch {
+    // The CLI prints a banner before everything; a parse failure here is that banner or a partial
+    // write, and the bytes are what a reader needs rather than "unexpected token".
+    throw new ControlRefused(`the schema command did not answer JSON: ${stdout.slice(0, 400)}`);
+  }
+}

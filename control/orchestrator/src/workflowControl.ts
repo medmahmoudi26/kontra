@@ -54,6 +54,7 @@ import {
   firstParagraph,
   folderDigest,
   readManifest,
+  workspaceRoot,
 } from './sources';
 import { TypedSearchAttributes } from '@temporalio/common';
 import { KontraTenant } from './visibility';
@@ -72,19 +73,25 @@ export function kontraBin(): string {
 }
 
 /**
- * The environment the SERVED WORKER needs, which is not the one this process has.
+ * OVERRIDES for the served worker's environment. EMPTY IS THE RIGHT ANSWER in the Compose cluster,
+ * and that is a change worth stating because this used to be load-bearing.
  *
- * Serving crosses a boundary: `kontra` runs here, in a container, and the worker it starts runs
- * out there, on the host, because the tmux client here drives the host's tmux server through a
- * mounted socket. Every address in this process's environment is a compose-network name —
- * `temporal:7233`, `http://seaweed:8333` — and not one of them resolves on the other side. A
- * worker handed them starts, fails to dial, and retries forever against a hostname that does not
- * exist.
+ * IT WAS WRITTEN FOR A BOUNDARY THAT NO LONGER EXISTS. The design it documented had `kontra` run
+ * in this container while the worker it started ran out on the HOST, because the tmux client here
+ * drove the host's tmux server through a mounted socket. Every address in this process's
+ * environment is a compose-network name — `temporal:7233`, `http://seaweed:8333` — and none of
+ * them resolve on the other side, so the host's view had to be DECLARED rather than derived.
  *
- * So the host's view is DECLARED rather than derived: `KONTRA_SERVE_ENV` is whitespace-separated
- * `KEY=VALUE`, set by whoever wired the mounts, since that is the only party who knows how the
- * host reaches these services. Nothing is guessed — an unset variable stays unset, and the worker
- * fails the same way it would if you had run it by hand.
+ * That mount was never in docker-compose.yml (only a `tmux-dir` Makefile target that prepared a
+ * directory nothing bound), and the host could not have run the worker anyway: it has no SDK and
+ * no interpreter, which is the whole point of "Docker is the only prerequisite". So the worker
+ * runs HERE now — `Dockerfile.orchestrator` ships the CLI, tmux, python3 and the SDK — and `run()`
+ * spawns it with `{...process.env, ...this}`. Inheriting is CORRECT: the worker is on the compose
+ * network, where every one of those names resolves.
+ *
+ * KONTRA_SERVE_ENV survives as the escape hatch for a deployment that does put the worker
+ * somewhere else — whitespace-separated `KEY=VALUE`, set by whoever wired that. Nothing is
+ * guessed; an entry that is absent is simply inherited.
  */
 export function serveEnv(): Record<string, string> {
   const raw = process.env.KONTRA_SERVE_ENV;
@@ -122,11 +129,33 @@ export function serveEnv(): Record<string, string> {
  * moving the home the rest of the installation defaults under, which is what lets a test point it
  * at a temp directory.
  *
+ * ── THE ACTIVE WORKSPACE COMES FIRST WHEN THERE IS ONE (ADR 0047) ───────────────────────────────
+ *
+ * A named workspace IS the operator's code folder: `workspaces.kontra/<name>/{actors,workflows}`,
+ * bind-mounted by Compose and chosen by `.current`. Registration already reached it — `sourceStore`
+ * discovers under `workspaceRoot()` — but THIS root did not, and the two together were a page that
+ * lied. `GET /api/workflows` lists this directory, so the Workflows page showed an empty list and
+ * named `/var/lib/kontra/workflows` while the workflow the operator had just written sat registered
+ * and servable in the workspace. The list and the thing being listed were two different directories.
+ *
+ * IT IS NOT A WIDENING OF THE AUTHORITY, it is the same authority pointed at the directory that now
+ * holds the code. The default root is a folder the operator was told to put workflows in; a
+ * workspace is a folder they were told to put workflows in AND that Compose mounts for exactly that
+ * purpose. Only one of them can be "where the workflows are", and with a workspace configured it is
+ * the workspace — which is also what makes `serve`'s relative path `hello/workflow.py` rather than
+ * eleven `..` segments back out of KONTRA_HOME.
+ *
+ * KONTRA_WORKFLOW_ROOT still wins over both, so a test still pins its own directory.
+ *
  * Resolved through symlinks once, here, because it is the confinement boundary and the candidate
  * is resolved the same way before being compared to it.
  */
 export function workflowRoot(): string {
-  const raw = process.env.KONTRA_WORKFLOW_ROOT || defaultRoot('workflow');
+  const workspace = workspaceRoot();
+  const raw =
+    process.env.KONTRA_WORKFLOW_ROOT ||
+    (workspace ? path.join(workspace, 'workflows') : '') ||
+    defaultRoot('workflow');
   try {
     return realpathSync(raw);
   } catch {

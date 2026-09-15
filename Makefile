@@ -3,27 +3,25 @@
 # **THE LOCAL CONTROL PLANE IS THE COMPOSE CLUSTER (ADR 0047).** `make up` starts
 # docker-compose.yml, which includes docker-compose.quickstart.yml. `kontra up` remains in the
 # binary and is not a supported install path.
-.PHONY: up up-d down logs tmux-dir ui api bundle proto-check image release worker-base
+.PHONY: up up-d down logs ui api bundle proto-check image release worker-base
 
-# THE TMUX SOCKET DIRECTORY, MADE BEFORE COMPOSE CAN MAKE IT WRONG.
+# THERE IS NO `tmux-dir` TARGET ANY MORE, and its absence is the fix rather than a deletion.
 #
-# `orchestrator-infra` bind-mounts the host's tmux socket dir so the panels streamer can watch
-# local `kontra-*` sessions (ADR 0020 mode `local`). Docker creates a MISSING bind source itself,
-# as root and mode 0755 — and tmux refuses a socket directory that is not 0700, so the first
-# `tmux` after a reboot fails with a permissions error and the operator has no reason to connect
-# that to a compose mount. `/tmp` is cleared on reboot, so this is not a rare case: it is every
-# reboot.
+# It prepared the HOST's tmux socket directory, for a bind mount docker-compose.yml never had:
+# the comment described `orchestrator-infra` mounting it so the panels streamer could watch local
+# sessions, and no such volume was ever declared. The served worker does not run on the host either
+# — it runs in orchestrator-api, which is the only place with the CLI, python3 and the SDK — so a
+# socket on the host would have been the wrong server to watch even if it had been mounted.
 #
-# `install -d -m 700` is idempotent and fixes the mode on a directory docker already created.
-tmux-dir:
-	@install -d -m 700 "$${TMUX_TMPDIR:-/tmp}/tmux-$$(id -u)"
+# The two containers share one tmux server over the `tmux-sock` VOLUME now (TMUX_TMPDIR in
+# docker-compose.yml). Docker owns that directory's mode, so there is nothing to prepare here.
 
 # THE COMPOSE CLUSTER (ADR 0047), including orchestrator-infra for dockerFleet and optional
 # DigitalOcean. `kontra up` is not this target.
-up: tmux-dir
+up:
 	docker compose up
 
-up-d: tmux-dir
+up-d:
 	docker compose up -d
 
 # THE SPA, WITHOUT THE 13-MINUTE IMAGE BUILD.
@@ -171,6 +169,22 @@ image-from-release: release
 # the artifact cannot rotate, is identical for every operator, and outlives the container in any
 # image that keeps it. So an absent `.env` is the correct state, and the guard was stopping a fresh
 # clone from building for a reason that had become the opposite of true.
+# WHERE THE CONTAINER ACTUALLY SERVES THE SPA FROM. This said `/app/web/dist`, which is the
+# APPLIANCE's layout and does not exist in `Dockerfile.orchestrator` — its WORKDIR is
+# /src/control/orchestrator and `server.ts` resolves `web/dist` relative to that. So `make ui`
+# deleted nothing and copied into a path docker created on the fly, and the console in the browser
+# never changed.
+ORCH_WEB := /src/control/orchestrator/web/dist
+
+# AND THE SERVER'S OWN PATH, which had the same phantom. `api` copied into `/app/dist` — the
+# APPLIANCE's layout, absent from `Dockerfile.orchestrator`, whose WORKDIR is
+# /src/control/orchestrator. `docker cp` CREATES a missing destination rather than refusing, so the
+# target printed "deployed and restarted" and restarted the container onto the code it already had.
+# MEASURED: `docker exec kontra-api ls -d /app/dist` -> no such file, while the process runs from
+# /src/control/orchestrator/dist. A deploy that reports success and changes nothing is worse than
+# one that fails, and it is the same mistake `ORCH_WEB` above exists to correct.
+ORCH_DIST := /src/control/orchestrator/dist
+
 ui: console
 	@api=$$(docker ps -q --filter label=com.docker.compose.service=orchestrator-api | head -1); \
 	  if [ -z "$$api" ]; then \
@@ -179,8 +193,8 @@ ui: console
 	    echo "  for the hydrated bundle instead:  kontra bundle spa  (then restart 'kontra up')"; \
 	    exit 0; \
 	  fi; \
-	  docker exec "$$api" rm -rf /app/web/dist/assets; \
-	  docker cp "$(CONSOLE)"/dist/. "$$api":/app/web/dist/ && echo "deployed the SPA to $$api"
+	  docker exec "$$api" rm -rf $(ORCH_WEB)/assets; \
+	  docker cp "$(CONSOLE)"/dist/. "$$api":$(ORCH_WEB)/ && echo "deployed the SPA to $$api"
 
 # THE SERVER, WITHOUT THE IMAGE BUILD EITHER — the `ui` target's twin.
 #
@@ -226,11 +240,11 @@ api:
 	    fi; \
 	    echo "no running $$svc container — start the stack with 'make up-d' first"; exit 1; \
 	  fi; \
-	  docker cp control/orchestrator/dist/. "$$cid":/app/dist/ && docker restart "$$cid" >/dev/null && echo "deployed and restarted $$svc ($$cid)"; \
+	  docker cp control/orchestrator/dist/. "$$cid":$(ORCH_DIST)/ && docker restart "$$cid" >/dev/null && echo "deployed and restarted $$svc ($$cid)"; \
 	done
 	@old=$$(docker ps -q --filter label=com.docker.compose.service=orchestrator-materializer | head -1); \
 	  test -z "$$old" || { \
-	    docker cp control/orchestrator/dist/. "$$old":/app/dist/ && docker restart "$$old" >/dev/null; \
+	    docker cp control/orchestrator/dist/. "$$old":$(ORCH_DIST)/ && docker restart "$$old" >/dev/null; \
 	    echo "also refreshed orchestrator-materializer ($$old) — a PRE-MERGE container this compose"; \
 	    echo "  file no longer defines. It is polling kontra-materializer beside orchestrator-api's"; \
 	    echo "  own materializer role; recreate the stack ('make up-d') to be rid of it."; \

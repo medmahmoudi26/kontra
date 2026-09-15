@@ -15,6 +15,7 @@ import os, { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultRoot, inspectFolder } from './sources';
+import { CURRENT_FILE } from './workspaces';
 import { KontraTenant } from './visibility';
 import {
   cliDetail,
@@ -368,8 +369,11 @@ describe('the root serve runs from is the root registration defaults to', () => 
   beforeEach(() => {
     fakeHome = realpathSync(mkdtempSync(path.join(tmpdir(), 'kontra-home-')));
     // The outer beforeEach pins KONTRA_WORKFLOW_ROOT; the point here is the path taken when nobody
-    // sets either variable and the root has to come from the home.
+    // sets any of them and the root has to come from the home. KONTRA_WORKSPACES goes too: an
+    // operator running this suite in a shell that exports it (which the Compose install tells them
+    // to) would otherwise get the workspace root here and a failure about their own laptop.
     delete process.env.KONTRA_WORKFLOW_ROOT;
+    delete process.env.KONTRA_WORKSPACES;
     delete process.env.KONTRA_HOME;
     vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
   });
@@ -428,6 +432,25 @@ describe('the root serve runs from is the root registration defaults to', () => 
     // Registration is unmoved — the override is scoped to what serve may run, which is what makes it
     // a narrower confinement rather than a second home.
     expect(defaultRoot('workflow')).toBe(defaultWorkflows());
+  });
+
+  it('prefers the active workspace’s workflows/ over the home, and KONTRA_WORKFLOW_ROOT over both', () => {
+    // ADR 0047. The Workflows page lists THIS directory, so when it was the home's while the code
+    // lived in the mounted workspace, the page drew an empty list and named a directory the
+    // operator had never put anything in — beside a Serve button that worked, because registration
+    // had already reached the workspace. One root, pointed where the code is.
+    const parent = mkdtempSync(path.join(tmpdir(), 'kontra-ws-'));
+    mkdirSync(path.join(parent, 'demo', 'workflows'), { recursive: true });
+    writeFileSync(path.join(parent, CURRENT_FILE), 'demo\n');
+    process.env.KONTRA_WORKSPACES = parent;
+
+    expect(workflowRoot()).toBe(realpathSync(path.join(parent, 'demo', 'workflows')));
+
+    // The override still wins, which is what keeps a test able to pin its own directory.
+    process.env.KONTRA_WORKFLOW_ROOT = root;
+    expect(workflowRoot()).toBe(realpathSync(root));
+
+    rmSync(parent, { recursive: true, force: true });
   });
 
   it('resolves the deployment’s explicit KONTRA_HOME exactly as it did before', () => {

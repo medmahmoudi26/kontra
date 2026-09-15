@@ -4,8 +4,17 @@ FROM ${SPA_IMAGE} AS spa-src
 
 FROM node:22-bookworm-slim
 
+# tmux and python3 are here for ONE reason: `serve`. This process spawns
+# `kontra workflow serve <folder> --tmux`, so the session lands on THIS container's tmux server —
+# which is the same server `panels/local.ts` runs `list-panes` against, so a served worker appears
+# on the Monitor wall without anything else being wired. The worker itself is `python3 workflow.py`.
+#
+# procps because this container now HOSTS those workers. Without it `ps` does not exist here, so the
+# first question anyone asks of a Terminal that looks wrong — is the process still alive — has no
+# answer from inside; and `panels/local.tmux.test.ts`, the suite that covers exactly the discovery
+# path above, needs `pkill` to kill a pane and assert it reports as exited.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl unzip docker.io \
+ && apt-get install -y --no-install-recommends ca-certificates curl unzip docker.io tmux python3 procps \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL https://get.pulumi.com | sh
 ENV PATH="/root/.pulumi/bin:${PATH}"
@@ -37,5 +46,32 @@ RUN mkdir -p web/dist \
       && test -f web/dist/index.html; \
     fi \
  && rm -rf /tmp/kontra-bundles /tmp/web /tmp/manifest.json
+
+# ── WHAT `serve` RUNS, TAKEN FROM THE APPLIANCE IMAGE RATHER THAN REBUILT ───────────────────────
+#
+# `serveWorkflow` (control/orchestrator/src/workflowControl.ts) shells out to the CLI instead of
+# reimplementing it, and `createWorkspace` (workspaces.ts) seeds from /opt/kontra/seed. Neither
+# path existed in this image, so both failed at runtime with nothing to point at: serve answered
+# `spawn kontra ENOENT` and a console-created workspace answered
+# `seed templates not found at /opt/kontra/seed` AFTER making the directory.
+#
+# COPIED FROM `spa-src`, NOT REINSTALLED. The CLI container serves with these exact bytes — the
+# same binary, the same SDK tree, the same pinned wheels — so a worker started from the console and
+# one started with `docker compose exec cli` cannot be running different code. A second
+# `pip install temporalio redis boto3 pydantic` here would be unpinned in two images and drift on
+# whichever is rebuilt next; that drift is a worker that dials a queue nobody else agrees on.
+#
+# Debian bookworm on both sides (node:22-bookworm-slim and debian:bookworm-slim), so python3.11 and
+# `/usr/local/lib/python3.11/dist-packages` mean the same thing in both. The RUN below is the check
+# that says so AT BUILD TIME rather than on the operator's first click.
+COPY --from=spa-src /usr/local/bin/kontra /usr/local/bin/kontra
+COPY --from=spa-src /opt/kontra /opt/kontra
+COPY --from=spa-src /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
+ENV KONTRA_SDK_ROOT=/opt/kontra
+RUN kontra --version \
+ && tmux -V \
+ && python3 -c 'import temporalio, redis, boto3, pydantic' \
+ && test -f /opt/kontra/seed/workflows/hello/workflow.py \
+ && test -d /opt/kontra/sdk/python/kontra
 
 ENTRYPOINT ["/usr/local/bin/orchestrator-entrypoint"]

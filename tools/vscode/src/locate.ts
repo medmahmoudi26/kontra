@@ -50,3 +50,17 @@ export function readActorKey(
     return undefined;
   }
 }
+
+/**
+ * Is `file` inside `dir`?
+ *
+ * `path.relative` rather than `startsWith`, because `/srv/kontra-evil` starts with `/srv/kontra` —
+ * the same rule the orchestrator's `resolveWorkflowFile` confines with, and wrong here in a smaller
+ * way: a save in a sibling directory would re-derive a schema for a folder it does not belong to.
+ * Symlinks are NOT resolved: this only decides whether to send a hint, and a stat per keystroke-
+ * triggered save buys nothing.
+ */
+export function isInside(file: string, dir: string): boolean {
+  const rel = path.relative(dir, file);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}

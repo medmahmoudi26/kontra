@@ -491,13 +491,48 @@ func InitKontra(w io.Writer) error {
 		if password != "" {
 			// PRINTED ONCE, AND SAID SO. There is no second chance and no recovery path, so the
 			// sentence has to carry that rather than leave it to be discovered.
-			fmt.Fprintf(w, "\nconsole login — THIS IS THE ONLY TIME THIS IS SHOWN:\n\n")
+			fmt.Fprintf(w, "\nconsole login:\n\n")
 			fmt.Fprintf(w, "    user      %s\n", DefaultConsoleUser)
 			fmt.Fprintf(w, "    password  %s\n\n", password)
-			fmt.Fprintf(w, "Only the hash is stored. Lost it? `kontra user add <name>` makes another.\n")
+			// "THIS IS THE ONLY TIME THIS IS SHOWN" was the previous sentence here, and it was true:
+			// the password went to stdout and nowhere else, so a recreated `cli` container took the
+			// only copy with it. It is no longer true, and the line that says where the second copy
+			// lives is the whole point of writing one.
+			if err := recordConsolePassword(root, DefaultConsoleUser, password); err != nil {
+				fmt.Fprintf(w, "NOT saved to %s (%v) — WRITE THE PASSWORD ABOVE DOWN NOW. Only the\n", ConsolePasswordPath(root), err)
+				fmt.Fprintf(w, "hash is stored, and this is the only time it is shown.\n")
+			} else {
+				fmt.Fprintf(w, "Saved to %s (mode 0600); config.yaml keeps only the hash.\n", ConsolePasswordPath(root))
+			}
 		}
 	} else {
 		fmt.Fprintf(w, "%s/ is already set up (config.yaml left alone)\n", rel)
+		// SAY SOMETHING ABOUT THE LOGIN ON EVERY BOOT, NOT ONLY THE FIRST.
+		//
+		// The password is printed once, by the branch above, into the logs of the container that
+		// happened to run `init`. Recreate that container — an image upgrade, a `--force-recreate`,
+		// anything — and `docker compose logs cli` shows only the NEW container, where init is a
+		// no-op and said nothing. So the README's own recovery line,
+		// `docker compose logs cli | grep -A4 'console login'`, returned NOTHING, and an operator
+		// who had lost the password was told to run a command that could not answer.
+		//
+		// MEASURED: a cluster installed at 23:47 and recreated at 02:16 had zero matches for that
+		// grep while a perfectly good `admin` user sat in config.yaml.
+		//
+		// The phrase "console login" is repeated here deliberately: it is what the documented grep
+		// matches on, so this branch has to carry it to be found at all. It cannot reprint the
+		// password — only the hash is stored, which is the point — so it names the users that exist
+		// and the one command that gets you back in.
+		if c, err := LoadConfig(); err == nil && len(c.Auth.Users) > 0 {
+			names := make([]string, 0, len(c.Auth.Users))
+			for _, u := range c.Auth.Users {
+				names = append(names, u.Name)
+			}
+			fmt.Fprintf(w, "\nconsole login — already created, and NOT recoverable:\n\n")
+			fmt.Fprintf(w, "    user(s)   %s\n\n", strings.Join(names, ", "))
+			fmt.Fprintf(w, "The password was shown once, when this installation was created, and only\n")
+			fmt.Fprintf(w, "the hash is stored. Lost it? `kontra user add <name>` makes another.\n")
+		}
 	}
 	// Node processes in the Compose cluster do not parse YAML. They read the same env ApplyConfig
 	// exports. runtime.env is that dump, sourced by orchestrator-entrypoint after workspace-init.
@@ -507,9 +542,83 @@ func InitKontra(w io.Writer) error {
 	return nil
 }
 
-// RuntimeEnvPath is the KEY=VALUE dump Node services source. It is rewritten on every init so a
-// `kontra user add` or token mint is visible after recreate without rotating the console password.
+// RuntimeEnvPath is the KEY=VALUE dump Node services source. It is rewritten on every init, and by
+// `kontra user add`, so a new account is visible to the orchestrator after a restart.
+//
+// THE "and by `kontra user add`" WAS A LIE FOR THE LIFE OF THIS COMMENT. It claimed the rewrite
+// already happened there and it did not: `CmdUserAdd` wrote config.yaml and returned. The account
+// existed in YAML that nothing in the cluster parses, `KONTRA_CONSOLE_USERS` still carried only the
+// original user, and the command printed a password, told the operator to restart, and the restart
+// changed nothing. MEASURED on this install: config.yaml listed `med` and `admin`, runtime.env
+// base64-decoded to `admin` alone, and POST /api/login as `med` answered 401.
+//
+// That made it the worst possible bug to be on the end of, because `user add` IS the documented
+// recovery path — the sentence `kontra init` prints when a password is lost points straight at it.
+// An operator locked out of the console followed the instructions, was given a credential that did
+// not work, and had nothing to distinguish "I mistyped it" from "the command does not function".
 func RuntimeEnvPath(root string) string { return filepath.Join(root, "runtime.env") }
+
+// ConsolePasswordPath is where the console password is kept IN CLEARTEXT, mode 0600.
+//
+// WHY A PRODUCT THAT HASHES ITS PASSWORDS ALSO WRITES ONE DOWN. The hash is what protects the
+// account if config.yaml leaks, and that stays. What it cannot do is answer "what is the password"
+// six weeks after install, and this appliance had no answer at all: `kontra init` printed the
+// password once into a container's stdout, `docker compose logs cli` shows only the CURRENT
+// container's output, and a recreate therefore destroyed the only copy. The owner of this install
+// lost the `admin` login exactly that way, and nothing in the system could recover it.
+//
+// The threat model is what makes this defensible rather than careless. This is a single-tenant
+// local appliance: the API binds to 127.0.0.1 by default, the file is 0600 in a directory only the
+// operator uses, and `refuseIfReadableByOthers` already refuses to read config.yaml — which holds
+// every service token in cleartext — if its mode has slipped. A machine-local reader who can open
+// this file can already open config.yaml beside it and mint tokens for every gated route. So this
+// widens no boundary that the existing file did not already define.
+//
+// APPEND, NEVER REWRITE. Each account is one line, so adding a second login cannot destroy the
+// record of the first — which is the failure this whole file exists to stop happening again.
+func ConsolePasswordPath(root string) string { return filepath.Join(root, "console-password") }
+
+// recordConsolePassword appends one account's cleartext credential to ConsolePasswordPath.
+//
+// A FAILURE HERE DOES NOT STOP THE CALLER, matching `freshConfigWithLogin`'s posture: the account
+// is already written and already works, so failing the command over the convenience copy would
+// trade a working login for no login. The error is returned so the caller can SAY so — an operator
+// who is told the file was not written still knows to keep the password that is on their screen.
+func recordConsolePassword(root, name, password string) error {
+	if password == "" {
+		return nil
+	}
+	path := ConsolePasswordPath(root)
+	if err := refuseIfReadableByOthers(path); err != nil {
+		return err
+	}
+	// O_APPEND|O_CREATE, 0600. The mode applies only on creation, which is why the check above
+	// exists for a file that already had its permissions loosened by something else.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	defer f.Close()
+	if info, statErr := f.Stat(); statErr == nil && info.Size() == 0 {
+		if _, err := fmt.Fprintf(f, "%s", consolePasswordHeader); err != nil {
+			return fmt.Errorf("writing %s: %w", path, err)
+		}
+	}
+	if _, err := fmt.Fprintf(f, "%s\t%s\n", name, password); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// The header explains the file to whoever opens it months later, which is the entire audience.
+const consolePasswordHeader = `# kontra console logins, in CLEARTEXT. Mode 0600 — keep it that way.
+#
+# This exists because the password is otherwise printed exactly once, to a container's stdout, and
+# ` + "`docker compose logs cli`" + ` shows only the current container: one recreate and it is gone for good.
+# config.yaml beside this file stores only an scrypt hash, which cannot be reversed.
+#
+# One TAB-separated "user<TAB>password" line per account, appended as accounts are made.
+`
 
 func writeRuntimeEnv(root string) error {
 	c, err := LoadConfig()
@@ -770,10 +879,31 @@ func CmdUserAdd(w io.Writer, args []string) error {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 
-	fmt.Fprintf(w, "\nconsole login — THIS IS THE ONLY TIME THIS IS SHOWN:\n\n")
+	// THE LINE WHOSE ABSENCE MADE THIS COMMAND A NO-OP. config.yaml is not a channel into the
+	// cluster: the orchestrator has no YAML parser and reads KONTRA_CONSOLE_USERS out of
+	// runtime.env, which orchestrator-entrypoint sources. Without this the account existed only in
+	// a file nothing in the cluster reads, and the restart this command asks for re-sourced an
+	// env that still held the previous user list. See RuntimeEnvPath.
+	//
+	// AFTER the config write, because it reloads from disk — `writeRuntimeEnv` calls LoadConfig
+	// rather than taking the value in hand, so it must not run while the new user is still only
+	// in this function's local variable.
+	if err := writeRuntimeEnv(root); err != nil {
+		return fmt.Errorf("account written to %s, but refreshing runtime.env failed "+
+			"(the orchestrator will not see it until this succeeds): %w", path, err)
+	}
+
+	fmt.Fprintf(w, "\nconsole login:\n\n")
 	fmt.Fprintf(w, "    user      %s\n", name)
 	fmt.Fprintf(w, "    password  %s\n\n", password)
-	fmt.Fprintf(w, "Only the hash is stored. Restart the orchestrator for it to take effect.\n")
+	if err := recordConsolePassword(root, name, password); err != nil {
+		// Said out loud rather than swallowed: the password is still on screen, and an operator who
+		// knows the copy did not land is an operator who writes it down themselves.
+		fmt.Fprintf(w, "NOT saved to %s (%v) — keep the password above.\n", ConsolePasswordPath(root), err)
+	} else {
+		fmt.Fprintf(w, "Also saved to %s (mode 0600).\n", ConsolePasswordPath(root))
+	}
+	fmt.Fprintf(w, "Restart the orchestrator for it to take effect: docker restart kontra-api\n")
 	return nil
 }
 

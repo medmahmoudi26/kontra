@@ -25,9 +25,10 @@
 import { readFileSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 
-import { AlreadyServing, callerFor, serveActor } from '../actorControl';
+import { AlreadyServing, callerFor, diskSchema, serveActor } from '../actorControl';
 import { checkOptionalBearer } from '../auth';
 import { ensureEndpoint, removeEndpoint } from '../nexusRegistry';
+import { watchDir } from '../schemaWatch';
 import { MARKER, SourceMissing, SourceRefused, defaultRoot, filesIn, resolveInside } from '../sources';
 import type { SourceStore } from '../sourceStore';
 import { ControlRefused, RUN_TOKEN_VARS } from '../workflowControl';
@@ -203,6 +204,101 @@ export function registerSourceRoutes(app: FastifyInstance, sources: SourceStore)
      "must not fold that write away with it"; this is not that simplification. It removes the write
      because the feature that needed it is gone, and an unused route is removed outright rather
      than left as a surface with no caller. `sources.writeInside` went with it, being its only use. */
+
+  /**
+   * What this folder's Methods take RIGHT NOW, from the files — see `actorControl.ts:diskSchema`.
+   *
+   * THE EDITOR PANE'S ROUTE. The catalog describes what a worker published at boot, which is the
+   * honest answer for the Actors grid and the wrong one beside an editor: the point of a form next
+   * to the code is that it tracks the code, and a parameter added a second ago is not in any
+   * catalog. Reading it is not a state change, so admission matches the other reads here.
+   */
+  app.get('/api/sources/actor/:id/schema', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const source = sources.get('actor', decodeURIComponent(id));
+    if (!source) return reply.code(404).send({ error: `${id}: no such registered folder` });
+    try {
+      return await diskSchema(source);
+    } catch (err) {
+      // 400, NOT 502: a schema that will not derive is almost always the author's own file — a
+      // syntax error, an import that is not installed, a type the SDK cannot turn into a schema —
+      // and the CLI has already put the traceback in the message. Reporting it as a gateway fault
+      // would send the reader to the server instead of to the line they just wrote.
+      if (err instanceof ControlRefused) return reply.code(400).send({ error: err.message });
+      return reply.code(502).send({ error: `could not read the schema: ${errMessage(err)}` });
+    }
+  });
+
+  /**
+   * WHEN to read that schema again. The route above is the read; this one is the doorbell.
+   *
+   * THE EDITOR IS NOT THE ONLY CLIENT ANY MORE, and that is the whole reason this exists. The VS
+   * Code extension made the form instant by hooking its own save event and pushing a reload into
+   * the pane, so "instant" was a property of the pane rather than of the runner. A browser tab —
+   * now the supported way to use the runner, because a cross-origin frame inside a webview cannot
+   * reach the clipboard — has no editor to hook. Without this it falls back to a poll, and a form
+   * that catches up eventually is the thing the pane was built to stop being.
+   *
+   * IT SENDS `changed`, NOT THE SCHEMA. Deriving one is a subprocess (`kontra actor schema`), and
+   * doing that per inode event, per watcher, would put a fork on the critical path of every
+   * keystroke that happens to hit ⌘S. The client already owns the read and its error handling; it
+   * only ever needed to be told. That also keeps this endpoint honest when derivation FAILS — a
+   * syntax error mid-edit must leave the last good form on screen, which is `readDisk`'s existing
+   * behaviour and would be much harder to preserve if the truth arrived over two channels.
+   *
+   * Ungated, matching the read it serves and `rowStream.ts` beside it: no `EventSource` can send an
+   * Authorization header, and what crosses here is one word that says a file moved.
+   */
+  app.get('/api/sources/actor/:id/schema/stream', (req, reply) => {
+    const { id } = req.params as { id: string };
+    const source = sources.get('actor', decodeURIComponent(id));
+    if (!source) return reply.code(404).send({ error: `${id}: no such registered folder` });
+
+    const raw = reply.raw;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const changed = (): void => {
+      // COALESCED, because one ⌘S is not one event. Editors write a temp file and rename over the
+      // target, so a single save arrives as several — and each one unbatched would cost the client
+      // a fork. 150ms is below what reads as lag and above the spread of one save's events.
+      clearTimeout(timer);
+      timer = setTimeout(() => raw.write('data: changed\n\n'), 150);
+    };
+
+    // SUBSCRIBE BEFORE THE HEAD IS WRITTEN. `watchDir` refuses at its cap by throwing, and a
+    // refusal is only sayable while this is still an ordinary reply — after `writeHead` the only
+    // remaining way to decline is to hang up, which a client reads as a network fault rather than
+    // as a limit it could act on.
+    let stop: () => void;
+    try {
+      stop = watchDir(source.path, changed);
+    } catch (err) {
+      return reply.code(503).send({ error: `${errMessage(err)} — close a runner tab and retry` });
+    }
+
+    reply.hijack();
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // Defeat any reverse-proxy response buffering: an SSE stream held until it "finishes" is a
+      // frozen page, which is the exact failure this endpoint exists to prevent.
+      'X-Accel-Buffering': 'no',
+    });
+    // Opens the stream so `EventSource` fires `onopen` now rather than on the first real event —
+    // an actor nobody is editing is correctly silent for hours, and "connected and quiet" must not
+    // look like "still connecting".
+    raw.write(': ok\n\n');
+
+    // Nothing reads this; it exists so an idle proxy does not reap a connection for being quiet.
+    const keepalive = setInterval(() => raw.write(': ping\n\n'), 25_000);
+    keepalive.unref?.();
+
+    req.raw.on('close', () => {
+      clearTimeout(timer);
+      clearInterval(keepalive);
+      stop();
+    });
+  });
 
   /**
    * Serve a registered Actor's worker on THIS machine. Local only — see actorControl.ts for why

@@ -118,8 +118,18 @@ export function createWorkspace(
     throw new WorkspaceRefused(`workspace ${JSON.stringify(name)} already exists`);
   }
   mkdirSync(child, { recursive: true });
+  // UNDO THE MKDIR IF THE SEED REFUSES. The directory is made before the only step that can fail,
+  // so a refusal used to leave a half-made workspace on the bind mount — and then the retry hit
+  // "already exists" above, which is a state the console cannot get out of. MEASURED: an image
+  // with no /opt/kontra/seed answered 400 and left an empty `test/` the operator had to delete by
+  // hand. The seed is present now; this is what keeps the failure recoverable if it is not.
   if (opts.seed) {
-    seedInto(child, opts.seedDir ?? (env.KONTRA_SEED_DIR ?? '/opt/kontra/seed').trim());
+    try {
+      seedInto(child, opts.seedDir ?? (env.KONTRA_SEED_DIR ?? '/opt/kontra/seed').trim());
+    } catch (err) {
+      rmSync(child, { recursive: true, force: true });
+      throw err;
+    }
   }
   if (opts.use !== false) {
     writeCurrentName(parent, name);

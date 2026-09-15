@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { actorDirFor, actorKeyFrom } from './locate.ts';
+import { actorDirFor, actorKeyFrom, isInside } from './locate.ts';
 
 test('finds the nearest actor.json above a file', () => {
   const present = new Set(['/w/myactor/actor.json']);
@@ -37,4 +37,13 @@ test('refuses a manifest with no name', () => {
   assert.equal(actorKeyFrom({ name: '   ' }), undefined);
   assert.equal(actorKeyFrom(null), undefined);
   assert.equal(actorKeyFrom('not an object'), undefined);
+});
+
+test('isInside does not admit a sibling that shares a prefix', () => {
+  assert.equal(isInside('/srv/kontra/actors/hello/actor.py', '/srv/kontra/actors/hello'), true);
+  assert.equal(isInside('/srv/kontra/actors/hello/sub/x.py', '/srv/kontra/actors/hello'), true);
+  // `startsWith` would say true for this one, and a save here would reload an unrelated pane.
+  assert.equal(isInside('/srv/kontra/actors/hello-evil/actor.py', '/srv/kontra/actors/hello'), false);
+  assert.equal(isInside('/srv/kontra/actors/hello', '/srv/kontra/actors/hello'), false);
+  assert.equal(isInside('/etc/passwd', '/srv/kontra/actors/hello'), false);
 });

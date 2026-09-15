@@ -50,6 +50,22 @@ x-orchestrator-env: &orchestrator-env
   KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:5000}
   KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:5000}
 
+# ── ONE TMUX SERVER, TWO CONTAINERS ────────────────────────────────────────────────────────────
+#
+# `serve` creates a tmux session in orchestrator-api (that is where the CLI, python3 and the SDK
+# are). The Dashboard's `local` mode runs `list-panes` from the PANELS STREAMER, which is a forked
+# child of orchestrator-infra. Two containers, two tmux servers, and the Monitor was therefore
+# empty for every worker the Serve button had just started — a wall that reports nothing is
+# indistinguishable from a worker that failed to boot, which is the one thing ADR 0020 says a tile
+# may never do.
+#
+# TMUX_TMPDIR moves the socket onto a shared volume, so both containers speak to the SAME server.
+# api starts it (it is the only one that creates sessions) and infra is a read-only client.
+# Restarting api kills that server and leaves a stale socket; MEASURED — tmux answers
+# `list-sessions` with exit 1 (which local.ts already reads as "no sessions") and the next
+# `new-session` starts a fresh server over it.
+x-tmux-socket: &tmux-socket /run/kontra-tmux
+
 x-kontra-home: &kontra-home
   - kontra-home:/var/lib/kontra
   - ${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}:${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}
@@ -69,7 +85,14 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_POSTGRES_PORT:-5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kontra"]
+      # `-d postgres`, and the missing word was not cosmetic. `pg_isready -U kontra` with no
+      # database asks for one NAMED AFTER THE USER — libpq's default — and there is no `kontra`
+      # database here (this server has `postgres` and the `kontra_ducklake` the init script makes).
+      # The probe still reported healthy, because a FATAL about a missing database is still proof
+      # the server answered, so nothing was broken and nothing said anything. What it cost was the
+      # log: one `FATAL: database "kontra" does not exist` every 5s, forever — 1295 of them in the
+      # first half day, which is the haystack every real postgres error then has to be found in.
+      test: ["CMD-SHELL", "pg_isready -U kontra -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -176,6 +199,16 @@ services:
   orchestrator-api:
     image: ${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:latest}
     container_name: kontra-api
+    # A STABLE HOSTNAME, BECAUSE A WORKER'S TEMPORAL IDENTITY IS `<pid>@<hostname>`.
+    #
+    # Served workers run in THIS container, so the pollers on their queues identify as
+    # `531@<hostname>`. Left to Docker that is a container id which changes on every recreate, and
+    # `panels/local.ts:localHost` deliberately refuses an id-shaped name (it "identifies nothing an
+    # operator can act on"). The Monitor's poller chip then could not attribute a poller to the node
+    # it was drawing: it reported `poller: none — polled by 2 worker(s) (98291999cb49, …) but none
+    # from localhost — its kontra-handler.service is probably down`, in red, about two workers that
+    # were up and polling. Exactly the reading ADR 0020 says a tile may never give.
+    hostname: kontra-api
     pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
     depends_on:
@@ -192,8 +225,21 @@ services:
     environment:
       <<: *orchestrator-env
       KONTRA_ORCHESTRATOR_ROLES: api,materializer
+      # `serve` starts the tmux server here; see x-tmux-socket.
+      TMUX_TMPDIR: *tmux-socket
+      # ON A VOLUME, BECAUSE IT WAS ON THE CONTAINER'S OWN FILESYSTEM. `server.ts` defaults this to
+      # `orchestrator.db` relative to its WORKDIR, which in this image is /src/control/orchestrator
+      # — an overlay layer. So the actors, workflows, graphs, scratches and SOURCES tables were
+      # destroyed by every `up -d` that recreated this container, which is every image upgrade.
+      # MEASURED: after one recreate, /api/workflows answered `"registered": []` for a catalog that
+      # had just had two workflows in it. Nothing said anything; the console simply drew an empty
+      # list. `kontra-home` is the wrong home for it — that volume is the CLI's and is mounted `:ro`
+      # here on purpose — so this is its own.
+      KONTRA_ORCHESTRATOR_DB: /var/lib/kontra-db/orchestrator.db
     volumes:
       - kontra-home:/var/lib/kontra:ro
+      - orchestrator-db:/var/lib/kontra-db
+      - tmux-sock:/run/kontra-tmux
       - ${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}:${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"
@@ -223,6 +269,22 @@ services:
     environment:
       <<: *orchestrator-env
       KONTRA_ORCHESTRATOR_ROLES: infra
+      # The panels streamer is a child of THIS container and reads the server api started.
+      TMUX_TMPDIR: *tmux-socket
+      # ...so "the local node" is orchestrator-api, NOT this container. The streamer would otherwise
+      # label local Terminals with its own `os.hostname()` and match pollers against it — the wrong
+      # box, since every local session lives in api. See the `hostname:` note on orchestrator-api.
+      KONTRA_PANEL_LOCAL_HOST: kontra-api
+      # BOTH SPELLINGS OF THE SAME ORIGIN, because the browser's is whichever the operator typed.
+      #
+      # `panels.ts:DEFAULT_ORIGIN` is `http://localhost:8088` alone, and the console reaches the
+      # streamer DIRECTLY on 8090 (`panelsClient.ts:22`) rather than through the API — deliberately,
+      # to keep panel bytes off the event loop serving DuckDB queries. That makes this a genuine
+      # cross-origin request, so the allow-list decides it. Open the console on `127.0.0.1:8088`
+      # instead of `localhost:8088` — the same server, and the address the compose port mapping
+      # actually names — and the default refuses the socket while every other page works.
+      KONTRA_PANEL_ORIGIN: >-
+        http://localhost:${KONTRA_API_PORT:-8088},http://127.0.0.1:${KONTRA_API_PORT:-8088}
       KONTRA_INFRA_QUEUE: kontra-infra
       KONTRA_PULUMI_STATE_DIR: /data/pulumi-state
       KONTRA_PULUMI_WORK_DIR: /data/pulumi
@@ -232,9 +294,30 @@ services:
       KONTRA_CLOUD_CREDENTIAL: ${KONTRA_CLOUD_CREDENTIAL:-}
     volumes:
       - kontra-home:/var/lib/kontra:ro
+      - tmux-sock:/run/kontra-tmux
       - pulumi-state:/data
       # Host-level Docker authority — see the file header.
       - /var/run/docker.sock:/var/run/docker.sock
+    # THE DASHBOARD'S OWN PORT, AND ITS ABSENCE WAS THE WHOLE BUG.
+    #
+    # The console does NOT reach the Monitor through the API. `panelsClient.ts:22` opens
+    # `ws://<host>:8090/api/panels/ws` straight at the streamer, deliberately — panel frames are a
+    # firehose and routing them through 8088 would put them on the event loop that serves the CLI's
+    # DuckDB queries. So the browser needs 8090 reachable from the HOST, and nothing published it.
+    #
+    # `control/orchestrator/src/routes/panels.ts:78` already asserted this mapping existed —
+    # "docker-compose.yml publishes 127.0.0.1:8090:8090" — and it did not. A comment describing a
+    # line that was never written is worse than no comment: it is where someone debugging stops
+    # looking. The observable failure was the Monitor alone refusing to connect, with every other
+    # page healthy: `the Dashboard socket failed (http://localhost:8090)`.
+    #
+    # MEASURED before this line: `curl http://localhost:8090/` from the host answered 000
+    # (unreachable), while the streamer inside the container binds 0.0.0.0 (`panels/server.ts:307`)
+    # and was listening the whole time. Same loopback default as every other published port here —
+    # the streamer carries no credential of its own beyond the panel ticket, so it must not be on a
+    # routable address by accident.
+    ports:
+      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_PANEL_PORT:-8090}:8090"
     healthcheck:
       test: ["CMD", "node", "-e", "process.exit(0)"]
       interval: 30s
@@ -340,6 +423,8 @@ volumes:
   registry-data:
   seaweed-data:
   kontra-home:
+  orchestrator-db:
+  tmux-sock:
   temporal-dynamicconfig:
   pulumi-state:
     # `docker compose down` keeps this. `down -v` destroys Pulumi dockerFleet state AND Datasets.

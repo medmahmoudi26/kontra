@@ -47,10 +47,17 @@ It is not on the Marketplace yet, so it is built from the clone:
 
     npm install && npm run compile
     npm run package                              # -> kontra-0.1.0.vsix
-    code --install-extension kontra-0.1.0.vsix
+    code --install-extension kontra-0.1.0.vsix   # or: cursor --install-extension …
 
 Or press <kbd>F5</kbd> in this folder to launch an Extension Development Host with it loaded, which
 is the faster loop while you are changing the extension itself.
+
+**The password box is pre-filled from your clipboard** when the clipboard holds something
+credential-shaped — no whitespace, not a paragraph. `kontra init` prints the console password once
+and copying it is the natural gesture, but the Connect prompt is the editor's own QuickInput rather
+than a webview, and on some builds (Cursor) the paste keystroke never reaches it. Ordinary copied
+text is ignored and the box opens empty, because it is masked and a value you did not choose must
+not become a password guess.
 
 Then **kontra: Connect to an orchestrator** and give it the address of the control plane — the same
 one the console is on, whether that came from `kontra up` or from `docker compose up -d`. The

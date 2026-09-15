@@ -54,12 +54,15 @@ docker compose --env-file .env.quickstart up -d --wait
 docker compose logs cli | grep -A4 'console login'
 ```
 
+That prints the password on a **first** boot. On any later boot — a recreate, an image upgrade —
+it prints which user exists and says the password cannot be recovered, because only the hash is
+kept. `docker compose exec cli kontra user add <name>` is the way back in.
+
 Named workspaces live in `workspaces.kontra/` beside `kontra/` and `kontra-console/` (not inside
 either repo). Seed creates `hello/` when that folder is empty. Pick another workspace in the
 console rail after login.
 
-Sign in as `admin` with the password that last line printed. It is shown **once**; only a scrypt
-hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.
+Sign in as `admin` with the password that line printed.
 
 Serve and start the seeded hello workflow (discovery does not run it for you):
 
