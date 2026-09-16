@@ -134,6 +134,69 @@ export const SPA_SURFACES: ReadonlySet<string> = new Set([
   'scratch',
 ]);
 
+/**
+ * The surfaces the SVELTE bundle serves (ADR 0048 §1).
+ *
+ * ── TWO SETS, ONE RULE ──────────────────────────────────────────────────────────────────────────
+ *
+ * The console is migrating one Surface at a time, and the seam is this: a first segment in here
+ * gets `svelte.html`, a first segment in {@link SPA_SURFACES} gets `index.html`. No interop, no
+ * shared shell — the only thing the two bundles share is an origin and a session.
+ *
+ * MUST BE DISJOINT FROM `SPA_SURFACES`, and {@link assertBundlesAreDisjoint} enforces it at boot.
+ * A segment in both is not a merge conflict that fails loudly; it is a surface that silently serves
+ * whichever bundle this file checks first, which is decided by the order of two `if`s.
+ *
+ * MOVING A SURFACE IS MOVING A STRING between these two sets. That is the whole migration
+ * mechanism, and it is reversible in one line — which is what makes the checkpoint in slice 10 a
+ * real decision rather than a direction of travel.
+ *
+ * Empty until slice 04. `/dev` is not here and does not need to be: it has no extension, so the
+ * fallback's second clause already serves it — which is also why the DEV_ROUTES set below exists,
+ * because "extensionless" is not a bundle.
+ */
+export const SVELTE_SURFACES: ReadonlySet<string> = new Set<string>([]);
+
+/**
+ * Extensionless routes the Svelte bundle owns that are not Surfaces — today, the IDE embed.
+ *
+ * `/dev` never appeared in `SPA_SURFACES` and was served anyway, by the fallback's "no file
+ * extension" clause. That worked while there was one document. With two it is ambiguous, and an
+ * ambiguity resolved by which branch runs first is the kind that is discovered by a user.
+ */
+export const SVELTE_ROUTES: ReadonlySet<string> = new Set<string>([
+  // THE WALKING SKELETON, and it is temporary on purpose. `/_svelte` is what slice 02 ships: a
+  // plain page that proves the second bundle is built, served, routed and sharing a session,
+  // before any surface depends on that being true. It goes when `/dev` moves in slice 04 — at
+  // which point this set has a real member and this one is noise.
+  //
+  // It is also what stops `spaFallback.test.ts` asserting over an empty set: a loop over nothing
+  // passes every expectation inside it, so a skeleton with no route is a test suite that proves
+  // the split works without ever having served the second document.
+  '_svelte',
+]);
+
+/**
+ * Refuse to boot if a segment claims both bundles.
+ *
+ * Called from {@link buildServer}. It throws rather than warns: a duplicated segment means one of
+ * two consoles is unreachable, and the process that would have told you is the one now serving the
+ * wrong one.
+ */
+export function assertBundlesAreDisjoint(
+  react: ReadonlySet<string> = SPA_SURFACES,
+  svelte: ReadonlySet<string> = SVELTE_SURFACES
+): void {
+  const both = [...svelte].filter((s) => react.has(s));
+  if (both.length > 0) {
+    throw new Error(
+      `SPA surfaces claimed by both bundles: ${both.join(', ')}. ` +
+        'A surface belongs to exactly one bundle — moving it means DELETING it from the other set, ' +
+        'not adding it here.'
+    );
+  }
+}
+
 export interface ServerOptions {
   repo?: Repo;
   /** Object store the dataset browser reads (default: env-configured). Injectable for tests. */
@@ -240,6 +303,9 @@ declare module 'fastify' {
 }
 
 export function buildServer(opts: ServerOptions = {}): FastifyInstance {
+  // BEFORE ANYTHING IS REGISTERED. A segment claiming both bundles makes one console unreachable,
+  // and the failure is a user finding the wrong page rather than a process that refused to start.
+  assertBundlesAreDisjoint();
   const repo = opts.repo ?? new Repo(process.env.KONTRA_ORCHESTRATOR_DB ?? 'orchestrator.db');
   // The object store: SHARED by the dataset browser, the workbench, the explore manifest, the row
   // tail and the history archive. One store, so a count on one surface cannot disagree with a
@@ -486,6 +552,9 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
       if (req.method === 'GET' && !req.url.startsWith('/api/')) {
         const path = req.url.split('?')[0] ?? '';
         const first = path.split('/')[1] ?? '';
+        // THE SVELTE BUNDLE IS CHECKED FIRST, and the order would matter if the two sets could
+        // overlap — `assertBundlesAreDisjoint` at boot is what makes it not matter.
+        if (SVELTE_SURFACES.has(first) || SVELTE_ROUTES.has(first)) return reply.sendFile('svelte.html');
         if (SPA_SURFACES.has(first)) return reply.sendFile('index.html');
         const last = path.slice(path.lastIndexOf('/') + 1);
         if (!/\.[A-Za-z0-9]+$/.test(last)) return reply.sendFile('index.html');

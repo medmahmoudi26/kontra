@@ -17,7 +17,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
 import { Repo } from './db/repo';
-import { SPA_SURFACES, buildServer } from './server';
+import {
+  SPA_SURFACES,
+  SVELTE_ROUTES,
+  SVELTE_SURFACES,
+  assertBundlesAreDisjoint,
+  buildServer,
+} from './server';
 
 let app: FastifyInstance | undefined;
 afterEach(async () => {
@@ -29,6 +35,10 @@ function serve(): FastifyInstance {
   const dir = mkdtempSync(join(tmpdir(), 'kontra-spa-'));
   mkdirSync(join(dir, 'assets'), { recursive: true });
   writeFileSync(join(dir, 'index.html'), '<!doctype html><div id="root"></div>');
+  // THE SECOND DOCUMENT. Both bundles build into one directory (ADR 0048 §1); a fixture with only
+  // `index.html` would 404 every Svelte route and read as a routing bug rather than a missing file.
+  // The marker is what the assertions below tell the two documents apart by.
+  writeFileSync(join(dir, 'svelte.html'), '<!doctype html><div id="app" data-bundle="svelte"></div>');
   writeFileSync(join(dir, 'assets', 'index-live.js'), 'export const ok = 1;\n');
   return buildServer({ repo: new Repo(':memory:'), webRoot: dir });
 }
@@ -152,5 +162,57 @@ describe('a surface address whose id contains a dot', () => {
     // already been wrong once: `secrets` shipped in the console and never reached this set.
     expect(SPA_SURFACES.size).toBe(surfaces.length);
     expect(SPA_SURFACES.size).toBe(9);
+  });
+});
+
+/**
+ * TWO BUNDLES, ONE ORIGIN (ADR 0048 §1).
+ *
+ * The console is migrating a Surface at a time and the seam is a pair of allowlists. Everything the
+ * single-bundle fallback could get wrong is now available twice, and one thing is new: a segment in
+ * BOTH sets serves whichever branch the handler tests first, which is a coin-flip decided by the
+ * order of two `if`s.
+ */
+describe('the two-bundle split', () => {
+  it('refuses to boot when a surface claims both bundles', () => {
+    // The guard is proven by BREAKING it, not by observing that it passes on today's sets — which
+    // it would do just as happily if the function body were `return`.
+    expect(() =>
+      assertBundlesAreDisjoint(new Set(['catalog', 'actors']), new Set(['actors']))
+    ).toThrow(/claimed by both bundles.*actors/s);
+
+    // …and the real sets are disjoint, which is the fact the guard exists to keep true.
+    expect(() => assertBundlesAreDisjoint()).not.toThrow();
+  });
+
+  it('serves the svelte document for a svelte surface, and the react one for a react surface', async () => {
+    app = serve();
+
+    for (const surface of SVELTE_SURFACES) {
+      const res = await app.inject({ method: 'GET', url: `/${surface}/an.id.with.dots` });
+      expect(res.statusCode, surface).toBe(200);
+      expect(res.body, surface).toContain('data-bundle="svelte"');
+    }
+    for (const route of SVELTE_ROUTES) {
+      const res = await app.inject({ method: 'GET', url: `/${route}` });
+      expect(res.statusCode, route).toBe(200);
+      expect(res.body, route).toContain('data-bundle="svelte"');
+    }
+    // A React surface must NOT have started answering with the other document. This is the
+    // assertion that fails if a segment is moved to the Svelte set and not removed from this one.
+    const react = await app.inject({ method: 'GET', url: '/catalog/an.id.with.dots' });
+    expect(react.statusCode).toBe(200);
+    expect(react.body).not.toContain('data-bundle="svelte"');
+  });
+
+  it('counts both sets, so a surface added to neither cannot pass unnoticed', () => {
+    // THE HALF THAT CATCHES AN OMISSION, restated for two sets: the loops above iterate whatever
+    // they are given, so an empty Svelte set makes them vacuous. The console declares seven
+    // surfaces; every one must be owned by exactly one bundle.
+    const owned = new Set([...SPA_SURFACES, ...SVELTE_SURFACES]);
+    for (const surface of ['catalog', 'workflows', 'actors', 'datasets', 'monitor', 'secrets', 'settings']) {
+      expect(owned.has(surface), `${surface} is owned by neither bundle`).toBe(true);
+    }
+    expect(owned.size).toBe(SPA_SURFACES.size + SVELTE_SURFACES.size);
   });
 });
