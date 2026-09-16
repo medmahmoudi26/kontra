@@ -125,7 +125,6 @@ export const SPA_SURFACES: ReadonlySet<string> = new Set([
   // `catalog` LEFT for the Svelte bundle (slice 06). Moving a surface is moving this string; the
   // set it left is as much a part of the change as the set it joined, and a segment in both is
   // what `assertBundlesAreDisjoint` refuses at boot.
-  'workflows',
   'datasets',
   'monitor',
   // retired, still addressable — see above
@@ -165,6 +164,8 @@ export const SVELTE_SURFACES: ReadonlySet<string> = new Set<string>([
   'actors',
   'secrets',
   'settings',
+  // Slice 12: Workflows, and with it the run timeline.
+  'workflows',
 ]);
 
 /**
