@@ -620,7 +620,26 @@ export async function serveWorkflow(input: ServeInput): Promise<ServeResult> {
   // argv ARRAY, no shell: the path is validated above, and the CLI derives the queue itself from the
   // folder — the two derivations are byte-identical peers, so no queue crosses this boundary.
   const argv = ['workflow', 'serve', rel, '--tmux'];
-  const { code, stdout, stderr } = await run(kontraBin(), argv, root, serveEnv());
+  /**
+   * `--repo`, WHEN THIS PROCESS KNOWS WHERE THE CHECKOUT IS.
+   *
+   * `kontra workflow serve` puts the Python SDK on the worker's PYTHONPATH, and it finds the
+   * checkout by walking UP FROM ITS CWD. The cwd here is `~/.kontra/workflows` inside a container,
+   * where walking up reaches `/` and finds nothing — so the button could only ever be refused with
+   * "needs the checkout ... (pass --repo <dir>)". Measured on a live compose install.
+   *
+   * The value comes from `KONTRA_SDK_ROOT` in {@link serveEnv}, which is already handed to the
+   * child: one variable, so the answer cannot differ between the flag and the environment. The flag
+   * is what makes it work with a CLI older than that variable — and the installed binary on the box
+   * this was found on was exactly that.
+   *
+   * ABSENT IS LEFT ALONE. Where nothing says, the CLI's own search is correct: on an appliance or a
+   * developer's machine it walks up from a real checkout and finds it.
+   */
+  const env = serveEnv();
+  const sdkRoot = (env.KONTRA_SDK_ROOT ?? '').trim();
+  if (sdkRoot) argv.push('--repo', sdkRoot);
+  const { code, stdout, stderr } = await run(kontraBin(), argv, root, env);
   if (code !== 0) {
     const detail = cliDetail(stderr, stdout);
     throw new ControlRefused(`serve failed (exit ${code}): ${detail || 'no output'}`);
