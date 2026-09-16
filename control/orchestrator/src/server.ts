@@ -126,11 +126,8 @@ export const SPA_SURFACES: ReadonlySet<string> = new Set([
   // set it left is as much a part of the change as the set it joined, and a segment in both is
   // what `assertBundlesAreDisjoint` refuses at boot.
   'workflows',
-  'actors',
   'datasets',
   'monitor',
-  'secrets',
-  'settings',
   // retired, still addressable — see above
   'runs',
   'scratch',
@@ -162,6 +159,12 @@ export const SVELTE_SURFACES: ReadonlySet<string> = new Set<string>([
   // dependency. It is also where the split gets its sharp edge — the nav here links OUT to six
   // React surfaces, and each of those is a document load.
   'catalog',
+  // Slices 07 and 08: the remaining surfaces with no React-only dependency. What is left in
+  // SPA_SURFACES is exactly the three the checkpoint (slice 10) is about — Workflows needs React
+  // Flow, Datasets needs ag-grid, Monitor needs the terminals.
+  'actors',
+  'secrets',
+  'settings',
 ]);
 
 /**
