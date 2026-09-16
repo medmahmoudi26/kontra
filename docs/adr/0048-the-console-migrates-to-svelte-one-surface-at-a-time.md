@@ -4,7 +4,9 @@ Date: 2026-09-16
 
 ## Status
 
-Accepted.
+Accepted, and **carried out** — 2026-09-16. Every Surface serves from Svelte, the React console is
+deleted, and there is one bundle again. What that cost and what it left undone is in
+[Outcome](#outcome) at the end; the decisions below are unchanged and are what was followed.
 
 Amends nothing. It constrains [ADR 0038](0038-two-repositories-one-version-one-licence.md) — the
 console stays one repository and one version — and depends on
@@ -139,3 +141,53 @@ Whether the Svelte app eventually absorbs the Dashboard's terminals; whether Sve
 right replacement for React Flow, which needs a spike rather than an argument; and what happens to
 the 30 render tests — ported to `@testing-library/svelte` or replaced by e2e coverage — which is
 cheap to decide once the first Surface exists.
+
+## Outcome
+
+Recorded the day the last slice landed, because a migration's value is in what it actually measured
+rather than in what it set out to do.
+
+| | before | after |
+|---|---|---|
+| JavaScript on first paint | 472 KB | **60.9 KB** (23.6 gzipped) |
+| Built output, all chunks | 6.2 MB | **1.8 MB** |
+| `setInterval` for data | 12 files | **0**, guarded |
+| SSE endpoints consumed | 0 of 2 | **2 of 2** |
+| Smallest type a person reads | 9px | **12px**, guarded |
+| Horizontal overflow at 320/390/1280px | untested | **0px**, 10 routes × 3 widths in CI |
+| Playwright specs passing | 19 | **19**, one assertion scoped (below) |
+
+**The e2e suite passed with one edit, and the edit is the wall.** `dashboard.spec.ts` searched the
+whole page for the word `snapshots`; the React console pinned ONE Terminal, so that was unambiguous,
+and the Monitor now draws every Terminal the streamer serves. The assertion is scoped to the tile
+under test. The same file's spec at line 230 was written to start proving itself "the day the wall
+arrives" — it now does. Nothing else in either spec changed.
+
+**Three things were found missing only by deleting React**, each of which had shipped as a surface
+and was not a replacement for what it replaced:
+
+ - the Monitor drew a LIST OF TERMINAL NAMES — no xterm, no socket, no converge — behind a comment
+   saying "xterm is a mount, not a port". `/monitor` was already serving Svelte, so the terminal
+   wall had been dark in the product since that slice shipped, and the e2e suite did not catch it
+   because it drives the app through its own Vite config rather than through the orchestrator.
+ - Workflows could READ runs and not START one. The console's whole purpose was unreachable.
+ - nothing called `session.install()` and there was no sign-in screen, so every API call went
+   unauthenticated (ADR 0045). On a gated install every surface would have rendered its own 401 as
+   "empty".
+
+The common shape is that each surface was ported until it looked right, and a browser test that
+drove the OLD app reported green throughout. What the deletion did was remove the old app the tests
+were driving.
+
+**What is NOT ported, and is therefore gone from the product until it is.** 49 of 80 framework-free
+modules in `@kontra/console-core` are now unreachable from the console. They are kept rather than
+deleted, because each is the derivation a port would need: `run/query` and `datasets/cells` (the
+dataset SQL workbench and its cell renderers), `panels/methodCall` (calling a Method from the Actors
+surface), `panels/workflowThread` and `panels/transcriptDrill` (the workflow thread and turn drill),
+`panels/runStats`, `panels/runMachines`, `panels/runDatasets` (what a run did, by machine and by
+dataset), `panels/grid/wall` and `panels/chrome/*` (the draggable tile wall, its menus and its
+scroll physics), `panels/folderWorkbench` (editing an actor's files in the console),
+`panels/widgets/*`, `panels/ask` (HITL turns).
+
+That list is the honest size of the remaining work, and it is larger than the seven-surfaces
+headline suggests.
