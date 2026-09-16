@@ -152,7 +152,14 @@ describe('a surface address whose id contains a dot', () => {
       'scratch',
     ];
     for (const surface of surfaces) {
-      expect(SPA_SURFACES.has(surface), surface).toBe(true);
+      // EITHER BUNDLE. Surfaces migrate one at a time (ADR 0048), so which set owns one changes
+      // over the life of this migration — what must never change is that SOMETHING serves it. This
+      // asserted `SPA_SURFACES.has` and went red the moment `catalog` moved, which is the test
+      // reporting a successful migration step as a regression.
+      expect(
+        SPA_SURFACES.has(surface) || SVELTE_SURFACES.has(surface),
+        `${surface} is owned by neither bundle`
+      ).toBe(true);
       const res = await app.inject({ method: 'GET', url: `/${surface}/an.id.with.dots` });
       expect(res.statusCode, surface).toBe(200);
     }
@@ -160,8 +167,12 @@ describe('a surface address whose id contains a dot', () => {
     // missing a surface — it only ever asserts what it was told to look for — so the count is what
     // makes a surface added on the console side and forgotten here fail on this side too. It has
     // already been wrong once: `secrets` shipped in the console and never reached this set.
-    expect(SPA_SURFACES.size).toBe(surfaces.length);
-    expect(SPA_SURFACES.size).toBe(9);
+    // COUNTED ACROSS BOTH BUNDLES, for the same reason the loop now checks both: this asserted
+    // `SPA_SURFACES.size` and the count fell to 8 the moment `catalog` migrated — a green suite
+    // turning red to report that the migration worked. What must hold is that the TOTAL is
+    // unchanged: a surface may move between bundles, and may not vanish from both.
+    expect(SPA_SURFACES.size + SVELTE_SURFACES.size).toBe(surfaces.length);
+    expect(SPA_SURFACES.size + SVELTE_SURFACES.size).toBe(9);
   });
 });
 
@@ -200,7 +211,9 @@ describe('the two-bundle split', () => {
     }
     // A React surface must NOT have started answering with the other document. This is the
     // assertion that fails if a segment is moved to the Svelte set and not removed from this one.
-    const react = await app.inject({ method: 'GET', url: '/catalog/an.id.with.dots' });
+    // Taken FROM the set rather than named, so it survives the next surface migrating.
+    const stillReact = [...SPA_SURFACES][0]!;
+    const react = await app.inject({ method: 'GET', url: `/${stillReact}/an.id.with.dots` });
     expect(react.statusCode).toBe(200);
     expect(react.body).not.toContain('data-bundle="svelte"');
   });

@@ -122,7 +122,9 @@ import { registerWorkflowRoutes } from './routes/workflows';
  * `/runs/sweep-v1.2` 404s on the dot before the shell that would forward it ever runs.
  */
 export const SPA_SURFACES: ReadonlySet<string> = new Set([
-  'catalog',
+  // `catalog` LEFT for the Svelte bundle (slice 06). Moving a surface is moving this string; the
+  // set it left is as much a part of the change as the set it joined, and a segment in both is
+  // what `assertBundlesAreDisjoint` refuses at boot.
   'workflows',
   'actors',
   'datasets',
@@ -155,7 +157,12 @@ export const SPA_SURFACES: ReadonlySet<string> = new Set([
  * fallback's second clause already serves it — which is also why the DEV_ROUTES set below exists,
  * because "extensionless" is not a bundle.
  */
-export const SVELTE_SURFACES: ReadonlySet<string> = new Set<string>([]);
+export const SVELTE_SURFACES: ReadonlySet<string> = new Set<string>([
+  // The first full Surface to cross (slice 06): the whole registry, searchable, with no React-only
+  // dependency. It is also where the split gets its sharp edge — the nav here links OUT to six
+  // React surfaces, and each of those is a document load.
+  'catalog',
+]);
 
 /**
  * Extensionless routes the Svelte bundle owns that are not Surfaces — today, the IDE embed.
