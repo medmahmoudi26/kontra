@@ -131,7 +131,7 @@ export function serveEnv(): Record<string, string> {
  *
  * ── THE ACTIVE WORKSPACE COMES FIRST WHEN THERE IS ONE (ADR 0047) ───────────────────────────────
  *
- * A named workspace IS the operator's code folder: `workspaces.kontra/<name>/{actors,workflows}`,
+ * A named workspace IS the operator's code folder: `workspaces/<name>/{actors,workflows}`,
  * bind-mounted by Compose and chosen by `.current`. Registration already reached it — `sourceStore`
  * discovers under `workspaceRoot()` — but THIS root did not, and the two together were a page that
  * lied. `GET /api/workflows` lists this directory, so the Workflows page showed an empty list and

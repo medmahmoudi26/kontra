@@ -1,11 +1,16 @@
 # kontra local cluster (ADR 0047). From a clone after building images (see README Install):
 #
-#   (from the parent of this checkout) mkdir -p workspaces.kontra
+#   mkdir -p workspaces          # your code lives here, beside this file
 #   docker compose --env-file .env.quickstart up -d --wait
 #   docker compose logs cli | grep -A4 'console login'
 #
-# Named workspaces live beside kontra/ and kontra-console/ as workspaces.kontra/
-# (default ${PWD}/../workspaces.kontra). Each child is a workspace; .current picks one.
+# YOUR CODE LIVES IN `workspaces/` BESIDE THIS FILE, and that is the whole registration: a folder
+# under `<workspace>/actors/` or `<workspace>/workflows/` is served, and nothing else is recorded
+# anywhere. Each child of `workspaces/` is one workspace and `.current` picks it; the console's
+# top-right selector writes that file.
+#
+# It is deliberately NOT hidden and NOT a docker volume: you edit this code in your editor, so it
+# has to be a directory you can see from the place you ran `docker compose up`.
 #
 # Postgres, Temporal, SeaweedFS, Redis, the registry, and the kontra processes are separate
 # services. The appliance (`kontra up` as one process) is not a supported install path.
@@ -25,9 +30,13 @@
 
 name: ${COMPOSE_PROJECT_NAME:-kontra}
 
-# ${PWD} is absolute (kontra checkout). Blank KONTRA_WORKSPACES defaults to the sibling
-# ../workspaces.kontra so user code stays outside both repos.
-x-workspaces: &workspaces ${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}
+# ${PWD} is where compose was run. Blank KONTRA_WORKSPACES puts the workspace right there, which
+# is where somebody who just ran the install commands will look for it.
+#
+# MOUNTED AT THE SAME PATH INSIDE AND OUT, because the control plane hands paths to the CLI and to
+# tmux panes; a workspace at a different path in the container turns every one of those into a
+# directory nobody can find.
+x-workspaces: &workspaces ${KONTRA_WORKSPACES:-${PWD}/workspaces}
 
 x-orchestrator-env: &orchestrator-env
   KONTRA_HOME: /var/lib/kontra
@@ -68,7 +77,7 @@ x-tmux-socket: &tmux-socket /run/kontra-tmux
 
 x-kontra-home: &kontra-home
   - kontra-home:/var/lib/kontra
-  - ${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}:${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}
+  - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}
 
 services:
   postgres:
@@ -240,7 +249,7 @@ services:
       - kontra-home:/var/lib/kontra:ro
       - orchestrator-db:/var/lib/kontra-db
       - tmux-sock:/run/kontra-tmux
-      - ${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}:${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}
+      - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"
     healthcheck:
@@ -372,7 +381,7 @@ services:
       KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
     volumes:
       - kontra-home:/var/lib/kontra
-      - ${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}:${KONTRA_WORKSPACES:-${PWD}/../workspaces.kontra}
+      - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}
       - /var/run/docker.sock:/var/run/docker.sock
     command:
       - /bin/sh

@@ -82,7 +82,7 @@ export interface WorkspaceList {
 export function describeWorkspaces(env: NodeJS.ProcessEnv = process.env): WorkspaceList {
   const parent = workspacesParent(env);
   const mountHint =
-    'mkdir -p workspaces.kontra beside kontra/ and kontra-console/, then docker compose up -d';
+    'mkdir -p workspaces beside kontra/ and kontra-console/, then docker compose up -d';
   if (!parent) {
     return { parent: '', current: '', names: [], currentPath: '', mountHint };
   }

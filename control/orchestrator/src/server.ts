@@ -265,10 +265,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // tail and the history archive. One store, so a count on one surface cannot disagree with a
   // count on another.
   const store = opts.store ?? new ObjectStore();
-  // Where an operator's own code lives. Reads its list through the same Repo, so a registration
-  // survives a restart the way an actor's catalog entry does. SHARED by the sources and probe
-  // surfaces: a probe runs the FOLDER's Actor and version, never a body's.
-  const sources = new SourceStore(repo);
+  // Where an operator's own code lives: the workspace, read from disk on every listing. SHARED by
+  // the sources and probe surfaces, because a probe runs the FOLDER's Actor and version — never a
+  // body's — and both must resolve a folder the same way.
+  const sources = new SourceStore();
   /* A REGISTERED WORKFLOW FOLDER IS OPENABLE WHEREVER IT LIVES (issue #4). Registration accepts any
      absolute path and the Workflows list draws what it accepted, but `resolveWorkflowFile` was
      confined to `~/.kontra/workflows` alone — so a folder registered from a checkout listed, and

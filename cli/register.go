@@ -40,22 +40,6 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
-// registerResult is what `POST /api/sources/:kind` answers with. `endpointState` and
-// `endpointError` are the endpoint half of the act — see server.ts.
-type registerResult struct {
-	ID          string `json:"id"`
-	Kind        string `json:"kind"`
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	Version     string `json:"version"`
-	Description string `json:"description"`
-	Digest      string `json:"digest"`
-	Endpoint    string `json:"endpoint"`
-	// "created" — this call made it; "existed" — it was already there, which is the normal answer
-	// for a re-register and for an Actor whose worker booted first.
-	EndpointState string `json:"endpointState"`
-	EndpointError string `json:"endpointError"`
-}
 
 // cmdRegister serves both `kontra actor register` and `kontra workflow register`.
 //
@@ -63,31 +47,61 @@ type registerResult struct {
 // and a manifest filename — and two copies would drift in exactly the place that matters, which is
 // what the two commands promise the operator they have recorded.
 func cmdRegister(kind string, args []string) error {
-	// THE DIRECTORY COMES OFF THE FRONT FIRST. Go's flag package stops parsing at the first
-	// positional, so `register <dir> --init` — the way every other CLI reads, subject then options —
-	// parses as zero flags and leaves `--init` as a stray argument, silently. `leadingPositional`
-	// is what the rest of this CLI already uses for the same reason.
+	// REGISTERING IS GONE AND THIS EXPLAINS ITSELF, the way `kontra actor <ref> dispatch` does.
+	//
+	// The workspace is the registration: a folder under `<workspace>/actors/` or
+	// `<workspace>/workflows/` is served, and nothing else is recorded anywhere. What that removes
+	// is a class of state nobody wanted — a recorded path outlives the directory it names, and an
+	// install accumulated entries for folders deleted weeks earlier, each listing and rendering and
+	// then failing with `404 no such workflow` on the first click.
+	//
+	// `--init` SURVIVES AS ITS OWN VERB, because writing a starter manifest is a real service and
+	// has nothing to do with registration: `kontra <kind> init <dir>`.
 	dir, rest := leadingPositional(args)
-	fs := flag.NewFlagSet(kind+" register", flag.ContinueOnError)
-	initManifest := fs.Bool("init", false, "write a starter "+manifestFile(kind)+" if the folder has none")
-	version := fs.String("version", "", "with --init: the version to declare (default 0.1.0)")
-	workflowType := fs.String("workflow", "", "with --init, workflows only: the @workflow.defn class (default: read from the code)")
-	apiURL := fs.String("api", orchestratorURL(), "orchestrator base URL")
-	jsonOut := fs.Bool("json", false, "print the registration as JSON")
+	if strings.TrimSpace(dir) == "" {
+		for _, arg := range rest {
+			if !strings.HasPrefix(arg, "-") {
+				dir = arg
+				break
+			}
+		}
+	}
+	where := strings.TrimSpace(dir)
+	if where == "" {
+		where = "<dir>"
+	}
+	plural := kind + "s"
+	return fmt.Errorf(
+		"`kontra %s register` is gone: the workspace IS the registration.\n"+
+			"Put the folder in the workspace and it is served:\n"+
+			"  kontra workspace path            # where the workspace is mounted\n"+
+			"  mv %s \"$(kontra workspace path)/%s/\"\n"+
+			"Nothing is recorded, so deleting the folder removes it — no `forget`, and no entry\n"+
+			"left pointing at code that is not there any more.\n"+
+			"To write a starter manifest: kontra %s init %s",
+		kind, where, plural, kind, where)
+}
+
+// cmdSourceInit writes the starter manifest a folder is missing — the half of `register` that was
+// a real service, kept as its own verb.
+//
+// IT DOES NOT TELL THE CONTROL PLANE ANYTHING, and that is the change: a manifest makes a folder
+// well-formed, and being in the workspace is what makes it SERVED. The two were one command and
+// the coupling is what produced entries for code nobody could open.
+func cmdSourceInit(kind string, args []string) error {
+	dir, rest := leadingPositional(args)
+	fs := flag.NewFlagSet(kind+" init", flag.ContinueOnError)
+	version := fs.String("version", "", "the version to declare (default 0.1.0)")
+	workflowType := fs.String("workflow", "", "workflows only: the @workflow.defn class (default: read from the code)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	// `--init <dir>` — options first — still works: the positional lands after the flags instead.
 	if strings.TrimSpace(dir) == "" {
 		dir = fs.Arg(0)
 	}
 	if strings.TrimSpace(dir) == "" {
-		return fmt.Errorf("usage: kontra %s register <dir> [--init] [--json]", kind)
+		return fmt.Errorf("usage: kontra %s init <dir> [--version X.Y.Z]", kind)
 	}
-
-	// ABSOLUTE, HERE. The orchestrator resolves the path against ITS filesystem, and a relative
-	// path means the shell's cwd — two different directories the moment the control plane is in a
-	// container. Resolving before sending is what makes `kontra actor register .` mean this one.
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
@@ -95,68 +109,22 @@ func cmdRegister(kind string, args []string) error {
 	if st, err := os.Stat(abs); err != nil {
 		return fmt.Errorf("%s: %w", abs, err)
 	} else if !st.IsDir() {
-		return fmt.Errorf("%s is a file — register the folder that contains it", abs)
+		return fmt.Errorf("%s is a file — init the folder that contains it", abs)
 	}
-
-	if *initManifest {
-		written, err := writeStarterManifest(kind, abs, *version, *workflowType)
-		if err != nil {
-			return err
-		}
-		if written != "" {
-			fmt.Fprintf(cliio.Stdout, "wrote %s\n", written)
-		}
-	}
-
-	// THE RUN TOKEN, BECAUSE `/api/sources/:kind` IS GATED BY IT.
-	//
-	// This was `newAPI` — no credential at all — and it worked for as long as every installation
-	// had a BLANK run token, which is to say for as long as that surface was open to anyone who
-	// could reach the API. `kontra init` generates one now, so on a fresh install the FIRST
-	// command in the getting-started path answered `401 unauthorized` with nothing to say about
-	// which token was missing. Measured on the docker install.
-	//
-	// `runToken()` reads `KONTRA_RUN_TOKEN`, which `LoadAndApplyConfig` has already filled from
-	// config.yaml — so a local operator needs nothing and a remote one exports one variable.
-	api := newAuthAPI(*apiURL, runToken())
-	var got registerResult
-	if err := api.postJSON("/api/sources/"+kind, map[string]any{"path": abs}, &got); err != nil {
+	written, err := writeStarterManifest(kind, abs, *version, *workflowType)
+	if err != nil {
 		return err
 	}
-
-	if *jsonOut {
-		enc := json.NewEncoder(cliio.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(got)
-	}
-
-	label := got.Name
-	if got.Version != "" {
-		label += "@" + got.Version
-	}
-	fmt.Fprintf(cliio.Stdout, "registered %s %s\n", kind, label)
-	fmt.Fprintf(cliio.Stdout, "  path    %s\n", got.Path)
-	if got.Digest != "" {
-		fmt.Fprintf(cliio.Stdout, "  digest  %s\n", got.Digest)
-	}
-	switch {
-	case got.EndpointError != "":
-		// THE REGISTRATION STOOD. Saying so in the same breath as the failure is the difference
-		// between "run this again" and "your folder is not registered" — and only the first is true.
-		fmt.Fprintf(cliio.Stdout, "  nexus   NOT created: %s\n", got.EndpointError)
-		fmt.Fprintf(cliio.Stdout, "          the folder IS registered; re-run this command to create it\n")
-	case got.Endpoint != "":
-		fmt.Fprintf(cliio.Stdout, "  nexus   %s (%s)\n", got.Endpoint, got.EndpointState)
-	case kind == "workflow":
-		// Said rather than silently absent: an operator who knows Actors get an endpoint will look
-		// for the workflow's, and "there isn't one" is the answer, not an omission.
-		fmt.Fprintf(cliio.Stdout, "  nexus   none — a workflow dispatches, nothing dispatches to it\n")
-	}
-	fmt.Fprintf(cliio.Stdout, "\nit is NOT running. Start it with:\n")
-	if kind == "actor" {
-		fmt.Fprintf(cliio.Stdout, "  kontra serve --actor %s\n", got.Path)
+	if written == "" {
+		fmt.Fprintf(cliio.Stdout, "%s already has a %s\n", abs, manifestFile(kind))
 	} else {
-		fmt.Fprintf(cliio.Stdout, "  kontra workflow serve %s\n", got.Name)
+		fmt.Fprintf(cliio.Stdout, "wrote %s\n", written)
+	}
+	// SAY WHERE IT HAS TO BE, every time. A well-formed folder outside the workspace is invisible to
+	// the control plane, and the failure mode is silence — it simply does not appear.
+	if root := activeWorkspace(); root != "" && !strings.HasPrefix(abs+string(filepath.Separator), filepath.Join(root, kind+"s")+string(filepath.Separator)) {
+		fmt.Fprintf(cliio.Stdout, "NOT in the workspace — move it to be served:\n  mv %s %s/\n",
+			abs, filepath.Join(root, kind+"s"))
 	}
 	return nil
 }
