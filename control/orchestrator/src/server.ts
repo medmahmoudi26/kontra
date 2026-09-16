@@ -165,14 +165,19 @@ export const SVELTE_SURFACES: ReadonlySet<string> = new Set<string>([]);
  * ambiguity resolved by which branch runs first is the kind that is discovered by a user.
  */
 export const SVELTE_ROUTES: ReadonlySet<string> = new Set<string>([
-  // THE WALKING SKELETON, and it is temporary on purpose. `/_svelte` is what slice 02 ships: a
-  // plain page that proves the second bundle is built, served, routed and sharing a session,
-  // before any surface depends on that being true. It goes when `/dev` moves in slice 04 — at
-  // which point this set has a real member and this one is noise.
+  // THE IDE EMBED, and the first real thing to move (ADR 0048 §6). `/dev?actor=&method=` is what
+  // the VS Code extension opens in a webview: the console's own MethodCall with the chrome removed.
+  // It moved first because it is the smallest surface, has no React-only dependency, and is already
+  // panel-shaped — so it exercises the route split, the type scale and the derived form at once.
   //
-  // It is also what stops `spaFallback.test.ts` asserting over an empty set: a loop over nothing
-  // passes every expectation inside it, so a skeleton with no route is a test suite that proves
-  // the split works without ever having served the second document.
+  // IT WAS NEVER IN `SPA_SURFACES` AND WAS SERVED ANYWAY, by the fallback's "no file extension"
+  // clause. That was unambiguous with one document and is not with two, which is why it is named
+  // here rather than left to a heuristic.
+  'dev',
+
+  // The walking skeleton from slice 02. It stays while `/dev` is the only real surface, because the
+  // overflow check needs a route it can open without inventing query parameters — and a check with
+  // nothing to check is the failure that check exists to prevent.
   '_svelte',
 ]);
 
