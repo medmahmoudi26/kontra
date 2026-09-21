@@ -10,7 +10,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { registerSearchAttributes } from './visibility';
+import {
+  KONTRA_INTERNAL_WORKFLOW_TYPES,
+  buildRunDiscoveryQuery,
+  registerSearchAttributes,
+} from './visibility';
+import { LEASE_WORKFLOW } from './lease';
 
 /** A stand-in Connection that records every addSearchAttributes call — the one seam registration
  *  reaches. Registration must be idempotent and self-healing, so an AlreadyExists is swallowed;
@@ -47,5 +52,40 @@ describe('registerSearchAttributes', () => {
       },
     } as unknown as Parameters<typeof registerSearchAttributes>[0];
     await expect(registerSearchAttributes(flaky, 'default')).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * THE PERPETUAL WORKFLOWS ARE EXCLUDED, AND AFTER kontra#10 THAT IS LOAD-BEARING.
+ *
+ * Both now continue-as-new when the server suggests it, so each resolves to a CHAIN of executions
+ * rather than one. `historyArchive.ts` sweeps by workflow id with no `execId`, and `fetchRunHistory`
+ * documents what Temporal answers to that — "whichever ran last" — so a swept chain would be
+ * archived as its FINAL LEG ALONE with every earlier leg silently absent. That is finding F4 of the
+ * event-log audit: fixing F2 makes F1 worse unless the two land together.
+ *
+ * They land together by EXCLUSION here, which is correct for these two because neither is a caller's
+ * Run. It is not a general answer, and `visibility.ts` says so at the entry: a CALLER workflow that
+ * continues-as-new (kontra#12) is a chain the sweep cannot exclude.
+ */
+describe('the internal workflow types', () => {
+  it('excludes both perpetual workflows, so the sweep never meets a continued chain', () => {
+    expect(KONTRA_INTERNAL_WORKFLOW_TYPES).toContain('wardenWorkflow');
+    expect(KONTRA_INTERNAL_WORKFLOW_TYPES).toContain('fleetLeaseWorkflow');
+  });
+
+  it('keeps them out of the discovery query rather than filtering afterwards', () => {
+    // In the QUERY, because a post-filter would still have paged them — and at ten Machines per
+    // Fleet that is the page the caller's own Run falls off the bottom of.
+    const q = buildRunDiscoveryQuery(KONTRA_INTERNAL_WORKFLOW_TYPES);
+    expect(q).toContain("'wardenWorkflow'");
+    expect(q).toContain("'fleetLeaseWorkflow'");
+    expect(q).toMatch(/WorkflowType NOT IN \(/);
+  });
+
+  it('names the Lease workflow exactly as `lease.ts` registers it', () => {
+    // A type name that disagrees with the registration excludes NOTHING and fails silently — the
+    // list would look right and the Runs page would still carry the rows.
+    expect(KONTRA_INTERNAL_WORKFLOW_TYPES).toContain(LEASE_WORKFLOW);
   });
 });

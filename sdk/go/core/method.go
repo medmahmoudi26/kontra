@@ -42,6 +42,16 @@ type Method struct {
 	// returns (ADR 0028 §3): a Method returns only an error. So the declaration is explicit.
 	Takes any
 	Emits any
+	// Streams is a zero value of what this Method publishes WHILE IT RUNS, from which the
+	// catalog reflects a third schema beside Takes and Emits. It is declared here for the same
+	// reason those are: a caller — or a console — learns the shape from the CATALOG, never by
+	// reading the actor's source. A workflow author is not assumed to be able to do that, which
+	// is the entire point of having a catalog, so the shape of what a run DISPLAYS cannot be
+	// something the workflow has to know.
+	//
+	// nil leaves the schema unset: the Method still registers, still dispatches, and anything it
+	// streams is drawn from the record's own keys rather than a declared shape.
+	Streams any
 	// Description is what this Method is FOR, in a sentence a caller reads.
 	//
 	// GO CANNOT DO WHAT PYTHON DOES HERE, and it is worth being exact about why rather than
@@ -65,6 +75,17 @@ func Takes(v any) MethodOption { return func(m *Method) { m.Takes = v } }
 
 // Emits declares what this Method emits per Unit. Pass a zero value: `Emits(Page{})`.
 func Emits(v any) MethodOption { return func(m *Method) { m.Emits = v } }
+
+// Streams declares what this Method publishes while it runs. Pass a zero value:
+// `Streams(CrawlProgress{})`.
+//
+// The record goes to the run's Temporal Workflow Stream on this Method's own topic —
+// `<actor>/<method>` — so a console groups a run's streams without being told what any of the
+// actors are, and pairs each with the schema reflected from this type.
+//
+// SEPARATE FROM the healthcheck, which answers whether the SESSION is alive and whose error ends
+// it. Progress is per Method and can end nothing.
+func Streams(v any) MethodOption { return func(m *Method) { m.Streams = v } }
 
 // Does declares what this Method is FOR, in one sentence: `Does("Resolve each domain's NS set")`.
 //

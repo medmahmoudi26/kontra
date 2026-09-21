@@ -55,6 +55,10 @@ ActorFn = Callable[..., Awaitable[Any]]
 # one Actor don't clobber each other; `None` outside a run (e.g. at import time, when a
 # `@actor.method/load` decorator is evaluated).
 _run_params: contextvars.ContextVar = contextvars.ContextVar("kontra_run_params", default=None)
+# The publisher `stream()` writes through, bound by the host for the life of one Batch. A
+# contextvar for the same reason `_run_params` is one: a Method may run its units concurrently and
+# each task must reach the right Batch's publisher without the author threading anything.
+_run_stream: contextvars.ContextVar = contextvars.ContextVar("kontra_run_stream", default=None)
 
 # `session_state` was a fourth tier and RETIRED with ADR 0023 §19. Every path that could read it
 # runs in the same process on the same instance, where `self.*` already works; the one path that
@@ -195,6 +199,44 @@ class _Param:
 param = _Param()
 
 
+async def stream(value: Any) -> None:
+    """Publish one progress record for the Method that is running.
+
+    THE AUTHOR WRITES THIS AND NOTHING ELSE:
+
+        @actor.method(takes=Seed, emits=Page, streams=CrawlProgress)
+        async def crawl(self, batch, dataset):
+            async for unit in batch:
+                await stream(CrawlProgress(at=unit.value.url, contexts=len(self.ctxs)))
+
+    ── WHERE IT GOES ───────────────────────────────────────────────────────────────────────────
+
+    Onto the RUN's Temporal Workflow Stream, on this Method's own topic — `<actor>/<method>`, e.g.
+    `webcrawl/crawl`. A console groups by topic without being told what a crawler is, and pairs it
+    with the `streams=` schema from the actor's catalog entry to render typed fields rather than a
+    bag of strings.
+
+    ── WHY THE WORKFLOW DOES NOT DECLARE THIS ──────────────────────────────────────────────────
+
+    A workflow author is not assumed to be able to read the actor's source; that is what the
+    catalog is for. They call `await c.crawl(page, out)` and the pane fills in, because the shape
+    came from the actor that owns it.
+
+    ── SILENT OUTSIDE A RUN, AND THAT IS ORDINARY ──────────────────────────────────────────────
+
+    A Method exercised from a unit test has no Batch and no workflow to publish to. Nothing is
+    wrong, so nothing is raised — the same rule `param.get` follows. A publish that FAILS inside a
+    run is swallowed too: an observability call must never fail a Unit that already committed.
+    """
+    publish = _run_stream.get()
+    if publish is None:
+        return
+    try:
+        await publish(value)
+    except Exception:  # noqa: BLE001 - visibility must never perturb the run
+        pass
+
+
 @dataclass
 class MethodRegistration:
     """One registered Method. `name` is what a caller dispatches; it defaults to the
@@ -211,6 +253,11 @@ class MethodRegistration:
     fn_name: str            # local function name, e.g. "crawl"
     takes: Optional[type] = None   # the Unit type this Method consumes
     emits: Optional[type] = None   # the record type it emits (never a return annotation: §18)
+    # THE TYPE THIS METHOD STREAMS, declared for the same reason `takes` and `emits` are: a
+    # caller reads it from the catalog rather than from this file. A workflow author is not
+    # assumed to be able to read the actor's source — that is what a catalog is FOR — so the
+    # shape of what a run displays cannot be something the workflow has to know.
+    streams: Optional[type] = None
 
     @property
     def description(self) -> str:
@@ -367,6 +414,7 @@ class ActorRegistry:
         # the detect-and-end. Undeclared -> a plain failure isolates the unit; SessionLost stays
         # available as the imperative fast path.
         self.healthcheck_fn: Optional[ActorFn] = None
+        self.progress_fn: Optional[ActorFn] = None
         # Every credential slot this actor declares, by name, in declaration order. Registered
         # with the orchestrator as the worker registers itself, so what this code will ASK FOR is
         # visible before it runs and a new slot in a new version reads as a diff.
@@ -480,6 +528,45 @@ class ActorRegistry:
         self.healthcheck_fn = fn
         return fn
 
+    # @actor.progress  (bare) — what this Session is WORKING ON. Never decides liveness.
+    def progress(self, fn: ActorFn) -> ActorFn:
+        """Declare `async (self) -> dict` describing the WORK, run on the same periodic beat.
+
+        ── WHY THIS IS NOT `healthcheck` ───────────────────────────────────────────────────────
+
+        `healthcheck` does two unrelated jobs: its EXCEPTION ends the Session, and its RETURN
+        VALUE is what every operator-facing surface renders. Those pull in opposite directions,
+        and the shipped actors show it. `webcrawl`'s probe is written to answer "reload or
+        isolate?" — its docstring says so — so it returned:
+
+            {"contexts": 2}
+
+        Two browser tabs. Not the program, not the URL. An operator watching a 454-program
+        campaign learned nothing, because the function was never asked what the work was.
+
+        The failure semantics make it worse: anything you do in `healthcheck` risks an exception
+        ENDING THE SESSION, so an author is right to keep it thin — which is exactly the wrong
+        incentive for the function that feeds the UI.
+
+        Split, each one gets a single job and honest failure semantics:
+
+            @actor.healthcheck                  @actor.progress
+            async def alive(self):              async def where(self):
+                if not self.browser.is_connected():   return {"program": self.program,
+                    raise RuntimeError("gone")                "at": self.url,
+                                                              "found": self.n}
+
+        A RAISE HERE IS SWALLOWED, not fatal — the opposite of `healthcheck`. Reporting where you
+        are must never be able to kill a Session that is working fine, so an author can read
+        `self.*` freely without the call becoming load-bearing.
+
+        THE KEYS ARE A CONTRACT, the same one `kontra.say.Progress` names: `program`, `at`,
+        `done`, `total`, `found`. Anything else rides along and is shown, but those five are what
+        a pane positions — a renamed key renders as absent, which reads as a worker doing nothing.
+        """
+        self.progress_fn = fn
+        return fn
+
     # @actor.method  OR  @actor.method(name=...)
     def method(
         self,
@@ -488,14 +575,24 @@ class ActorRegistry:
         name: Optional[str] = None,
         takes: Optional[type] = None,
         emits: Optional[type] = None,
+        streams: Optional[type] = None,
     ) -> Any:
         """Declare a dispatchable Method. It receives the whole Batch, the output Dataset, and
         YOU write the loop (ADR 0028 §2):
 
-            @actor.method(takes=Target, emits=Page)
+            @actor.method(takes=Target, emits=Page, streams=CrawlProgress)
             async def crawl(self, batch, dataset):
                 async for unit in batch:
+                    await stream(CrawlProgress(at=unit.value.url))
                     await dataset.push(await fetch(unit.value))
+
+        `streams=` DECLARES WHAT THIS METHOD SHOWS WHILE IT RUNS, and `await stream(x)` publishes
+        one. It goes to the run's Temporal Workflow Stream on this Method's own topic —
+        `<actor>/<method>` — so a console groups it without being told, and the schema travels
+        with the actor's catalog entry so the display is typed rather than a bag of strings.
+
+        SEPARATE FROM `@actor.healthcheck`, which answers whether the SESSION is alive and whose
+        raise ends it. Progress is per Method and cannot end anything.
 
         `await dataset.push(x)` appends one record to the output — it names no Unit (put the
         provenance you care about INSIDE the record) and returns nothing (a write failure
@@ -550,7 +647,8 @@ class ActorRegistry:
                     f"({clash.fn_name}, {f.__name__}); give one of them name=\"...\""
                 )
             self.methods[dispatch_name] = MethodRegistration(
-                fn=f, name=dispatch_name, fn_name=f.__name__, takes=takes, emits=emits)
+                fn=f, name=dispatch_name, fn_name=f.__name__, takes=takes, emits=emits,
+                streams=streams)
             return f
 
         return register(fn) if fn is not None else register

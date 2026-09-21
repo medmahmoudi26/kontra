@@ -263,6 +263,48 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target`,
 
+    // The SAME SHAPE as the agent above, for the other signal (ADR 0050 §1). Workers accept no
+    // inbound connections, so logs leave the same way metrics do: an agent on the Machine, pushing
+    // outward. It reads journald directly, so `workflow.logger` writing to a host's stdout becomes
+    // a journal entry becomes a shipped record — WITH NO WORKFLOW-SIDE CHANGE. The Temporal sandbox
+    // forbids I/O; it does not forbid logging.
+    //
+    // THE DISK BUFFER IS THE REQUIREMENT, NOT A NICETY, and it is why this is vlagent rather than
+    // something hand-rolled. The Machine whose last words matter most is the one that is failing or
+    // about to be destroyed when its Lease drops — exactly when the Controller is least likely to be
+    // answering. `-remoteWrite.tmpDataPath` buffers to disk across that window and
+    // `-remoteWrite.maxDiskUsagePerURL` bounds it, so a Machine that cannot reach the Controller
+    // neither loses lines nor fills its own disk and takes the Worker down with it.
+    //
+    // THE UNIT LIST IS A PREFIX MATCH ON PURPOSE. A packed Machine runs N Workers as
+    // `kontra-actor-<name>` / `kontra-handler-<name>`, so naming units individually would need this
+    // file rewritten per Worker — the same mistake the scrape config already avoids with a
+    // directory. `_SYSTEMD_UNIT` globs cover every Worker a Machine ever packs, including ones
+    // placed after this agent started.
+    'kontra-vlagent.service': `[Unit]
+Description=kontra logs agent (journald on this Machine, pushed to the Controller)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/kontra/bin/vlagent
+
+[Service]
+EnvironmentFile=/etc/kontra/vmagent.env
+ExecStart=/opt/kontra/bin/vlagent \\
+  -syslog.listenAddr.tcp= \\
+  -journald \\
+  -journald.matches='_SYSTEMD_UNIT=kontra-actor-*.service _SYSTEMD_UNIT=kontra-handler-*.service' \\
+  -journald.streamFields='_SYSTEMD_UNIT,_HOSTNAME' \\
+  -remoteWrite.url=http://\${KONTRA_CONTROLLER}:9428/internal/insert \\
+  -remoteWrite.label=machine=%H \\
+  -remoteWrite.label=tag=\${KONTRA_TAG} \\
+  -remoteWrite.tmpDataPath=/var/lib/kontra/vlagent \\
+  -remoteWrite.maxDiskUsagePerURL=512MB
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target`,
+
     // THERE IS NO WATCHDOG UNIT HERE ANY MORE, AND NO TIMER (ADR 0037). See the block above
     // `machineInstall` for what it did, what it could not do, and what took the duty.
     //
@@ -361,6 +403,10 @@ TAG='${a.tag}'
 ROOT=${machineRoot(a.name)}
 SHARED=/opt/kontra
 VMAGENT_VERSION='1.106.1'
+# vlagent ships in the VictoriaLogs repo, on its own release train — a separate pin, not a second
+# spelling of the one above. Matches the victorialogs service in docker-compose.yml. (No backticks
+# in this script: it is one TypeScript template literal and a backtick ends it mid-sentence.)
+VLAGENT_VERSION='1.9.1'
 log() { echo "[install] $*" >&2; }
 
 # 1) base packages. A DO Ubuntu image has python3 but not pip, and cloud-init is usually STILL
@@ -592,6 +638,23 @@ cat > /etc/kontra/scrape.d/$ACTOR.json <<TARGET_EOF
   "labels": {"actor": "$ACTOR", "actor_version": "$VERSION"}}]
 TARGET_EOF
 
+# 7b) the logs agent (ADR 0050 §1). Same reason, same direction, different signal: nothing can
+#     reach a Worker from the Controller, so the agent reads this Machine's journal and pushes.
+#
+#     IT IS NOT FATAL IF IT IS MISSING, matching vmagent one block up: a Machine that cannot fetch
+#     the binary still runs its Worker. It says so rather than failing the deploy, because a Fleet
+#     that will not come up because a log shipper 404'd is a worse outcome than a Fleet with no logs
+#     — and the line above is the only place anybody would learn which one happened.
+#
+#     THE BUFFER DIRECTORY IS CREATED HERE, not left to the unit: systemd would start the agent with
+#     a tmpDataPath it cannot write, which vlagent reports once at startup and then never again.
+if [ ! -x "$SHARED/bin/vlagent" ]; then
+  curl -fsSL "https://github.com/VictoriaMetrics/VictoriaLogs/releases/download/v\${VLAGENT_VERSION}/vlutils-linux-amd64-v\${VLAGENT_VERSION}.tar.gz" \
+    | tar -xz -C "$SHARED/bin" vlagent-prod 2>/dev/null && mv "$SHARED/bin/vlagent-prod" "$SHARED/bin/vlagent" || log "vlagent unavailable; continuing without fleet logs"
+  [ -f "$SHARED/bin/vlagent" ] && chmod +x "$SHARED/bin/vlagent"
+fi
+mkdir -p /var/lib/kontra/vlagent
+
 # 8) units. There is no watchdog here any more (ADR 0037) — see the block above machineInstall for
 #    what it did, why it never did it, and what took the duty. A re-converged Machine that HAD the
 #    old pair is left with two inert unit files it will never start again; they are stopped and
@@ -609,6 +672,10 @@ systemctl disable --now kontra-watchdog.timer kontra-watchdog.service >/dev/null
 systemctl disable --now kontra-actor.service kontra-handler.service >/dev/null 2>&1 || true
 systemctl enable ${names.actor} ${names.handler} >/dev/null 2>&1
 [ -x "$SHARED/bin/vmagent" ] && systemctl enable --now kontra-vmagent.service >/dev/null 2>&1 || true
+# Same terms as vmagent, and machineTeardown leaves this one running for the same reason: a
+# teardown is not the end of the Machine, and a co-tenant's logs must not stop because a neighbour
+# left. It is also the moment its lines matter most.
+[ -x "$SHARED/bin/vlagent" ] && systemctl enable --now kontra-vlagent.service >/dev/null 2>&1 || true
 # Actor first: the handler Requires= it, and a handler polling for workflows whose RunBatch has
 # no listener is the one failure that reports as a healthy Worker.
 systemctl restart ${names.actor}

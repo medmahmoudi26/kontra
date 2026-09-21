@@ -32,7 +32,7 @@ import (
 
 	"go.temporal.io/sdk/converter"
 
-	"github.com/medmahmoudi26/kontra/runtime/handler/internal/codec"
+	"github.com/medmahmoudi26/kontra/runtime/go/codec"
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/objectstore"
 )
 
@@ -98,7 +98,7 @@ func New(opts Options) http.Handler {
 	if origin == "" {
 		origin = DefaultUIOrigin
 	}
-	return withCORS(origin, converter.NewPayloadCodecHTTPHandler(codec.New(store, threshold)))
+	return withCORS(origin, converter.NewPayloadCodecHTTPHandler(codec.New(objectstore.AsCodecStore(store), threshold)))
 }
 
 // withCORS adds the CORS headers + OPTIONS preflight the native SDK handler does not provide.

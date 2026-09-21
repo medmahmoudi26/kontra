@@ -37,6 +37,12 @@ type confParams struct {
 	Depth int `json:"depth"`
 }
 
+// confBeat is what `fetch` publishes WHILE IT RUNS — the third schema, beside input and output.
+type confBeat struct {
+	At   string `json:"at"`
+	Done int    `json:"done"`
+}
+
 type catalogFixture struct {
 	Expect      map[string]any `json:"expect"`
 	UnsetDigest struct {
@@ -116,7 +122,13 @@ func projectSchema(v any) any {
 	return out
 }
 
-// projectDescriptor applies projectSchema to the three schema-carrying keys of every operation,
+// schemaKeys are the operation keys whose VALUE is a JSON Schema document, and which therefore
+// have to be projected down to the dialect-neutral core before comparison. `stream` joined them
+// when a Method gained Streams(...); leaving it out would compare invopop's `$schema`/
+// `additionalProperties` branding verbatim against a fixture that carries neither.
+var schemaKeys = []string{"params", "input", "output", "stream"}
+
+// projectDescriptor applies projectSchema to the schema-carrying keys of every operation,
 // in place. Everything else — the identity keys, the operation names, the descriptions, and WHICH
 // keys are present at all — is compared verbatim.
 func projectDescriptor(d map[string]any) {
@@ -126,7 +138,7 @@ func projectDescriptor(d map[string]any) {
 		if !ok {
 			continue
 		}
-		for _, k := range []string{"params", "input", "output"} {
+		for _, k := range schemaKeys {
 			if v, ok := op[k]; ok {
 				op[k] = projectSchema(v)
 			}
@@ -150,8 +162,12 @@ func asJSON(t *testing.T, v any) string {
 // could not express), one described, one declaring nothing at all, and Actor-level params.
 func fixtureRegistry() *core.Registry {
 	reg := &core.Registry{Name: "demo", Version: "1.2.3", ParamsType: confParams{}}
+	// `Streams` rides on fetch rather than on a Method of its own: the fixture's job is to make
+	// ONE operation carry every field the contract defines, and a fourth Method declaring only
+	// this would leave `stream` untested in combination with the rest.
 	reg.AddMethod("fetch", noop,
-		core.Takes(confTarget{}), core.Emits(confPage{}), core.Does("Fetch each host once."))
+		core.Takes(confTarget{}), core.Emits(confPage{}), core.Streams(confBeat{}),
+		core.Does("Fetch each host once."))
 	reg.AddMethod("title", noop, core.Takes(confPage{}), core.Emits(confTitle{}))
 	reg.AddMethod("probe", noop)
 	return reg

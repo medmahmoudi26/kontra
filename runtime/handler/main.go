@@ -22,7 +22,7 @@ import (
 
 	kontrav1 "github.com/medmahmoudi26/kontra/runtime/handler/_gen/kontra/v1"
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/cas"
-	"github.com/medmahmoudi26/kontra/runtime/handler/internal/codec"
+	"github.com/medmahmoudi26/kontra/runtime/go/codec"
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/identity"
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/objectstore"
 )
@@ -41,7 +41,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("object store: %v", err)
 	}
-	cdc := codec.New(store, codec.ThresholdFromEnv())
+	cdc := codec.New(objectstore.AsCodecStore(store), codec.ThresholdFromEnv())
 	dc := converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), cdc)
 
 	// OTel tracing (roadmap platform-x100 #03): init the tracer provider + W3C global

@@ -134,7 +134,11 @@ def operations_of(registry) -> list[dict]:
         description = getattr(method, "description", "")
         if description:
             op["description"] = description
-        for field, tp in (("input", method.takes), ("output", method.emits)):
+        # `stream` RIDES BESIDE `input` AND `output`, and that is the whole reason a workflow
+        # author never has to read the actor's source: the shape a run DISPLAYS is discovered the
+        # same way the shapes it takes and emits are.
+        for field, tp in (("input", method.takes), ("output", method.emits),
+                          ("stream", getattr(method, "streams", None))):
             schema = schema_of(tp)
             if schema is not None:
                 op[field] = schema          # omitted entirely when undeclared, never null

@@ -523,10 +523,25 @@ func ensureWorkerBase(ctx context.Context, d imageAPI, progress io.Writer) error
 // deps don't OOM a small host) and parks it + the entrypoint in a slim image the per-actor
 // worker COPYs from.
 func workerBaseDockerfile() string {
+	// `runtime/go` IS REQUIRED AND WAS MISSING, and the way it failed is the reason this comment
+	// is here rather than just the line.
+	//
+	// `runtime/handler` imports `runtime/go/codec` and its go.mod `replace`s that module to
+	// `../go`, so the build needs the directory present. It was not copied — but the image is
+	// built ONCE and cached (`ensureWorkerBase` returns early when the tag exists), so the
+	// existing `kontra-worker-base:1` predated the import and nothing failed for as long as
+	// nobody deleted it. The moment one is deleted — which the docs tell you to do, as the way to
+	// pick up a handler or entrypoint change — every deploy on the machine breaks with a bare
+	// `returned a non-zero code: 1`.
+	//
+	// `control/images/Dockerfile.workerbase` is a SECOND COPY of this same image and already has
+	// the line. Two spellings of one artifact, one of them fixed: the standalone file is what a
+	// human reads and edits, and this is what actually runs.
 	return fmt.Sprintf(`FROM golang:1.25 AS handler-build
 ENV GOTOOLCHAIN=go1.26.4
 WORKDIR /src
 COPY sdk/go ./sdk/go
+COPY runtime/go ./runtime/go
 COPY runtime/handler ./runtime/handler
 RUN cd runtime/handler && GOWORK=off go build -p=1 -trimpath -o /out/handler .
 

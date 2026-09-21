@@ -39,6 +39,13 @@ type Session struct {
 	// emitDurable reports whether an emitted record is persisted at emit time (an object store
 	// is configured). Bound once per batch by the host; false outside one.
 	emitDurable bool
+	// stream is where `Stream(s, rec)` writes — bound ONCE PER BATCH by the host, to the topic
+	// `<actor>/<method>` of the Method this batch dispatched. nil outside a hosted run, which is
+	// the ordinary case for a unit test and must not be an error.
+	//
+	// RE-BOUND EVERY BATCH, INCLUDING TO nil. The instance survives across batches, so a stale
+	// publisher left here would send one Method's records onto the previous Method's topic.
+	stream func(any)
 }
 
 // NewSession builds a session with an initialized shared-state mutex and empty State. The
@@ -149,6 +156,32 @@ func (s *Session) GlobalState() GlobalState {
 // per-unit views inherit it via WithArunState's copy. Authors never call this.
 func (s *Session) BindGlobalState(gs GlobalState) {
 	s.globalState = gs
+}
+
+// BindStream binds where `Stream(s, rec)` publishes for THIS batch. The host calls it once per
+// batch, with nil when there is nowhere to publish. Authors never call this.
+func (s *Session) BindStream(f func(any)) { s.stream = f }
+
+// Stream publishes one progress record for the Method that is running.
+//
+//	kontra.Stream(s, CrawlProgress{At: u.URL, Contexts: len(ctxs)})
+//
+// It goes to the run's Temporal Workflow Stream on this Method's own topic — `<actor>/<method>` —
+// and is paired by a console with the schema reflected from the Method's `Streams(...)`
+// declaration, so a run displays typed fields for an actor nobody had to read the source of.
+//
+// SILENT OUTSIDE A RUN, AND THAT IS ORDINARY. A Method exercised from a test has no batch and no
+// workflow to publish to; nothing is wrong, so nothing is reported. A publish that FAILS inside a
+// run is swallowed by the host for the same reason the heartbeat is: an observability call must
+// never be the thing that fails a Unit that already committed.
+//
+// Peer of Python's `await kontra.stream(...)`. Not a method on Session so that it reads the same
+// as the Python free function and so a nil Session is a no-op rather than a panic.
+func Stream(s *Session, record any) {
+	if s == nil || s.stream == nil {
+		return
+	}
+	s.stream(record)
 }
 
 // The lifecycle function shapes (the Go peers of @actor.load/method/close/healthcheck).

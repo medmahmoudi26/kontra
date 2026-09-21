@@ -304,11 +304,24 @@ export interface DispatchTurn extends TurnBase {
  * Actor, which Method, how many machines, what failed. None of that can say what the run MEANT by
  * any of it, because that is not in the log. A narration is the author putting it there.
  *
- * IT ARRIVES AS A SUMMARY ON A TIMER (`sdk/python/kontra/narrate.py` writes it as
- * `workflow.sleep(0, summary=…)`), because a timer is the only command a workflow can issue that
+ * IT ARRIVES AS A SUMMARY ON A TIMER, because a timer is the only command a workflow can issue that
  * carries user metadata and runs nothing. That is a writer's detail and this reader does not
  * depend on it: what makes a narration is a Summary on an event that is not about anything else,
  * so a sentence written some other way — another SDK, a marker — reads identically.
+ *
+ * ── NOTHING WRITES ONE ANY MORE, AND THIS READER STAYS (ADR 0050 §2, kontra#18) ─────────────────
+ *
+ * `speak` is gone: `sdk/python/kontra/narrate.py` was deleted and an author now writes `note` or
+ * `partial`, which are log lines and reach the log store rather than history. A sentence cost ~5
+ * history events and ~1s, capped at 200 a Run, for no property a log line lacks.
+ *
+ * THE READER IS NOT DELETED WITH THE WRITER, and the distinction is the point: **history is
+ * immutable.** Every Run that has already happened still HAS these events, and removing the arm
+ * that reads them would take lines out of accounts that are already written — turning a completed
+ * run's transcript into a quieter and less true version of itself, which is the one thing a record
+ * may never do. New runs simply produce no narration turns, and the arm goes quiet on its own.
+ *
+ * So this is now a READ-ONLY compatibility surface. Nothing should be added to it.
  *
  * AN ASK IS NOT A SENTENCE, AND THAT IS THE ONE EXCEPTION THE RULE NEEDS. The ask route writes on a
  * timer too — `wait_condition(timeout=…, timeout_summary='kontra.ask/<id>')` — so the deadline of a

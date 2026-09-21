@@ -188,7 +188,20 @@ type ActorOperation struct {
 	//
 	// Appended (5), declared last: field numbers here are APPEND-ONLY. Renumbering to put this
 	// next to `name` would silently re-point every already-registered descriptor's fields.
-	Description   string `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
+	Description string `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
+	// What the Method STREAMS while it runs — `@actor.method(streams=…)` in Python, `Streams(…)`
+	// in Go. A console pairs it with the run's progress topic `<actor>/<method>` to draw typed
+	// fields for an actor it has never heard of, which is what lets a workflow author who cannot
+	// read the actor's source still get a live view: the shape is discovered here, not declared
+	// by the caller.
+	//
+	// NOT part of the version-immutability signature (see CARRIED in orchestrator/src/catalog.ts).
+	// Nothing is TYPED against it the way a caller is typed against `input`/`output` — a console
+	// re-reads it on every fetch — so demanding a version bump to add a counter to a progress
+	// record would train authors to bump for nothing, or to report nothing.
+	//
+	// Appended (6), declared last: field numbers here are APPEND-ONLY.
+	Stream        *structpb.Struct `protobuf:"bytes,6,opt,name=stream,proto3" json:"stream,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -256,6 +269,13 @@ func (x *ActorOperation) GetDescription() string {
 		return x.Description
 	}
 	return ""
+}
+
+func (x *ActorOperation) GetStream() *structpb.Struct {
+	if x != nil {
+		return x.Stream
+	}
+	return nil
 }
 
 // A CALLER WORKFLOW, described — the other half of a run, which today describes nothing.
@@ -395,13 +415,14 @@ const file_kontra_v1_catalog_proto_rawDesc = "" +
 	"operations\x18\x05 \x03(\v2\x19.kontra.v1.ActorOperationR\n" +
 	"operations\x12\x16\n" +
 	"\x06digest\x18\x06 \x01(\tR\x06digest\x12\x16\n" +
-	"\x06source\x18\a \x01(\tR\x06source\"\xd7\x01\n" +
+	"\x06source\x18\a \x01(\tR\x06source\"\x88\x02\n" +
 	"\x0eActorOperation\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12/\n" +
 	"\x06params\x18\x02 \x01(\v2\x17.google.protobuf.StructR\x06params\x12-\n" +
 	"\x05input\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x05input\x12/\n" +
 	"\x06output\x18\x04 \x01(\v2\x17.google.protobuf.StructR\x06output\x12 \n" +
-	"\vdescription\x18\x05 \x01(\tR\vdescription\"\xd6\x01\n" +
+	"\vdescription\x18\x05 \x01(\tR\vdescription\x12/\n" +
+	"\x06stream\x18\x06 \x01(\v2\x17.google.protobuf.StructR\x06stream\"\xd6\x01\n" +
 	"\x12WorkflowDescriptor\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12-\n" +
@@ -434,13 +455,14 @@ var file_kontra_v1_catalog_proto_depIdxs = []int32{
 	3, // 1: kontra.v1.ActorOperation.params:type_name -> google.protobuf.Struct
 	3, // 2: kontra.v1.ActorOperation.input:type_name -> google.protobuf.Struct
 	3, // 3: kontra.v1.ActorOperation.output:type_name -> google.protobuf.Struct
-	3, // 4: kontra.v1.WorkflowDescriptor.input:type_name -> google.protobuf.Struct
-	3, // 5: kontra.v1.WorkflowDescriptor.output:type_name -> google.protobuf.Struct
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	3, // 4: kontra.v1.ActorOperation.stream:type_name -> google.protobuf.Struct
+	3, // 5: kontra.v1.WorkflowDescriptor.input:type_name -> google.protobuf.Struct
+	3, // 6: kontra.v1.WorkflowDescriptor.output:type_name -> google.protobuf.Struct
+	7, // [7:7] is the sub-list for method output_type
+	7, // [7:7] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_kontra_v1_catalog_proto_init() }

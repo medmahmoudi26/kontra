@@ -523,7 +523,10 @@ describe('serveWorkflow', () => {
     process.env.KONTRA_SERVE_ENV = 'KONTRA_ADDRESS=1.2.3.4:7233 KONTRA_SDK_ROOT=/srv/checkout';
     servable('nscheck');
     await serveWorkflow({ file: 'nscheck' });
-    expect(argv()).toEqual(['workflow', 'serve', 'nscheck/workflow.py', '--tmux', '--repo', '/srv/checkout']);
+    // `--watch` rides on every console-started worker: a worker holds the contract it imported at
+    // boot, so without it the Workflows form describes the code as it was when Serve was pressed.
+    expect(argv()).toEqual(
+      ['workflow', 'serve', 'nscheck/workflow.py', '--tmux', '--watch', '--repo', '/srv/checkout']);
   });
 
   it('passes no --repo when nothing says where the checkout is', async () => {
@@ -533,7 +536,7 @@ describe('serveWorkflow', () => {
     process.env.KONTRA_SERVE_ENV = 'KONTRA_ADDRESS=1.2.3.4:7233';
     servable('nscheck');
     await serveWorkflow({ file: 'nscheck' });
-    expect(argv()).toEqual(['workflow', 'serve', 'nscheck/workflow.py', '--tmux']);
+    expect(argv()).toEqual(['workflow', 'serve', 'nscheck/workflow.py', '--tmux', '--watch']);
   });
 
   it('reports a missing file as a missing workflow, not a queue problem', async () => {

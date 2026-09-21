@@ -36,12 +36,13 @@ import { LEASE_QUERY, leaseWorkflowId, type FleetLeaseSet } from './lease';
 import { parseFqn } from './infra/paths';
 import { listStacks, readStack } from './infra/state';
 import { errMessage } from './routes/errors';
-import { getClient } from './temporalClient';
+import { NAMESPACE, getClient } from './temporalClient';
 // The QUEUE, from `queues.ts` and not from `infra.ts`. This route holds no credential and runs no
 // engine — it starts a workflow on an address — and importing the provisioner to read that address
 // put Pulumi in the API's module graph for a string.
 import { infraQueue } from './queues';
 import type { StackOp } from './workflows/stack';
+import { tenantAttributes } from './visibility';
 
 /**
  * Infra routes accept the state token — the narrower of the two, not the explore token.
@@ -75,6 +76,10 @@ export async function startStackOp(
     taskQueue: infraQueue(),
     workflowId: fqn,
     workflowIdConflictPolicy: 'FAIL',
+    // Whose Fleet operation this is, stamped at start — see `tenantAttributes`. This one is the
+    // reason the gap mattered: a stack up/down is what spends money, and it was the least
+    // attributable execution on the cluster.
+    typedSearchAttributes: tenantAttributes(NAMESPACE),
     args: [
       {
         stackFqn: fqn,

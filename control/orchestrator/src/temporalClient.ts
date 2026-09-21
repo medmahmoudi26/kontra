@@ -20,7 +20,7 @@ import { OpenTelemetryWorkflowClientInterceptor } from '@temporalio/interceptors
 import type { RunStatus } from '../contract/types';
 import { dataConverter } from './codec/dataConverter';
 import { type HeartbeatDetail, type NodeHeartbeat, heartbeatRow } from './heartbeat';
-import { mapHistory, type RawHistoryEvent, type RunHistory } from './history';
+import { HistoryReducer, type RawHistoryEvent, type RunHistory } from './history';
 import { inFlightOf, type InFlight } from './runActivity';
 import { startTracing, tracingEnabled } from './otel';
 import {
@@ -138,6 +138,30 @@ export interface RunRow extends RunDescription {
 }
 
 /**
+ * Whose Run this is — read from the attribute, DERIVED when nothing wrote one.
+ *
+ * A TENANT IS A TEMPORAL NAMESPACE (ADR 0036 §7, and `CONTEXT.md` says it in as many words). It is
+ * the only authorisation boundary Temporal has and the only one kontra leans on. Every read in this
+ * module is namespace-scoped — `client.workflow.list` and `getHandle(id).describe()` both answer
+ * within the namespace `getClient` connected to — so the tenant of any row this process can SEE is
+ * `NAMESPACE`, whether or not an attribute was ever stamped.
+ *
+ * WHICH IS WHY THE FALLBACK IS THE NAMESPACE AND NOT THE EMPTY STRING. `startRun` stamps
+ * `KontraTenant` at start (`workflowControl.ts`), but that reaches only executions begun after it
+ * landed. The perpetual ones — `wardenWorkflow`, `leaseWorkflow` — were already running, never
+ * close, and in the Warden's case cannot be made to restart into a stamp: its start site uses
+ * `WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING` precisely so `systemctl restart kontra-warden`
+ * RE-ATTACHES to the same execution. Reporting `''` for those was reporting "no tenant" about a
+ * fact that is knowable without asking anyone.
+ *
+ * ABSENT IS STILL ABSENT FOR ANYTHING THE NAMESPACE CANNOT ANSWER — this is not a default, it is a
+ * derivation, and it is only sound because the read that produced the row was namespace-scoped.
+ */
+function tenantOf(attrs: { get(key: typeof KontraTenant): string | undefined }): string {
+  return attrs.get(KontraTenant) ?? NAMESPACE;
+}
+
+/**
  * Describe one run by the id the caller started it under. `undefined` when Temporal has no
  * such execution — which is an ordinary answer, not an error: retention drops closed
  * workflows long before the Datasets they wrote expire.
@@ -150,7 +174,7 @@ export async function describeRun(runId: string): Promise<RunDescription | undef
       runId,
       status: mapStatus(desc.status),
       type: desc.type ?? '',
-      tenant: desc.typedSearchAttributes.get(KontraTenant) ?? '',
+      tenant: tenantOf(desc.typedSearchAttributes),
       startedAt: desc.startTime?.getTime() ?? 0,
       closedAt: desc.closeTime?.getTime() ?? 0,
       // Both come off the SAME response. A parked run's asks and the evidence that a running run
@@ -216,7 +240,7 @@ export async function listRuns(
       runId: info.workflowId,
       status: mapStatus(info.status),
       type: info.type ?? '',
-      tenant: info.typedSearchAttributes.get(KontraTenant) ?? '',
+      tenant: tenantOf(info.typedSearchAttributes),
       startedAt: info.startTime?.getTime() ?? 0,
       closedAt: info.closeTime?.getTime() ?? 0,
       dispatches: 0,
@@ -501,7 +525,18 @@ export async function fetchRunHistory(
   execId?: string
 ): Promise<RunHistory | undefined> {
   const client = await getClient();
-  const events: RawHistoryEvent[] = [];
+  /* REDUCED PER PAGE, SO NO PAGE OUTLIVES THE LOOP.
+   *
+   * This used to accumulate every raw event into one array — `HISTORY_PAGE × HISTORY_MAX_PAGES` =
+   * 20,000 decoded `HistoryEvent`s, each with its whole attribute bag — and hand that to the
+   * reducer, to produce at most `EVENT_CAP` = 1,000 rows. Peak heap scaled with the size of the RUN
+   * on a path every open browser tab polls, for an output whose size is FIXED.
+   *
+   * The reducer keeps a head and a bounded tail, which is exactly what a streaming reduce needs; the
+   * page is garbage the moment it has been pushed. `scanned`, `elided` and `truncated` are unchanged
+   * — see `HistoryReducer` for why the link pass can still be correct without the array.
+   */
+  const reducer = new HistoryReducer();
   let nextPageToken: Uint8Array | undefined;
   let truncated = false;
   try {
@@ -515,7 +550,7 @@ export async function fetchRunHistory(
         // for the next event is a request that holds a connection per open tab.
         waitNewEvent: false,
       });
-      for (const ev of res.history?.events ?? []) events.push(ev as RawHistoryEvent);
+      for (const ev of res.history?.events ?? []) reducer.push(ev as RawHistoryEvent);
       nextPageToken = res.nextPageToken?.length ? res.nextPageToken : undefined;
       if (!nextPageToken) break;
       if (page === HISTORY_MAX_PAGES - 1) truncated = true;
@@ -527,7 +562,7 @@ export async function fetchRunHistory(
   // The namespace goes in so the reducer can refuse a link that points OUT of it — see mapHistory.
   // The LENGTH goes in because `scanned` is what this reader fetched, and past the cap above that
   // is not the same number — see `describeLength`.
-  return mapHistory(events, truncated, NAMESPACE, await describeLength(client, runId, execId));
+  return reducer.finish(truncated, NAMESPACE, await describeLength(client, runId, execId));
 }
 
 /**

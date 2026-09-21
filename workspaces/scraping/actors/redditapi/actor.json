@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "kontra.actor.v1",
+  "name": "redditapi",
+  "version": "0.1.0",
+  "targets": {
+    "container": { "memory": "512m", "cpus": 1 },
+    "machine": { "size": "s-1vcpu-1gb", "region": "sfo3", "image": "ubuntu-22-04-x64" }
+  }
+}

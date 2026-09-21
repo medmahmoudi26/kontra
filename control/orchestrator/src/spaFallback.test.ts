@@ -138,6 +138,7 @@ describe('a surface address whose id contains a dot', () => {
       'actors',
       'datasets',
       'monitor',
+      'logs',
       'secrets',
       'settings',
       'runs',
@@ -155,7 +156,7 @@ describe('a surface address whose id contains a dot', () => {
     // It was counted across two sets while the migration ran — a surface could move between them
     // and the total was what had to hold. There is one set now and the count is its size.
     expect(SPA_SURFACES.size).toBe(surfaces.length);
-    expect(SPA_SURFACES.size).toBe(9);
+    expect(SPA_SURFACES.size).toBe(10);
   });
 });
 

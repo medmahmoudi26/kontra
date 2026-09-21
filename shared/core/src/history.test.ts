@@ -3,6 +3,7 @@ import { describe as test, expect, it } from 'vitest';
 import {
   EVENT_CAP,
   HEAD_KEEP,
+  HistoryReducer,
   attrKey,
   categorize,
   describe as describeEvent,
@@ -648,5 +649,74 @@ test('protobufjs Longs', () => {
     const { events } = mapHistory([raw]);
     expect(events[0]!.id).toBe(7);
     expect(events[0]!.at).toBe(1_700_000_000_500);
+  });
+});
+
+/*
+ * THE PAGER MUST NOT NEED THE ARRAY.
+ *
+ * `fetchRunHistory` walked up to 20,000 raw events into one array to produce at most 1,000 rows.
+ * `HistoryReducer` is the same reduction fed one event at a time; these assert it is the SAME
+ * reduction rather than a second one that happens to agree on the easy cases — which is the failure
+ * this repository keeps finding, a parallel path that drifts because nothing compares them.
+ */
+test('the streaming reducer', () => {
+  /** Feed `raw` through the reducer in pages of `size`, as the pager does. */
+  const streamed = (raw: RawHistoryEvent[], size: number, home = '') => {
+    const r = new HistoryReducer();
+    for (let i = 0; i < raw.length; i += size) for (const e of raw.slice(i, i + size)) r.push(e);
+    return r.finish(false, home);
+  };
+
+  const sweep = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      ev(i + 1, 'activityTaskScheduledEventAttributes', 1000 + i, {
+        activityType: { name: 'RunBatch' },
+      })
+    );
+
+  // Under the cap, exactly at it, and over it — the three the head/tail split treats differently.
+  for (const n of [0, 1, HEAD_KEEP, EVENT_CAP - 1, EVENT_CAP, EVENT_CAP + 500]) {
+    it(`agrees with mapHistory at ${n} events`, () => {
+      expect(streamed(sweep(n), 1000)).toEqual(mapHistory(sweep(n)));
+    });
+  }
+
+  // The page size must not change the answer: 1 and 7 both split the stream where 1000 does not.
+  it('is independent of where the pages fall', () => {
+    const raw = sweep(EVENT_CAP + 137);
+    const once = mapHistory(raw);
+    for (const size of [1, 7, 333, 1000]) expect(streamed(raw, size)).toEqual(once);
+  });
+
+  /*
+   * THE CASE THAT FORCED `finish` TO EXIST, and the one a naive per-page reduce gets wrong.
+   *
+   * A `NexusOperationScheduled` learns its workflow id from the `Started` event AFTER it. Put the
+   * two in DIFFERENT PAGES and a reducer that resolved links as it went would emit the Scheduled row
+   * with no link at all. Both events are inside the head here, so the assertion is about the link
+   * and not about retention.
+   */
+  it('links an event to a workflow id that only arrives in a later page', () => {
+    // THE REAL PAIR off the recorded run — 38 `NexusOperationScheduled` and 39 `…Started`, whose
+    // `operationToken` is the only place the backing workflow id appears. A token invented here
+    // would decode to nothing and the assertion would pass for the wrong reason.
+    const raw = [recorded(38), recorded(39), recorded(43)];
+    const split = streamed(raw, 1, 'default'); // one event per page — 38 and 39 land apart
+    expect(split).toEqual(mapHistory(raw, false, 'default'));
+    expect(split.events[0]!.link?.workflowId).toBe(
+      'actor-nscheck-nscheck-1786831339-nscheck-60c3bfac'
+    );
+  });
+
+  // The whole point: what it HOLDS is bounded by the cap, not by the run.
+  it('never retains more than the cap, however long the history', () => {
+    const r = new HistoryReducer();
+    for (const e of sweep(EVENT_CAP * 5)) r.push(e);
+    const got = r.finish(true, '');
+    expect(got.events).toHaveLength(EVENT_CAP);
+    expect(got.scanned).toBe(EVENT_CAP * 5);
+    expect(got.elided).toBe(EVENT_CAP * 4);
+    expect(got.truncated).toBe(true);
   });
 });

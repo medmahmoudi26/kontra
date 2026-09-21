@@ -150,6 +150,26 @@ func Takes(v any) MethodOption { return core.Takes(v) }
 // a Method returns only an error. So it is stated.
 func Emits(v any) MethodOption { return core.Emits(v) }
 
+// Streams declares what this Method publishes while it runs — see core.Streams.
+//
+//	a.Method("crawl", crawl,
+//	    kontra.Takes(Seed{}), kontra.Emits(Page{}), kontra.Streams(CrawlProgress{}))
+//
+// and in the body, one record at a time:
+//
+//	kontra.Stream(s, CrawlProgress{At: u.URL, Contexts: len(ctxs)})
+func Streams(v any) MethodOption { return core.Streams(v) }
+
+// Stream publishes one progress record for the running Method — see core.Stream.
+//
+//	func crawl(s *kontra.Session, b *kontra.Batch, d *kontra.Dataset) error {
+//	    for u := range b.Units() {
+//	        kontra.Stream(s, CrawlProgress{At: u.URL})
+//	        ...
+//	    }
+//	}
+func Stream(s *Session, record any) { core.Stream(s, record) }
+
 // Does declares what this Method is FOR, in one sentence: `Does("Resolve each domain's NS set")`.
 //
 // The Go peer of a Python docstring, and it has to be a VALUE because a Go doc comment is not in

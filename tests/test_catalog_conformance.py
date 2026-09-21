@@ -56,6 +56,19 @@ class Params:
     depth: int
 
 
+@dataclass
+class Beat:
+    """What `fetch` publishes WHILE IT RUNS — the third schema, beside input and output.
+
+    It rides on `fetch` rather than on a Method of its own because the fixture's job is to make
+    one operation carry every field the contract defines; a fourth Method declaring only this
+    would leave `stream` untested in combination with the rest.
+    """
+
+    at: str
+    done: int
+
+
 def fixture_registry() -> ActorRegistry:
     """The fixture's Actor: three Methods in declaration order, two with DIFFERENT signatures
     (title takes what fetch emits — the §9 property a single Actor-level pair could not express),
@@ -65,7 +78,7 @@ def fixture_registry() -> ActorRegistry:
     reg.actor_dir = Path(EXPECT["source"])
     reg.params_type = Params
 
-    @reg.method(takes=Target, emits=Page)
+    @reg.method(takes=Target, emits=Page, streams=Beat)
     async def fetch(self, batch):
         """Fetch each host once."""
 
@@ -133,13 +146,20 @@ def project_schema(value):
     return out
 
 
+# The operation keys whose VALUE is a JSON Schema document, and which therefore have to be
+# projected down to the dialect-neutral core before comparison. `stream` joined them when a Method
+# gained `streams=`; leaving it out compared pydantic's `title`/`description` branding verbatim
+# against a fixture that carries neither, so the Python arm failed while the emission was correct.
+SCHEMA_KEYS = ("params", "input", "output", "stream")
+
+
 def project_descriptor(body: dict) -> dict:
-    """Project the three schema-carrying keys of every operation. Everything else — the identity
+    """Project the schema-carrying keys of every operation. Everything else — the identity
     keys, the operation names and order, the descriptions, and WHICH keys are present at all — is
     compared verbatim."""
     out = dict(body)
     out["operations"] = [
-        {k: (project_schema(v) if k in ("params", "input", "output") else v) for k, v in op.items()}
+        {k: (project_schema(v) if k in SCHEMA_KEYS else v) for k, v in op.items()}
         for op in body["operations"]
     ]
     return out

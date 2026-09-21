@@ -705,3 +705,91 @@ describe('the workflow bundles', () => {
     expect(applianceBundle.code).not.toContain('KONTRA_ADDRESS');
   }, 300_000);
 });
+
+/**
+ * THE HANDOVER (kontra#10).
+ *
+ * The header of `workflows/lease.ts` used to end "…which is why there is no continue-as-new here".
+ * That was right about the RATE and silent about the TOTAL: Temporal TERMINATES an execution at
+ * 51,200 events, so a **Fleet** held across a quarter walks into a hard stop and what dies is the
+ * thing that knows the **Machines** must be destroyed.
+ *
+ * THE THRESHOLD IS LOWERED RATHER THAN THE HISTORY INFLATED. Reaching the real 4,096 would take
+ * ~680 hold/drop pairs at ~6 events each — minutes of test, for no extra confidence. Moving the
+ * server's own `suggestContinueAsNew` limit exercises the SAME signal on the SAME path: the server
+ * sets `continueAsNewSuggested` on a workflow task and the workflow reads it. What is asserted is
+ * the workflow's behaviour, not the number.
+ */
+describe('continue-as-new', () => {
+  let small: TestWorkflowEnvironment;
+
+  beforeAll(async () => {
+    small = await TestWorkflowEnvironment.createLocal({
+      server: {
+        extraArgs: [
+          '--dynamic-config-value',
+          'limit.historyCount.suggestContinueAsNew=40',
+        ],
+      },
+    });
+  }, 300_000);
+
+  afterAll(async () => {
+    await small?.teardown();
+  });
+
+  it('hands over when the server suggests it, and the Leases survive the boundary', async () => {
+    const fqn = nextFqn();
+    const queue = nextQueue();
+    // THE FILE'S OWN ACTIVITY SET, against the lowered-threshold server. A hand-rolled one here
+    // registered two activities and the teardown path calls `checkCloudCredential` as well — the
+    // workflow failed on a missing activity rather than on anything this test is about.
+    const rec = fresh();
+    const w = await Worker.create({
+      connection: small.nativeConnection,
+      taskQueue: queue,
+      workflowBundle: bundle,
+      activities: activities(rec),
+    });
+
+    await w.runUntil(async () => {
+      const handle = await small.client.workflow.signalWithStart(LEASE_WORKFLOW, {
+        taskQueue: queue,
+        workflowId: `kontra-lease/${fqn}`,
+        args: [{ stackFqn: fqn, livenessQueue: queue }],
+        signal: LEASE_HOLD_SIGNAL,
+        signalArgs: [{ lease: 'run-a#1', holder: '', ttlMs: 60_000, credential: 'do-token' }],
+      });
+      const first = handle.firstExecutionRunId;
+
+      // Signals are ~6 events each, so this crosses 40 several times over and the workflow has to
+      // hand over more than once. A chain of TWO would pass a test that only looked at one.
+      for (let i = 0; i < 24; i++) {
+        await handle.signal(LEASE_HOLD_SIGNAL, { lease: `filler#${i}`, holder: '', ttlMs: 60_000 });
+        await handle.signal(LEASE_DROP_SIGNAL, { lease: `filler#${i}` });
+      }
+
+      const desc = await handle.describe();
+      // THE CHAIN MOVED. `runId` is the CURRENT execution; `firstExecutionRunId` is where the chain
+      // began. They differ only if at least one continue-as-new happened.
+      expect(desc.runId, 'the workflow never handed over').not.toBe(first);
+
+      // THE LEDGER CROSSED THE BOUNDARY, which is the whole risk: a handover that lost its Leases
+      // would destroy a Fleet under a live holder.
+      const held = (await handle.query(LEASE_QUERY)) as FleetLeaseSet;
+      expect(held.leases.map((l) => l.lease)).toEqual(['run-a#1']);
+
+      // …AND SO DID `everHeld`. Without it the new leg would drop the last Lease and decline to
+      // destroy, leaving Machines billing with nobody watching.
+      await handle.signal(LEASE_DROP_SIGNAL, { lease: 'run-a#1' });
+      await handle.result();
+      // `${fqn}|${credential}` — so this asserts TWO carried fields at once: `everHeld` (without it
+      // there is no destroy at all) and `credential` (without it the teardown runs against an empty
+      // credential name, which on a real Fleet is Machines left billing and reaching hostile
+      // infrastructure because the provider call had nothing to authenticate with).
+      expect(rec.destroys, 'the continued leg lost everHeld or the credential').toEqual([
+        `${fqn}|do-token`,
+      ]);
+    });
+  }, 300_000);
+});

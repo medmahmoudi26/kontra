@@ -45,6 +45,9 @@ export interface ActorOperation {
   params?: JsonSchemaDoc;
   input?: JsonSchemaDoc;
   output?: JsonSchemaDoc;
+  /** What this Method displays while it runs — `@actor.method(streams=…)`. Not part of the
+   *  version-immutability signature; see CARRIED in catalog.ts. */
+  stream?: JsonSchemaDoc;
 }
 
 /** A catalogued actor (the persisted form of the frontend's CatalogActor). */

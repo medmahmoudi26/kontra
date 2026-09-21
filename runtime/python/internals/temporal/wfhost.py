@@ -76,6 +76,14 @@ def _configure_logging() -> None:
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
             datefmt="%H:%M:%S",
         )
+    # STRUCTURED AND RUN-STAMPED WHEN ASKED (ADR 0050 §1, kontra#16). Off unless
+    # `KONTRA_LOG_FORMAT=json`: a developer watching a tmux pane wants the human format above, and a
+    # fleet Machine writing to journald at volume wants one JSON object per line that vlagent parses
+    # into fields. The pane is the default because that is the surface somebody is looking at while
+    # they decide. `logs.configure_shipping` is a no-op otherwise.
+    from internals import logs  # local: the sandbox passes `internals`, and this is import-cheap
+
+    logs.configure_shipping()
     # The workflow logger is a CHILD of `temporalio`, which the SDK leaves at the root's level.
     # Setting it explicitly is what makes KONTRA_LOG_LEVEL=DEBUG mean the workflow's own lines and
     # not just the SDK's.

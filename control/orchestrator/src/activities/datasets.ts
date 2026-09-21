@@ -17,6 +17,8 @@
  * (`DATASET_QUEUE`) so a caller's page read never queues behind a long decode.
  */
 
+import { ApplicationFailure } from '@temporalio/common';
+
 import { ObjectStore } from '../codec/objectStore';
 // The lifecycle vocabulary lives with the READ side, because that is what has to agree with the
 // UI's badge; this module only writes it (ADR 0023 §11).
@@ -141,6 +143,19 @@ function unitRefOf(entry: unknown): UnitRef | null {
   const { key, sha256 } = ref as UnitRef;
   if (typeof key !== 'string' || key === '') return null;
   return typeof sha256 === 'string' ? { key, sha256 } : { key };
+}
+
+/**
+ * DuckDB's DETERMINISTIC error classes — the ones that fail identically on every attempt.
+ *
+ * Each names a fault in the SQL or the catalog, not in the machine: a column that is not there, a
+ * statement that does not parse, a table that does not exist, a value that cannot be cast. None of
+ * those are fixed by waiting. Conservative BY CONSTRUCTION — anything unrecognised stays retryable,
+ * because marking a transient failure non-retryable kills runs that would have recovered.
+ */
+function isDeterministicSqlError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\b(Binder|Parser|Catalog|Conversion|Syntax) Error\b/i.test(msg);
 }
 
 export function createDatasetActivities(deps: DatasetDeps = {}) {
@@ -405,14 +420,39 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
      */
     async pageDataset(input: PageDatasetInput): Promise<DatasetPage> {
       const sql = input.sql?.trim() || `SELECT * FROM "${input.name.replace(/"/g, '""')}"`;
-      return pageDataset(store, {
-        sql,
-        orderBy: input.orderBy,
-        limit: input.limit,
-        offset: input.offset,
-        scope: input.scope,
-        lake,
-      });
+      try {
+        return await pageDataset(store, {
+          sql,
+          orderBy: input.orderBy,
+          limit: input.limit,
+          offset: input.offset,
+          scope: input.scope,
+          lake,
+        });
+      } catch (err) {
+        // A MALFORMED QUERY IS NOT A FLAKE, and retrying one is how a run spends hours looking
+        // alive while doing nothing. MEASURED: `hunt` paged `scope_8x8` with
+        // `WHERE kind NOT IN (…)` against a scope built without that column, and Temporal retried
+        //
+        //   Binder Error: Referenced column "kind" not found in FROM clause!
+        //
+        // 21 times against `MaximumAttempts: 0` — unbounded — while the workflow sat in `running`
+        // for over two hours. The column was never going to appear on attempt 22.
+        //
+        // ONLY THE DETERMINISTIC CLASSES. DuckDB names them, and each is a statement about the SQL
+        // or the catalog rather than about the machine: a Binder/Parser/Catalog/Conversion error
+        // fails identically forever. Everything else — a closed connection, a lock, a spill, an
+        // object store hiccup — stays retryable, because those are exactly the failures a retry is
+        // for. Getting this backwards in the other direction would be worse: a non-retryable
+        // network blip fails a run that would have succeeded on its own.
+        if (isDeterministicSqlError(err)) {
+          throw ApplicationFailure.nonRetryable(
+            err instanceof Error ? err.message : String(err),
+            'DatasetQueryRejected'
+          );
+        }
+        throw err;
+      }
     },
   };
 }

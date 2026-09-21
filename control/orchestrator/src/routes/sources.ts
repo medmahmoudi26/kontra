@@ -200,6 +200,71 @@ export function registerSourceRoutes(app: FastifyInstance, sources: SourceStore)
    * Ungated, matching the read it serves and `rowStream.ts` beside it: no `EventSource` can send an
    * Authorization header, and what crosses here is one word that says a file moved.
    */
+  /**
+   * TELL ME WHEN THIS FOLDER CHANGES — for either kind.
+   *
+   * ── WHY A WORKFLOW NEEDED ITS OWN ────────────────────────────────────────────────────────────
+   *
+   * An Actor's schema has had a stream since `/dev` existed, and a workflow's descriptor had
+   * nothing: the worker re-registers on save, the control plane writes the new contract, and the
+   * browser found out by being reloaded. An operator edited `approve`, added a required field,
+   * and the runner kept offering the old form — with no way to know it was stale.
+   *
+   * ── IT WATCHES THE FOLDER, NOT THE CATALOG ───────────────────────────────────────────────────
+   *
+   * The same seam the actor stream uses, for the same reason: the filesystem is where the change
+   * happens first and it is the one authority that cannot be behind. The client re-reads the
+   * descriptor when this fires — including once again shortly after, because the worker's
+   * re-registration lands a moment after the save that triggered it.
+   *
+   * COALESCED at 150ms: one ⌘S is several filesystem events (editors write a temp file and rename
+   * over the target), and each unbatched one would cost the client a fetch.
+   */
+  app.get('/api/sources/:kind/:id/watch', (req, reply) => {
+    const { kind, id } = req.params as { kind: string; id: string };
+    if (kind !== 'actor' && kind !== 'workflow') {
+      return reply.code(404).send({ error: `${kind}: not a kind of source` });
+    }
+    const source = sources.get(kind, decodeURIComponent(id));
+    if (!source) return reply.code(404).send({ error: `${id}: no such folder in the workspace` });
+
+    const raw = reply.raw;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const changed = (): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => raw.write('event: changed\ndata: 1\n\n'), 150);
+    };
+
+    // SUBSCRIBE BEFORE THE HEAD IS WRITTEN — a refusal is only sayable while this is an ordinary
+    // reply; after `writeHead` the only way to decline is to hang up, which reads as a fault.
+    let stop: () => void;
+    try {
+      stop = watchDir(source.path, changed);
+    } catch (err) {
+      return reply.code(503).send({ error: `${errMessage(err)} — close a runner tab and retry` });
+    }
+
+    reply.hijack();
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    // Opens the stream so `EventSource` fires `onopen` now: a folder nobody is editing is
+    // correctly silent for hours, and "connected and quiet" must not look like "still connecting".
+    raw.write(': ok\n\n');
+    const keepalive = setInterval(() => raw.write(': ping\n\n'), 25_000);
+    keepalive.unref?.();
+
+    req.raw.on('close', () => {
+      clearTimeout(timer);
+      clearInterval(keepalive);
+      stop();
+    });
+    return reply;
+  });
+
   app.get('/api/sources/actor/:id/schema/stream', (req, reply) => {
     const { id } = req.params as { id: string };
     const source = sources.get('actor', decodeURIComponent(id));

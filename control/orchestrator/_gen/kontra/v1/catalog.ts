@@ -113,6 +113,21 @@ export interface ActorOperation {
    * next to `name` would silently re-point every already-registered descriptor's fields.
    */
   description: string;
+  /**
+   * What the Method STREAMS while it runs — `@actor.method(streams=…)` in Python, `Streams(…)`
+   * in Go. A console pairs it with the run's progress topic `<actor>/<method>` to draw typed
+   * fields for an actor it has never heard of, which is what lets a workflow author who cannot
+   * read the actor's source still get a live view: the shape is discovered here, not declared
+   * by the caller.
+   *
+   * NOT part of the version-immutability signature (see CARRIED in orchestrator/src/catalog.ts).
+   * Nothing is TYPED against it the way a caller is typed against `input`/`output` — a console
+   * re-reads it on every fetch — so demanding a version bump to add a counter to a progress
+   * record would train authors to bump for nothing, or to report nothing.
+   *
+   * Appended (6), declared last: field numbers here are APPEND-ONLY.
+   */
+  stream: { [key: string]: any } | undefined;
 }
 
 /**

@@ -10,6 +10,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -29,6 +30,11 @@ const (
 	// The Dashboard streamer's port is NOT repeated here: `panels.go` owns that fact as
 	// `defaultPanelPort` + KONTRA_PANEL_PORT, and two spellings of one port is how a moved port
 	// starts showing up in one table and not the other.
+
+	// THE SAME STRING `control/orchestrator/src/panels/metrics.ts` HARD-CODES as
+	// `DEFAULT_METRICS_URL`, and `metrics.test.ts` asserts. It is a compose hostname, not a host
+	// port, because the service is deliberately unpublished — see `metricsHealth`.
+	defaultMetricsURL = "http://victoriametrics:8428"
 )
 
 // hostOf extracts the bare host from "host:port" or "scheme://host:port[/path]"; "" →
@@ -93,6 +99,7 @@ func cmdDoctor(args []string) error {
 		panelsURL = ui(orchHost, cliutil.EnvOr("KONTRA_PANEL_PORT", defaultPanelPort))
 	}
 	panelsOK, panelsStat := panelsHealth(panelsURL)
+	metricsAddr, metricsOK, metricsStat := metricsHealth()
 
 	services := []svcRow{
 		{"control plane", "docker compose containers", "-", composeOK, composeStat},
@@ -100,6 +107,7 @@ func cmdDoctor(args []string) error {
 		{"temporal", "workflow engine (gRPC)", config.TemporalAddress(), tcpUp(config.TemporalAddress()), ""},
 		{"seaweedfs", "S3 object store", ui(orchHost, portSeaweedS3), httpAnswers(ui(orchHost, portSeaweedS3)), ""},
 		{"panels", "Dashboard streamer (forked child of orchestrator-infra)", panelsURL, panelsOK, panelsStat},
+		{"metrics", "VictoriaMetrics — what every Machine's vmagent pushes to", metricsAddr, metricsOK, metricsStat},
 	}
 
 	consoles := []uiRow{
@@ -205,6 +213,33 @@ func ageWords(ms int64) string {
 	default:
 		return fmt.Sprintf("%ds", ms/1000)
 	}
+}
+
+// metricsHealth probes the backend every Machine's vmagent remote-writes to, and returns a status
+// that distinguishes DOWN from "correctly not reachable from where you typed this".
+//
+// WHY THIS ROW EXISTS. `machine.ts` wrote vmagent's unit, its scrape config and its remote-write
+// target, and for the life of every Fleet nothing listened on `:8428` — every fleet metric was
+// discarded, and the only evidence was a `connection refused` line in a unit's journal on a Machine
+// that no longer exists. ADR 0050 stands this backend up; this row is so the next person learns it
+// from `kontra doctor` instead of by reading a unit file.
+//
+// "NOT PUBLISHED" IS NOT "DOWN", and conflating them would be the same false-green this file's
+// neighbours warn about. `docker-compose.yml` publishes no host port for VictoriaMetrics on purpose
+// (a published Docker port is DNATed in PREROUTING and a host firewall does not protect it), so the
+// compose hostname does not resolve from the host — which is CORRECT, not broken. Run it where the
+// name means something: `docker compose exec cli kontra doctor`.
+func metricsHealth() (addr string, ok bool, stat string) {
+	addr = cliutil.EnvOr("KONTRA_METRICS_URL", defaultMetricsURL)
+	if httpOK(addr + "/health") {
+		return addr, true, ""
+	}
+	// A name that does not resolve is the unpublished case; a name that resolves and refuses is a
+	// backend that is actually down. The two want different sentences.
+	if _, err := net.LookupHost(hostOf(addr)); err != nil {
+		return addr, false, "not reachable from here (unpublished by design — try `compose exec cli`)"
+	}
+	return addr, false, "DOWN — fleet vmagent remote-writes are being discarded"
 }
 
 func ui(host, port string) string { return "http://" + host + ":" + port }

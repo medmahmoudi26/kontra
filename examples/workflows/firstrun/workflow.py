@@ -36,7 +36,7 @@ from typing_extensions import TypedDict
 # constructing one builds an argument dict and talks to nothing, which is what lets it live in a
 # workflow file at all. The provisioning happens inside `fleet.up()`, in an activity, off the
 # workflow thread.
-from kontra import catalog, fleet, speak
+from kontra import catalog, fleet, note
 from kontra.fleet import do_fleet
 
 #: The actor this workflow dispatches to, as (name, version). A TUPLE and not two arguments,
@@ -88,12 +88,12 @@ class FirstRun:
 
         machines = int(req.get("machines") or 0)
         if machines == 0:
-            await speak(f"attached to whoever is serving {FIRSTACTOR[0]}@{FIRSTACTOR[1]}")
+            note(f"attached to whoever is serving {FIRSTACTOR[0]}@{FIRSTACTOR[1]}")
             rows = await self._expand(units, out, call_opts)
         else:
             rows = await self._with_fleet(req, machines, units, out, call_opts)
 
-        await speak(f"{rows} candidate(s) in {out.name}")
+        note(f"{rows} candidate(s) in {out.name}")
         return {"hosts": len(hosts), "candidates": rows, "dataset": out.name}
 
     async def _expand(self, units, out, call_opts) -> int:
@@ -152,7 +152,7 @@ class FirstRun:
             # WAIT FOR POLLERS, not for droplets. A Machine that exists and is not yet polling its
             # queue takes a dispatch that nothing answers, which is a run that looks hung.
             await f.ready()
-            await speak(f"{len(f.inventory)} machine(s) polling {FIRSTACTOR[0]}")
+            note(f"{len(f.inventory)} machine(s) polling {FIRSTACTOR[0]}")
             return await self._expand(units, out, call_opts)
 
 

@@ -37,11 +37,12 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import { checkOptionalBearer } from '../auth';
+import { EXPLORE_TOKEN_VARS, checkBearer, checkOptionalBearer } from '../auth';
 import { InvalidRunWorkflowError, type RunWorkflowStore } from '../data/runWorkflows';
 import type { QueueDescriber } from '../panels/pollers';
 import type { RunLifecycle } from '../runs';
-import { describeRunHeartbeats } from '../temporalClient';
+import { NAMESPACE, describeRunHeartbeats, getClient } from '../temporalClient';
+import { STREAM_HEADERS } from './runStream';
 import {
   CANCEL_REPORT_MS,
   ControlRefused,
@@ -281,5 +282,148 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): voi
     } catch (err) {
       return reply.code(502).send({ error: `could not read heartbeats: ${errMessage(err)}` });
     }
+  });
+  /**
+   * The run's Workflow Stream, forwarded as SSE.
+   *
+   * `progress-stream`, NOT `stream`: `routes/runStream.ts` already owns `/api/runs/:runId/stream`
+   * and serves the run's EVENT feed there (activity started, dispatch completed — the timeline's
+   * source). Registering a second GET on it makes Fastify refuse to boot the whole server with
+   * `FST_ERR_DUPLICATED_ROUTE`, which is how this was found. The two are different feeds for
+   * different questions and both are worth having: that one is what the run DID, this one is what
+   * the actor is ON.
+   *
+   * ── WHY THIS ROUTE EXISTS AT ALL ────────────────────────────────────────────────────────────
+   *
+   * A browser cannot speak gRPC to Temporal, and `/api/logs/tail` answers the wrong question: it
+   * carries LINES for a human to read afterwards, while this carries STATE for a pane to draw now
+   * — `{program, at, done, total, found}`, typed by `kontra.say.Progress`. The two are different
+   * shapes for different consumers, which is why there are two routes and not one.
+   *
+   * ── WHAT IT REPLACES ────────────────────────────────────────────────────────────────────────
+   *
+   * `/api/runs/:runId/heartbeats` polls DescribeWorkflowExecution and returns whatever the last
+   * beat happened to be; a caller that wants to follow a run has to poll it and will miss every
+   * beat between polls. The stream is a log with offsets, so `from_offset` replays what a late
+   * subscriber missed and a reconnect resumes exactly where it stopped — which is also why this
+   * route needs none of the hand-written backoff and frame-reassembly `logstream.ts` carries.
+   *
+   * ── FAILURE IS IN-BAND, ON PURPOSE ──────────────────────────────────────────────────────────
+   *
+   * The head goes out before the subscription is opened, for the reason `/api/logs/tail` states at
+   * length: a workflow that has not published yet answers nothing, and a route that awaits the
+   * first item before writing headers is indistinguishable from a hung backend. Once the head is
+   * written the status is spent, so a workflow that hosts no stream arrives as `event: error`
+   * rather than a 502.
+   */
+  app.get('/api/runs/:runId/progress-stream', (req, reply) => {
+    // FAIL-CLOSED, on `/api/logs/tail`'s grounds and not the read-routes'. A progress event
+    // carries `at` — the exact host and path a scanner is on — which is the same class of content
+    // that made the log routes fail-closed. `heartbeats` above is open because `done/total` names
+    // no target; this one does.
+    const denied = checkBearer(req.headers.authorization, EXPLORE_TOKEN_VARS);
+    if (denied) return reply.code(denied.code).send(denied.body);
+    const runId = runIdOf(req);
+    const q = (req.query as { topics?: string; from?: string }) ?? {};
+    const topics = (q.topics ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+    const fromOffset = Number.parseInt(q.from ?? '0', 10) || 0;
+
+    reply.hijack();
+    const controller = new AbortController();
+    req.raw.on('close', () => controller.abort());
+    reply.raw.writeHead(200, STREAM_HEADERS);
+    reply.raw.write(': open\n\n');
+
+    void (async () => {
+      try {
+        const { WorkflowStreamClient } = await import('@temporalio/workflow-streams/client');
+        const client = await getClient();
+
+        // A CLOSED RUN CANNOT BE SUBSCRIBED, and must not render as "connecting" forever.
+        //
+        // The stream's log is workflow memory, not history: once the workflow completes, the
+        // offset QUERY still answers (it is served from closed-workflow state) but the poll
+        // UPDATE cannot be, so `subscribe()` yields nothing at all. Measured on
+        // surface-1789915833: `get_offset()` returned 9 — nine events were published — and the
+        // subscription produced zero. A pane that just subscribes therefore shows an empty box on
+        // every finished run, which is indistinguishable from a backend that is down.
+        //
+        // So the state is checked FIRST and said out loud. `final` carries the offset the run
+        // reached, because "this run published 9 events and they are gone" is a different fact
+        // from "this run published nothing".
+        const desc = await client.workflow.getHandle(runId).describe();
+
+        // IS ANYBODY SERVING THIS RUN? A workflow start SUCCEEDS with no worker anywhere: Temporal
+        // queues the task and waits, so the run sits at RUNNING and publishes nothing. The pane
+        // then shows an open stream, no error and no records — which is indistinguishable from a
+        // broken backend, and is exactly what a person sees after `Run` when they forgot to serve
+        // the workflow. Said out loud, it is a one-line diagnosis instead of a bug report.
+        if (desc.status.name === 'RUNNING') {
+          const queue = desc.taskQueue ?? '';
+          let pollers = -1;
+          try {
+            const tq = await client.workflowService.describeTaskQueue({
+              namespace: NAMESPACE,
+              taskQueue: { name: queue },
+            });
+            pollers = (tq.pollers ?? []).length;
+          } catch {
+            /* an older server may not answer this; -1 means "could not tell", not "none" */
+          }
+          reply.raw.write(
+            `event: serving\ndata: ${JSON.stringify({ queue, pollers })}\n\n`
+          );
+        }
+
+        if (desc.status.name !== 'RUNNING') {
+          let reached = -1;
+          try {
+            reached = await WorkflowStreamClient.create(client, runId).getOffset();
+          } catch {
+            /* a run that never hosted a stream has no offset, and that is not an error */
+          }
+          reply.raw.write(
+            `event: final\ndata: ${JSON.stringify({ status: desc.status.name, offset: reached })}\n\n`
+          );
+          reply.raw.end();
+          return;
+        }
+
+        const stream = WorkflowStreamClient.create(client, runId);
+        // `fromOffset` IS POSITIONAL, not an option — and 0 means "replay the whole log", which
+        // is what makes a pane opened mid-run show the run from its start rather than from now.
+        // `resultType: true` IS WHAT DECODES THE PAYLOAD. Without it `subscribe` yields
+        // `WorkflowStreamItem<Payload>` — the raw protobuf envelope — and forwarding `item.data`
+        // straight out sends the browser `{metadata, data: "<base64>"}` instead of the author's
+        // map. Measured: the pane received 15 events and rendered `phase= done=/ found=` for
+        // every one of them, because every field it looked for was one level down inside base64.
+        for await (const item of stream.subscribe<Record<string, unknown>>(
+          topics.length ? topics : undefined,
+          fromOffset,
+          { resultType: true }
+        )) {
+          if (controller.signal.aborted) break;
+          reply.raw.write(
+            `event: progress\ndata: ${JSON.stringify({
+              offset: item.offset,
+              topic: item.topic,
+              data: item.data,
+            })}\n\n`
+          );
+        }
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          // THE SENTENCE, NOT A CODE. A workflow with no stream and an unreachable Temporal are
+          // both errors here and a reader has to be able to tell them apart without guessing.
+          reply.raw.write(
+            `event: error\ndata: ${JSON.stringify({
+              error: `could not follow ${runId}: ${errMessage(err)}`,
+            })}\n\n`
+          );
+        }
+      } finally {
+        reply.raw.end();
+      }
+    })();
   });
 }

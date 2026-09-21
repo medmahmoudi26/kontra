@@ -20,6 +20,7 @@ import { DEFAULT_WINDOWS } from './converge';
 import type { MachineTarget } from './discovery';
 import { sshAddress } from './discovery';
 import { temporalConnectOptions } from '../temporalTls';
+import { tenantAttributes } from '../visibility';
 
 /** The workflow's registered type name — its exported function name in `workflows/infra.ts`. A
  * string, not an import: the streamer must not pull workflow code into its bundle. */
@@ -73,6 +74,8 @@ export function temporalConverger(options?: {
         await c.workflow.start(TMUX_SESSION_WORKFLOW, {
           taskQueue,
           workflowId,
+          // Whose Machine this Terminal is on — see `tenantAttributes`.
+          typedSearchAttributes: tenantAttributes(namespace),
           // One writer per Machine, structurally. A second concurrent converge would race on
           // `has-session` and produce duplicate windows.
           workflowIdConflictPolicy: 'FAIL',

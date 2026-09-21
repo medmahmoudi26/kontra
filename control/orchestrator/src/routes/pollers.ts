@@ -18,11 +18,66 @@
 
 import type { FastifyInstance } from 'fastify';
 
+import type { Repo } from '../db/repo';
 import { describeQueue, type QueueDescriber } from '../panels/pollers';
 import { QUEUE_RE } from '../workflowControl';
 import { errMessage } from './errors';
 
-export function registerPollerRoutes(app: FastifyInstance, queueDescriber: () => QueueDescriber): void {
+export function registerPollerRoutes(
+  app: FastifyInstance,
+  queueDescriber: () => QueueDescriber,
+  repo: Repo,
+): void {
+  /**
+   * EVERY QUEUE AT ONCE — what the console actually asks for, and what was missing.
+   *
+   * `Actors.svelte` and `catalog/load.ts` both GET `/api/pollers` and key the result by queue. Only
+   * the per-queue route below existed, so all three call sites 404ed and fell back to `{}` — and
+   * because an ABSENT report is indistinguishable from an unreachable cluster, every actor on the
+   * page rendered "UNKNOWN / the cluster could not be asked" while its worker was polling happily.
+   * A 404 swallowed by `.catch(() => ({}))` is the silent-empty shape this codebase keeps finding:
+   * the page was not wrong about what it had, it was never given anything.
+   *
+   * ONE ROUND TRIP, NOT N. The page knows N queues and polls; asking per queue would open a
+   * describe per actor per poll against the shared Temporal connection. They are gathered
+   * concurrently here instead.
+   *
+   * A QUEUE THAT CANNOT BE DESCRIBED STILL GETS A ROW, carrying `error`. Dropping it would make it
+   * absent, and absent reads as "no such queue" rather than "could not ask" — precisely the
+   * distinction the per-queue route below goes to such lengths to preserve.
+   */
+  app.get('/api/pollers', async () => {
+    const queues = new Set<string>();
+    for (const a of repo.listActors()) queues.add(`${a.name}-${a.version}`);
+    for (const w of repo.listWorkflows()) if (w.queue) queues.add(w.queue);
+
+    const named = [...queues].filter((q) => QUEUE_RE.test(q));
+    const reports = await Promise.all(
+      named.map(async (queue) => {
+        try {
+          const state = await describeQueue(queueDescriber(), queue);
+          return [
+            queue,
+            {
+              queue,
+              pollers: state.identities.length,
+              identities: state.identities,
+              workers: state.workers,
+              lastPoll: state.lastPoll,
+              ...(state.error === undefined ? {} : { error: state.error }),
+            },
+          ] as const;
+        } catch (err) {
+          return [
+            queue,
+            { queue, pollers: 0, identities: [], workers: [], lastPoll: 0, error: errMessage(err) },
+          ] as const;
+        }
+      }),
+    );
+    return Object.fromEntries(reports);
+  });
+
   /**
    * IS ANYBODY SERVING THIS QUEUE — the third state a workflow can be in.
    *

@@ -176,8 +176,18 @@ describe('the spec tells the truth about auth', () => {
       // `{param}` back to something concrete. The value does not matter: a 404 for a missing id is
       // still proof the request was not refused for want of a credential.
       const url = path.replace(/\{[^}]+\}/g, 'x');
-      const res = await app.inject({ method: method.toUpperCase() as 'GET', url });
-      if (res.statusCode === 401 || res.statusCode === 403) {
+      // A STREAMING ROUTE NEVER RESOLVES, AND THAT IS NOT A REFUSAL. `/api/workflows/stream` and
+      // `/api/logs/tail` call `reply.hijack()` and hold the socket open for as long as the client
+      // wants events, so `inject` on one waits forever and takes the whole test's 30s budget with
+      // it — the suite reported a timeout rather than the auth answer it exists to give.
+      // Racing a timer keeps the assertion exact: this test only ever accuses a route that
+      // ANSWERED 401 or 403, and a request still open after a second has self-evidently not been
+      // refused for want of a credential.
+      const res = await Promise.race([
+        app.inject({ method: method.toUpperCase() as 'GET', url }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000)),
+      ]);
+      if (res && (res.statusCode === 401 || res.statusCode === 403)) {
         lying.push(`${method.toUpperCase()} ${path} answered ${res.statusCode} but is documented open`);
       }
     }

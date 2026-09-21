@@ -76,9 +76,56 @@ export function registerWorkflowRoutes(app: FastifyInstance, repo: Repo): void {
    * `/catalog` and not the bare `/api/workflows`, which is the FILE surface: a registration names a
    * TYPE and can arrive from a worker serving code on another machine, so the two must not collide.
    */
+  /**
+   * WHO IS WATCHING A DESCRIPTOR CHANGE — one set of writers, told when the catalog moves.
+   *
+   * THE CATALOG WRITE IS THE EVENT, and that is the correction. The console subscribed to the
+   * FILESYSTEM instead, which fires on save — and a save is not a new contract: the worker has to
+   * re-import the module and re-register, which takes seconds. Measured on a live install: the
+   * file event arrived, the console re-read twice inside 1.2s, and both reads returned the old
+   * descriptor because the worker was still importing. The form never changed and nothing said why.
+   */
+  const watchers = new Set<(name: string) => void>();
+
+  app.get('/api/workflows/stream', (req, reply) => {
+    const raw = reply.raw;
+    reply.hijack();
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // A reverse proxy that buffers an SSE response turns this into a page that never updates.
+      'X-Accel-Buffering': 'no',
+    });
+    // So `EventSource` fires `onopen` now: a control plane where nobody is editing is correctly
+    // silent for hours, and "connected and quiet" must not look like "still connecting".
+    raw.write(': ok\n\n');
+    const send = (name: string): void => {
+      raw.write(`event: descriptor\ndata: ${JSON.stringify({ name })}\n\n`);
+    };
+    watchers.add(send);
+    const keepalive = setInterval(() => raw.write(': ping\n\n'), 25_000);
+    keepalive.unref?.();
+    req.raw.on('close', () => {
+      watchers.delete(send);
+      clearInterval(keepalive);
+    });
+    return reply;
+  });
+
   app.post('/api/workflows/catalog', async (req, reply) => {
     try {
-      return repo.upsertWorkflow(parseWorkflowDescriptor(req.body));
+      const saved = repo.upsertWorkflow(parseWorkflowDescriptor(req.body));
+      // AFTER THE WRITE, so a subscriber that re-reads on this event cannot read what was there
+      // before it. A throwing subscriber must not fail the worker's registration.
+      for (const send of [...watchers]) {
+        try {
+          send(saved.name);
+        } catch {
+          /* a dead stream is reaped by its own close handler */
+        }
+      }
+      return saved;
     } catch (err) {
       if (err instanceof DescriptorRefused) return reply.code(400).send({ error: err.message });
       throw err;
@@ -108,9 +155,11 @@ export function registerWorkflowRoutes(app: FastifyInstance, repo: Repo): void {
     // which is the operator's choice and the opposite of the fail-closed default. See auth.ts.
     const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
     if (denied) return reply.code(denied.code).send(denied.body);
-    const body = (req.body ?? {}) as { file?: string };
+    // `restart` REPLACES a worker that is already serving this folder. A missing body is no
+    // restart, which is what a bare press means — the same posture the actor route takes.
+    const body = (req.body ?? {}) as { file?: string; restart?: unknown };
     try {
-      return await serveWorkflow({ file: body.file ?? '' });
+      return await serveWorkflow({ file: body.file ?? '', restart: body.restart === true });
     } catch (err) {
       // A refusal is the caller's fault (bad path, bad queue, session already there); anything
       // else is ours. Collapsing them into one status is how "you typed it wrong" reads as

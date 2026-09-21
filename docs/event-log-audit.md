@@ -254,9 +254,14 @@ dispatch, worth taking when that file is next open.
 Worth stating plainly, because it is unusual — this codebase reasons about history events more
 carefully than most. The findings above are at the seams, not in the design.
 
-- **Narration is hard-capped.** `MAX_SENTENCES = 200` at 5 events each (`sdk/python/kontra/narrate.py:152`)
-  — a ceiling of ~1,000 events that refuses the sentence rather than killing the run, and says so in
-  the transcript. The module header documents the two prior incidents it exists to prevent.
+- **Narration was hard-capped — and is now gone entirely (ADR 0050 §2).** `MAX_SENTENCES = 200` at
+  5 events each was a ceiling of ~1,000 events that refused the sentence rather than killing the run,
+  and said so in the transcript. That discipline was right and the conclusion it led to was that the
+  sentences did not belong in history at all: `speak` cost ~5 events and ~1s for no property a log
+  line lacks. `sdk/python/kontra/narrate.py` is deleted; an author writes `note` or `partial`
+  (`kontra/say.py`) and the lines reach VictoriaLogs, where they can be queried ACROSS runs — which
+  narration never could. The reader in `shared/core/src/transcript.ts` stays, because history is
+  immutable and runs that already narrated must keep rendering what they wrote.
 - **The Warden starts no timers.** Backoff is expressed as the next watch's `ScheduleToStartTimeout`,
   which costs nothing until it fires. `TestTheWatcherStartsNoTimer` reads the finished history back
   and fails on any timer event.

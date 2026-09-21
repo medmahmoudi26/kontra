@@ -9,8 +9,8 @@
         deadline=timedelta(hours=4),          # or None to wait indefinitely
     )
 
-{@link ask} IS ALSO A TOP-LEVEL VERB — `from kontra import ask, speak` reaches this exact
-function, beside `narrate.speak`, because the two are a pair: one reports and returns, the other
+{@link ask} IS ALSO A TOP-LEVEL VERB — `from kontra import ask, note` reaches this exact
+function. `say.note` reports and returns; this one blocks — they are no longer a pair (ADR 0050 §2), and the
 stops the run until a person moves it. Same function, either spelling; nothing here is a second
 implementation and no existing `hitl.ask` caller changed.
 
@@ -352,12 +352,12 @@ async def ask(
 ) -> Any:
     """Park this workflow on a question, and return what a human answered.
 
-        from kontra import ask, speak
+        from kontra import ask, note
 
         answer = await ask("Approve these 12 hosts?", takes=Approval, context={"n": 12})
 
     THE PAIR, AND WHY THERE ARE TWO. `speak` and `ask` are the two things a workflow says out
-    loud. {@link kontra.narrate.speak} costs history and RETURNS IMMEDIATELY; `ask` costs
+    loud. {@link kontra.say.note} is a log line and RETURNS IMMEDIATELY; `ask` costs
     history AND STOPS THE RUN, until a human answers or the deadline expires. Reaching for this
     one where a progress line was meant does not produce a chattier transcript — it produces a
     stalled run, waiting on a person nobody told to look. Say what a run is doing with

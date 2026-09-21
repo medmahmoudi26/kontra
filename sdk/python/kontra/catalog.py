@@ -922,6 +922,23 @@ class ActorHandle:
         method: str = "",
         session_id: str = "",
         schedule_to_close_timeout: timedelta | None = None,
+        # THE LIVENESS BOUND, AND IT WAS UNREACHABLE FROM HERE. `entry_input` has carried
+        # `debug_heartbeat_seconds` all along, but no dispatch signature exposed it, so a workflow
+        # could not raise it no matter what it knew about its own units.
+        #
+        # THAT IS NOT ONLY A DEBUGGING KNOB, whatever the name says. The actor beats ONCE PER
+        # COMMITTED UNIT (`runtime/go/temporalhost/host.go`), so the two-minute default assumes a
+        # unit finishes inside two minutes. MEASURED, on hunt's sweep: class `CL.0` holds 3,630
+        # techniques, the oracle writes normal/attack/normal, and `rate_ms` paces PER HOST — so one
+        # unit is 10,890 requests at 250ms, about 45 minutes. The first beat was due 43 minutes
+        # after Temporal had already killed the attempt for silence. The run could not have
+        # survived, and it failed with `activity Heartbeat timeout` while the worker was sending
+        # probes perfectly.
+        #
+        # Bounded by the handler, not here: `heartbeatFor` floors it at the 2-minute default and
+        # caps it at `runStartToClose` (1 hour), so this cannot make liveness checking weaker than
+        # production nor promise a number that can never fire.
+        debug_heartbeat_seconds: int = 0,
     ) -> dict:
         """Dispatch and return the raw claim-check ref WITHOUT fetching it.
 
@@ -974,6 +991,7 @@ class ActorHandle:
             # actor's shared queue with load and close around it — which is what an Activity is.
             session_id=session_id,
             input_ref=ref_in,
+            debug_heartbeat_seconds=debug_heartbeat_seconds,
         )
 
         # The shared service definition, not a pair of strings — Temporal's own pattern for

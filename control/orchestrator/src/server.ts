@@ -56,8 +56,10 @@
  */
 
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import Fastify, { type FastifyInstance } from 'fastify';
+import type { FastifyReply } from 'fastify';
+
 import fastifyStatic from '@fastify/static';
 import fastifyCompress from '@fastify/compress';
 import { Repo } from './db/repo';
@@ -86,6 +88,7 @@ import { registerExploreRoutes } from './routes/explore';
 import { registerFleetRoutes } from './routes/fleet';
 import { registerHistoryRoutes } from './routes/history';
 import { registerHitlRoutes } from './routes/hitl';
+import { registerLogsRoutes } from './routes/logs';
 import { registerLoginRoutes } from './routes/login';
 import { registerPanelRoutes } from './routes/panels';
 import { registerPollerRoutes } from './routes/pollers';
@@ -135,6 +138,7 @@ export const SPA_SURFACES: ReadonlySet<string> = new Set([
   'actors',
   'datasets',
   'monitor',
+  'logs',
   'secrets',
   'settings',
   // retired, still addressable — see above
@@ -364,9 +368,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerRunRoutes(app, { runs, runWorkflows, queueDescriber });
   registerHistoryRoutes(app, archive);
   registerHitlRoutes(app, { runs, archive });
+  registerLogsRoutes(app);
   registerFleetRoutes(app);
   registerWorkflowRoutes(app, repo);
-  registerPollerRoutes(app, queueDescriber);
+  registerPollerRoutes(app, queueDescriber, repo);
   registerSourceRoutes(app, sources);
   registerWorkspaceRoutes(app);
   registerProbeRoutes(app, sources);
@@ -455,9 +460,65 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // every one of those requests — which is exactly the thing `routes/` modules must not know.
   const webRoot = opts.webRoot ?? defaultWebRoot();
   if (webRoot && existsSync(webRoot)) {
+    // THE SHELL'S VALIDATOR IS ITS CONTENT, and it has to be, because its mtime is a lie.
+    //
+    // `no-cache` above means "revalidate", not "do not cache" — so the browser asks with the
+    // validator it holds and keeps its copy on a 304. send derives that validator from
+    // `(size, mtime)`, and BOTH are constant across builds here: the image extracts the SPA from
+    // a tarball written with a FIXED mtime (deliberately — it is what makes the bundle's sha
+    // reproducible, see cli/bundle.go), so `last-modified` is the epoch and the ETag is
+    // `W/"<size>-0"`. Vite's asset hashes are fixed-length, so index.html is the SAME SIZE on
+    // every build too.
+    //
+    // The result: `W/"184-0"` for every build this image has ever served. A browser that loaded
+    // the console once revalidates, gets 304, and keeps a shell naming last week's chunks — the
+    // deploy is invisible, which is precisely what the comment above says must not happen.
+    // MEASURED: a rebuilt console with a new pane did not appear until a hard reload.
+    //
+    // Hashed once at boot rather than per request: this process serves exactly one build and the
+    // file cannot change under it.
+    // THE SHELL IS SERVED FROM MEMORY, and not by send, because send 304s on a request we
+    // cannot stop it answering.
+    //
+    // `lastModified: false` stops the header going OUT; it does not stop send honouring an
+    // incoming `If-Modified-Since`. MEASURED after that change: a request carrying the epoch —
+    // which is exactly what a browser holding a previous shell sends, since the image extracts
+    // the SPA from a tarball with a fixed mtime — still came back 304, so the deploy stayed
+    // invisible. Serving the bytes ourselves is the only version with no conditional path at all.
+    //
+    // `no-store`, not `no-cache`: the second means "revalidate", which is what put us here. The
+    // shell is ~400 bytes and names the hashes of everything else, so it is the one file that must
+    // never be answered from anybody's cache.
+    const shell = (() => {
+      try {
+        return readFileSync(path.join(webRoot, 'index.html'));
+      } catch {
+        return null; // no SPA in this image (CI's `--no-spa` build); `/` then 404s, and /api works
+      }
+    })();
+    const sendShell = (reply: FastifyReply) =>
+      shell
+        ? reply.code(200).header('content-type', 'text/html; charset=utf-8')
+            .header('cache-control', 'no-store').send(shell)
+        : reply.code(404).send({ error: 'no console bundle in this build' });
+
+    app.get('/', (_req, reply) => sendShell(reply));
+
     app.register(fastifyStatic, {
       root: webRoot,
       cacheControl: false,
+      // BOTH VALIDATORS OFF, so the shell has none and a browser must actually fetch it.
+      //
+      // Sending a content ETag instead was the first attempt and it is worse than it looks:
+      // `etag: false` also turns off send's If-None-Match HANDLING, so the header would go out
+      // and never produce a 304 — a validator the server refuses to honour. An asset needs no
+      // validator either: its NAME is its content hash, and `immutable` already means "never
+      // ask again".
+      //
+      // The cost of always serving the shell is ~400 bytes per navigation. The cost of getting
+      // it wrong is a deploy nobody can see.
+      etag: false,
+      lastModified: false,
       setHeaders(res, filePath) {
         const immutable = filePath.includes(`${path.sep}assets${path.sep}`);
         res.setHeader(
@@ -506,9 +567,9 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
       if (req.method === 'GET' && !req.url.startsWith('/api/')) {
         const path = req.url.split('?')[0] ?? '';
         const first = path.split('/')[1] ?? '';
-        if (SPA_SURFACES.has(first) || SVELTE_ROUTES.has(first)) return reply.sendFile('index.html');
+        if (SPA_SURFACES.has(first) || SVELTE_ROUTES.has(first)) return sendShell(reply);
         const last = path.slice(path.lastIndexOf('/') + 1);
-        if (!/\.[A-Za-z0-9]+$/.test(last)) return reply.sendFile('index.html');
+        if (!/\.[A-Za-z0-9]+$/.test(last)) return sendShell(reply);
       }
       return reply.code(404).send({ error: 'not found' });
     });

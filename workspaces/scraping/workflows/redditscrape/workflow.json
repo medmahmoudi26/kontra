@@ -1,0 +1,6 @@
+{
+  "entry": "workflow.py",
+  "name": "redditscrape",
+  "version": "0.1.0",
+  "workflow": "RedditScrape"
+}

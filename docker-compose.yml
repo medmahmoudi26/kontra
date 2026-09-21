@@ -53,11 +53,34 @@ x-orchestrator-env: &orchestrator-env
   KONTRA_CONTROLLER: orchestrator-api
   KONTRA_DUCKLAKE_CATALOG: postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra
   KONTRA_MATERIALIZATION_DB: postgres://kontra:kontra@postgres:5432/kontra_ducklake
+  # DuckDB's ceiling for the MATERIALIZER. The default is 256MB (data/parquet.ts), and a crawl
+  # batch carrying full HTTP header JSON does not fit in it:
+  #
+  #   Out of Memory Error: could not allocate block of size 720.0 KiB (243.9 MiB/244.1 MiB used)
+  #
+  # observed on `publishBatch` ATTEMPT 55 — the crawl had already succeeded, and it was the
+  # publish that could not land. The failure mode is nasty because the run stays RUNNING and the
+  # worker goes silent, which reads as a slow crawl rather than a stuck write.
+  #
+  # 512MB against ~1GB free on this host. Raise with care: the comment on `memoryLimit` is right
+  # that this is NOT an RSS cap — the cgroup is — so setting it above what the container can
+  # actually get trades a clean DuckDB error for the OOM killer taking the whole API.
+  KONTRA_DUCKDB_MEMORY_LIMIT: ${KONTRA_DUCKDB_MEMORY_LIMIT:-512MB}
   KONTRA_WORKSPACES: *workspaces
   KONTRA_IMAGE: ${KONTRA_IMAGE:-kontra:latest}
   KONTRA_HOST_IMAGE: ${KONTRA_HOST_IMAGE:-kontra-host:1}
   KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:5000}
   KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:5000}
+  # THE READ TOKEN FOR THE TWO SURFACES THAT READ A RUN'S CONTENT: the query workbench and the logs
+  # proxy (ADR 0050 §1, issue #17). Both are `checkBearer` — FAIL-CLOSED — so with this unset they
+  # answer 503 and say which variable turns them on, rather than opening. That is why it is passed
+  # through EMPTY by default instead of being omitted: an operator who sets it in `.env` should not
+  # also have to discover that no `environment:` block carried it, which is the exact trap
+  # `.env.quickstart` records for the five variables that used to sit there reaching nothing.
+  KONTRA_EXPLORE_TOKEN: ${KONTRA_EXPLORE_TOKEN:-}
+  # Where the logs proxy reads from. In-compose and unpublished by default; a deployment with its
+  # own OpenTelemetry-compatible store re-points this one variable (ADR 0050 §1).
+  KONTRA_LOGS_URL: ${KONTRA_LOGS_URL:-http://victorialogs:9428}
 
 # ── ONE TMUX SERVER, TWO CONTAINERS ────────────────────────────────────────────────────────────
 #
@@ -204,6 +227,129 @@ services:
       retries: 30
       start_period: 20s
 
+  # ── THE BACKEND THE AGENT HAS BEEN SHIPPING TO SINCE BEFORE IT EXISTED (ADR 0050 §1) ──────────
+  #
+  # `machine.ts` installs `vmagent` on EVERY Machine, writes its unit, its scrape config and its
+  # remote-write target — and until this service, nothing listened. Measured on `kf-webcrawl-01`,
+  # every 60 seconds, for the whole life of the Fleet:
+  #
+  #   couldn't send a block with size 575 bytes to "1:secret-url":
+  #     Post "http://10.124.0.2:8428/api/v1/write": dial tcp4 10.124.0.2:8428: connect: connection refused
+  #
+  # Every fleet metric ever collected was discarded. This is the smallest change that turns a
+  # silently-broken pipeline into a working one.
+  #
+  # THE NAME IS LOAD-BEARING. `panels/metrics.ts` hard-codes `http://victoriametrics:8428` as
+  # `DEFAULT_METRICS_URL` and `metrics.test.ts` asserts that exact string, so the service had to be
+  # called `victoriametrics` — renaming it to `victoria-metrics` would leave the `loads` chip
+  # reporting `unknown` forever, which is the one failure mode that file's header warns about.
+  #
+  # NO `ports:`, DELIBERATELY. Nothing on the host needs to reach this and a published Docker port
+  # is DNATed in PREROUTING — a host firewall does not protect it (see the header). The orchestrator
+  # reaches it over the compose network by name. A CLOUD Fleet is the case this does not yet serve:
+  # a Droplet resolves `KONTRA_CONTROLLER` to the Controller's VPC address and pushes to `:8428`
+  # there, so it needs this published on the VPC address ONLY — loopback + VPC, never `eth0`, which
+  # is the shape `7233`/`6379`/`8333` already hold and the shape the 2026-09-12 incident was about.
+  # That publish is deliberately not written here, because guessing the VPC address in a file that
+  # ships to everyone is how `0.0.0.0` gets typed.
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.111.0
+    container_name: kontra-victoriametrics
+    restart: unless-stopped
+    command:
+      - -storageDataPath=/victoria-metrics-data
+      # RETENTION IS SET, NOT INHERITED. The default is one month; a Fleet that ran a campaign three
+      # months ago is exactly the one somebody asks about, and silently aging its series out is the
+      # same shape of loss as the Terminal scrollback this ADR exists to replace.
+      - -retentionPeriod=${KONTRA_METRICS_RETENTION:-6}
+      # Loopback would be wrong INSIDE the container: the orchestrator dials it across the compose
+      # network. The container is not published, so this listens on the compose network only.
+      - -httpListenAddr=:8428
+    volumes:
+      - victoriametrics-data:/victoria-metrics-data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8428/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── WHERE A MACHINE'S LAST WORDS GO (ADR 0050 §1) ─────────────────────────────────────────────
+  #
+  # Logs had no path off a Machine at all. The only way to see inside a running Worker was a
+  # Terminal — `tmux attach -r` over SSH — which is machine-local, unsearchable, and dies with the
+  # box. On 2026-09-17 the only evidence that a Worker was grinding an abandoned sweep was
+  # `journalctl -u kontra-actor-desync` on `kf-desync-01`; that Machine no longer exists and that
+  # evidence is gone.
+  #
+  # NOT PUBLISHED, AND THIS ONE MATTERS MORE THAN THE METRICS STORE. VictoriaLogs has NO
+  # AUTHENTICATION: its multi-tenancy is an `AccountID`/`ProjectID` REQUEST HEADER, which means the
+  # header is an authorisation decision made by whoever sets it. Anything that can reach this port
+  # can read every tenant's logs by setting a different number. The orchestrator proxies it and
+  # stamps the tenant header server-side; the console never talks to it. That proxy is #17 — until
+  # it lands, the only thing reaching this is the compose network.
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.9.1-victorialogs
+    container_name: kontra-victorialogs
+    restart: unless-stopped
+    command:
+      - -storageDataPath=/victoria-logs-data
+      # Explicit, for the same reason as the metrics store: the Fleet somebody asks about months
+      # later is exactly the one whose lines would have aged out without anyone choosing that.
+      - -retentionPeriod=${KONTRA_LOGS_RETENTION:-6}
+      - -httpListenAddr=:9428
+      # A LIVE TAIL HOLDS A SELECT SLOT FOR ITS WHOLE LIFE, and the default pool is sized to
+      # GOMAXPROCS — four here. That default is right for point queries, which finish in
+      # milliseconds and hand the slot back, and wrong for `/select/logsql/tail`, which by design
+      # holds one open until the viewer closes the tab.
+      #
+      # MEASURED, not theorised: `vl_concurrent_select_capacity 4`, `vl_concurrent_select_current 3`,
+      # `vl_concurrent_select_limit_reached_total 8` with three console tabs' worth of tails open.
+      # The FOURTH viewer takes the last slot and every `/api/logs/query` then queues past
+      # `-search.maxQueueDuration` (10s) and 503s — including the run page's logs rail, which has
+      # nothing to do with anyone's tail. VictoriaLogs answers those queries in 0.5s; it simply
+      # never gets a slot.
+      #
+      # Worse, the orchestrator reports that timeout through `unreachable()`, whose sentence sends
+      # an operator to `docker compose ps victorialogs` to stare at a perfectly healthy container.
+      #
+      # 64 because an idle tail costs a blocked goroutine and no CPU, so the pool should be sized
+      # to CONCURRENT VIEWERS, not to cores. This does not fix a tail that leaks after its client
+      # is gone — it stops one leak from taking the whole logs surface down with it.
+      - -search.maxConcurrentRequests=64
+    volumes:
+      - victorialogs-data:/victoria-logs-data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9428/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # LOCAL WORKERS HAVE NO vlagent, so their stdout reaches the console's logs rail only if
+  # something ships it. On a Fleet Machine that job belongs to vlagent; here it belongs to this.
+  #
+  # A SERVICE AND NOT A `docker exec`, because it had been solved by patching a running container
+  # and that fix died the next time one was recreated — leaving an empty rail, which reads exactly
+  # like a Run that logged nothing.
+  logship:
+    image: python:3.12-alpine
+    container_name: kontra-logship
+    restart: unless-stopped
+    depends_on:
+      victorialogs:
+        condition: service_healthy
+    environment:
+      KONTRA_LOGS_URL: ${KONTRA_LOGS_URL:-http://victorialogs:9428}
+      KONTRA_NAMESPACE: ${KONTRA_NAMESPACE:-default}
+      KONTRA_LOGSHIP_MATCH: ${KONTRA_LOGSHIP_MATCH:-kontra-desync|kontra-webcrawl|kontra-nuclei|kontra-subfinder}
+    volumes:
+      # READ-ONLY. This service only ever reads container stdout; it has no reason to be able to
+      # start, stop or exec anything, and the socket is the whole host if it can.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./control/images/logship.sh:/logship.sh:ro
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache docker-cli curl >/dev/null && exec /bin/sh /logship.sh"]
+
   # API + materializer in one process (queues stay distinct). Infra stays separate (Pulumi).
   orchestrator-api:
     image: ${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:latest}
@@ -245,8 +391,10 @@ services:
       # list. `kontra-home` is the wrong home for it — that volume is the CLI's and is mounted `:ro`
       # here on purpose — so this is its own.
       KONTRA_ORCHESTRATOR_DB: /var/lib/kontra-db/orchestrator.db
+      KONTRA_SECRETS_DIR: /var/lib/kontra-secrets
     volumes:
       - kontra-home:/var/lib/kontra:ro
+      - secrets-store:/var/lib/kontra-secrets
       - orchestrator-db:/var/lib/kontra-db
       - tmux-sock:/run/kontra-tmux
       - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}
@@ -301,8 +449,10 @@ services:
       PULUMI_CONFIG_PASSPHRASE: ${PULUMI_CONFIG_PASSPHRASE:-local-dev}
       DIGITALOCEAN_TOKEN: ${DIGITALOCEAN_TOKEN:-}
       KONTRA_CLOUD_CREDENTIAL: ${KONTRA_CLOUD_CREDENTIAL:-}
+      KONTRA_SECRETS_DIR: /var/lib/kontra-secrets
     volumes:
       - kontra-home:/var/lib/kontra:ro
+      - secrets-store:/var/lib/kontra-secrets
       - tmux-sock:/run/kontra-tmux
       - pulumi-state:/data
       # Host-level Docker authority — see the file header.
@@ -431,8 +581,26 @@ volumes:
   redis-data:
   registry-data:
   seaweed-data:
+  victoriametrics-data:
+  victorialogs-data:
   kontra-home:
   orchestrator-db:
+  # THE SECRET STORE NEEDS A WRITABLE HOME, AND `kontra-home` IS NOT ONE HERE.
+  #
+  # `secrets/keyring.ts` defaults the store to `${KONTRA_HOME}/secrets`, which lands inside
+  # `kontra-home` — mounted `:ro` into both orchestrator processes ON PURPOSE (see the note on the
+  # api service: "that volume is the CLI's"). So every `PUT /api/secrets/:name` failed with
+  #
+  #     ENOENT: no such file or directory, mkdir '/var/lib/kontra/secrets'
+  #
+  # which reads as a missing directory and is actually a read-only filesystem. The fleet then
+  # refused every run with "needs the cloud credential do-token and there is no secret by that
+  # name", and no amount of writing the secret could fix it.
+  #
+  # SHARED BY BOTH PROCESSES, because they are two halves of one flow: the api WRITES the secret
+  # and orchestrator-infra RESOLVES it at the last hop when a fleet comes up. A store only one of
+  # them can see is a credential that saves and then cannot be found.
+  secrets-store:
   tmux-sock:
   temporal-dynamicconfig:
   pulumi-state:

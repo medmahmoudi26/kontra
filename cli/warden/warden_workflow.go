@@ -641,6 +641,25 @@ type wardenWorkflowInput struct {
 	Heartbeat      time.Duration `json:"heartbeat,omitempty"`
 	UnreachableMin time.Duration `json:"unreachableMin,omitempty"`
 	UnreachableMax time.Duration `json:"unreachableMax,omitempty"`
+
+	// ═══ WHAT CROSSES A CONTINUE-AS-NEW BOUNDARY (kontra#10) ═══
+	//
+	// This workflow watches a Machine for as long as the Machine exists, and Temporal TERMINATES an
+	// execution at 51,200 history events. A dark Machine writes five events per watch — measured —
+	// which is a death date about 14 months out. What dies is the watcher on a live Machine, with no
+	// signal, no metric and no degraded mode: the server simply ends it.
+	//
+	// CARRIED, NOT REBUILT. `Last` is what the next watch's Summary says, so losing it would make the
+	// first row after a handover read "attached from …" as though the Machine had just enrolled —
+	// a lie about a Machine that may have been dark for a month. `Misses` drives the backoff, so
+	// losing it would drop a Machine that had backed off to an hour straight back to a minute and
+	// undo the whole reason the backoff exists.
+	Last   *wardenDecision `json:"last,omitempty"`
+	Misses int             `json:"misses,omitempty"`
+	// Failures is deliberately NOT carried. It counts CONSECUTIVE errors toward
+	// wardenFailuresBeforeStopping, and a handover is not an error — resetting it is the correct
+	// reading of "consecutive", and carrying it would let a chain accumulate toward a stop across
+	// boundaries that had nothing to do with each other.
 }
 
 func (in wardenWorkflowInput) heartbeat() time.Duration {
@@ -693,18 +712,41 @@ func wardenWorkflow(ctx workflow.Context, in wardenWorkflowInput) error {
 	log := workflow.GetLogger(ctx)
 	retire := workflow.GetSignalChannel(ctx, wardenRetireSignal)
 
+	// SEEDED FROM THE HANDOVER when there was one, so the first row of a continued leg says what the
+	// Machine was actually doing rather than announcing a fresh attach.
 	last := wardenDecision{
 		Kind:    decisionWatching,
 		Subject: in.WardenID,
 		Detail:  "attached from " + wardenHostLabel(in),
 	}
+	if in.Last != nil {
+		last = *in.Last
+	}
 	// misses is consecutive TIMEOUTS and drives the backoff; failures is consecutive ERRORS and is the
 	// only thing that can stop this workflow on its own. Two counters because they mean two different
 	// things: a Machine that is quiet is expected and cheap, and a watch that keeps erroring is a bug
 	// that must not be allowed to fill a history.
-	misses, failures := 0, 0
+	misses, failures := in.Misses, 0
 
 	for {
+		// ═══ HAND OVER WHEN THE SERVER SAYS SO ═══
+		//
+		// GetContinueAsNewSuggested is set on EVERY workflow task once history passes 4,096 events,
+		// and nothing in this repository has ever read it. It is free — it is already on the info
+		// object — and it is the only warning before the 51,200 ceiling. A dark Machine trips the
+		// suggestion at ~34 days and the ceiling at ~14 months.
+		//
+		// AT THE TOP OF THE LOOP, BEFORE THE WATCH IS ARMED, which is the one place in this loop
+		// where nothing is in flight: no activity to abandon, no decision half-read. A handover
+		// below the Select would race a watch that had already been scheduled.
+		if workflow.GetInfo(ctx).GetContinueAsNewSuggested() {
+			log.Info("warden handing over", "wardenId", in.WardenID, "misses", misses)
+			next := in
+			next.Last = &last
+			next.Misses = misses
+			return workflow.NewContinueAsNewError(ctx, wardenWorkflowType, next)
+		}
+
 		opts := workflow.ActivityOptions{
 			TaskQueue: in.Queue,
 			// NOBODY TOOK IT = THE MACHINE IS NOT THERE. This is the timeout that turns "the Warden
@@ -931,6 +973,25 @@ func wardenAttach(ctx context.Context, id *wardenIdentity, driverName string, wa
 		// the Machine's history stays one story. Anything else would start a second watcher on a
 		// queue that already has one — the same failure `list()` exists to prevent, one level up.
 		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		// WHOSE MACHINE THIS IS, stamped at start — the Go half of the control plane's
+		// `tenantAttributes` (control/orchestrator/src/visibility.ts). A Tenant IS a Temporal
+		// namespace (ADR 0036 §7), so this records what a tenant already is rather than inventing a
+		// second notion of one.
+		//
+		// AT START, WHICH IS THE ONLY AFFORDABLE MOMENT. Attributes on start ride inside
+		// WorkflowExecutionStarted and write no extra event; an UpsertTypedSearchAttributes inside
+		// this workflow would write one per call, into the history that the event-log audit measured
+		// walking toward Temporal's 51,200-event ceiling at five events per dark watch.
+		//
+		// AND IT DOES NOT RETROFIT, WHICH IS WHY IT IS NOT THE WHOLE FIX. USE_EXISTING above means a
+		// `systemctl restart kontra-warden` RE-ATTACHES to the execution already running — so a
+		// Machine placed before this line never acquires the stamp, and a Warden's execution does
+		// not close on its own. Those are read correctly anyway because `temporalClient.ts` derives
+		// the tenant from the namespace it queried when the attribute is absent. This line is for
+		// Machines placed from here on; that derivation is for the ones already out there.
+		TypedSearchAttributes: temporal.NewSearchAttributes(
+			temporal.NewSearchAttributeKeyKeyword("KontraTenant").ValueSet(ns),
+		),
 	}, wardenWorkflowType, in)
 	if err != nil {
 		wk.Stop()

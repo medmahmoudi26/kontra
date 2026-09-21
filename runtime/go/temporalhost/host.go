@@ -139,6 +139,11 @@ type Activities struct {
 	// the identity (ADR 0022).
 	scopeMu sync.Mutex
 	scopes  map[string]string
+	// tc is the host's Temporal client, kept so an activity can publish onto the RUN workflow's
+	// stream. `workflowstreams.NewClientFromActivity` addresses the activity's OWN workflow —
+	// which here is `actor-<actor>-<run>-<node>`, not the run a console subscribes to — so the
+	// run workflow has to be named explicitly, and naming it needs a client.
+	tc client.Client
 }
 
 func newActivities(name, version string, spawn spawnFn, maxLive int) *Activities {
@@ -164,10 +169,81 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 	// Beat per committed unit. The field names are a cross-language contract with
 	// control/orchestrator/src/heartbeat.ts, where every field is optional and defaults to 0 — so a
 	// wrong name reports 0/0 forever rather than erroring. Peer of _beat in engine.py.
+	// `last` carries the most recent unit counts into the progress beat below, so a progress
+	// heartbeat never REPLACES the liveness numbers with a payload that lacks them.
+	// heartbeat.ts defaults every missing field to 0, so a beat without `done` would read as a
+	// batch that had made no progress at all.
+	var lk2 sync.Mutex
+	last := map[string]any{"node": req.NodeID, "done": 0, "total": len(req.Units), "isolated": 0}
+
 	a.SetHeartbeat(func(done, total, isolated int) {
-		activity.RecordHeartbeat(ctx, map[string]any{
-			"node": req.NodeID, "done": done, "total": total, "isolated": isolated,
-		})
+		lk2.Lock()
+		last["done"], last["total"], last["isolated"] = done, total, isolated
+		beat := map[string]any{}
+		for k, v := range last {
+			beat[k] = v
+		}
+		lk2.Unlock()
+		activity.RecordHeartbeat(ctx, beat)
+	})
+
+	// THE AUTHOR'S OWN PROGRESS, ONTO THE SAME WIRE.
+	//
+	// @actor.healthcheck returns whatever the author thinks describes this actor's work — for
+	// the desync scanner that is hosts probed, techniques sent, signals found, claims withdrawn.
+	// It used to go to `log.Printf` and nowhere else, i.e. to a file inside a container.
+	//
+	// Temporal already returns an activity's heartbeat details from DescribeWorkflowExecution, so
+	// putting it here makes `temporal workflow describe -w <run>` show live actor progress with
+	// no log shipper, no mounted volume, and no shell into the box — which is the only form that
+	// works for a Machine in a Fleet.
+	//
+	// MERGED, NOT SUBSTITUTED: the liveness counts stay in the payload (see `last`), and the
+	// author's keys are namespaced under `progress` so an author who returns `{"done": ...}`
+	// cannot overwrite the field the orchestrator reads to decide whether a batch is moving.
+	//
+	// AND ONTO THE RUN'S STREAM, which is the half a browser can reach. A heartbeat is readable
+	// only by something that can call DescribeWorkflowExecution and poll it; the stream is a
+	// subscribable log with offsets, so a console follows a run instead of sampling it. Peer of
+	// `_publish_progress` in runtime/python/internals/engine.py — one transport for both hosts,
+	// where Python used an HTTP side-channel to the orchestrator and Go used only the heartbeat.
+	pub := h.streamFor(req.RunID)
+	defer closeStream(ctx, pub)
+	a.SetProgress(func(v any) {
+		lk2.Lock()
+		beat := map[string]any{"progress": v}
+		for k, val := range last {
+			beat[k] = val
+		}
+		lk2.Unlock()
+		activity.RecordHeartbeat(ctx, beat)
+		publishProgress(pub, req.NodeID, req.ActorID, v, last)
+	})
+
+	// THE PER-METHOD STREAM, which is a different thing from the beat above.
+	//
+	// That one is the author's healthcheck, polled on the engine's ticker, and it answers "is
+	// this Session alive and roughly where". This one is pushed by the author from inside the
+	// Method — `kontra.Stream(s, rec)` — carries a type the Method DECLARED with `Streams(...)`,
+	// and goes to that Method's own topic so a console can group and label it without knowing
+	// what this actor is.
+	//
+	// The topic is named HERE rather than in the engine: `h.name` is the actor and the resolved
+	// method name comes back from the engine, so naming stays beside the other publisher and the
+	// engine's only new knowledge is that a sink exists.
+	//
+	// THE TOPIC CARRIES THE NAME; THE RECORD CARRIES THE INSTANCE. `h.name` addresses the topic
+	// (`gocanary/tick`) and `req.ActorID` rides in the record, which is what Python's publisher
+	// has always sent (`self._actor_id`). This passed `h.name` in both places, so one run's stream
+	// carried `"actor": "c5eaf2b6a275"` from the Python leg and `"actor": "gocanary"` from the Go
+	// leg — the same key meaning two different things depending on which host wrote it, which is
+	// the one thing a cross-language wire format cannot do. It also said nothing: a console
+	// reading `actor: gocanary` under the heading `gocanary/tick` has been told the same word
+	// twice, where the id names WHICH SESSION of that actor is speaking — the thing a keyed
+	// dispatch makes ambiguous and the roster exists to disambiguate.
+	a.SetStream(func(v any) {
+		publishRecord(pub, methodTopic(h.name, a.ResolvedMethodName(req.Method)),
+			req.NodeID, req.ActorID, v)
 	})
 
 	resp, err := a.RunBatch(ctx, req)
@@ -265,6 +341,7 @@ func serve(r *core.Registry, stop <-chan interface{}) error {
 		return sw, nil
 	}
 	h = newActivities(r.Name, r.Version, spawn, maxParallelSessions())
+	h.tc = c
 
 	// The SHARED queue carries the open, and only the open: Temporal's dispatch of it is the
 	// placement decision. RunBatch and Close stay here too for the unscoped path, where a

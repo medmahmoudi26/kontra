@@ -195,11 +195,52 @@ type KontraActor struct {
 	// beat is set by the host; called once per Unit outcome. nil outside a hosted run, which is
 	// what makes the engine testable without a Temporal activity context.
 	beat func(done, total, isolated int)
+	// progress is the sink for the author's @actor.healthcheck value, on the engine's own
+	// ticker rather than per Unit. See SetProgress.
+	progress func(any)
+	// stream is the sink for `kontra.Stream(s, rec)` — per METHOD, pushed by the author, and
+	// re-bound on every batch. See SetStream.
+	stream func(any)
 }
 
 // SetHeartbeat installs the liveness/progress callback. Called by the host per activity
 // execution, because RecordHeartbeat resolves against whichever execution is running.
 func (a *KontraActor) SetHeartbeat(f func(done, total, isolated int)) { a.beat = f }
+
+// SetProgress installs the sink for the author's @actor.healthcheck value.
+//
+// SEPARATE FROM SetHeartbeat because the two answer different questions and fire on different
+// clocks. The heartbeat is LIVENESS and fires once per COMMITTED UNIT — which for a sweep unit
+// (one host against 3,625 techniques) is tens of minutes apart, long enough that Temporal's
+// heartbeat timeout has already killed the attempt. This one fires on the engine's own 2-second
+// ticker regardless of unit boundaries, so a long unit still says what it is doing.
+//
+// It is also why this is not folded into `beat`: widening that signature would make every
+// liveness beat carry a healthcheck probe, and the probe calls into the author's code.
+func (a *KontraActor) SetProgress(f func(any)) { a.progress = f }
+
+// ResolvedMethodName is the Method a dispatch MEANS, as a name — "" when the actor declares none
+// or the dispatch is ambiguous.
+//
+// It exists so the host can name this batch's topic without duplicating `ResolveMethod`'s rules.
+// `req.Method` is NOT that name: it is empty for a sole-Method actor dispatched without one, and
+// a topic built from it would be `<actor>/` for exactly the simplest actor anybody writes.
+// Errors are swallowed to "" rather than returned — a topic is an observability concern and must
+// not be able to fail a dispatch that the resolver is about to reject on its own terms anyway.
+func (a *KontraActor) ResolvedMethodName(wireName string) string {
+	m, err := reg.ResolveMethod(wireName)
+	if err != nil || m == nil {
+		return ""
+	}
+	return m.Name
+}
+
+// SetStream installs the per-batch sink `kontra.Stream(s, rec)` writes through. The host passes a
+// closure that already knows the topic, so this package holds no topic-naming policy — its only
+// new knowledge is "there is a sink", which is exactly what it already knows about progress.
+//
+// Called by the host BEFORE the author's loop and re-called on every batch, including with nil.
+func (a *KontraActor) SetStream(f func(any)) { a.stream = f }
 
 // heartbeat reports progress, best-effort: a heartbeat that fails must never fail a Unit that
 // already committed.
@@ -393,6 +434,15 @@ func (a *KontraActor) RunBatch(ctx context.Context, req RunBatchReq) (*RunBatchR
 	r.renewTTLs()
 	// Bind cross-session global_state (its Redis client is opened lazily on first use).
 	a.inst.BindGlobalState(boundGlobalState{ctx: ctx, s: a.globalStore()})
+
+	// WHERE `kontra.Stream(s, rec)` GOES, for THIS batch and no longer.
+	//
+	// Bound unconditionally — including to nil — because the instance survives across batches
+	// (a Session is loaded once and serves many), so a publisher left over from the previous
+	// batch would put this Method's records onto the previous Method's topic. Python resets its
+	// contextvar in a `finally` for exactly this reason; Go has no contextvar, so the honest
+	// equivalent is to overwrite on every entry.
+	a.inst.BindStream(a.stream)
 
 	// The commit map below is per BATCH; the state hash it lives in is per ACTOR ID. A KEYED
 	// dispatch points many batches at ONE id, so per-batch state from a superseded owner is
@@ -712,9 +762,25 @@ func (r *batchRun) response() *RunBatchResp {
 	}
 }
 
-// progressBeat periodically probes the healthcheck and logs the returned progress, until ctx is
-// cancelled (peer of Python's _progress_beat). It never triggers reload — a failing Method does
-// that — it only surfaces liveness/progress for observability.
+// progressBeat periodically probes the healthcheck and REPORTS the returned progress, until ctx
+// is cancelled (peer of Python's _progress_beat). It never triggers reload — a failing Method
+// does that — it only surfaces liveness/progress for observability.
+//
+// ── IT REPORTS TO TEMPORAL, NOT ONLY TO A LOG ───────────────────────────────────────────────────
+//
+// This used to be `log.Printf` and nothing else, which put the richest progress signal in the
+// system — whatever the author's @actor.healthcheck chose to return — into a file inside a
+// container, reachable only by someone who knew to `docker exec … tail /tmp/host.log`. For a
+// Machine in a Fleet there is no such someone.
+//
+// Temporal already carries progress for a running activity: `RecordHeartbeat` details are
+// returned by DescribeWorkflowExecution on the pending activity, so `temporal workflow describe`
+// shows them live and any client can poll them without a log pipeline, a shipper, or a mounted
+// volume. The unit-level beat (`done`/`total`/`isolated`) already went that way; the healthcheck
+// map did not, and the healthcheck map is the one that says what the actor is actually doing.
+//
+// Both still happen. The log line stays because it is what `docker logs` shows on a local
+// worker, and the heartbeat is added because it is what works everywhere else.
 func (a *KontraActor) progressBeat(ctx context.Context) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
@@ -729,9 +795,23 @@ func (a *KontraActor) progressBeat(ctx context.Context) {
 			}
 			if progress != nil {
 				log.Printf("[%s] progress: %v", a.ID(), progress)
+				a.reportProgress(progress)
 			}
 		}
 	}
+}
+
+// reportProgress hands the healthcheck's value to the host's progress sink, best-effort.
+//
+// Best-effort for the same reason `heartbeat` is: an observability call must never be the thing
+// that fails a Unit that already committed. A nil sink is the ordinary case outside a hosted run
+// and is what keeps the engine testable without a Temporal activity context.
+func (a *KontraActor) reportProgress(v any) {
+	if a.progress == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	a.progress(v)
 }
 
 // Close is the handler-driven cleanup: run CloseFn once and null the instance. The workflow

@@ -26,9 +26,9 @@ import (
 )
 
 const (
-	currentFile     = ".current"
-	defaultChild    = "hello"
-	workspaceUsage  = "usage: kontra workspace path|seed|watch|list|use|create"
+	currentFile    = ".current"
+	defaultChild   = "hello"
+	workspaceUsage = "usage: kontra workspace path|seed|watch|list|use|create"
 )
 
 var workspaceNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
@@ -607,6 +607,23 @@ func postSource(api, kind, dir string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// 410 IS THE SERVER SAYING THERE IS NOTHING TO DO, NOT A FAILURE.
+	//
+	// ADR 0049 made the workspace itself the registration, and `routes/sources.ts` answers this
+	// POST with 410 Gone on purpose — "the workspace is the registration. Put the folder in the
+	// workspace." The watcher kept posting anyway, so every scan of every folder printed
+	//
+	//	workspace watch: actor …/actors/subfinder: 410 Gone: {"error":"registering a folder is gone…
+	//
+	// to stderr, forever, for seven actors. Nothing was broken: the folders ARE served, because
+	// being in the workspace is what serves them. The only thing the call produced was noise, and
+	// noise in the one stream an operator watches for real failures is worse than no call at all.
+	//
+	// Swallowed rather than deleted, so a control plane older than ADR 0049 still gets registered
+	// by a newer CLI.
+	if resp.StatusCode == http.StatusGone {
+		return nil
+	}
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(b)))

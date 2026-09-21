@@ -27,7 +27,7 @@
 package claimcheck
 
 import (
-	"github.com/medmahmoudi26/kontra/runtime/handler/internal/codec"
+	"github.com/medmahmoudi26/kontra/runtime/go/codec"
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/objectstore"
 )
 
@@ -59,7 +59,7 @@ func New(store Backing, prefix string, threshold int) *Codec {
 	if store == nil {
 		return codec.New(nil, threshold)
 	}
-	return codec.New(objectstore.New(store, prefix), threshold)
+	return codec.New(objectstore.AsCodecStore(objectstore.New(store, prefix)), threshold)
 }
 
 // ThresholdFromEnv reads KONTRA_S3_THRESHOLD, else DefaultThreshold — the same read the three SDK

@@ -50,6 +50,13 @@ const GATES: ReadonlyArray<{
   { prefix: '/api/infra', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
   { prefix: '/api/datasets/query', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
   { prefix: '/api/explore', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
+  // THE SAME PRIVILEGE AS THE QUERY WORKBENCH, and fail-closed for the same reason: a Run's log
+  // lines "routinely contain targets and sometimes secrets". `routes/logs.ts` gates all three of
+  // query/hits/tail through one `admit` helper on EXPLORE_TOKEN_VARS, but the prefix was missing
+  // here — so the generated spec published them as "Open: no credential is checked" over routes
+  // that 401. Same failure as `/api/uploads` below, caught the same way, by
+  // `everyOpenPathIsActuallyOpen`.
+  { prefix: '/api/logs', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
   { prefix: '/api/workflows/serve', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/workflows/start', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/workflows/stop', scheme: 'runToken', vars: RUN_TOKEN_VARS },

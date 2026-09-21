@@ -1,0 +1,6 @@
+{
+  "entry": "workflow.py",
+  "name": "resumable",
+  "version": "0.1.0",
+  "workflow": "Resumable"
+}

@@ -191,6 +191,10 @@ const LINKABLE = /^(NexusOperation|ChildWorkflowExecution|StartChildWorkflowExec
  * Everything else here is computed from `raw` — which is exactly why the authoritative length
  * cannot be: the reader that produced `raw` stopped at a cap, so counting it again would produce
  * the same wrong number by a second route. It is threaded in, or it is absent.
+ *
+ * IT TAKES AN ARRAY BECAUSE A TEST HAS ONE. A reader that pages does not, and must not build one —
+ * see {@link HistoryReducer}, which this is a three-line wrapper over. There is ONE reduction here,
+ * not two: the array form exists so literals stay the unit of test.
  */
 export function mapHistory(
   raw: RawHistoryEvent[],
@@ -198,73 +202,102 @@ export function mapHistory(
   home = '',
   server: { historyLength?: number; historySizeBytes?: number } = {}
 ): RunHistory {
-  const scanned = raw.length;
-  /* SPREAD, SO ABSENT STAYS ABSENT. `historyLength: undefined` and no `historyLength` at all are
-     the same to a reader in TypeScript and NOT the same over JSON — the first serialises to a key
-     that is missing anyway, but it also defeats `'historyLength' in history`, which is how a caller
-     asks whether the server was consulted. */
-  const fromServer = {
-    ...(server.historyLength === undefined ? {} : { historyLength: server.historyLength }),
-    ...(server.historySizeBytes === undefined ? {} : { historySizeBytes: server.historySizeBytes }),
-  };
-  /** Event id → epoch ms, so a closing event can measure back to its opener. */
-  const startedAt = new Map<number, number>();
-  /** Event id → the event that opened it, so the second pass can inherit a link backwards. */
-  const openerOf = new Map<number, number>();
-  /**
-   * Event id → the workflow that family of events is about.
-   *
-   * Written under the event's OWN id AND under its opener's, because the id arrives on exactly one
-   * event of the three. MEASURED: a dispatch is `NexusOperationScheduled`(38) → `Started`(39) →
-   * `Completed`(43), and only 39 carries the operation token — 38 does not know the workflow id
-   * yet and 43 no longer repeats it. Both point at 38, so seeding 38 from 39 makes all three rows
-   * name the same dispatch, which is what an operator clicking any of them expects.
-   */
-  const linkFor = new Map<number, EventLink>();
-  /**
-   * Event id → what that event's family is ABOUT, e.g. `activityType=resolveBatch`.
-   *
-   * Written by the one event of a family that names it, read back by the ones that do not. Temporal
-   * puts the name on the SCHEDULING event only; every event after it carries a back-reference and
-   * an identity instead, so `ActivityTaskStarted identity=1@13c18db2fb13` is a row that says
-   * somebody picked something up without saying WHAT — and there are two of those for every one
-   * that names the Method.
-   */
-  const subjectOf = new Map<number, string>();
-  const first = raw.length > 0 ? tsToMs(raw[0]!.eventTime) : 0;
+  const reducer = new HistoryReducer();
+  for (const ev of raw) reducer.push(ev);
+  return reducer.finish(truncated, home, server);
+}
 
-  const all: RunEvent[] = [];
-  for (const ev of raw) {
+/**
+ * The same reduction, fed ONE EVENT AT A TIME so a pager never holds the history it is reducing.
+ *
+ * WHY THIS EXISTS. `fetchRunHistory` walks `HISTORY_MAX_PAGES × HISTORY_PAGE` = 20,000 RAW events
+ * into a single array and hands it here — to produce at most {@link EVENT_CAP} = 1,000. The raw
+ * events are the expensive object: a decoded `HistoryEvent` carries its whole attribute bag and its
+ * payload metadata, where a {@link RunEvent} is a handful of numbers and two short strings. Peak
+ * heap therefore scaled with the size of the RUN, on a path every open browser tab polls, for an
+ * output whose size is fixed.
+ *
+ * WHAT MAKES IT SAFE, stated rather than assumed, because "just stream it" is wrong here:
+ *
+ *   - **Pass 1 is per-event already.** `dur` reads `startedAt.get(opener)`, and an opener always
+ *     PRECEDES the event that closes it. Nothing in the first pass looks forward.
+ *   - **Pass 2 (the subject) walks BACKWARDS** through `openerOf`, so it too only ever needs events
+ *     already seen.
+ *   - **Pass 3 (the link) genuinely looks FORWARD**, and is the reason this is a class and not a
+ *     `map`. A `NexusOperationScheduled` learns its workflow id from the `Started` event AFTER it —
+ *     `keepBest(linkFor, opener, link)` seeds the opener's id from its successor. So passes 2 and 3
+ *     run in {@link HistoryReducer.finish}, once the maps are complete, over the ≤1,000 events that
+ *     SURVIVED — never over the 20,000 that were read.
+ *
+ * WHAT IS STILL O(N): the four id-keyed maps. They hold numbers, short strings and small link
+ * objects — kilobytes per thousand events against the megabytes a thousand raw events cost — and
+ * they cannot be pruned without knowing which ids the retained tail will reference. This bounds the
+ * big term, and says plainly that it does not bound every term.
+ */
+export class HistoryReducer {
+  /** Event id → epoch ms, so a closing event can measure back to its opener. */
+  private readonly startedAt = new Map<number, number>();
+  /** Event id → the event that opened it, so `finish` can inherit a subject backwards. */
+  private readonly openerOf = new Map<number, number>();
+  /** Event id → the workflow that family of events is about. Seeded under an event's OWN id AND
+   *  under its opener's, which is the forward reference that forces pass 3 into `finish`. */
+  private readonly linkFor = new Map<number, EventLink>();
+  /** Event id → what that event's family is ABOUT, e.g. `activityType=resolveBatch`. */
+  private readonly subjectOf = new Map<number, string>();
+
+  /** The first {@link HEAD_KEEP} reduced events — "what did this run set out to do". */
+  private readonly head: RunEvent[] = [];
+  /** A ring over everything AFTER the head, holding the last `EVENT_CAP - HEAD_KEEP`. Sized so that
+   *  head + ring reproduces `[...all.slice(0, HEAD_KEEP), ...all.slice(-(EVENT_CAP - HEAD_KEEP))]`
+   *  exactly — including the under-cap case, where the two together are simply everything. */
+  private readonly ring: RunEvent[] = [];
+  private ringAt = 0;
+
+  /** Raw events READ — including any the reducer skipped, because that is what `scanned` means. */
+  private scanned = 0;
+  /** Events that actually REDUCED. `elided` is computed from this and not from `scanned`: an event
+   *  with no attribute key never became a row, and counting it as elided would report a hole that
+   *  was never there. */
+  private reduced = 0;
+  /** Epoch ms of the FIRST raw event, which is `t = 0`. Taken from the first event pushed whether or
+   *  not it reduced, matching the array form's `raw[0]`. */
+  private first = 0;
+
+  /** Feed one raw event. Callers may discard it immediately afterwards — nothing here retains it. */
+  push(ev: RawHistoryEvent): void {
+    if (this.scanned === 0) this.first = tsToMs(ev.eventTime);
+    this.scanned++;
+
     const key = attrKey(ev);
-    if (!key) continue;
+    if (!key) return;
     const type = typeName(key);
     const attrs = (ev[key] ?? {}) as Record<string, unknown>;
     const id = num(ev.eventId);
     const at = tsToMs(ev.eventTime);
-    startedAt.set(id, at);
+    this.startedAt.set(id, at);
 
     // `initiatedEventId` is the child-workflow family's word for the same back-reference the
     // activity family spells `scheduledEventId`.
     const opener =
       num(attrs.startedEventId) || num(attrs.scheduledEventId) || num(attrs.initiatedEventId);
-    const openedAt = opener ? startedAt.get(opener) : undefined;
-    if (id > 0 && opener > 0) openerOf.set(id, opener);
+    const openedAt = opener ? this.startedAt.get(opener) : undefined;
+    if (id > 0 && opener > 0) this.openerOf.set(id, opener);
 
     const link = eventLink(type, attrs);
     if (link) {
-      if (id > 0) keepBest(linkFor, id, link);
-      if (opener > 0) keepBest(linkFor, opener, link);
+      if (id > 0) keepBest(this.linkFor, id, link);
+      if (opener > 0) keepBest(this.linkFor, opener, link);
     }
 
     const detail = describe(type, attrs);
     const subject = SUBJECT.exec(detail)?.[0];
-    if (id > 0 && subject) subjectOf.set(id, subject);
+    if (id > 0 && subject) this.subjectOf.set(id, subject);
 
-    all.push({
+    this.retain({
       id,
       type,
       cat: categorize(type),
-      t: first > 0 ? Math.max(0, (at - first) / 1000) : 0,
+      t: this.first > 0 ? Math.max(0, (at - this.first) / 1000) : 0,
       at,
       detail,
       attempt: Math.max(1, num(attrs.attempt) || 1),
@@ -276,47 +309,92 @@ export function mapHistory(
     });
   }
 
-  // THE NAME TRAVELS FORWARD TO THE EVENTS THAT CLOSE IT. Following the back-references rather
-  // than pairing by type is what makes it work across all three families at once: an activity is
-  // Scheduled→Started→Completed and a Nexus dispatch is Scheduled→Started→Completed, but the second
-  // hop is spelled `startedEventId` on one and `scheduledEventId` on the other, and a child spells
-  // it `initiatedEventId`. Three hops covers every chain Temporal writes; a family whose opener
-  // named nothing (a workflow task) picks up nothing, which is the correct outcome rather than a
-  // gap.
-  for (const e of all) {
-    const named = subjectFrom(e.id, subjectOf, openerOf);
-    if (!named || e.detail.includes(named)) continue;
-    e.detail = e.detail === e.type ? named : `${named} · ${e.detail}`;
-  }
-
-  for (const e of all) {
-    if (!LINKABLE.test(e.type)) continue;
-    const link = linkFor.get(e.id) ?? linkFor.get(openerOf.get(e.id) ?? 0);
-    if (!link) continue;
-    // A LINK INTO ANOTHER NAMESPACE IS NOT ONE THIS CONSOLE CAN FOLLOW. The history route reads
-    // exactly one namespace (`KONTRA_NAMESPACE`), so a workflow id that also exists in ours would
-    // render a DIFFERENT workflow's history under this row. Nexus endpoints are namespace-per-author
-    // by design (ADR 0001), so this is reachable rather than theoretical. Say where it went instead
-    // of offering a click that lies.
-    if (home && link.namespace && link.namespace !== home) {
-      e.detail = `${e.detail} · elsewhere in namespace=${link.namespace}`;
-      continue;
+  /** Head first, then the ring — the whole of the cap, applied as events arrive. */
+  private retain(e: RunEvent): void {
+    this.reduced++;
+    if (this.head.length < HEAD_KEEP) {
+      this.head.push(e);
+      return;
     }
-    e.link = link;
+    const cap = EVENT_CAP - HEAD_KEEP;
+    if (this.ring.length < cap) this.ring.push(e);
+    else {
+      this.ring[this.ringAt] = e;
+      this.ringAt = (this.ringAt + 1) % cap;
+    }
   }
 
-  if (all.length <= EVENT_CAP) return { events: all, scanned, elided: 0, truncated, ...fromServer };
-  // Keep the head and the TAIL. The tail is where a live run is, and the head is what it set out
-  // to do; the middle of a 20,000-event sweep is the same twenty lines repeating.
-  const tail = all.slice(all.length - (EVENT_CAP - HEAD_KEEP));
-  return {
-    events: [...all.slice(0, HEAD_KEEP), ...tail],
-    scanned,
-    elided: all.length - EVENT_CAP,
-    truncated,
-    ...fromServer,
-  };
+  /** The retained events in history order — the ring unrolled from its oldest slot. */
+  private retained(): RunEvent[] {
+    const cap = EVENT_CAP - HEAD_KEEP;
+    const tail =
+      this.ring.length < cap
+        ? this.ring
+        : [...this.ring.slice(this.ringAt), ...this.ring.slice(0, this.ringAt)];
+    return [...this.head, ...tail];
+  }
+
+  /**
+   * Finish the reduction — the two passes that need the whole history, over only what survived.
+   *
+   * See the class note for why these are here and not in {@link HistoryReducer.push}.
+   */
+  finish(
+    truncated = false,
+    home = '',
+    server: { historyLength?: number; historySizeBytes?: number } = {}
+  ): RunHistory {
+    /* SPREAD, SO ABSENT STAYS ABSENT. `historyLength: undefined` and no `historyLength` at all are
+       the same to a reader in TypeScript and NOT the same over JSON — the first serialises to a key
+       that is missing anyway, but it also defeats `'historyLength' in history`, which is how a caller
+       asks whether the server was consulted. */
+    const fromServer = {
+      ...(server.historyLength === undefined ? {} : { historyLength: server.historyLength }),
+      ...(server.historySizeBytes === undefined ? {} : { historySizeBytes: server.historySizeBytes }),
+    };
+    const events = this.retained();
+
+    // THE NAME TRAVELS FORWARD TO THE EVENTS THAT CLOSE IT. Following the back-references rather
+    // than pairing by type is what makes it work across all three families at once: an activity is
+    // Scheduled→Started→Completed and a Nexus dispatch is Scheduled→Started→Completed, but the second
+    // hop is spelled `startedEventId` on one and `scheduledEventId` on the other, and a child spells
+    // it `initiatedEventId`. Three hops covers every chain Temporal writes; a family whose opener
+    // named nothing (a workflow task) picks up nothing, which is the correct outcome rather than a
+    // gap.
+    for (const e of events) {
+      const named = subjectFrom(e.id, this.subjectOf, this.openerOf);
+      if (!named || e.detail.includes(named)) continue;
+      e.detail = e.detail === e.type ? named : `${named} · ${e.detail}`;
+    }
+
+    for (const e of events) {
+      if (!LINKABLE.test(e.type)) continue;
+      const link = this.linkFor.get(e.id) ?? this.linkFor.get(this.openerOf.get(e.id) ?? 0);
+      if (!link) continue;
+      // A LINK INTO ANOTHER NAMESPACE IS NOT ONE THIS CONSOLE CAN FOLLOW. The history route reads
+      // exactly one namespace (`KONTRA_NAMESPACE`), so a workflow id that also exists in ours would
+      // render a DIFFERENT workflow's history under this row. Nexus endpoints are namespace-per-author
+      // by design (ADR 0001), so this is reachable rather than theoretical. Say where it went instead
+      // of offering a click that lies.
+      if (home && link.namespace && link.namespace !== home) {
+        e.detail = `${e.detail} · elsewhere in namespace=${link.namespace}`;
+        continue;
+      }
+      e.link = link;
+    }
+
+    return {
+      events,
+      scanned: this.scanned,
+      // Keep the head and the TAIL. The tail is where a live run is, and the head is what it set out
+      // to do; the middle of a 20,000-event sweep is the same twenty lines repeating.
+      elided: this.reduced > EVENT_CAP ? this.reduced - EVENT_CAP : 0,
+      truncated,
+      ...fromServer,
+    };
+  }
 }
+
 
 /**
  * Keep the better of two links for one event id.

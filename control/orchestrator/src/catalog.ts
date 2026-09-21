@@ -96,6 +96,7 @@ const DESCRIPTOR_SCHEMA = {
           params: { type: 'object' },
           input: { type: 'object' },
           output: { type: 'object' },
+          stream: { type: 'object' },
         },
       },
     },
@@ -109,6 +110,16 @@ const validate = ajv.compile(DESCRIPTOR_SCHEMA);
  *  it is the author's sentence about the Method, and making a typo fix in a docstring demand a
  *  version bump would train everyone to bump for nothing. */
 const SIGNATURE = ['params', 'input', 'output'] as const;
+
+/** Schema fields carried through to callers but NOT part of the immutability gate.
+ *
+ *  `stream` is what a Method DISPLAYS while it runs (`@actor.method(streams=…)`), and it is kept
+ *  out of {@link SIGNATURE} on `description`'s grounds rather than `input`'s: nothing is TYPED
+ *  against it. A caller passes `input` and consumes `output`, so a silent change there breaks
+ *  code; a console reads `stream` live on every fetch and simply draws the new fields. Demanding
+ *  a version bump to add a counter to a progress record would train authors to bump for nothing,
+ *  or — likelier — to not report progress at all. */
+const CARRIED = ['stream'] as const;
 
 const BUMP =
   'A version is immutable and any input/output/params schema change must bump it (ADR 0004): ' +
@@ -158,10 +169,15 @@ export function parseDescriptor(body: unknown): Descriptor {
       params?: JsonSchemaDoc;
       input?: JsonSchemaDoc;
       output?: JsonSchemaDoc;
+      stream?: JsonSchemaDoc;
     };
     const kept: ActorOperation = { name: op.name };
     if (op.description !== undefined) kept.description = op.description;
-    for (const field of SIGNATURE) {
+    // AN ALLOWLIST, so anything not named here is DROPPED — which is why `stream` had to be added
+    // in two places rather than one. The worker published it and the POST returned 200 (the AJV
+    // descriptor is not `additionalProperties: false`), so nothing anywhere said it had been
+    // discarded; it simply never reached the browser.
+    for (const field of [...SIGNATURE, ...CARRIED]) {
       const doc = op[field];
       if (doc === undefined) continue; // a Method that declares neither still registers
       refuseNonSchema(`Method ${JSON.stringify(op.name)}`, field, doc);

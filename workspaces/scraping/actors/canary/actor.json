@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "kontra.actor.v1",
+  "name": "canary",
+  "version": "0.1.1",
+  "targets": {
+    "container": { "memory": "256m", "cpus": 1 },
+    "machine": { "size": "s-1vcpu-1gb", "region": "sfo3", "image": "ubuntu-22-04-x64" }
+  }
+}
