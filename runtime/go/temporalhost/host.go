@@ -205,27 +205,12 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 	// author's keys are namespaced under `progress` so an author who returns `{"done": ...}`
 	// cannot overwrite the field the orchestrator reads to decide whether a batch is moving.
 	//
-	// AND ONTO THE RUN'S STREAM, which is the half a browser can reach. A heartbeat is readable
-	// only by something that can call DescribeWorkflowExecution and poll it; the stream is a
-	// subscribable log with offsets, so a console follows a run instead of sampling it. Peer of
-	// `_publish_progress` in runtime/python/internals/engine.py — one transport for both hosts,
-	// where Python used an HTTP side-channel to the orchestrator and Go used only the heartbeat.
-	pub := h.streamFor(req.RunID)
-	defer closeStream(ctx, pub)
-	// WHICH WORKER IS SPEAKING, resolved once per batch from the queue Temporal itself named. Not
-	// per record: the identity is a fact about this process and this activity, and `GetInfo` in
-	// the publish path would be a lookup per streamed row. See workerid.go for why it rides on the
-	// record rather than in the stream library's publisher id.
-	//
-	// GUARDED, BECAUSE `activity.GetInfo` PANICS OUTSIDE AN ACTIVITY. RunBatch is called directly
-	// with a plain context by this package's own tests and by anything driving an actor outside a
-	// hosted Run — the same case `streamFor` returns nil for. An observability label must not be
-	// the thing that turns that into a panic. Empty then, which `streamBody` omits rather than
-	// writing blank.
-	worker := ""
-	if activity.IsActivity(ctx) {
-		worker = WorkerIdentity(activity.GetInfo(ctx).TaskQueue)
-	}
+	// IT ALSO WENT ONTO THE RUN'S WORKFLOW STREAM, and that half is gone. A Workflow Stream lives
+	// in the workflow's memory and dies with the workflow, so nothing published through it could
+	// be read once the run closed — the console pane fed by it was empty for anybody who opened a
+	// finished run. The heartbeat survives because it does not have that property: Temporal keeps
+	// it with the activity, and `temporal workflow describe -w <run>` shows it with no log
+	// shipper, no mounted volume and no shell into the box.
 	a.SetProgress(func(v any) {
 		lk2.Lock()
 		beat := map[string]any{"progress": v}
@@ -234,34 +219,12 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 		}
 		lk2.Unlock()
 		activity.RecordHeartbeat(ctx, beat)
-		publishProgress(pub, req.NodeID, req.ActorID, worker, v, last)
 	})
 
-	// THE PER-METHOD STREAM, which is a different thing from the beat above.
-	//
-	// That one is the author's healthcheck, polled on the engine's ticker, and it answers "is
-	// this Session alive and roughly where". This one is pushed by the author from inside the
-	// Method — `kontra.Stream(s, rec)` — carries a type the Method DECLARED with `Streams(...)`,
-	// and goes to that Method's own topic so a console can group and label it without knowing
-	// what this actor is.
-	//
-	// The topic is named HERE rather than in the engine: `h.name` is the actor and the resolved
-	// method name comes back from the engine, so naming stays beside the other publisher and the
-	// engine's only new knowledge is that a sink exists.
-	//
-	// THE TOPIC CARRIES THE NAME; THE RECORD CARRIES THE INSTANCE. `h.name` addresses the topic
-	// (`gocanary/tick`) and `req.ActorID` rides in the record, which is what Python's publisher
-	// has always sent (`self._actor_id`). This passed `h.name` in both places, so one run's stream
-	// carried `"actor": "c5eaf2b6a275"` from the Python leg and `"actor": "gocanary"` from the Go
-	// leg — the same key meaning two different things depending on which host wrote it, which is
-	// the one thing a cross-language wire format cannot do. It also said nothing: a console
-	// reading `actor: gocanary` under the heading `gocanary/tick` has been told the same word
-	// twice, where the id names WHICH SESSION of that actor is speaking — the thing a keyed
-	// dispatch makes ambiguous and the roster exists to disambiguate.
-	a.SetStream(func(v any) {
-		publishRecord(pub, methodTopic(h.name, a.ResolvedMethodName(req.Method)),
-			req.NodeID, req.ActorID, worker, v)
-	})
+	// THE PER-METHOD STREAM WAS WIRED HERE — `kontra.Stream(s, rec)` onto `<actor>/<method>` —
+	// and the verb, the sink and the topic naming are all gone with it. A Method narrates through
+	// the host's logger, which carries the run, the Worker identity and the Temporal context on
+	// every line, and reports what it found through the output Dataset. Both outlive the run.
 
 	resp, err := a.RunBatch(ctx, req)
 	if err != nil {

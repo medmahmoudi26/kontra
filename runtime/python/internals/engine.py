@@ -50,8 +50,6 @@ from internals import metrics
 # the SAME module instance `param` uses, so setting _run_params actually feeds param.get()
 _lib = importlib.import_module(type(param).__module__)  # kontra.actor
 _run_params = _lib._run_params
-# the SAME contextvar `kontra.stream()` reads, so binding it here actually reaches the author
-_run_stream = _lib._run_stream
 _ckpt_io = _lib._ckpt_io
 _global_io = _lib._global_io
 _object_io = _lib._object_io
@@ -145,132 +143,25 @@ async def _maybe_await(v):
     return await v if inspect.isawaitable(v) else v
 
 
-def _stream_for(run_id):
-    """A publisher onto `run_id`'s workflow stream, or None when there is nothing to publish to.
-
-    NONE IS THE ORDINARY CASE, not a failure: an actor driven outside a hosted Run has no
-    activity context, and a workflow that does not host a `WorkflowStream` has no handlers for
-    the publish signal. Both must leave the Batch completely unaffected, which is why every
-    failure here returns None rather than raising.
-    """
-    if not run_id:
-        return None
-    try:
-        from temporalio import activity
-        from temporalio.contrib.workflow_streams import WorkflowStreamClient
-
-        client = activity.client()
-        if client is None:
-            return None
-        return WorkflowStreamClient(client.get_workflow_handle(run_id))
-    except Exception:  # noqa: BLE001 - an absent stream is not an error
-        return None
-
-
-def _method_topic(actor_name, method_name):
-    """`<actor>/<method>` — e.g. `webcrawl/crawl`.
-
-    ONE TOPIC PER METHOD, so a console can group a run's streams without being told what any of
-    the actors are, and so two actors in one run cannot write over each other. Which WORKER is
-    speaking rides in the record (`node`), not in the topic: six crawlers doing the same job are
-    one stream with six speakers, not six streams.
-    """
-    return f"{actor_name or 'actor'}/{method_name or 'run'}"
-
-
-def _stream_body(node_id, actor_id, worker, value):
-    """The record as it goes on the wire: the author's fields, plus the engine's routing keys.
-
-    SPLIT OUT OF `publish` SO IT CAN BE TESTED — which is what the Go arm did from the start
-    (`runtime/go/temporalhost/stream.go::streamBody`) and this side did not. The whole of the Go
-    file's argument applies here: the rest of the publisher needs a live stream client, and a
-    `None` one is a no-op, so a test against it can only ever assert that nothing happened. This
-    half is the part that crosses a language boundary and is therefore the part worth pinning.
-
-    THE AUTHOR WINS A COLLISION. A record that genuinely carries its own `node` — a scheduler
-    reporting which worker it PLACED something on — means that field, and having the engine
-    overwrite it with whichever worker happens to be publishing would be a lie the author cannot
-    see or prevent. Same for `worker`.
-    """
-    body = _as_mapping(value)
-    body.setdefault("node", node_id)
-    body.setdefault("actor", actor_id)
-    # Absent when there is no Worker to name, never `""` — a record written outside an activity
-    # has no identity, and an empty string reads as one that declined to say.
-    if worker:
-        body.setdefault("worker", worker)
-    return body
-
-
-def _worker_label():
-    """WHICH WORKER IS SPEAKING, as the string Temporal knows this process by.
-
-    ── WHY THIS IS NOT `publisher_id` ──────────────────────────────────────────────────────────────
-
-    `temporalio.contrib.workflow_streams` has a publisher identity and it is the wrong one for this:
-    `PublishInput.publisher_id` is a `uuid.uuid4().hex[:16]` minted per client, it exists to
-    deduplicate a retried signal, it is not settable, and it is NOT carried through to a subscriber
-    — `WorkflowStreamItem` has `topic`, `data` and `offset` and nothing else. So the stream protocol
-    cannot answer "which Worker" even though it has a field that looks like it should.
-
-    ── SO IT RIDES ON THE RECORD, AND IT IS STILL TEMPORAL'S ANSWER ────────────────────────────────
-
-    The value is not invented here. It is the identity this process passed to `Worker(identity=)`,
-    derived from the queue `activity.info()` just named — so a stream record and the
-    `ActivityTaskStarted` event for the same work carry the SAME string, and joining a live pane to
-    a Run's history is an equality rather than a reconstruction.
-
-    `node` already distinguishes the six crawlers of one run from each other. `worker` distinguishes
-    the PROCESS, which is a different question and the one asked when six nodes are healthy and one
-    Machine is not: a node id says which unit of work, an identity says which box to go look at.
-    """
-    try:
-        from temporalio import activity
-
-        return workerid.worker_identity(activity.info().task_queue)
-    except Exception:  # noqa: BLE001 - outside an activity there is no Worker to name
-        return ""
-
-
-def _publisher_for(run_id, topic, node_id, actor_id):
-    """The callable `kontra.stream()` writes through, or None when there is nowhere to publish.
-
-    NONE IS ORDINARY: a Method exercised outside a hosted Run has no activity context, and a
-    workflow that does not host a stream has no handler for the publish signal. Both must leave
-    the Batch completely unaffected.
-    """
-    client = _stream_for(run_id)
-    if client is None:
-        return None
-    handle = client.topic(topic)
-    # RESOLVED ONCE, not per record: the identity is a fact about this process and this queue, and
-    # `activity.info()` inside the publish path would be a lookup per streamed row.
-    worker = _worker_label()
-    # The SAME converter the client would reach for at flush time — converting here is
-    # byte-identical, only earlier. See the comment in `publish`.
-    from temporalio.converter import DataConverter
-
-    conv = DataConverter.default.payload_converter
-
-    async def publish(value):
-        # THE RECORD IS THE AUTHOR'S TYPE, flattened to a mapping so it crosses the wire as the
-        # shape their `streams=` schema describes. `node` is added because a run is many workers
-        # and a pane showing one merged position would describe none of them.
-        body = _stream_body(node_id, actor_id, worker, value)
-        # CONVERTED PER RECORD, NOT AT FLUSH. The client buffers the raw value and only calls the
-        # payload converter when it ships, so ONE unserialisable field — a plain `enum.Enum`, a
-        # `Decimal`, a `Path` — raised once, out of the teardown, and took the WHOLE Batch's
-        # stream with it while `kontra.stream()`'s own per-publish guard never saw a thing.
-        # Converting here keeps the loss at one record and puts a line in the actor's log, and a
-        # pre-built Payload is the library's documented zero-copy path on the way out.
-        try:
-            payload = conv.to_payload(body)
-        except Exception:  # noqa: BLE001 - one record, named, not the whole stream
-            log.warning("[%s] stream record dropped, not serialisable: %r", actor_id, body)
-            return
-        handle.publish(payload)
-
-    return client, publish
+# ── THE WORKFLOW-STREAM PUBLISHER WAS HERE, AND IT IS GONE ─────────────────────────────────────
+#
+# Six functions: `_stream_for` (a `WorkflowStreamClient` for the run), `_method_topic`
+# (`<actor>/<method>`), `_stream_body` (the author's fields plus the engine's routing keys),
+# `_worker_label`, `_publisher_for` and the `publish` closure `kontra.stream()` wrote through.
+#
+# A Temporal Workflow Stream lives in the WORKFLOW'S MEMORY and dies with the workflow, so every
+# record published through this was unreadable the moment the run closed — and a run that takes
+# under a minute is over before a browser has loaded and signed in. The console pane that consumed
+# it is gone; this is the producer.
+#
+# `_worker_label` WENT WITH IT AND IS NOT MISSED: it answered "which Worker is speaking" for a
+# stream record, and the log records the Method now emits already carry the same string, put there
+# by `logs.bind_run` for every line rather than only for the ones that called a verb.
+#
+# WHAT SURVIVES, BELOW: `_as_mapping`, because the healthcheck beat still flattens an author's map,
+# and `_post_progress`, which is a DIFFERENT mechanism — an HTTP POST to the orchestrator's live
+# beat store (`GET /api/runs/{runId}/progress`), read by the CLI, durable for the life of the
+# process rather than the workflow.
 
 
 def _as_mapping(value):
@@ -302,38 +193,6 @@ def _as_mapping(value):
     # thing to try given the verb's name. Nest it instead, which is the same rule the Go host
     # already follows for a non-map beat.
     return {"value": value}
-
-
-def _publish_progress(stream, node_id, actor_id, progress, total, worker=""):
-    """One beat onto the `progress` topic. Buffered by the client and flushed on its interval.
-
-    NODE AND ACTOR TRAVEL WITH IT because a run is many workers: a pane showing one merged
-    `at` for a six-node fleet would flicker between hosts and describe none of them. The author's
-    map is spread at the top level so `program` and `at` are first-class fields a subscriber can
-    read without knowing which actor produced them.
-    """
-    if stream is None:
-        return
-    try:
-        # THE AUTHOR'S KEYS DO NOT GET TO WIN. Spread naively, an actor returning `done` — which
-        # the canary does, counting units it finished — OVERWRITES the engine's liveness `done`,
-        # and a reader watching a retrying batch sees a number climbing while the batch is in fact
-        # restarting from unit one. Measured on canary-1789917060: `done` walked 0..6 while `at`
-        # stayed `unit-1`, because the retry reset the label and the author's counter survived it.
-        #
-        # The framework's fields are applied LAST for that reason, which is the same rule the Go
-        # host states where it namespaces the author's map under `progress`.
-        beat = {"actor": actor_id, **dict(progress or {})}
-        beat["node"], beat["total"] = node_id, total
-        # A FRAMEWORK FIELD, so it goes in the LAST group with `node` and `total` rather than being
-        # `setdefault`ed like the typed publisher's. The rule differs because the record differs:
-        # there the author's declared type IS the record, here their healthcheck map is spread into
-        # one the engine owns — and the `done` collision above is what that costs when it is wrong.
-        if worker:
-            beat["worker"] = worker
-        stream.topic("progress").publish(beat)
-    except Exception:  # noqa: BLE001 - visibility must never perturb the run
-        pass
 
 
 def _post_progress(orch, run_id, node_id, actor_id, progress, total):
@@ -849,27 +708,11 @@ def build_session_factory(registry, *, store="env"):
             # current Unit and is folded into results below.
             batch = Batch(self, todo, getattr(self._method, "takes", None))
             beat = asyncio.create_task(self._progress_beat(run_id, node_id, len(units)))
-            # `kontra.stream()` WRITES THROUGH HERE, for the life of this Batch and no longer.
-            # Bound as a contextvar rather than passed, so a Method running its units concurrently
-            # reaches the right publisher from every task without the author threading anything —
-            # the same mechanism `param.get` uses.
-            # `actor_name`, NOT `name` — the registry has no `name`, so the old lookup silently
-            # fell back and every actor published to `actor/<method>`. One workspace's actors
-            # would all have collided on it.
-            topic = _method_topic(getattr(registry, "actor_name", ""),
-                                  getattr(self._method, "name", ""))
-            bound = _publisher_for(run_id, topic, node_id, self._actor_id)
-            stream_client, stream_token = (bound[0], _run_stream.set(bound[1])) if bound else (None, None)
-            if stream_client is not None:
-                # ENTERING IS WHAT STARTS THE BACKGROUND FLUSHER, and without it this is not a
-                # stream at all. `TopicHandle.publish` only APPENDS to the client's buffer; the
-                # task that ships the buffer on its interval is created solely in `__aenter__`.
-                # Un-entered, every record sat in memory until the flush in the `finally` below —
-                # so a pane showed nothing for the whole Batch and then everything at once, and a
-                # worker killed mid-Batch lost the lot, including records for Units that had
-                # already committed. MEASURED before the fix: 20 units of 4s published nothing for
-                # 80 seconds.
-                await stream_client.__aenter__()
+            # A PER-BATCH WORKFLOW-STREAM PUBLISHER WAS BOUND HERE, and `kontra.stream()` wrote
+            # through it. Both are gone: the stream died with the workflow, so nothing could read
+            # it a minute after the run. A Method narrates with its own logger, which
+            # `logs.bind_run` has already stamped with the run, the Worker and the Temporal
+            # context — so the same facts reach the run page's rail and stay there.
             try:
                 if self._method is None:
                     # No @actor.method (load-only actor): identity passthrough, one turn.
@@ -900,28 +743,6 @@ def build_session_factory(registry, *, store="env"):
                 raise
             finally:
                 beat.cancel()
-                # UNBOUND AND FLUSHED, in that order. `stream()` must be inert the moment the
-                # Method returns — a later call belongs to no Batch and would publish onto a
-                # topic nothing is watching. The flush matters because events buffered but
-                # unshipped when a process ends are LOST, and a Batch ending is exactly when the
-                # last and most interesting record is still inside the client's 2s window.
-                if stream_token is not None:
-                    _run_stream.reset(stream_token)
-                if stream_client is not None:
-                    # `__aexit__`, NOT `flush()` + `close()`. There IS no `close()` on
-                    # WorkflowStreamClient — that call raised AttributeError on every single
-                    # Batch and was swallowed by the handler below, which is exactly why the
-                    # missing `__aenter__` above went unnoticed for so long. `__aexit__` cancels
-                    # the flusher and drains both the pending batch and the buffer, which a bare
-                    # `flush()` does not guarantee.
-                    try:
-                        await stream_client.__aexit__(None, None, None)
-                    except Exception as exc:  # noqa: BLE001 - never fail a finished Batch
-                        # SAID, NOT SWALLOWED. A silent drop here is how the two bugs above hid:
-                        # the records are gone either way, and the only difference a log makes is
-                        # whether anybody can find out.
-                        log.warning("[%s] stream teardown failed; buffered records lost: %r",
-                                    self._actor_id, exc)
 
             done = len(slots) + len(self._fail_slots) == len(units)
             # Per-Unit outputs in input order, then the tail: records pushed with no current Unit
@@ -964,21 +785,9 @@ def build_session_factory(registry, *, store="env"):
             # Beat @actor.healthcheck output to the orchestrator so the CLI/UI can stream live
             # progress. Best-effort visibility — a POST failure NEVER touches the run.
             orch = os.environ.get("KONTRA_ORCHESTRATOR_URL", "").rstrip("/")
-            # THE SAME BEAT, ONTO THE RUN'S STREAM. `_post_progress` above is an HTTP side-channel
-            # to the orchestrator that only the Python host has — the Go host beats its
-            # healthcheck through RecordHeartbeat instead, and `heartbeat.ts` then dropped the map.
-            # Two hosts, two transports, and neither reached a UI. A workflow stream is one
-            # transport both can use, addressed by RUN ID, which is what a console already knows.
-            stream = _stream_for(run_id)
-            # Resolved beside the stream, before the beat loop — one lookup for the Session's life.
-            worker = _worker_label()
-            if stream is not None:
-                # Same reason as the per-Method publisher: un-entered, the background flusher
-                # never starts and the beats only ship at teardown.
-                try:
-                    await stream.__aenter__()
-                except Exception:  # noqa: BLE001 - an unusable stream is not a failed Batch
-                    stream = None
+            # THE BEAT ALSO WENT ONTO THE RUN'S WORKFLOW STREAM, and that half is gone. What is
+            # left is `_post_progress` — an HTTP POST to the orchestrator's live beat store, which
+            # outlives the workflow and which `GET /api/runs/{runId}/progress` and the CLI read.
             try:
                 while True:
                     await asyncio.sleep(_BEAT_S)
@@ -996,18 +805,9 @@ def build_session_factory(registry, *, store="env"):
                         if orch and run_id:
                             await asyncio.to_thread(
                                 _post_progress, orch, run_id, node_id, self._actor_id, progress, total)
-                        _publish_progress(stream, node_id, self._actor_id, progress, total, worker)
             except asyncio.CancelledError:
                 pass
             finally:
-                # BUFFERED-BUT-UNSHIPPED EVENTS ARE LOST on process exit — the library says so
-                # explicitly — and a Batch ending is exactly when the last and most interesting
-                # beat is still sitting in the 2-second window.
-                if stream is not None:
-                    try:
-                        await stream.__aexit__(None, None, None)
-                    except Exception as exc:  # noqa: BLE001 - never fail a finished Batch
-                        log.warning("[%s] progress stream teardown failed: %r",
-                                    self._actor_id, exc)
+                pass
 
     return Session

@@ -48,7 +48,7 @@ from typing_extensions import TypedDict
 from dataclasses import dataclass
 from datetime import timedelta
 
-from kontra import KontraFlow, catalog, fleet, progress
+from kontra import catalog, fleet
 
 # 0.2.0 CARRIES THE TRAVERSAL. 0.1.0 visits exactly the seed, so `depth` had nowhere to go —
 # and it also predates the Set-Cookie fix, which means its `injection_points` can never contain
@@ -133,7 +133,7 @@ def _num(req, key, default):
 
 
 @workflow.defn
-class Surface(KontraFlow):
+class Surface:
     @workflow.run
     async def run(self, req: SurfaceInput) -> dict:
         program = req.get("program") or "8x8"
@@ -237,11 +237,11 @@ class Surface(KontraFlow):
                 break
 
         workflow.logger.info(f"crawling {len(pages)} page(s) of {scope_name} for {program}")
-        # THE SHAPE A PANE READS. `program` and `at` are what turn "done 3/8" — which describes
-        # the machine — into "visa, on aw.visa.com" — which describes the work. `total` is
-        # published once up front so a subscriber joining late can draw a bar without waiting for
-        # a second event to infer the denominator.
-        progress(phase="crawl", program=program, done=0, total=len(pages), found=0)
+        # THE DENOMINATOR UP FRONT, so a reader opening the rail at second zero knows how big this
+        # is before the per-page lines start. `progress()` published the same fact as typed state
+        # for a pane; the pane is gone and so is the verb — the Workflow Stream it wrote to died
+        # with the workflow, which made it unreadable for anybody who opened a finished run.
+        workflow.logger.info("crawl: %s — %d page(s)", program, len(pages))
         crawled = 0
         # A fresh Session per chunk, for the reason the fold axis learned the hard way: a Session
         # pins to ONE Worker, so one Session held across a whole crawl is a single Machine doing
@@ -258,21 +258,13 @@ class Surface(KontraFlow):
                         workflow.logger.warning(
                             f"crawl batch voided: {exc!r} — that scope page has no surface",
                             extra={"incomplete": True, "axis": "scope-pages", "phase": "crawl"})
-                        # A VOID IS AN EVENT A WATCHER NEEDS. Left unpublished, a page that threw
-                        # and a page still running look identical in the pane — which is the same
-                        # ambiguity that let a fully-voided run read as COMPLETED.
-                        progress(phase="crawl", program=program,
-                                 at=f"page {done + voided} voided", done=done,
-                                 total=len(pages), found=crawled)
+                        # A VOID IS AN EVENT A WATCHER NEEDS — and the WARNING above is now the
+                        # whole of it. It already carries `incomplete`, which the console's rail
+                        # filters on independently of the level, so a voided page cannot be
+                        # mistaken for one still running.
                         continue
                     crawled += len(rows)
                     done += 1
-                    # `at` IS LEFT TO THE ACTOR. A Batch is a claim-check ref, so naming the
-                    # host it holds would mean an async fetch per page from inside the workflow —
-                    # a network round trip bought purely to label a progress line. The actor
-                    # already knows the host it has open; it publishes `at` onto the same topic.
-                    progress(phase="crawl", program=program, done=done,
-                             total=len(pages), found=crawled)
                     # PER PAGE, because a crawl is browser-bound and slow, and between the
                     # "crawling N page(s)" line and the final count it otherwise says nothing
                     # for however long Chromium takes. `surface-1789866474` spent eleven

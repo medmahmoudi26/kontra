@@ -55,11 +55,6 @@ ActorFn = Callable[..., Awaitable[Any]]
 # one Actor don't clobber each other; `None` outside a run (e.g. at import time, when a
 # `@actor.method/load` decorator is evaluated).
 _run_params: contextvars.ContextVar = contextvars.ContextVar("kontra_run_params", default=None)
-# The publisher `stream()` writes through, bound by the host for the life of one Batch. A
-# contextvar for the same reason `_run_params` is one: a Method may run its units concurrently and
-# each task must reach the right Batch's publisher without the author threading anything.
-_run_stream: contextvars.ContextVar = contextvars.ContextVar("kontra_run_stream", default=None)
-
 # `session_state` was a fourth tier and RETIRED with ADR 0023 §19. Every path that could read it
 # runs in the same process on the same instance, where `self.*` already works; the one path that
 # loses `self.*` is host death, and that FAILS THE SCOPE (§7), so the reader is gone too.
@@ -199,42 +194,30 @@ class _Param:
 param = _Param()
 
 
-async def stream(value: Any) -> None:
-    """Publish one progress record for the Method that is running.
-
-    THE AUTHOR WRITES THIS AND NOTHING ELSE:
-
-        @actor.method(takes=Seed, emits=Page, streams=CrawlProgress)
-        async def crawl(self, batch, dataset):
-            async for unit in batch:
-                await stream(CrawlProgress(at=unit.value.url, contexts=len(self.ctxs)))
-
-    ── WHERE IT GOES ───────────────────────────────────────────────────────────────────────────
-
-    Onto the RUN's Temporal Workflow Stream, on this Method's own topic — `<actor>/<method>`, e.g.
-    `webcrawl/crawl`. A console groups by topic without being told what a crawler is, and pairs it
-    with the `streams=` schema from the actor's catalog entry to render typed fields rather than a
-    bag of strings.
-
-    ── WHY THE WORKFLOW DOES NOT DECLARE THIS ──────────────────────────────────────────────────
-
-    A workflow author is not assumed to be able to read the actor's source; that is what the
-    catalog is for. They call `await c.crawl(page, out)` and the pane fills in, because the shape
-    came from the actor that owns it.
-
-    ── SILENT OUTSIDE A RUN, AND THAT IS ORDINARY ──────────────────────────────────────────────
-
-    A Method exercised from a unit test has no Batch and no workflow to publish to. Nothing is
-    wrong, so nothing is raised — the same rule `param.get` follows. A publish that FAILS inside a
-    run is swallowed too: an observability call must never fail a Unit that already committed.
-    """
-    publish = _run_stream.get()
-    if publish is None:
-        return
-    try:
-        await publish(value)
-    except Exception:  # noqa: BLE001 - visibility must never perturb the run
-        pass
+# `stream()` WAS HERE, AND IT IS GONE.
+#
+# It published one typed record per Method onto the run's Temporal Workflow Stream, on that
+# Method's own topic, for a console pane that drew it live. The pane is gone and so is this.
+#
+# THE REASON IS DURABILITY. A Workflow Stream lives in the WORKFLOW'S MEMORY and dies with the
+# workflow, so everything published through it is unreadable the moment the run ends — and a run
+# that takes under a minute is already over by the time somebody has opened a browser and signed
+# in. Measured on the canary: the pane's ordinary state was an empty box under a "stream" heading,
+# which reads as a broken feature rather than as a finished run.
+#
+# WHAT AN AUTHOR WRITES INSTEAD is a log line, which VictoriaLogs keeps:
+#
+#     log = logging.getLogger("kontra.crawl")
+#     log.info("crawl: %s (%d of %d) — %d row(s) so far", url, i + 1, n, found)
+#
+# It carries the run id, the Worker identity and the Temporal context already (`logs.bind_run`),
+# so the run page's rail groups it without being told anything. The rows themselves are the other
+# half: `dataset.push` writes to the lake, and the run page tails it.
+#
+# IT COMES BACK WHEN THERE IS A DURABLE STORE UNDER IT. The idea was not wrong; the transport was.
+# Field 6 of `Method` in `shared/contracts/kontra/v1/catalog.proto` is RESERVED rather than reused,
+# so a future `streams=` can be added back without colliding with a descriptor already in a
+# registry somewhere.
 
 
 @dataclass
@@ -253,11 +236,6 @@ class MethodRegistration:
     fn_name: str            # local function name, e.g. "crawl"
     takes: Optional[type] = None   # the Unit type this Method consumes
     emits: Optional[type] = None   # the record type it emits (never a return annotation: §18)
-    # THE TYPE THIS METHOD STREAMS, declared for the same reason `takes` and `emits` are: a
-    # caller reads it from the catalog rather than from this file. A workflow author is not
-    # assumed to be able to read the actor's source — that is what a catalog is FOR — so the
-    # shape of what a run displays cannot be something the workflow has to know.
-    streams: Optional[type] = None
 
     @property
     def description(self) -> str:
@@ -575,24 +553,25 @@ class ActorRegistry:
         name: Optional[str] = None,
         takes: Optional[type] = None,
         emits: Optional[type] = None,
-        streams: Optional[type] = None,
     ) -> Any:
         """Declare a dispatchable Method. It receives the whole Batch, the output Dataset, and
         YOU write the loop (ADR 0028 §2):
 
-            @actor.method(takes=Target, emits=Page, streams=CrawlProgress)
+            @actor.method(takes=Target, emits=Page)
             async def crawl(self, batch, dataset):
                 async for unit in batch:
-                    await stream(CrawlProgress(at=unit.value.url))
+                    log.info("crawl: %s", unit.value.url)
                     await dataset.push(await fetch(unit.value))
 
-        `streams=` DECLARES WHAT THIS METHOD SHOWS WHILE IT RUNS, and `await stream(x)` publishes
-        one. It goes to the run's Temporal Workflow Stream on this Method's own topic —
-        `<actor>/<method>` — so a console groups it without being told, and the schema travels
-        with the actor's catalog entry so the display is typed rather than a bag of strings.
+        THERE IS NO `streams=`, and there was. It declared a third type — what the Method SHOWS
+        while it runs — published through `await stream(x)` onto the run's Workflow Stream for a
+        console pane. Both are gone: the stream lived in workflow memory and died with the
+        workflow, so the pane was empty for anybody who opened the run after it finished. A Method
+        says what it is doing with its own logger, and what it FOUND with `dataset.push`. Both
+        outlive the run.
 
         SEPARATE FROM `@actor.healthcheck`, which answers whether the SESSION is alive and whose
-        raise ends it. Progress is per Method and cannot end anything.
+        raise ends it.
 
         `await dataset.push(x)` appends one record to the output — it names no Unit (put the
         provenance you care about INSIDE the record) and returns nothing (a write failure
@@ -647,8 +626,7 @@ class ActorRegistry:
                     f"({clash.fn_name}, {f.__name__}); give one of them name=\"...\""
                 )
             self.methods[dispatch_name] = MethodRegistration(
-                fn=f, name=dispatch_name, fn_name=f.__name__, takes=takes, emits=emits,
-                streams=streams)
+                fn=f, name=dispatch_name, fn_name=f.__name__, takes=takes, emits=emits)
             return f
 
         return register(fn) if fn is not None else register

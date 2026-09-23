@@ -218,8 +218,8 @@ def test_an_unknown_name_is_still_an_attribute_error() -> None:
 
 
 def test_reaching_a_verb_does_not_put_temporal_behind_import_kontra() -> None:
-    """THE INVARIANT THE LAZINESS EXISTS FOR, and the reason `say`/`hitl` are not imported in
-    `kontra/__init__.py` in the first place: both import temporalio at module scope, `kontra`
+    """THE INVARIANT THE LAZINESS EXISTS FOR, and the reason `hitl` is not imported in
+    `kontra/__init__.py` in the first place: it imports temporalio at module scope, `kontra`
     is what the workflow sandbox re-imports per instance, and every non-workflow caller of this
     package is entitled to import it without a Temporal dependency.
 
@@ -231,7 +231,7 @@ def test_reaching_a_verb_does_not_put_temporal_behind_import_kontra() -> None:
     probe = (
         "import sys, kontra;"
         "print('bare', 'temporalio' in sys.modules);"
-        "from kontra import ask, progress;"
+        "from kontra import ask;"
         "print('verbs', 'temporalio' in sys.modules)"
     )
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
@@ -251,18 +251,18 @@ def test_the_shipped_package_file_carries_the_lazy_accessor() -> None:
     `__all__` a test in test_loader.py compared against it.
 
     This still reads the file from disk rather than the imported module, and that is the point: it
-    is the half `__all__` cannot see. `speak`/`ask` are resolved by a module `__getattr__`, so an
-    exports list can agree while the accessor is missing, and `from kontra import progress` would
+    is the half `__all__` cannot see. `ask` is resolved by a module `__getattr__`, so an
+    exports list can agree while the accessor is missing, and `from kontra import ask` would
     then fail on exactly the surface an author uses."""
     ns: dict = {}
     exec(compile(PKG_INIT.read_text(), "pkg-init", "exec"), ns)
-    from kontra import say
-    assert ns["__getattr__"]("progress") is say.progress
     assert ns["__getattr__"]("ask") is hitl.ask
-    # `note`/`partial` were removed with the rest of the logger wrappers: the accessor must now
-    # REFUSE them rather than resolve something, or an author following a stale example gets a
-    # confusing failure deep in `say` instead of the plain one Python gives for a gone name.
-    for gone in ("note", "partial"):
+    # EVERY REMOVED VERB MUST REFUSE, not resolve something. `note`/`partial` went with the rest of
+    # the logger wrappers; `progress`, `stream` and `KontraFlow` went with the Workflow Stream they
+    # published onto (the module they lived in, `say`, is deleted). An author following a stale
+    # example has to get the plain AttributeError Python gives for a gone name, rather than a
+    # confusing failure deeper in.
+    for gone in ("note", "partial", "progress", "stream", "KontraFlow"):
         with pytest.raises(AttributeError, match=gone):
             ns["__getattr__"](gone)
     assert "ask" in set(ns["__all__"])

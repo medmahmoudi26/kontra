@@ -54,7 +54,7 @@ from pydantic import Field
 from temporalio import workflow
 from typing_extensions import Annotated, TypedDict
 
-from kontra import KontraFlow, catalog, fleet
+from kontra import catalog, fleet
 from kontra.fleet import docker_fleet, do_fleet
 
 #: The Actor this run places and calls. One actor, deliberately: a first run should have exactly
@@ -132,7 +132,7 @@ def _provider(name: str, machines: int):
 
 
 @workflow.defn
-class Canary(KontraFlow):
+class Canary:
     """Provisions a Fleet, sweeps on it, and lets you watch every part of it happen.
 
     THE FIRST PARAGRAPH OF THIS DOCSTRING IS THE WORKFLOW'S DESCRIPTION, everywhere. `catalog.py`

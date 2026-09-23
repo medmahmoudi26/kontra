@@ -65,14 +65,6 @@ type actorOperation struct {
 	Params      json.RawMessage `json:"params,omitempty"`
 	Input       json.RawMessage `json:"input,omitempty"`
 	Output      json.RawMessage `json:"output,omitempty"`
-	// Stream is what this Method publishes while it runs — `Streams(CrawlProgress{})`. A console
-	// pairs it with the run's topic `<actor>/<method>` to draw typed fields for an actor it has
-	// never heard of, which is what lets a workflow author who cannot read this actor's source
-	// still get a live view of it.
-	//
-	// Omitted when unset, like every other schema here: a Method that declares none still
-	// registers and anything it streams is drawn from the record's own keys.
-	Stream json.RawMessage `json:"stream,omitempty"`
 }
 
 // Describe builds the catalog descriptor for a registry — the Go peer of python's
@@ -98,7 +90,6 @@ func Describe(reg *core.Registry) actorDescriptor {
 			Params:      params,
 			Input:       schemaJSON(m.Takes),
 			Output:      schemaJSON(m.Emits),
-			Stream:      schemaJSON(m.Streams),
 		})
 	}
 	return actorDescriptor{

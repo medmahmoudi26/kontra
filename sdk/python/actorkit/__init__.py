@@ -39,7 +39,7 @@ import kontra as _kontra
 #: I/O, and `import kontra` is required to cost neither. Aliasing is not importing: the entry is
 #: created only for a submodule that has ALREADY been loaded, so the cost stays where it was.
 _SUBMODULES = (
-    "actor", "batch", "catalog", "contract", "fleet", "hitl", "say",
+    "actor", "batch", "catalog", "contract", "fleet", "hitl",
     "probe", "retry", "schema", "secrets", "testing", "version",
 )
 
@@ -68,7 +68,7 @@ def __getattr__(name: str) -> object:
     """Everything `kontra` exposes, including the two lazily-resolved verbs.
 
     Delegating through `getattr` rather than copying `kontra`'s namespace at import is what keeps
-    `progress` and `ask` lazy: `kontra.__getattr__` imports `say`/`hitl` on first use so that
+    `ask` lazy: `kontra.__getattr__` imports `hitl` on first use so that
     `import kontra` costs no temporalio, and a star-import here would have resolved both eagerly and
     undone it.
     """
@@ -79,7 +79,7 @@ def __getattr__(name: str) -> object:
         # A SUBMODULE THAT NOBODY HAS IMPORTED YET IS NOT AN ATTRIBUTE OF ITS PACKAGE, and
         # `from actorkit import batch` is the spelling that finds out. `kontra/__init__.py` imports
         # `catalog` and `fleet` at module scope and deliberately leaves the rest — `narrate` and
-        # `say` and `hitl` import temporalio, `secrets` does network I/O — so delegating with `getattr` alone
+        # `hitl` imports temporalio, `secrets` does network I/O — so delegating with `getattr` alone
         # answered for two of thirteen. Import it, then delegate, so the alias forwards the whole
         # package rather than the part that happened to be loaded.
         if name in _SUBMODULES:

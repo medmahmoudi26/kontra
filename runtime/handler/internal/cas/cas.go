@@ -55,6 +55,23 @@ func Sha256Hex(data []byte) string {
 // with no opinion, so that the key it produces cannot drift from CasKey's.
 func RelKey(digest string) string { return "cas/" + digest[:2] + "/" + digest }
 
+// usableSha reports whether a digest is 64 lower-hex characters — what Sha256Hex produces, and
+// what `CasKey` may safely slice. Unexported: this package's own boundary, mirroring
+// `runtime/go/codec.UsableSha` rather than importing it, because the two modules do not depend on
+// each other and a shared helper here would be the only reason they did.
+func usableSha(sha string) bool {
+	if len(sha) != 64 {
+		return false
+	}
+	for i := 0; i < len(sha); i++ {
+		c := sha[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // Put content-addresses data: digest = sha256(data); store at cas/<sha[:2]>/<sha> iff
 // absent (dedup is free under content-addressing). Returns the digest.
 func (c *CAS) Put(ctx context.Context, data []byte) (string, error) {
@@ -75,7 +92,16 @@ func (c *CAS) Put(ctx context.Context, data []byte) (string, error) {
 // GetVerified fetches by digest (derived, never carried) and re-checks integrity. noun
 // shapes the exact error string for the caller's surface ("claim-check object missing:
 // <key>" / "node-result integrity check failed for <key>").
+//
+// THE DIGEST IS CHECKED BEFORE IT IS SLICED. "derived, never carried" is true of the Put path and
+// NOT of this one: every caller of GetVerified is holding a digest that arrived from somewhere —
+// a claim-check ref on history, a node result's meta — and `CasKey` slices it two characters in.
+// A one-character digest panicked the worker instead of refusing the payload. See
+// `runtime/go/codec.UsableSha`, which is the same guard on the other Go arm.
 func (c *CAS) GetVerified(ctx context.Context, digest, noun string) ([]byte, error) {
+	if !usableSha(digest) {
+		return nil, fmt.Errorf("%s ref has no usable sha256: %q", noun, digest)
+	}
 	key := c.store.CasKey(digest)
 	data, found, err := c.store.Get(ctx, key)
 	if err != nil {

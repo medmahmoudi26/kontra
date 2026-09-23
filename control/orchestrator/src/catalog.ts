@@ -96,7 +96,6 @@ const DESCRIPTOR_SCHEMA = {
           params: { type: 'object' },
           input: { type: 'object' },
           output: { type: 'object' },
-          stream: { type: 'object' },
         },
       },
     },
@@ -113,13 +112,16 @@ const SIGNATURE = ['params', 'input', 'output'] as const;
 
 /** Schema fields carried through to callers but NOT part of the immutability gate.
  *
- *  `stream` is what a Method DISPLAYS while it runs (`@actor.method(streams=…)`), and it is kept
- *  out of {@link SIGNATURE} on `description`'s grounds rather than `input`'s: nothing is TYPED
- *  against it. A caller passes `input` and consumes `output`, so a silent change there breaks
- *  code; a console reads `stream` live on every fetch and simply draws the new fields. Demanding
- *  a version bump to add a counter to a progress record would train authors to bump for nothing,
- *  or — likelier — to not report progress at all. */
-const CARRIED = ['stream'] as const;
+ *  EMPTY, AND KEPT RATHER THAN INLINED. `stream` was the one member — what a Method DISPLAYED
+ *  while it ran — and it went when the verb that produced it did (field 6 of `Method` in
+ *  catalog.proto is reserved, not reused). The distinction it encodes is still the right one and
+ *  the next carried-but-not-signed field will want it: a caller is TYPED against `input` and
+ *  `output`, so a silent change there breaks code, where a console re-reads a display schema on
+ *  every fetch and simply draws the new fields.
+ *
+ *  A descriptor from an older SDK may still POST `stream`. It is dropped by the allowlist below,
+ *  silently and correctly — the field means nothing to any reader now. */
+const CARRIED = [] as const;
 
 const BUMP =
   'A version is immutable and any input/output/params schema change must bump it (ADR 0004): ' +
@@ -169,14 +171,14 @@ export function parseDescriptor(body: unknown): Descriptor {
       params?: JsonSchemaDoc;
       input?: JsonSchemaDoc;
       output?: JsonSchemaDoc;
-      stream?: JsonSchemaDoc;
     };
     const kept: ActorOperation = { name: op.name };
     if (op.description !== undefined) kept.description = op.description;
-    // AN ALLOWLIST, so anything not named here is DROPPED — which is why `stream` had to be added
-    // in two places rather than one. The worker published it and the POST returned 200 (the AJV
-    // descriptor is not `additionalProperties: false`), so nothing anywhere said it had been
-    // discarded; it simply never reached the browser.
+    // AN ALLOWLIST, so anything not named here is DROPPED. That is what makes a removed field
+    // safe — an older SDK's `stream` lands, validates (the AJV descriptor is not
+    // `additionalProperties: false`) and is discarded — and it is also the trap adding one falls
+    // into: `stream` had to be named in TWO places, and until it was, the worker published it,
+    // the POST returned 200, and it simply never reached the browser with nothing saying so.
     for (const field of [...SIGNATURE, ...CARRIED]) {
       const doc = op[field];
       if (doc === undefined) continue; // a Method that declares neither still registers

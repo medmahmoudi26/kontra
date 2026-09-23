@@ -24,7 +24,7 @@ import kontra
 # Every submodule the alias claims to forward. Kept as a literal rather than read from the alias, so
 # that deleting one from `_SUBMODULES` fails here instead of silently narrowing what is forwarded.
 FORWARDED = (
-    "actor", "batch", "catalog", "contract", "fleet", "hitl", "say",
+    "actor", "batch", "catalog", "contract", "fleet", "hitl",
     "probe", "retry", "schema", "secrets", "testing", "version",
 )
 
@@ -69,7 +69,7 @@ def test_the_alias_warns_once_and_names_the_replacement() -> None:
          "import warnings\n"
          "with warnings.catch_warnings(record=True) as w:\n"
          "    warnings.simplefilter('always')\n"
-         "    from actorkit import catalog, fleet, progress\n"
+         "    from actorkit import catalog, fleet, ask\n"
          "    import actorkit\n"
          "    d = [x for x in w if issubclass(x.category, DeprecationWarning)]\n"
          "    print(len(d)); print(d[0].message if d else '')\n"],
@@ -83,8 +83,8 @@ def test_the_alias_warns_once_and_names_the_replacement() -> None:
 
 
 def test_the_lazy_verbs_stay_lazy_through_the_alias() -> None:
-    # `import kontra` must cost no temporalio — `say` and `hitl` import it at module scope, so
-    # the top-level `progress`/`ask` are resolved by `__getattr__` on first use. A star-import in the
+    # `import kontra` must cost no temporalio — `hitl` imports it at module scope, so
+    # the top-level `ask` is resolved by `__getattr__` on first use. A star-import in the
     # alias would have resolved both eagerly and undone it, which no assertion about identity
     # would have caught.
     for module in ("kontra", "actorkit"):
