@@ -683,9 +683,9 @@ func stageDependencies(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 		return err
 	}
 	m.Components = append(m.Components, Component{
-		Name:       "orchestrator-dependencies",
-		Kind:       "dependencies",
-		Version:    "sha256:" + lockSum[:16],
+		Name:    "orchestrator-dependencies",
+		Kind:    "dependencies",
+		Version: "sha256:" + lockSum[:16],
 		// INSIDE THE ARCHIVE, WHICH IS NOT WHERE THE REPO KEEPS IT. Every `Path` on a Component is
 		// relative to the extracted bundle, and the bundle's layout is a published contract — the
 		// `run it:` line tells people to exec `orchestrator/dist/src/main.js`. The repo's own copy

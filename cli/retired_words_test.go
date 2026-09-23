@@ -30,7 +30,7 @@ var retiredWords = map[string]string{
 // comment.
 //
 // A REGEX WAS NOT ENOUGH, and the first version proved it on itself. This codebase writes markdown
-// in its comments, so `// It used to be ` + "`--campaign`" + `` looks exactly like a raw-string
+// in its comments, so `// It used to be ` + "`--campaign`" + “ looks exactly like a raw-string
 // literal to any pattern that only knows about quotes — and the guard fired on the very prose that
 // explains the retirement, which is the one thing it must never do. So this is a small scanner that
 // tracks the four states Go has, and a comment is simply not one of the two it collects.
