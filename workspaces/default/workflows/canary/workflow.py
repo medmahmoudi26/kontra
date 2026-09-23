@@ -6,22 +6,29 @@ WHAT A READER SEES, IN ORDER, AND WHERE EACH ONE COMES FROM:
                               so the launch form renders help text and pre-filled values
     Machines coming up        `fleet.hold(...)`, whose scope IS the Fleet's lifetime
     a Worker taking work      `f.place(...)` then `f.ready()`
-    typed records, every 2s   the ACTOR's `stream(Sweep(...))`, on topic `canary/sweep`
-    a bar that means it       this workflow's own `progress(...)`, on topic `progress`
+    a line every 2 seconds    the ACTOR's own logger, on the run's log rail
     rows you can SQL          `catalog.dataset("canary_signals")`
     the Machines going away   the scope exiting — a replayable step, not a line in a script
-    log lines throughout      `workflow.logger`, replay-aware, carrying the run id
+    the run's own narration   `workflow.logger`, replay-aware, carrying the run id
 
-THE POINT IS THAT NOTHING HERE IS A MOCK. It is a real Fleet, a real Worker, a real Dataset and a
-real stream; the only pretend part is that the actor sleeps instead of talking to somebody else's
-estate, which is the one thing a first run should NOT do.
+THE POINT IS THAT NOTHING HERE IS A MOCK. It is a real Fleet, a real Worker and a real Dataset; the
+only pretend part is that the actor sleeps instead of talking to somebody else's estate, which is
+the one thing a first run should NOT do.
 
-── THREE PUBLISHERS, THREE TOPICS, ONE RUN ─────────────────────────────────────────────────────────
+── ONE CHANNEL FOR "WHERE IS IT", AND IT IS THE LOG ────────────────────────────────────────────────
 
-`progress(...)` is the WORKFLOW's vocabulary and knows the whole run's denominator. `stream(...)`
-inside the actor is the METHOD's, and knows only its own Batch. They are deliberately not folded
-together: a single flat state is what makes a bar jump between a batch's denominator and a run's on
-alternate records. The console draws them as separate cards because they answer different questions.
+This workflow used to also publish `progress(...)` records on their own topic, and the actor
+published typed `Sweep` records on another, for a console pane that drew both. Both are gone.
+
+A Workflow Stream lives in the workflow's MEMORY and dies with the workflow. The run finishes in
+under a minute, so by the time anybody has loaded the console and signed in there is nothing left
+to subscribe to — the pane's ordinary state was an empty box, which reads as a broken feature. The
+log goes to VictoriaLogs and the rows go to the lake, and both are still there tomorrow. A first
+run must not be the demo of a channel that is usually empty.
+
+So: `workflow.logger` says what the RUN is doing, the actor's logger says what the SWEEP is doing,
+and the Dataset says what came of it. The verbs come back when there is a durable store behind
+them.
 
 ── WHY IT IS NOT FASTER THAN IT IS ─────────────────────────────────────────────────────────────────
 
@@ -47,7 +54,7 @@ from pydantic import Field
 from temporalio import workflow
 from typing_extensions import Annotated, TypedDict
 
-from kontra import KontraFlow, catalog, fleet, progress
+from kontra import KontraFlow, catalog, fleet
 from kontra.fleet import docker_fleet, do_fleet
 
 #: The Actor this run places and calls. One actor, deliberately: a first run should have exactly
@@ -77,13 +84,13 @@ class CanaryInput(TypedDict, total=False):
                     "resumption, so a Worker killed halfway resumes at the target it reached.")]
     steps: Annotated[int, Field(
         default=5,
-        description="Phases per target. Each one publishes a typed record and pushes a row, so "
-                    "targets x steps is both the number of records you will watch and the number "
-                    "of rows the Dataset ends up with.")]
+        description="Phases per target. Each one logs a line and pushes a row, so targets x steps "
+                    "is both the number of lines you will watch go by and the number of rows the "
+                    "Dataset ends up with.")]
     every: Annotated[float, Field(
         default=2.0,
-        description="Seconds between records. 2.0 is the Workflow Stream's own flush interval — "
-                    "anything smaller buys latency nobody can see and costs Signals nobody wanted.")]
+        description="Seconds between records. One record is one line on the run's log rail and "
+                    "one row in the Dataset, so this is the pace the run reads at.")]
     machines: Annotated[int, Field(
         default=1,
         description="How many Machines the Fleet has. One is enough to prove placement; the "
@@ -126,6 +133,19 @@ def _provider(name: str, machines: int):
 
 @workflow.defn
 class Canary(KontraFlow):
+    """Provisions a Fleet, sweeps on it, and lets you watch every part of it happen.
+
+    THE FIRST PARAGRAPH OF THIS DOCSTRING IS THE WORKFLOW'S DESCRIPTION, everywhere. `catalog.py`
+    derives it with `first_paragraph(cls.__doc__)` and publishes it on the descriptor beside
+    `input` and `output`, so it is what the console's launch form prints above the fields and what
+    `kontra workflow ls` prints beside the name. A `@workflow.defn` class with no docstring reaches
+    every reader as a bare type name — which is the state this one was in.
+
+    It is the CLASS's docstring and not `run`'s, because `run`'s belongs to the signature: it is
+    where the argument's defaulting is explained, and that is a note for somebody editing this file
+    rather than for somebody deciding whether to press Run.
+    """
+
     @workflow.run
     async def run(self, req: CanaryInput | None = None) -> dict:
         """`req` DEFAULTS, because `kontra workflow start` with no `--input` passes no argument at
@@ -149,17 +169,14 @@ class Canary(KontraFlow):
         units = [{"target": t, "steps": steps} for t in targets]
         total = len(targets) * steps
 
+        # THE DENOMINATOR FIRST, BEFORE ANYTHING HAPPENS. A reader who opens the rail at second
+        # zero should already know how big this run is, so the lines that follow mean something.
+        # It is one line rather than the two it used to be: the same fact printed twice, once with
+        # `%s` and once with an f-string, is how a rail teaches people to skim past it.
         workflow.logger.info(
-            "canary: %d target(s) x %d step(s) = %d record(s), %d %s machine(s)",
+            "canary: %d target(s) x %d step(s) = %d record(s), on %d %s machine(s)",
             len(targets), steps, total, machines, provider)
-
-        # PUBLISHED BEFORE ANYTHING HAPPENS, so a pane opened at the very start draws a bar
-        # immediately instead of waiting for a second event to infer the denominator.
-        progress(phase="fleet", done=0, total=total, machines=machines,
-                 where=provider, note="bringing the Fleet up")
-        workflow.logger.info(
-            f"canary: {len(targets)} target(s), {steps} step(s) each, on {machines} "
-            f"{provider} machine(s)")
+        workflow.logger.info("canary: bringing the Fleet up")
 
         rows: list = []
         voided = ""
@@ -169,8 +186,6 @@ class Canary(KontraFlow):
         # is a workflow and not a shell script: a script that dies leaves the Machines standing.
         async with fleet.hold(_provider(provider, machines), tag="canary") as f:
             workflow.logger.info("canary: fleet held — placing %s@%s", *ACTOR)
-            progress(phase="place", done=0, total=total, machines=machines,
-                     where=provider, note="placing the actor")
 
             await f.place(ACTOR[0], ACTOR[1], sessions=sessions)
             # `place` returns while systemd (or the container) is still starting. A Batch
@@ -178,9 +193,12 @@ class Canary(KontraFlow):
             # indistinguishable from a hung run — so the readiness gate is not optional.
             await f.ready()
 
-            workflow.logger.info("canary: worker ready — sweeping %d unit(s)", len(units))
-            progress(phase="sweep", done=0, total=total, machines=machines,
-                     where=provider, note="sweeping")
+            # THE HANDOVER, NAMED. Every line after this one and before "sweep finished" comes
+            # from the ACTOR, on a Machine, and carries that Worker's identity — so a reader who
+            # sees the rail go quiet knows exactly which process went quiet.
+            workflow.logger.info(
+                "canary: worker ready — handing %d unit(s) to %s@%s, a line every %.1fs",
+                len(units), *ACTOR, every)
 
             async with catalog.actor(*ACTOR) as c:
                 try:
@@ -192,20 +210,21 @@ class Canary(KontraFlow):
                 except Exception as exc:  # noqa: BLE001 - the reason is the announcement
                     # A VOIDED BATCH IS NOT A BATCH THAT FOUND NOTHING, and this demo exists to
                     # make that distinction visible rather than to hide it behind a zero.
+                    #
+                    # ERROR, ONCE. It used to be logged twice — a WARNING carrying the structured
+                    # fields and an ERROR carrying the sentence — which put the same failure on the
+                    # rail at two levels, so a reader filtering to errors saw half of it and a
+                    # reader at warning saw it twice. The fields ride on the ERROR.
                     voided = repr(exc)
-                    workflow.logger.warning(
-                        f"canary sweep voided: {voided}",
+                    workflow.logger.error(
+                        "canary: sweep voided — %s", voided,
                         extra={"incomplete": True, "axis": "targets", "phase": "sweep"})
-                    workflow.logger.error("canary: sweep voided — %s", voided)
 
-            progress(phase="sweep", done=len(rows), total=total, machines=machines,
-                     where=provider, note="sweep complete")
-            workflow.logger.info("canary: %d row(s) into %s", len(rows), out.name)
+            workflow.logger.info(
+                "canary: sweep finished — %d of %d row(s) into %s", len(rows), total, out.name)
 
         # The scope has exited here, which means the Lease is dropped and the Machines are gone.
-        workflow.logger.info("canary: fleet released")
-        progress(phase="done", done=len(rows), total=total, machines=0,
-                 where=provider, note="fleet released")
+        workflow.logger.info("canary: fleet released — %d machine(s) destroyed", machines)
 
         complete = not voided and len(rows) == total
         if not complete:
@@ -216,10 +235,9 @@ class Canary(KontraFlow):
                 "canary: INCOMPLETE — %d of %d record(s)%s",
                 len(rows), total, f"; {voided}" if voided else "",
                 extra={"incomplete": True, "axis": "targets"})
-            workflow.logger.info(f"canary INCOMPLETE — {len(rows)} of {total} record(s)")
         else:
             workflow.logger.info(
-                f"canary complete: {len(rows)} record(s) into {out.name}; Machines destroyed")
+                "canary: complete — %d record(s) in %s, Machines destroyed", len(rows), out.name)
 
         return {
             "targets": targets,

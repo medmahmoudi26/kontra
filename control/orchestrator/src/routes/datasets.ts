@@ -38,6 +38,7 @@ import {
   NoSuchDatasetError,
   NotTemporaryDatasetError,
   datasetProvenance,
+  type DatasetInfo,
   datasetRunIds,
   deleteTemporaryDataset,
   listDatasets,
@@ -64,6 +65,51 @@ export interface DatasetRouteDeps {
 export function registerDatasetRoutes(app: FastifyInstance, deps: DatasetRouteDeps): void {
   const { store, lake, materialization, records, runWorkflows } = deps;
 
+  /**
+   * The listing, named and tagged — the three best-effort joins, in one place.
+   *
+   * EXTRACTED BECAUSE TWO ROUTES ASK THE SAME QUESTION. `GET /api/datasets` lists the lake and
+   * `GET /api/runs/:runId/datasets` asks which of those rows belong to one Run; if the second one
+   * re-implemented the joins, the run page could name a Dataset differently from the Datasets page
+   * — and "which authority resolved the Run" is exactly the thing this file's header says must
+   * stay written down once.
+   *
+   * EVERY LEG STAYS CAUGHT SEPARATELY. A ledger outage costs the dispatch-matched leg and nothing
+   * else, because a v2 Run's Dataset names itself from the lake's own `run_id` statistics and the
+   * ledger has no record of it either way.
+   */
+  async function named(sel: {
+    name?: string;
+    version?: string;
+    dt?: string;
+    kind?: DatasetKind;
+  }): Promise<DatasetInfo[]> {
+    const infos = await listDatasets(store, sel, lake);
+    let dispatches: DispatchRef[] = [];
+    try {
+      dispatches = await materialization.listDispatches({
+        actor: sel.name,
+        version: sel.version,
+        dt: sel.dt,
+      });
+    } catch {
+      /* no ledger: rows that know their own Run still name themselves */
+    }
+    let identities: RunWorkflow[] = [];
+    try {
+      identities = await runWorkflows.list(datasetRunIds(infos, dispatches));
+    } catch {
+      /* no identities: every row falls back to the Actor's name and version */
+    }
+    const rows = withDatasetNames(infos, dispatches, identities);
+    try {
+      const runIds = rows.map((i) => i.runId).filter((id): id is string => typeof id === 'string');
+      return withDatasetDeviations(rows, await records.list(runIds));
+    } catch {
+      return rows;
+    }
+  }
+
   // --- datasets (the query browser) ---
   //
   // EVERYTHING IS A DATASET: an actor's output for one dispatch, and an operator-loaded list,
@@ -78,47 +124,67 @@ export function registerDatasetRoutes(app: FastifyInstance, deps: DatasetRouteDe
       kind: DatasetKind;
     }>;
     try {
-      const infos = await listDatasets(store, { name, version, dt, kind }, lake);
-      // Attach the DERIVED run-grain name (ADR 0029 §2). Three authorities can say which Run is
-      // behind a row — the ledger, a temp's owner marker, and the row's own `run_id` statistics —
-      // and `withDatasetNames` documents the order. They are joined HERE rather than inside the
-      // catalog scan because the ledger and the run record are not the lake.
-      //
-      // EVERY LEG IS BEST-EFFORT AND NONE OF THEM CAN 502 THE LISTING. A ledger outage used to
-      // return the rows bare; it now costs only the dispatch-matched leg, because a v2 Run's
-      // Dataset names itself from the lake and the ledger has no record of it either way.
-      // Scoped by the same selector so a named query does not group the whole ledger.
-      let dispatches: DispatchRef[] = [];
-      try {
-        dispatches = await materialization.listDispatches({ actor: name, version, dt });
-      } catch {
-        /* no ledger: rows that know their own Run still name themselves */
-      }
-      // The identity the name renders is the CALLER WORKFLOW's, snapshotted at start (ADR 0029 §2)
-      // and keyed by runId. Asked for the UNION the rows and the ledger between them can resolve,
-      // in one round trip. Best-effort within the best-effort join: an unreachable store leaves the
-      // rows named from the producing Actor — the documented fallback in `withDatasetNames`.
-      let identities: RunWorkflow[] = [];
-      try {
-        identities = await runWorkflows.list(datasetRunIds(infos, dispatches));
-      } catch {
-        /* no identities: every row falls back to the Actor's name and version */
-      }
-      const named = withDatasetNames(infos, dispatches, identities);
-      // Layer the stored tags and rename (ADR 0029 §1, §4) over the derived names, keyed by the
-      // runId just stamped on each row. Best-effort on the same terms as the ledger join beside it:
-      // the record store being unreachable leaves the rows derived-and-untagged, not a failed list.
-      try {
-        const runIds = named
-          .map((i) => i.runId)
-          .filter((id): id is string => typeof id === 'string');
-        const deviations = await records.list(runIds);
-        return withDatasetDeviations(named, deviations);
-      } catch {
-        return named;
-      }
+      // The DERIVED run-grain name (ADR 0029 §2), the tags and the rename. Three authorities can
+      // say which Run is behind a row — the ledger, a temp's owner marker, and the row's own
+      // `run_id` statistics — and `withDatasetNames` documents the order. They are joined in
+      // `named` rather than inside the catalog scan because the ledger and the run record are not
+      // the lake, and rather than here because `/api/runs/:runId/datasets` needs the same answer.
+      return await named({ name, version, dt, kind });
     } catch (err) {
       return reply.code(502).send({ error: `could not list datasets: ${errMessage(err)}` });
+    }
+  });
+
+  /**
+   * WHAT ONE RUN WROTE — the run page's Dataset region, answered by the LAKE.
+   *
+   * ── WHY THIS ROUTE EXISTS AT ALL ───────────────────────────────────────────────────────────────
+   *
+   * `GET /api/runs/:runId` answers this from the ADR 0017 ledger, in `materializationRecords`, and
+   * for a v2 Run that list is ALWAYS EMPTY. `publishBatch` writes lake rows and no ledger record,
+   * so every Dataset the SDK path produces is invisible to it. MEASURED on this box:
+   *
+   *     /api/runs/canary-1790163275   materializationRecords: []   materialization.total: 0
+   *     /api/datasets                 canary_signals · runId canary-1790163275 · 10 rows
+   *
+   * Both answers were correct about their own authority, and the run page believed the one that
+   * had nothing to say — so it printed "This run recorded no output Dataset" over ten rows that
+   * were sitting in the lake with this run's id stamped on every one of them.
+   *
+   * THE ROWS THEMSELVES HAVE ALWAYS KNOWN. `run_id` is stamped on every materialized row and
+   * survives promotion, and DuckLake keeps per-file column statistics — so `contributingRuns`
+   * comes out of the same metadata query that already counts rows and bytes. No data file is
+   * opened to answer this.
+   *
+   * A ROW MATCHES ON ANY OF THE THREE AUTHORITIES, which is the point of asking here rather than
+   * filtering on `runId` alone: `runId` is deliberately ABSENT once two Runs share a partition
+   * (`DatasetInfo.runId`), and a temp Dataset is addressed by its `owner` before any row lands. A
+   * Run that contributed to a shared partition still contributed to it.
+   *
+   * IT IS A LIST, NOT A ROW. One Run can write several Datasets — a durable output and a temp it
+   * promoted from — and collapsing that to the first would hide the others.
+   *
+   * ADMISSION: open, on the same terms as the rest of the lake browser above, and it widens
+   * nothing. Every row this can return is a row `GET /api/datasets` already returns to the same
+   * caller — this is a FILTER over that answer, not a new read. No operator SQL crosses the wire
+   * and no object-store URL leaves the process. (The generated spec documents it under the
+   * `/api/runs` prefix gate, which is where `GET /api/runs` and `GET /api/runs/:runId` already sit
+   * while being open reads themselves; that mismatch predates this route and is not this route's
+   * to resolve quietly.)
+   */
+  app.get('/api/runs/:runId/datasets', async (req, reply) => {
+    const runId = runIdOf(req);
+    if (!runId) return reply.code(400).send({ error: 'runId is required' });
+    try {
+      const rows = await named({});
+      return rows.filter(
+        (i) =>
+          i.runId === runId ||
+          i.owner === runId ||
+          (i.contributingRuns ?? []).includes(runId)
+      );
+    } catch (err) {
+      return reply.code(502).send({ error: `could not list this run's datasets: ${errMessage(err)}` });
     }
   });
 

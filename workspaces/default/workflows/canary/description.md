@@ -3,11 +3,12 @@
 **Provisions a Fleet, sweeps on it, and lets you watch every part of it happen.** The first run
 anybody does on a fresh install, and the one that shows what kontra actually is.
 
-In one run you see a Fleet come into existence, a Worker pick up work on it, typed records arrive
-in a pane every two seconds *while it is still running*, rows land in a Dataset you can query in
-SQL, and the Machines destroyed when the scope exits — with a line of code responsible for each.
+In one run you see a Fleet come into existence, a Worker pick up work on it, a line arrive every
+two seconds saying what it is doing *while it is still doing it*, rows land in a Dataset you can
+query in SQL, and the Machines destroyed when the scope exits — with a line of code responsible
+for each.
 
-Nothing here is a mock. Real Fleet, real Worker, real Dataset, real stream. The only pretend part
+Nothing here is a mock. Real Fleet, real Worker, real Dataset. The only pretend part
 is that the actor sleeps instead of reaching somebody else's estate, which is the one thing a first
 run should not do.
 
@@ -15,7 +16,7 @@ run should not do.
 
 ```sh
 kontra deploy --actor workspaces/default/actors/canary
-kontra workflow serve workspaces/default/workflows/canary --tmux
+kontra workflow serve workspaces/default/workflows/canary
 kontra workflow start Canary --wait
 ```
 
@@ -29,7 +30,7 @@ than as comments — comments do not exist at runtime.
 |---|---|---|
 | `targets` | `["alpha", "beta"]` | one target is one **Unit** — the unit of failure and of resumption |
 | `steps` | `5` | phases per target; `targets × steps` is both the records you watch and the rows you get |
-| `every` | `2.0` | seconds between records — the Workflow Stream's own flush interval |
+| `every` | `2.0` | seconds between records — one log line and one Dataset row each |
 | `machines` | `1` | Fleet scale |
 | `sessions` | `1` | density per Machine |
 | `provider` | `docker` | `docker` = Warden containers, no credential. `cloud` = DigitalOcean |
@@ -50,9 +51,12 @@ registers nothing, and looks idle.
 
 ## What to look at while it runs
 
-- **the run page** — three publishers on three topics: this workflow's `progress`, the actor's
-  typed `canary/sweep` records, and the run's own history. They are separate because they answer
-  different questions; folding them into one flat state is what makes a bar jump.
+- **the run page** — the log rail and the Dataset tail, side by side. The workflow narrates the
+  run, the actor narrates the sweep, and both land on the same rail carrying the run id and the
+  Worker identity. There is no separate progress pane: a Workflow Stream lives in workflow memory
+  and dies with the run, so a pane fed by one is empty for everybody who opens the page after it
+  finishes — which, at 55 seconds, is everybody. Typed streaming returns when there is a durable
+  store behind it.
 - **Datasets** — `canary_signals` fills while the run is still going. Click a cell to read it whole.
 - **Logs** — every line carries the run id and the Worker identity, so "which process said this"
   is answerable without leaving the page.

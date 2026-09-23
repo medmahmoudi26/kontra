@@ -1,5 +1,5 @@
 /**
- * THE EVENT-LOG SURFACE — one route, and the only drill-down this API has.
+ * THE EVENT-LOG SURFACE — the log, the drill-down, and the run's own two payloads.
  *
  * `GET /api/runs/:runId` says a run is `running`; it cannot say whether that run is grinding
  * through Batches, sitting in a retry backoff, or blocked on a queue nobody polls, and only the
@@ -11,6 +11,12 @@
  * in the run module: it answers about any execution the log names, not just the Run the caller
  * started.
  *
+ * IT ALSO SERVES `…/io`, WHICH IS THE ONE THING HERE THAT READS A PAYLOAD. It is in this module
+ * because it comes from the same history and because the payload-free rule is stated here: `…/io`
+ * decodes exactly two payloads — the run's argument and its result — fetched with two targeted
+ * RPCs rather than by paging. See {@link fetchRunIO} for why that does not reopen the blob-GET
+ * fan-out the log path exists to avoid.
+ *
  * WHAT IT NEEDS: the {@link HistoryArchive} (ADR 0025) — SHARED with the hitl module, and built
  * over the SAME object store the dataset browser reads. `fetchRunHistory` is the live authority and
  * is imported directly; `readHistoryOrArchive` owns the order and the fallback rule.
@@ -19,7 +25,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { type HistoryArchive, readHistoryOrArchive } from '../historyArchive';
-import { fetchRunHistory } from '../temporalClient';
+import { fetchRunHistory, fetchRunIO } from '../temporalClient';
 import { errMessage } from './errors';
 import { runIdOf } from './runId';
 
@@ -48,6 +54,34 @@ export function registerHistoryRoutes(app: FastifyInstance, archive: HistoryArch
       return history ?? reply.code(404).send({ error: 'no history for that run' });
     } catch (err) {
       return reply.code(502).send({ error: `could not read history: ${errMessage(err)}` });
+    }
+  });
+
+  /**
+   * WHAT THIS RUN WAS STARTED WITH, AND WHAT IT RETURNED.
+   *
+   * THE RUN PAGE WAS DRAWING THE SCHEMA AND CALLING IT THE RUN. Its Input region printed each
+   * declared field's DEFAULT — footnoted "the run's recorded values land with the snapshot store"
+   * — and its Output region printed field names and descriptions with no values at all. Two runs
+   * of the same workflow started with different arguments therefore rendered identically, which
+   * makes a run RECORD into a second copy of the launch FORM.
+   *
+   * 404 IS AN ANSWER AND NOT A FAULT: Temporal drops an execution at retention, and a run whose
+   * argument is gone is a run whose argument is gone. `output` absent while `execution` is still
+   * running is ordinary for the same reason — there is no close event yet.
+   *
+   * NO ARCHIVE FALLBACK, unlike `…/history` beside it. The archive (ADR 0025) stores the reduced
+   * EVENT LOG, which is payload-free by construction, so there is nothing in it to answer this
+   * with. Saying so is better than a fallback that silently returns `{}`.
+   */
+  app.get('/api/runs/:runId/io', async (req, reply) => {
+    const runId = runIdOf(req);
+    const { exec } = (req.query ?? {}) as { exec?: string };
+    try {
+      const io = await fetchRunIO(runId, exec || undefined);
+      return io ?? reply.code(404).send({ error: 'no such execution — Temporal has dropped it' });
+    } catch (err) {
+      return reply.code(502).send({ error: `could not read the run's input: ${errMessage(err)}` });
     }
   });
 }

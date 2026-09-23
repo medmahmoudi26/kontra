@@ -1,13 +1,24 @@
 """canary — the first thing anybody runs on kontra, and the whole product in one screen.
 
 WHAT A READER IS SUPPOSED TO SEE. Not "a test passed". They should watch a Fleet come into
-existence, a Worker pick up work on it, typed records arrive in a pane every two seconds while it
-is still running, rows land in a queryable Dataset, and the Machines go away when the scope exits —
-and be able to point at the line of code responsible for each one.
+existence, a Worker pick up work on it, a line arrive every two seconds saying what it is doing
+while it is still doing it, rows land in a queryable Dataset, and the Machines go away when the
+scope exits — and be able to point at the line of code responsible for each one.
 
-    @actor.method(takes=Probe, emits=Signal, streams=Sweep)
-      await stream(Sweep(...))   ──► topic `canary/sweep` ──► the run's Workflow Stream
+    @actor.method(takes=Probe, emits=Signal)
+      log.info(...)              ──► the run's log rail ────► every line carries the run id
       await dataset.push(...)    ──► the lake ──────────────► Datasets, queryable in SQL
+
+TWO CHANNELS, NOT THREE. An earlier version of this file also published a typed `Sweep` record
+through `stream()`, on its own topic, for a pane that drew it live. It is gone, and what replaced
+it is the two things above: the LOG says what is happening, the DATASET TAIL says what came of it.
+
+The reason is durability, not taste. A Workflow Stream lives in the workflow's memory and dies with
+the workflow, so the pane's most common state was an EMPTY BOX — a 55-second run is already over by
+the time a browser has loaded and signed in. The log survives in VictoriaLogs and the rows survive
+in the lake, so the run page says the same thing five minutes later as it did live. Typed streaming
+comes back when there is a durable store under it; until then a demo must not ship a pane whose
+usual state is blank.
 
 IT TOUCHES NOTHING. No network, no third party, no credential. A demo whose failure mode is "the
 target was slow" teaches a first-time reader nothing about kontra, and a demo that needs an API key
@@ -16,12 +27,11 @@ time, and the sleep is the ONLY reason this takes any time at all.
 
 ── WHY THE CADENCE IS A DECLARED FIELD AND NOT A `sleep(2)` ────────────────────────────────────────
 
-`every` is an author-visible parameter with a default of two seconds, and two seconds is not
-arbitrary: it is the Workflow Stream client's own flush interval (`workflowstreams`,
-`batch_interval=2s`). A record produced faster than that does not reach a reader faster — it waits
-in the buffer — so a tighter loop buys latency nobody sees and costs Signals nobody wanted. Two
-seconds is the floor where "every record is on screen as soon as it exists" is TRUE rather than
-aspirational.
+`every` is an author-visible parameter with a default of two seconds. Two seconds is the floor at
+which a reader watching the rail always has something newer than their last glance without the rail
+turning into a wall nobody reads — and it is also one row in the Dataset, so `targets x steps` is
+both the lines you watch and the rows you get. A tighter loop makes those two numbers bigger and
+the demo no clearer.
 
 ── THE UNIT IS THE UNIT OF FAILURE ─────────────────────────────────────────────────────────────────
 
@@ -36,7 +46,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from kontra import actor, param, stream
+from kontra import actor, param
 
 #: THE ACTOR'S OWN LOGGER, and the demo is incomplete without one.
 #:
@@ -82,7 +92,8 @@ class Signal:
 
     — which the publisher then retried while the run sat at RUNNING with nothing in the actor's log
     to explain it. The column that names the process is `worker`, which is also the Temporal worker
-    identity the log records and the stream records carry, so the three join on one string.
+    identity every log line from this Batch carries — so the rail and the Dataset join on one
+    string, and "which process produced this row" is answerable from either end.
     """
 
     target: str
@@ -94,34 +105,11 @@ class Signal:
 
 
 @dataclass
-class Sweep:
-    """WHAT THIS METHOD SHOWS WHILE IT RUNS — declared here, in the actor that owns it.
-
-    A workflow author never reads this file; they read the catalog, where this arrives beside the
-    Method's `input` and `output`. That is what lets a console draw typed progress for a run whose
-    actor it has never heard of.
-
-    THE VOCABULARY IS THIS ACTOR'S. `target`, `phase`, `step` — not `done`/`total`/`percent`. A
-    framework word here would be a framework word on every actor's pane, and the whole argument for
-    typed streaming is that a crawler says `url` and a scanner says `host`.
-    """
-
-    target: str
-    step: int
-    of: int
-    phase: str
-    latency_ms: float
-    #: Rows this Session has pushed so far. A number that stops climbing is a stall, which is the
-    #: one thing a reader watching a pane is actually trying to detect.
-    found: int
-
-
-@dataclass
 class CanaryParams:
     """Knobs, with defaults and descriptions because the console renders this shape as a form."""
 
-    #: Seconds between records. The Workflow Stream flushes every 2s, so anything smaller buys
-    #: latency nobody can see — see the module docstring.
+    #: Seconds between records. One record is one log line and one Dataset row — see the module
+    #: docstring for why two seconds is the floor rather than an arbitrary pause.
     every: float = 2.0
     #: Name a target here and that ONE Unit raises, so per-unit isolation is visible rather than
     #: claimed. Empty on purpose: the first run anybody sees has nothing red in it.
@@ -167,8 +155,8 @@ class Canary:
         """IS THE SESSION STILL USABLE? Nothing else.
 
         There is no resource to lose here, so it can only say yes — which is the shape every
-        healthcheck should have. Progress is NOT this hook's job: it is per Method, it is typed,
-        and it goes through `stream()`.
+        healthcheck should have. "How far along is it" is NOT this hook's question: that is what
+        the Method's own log lines say, as they happen.
         """
         return None
 
@@ -176,7 +164,7 @@ class Canary:
     async def stop(self):
         self._found = 0
 
-    @actor.method(takes=Probe, emits=Signal, streams=Sweep)
+    @actor.method(takes=Probe, emits=Signal)
     async def sweep(self, batch, dataset):
         """Walk each target through its phases, saying so as it goes.
 
@@ -192,8 +180,8 @@ class Canary:
         fail_on = str(param.get("fail_on", "") or "")
         # The Temporal worker identity of the process running this Batch. `machine.ts` writes it
         # into the Worker's environment; on a Fleet Machine it is the Droplet's name, in a
-        # container it is the container's. It rides on the row so the Dataset, the stream and the
-        # log lines all name the same process.
+        # container it is the container's. It rides on the row so the Dataset and the log lines
+        # name the same process.
         worker = os.environ.get("KONTRA_MACHINE") or os.environ.get("HOSTNAME") or "local"
 
         async for unit in batch:
@@ -219,18 +207,25 @@ class Canary:
                 phase = _phase(step)
                 latency = _latency(probe.target, step)
 
-                # SAID BEFORE THE SLEEP, NOT AFTER. A stall is exactly when a reader needs the
-                # label, and a record that names what just FINISHED says nothing during the wait.
-                await stream(
-                    Sweep(
-                        target=probe.target,
-                        step=step + 1,
-                        of=steps,
-                        phase=phase,
-                        latency_ms=latency,
-                        found=self._found,
-                    )
-                )
+                # SAID BEFORE THE SLEEP, NOT AFTER, and at INFO.
+                #
+                # BEFORE, because a stall is exactly when a reader needs the label: a line that
+                # names what just FINISHED says nothing for the two seconds somebody is staring at
+                # the rail wondering whether it is stuck.
+                #
+                # INFO, because this IS the progress channel now. It used to be DEBUG, on the
+                # grounds that the typed `Sweep` record already carried the phase for a pane and a
+                # log line would be the same fact twice at the reader's default level. That
+                # argument died with the stream: at DEBUG this line is invisible to everybody who
+                # has not gone looking, and the rail goes silent for `steps x every` seconds per
+                # target — which is the entire duration of the demo.
+                #
+                # The counter rides on the line rather than the row it describes: a number that
+                # stops climbing is a stall, and that is the one thing a reader watching a rail is
+                # actually trying to detect.
+                log.info(
+                    "canary: %s %s (step %d/%d, %.1f ms) — %d row(s) so far",
+                    probe.target, phase, step + 1, steps, latency, self._found)
 
                 await dataset.push(
                     Signal(
@@ -243,13 +238,6 @@ class Canary:
                     )
                 )
                 self._found += 1
-
-                # DEBUG, NOT INFO, AND THE SPLIT IS ADR 0050's. The STREAM is state a machine
-                # draws — it already carries this phase, typed, for the pane. A log line repeating
-                # it at INFO would be the same fact twice at the reader's default level, which is
-                # how a rail becomes something people stop reading. At DEBUG it is there for
-                # somebody who has raised the floor because they are debugging this actor.
-                log.debug("canary: %s %s (%.1f ms)", probe.target, phase, latency)
 
                 await asyncio.sleep(every)
 

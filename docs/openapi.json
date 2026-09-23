@@ -777,6 +777,25 @@
         "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
       }
     },
+    "/api/runs/{runId}/datasets": {
+      "get": {
+        "operationId": "getRunsByRunIdDatasets",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
     "/api/runs/{runId}/explore": {
       "get": {
         "operationId": "getRunsByRunIdExplore",
@@ -818,6 +837,25 @@
     "/api/runs/{runId}/history": {
       "get": {
         "operationId": "getRunsByRunIdHistory",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/io": {
+      "get": {
+        "operationId": "getRunsByRunIdIo",
         "responses": {
           "200": {
             "description": "ok"
