@@ -30,12 +30,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import socket
 from datetime import timedelta
 from typing import Any, Dict
 
 from kontra.retry import NonRetryableError, SessionLost
 
+from internals import logs, workerid
 from internals.catalog import publish_catalog
 from internals.engine import build_session_factory
 from internals.temporal.sessions import SessionWorkers
@@ -75,20 +75,17 @@ _SESSION_DRAIN = timedelta(seconds=60)
 _SESSION_SLOTS = 4
 
 
-#: THE MACHINE THIS HOST RUNS ON — the host portion of the Temporal worker identity, which is
-#: exactly what the fleet's poller listing shows per Machine (`11@kf-dns-01@nscheck-0.1.0` is
-#: `pid@host@queue`). The pid is deliberately dropped: a restarted Worker is the same Machine,
-#: and keeping it would make one Droplet read as a new Machine after every restart.
+#: THE MACHINE THIS HOST RUNS ON — field two of the Temporal worker identity, which is exactly
+#: what the fleet's poller listing shows per Machine (`11@kf-dns-01@nscheck-0.1.0` is
+#: `pid@host@queue`). Re-exported from `internals/workerid.py` rather than derived a second time:
+#: the value a Batch reports as its Machine and the value inside this Worker's Temporal identity
+#: must be one string, and two `socket.gethostname()` calls are two chances for them not to be.
 #:
-#: Snapshotted at import because a hostname does not change under a live process, and this is
-#: read once per Batch. Neither SDK sets a custom Temporal identity, so the default derivation —
-#: `{pid}@{hostname}` in Python, `{pid}@{hostname}@{queue}` in Go — makes this string and the
-#: poller listing's host portion the same value on both halves of a Worker.
-#:
-#: On the fleet it is the Droplet's name (`kf-dns-01`): a Worker is a pair of systemd units ON
-#: the Machine, not a container, so there is no container id standing between the two
-#: (control/orchestrator/src/infra/programs/machine.ts).
-MACHINE = socket.gethostname()
+#: This USED to note that "neither SDK sets a custom Temporal identity". Both do now — the Python
+#: side adopts the Go default's three-field shape — which is what makes the poller listing's host
+#: portion and this string the same value on both halves of a Worker by construction rather than
+#: by coincidence.
+MACHINE = workerid.MACHINE
 
 
 def _lock(actor_id: str) -> asyncio.Lock:
@@ -308,6 +305,11 @@ def _spawn_session_worker(registry):
 
     The client is the one the OPEN is running on (`activity.client()`), so the Session's worker
     inherits the claim-check codec and the address without any of it being passed around.
+
+    IT IDENTIFIES AS ITS OWN QUEUE, NOT AS THE HOST'S. A Session's worker polls
+    `{actor}-{version}-s-{sessionId}`, which nobody else polls — so a poller listing that showed
+    it under the shared queue's identity would report one Worker where there are five, and the
+    scope that is actually wedged would be the one indistinguishable from the four that are fine.
     """
     def spawn(queue: str):
         from temporalio import activity
@@ -319,6 +321,8 @@ def _spawn_session_worker(registry):
             activities=build_activities(registry, sessions=live_sessions(registry)),
             max_concurrent_activities=_SESSION_SLOTS,
             graceful_shutdown_timeout=_SESSION_DRAIN,
+            identity=workerid.worker_identity(queue),
+            build_id=workerid.build_id(),
         )
 
     return spawn
@@ -388,8 +392,18 @@ async def serve_async(registry, *, address: str = "", namespace: str = "") -> No
     # `internals/temporal/tlsconfig.py`. `False` when nothing is configured, which is what the
     # SDK means by no TLS and what this call passed before.
     tls = connect_tls()
+    # THE CLIENT CARRIES THE IDENTITY TOO, and not only the Worker. A client identity is what the
+    # server records against the calls this process MAKES — starting a workflow, signalling a
+    # stream, completing an activity — where the Worker's is what it records against tasks this
+    # process TAKES. Left at the default, half of what a Machine did would be attributed to
+    # `<pid>@<hostname>` and the other half to the identity below, which is one Worker wearing two
+    # names in one Run's history.
     client = await Client.connect(
-        address, namespace=namespace, data_converter=casstore.data_converter(), tls=tls
+        address,
+        namespace=namespace,
+        data_converter=casstore.data_converter(),
+        tls=tls,
+        identity=workerid.worker_identity(queue),
     )
     metrics.serve(registry.actor_name, version)  # /metrics on its own port
     publish_catalog(registry)                    # self-register so the actor is dispatchable
@@ -399,15 +413,26 @@ async def serve_async(registry, *, address: str = "", namespace: str = "") -> No
     # live-Session cap — an OpenSession frees its slot the moment the Session's worker is up, so
     # this number would bound opens in flight, not Sessions alive. The cap that means what it
     # says is KONTRA_MAX_PARALLEL_SESSIONS, counted in live Sessions by `SessionWorkers`.
+    # THE QUEUE, FOR THE LINES THAT HAVE NO TASK. Inside an activity `logs.temporal_context` reads
+    # the real queue off `activity.info()` — which on a Session's worker is the Session's own, not
+    # this one. This names the fallback for boot, shutdown, and the polling-with-nothing-in-flight
+    # lines that are exactly the ones explaining a Worker that never picked anything up.
+    logs.bind_worker(queue)
+    identity = workerid.worker_identity(queue)
     worker = Worker(
         client,
         task_queue=queue,
         activities=build_activities(registry, sessions=live_sessions(registry)),
         max_concurrent_activities=max(4, max_parallel_sessions()),
+        identity=identity,
+        build_id=workerid.build_id(),
     )
-    log.info("[host] %s@%s serving on %s (%s), %d live Sessions max",
-             registry.actor_name, version, queue, address, max_parallel_sessions())
-    print(f"[host] {registry.actor_name}@{version} -> {queue} @ {address}", flush=True)
+    log.info("[host] %s@%s serving on %s (%s) as %s, %d live Sessions max",
+             registry.actor_name, version, queue, address, identity, max_parallel_sessions())
+    # THE IDENTITY IS IN THE BOOT LINE because it is the string an operator pastes into
+    # `temporal task-queue describe` or into the console's logs filter. A label nobody can find
+    # the spelling of is a label nobody uses.
+    print(f"[host] {registry.actor_name}@{version} -> {queue} @ {address} as {identity}", flush=True)
     await worker.run()
 
 

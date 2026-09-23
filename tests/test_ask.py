@@ -35,7 +35,7 @@ import pytest
 from temporalio import workflow as temporal_workflow
 
 import kontra
-from kontra import ask, hitl, note
+from kontra import ask, hitl
 from kontra import redaction
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -217,9 +217,9 @@ def test_an_unknown_name_is_still_an_attribute_error() -> None:
         kontra.notes  # noqa: B018
 
 
-def test_reaching_the_pair_does_not_put_temporal_behind_import_kontra() -> None:
-    """THE INVARIANT THE LAZINESS EXISTS FOR, and the reason `say`/`hitl` are not imported in
-    `kontra/__init__.py` in the first place: both import temporalio at module scope, `kontra`
+def test_reaching_a_verb_does_not_put_temporal_behind_import_kontra() -> None:
+    """THE INVARIANT THE LAZINESS EXISTS FOR, and the reason `hitl` is not imported in
+    `kontra/__init__.py` in the first place: it imports temporalio at module scope, `kontra`
     is what the workflow sandbox re-imports per instance, and every non-workflow caller of this
     package is entitled to import it without a Temporal dependency.
 
@@ -231,7 +231,7 @@ def test_reaching_the_pair_does_not_put_temporal_behind_import_kontra() -> None:
     probe = (
         "import sys, kontra;"
         "print('bare', 'temporalio' in sys.modules);"
-        "from kontra import ask, note;"
+        "from kontra import ask;"
         "print('verbs', 'temporalio' in sys.modules)"
     )
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
@@ -251,14 +251,20 @@ def test_the_shipped_package_file_carries_the_lazy_accessor() -> None:
     `__all__` a test in test_loader.py compared against it.
 
     This still reads the file from disk rather than the imported module, and that is the point: it
-    is the half `__all__` cannot see. `speak`/`ask` are resolved by a module `__getattr__`, so an
-    exports list can agree while the accessor is missing, and `from kontra import note` would
+    is the half `__all__` cannot see. `ask` is resolved by a module `__getattr__`, so an
+    exports list can agree while the accessor is missing, and `from kontra import ask` would
     then fail on exactly the surface an author uses."""
     ns: dict = {}
     exec(compile(PKG_INIT.read_text(), "pkg-init", "exec"), ns)
-    from kontra import say
-    assert ns["__getattr__"]("note") is say.note
     assert ns["__getattr__"]("ask") is hitl.ask
+    # EVERY REMOVED VERB MUST REFUSE, not resolve something. `note`/`partial` went with the rest of
+    # the logger wrappers; `progress`, `stream` and `KontraFlow` went with the Workflow Stream they
+    # published onto (the module they lived in, `say`, is deleted). An author following a stale
+    # example has to get the plain AttributeError Python gives for a gone name, rather than a
+    # confusing failure deeper in.
+    for gone in ("note", "partial", "progress", "stream", "KontraFlow"):
+        with pytest.raises(AttributeError, match=gone):
+            ns["__getattr__"](gone)
     assert "ask" in set(ns["__all__"])
 
 
@@ -306,7 +312,7 @@ def test_neither_verb_carries_a_credential_into_the_runs_own_history(wf: Fake) -
     """
 
     async def scenario() -> None:
-        note(f"authenticating with api_key={SENTINEL}")
+        temporal_workflow.logger.info(f"authenticating with api_key={SENTINEL}")
         task = await parked(
             wf,
             ask(
@@ -322,10 +328,16 @@ def test_neither_verb_carries_a_credential_into_the_runs_own_history(wf: Fake) -
 
     assert SENTINEL not in wf.history, "a credential reached the run's own history"
 
-    # AND IT SAYS SO rather than going quiet: a sentence that lost a word without explanation is a
-    # worse account than one that names what would not be carried. `note` no longer reaches history
-    # at all (ADR 0050 §2), so the assertion is on what it WRITES — the redaction is the same guard
-    # and the same corpus, applied one layer out.
+    # THE LOG HALF IS NOT CURRENTLY GUARDED, AND THIS SAYS SO RATHER THAN IMPLYING OTHERWISE.
+    # `note` used to run every sentence through `redact(one_line(...))`; `note` is gone and
+    # `workflow.logger.info` does no such thing, so the sentinel above DOES reach the log store.
+    # That is a known gap, not an oversight: the guard belongs on the HANDLER, beside
+    # `IdentityFilter` in `runtime/python/internals/logs.py`, where it covers every record —
+    # including the engine and library lines that never called `note` in the first place.
+    #
+    # Until that filter exists, what is still true is that the CORPUS holds: the same function, the
+    # same shared conformance fixtures, one layer out from a call site that no longer invokes it.
+    # When the filter lands, tighten this into an assertion over what the handler actually emitted.
     assert redaction.redact(f"authenticating with api_key={SENTINEL}") == (
         f"authenticating with api_key={redaction.REDACTED}"
     )

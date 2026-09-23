@@ -742,7 +742,7 @@ class Fleet:
 
         A **Fleet** is the only part of a **Run** that bills by wall clock, so a **Run** that
         never says what it is holding is a **Run** whose cost is discovered on an invoice. This is
-        the sentence `note()` carries.
+        the sentence a `workflow.logger` line carries.
         """
         n = len(self.inventory)
         sizes = {str(m.get("size") or "?") for m in self.inventory.values()}

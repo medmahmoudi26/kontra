@@ -45,7 +45,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 
-from kontra import catalog, fleet, note, partial
+from kontra import catalog, fleet
 from kontra.fleet import docker_fleet
 
 PROBE = ("probe", "0.1.0")
@@ -71,7 +71,8 @@ class Resumable:
             sessions=int(req.get("sessions") or 4),
         ) as f:
             await f.ready()
-            note(f"{len(f.inventory)} machine(s) polling {PROBE[0]}; sweeping {source}")
+            workflow.logger.info(
+                f"{len(f.inventory)} machine(s) polling {PROBE[0]}; sweeping {source}")
 
             # THE ONE STRUCTURAL LINE. The child may continue-as-new for as long as the corpus
             # takes; this scope sees a SINGLE child execution and does not unwind, so the Fleet
@@ -87,7 +88,7 @@ class Resumable:
                 execution_timeout=timedelta(hours=12),
             )
 
-        note(f"swept {tally['scanned']} row(s) into {into}")
+        workflow.logger.info(f"swept {tally['scanned']} row(s) into {into}")
         return {"into": into, "machines": len(f.inventory), **tally}
 
 
@@ -135,16 +136,18 @@ class ResumableSweep:
                 # handing over mid-page would carry a position no cursor can express and the next
                 # leg would re-dispatch work it had already done.
                 if workflow.info().is_continue_as_new_suggested():
-                    note(f"handing over at {cursor} rows; {t['scanned']} scanned so far")
+                    workflow.logger.info(
+                        f"handing over at {cursor} rows; {t['scanned']} scanned so far")
                     workflow.continue_as_new(source, size, into, order_by, cursor, t)
 
         if t["dropped"]:
             # A COMPLETENESS CLAIM, not progress (ADR 0050 §2). Rows the sweep could not read are
             # rows the caller's result does not contain, and a reader who missed this line would be
             # wrong about what was covered.
-            partial(
+            workflow.logger.warning(
                 f"{t['dropped']} row(s) dropped across the sweep — {into} does not cover them",
-                axis="sweep", phase="scan", dropped=t["dropped"],
+                extra={"incomplete": True, "axis": "sweep", "phase": "scan",
+                       "dropped": t["dropped"]},
             )
         return t
 

@@ -65,7 +65,7 @@ Run it:
 from temporalio import workflow
 from typing_extensions import TypedDict
 
-from kontra import catalog, fleet, note
+from kontra import catalog, fleet
 
 
 class NsCheckInput(TypedDict, total=False):
@@ -142,7 +142,8 @@ class NsCheck:
                 # ONE SENTENCE PER PHASE, and this run has two: produce, then promote. It goes
                 # here and NOT in the page loop below — a corpus of 40,000 domains is 400 pages,
                 # and a sentence each is 2,000 history events and seven minutes of pure waiting.
-                note(f"{len(f.inventory)} machine(s) polling; producing verdicts into tmp")
+                workflow.logger.info(
+                    f"{len(f.inventory)} machine(s) polling; producing verdicts into tmp")
 
                 async with catalog.actor("nscheck", "0.1.0") as ns:
                     # `order_by` is required: a materialized dataset stamps no row id, so paging
@@ -175,7 +176,7 @@ class NsCheck:
             # THE SECOND PHASE, AND WHAT IT MEANT. No derived turn can say that these rows are the
             # findings and the other 38,000 were fine — that is in the head of whoever wrote
             # `where="NOT ok"`, and this is the one place it can be put.
-            note(f"{promoted} lame of {checked} verdicts promoted into {out_name}")
+            workflow.logger.info(f"{promoted} lame of {checked} verdicts promoted into {out_name}")
 
         # `bundle` is the IMMUTABLE sha the mutable `latest` pointer resolved to, recorded so
         # "what did this run place" survives the next `kontra build`. `dropped` is isolation,

@@ -150,25 +150,9 @@ func Takes(v any) MethodOption { return core.Takes(v) }
 // a Method returns only an error. So it is stated.
 func Emits(v any) MethodOption { return core.Emits(v) }
 
-// Streams declares what this Method publishes while it runs — see core.Streams.
-//
-//	a.Method("crawl", crawl,
-//	    kontra.Takes(Seed{}), kontra.Emits(Page{}), kontra.Streams(CrawlProgress{}))
-//
-// and in the body, one record at a time:
-//
-//	kontra.Stream(s, CrawlProgress{At: u.URL, Contexts: len(ctxs)})
-func Streams(v any) MethodOption { return core.Streams(v) }
-
-// Stream publishes one progress record for the running Method — see core.Stream.
-//
-//	func crawl(s *kontra.Session, b *kontra.Batch, d *kontra.Dataset) error {
-//	    for u := range b.Units() {
-//	        kontra.Stream(s, CrawlProgress{At: u.URL})
-//	        ...
-//	    }
-//	}
-func Stream(s *Session, record any) { core.Stream(s, record) }
+// `Streams` AND `Stream` WERE RE-EXPORTED HERE and are gone — see the note in `core/core.go`.
+// A Method narrates with the host's logger and reports what it found through the output Dataset;
+// both outlive the run, which a Temporal Workflow Stream did not.
 
 // Does declares what this Method is FOR, in one sentence: `Does("Resolve each domain's NS set")`.
 //

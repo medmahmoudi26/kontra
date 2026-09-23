@@ -52,15 +52,18 @@ func TaskQueue(name, version string) string {
 	return base + "-sessions"
 }
 
-// Machine is the Machine this host runs on — the host portion of the Temporal worker identity,
-// which is exactly what the fleet's poller listing shows per Machine (`11@kf-dns-01@nscheck-0.1.0`
-// is `pid@host@queue`). The pid is deliberately dropped: a restarted Worker is the same Machine,
-// and keeping it would make one Droplet read as a new Machine after every restart.
+// Machine is the Machine this host runs on — field two of the Temporal worker identity, which is
+// exactly what the fleet's poller listing shows per Machine (`11@kf-dns-01@nscheck-0.1.0` is
+// `pid@host@queue`). The pid is deliberately dropped from what a Batch reports: a restarted Worker
+// is the same Machine, and keeping it would make one Droplet read as a new Machine after every
+// restart.
 //
 // Snapshotted at init because a hostname does not change under a live process and this is read
 // once per Batch. Peer of MACHINE in internals/temporal/host.py, derived the same way on both
-// sides — neither SDK sets a custom Temporal identity, so the SDK default (`{pid}@{hostname}` in
-// Python, `{pid}@{hostname}@{queue}` here) carries the same host portion this reads.
+// sides. It USED to note that "neither SDK sets a custom Temporal identity"; both do now
+// (workerid.go, internals/workerid.py), and this is the value they compose — so the host portion
+// of the identity and the Machine on a Batch are one string by construction, not by two
+// derivations agreeing.
 //
 // On the fleet it is the Droplet's name (`kf-dns-01`): a Worker is a pair of systemd units ON the
 // Machine, not a container, so nothing stands between the two
@@ -202,13 +205,12 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 	// author's keys are namespaced under `progress` so an author who returns `{"done": ...}`
 	// cannot overwrite the field the orchestrator reads to decide whether a batch is moving.
 	//
-	// AND ONTO THE RUN'S STREAM, which is the half a browser can reach. A heartbeat is readable
-	// only by something that can call DescribeWorkflowExecution and poll it; the stream is a
-	// subscribable log with offsets, so a console follows a run instead of sampling it. Peer of
-	// `_publish_progress` in runtime/python/internals/engine.py — one transport for both hosts,
-	// where Python used an HTTP side-channel to the orchestrator and Go used only the heartbeat.
-	pub := h.streamFor(req.RunID)
-	defer closeStream(ctx, pub)
+	// IT ALSO WENT ONTO THE RUN'S WORKFLOW STREAM, and that half is gone. A Workflow Stream lives
+	// in the workflow's memory and dies with the workflow, so nothing published through it could
+	// be read once the run closed — the console pane fed by it was empty for anybody who opened a
+	// finished run. The heartbeat survives because it does not have that property: Temporal keeps
+	// it with the activity, and `temporal workflow describe -w <run>` shows it with no log
+	// shipper, no mounted volume and no shell into the box.
 	a.SetProgress(func(v any) {
 		lk2.Lock()
 		beat := map[string]any{"progress": v}
@@ -217,34 +219,12 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 		}
 		lk2.Unlock()
 		activity.RecordHeartbeat(ctx, beat)
-		publishProgress(pub, req.NodeID, req.ActorID, v, last)
 	})
 
-	// THE PER-METHOD STREAM, which is a different thing from the beat above.
-	//
-	// That one is the author's healthcheck, polled on the engine's ticker, and it answers "is
-	// this Session alive and roughly where". This one is pushed by the author from inside the
-	// Method — `kontra.Stream(s, rec)` — carries a type the Method DECLARED with `Streams(...)`,
-	// and goes to that Method's own topic so a console can group and label it without knowing
-	// what this actor is.
-	//
-	// The topic is named HERE rather than in the engine: `h.name` is the actor and the resolved
-	// method name comes back from the engine, so naming stays beside the other publisher and the
-	// engine's only new knowledge is that a sink exists.
-	//
-	// THE TOPIC CARRIES THE NAME; THE RECORD CARRIES THE INSTANCE. `h.name` addresses the topic
-	// (`gocanary/tick`) and `req.ActorID` rides in the record, which is what Python's publisher
-	// has always sent (`self._actor_id`). This passed `h.name` in both places, so one run's stream
-	// carried `"actor": "c5eaf2b6a275"` from the Python leg and `"actor": "gocanary"` from the Go
-	// leg — the same key meaning two different things depending on which host wrote it, which is
-	// the one thing a cross-language wire format cannot do. It also said nothing: a console
-	// reading `actor: gocanary` under the heading `gocanary/tick` has been told the same word
-	// twice, where the id names WHICH SESSION of that actor is speaking — the thing a keyed
-	// dispatch makes ambiguous and the roster exists to disambiguate.
-	a.SetStream(func(v any) {
-		publishRecord(pub, methodTopic(h.name, a.ResolvedMethodName(req.Method)),
-			req.NodeID, req.ActorID, v)
-	})
+	// THE PER-METHOD STREAM WAS WIRED HERE — `kontra.Stream(s, rec)` onto `<actor>/<method>` —
+	// and the verb, the sink and the topic naming are all gone with it. A Method narrates through
+	// the host's logger, which carries the run, the Worker identity and the Temporal context on
+	// every line, and reports what it found through the output Dataset. Both outlive the run.
 
 	resp, err := a.RunBatch(ctx, req)
 	if err != nil {
@@ -312,6 +292,10 @@ func serve(r *core.Registry, stop <-chan interface{}) error {
 		Namespace:         getenv("KONTRA_NAMESPACE", "default"),
 		DataConverter:     codec.DataConverter(casStore),
 		ConnectionOptions: conn,
+		// The CLIENT's identity, which the server records against the calls this process MAKES —
+		// the stream signals in `stream.go` above all. Field three is the ROLE and not a queue,
+		// because a client polls none. See workerid.go.
+		Identity: WorkerIdentity(getenv("KONTRA_WORKER_ROLE", "actor")),
 	})
 	if err != nil {
 		return fmt.Errorf("temporal dial: %w", err)
@@ -325,6 +309,12 @@ func serve(r *core.Registry, stop <-chan interface{}) error {
 	// shared queue, which is what it actually is.
 	w := worker.New(c, queue, worker.Options{
 		MaxConcurrentActivityExecutionSize: maxParallelSessions(),
+		// STATED, not inherited. The SDK's default for this is already `<pid>@<host>@<queue>`;
+		// saying it here is what lets `stream.go` put the SAME string on a record, so a stream
+		// item and an `ActivityTaskStarted` event join by equality rather than by two derivations
+		// agreeing. BuildID names the Bundle — versioning stays off. See workerid.go.
+		Identity: WorkerIdentity(queue),
+		BuildID:  BuildID(),
 	})
 
 	// A live Session's worker: same client, same activities, its OWN queue. Built here rather
@@ -332,7 +322,12 @@ func serve(r *core.Registry, stop <-chan interface{}) error {
 	// testable without a cluster (ADR 0023 §6).
 	var h *Activities
 	spawn := func(sessionQueue string) (sessionWorker, error) {
-		sw := worker.New(c, sessionQueue, worker.Options{})
+		// Its own queue, so its own identity — a Session worker that reported under the shared
+		// queue's name would make five live scopes read as one Worker in a poller listing.
+		sw := worker.New(c, sessionQueue, worker.Options{
+			Identity: WorkerIdentity(sessionQueue),
+			BuildID:  BuildID(),
+		})
 		sw.RegisterActivityWithOptions(h.RunBatch, activity.RegisterOptions{Name: "RunBatch"})
 		sw.RegisterActivityWithOptions(h.Close, activity.RegisterOptions{Name: "Close"})
 		// The close is served HERE, on the Session's own queue, so only the host holding the

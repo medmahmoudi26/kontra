@@ -110,7 +110,7 @@ func Verify(password, encoded string) (bool, error) {
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
-//: The alphabet a generated password is drawn from.
+// : The alphabet a generated password is drawn from.
 //
 // UNAMBIGUOUS ON PURPOSE: no `O`/`0`, no `l`/`1`/`I`. This value is PRINTED ONCE at install and
 // typed into a browser by a person reading it off a terminal, and a character pair that two fonts

@@ -1,4 +1,0 @@
-# The compiled actor. `kontra serve` execs `<actor-dir>/<name>` for a Go actor, so this binary has
-# to exist next to the source — but it is a build output, rebuilt by canary.sh on every run, and
-# committing it would put a ~30MB architecture-specific blob in the tree.
-/gocanary

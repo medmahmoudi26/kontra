@@ -186,6 +186,22 @@ describe('the install script', () => {
       'KONTRA_TAG',
       'KONTRA_MAX_PARALLEL_SESSIONS',
       'KONTRA_METRICS_ADDR',
+      // The Bundle's own sha256 — the OCI layer digest the Machine verified on the way down. It is
+      // the Temporal `build_id` every Worker registers with, so a log line, a stream record and a
+      // poller listing all name the same CODE rather than the same version string. Read by all
+      // three runtimes: `runtime/python/internals/workerid.py`, `runtime/go/temporalhost/
+      // workerid.go` and `runtime/handler/internal/identity/worker.go`.
+      //
+      // IT WAS WRITTEN BEFORE IT WAS DECLARED, and this sweep is what caught that — which is the
+      // whole reason it is an allowlist and not an absence check. So were the two below.
+      'KONTRA_BUNDLE_SHA',
+      // Field three of the Worker's Temporal client identity — what this Worker is FOR. Read by
+      // `runtime/go/temporalhost/host.go`, `runtime/handler/main.go` and `workerid.py`.
+      'KONTRA_WORKER_ROLE',
+      // Structured logs, because `vlagent` reads them and a person does not. `internals/logs.py`
+      // had shipped identity-stamped JSON since ADR 0050 §1 and nothing set this, so every Worker
+      // in every Fleet wrote the human format and the stamping was dead code in production.
+      'KONTRA_LOG_FORMAT',
     ];
     let checked = 0;
     for (const line of env.split('\n')) {

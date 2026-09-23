@@ -39,13 +39,6 @@ type Session struct {
 	// emitDurable reports whether an emitted record is persisted at emit time (an object store
 	// is configured). Bound once per batch by the host; false outside one.
 	emitDurable bool
-	// stream is where `Stream(s, rec)` writes — bound ONCE PER BATCH by the host, to the topic
-	// `<actor>/<method>` of the Method this batch dispatched. nil outside a hosted run, which is
-	// the ordinary case for a unit test and must not be an error.
-	//
-	// RE-BOUND EVERY BATCH, INCLUDING TO nil. The instance survives across batches, so a stale
-	// publisher left here would send one Method's records onto the previous Method's topic.
-	stream func(any)
 }
 
 // NewSession builds a session with an initialized shared-state mutex and empty State. The
@@ -158,31 +151,17 @@ func (s *Session) BindGlobalState(gs GlobalState) {
 	s.globalState = gs
 }
 
-// BindStream binds where `Stream(s, rec)` publishes for THIS batch. The host calls it once per
-// batch, with nil when there is nowhere to publish. Authors never call this.
-func (s *Session) BindStream(f func(any)) { s.stream = f }
-
-// Stream publishes one progress record for the Method that is running.
+// `Stream` AND `BindStream` WERE HERE, AND THEY ARE GONE.
 //
-//	kontra.Stream(s, CrawlProgress{At: u.URL, Contexts: len(ctxs)})
+// `kontra.Stream(s, rec)` published one typed record per Method onto the run's Temporal Workflow
+// Stream, for a console pane that drew it. A Workflow Stream lives in the WORKFLOW'S MEMORY and
+// dies with the workflow, so every record was unreadable the moment the run closed — and a run
+// under a minute long is over before a browser has loaded and signed in.
 //
-// It goes to the run's Temporal Workflow Stream on this Method's own topic — `<actor>/<method>` —
-// and is paired by a console with the schema reflected from the Method's `Streams(...)`
-// declaration, so a run displays typed fields for an actor nobody had to read the source of.
-//
-// SILENT OUTSIDE A RUN, AND THAT IS ORDINARY. A Method exercised from a test has no batch and no
-// workflow to publish to; nothing is wrong, so nothing is reported. A publish that FAILS inside a
-// run is swallowed by the host for the same reason the heartbeat is: an observability call must
-// never be the thing that fails a Unit that already committed.
-//
-// Peer of Python's `await kontra.stream(...)`. Not a method on Session so that it reads the same
-// as the Python free function and so a nil Session is a no-op rather than a panic.
-func Stream(s *Session, record any) {
-	if s == nil || s.stream == nil {
-		return
-	}
-	s.stream(record)
-}
+// A Method says what it is doing with the host's logger and what it FOUND with the output Dataset.
+// Both outlive the run. The Python peer (`await kontra.stream(...)`) went at the same time, and
+// field 6 of Method in catalog.proto is reserved so the declaration can come back when there is a
+// durable store under it.
 
 // The lifecycle function shapes (the Go peers of @actor.load/method/close/healthcheck).
 type (

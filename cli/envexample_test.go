@@ -49,11 +49,22 @@ func envExampleNames(t *testing.T) map[string]string {
 func TestEveryComposeVariableIsInEnvExample(t *testing.T) {
 	compose := repoFile(t, "docker-compose.quickstart.yml")
 	found := map[string]bool{}
-	for _, m := range composeVar.FindAllStringSubmatch(compose, -1) {
-		if m[1] == "PWD" {
-			continue // compose's own default, not an install setting
+	for _, line := range strings.Split(compose, "\n") {
+		// COMMENTS ARE NOT SUBSTITUTIONS, and scanning the whole file as one string made every
+		// `${VAR}` an author MENTIONED indistinguishable from one compose expands. It reported
+		// KONTRA_HOME — which this file sets as a literal and only discusses in a note about
+		// `secrets/keyring.ts` defaulting to `${KONTRA_HOME}/secrets` — so the failure named a
+		// variable that needs no entry, beside two that genuinely did. A guard whose output
+		// contains a name nobody should act on is a guard people learn to skim.
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
 		}
-		found[m[1]] = true
+		for _, m := range composeVar.FindAllStringSubmatch(line, -1) {
+			if m[1] == "PWD" {
+				continue // compose's own default, not an install setting
+			}
+			found[m[1]] = true
+		}
 	}
 	if len(found) == 0 {
 		t.Fatal("no ${VAR} substitutions found in docker-compose.quickstart.yml — this guard is not looking at the right file")

@@ -1,39 +1,62 @@
 # canary
 
-Calls one Actor twice — first on a worker here, then on a fleet it provisions — and reports whether the two halves agree.
+**Provisions a Fleet, sweeps on it, and lets you watch every part of it happen.** The first run
+anybody does on a fresh install, and the one that shows what kontra actually is.
 
-## What it is for
+In one run you see a Fleet come into existence, a Worker pick up work on it, a line arrive every
+two seconds saying what it is doing *while it is still doing it*, rows land in a Dataset you can
+query in SQL, and the Machines destroyed when the scope exits — with a line of code responsible
+for each.
 
-Two different questions get asked when something breaks, and until now they needed two different runs.
+Nothing here is a mock. Real Fleet, real Worker, real Dataset. The only pretend part
+is that the actor sleeps instead of reaching somebody else's estate, which is the one thing a first
+run should not do.
 
-*Does this installation work at all?* — the interpreter the worker booted with, the task queue, the Nexus endpoint the dispatch is addressed to, the codec that carries a Batch over S3. All of that is provable in a second, locally, for nothing.
+## Run it
 
-*Does it work the same way on a Machine?* — a stale Artifact, a version pinned differently in two places, a codec that passes through locally and truncates over the object store. That costs four minutes and real money to find out, and it is usually asked only after a run has already failed.
-
-`canary` is both, in that order. The cheap half runs first, so a wiring fault fails before any Droplet is created; the expensive half only ever runs against a control plane that has just been proven.
-
-## The comparison is the output
-
-Both halves are handed the **same units** and call the **same Methods** on the **same Actor** — the only thing that changes is which worker is polling the queue. That is what makes a divergence meaningful: `agree: false` says the placement changed the answer, which is the failure this exists to catch. Verdicts are compared by `(domain, nameserver)` rather than by list order, because two Machines answer in whatever order they finish.
-
-`agree` is `null`, never `true`, when no fleet ran. An absent comparison and a passing one must not render the same.
-
-## Machines cost money
-
-`machines` defaults to **0**, which runs the local half only. Provisioning outlives the tab and bills by the hour, so it is asked for explicitly:
-
-```
-kontra workflow start Canary --queue canary --wait \
-    --input '{"domains": ["example.com"], "machines": 2}'
+```sh
+kontra deploy --actor workspaces/default/actors/canary
+kontra workflow serve workspaces/default/workflows/canary
+kontra workflow start Canary --wait
 ```
 
-The fleet scope destroys its Machines on exit, and it is a replayable step in a durable program rather than a line in a script that might not be reached.
+No `--input` needed. Every field has a default, and the console's launch form renders them with
+help text because they are declared as `Annotated[..., Field(default=…, description=…)]` rather
+than as comments — comments do not exist at runtime.
 
-## Input
+## What the knobs do
 
-| field | default | what it does |
+| field | default | what it changes |
 |---|---|---|
-| `domains` | `example.com`, `iana.org` | what to look up. No Dataset needed — a canary that required one would fail on a fresh installation for a reason unrelated to what it tests |
-| `machines` | `0` | Droplets for the second half. `0` skips it |
-| `sessions` | `2` | live Sessions per Machine — density, not scale |
-| `tag` | `canary` | the DigitalOcean tag and `kf-<tag>-NN` name prefix |
+| `targets` | `["alpha", "beta"]` | one target is one **Unit** — the unit of failure and of resumption |
+| `steps` | `5` | phases per target; `targets × steps` is both the records you watch and the rows you get |
+| `every` | `2.0` | seconds between records — one log line and one Dataset row each |
+| `machines` | `1` | Fleet scale |
+| `sessions` | `1` | density per Machine |
+| `provider` | `docker` | `docker` = Warden containers, no credential. `cloud` = DigitalOcean |
+| `fail_on` | `""` | name a target and that one Unit raises, so per-unit isolation is visible |
+
+## Where the time goes
+
+The sweep is `targets × steps × every` and nothing else — 20 seconds at the defaults, all of it
+deliberate and all of it on screen. Everything before it is the Fleet:
+
+- **`docker`** — seconds. Warden containers on the Compose network.
+- **`cloud`** — about 50 seconds to converge, plus cloud-init, plus the Worker's first poll.
+
+That asymmetry is why `provider` defaults to `docker`. A first run should not depend on a cloud
+credential, and `cloud` additionally needs `KONTRA_CONTROLLER` to be an address a Droplet can
+actually reach — a Compose service name is not one, and a Machine that cannot call home starts,
+registers nothing, and looks idle.
+
+## What to look at while it runs
+
+- **the run page** — the log rail and the Dataset tail, side by side. The workflow narrates the
+  run, the actor narrates the sweep, and both land on the same rail carrying the run id and the
+  Worker identity. There is no separate progress pane: a Workflow Stream lives in workflow memory
+  and dies with the run, so a pane fed by one is empty for everybody who opens the page after it
+  finishes — which, at 55 seconds, is everybody. Typed streaming returns when there is a durable
+  store behind it.
+- **Datasets** — `canary_signals` fills while the run is still going. Click a cell to read it whole.
+- **Logs** — every line carries the run id and the Worker identity, so "which process said this"
+  is answerable without leaving the page.

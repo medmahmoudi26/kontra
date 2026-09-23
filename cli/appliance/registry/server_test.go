@@ -928,7 +928,13 @@ func aFreePort(t *testing.T, ip string) int {
 // would fail rather than be skipped.
 func TestRegistryOnLoopbackKeepsOneAddress(t *testing.T) {
 	dir := t.TempDir()
-	r, err := Start(Options{DataDir: dir, BindIP: "127.0.0.1", Port: 0, Logf: func(string, ...any) {}})
+	// `aFreePort`, NOT `Port: 0` — and the helper's own docstring says why. Start reads 0 as
+	// DefaultPort (5000), which is right for the command and wrong for a test: on any machine
+	// with the compose stack up, this bound against the developer's own registry and failed with
+	// "address already in use". The helper was written for exactly this and this call site was
+	// missed, so the test failed for everybody running kontra and passed in CI.
+	r, err := Start(Options{DataDir: dir, BindIP: "127.0.0.1", Port: aFreePort(t, "127.0.0.1"),
+		Logf: func(string, ...any) {}})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

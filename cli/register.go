@@ -40,7 +40,6 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
 
-
 // cmdRegister serves both `kontra actor register` and `kontra workflow register`.
 //
 // ONE IMPLEMENTATION, TWO VERBS, because the difference between the kinds is a string in the URL

@@ -27,6 +27,11 @@
         "scheme": "bearer",
         "description": "KONTRA_EXPLORE_TOKEN, falling back to state."
       },
+      "secretsToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "KONTRA_SECRETS_TOKEN, falling back to state. Fail-closed on /api/audit: unset means 503, not open."
+      },
       "actorIdentity": {
         "type": "http",
         "scheme": "bearer",
@@ -79,6 +84,25 @@
         },
         "security": [],
         "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
+      }
+    },
+    "/api/audit": {
+      "get": {
+        "operationId": "getAudit",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "secretsToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_SECRETS_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
       }
     },
     "/api/datasets": {
@@ -493,6 +517,25 @@
         "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
       }
     },
+    "/api/logs/coverage": {
+      "get": {
+        "operationId": "getLogsCoverage",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
     "/api/logs/hits": {
       "get": {
         "operationId": "getLogsHits",
@@ -734,6 +777,25 @@
         "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
       }
     },
+    "/api/runs/{runId}/datasets": {
+      "get": {
+        "operationId": "getRunsByRunIdDatasets",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
     "/api/runs/{runId}/explore": {
       "get": {
         "operationId": "getRunsByRunIdExplore",
@@ -775,6 +837,25 @@
     "/api/runs/{runId}/history": {
       "get": {
         "operationId": "getRunsByRunIdHistory",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "runToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/io": {
+      "get": {
+        "operationId": "getRunsByRunIdIo",
         "responses": {
           "200": {
             "description": "ok"

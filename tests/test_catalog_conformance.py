@@ -56,19 +56,6 @@ class Params:
     depth: int
 
 
-@dataclass
-class Beat:
-    """What `fetch` publishes WHILE IT RUNS — the third schema, beside input and output.
-
-    It rides on `fetch` rather than on a Method of its own because the fixture's job is to make
-    one operation carry every field the contract defines; a fourth Method declaring only this
-    would leave `stream` untested in combination with the rest.
-    """
-
-    at: str
-    done: int
-
-
 def fixture_registry() -> ActorRegistry:
     """The fixture's Actor: three Methods in declaration order, two with DIFFERENT signatures
     (title takes what fetch emits — the §9 property a single Actor-level pair could not express),
@@ -78,7 +65,7 @@ def fixture_registry() -> ActorRegistry:
     reg.actor_dir = Path(EXPECT["source"])
     reg.params_type = Params
 
-    @reg.method(takes=Target, emits=Page, streams=Beat)
+    @reg.method(takes=Target, emits=Page)
     async def fetch(self, batch):
         """Fetch each host once."""
 
@@ -147,10 +134,11 @@ def project_schema(value):
 
 
 # The operation keys whose VALUE is a JSON Schema document, and which therefore have to be
-# projected down to the dialect-neutral core before comparison. `stream` joined them when a Method
-# gained `streams=`; leaving it out compared pydantic's `title`/`description` branding verbatim
-# against a fixture that carries neither, so the Python arm failed while the emission was correct.
-SCHEMA_KEYS = ("params", "input", "output", "stream")
+# projected down to the dialect-neutral core before comparison. A fourth, `stream`, was here while
+# a Method could declare `streams=`; leaving any of them out compares pydantic's `title`/
+# `description` branding verbatim against a fixture that carries neither, so the Python arm fails
+# while the emission is correct.
+SCHEMA_KEYS = ("params", "input", "output")
 
 
 def project_descriptor(body: dict) -> dict:

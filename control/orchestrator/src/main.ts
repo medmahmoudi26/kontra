@@ -50,6 +50,7 @@ import { assertDistinctQueues, queueAssignments, resolveRoles, ROLES_VAR, type R
 import { runApi } from './server';
 import { getClient } from './temporalClient';
 import { temporalConnectOptions } from './temporalTls';
+import { identityFor } from './workerIdentity';
 
 function log(line: string): void {
   // eslint-disable-next-line no-console
@@ -106,9 +107,13 @@ export async function runInfra(): Promise<void> {
     taskQueue: queue,
     namespace,
     connection,
+    // NAMED, because this Worker shares a container and therefore a hostname with the API's and
+    // the materializer's. At the SDK default all of them are one `<pid>@<hostname>` and a poller
+    // listing cannot say which queue stopped being served. See `workerIdentity.ts`.
+    identity: identityFor(queue),
   });
 
-  log(`infra role: queue=${queue} (no provisioner — stackWorkflow is registered and refuses)`);
+  log(`infra role: queue=${queue} as ${identityFor(queue)} (no provisioner — stackWorkflow is registered and refuses)`);
 
   // ARM THE RETENTION SWEEP (ADR 0029 §5) — after the Worker exists, before it polls, and HERE
   // because this is the process hosting `sweepDatasetsWorkflow`. The Schedule targets this queue,

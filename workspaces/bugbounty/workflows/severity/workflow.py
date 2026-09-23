@@ -45,7 +45,7 @@ from typing_extensions import TypedDict
 
 from datetime import timedelta
 
-from kontra import catalog, note, partial
+from kontra import catalog
 
 DESYNC = ("desync", "1.2.2")
 
@@ -76,8 +76,10 @@ class Severity:
         variant = (req.get("variant") or "").strip()
         # REFUSED, NOT DEFAULTED. An empty host here would select the whole leads table.
         if not host or not variant:
-            partial("severity needs BOTH host and variant — it poisons a live front-end and "
-                    "will not infer which one", axis="leads", phase="poison")
+            workflow.logger.warning(
+                "severity needs BOTH host and variant — it poisons a live front-end and "
+                "will not infer which one",
+                extra={"incomplete": True, "axis": "leads", "phase": "poison"})
             return {"poisoned": 0, "reason": "host and variant are required"}
 
         leads = catalog.dataset(req.get("leads") or "desync_leads_v2")
@@ -124,24 +126,27 @@ class Severity:
             async for batch in leads.batches(10, order_by="host, endpoint, variant", query=query):
                 pages.append(batch)
         except Exception as exc:  # noqa: BLE001 - the reason is the announcement
-            partial(f"no lead matches {host} / {variant}"
-                    + (f" / {endpoint}" if endpoint else "") + f" — {exc!r}",
-                    axis="leads", phase="poison")
+            workflow.logger.warning(
+                f"no lead matches {host} / {variant}"
+                + (f" / {endpoint}" if endpoint else "") + f" — {exc!r}",
+                extra={"incomplete": True, "axis": "leads", "phase": "poison"})
             return {"poisoned": 0, "reason": "no matching lead"}
 
-        note(f"poisoning {host} ({variant}"
-             + (f", {endpoint}" if endpoint else ", every endpoint")
-             + f") for {params['rounds']} round(s) — observe from the OTHER egress now")
+        workflow.logger.info(
+            f"poisoning {host} ({variant}"
+            + (f", {endpoint}" if endpoint else ", every endpoint")
+            + f") for {params['rounds']} round(s) — observe from the OTHER egress now")
 
         rows = 0
         async with catalog.actor(*DESYNC) as d:
             for i, page in enumerate(pages, 1):
                 out, _ = await d.reach(page, verdicts, params=params, **call_opts)
                 rows += len(out)
-                note(f"poison: page {i}/{len(pages)}, +{len(out)} verdict row(s)")
+                workflow.logger.info(f"poison: page {i}/{len(pages)}, +{len(out)} verdict row(s)")
 
-        note(f"poisoning done: {rows} row(s) in {verdicts.name}. The impact answer is on the "
-             f"OBSERVER's side — this half reports only its own egress.")
+        workflow.logger.info(
+            f"poisoning done: {rows} row(s) in {verdicts.name}. The impact answer is on the "
+            f"OBSERVER's side — this half reports only its own egress.")
         return {"poisoned": rows, "host": host, "variant": variant, "endpoint": endpoint,
                 "rounds": params["rounds"]}
 

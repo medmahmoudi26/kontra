@@ -48,7 +48,7 @@ from typing_extensions import TypedDict
 from dataclasses import dataclass
 from datetime import timedelta
 
-from kontra import KontraFlow, catalog, fleet, note, partial, progress
+from kontra import catalog, fleet
 
 # 0.2.0 CARRIES THE TRAVERSAL. 0.1.0 visits exactly the seed, so `depth` had nowhere to go —
 # and it also predates the Set-Cookie fix, which means its `injection_points` can never contain
@@ -133,7 +133,7 @@ def _num(req, key, default):
 
 
 @workflow.defn
-class Surface(KontraFlow):
+class Surface:
     @workflow.run
     async def run(self, req: SurfaceInput) -> dict:
         program = req.get("program") or "8x8"
@@ -173,7 +173,8 @@ class Surface(KontraFlow):
                       events=events, size=size, params=params, call_opts=call_opts)
 
         if req.get("attach"):
-            note(f"attached to whoever is serving webcrawl@{WEBCRAWL[1]} — no Lease held")
+            workflow.logger.info(
+                f"attached to whoever is serving webcrawl@{WEBCRAWL[1]} — no Lease held")
             crawled = await self._sweep(phase)
         else:
             # `actor=` AND `version=` ARE REQUIRED, and `up` PLACES them itself — it is sugar
@@ -188,14 +189,15 @@ class Surface(KontraFlow):
                 await f.ready()
                 # See the same block in `hunt`: the rate before the work, the total after it, and
                 # the total in `finally` so a cancelled crawl still reports what it cost.
-                note(f"{len(f.inventory)} machine(s) polling; crawling {program} — "
-                     f"{f.cost_words()}")
+                workflow.logger.info(
+                    f"{len(f.inventory)} machine(s) polling; crawling {program} — "
+                    f"{f.cost_words()}")
                 held = workflow.now()
                 try:
                     crawled = await self._sweep(phase)
                 finally:
-                    note("fleet released — "
-                         + f.cost_words((workflow.now() - held).total_seconds()))
+                    workflow.logger.info("fleet released — "
+                                         + f.cost_words((workflow.now() - held).total_seconds()))
 
         # THE FLEET IS GONE before either reduction runs. Both are pure SQL over a durable
         # Dataset, so they cost no browser and no network and can be re-run next month over a
@@ -228,16 +230,18 @@ class Surface(KontraFlow):
             if limit and seen * size >= limit:
                 # A BOUND THAT IS ANNOUNCED. A capped crawl that reads as a complete one is how
                 # the surface silently describes a fraction of the program.
-                partial(f"seed_limit {limit} reached — the crawl is PARTIAL by request",
-                        axis="seeds", phase="crawl", seed_limit=limit)
+                workflow.logger.warning(
+                    f"seed_limit {limit} reached — the crawl is PARTIAL by request",
+                    extra={"incomplete": True, "axis": "seeds", "phase": "crawl",
+                           "seed_limit": limit})
                 break
 
-        note(f"crawling {len(pages)} page(s) of {scope_name} for {program}")
-        # THE SHAPE A PANE READS. `program` and `at` are what turn "done 3/8" — which describes
-        # the machine — into "visa, on aw.visa.com" — which describes the work. `total` is
-        # published once up front so a subscriber joining late can draw a bar without waiting for
-        # a second event to infer the denominator.
-        progress(phase="crawl", program=program, done=0, total=len(pages), found=0)
+        workflow.logger.info(f"crawling {len(pages)} page(s) of {scope_name} for {program}")
+        # THE DENOMINATOR UP FRONT, so a reader opening the rail at second zero knows how big this
+        # is before the per-page lines start. `progress()` published the same fact as typed state
+        # for a pane; the pane is gone and so is the verb — the Workflow Stream it wrote to died
+        # with the workflow, which made it unreadable for anybody who opened a finished run.
+        workflow.logger.info("crawl: %s — %d page(s)", program, len(pages))
         crawled = 0
         # A fresh Session per chunk, for the reason the fold axis learned the hard way: a Session
         # pins to ONE Worker, so one Session held across a whole crawl is a single Machine doing
@@ -251,29 +255,23 @@ class Surface(KontraFlow):
                         rows, _ = await c.crawl(page, events, params=params, **call_opts)
                     except Exception as exc:  # noqa: BLE001 - the reason is the payload
                         voided += 1
-                        partial(f"crawl batch voided: {exc!r} — that scope page has no surface",
-                                axis="scope-pages", phase="crawl")
-                        # A VOID IS AN EVENT A WATCHER NEEDS. Left unpublished, a page that threw
-                        # and a page still running look identical in the pane — which is the same
-                        # ambiguity that let a fully-voided run read as COMPLETED.
-                        progress(phase="crawl", program=program,
-                                 at=f"page {done + voided} voided", done=done,
-                                 total=len(pages), found=crawled)
+                        workflow.logger.warning(
+                            f"crawl batch voided: {exc!r} — that scope page has no surface",
+                            extra={"incomplete": True, "axis": "scope-pages", "phase": "crawl"})
+                        # A VOID IS AN EVENT A WATCHER NEEDS — and the WARNING above is now the
+                        # whole of it. It already carries `incomplete`, which the console's rail
+                        # filters on independently of the level, so a voided page cannot be
+                        # mistaken for one still running.
                         continue
                     crawled += len(rows)
                     done += 1
-                    # `at` IS LEFT TO THE ACTOR. A Batch is a claim-check ref, so naming the
-                    # host it holds would mean an async fetch per page from inside the workflow —
-                    # a network round trip bought purely to label a progress line. The actor
-                    # already knows the host it has open; it publishes `at` onto the same topic.
-                    progress(phase="crawl", program=program, done=done,
-                             total=len(pages), found=crawled)
                     # PER PAGE, because a crawl is browser-bound and slow, and between the
                     # "crawling N page(s)" line and the final count it otherwise says nothing
                     # for however long Chromium takes. `surface-1789866474` spent eleven
                     # minutes in exactly that silence and ended with zero events.
-                    note(f"crawl: page {done}/{len(pages)}, +{len(rows)} event(s), "
-                         f"{crawled} total")
+                    workflow.logger.info(
+                        f"crawl: page {done}/{len(pages)}, +{len(rows)} event(s), "
+                        f"{crawled} total")
 
         # EVERY BATCH VOIDED IS NOT A CRAWL THAT FOUND NOTHING. It is a crawl that did not happen,
         # and the two must not return the same thing.
@@ -297,11 +295,14 @@ class Surface(KontraFlow):
                 f"`kontra workers list` against webcrawl@{WEBCRAWL[1]}.")
 
         if voided:
-            partial(f"crawl complete WITH GAPS: {crawled} event(s), {voided} of {len(pages)} "
-                    f"batch(es) voided — that ground was not covered.",
-                    axis="scope-pages", phase="crawl", voided=voided)
+            workflow.logger.warning(
+                f"crawl complete WITH GAPS: {crawled} event(s), {voided} of {len(pages)} "
+                f"batch(es) voided — that ground was not covered.",
+                extra={"incomplete": True, "axis": "scope-pages", "phase": "crawl",
+                       "voided": voided})
         else:
-            note(f"crawl complete: {crawled} http event(s) into http_events_{program}")
+            workflow.logger.info(
+                f"crawl complete: {crawled} http event(s) into http_events_{program}")
         return crawled
 
     async def _points(self, program, events, scope_name, into=None):
@@ -441,7 +442,7 @@ class Surface(KontraFlow):
         SELECT * FROM headers
         """
         n = await points.insert_from(events, query=sql)
-        note(f"{points.name}: {n} injection point(s) across {program}")
+        workflow.logger.info(f"{points.name}: {n} injection point(s) across {program}")
         return n
 
     async def _exchanges(self, program, events):
@@ -468,7 +469,7 @@ class Surface(KontraFlow):
         WHERE q.kind = 'request' AND q.url LIKE 'http%'
         """
         n = await exch.insert_from(events, query=sql)
-        note(f"exchanges_{program}: {n} replayable exchange(s)")
+        workflow.logger.info(f"exchanges_{program}: {n} replayable exchange(s)")
         return n
 
 

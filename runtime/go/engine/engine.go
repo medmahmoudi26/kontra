@@ -198,9 +198,6 @@ type KontraActor struct {
 	// progress is the sink for the author's @actor.healthcheck value, on the engine's own
 	// ticker rather than per Unit. See SetProgress.
 	progress func(any)
-	// stream is the sink for `kontra.Stream(s, rec)` — per METHOD, pushed by the author, and
-	// re-bound on every batch. See SetStream.
-	stream func(any)
 }
 
 // SetHeartbeat installs the liveness/progress callback. Called by the host per activity
@@ -234,13 +231,6 @@ func (a *KontraActor) ResolvedMethodName(wireName string) string {
 	}
 	return m.Name
 }
-
-// SetStream installs the per-batch sink `kontra.Stream(s, rec)` writes through. The host passes a
-// closure that already knows the topic, so this package holds no topic-naming policy — its only
-// new knowledge is "there is a sink", which is exactly what it already knows about progress.
-//
-// Called by the host BEFORE the author's loop and re-called on every batch, including with nil.
-func (a *KontraActor) SetStream(f func(any)) { a.stream = f }
 
 // heartbeat reports progress, best-effort: a heartbeat that fails must never fail a Unit that
 // already committed.
@@ -434,15 +424,6 @@ func (a *KontraActor) RunBatch(ctx context.Context, req RunBatchReq) (*RunBatchR
 	r.renewTTLs()
 	// Bind cross-session global_state (its Redis client is opened lazily on first use).
 	a.inst.BindGlobalState(boundGlobalState{ctx: ctx, s: a.globalStore()})
-
-	// WHERE `kontra.Stream(s, rec)` GOES, for THIS batch and no longer.
-	//
-	// Bound unconditionally — including to nil — because the instance survives across batches
-	// (a Session is loaded once and serves many), so a publisher left over from the previous
-	// batch would put this Method's records onto the previous Method's topic. Python resets its
-	// contextvar in a `finally` for exactly this reason; Go has no contextvar, so the honest
-	// equivalent is to overwrite on every entry.
-	a.inst.BindStream(a.stream)
 
 	// The commit map below is per BATCH; the state hash it lives in is per ACTOR ID. A KEYED
 	// dispatch points many batches at ONE id, so per-batch state from a superseded owner is

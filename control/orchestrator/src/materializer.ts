@@ -48,6 +48,7 @@ import { materializationStore } from './data/materializationStore';
 import { startTracing, tracingEnabled } from './otel';
 import { datasetQueue, materializerQueue } from './queues';
 import { temporalConnectOptions } from './temporalTls';
+import { identityFor } from './workerIdentity';
 
 /** One decode at a time by default — concurrency here multiplies peak RSS directly. */
 const DEFAULT_SLOTS = 1;
@@ -88,6 +89,11 @@ export async function runMaterializer(): Promise<void> {
       // or anyone's — even by accident.
       activities: createMaterializerActivities({ store: new ObjectStore(), status }),
       maxConcurrentActivityTaskExecutions: slots(),
+      // NAMED, AND THIS PROCESS IS WHY THE FIELD MATTERS. The decoder and the pager below share a
+      // pid and a hostname, so at the SDK default they are ONE identity on two queues — and these
+      // two have opposite shapes (a 40-minute decode, a sub-second page read). "Which one is
+      // wedged" has to be answerable from a poller listing.
+      identity: identityFor(materializerQueue()),
       // The materializer reads payloads from the object store by ref; it is never handed
       // one through Temporal, so it needs no claim-check data converter.
       ...(tracingEnabled
@@ -126,6 +132,8 @@ export async function runMaterializer(): Promise<void> {
         ...leaseActivities,
       },
       maxConcurrentActivityTaskExecutions: pagerSlots(),
+      // Its own name, on its own queue — see the decoder above.
+      identity: identityFor(datasetQueue()),
       ...(tracingEnabled
         ? {
             interceptors: {

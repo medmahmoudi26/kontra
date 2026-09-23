@@ -198,9 +198,9 @@ func (d *dockerDriver) Stop(ctx context.Context, h workerHandle, drain time.Dura
 
 func (d *dockerDriver) stopNames(ctx context.Context, secs int, h workerHandle) {
 	names := map[string]struct{}{
-		dockerNetwork(h.Name, h.Version):                   {},
-		dockerContainer(h.Name, h.Version, partActor):      {},
-		dockerContainer(h.Name, h.Version, partHandler):    {},
+		dockerNetwork(h.Name, h.Version):                {},
+		dockerContainer(h.Name, h.Version, partActor):   {},
+		dockerContainer(h.Name, h.Version, partHandler): {},
 	}
 	for _, half := range h.Halves {
 		if half.Ref != "" {
