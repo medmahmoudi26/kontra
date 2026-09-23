@@ -57,7 +57,7 @@ const QUERY_TIMEOUT_MS = 10_000;
  * Run's tenant, rather than a second notion of one. When kontra serves more than one namespace this
  * is the line that changes, and it changes in ONE place.
  */
-function tenantHeaders(): Record<string, string> {
+export function tenantHeaders(): Record<string, string> {
   // `AccountID` is numeric in VictoriaLogs. A named namespace has no number, so single-tenant
   // installs sit on account 0 and the namespace travels as a STREAM FIELD on the records
   // themselves (see #16) — which is what a LogsQL query can actually filter on.
@@ -78,7 +78,7 @@ export function scopedQuery(caller: string | undefined, tenant: string): string 
 }
 
 /** The namespace this control plane serves, which is the tenant — see `tenantHeaders`. */
-function tenant(): string {
+export function tenant(): string {
   return process.env.KONTRA_NAMESPACE ?? 'default';
 }
 

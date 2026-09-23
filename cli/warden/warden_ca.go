@@ -709,15 +709,48 @@ func (a assignedWorker) derivedEnv(namespace string) map[string]string {
 	return out
 }
 
-// envList merges the Worker's environment, one half's, and the DERIVED variables, and renders it.
+// workerDefaults is what a supervised **Worker** gets unless somebody says otherwise.
 //
-// THE ORDER IS THE RULE: the assignment's shared map, then the half's own (so a per-half PYTHONPATH
-// can override a shared one), then `derivedEnv` — which therefore wins over both and cannot be
-// overridden by anything anybody writes in a JSON file. See `derivedEnv` for which three variables
-// those are and why each one is not the assignment's to set.
+// ═══ A DEFAULT IS NOT A DERIVED FACT, AND THE DIFFERENCE IS WHO MAY OVERRIDE IT ═══
+//
+// `derivedEnv` below holds the three variables an assignment must NOT be able to contradict,
+// because contradicting them starts a Worker that polls the wrong queue or the wrong tenant. These
+// are different: they are right for every Worker a **Warden** starts, and wrong to make
+// unchangeable, because an operator debugging one Machine has a legitimate reason to want the
+// human log format back. So they are applied FIRST and every other map wins over them.
+//
+// ═══ KONTRA_LOG_FORMAT, AND WHY IT WAS NEVER SET ANYWHERE ═══
+//
+// `internals/logs.py::configure_shipping` has been "off unless asked, via KONTRA_LOG_FORMAT=json"
+// since ADR 0050 §1 — and NOTHING IN THIS REPOSITORY ASKED. Not compose, not the Machine's env
+// file, not the Warden. So every Worker in every Fleet wrote the human format, the identity
+// stamping that ADR built was dead code in production, and `control/images/logship.sh` was left
+// recovering a run id from the message text with a regular expression.
+//
+// A Worker under a Warden writes to a shipper, never to a terminal somebody is watching. That is
+// what makes json the right DEFAULT here and the wrong one in `kontra workflow serve`, where a
+// person is reading the output and the host keeps its human format.
+func workerDefaults() map[string]string {
+	return map[string]string{
+		"KONTRA_LOG_FORMAT": "json",
+		// Field three of this process's CLIENT identity — see runtime/go/temporalhost/workerid.go.
+		// A default rather than derived: a packed Machine may legitimately want to distinguish
+		// two roles an assignment knows about and this function does not.
+		"KONTRA_WORKER_ROLE": "actor",
+	}
+}
+
+// envList merges the defaults, the Worker's environment, one half's, and the DERIVED variables,
+// and renders it.
+//
+// THE ORDER IS THE RULE: `workerDefaults` first (anything may override it), then the assignment's
+// shared map, then the half's own (so a per-half PYTHONPATH can override a shared one), then
+// `derivedEnv` — which therefore wins over all of them and cannot be overridden by anything
+// anybody writes in a JSON file. See `derivedEnv` for which three variables those are and why each
+// one is not the assignment's to set.
 func envList(shared, own, derived map[string]string) []string {
 	merged := map[string]string{}
-	for _, m := range []map[string]string{shared, own, derived} {
+	for _, m := range []map[string]string{workerDefaults(), shared, own, derived} {
 		for k, v := range m {
 			merged[k] = v
 		}

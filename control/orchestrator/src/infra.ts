@@ -47,6 +47,7 @@ import { superviseChild, type Supervisor } from './panels/supervisor';
 import { infraQueue } from './queues';
 import { armRetentionSchedule } from './retention';
 import { temporalConnectOptions } from './temporalTls';
+import { identityFor } from './workerIdentity';
 
 /**
  * The queue this process serves. It is `queues.ts`'s now — a queue NAME is a routing fact and not
@@ -154,11 +155,16 @@ async function runWorker(): Promise<void> {
     // moment later — whereas a converge racing an `up` on the same Machine is a Machine being
     // rebuilt under a session that was just created on it.
     maxConcurrentActivityTaskExecutions: 1,
+    // NAMED. This is the one Worker that holds the cloud credential, so "which Worker converged
+    // this stack" is a question with an auditor behind it — and the answer has to be a value
+    // Temporal recorded on `ActivityTaskStarted`, not one reconstructed from a deploy log.
+    identity: identityFor(INFRA_QUEUE),
   });
 
   // eslint-disable-next-line no-console
   console.log(
-    `[infra] queue=${INFRA_QUEUE} temporal=${address} ns=${namespace} backend=${backendUrl()}`
+    `[infra] queue=${INFRA_QUEUE} temporal=${address} ns=${namespace} ` +
+      `backend=${backendUrl()} as=${identityFor(INFRA_QUEUE)}`
   );
 
   // ARM THE RETENTION SWEEP (ADR 0029 §5) — after the Worker exists, before it polls.

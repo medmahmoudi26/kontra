@@ -342,12 +342,20 @@ services:
     environment:
       KONTRA_LOGS_URL: ${KONTRA_LOGS_URL:-http://victorialogs:9428}
       KONTRA_NAMESPACE: ${KONTRA_NAMESPACE:-default}
-      KONTRA_LOGSHIP_MATCH: ${KONTRA_LOGSHIP_MATCH:-kontra-desync|kontra-webcrawl|kontra-nuclei|kontra-subfinder}
+      # KONTRA_LOGSHIP_MATCH IS GONE. It named four containers — `kontra-desync|kontra-webcrawl|
+      # kontra-nuclei|kontra-subfinder` — which is an enumeration of an open set: a fifth actor's
+      # logs were absent and nothing said so. Selection is now by label (`KONTRA_WORKER`, which the
+      # Warden already stamps on every Worker, and `kontra.logs=true` below), so a new actor is
+      # covered the day it exists. See control/images/logship.sh.
     volumes:
       # READ-ONLY. This service only ever reads container stdout; it has no reason to be able to
       # start, stop or exec anything, and the socket is the whole host if it can.
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./control/images/logship.sh:/logship.sh:ro
+      # THE PARSER, AS ITS OWN FILE. It used to be a heredoc inside the script, where nothing could
+      # import it and a syntax error read as "this run logged nothing". `tests/test_logline.py` is
+      # what runs it now, and it can only do that because it is a file.
+      - ./control/images/logline.py:/logline.py:ro
     entrypoint: ["/bin/sh", "-c", "apk add --no-cache docker-cli curl >/dev/null && exec /bin/sh /logship.sh"]
 
   # API + materializer in one process (queues stay distinct). Infra stays separate (Pulumi).
@@ -364,6 +372,11 @@ services:
     # from localhost — its kontra-handler.service is probably down`, in red, about two workers that
     # were up and polling. Exactly the reading ADR 0020 says a tile may never give.
     hostname: kontra-api
+    # SHIP THIS CONTAINER'S LOGS. The control plane's own processes were excluded from the shipper
+    # by the name list that preceded this, so the components making the authorisation decisions
+    # were the ones with no retained logs — the exact inversion an audit asks about.
+    labels:
+      kontra.logs: 'true'
     pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
     depends_on:
@@ -380,6 +393,11 @@ services:
     environment:
       <<: *orchestrator-env
       KONTRA_ORCHESTRATOR_ROLES: api,materializer
+      # FIELD THREE OF THE TEMPORAL IDENTITY, for the calls this process MAKES. A Worker's identity
+      # names its queue (`workerIdentity.ts`); a client polls nothing, so the role goes there
+      # instead — which is what tells a Run's history that `kontra-api` started it and not the
+      # infra container sharing the image. Not an address: nothing routes on this.
+      KONTRA_WORKER_ROLE: api
       # `serve` starts the tmux server here; see x-tmux-socket.
       TMUX_TMPDIR: *tmux-socket
       # ON A VOLUME, BECAUSE IT WAS ON THE CONTAINER'S OWN FILESYSTEM. `server.ts` defaults this to
@@ -416,6 +434,9 @@ services:
   orchestrator-infra:
     image: ${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:latest}
     container_name: kontra-infra
+    # See the api's. This is the role that holds the cloud credential.
+    labels:
+      kontra.logs: 'true'
     pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
     depends_on:
@@ -426,6 +447,9 @@ services:
     environment:
       <<: *orchestrator-env
       KONTRA_ORCHESTRATOR_ROLES: infra
+      # See the api's. This is the role that holds the cloud credential, so it is the one whose
+      # name on a history event an auditor will be reading.
+      KONTRA_WORKER_ROLE: infra
       # The panels streamer is a child of THIS container and reads the server api started.
       TMUX_TMPDIR: *tmux-socket
       # ...so "the local node" is orchestrator-api, NOT this container. The streamer would otherwise
@@ -486,6 +510,8 @@ services:
   orchestrator-probe:
     image: ${KONTRA_HOST_IMAGE:-kontra-host:1}
     container_name: kontra-probe
+    labels:
+      kontra.logs: 'true'
     pull_policy: ${KONTRA_PULL_POLICY:-never}
     restart: unless-stopped
     depends_on:
@@ -501,6 +527,12 @@ services:
       KONTRA_S3_BUCKET: kontra
       KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
       KONTRA_PROBE_QUEUE: ${KONTRA_PROBE_QUEUE:-kontra-probe}
+      # See the api's. `internals/workerid.py` reads it.
+      KONTRA_WORKER_ROLE: probe
+      # STRUCTURED, because nothing reads this container's stdout with its eyes. `logs.py` has
+      # shipped identity-stamped JSON since ADR 0050 §1 and no deployment had ever asked for it,
+      # which is why the shipper was recovering a run id from the message text with a regex.
+      KONTRA_LOG_FORMAT: json
     command: ["python3", "-m", "kontra.probe"]
     healthcheck:
       test: ["CMD", "python3", "-c", "raise SystemExit(0)"]

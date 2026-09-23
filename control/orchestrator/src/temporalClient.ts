@@ -32,6 +32,7 @@ import {
   registerSearchAttributes,
 } from './visibility';
 import { temporalConnectOptions } from './temporalTls';
+import { clientIdentity } from './workerIdentity';
 
 /** EXPORTED so the one place that STARTS a workflow can stamp the tenant with the same value this
  *  connects to. A second `process.env.KONTRA_NAMESPACE ?? 'default'` elsewhere is how a client and
@@ -73,6 +74,12 @@ export async function getClient(): Promise<Client> {
         connection,
         namespace: NAMESPACE,
         dataConverter,
+        // WHO STARTED THIS RUN, recorded by the server rather than inferred. Every console-driven
+        // start, signal, terminate and reset goes through THIS client, so its identity is what
+        // lands on `WorkflowExecutionStarted.identity` and on a `RequestCancel` event. Left at the
+        // default that is `<pid>@<hostname>` — indistinguishable from the Workers sharing this
+        // container, and useless for the question an audit asks of it.
+        identity: clientIdentity(),
         interceptors: tracingEnabled
           ? { workflow: [new OpenTelemetryWorkflowClientInterceptor()] }
           : undefined,

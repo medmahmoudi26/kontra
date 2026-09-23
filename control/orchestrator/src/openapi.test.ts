@@ -78,13 +78,18 @@ describe('auth is described, because it is the thing worth reading in one view',
   it('names every scheme the server actually uses', () => {
     const { doc } = live();
     expect(Object.keys(doc.components.securitySchemes).sort()).toEqual([
-      // An ACTOR IDENTITY is the fifth, and it is not a service token: a signed bearer naming one
-      // actor, minted when it is served, admitting only what that actor owns. The two `resolve`
-      // routes take it and nothing else — no console session gets in, which is the point of it.
+      // An ACTOR IDENTITY is not a service token: a signed bearer naming one actor, minted when it
+      // is served, admitting only what that actor owns. The two `resolve` routes take it and
+      // nothing else — no console session gets in, which is the point of it.
       'actorIdentity',
       'consoleSession',
       'exploreToken',
       'runToken',
+      // THE SECRETS TOKEN APPEARS BECAUSE ONE ROUTE ON IT FAILS CLOSED. Most of the secrets
+      // surface uses `checkOptionalBearer` and is therefore genuinely OPEN when no token is
+      // configured — correctly absent from the gate table. `/api/audit` uses `checkBearer`, so it
+      // 401s either way, and the spec has to say which credential opens it.
+      'secretsToken',
       'stateToken',
     ]);
   });

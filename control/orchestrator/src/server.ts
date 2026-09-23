@@ -89,6 +89,8 @@ import { registerFleetRoutes } from './routes/fleet';
 import { registerHistoryRoutes } from './routes/history';
 import { registerHitlRoutes } from './routes/hitl';
 import { registerLogsRoutes } from './routes/logs';
+import { registerLogsCoverageRoutes } from './routes/logsCoverage';
+import { registerAuditRoutes } from './routes/audit';
 import { registerLoginRoutes } from './routes/login';
 import { registerPanelRoutes } from './routes/panels';
 import { registerPollerRoutes } from './routes/pollers';
@@ -362,6 +364,8 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // the console's `Authorization` token comes from — a browser cannot read `~/.kontra/config.yaml`
   // the way the CLI does, and the alternative was a bearer baked into the bundle at build time.
   registerLoginRoutes(app);
+  // The operator trail, beside the sign-in that is its first entry (`audit.ts`).
+  registerAuditRoutes(app);
   registerPanelRoutes(app);
   registerCatalogRoutes(app, repo);
   registerScratchRoutes(app, repo);
@@ -369,6 +373,8 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerHistoryRoutes(app, archive);
   registerHitlRoutes(app, { runs, archive });
   registerLogsRoutes(app);
+  // Which Workers are running and NOT logging — the check every silent shipper failure needed.
+  registerLogsCoverageRoutes(app, queueDescriber, repo);
   registerFleetRoutes(app);
   registerWorkflowRoutes(app, repo);
   registerPollerRoutes(app, queueDescriber, repo);

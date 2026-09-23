@@ -30,6 +30,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
+import { audit, callerOf } from '../audit';
 import { checkOptionalBearer } from '../auth';
 import type { ObjectStore } from '../codec/objectStore';
 import {
@@ -211,6 +212,14 @@ export function registerDatasetRoutes(app: FastifyInstance, deps: DatasetRouteDe
     const { name } = req.params as { name: string };
     try {
       const freed = await deleteTemporaryDataset(store, name, lake);
+      // DATA THAT STOPS EXISTING IS AN AUDIT EVENT, and this route is ungated — see the paragraph
+      // above, which is a deliberate decision about a temporary dataset and not an oversight. An
+      // ungated route is precisely the one whose trail matters: the question "where did this go"
+      // has no other answer here, because the rows are gone and the catalog entry with them.
+      audit(
+        { action: 'dataset.delete', outcome: 'allowed', ...callerOf(req), target: name },
+        req.log
+      );
       return { deleted: true, ...freed };
     } catch (err) {
       if (err instanceof NotTemporaryDatasetError) {

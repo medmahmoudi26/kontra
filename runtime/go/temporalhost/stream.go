@@ -61,7 +61,7 @@ func (h *Activities) streamFor(runID string) *workflowstreams.Client {
 // heartbeat payload — there the nesting exists so an author returning `{"done": …}` cannot
 // overwrite the liveness field the orchestrator reads. Here there is no such field to protect, and
 // a subscriber wants `program` and `at` as first-class keys rather than one level down.
-func publishProgress(pub *workflowstreams.Client, node, actor string, v any, last map[string]any) {
+func publishProgress(pub *workflowstreams.Client, node, actor, worker string, v any, last map[string]any) {
 	if pub == nil {
 		return
 	}
@@ -75,6 +75,13 @@ func publishProgress(pub *workflowstreams.Client, node, actor string, v any, las
 		}
 	} else if v != nil {
 		beat["progress"] = v
+	}
+	// THE FRAMEWORK'S FIELD, WRITTEN LAST. Unlike streamBody's `setdefault` rule, the author's map
+	// is spread into a record the ENGINE owns here — so `worker` is assigned rather than defaulted,
+	// which is the same reasoning that keeps an author's `done` from overwriting the liveness one.
+	// Absent when there is nothing to name; never an empty string.
+	if worker != "" {
+		beat["worker"] = worker
 	}
 	// Buffered by the client and flushed on its interval; `false` is "do not force a flush", which
 	// is what keeps a 2-second beat from costing a Signal apiece.
@@ -123,11 +130,11 @@ func methodTopic(actorName, methodName string) string {
 // and nests a non-map under `progress`; both would corrupt a typed record against the schema its
 // Method declared with `Streams(...)`. This one does only what Python's publisher does: flatten,
 // add `node` and `actor`, publish.
-func publishRecord(pub *workflowstreams.Client, topic, node, actor string, v any) {
+func publishRecord(pub *workflowstreams.Client, topic, node, actor, worker string, v any) {
 	if pub == nil {
 		return
 	}
-	pub.Topic(topic).Publish(streamBody(node, actor, v), false)
+	pub.Topic(topic).Publish(streamBody(node, actor, worker, v), false)
 }
 
 // streamBody is the record as it goes on the wire: the author's fields, plus the engine's routing
@@ -142,13 +149,28 @@ func publishRecord(pub *workflowstreams.Client, topic, node, actor string, v any
 // that genuinely carries its own `node` — a scheduler reporting which worker it PLACED something
 // on — means that field, and having the engine silently overwrite it with the worker that happens
 // to be publishing would be a lie the author cannot see or prevent.
-func streamBody(node, actor string, v any) map[string]any {
+func streamBody(node, actor, worker string, v any) map[string]any {
 	body := asMapping(v)
 	if _, ok := body["node"]; !ok {
 		body["node"] = node
 	}
 	if _, ok := body["actor"]; !ok {
 		body["actor"] = actor
+	}
+	// WHICH WORKER IS SPEAKING — `<pid>@<host>@<queue>`, the string this process gave Temporal as
+	// its identity, so a record and the `ActivityTaskStarted` event for the same work join by
+	// equality. `node` says which unit of work; this says which box to go and look at, and when
+	// six nodes are healthy and one Machine is sick those are different questions.
+	//
+	// NOT the stream library's `publisher_id`: that is a random uuid minted per client for signal
+	// deduplication, it is not settable, and `WorkflowStreamItem` never carries it to a subscriber.
+	//
+	// Empty is omitted rather than written blank — a record outside an activity has no Worker to
+	// name, and `""` would read as one that did not say.
+	if worker != "" {
+		if _, ok := body["worker"]; !ok {
+			body["worker"] = worker
+		}
 	}
 	return body
 }
@@ -188,4 +210,3 @@ func asMapping(v any) map[string]any {
 	}
 	return out
 }
-

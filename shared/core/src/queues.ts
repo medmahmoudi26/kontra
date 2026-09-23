@@ -79,3 +79,25 @@ export function identityHost(identity: string): string | undefined {
   const host = (parts[1] ?? '').trim();
   return host === '' ? undefined : host;
 }
+
+/**
+ * The producing half of {@link identityHost}: `<pid>@<host>@<queue>`, which every Worker in this
+ * repository now passes to Temporal as its `identity`.
+ *
+ * IT SITS BESIDE THE PARSER ON PURPOSE. These two functions are one contract, and the failure mode
+ * of splitting them is silent: a producer that drifts does not throw, it produces identities the
+ * Monitor cannot attribute, and the column goes to `unknown` for a Machine that is perfectly
+ * healthy. Written here, `identityHost(workerIdentity(...))` is a property a test can state.
+ *
+ * NOT A KONTRA SCHEME. This is the shape the GO SDK writes by default; Python's default drops the
+ * queue and is widened to match, so one parser reads both halves of a Worker. That is the test for
+ * whether a field belongs here at all — anything needing a new parser is a kontra label and belongs
+ * on the record, not inside Temporal's identity.
+ *
+ * PURE, AND THEREFORE `pid` AND `host` ARE ARGUMENTS. `@kontra/core` is in the console's bundle;
+ * `process.pid` and `os.hostname()` are not things a browser has. The caller that has them passes
+ * them, exactly as every other derivation in this file takes its inputs rather than reading them.
+ */
+export function workerIdentity(pid: number | string, host: string, queue: string): string {
+  return `${pid}@${host}@${queue}`;
+}

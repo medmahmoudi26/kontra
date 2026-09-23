@@ -37,6 +37,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
+import { audit, callerOf } from '../audit';
 import { EXPLORE_TOKEN_VARS, checkBearer, checkOptionalBearer } from '../auth';
 import { InvalidRunWorkflowError, type RunWorkflowStore } from '../data/runWorkflows';
 import type { QueueDescriber } from '../panels/pollers';
@@ -104,8 +105,17 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): voi
   // `POST /api/runs` and not `/api/runs/start`: starting a Run is creating one, and the read
   // route for the collection is already `GET /api/runs`.
   app.post('/api/runs', async (req, reply) => {
+    const caller = callerOf(req);
     const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
-    if (denied) return reply.code(denied.code).send(denied.body);
+    if (denied) {
+      // THE REFUSAL IS THE INTERESTING HALF. A rejected attempt to start work on somebody's
+      // control plane is the event an audit is looking for, and until this it left no trace at all.
+      audit(
+        { action: 'run.start', outcome: 'refused', ...caller, target: String((req.body as { file?: string } | undefined)?.file ?? ''), detail: 'bearer refused' },
+        req.log
+      );
+      return reply.code(denied.code).send(denied.body);
+    }
     // NO QUEUE in the body — it is derived from the folder server-side (GitHub #15). `file` is the
     // registered folder; `type` is the class the page is showing (a folder can declare several), and
     // the queue comes from the folder, never from either string a client sends.
@@ -118,6 +128,19 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): voi
           ...(body.input === undefined ? {} : { input: body.input }),
         },
         queueDescriber()
+      );
+      // THE RUN ID IS THE TARGET, not the file: it is what every other signal about this work is
+      // keyed by — the Temporal history, the log records, the stream — so an audit line that named
+      // only the folder would be the one record in the system that could not be joined to the rest.
+      audit(
+        {
+          action: 'run.start',
+          outcome: 'allowed',
+          ...caller,
+          target: started.runId ?? '',
+          detail: body.file ?? '',
+        },
+        req.log
       );
       return reply.code(201).send(started);
     } catch (err) {
@@ -173,9 +196,16 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): voi
    * cancels first — see `stopRun` for why the forceful-sounding verb has to be the patient one.
    */
   app.post('/api/runs/:runId/stop', async (req, reply) => {
-    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
-    if (denied) return reply.code(denied.code).send(denied.body);
+    const caller = callerOf(req);
     const runId = runIdOf(req);
+    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
+    if (denied) {
+      audit(
+        { action: 'run.terminate', outcome: 'refused', ...caller, target: runId, detail: 'bearer refused' },
+        req.log
+      );
+      return reply.code(denied.code).send(denied.body);
+    }
     const body = (req.body ?? {}) as { escalate?: boolean; force?: boolean; graceMs?: number };
     try {
       // ONE FUNCTION, two verbs, and the difference is one flag — so the two cannot drift into
@@ -183,11 +213,25 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): voi
       // is durable and does not need re-sending); a terminate waits the grace period because what
       // happens next depends on the answer.
       const escalate = body.escalate === true;
-      return await stopRun(runId, {
+      const stopped = await stopRun(runId, {
         escalate,
         force: escalate && body.force === true,
         graceMs: escalate ? clampGrace(body.graceMs) : CANCEL_REPORT_MS,
       });
+      // TWO VERBS, TWO ACTIONS. A cancel asks a workflow to stop and lets it finish its own
+      // cleanup; a terminate takes it away. An audit trail that called both "stop" would lose the
+      // distinction that matters most to whoever is reading it afterwards.
+      audit(
+        {
+          action: escalate ? 'run.terminate' : 'run.cancel',
+          outcome: 'allowed',
+          ...caller,
+          target: runId,
+          ...(escalate && body.force === true ? { detail: 'forced' } : {}),
+        },
+        req.log
+      );
+      return stopped;
     } catch (err) {
       if (err instanceof ControlRefused) return reply.code(404).send({ error: err.message });
       return reply.code(502).send({ error: `could not stop run: ${errMessage(err)}` });

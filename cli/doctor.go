@@ -143,7 +143,89 @@ func cmdDoctor(args []string) error {
 	fmt.Fprintln(cliio.Stdout, "  run `kontra workers list` to see live Temporal workers per actor")
 
 	reportStuck(api)
+	reportLogCoverage(*apiURL)
 	return nil
+}
+
+// logCoverage mirrors `control/orchestrator/src/routes/logsCoverage.ts`. Only the fields this
+// prints — the nullables are pointers because "unknown" is a THIRD state and must not collapse to
+// an empty slice, which is what "everything is fine" looks like.
+type logCoverage struct {
+	WindowMinutes int       `json:"windowMinutes"`
+	Expected      []string  `json:"expected"`
+	Seen          *[]string `json:"seen"`
+	Missing       *[]string `json:"missing"`
+	Unexpected    *[]string `json:"unexpected"`
+	OK            *bool     `json:"ok"`
+	Detail        string    `json:"detail"`
+}
+
+// reportLogCoverage answers the one question every silent logging failure in this system left open:
+// WHICH WORKERS ARE RUNNING AND NOT LOGGING.
+//
+// ═══ WHY IT IS A DOCTOR ROW AND NOT A DASHBOARD PANEL ═══
+//
+// Every failure on this path presents identically to success. A shipper following nothing, a
+// Machine whose vlagent never installed, an actor whose container name was not in an allow-list —
+// all of them draw an EMPTY logs rail, and an empty rail reads as "this Run logged nothing". The
+// person who would notice is the person already looking, and they are looking precisely because
+// they expected lines that are not there. By then the Machine is often gone.
+//
+// `doctor` is where an operator goes BEFORE that, which is the only useful time to be told.
+//
+// ═══ UNKNOWN IS PRINTED AS UNKNOWN ═══
+//
+// A logs backend that cannot be asked reports `ok: null`, and this says so rather than showing a
+// clean bill. The second false all-clear is what makes a check like this stop being read.
+func reportLogCoverage(apiURL string) {
+	token := exploreToken()
+	if token == "" {
+		// SILENT, because this is the ordinary state outside a checkout and doctor already has a
+		// row for every surface that is genuinely down. A line here would be noise on every run
+		// from a laptop with no token exported.
+		return
+	}
+	var cov logCoverage
+	if err := newAuthAPI(apiURL, token).getJSON("/api/logs/coverage", &cov); err != nil {
+		return
+	}
+
+	fmt.Fprintf(cliio.Stdout, "\n%s\n", paint("1", "Log coverage"))
+
+	if cov.OK == nil {
+		fmt.Fprintf(cliio.Stdout, "  %s unknown — %s\n", paint("1;33", "?"), cov.Detail)
+		return
+	}
+	missing := *cov.Missing
+	if len(missing) == 0 {
+		fmt.Fprintf(cliio.Stdout, "  %s all %d worker(s) polling in the last %dm also wrote log lines\n",
+			paint("1;32", "✓"), len(cov.Expected), cov.WindowMinutes)
+	} else {
+		fmt.Fprintf(cliio.Stdout,
+			"  %s %d of %d worker(s) are POLLING AND NOT LOGGING in the last %dm.\n"+
+				"  An empty logs rail for these is not a Run that logged nothing — it is a shipper\n"+
+				"  that is not reaching them.\n",
+			paint("1;31", "✗"), len(missing), len(cov.Expected), cov.WindowMinutes)
+		for _, w := range missing {
+			fmt.Fprintf(cliio.Stdout, "    %s\n", w)
+		}
+		fmt.Fprintln(cliio.Stdout,
+			"  check: is KONTRA_LOG_FORMAT=json set for them, and is the shipper following them?\n"+
+				"    docker compose logs logship | tail\n"+
+				"    ssh <machine> systemctl status kontra-vlagent")
+	}
+
+	if cov.Unexpected != nil && len(*cov.Unexpected) > 0 {
+		// NOT AN ERROR. A Worker logging on a queue this control plane does not know about is a
+		// stale deploy still running, an actor removed from the catalog while its Machine lives
+		// on, or a Worker pointed at the wrong namespace. All three are worth knowing and none of
+		// them shows up anywhere else.
+		fmt.Fprintf(cliio.Stdout, "  %s %d worker(s) are logging but poll no known queue:\n",
+			paint("1;33", "!"), len(*cov.Unexpected))
+		for _, w := range *cov.Unexpected {
+			fmt.Fprintf(cliio.Stdout, "    %s\n", w)
+		}
+	}
 }
 
 // stuckReport mirrors `control/orchestrator/src/routes/stuck.ts`. Only the fields this prints.

@@ -587,6 +587,21 @@ mkdir -p /etc/kontra
 cat > /etc/kontra/worker-$ACTOR.env <<ENV_EOF
 KONTRA_ACTOR_NAME=$ACTOR
 KONTRA_ACTOR_VERSION=$VERSION
+# THE BUNDLE'S OWN DIGEST, WHICH THIS MACHINE ALREADY VERIFIED. Step 5 checks the tar against
+# BUNDLE_SHA before unpacking it, so by the time a Worker boots this value is not a claim — it is
+# a property of the bytes on disk. internals/workerid.py hands it to Temporal as the Worker's
+# build_id, which makes "which build is this Worker running" a server-side fact and also skips the
+# SDK default of hashing every module in the tree on every boot. (No backticks: see the note at
+# the top of this script.)
+KONTRA_BUNDLE_SHA=$BUNDLE_SHA
+# What this Worker is FOR, as field three of its client identity — see the compose services.
+KONTRA_WORKER_ROLE=actor
+# STRUCTURED, BECAUSE vlagent READS THIS, NOT A PERSON. internals/logs.py has shipped
+# identity-stamped JSON since ADR 0050 section 1 and nothing had ever set this variable, so every
+# Worker in every Fleet wrote the human format and the stamping was dead code in production.
+# vlagent parses these into fields and VictoriaLogs indexes them; a person wanting the readable
+# format on one Machine edits this file.
+KONTRA_LOG_FORMAT=json
 KONTRA_ADDRESS=$CONTROLLER:7233
 KONTRA_ORCHESTRATOR_URL=http://$CONTROLLER:8088
 KONTRA_S3_ENDPOINT=http://$CONTROLLER:8333

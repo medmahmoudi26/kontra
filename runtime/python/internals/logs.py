@@ -33,14 +33,18 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+from internals import workerid
+
 __all__ = [
     "RunIdentity",
     "bind_run",
+    "bind_worker",
     "current_run",
     "IdentityFilter",
     "JsonFormatter",
     "configure_shipping",
     "otlp_endpoint",
+    "temporal_context",
 ]
 
 
@@ -71,10 +75,118 @@ def current_run() -> Optional[RunIdentity]:
     return _CURRENT.get()
 
 
+#: THE QUEUE THIS PROCESS BOOTED ON, for records written outside any Temporal context.
+#:
+#: A MODULE GLOBAL and not a contextvar, unlike the Run above, because it is a fact about the
+#: PROCESS rather than about the task: one host boots on one queue and that never varies per
+#: coroutine. Records written INSIDE an activity do better than this — `temporal_context` reads the
+#: real queue off `activity.info()`, which on a Session's worker is the Session's own queue and not
+#: this one. So this is the fallback for the lines that have no task: boot, shutdown, and the
+#: polling-with-nothing-in-flight lines ADR 0050 §1 exists to keep.
+_BOOT_QUEUE = ""
+
+
+def bind_worker(queue: str) -> None:
+    """Name the queue this process serves. Called once, at boot, by the host that knows it."""
+    global _BOOT_QUEUE
+    _BOOT_QUEUE = queue or ""
+
+
+def temporal_context() -> Dict[str, Any]:
+    """What TEMPORAL already knows about this record, asked of Temporal.
+
+    ── WHY THIS IS READ RATHER THAN PASSED ─────────────────────────────────────────────────────────
+
+    `bind_run` below carries the identity the ENGINE has — the Run, the node, the actor — because
+    those are kontra's own concepts and the handler sends them in the batch payload. Everything in
+    THIS function is Temporal's: the workflow id, the run id Temporal means by that phrase, the
+    attempt, the task queue and the activity. Re-deriving those from a payload would be a second
+    source for a fact the SDK holds authoritatively, and the failure mode is silent — a payload
+    field that stops being sent leaves a label that is simply absent, with nothing to compare it to.
+
+    ── THE SDK HAS A TODO WHERE THE WORKER SHOULD BE ───────────────────────────────────────────────
+
+    `activity.Info._logger_details` and `workflow.Info._logger_details` are what
+    `activity.logger` / `workflow.logger` put on every record, and BOTH carry the same comment:
+
+        # TODO(cretz): worker ID?
+
+    So the one field that answers "which Worker wrote this" is the one Temporal's own logger
+    adapters do not include yet. That is the whole of what is added here on top of theirs — the
+    identity is not invented, it is the string this process already passed to `Worker(identity=)`.
+
+    ── IT NEVER RAISES ─────────────────────────────────────────────────────────────────────────────
+
+    `activity.info()` and `workflow.info()` raise outside their contexts, which is most of the
+    time: a boot line, a shipper, a unit test. A logging filter that raised would take the record
+    AND the handler with it, at the exact moment something else is already going wrong.
+    """
+    out: Dict[str, Any] = {}
+    queue = _BOOT_QUEUE
+
+    try:  # noqa: SIM105 - the two contexts are asked separately; see below
+        from temporalio import activity
+
+        info = activity.info()
+    except Exception:  # noqa: BLE001 - not in an activity, which is a normal state
+        info = None
+    if info is not None:
+        queue = info.task_queue or queue
+        out.update(
+            {
+                "task_queue": info.task_queue,
+                "attempt": info.attempt,
+                "activity_id": info.activity_id,
+                "activity_type": info.activity_type,
+                "workflow_id": info.workflow_id or "",
+                "workflow_run_id": info.workflow_run_id or "",
+                "workflow_type": info.workflow_type or "",
+                "namespace": info.namespace,
+            }
+        )
+
+    if info is None:
+        # A WORKFLOW, WHICH IS A DIFFERENT CONTEXT AND NOT A FALLBACK OF THE FIRST. Asking for both
+        # unconditionally would mean calling `workflow.info()` from inside an activity, where it
+        # raises — cheap, but it makes the normal path go through an exception on every line.
+        try:
+            from temporalio import workflow as _wf
+
+            winfo = _wf.info()
+        except Exception:  # noqa: BLE001 - not in a workflow either
+            winfo = None
+        if winfo is not None:
+            queue = winfo.task_queue or queue
+            out.update(
+                {
+                    "task_queue": winfo.task_queue,
+                    "attempt": winfo.attempt,
+                    "workflow_id": winfo.workflow_id,
+                    "workflow_run_id": winfo.run_id,
+                    "workflow_type": winfo.workflow_type,
+                    "namespace": winfo.namespace,
+                }
+            )
+
+    # THE WORKER, WHICH IS THE FIELD THIS FUNCTION EXISTS FOR. Derived from the queue Temporal just
+    # named, so a line written on a Session's own worker says so — `worker_fields` composes the
+    # identical string `Worker(identity=...)` was given, which is what lets an operator paste it
+    # into `temporal task-queue describe` and get the process back.
+    out.update(workerid.worker_fields(queue))
+    return {k: v for k, v in out.items() if v not in (None, "")}
+
+
 class IdentityFilter(logging.Filter):
-    """Stamp the bound Run identity onto every record. Never drops one."""
+    """Stamp the Run, the Temporal context and the Worker onto every record. Never drops one."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # TEMPORAL FIRST, THE ENGINE'S BIND SECOND, AND NEITHER CLOBBERS THE CALLER. Order matters
+        # only where the two overlap, and they are written not to: Temporal owns `workflow_run_id`,
+        # the engine owns kontra's `run_id`, and conflating them is how "which run" gets two
+        # answers. A caller's own field on the record still beats both — see the loop below.
+        for key, value in temporal_context().items():
+            if not hasattr(record, key):
+                setattr(record, key, value)
         ident = _CURRENT.get()
         if ident:
             for key, value in ident.items():
@@ -91,6 +203,19 @@ _STANDARD = frozenset(
     msecs message msg name pathname process processName relativeCreated stack_info thread
     threadName taskName""".split()
 )
+
+#: WHAT TEMPORAL'S OWN LOGGER ADAPTERS PUT ON A RECORD, and what this formatter was silently
+#: throwing away.
+#:
+#: `workflow.logger` and `activity.logger` are `LoggerAdapter`s that attach their context as a
+#: NESTED DICT under these keys (`temporalio/workflow/_sandbox.py`, `temporalio/activity.py`). The
+#: scalar test below — `isinstance(value, (str, int, float, bool))` — is exactly right for keeping
+#: a stray object out of the line, and it dropped both of these on the floor: every author who
+#: reached for the documented `workflow.logger` got a record carrying `workflow_id`, `attempt` and
+#: `task_queue`, none of which survived to the store.
+#:
+#: So they are FLATTENED rather than excluded. One level deep, because that is how deep they are.
+_TEMPORAL_EXTRAS = ("temporal_workflow", "temporal_activity")
 
 
 class JsonFormatter(logging.Formatter):
@@ -115,6 +240,18 @@ class JsonFormatter(logging.Formatter):
             out["_msg"] = str(record.msg)
         for key, value in record.__dict__.items():
             if key in _STANDARD or key.startswith("_"):
+                continue
+            if key in _TEMPORAL_EXTRAS and isinstance(value, dict):
+                # Temporal's context, one level deep — see `_TEMPORAL_EXTRAS`.
+                #
+                # `hasattr(record, sub)` AND NOT `sub not in out`: the adapter's extras are on the
+                # record BEFORE the filter runs, so `out` ordering would make the nested copy win a
+                # race it should lose. Asking the record instead is order-independent — a key the
+                # filter already stamped (from `info()` directly) is skipped here and emitted by
+                # the scalar branch below, which is the one derivation we want in the line.
+                for sub, subvalue in value.items():
+                    if not hasattr(record, sub) and isinstance(subvalue, (str, int, float, bool)):
+                        out[sub] = subvalue
                 continue
             if isinstance(value, (str, int, float, bool)):
                 out[key] = value
