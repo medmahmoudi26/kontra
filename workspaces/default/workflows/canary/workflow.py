@@ -115,6 +115,35 @@ class CanaryInput(TypedDict, total=False):
                     "`every` cannot hang a run forever.")]
 
 
+def _tag() -> str:
+    """This Run's Fleet tag — short, unique per Run, and the same on every replay.
+
+    THE TAG IS THE FLEET'S IDENTITY. `fleet.hold(..., tag=X)` joins the Fleet called X, and a
+    placement is that Fleet's WHOLE desired state — so two Runs on one tag cannot both place, and
+    the second is refused. The tag was the constant `"canary"`, which made "press Run twice" a
+    broken state rather than a second run.
+
+    ── IT IS NOT THE WORKFLOW ID, AND THE RULE IS WHY ──────────────────────────────────────────
+
+    `TAG_RE` is `^[a-z][a-z0-9-]{1,15}$` — 2 to 16 characters, because the tag becomes a
+    DigitalOcean tag, an inventory group and part of every Machine's name. `canary-1790186209` is
+    seventeen, so passing the workflow id straight through refused every Run with
+
+        tag 'canary-1790186209' invalid: lowercase letters, digits and dashes, 2-16 chars
+
+    The last eleven characters of the id are its timestamp, which is what distinguishes one Run of
+    this workflow from another, and `c` in front keeps the leading-letter rule. Sanitised rather
+    than assumed: a workflow id may legally carry `/`, `_` and uppercase, none of which a tag may.
+
+    DETERMINISTIC, because it is derived from the id alone. A replay computes the same string, so
+    the Fleet a retry rejoins is the Fleet it held before — which is the property `fleet.hold`
+    needs and a random suffix would break.
+    """
+    wid = workflow.info().workflow_id.lower()
+    tail = "".join(c if (c.isascii() and (c.isalnum() or c == "-")) else "-" for c in wid)[-11:]
+    return f"c{tail}"[:16]
+
+
 def _provider(name: str, machines: int):
     """Which Fleet, as an object rather than a flag.
 
@@ -184,9 +213,34 @@ class Canary:
         # the last one goes — and it is a REPLAYABLE step in a durable program rather than a line
         # in a script that might not run. That is the whole reason a run that provisions anything
         # is a workflow and not a shell script: a script that dies leaves the Machines standing.
-        async with fleet.hold(_provider(provider, machines), tag="canary") as f:
+        # ── ONE FLEET PER RUN, AND THE TAG IS WHAT MAKES IT ONE ─────────────────────────────────
+        #
+        # The tag was the constant `"canary"`, so every Run of this workflow held the SAME Fleet.
+        # A placement is the WHOLE Fleet's desired state, so the second Run's `place()` is refused
+        # — converging it would delete the first Run's placement and stop its Workers.
+        #
+        # MEASURED, twice, and neither failure mode is acceptable in the first thing anybody runs:
+        #
+        #   press Run twice      the second Run is refused at `place()` and WEDGES. The refusal is
+        #                        a plain RuntimeError in workflow code, which Temporal retries as a
+        #                        workflow TASK for ever — 301 seconds at RUNNING with an empty run
+        #                        page, against 69 seconds for the Run that won.
+        #   skip place() when
+        #   the Fleet is shared  wrong for the same race. `shared` means another Run holds a LEASE,
+        #                        not that it has PLACED — during a race neither has, so `ready()`
+        #                        then fails with "0 Machine(s) with nothing on them".
+        #
+        # `place()`'s own message names both fixes, and the second is the one a canary wants: hold
+        # a Fleet under a tag nobody else is using. Two Runs then provision two Machines instead of
+        # contending for one, which for a demo with `machines=1` is exactly right — a canary should
+        # be self-contained, and "what happens if I press it twice" should not be a question.
+        #
+        # NOTHING HERE TOUCHES RETRY SEMANTICS. The wedge is real and it belongs to the platform,
+        # not to this file: an author error raised inside a workflow retries the task for ever by
+        # design, because that is what lets a human fix the code and have the run resume. This
+        # workflow simply stops making a call that cannot succeed.
+        async with fleet.hold(_provider(provider, machines), tag=_tag()) as f:
             workflow.logger.info("canary: fleet held — placing %s@%s", *ACTOR)
-
             await f.place(ACTOR[0], ACTOR[1], sessions=sessions)
             # `place` returns while systemd (or the container) is still starting. A Batch
             # dispatched into that gap waits on a queue nobody is serving, which is
