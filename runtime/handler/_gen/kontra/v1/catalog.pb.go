@@ -395,13 +395,13 @@ const file_kontra_v1_catalog_proto_rawDesc = "" +
 	"operations\x18\x05 \x03(\v2\x19.kontra.v1.ActorOperationR\n" +
 	"operations\x12\x16\n" +
 	"\x06digest\x18\x06 \x01(\tR\x06digest\x12\x16\n" +
-	"\x06source\x18\a \x01(\tR\x06source\"\xd7\x01\n" +
+	"\x06source\x18\a \x01(\tR\x06source\"\xe5\x01\n" +
 	"\x0eActorOperation\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12/\n" +
 	"\x06params\x18\x02 \x01(\v2\x17.google.protobuf.StructR\x06params\x12-\n" +
 	"\x05input\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x05input\x12/\n" +
 	"\x06output\x18\x04 \x01(\v2\x17.google.protobuf.StructR\x06output\x12 \n" +
-	"\vdescription\x18\x05 \x01(\tR\vdescription\"\xd6\x01\n" +
+	"\vdescription\x18\x05 \x01(\tR\vdescriptionJ\x04\b\x06\x10\aR\x06stream\"\xd6\x01\n" +
 	"\x12WorkflowDescriptor\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12-\n" +

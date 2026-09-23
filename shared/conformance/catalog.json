@@ -1,72 +1,124 @@
 {
- "why": "one Actor, three SDKs, ONE descriptor — the JSON every SDK must emit for POST /api/actors and the orchestrator must store without loss. Each side asserts this file: runtime/go/registrar/conformance_test.go, tests/test_catalog_conformance.py, control/orchestrator/src/catalog.conformance.test.ts",
- "schemas": "the input/output/params documents here are the DIALECT-NEUTRAL CORE of what each SDK derives — type, properties (each reduced to its own core) and required. Pydantic brands every schema with `title`, invopop's reflector with `$schema`/`$id`/`additionalProperties`, and neither branding is a contract: what the catalog reads is the property names and their JSON types. Each SDK's test projects its real emission down to this before comparing, and `required` is sorted because it is a set — its order is whichever order that language's author declared the fields in.",
- "covers": {
-  "multi-method": "fetch/title/probe — ONE OPERATION PER METHOD (ADR 0023 §9), in declaration order",
-  "per-method-signatures": "title takes what fetch emits; a single Actor-level input/output pair could describe only one of them, and would typecheck every node against the other",
-  "description": "fetch carries the author's sentence (a Python docstring's first paragraph, a Go Does(...)); title and probe carry none and the key is ABSENT, never an empty string",
-  "unset-schemas": "probe declares neither takes nor emits — it registers and stays dispatchable, and simply advertises nothing",
-  "params": "run-wide config is ACTOR-level, so it rides EVERY operation including the one with no schemas of its own",
-  "digest": "the OCI image digest the worker self-registers (ADR 0011), from KONTRA_ACTOR_DIGEST in both SDKs",
-  "source": "the directory the WORKER loaded this actor from — on a fleet Machine `/opt/kontra/actor/<name>`, which is not a path on the reader's disk and is still the honest answer to where the code is"
- },
- "expect": {
-  "key": "demo@1.2.3",
-  "name": "demo",
-  "version": "1.2.3",
-  "schemaVersion": "kontra.actor.v1",
-  "digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-  "source": "/opt/kontra/actor/demo",
-  "operations": [
-   {
-    "name": "fetch",
-    "description": "Fetch each host once.",
-    "params": {
-     "type": "object",
-     "properties": {"depth": {"type": "integer"}},
-     "required": ["depth"]
-    },
-    "input": {
-     "type": "object",
-     "properties": {"host": {"type": "string"}},
-     "required": ["host"]
-    },
-    "output": {
-     "type": "object",
-     "properties": {"status": {"type": "integer"}, "url": {"type": "string"}},
-     "required": ["status", "url"]
-    }
-   },
-   {
-    "name": "title",
-    "params": {
-     "type": "object",
-     "properties": {"depth": {"type": "integer"}},
-     "required": ["depth"]
-    },
-    "input": {
-     "type": "object",
-     "properties": {"status": {"type": "integer"}, "url": {"type": "string"}},
-     "required": ["status", "url"]
-    },
-    "output": {
-     "type": "object",
-     "properties": {"text": {"type": "string"}},
-     "required": ["text"]
-    }
-   },
-   {
-    "name": "probe",
-    "params": {
-     "type": "object",
-     "properties": {"depth": {"type": "integer"}},
-     "required": ["depth"]
-    }
-   }
-  ]
- },
- "unsetDigest": {
-  "why": "a worker with no KONTRA_ACTOR_DIGEST OMITS the key. It is not an empty string: the catalog keeps a previously registered digest only when the key is ABSENT (`body.digest ?? prev.digest`), so a dev worker that posted \"\" would unpin the image on every restart",
-  "absent": ["digest"]
- }
+  "why": "one Actor, three SDKs, ONE descriptor \u2014 the JSON every SDK must emit for POST /api/actors and the orchestrator must store without loss. Each side asserts this file: runtime/go/registrar/conformance_test.go, tests/test_catalog_conformance.py, control/orchestrator/src/catalog.conformance.test.ts",
+  "schemas": "the input/output/params documents here are the DIALECT-NEUTRAL CORE of what each SDK derives \u2014 type, properties (each reduced to its own core) and required. Pydantic brands every schema with `title`, invopop's reflector with `$schema`/`$id`/`additionalProperties`, and neither branding is a contract: what the catalog reads is the property names and their JSON types. Each SDK's test projects its real emission down to this before comparing, and `required` is sorted because it is a set \u2014 its order is whichever order that language's author declared the fields in.",
+  "covers": {
+    "multi-method": "fetch/title/probe \u2014 ONE OPERATION PER METHOD (ADR 0023 \u00a79), in declaration order",
+    "per-method-signatures": "title takes what fetch emits; a single Actor-level input/output pair could describe only one of them, and would typecheck every node against the other",
+    "description": "fetch carries the author's sentence (a Python docstring's first paragraph, a Go Does(...)); title and probe carry none and the key is ABSENT, never an empty string",
+    "unset-schemas": "probe declares neither takes nor emits \u2014 it registers and stays dispatchable, and simply advertises nothing",
+    "params": "run-wide config is ACTOR-level, so it rides EVERY operation including the one with no schemas of its own",
+    "digest": "the OCI image digest the worker self-registers (ADR 0011), from KONTRA_ACTOR_DIGEST in both SDKs",
+    "source": "the directory the WORKER loaded this actor from \u2014 on a fleet Machine `/opt/kontra/actor/<name>`, which is not a path on the reader's disk and is still the honest answer to where the code is"
+  },
+  "expect": {
+    "key": "demo@1.2.3",
+    "name": "demo",
+    "version": "1.2.3",
+    "schemaVersion": "kontra.actor.v1",
+    "digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "source": "/opt/kontra/actor/demo",
+    "operations": [
+      {
+        "name": "fetch",
+        "description": "Fetch each host once.",
+        "params": {
+          "type": "object",
+          "properties": {
+            "depth": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "depth"
+          ]
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "url"
+          ]
+        }
+      },
+      {
+        "name": "title",
+        "params": {
+          "type": "object",
+          "properties": {
+            "depth": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "depth"
+          ]
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "url"
+          ]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      },
+      {
+        "name": "probe",
+        "params": {
+          "type": "object",
+          "properties": {
+            "depth": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "depth"
+          ]
+        }
+      }
+    ]
+  },
+  "unsetDigest": {
+    "why": "a worker with no KONTRA_ACTOR_DIGEST OMITS the key. It is not an empty string: the catalog keeps a previously registered digest only when the key is ABSENT (`body.digest ?? prev.digest`), so a dev worker that posted \"\" would unpin the image on every restart",
+    "absent": [
+      "digest"
+    ]
+  }
 }

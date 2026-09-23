@@ -32,6 +32,7 @@ import {
 } from '../lease';
 import { datasetQueue, infraQueue } from '../queues';
 import { temporalConnectOptions } from '../temporalTls';
+import { registerSearchAttributes, tenantAttributes } from '../visibility';
 
 export interface HoldFleetLeaseInput {
   /** The stack being held — `kontra-fleet/<actor>-<version>`. The **Lease** workflow's id derives from it. */
@@ -115,10 +116,36 @@ async function withClient<T>(
   const namespace = process.env.KONTRA_NAMESPACE ?? 'default';
   const connection = await Connection.connect(temporalConnectOptions({ address }));
   try {
+    // REGISTERED BEFORE THE FIRST STAMPED START, AND THIS IS NOT BOOKKEEPING.
+    //
+    // `holdFleetLease` stamps `KontraTenant` at start. Temporal HARD-ERRORS on an attribute the
+    // namespace has no mapping for — "Namespace default has no mapping defined for search attribute
+    // KontraTenant" — so on a namespace where nothing had registered it, adding the stamp turned a
+    // working Lease hold into a failed one. Caught by `lease.test.ts`, which drives a real ephemeral
+    // server; it would otherwise have surfaced on a fresh install, at the moment a Run first claimed
+    // a Fleet.
+    //
+    // THIS CLIENT IS THE REASON IT WAS MISSING. `temporalClient.ts:getClient` registers on connect,
+    // and this activity deliberately does NOT use it (see the header: a NativeConnection cannot do
+    // signal-with-start). A second client is a second place the namespace has to be prepared.
+    //
+    // Idempotent, self-healing and it never throws — see `registerSearchAttributes`. Memoised per
+    // namespace so this costs one round trip per worker process, not one per hold.
+    await ensureAttributes(connection, namespace);
     return await fn(new Client({ connection, namespace, dataConverter }));
   } finally {
     await connection.close().catch(() => undefined);
   }
+}
+
+/** Namespaces this process has already prepared. Per-process, which is the lifetime that matters:
+ *  a worker restart re-registering four attributes is four no-ops. */
+const prepared = new Set<string>();
+
+async function ensureAttributes(connection: Connection, namespace: string): Promise<void> {
+  if (prepared.has(namespace)) return;
+  await registerSearchAttributes(connection, namespace);
+  prepared.add(namespace);
 }
 
 /**
@@ -144,9 +171,18 @@ export async function holdFleetLease(
   const workflowId = leaseWorkflowId(input.stackFqn);
 
   return withClient(client, async (client) => {
-    const handle = await client.workflow.signalWithStart(LEASE_WORKFLOW, {
+    const start = (stamp: boolean) => client.workflow.signalWithStart(LEASE_WORKFLOW, {
       taskQueue: infraQueue(),
       workflowId: workflowId,
+      // Whose Lease this is, stamped at start — see `tenantAttributes`. On a signalWithStart this
+      // rides the START half only, so an existing Lease that is merely being signalled is not
+      // re-stamped and writes no extra event, which is the behaviour this workflow's own
+      // event-budget comment asks for.
+      //
+      // BEST-EFFORT, AND THAT IS THE WHOLE POINT — see `withoutAttributes` below.
+      ...(stamp
+        ? { typedSearchAttributes: tenantAttributes(process.env.KONTRA_NAMESPACE ?? 'default') }
+        : {}),
       args: [
         {
           stackFqn: input.stackFqn,
@@ -166,6 +202,34 @@ export async function holdFleetLease(
           ...(input.credential ? { credential: input.credential } : {}),
         },
       ],
+    });
+
+    /*
+     * A LEASE HOLD MUST NEVER FAIL BECAUSE OF A VISIBILITY INDEX.
+     *
+     * Temporal HARD-ERRORS on an attribute the namespace has no mapping for — `3 INVALID_ARGUMENT:
+     * Namespace default has no mapping defined for search attribute KontraTenant`. Adding the stamp
+     * therefore turned a working hold into a failed one on any namespace where nothing had
+     * registered it: a fresh install, a second control plane, or an ephemeral test server.
+     *
+     * AND A FAILED HOLD IS NOT A COSMETIC FAILURE. A Fleet nobody holds is a Fleet the sweep tears
+     * down (ADR 0037), so this would have turned a missing INDEX into destroyed Machines and a Run
+     * that cannot place work. `tenantOf` already derives the tenant from the namespace at READ time,
+     * which is what makes the attribute a convenience rather than the authority — so the correct
+     * behaviour when it cannot be written is to carry on without it.
+     *
+     * `registerSearchAttributes` in `withClient` prevents this for a client we dial ourselves. This
+     * covers the one we do not: an INJECTED client belongs to its caller, and a caller that has not
+     * prepared the namespace is not a caller whose Lease should break.
+     */
+    const handle = await start(true).catch(async (err: unknown) => {
+      if (!isUnmappedSearchAttribute(err)) throw err;
+      console.warn(
+        `[lease] ${leaseWorkflowId(input.stackFqn)}: this namespace has no KontraTenant mapping, ` +
+          `so the hold is recorded without it. The tenant is still derived at read time ` +
+          `(temporalClient.ts:tenantOf); run the control plane once to register the attributes.`
+      );
+      return start(false);
     });
 
     const held = (await handle.query(LEASE_QUERY)) as FleetLeaseSet;
@@ -251,4 +315,31 @@ export async function runningHolders(
     }
     return out;
   });
+}
+
+/**
+ * Is this "the namespace has no mapping for that search attribute", and nothing else?
+ *
+ * MATCHED ON THE gRPC CODE **AND** THE PHRASE, not on the phrase alone. `INVALID_ARGUMENT` covers a
+ * great many caller mistakes and swallowing all of them here would hide a real bug behind a retry
+ * that quietly drops the attribute; matching the phrase alone would fire on an unrelated message
+ * that happened to contain it. Both, or neither.
+ */
+function isUnmappedSearchAttribute(err: unknown): boolean {
+  // WALKED, NOT READ OFF THE TOP. The SDK wraps the gRPC ServiceError, so `code` and the phrase can
+  // sit one or two `cause` links down — reading only the outermost object silently answered `false`
+  // and rethrew, which is exactly the failure this predicate exists to prevent.
+  let code: number | undefined;
+  let text = '';
+  let cur: unknown = err;
+  for (let depth = 0; cur && depth < 5; depth++) {
+    const e = cur as { code?: unknown; message?: unknown; details?: unknown; cause?: unknown };
+    if (typeof e.code === 'number' && code === undefined) code = e.code;
+    text += ` ${String(e.message ?? '')} ${String(e.details ?? '')}`;
+    cur = e.cause;
+  }
+  // grpc.status.INVALID_ARGUMENT, AND the phrase. Either alone is wrong: INVALID_ARGUMENT covers a
+  // great many caller mistakes and swallowing all of them would hide a real bug behind a retry that
+  // quietly drops the attribute; the phrase alone would fire on an unrelated message containing it.
+  return code === 3 && /no mapping defined for search attribute/i.test(text);
 }

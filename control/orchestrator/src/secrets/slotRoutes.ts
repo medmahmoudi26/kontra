@@ -39,6 +39,7 @@
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
 
+import { audit, callerOf } from '../audit';
 import { checkOptionalBearer, type AuthFailure } from '../auth';
 import { SECRETS_TOKEN_VARS } from './routes';
 import { SlotRefused, SlotUndeclared, SlotUnbound, type ActorRef, type SlotSpec } from './slots';
@@ -138,9 +139,19 @@ export function registerSlotRoutes(app: FastifyInstance, secrets: SecretStore, s
 
   /** Bind a slot to one of the operator's secrets, or rebind it. One verb for both. */
   app.put('/api/slots/actor/:actor/:slot', async (req, reply) => {
-    const denied = denyManage(req.headers.authorization);
-    if (denied) return reply.code(denied.code).send(denied.body);
+    const caller = callerOf(req);
     const { actor, slot } = req.params as { actor: string; slot: string };
+    const denied = denyManage(req.headers.authorization);
+    if (denied) {
+      // A REFUSED ATTEMPT TO GRANT A CREDENTIAL is the single most interesting line this trail can
+      // carry, and it was leaving no record at all.
+      audit(
+        { action: 'secret.bind', outcome: 'refused', ...caller,
+          target: `${decodeURIComponent(actor)}/${decodeURIComponent(slot)}`, detail: 'bearer refused' },
+        req.log
+      );
+      return reply.code(denied.code).send(denied.body);
+    }
     const body = (req.body ?? {}) as { secret?: unknown };
     if (typeof body.secret !== 'string' || !body.secret) {
       return reply.code(400).send({ error: 'a binding needs the `secret` name to bind the slot to' });
@@ -149,6 +160,18 @@ export function registerSlotRoutes(app: FastifyInstance, secrets: SecretStore, s
       const binding = await slots.bind(decodeURIComponent(actor), decodeURIComponent(slot), body.secret);
       // The GRANT is logged, never a value — there is none on this path to log.
       req.log?.info?.({ actor: binding.actor, slot: binding.slot, secret: binding.secret }, 'slot bound');
+      // THE OPERATOR'S HALF OF THE CREDENTIAL STORY. `secrets/audit.ts` records which ACTOR read
+      // which secret; this records which PERSON granted it the right to. Neither is derivable from
+      // the other, and an investigation needs both: one says a key was used, the other says who
+      // made that possible and when.
+      //
+      // The secret's NAME, never any part of its value — same rule as the resolution ledger, and
+      // with more force here, because this is the file most likely to leave the company.
+      audit(
+        { action: 'secret.bind', outcome: 'allowed', ...caller,
+          target: `${binding.actor}/${binding.slot}`, detail: `secret ${binding.secret}` },
+        req.log
+      );
       return { binding, actor: await slots.view(binding.actor) };
     } catch (err) {
       return fail(reply, err);
@@ -157,15 +180,30 @@ export function registerSlotRoutes(app: FastifyInstance, secrets: SecretStore, s
 
   /** Withdraw a grant. 404 when there was none, so a page can tell "removed" from "was not there". */
   app.delete('/api/slots/actor/:actor/:slot', async (req, reply) => {
-    const denied = denyManage(req.headers.authorization);
-    if (denied) return reply.code(denied.code).send(denied.body);
+    const caller = callerOf(req);
     const { actor, slot } = req.params as { actor: string; slot: string };
+    const denied = denyManage(req.headers.authorization);
+    if (denied) {
+      audit(
+        { action: 'secret.unbind', outcome: 'refused', ...caller,
+          target: `${decodeURIComponent(actor)}/${decodeURIComponent(slot)}`, detail: 'bearer refused' },
+        req.log
+      );
+      return reply.code(denied.code).send(denied.body);
+    }
     try {
       const name = decodeURIComponent(actor);
       const key = decodeURIComponent(slot);
       const had = await slots.unbind(name, key);
       if (!had) return reply.code(404).send({ error: `${name} has no binding for slot ${JSON.stringify(key)}` });
       req.log?.info?.({ actor: name, slot: key }, 'slot unbound');
+      // WITHDRAWING A GRANT IS AUDITED AS LOUDLY AS MAKING ONE. An actor that stopped being able
+      // to reach a credential is a change somebody made, and the question afterwards is always
+      // "who took this away and when" — asked, in practice, by the person whose run just broke.
+      audit(
+        { action: 'secret.unbind', outcome: 'allowed', ...caller, target: `${name}/${key}` },
+        req.log
+      );
       return { unbound: true, actor: await slots.view(name) };
     } catch (err) {
       return fail(reply, err);

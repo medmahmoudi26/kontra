@@ -81,7 +81,12 @@ export function dockerFleetProgram(args: DockerFleetArgs) {
 
     const inventory = pulumi.all(machines.map((m) => m.container.name)).apply((names) =>
       names.reduce<Record<string, MachineEntry>>((acc, name) => {
-        acc[name] = { name, host: name, publicIp: name, tag: args.tag };
+        // A LOCAL CONTAINER HAS NO METER. `priceHourly: 0` is the same sentinel the cloud path
+        // uses for "unknown", and both readings want the same thing from a caller: do not print
+        // a dollar figure. A docker Fleet costs this machine's RAM, which is real but is not
+        // something this program can price.
+        acc[name] = { name, host: name, publicIp: name, tag: args.tag,
+                      size: 'docker', priceHourly: 0 };
         return acc;
       }, {})
     );

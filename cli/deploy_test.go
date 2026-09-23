@@ -38,6 +38,42 @@ func TestWorkerBaseDockerfile(t *testing.T) {
 	}
 }
 
+// EVERY MODULE THE HANDLER IMPORTS MUST BE IN THE CONTEXT, and this is pinned by reading
+// handler's go.mod rather than by listing modules here — a list would be a third place to forget.
+//
+// THE FAILURE THIS CATCHES IS DELAYED AND CONFUSING. The base image is built ONCE and cached
+// (`ensureWorkerBase` returns early when the tag exists), so a missing COPY breaks nothing until
+// somebody deletes the image — which is the documented way to pick up a handler or entrypoint
+// change. Then every deploy on that machine fails with a bare `returned a non-zero code: 1`, long
+// after the import that caused it was added. Measured: `runtime/handler` imports
+// `runtime/go/codec`, `runtime/go` was never copied, and the base built fine for months.
+func TestWorkerBaseCopiesEveryModuleTheHandlerReplaces(t *testing.T) {
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gomod, err := os.ReadFile(filepath.Join(root, "..", "runtime", "handler", "go.mod"))
+	if err != nil {
+		t.Skipf("handler go.mod not readable from here: %v", err)
+	}
+	df := workerBaseDockerfile()
+	for _, line := range strings.Split(string(gomod), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "replace ") || !strings.Contains(line, "=> ..") {
+			continue
+		}
+		// `replace <mod> => ../go` -> the directory the build needs, as its repo-relative path.
+		parts := strings.Fields(line)
+		target := parts[len(parts)-1]
+		dir := strings.TrimPrefix(filepath.Clean(filepath.Join("runtime", "handler", target)), "./")
+		if !strings.Contains(df, "COPY "+dir+" ./"+dir) {
+			t.Errorf("handler replaces a module in %s but the worker-base Dockerfile never "+
+				"COPYs it — the build will fail the next time the cached image is deleted.\n"+
+				"want: COPY %s ./%s\ngot:\n%s", dir, dir, dir, df)
+		}
+	}
+}
+
 func TestWorkerDockerfile(t *testing.T) {
 	// The per-actor worker must NOT recompile the handler — it COPYs from the cached base.
 	df := workerDockerfile("kontra/beacon:0.2.0", actorManifest{Name: "beacon", Version: "0.2.0"}, "py")

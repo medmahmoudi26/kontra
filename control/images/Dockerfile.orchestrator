@@ -65,6 +65,12 @@ RUN mkdir -p web/dist \
 # `/usr/local/lib/python3.11/dist-packages` mean the same thing in both. The RUN below is the check
 # that says so AT BUILD TIME rather than on the operator's first click.
 COPY --from=spa-src /usr/local/bin/kontra /usr/local/bin/kontra
+# THE CLI'S OTHER HALF. `serveWorkflow` spawns `kontra` in THIS container, and a workflow that
+# reaches a dataset verb shells out to `duckdb` (cli/runs.go:duckdbBin) — so shipping the CLI
+# without it is shipping a binary that fails on a subset of its own commands. Copied rather than
+# downloaded again so both images carry the SAME build: the version is pinned to the embedded
+# `@duckdb/node-api` because they share one DuckLake catalog — see Dockerfile.selfcontained.
+COPY --from=spa-src /usr/local/bin/duckdb /usr/local/bin/duckdb
 COPY --from=spa-src /opt/kontra /opt/kontra
 COPY --from=spa-src /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
 ENV KONTRA_SDK_ROOT=/opt/kontra

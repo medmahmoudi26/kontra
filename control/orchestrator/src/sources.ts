@@ -25,6 +25,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { workspaceRoot } from './workspaces';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -163,9 +164,44 @@ export function kontraHome(): string {
   return process.env.KONTRA_HOME || path.join(os.homedir(), '.kontra');
 }
 
-/** The conventional folder for a kind: `~/.kontra/actors`, `~/.kontra/workflows`. */
+/**
+ * WHERE CODE LIVES — the one root, per kind.
+ *
+ * ── THE WORKSPACE IS THE REGISTRATION ───────────────────────────────────────────────────────────
+ *
+ * There used to be two ways for a folder to be here: discovery under a conventional root, and an
+ * explicit `register` that recorded an absolute path in the database. The second one is gone, and
+ * this is what replaced it: a folder is an Actor or a Workflow because it is IN THE WORKSPACE and
+ * looks like one.
+ *
+ * WHAT REGISTRATION COST. A recorded path outlives the directory it names, so an install
+ * accumulated entries for code that no longer existed — `crawl` listed and `absent`, pointing at
+ * `/root/oss/kontra-workflows/python`, a folder deleted weeks earlier. Every surface then had to
+ * carry the `absent` state, `serve` had to refuse it with a 404, and the operator had to `forget`
+ * it by hand. None of that is possible now: the listing IS the filesystem, so deleting a folder
+ * un-registers it and there is nothing to repair.
+ *
+ * WHAT IT ALSO COST: the allowlist `serve` runs code through was a database table, which is a
+ * strange thing for a security boundary to be. It is a directory now — one bind mount, auditable
+ * by `ls`.
+ *
+ * THE WORKSPACE IS A MOUNT, which is the other half of the point: code lives in a volume you can
+ * see, back up and edit from outside the container, not in a path the control plane remembered.
+ * `KONTRA_WORKSPACES` + `.current` selects one of several; `KONTRA_WORKSPACE` names a single tree;
+ * with neither set it is `~/.kontra`, which is what a bare `kontra init` produces.
+ */
+export function codeRoot(kind: SourceKind): string {
+  const workspace = workspaceRoot();
+  const root = workspace || kontraHome();
+  return path.join(root, kind === 'actor' ? 'actors' : 'workflows');
+}
+
+/**
+ * @deprecated The old name for {@link codeRoot}, kept for one release because it is in tests and in
+ * `routes/sources.ts`'s wording. It is the same path whenever no workspace is configured.
+ */
 export function defaultRoot(kind: SourceKind): string {
-  return path.join(kontraHome(), kind === 'actor' ? 'actors' : 'workflows');
+  return codeRoot(kind);
 }
 
 /**
@@ -517,7 +553,19 @@ function discoverWalk(
     return [];
   }
   const found: Omit<Source, 'id' | 'registeredAt'>[] = [];
-  const marker = MANIFEST[kind];
+  /**
+   * THE CODE IS WHAT MAKES A FOLDER ONE, not the manifest.
+   *
+   * This keyed on `MANIFEST[kind]` — `workflow.json` for a workflow — which was right while
+   * registering was the act that required a manifest. With the workspace as the registration, a
+   * folder holding `workflow.py` and no `workflow.json` would simply not appear: you drop your code
+   * in the workspace, nothing happens, and there is no error anywhere to read.
+   *
+   * It is listed instead, incomplete, and the acts that need a version refuse by name —
+   * `kontra workflow init` writes the missing file. For an Actor the two are the same file
+   * (`actor.json`), so nothing changes there.
+   */
+  const marker = MARKER[kind];
   for (const entry of entries) {
     if (entry.startsWith('.') || entry === 'node_modules' || entry === '__pycache__') continue;
     const full = path.join(root, entry);
@@ -542,4 +590,4 @@ function discoverWalk(
 }
 
 /** Extra root Compose bind-mounts. Named workspaces: KONTRA_WORKSPACES + .current child. */
-export { workspaceRoot } from './workspaces';
+export { workspaceRoot };

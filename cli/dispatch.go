@@ -70,6 +70,9 @@ func cmdActor(args []string) error {
 	// `schema` sits beside `register` for the same reason, and is checked here rather than under
 	// the `<ref> <verb>` grammar because it addresses a DIRECTORY, not a registered Actor — the
 	// whole point is that it answers for code that has never been registered at all.
+	if len(args) >= 1 && args[0] == "init" {
+		return cmdSourceInit("actor", args[1:])
+	}
 	if len(args) >= 1 && args[0] == "schema" {
 		return cmdActorSchema(args[1:])
 	}
@@ -87,6 +90,7 @@ func cmdActor(args []string) error {
 				"  kontra workflow start <your_workflow_folder> --wait --input '…'\n"+
 				"See examples/python/workflows/ for two that dispatch a Method over a Batch.", args[0])
 	}
-	return errors.New("usage: kontra actor register <dir> [--init] [--json]\n" +
-		"       kontra actor schema <dir> [--method NAME]")
+	return errors.New("usage: kontra actor init <dir>          # write a starter actor.json\n" +
+		"       kontra actor schema <dir> [--method NAME]\n" +
+		"An actor is served because it is in the workspace: kontra workspace path")
 }

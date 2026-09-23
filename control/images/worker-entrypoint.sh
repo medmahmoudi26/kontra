@@ -55,18 +55,44 @@ if [ "${KONTRA_ACTOR_KIND:-actor}" = "activity" ]; then
   exit 1
 fi
 
+# BOTH DESTINATIONS, VIA A FIFO. The redirect used to be `>"$LOG_DIR/host.log" 2>&1`, which sent
+# every line the actor wrote to a file INSIDE the container and nothing at all to stdout — so
+# `docker logs <worker>` showed the two `[worker]` banner lines above and then silence, for the
+# whole life of a scan. The only way to watch a running actor was to know the path and
+# `docker exec … tail -f /tmp/host.log`, which is not something an operator should have to know,
+# and is impossible for a Machine in a Fleet.
+#
+# It must be BOTH and not just stdout: the file is the documented reason $LOG_DIR exists (mount
+# it and a long scan stays inspectable after the container is gone), and it is what
+# `cli/scale.go --logs` binds.
+#
+# `tee` reads the FIFO rather than sitting in a pipeline, because `cmd | tee … &` would make `$!`
+# the pid of TEE — and $HOST_PID is what the supervise loop below watches and what the trap
+# kills. A pipeline here would leave this script watching the wrong process and reporting a dead
+# actor as alive.
+pipe_to_both() { # <fifo> <logfile>
+  [ -p "$1" ] || { rm -f "$1"; mkfifo "$1"; }
+  tee -a "$2" <"$1" &
+}
+pipe_to_both "$LOG_DIR/host.pipe" "$LOG_DIR/host.log"
+pipe_to_both "$LOG_DIR/handler.pipe" "$LOG_DIR/handler.log"
+
 # 1) the actor — a Python actor is run by Python; a Go actor is a compiled binary beside its
 #    manifest. KONTRA_ACTOR_ENGINE is baked by `kontra deploy`; it defaults to py so an older
 #    worker image keeps working.
+#
+# PYTHON IS UNBUFFERED (-u) because its stdout is now a pipe, not a tty, so the interpreter
+# switches to block buffering and a progress line written every few seconds arrives in 4 KB
+# lumps — which turns "logging as it progresses" back into silence, just with a different cause.
 if [ "${KONTRA_ACTOR_ENGINE:-py}" = "go" ]; then
-  "/actor/${KONTRA_ACTOR_NAME}/${KONTRA_ACTOR_NAME}" >"$LOG_DIR/host.log" 2>&1 &
+  "/actor/${KONTRA_ACTOR_NAME}/${KONTRA_ACTOR_NAME}" >"$LOG_DIR/host.pipe" 2>&1 &
 else
-  python3 "/actor/${KONTRA_ACTOR_NAME}/${KONTRA_ACTOR_ENTRY:-actor.py}" >"$LOG_DIR/host.log" 2>&1 &
+  python3 -u "/actor/${KONTRA_ACTOR_NAME}/${KONTRA_ACTOR_ENTRY:-actor.py}" >"$LOG_DIR/host.pipe" 2>&1 &
 fi
 HOST_PID=$!
 
 # 2) the handler — the workflow half.
-/kontra/handler >"$LOG_DIR/handler.log" 2>&1 &
+/kontra/handler >"$LOG_DIR/handler.pipe" 2>&1 &
 HANDLER_PID=$!
 
 log "started: host=$HOST_PID handler=$HANDLER_PID"

@@ -23,6 +23,7 @@ from temporalio.worker import Worker
 
 from internals import casstore
 from internals.replay import Outcome, replay_history
+from internals.temporal.tlsconfig import connect_tls
 
 ADDRESS = os.environ.get("KONTRA_ADDRESS", "localhost:7233")
 
@@ -67,7 +68,14 @@ class ReplayProbeReordered:
 
 
 async def _client() -> Client:
-    return await Client.connect(ADDRESS, namespace="default", data_converter=casstore.data_converter())
+    # TLS THROUGH THE ONE MODULE, like every other client in this repository — `replay.py` itself
+    # does the same two lines down. `connect_tls()` is `False` when nothing is configured, so this is
+    # identical against a plaintext dev server and correct against a TLS one; without it this file is
+    # the single site `test_temporal_tls.py`'s sweep reports, and a guard with a standing exception
+    # stops being read.
+    return await Client.connect(
+        ADDRESS, namespace="default", data_converter=casstore.data_converter(), tls=connect_tls()
+    )
 
 
 async def _run_and_capture() -> dict:

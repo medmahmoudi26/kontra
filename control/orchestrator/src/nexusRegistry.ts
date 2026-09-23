@@ -85,6 +85,39 @@ function namespace(): string {
 }
 
 /**
+ * The endpoint's description, as a Nexus `Payload` — Markdown, which is what the endpoint page
+ * renders.
+ *
+ * ONE METHOD PER LINE AND NOTHING ELSE. The caller reading this is deciding what to call, so the
+ * useful content is the Method names and what each one does; schemas live on the Actors page and
+ * would drown the list here.
+ *
+ * Returns `{}` when there is nothing to say, so the spread at the call site adds no key at all
+ * rather than writing an empty description over one somebody set by hand.
+ */
+function describeActor(
+  name: string,
+  version: string,
+  methods: ReadonlyArray<{ name?: string; description?: string }>
+): { description?: { metadata: Record<string, Uint8Array>; data: Uint8Array } } {
+  const named = methods.filter((m) => m.name);
+  if (named.length === 0) return {};
+  const lines = [`**${name}@${version}** — ${named.length} Method${named.length === 1 ? '' : 's'}.`, ''];
+  for (const m of named) {
+    const d = (m.description ?? '').trim().replace(/\s+/g, ' ');
+    lines.push(d ? `- **\`${m.name}\`** — ${d}` : `- **\`${m.name}\`**`);
+  }
+  return {
+    description: {
+      // `encoding: json/plain` with a JSON string body is how the server and the UI round-trip a
+      // description payload; the CLI's `--description-file` writes the same shape.
+      metadata: { encoding: new TextEncoder().encode('json/plain') },
+      data: new TextEncoder().encode(JSON.stringify(lines.join('\n'))),
+    },
+  };
+}
+
+/**
  * Create the endpoint for an Actor, idempotently.
  *
  * ALREADY-EXISTS IS SUCCESS, not a race to lose. Two operators registering the same folder, a
@@ -94,7 +127,22 @@ function namespace(): string {
  * made still addresses this Actor, and the row has to name it or forgetting the folder would leave
  * it behind.
  */
-export async function ensureEndpoint(name: string, version: string): Promise<EndpointResult> {
+export async function ensureEndpoint(
+  name: string,
+  version: string,
+  /**
+   * The Actor's Methods, for the endpoint's DESCRIPTION.
+   *
+   * THE ENDPOINT IS WHERE A CALLER ARRIVES, so it is where the answer to "what can I call here"
+   * belongs. Temporal renders this on the endpoint page and it read "No description provided" for
+   * every actor we register, while the same prose sat in `actor.json` and on the console's Actors
+   * page. Two surfaces describing one thing, one of them blank.
+   *
+   * Optional, because an endpoint with no description is still a working endpoint — a registration
+   * must never fail over documentation.
+   */
+  methods: ReadonlyArray<{ name?: string; description?: string }> = []
+): Promise<EndpointResult> {
   const endpoint = endpointName(name, version);
   try {
     // LIST FIRST. CreateNexusEndpoint is not idempotent on matching: an AlreadyExists is
@@ -106,6 +154,7 @@ export async function ensureEndpoint(name: string, version: string): Promise<End
       spec: {
         name: endpoint,
         target: { worker: { namespace: namespace(), taskQueue: sharedQueue(name, version) } },
+        ...describeActor(name, version, methods),
       },
     });
     return { endpoint, state: 'created' };

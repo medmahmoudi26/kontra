@@ -56,8 +56,7 @@ import {
   readManifest,
   workspaceRoot,
 } from './sources';
-import { TypedSearchAttributes } from '@temporalio/common';
-import { KontraTenant } from './visibility';
+import { tenantAttributes } from './visibility';
 import { NAMESPACE, getClient } from './temporalClient';
 import { toActorRef } from './secrets/slotRoutes';
 import { slotStore } from './secrets/slotStore';
@@ -131,7 +130,7 @@ export function serveEnv(): Record<string, string> {
  *
  * ── THE ACTIVE WORKSPACE COMES FIRST WHEN THERE IS ONE (ADR 0047) ───────────────────────────────
  *
- * A named workspace IS the operator's code folder: `workspaces.kontra/<name>/{actors,workflows}`,
+ * A named workspace IS the operator's code folder: `workspaces/<name>/{actors,workflows}`,
  * bind-mounted by Compose and chosen by `.current`. Registration already reached it — `sourceStore`
  * discovers under `workspaceRoot()` — but THIS root did not, and the two together were a page that
  * lied. `GET /api/workflows` lists this directory, so the Workflows page showed an empty list and
@@ -574,6 +573,8 @@ export function workflowQueueFor(file: string): string {
 export const FLAT_FILE_VERSION = '0.0.0';
 
 export interface ServeInput {
+  /** Replace a worker that is already serving this folder — see {@link serveWorkflow}. */
+  restart?: boolean;
   /** A workflow FOLDER (`nscheck`) or a flat file (`nscheck.py`), relative to the workflow root —
    *  whichever it is, {@link resolveWorkflowFile} answers with the file that gets run. There is NO
    *  queue field: the queue is derived from the folder's content and cannot be passed (see the
@@ -603,6 +604,18 @@ export interface ServeResult {
  * queue are rivals, and silently having two is worse than being told.
  */
 export async function serveWorkflow(input: ServeInput): Promise<ServeResult> {
+  /**
+   * RESTART REPLACES THE WORKER THAT IS ALREADY THERE.
+   *
+   * `serve` refuses a session that exists — two workers on one queue are rivals, and silently
+   * having two is worse than being told. But "replace it" is the commonest thing an operator
+   * actually wants: they edited the code, and the running worker holds what it imported at boot.
+   * Without this the console's Re-serve button could only ever report the refusal, and the fix it
+   * printed was a tmux command the operator had to run somewhere else.
+   *
+   * The actor side has had this since it had a Serve button (`actorControl.ts`); this is the same
+   * act for the other kind.
+   */
   // THE FILE, not what the caller typed. A folder resolves to its `workflow.py`, and handing the
   // CLI the resolved path is what keeps the two independent session derivations fed the same
   // string — `cli/identity.go:workflowSession` names the session the worker actually lands in, and
@@ -619,14 +632,51 @@ export async function serveWorkflow(input: ServeInput): Promise<ServeResult> {
 
   // argv ARRAY, no shell: the path is validated above, and the CLI derives the queue itself from the
   // folder — the two derivations are byte-identical peers, so no queue crosses this boundary.
-  const argv = ['workflow', 'serve', rel, '--tmux'];
-  const { code, stdout, stderr } = await run(kontraBin(), argv, root, serveEnv());
+  /**
+   * `--watch`, ALWAYS, FOR A WORKER THE CONSOLE STARTED.
+   *
+   * A worker holds the contract it imported at boot, so without this the form on the Workflows
+   * surface describes the code as it was when Serve was pressed — and an operator who edits their
+   * workflow and reloads the page sees no change, with nothing anywhere saying why. That is the
+   * "reactive to your code" property the console is built around; it costs one flag and a file
+   * watcher in the worker.
+   *
+   * The CLI keeps its own default (no watch) for `kontra workflow serve` typed by hand, where a
+   * long-lived re-registering process is a choice rather than the point.
+   */
+  const session = workflowSession(rel);
+  if (input.restart === true) {
+    // The kill is best-effort: a session that is not there is the state we want anyway, and
+    // `tmux kill-session` on a missing target is an error this must not turn into a refusal.
+    await run('tmux', ['kill-session', '-t', session], root, serveEnv()).catch(() => undefined);
+  }
+
+  const argv = ['workflow', 'serve', rel, '--tmux', '--watch'];
+  /**
+   * `--repo`, WHEN THIS PROCESS KNOWS WHERE THE CHECKOUT IS.
+   *
+   * `kontra workflow serve` puts the Python SDK on the worker's PYTHONPATH, and it finds the
+   * checkout by walking UP FROM ITS CWD. The cwd here is `~/.kontra/workflows` inside a container,
+   * where walking up reaches `/` and finds nothing — so the button could only ever be refused with
+   * "needs the checkout ... (pass --repo <dir>)". Measured on a live compose install.
+   *
+   * The value comes from `KONTRA_SDK_ROOT` in {@link serveEnv}, which is already handed to the
+   * child: one variable, so the answer cannot differ between the flag and the environment. The flag
+   * is what makes it work with a CLI older than that variable — and the installed binary on the box
+   * this was found on was exactly that.
+   *
+   * ABSENT IS LEFT ALONE. Where nothing says, the CLI's own search is correct: on an appliance or a
+   * developer's machine it walks up from a real checkout and finds it.
+   */
+  const env = serveEnv();
+  const sdkRoot = (env.KONTRA_SDK_ROOT ?? '').trim();
+  if (sdkRoot) argv.push('--repo', sdkRoot);
+  const { code, stdout, stderr } = await run(kontraBin(), argv, root, env);
   if (code !== 0) {
     const detail = cliDetail(stderr, stdout);
     throw new ControlRefused(`serve failed (exit ${code}): ${detail || 'no output'}`);
   }
 
-  const session = workflowSession(rel);
   return { file: rel, queue, session, attach: `tmux attach -t ${session}` };
 }
 
@@ -841,7 +891,7 @@ export async function startRun(
      * is `default`, which is a true and useful answer — the alternative, leaving it blank, is what
      * made every one of those readers silently wrong.
      */
-    typedSearchAttributes: new TypedSearchAttributes([{ key: KontraTenant, value: NAMESPACE }]),
+    typedSearchAttributes: tenantAttributes(NAMESPACE),
   });
 
   const workflow = await stampRunWorkflow(handle.workflowId, manifest, recorder);

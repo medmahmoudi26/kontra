@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { Repo } from './db/repo';
+import { codeRoot } from './sources';
 import { buildServer } from './server';
 
 let app: FastifyInstance;
@@ -24,16 +25,33 @@ afterEach(async () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
+/**
+ * An Actor, made the only way there is: a folder in the WORKSPACE that looks like one (ADR 0049).
+ *
+ * THIS FILE USED TO `register()` A PATH, and every test in it broke when that verb went — 22 of
+ * them, all failing on a 410 from a route that now exists only to say the verb is gone. They were
+ * not testing anything wrong; they were testing the previous design, and nothing updated them.
+ *
+ * `KONTRA_HOME` is set per test above, so `codeRoot('actor')` is `<tmp>/home/actors` and dropping a
+ * directory there IS the registration. Nothing records a path, so there is nothing to clean up and
+ * no id to read out of a response.
+ */
 function actorFolder(name: string): string {
-  const dir = path.join(tmp, name);
+  const dir = path.join(codeRoot('actor'), name);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, 'actor.json'), JSON.stringify({ name, version: '0.1.0' }));
   writeFileSync(path.join(dir, 'actor.py'), '# code\n');
   return dir;
 }
 
-const register = (kind: string, dir: string) =>
-  app.inject({ method: 'POST', url: `/api/sources/${kind}`, payload: { path: dir } });
+/**
+ * The id of a discovered folder, which is `at:<absolute path>` (`sourceStore.ts`).
+ *
+ * DERIVED RATHER THAN RETURNED, because discovery has no response to return it in. It is asserted
+ * against the listing once, below, so a change to the scheme fails loudly here instead of making
+ * every id in this file a string that addresses nothing.
+ */
+const idOf = (dir: string) => `at:${dir}`;
 
 describe('GET /api/sources/:kind', () => {
   it('names the default root so the form can suggest it', async () => {
@@ -50,46 +68,68 @@ describe('GET /api/sources/:kind', () => {
   });
 });
 
-describe('POST /api/sources/:kind', () => {
-  it('registers a folder and lists it back with its path', async () => {
+describe('POST /api/sources/:kind — registering is GONE (ADR 0049)', () => {
+  /**
+   * WHAT REPLACED THE VERB, pinned as the contract it now has.
+   *
+   * A recorded path outlives the directory it names, so an install accumulated rows for code that
+   * no longer existed — `crawl`, listed and clickable, pointing at a folder deleted weeks earlier.
+   * Every surface carried an `absent` state for it, `serve` refused it with a 404, and the operator
+   * had to `forget` it by hand. The listing IS the filesystem now, so none of that is reachable.
+   */
+  it('410s a register, and says what to do instead', async () => {
+    // 410 AND NOT 404: a script that still posts here is not making a typo, it is doing something
+    // that USED to work, and the difference is an hour of somebody's afternoon.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/sources/actor',
+      payload: { path: path.join(tmp, 'anywhere') },
+    });
+    expect(res.statusCode).toBe(410);
+    const said = (res.json() as { error: string }).error;
+    expect(said).toContain('the workspace is the registration');
+    expect(said).toContain('Put the folder in the workspace.');
+  });
+
+  it('lists a folder dropped into the workspace, with its path — no call required', async () => {
     const dir = actorFolder('probe');
-    expect((await register('actor', dir)).statusCode).toBe(200);
     const listed = (await app.inject({ method: 'GET', url: '/api/sources/actor' })).json() as {
-      sources: Array<{ name: string; path: string }>;
+      sources: Array<{ id: string; name: string; path: string }>;
     };
     expect(listed.sources).toHaveLength(1);
     expect(listed.sources[0]).toMatchObject({ name: 'probe', path: dir });
+    // THE ID SCHEME, asserted once. Every other test in this file derives ids with `idOf`, so a
+    // change here fails loudly instead of leaving them all addressing nothing.
+    expect(listed.sources[0]?.id).toBe(idOf(dir));
   });
 
-  it('still lists a folder that was deleted, marked absent', async () => {
-    // The page draws the row either way — the registration is the operator's to keep or forget —
-    // so the flag is the only thing that stops a dangling path reading like a healthy one.
+  it('stops listing a folder that was deleted — there is nothing left to forget', async () => {
+    // THE HEADLINE OF ADR 0049. This test used to assert the opposite: that a deleted folder stayed
+    // listed with `absent: true`, because the REGISTRATION outlived it and was the operator's to
+    // keep. With the directory as the record there is no row to keep.
     const dir = actorFolder('probe');
-    await register('actor', dir);
     rmSync(dir, { recursive: true, force: true });
     const listed = (await app.inject({ method: 'GET', url: '/api/sources/actor' })).json() as {
-      sources: Array<{ path: string; absent?: boolean }>;
+      sources: unknown[];
     };
-    expect(listed.sources).toEqual([expect.objectContaining({ path: dir, absent: true })]);
+    expect(listed.sources).toEqual([]);
   });
 
-  it('400s a folder that is not one, and says which file was missing', async () => {
-    const bare = path.join(tmp, 'empty');
-    mkdirSync(bare);
-    const res = await register('actor', bare);
-    expect(res.statusCode).toBe(400);
-    expect((res.json() as { error: string }).error).toMatch(/actor\.json/);
-  });
-
-  it('400s a path that does not exist rather than registering a dangling row', async () => {
-    expect((await register('workflow', path.join(tmp, 'ghost'))).statusCode).toBe(400);
+  it('does not list a directory that is not an Actor', async () => {
+    // No `actor.json`, so it is not one. It used to be a 400 from `register` naming the missing
+    // file; discovery has nobody to answer, so the folder is simply not an Actor.
+    mkdirSync(path.join(codeRoot('actor'), 'empty'), { recursive: true });
+    const listed = (await app.inject({ method: 'GET', url: '/api/sources/actor' })).json() as {
+      sources: unknown[];
+    };
+    expect(listed.sources).toEqual([]);
   });
 });
 
 describe('the registration IS the allowlist', () => {
   it('reads a file inside a registered folder', async () => {
     const dir = actorFolder('probe');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     const res = await app.inject({
       method: 'GET',
       url: `/api/sources/actor/${encodeURIComponent(id)}/file?name=actor.py`,
@@ -100,13 +140,17 @@ describe('the registration IS the allowlist', () => {
 
   it('refuses to read out of the folder with ..', async () => {
     const dir = actorFolder('probe');
-    writeFileSync(path.join(tmp, 'secrets.env'), 'TOKEN=1');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    // THE BAIT HAS TO EXIST, AND BESIDE THE FOLDER. `resolveInside` refuses MISSING (404) before it
+    // refuses OUTSIDE (400), so a file planted anywhere `..` does not reach makes this assert the
+    // wrong refusal — it would pass for a server with no containment check at all.
+    writeFileSync(path.join(codeRoot('actor'), 'secrets.env'), 'TOKEN=1');
+    const id = idOf(dir);
     const res = await app.inject({
       method: 'GET',
       url: `/api/sources/actor/${encodeURIComponent(id)}/file?name=${encodeURIComponent('../secrets.env')}`,
     });
     expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toContain('resolves outside');
   });
 
   it('404s a folder nobody registered, so an id cannot be guessed into authority', async () => {
@@ -132,7 +176,7 @@ describe('the registration IS the allowlist', () => {
    */
   it('404s a file the registered folder does not have, rather than 400ing or 502ing', async () => {
     const dir = actorFolder('probe');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     const res = await app.inject({
       method: 'GET',
       url: `/api/sources/actor/${encodeURIComponent(id)}/file?name=description.md`,
@@ -154,7 +198,7 @@ describe('the registration IS the allowlist', () => {
 
        404, not 405: no handler is registered for the method at all. */
     const dir = actorFolder('probe');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     const res = await app.inject({
       method: 'PUT',
       url: `/api/sources/actor/${encodeURIComponent(id)}/file`,
@@ -169,7 +213,6 @@ describe('the registration IS the allowlist', () => {
     // Listing RE-READS name, version and description, which is what keeps a row honest about the
     // folder as it is rather than as it was registered.
     const dir = actorFolder('probe');
-    await register('actor', dir);
     writeFileSync(path.join(dir, 'description.md'), '# probe\n\nGET each target.');
     const listed = (await app.inject({ method: 'GET', url: '/api/sources/actor' })).json() as {
       sources: Array<{ description: string }>;
@@ -184,7 +227,7 @@ describe('GET /api/sources/:kind/:id/files', () => {
     // list that named only the marker would be an editor for the least interesting of them.
     const dir = actorFolder('probe');
     writeFileSync(path.join(dir, 'description.md'), '# probe\n\nHEAD each target.\n');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     const res = await app.inject({
       method: 'GET',
       url: `/api/sources/actor/${encodeURIComponent(id)}/files`,
@@ -202,7 +245,7 @@ describe('GET /api/sources/:kind/:id/files', () => {
     const dir = actorFolder('probe');
     writeFileSync(path.join(dir, '.env'), 'TOKEN=1');
     mkdirSync(path.join(dir, 'tests'));
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     const body = (
       await app.inject({ method: 'GET', url: `/api/sources/actor/${encodeURIComponent(id)}/files` })
     ).json() as { files: Array<{ name: string }> };
@@ -219,7 +262,7 @@ describe('GET /api/sources/:kind/:id/files', () => {
     // terminal — and the list is where the operator sees what is there now. Nothing in this app
     // writes it (ADR 0033 §6), which is exactly why the reload matters.
     const dir = actorFolder('probe');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     writeFileSync(path.join(dir, 'description.md'), '# probe\n\nHEAD each target.\n');
     const body = (
       await app.inject({ method: 'GET', url: `/api/sources/actor/${encodeURIComponent(id)}/files` })
@@ -250,7 +293,7 @@ describe('POST /api/sources/actor/:id/serve', () => {
     // --actor` does. The session is `<name>-<version>` with tmux's own rewriting applied, which is
     // the string `cli/internal/tmux/tmux.go`, `cli/fleet.go` and `panels/discovery.ts` also mint.
     process.env.KONTRA_BIN = 'true';
-    const { id } = (await register('actor', actorFolder('probe'))).json() as { id: string };
+    const id = idOf(actorFolder('probe'));
     const res = await serve(id);
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
@@ -261,18 +304,19 @@ describe('POST /api/sources/actor/:id/serve', () => {
     });
   });
 
-  it('refuses a folder that has gone away, and names it', async () => {
-    // The registration outlives the directory on purpose, so the row is still here and still
-    // clickable. Without the folder check this fails inside `spawn` as `ENOENT` on the cwd and is
-    // reported as a missing `kontra` binary.
+  it('404s a folder that has gone away, because it is not an Actor any more', async () => {
+    // THIS ASSERTED 400 AND THE REASONING UNDER IT IS GONE. It said "the registration outlives the
+    // directory on purpose, so the row is still here and still clickable" — which was true while a
+    // path in a database made a folder an Actor. ADR 0049 made the directory the record, so a
+    // deleted folder is not listed, has no id to address, and serve answers the same 404 it
+    // answers for an id nobody ever had. The `absent`-but-clickable state it was guarding is
+    // unreachable.
     process.env.KONTRA_BIN = 'true';
     const dir = actorFolder('probe');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     rmSync(dir, { recursive: true, force: true });
     const res = await serve(id);
-    expect(res.statusCode).toBe(400);
-    expect((res.json() as { error: string }).error).toContain(dir);
-    expect((res.json() as { error: string }).error).toContain('is not on this machine any more');
+    expect(res.statusCode).toBe(404);
   });
 
   it('404s a folder nobody registered', async () => {
@@ -283,7 +327,7 @@ describe('POST /api/sources/actor/:id/serve', () => {
     // THE ANTI-FEATURE, pinned at the seam. `serveActor` passes `--mode local`; a body that could
     // ask for anything else would make an edit and a fleet deployment one field apart.
     process.env.KONTRA_BIN = 'true';
-    const { id } = (await register('actor', actorFolder('probe'))).json() as { id: string };
+    const id = idOf(actorFolder('probe'));
     const res = await app.inject({
       method: 'POST',
       url: `/api/sources/actor/${encodeURIComponent(id)}/serve`,
@@ -310,7 +354,7 @@ describe('POST /api/sources/actor/:id/caller', () => {
        this pins is that the two are separate calls: this one returns bytes, and reading the code
        you are about to run must not require running it — otherwise every keystroke in the Batch
        form, which regenerates this, would be a Run. */
-    const { id } = (await register('actor', actorFolder('probe'))).json() as { id: string };
+    const id = idOf(actorFolder('probe'));
     const res = await caller(id, { method: 'head', units: [{ url: 'https://a.test' }] });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { filename: string; source: string };
@@ -325,7 +369,7 @@ describe('POST /api/sources/actor/:id/caller', () => {
     // Method a worker really does self-register. This route used to demand a Python identifier and
     // refused every one of them as "not a Method name" — about a name the catalog on the page
     // beside it was showing.
-    const { id } = (await register('actor', actorFolder('probe'))).json() as { id: string };
+    const id = idOf(actorFolder('probe'));
     const res = await caller(id, { method: 'dns-facts', units: [] });
     expect(res.statusCode).toBe(200);
     // `probe.dns-facts` is a SyntaxError, so the callable handle is reached through `getattr` —
@@ -338,7 +382,7 @@ describe('POST /api/sources/actor/:id/caller', () => {
   it('refuses a name that could escape the file it is written into', async () => {
     // The name lands in the generated module's docstring as prose. A quote or a newline in it is
     // the difference between a file the operator reads and a file that carries something else.
-    const { id } = (await register('actor', actorFolder('probe'))).json() as { id: string };
+    const id = idOf(actorFolder('probe'));
     for (const bad of ['', 'dns facts', 'head"', 'a\nb', '../head']) {
       const res = await caller(id, { method: bad, units: [] });
       expect(res.statusCode).toBe(400);
@@ -348,7 +392,7 @@ describe('POST /api/sources/actor/:id/caller', () => {
 
   it('treats a missing Batch as an empty one rather than failing', async () => {
     // `BATCH = []` is a legal generated file — the operator types the Units into it.
-    const { id } = (await register('actor', actorFolder('probe'))).json() as { id: string };
+    const id = idOf(actorFolder('probe'));
     const res = await caller(id, { method: 'head' });
     expect(res.statusCode).toBe(200);
     expect((res.json() as { source: string }).source).toContain('BATCH = []');
@@ -359,17 +403,22 @@ describe('POST /api/sources/actor/:id/caller', () => {
   });
 });
 
-describe('DELETE /api/sources/:kind/:id', () => {
-  it('forgets a registration', async () => {
-    const { id } = (await register('actor', actorFolder('probe'))).json() as { id: string };
+describe('DELETE /api/sources/:kind/:id — forgetting is GONE (ADR 0049)', () => {
+  it('410s, and says that deleting the folder is what forgetting is now', async () => {
+    const id = idOf(actorFolder('probe'));
     const res = await app.inject({
       method: 'DELETE',
       url: `/api/sources/actor/${encodeURIComponent(id)}`,
     });
-    // FORGETTING TAKES THE ENDPOINT WITH IT. Under the old rule — worker boot created endpoints and
-    // nothing removed one — thirty-one accumulated on this cluster, each a live route to a queue
-    // nobody polls and each indistinguishable from a real Actor in the endpoint list.
-    expect(res.json()).toMatchObject({ forgotten: true, endpoint: 'kontra-probe-0-1-0' });
+    expect(res.statusCode).toBe(410);
+    const said = (res.json() as { error: string }).error;
+    expect(said).toContain('forgetting a folder is gone');
+    expect(said).toContain('Delete the folder from the workspace.');
+  });
+
+  it('and deleting the folder really is enough', async () => {
+    const dir = actorFolder('probe');
+    rmSync(dir, { recursive: true, force: true });
     expect((await app.inject({ method: 'GET', url: '/api/sources/actor' })).json()).toMatchObject({
       sources: [],
     });
@@ -385,7 +434,7 @@ describe('POST /api/sources/actor/:id/probe', () => {
    */
   it('refuses a request naming a second Method, and names the field', async () => {
     const dir = actorFolder('probe');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     const res = await app.inject({
       method: 'POST',
       url: `/api/sources/actor/${encodeURIComponent(id)}/probe`,
@@ -399,7 +448,7 @@ describe('POST /api/sources/actor/:id/probe', () => {
 
   it('refuses a key, because a keyed dispatch attaches (ADR 0033 §2)', async () => {
     const dir = actorFolder('probe');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     const res = await app.inject({
       method: 'POST',
       url: `/api/sources/actor/${encodeURIComponent(id)}/probe`,
@@ -411,7 +460,7 @@ describe('POST /api/sources/actor/:id/probe', () => {
 
   it('refuses a Batch that is not a list', async () => {
     const dir = actorFolder('probe');
-    const { id } = (await register('actor', dir)).json() as { id: string };
+    const id = idOf(dir);
     const res = await app.inject({
       method: 'POST',
       url: `/api/sources/actor/${encodeURIComponent(id)}/probe`,

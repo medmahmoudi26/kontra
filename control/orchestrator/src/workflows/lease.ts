@@ -118,6 +118,40 @@ export interface FleetLeaseInput {
    * failure a **Run** can retry.
    */
   livenessQueue?: string;
+  /**
+   * The **Leases** held at the moment of a continue-as-new handover (ADR 0050 is not this; see
+   * kontra#10). Absent on a first start, which is every start a caller makes.
+   *
+   * WHY THIS WORKFLOW CONTINUES AT ALL. The header below measures 0 events/hour while a **Fleet**
+   * is held and nothing happens to it, and then says a one-hour TTL costs ~2,100 events a week —
+   * "roughly five months of continuous holding, which is why there is no continue-as-new here".
+   * That reasoning is right about the RATE and silent about the TOTAL. Temporal TERMINATES an
+   * execution at 51,200 events, so a **Fleet** held across a quarter walks into a hard stop, and
+   * what dies is the thing that knows the **Fleet** must be destroyed. The backoff made the bleed
+   * slow; it did not make it stop.
+   *
+   * CARRIED AS INPUT AND NOT REBUILT. A handover that re-derived the ledger would be a second
+   * source of truth for who holds what, and the one moment it could disagree is the moment a
+   * **Fleet** is torn down under a live holder.
+   */
+  carried?: CarriedLeases;
+}
+
+/** What crosses a continue-as-new boundary. Counters and the ledger — never a result list. */
+export interface CarriedLeases {
+  /** `lease id -> entry`, as pairs because a Map is not JSON. */
+  leases: [string, Entry][];
+  /** The credential NAME the eventual teardown uses. Never a value. */
+  credential: string;
+  /**
+   * Whether this chain has ever actually held something.
+   *
+   * IT MUST CROSS THE BOUNDARY OR THE TEARDOWN IS LOST. `everHeld` gates the destroy, and a
+   * continued execution starts with an empty one — so a **Fleet** that had been held for months
+   * would hand over, drop its last **Lease**, and then decline to destroy the Machines because the
+   * new leg had never seen a hold. That is a running bill nobody is watching.
+   */
+  everHeld: boolean;
 }
 
 export const holdLease = wf.defineSignal<[HoldSignal]>(LEASE_HOLD_SIGNAL);
@@ -190,8 +224,9 @@ export async function fleetLeaseWorkflow(input: FleetLeaseInput): Promise<FleetL
     retry: { maximumAttempts: 3 },
   });
 
-  const leases = new Map<string, Entry>();
-  let credential = '';
+  // SEEDED FROM THE HANDOVER, empty on a first start. See `FleetLeaseInput.carried`.
+  const leases = new Map<string, Entry>(input.carried?.leases ?? []);
+  let credential = input.carried?.credential ?? '';
   let destroying = false;
   let destroyed = false;
 
@@ -205,7 +240,7 @@ export async function fleetLeaseWorkflow(input: FleetLeaseInput): Promise<FleetL
    * Signal-with-start is the only way in, so the input that gets here is not always one this repo
    * wrote.
    */
-  let everHeld = false;
+  let everHeld = input.carried?.everHeld ?? false;
 
   /** Bumped by every signal; the loop waits for it to move. A counter rather than a boolean so two
    *  signals arriving inside one workflow task cannot cancel each other out. */
@@ -272,6 +307,30 @@ export async function fleetLeaseWorkflow(input: FleetLeaseInput): Promise<FleetL
     const signalled = await wf.condition(() => generation !== seen, wait);
     seen = generation;
     if (!signalled) await reap();
+
+    /*
+     * HAND OVER WHEN THE SERVER SAYS SO (kontra#10).
+     *
+     * `continueAsNewSuggested` is set by the server on EVERY workflow task once history passes
+     * 4,096 events, and until now nothing in this repository read it. It is free — it is already on
+     * the info object — and it is the only warning this workflow gets before Temporal terminates it
+     * at 51,200. A held **Fleet** trips the suggestion at ~13.7 days and the ceiling at ~5.6 months.
+     *
+     * ONLY ON THE QUIET PATH — `!signalled`. A continue-as-new abandons the current execution, and a
+     * signal that arrived but has not been folded into `leases` yet would be lost with it: a hold
+     * dropped on the floor is a **Fleet** destroyed under a live holder, and a drop dropped on the
+     * floor is a **Fleet** that outlives its last holder and bills. Waking on the timer means the
+     * handler ran to completion and the ledger is settled, so the boundary is safe exactly here.
+     *
+     * AND NOT WHILE LEAVING. `destroying` is committed before the loop breaks, so a handover cannot
+     * race the teardown; this point is only reached with at least one **Lease** still held.
+     */
+    if (wf.workflowInfo().continueAsNewSuggested) {
+      await wf.continueAsNew<typeof fleetLeaseWorkflow>({
+        ...input,
+        carried: { leases: [...leases.entries()], credential, everHeld },
+      });
+    }
   }
 
   if (everHeld) {

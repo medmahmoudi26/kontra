@@ -87,9 +87,27 @@ func TestActorDispatchIsARedirect(t *testing.T) {
 }
 
 func TestActorRoutesRegister(t *testing.T) {
-	// Not "register" and not "dispatch" → the usage line, which names the one live verb.
+	// Not a verb this command has → the usage line, which names the ones it does. `register` is not
+	// among them any more (ADR 0049): the workspace is the registration, so what an operator needs
+	// from this line is `init` and where the workspace is.
 	err := cmdActor([]string{"echo"})
-	if err == nil || !strings.Contains(err.Error(), "kontra actor register") {
-		t.Fatalf("want the register usage line, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "kontra actor init") {
+		t.Fatalf("want the init usage line, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "workspace") {
+		t.Fatalf("the usage line must say where an actor has to live, got %v", err)
+	}
+}
+
+// A operator with `register` in their muscle memory gets a sentence, not `unknown command`.
+func TestActorRegisterExplainsTheWorkspace(t *testing.T) {
+	err := cmdActor([]string{"register", "/tmp/whatever"})
+	if err == nil {
+		t.Fatal("register must refuse")
+	}
+	for _, want := range []string{"workspace IS the registration", "kontra workspace path", "kontra actor init"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal must contain %q, got %v", want, err)
+		}
 	}
 }

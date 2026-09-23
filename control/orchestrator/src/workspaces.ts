@@ -1,7 +1,11 @@
 /**
  * Named workspaces under KONTRA_WORKSPACES — one parent, many children, `.current` picks one.
  *
- * A workspace is a code folder (actors/ + workflows/). Datasets, runs and login stay cluster-wide.
+ * A workspace is a code folder (actors/ + workflows/). Datasets, runs and login stay cluster-wide
+ * — which ADR 0051 says is the wrong half of the boundary: the workspace is meant to decide where
+ * everything that code produces GOES, not only which code exists. Every store below resolves its
+ * target once from the environment at process boot (`NAMESPACE` is a module-level `const`), so a
+ * switch cannot move them today and does not try to. See docs/adr/0051.
  * Switching rewrites `.current`; discovery and watch re-read it. Nothing remounts.
  */
 
@@ -82,7 +86,7 @@ export interface WorkspaceList {
 export function describeWorkspaces(env: NodeJS.ProcessEnv = process.env): WorkspaceList {
   const parent = workspacesParent(env);
   const mountHint =
-    'mkdir -p workspaces.kontra beside kontra/ and kontra-console/, then docker compose up -d';
+    'mkdir -p workspaces beside kontra/ and kontra-console/, then docker compose up -d';
   if (!parent) {
     return { parent: '', current: '', names: [], currentPath: '', mountHint };
   }

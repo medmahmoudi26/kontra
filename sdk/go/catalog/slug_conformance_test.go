@@ -32,10 +32,10 @@ type slugCase struct {
 }
 
 type slugCorpus struct {
-	Bound int         `json:"bound"`
-	Empty string      `json:"empty"`
-	Cases []slugCase  `json:"cases"`
-	Raw   []byte      `json:"-"`
+	Bound int        `json:"bound"`
+	Empty string     `json:"empty"`
+	Cases []slugCase `json:"cases"`
+	Raw   []byte     `json:"-"`
 }
 
 func loadSlugCorpus(t *testing.T) slugCorpus {

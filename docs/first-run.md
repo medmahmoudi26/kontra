@@ -12,7 +12,7 @@ serve or start it.
 ```bash
 git clone https://github.com/medmahmoudi26/kontra-console.git
 git clone https://github.com/medmahmoudi26/kontra.git
-mkdir -p workspaces.kontra
+mkdir -p workspaces
 cd kontra
 make image
 docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
@@ -27,13 +27,13 @@ only a hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.
 
 `docker compose down` keeps Datasets and Pulumi dockerFleet state. **`down -v` destroys both.**
 
-Named workspaces live in `workspaces.kontra/` beside `kontra/` and `kontra-console/` (not inside
+Named workspaces live in `workspaces/` beside `kontra/` and `kontra-console/` (not inside
 either repo). Seed creates `hello/` when that parent is empty. The console rail switches the current
 workspace; Datasets and runs stay cluster-wide.
 
 ### Serve and start the starter
 
-The empty parent was seeded with `../workspaces.kontra/hello` (`actors/hello`, `workflows/hello`).
+The empty parent was seeded with `./workspaces/hello` (`actors/hello`, `workflows/hello`).
 Watch has registered them and published the actor image. You still have to serve and start:
 
 ```bash

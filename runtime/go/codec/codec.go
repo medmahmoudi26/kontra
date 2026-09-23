@@ -83,7 +83,45 @@ func ThresholdFromEnv() int {
 
 // CasKey is the content address: `cas/<sha[:2]>/<sha>`. The two-char shard keeps any one
 // directory small, and the lower-hex case is part of the key.
+//
+// CALLERS MUST HAVE CHECKED {@link UsableSha} FIRST when the digest did not come from this
+// process. The slice below panics on anything shorter than two characters.
 func CasKey(sha string) string { return "cas/" + sha[:2] + "/" + sha }
+
+// UsableSha reports whether `sha` is a sha256 this codec will address the CAS with: 64 lower-hex
+// characters, exactly as {@link Sha256Hex} produces.
+//
+// ── IT EXISTS BECAUSE THE SLICE IN THE KEY IS A PANIC ────────────────────────────────────────────
+//
+// A CAS key is `cas/<sha[:2]>/<sha>`, and `sha` on the DECODE path does not come from this process:
+// it is read out of a claim-check ref that arrived on Temporal history. Go bounds-checks a slice,
+// so a ref carrying `{"sha256":"a"}` did not produce a wrong key — it panicked the decoder with
+//
+//	slice bounds out of range [:2] with length 1
+//
+// which takes the worker down rather than refusing one payload. `cli/claimcheck_test.go` has
+// asserted the refusal since the fold that found it, under the name
+// `TestAnUnusableRefIsRefusedRatherThanCrashing`, and the guard it describes was never actually
+// written — the test failed, and went on failing, naming its own fix.
+//
+// THE PEER LANGUAGES DO NOT SHARE THE BUG and that is luck, not design: Python and TypeScript
+// slice a short string to whatever is there, so they build a nonsense key and take a 404. Refusing
+// by shape is the same answer, reached on purpose and one call earlier.
+//
+// LOWER-HEX IS CHECKED, NOT JUST LENGTH. The case is part of the key (`Sha256Hex` is lower), so an
+// upper-case digest addresses an object that is not there — a 404 a reader would spend a while on.
+func UsableSha(sha string) bool {
+	if len(sha) != 64 {
+		return false
+	}
+	for i := 0; i < len(sha); i++ {
+		c := sha[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
@@ -149,6 +187,11 @@ func (c *Codec) Decode(payloads []*commonpb.Payload) ([]*commonpb.Payload, error
 		var r ref
 		if err := json.Unmarshal(p.GetData(), &r); err != nil {
 			return payloads, err
+		}
+		// REFUSED BY SHAPE, BEFORE THE KEY IS BUILT. `r.Sha256` came off Temporal history, not
+		// from this process, and `CasKey` slices it — see UsableSha for what that cost.
+		if !UsableSha(r.Sha256) {
+			return payloads, fmt.Errorf("claim-check ref has no usable sha256: %q", r.Sha256)
 		}
 		data, err := c.store.Get(ctx, CasKey(r.Sha256))
 		if err != nil {

@@ -22,6 +22,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { EXPLORE_TOKEN_VARS, STATE_TOKEN_VARS } from './auth';
+import { SECRETS_TOKEN_VARS } from './secrets/routes';
 import { RUN_TOKEN_VARS } from './workflowControl';
 
 export interface OpenApiDoc {
@@ -50,6 +51,21 @@ const GATES: ReadonlyArray<{
   { prefix: '/api/infra', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
   { prefix: '/api/datasets/query', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
   { prefix: '/api/explore', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
+  // THE SAME PRIVILEGE AS THE QUERY WORKBENCH, and fail-closed for the same reason: a Run's log
+  // lines "routinely contain targets and sometimes secrets". `routes/logs.ts` gates all three of
+  // query/hits/tail through one `admit` helper on EXPLORE_TOKEN_VARS, but the prefix was missing
+  // here — so the generated spec published them as "Open: no credential is checked" over routes
+  // that 401. Same failure as `/api/uploads` below, caught the same way, by
+  // `everyOpenPathIsActuallyOpen`.
+  { prefix: '/api/logs', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
+  // THE AUDIT TRAIL, AND IT IS THE ONE SURFACE ON THIS TOKEN THAT FAILS CLOSED.
+  //
+  // The rest of the secrets surface uses `checkOptionalBearer` — "require the token if one is
+  // configured" — which is right for a Settings page that must work on a fresh appliance, and is
+  // why `/api/secrets` and `/api/slots` are correctly absent from this table: unconfigured, they
+  // ARE open. `/api/audit` uses `checkBearer`, so it 401s whether or not a token is set, and a
+  // world-readable audit log is not a trade worth making for convenience on first boot.
+  { prefix: '/api/audit', scheme: 'secretsToken', vars: SECRETS_TOKEN_VARS },
   { prefix: '/api/workflows/serve', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/workflows/start', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/workflows/stop', scheme: 'runToken', vars: RUN_TOKEN_VARS },
@@ -151,6 +167,13 @@ export function buildOpenApi(app: FastifyInstance, version: string): OpenApiDoc 
         stateToken: { type: 'http', scheme: 'bearer', description: 'KONTRA_STATE_TOKEN. Can spend money.' },
         runToken: { type: 'http', scheme: 'bearer', description: 'KONTRA_RUN_TOKEN. Open when unset.' },
         exploreToken: { type: 'http', scheme: 'bearer', description: 'KONTRA_EXPLORE_TOKEN, falling back to state.' },
+        secretsToken: {
+          type: 'http',
+          scheme: 'bearer',
+          description:
+            'KONTRA_SECRETS_TOKEN, falling back to state. Fail-closed on /api/audit: unset means ' +
+            '503, not open.',
+        },
         actorIdentity: {
           type: 'http',
           scheme: 'bearer',

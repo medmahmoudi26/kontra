@@ -33,6 +33,8 @@ import inspect
 import logging
 import os
 from typing import Any, Sequence
+
+from internals import workerid
 from internals.temporal.tlsconfig import connect_tls
 
 log = logging.getLogger("kontra.wfhost")
@@ -76,6 +78,14 @@ def _configure_logging() -> None:
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
             datefmt="%H:%M:%S",
         )
+    # STRUCTURED AND RUN-STAMPED WHEN ASKED (ADR 0050 §1, kontra#16). Off unless
+    # `KONTRA_LOG_FORMAT=json`: a developer watching a tmux pane wants the human format above, and a
+    # fleet Machine writing to journald at volume wants one JSON object per line that vlagent parses
+    # into fields. The pane is the default because that is the surface somebody is looking at while
+    # they decide. `logs.configure_shipping` is a no-op otherwise.
+    from internals import logs  # local: the sandbox passes `internals`, and this is import-cheap
+
+    logs.configure_shipping()
     # The workflow logger is a CHILD of `temporalio`, which the SDK leaves at the root's level.
     # Setting it explicitly is what makes KONTRA_LOG_LEVEL=DEBUG mean the workflow's own lines and
     # not just the SDK's.
@@ -159,8 +169,22 @@ async def serve_workflows_async(
     namespace = namespace or os.environ.get("KONTRA_NAMESPACE", "default")
 
     tls = connect_tls()  # see `internals/temporal/tlsconfig.py`
+    # The identity this process answers to, on the client AND on the worker below — see
+    # `internals/workerid.py` for why it is Temporal's own three-field shape and not a scheme of
+    # ours. A WORKFLOW host is the one place this matters most to an author: the workflow's own
+    # `workflow.logger` lines carry it, so "my run logged nothing" becomes "this laptop's worker
+    # logged nothing" without anybody having to guess which of three terminals is serving.
+    # The fallback queue for records written outside any task — see the actor host's call site.
+    from internals import logs
+
+    logs.bind_worker(task_queue)
+    identity = workerid.worker_identity(task_queue)
     client = await Client.connect(
-        address, namespace=namespace, data_converter=casstore.data_converter(), tls=tls
+        address,
+        namespace=namespace,
+        data_converter=casstore.data_converter(),
+        tls=tls,
+        identity=identity,
     )
 
     # SELF-REGISTRATION, exactly where the actor host does it (`internals/temporal/host.py`).
@@ -195,11 +219,13 @@ async def serve_workflows_async(
         workflows=list(workflows),
         activities=list(activities),
         workflow_runner=runner,
+        identity=identity,
+        build_id=workerid.build_id(),
         **kwargs,
     )
     names = ", ".join(getattr(w, "__name__", str(w)) for w in workflows)
-    log.info("[wfhost] %s on %s (%s)", names, task_queue, address)
-    print(f"[wfhost] {names} -> {task_queue} @ {address}", flush=True)
+    log.info("[wfhost] %s on %s (%s) as %s", names, task_queue, address, identity)
+    print(f"[wfhost] {names} -> {task_queue} @ {address} as {identity}", flush=True)
     if not os.environ.get("KONTRA_S3_ENDPOINT"):
         # Not fatal — a no-S3 setup is a legitimate local mode, and the actor side is passthrough
         # under the same condition. But it is the difference between "works" and "works until the

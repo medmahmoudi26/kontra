@@ -151,6 +151,18 @@ func (s *Session) BindGlobalState(gs GlobalState) {
 	s.globalState = gs
 }
 
+// `Stream` AND `BindStream` WERE HERE, AND THEY ARE GONE.
+//
+// `kontra.Stream(s, rec)` published one typed record per Method onto the run's Temporal Workflow
+// Stream, for a console pane that drew it. A Workflow Stream lives in the WORKFLOW'S MEMORY and
+// dies with the workflow, so every record was unreadable the moment the run closed — and a run
+// under a minute long is over before a browser has loaded and signed in.
+//
+// A Method says what it is doing with the host's logger and what it FOUND with the output Dataset.
+// Both outlive the run. The Python peer (`await kontra.stream(...)`) went at the same time, and
+// field 6 of Method in catalog.proto is reserved so the declaration can come back when there is a
+// durable store under it.
+
 // The lifecycle function shapes (the Go peers of @actor.load/method/close/healthcheck).
 type (
 	LoadFunc  func(*Session) error

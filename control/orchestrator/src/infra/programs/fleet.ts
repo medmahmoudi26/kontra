@@ -294,6 +294,18 @@ export interface MachineEntry {
    * Machine: passive recon sources rate-limit by source IP. */
   publicIp: string;
   tag: string;
+  /** The Droplet slug this machine was created with — what the price below is the price OF. */
+  size: string;
+  /**
+   * List price per hour in USD, read from DigitalOcean's own sizes endpoint at converge.
+   *
+   * NOT A CONSTANT IN THIS REPO. A price table in source is wrong the first time DigitalOcean
+   * changes one and wrong silently, and the number exists precisely so a workflow can tell an
+   * operator what their Run is spending. **0 means "unknown"**, never "free" — the lookup is
+   * allowed to fail (a region without that slug, an API hiccup) and a Fleet must still converge,
+   * so callers have to render 0 as unknown rather than multiply it.
+   */
+  priceHourly: number;
 }
 
 /**
@@ -426,6 +438,18 @@ export function fleetProgram(args: FleetArgs) {
       });
     }
 
+    // ONE LOOKUP FOR THE WHOLE FLEET, not one per machine: every machine here shares `cfg.size`,
+    // and `getSizes` is a network call. `.catch` rather than a throw, because a Fleet that
+    // refuses to converge because it could not price itself would trade the actual job for the
+    // accounting.
+    const priceHourly = pulumi
+      .output(
+        digitalocean
+          .getSizes({ filters: [{ key: 'slug', values: [cfg.size] }] })
+          .then((r) => Number(r.sizes?.[0]?.priceHourly ?? 0))
+          .catch(() => 0)
+      );
+
     const inventory = pulumi
       .all(
         machines.map((m) =>
@@ -433,10 +457,12 @@ export function fleetProgram(args: FleetArgs) {
         )
       )
       .apply((rows) =>
-        rows.reduce<Record<string, MachineEntry>>((acc, [name, host, publicIp]) => {
-          acc[name] = { name, host, publicIp, tag: args.tag };
-          return acc;
-        }, {})
+        pulumi.output(priceHourly).apply((price) =>
+          rows.reduce<Record<string, MachineEntry>>((acc, [name, host, publicIp]) => {
+            acc[name] = { name, host, publicIp, tag: args.tag, size: cfg.size, priceHourly: price };
+            return acc;
+          }, {})
+        )
       );
 
     const first = placements[0];

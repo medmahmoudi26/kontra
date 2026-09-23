@@ -10,7 +10,17 @@
  * implementation that is trivially escapable.
  */
 
-import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs';
 import os, { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -490,6 +500,43 @@ describe('serveWorkflow', () => {
     mkdirSync(path.join(root, 'bare'), { recursive: true });
     writeFileSync(path.join(root, 'bare', 'workflow.py'), '# no manifest beside me\n');
     await expect(serveWorkflow({ file: 'bare' })).rejects.toThrow(/derive a queue|--init/);
+  });
+
+  /**
+   * A stand-in for the CLI that RECORDS ITS ARGV — `true` proves the exit-0 path and says nothing
+   * about what was passed, which is exactly what the `--repo` case is about.
+   */
+  function recordingBin(): () => string[] {
+    const log = path.join(root, 'argv.log');
+    const bin = path.join(root, 'fake-kontra.sh');
+    writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$@" > ${log}\nexit 0\n`);
+    chmodSync(bin, 0o755);
+    process.env.KONTRA_BIN = bin;
+    return () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []);
+  }
+
+  it('passes --repo when a checkout is configured, because a container has none to walk up to', async () => {
+    // MEASURED ON A LIVE INSTALL. The cwd is `~/.kontra/workflows` inside the container, so the
+    // CLI's walk-up finds no checkout and refuses — "needs the checkout ... (pass --repo <dir>)" —
+    // which made the console's Serve button unpressable in the only topology most people run.
+    const argv = recordingBin();
+    process.env.KONTRA_SERVE_ENV = 'KONTRA_ADDRESS=1.2.3.4:7233 KONTRA_SDK_ROOT=/srv/checkout';
+    servable('nscheck');
+    await serveWorkflow({ file: 'nscheck' });
+    // `--watch` rides on every console-started worker: a worker holds the contract it imported at
+    // boot, so without it the Workflows form describes the code as it was when Serve was pressed.
+    expect(argv()).toEqual(
+      ['workflow', 'serve', 'nscheck/workflow.py', '--tmux', '--watch', '--repo', '/srv/checkout']);
+  });
+
+  it('passes no --repo when nothing says where the checkout is', async () => {
+    // The CLI's own search is right on a developer's machine and on the appliance: it walks up from
+    // a real checkout. An empty `--repo ""` would turn that working case into a refusal.
+    const argv = recordingBin();
+    process.env.KONTRA_SERVE_ENV = 'KONTRA_ADDRESS=1.2.3.4:7233';
+    servable('nscheck');
+    await serveWorkflow({ file: 'nscheck' });
+    expect(argv()).toEqual(['workflow', 'serve', 'nscheck/workflow.py', '--tmux', '--watch']);
   });
 
   it('reports a missing file as a missing workflow, not a queue problem', async () => {

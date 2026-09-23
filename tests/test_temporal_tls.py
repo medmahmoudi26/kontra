@@ -132,7 +132,12 @@ CONNECT = re.compile(r"Client\.connect\(")
 
 
 def _python_sources() -> dict[str, str]:
-    skip = {".git", "node_modules", "dist", "__pycache__", "_gen", ".scratch", "build"}
+    # `.venv` IS THIS REPOSITORY'S DOCUMENTED LAYOUT, and it was not excluded. `.gitignore` says a
+    # worktree "usually SYMLINKS .venv to the main checkout's", so a virtualenv at the root is the
+    # expected shape — and the moment one exists, this walk reads `site-packages` and reports
+    # temporalio's OWN `Client.connect` calls as kontra clients bypassing `connect_tls`. The guard is
+    # about the Python WE ship; a dependency's internals are not a site this repository can route.
+    skip = {".git", "node_modules", "dist", "__pycache__", "_gen", ".scratch", "build", ".venv"}
     out: dict[str, str] = {}
     for p in ROOT.rglob("*.py"):
         rel = p.relative_to(ROOT)

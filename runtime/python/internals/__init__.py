@@ -1,6 +1,6 @@
 """Kontra's Python RUNTIME — the engine, the codec, the state tiers and the Temporal hosts.
 
-Not the author surface. Authors import `actorkit` (actor, param, SessionLost, ask, speak, …),
+Not the author surface. Authors import `actorkit` (actor, param, SessionLost, ask, note, …),
 which lives in `sdk/python` and is a different seam on purpose. These modules are implementation
 detail and may change without notice.
 

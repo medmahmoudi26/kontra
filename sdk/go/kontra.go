@@ -150,6 +150,10 @@ func Takes(v any) MethodOption { return core.Takes(v) }
 // a Method returns only an error. So it is stated.
 func Emits(v any) MethodOption { return core.Emits(v) }
 
+// `Streams` AND `Stream` WERE RE-EXPORTED HERE and are gone — see the note in `core/core.go`.
+// A Method narrates with the host's logger and reports what it found through the output Dataset;
+// both outlive the run, which a Temporal Workflow Stream did not.
+
 // Does declares what this Method is FOR, in one sentence: `Does("Resolve each domain's NS set")`.
 //
 // The Go peer of a Python docstring, and it has to be a VALUE because a Go doc comment is not in

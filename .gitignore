@@ -135,3 +135,8 @@ backend.db-wal
 
 # Never commit operator workspace trees if someone creates them inside the checkout by mistake.
 /workspaces.kontra/
+
+# A compiled Go actor lands beside its source with the folder name and no extension —
+# `go build` in workspaces/<ws>/actors/<name>/ writes ./<name>. One reached a commit that way
+# (51 MB, see cli/notrackedbinaries_test.go); the test catches the class, this catches the path.
+workspaces/*/actors/*/[!.]*.out

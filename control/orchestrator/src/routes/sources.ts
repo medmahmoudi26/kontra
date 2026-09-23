@@ -55,85 +55,36 @@ export function registerSourceRoutes(app: FastifyInstance, sources: SourceStore)
     }
   });
 
-  app.post('/api/sources/:kind', async (req, reply) => {
-    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
-    if (denied) return reply.code(denied.code).send(denied.body);
-    const { kind } = req.params as { kind: string };
-    if (kind !== 'actor' && kind !== 'workflow') {
-      return reply.code(404).send({ error: `${kind}: not a kind of source` });
-    }
-    const body = (req.body ?? {}) as { path?: string };
-    let registered;
-    try {
-      registered = sources.register(kind, body.path ?? '');
-    } catch (err) {
-      // A refusal is the operator's typo — the message names the path and the file it wanted, and
-      // it is the entire content of the answer. A 502 here would read as "kontra is broken".
-      if (err instanceof SourceRefused) return reply.code(400).send({ error: err.message });
-      return reply.code(502).send({ error: `could not register: ${errMessage(err)}` });
-    }
-
-    /**
-     * THE NEXUS ENDPOINT IS PART OF REGISTERING, AND IT IS THE SECOND HALF.
-     *
-     * A registration is now two facts: this folder is on this disk (written above, from a
-     * filesystem read that cannot fail on a cluster being down), and this Actor is ADDRESSABLE at
-     * `kontra-<name>-<version>` (written here, over the network). Doing them in that order is what
-     * makes a cluster outage cost the endpoint rather than the registration.
-     *
-     * ONLY FOR AN ACTOR. A workflow is a CALLER — it dispatches, nothing dispatches to it — so an
-     * endpoint aimed at its queue would be a route with no service behind it, and the first call
-     * through it would time out instead of failing as the design error it is.
-     *
-     * A FAILURE IS REPORTED, NOT RAISED. The folder is registered either way and the answer says
-     * which state it is in, because a 502 here would tell an operator that registering failed while
-     * the row they asked for sits in the database.
-     */
-    if (kind === 'actor' && registered.version !== '') {
-      const result = await ensureEndpoint(registered.name, registered.version);
-      if (result.state !== 'failed') {
-        sources.recordEndpoint(kind, registered.id, result.endpoint);
-        return { ...registered, endpoint: result.endpoint, endpointState: result.state };
-      }
-      return { ...registered, endpointError: result.detail };
-    }
-    return registered;
+  /**
+   * REGISTERING IS GONE, and this route says so rather than 404ing.
+   *
+   * A folder is an Actor or a Workflow because it is in the WORKSPACE (see `sourceStore.ts`). The
+   * two verbs that used to be here — register a path, forget a path — have no meaning against a
+   * directory listing: the way to add one is to put it in the workspace, and the way to remove one
+   * is to delete it.
+   *
+   * 410 AND NOT 404, because an old console or a script that still posts here is not making a typo:
+   * it is doing something that USED to work, and the difference between "no such route" and "this
+   * was removed, here is what replaced it" is an hour of somebody's afternoon.
+   *
+   * THE NEXUS ENDPOINT MOVED WITH IT. Registering an Actor used to create `kontra-<name>-<version>`
+   * as a side effect; a worker creates it at boot, which is the path every fleet Actor already took
+   * — so what is lost is an endpoint for an Actor that has never run, which addressed nothing.
+   */
+  const gone = (verb: string, instead: string) => ({
+    error:
+      `${verb} is gone: the workspace is the registration. ${instead}\n` +
+      `The workspace is a mounted volume — ${'`'}actors/${'`'} and ${'`'}workflows/${'`'} under it are what this ` +
+      `control plane serves, and nothing else is recorded anywhere.`,
   });
 
-  app.delete('/api/sources/:kind/:id', async (req, reply) => {
-    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
-    if (denied) return reply.code(denied.code).send(denied.body);
-    const { kind, id } = req.params as { kind: string; id: string };
-    const decoded = decodeURIComponent(id);
-    // READ BEFORE DELETE: the row is what names the endpoint to remove, and after `forget` there is
-    // nothing left to ask. A folder whose registration predates endpoints has none, which is not a
-    // failure — it is a row written before this existed.
-    const before = kind === 'actor' ? sources.get('actor', decoded) : undefined;
-    let forgotten: boolean;
-    try {
-      forgotten = sources.forget(decoded);
-    } catch (err) {
-      if (err instanceof SourceRefused) return reply.code(400).send({ error: err.message });
-      return reply.code(502).send({ error: `could not forget: ${errMessage(err)}` });
-    }
+  app.post('/api/sources/:kind', async (_req, reply) =>
+    reply.code(410).send(gone('registering a folder', 'Put the folder in the workspace.'))
+  );
 
-    /* THE ENDPOINT GOES WITH THE REGISTRATION THAT MADE IT. Thirty-one of them accumulated on this
-       cluster under the old rule, where worker boot created them and nothing ever removed one —
-       each a live route to a task queue nobody polls, and each one indistinguishable from a real
-       Actor to anybody reading the endpoint list.
-
-       A FAILURE HERE DOES NOT UN-FORGET ANYTHING. The registration is the operator's to drop and it
-       is already dropped; a leaked endpoint is a fact to report, not a reason to put a row back
-       that somebody asked to remove. */
-    if (forgotten && before?.name && before.version) {
-      const result = await removeEndpoint(before.name, before.version);
-      if (result.state === 'failed') {
-        return { forgotten, endpointError: result.detail, endpoint: result.endpoint };
-      }
-      return { forgotten, endpoint: result.endpoint, endpointState: result.detail ?? 'deleted' };
-    }
-    return { forgotten };
-  });
+  app.delete('/api/sources/:kind/:id', async (_req, reply) =>
+    reply.code(410).send(gone('forgetting a folder', 'Delete the folder from the workspace.'))
+  );
 
   /**
    * What is IN a registered folder, for the editor's file list.
@@ -249,6 +200,71 @@ export function registerSourceRoutes(app: FastifyInstance, sources: SourceStore)
    * Ungated, matching the read it serves and `rowStream.ts` beside it: no `EventSource` can send an
    * Authorization header, and what crosses here is one word that says a file moved.
    */
+  /**
+   * TELL ME WHEN THIS FOLDER CHANGES — for either kind.
+   *
+   * ── WHY A WORKFLOW NEEDED ITS OWN ────────────────────────────────────────────────────────────
+   *
+   * An Actor's schema has had a stream since `/dev` existed, and a workflow's descriptor had
+   * nothing: the worker re-registers on save, the control plane writes the new contract, and the
+   * browser found out by being reloaded. An operator edited `approve`, added a required field,
+   * and the runner kept offering the old form — with no way to know it was stale.
+   *
+   * ── IT WATCHES THE FOLDER, NOT THE CATALOG ───────────────────────────────────────────────────
+   *
+   * The same seam the actor stream uses, for the same reason: the filesystem is where the change
+   * happens first and it is the one authority that cannot be behind. The client re-reads the
+   * descriptor when this fires — including once again shortly after, because the worker's
+   * re-registration lands a moment after the save that triggered it.
+   *
+   * COALESCED at 150ms: one ⌘S is several filesystem events (editors write a temp file and rename
+   * over the target), and each unbatched one would cost the client a fetch.
+   */
+  app.get('/api/sources/:kind/:id/watch', (req, reply) => {
+    const { kind, id } = req.params as { kind: string; id: string };
+    if (kind !== 'actor' && kind !== 'workflow') {
+      return reply.code(404).send({ error: `${kind}: not a kind of source` });
+    }
+    const source = sources.get(kind, decodeURIComponent(id));
+    if (!source) return reply.code(404).send({ error: `${id}: no such folder in the workspace` });
+
+    const raw = reply.raw;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const changed = (): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => raw.write('event: changed\ndata: 1\n\n'), 150);
+    };
+
+    // SUBSCRIBE BEFORE THE HEAD IS WRITTEN — a refusal is only sayable while this is an ordinary
+    // reply; after `writeHead` the only way to decline is to hang up, which reads as a fault.
+    let stop: () => void;
+    try {
+      stop = watchDir(source.path, changed);
+    } catch (err) {
+      return reply.code(503).send({ error: `${errMessage(err)} — close a runner tab and retry` });
+    }
+
+    reply.hijack();
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    // Opens the stream so `EventSource` fires `onopen` now: a folder nobody is editing is
+    // correctly silent for hours, and "connected and quiet" must not look like "still connecting".
+    raw.write(': ok\n\n');
+    const keepalive = setInterval(() => raw.write(': ping\n\n'), 25_000);
+    keepalive.unref?.();
+
+    req.raw.on('close', () => {
+      clearTimeout(timer);
+      clearInterval(keepalive);
+      stop();
+    });
+    return reply;
+  });
+
   app.get('/api/sources/actor/:id/schema/stream', (req, reply) => {
     const { id } = req.params as { id: string };
     const source = sources.get('actor', decodeURIComponent(id));

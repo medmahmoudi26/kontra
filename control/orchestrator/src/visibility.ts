@@ -12,7 +12,11 @@
  */
 
 import type { Connection } from '@temporalio/client';
-import { SearchAttributeType, defineSearchAttributeKey } from '@temporalio/common';
+import {
+  SearchAttributeType,
+  TypedSearchAttributes,
+  defineSearchAttributeKey,
+} from '@temporalio/common';
 import { temporal } from '@temporalio/proto';
 
 /** temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD — all four SAs are
@@ -40,6 +44,31 @@ export const KontraActor = defineSearchAttributeKey('KontraActor', SearchAttribu
 export const KontraTag = defineSearchAttributeKey('KontraTag', SearchAttributeType.KEYWORD);
 
 const ALL = [KontraTenant, KontraRunId, KontraActor, KontraTag];
+
+/**
+ * The tenant stamp every start in this control plane carries — written once, here, because it was
+ * previously written nowhere.
+ *
+ * WHAT THIS FIXES. `KontraTenant` was registered on the namespace and written by NOTHING. Two
+ * readers took it, so every `tenant` this control plane reported was the empty string. `startRun`
+ * was fixed first (ADR 0046's prerequisite); the INFRA side never goes through `startRun`, so
+ * `leaseWorkflow`, `stackWorkflow`, `tmuxSessionWorkflow` and the Probe were still unstamped — and
+ * those are exactly the perpetual executions a meter has to attribute.
+ *
+ * AT START, NEVER BY UPSERT. Attributes on `start` ride inside `WorkflowExecutionStarted` and write
+ * no extra event; an upsert inside the workflow is a command of its own, and adding one per Machine
+ * per attach to a Warden's history is the precise cost the event-log audit exists to avoid.
+ *
+ * THE NAMESPACE IS THE TENANT (ADR 0036 §7, `CONTEXT.md`), so this records what a tenant IS rather
+ * than inventing a second notion of one. It also means this stamp is a CONVENIENCE and not the
+ * authority: `temporalClient.ts`'s `tenantOf` derives the same answer from the namespace it queried,
+ * which is what makes the already-attached Wardens — the ones whose start site re-attaches by
+ * `WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING` and which therefore can never acquire a stamp —
+ * readable anyway.
+ */
+export function tenantAttributes(namespace: string): TypedSearchAttributes {
+  return new TypedSearchAttributes([{ key: KontraTenant, value: namespace }]);
+}
 
 /**
  * Idempotently register the four Kontra Search Attributes on the namespace's visibility
@@ -113,6 +142,30 @@ export const KONTRA_INTERNAL_WORKFLOW_TYPES = [
    * against that file's bytes with the rest of the Warden's wire words.
    */
   'wardenWorkflow',
+  /**
+   * ONE PER **FLEET**, AND IT OUTLIVES EVERY **RUN** THAT HOLDS IT (ADR 0037) — the same shape as
+   * the two above it, and it was the one omission in this list.
+   *
+   * OBSERVED, NOT REASONED ABOUT. `GET /api/runs` on the live cluster answered with two rows for one
+   * `nscheck` run: the run, and `kontra-lease/kontra-fleet/dns` beside it. A **Lease** workflow is a
+   * **Fleet**'s bookkeeping — started by an activity, never by a caller — so it is exactly "a Fleet's
+   * infrastructure in the list of things a CALLER ran", which is what the entry above says this list
+   * exists to remove.
+   *
+   * AND IT IS NOW LOAD-BEARING FOR THE ARCHIVE (kontra#10). The **Lease** workflow continues-as-new
+   * when the server suggests it, so its workflow id resolves to a CHAIN. `historyArchive.ts` reads
+   * by workflow id with no `execId`, and `fetchRunHistory` documents what that answers — "whichever
+   * ran last" — so a swept chain would be archived as its final leg alone, with every earlier leg
+   * silently absent. Excluding it means the sweep never sees a chain at all.
+   *
+   * THAT IS A FIX HERE AND NOT A FIX EVERYWHERE. The day a CALLER's workflow continues-as-new
+   * (kontra#12 proposes exactly that) the sweep meets a chain it cannot exclude, and `read(runId)`
+   * has to learn `firstExecutionRunId`. This list postpones that; it does not answer it.
+   *
+   * Still readable by id, on the same terms as the Warden: `GET /api/runs/:runId` does not consult
+   * this list, so `kontra fleet leases` and the Transcript are unaffected.
+   */
+  'fleetLeaseWorkflow',
 ] as const;
 
 /**

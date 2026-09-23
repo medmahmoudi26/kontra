@@ -45,8 +45,9 @@ import { ControlRefused } from './workflowControl';
 import { endpointName, listEndpoints, sharedQueue } from './nexusRegistry';
 import { describeQueue, pollIsFresh, temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
 import { PROBE_WORKFLOW, probeQueue } from './queues';
-import { getClient } from './temporalClient';
+import { NAMESPACE, getClient } from './temporalClient';
 import { runWorkflowStore, type RunWorkflowStore } from './data/runWorkflows';
+import { tenantAttributes } from './visibility';
 
 /**
  * The five fields a probe request has, and there is no sixth.
@@ -352,7 +353,13 @@ export type ProbeStarter = (
 function temporalProbeStarter(): ProbeStarter {
   return async (type, options) => {
     const client = await getClient();
-    const handle = await client.workflow.start(type, options);
+    // Stamped HERE and not in `ProbeStarter`'s type, so the test double stays three lines: the
+    // attribute is a property of how THIS starter reaches Temporal, not of what a probe is. See
+    // `tenantAttributes` for why every start in this control plane carries it.
+    const handle = await client.workflow.start(type, {
+      ...options,
+      typedSearchAttributes: tenantAttributes(NAMESPACE),
+    });
     return handle.workflowId;
   };
 }

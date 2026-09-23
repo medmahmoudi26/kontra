@@ -1459,10 +1459,24 @@ describe('static assets', () => {
     expect(res.headers['cache-control']).toBe('public, max-age=31536000, immutable');
   });
 
-  // index.html names the current asset hashes. Cache it and a deploy becomes invisible.
+  /**
+   * index.html names the current asset hashes. Cache it and a deploy becomes invisible.
+   *
+   * `no-store`, NOT `no-cache`, AND THE DIFFERENCE IS THE WHOLE BUG. `no-cache` does not mean
+   * "do not cache" — it means "cache, but revalidate", so the browser still sent a conditional
+   * request and the server was free to answer 304. It did: the shell went out with
+   * `etag: W/"184-0"`, where `-0` is the mtime, and the image extracts the SPA from a tarball
+   * with a FIXED mtime (deliberately — that is what makes the bundle's sha reproducible) while
+   * Vite's asset hashes keep the file the same length. Identical validator on every build this
+   * image has ever served, so every console rebuild was invisible to an already-loaded browser.
+   *
+   * Turning the validators off was not enough either: `lastModified: false` stops the header
+   * going out but send still honours an incoming If-Modified-Since. The shell is read once at
+   * boot and served from memory with `no-store`, so there is no conditional path left to take.
+   */
   it('does not cache index.html', async () => {
     const res = await app.inject({ method: 'GET', url: '/' });
-    expect(res.headers['cache-control']).toBe('no-cache');
+    expect(res.headers['cache-control']).toBe('no-store');
   });
 
   it('compresses when the client accepts it, and only then', async () => {

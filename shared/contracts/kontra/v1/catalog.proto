@@ -90,6 +90,23 @@ message ActorOperation {
   // Appended (5), declared last: field numbers here are APPEND-ONLY. Renumbering to put this
   // next to `name` would silently re-point every already-registered descriptor's fields.
   string description = 5;
+  // FIELD 6 WAS `stream` — what the Method published WHILE IT RAN, declared with
+  // `@actor.method(streams=…)` in Python and `Streams(…)` in Go, for a console pane that drew it
+  // typed without having read the actor's source.
+  //
+  // IT IS RESERVED AND NOT REUSED, which is the whole reason this note is longer than a line. The
+  // transport was a Temporal Workflow Stream, which lives in the WORKFLOW'S MEMORY and dies with
+  // the workflow — so everything published through it was unreadable the moment the run closed,
+  // and a run that takes under a minute is over before a browser has loaded and signed in. The
+  // idea was sound and the transport was not; it comes back when there is a durable store under
+  // it, and it will want this field.
+  //
+  // A descriptor posted by an older SDK may still carry 6. Reserving it means such a descriptor
+  // decodes without error and the field is simply dropped, which is the behaviour a rolling
+  // upgrade needs — renumbering or reusing it would make one of those descriptors decode as
+  // something else entirely.
+  reserved 6;
+  reserved "stream";
 }
 
 // A CALLER WORKFLOW, described — the other half of a run, which today describes nothing.

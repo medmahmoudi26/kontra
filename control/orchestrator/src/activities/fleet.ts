@@ -163,13 +163,21 @@ interface BundleConfig {
  * run is not the cost worth optimising.
  */
 export async function resolveBundle(input: ResolveBundleInput): Promise<ResolvedBundle> {
+  /**
+   * THE DEFAULT IS THE COMPOSE SERVICE NAME, and the guard that used to follow it was dead code.
+   *
+   * `|| 'orchestrator-api'` means `controller` is never empty, so the `if (!controller) throw`
+   * that sat here could not fire — it read as a check and was a comment. Removed rather than
+   * reinstated, because the default is load-bearing: a dockerFleet Machine is a Warden container
+   * on the Compose network and `orchestrator-api` is exactly right there, which is what makes the
+   * local path zero-config (ADR 0047).
+   *
+   * IT IS WRONG FOR A DROPLET, and nothing here can tell the two apart. A cloud Machine handed
+   * `orchestrator-api` starts, registers nothing and looks idle — so that boundary belongs to the
+   * cloud provider, which knows what it is provisioning. `do_fleet`'s own preflight is where the
+   * address has to be demanded.
+   */
   const controller = input.controller || process.env.KONTRA_CONTROLLER || 'orchestrator-api';
-  if (!controller) {
-    throw new Error(
-      'no controller address: a Machine that cannot name the Controller starts, registers ' +
-        'nothing and looks idle (set KONTRA_CONTROLLER, or pass controller=)'
-    );
-  }
   // The operator's spelling is kept, scheme and all — `registryBase` decides http vs https once,
   // for both the manifest read here and the blob URL every Machine is handed.
   const registry = (

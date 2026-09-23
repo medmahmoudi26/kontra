@@ -555,7 +555,7 @@ jobs:
       - name: compose files into a fresh install directory
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/install/control/images" "$RUNNER_TEMP/workspaces.kontra"
+          mkdir -p "$RUNNER_TEMP/install/control/images" "$RUNNER_TEMP/workspaces"
           cp docker-compose.quickstart.yml "$RUNNER_TEMP/install/docker-compose.yml"
           cp .env.quickstart "$RUNNER_TEMP/install/.env"
           cp control/images/postgres-init.sh "$RUNNER_TEMP/install/control/images/postgres-init.sh"
@@ -564,7 +564,7 @@ jobs:
             echo "KONTRA_ORCHESTRATOR_IMAGE=kontra-orchestrator:ci"
             echo "KONTRA_HOST_IMAGE=kontra-host:1"
             echo "KONTRA_PULL_POLICY=never"
-            echo "KONTRA_WORKSPACES=$RUNNER_TEMP/workspaces.kontra"
+            echo "KONTRA_WORKSPACES=$RUNNER_TEMP/workspaces"
           } >> "$RUNNER_TEMP/install/.env"
 
       - name: docker compose up -d --wait
@@ -606,7 +606,7 @@ jobs:
         working-directory: ${{ runner.temp }}/install
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/workspaces.kontra"
+          root="$RUNNER_TEMP/workspaces"
           test -f "$root/hello/actors/hello/actor.json"
           test -f "$root/hello/workflows/hello/workflow.py"
           echo marker > "$root/hello/KEEP"

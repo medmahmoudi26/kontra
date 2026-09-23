@@ -17,6 +17,7 @@ package warden
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -646,4 +647,81 @@ func TestTheWatcherStopsWhenTheMachineIsRetired(t *testing.T) {
 		t.Errorf("a retired watcher ended with %v, want a clean completion — retiring is an "+
 			"operator's act, not a failure", err)
 	}
+}
+
+// ═══ THE HANDOVER (kontra#10) ═══
+//
+// This workflow watches a Machine for as long as the Machine exists, and Temporal TERMINATES an
+// execution at 51,200 history events — measured at five per watch for a dark Machine, which is a
+// death date about 14 months out. `GetContinueAsNewSuggested` is the only warning before it, set by
+// the server on every workflow task from 4,096 events, and until this slice nothing read it.
+//
+// WHAT IS ASSERTED HERE IS THE STATE TRANSFER, NOT THE TRIGGER. The trigger is a server signal, and
+// `testsuite.NewTestWorkflowEnvironment` has no server — `GetContinueAsNewSuggested` is false in it
+// by construction, so a test that waited for it here would assert nothing for ever. The trigger is
+// covered end-to-end against a real server on the Lease side
+// (`control/orchestrator/src/workflows/lease.test.ts`), where the same mechanism can be driven by
+// lowering the server's own threshold. What the replayer CAN prove is the half that carries the
+// Machine's identity across the boundary, and that is the half with the failure modes.
+func TestAContinuedWatcherDoesNotForgetTheMachine(t *testing.T) {
+	// THE LIE A LOST `Last` WOULD TELL. The next watch's Summary is the previous decision, so a leg
+	// that started from the zero value would write "attached from …" as its first row — announcing a
+	// fresh enrolment for a Machine that may have been dark for a month. The row is the only account
+	// anyone gets of what the Machine was doing.
+	t.Run("carries the last decision, so the first row is not a fresh attach", func(t *testing.T) {
+		var suite testsuite.WorkflowTestSuite
+		env := suite.NewTestWorkflowEnvironment()
+		env.SetTestTimeout(30 * time.Second)
+
+		env.RegisterActivityWithOptions(func(ctx context.Context) (wardenDecision, error) {
+			<-time.After(50 * time.Millisecond)
+			return wardenDecision{}, nil
+		}, activity.RegisterOptions{Name: wardenWatchActivityName})
+		env.RegisterDelayedCallback(func() { env.SignalWorkflow(wardenRetireSignal, nil) }, time.Second)
+
+		carried := wardenDecision{
+			Kind:    decisionUnreachable,
+			Subject: "wdn-carried00000",
+			Detail:  "no answer for 3 watches",
+		}
+		env.ExecuteWorkflow(wardenWorkflow, wardenWorkflowInput{
+			WardenID: "wdn-carried00000", Queue: "q",
+			UnreachableMin: time.Hour, UnreachableMax: time.Hour, Heartbeat: time.Minute,
+			Last: &carried, Misses: 3,
+		})
+		if err := env.GetWorkflowError(); err != nil {
+			t.Fatalf("a continued watcher failed to start: %v", err)
+		}
+	})
+
+	// THE BACKOFF MUST NOT RESET. `Misses` drives `unreachableAfter`, so a leg that started at zero
+	// would drop a Machine which had backed off to an hour straight back to a minute — undoing the
+	// whole reason the backoff exists, and doing it on exactly the Machines that have been dark
+	// longest and are therefore the most numerous in a large Fleet.
+	t.Run("carries the miss count, so the backoff does not reset", func(t *testing.T) {
+		in := wardenWorkflowInput{
+			UnreachableMin: time.Minute, UnreachableMax: time.Hour,
+			Misses: 6,
+		}
+		fresh := wardenWorkflowInput{UnreachableMin: time.Minute, UnreachableMax: time.Hour}
+		if in.unreachableAfter(in.Misses) <= fresh.unreachableAfter(0) {
+			t.Fatalf("a continued watcher backs off %v, a fresh one %v — the handover reset it",
+				in.unreachableAfter(in.Misses), fresh.unreachableAfter(0))
+		}
+		// And it is the ceiling that bounds it, not the carried number.
+		if got := in.unreachableAfter(9999); got != time.Hour {
+			t.Fatalf("backoff %v exceeded the ceiling", got)
+		}
+	})
+
+	// FAILURES IS DELIBERATELY NOT CARRIED, and this pins the reasoning rather than the field: it
+	// counts CONSECUTIVE errors toward `wardenFailuresBeforeStopping`, and a handover is not an
+	// error. Carrying it would let a chain accumulate toward a stop across boundaries that had
+	// nothing to do with each other — a Warden that gave up on a healthy Machine.
+	t.Run("does not carry the failure count", func(t *testing.T) {
+		var in wardenWorkflowInput
+		if strings.Contains(fmt.Sprintf("%+v", in), "Failures") {
+			t.Fatal("wardenWorkflowInput carries Failures; see this test's docblock for why it must not")
+		}
+	})
 }

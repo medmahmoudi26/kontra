@@ -2,7 +2,7 @@ package main
 
 // kontra workspace seed|watch|list|use|create — named workspaces under one parent folder.
 //
-// The Compose cluster bind-mounts KONTRA_WORKSPACES (../workspaces.kontra beside kontra/ and
+// The Compose cluster bind-mounts KONTRA_WORKSPACES (./workspaces beside kontra/ and
 // kontra-console/ by default). Each child directory is a workspace. .current in the parent names
 // the active one. Discovery, watch, serve and start use only that child. Switching never remounts.
 
@@ -26,9 +26,9 @@ import (
 )
 
 const (
-	currentFile     = ".current"
-	defaultChild    = "hello"
-	workspaceUsage  = "usage: kontra workspace seed|watch|list|use|create"
+	currentFile    = ".current"
+	defaultChild   = "hello"
+	workspaceUsage = "usage: kontra workspace path|seed|watch|list|use|create"
 )
 
 var workspaceNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
@@ -38,6 +38,8 @@ func cmdWorkspace(args []string) error {
 		return fmt.Errorf("%s", workspaceUsage)
 	}
 	switch args[0] {
+	case "path":
+		return cmdWorkspacePath(args[1:])
 	case "seed":
 		return cmdWorkspaceSeed(args[1:])
 	case "watch":
@@ -53,6 +55,69 @@ func cmdWorkspace(args []string) error {
 	}
 }
 
+// cmdWorkspacePath prints where code goes — the one question every other command's error message
+// ends up pointing at now that the workspace IS the registration.
+//
+// It prints a PATH AND NOTHING ELSE on success, because it is meant to be used in a shell:
+//
+//	mv ./myactor "$(kontra workspace path)/actors/"
+func cmdWorkspacePath(args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("usage: kontra workspace path")
+	}
+	root := activeWorkspace()
+	if root == "" {
+		// ASK THE CONTROL PLANE, because it is the one that decides.
+		//
+		// The env vars are set for the SERVER — on a compose install they live in `.env`, which the
+		// shell running this command has never read — so a CLI that answered only from its own
+		// environment said "no workspace is configured" about an installation that has one and is
+		// serving from it. The control plane is the authority on what it serves; this asks it, and
+		// the two cannot disagree.
+		if remote, err := workspaceFromAPI(); err == nil && remote != "" {
+			fmt.Fprintln(cliio.Stdout, remote)
+			return nil
+		}
+		return fmt.Errorf(
+			"no workspace is configured.\n" +
+				"Set KONTRA_WORKSPACES to a directory the control plane can see — on a compose\n" +
+				"install that means a bind mount, so the path is the same inside and out — and\n" +
+				"`kontra workspace create <name>` makes one inside it.")
+	}
+	fmt.Fprintln(cliio.Stdout, root)
+	return nil
+}
+
+// workspaceFromAPI reads the active workspace path from the orchestrator. Empty when it has none.
+func workspaceFromAPI() (string, error) {
+	var got struct {
+		CurrentPath string `json:"currentPath"`
+	}
+	if err := newAPI(orchestratorURL()).getJSON("/api/workspaces", &got); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(got.CurrentPath), nil
+}
+
+// activeWorkspace is the code root: the named child when there is a parent, else the single tree.
+// Peer of control/orchestrator/src/workspaces.ts:workspaceRoot — the two must agree, because one
+// decides what the CLI prints and the other decides what the control plane serves.
+func activeWorkspace() string {
+	if parent := workspacesParent(); parent != "" {
+		name, err := readCurrentName(parent)
+		if err != nil || strings.TrimSpace(name) == "" {
+			return ""
+		}
+		name = strings.TrimSpace(name)
+		child := filepath.Join(parent, name)
+		if st, err := os.Stat(child); err == nil && st.IsDir() {
+			return child
+		}
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv("KONTRA_WORKSPACE"))
+}
+
 // workspacesParent is the bind-mounted folder that holds named workspace children.
 func workspacesParent() string {
 	if v := strings.TrimSpace(os.Getenv("KONTRA_WORKSPACES")); v != "" {
@@ -60,9 +125,9 @@ func workspacesParent() string {
 	}
 	if wd, err := os.Getwd(); err == nil {
 		// Sibling of the kontra checkout when the env is unset (host CLI).
-		return filepath.Clean(filepath.Join(wd, "..", "workspaces.kontra"))
+		return filepath.Clean(filepath.Join(wd, "..", "workspaces"))
 	}
-	return filepath.Join("..", "workspaces.kontra")
+	return filepath.Join("..", "workspaces")
 }
 
 // legacyWorkspaceRoot is the pre-named-workspaces single tree (actors/ + workflows/ at top).
@@ -542,6 +607,23 @@ func postSource(api, kind, dir string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// 410 IS THE SERVER SAYING THERE IS NOTHING TO DO, NOT A FAILURE.
+	//
+	// ADR 0049 made the workspace itself the registration, and `routes/sources.ts` answers this
+	// POST with 410 Gone on purpose — "the workspace is the registration. Put the folder in the
+	// workspace." The watcher kept posting anyway, so every scan of every folder printed
+	//
+	//	workspace watch: actor …/actors/subfinder: 410 Gone: {"error":"registering a folder is gone…
+	//
+	// to stderr, forever, for seven actors. Nothing was broken: the folders ARE served, because
+	// being in the workspace is what serves them. The only thing the call produced was noise, and
+	// noise in the one stream an operator watches for real failures is worse than no call at all.
+	//
+	// Swallowed rather than deleted, so a control plane older than ADR 0049 still gets registered
+	// by a newer CLI.
+	if resp.StatusCode == http.StatusGone {
+		return nil
+	}
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(b)))

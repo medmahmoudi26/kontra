@@ -26,6 +26,7 @@ replay, and the commit map makes a retry skip what already finished.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import importlib
 import inspect
@@ -39,6 +40,7 @@ from kontra import param
 from kontra.retry import NonRetryableError, SessionLost
 
 from kontra.batch import Batch, Dataset
+from internals import logs, workerid
 from internals.globalstore import GlobalStore, object_prefix
 from internals.redis_kv import redis_kv_from_env
 from internals.statekv import STATE_TTL_S, ActorStateKV, state_kv
@@ -139,6 +141,58 @@ def unit_slot(bid: str, i: int) -> str:
 
 async def _maybe_await(v):
     return await v if inspect.isawaitable(v) else v
+
+
+# ── THE WORKFLOW-STREAM PUBLISHER WAS HERE, AND IT IS GONE ─────────────────────────────────────
+#
+# Six functions: `_stream_for` (a `WorkflowStreamClient` for the run), `_method_topic`
+# (`<actor>/<method>`), `_stream_body` (the author's fields plus the engine's routing keys),
+# `_worker_label`, `_publisher_for` and the `publish` closure `kontra.stream()` wrote through.
+#
+# A Temporal Workflow Stream lives in the WORKFLOW'S MEMORY and dies with the workflow, so every
+# record published through this was unreadable the moment the run closed — and a run that takes
+# under a minute is over before a browser has loaded and signed in. The console pane that consumed
+# it is gone; this is the producer.
+#
+# `_worker_label` WENT WITH IT AND IS NOT MISSED: it answered "which Worker is speaking" for a
+# stream record, and the log records the Method now emits already carry the same string, put there
+# by `logs.bind_run` for every line rather than only for the ones that called a verb.
+#
+# WHAT SURVIVES, BELOW: `_as_mapping`, because the healthcheck beat still flattens an author's map,
+# and `_post_progress`, which is a DIFFERENT mechanism — an HTTP POST to the orchestrator's live
+# beat store (`GET /api/runs/{runId}/progress`), read by the CLI, durable for the life of the
+# process rather than the workflow.
+
+
+def _as_mapping(value):
+    """An author's record as a plain dict — dataclass, pydantic model or mapping alike.
+
+    Not `json.dumps`: the payload converter wants a structure, and a dataclass that reached it
+    unconverted would arrive as a repr string that no schema describes.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    dump = getattr(value, "model_dump", None) or getattr(value, "dict", None)
+    if callable(dump):
+        try:
+            return dict(dump())
+        except Exception:  # noqa: BLE001 - fall through to __dict__
+            pass
+    d = getattr(value, "__dict__", None)
+    if d is not None:
+        return dict(d)
+    if hasattr(value, "_asdict"):      # NamedTuple: its fields, not a positional tuple
+        return dict(value._asdict())
+    # A str, int, list or tuple has NO mapping to flatten, and returning `{}` here shipped a
+    # record carrying only the framework's own `node`/`actor` — the author's value gone with
+    # nothing raised and nothing logged. `await stream(f"fetched {url}")` is a natural first
+    # thing to try given the verb's name. Nest it instead, which is the same rule the Go host
+    # already follows for a non-map beat.
+    return {"value": value}
 
 
 def _post_progress(orch, run_id, node_id, actor_id, progress, total):
@@ -360,7 +414,21 @@ def build_session_factory(registry, *, store="env"):
             raise SessionLost(str(e)) from e
 
         async def _probe(self):
-            """@actor.healthcheck: (dead, progress). return=progress, raise/False=dead."""
+            """(dead, progress) — from TWO hooks now, with opposite failure semantics.
+
+            `@actor.healthcheck` decides LIVENESS: a raise or `False` ends the Session.
+            `@actor.progress` describes the WORK: a raise is swallowed, because reporting where
+            you are must never kill a Session that is working fine.
+
+            They used to be one function, and the shipped actors show what that cost. `webcrawl`'s
+            probe is written to answer "reload or isolate?", so it returned `{"contexts": 2}` —
+            two browser tabs — and that was the entire progress signal an operator got for a
+            454-program campaign.
+
+            A healthcheck that still returns a value keeps working: its map is merged UNDER the
+            progress hook's, so an actor that has not been split yet loses nothing, and one that
+            has cannot have its `at` overwritten by a stale liveness field.
+            """
             if hc_fn is None:
                 return (False, None)
             try:
@@ -533,6 +601,34 @@ def build_session_factory(registry, *, store="env"):
             self._method = registry.resolve_method(str(payload.get("method") or ""))
             # for the per-record blob keys
             self._run_id, self._node_id, self._run_date = run_id, node_id, run_date
+            # AND ONTO EVERY LOG LINE THIS BATCH WRITES (ADR 0050 §1, kontra#16). The identity is
+            # already here — it is the same lineage the blob keys hang off — so correlating a line to
+            # a Run is a bind, not a new plumbing path. A CONTEXTVAR because one host runs many
+            # Sessions on one loop: a module global would label every line with whichever Unit bound
+            # last, which is the lie one layer up that `vmagent.env` exists to prevent.
+            #
+            # Absent values are dropped by `bind_run`, so a Worker polling with no Run writes records
+            # WITHOUT the label rather than records with an empty one.
+            #
+            # `actor` IS THE NAME AND `actor_id` IS THE SESSION, WHICH IS NOT WHAT THIS SENT.
+            # It bound `actor=self._actor_id` — a session id like `c5eaf2b6a275` — into the field
+            # the console's logs rail renders and filters as the actor NAME
+            # (`core/src/run/logs.ts`, whose fixture reads `actor: 'desync'`). Two consequences,
+            # and the second is worse than the first: a reader filtering `actor:desync` matched
+            # nothing, and `actor` is one of the four STREAM fields the shipper declares — so a
+            # session id there mints a new log stream per Session, which is unbounded cardinality
+            # in the index for a value nobody groups by.
+            #
+            # This is the same confusion the streaming work fixed one layer over, in the other
+            # direction: there the topic carried the name and the record had to carry the session,
+            # here the label carries the name and the session needed its own key.
+            logs.bind_run(
+                run_id=run_id,
+                node_id=node_id,
+                actor=os.environ.get("KONTRA_ACTOR_NAME", ""),
+                actor_id=self._actor_id,
+                actor_version=os.environ.get("KONTRA_ACTOR_VERSION", ""),
+            )
             # Every commit key of this batch hangs off its content hash. The RESOLVED name goes
             # in, not the wire field: a sole Method dispatched once by name and once without is
             # one Method, and must hash to one Batch.
@@ -612,6 +708,11 @@ def build_session_factory(registry, *, store="env"):
             # current Unit and is folded into results below.
             batch = Batch(self, todo, getattr(self._method, "takes", None))
             beat = asyncio.create_task(self._progress_beat(run_id, node_id, len(units)))
+            # A PER-BATCH WORKFLOW-STREAM PUBLISHER WAS BOUND HERE, and `kontra.stream()` wrote
+            # through it. Both are gone: the stream died with the workflow, so nothing could read
+            # it a minute after the run. A Method narrates with its own logger, which
+            # `logs.bind_run` has already stamped with the run, the Worker and the Temporal
+            # context — so the same facts reach the run page's rail and stay there.
             try:
                 if self._method is None:
                     # No @actor.method (load-only actor): identity passthrough, one turn.
@@ -684,6 +785,9 @@ def build_session_factory(registry, *, store="env"):
             # Beat @actor.healthcheck output to the orchestrator so the CLI/UI can stream live
             # progress. Best-effort visibility — a POST failure NEVER touches the run.
             orch = os.environ.get("KONTRA_ORCHESTRATOR_URL", "").rstrip("/")
+            # THE BEAT ALSO WENT ONTO THE RUN'S WORKFLOW STREAM, and that half is gone. What is
+            # left is `_post_progress` — an HTTP POST to the orchestrator's live beat store, which
+            # outlives the workflow and which `GET /api/runs/{runId}/progress` and the CLI read.
             try:
                 while True:
                     await asyncio.sleep(_BEAT_S)
@@ -702,6 +806,8 @@ def build_session_factory(registry, *, store="env"):
                             await asyncio.to_thread(
                                 _post_progress, orch, run_id, node_id, self._actor_id, progress, total)
             except asyncio.CancelledError:
+                pass
+            finally:
                 pass
 
     return Session

@@ -27,26 +27,50 @@ kind of its own and spares the catalog, the CLI, the queue derivations and both 
 
 ── THE TWO THINGS A WORKFLOW SAYS OUT LOUD ────────────────────────────────────────────────────
 
-    from kontra import ask, speak
+    from temporalio import workflow
+    from kontra import ask
 
-    await speak(f"batch {i} of {n}")                  # tell the operator where you are
+    workflow.logger.info(f"batch {i} of {n}")        # tell the operator where you are
     answer = await ask("Approve these 12 hosts?", takes=Approval, context={"n": 12})
 
-THEY ARE A PAIR, AND THE DIFFERENCE IS THE WHOLE REASON THERE ARE TWO. `speak` costs history and
-RETURNS IMMEDIATELY. `ask` costs history AND STOPS THE RUN until a human moves it. Confusing them
-turns a progress line into a stalled run, so they are exposed side by side here rather than
-buried in two modules an author would meet separately. `speak`'s shape is A SENTENCE PER PHASE,
-never one per Unit — see {@link kontra.narrate.speak} for the budget that enforces it.
+THEY ARE NOT INTERCHANGEABLE. A LOG LINE costs no history, is not capped, and reaches the log store
+where it can be queried across runs — and it is still there tomorrow. `ask` costs history AND STOPS
+THE RUN until a human moves it. Confusing the two turns a status line into a stalled run.
 
-Neither may carry a credential. Both reach history, where the codec is a claim-check and not
+THERE IS NO `progress` AND NO `stream`, and the reason is not the one that removed the wrappers
+below. They were not redundant with a log line — they published TYPED STATE, which a sentence
+genuinely cannot carry. What they published onto was a Temporal Workflow Stream, which lives in the
+WORKFLOW'S MEMORY and dies with the workflow. So everything sent through them was unreadable the
+moment the run ended, and a run that takes under a minute is already over by the time somebody has
+opened a browser and signed in: measured on the canary, the console pane's ordinary state was an
+empty box. A typed channel nobody can read is worse than no channel, because it looks like one.
+
+They come back when there is a durable store under them. `KontraFlow` went with them — it existed
+only to construct the stream at workflow-init time — so a workflow now inherits from nothing.
+
+THERE IS NO `note` AND NO `partial` either. Both were wrappers over the logger and both are gone:
+`note` was `logger.info`, `partial` was `logger.warning` plus one field. `workflow.logger` is the
+spelling that survives, and the field that mattered survives with it —
+
+    workflow.logger.warning("seed_limit reached — the crawl is PARTIAL", extra={"incomplete": True})
+
+`incomplete` says THE RESULT IS NOT WHAT A READER WOULD ASSUME (an abandoned axis, a limit reached,
+a phase skipped), and the console filters on it INDEPENDENTLY of the level, so raising the floor
+cannot hide it. The question at each call site is unchanged: would a reader be wrong about the
+result if they missed this line? (ADR 0050 §2 removed `speak` before them, for the same reason.)
+
+Neither may carry a credential. `ask` reaches history, where the codec is a claim-check and not
 encryption (ADR 0007): under its threshold a value rides inline, in the clear, readable by anyone
-who can read the run. Each has a guard against the ordinary mistake and neither is a boundary.
+who can read the run. Log lines reach the log store, which is no more private — and since they are
+now plain `logging` calls, the redaction guard belongs on the HANDLER (`IdentityFilter`'s neighbour
+in `runtime/python/internals/logs.py`), where it covers every record rather than only the ones that
+remembered to call a wrapper. It was never a boundary either way.
 
-BOTH ARE RESOLVED LAZILY, by the module `__getattr__` at the bottom of this file, and that is not
-an optimisation — it is what keeps the paragraph below true. `narrate` and `hitl` import temporalio
-at module scope (they must, to subclass `ApplicationError` at class-definition time), so importing
-either here would put a Temporal dependency behind `import kontra`. The verbs cost nothing until
-an author names one, and naming one is something only a workflow does.
+`ask` IS RESOLVED LAZILY, by the module `__getattr__` at the bottom of this file, and that is not
+an optimisation — it is what keeps the paragraph below true. `hitl` imports temporalio at module
+scope (it must, to subclass `ApplicationError` at class-definition time), so importing it here
+would put a Temporal dependency behind `import kontra`. The verb costs nothing until an author
+names it, and naming it is something only a workflow does.
 
 ── THE MODULES BEHIND THEM, AND WHAT ELSE IS NOT IMPORTED HERE ─────────────────────────────────
 
@@ -80,17 +104,11 @@ imports `secrets` lazily, inside `.get()`, so the network half stays out of the 
     async def load(self):
         self.client = Vendor(await API_KEY.get(run=self.run_id))
 
-And a THIRD, on `hitl`'s grounds rather than `secrets`': `narrate`, the module `speak` lives in,
-which writes one sentence of the author's own prose into the run's transcript at the point in the
-run where it was written — derived turns make an untooled workflow readable; narration makes a
-tooled one explain itself. It too imports temporalio at module scope, to subclass
-`ApplicationError`, and it too is reached from inside your workflow:
-
-    from kontra import narrate
-    await narrate.say(f"{live} of {len(apexes)} apexes resolve; crawling those")
-
-`narrate.say` is `speak` under its older name — one function, either spelling, and every existing
-caller of `say` is untouched.
+`say` WAS A THIRD SUCH MODULE and is deleted. It held `progress` and `KontraFlow`, and nothing
+imports it any more. `narrate.say` and `speak` were removed by ADR 0050 §2; `note` and `partial`
+followed them; `progress`, `stream` and `KontraFlow` followed those. A caller of any of them
+becomes `workflow.logger.info(...)`, or `workflow.logger.warning(..., extra={"incomplete": True})`
+where the sentence is a claim about the RESULT rather than about where the run has got to.
 """
 
 from kontra import catalog, fleet
@@ -101,10 +119,16 @@ from kontra.actor import (
 from kontra.retry import NonRetryableError, SessionLost
 from kontra.version import CONTRACT_VERSION
 
-#: The two verbs a workflow says out loud. RESOLVED ON FIRST USE by `__getattr__` below, never at
-#: import: the modules they live in import temporalio at module scope, and `import kontra` is
-#: required to stay free of a Temporal dependency (see the header).
-_VERBS = ("speak", "ask")
+#: The verb a workflow says out loud. RESOLVED ON FIRST USE by `__getattr__` below, never at
+#: import: `hitl` imports temporalio at module scope, and `import kontra` is required to stay free
+#: of a Temporal dependency (see the header).
+#:
+#: `speak` WAS HERE AND ITS REMOVAL WAS LEFT HALF DONE — ADR 0050 §2 deleted the function and
+#: `__getattr__` stopped resolving it, but this tuple and `__all__` went on advertising it. So
+#: `dir(kontra)` listed a name that raised, and `from kontra import *` failed outright. A surface
+#: that names something it will not provide is worse than one that never mentioned it. That is the
+#: mistake `progress`/`stream`/`KontraFlow` were removed from all three places to avoid repeating.
+_VERBS = ("ask",)
 
 #: The two INPUT TYPES an author declares on a Method — `takes=File`. Lazy for the same reason the
 #: verbs are, and a different dependency: `blobs` imports pydantic at module scope, which
@@ -114,7 +138,7 @@ _INPUT_TYPES = ("File", "Folder")
 
 
 def __getattr__(name: str) -> object:
-    """`from kontra import ask, speak`, without importing temporalio to find out.
+    """`from kontra import ask`, without importing temporalio to find out.
 
     PEP 562, and the only mechanism that gives BOTH halves of what this package needs: the pair is
     reachable at the top level where an author looks for it, and `import kontra` still costs no
@@ -130,10 +154,6 @@ def __getattr__(name: str) -> object:
     reaches around that machinery entirely, which happens to give the same answer for a passthrough
     module and would quietly stop doing so the day one of these was not passed through.
     """
-    if name == "speak":
-        from kontra.narrate import speak
-
-        return speak
     if name == "ask":
         from kontra.hitl import ask
 
@@ -147,15 +167,33 @@ def __getattr__(name: str) -> object:
 
 def __dir__() -> list[str]:
     """`dir(kontra)` names the verbs too — a lazy attribute is invisible to it otherwise, and a
-    surface an author cannot discover from the REPL is a surface they will not find."""
-    return sorted([*globals(), *_VERBS, *_INPUT_TYPES])
+    surface an author cannot discover from the REPL is a surface they will not find.
+
+    DERIVED FROM `__all__`, not from the tuples beside it. A lazy public name that belongs to
+    neither `_VERBS` nor `_INPUT_TYPES` would be silently omitted by a listing built from those two
+    alone — which is how `stream` and `KontraFlow` went undiscoverable for as long as they existed.
+    `__all__` is the one list that already has to name every public attribute, which is what stops
+    them drifting again.
+    """
+    return sorted({*globals(), *__all__, *_VERBS, *_INPUT_TYPES})
 
 
 __all__ = [
     "actor",
-    # THE PAIR, at the top level and side by side, which is what makes it obvious there are two of
-    # them: `speak` reports and returns, `ask` stops the run until a human moves it.
-    "speak",
+    # THE VERB. One, now — `ask` stops the run until a human moves it, which is the only thing
+    # here that a log line provably cannot do.
+    #
+    # FOUR WENT BEFORE IT. `speak` (ADR 0050 §2), then `note` and `partial` — all three wrappers
+    # over the logger, and a wrapper that adds one dict to a stdlib call is a second API to learn
+    # for something the author already knows how to spell. `workflow.logger.info(...)` and
+    # `workflow.logger.warning(..., extra={"incomplete": True})` replaced them, and `incomplete` is
+    # still what the console's logs rail filters on independently of the level.
+    #
+    # `progress`, `stream` and `KontraFlow` followed them, and for a different reason: not that a
+    # log line could say the same thing, but that NOTHING COULD READ THEM. They published onto a
+    # Temporal Workflow Stream, which lives in the workflow's memory and dies with the workflow —
+    # so a run under a minute long had nothing left to subscribe to by the time a browser had
+    # loaded. They come back when there is a durable store under them.
     "ask",
     "catalog",
     "fleet",

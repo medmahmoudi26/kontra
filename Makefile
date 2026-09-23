@@ -227,8 +227,28 @@ ui: console
 # which orchestrator it chose. So a missing api container is REPORTED and skipped rather than
 # failing the target — a recipe that exits 1 naming a service this file no longer defines is the
 # same silent-mismatch trap that `kontra infra up` reverting a hot-copied container was.
+# `@kontra/core` GOES WITH IT, AND LEAVING IT OUT CRASH-LOOPED THE CONTROL PLANE.
+#
+# The orchestrator imports `@kontra/core` as a workspace link, so `tsc` here compiles against the
+# checkout's shared/core SOURCE while the container keeps whatever shared/core DIST its image was
+# built with. Add an export to shared/core, `make api`, and the container gets an orchestrator that
+# calls a function its own copy of core does not have:
+#
+#     [orchestrator] fatal: TypeError: (0 , queues_1.workerIdentity) is not a function
+#
+# — on both roles, as a restart loop, with the api answering health checks in between. What it
+# actually broke was `holdFleetLease` on the `kontra-datasets` queue: nothing was polling it, so
+# every run that provisions a Fleet sat at one event for ever with no error anywhere.
+#
+# Building and copying core beside the orchestrator is the whole fix, and it is cheap. The two are
+# ONE deployable; a target that ships half of it is a target that ships a mismatch.
 api:
+	cd shared/core && pnpm run build
 	cd control/orchestrator && pnpm exec tsc
+	@for svc in orchestrator-api orchestrator-infra; do \
+	  cid=$$(docker ps -q --filter label=com.docker.compose.service=$$svc | head -1); \
+	  if [ -n "$$cid" ]; then docker cp shared/core/dist/. "$$cid":/src/shared/core/dist/; fi; \
+	done
 	@for svc in orchestrator-api orchestrator-infra; do \
 	  cid=$$(docker ps -q --filter label=com.docker.compose.service=$$svc | head -1); \
 	  if [ -z "$$cid" ]; then \

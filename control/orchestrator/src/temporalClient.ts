@@ -20,7 +20,7 @@ import { OpenTelemetryWorkflowClientInterceptor } from '@temporalio/interceptors
 import type { RunStatus } from '../contract/types';
 import { dataConverter } from './codec/dataConverter';
 import { type HeartbeatDetail, type NodeHeartbeat, heartbeatRow } from './heartbeat';
-import { mapHistory, type RawHistoryEvent, type RunHistory } from './history';
+import { HistoryReducer, type RawHistoryEvent, type RunHistory } from './history';
 import { inFlightOf, type InFlight } from './runActivity';
 import { startTracing, tracingEnabled } from './otel';
 import {
@@ -32,6 +32,7 @@ import {
   registerSearchAttributes,
 } from './visibility';
 import { temporalConnectOptions } from './temporalTls';
+import { clientIdentity } from './workerIdentity';
 
 /** EXPORTED so the one place that STARTS a workflow can stamp the tenant with the same value this
  *  connects to. A second `process.env.KONTRA_NAMESPACE ?? 'default'` elsewhere is how a client and
@@ -73,6 +74,12 @@ export async function getClient(): Promise<Client> {
         connection,
         namespace: NAMESPACE,
         dataConverter,
+        // WHO STARTED THIS RUN, recorded by the server rather than inferred. Every console-driven
+        // start, signal, terminate and reset goes through THIS client, so its identity is what
+        // lands on `WorkflowExecutionStarted.identity` and on a `RequestCancel` event. Left at the
+        // default that is `<pid>@<hostname>` — indistinguishable from the Workers sharing this
+        // container, and useless for the question an audit asks of it.
+        identity: clientIdentity(),
         interceptors: tracingEnabled
           ? { workflow: [new OpenTelemetryWorkflowClientInterceptor()] }
           : undefined,
@@ -138,6 +145,30 @@ export interface RunRow extends RunDescription {
 }
 
 /**
+ * Whose Run this is — read from the attribute, DERIVED when nothing wrote one.
+ *
+ * A TENANT IS A TEMPORAL NAMESPACE (ADR 0036 §7, and `CONTEXT.md` says it in as many words). It is
+ * the only authorisation boundary Temporal has and the only one kontra leans on. Every read in this
+ * module is namespace-scoped — `client.workflow.list` and `getHandle(id).describe()` both answer
+ * within the namespace `getClient` connected to — so the tenant of any row this process can SEE is
+ * `NAMESPACE`, whether or not an attribute was ever stamped.
+ *
+ * WHICH IS WHY THE FALLBACK IS THE NAMESPACE AND NOT THE EMPTY STRING. `startRun` stamps
+ * `KontraTenant` at start (`workflowControl.ts`), but that reaches only executions begun after it
+ * landed. The perpetual ones — `wardenWorkflow`, `leaseWorkflow` — were already running, never
+ * close, and in the Warden's case cannot be made to restart into a stamp: its start site uses
+ * `WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING` precisely so `systemctl restart kontra-warden`
+ * RE-ATTACHES to the same execution. Reporting `''` for those was reporting "no tenant" about a
+ * fact that is knowable without asking anyone.
+ *
+ * ABSENT IS STILL ABSENT FOR ANYTHING THE NAMESPACE CANNOT ANSWER — this is not a default, it is a
+ * derivation, and it is only sound because the read that produced the row was namespace-scoped.
+ */
+function tenantOf(attrs: { get(key: typeof KontraTenant): string | undefined }): string {
+  return attrs.get(KontraTenant) ?? NAMESPACE;
+}
+
+/**
  * Describe one run by the id the caller started it under. `undefined` when Temporal has no
  * such execution — which is an ordinary answer, not an error: retention drops closed
  * workflows long before the Datasets they wrote expire.
@@ -150,7 +181,7 @@ export async function describeRun(runId: string): Promise<RunDescription | undef
       runId,
       status: mapStatus(desc.status),
       type: desc.type ?? '',
-      tenant: desc.typedSearchAttributes.get(KontraTenant) ?? '',
+      tenant: tenantOf(desc.typedSearchAttributes),
       startedAt: desc.startTime?.getTime() ?? 0,
       closedAt: desc.closeTime?.getTime() ?? 0,
       // Both come off the SAME response. A parked run's asks and the evidence that a running run
@@ -216,7 +247,7 @@ export async function listRuns(
       runId: info.workflowId,
       status: mapStatus(info.status),
       type: info.type ?? '',
-      tenant: info.typedSearchAttributes.get(KontraTenant) ?? '',
+      tenant: tenantOf(info.typedSearchAttributes),
       startedAt: info.startTime?.getTime() ?? 0,
       closedAt: info.closeTime?.getTime() ?? 0,
       dispatches: 0,
@@ -501,7 +532,18 @@ export async function fetchRunHistory(
   execId?: string
 ): Promise<RunHistory | undefined> {
   const client = await getClient();
-  const events: RawHistoryEvent[] = [];
+  /* REDUCED PER PAGE, SO NO PAGE OUTLIVES THE LOOP.
+   *
+   * This used to accumulate every raw event into one array — `HISTORY_PAGE × HISTORY_MAX_PAGES` =
+   * 20,000 decoded `HistoryEvent`s, each with its whole attribute bag — and hand that to the
+   * reducer, to produce at most `EVENT_CAP` = 1,000 rows. Peak heap scaled with the size of the RUN
+   * on a path every open browser tab polls, for an output whose size is FIXED.
+   *
+   * The reducer keeps a head and a bounded tail, which is exactly what a streaming reduce needs; the
+   * page is garbage the moment it has been pushed. `scanned`, `elided` and `truncated` are unchanged
+   * — see `HistoryReducer` for why the link pass can still be correct without the array.
+   */
+  const reducer = new HistoryReducer();
   let nextPageToken: Uint8Array | undefined;
   let truncated = false;
   try {
@@ -515,7 +557,7 @@ export async function fetchRunHistory(
         // for the next event is a request that holds a connection per open tab.
         waitNewEvent: false,
       });
-      for (const ev of res.history?.events ?? []) events.push(ev as RawHistoryEvent);
+      for (const ev of res.history?.events ?? []) reducer.push(ev as RawHistoryEvent);
       nextPageToken = res.nextPageToken?.length ? res.nextPageToken : undefined;
       if (!nextPageToken) break;
       if (page === HISTORY_MAX_PAGES - 1) truncated = true;
@@ -527,7 +569,7 @@ export async function fetchRunHistory(
   // The namespace goes in so the reducer can refuse a link that points OUT of it — see mapHistory.
   // The LENGTH goes in because `scanned` is what this reader fetched, and past the cap above that
   // is not the same number — see `describeLength`.
-  return mapHistory(events, truncated, NAMESPACE, await describeLength(client, runId, execId));
+  return reducer.finish(truncated, NAMESPACE, await describeLength(client, runId, execId));
 }
 
 /**
@@ -705,4 +747,127 @@ function mapStatus(s: unknown): RunStatus {
     default:
       return 'pending';
   }
+}
+
+/**
+ * WHAT A RUN WAS STARTED WITH AND WHAT IT RETURNED — the two payloads, and nothing else.
+ *
+ * ── WHY IT IS NOT `fetchRunHistory` ────────────────────────────────────────────────────────────
+ *
+ * That function is emphatic that it reads NO payload, and it is right to be: it walks up to 20,000
+ * events, and on this deployment the converter is a claim-check codec (ADR 0007), so decoding them
+ * would fan a browser poll out into thousands of blob GETs. The rule it is protecting is "a
+ * history read costs no blob reads", not "no route may ever decode a payload".
+ *
+ * This decodes exactly TWO — the run's argument and its result — and fetches them with two
+ * targeted RPCs rather than by paging anything:
+ *
+ *   - the FIRST event, `maximumPageSize: 1`, which is always `WorkflowExecutionStarted`;
+ *   - the CLOSE event, via `historyEventFilterType: CLOSE_EVENT`, which is Temporal answering
+ *     "the last event" without sending the ones before it.
+ *
+ * So the cost is bounded by the size of one workflow argument and one workflow result, whatever
+ * the run did in between. A run that is still going has no close event and gets `output: undefined`
+ * — which is the honest answer and not an error.
+ *
+ * ── WHY THE RUN PAGE NEEDED IT ─────────────────────────────────────────────────────────────────
+ *
+ * The page rendered the DECLARED SCHEMA in place of the run: the Input region printed each field's
+ * default and footnoted "the run's recorded values land with the snapshot store", and the Output
+ * region printed field names and descriptions with no values at all. So two runs of the same
+ * workflow started with different arguments drew the identical page, and a reader had no way to
+ * see what THIS one did. A run record that shows the defaults is a form, not a record.
+ *
+ * ── FAILURE IS NOT SILENCE ─────────────────────────────────────────────────────────────────────
+ *
+ * `undefined` on either half means NOT AVAILABLE, and the caller says so rather than drawing an
+ * empty object: Temporal drops an execution at retention, a payload may be a claim-check whose
+ * blob has expired, and a failed run has a failure where its result would be. Each of those is a
+ * different fact from "this run was started with nothing".
+ */
+export interface RunIO {
+  /** The single `@workflow.run` argument, decoded. `undefined` when there was none or it is gone. */
+  input?: unknown;
+  /** The workflow's return value, decoded. `undefined` while it is still running, or on failure. */
+  output?: unknown;
+  /** Why the close event carries no output — `failed`, `canceled`, `terminated`, `timed_out`. */
+  closedAs?: string;
+}
+
+/** One payload list through the codec and the default converter. `undefined` on anything odd,
+ *  because a run record must not 500 over an argument it cannot read. */
+async function decodeFirst(
+  codec: PayloadCodec | undefined,
+  payloads: unknown[] | null | undefined
+): Promise<unknown> {
+  if (!payloads || payloads.length === 0) return undefined;
+  try {
+    const raw = payloads as unknown as Payload[];
+    const decoded = codec ? await codec.decode(raw) : raw;
+    const first = decoded[0];
+    return first ? defaultPayloadConverter.fromPayload(first) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Which terminal event this is, as the word the run page shows. */
+function closedAsOf(ev: Record<string, unknown>): string | undefined {
+  if (ev.workflowExecutionFailedEventAttributes) return 'failed';
+  if (ev.workflowExecutionCanceledEventAttributes) return 'canceled';
+  if (ev.workflowExecutionTerminatedEventAttributes) return 'terminated';
+  if (ev.workflowExecutionTimedOutEventAttributes) return 'timed out';
+  if (ev.workflowExecutionContinuedAsNewEventAttributes) return 'continued as new';
+  return undefined;
+}
+
+export async function fetchRunIO(runId: string, execId?: string): Promise<RunIO | undefined> {
+  const client = await getClient();
+  const codec = dataConverter.payloadCodecs[0];
+  const execution = { workflowId: runId, ...(execId ? { runId: execId } : {}) };
+  const io: RunIO = {};
+
+  try {
+    const first = await client.workflowService.getWorkflowExecutionHistory({
+      namespace: NAMESPACE,
+      execution,
+      maximumPageSize: 1,
+      waitNewEvent: false,
+    });
+    const started = (first.history?.events ?? [])[0] as Record<string, unknown> | undefined;
+    const attrs = started?.workflowExecutionStartedEventAttributes as
+      | { input?: { payloads?: unknown[] } }
+      | undefined;
+    io.input = await decodeFirst(codec, attrs?.input?.payloads);
+  } catch (err) {
+    if (isNotFound(err) || isNotFoundStatus(err)) return undefined;
+    throw err;
+  }
+
+  try {
+    const close = await client.workflowService.getWorkflowExecutionHistory({
+      namespace: NAMESPACE,
+      execution,
+      // 2 = CLOSE_EVENT. The numeric form rather than the enum, because the enum's export path has
+      // moved between SDK minors and this is a stable wire value.
+      historyEventFilterType: 2,
+      waitNewEvent: false,
+    });
+    const last = (close.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
+    if (last) {
+      const done = last.workflowExecutionCompletedEventAttributes as
+        | { result?: { payloads?: unknown[] } }
+        | undefined;
+      if (done) io.output = await decodeFirst(codec, done.result?.payloads);
+      else {
+        const why = closedAsOf(last);
+        if (why) io.closedAs = why;
+      }
+    }
+  } catch {
+    // A RUNNING RUN HAS NO CLOSE EVENT, and asking for one is not an error worth propagating —
+    // the input half is already in hand and is the half a live run has.
+  }
+
+  return io;
 }

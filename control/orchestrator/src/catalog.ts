@@ -110,6 +110,19 @@ const validate = ajv.compile(DESCRIPTOR_SCHEMA);
  *  version bump would train everyone to bump for nothing. */
 const SIGNATURE = ['params', 'input', 'output'] as const;
 
+/** Schema fields carried through to callers but NOT part of the immutability gate.
+ *
+ *  EMPTY, AND KEPT RATHER THAN INLINED. `stream` was the one member — what a Method DISPLAYED
+ *  while it ran — and it went when the verb that produced it did (field 6 of `Method` in
+ *  catalog.proto is reserved, not reused). The distinction it encodes is still the right one and
+ *  the next carried-but-not-signed field will want it: a caller is TYPED against `input` and
+ *  `output`, so a silent change there breaks code, where a console re-reads a display schema on
+ *  every fetch and simply draws the new fields.
+ *
+ *  A descriptor from an older SDK may still POST `stream`. It is dropped by the allowlist below,
+ *  silently and correctly — the field means nothing to any reader now. */
+const CARRIED = [] as const;
+
 const BUMP =
   'A version is immutable and any input/output/params schema change must bump it (ADR 0004): ' +
   'raise the actor\'s version and re-serve. There is no override — the same (name, version) ' +
@@ -161,7 +174,12 @@ export function parseDescriptor(body: unknown): Descriptor {
     };
     const kept: ActorOperation = { name: op.name };
     if (op.description !== undefined) kept.description = op.description;
-    for (const field of SIGNATURE) {
+    // AN ALLOWLIST, so anything not named here is DROPPED. That is what makes a removed field
+    // safe — an older SDK's `stream` lands, validates (the AJV descriptor is not
+    // `additionalProperties: false`) and is discarded — and it is also the trap adding one falls
+    // into: `stream` had to be named in TWO places, and until it was, the worker published it,
+    // the POST returned 200, and it simply never reached the browser with nothing saying so.
+    for (const field of [...SIGNATURE, ...CARRIED]) {
       const doc = op[field];
       if (doc === undefined) continue; // a Method that declares neither still registers
       refuseNonSchema(`Method ${JSON.stringify(op.name)}`, field, doc);

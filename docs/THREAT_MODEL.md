@@ -122,6 +122,35 @@ in `PREROUTING` and accepted in `FORWARD`, never traversing `ufw-user-input`. A 
 to the bridge existed and did nothing. **For anything containerised, the bind address is the only
 control.** Verify from off-box, never from a rule table.
 
+### Re-verified 2026-09-17
+
+**Two of the three indictments are closed.** The registry (**EP11**) is no longer on `0.0.0.0`: it
+binds `127.0.0.1:5000` and the VPC address, which is the shape every other service already held —
+`7233`, `6379`, `5432`, `9333`/`8333`/`8888` are all loopback plus VPC. `xrdp` is not listening.
+`kontra-local/.env` is `600`.
+
+**And one fact that changes how EP6 should be READ on this deployment.** The unauthenticated
+remainder of the API is not reachable from the internet here. The only listeners on a public
+interface are `nginx` (`:80`, `:443`) and `sshd`; nginx's entire configuration is two server blocks
+for an unrelated application with a single `proxy_pass` to `127.0.0.1:3000`, with no
+`default_server`, no catch-all `server_name`, and nothing proxying to a kontra port. EP6 is therefore
+a **VPC-scoped** exposure on this box rather than a public one.
+
+**That is a property of a deployment, not of kontra, and it is one line from being false.** A single
+`proxy_pass` to the API port would make every open route public without touching a line in this
+repository, and nothing in CI would notice. This is recorded so the severity of EP6 is read correctly
+today — **not** so EP6 is treated as closed. It is not: `hosted-readiness/03` is still open and
+`auth.ts` still records the gap.
+
+**This check was made ON-BOX, which §5 says is the weaker form.** `ss -lntp` and `nginx -T` are a
+rule table by another name, and the lesson above is to verify from off-box. That confirmation has not
+been done. Until it is, read the paragraph above as *consistent with the configuration* rather than
+as measured reachability.
+
+**Unrelated to kontra, same host, same lesson (EP15):** two `.env` files outside this repository are
+world-readable — one of them belonging to the application that *is* internet-facing on `443`. The
+incident's finding was a mode bit on a file nobody had looked at; it is still true of neighbours.
+
 ## 6. Review checklist for a change
 
 - Does it add a listener? What does it **bind** — not what does the firewall say.

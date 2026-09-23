@@ -243,7 +243,7 @@ async function runnerTarget(
   const url = new URL(`${orchestratorUrl()}/dev`);
   url.searchParams.set('actor', key);
   // THE FOLDER, because the pane would otherwise guess. It joins actor→folder by name+version, and
-  // `workspaces.kontra` normally holds the same actor in several workspaces — so the guess picks
+  // `workspaces` normally holds the same actor in several workspaces — so the guess picks
   // whichever registered first, which is how an edit in one workspace showed no change in the pane.
   url.searchParams.set('dir', dir);
   url.searchParams.set('theme', editorTheme());

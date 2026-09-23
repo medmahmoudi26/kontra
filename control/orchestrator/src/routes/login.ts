@@ -32,6 +32,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
+import { audit } from '../audit';
 import { verifyPassword } from '../auth/password';
 import { bearerOf, sessions } from '../auth/session';
 import { consoleUsers, type ConsoleUser } from '../auth/users';
@@ -90,17 +91,43 @@ export function registerLoginRoutes(app: FastifyInstance): void {
     }
     const name = await authenticate(users, user, password);
     if (!name) {
-      req.log?.warn?.({ ip: req.ip, user }, 'login: refused');
+      // A FAILED SIGN-IN IS AN AUDIT EVENT, and it was previously only a pino line — which lives
+      // as long as the container's stdout buffer and is retained by nothing. Repeated refusals
+      // from one address are the signal a brute-force attempt produces, and it is the one this
+      // control plane could not have seen.
+      //
+      // `who` IS THE NAME THAT WAS TRIED, and recording it is deliberate: without it the trail
+      // says only "somebody failed", which cannot distinguish a typo from an attack on one
+      // account. It is not an enumeration oracle — the RESPONSE still does not vary, and this file
+      // is readable only by the operator who owns the box.
+      audit(
+        { action: 'login', outcome: 'refused', who: user, via: 'anonymous', target: 'console', ip: req.ip },
+        req.log
+      );
       return reply.code(401).send(REFUSED);
     }
     const session = sessions.mint(name);
-    req.log?.info?.({ ip: req.ip, user: name }, 'login: admitted');
+    audit(
+      { action: 'login', outcome: 'allowed', who: name, via: 'session', target: 'console', ip: req.ip },
+      req.log
+    );
     return reply.send({ token: session.token, user: name, expiresAt: session.expiresAt });
   });
 
   /** Sign out. Idempotent: a token that is already gone is not an error worth reporting. */
   app.post('/api/logout', async (req, reply) => {
-    sessions.revoke(bearerOf(req.headers.authorization));
+    const token = bearerOf(req.headers.authorization);
+    // WHO signed out, resolved BEFORE the revoke — afterwards the token names nobody, and an
+    // audit line reading `who: ""` for every sign-out is a line that records that something
+    // happened and not who did it.
+    const who = sessions.verify(token) ?? '';
+    sessions.revoke(token);
+    if (who) {
+      audit(
+        { action: 'logout', outcome: 'allowed', who, via: 'session', target: 'console', ip: req.ip },
+        req.log
+      );
+    }
     return reply.send({ ok: true });
   });
 }

@@ -55,7 +55,6 @@ ActorFn = Callable[..., Awaitable[Any]]
 # one Actor don't clobber each other; `None` outside a run (e.g. at import time, when a
 # `@actor.method/load` decorator is evaluated).
 _run_params: contextvars.ContextVar = contextvars.ContextVar("kontra_run_params", default=None)
-
 # `session_state` was a fourth tier and RETIRED with ADR 0023 §19. Every path that could read it
 # runs in the same process on the same instance, where `self.*` already works; the one path that
 # loses `self.*` is host death, and that FAILS THE SCOPE (§7), so the reader is gone too.
@@ -193,6 +192,32 @@ class _Param:
 
 
 param = _Param()
+
+
+# `stream()` WAS HERE, AND IT IS GONE.
+#
+# It published one typed record per Method onto the run's Temporal Workflow Stream, on that
+# Method's own topic, for a console pane that drew it live. The pane is gone and so is this.
+#
+# THE REASON IS DURABILITY. A Workflow Stream lives in the WORKFLOW'S MEMORY and dies with the
+# workflow, so everything published through it is unreadable the moment the run ends — and a run
+# that takes under a minute is already over by the time somebody has opened a browser and signed
+# in. Measured on the canary: the pane's ordinary state was an empty box under a "stream" heading,
+# which reads as a broken feature rather than as a finished run.
+#
+# WHAT AN AUTHOR WRITES INSTEAD is a log line, which VictoriaLogs keeps:
+#
+#     log = logging.getLogger("kontra.crawl")
+#     log.info("crawl: %s (%d of %d) — %d row(s) so far", url, i + 1, n, found)
+#
+# It carries the run id, the Worker identity and the Temporal context already (`logs.bind_run`),
+# so the run page's rail groups it without being told anything. The rows themselves are the other
+# half: `dataset.push` writes to the lake, and the run page tails it.
+#
+# IT COMES BACK WHEN THERE IS A DURABLE STORE UNDER IT. The idea was not wrong; the transport was.
+# Field 6 of `Method` in `shared/contracts/kontra/v1/catalog.proto` is RESERVED rather than reused,
+# so a future `streams=` can be added back without colliding with a descriptor already in a
+# registry somewhere.
 
 
 @dataclass
@@ -367,6 +392,7 @@ class ActorRegistry:
         # the detect-and-end. Undeclared -> a plain failure isolates the unit; SessionLost stays
         # available as the imperative fast path.
         self.healthcheck_fn: Optional[ActorFn] = None
+        self.progress_fn: Optional[ActorFn] = None
         # Every credential slot this actor declares, by name, in declaration order. Registered
         # with the orchestrator as the worker registers itself, so what this code will ASK FOR is
         # visible before it runs and a new slot in a new version reads as a diff.
@@ -480,6 +506,45 @@ class ActorRegistry:
         self.healthcheck_fn = fn
         return fn
 
+    # @actor.progress  (bare) — what this Session is WORKING ON. Never decides liveness.
+    def progress(self, fn: ActorFn) -> ActorFn:
+        """Declare `async (self) -> dict` describing the WORK, run on the same periodic beat.
+
+        ── WHY THIS IS NOT `healthcheck` ───────────────────────────────────────────────────────
+
+        `healthcheck` does two unrelated jobs: its EXCEPTION ends the Session, and its RETURN
+        VALUE is what every operator-facing surface renders. Those pull in opposite directions,
+        and the shipped actors show it. `webcrawl`'s probe is written to answer "reload or
+        isolate?" — its docstring says so — so it returned:
+
+            {"contexts": 2}
+
+        Two browser tabs. Not the program, not the URL. An operator watching a 454-program
+        campaign learned nothing, because the function was never asked what the work was.
+
+        The failure semantics make it worse: anything you do in `healthcheck` risks an exception
+        ENDING THE SESSION, so an author is right to keep it thin — which is exactly the wrong
+        incentive for the function that feeds the UI.
+
+        Split, each one gets a single job and honest failure semantics:
+
+            @actor.healthcheck                  @actor.progress
+            async def alive(self):              async def where(self):
+                if not self.browser.is_connected():   return {"program": self.program,
+                    raise RuntimeError("gone")                "at": self.url,
+                                                              "found": self.n}
+
+        A RAISE HERE IS SWALLOWED, not fatal — the opposite of `healthcheck`. Reporting where you
+        are must never be able to kill a Session that is working fine, so an author can read
+        `self.*` freely without the call becoming load-bearing.
+
+        THE KEYS ARE A CONTRACT, the same one `kontra.say.Progress` names: `program`, `at`,
+        `done`, `total`, `found`. Anything else rides along and is shown, but those five are what
+        a pane positions — a renamed key renders as absent, which reads as a worker doing nothing.
+        """
+        self.progress_fn = fn
+        return fn
+
     # @actor.method  OR  @actor.method(name=...)
     def method(
         self,
@@ -495,7 +560,18 @@ class ActorRegistry:
             @actor.method(takes=Target, emits=Page)
             async def crawl(self, batch, dataset):
                 async for unit in batch:
+                    log.info("crawl: %s", unit.value.url)
                     await dataset.push(await fetch(unit.value))
+
+        THERE IS NO `streams=`, and there was. It declared a third type — what the Method SHOWS
+        while it runs — published through `await stream(x)` onto the run's Workflow Stream for a
+        console pane. Both are gone: the stream lived in workflow memory and died with the
+        workflow, so the pane was empty for anybody who opened the run after it finished. A Method
+        says what it is doing with its own logger, and what it FOUND with `dataset.push`. Both
+        outlive the run.
+
+        SEPARATE FROM `@actor.healthcheck`, which answers whether the SESSION is alive and whose
+        raise ends it.
 
         `await dataset.push(x)` appends one record to the output — it names no Unit (put the
         provenance you care about INSIDE the record) and returns nothing (a write failure

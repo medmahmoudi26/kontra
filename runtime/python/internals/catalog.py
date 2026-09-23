@@ -134,6 +134,10 @@ def operations_of(registry) -> list[dict]:
         description = getattr(method, "description", "")
         if description:
             op["description"] = description
+        # `stream` ONCE RODE HERE BESIDE `input` AND `output` — the shape a run DISPLAYED, so a
+        # workflow author never had to read the actor's source to get a typed live view. The verb
+        # that produced it is gone (the Workflow Stream died with the workflow), so nothing can
+        # declare it and the field is reserved in the proto rather than reused.
         for field, tp in (("input", method.takes), ("output", method.emits)):
             schema = schema_of(tp)
             if schema is not None:

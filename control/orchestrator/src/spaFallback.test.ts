@@ -17,13 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
 import { Repo } from './db/repo';
-import {
-  SPA_SURFACES,
-  SVELTE_ROUTES,
-  SVELTE_SURFACES,
-  assertBundlesAreDisjoint,
-  buildServer,
-} from './server';
+import { SPA_SURFACES, SVELTE_ROUTES, buildServer } from './server';
 
 let app: FastifyInstance | undefined;
 afterEach(async () => {
@@ -34,11 +28,9 @@ afterEach(async () => {
 function serve(): FastifyInstance {
   const dir = mkdtempSync(join(tmpdir(), 'kontra-spa-'));
   mkdirSync(join(dir, 'assets'), { recursive: true });
-  writeFileSync(join(dir, 'index.html'), '<!doctype html><div id="root"></div>');
-  // THE SECOND DOCUMENT. Both bundles build into one directory (ADR 0048 §1); a fixture with only
-  // `index.html` would 404 every Svelte route and read as a routing bug rather than a missing file.
-  // The marker is what the assertions below tell the two documents apart by.
-  writeFileSync(join(dir, 'svelte.html'), '<!doctype html><div id="app" data-bundle="svelte"></div>');
+  // ONE DOCUMENT AGAIN. There were two while the console migrated a surface at a time (ADR 0048
+  // §1) and the fixture wrote both; React is deleted, so `index.html` is the console.
+  writeFileSync(join(dir, 'index.html'), '<!doctype html><div id="app" data-bundle="console"></div>');
   writeFileSync(join(dir, 'assets', 'index-live.js'), 'export const ok = 1;\n');
   return buildServer({ repo: new Repo(':memory:'), webRoot: dir });
 }
@@ -146,20 +138,14 @@ describe('a surface address whose id contains a dot', () => {
       'actors',
       'datasets',
       'monitor',
+      'logs',
       'secrets',
       'settings',
       'runs',
       'scratch',
     ];
     for (const surface of surfaces) {
-      // EITHER BUNDLE. Surfaces migrate one at a time (ADR 0048), so which set owns one changes
-      // over the life of this migration — what must never change is that SOMETHING serves it. This
-      // asserted `SPA_SURFACES.has` and went red the moment `catalog` moved, which is the test
-      // reporting a successful migration step as a regression.
-      expect(
-        SPA_SURFACES.has(surface) || SVELTE_SURFACES.has(surface),
-        `${surface} is owned by neither bundle`
-      ).toBe(true);
+      expect(SPA_SURFACES.has(surface), `${surface} is served by nothing`).toBe(true);
       const res = await app.inject({ method: 'GET', url: `/${surface}/an.id.with.dots` });
       expect(res.statusCode, surface).toBe(200);
     }
@@ -167,65 +153,36 @@ describe('a surface address whose id contains a dot', () => {
     // missing a surface — it only ever asserts what it was told to look for — so the count is what
     // makes a surface added on the console side and forgotten here fail on this side too. It has
     // already been wrong once: `secrets` shipped in the console and never reached this set.
-    // COUNTED ACROSS BOTH BUNDLES, for the same reason the loop now checks both: this asserted
-    // `SPA_SURFACES.size` and the count fell to 8 the moment `catalog` migrated — a green suite
-    // turning red to report that the migration worked. What must hold is that the TOTAL is
-    // unchanged: a surface may move between bundles, and may not vanish from both.
-    expect(SPA_SURFACES.size + SVELTE_SURFACES.size).toBe(surfaces.length);
-    expect(SPA_SURFACES.size + SVELTE_SURFACES.size).toBe(9);
+    // It was counted across two sets while the migration ran — a surface could move between them
+    // and the total was what had to hold. There is one set now and the count is its size.
+    expect(SPA_SURFACES.size).toBe(surfaces.length);
+    expect(SPA_SURFACES.size).toBe(10);
   });
 });
 
 /**
- * TWO BUNDLES, ONE ORIGIN (ADR 0048 §1).
+ * THE EMBED ROUTE, which is not a Surface and is not a file.
  *
- * The console is migrating a Surface at a time and the seam is a pair of allowlists. Everything the
- * single-bundle fallback could get wrong is now available twice, and one thing is new: a segment in
- * BOTH sets serves whichever branch the handler tests first, which is a coin-flip decided by the
- * order of two `if`s.
+ * `/dev` is what the VS Code extension opens in a webview. It was served by the fallback's "no file
+ * extension" clause — a heuristic that worked until there were two documents, and is named
+ * explicitly now so it keeps working whatever the heuristic does next.
  */
-describe('the two-bundle split', () => {
-  it('refuses to boot when a surface claims both bundles', () => {
-    // The guard is proven by BREAKING it, not by observing that it passes on today's sets — which
-    // it would do just as happily if the function body were `return`.
-    expect(() =>
-      assertBundlesAreDisjoint(new Set(['catalog', 'actors']), new Set(['actors']))
-    ).toThrow(/claimed by both bundles.*actors/s);
-
-    // …and the real sets are disjoint, which is the fact the guard exists to keep true.
-    expect(() => assertBundlesAreDisjoint()).not.toThrow();
-  });
-
-  it('serves the svelte document for a svelte surface, and the react one for a react surface', async () => {
+describe('the extensionless routes the console owns', () => {
+  it('serves the shell for every one of them', async () => {
     app = serve();
-
-    for (const surface of SVELTE_SURFACES) {
-      const res = await app.inject({ method: 'GET', url: `/${surface}/an.id.with.dots` });
-      expect(res.statusCode, surface).toBe(200);
-      expect(res.body, surface).toContain('data-bundle="svelte"');
-    }
+    // NOT VACUOUS: an empty set would make the loop below pass while serving nothing.
+    expect(SVELTE_ROUTES.size).toBeGreaterThan(0);
     for (const route of SVELTE_ROUTES) {
       const res = await app.inject({ method: 'GET', url: `/${route}` });
       expect(res.statusCode, route).toBe(200);
-      expect(res.body, route).toContain('data-bundle="svelte"');
+      expect(res.body, route).toContain('data-bundle="console"');
     }
-    // A React surface must NOT have started answering with the other document. This is the
-    // assertion that fails if a segment is moved to the Svelte set and not removed from this one.
-    // Taken FROM the set rather than named, so it survives the next surface migrating.
-    const stillReact = [...SPA_SURFACES][0]!;
-    const react = await app.inject({ method: 'GET', url: `/${stillReact}/an.id.with.dots` });
-    expect(react.statusCode).toBe(200);
-    expect(react.body).not.toContain('data-bundle="svelte"');
   });
 
-  it('counts both sets, so a surface added to neither cannot pass unnoticed', () => {
-    // THE HALF THAT CATCHES AN OMISSION, restated for two sets: the loops above iterate whatever
-    // they are given, so an empty Svelte set makes them vacuous. The console declares seven
-    // surfaces; every one must be owned by exactly one bundle.
-    const owned = new Set([...SPA_SURFACES, ...SVELTE_SURFACES]);
-    for (const surface of ['catalog', 'workflows', 'actors', 'datasets', 'monitor', 'secrets', 'settings']) {
-      expect(owned.has(surface), `${surface} is owned by neither bundle`).toBe(true);
-    }
-    expect(owned.size).toBe(SPA_SURFACES.size + SVELTE_SURFACES.size);
+  it('serves the embed with the query the extension opens it with', async () => {
+    app = serve();
+    const res = await app.inject({ method: 'GET', url: '/dev?actor=firstactor&method=expand' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/html');
   });
 });

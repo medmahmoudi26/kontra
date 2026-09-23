@@ -81,9 +81,11 @@ func leadingPositional(args []string) (string, []string) {
 
 func cmdWorkflow(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: kontra workflow <register|serve|start|replay|history> …")
+		return errors.New("usage: kontra workflow <init|serve|start|replay|history> …")
 	}
 	switch args[0] {
+	case "init":
+		return cmdSourceInit("workflow", args[1:])
 	case "register":
 		// FIRST IN THE LIST, and first in the sentence above, because it is now the first thing you
 		// do with a workflow folder — it is what records the version, the digest and the

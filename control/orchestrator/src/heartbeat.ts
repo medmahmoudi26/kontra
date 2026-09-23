@@ -15,6 +15,22 @@ export interface NodeHeartbeat {
   isolated: number;
   attempt: number;
   lastBeat: number; // epoch ms; 0 when never beaten
+  /**
+   * The author's `@actor.healthcheck` map, VERBATIM — `{program, at, found, hosts, probes, …}`
+   * for the desync scanner.
+   *
+   * IT USED TO BE DROPPED HERE, and that was the whole reason the console had nothing worth
+   * rendering. The actor beats this every two seconds (`engine.go::progressBeat`), Temporal
+   * stores and serves it on the pending activity, and this mapper then built a row out of
+   * `done/total/isolated` and discarded the rest — so the only fields that reached an API were
+   * the ones that describe the machine, never the ones that say which PROGRAM, which HOST and
+   * which PATH the worker is on, or whether it has found anything.
+   *
+   * Deliberately `unknown` and passed through untouched: the shape is the actor author's, this
+   * file has no business knowing desync's keys, and a typed subset here would silently drop the
+   * next actor's fields exactly as it dropped these.
+   */
+  progress?: Record<string, unknown>;
 }
 
 /**
@@ -34,6 +50,9 @@ export interface HeartbeatDetail {
   done?: number;
   total?: number;
   isolated?: number;
+  /** The author's healthcheck map. Optional like everything else here — an actor that defines no
+   * `@actor.healthcheck` beats liveness only, and that is a normal actor, not a broken one. */
+  progress?: Record<string, unknown>;
 }
 
 /**
@@ -59,5 +78,9 @@ export function heartbeatRow(
     isolated: detail.isolated ?? 0,
     attempt,
     lastBeat,
+    // ABSENT, NOT EMPTY, when the actor beat none. `{}` would read as "healthcheck ran and had
+    // nothing to say", which is a different fact from "this actor defines no healthcheck" — and
+    // a panel that cannot tell them apart shows an empty progress row for a healthy worker.
+    ...(detail.progress ? { progress: detail.progress } : {}),
   };
 }

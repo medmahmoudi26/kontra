@@ -26,9 +26,9 @@ package config
 // code, which is theirs and not this repository's.
 
 import (
-	"encoding/json"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"

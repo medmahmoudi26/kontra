@@ -219,7 +219,7 @@ schedule:
 	}
 }
 
-// A bare `run:` (YAML null) is blank too, and so is `''`.
+// A bare `run:` (YAML null) is blank too, and so is `”`.
 func TestMintTreatsEveryBlankFormAsBlank(t *testing.T) {
 	for _, form := range []string{`  run:`, `  run: ""`, `  run: ''`} {
 		body := "tokens:\n  state: \"aaaa\"\n" + form + "\n"

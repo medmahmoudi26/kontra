@@ -1,0 +1,6 @@
+{
+  "entry": "workflow.py",
+  "name": "ping",
+  "version": "0.1.0",
+  "workflow": "Ping"
+}

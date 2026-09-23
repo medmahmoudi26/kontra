@@ -116,7 +116,13 @@ func projectSchema(v any) any {
 	return out
 }
 
-// projectDescriptor applies projectSchema to the three schema-carrying keys of every operation,
+// schemaKeys are the operation keys whose VALUE is a JSON Schema document, and which therefore
+// have to be projected down to the dialect-neutral core before comparison. A fourth, `stream`,
+// was here while a Method could declare Streams(...); leaving it out would compare invopop's `$schema`/
+// `additionalProperties` branding verbatim against a fixture that carries neither.
+var schemaKeys = []string{"params", "input", "output"}
+
+// projectDescriptor applies projectSchema to the schema-carrying keys of every operation,
 // in place. Everything else — the identity keys, the operation names, the descriptions, and WHICH
 // keys are present at all — is compared verbatim.
 func projectDescriptor(d map[string]any) {
@@ -126,7 +132,7 @@ func projectDescriptor(d map[string]any) {
 		if !ok {
 			continue
 		}
-		for _, k := range []string{"params", "input", "output"} {
+		for _, k := range schemaKeys {
 			if v, ok := op[k]; ok {
 				op[k] = projectSchema(v)
 			}
@@ -151,7 +157,8 @@ func asJSON(t *testing.T, v any) string {
 func fixtureRegistry() *core.Registry {
 	reg := &core.Registry{Name: "demo", Version: "1.2.3", ParamsType: confParams{}}
 	reg.AddMethod("fetch", noop,
-		core.Takes(confTarget{}), core.Emits(confPage{}), core.Does("Fetch each host once."))
+		core.Takes(confTarget{}), core.Emits(confPage{}),
+		core.Does("Fetch each host once."))
 	reg.AddMethod("title", noop, core.Takes(confPage{}), core.Emits(confTitle{}))
 	reg.AddMethod("probe", noop)
 	return reg

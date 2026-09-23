@@ -64,6 +64,7 @@ require (
 	github.com/klauspost/compress v1.17.3 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/matoous/go-nanoid/v2 v2.0.0 // indirect
+	github.com/medmahmoudi26/kontra/runtime/go v0.0.0
 	github.com/medmahmoudi26/kontra/sdk/go v0.0.0
 	github.com/microcosm-cc/bluemonday v1.0.26 // indirect
 	github.com/nexus-rpc/nexus-proto-annotations v0.1.0 // indirect
@@ -99,3 +100,10 @@ require (
 )
 
 replace github.com/medmahmoudi26/kontra/sdk/go => ../../sdk/go
+
+// ONE CLAIM-CHECK CODEC IN GO, NOT TWO (kontra#11). `runtime/handler/internal/codec` was a
+// byte-for-byte second implementation of `runtime/go/codec` — same package name, same
+// `binary/claim-check-v1` marker, same 128 KiB default, same `KONTRA_S3_THRESHOLD` — and a
+// separate arm of the cross-language conformance corpus to keep the two honest with each other.
+// The shared one takes a `Store` INTERFACE, which is what makes it importable here.
+replace github.com/medmahmoudi26/kontra/runtime/go => ../go

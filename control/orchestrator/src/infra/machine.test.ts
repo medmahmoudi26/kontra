@@ -186,6 +186,22 @@ describe('the install script', () => {
       'KONTRA_TAG',
       'KONTRA_MAX_PARALLEL_SESSIONS',
       'KONTRA_METRICS_ADDR',
+      // The Bundle's own sha256 — the OCI layer digest the Machine verified on the way down. It is
+      // the Temporal `build_id` every Worker registers with, so a log line, a stream record and a
+      // poller listing all name the same CODE rather than the same version string. Read by all
+      // three runtimes: `runtime/python/internals/workerid.py`, `runtime/go/temporalhost/
+      // workerid.go` and `runtime/handler/internal/identity/worker.go`.
+      //
+      // IT WAS WRITTEN BEFORE IT WAS DECLARED, and this sweep is what caught that — which is the
+      // whole reason it is an allowlist and not an absence check. So were the two below.
+      'KONTRA_BUNDLE_SHA',
+      // Field three of the Worker's Temporal client identity — what this Worker is FOR. Read by
+      // `runtime/go/temporalhost/host.go`, `runtime/handler/main.go` and `workerid.py`.
+      'KONTRA_WORKER_ROLE',
+      // Structured logs, because `vlagent` reads them and a person does not. `internals/logs.py`
+      // had shipped identity-stamped JSON since ADR 0050 §1 and nothing set this, so every Worker
+      // in every Fleet wrote the human format and the stamping was dead code in production.
+      'KONTRA_LOG_FORMAT',
     ];
     let checked = 0;
     for (const line of env.split('\n')) {
@@ -293,6 +309,37 @@ describe('the install script', () => {
     expect(script).not.toMatch(/127\.0\.0\.1:9090/);
   });
 
+  /**
+   * THE LOGS HALF (ADR 0050 §1, issue #15) — the same direction as the metrics agent, because it is
+   * the same constraint: nothing reaches a Worker from the Controller.
+   *
+   * WHAT IS ASSERTED HERE IS THE PART THAT IS EASY TO GET WRONG AND IMPOSSIBLE TO NOTICE. A shipper
+   * with no disk buffer looks identical to one with a buffer right up until the Controller is
+   * unreachable — which is the exact window that matters, because the Machine whose last words are
+   * worth having is the one that is failing or about to be destroyed when its Lease drops. And an
+   * UNBOUNDED buffer trades a lost log for a full disk, which takes the Worker with it.
+   */
+  it('ships journald off the Machine, with a buffer that is bounded', () => {
+    expect(script).toContain('vlagent');
+    // journald, not a file tail: `workflow.logger` writes to the host's stdout, systemd turns that
+    // into a journal entry, and this ships journals — so a workflow becomes loggable with NO
+    // workflow-side change. The sandbox forbids I/O; it does not forbid logging.
+    expect(script).toContain('-journald');
+    // Both Worker unit families, by GLOB. A packed Machine runs N of each, and naming them
+    // individually would need this file rewritten per Worker.
+    expect(script).toMatch(/_SYSTEMD_UNIT=kontra-actor-\*\.service/);
+    expect(script).toMatch(/_SYSTEMD_UNIT=kontra-handler-\*\.service/);
+    // The buffer, and its ceiling. Neither is optional; see the docblock.
+    expect(script).toContain('-remoteWrite.tmpDataPath=/var/lib/kontra/vlagent');
+    expect(script).toMatch(/-remoteWrite\.maxDiskUsagePerURL=\d+[KMG]B/);
+    // The directory must exist before systemd starts the unit, or vlagent reports once and never
+    // again — a shipper that is running and silently buffering nowhere.
+    expect(script).toContain('mkdir -p /var/lib/kontra/vlagent');
+    // Machine-scoped labels only. `actor` comes off the journal's own unit field, never from a
+    // Worker env file — the lie `vmagent.env` exists to prevent.
+    expect(script).toContain('-remoteWrite.label=machine=%H');
+  });
+
   it('waits out cloud-init AND retries, because a lock timeout alone does not cover the lists lock', () => {
     // THREE ATTEMPTS AT THIS, AND WHY THE THIRD IS THE ONE.
     //
@@ -387,6 +434,18 @@ describe('teardown', () => {
   it('leaves the Machine-wide metrics agent alone', () => {
     expect(teardown).not.toContain('kontra-vmagent');
   });
+
+  /**
+   * AND THE LOGS AGENT, FOR A SHARPER VERSION OF THE SAME REASON (ADR 0050 §1).
+   *
+   * A teardown is not the end of the Machine — but it IS the moment a Machine is most likely to be
+   * about to end, and the lines explaining why are the ones nobody can get afterwards. Stopping the
+   * shipper as part of a teardown would discard exactly the window the whole slice exists to
+   * capture, and it would do it silently, which is the shape this file keeps finding.
+   */
+  it('leaves the Machine-wide logs agent alone', () => {
+    expect(teardown).not.toContain('kontra-vlagent');
+  });
 });
 
 /**
@@ -432,14 +491,22 @@ describe('packing', () => {
     const theirs = writes(b, 'subfinder');
     expect(mine.length, 'the write sweep found nothing').toBeGreaterThan(5);
     const shared = [...new Set(mine.filter((p) => theirs.includes(p)))].sort();
-    // These four are Machine-wide ON PURPOSE and every install writes them with identical content:
+    // These five are Machine-wide ON PURPOSE and every install writes them with identical content:
     // the kernel settings the Warden's egress policy needs, the vmagent's own environment, its
-    // config, and its unit. EVERYTHING ELSE MUST DIFFER — a fifth entry here is a file the second
-    // placement overwrites, which is a Worker that silently replaced its co-tenant.
+    // config, its unit — and vlagent's unit. EVERYTHING ELSE MUST DIFFER — a sixth entry here is a
+    // file the second placement overwrites, which is a Worker that silently replaced its co-tenant.
+    //
+    // VLAGENT IS ON THIS LIST FOR THE REASON VMAGENT IS: ONE AGENT PER MACHINE (ADR 0050 §1). It
+    // reads the Machine's journal with a unit GLOB, so it already covers every Worker a Machine
+    // packs and a second placement has nothing to add — which is why it needs no per-Worker file at
+    // all, where vmagent needs one target file each under `scrape.d`. It shares `vmagent.env`
+    // rather than carrying its own for the same reason that file exists: it must say only what is
+    // true of the whole Machine, never a Worker's `KONTRA_ACTOR_NAME`.
     expect(shared).toEqual([
       '/etc/kontra/vmagent.env',
       '/etc/kontra/vmagent.yml',
       '/etc/sysctl.d/99-kontra-warden.conf',
+      '/etc/systemd/system/kontra-vlagent.service',
       '/etc/systemd/system/kontra-vmagent.service',
     ]);
   });

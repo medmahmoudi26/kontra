@@ -20,9 +20,9 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/medmahmoudi26/kontra/runtime/go/codec"
 	kontrav1 "github.com/medmahmoudi26/kontra/runtime/handler/_gen/kontra/v1"
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/cas"
-	"github.com/medmahmoudi26/kontra/runtime/handler/internal/codec"
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/identity"
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/objectstore"
 )
@@ -41,7 +41,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("object store: %v", err)
 	}
-	cdc := codec.New(store, codec.ThresholdFromEnv())
+	cdc := codec.New(objectstore.AsCodecStore(store), codec.ThresholdFromEnv())
 	dc := converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), cdc)
 
 	// OTel tracing (roadmap platform-x100 #03): init the tracer provider + W3C global
@@ -77,6 +77,9 @@ func main() {
 		DataConverter:     dc,
 		Interceptors:      []interceptor.ClientInterceptor{tracingInterceptor},
 		ConnectionOptions: conn,
+		// Stated rather than defaulted — see identity/worker.go. Field three is the role, because
+		// a client polls no queue.
+		Identity: identity.WorkerIdentity(getenv("KONTRA_WORKER_ROLE", "handler")),
 	})
 	if err != nil {
 		log.Fatalf("temporal dial: %v", err)
@@ -90,7 +93,10 @@ func main() {
 	a := &Activities{blob: blob}
 
 	queue := identity.SharedQueue(name, version)
-	w := worker.New(c, queue, worker.Options{})
+	w := worker.New(c, queue, worker.Options{
+		Identity: identity.WorkerIdentity(queue),
+		BuildID:  identity.BuildID(),
+	})
 
 	w.RegisterWorkflowWithOptions(a.RunWorkflow, workflow.RegisterOptions{Name: kontrav1.RunWorkflowName})
 	w.RegisterActivityWithOptions(a.StoreBlob, activity.RegisterOptions{Name: identity.StoreBlobActivity})

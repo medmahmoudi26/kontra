@@ -133,13 +133,21 @@ def project_schema(value):
     return out
 
 
+# The operation keys whose VALUE is a JSON Schema document, and which therefore have to be
+# projected down to the dialect-neutral core before comparison. A fourth, `stream`, was here while
+# a Method could declare `streams=`; leaving any of them out compares pydantic's `title`/
+# `description` branding verbatim against a fixture that carries neither, so the Python arm fails
+# while the emission is correct.
+SCHEMA_KEYS = ("params", "input", "output")
+
+
 def project_descriptor(body: dict) -> dict:
-    """Project the three schema-carrying keys of every operation. Everything else — the identity
+    """Project the schema-carrying keys of every operation. Everything else — the identity
     keys, the operation names and order, the descriptions, and WHICH keys are present at all — is
     compared verbatim."""
     out = dict(body)
     out["operations"] = [
-        {k: (project_schema(v) if k in ("params", "input", "output") else v) for k, v in op.items()}
+        {k: (project_schema(v) if k in SCHEMA_KEYS else v) for k, v in op.items()}
         for op in body["operations"]
     ]
     return out

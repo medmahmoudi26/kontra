@@ -248,7 +248,20 @@ describe('the generated file, run by Python', () => {
   // rather than on the generated file. Two entries, not one: `sdk/python` carries `actorkit` and
   // `runtime/python` carries `internals`, which the SDK reaches at `serve()`. It used to be one —
   // the repo root — because the seam directory `actorkit/` was itself the package there.
-  const repoRoot = path.resolve(fileURLToPath(import.meta.url), '../../..');
+  /**
+   * THE REPO ROOT, AND IT WAS ONE LEVEL SHORT — which is why all six checks below failed.
+   *
+   * This file is `<repo>/control/orchestrator/src/actorControl.test.ts`, so climbing three is
+   * `<repo>/control`. Everything built from it then pointed at a directory that does not exist:
+   * `PYTHONPATH` got `control/sdk/python`, the venv candidate got `control/.venv/bin/python`, and
+   * the probe fell through to a bare `python3` with no temporalio. The error it raised blamed the
+   * ENVIRONMENT — "set KONTRA_PYTHON, or pip install -e ./sdk/python[dev]" — for a wrong path in
+   * this line, which is the most expensive shape a test failure can have: it sends the reader to
+   * install something they already had.
+   *
+   * Four levels. `path.resolve` treats the FILE as the base, so the first `..` only reaches `src`.
+   */
+  const repoRoot = path.resolve(fileURLToPath(import.meta.url), '../../../..');
   const pyEnv = {
     ...process.env,
     PYTHONPATH: [

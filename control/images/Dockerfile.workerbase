@@ -4,7 +4,19 @@
 FROM golang:1.25 AS handler-build
 ENV GOTOOLCHAIN=go1.26.4
 WORKDIR /src
+# BOTH `replace` TARGETS HAVE TO BE IN THE CONTEXT, and `runtime/go` was missing. The handler's
+# go.mod redirects two modules at local paths — `sdk/go => ../../sdk/go` and `runtime/go => ../go`
+# — and `GOWORK=off` means the workspace file cannot supply either. A replacement whose directory
+# is absent is not a download the builder can fall back on; it is a hard stop:
+#
+#   main.go:25:2: github.com/medmahmoudi26/kontra/runtime/go@v0.0.0:
+#                 replacement directory ../go does not exist
+#
+# The error names `../go` relative to the handler, which resolves to `runtime/go` here — the line
+# below. Copying only `runtime/handler` satisfied the import graph right up to the point where the
+# handler imported the runtime, which is every build.
 COPY sdk/go ./sdk/go
+COPY runtime/go ./runtime/go
 COPY runtime/handler ./runtime/handler
 RUN cd runtime/handler && GOWORK=off go build -p=1 -trimpath -o /out/handler .
 

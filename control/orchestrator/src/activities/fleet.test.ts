@@ -160,7 +160,10 @@ describe('resolveBundle', () => {
     // The most likely first failure of the whole API: the actor is in the checkout and has simply
     // never been built. An operator should not have to find that out from a 404.
     serveRegistry({ status: 404 });
-    await expect(resolveBundle(args)).rejects.toThrow(/kontra build --actor/);
+    // `deploy`, NOT `build`. This asserted `kontra build --actor`, which is not a verb the CLI has
+    // — so the test was pinning a sentence that would have sent an operator to a command that does
+    // not exist, and it failed the moment the message was corrected rather than when it was wrong.
+    await expect(resolveBundle(args)).rejects.toThrow(/kontra deploy --actor/);
   });
 
   it('refuses a malformed artifact rather than placing whatever it says', async () => {
@@ -188,15 +191,49 @@ describe('resolveBundle', () => {
     }
   });
 
-  it('refuses to resolve without a Controller address', async () => {
-    // A Machine that cannot name the Controller starts, registers nothing, and looks idle.
+  it('falls back to the Compose service name when nothing names the Controller', async () => {
+    /**
+     * THIS ASSERTED A REFUSAL, AND THE REFUSAL IS UNREACHABLE.
+     *
+     * `resolveBundle` reads `input.controller || KONTRA_CONTROLLER || 'orchestrator-api'`, so the
+     * `if (!controller) throw` under it could never fire — the test was pinning dead code, and the
+     * dead code has been removed rather than the default.
+     *
+     * THE DEFAULT IS RIGHT FOR THE CASE IT WAS ADDED FOR AND WRONG FOR THE OTHER ONE, which is
+     * why it is asserted here with the hazard written down. A dockerFleet Machine is a Warden
+     * container on the Compose network, where `orchestrator-api` resolves — that is the zero-config
+     * local path (ADR 0047) and demanding an env var for it would be a regression. A DigitalOcean
+     * Droplet is not on that network, and `orchestrator-api` is not an address it can reach: it
+     * starts, registers nothing, and looks idle, which is exactly the failure the deleted message
+     * described. The canary's `provider` field says so in the console, in the author's own words.
+     *
+     * So the boundary that has to hold is the CLOUD provider's, not this function's — it has no
+     * idea which one it is resolving for.
+     */
     serveRegistry();
     const prev = process.env.KONTRA_CONTROLLER;
     delete process.env.KONTRA_CONTROLLER;
     try {
-      await expect(resolveBundle({ actor: 'a', version: '1' })).rejects.toThrow(/controller/i);
+      const got = await resolveBundle({ actor: 'a', version: '1' });
+      expect(got.controller).toBe('orchestrator-api');
+      expect(got.bundleUrl).toContain('orchestrator-api:5000');
     } finally {
       if (prev !== undefined) process.env.KONTRA_CONTROLLER = prev;
+    }
+  });
+
+  it('prefers an explicit controller over the environment and over the default', async () => {
+    // The non-vacuous partner: a function that ignored its input and always answered the default
+    // would pass the case above.
+    serveRegistry();
+    const prev = process.env.KONTRA_CONTROLLER;
+    process.env.KONTRA_CONTROLLER = 'from-the-env';
+    try {
+      const got = await resolveBundle({ actor: 'a', version: '1', controller: '10.124.0.2' });
+      expect(got.controller).toBe('10.124.0.2');
+    } finally {
+      if (prev === undefined) delete process.env.KONTRA_CONTROLLER;
+      else process.env.KONTRA_CONTROLLER = prev;
     }
   });
 });

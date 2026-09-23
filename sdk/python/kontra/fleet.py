@@ -131,6 +131,7 @@ is the DOOR and is reserved for the local Docker case; it is not a provider.
 
 from __future__ import annotations
 
+import math
 import asyncio
 import functools
 import re
@@ -722,6 +723,41 @@ class Fleet:
     def hosts(self) -> list[str]:
         """Private VPC addresses, sorted by machine name. How the Controller reaches them."""
         return [self.inventory[k].get("host", "") for k in sorted(self.inventory)]
+
+    def cost_hourly(self) -> float:
+        """What this **Fleet** costs per hour, in USD, summed across its **Machines**.
+
+        The per-machine price is DigitalOcean's own list price, read from their sizes endpoint
+        when the **Fleet** converged — not a table in this repo, which would be wrong the first
+        time a price changed and wrong silently.
+
+        **0.0 means UNKNOWN, never free.** A docker **Fleet** has no meter, and the cloud lookup
+        is allowed to fail rather than block a converge. `cost_words` is the thing to render;
+        it refuses to invent a figure it does not have.
+        """
+        return sum(float(m.get("priceHourly") or 0.0) for m in self.inventory.values())
+
+    def cost_words(self, seconds: float | None = None) -> str:
+        """One sentence an operator can act on: the rate, and the spend so far if asked.
+
+        A **Fleet** is the only part of a **Run** that bills by wall clock, so a **Run** that
+        never says what it is holding is a **Run** whose cost is discovered on an invoice. This is
+        the sentence a `workflow.logger` line carries.
+        """
+        n = len(self.inventory)
+        sizes = {str(m.get("size") or "?") for m in self.inventory.values()}
+        shape = f"{n} x {sorted(sizes)[0]}" if len(sizes) == 1 else f"{n} machine(s)"
+        rate = self.cost_hourly()
+        if rate <= 0:
+            return f"{shape} — no cloud meter on this Fleet, so nothing to price"
+        words = f"{shape} at ${rate:.4f}/hr (${rate * 24:.2f}/day)"
+        if seconds is not None and seconds > 0:
+            # ROUNDED UP TO THE HOUR, because that is how DigitalOcean bills a Droplet: a Fleet
+            # held for 70 minutes is charged two hours, and reporting 1.17 would understate every
+            # short Run.
+            hours = max(1, math.ceil(seconds / 3600.0))
+            words += f"; held {seconds / 60:.0f} min, billed {hours}h = ${rate * hours:.2f}"
+        return words
 
     def __repr__(self) -> str:  # pragma: no cover - debugging affordance
         state = f"{len(self.inventory)} machines" if self._up else "not converged"

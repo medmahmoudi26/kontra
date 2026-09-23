@@ -44,7 +44,7 @@ Docker is the only host prerequisite.
 ```bash
 git clone https://github.com/medmahmoudi26/kontra-console.git
 git clone https://github.com/medmahmoudi26/kontra.git
-mkdir -p workspaces.kontra
+mkdir -p workspaces
 cd kontra
 make image
 docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
@@ -58,7 +58,7 @@ That prints the password on a **first** boot. On any later boot — a recreate, 
 it prints which user exists and says the password cannot be recovered, because only the hash is
 kept. `docker compose exec cli kontra user add <name>` is the way back in.
 
-Named workspaces live in `workspaces.kontra/` beside `kontra/` and `kontra-console/` (not inside
+Named workspaces live in `workspaces/` beside `kontra/` and `kontra-console/` (not inside
 either repo). Seed creates `hello/` when that folder is empty. Pick another workspace in the
 console rail after login.
 

@@ -56,8 +56,10 @@
  */
 
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import Fastify, { type FastifyInstance } from 'fastify';
+import type { FastifyReply } from 'fastify';
+
 import fastifyStatic from '@fastify/static';
 import fastifyCompress from '@fastify/compress';
 import { Repo } from './db/repo';
@@ -86,6 +88,9 @@ import { registerExploreRoutes } from './routes/explore';
 import { registerFleetRoutes } from './routes/fleet';
 import { registerHistoryRoutes } from './routes/history';
 import { registerHitlRoutes } from './routes/hitl';
+import { registerLogsRoutes } from './routes/logs';
+import { registerLogsCoverageRoutes } from './routes/logsCoverage';
+import { registerAuditRoutes } from './routes/audit';
 import { registerLoginRoutes } from './routes/login';
 import { registerPanelRoutes } from './routes/panels';
 import { registerPollerRoutes } from './routes/pollers';
@@ -106,113 +111,52 @@ import { registerSummaryRoutes } from './routes/summaries';
 import { registerWorkflowRoutes } from './routes/workflows';
 
 /**
- * The web app's surfaces, by first path segment — the closed set the SPA fallback serves.
+ * The console's surfaces, by first path segment — the closed set the SPA fallback serves.
  *
- * MUST TRACK `frontend/src/state/surfaces.ts`'s `SPA_SEGMENTS`, which is the authority. It
- * is copied rather than imported because `frontend` is a separate package this one does not
- * depend on; `spaFallback.test.ts` pins the two together so the copy cannot drift silently.
+ * MUST TRACK the console's own `state/surfaces.ts` (`SPA_SEGMENTS`), which is the authority. It is
+ * copied rather than imported because the console is a separate package this one does not depend
+ * on; `spaFallback.test.ts` pins the two together so the copy cannot drift silently.
  *
  * Matching the FIRST segment is the point: everything after it is an id whose bytes are not ours to
  * predict — a Terminal id carries a colon and, on tmux, a dot, and a dataset name may carry one too.
  *
  * `runs` AND `scratch` ARE RETIRED SURFACES AND ARE STILL SERVED. A run is reached through the
  * workflow that produced it and Scratch became a workflow's own tab, but `/runs/<id>` is in
- * somebody's notes and still names a run — the console REDIRECTS it.
- * A redirect is code, and code has to load: drop either segment here and a cold load of
- * `/runs/sweep-v1.2` 404s on the dot before the shell that would forward it ever runs.
+ * somebody's notes and still names a run — the console REDIRECTS it. A redirect is code, and code
+ * has to load: drop either segment here and a cold load of `/runs/sweep-v1.2` 404s on the dot
+ * before the shell that would forward it ever runs.
+ *
+ * ── ONE SET AGAIN (ADR 0048 §7) ─────────────────────────────────────────────────────────────────
+ *
+ * This was two sets for the length of the migration — `SPA_SURFACES` for React, `SVELTE_SURFACES`
+ * for the bundle replacing it — and moving a surface between consoles was moving a string between
+ * them. Every surface has moved and React is deleted, so there is one bundle and one list. The
+ * disjointness check that guarded the pair is gone with the pair; what replaces it is that there is
+ * no second document to serve by mistake.
  */
 export const SPA_SURFACES: ReadonlySet<string> = new Set([
-  // `catalog` LEFT for the Svelte bundle (slice 06). Moving a surface is moving this string; the
-  // set it left is as much a part of the change as the set it joined, and a segment in both is
-  // what `assertBundlesAreDisjoint` refuses at boot.
+  'catalog',
+  'workflows',
+  'actors',
+  'datasets',
   'monitor',
+  'logs',
+  'secrets',
+  'settings',
   // retired, still addressable — see above
   'runs',
   'scratch',
 ]);
 
 /**
- * The surfaces the SVELTE bundle serves (ADR 0048 §1).
+ * Extensionless routes the console owns that are not Surfaces — today, the IDE embed.
  *
- * ── TWO SETS, ONE RULE ──────────────────────────────────────────────────────────────────────────
- *
- * The console is migrating one Surface at a time, and the seam is this: a first segment in here
- * gets `svelte.html`, a first segment in {@link SPA_SURFACES} gets `index.html`. No interop, no
- * shared shell — the only thing the two bundles share is an origin and a session.
- *
- * MUST BE DISJOINT FROM `SPA_SURFACES`, and {@link assertBundlesAreDisjoint} enforces it at boot.
- * A segment in both is not a merge conflict that fails loudly; it is a surface that silently serves
- * whichever bundle this file checks first, which is decided by the order of two `if`s.
- *
- * MOVING A SURFACE IS MOVING A STRING between these two sets. That is the whole migration
- * mechanism, and it is reversible in one line — which is what makes the checkpoint in slice 10 a
- * real decision rather than a direction of travel.
- *
- * Empty until slice 04. `/dev` is not here and does not need to be: it has no extension, so the
- * fallback's second clause already serves it — which is also why the DEV_ROUTES set below exists,
- * because "extensionless" is not a bundle.
+ * `/dev?actor=&method=` is what the VS Code extension opens in a webview: the console's own Method
+ * form with the chrome removed. It was served by the fallback's "no file extension" clause and is
+ * named here instead, because a route that works by heuristic works until the heuristic changes.
  */
-export const SVELTE_SURFACES: ReadonlySet<string> = new Set<string>([
-  // The first full Surface to cross (slice 06): the whole registry, searchable, with no React-only
-  // dependency. It is also where the split gets its sharp edge — the nav here links OUT to six
-  // React surfaces, and each of those is a document load.
-  'catalog',
-  // Slices 07 and 08: the remaining surfaces with no React-only dependency. What is left in
-  // SPA_SURFACES is exactly the three the checkpoint (slice 10) is about — Workflows needs React
-  // Flow, Datasets needs ag-grid, Monitor needs the terminals.
-  'actors',
-  'secrets',
-  'settings',
-  // Slice 12: Workflows, and with it the run timeline.
-  'workflows',
-  // Slice 11: the densest surface, on ag-grid's framework-agnostic core.
-  'datasets',
-]);
+export const SVELTE_ROUTES: ReadonlySet<string> = new Set<string>(['dev']);
 
-/**
- * Extensionless routes the Svelte bundle owns that are not Surfaces — today, the IDE embed.
- *
- * `/dev` never appeared in `SPA_SURFACES` and was served anyway, by the fallback's "no file
- * extension" clause. That worked while there was one document. With two it is ambiguous, and an
- * ambiguity resolved by which branch runs first is the kind that is discovered by a user.
- */
-export const SVELTE_ROUTES: ReadonlySet<string> = new Set<string>([
-  // THE IDE EMBED, and the first real thing to move (ADR 0048 §6). `/dev?actor=&method=` is what
-  // the VS Code extension opens in a webview: the console's own MethodCall with the chrome removed.
-  // It moved first because it is the smallest surface, has no React-only dependency, and is already
-  // panel-shaped — so it exercises the route split, the type scale and the derived form at once.
-  //
-  // IT WAS NEVER IN `SPA_SURFACES` AND WAS SERVED ANYWAY, by the fallback's "no file extension"
-  // clause. That was unambiguous with one document and is not with two, which is why it is named
-  // here rather than left to a heuristic.
-  'dev',
-
-  // The walking skeleton from slice 02. It stays while `/dev` is the only real surface, because the
-  // overflow check needs a route it can open without inventing query parameters — and a check with
-  // nothing to check is the failure that check exists to prevent.
-  '_svelte',
-]);
-
-/**
- * Refuse to boot if a segment claims both bundles.
- *
- * Called from {@link buildServer}. It throws rather than warns: a duplicated segment means one of
- * two consoles is unreachable, and the process that would have told you is the one now serving the
- * wrong one.
- */
-export function assertBundlesAreDisjoint(
-  react: ReadonlySet<string> = SPA_SURFACES,
-  svelte: ReadonlySet<string> = SVELTE_SURFACES
-): void {
-  const both = [...svelte].filter((s) => react.has(s));
-  if (both.length > 0) {
-    throw new Error(
-      `SPA surfaces claimed by both bundles: ${both.join(', ')}. ` +
-        'A surface belongs to exactly one bundle — moving it means DELETING it from the other set, ' +
-        'not adding it here.'
-    );
-  }
-}
 
 export interface ServerOptions {
   repo?: Repo;
@@ -322,16 +266,15 @@ declare module 'fastify' {
 export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // BEFORE ANYTHING IS REGISTERED. A segment claiming both bundles makes one console unreachable,
   // and the failure is a user finding the wrong page rather than a process that refused to start.
-  assertBundlesAreDisjoint();
   const repo = opts.repo ?? new Repo(process.env.KONTRA_ORCHESTRATOR_DB ?? 'orchestrator.db');
   // The object store: SHARED by the dataset browser, the workbench, the explore manifest, the row
   // tail and the history archive. One store, so a count on one surface cannot disagree with a
   // count on another.
   const store = opts.store ?? new ObjectStore();
-  // Where an operator's own code lives. Reads its list through the same Repo, so a registration
-  // survives a restart the way an actor's catalog entry does. SHARED by the sources and probe
-  // surfaces: a probe runs the FOLDER's Actor and version, never a body's.
-  const sources = new SourceStore(repo);
+  // Where an operator's own code lives: the workspace, read from disk on every listing. SHARED by
+  // the sources and probe surfaces, because a probe runs the FOLDER's Actor and version — never a
+  // body's — and both must resolve a folder the same way.
+  const sources = new SourceStore();
   /* A REGISTERED WORKFLOW FOLDER IS OPENABLE WHEREVER IT LIVES (issue #4). Registration accepts any
      absolute path and the Workflows list draws what it accepted, but `resolveWorkflowFile` was
      confined to `~/.kontra/workflows` alone — so a folder registered from a checkout listed, and
@@ -421,15 +364,20 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // the console's `Authorization` token comes from — a browser cannot read `~/.kontra/config.yaml`
   // the way the CLI does, and the alternative was a bearer baked into the bundle at build time.
   registerLoginRoutes(app);
+  // The operator trail, beside the sign-in that is its first entry (`audit.ts`).
+  registerAuditRoutes(app);
   registerPanelRoutes(app);
   registerCatalogRoutes(app, repo);
   registerScratchRoutes(app, repo);
   registerRunRoutes(app, { runs, runWorkflows, queueDescriber });
   registerHistoryRoutes(app, archive);
   registerHitlRoutes(app, { runs, archive });
+  registerLogsRoutes(app);
+  // Which Workers are running and NOT logging — the check every silent shipper failure needed.
+  registerLogsCoverageRoutes(app, queueDescriber, repo);
   registerFleetRoutes(app);
   registerWorkflowRoutes(app, repo);
-  registerPollerRoutes(app, queueDescriber);
+  registerPollerRoutes(app, queueDescriber, repo);
   registerSourceRoutes(app, sources);
   registerWorkspaceRoutes(app);
   registerProbeRoutes(app, sources);
@@ -518,9 +466,65 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // every one of those requests — which is exactly the thing `routes/` modules must not know.
   const webRoot = opts.webRoot ?? defaultWebRoot();
   if (webRoot && existsSync(webRoot)) {
+    // THE SHELL'S VALIDATOR IS ITS CONTENT, and it has to be, because its mtime is a lie.
+    //
+    // `no-cache` above means "revalidate", not "do not cache" — so the browser asks with the
+    // validator it holds and keeps its copy on a 304. send derives that validator from
+    // `(size, mtime)`, and BOTH are constant across builds here: the image extracts the SPA from
+    // a tarball written with a FIXED mtime (deliberately — it is what makes the bundle's sha
+    // reproducible, see cli/bundle.go), so `last-modified` is the epoch and the ETag is
+    // `W/"<size>-0"`. Vite's asset hashes are fixed-length, so index.html is the SAME SIZE on
+    // every build too.
+    //
+    // The result: `W/"184-0"` for every build this image has ever served. A browser that loaded
+    // the console once revalidates, gets 304, and keeps a shell naming last week's chunks — the
+    // deploy is invisible, which is precisely what the comment above says must not happen.
+    // MEASURED: a rebuilt console with a new pane did not appear until a hard reload.
+    //
+    // Hashed once at boot rather than per request: this process serves exactly one build and the
+    // file cannot change under it.
+    // THE SHELL IS SERVED FROM MEMORY, and not by send, because send 304s on a request we
+    // cannot stop it answering.
+    //
+    // `lastModified: false` stops the header going OUT; it does not stop send honouring an
+    // incoming `If-Modified-Since`. MEASURED after that change: a request carrying the epoch —
+    // which is exactly what a browser holding a previous shell sends, since the image extracts
+    // the SPA from a tarball with a fixed mtime — still came back 304, so the deploy stayed
+    // invisible. Serving the bytes ourselves is the only version with no conditional path at all.
+    //
+    // `no-store`, not `no-cache`: the second means "revalidate", which is what put us here. The
+    // shell is ~400 bytes and names the hashes of everything else, so it is the one file that must
+    // never be answered from anybody's cache.
+    const shell = (() => {
+      try {
+        return readFileSync(path.join(webRoot, 'index.html'));
+      } catch {
+        return null; // no SPA in this image (CI's `--no-spa` build); `/` then 404s, and /api works
+      }
+    })();
+    const sendShell = (reply: FastifyReply) =>
+      shell
+        ? reply.code(200).header('content-type', 'text/html; charset=utf-8')
+            .header('cache-control', 'no-store').send(shell)
+        : reply.code(404).send({ error: 'no console bundle in this build' });
+
+    app.get('/', (_req, reply) => sendShell(reply));
+
     app.register(fastifyStatic, {
       root: webRoot,
       cacheControl: false,
+      // BOTH VALIDATORS OFF, so the shell has none and a browser must actually fetch it.
+      //
+      // Sending a content ETag instead was the first attempt and it is worse than it looks:
+      // `etag: false` also turns off send's If-None-Match HANDLING, so the header would go out
+      // and never produce a 304 — a validator the server refuses to honour. An asset needs no
+      // validator either: its NAME is its content hash, and `immutable` already means "never
+      // ask again".
+      //
+      // The cost of always serving the shell is ~400 bytes per navigation. The cost of getting
+      // it wrong is a deploy nobody can see.
+      etag: false,
+      lastModified: false,
       setHeaders(res, filePath) {
         const immutable = filePath.includes(`${path.sep}assets${path.sep}`);
         res.setHeader(
@@ -569,12 +573,9 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
       if (req.method === 'GET' && !req.url.startsWith('/api/')) {
         const path = req.url.split('?')[0] ?? '';
         const first = path.split('/')[1] ?? '';
-        // THE SVELTE BUNDLE IS CHECKED FIRST, and the order would matter if the two sets could
-        // overlap — `assertBundlesAreDisjoint` at boot is what makes it not matter.
-        if (SVELTE_SURFACES.has(first) || SVELTE_ROUTES.has(first)) return reply.sendFile('svelte.html');
-        if (SPA_SURFACES.has(first)) return reply.sendFile('index.html');
+        if (SPA_SURFACES.has(first) || SVELTE_ROUTES.has(first)) return sendShell(reply);
         const last = path.slice(path.lastIndexOf('/') + 1);
-        if (!/\.[A-Za-z0-9]+$/.test(last)) return reply.sendFile('index.html');
+        if (!/\.[A-Za-z0-9]+$/.test(last)) return sendShell(reply);
       }
       return reply.code(404).send({ error: 'not found' });
     });
