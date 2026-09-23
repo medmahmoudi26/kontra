@@ -52,7 +52,32 @@ import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 
-from kontra import catalog, fleet, note, partial
+from kontra import catalog, fleet
+
+
+async def _log_drops(dropped, *, phase: str) -> None:
+    """Surface what a Method call DROPPED — a workflow's choice, not the framework's.
+
+    Nothing logs a dropped Unit by default: isolation comes back as the second half of the tuple
+    (`obs, dropped = await d.smuggle(...)`) and it is THIS branch that decides to say so. Each line
+    is the ACTOR'S OWN error message, verbatim — `PerUnitFailure.error.message`, the message the Unit
+    actually failed with — never a sentence composed here. The record it happened on rides in the
+    line's structured fields (`host`/`endpoint`/`url`/`unit_id`/`point`/`class`/`category`), so the
+    run's log rail can show WHICH Unit and WHY without the message having to carry either.
+
+    `bool(dropped)` and the fetch are free when nothing was lost (`isolated == 0`, the common case),
+    so this costs a blob fetch only on the runs that actually dropped something.
+    """
+    if not dropped:
+        return
+    for f in await dropped.rows():
+        err = f.get("error") or {}
+        unit = f.get("unit") or {}
+        fields = {"phase": phase, "category": f.get("category", "")}
+        for k in ("host", "endpoint", "url", "unit_id", "point", "class"):
+            if isinstance(unit, dict) and unit.get(k) is not None:
+                fields[k] = unit[k]
+        workflow.logger.error(err.get("message") or "unit isolated with no error message", extra=fields)
 
 # 1.2.0 IS THE VERSION THAT CAN BE BELIEVED, and the version is how a reader tells its rows from
 # the ones that could not be.
@@ -252,7 +277,7 @@ class Hunt:
                       call_opts=call_opts, erratic_sql=erratic_sql)
 
         if req.get("attach"):
-            note(f"attached to whoever is serving desync@{DESYNC[1]} — no Lease held")
+            workflow.logger.info(f"attached to whoever is serving desync@{DESYNC[1]} — no Lease held")
             screened, swept = await self._sweep(phase)
         else:
             # `actor=` AND `version=` ARE REQUIRED, and `up` PLACES them itself — it is sugar
@@ -270,7 +295,7 @@ class Hunt:
                 # cost arrives on an invoice. The rate goes out before the work starts (so it can
                 # still be cancelled) and the total after the Fleet is released (so it is real
                 # rather than estimated).
-                note(f"{len(f.inventory)} machine(s) polling desync@{DESYNC[1]} — "
+                workflow.logger.info(f"{len(f.inventory)} machine(s) polling desync@{DESYNC[1]} — "
                      f"{f.cost_words()}")
                 held = workflow.now()
                 try:
@@ -278,7 +303,7 @@ class Hunt:
                 finally:
                     # IN `finally`, because a cancelled or failed Run held the Machines just the
                     # same and is exactly the Run whose cost somebody will ask about.
-                    note("fleet released — "
+                    workflow.logger.info("fleet released — "
                          + f.cost_words((workflow.now() - held).total_seconds()))
 
         promoted = 0
@@ -406,16 +431,16 @@ class Hunt:
                     # all. That is the single longest unexplained wait in a run, and it happens
                     # before any probe goes out, so an operator watching a new campaign sees it
                     # first and has no way to tell it from a hang.
-                    note(f"corpus shard {i + 1}/{n}: {len(rows)} technique(s), {total} so far")
-            note(f"corpus published: {total} technique(s) in {n} shard(s) "
+                    workflow.logger.info(f"corpus shard {i + 1}/{n}: {len(rows)} technique(s), {total} so far")
+            workflow.logger.info(f"corpus published: {total} technique(s) in {n} shard(s) "
                  f"at desync@{DESYNC[1]}")
         else:
-            note("corpus publish skipped — the scan reads techniques from memory")
+            workflow.logger.info("corpus publish skipped — the scan reads techniques from memory")
 
         # ── PHASE A · screen every host with the tier-1 set ────────────────────────
         screened = 0
         if req.get("skip_screen"):
-            partial("screen skipped — the framing axis is not being re-run", axis="framing", phase="screen")
+            workflow.logger.warning("screen skipped — the framing axis is not being re-run", extra={"incomplete": True, "axis": "framing", "phase": "screen"})
         else:
             # A WILDCARD IS NOT A HOST. `scope_<program>` carries the authorisation list, and
             # that includes `*.wavecell.com` (subfinder's input) and `vcc-*.8x8.com` (a glob that
@@ -448,17 +473,17 @@ class Hunt:
                         size, order_by="host, endpoint",
                         query=self._targets(program, scope_name, where, paths, per_host)):
                     pages.append(batch)
-                note(f"targets: root + up to {per_host} crawled path(s) per host, from {paths}")
+                workflow.logger.info(f"targets: root + up to {per_host} crawled path(s) per host, from {paths}")
             except Exception as exc:  # noqa: BLE001 - the reason is the announcement
                 pages = []
-                partial(f"no usable path inventory ({paths}: {exc!r}) — screening ROOT ONLY. "
+                workflow.logger.warning(f"no usable path inventory ({paths}: {exc!r}) — screening ROOT ONLY. "
                         f"Every non-root path in {program} is UNSCANNED, not clean. Run the "
                         f"`surface` workflow to build it.",
-                        axis="endpoints", phase="screen", paths_from=paths)
+                        extra={"incomplete": True, "axis": "endpoints", "phase": "screen", "paths_from": paths})
                 async for batch in scope.batches(size, order_by="host",
                                                  query=self._root_targets(scope_name, where)):
                     pages.append(batch)
-            note(f"screening {len(pages)} page(s) across {lanes} lane(s)")
+            workflow.logger.info(f"screening {len(pages)} page(s) across {lanes} lane(s)")
 
             # PROGRESS IS REPORTED PER PAGE, NOT PER PHASE.
             #
@@ -475,15 +500,16 @@ class Hunt:
                 mine = pages[i::lanes]
                 async with catalog.actor(*DESYNC) as d:
                     for j, page in enumerate(mine, 1):
-                        obs, _ = await d.smuggle(page, observations,
+                        obs, dropped = await d.smuggle(page, observations,
                                                params={**params, "phase": "screen"}, **call_opts)
+                        await _log_drops(dropped, phase="screen")
                         n += len(obs)
-                        note(f"screen lane {i + 1}/{lanes}: page {j}/{len(mine)} "
+                        workflow.logger.info(f"screen lane {i + 1}/{lanes}: page {j}/{len(mine)} "
                              f"(+{len(obs)} observation(s), {n} this lane)")
                 return n
 
             screened = sum(await asyncio.gather(*(lane(i) for i in range(lanes))))
-            note(f"screen complete: {screened} observation(s)")
+            workflow.logger.info(f"screen complete: {screened} observation(s)")
 
         # ── PHASE B · sweep only what moved, only in the class it moved on ─────────
         swept = 0
@@ -520,16 +546,17 @@ class Hunt:
             pages_done = 0
             async with catalog.actor(*DESYNC) as d:
                 async for pair in observations.batches(size, order_by="host", query=reactive):
-                    obs, _ = await d.smuggle(pair, observations,
+                    obs, dropped = await d.smuggle(pair, observations,
                                            params={**params, "phase": "sweep"}, **call_opts)
+                    await _log_drops(dropped, phase="sweep")
                     swept += len(obs)
                     pages_done += 1
                     # THE SWEEP IS THE LONGEST PHASE IN THE SYSTEM — one reacting host is 3,625
                     # techniques — so it is the one that most needs to say where it is. The page
                     # count is not known in advance here (the query streams), so this reports
                     # what it has done rather than a fraction.
-                    note(f"sweep: page {pages_done}, +{len(obs)} observation(s), {swept} total")
-            note(f"sweep complete: {swept} observation(s)")
+                    workflow.logger.info(f"sweep: page {pages_done}, +{len(obs)} observation(s), {swept} total")
+            workflow.logger.info(f"sweep complete: {swept} observation(s)")
 
         # ── PHASE C · the FOLD axis ───────────────────────────────────────────────
         if not req.get("skip_split"):
@@ -548,11 +575,11 @@ class Hunt:
         # whole first campaign. It informs; it does not gate.
         state = await exchanges.state()
         if state is None:
-            partial(f"exchanges_{program} has no lifecycle record — written outside a Run. "
-                    f"Paging it anyway; that is not the same as empty.", axis="exchanges", phase="sweep")
+            workflow.logger.warning(f"exchanges_{program} has no lifecycle record — written outside a Run. "
+                    f"Paging it anyway; that is not the same as empty.", extra={"incomplete": True, "axis": "exchanges", "phase": "sweep"})
         elif state == "open":
-            partial(f"exchanges_{program} is still open — this reads a partial crawl as whole",
-                    axis="exchanges", phase="sweep")
+            workflow.logger.warning(f"exchanges_{program} is still open — this reads a partial crawl as whole",
+                    extra={"incomplete": True, "axis": "exchanges", "phase": "sweep"})
 
         where = f"program = '{program}'"
         if req.get("only"):
@@ -564,7 +591,7 @@ class Hunt:
             pages.append(batch)
 
         chunk = max(1, _num(req, "chunk", 16))
-        note(f"splitting axis: {len(pages)} page(s), a fresh Session every {chunk}")
+        workflow.logger.info(f"splitting axis: {len(pages)} page(s), a fresh Session every {chunk}")
 
         # A SESSION PER CHUNK, and the BATCH as the unit of failure. Both were learned the same
         # way: one Session held across a whole crawl pins the axis to ONE Machine and dies partway,
@@ -578,30 +605,31 @@ class Hunt:
             async with catalog.actor(*DESYNC) as d:
                 for batch in pages[start:start + chunk]:
                     try:
-                        obs, _ = await d.split(batch, observations,
+                        obs, dropped = await d.split(batch, observations,
                                               params={**params, "phase": "split"}, **call_opts)
+                        await _log_drops(dropped, phase="split")
                     except asyncio.CancelledError:
                         raise   # an operator's cancel is not a phase that quietly completed
                     except Exception as exc:  # noqa: BLE001 - the reason is the payload
                         lost += 1
                         streak += 1
-                        partial(f"split batch voided ({lost} so far): {exc!r}", axis="url-order", phase="split", voided=lost)
+                        workflow.logger.warning(f"split batch voided ({lost} so far): {exc!r}", extra={"incomplete": True, "axis": "url-order", "phase": "split", "voided": lost})
                         if streak >= 3:
-                            partial(f"splitting axis ABANDONED after {folded} observation(s): "
+                            workflow.logger.warning(f"splitting axis ABANDONED after {folded} observation(s): "
                                     f"{streak} consecutive failures. Everything past this "
                                     f"point in url order is UNSCANNED, not clean.",
-                                axis="url-order", phase="split", scanned=folded)
+                                extra={"incomplete": True, "axis": "url-order", "phase": "split", "scanned": folded})
                             break
                         continue
                     streak = 0
                     folded += len(obs)
 
         if lost:
-            partial(f"splitting axis complete with gaps: {folded} observation(s), "
+            workflow.logger.warning(f"splitting axis complete with gaps: {folded} observation(s), "
                     f"{lost} batch(es) voided — that ground was not covered.",
-                        axis="url-order", phase="split", voided=lost, scanned=folded)
+                        extra={"incomplete": True, "axis": "url-order", "phase": "split", "voided": lost, "scanned": folded})
         else:
-            note(f"splitting axis complete: {folded} observation(s)")
+            workflow.logger.info(f"splitting axis complete: {folded} observation(s)")
         return folded
 
     # ------------------------------------------------------------------ the leads
@@ -706,7 +734,7 @@ class Hunt:
               AND o.signal_count > 0
         """
         n = await leads.insert_from(observations, query=promote)
-        note(f"{n} lead(s) promoted into {leads.name}")
+        workflow.logger.info(f"{n} lead(s) promoted into {leads.name}")
         return n
 
 

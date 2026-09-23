@@ -32,7 +32,7 @@ from datetime import timedelta
 
 from pydantic import Field
 
-from kontra import KontraFlow, catalog, note, partial, progress
+from kontra import KontraFlow, catalog, progress
 
 # THE TWO HOSTS, AND WHY BOTH ARE HERE.
 #
@@ -194,8 +194,9 @@ class Canary(KontraFlow):
         # instead of waiting for a second event to infer the denominator.
         progress(phase="tick", batch_size=phase.size, done=0, total=total, beats=0,
                  hosts=" + ".join(legs))
-        note(f"canary: {units} unit(s) of {seconds}s per host ({', '.join(legs)}), "
-             f"{phase.size} per batch")
+        workflow.logger.info(
+            f"canary: {units} unit(s) of {seconds}s per host ({', '.join(legs)}), "
+            f"{phase.size} per batch")
 
         async def leg(name: str) -> None:
             """One host's whole leg. Its records land on that actor's OWN topic —
@@ -217,13 +218,16 @@ class Canary(KontraFlow):
                         # A VOIDED BATCH IS NOT A BATCH THAT FOUND NOTHING, and the canary exists
                         # to make that distinction visible rather than to hide it. The host is
                         # named because with two legs running, "voided" alone does not say which.
-                        partial(f"canary {name} batch voided: {exc!r}", axis="units", phase="tick")
+                        workflow.logger.warning(
+                            f"canary {name} batch voided: {exc!r}",
+                            extra={"incomplete": True, "axis": "units", "phase": "tick"})
                         continue
                     tally["done"] += len(chunk)
                     tally["found"] += len(rows)
                     progress(phase="tick", batch_size=phase.size, done=tally["done"],
                              total=total, beats=tally["found"], hosts=" + ".join(legs))
-                    note(f"canary: {tally['done']}/{total} unit(s), {tally['found']} beat(s)")
+                    workflow.logger.info(
+                        f"canary: {tally['done']}/{total} unit(s), {tally['found']} beat(s)")
 
         # CONCURRENTLY, so the two hosts publish INTERLEAVED and the pane is watched proving both
         # at once rather than one after the other. Temporal's event loop is single-threaded and
@@ -232,8 +236,9 @@ class Canary(KontraFlow):
 
         progress(phase="done", batch_size=phase.size, done=tally["done"], total=total,
                  beats=tally["found"], hosts=" + ".join(legs))
-        note(f"canary complete: {tally['found']} beat(s) into {out.name}"
-             + (f", {tally['voided']} batch(es) voided" if tally["voided"] else ""))
+        workflow.logger.info(
+            f"canary complete: {tally['found']} beat(s) into {out.name}"
+            + (f", {tally['voided']} batch(es) voided" if tally["voided"] else ""))
         return {"units": total, "hosts": legs, "done": tally["done"],
                 "beats": tally["found"], "voided": tally["voided"]}
 

@@ -1,38 +1,40 @@
-"""`note` and `partial` — what replaced `speak` (ADR 0050 §2).
+"""`progress` and `KontraFlow` — STATE for a machine to draw, not sentences for a human to read.
 
-── WHY `speak` IS GONE ─────────────────────────────────────────────────────────────────────────────
+── WHAT USED TO BE HERE, AND WHY IT IS NOT ─────────────────────────────────────────────────────────
 
-Narration put AUTHORED SENTENCES in Temporal's history, which is the engine's own record and costs
-nothing extra only for what the engine writes. A sentence cost ~5 history events and ~1 second, and
-the budget that made that survivable capped a Run at 200 of them. For no property a log line lacks:
+`speak` went first (ADR 0050 §2): narration put AUTHORED SENTENCES in Temporal's history, costing ~5
+events and ~1 second each against a 200-per-Run budget, for no property a log line lacks.
 
-    logs are not narration at higher volume; narration was logs in the wrong place.
+`note` and `partial` replaced it and have now gone the same way, one layer further down. They were
+thin wrappers over the logger — `note` was `logger.info`, `partial` was `logger.warning` plus an
+`incomplete=true` field — and a wrapper that adds one dict to a stdlib call is a second API to learn
+for something the author already knows how to spell:
 
-Now that a line carries its `run_id` (kontra#16) and leaves the Machine with a disk buffer behind it
-(kontra#15), the console can answer "what did this Run say" from the log store — across runs, which
-is a question narration could never answer at all.
+    workflow.logger.info(f"{n} hosts in {len(waves)} wave(s)")
+    workflow.logger.warning("seed_limit reached — the crawl is PARTIAL", extra={"incomplete": True})
 
-── THE CONDITION, WHICH IS THE WHOLE RISK ──────────────────────────────────────────────────────────
+`incomplete` survives them and is still the field that matters: the console's logs rail filters on it
+INDEPENDENTLY of the level, so raising the floor to `error` cannot hide a claim that the result is
+smaller than it appears. It is now the author's to set, which is the same judgement `partial` asked
+for, spelled where the reader can see it.
 
-A completeness claim demoted to `log.info` has gone from IN THE RUN RECORD to one line among
-thousands, and that is strictly worse than narration was. About a third of the sentences this
-replaced were claims that the RESULT IS NOT WHAT A READER WOULD ASSUME:
+WHAT THE REMOVAL COST, AND WHERE IT IS OWED BACK. `note`/`partial` ran every sentence through
+`redact(one_line(...))`. A bare `workflow.logger` call does not, so that guard belongs on the HANDLER
+beside `IdentityFilter` (`runtime/python/internals/logs.py`) — which covers every record, including
+the library lines and engine errors that never called `note` in the first place.
 
-    splitting axis ABANDONED … everything past this point in url order is UNSCANNED, not clean
-    seed_limit 200 reached — the crawl is PARTIAL by request
-    exchanges_8x8 is still open — this reads a partial crawl as whole
+── WHY THIS MODULE STILL EXISTS ────────────────────────────────────────────────────────────────────
 
-So there are TWO functions and not one. `note` is progress. `partial` is a claim about the result,
-and it emits at WARNING with `incomplete=true` — a structured field the console's logs rail filters
-on INDEPENDENTLY of the level, so raising the floor to `error` cannot hide it. Choosing between them
-is the author's judgement and it is the one thing this module asks for:
+`progress` is NOT a log line and could not be replaced by one. A pane cannot parse "crawl: page
+12/26" back into a bar without a regex that breaks the moment somebody rewords the sentence — and
+rewording a log line is not supposed to be a breaking change. So progress is published as STRUCTURED
+STATE onto the run's Temporal Workflow Stream, and `KontraFlow` is the one word on a class line that
+makes that stream exist. See {@link Progress} for the three keys a generic reader can position.
 
-    would a reader be wrong about the result if they missed this line?
+── `ask` IS UNRELATED AND STILL BLOCKS ─────────────────────────────────────────────────────────────
 
-── NEITHER BLOCKS, AND `ask` STILL DOES ────────────────────────────────────────────────────────────
-
-`ask` is untouched and is not a pair with this. It BLOCKS the workflow until a human answers, and a
-log line cannot block a workflow — which is why removing narration says nothing about it.
+`ask` was never a pair with any of this. It BLOCKS the workflow until a human answers, and neither a
+log line nor a stream event can block a workflow.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ from typing import Any, TypedDict
 
 from kontra.redaction import one_line, redact
 
-__all__ = ["note", "partial"]
+__all__ = ["PROGRESS_TOPIC", "KontraFlow", "Progress", "progress"]
 
 
 def _logger() -> Any:
@@ -66,39 +68,6 @@ def _logger() -> Any:
 #: The topic every kontra run publishes progress on. One name, so a consumer subscribing to a
 #: run it has never seen still knows what to ask for.
 PROGRESS_TOPIC = "progress"
-
-
-def note(sentence: str, **fields: Any) -> None:
-    """Say where the Run is. INFO.
-
-    Redacted and single-lined on the way out, for the reason the old narration was: an f-string that
-    interpolated something in scope is the ordinary mistake, and this catches the case where the
-    sentence names what it is carrying. Not a security boundary — see `kontra.redaction`.
-
-    NOT ASYNC, and that is the visible difference from `speak`. There is nothing to await: a log line
-    is not a command, writes no event, and cannot fail the Run. An author who writes `await note(...)`
-    gets a TypeError that says so, which is better than a silent no-op.
-    """
-    _logger().info(redact(one_line(sentence)), extra=_extra(fields))
-
-
-def partial(sentence: str, **fields: Any) -> None:
-    """Say that the RESULT is not what a reader would assume. WARNING, and `incomplete=true`.
-
-    Use this and not `note` whenever a reader who missed the line would be WRONG about what the Run
-    produced — an abandoned axis, a limit reached, a batch voided, a phase skipped, a source read
-    while it was still being written.
-
-    `incomplete` is a separate field rather than a level because the two say different things:
-    WARNING is "this looks wrong", `incomplete` is "the answer you are about to act on is smaller
-    than it appears". The console filters on it independently of the level for exactly that reason,
-    so a reader who raised the floor still sees every one of these.
-
-    Name the AXIS or PHASE in `fields` where you can — that is what makes a LogsQL query find every
-    Run in a window whose result was incomplete, which is the capability narration never had and the
-    reason this change was worth making.
-    """
-    _logger().warning(redact(one_line(sentence)), extra=_extra({**fields, "incomplete": True}))
 
 
 def _extra(fields: dict) -> dict:

@@ -9,10 +9,11 @@
         deadline=timedelta(hours=4),          # or None to wait indefinitely
     )
 
-{@link ask} IS ALSO A TOP-LEVEL VERB — `from kontra import ask, note` reaches this exact
-function. `say.note` reports and returns; this one blocks — they are no longer a pair (ADR 0050 §2), and the
-stops the run until a person moves it. Same function, either spelling; nothing here is a second
-implementation and no existing `hitl.ask` caller changed.
+{@link ask} IS ALSO A TOP-LEVEL VERB — `from kontra import ask` reaches this exact function.
+A `workflow.logger` line reports and returns; this one BLOCKS, stopping the run until a person
+moves it. They were never a pair (ADR 0050 §2 removed `speak`, and `note`/`partial` went after it).
+Same function, either spelling; nothing here is a second implementation and no existing `hitl.ask`
+caller changed.
 
 THE QUESTION IS CONTEXTUAL, which is why none of it is a static declaration on the workflow or in
 the catalog. What a run needs a human for depends on what it just found: the prompt, the shape of
@@ -352,16 +353,15 @@ async def ask(
 ) -> Any:
     """Park this workflow on a question, and return what a human answered.
 
-        from kontra import ask, note
+        from kontra import ask
 
         answer = await ask("Approve these 12 hosts?", takes=Approval, context={"n": 12})
 
-    THE PAIR, AND WHY THERE ARE TWO. `speak` and `ask` are the two things a workflow says out
-    loud. {@link kontra.say.note} is a log line and RETURNS IMMEDIATELY; `ask` costs
-    history AND STOPS THE RUN, until a human answers or the deadline expires. Reaching for this
-    one where a progress line was meant does not produce a chattier transcript — it produces a
-    stalled run, waiting on a person nobody told to look. Say what a run is doing with
-    `speak`; use `ask` only where the run genuinely must not proceed unattended.
+    WHY THIS IS NOT A LOG LINE. `workflow.logger.info(...)` RETURNS IMMEDIATELY and costs no
+    history; `ask` costs history AND STOPS THE RUN, until a human answers or the deadline expires.
+    Reaching for this one where a progress line was meant does not produce a chattier transcript —
+    it produces a stalled run, waiting on a person nobody told to look. Say what a run is doing
+    with `workflow.logger`; use `ask` only where the run genuinely must not proceed unattended.
 
     Args:
         prompt: the sentence the operator reads.

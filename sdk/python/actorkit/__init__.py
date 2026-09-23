@@ -1,7 +1,7 @@
 """`actorkit` is now `kontra` — ADR 0044. This module keeps every existing import working.
 
-    from actorkit import catalog, fleet, note       # still works, warns once
-    from kontra   import catalog, fleet, note       # what to write instead
+    from actorkit import catalog, fleet, progress   # still works, warns once
+    from kontra   import catalog, fleet, progress   # what to write instead
 
 WHY THE NAME CHANGED. `actorkit` described one of the two surfaces it contains — the SDK's own
 header says so — and a workflow, which is the caller, is not an Actor. "Actor" also stopped
@@ -68,7 +68,7 @@ def __getattr__(name: str) -> object:
     """Everything `kontra` exposes, including the two lazily-resolved verbs.
 
     Delegating through `getattr` rather than copying `kontra`'s namespace at import is what keeps
-    `note` and `ask` lazy: `kontra.__getattr__` imports `say`/`hitl` on first use so that
+    `progress` and `ask` lazy: `kontra.__getattr__` imports `say`/`hitl` on first use so that
     `import kontra` costs no temporalio, and a star-import here would have resolved both eagerly and
     undone it.
     """

@@ -25,30 +25,39 @@ There is no second kind. An **Activity** — a function with no loaded resource 
 with one Method and no `@actor.load`/`@actor.close`, which costs nothing it did not cost as a
 kind of its own and spares the catalog, the CLI, the queue derivations and both SDKs a fork.
 
-── THE TWO THINGS A WORKFLOW SAYS OUT LOUD ────────────────────────────────────────────────────
+── THE THREE THINGS A WORKFLOW SAYS OUT LOUD ──────────────────────────────────────────────────
 
-    from kontra import ask, note
+    from temporalio import workflow
+    from kontra import ask, progress
 
-    note(f"batch {i} of {n}")                        # tell the operator where you are
+    workflow.logger.info(f"batch {i} of {n}")        # tell the operator where you are
+    progress(at=host, done=i, total=n)               # typed state a pane can DRAW
     answer = await ask("Approve these 12 hosts?", takes=Approval, context={"n": 12})
 
-THEY ARE NOT A PAIR, AND THE DIFFERENCE IS THE WHOLE REASON THERE ARE TWO. `note` is a LOG LINE —
-it costs no history, is not capped, and reaches the log store where it can be queried across runs.
-`ask` costs history AND STOPS THE RUN until a human moves it. Confusing them turns a progress line
-into a stalled run, so they are exposed side by side here rather than buried in two modules an
-author would meet separately.
+THEY ARE NOT INTERCHANGEABLE, AND THE DIFFERENCES ARE THE WHOLE REASON THERE ARE THREE. A LOG LINE
+costs no history, is not capped, and reaches the log store where it can be queried across runs.
+`progress` costs no history either but is read by a MACHINE — a bar cannot be regex'd back out of a
+sentence somebody is free to reword, which is why it is not a log line. `ask` costs history AND
+STOPS THE RUN until a human moves it. Confusing the last with the first turns a progress line into a
+stalled run.
 
-AND THERE IS A THIRD, WHICH IS THE ONE TO GET RIGHT: `partial` says the RESULT IS NOT WHAT A READER
-WOULD ASSUME — an abandoned axis, a limit reached, a phase skipped. It emits at WARNING with a
-structured `incomplete` field, and the console filters on that field INDEPENDENTLY of the level, so
-raising the floor cannot hide it. The question at each call site is: would a reader be wrong about
-the result if they missed this line? (ADR 0050 §2 — this replaced `speak`, which paid ~5 history
-events and ~1s a sentence, capped at 200 a Run, for no property a log line lacks.)
+THERE IS NO `note` AND NO `partial`. Both were wrappers over the logger and both are gone: `note`
+was `logger.info`, `partial` was `logger.warning` plus one field. `workflow.logger` is the spelling
+that survives, and the field that mattered survives with it —
+
+    workflow.logger.warning("seed_limit reached — the crawl is PARTIAL", extra={"incomplete": True})
+
+`incomplete` says THE RESULT IS NOT WHAT A READER WOULD ASSUME (an abandoned axis, a limit reached,
+a phase skipped), and the console filters on it INDEPENDENTLY of the level, so raising the floor
+cannot hide it. The question at each call site is unchanged: would a reader be wrong about the
+result if they missed this line? (ADR 0050 §2 removed `speak` before them, for the same reason.)
 
 None may carry a credential. `ask` reaches history, where the codec is a claim-check and not
 encryption (ADR 0007): under its threshold a value rides inline, in the clear, readable by anyone
-who can read the run. `note` and `partial` reach the log store, which is no more private. Each has a
-guard against the ordinary mistake and none is a boundary.
+who can read the run. Log lines reach the log store, which is no more private — and since they are
+now plain `logging` calls, the redaction guard belongs on the HANDLER (`IdentityFilter`'s neighbour
+in `runtime/python/internals/logs.py`), where it covers every record rather than only the ones that
+remembered to call a wrapper. It was never a boundary either way.
 
 BOTH ARE RESOLVED LAZILY, by the module `__getattr__` at the bottom of this file, and that is not
 an optimisation — it is what keeps the paragraph below true. `say` and `hitl` import temporalio
@@ -88,17 +97,17 @@ imports `secrets` lazily, inside `.get()`, so the network half stays out of the 
     async def load(self):
         self.client = Vendor(await API_KEY.get(run=self.run_id))
 
-And a THIRD, on `hitl`'s grounds rather than `secrets`': `say`, the module `note` and `partial`
-live in. Derived turns make an untooled workflow readable; these make a tooled one explain itself —
-in the log store rather than in history, so the explanation can be searched across runs instead of
-being read one execution at a time. It imports temporalio at module scope to reach
-`workflow.logger`, which is replay-aware, and it is reached from inside your workflow:
+And a THIRD, on `hitl`'s grounds rather than `secrets`': `say`, the module `progress` and
+`KontraFlow` live in. Derived turns make an untooled workflow readable; this makes a tooled one
+report itself — as structured state on the run's workflow stream, which a pane draws while the run
+is still going. It imports temporalio at module scope, and it is reached from inside your workflow:
 
-    from kontra import say
-    say.note(f"{live} of {len(apexes)} apexes resolve; crawling those")
+    from kontra import progress
+    progress(at=apex, done=live, total=len(apexes))
 
-`narrate.say` and `speak` were removed by ADR 0050 §2. A caller of either becomes `note`, or
-`partial` where the sentence is a claim about the RESULT rather than about progress.
+`narrate.say` and `speak` were removed by ADR 0050 §2; `note` and `partial` followed them. A caller
+of any of the four becomes `workflow.logger.info(...)`, or `workflow.logger.warning(...,
+extra={"incomplete": True})` where the sentence is a claim about the RESULT rather than progress.
 """
 
 from kontra import catalog, fleet
@@ -131,12 +140,10 @@ if TYPE_CHECKING:
     # import that stops an author who never reports from paying for `temporalio`.
     from kontra.say import Progress as Progress
     from kontra.say import KontraFlow as KontraFlow
-    from kontra.say import note as note
-    from kontra.say import partial as partial
     from kontra.say import progress as progress
     from kontra.actor import stream as stream
 
-_VERBS = ("note", "partial", "progress", "ask")
+_VERBS = ("progress", "ask")
 
 #: The two INPUT TYPES an author declares on a Method — `takes=File`. Lazy for the same reason the
 #: verbs are, and a different dependency: `blobs` imports pydantic at module scope, which
@@ -146,7 +153,7 @@ _INPUT_TYPES = ("File", "Folder")
 
 
 def __getattr__(name: str) -> object:
-    """`from kontra import ask, note`, without importing temporalio to find out.
+    """`from kontra import ask, progress`, without importing temporalio to find out.
 
     PEP 562, and the only mechanism that gives BOTH halves of what this package needs: the pair is
     reachable at the top level where an author looks for it, and `import kontra` still costs no
@@ -169,10 +176,12 @@ def __getattr__(name: str) -> object:
         import importlib
 
         return importlib.import_module("kontra.actor").stream
-    if name in ("note", "partial", "progress", "KontraFlow"):
-        # ADR 0050 §2 — `speak` is gone. `note` is progress; `partial` says the RESULT is not what a
-        # reader would assume and carries `incomplete=true`. Lazy for the same reason `ask` is: the
-        # module imports `temporalio`, and an author who never logs should not pay for it.
+    if name in ("progress", "KontraFlow"):
+        # `speak` went in ADR 0050 §2, and `note`/`partial` followed it — both were wrappers over the
+        # logger, and `workflow.logger` is the spelling that survives. `progress` is NOT a log line
+        # and could not be replaced by one: it is structured state a pane draws. Lazy for the same
+        # reason `ask` is — the module imports `temporalio`, and an author who never reports
+        # progress should not pay for it.
         from kontra import say
 
         return getattr(say, name)
@@ -204,12 +213,17 @@ def __dir__() -> list[str]:
 __all__ = [
     "actor",
     # THE VERBS, at the top level and side by side, which is what makes it obvious how they differ:
-    # `note` reports progress and returns, `partial` reports that the RESULT is short and returns,
-    # `ask` stops the run until a human moves it.
-    "note",
-    "partial",
-    # `progress` is the fourth verb and the only one a MACHINE reads: typed state onto the run's
-    # workflow stream, for a pane drawing now, where `note` is a sentence for a human reading after.
+    # `progress` reports typed state and returns, `ask` stops the run until a human moves it.
+    #
+    # `note` and `partial` WERE here and are gone: both were wrappers over the logger, and a wrapper
+    # that adds one dict to a stdlib call is a second API to learn for something the author already
+    # knows how to spell. `workflow.logger.info(...)` and `workflow.logger.warning(..., extra={
+    # "incomplete": True})` are the replacements, and `incomplete` is still what the console's logs
+    # rail filters on independently of the level.
+    #
+    # `progress` is the verb a MACHINE reads: typed state onto the run's workflow stream, for a pane
+    # drawing NOW. It survives the removal precisely because a log line could not replace it — a bar
+    # cannot be regex'd back out of a sentence somebody is free to reword.
     "progress",
     # `stream` is the ACTOR's half: one typed record per Method, on that Method's own topic.
     # `progress` is the WORKFLOW's. They are different publishers with different vocabularies.

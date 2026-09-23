@@ -35,7 +35,7 @@ from typing_extensions import TypedDict
 
 from datetime import timedelta
 
-from kontra import catalog, note, partial
+from kontra import catalog
 
 DESYNC = ("desync", "1.2.2")
 
@@ -129,27 +129,32 @@ class Verify:
             # AN EMPTY FIRST PAGE RAISES (catalog.py), and here that is the ordinary case rather
             # than a fault: a program with no proofs has nothing to verify. Saying so is not the
             # same as failing.
-            partial(f"nothing to verify in {leads.name}"
-                    + (f" for {program}" if program else "")
-                    + f" — {exc!r}", axis="leads", phase="verify")
+            workflow.logger.warning(
+                f"nothing to verify in {leads.name}"
+                + (f" for {program}" if program else "")
+                + f" — {exc!r}",
+                extra={"incomplete": True, "axis": "leads", "phase": "verify"})
             return {"program": program, "verified": 0, "verdicts": 0}
 
-        note(f"verifying {len(pages)} page(s) of leads against desync@{DESYNC[1]} "
-             f"— {params['batch_per_arm']} probes per arm, two arms each")
+        workflow.logger.info(
+            f"verifying {len(pages)} page(s) of leads against desync@{DESYNC[1]} "
+            f"— {params['batch_per_arm']} probes per arm, two arms each")
 
         rows = 0
         async with catalog.actor(*DESYNC) as d:
             for i, page in enumerate(pages, 1):
                 out, _ = await d.reach(page, verdicts, params=params, **call_opts)
                 rows += len(out)
-                note(f"verify: page {i}/{len(pages)}, +{len(out)} verdict(s), {rows} total")
+                workflow.logger.info(
+                    f"verify: page {i}/{len(pages)}, +{len(out)} verdict(s), {rows} total")
 
         # THE VERDICT IS NOT COMPUTED HERE. Two arms produce two rows and the comparison is
         # `attack.hits` against `control.hits` — a SQL question over a durable table, asked by
         # whoever is writing the report, with the counts visible. Collapsing it to a boolean in
         # this workflow would hide the one number a triager argues about.
-        note(f"verification complete: {rows} verdict row(s) in {verdicts.name}. "
-             f"Compare arms: SELECT lead_id, arm, n, hits FROM {verdicts.name} ORDER BY lead_id, arm")
+        workflow.logger.info(
+            f"verification complete: {rows} verdict row(s) in {verdicts.name}. "
+            f"Compare arms: SELECT lead_id, arm, n, hits FROM {verdicts.name} ORDER BY lead_id, arm")
         return {"program": program, "verified": len(pages), "verdicts": rows}
 
 

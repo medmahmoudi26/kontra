@@ -16,7 +16,7 @@ workflow, which uses both).
 """
 from temporalio import workflow
 
-from actorkit import catalog, note
+from actorkit import catalog
 
 # The appliance's own surfaces. Harmless by construction — a HEAD against the API that is already
 # serving this console, rather than somebody else's host.
@@ -39,7 +39,7 @@ class ProbeDemo:
         # A PHASE, NOT A UNIT: one sentence for the whole dispatch, not one per target. Six targets
         # would be six seconds and thirty history events for a demo that takes about one, and the
         # same line in a 623-unit sweep is the mistake that only shows up in production.
-        note(f"probing {len(TARGETS)} appliance endpoints into {into}")
+        workflow.logger.info(f"probing {len(TARGETS)} appliance endpoints into {into}")
 
         # `head(batch, out)` publishes the Method's output straight into the writer — the Batch's
         # ref IS the manifest, so nothing is reshaped and no rows pass through this workflow.
@@ -49,7 +49,7 @@ class ProbeDemo:
 
         # Isolation is not an error and will not fail this run, so the sentence carries it: a run
         # that dropped everything and one that found nothing must not read the same.
-        note(f"{len(checked)} checked, {len(dropped)} dropped; {into} is sealed")
+        workflow.logger.info(f"{len(checked)} checked, {len(dropped)} dropped; {into} is sealed")
 
         return {
             "into": into,

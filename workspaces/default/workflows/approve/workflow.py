@@ -25,7 +25,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 
-from actorkit import ask, catalog, note
+from actorkit import ask, catalog
 
 @dataclass
 class ApprovalRequest:
@@ -54,7 +54,7 @@ class Approve:
         )
 
         approved = bool(getattr(answer, "approved", False))
-        note(f"{'approved' if approved else 'declined'}; {req.test_input}")
+        workflow.logger.info(f"{'approved' if approved else 'declined'}; {req.test_input}")
 
         return {
             "approved": approved,
