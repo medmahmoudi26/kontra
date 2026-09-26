@@ -47,6 +47,7 @@ import type { ActivityOptions } from '@temporalio/common';
 import * as wf from '@temporalio/workflow';
 
 import type { RetentionActivities, SweepDatasetsInput, SweepSummary } from '../activities/retention';
+import type { MaintenanceResult } from '../data/maintenance';
 
 /**
  * Everything about the proxy EXCEPT where it goes. Held apart from the workflow body so the timeouts
@@ -143,9 +144,39 @@ function stated(input: SweepDatasetsWorkflowInput | null | undefined): SweepData
   return out as SweepDatasetsWorkflowInput;
 }
 
+/**
+ * What a tick freed, beside the rows it deleted — bounded for workflow history.
+ *
+ * SEPARATE FROM `SweepSummary` AND ADDED RATHER THAN MERGED, so every existing reader of a sweep
+ * result keeps reading exactly the fields it did. A consumer that does not know about storage sees
+ * the summary it always saw.
+ */
+export interface StorageSummary {
+  /** Per-operation results of the reclamation chain. Absent when the step threw — see `lakeError`. */
+  lake?: MaintenanceResult[];
+  /** Why the lake chain did not run. A recorded failure, never a thrown one (see the body). */
+  lakeError?: string;
+  /** The `units/` pass, counts and a bounded sample. */
+  units?: {
+    dryRun: boolean;
+    scanned: number;
+    deleted: number;
+    bytes: number;
+    runs: number;
+    collecting: number;
+    sample: string[];
+    errors: string[];
+  };
+  /** Why the units pass did not run. */
+  unitsError?: string;
+}
+
+/** A sweep summary with what the same tick reclaimed. */
+export type StorageSweepSummary = SweepSummary & { storage: StorageSummary };
+
 export async function sweepDatasetsWorkflow(
   input: SweepDatasetsWorkflowInput = {}
-): Promise<SweepSummary> {
+): Promise<StorageSweepSummary> {
   // WHERE, split from WHAT. The rest is the activity's input, unchanged from before this field
   // existed — the queue is routing and the activity never sees it.
   const { datasetQueue, ...sweep } = stated(input);
@@ -159,7 +190,7 @@ export async function sweepDatasetsWorkflow(
   // PROXIED PER EXECUTION, from a value that came in over the wire. That is deterministic in the way
   // the sandbox demands: the input is in history, so a replay builds the identical proxy — which a
   // `process.env` read in here could not do, because there is no `process` in here at all.
-  const { sweepDatasets } = wf.proxyActivities<RetentionActivities>({
+  const { sweepDatasets, maintainLake, sweepUnits } = wf.proxyActivities<RetentionActivities>({
     ...SWEEP_ACTIVITY_OPTIONS,
     taskQueue: datasetQueue,
   });
@@ -170,5 +201,66 @@ export async function sweepDatasetsWorkflow(
   // AND IT RETURNS THE SUMMARY THE ACTIVITY RETURNED, unchanged and bounded: a workflow result is
   // written into history exactly like an activity result, so returning the full per-Dataset report
   // here would have paid the catalog's size a second time on every tick.
-  return sweepDatasets(sweep);
+  const summary = await sweepDatasets(sweep);
+
+  /*
+   * ── AND THEN THE TWO STEPS THAT ACTUALLY FREE DISK ────────────────────────────────────────────
+   *
+   * A tick used to end at the line above, and a tick that ends there frees nothing. `sweepDatasets`
+   * issues `DELETE … WHERE run_id = …`; on a DuckLake the parquet is immutable, so that records which
+   * rows are dead and leaves every byte on disk. Reclaiming them takes the rest of the chain, which
+   * `data/maintenance.ts` has implemented since it was written and which nothing in this repo called.
+   *
+   * IN THIS WORKFLOW AND NOT ON THEIR OWN SCHEDULE, for the reason the ordering exists at all: the
+   * files `maintainLake` reclaims are the ones `sweepDatasets` just orphaned, one tick earlier. A
+   * separate schedule would fire on its own clock, usually find nothing, and occasionally race the
+   * sweep it exists to finish.
+   *
+   * EACH STEP'S FAILURE IS RECORDED, NOT THROWN, and this is a deliberate departure from "the
+   * schedule's cadence is the retry". Three independent passes now share one tick, and letting the
+   * first failure abandon the rest would mean a broken units sweep silently stops the lake being
+   * reclaimed — the exact "silent by construction" failure `data/maintenance.ts` was written to end.
+   * So a step that throws lands in the summary as a stated error and the next step still runs. The
+   * tick succeeds; what failed is in the result, which is where an operator reads it.
+   */
+  // The mode travels exactly as it did to the sweep: stated if the caller stated it, otherwise ABSENT
+  // so the worker holding the lake answers with its own posture. Never coerced to a boolean here —
+  // `dryRun: false` is a deletion order, and this workflow does not write one nobody asked for.
+  const mode = sweep.dryRun === undefined ? {} : { dryRun: sweep.dryRun };
+  const storage: StorageSummary = {};
+
+  try {
+    storage.lake = await maintainLake(mode);
+  } catch (err) {
+    storage.lakeError = errorText(err);
+  }
+
+  try {
+    const units = await sweepUnits(mode);
+    // BOUNDED FOR HISTORY, like the dataset summary above and for the same measured reason: the units
+    // report holds one row per Run under the prefix, and a workflow result is written into history on
+    // every tick. Counts and the biggest few; the rest is a listing, not a schedule's business.
+    storage.units = {
+      dryRun: units.dryRun,
+      scanned: units.scanned,
+      deleted: units.deleted,
+      bytes: units.bytes,
+      runs: units.runs.length,
+      collecting: units.runs.filter((r) => r.disposition === 'collect').length,
+      sample: units.runs.slice(0, UNITS_SAMPLE).map((r) => `${r.runId}: ${r.disposition} (${r.objects} objs, ${r.bytes}b)`),
+      errors: units.errors.slice(0, UNITS_SAMPLE),
+    };
+  } catch (err) {
+    storage.unitsError = errorText(err);
+  }
+
+  return { ...summary, storage };
+}
+
+/** How many rows of a units report reach workflow history. The rest is the preview route's job. */
+const UNITS_SAMPLE = 10;
+
+/** An error as a sentence, from inside the sandbox where `err` may be anything. */
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

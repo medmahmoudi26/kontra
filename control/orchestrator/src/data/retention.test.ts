@@ -442,6 +442,68 @@ describe('sweepDatasets — end to end over a real lake', () => {
  *
  * The fix keys a candidate on EVERY contributing Run. These tests are the proof, over the real lake.
  */
+/**
+ * WHERE `open` COMES FROM — the grain fix, pinned in both directions.
+ *
+ * Before this, `open` was read off the per-DATASET lifecycle marker, and because `publishBatch`
+ * rewrites that marker to `open` on every append while run output never seals, EVERY Run-share of
+ * every Actor was exempt forever. Measured on the dev box: 84 scanned, 0 collected, 84 `kept-open`,
+ * ages up to 151.9 hours against a 24h TTL. `collect` was unreachable.
+ *
+ * The marker is now reported by the listing and IGNORED by the decision; the ledger answers "might
+ * THIS Run still append?" instead. These two tests are the whole change.
+ */
+describe('sweepDatasets — `open` is a fact about the Run, not the Dataset', () => {
+  let ctx: Ctx;
+  beforeEach(() => {
+    resetLakeConnections();
+    ctx = lake();
+  });
+  afterEach(async () => {
+    await ctx.materialization.close().catch(() => undefined);
+    await ctx.records.close().catch(() => undefined);
+    await ctx.summaries.close().catch(() => undefined);
+  });
+
+  it('collects a finished Run even though its Dataset marker says `open`', async () => {
+    // THE REGRESSION THAT MATTERED. The marker is `open` — exactly the state every real Dataset on
+    // the box is in — and the Run is long done with its ledger complete. It must be collectable.
+    await seedRun(ctx, {
+      runId: 'done',
+      actor: 'obs',
+      version: '1.0.0',
+      runStartedAt: NOW - 900 * HOUR,
+      state: 'open',
+    });
+
+    // CLOCKED OFF THE REAL WRITE, not the suite's fixed NOW: `lastWriteAt` is the catalog's own
+    // commit time, so a fixed past instant gives a NEGATIVE age and everything reads `kept-fresh`.
+    const report = await sweepDatasets(deps(ctx), { dryRun: true, now: Date.now() + 1000 * HOUR });
+    expect(report.collected.map((x) => x.runId)).toContain('done');
+  });
+
+  it('keeps a Run whose materialization has NOT finished, whatever the marker says', async () => {
+    // The safeguard fix #4 actually wanted, now sourced from an authority that tracks the Run. The
+    // marker here is absent entirely, so nothing but the ledger can be keeping it.
+    await seedRun(ctx, {
+      runId: 'busy',
+      actor: 'obs2',
+      version: '1.0.0',
+      runStartedAt: NOW - 900 * HOUR,
+    });
+    // A second dispatch DECLARED and never completed — the ledger's `worst` for this Run is now
+    // `pending`, which is what "still has work outstanding" means.
+    await ctx.materialization.declare(
+      { runId: 'busy', actor: 'obs2', version: '1.0.0', node: 'n2', schemaVersion: MATERIALIZATION_SCHEMA_VERSION },
+      NOW - 900 * HOUR
+    );
+
+    const report = await sweepDatasets(deps(ctx), { dryRun: true, now: Date.now() + 1000 * HOUR });
+    expect(report.collected.map((x) => x.runId)).not.toContain('busy');
+    expect(report.kept.find((x) => x.runId === 'busy')?.disposition).toBe('kept-open');
+  });
+});
+
 describe('sweepDatasets — a partition several Runs wrote', () => {
   let ctx: Ctx;
   beforeEach(() => {

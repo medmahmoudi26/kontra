@@ -74,6 +74,7 @@ import {
   type DatasetInfo,
 } from './datasets';
 import type { DatasetDeviation } from './datasetRecords';
+import type { MaterializationState } from './materialization';
 import type { DispatchRef } from './materializationStore';
 import type { RunWorkflow } from './runWorkflows';
 import {
@@ -122,7 +123,10 @@ export interface SweepCandidate {
   rows: number;
   /** The Dataset record carries at least one tag — KEPT (fix #1, read from the record not Temporal). */
   tagged: boolean;
-  /** Some table of this Run is `open` — still being written (or crashed mid-write) — KEPT (fix #4). */
+  /**
+   * THIS RUN may still be appending — KEPT (fix #4), and read from the LEDGER, not the lifecycle
+   * marker. See {@link groupByRun} for the measurement that forced the change.
+   */
   open: boolean;
   /** The Run owns this as a temporary Dataset — KEPT; temps are deleted explicitly, never swept. */
   temporary: boolean;
@@ -532,7 +536,10 @@ export async function gatherCandidates(
   return groupByRun(
     named,
     new Map(deviations.map((d) => [d.runId, d])),
-    new Map(identities.map((i) => [i.runId, i]))
+    new Map(identities.map((i) => [i.runId, i])),
+    // The liveness authority, out of the ledger read above — no extra call. One entry per Run, its
+    // WORST dispatch state, which is what `listDispatches` already folds for the dashboard.
+    new Map(dispatches.map((d) => [d.runId, d.state]))
   );
 }
 
@@ -545,17 +552,56 @@ export async function gatherCandidates(
  * produces one candidate EACH, every one of them reading its own record, and each marked
  * {@link SweepCandidate.shared} so the report says its row count is a bound.
  *
- * THE KEEP FLAGS ARE PER-ROW, NOT PER-RUN, for `open` and `temporary`: a partition still being
- * appended to keeps every contributor to it, because the lifecycle is recorded per Dataset and
- * collecting one Run's rows out from under a live append is exactly fix #4. Only `tagged` is
- * per-Run — the record is Run-grain (ADR 0029 §4), so one contributor's tag keeps that contributor's
- * rows and nobody else's, which is the direction that makes a tag mean something on a shared
- * partition at all.
+ * `temporary` IS PER-ROW: a temp is owned by the Run that opened it and the marker is that Run's.
+ * `tagged` is per-Run — the record is Run-grain (ADR 0029 §4), so one contributor's tag keeps that
+ * contributor's rows and nobody else's, which is the direction that makes a tag mean something on a
+ * shared partition at all.
+ *
+ * ── `open` WAS PER-ROW TOO, AND THAT MADE THE WHOLE SWEEP A NO-OP ───────────────────────────────
+ *
+ * It used to read `if (i.state === 'open') c.open = true`, on the stated reasoning that "a partition
+ * still being appended to keeps every contributor to it". The premise is false, and the consequence
+ * was total.
+ *
+ * THE LIFECYCLE MARKER IS PER **DATASET NAME**, NOT PER PARTITION AND NOT PER RUN. It lives at
+ * `datasets/<name>/_state.json` — ONE object per logical Dataset — and `publishBatch` REWRITES it to
+ * `open` on every single append (`activities/datasets.ts`), while `sealed` is only ever written by a
+ * caller's explicit close, which run output never performs. So the marker says `open` from the first
+ * row an Actor ever produced until somebody closes it by hand, and one marker was being applied to
+ * every historical Run-share of that Actor.
+ *
+ * MEASURED ON THE DEV BOX, 2026-09-24, before this changed:
+ *
+ *     GET /api/datasets/retention/preview  ->  scanned 84, collected 0
+ *     dispositions:  kept-open 84   (100%)
+ *     ages:          9.3h … 151.9h   against a 24h TTL + 6h grace
+ *     markers:       12 `_state.json` objects, every one `open`, oldest written six days ago
+ *
+ * Every Dataset on the box, exempt forever, by construction. `collect` was unreachable — not rare,
+ * UNREACHABLE — and nothing said so, because "kept-open" reads like a safety feature working.
+ *
+ * ── SO `open` IS NOW A FACT ABOUT THE **RUN**, FROM THE LEDGER ──────────────────────────────────
+ *
+ * The question fix #4 actually wants answered is "might THIS Run still append?", and the marker
+ * cannot answer it: it describes a Dataset that other Runs also write to. The materialization ledger
+ * can, and `gatherCandidates` already reads it one call earlier for the partition attribution — a
+ * Run whose dispatches have not all reached `complete` has work outstanding, and work outstanding is
+ * what "might still append" means.
+ *
+ * THIS IS SAFE PRECISELY BECAUSE OF FIX #5. Collection deletes `WHERE run_id = <this Run>`, so a
+ * finished Run's rows can go while a live Run appends to the same table — they are different rows,
+ * and the live Run's are not touched. Keeping A's rows because B is writing was never protecting
+ * anything; it was only ever preventing everything.
+ *
+ * AND THE AGE GATE IS STILL UNDER IT. A candidate only reaches the ledger question at all once its
+ * own newest write is TTL + GRACE behind (fix #2, fix #3). A Run that has written nothing for thirty
+ * hours AND has no outstanding materialization is finished by both authorities, not one.
  */
 function groupByRun(
   infos: readonly DatasetInfo[],
   deviations: ReadonlyMap<string, DatasetDeviation>,
-  callers: ReadonlyMap<string, RunWorkflow>
+  callers: ReadonlyMap<string, RunWorkflow>,
+  liveness: ReadonlyMap<string, MaterializationState>
 ): SweepCandidate[] {
   const byRun = new Map<string, SweepCandidate>();
   for (const i of infos) {
@@ -579,7 +625,11 @@ function groupByRun(
       // The record, keyed by THIS Run — never the row's `tags`, which carry the sole contributor's
       // record and would shield (or expose) everyone else's rows along with it.
       if ((deviations.get(runId)?.tags.length ?? 0) > 0) c.tagged = true;
-      if (i.state === 'open') c.open = true;
+      // PER RUN, FROM THE LEDGER — see the header. A Run the ledger has never heard of is not
+      // "maybe live", it is unattributed, and the age gate decides it; a Run with any dispatch not
+      // yet `complete` has outstanding work and is kept.
+      const state = liveness.get(runId);
+      if (state !== undefined && state !== 'complete') c.open = true;
       if (i.temporary) c.temporary = true;
       if (runs.length > 1) c.shared = true;
       const table = safeName(i.name);

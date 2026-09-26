@@ -8,7 +8,7 @@
  * that calls nothing. That is the case this suite pins.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -96,7 +96,10 @@ describe('lake maintenance', () => {
       ops: ['orphans', 'snapshots'],
       dryRun: true,
     });
-    expect(results.map((r) => r.op)).toEqual(['orphans', 'snapshots']);
+    // ASKED IN ONE ORDER, RUN IN THE OTHER. `runMaintenance` sorts into chain order (`OP_ORDER`),
+    // because expiry is what makes a file look orphaned in the first place and a caller who listed
+    // them the other way round has written a no-op they cannot detect.
+    expect(results.map((r) => r.op)).toEqual(['snapshots', 'orphans']);
     for (const r of results) {
       expect(r.dryRun).toBe(true);
       // These two DO have a real dry run, so they are not estimates.
@@ -121,6 +124,107 @@ describe('lake maintenance', () => {
     expect(r.dryRun).toBe(true);
   });
 });
+
+/**
+ * THE CHAIN, end to end, against a real lake — the claim the header makes, asserted.
+ *
+ * Every step of this was measured by hand before it was written down, because "a DELETE frees disk"
+ * is the assumption the whole retention design rested on and it is false.
+ */
+describe('the reclamation chain', () => {
+  it('frees nothing until cleanup runs, and cleanup is what frees it', async () => {
+    if (!available) return expect.soft(available, 'ducklake extension unavailable — suite skipped').toBe(true);
+
+    // A table of its own, so the compaction fixture above is not disturbed.
+    await conn.run(`CREATE TABLE ${CATALOG}.chain (run_id VARCHAR, v INTEGER)`);
+    for (const run of ['r1', 'r2', 'r3']) {
+      await conn.run(`INSERT INTO ${CATALOG}.chain SELECT '${run}', i FROM range(20000) t(i)`);
+      await conn.run(`CALL ducklake_flush_inlined_data('${CATALOG}')`);
+    }
+    const planted = diskBytes();
+    expect(planted).toBeGreaterThan(0);
+
+    // 1. THE DELETE. This is all `data/retention.ts` does, and on its own it frees nothing.
+    await conn.run(`DELETE FROM ${CATALOG}.chain WHERE run_id = 'r1'`);
+    expect(diskBytes()).toBe(planted);
+
+    // 2 + 3. Rewrite and expire. Still nothing: expiry SCHEDULES files for deletion.
+    await runMaintenance(conn, CATALOG, {
+      ops: ['rewrite', 'snapshots'],
+      dryRun: false,
+      olderThan: new Date(Date.now() + 60_000),
+    });
+    expect(diskBytes()).toBe(planted);
+
+    // 4. CLEANUP — the only step that changes a byte count.
+    const [cleaned] = await runMaintenance(conn, CATALOG, {
+      ops: ['cleanup'],
+      dryRun: false,
+      olderThan: new Date(Date.now() + 60_000),
+    });
+    expect(cleaned.op).toBe('cleanup');
+    expect(cleaned.count).toBeGreaterThan(0);
+    expect(diskBytes()).toBeLessThan(planted);
+
+    // And the surviving runs are intact — reclaiming space is not losing data.
+    const [{ n }] = await rows(`SELECT count(*)::BIGINT AS n FROM ${CATALOG}.chain`);
+    expect(Number(n)).toBe(40000);
+  }, 120_000);
+
+  it('previews rewrite without rewriting, because DuckLake gives it no dry run', async () => {
+    if (!available) return;
+    const [r] = await runMaintenance(conn, CATALOG, { ops: ['rewrite'], dryRun: true });
+    expect(r.op).toBe('rewrite');
+    expect(r.estimated).toBe(true);
+    expect(r.detail).toContain('no dry run');
+  });
+
+  it('previews cleanup with a real dry run', async () => {
+    if (!available) return;
+    const [r] = await runMaintenance(conn, CATALOG, { ops: ['cleanup'], dryRun: true });
+    expect(r.op).toBe('cleanup');
+    // It HAS a `dry_run` parameter, so unlike rewrite this is not an estimate.
+    expect(r.estimated).toBeUndefined();
+    expect(r.detail).toContain('would be');
+  });
+
+  it('runs the chain in chain order however the caller lists it', async () => {
+    if (!available) return;
+    const results = await runMaintenance(conn, CATALOG, {
+      // Deliberately backwards, and with a duplicate.
+      ops: ['compact', 'cleanup', 'snapshots', 'rewrite', 'cleanup'],
+      dryRun: true,
+    });
+    expect(results.map((r) => r.op)).toEqual(['rewrite', 'snapshots', 'cleanup', 'compact']);
+  });
+});
+
+/**
+ * BYTES ON DISK, walked — deliberately NOT `ducklake_table_info.file_size_bytes`.
+ *
+ * The catalog view is what makes this whole class of bug invisible. It reports the size of the files
+ * a table currently REFERENCES, so it drops the moment a `DELETE` releases a file — measured here,
+ * 241,206 -> 160,804 bytes with nothing unlinked and not one byte returned to the filesystem. Believe
+ * that number and retention looks like it works.
+ *
+ * The claim under test is about DISK, so the test reads the disk.
+ */
+function diskBytes(): number {
+  let total = 0;
+  const walk = (p: string) => {
+    for (const e of readdirSync(p, { withFileTypes: true })) {
+      const f = join(p, e.name);
+      if (e.isDirectory()) walk(f);
+      else if (f.endsWith('.parquet')) total += statSync(f).size;
+    }
+  };
+  try {
+    walk(join(dir, 'data'));
+  } catch {
+    return 0; // no data directory yet
+  }
+  return total;
+}
 
 async function rows(sql: string): Promise<Record<string, unknown>[]> {
   const reader = await conn.runAndReadAll(sql);

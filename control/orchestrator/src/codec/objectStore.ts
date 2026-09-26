@@ -24,6 +24,8 @@ import {
   ListObjectsV2Command,
   PutBucketCorsCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
+  PutBucketLifecycleConfigurationCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -44,6 +46,44 @@ export interface BackingStore {
   list?(prefix: string): Promise<string[]>;
   /** Delete a key. Optional — only retention sweeps need it. */
   remove?(key: string): Promise<void>;
+}
+
+/**
+ * S3's cap on one DeleteObjects request. Not a tuning knob — the API rejects 1,001.
+ *
+ * It is what makes a units sweep finishable at all: the measured `units/` prefix on this box holds
+ * 254,801 objects, and one DeleteObject round trip each would be a quarter of a million requests
+ * against a 30-minute activity timeout. At 1,000 a call it is 255.
+ */
+export const DELETE_BATCH_MAX = 1000;
+
+/**
+ * The ONE prefix a lifecycle rule is ever written for. A constant, never a parameter — see
+ * {@link ObjectStore.ensureLifecycle} for why this is the whole of the blast-radius argument.
+ */
+export const UNITS_LIFECYCLE_PREFIX = 'units/';
+
+/** Stable across boots so the PUT is an update, not an accumulation of near-identical rules. */
+export const UNITS_LIFECYCLE_RULE_ID = 'kontra-expire-units';
+
+/** The same variable the sweep reads, so the store's rule and the backstop cannot disagree about
+ *  the window. Unset means NO rule is written — this never imposes a policy nobody stated. */
+export const UNITS_RETENTION_DAYS_ENV = 'KONTRA_UNITS_RETENTION_DAYS';
+
+/**
+ * The lifecycle window in whole days, or `null` for "state nothing".
+ *
+ * REFUSES ANYTHING UNDER A DAY rather than rounding it down. S3 expiry is day-granular, so `0.5`
+ * would floor to 0 — which is not "half a day", it is "expire everything immediately", written by
+ * somebody who meant the opposite. A sub-day value is a misunderstanding, and the safe reading of a
+ * misunderstanding about deletion is to do nothing.
+ */
+export function unitsLifecycleDays(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = (env[UNITS_RETENTION_DAYS_ENV] ?? '').trim();
+  if (raw === '') return null;
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days < 1) return null;
+  return Math.floor(days);
 }
 
 /** One listed object: its full key plus metadata S3 returns on a listing. */
@@ -287,6 +327,81 @@ export class ObjectStore {
     }
   }
 
+  /**
+   * HAND `units/` TO THE OBJECT STORE, so nothing in this repo has to collect it.
+   *
+   * ── WHY THIS EXISTS WHEN `sweepUnits` ALREADY DOES THE JOB ──────────────────────────────────────
+   *
+   * Because a sweeper is a garbage collector we maintain, and the store has one we do not. Measured
+   * on SeaweedFS 3.80, which is what this rule is worth over the sweep:
+   *
+   *   PER-OBJECT DELETE LEAVES HOLES, NOT FREE DISK. An object store reclaims a deleted object by
+   *   marking it dead inside its volume; the `.dat` file does not shrink. This bucket today reports
+   *   `deleted_file: 1378, deleted_bytes: 4,326,291` against `total size: 8,409,664,672` — 0.05%,
+   *   accumulated and never reclaimed. Deleting the 102,257 collectable unit objects would have
+   *   punched 7.3 GiB of holes that only `volume.vacuum` can recover, and vacuum is a COPY: it needs
+   *   as much free space as the volume it is rewriting, on the disk that is full. The sweep would
+   *   have reported 7.3 GiB freed and freed approximately none of it.
+   *
+   *   A TTL RULE SEGREGATES AND THEN UNLINKS WHOLE VOLUMES. Writing one object under this prefix
+   *   made SeaweedFS open seven fresh volumes stamped `ttl:260` (7 days). An expired TTL volume is
+   *   deleted as a FILE — no vacuum, no copy, no free-space requirement — which is also the only
+   *   thing that fixes this deployment's real amplification: ~1 GiB of live objects occupying 26 GiB
+   *   of preallocated volumes that never shrink.
+   *
+   *   AND IT COSTS NO RUNTIME AT ALL. The sweep's LIST of 254,801 objects takes 107 seconds every
+   *   time it runs. This is one idempotent PUT at boot.
+   *
+   * ── WHY IT IS SAFE, AND WHY IT CANNOT REACH `cas/` ──────────────────────────────────────────────
+   *
+   * {@link UNITS_LIFECYCLE_PREFIX} is a module constant and the ONLY prefix this ever names. That is
+   * a stronger guarantee than the sweeper's, not a weaker one: there is no delete path in this
+   * process to get wrong, no listing to mis-filter, and nothing a caller can pass. Verified on the
+   * live store — an object written under `units/` came back `ttlSec: 604800`, one written under
+   * `cas/` came back `ttlSec: 0`. CAS keys are bare content hashes shared across runs and tenants,
+   * where age tells you nothing about liveness (ADR 0001, ADR 0007); an age rule there WILL delete
+   * blobs live runs still reference.
+   *
+   * THE WINDOW IS WHAT MAKES IT SAFE AGAINST A RETRY, and this is the one thing the store cannot
+   * know. `units/` is the SOURCE materialization reads — `activities/datasets.ts:resolveBatch` GETs
+   * every blob and fails the dispatch if one is missing. A blind rule cannot check the ledger, so
+   * the safety has to come from the gap: materialization retries are bounded by a Temporal retry
+   * policy measured in HOURS, and this window is measured in DAYS. Do not set it below one day.
+   *
+   * ── IT ONLY BINDS OBJECTS WRITTEN AFTER IT IS SET ───────────────────────────────────────────────
+   *
+   * A filer TTL is stamped on the entry at write time, so the 254,801 objects already on this box
+   * carry `ttlSec: 0` and this rule will never touch them. That backlog is what `sweepUnits` is for,
+   * along with stores that have no lifecycle support at all. The division is deliberate: the store
+   * owns the steady state, the sweep owns the backlog and the exceptions.
+   *
+   * BEST-EFFORT, like {@link ensureCors}. A store that refuses the call still serves every read and
+   * write; it just keeps its unit blobs until something else collects them.
+   */
+  private async ensureLifecycle(): Promise<void> {
+    const days = unitsLifecycleDays();
+    if (days === null) return; // no policy stated — do not impose one
+    try {
+      await this.client().send(
+        new PutBucketLifecycleConfigurationCommand({
+          Bucket: this.bucket,
+          LifecycleConfiguration: {
+            Rules: [
+              {
+                ID: UNITS_LIFECYCLE_RULE_ID,
+                Status: 'Enabled',
+                Filter: { Prefix: UNITS_LIFECYCLE_PREFIX },
+                Expiration: { Days: days },
+              },
+            ],
+          },
+        })
+      );
+    } catch {
+      // best-effort — an older S3, or one that denies PutLifecycleConfiguration, still works.
+    }
+  }
+
   /** S3 client whose endpoint is the browser-facing host, for signing presigned URLs. */
   private presignClient(): S3Client {
     if (this.presignS3 === null) {
@@ -325,6 +440,7 @@ export class ObjectStore {
       // already exists / not authorized to create — best-effort, ignore.
     }
     await this.ensureCors(); // let the browser range-read parquet cross-origin
+    await this.ensureLifecycle(); // hand `units/` expiry to the store, not to a sweeper
   }
 
   async put(key: string, data: Uint8Array): Promise<void> {
@@ -365,6 +481,51 @@ export class ObjectStore {
     if (!this.endpoint) return;
     await this.ensureBucket();
     await this.client().send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+  }
+
+  /**
+   * Remove many objects, batched. Returns how many the store confirmed gone.
+   *
+   * WHY THIS EXISTS AND `delete` IN A LOOP DOES NOT DO: see {@link DELETE_BATCH_MAX}. A units sweep
+   * deletes objects by the hundred thousand, and per-key round trips do not fit in an activity.
+   *
+   * IT COUNTS WHAT THE STORE CONFIRMED, NEVER WHAT IT WAS ASKED. `DeleteObjects` is partial-success
+   * by design — it answers with a `Deleted` list AND an `Errors` list, and a sweep that reported its
+   * input length would claim to have freed space it did not free, which is the one lie a storage
+   * report must not tell. Errors are returned rather than thrown: one denied key must not abandon
+   * the other 999, and the caller decides whether a partial sweep is worth reporting or failing.
+   *
+   * A BACKING STORE WITHOUT `remove` DELETES NOTHING AND SAYS SO — zero, not the input length. That
+   * keeps a test store's sweep honest in the same direction as the live one.
+   */
+  async deleteMany(keys: readonly string[]): Promise<{ deleted: number; errors: string[] }> {
+    if (keys.length === 0) return { deleted: 0, errors: [] };
+    if (this.backing) {
+      if (!this.backing.remove) return { deleted: 0, errors: [] };
+      let deleted = 0;
+      for (const key of keys) {
+        await this.backing.remove(key);
+        deleted += 1;
+      }
+      return { deleted, errors: [] };
+    }
+    if (!this.endpoint) return { deleted: 0, errors: [] };
+    await this.ensureBucket();
+    let deleted = 0;
+    const errors: string[] = [];
+    for (let i = 0; i < keys.length; i += DELETE_BATCH_MAX) {
+      const batch = keys.slice(i, i + DELETE_BATCH_MAX);
+      const res = await this.client().send(
+        new DeleteObjectsCommand({
+          Bucket: this.bucket,
+          // `Quiet` would suppress the `Deleted` list, which is exactly the list this counts.
+          Delete: { Objects: batch.map((Key) => ({ Key })), Quiet: false },
+        })
+      );
+      deleted += (res.Deleted ?? []).length;
+      for (const e of res.Errors ?? []) errors.push(`${e.Key}: ${e.Code} ${e.Message}`);
+    }
+    return { deleted, errors };
   }
 
   async exists(key: string): Promise<boolean> {

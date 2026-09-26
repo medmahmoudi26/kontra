@@ -60,7 +60,7 @@ standalone/<name>/…parquet                                     # a list you lo
 
 The decode is bounded and verified (`control/orchestrator/src/data/parquet.ts`): read the manifest and check its sha256 **in SQL**, page its unit refs into Node (refs only — ~110 bytes each, no payload), then per batch `read_blob` the objects and verify **every** carried sha256 before `read_json` parses them. A missing object reads as zero rows in `read_blob`, which is exactly the shape of "absent output looks empty" — so it is detected and raised, not skipped. One transaction per node: every batch lands or none does. `DATA_INLINING_ROW_LIMIT 0` keeps data in real parquet files rather than inlined into the catalog, so a presigned data file is a complete readable object on its own.
 
-**Materialization is gated, not best-effort.** It runs as the `materializeNode` activity on its own Temporal task queue (`kontra-materializer`), served by an isolated off-controller worker ([[Deployment]]); the interpreter does not poll that queue, so the placement is enforced by routing. The old `linkDataset` activity swallowed every error in a bare `catch {}` with no log line, which made a failed materialization indistinguishable from an empty result. Failures are now recorded and surfaced.
+**Materialization is gated, not best-effort.** It runs as the `publishBatch` activity on the Temporal task queue `kontra-datasets`, served by an isolated off-controller worker ([[Deployment]]); no other role polls that queue, so the placement is enforced by routing. (It ran as `materializeNode` on a `kontra-materializer` queue until 2026-09-26; `kontra-materializer` and the three activities behind it (`materializeNode`, `declareMaterialization`, `recordMaterializationFailure`) were REMOVED on 2026-09-26 as uncalled — ADR 0023 §1 took materialization off the graph interpreter and nothing replaced the caller. Typed output still reaches DuckLake, through `publishBatch` on `kontra-datasets`.) The old `linkDataset` activity swallowed every error in a bare `catch {}` with no log line, which made a failed materialization indistinguishable from an empty result. Failures are now recorded and surfaced.
 
 That gives a run **two status dimensions**, never merged in storage:
 
@@ -127,8 +127,8 @@ The prefixes have **different** safe reclamation rules:
 | Prefix | What it holds | How it is reclaimed |
 |---|---|---|
 | `cas/` | claim-check objects, content-addressed | mark-and-sweep by reachability — **never** by age |
-| `units/` | raw per-unit output blobs + cursors, run-addressed | expiry by age, 90 days (`sweepUnits`) |
-| `output/` | DuckLake data files for actor output | **untagged**: TTL sweep, 24h from last write (`sweepDatasets`, ADR 0029). **Tagged**: kept. Compaction/snapshot expiry still happen through the catalog |
+| `units/` | raw per-unit output blobs + cursors, run-addressed | expiry by age (`sweepUnits`), whole runs only, and never while a run's materialization is outstanding. Default 90 days; `KONTRA_UNITS_RETENTION_DAYS` is the real one |
+| `output/` | DuckLake data files for actor output | **untagged**: TTL sweep, 24h from last write (`sweepDatasets`, ADR 0029), then rewrite → expire → **cleanup**, which is the step that frees the bytes. **Tagged**: kept |
 | `standalone/` | DuckLake data files for the lists you loaded | operator-owned: `kontra dataset delete <name>`, never a lifecycle rule |
 | `history/` | one run's reduced Temporal event log, kept after retention drops the execution (ADR 0025) | **kept** — nothing reclaims it, by decision |
 
@@ -186,6 +186,60 @@ Run-addressed, not content-shared: `units/run={run}/…` is a per-run emit outpu
 
 `sweepUnits` (`control/orchestrator/src/data/maintenance.ts`) is the in-repo sweeper: default retention **90 days**, `keepRuns` to pin runs that must survive, and **dry-run by default** — a sweep that deletes on its first invocation is one typo away from removing a run's raw evidence, and the report is what makes the blast radius inspectable first. An object whose backing store reports no mtime is **retained**, never guessed at. It walks `units/` only: `cas/` is never touched by age, whatever the retention is set to.
 
+> **This paragraph described a function that did not exist until 2026-09-24.** It was referenced
+> here and in three comments in `data/retention.ts` as an existing peer, and nothing had ever
+> collected `units/`. MEASURED the day it was written: **254,801 objects, 7.56 GiB, 99.1% of the
+> whole object store**, all of it laid down in the preceding six days (~1.25 GiB/day). Treat the
+> rest of this page the same way — a named function is a claim, not a guarantee.
+
+Two things the paragraph above still gets wrong, now that the code exists:
+
+- **A run is collected WHOLE or not at all**, and its clock is its **newest** object, not its
+  oldest. A run that appends for thirty hours must not have its first blobs collected while it is
+  still pushing to the same prefix, and a half-swept run reads on the Runs page as a run that
+  produced less rather than as an error — `rowTail` reports live progress by counting objects under
+  exactly this prefix.
+- **A run whose materialization is not `complete` keeps its blobs whatever their age.** This is not
+  a refinement, it is the difference between a sweep and data loss: `units/` is the **source** the
+  lake is built from, not a byproduct of it. `activities/datasets.ts:resolveBatch` GETs every unit
+  blob to assemble the records a dispatch materializes and fails the dispatch outright if one is
+  missing — *"this is data loss, not a shape problem"*. A `pending`, `running` or `failed`
+  materialization is retryable, and its retry reads these objects.
+
+**Ninety days is the documented default and is the wrong number for a busy deployment.** At the
+measured rate it is ~112 GiB of unit blobs before the first object is ever eligible. The default
+stays at 90 because silently disagreeing with this page is worse than a large number; the number
+that applies to a given deployment is `KONTRA_UNITS_RETENTION_DAYS` (compose sets **7**).
+
+### Prefer the STORE's lifecycle over the sweep — it is the only one that frees disk
+
+The `mc ilm` / S3-lifecycle equivalents below are not a fallback for people who would rather not run
+the sweeper. **They are the better mechanism**, and `codec/objectStore.ts:ensureLifecycle` writes the
+rule idempotently at bucket-ensure whenever `KONTRA_UNITS_RETENTION_DAYS` is set. Measured on
+SeaweedFS 3.80:
+
+- **Per-object DELETE leaves holes, not free space.** A deleted object is marked dead *inside* its
+  volume and the `.dat` file does not shrink. This box reports `deleted_bytes: 4,326,291` against
+  `total size: 8,409,664,672` — 0.05%, accumulated and never reclaimed. Collecting the 102,257
+  eligible unit objects would have punched **7.3 GiB of holes**, recoverable only by
+  `volume.vacuum`, which *copies* each volume and so needs as much free disk as the volume it is
+  rewriting — on the disk that is full. The sweep would have reported 7.3 GiB freed and freed
+  approximately none of it.
+- **A TTL rule segregates and unlinks whole volumes.** SeaweedFS translates the S3 rule into a filer
+  path TTL (`fs.configure` shows `locationPrefix: /buckets/kontra/units/, ttl: 7d`) and opens
+  dedicated volumes stamped `ttl:260` for those writes. An expired TTL volume is deleted as a file:
+  no vacuum, no copy, no free-space requirement. It is also the only thing that addresses this
+  deployment's real amplification — ~1 GiB of live objects in **26 GiB** of preallocated volumes.
+- **It costs no runtime.** The sweep's LIST of 254,801 objects takes **107 seconds** per firing.
+  The rule is one PUT at boot.
+- **Verified scoping, not assumed:** an object written under `units/` came back `ttlSec: 604800`;
+  one written under `cas/` came back `ttlSec: 0`.
+
+**A filer TTL binds only objects written after the rule is set.** The objects already on a box carry
+`ttlSec: 0` and no rule will ever touch them — that backlog, and stores with no lifecycle support at
+all, are what `sweepUnits` is for. The store owns the steady state; the sweep owns the backlog and
+the exceptions.
+
 MinIO (`mc ilm rule add`, [MinIO docs](https://docs.min.io/aistor/reference/cli/mc-ilm-rule/mc-ilm-rule-add/)) is the equivalent if you would rather the object store do it:
 
 ```bash
@@ -197,9 +251,39 @@ mc ilm rule add myminio/kontra --prefix "units/" --expire-days 90
 
 These hold DuckLake's parquet **data files**, and the catalog is what knows which are live. Deleting them out of band removes files the catalog still references, which turns a readable lake into one that errors on every query touching a missing file — so a lifecycle rule on these prefixes is **not** safe, even though the paths look dispatch-addressed. `control/orchestrator/src/data/maintenance.ts` owns the three passes:
 
-- **`compactTable`** — merges small files **within** each `version=…/dt=…` partition, target 128 MB. Bounded per pass (`maxFiles`, default 10) and it re-checks after every pass that every data file still carries both partition values. That check is load-bearing: a compaction that merged two dispatches into one file would silently turn every exact-dispatch presigned URL into a cross-dispatch disclosure ([[Query-Surface]] §8). **Never merge across dispatches.**
-- **`expireSnapshots`** — `ducklake_expire_snapshots` then `ducklake_cleanup_old_files`, in that order, always. Expiry only *schedules* files for deletion; cleanup is what removes them, and cleanup without expiry deletes nothing.
-- **`sweepUnits`** — the `units/` pass above.
+**A `DELETE` frees nothing, and for a long time that was the whole of kontra's retention.** Parquet
+is immutable, so `data/retention.ts`'s `DELETE … WHERE run_id = …` records which rows are dead and
+leaves every byte on disk. Reclaiming them is a **four-step chain**, and the order is load-bearing
+because each step only has work to do because the one before it created it. Measured on a scratch
+lake (`data/maintenance.test.ts` asserts all of it, against the **disk**, not against
+`ducklake_table_info` — the catalog's byte count drops at the DELETE while nothing is unlinked, and
+believing that number is how this stayed invisible):
+
+| step | function | effect on disk |
+|---|---|---|
+| 1. delete | `data/retention.ts` | **none** — 236 KiB → 236 KiB |
+| 2. rewrite | `ducklake_rewrite_data_files` | none directly; drops dead rows out of partly-deleted files, which is what makes a **partial** delete reclaimable at all |
+| 3. expire | `ducklake_expire_snapshots` | **none** — retires the snapshots still referencing them |
+| 4. cleanup | `ducklake_cleanup_old_files` | **236 KiB → 157 KiB** — the only step that changes a byte count |
+
+`runMaintenance` sorts whatever ops it is given into that order, because a caller who asks for
+cleanup-then-expire has written a no-op and would have no way to tell: every operation reports
+success with a count of zero, which reads as "the lake was already clean".
+
+- **`cleanup`** — step 4, and **not** `delete_orphaned_files`. Orphans are files the catalog never
+  knew about (a crashed write); these are files it knew about and has retired. This module called
+  only the orphan pass for its whole life, which is why expiry freed nothing.
+- **`rewrite`** — step 2, at a `delete_threshold` of **0.25** rather than DuckLake's 0.95. Retention
+  here removes whole Runs from partitions several Runs share, so the steady state is files that are
+  half dead and never rewritten.
+- **`compact`** (`ducklake_merge_adjacent_files`) and **`orphans`** exist but are **not** in the
+  default set. Compaction rewrites live data for a read-speed win nobody has asked for, and the
+  orphan pass can destroy a commit that is in flight.
+- **`sweepUnits`** — the `units/` pass above. Object store only; it never touches the catalog.
+
+All of it runs inside `sweepDatasetsWorkflow`, in the same tick as the sweep, after it — the files
+it reclaims are the ones that sweep just orphaned. Each step's failure is **recorded in the
+returned summary rather than thrown**, so one broken pass cannot silently stop the other two.
 
 Equivalent S3 lifecycle JSON (`aws s3api put-bucket-lifecycle-configuration --bucket kontra --lifecycle-configuration file://lifecycle.json`, [AWS PutBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycleConfiguration.html)):
 
