@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bundleBlobUrl, bundleManifestUrl, queuePollers, resolveBundle } from './fleet';
-import type { PollerInfo, QueueDescriber, TaskQueueType } from '../panels/pollers';
+import type { PollerInfo, QueueDescriber, TaskQueueType } from '../pollers';
 
 const SHA = 'b'.repeat(64);
 const CONFIG = { name: 'nscheck', version: '0.1.0', engine: 'go' };

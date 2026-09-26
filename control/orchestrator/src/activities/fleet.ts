@@ -25,7 +25,7 @@
 
 import { createHash } from 'node:crypto';
 
-import { describeQueue, sharedQueue, temporalQueueDescriber, type QueueDescriber } from '../panels/pollers';
+import { describeQueue, sharedQueue, temporalQueueDescriber, type QueueDescriber } from '../pollers';
 
 /**
  * The OCI registry port — `cli/appliance/registry.DefaultPort`, which is what `kontra up` serves
@@ -310,7 +310,7 @@ export interface QueuePollersOutput {
    * Set when Temporal could not be asked. `pollers` is then 0 AND MEANINGLESS — the caller must
    * treat it as unknown and keep waiting, never as "nothing is polling".
    *
-   * The distinction is the whole point of this activity (`panels/pollers.ts` carries the same
+   * The distinction is the whole point of this activity (`pollers.ts` carries the same
    * line, and `heartbeat.ts` records what conflating them costs: a monitor stuck at `0/0`
    * forever while looking like a measurement).
    */
