@@ -136,6 +136,16 @@ backend.db-wal
 # Never commit operator workspace trees if someone creates them inside the checkout by mistake.
 /workspaces.kontra/
 
+# ONE WORKSPACE SHIPS, AND IT IS THE SEEDED ONE. `workspaces/default` is what a first-time
+# install runs — the canary actor and the workflows that drive it — so it is tracked on purpose.
+# Every other workspace is an OPERATOR's: `bugbounty` and `scraping` were tracked until
+# 2026-09-26 and are not the project's to publish. A new workspace is ignored by default, which
+# is the right way round: adding one should take a deliberate negation here, not a deliberate
+# .gitignore edit after the fact.
+/workspaces/*
+!/workspaces/.current
+!/workspaces/default/
+
 # A compiled Go actor lands beside its source with the folder name and no extension —
 # `go build` in workspaces/<ws>/actors/<name>/ writes ./<name>. One reached a commit that way
 # (51 MB, see cli/notrackedbinaries_test.go); the test catches the class, this catches the path.
