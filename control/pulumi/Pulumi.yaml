@@ -1,0 +1,1220 @@
+# kontra-control — the local control plane as a Pulumi program (ADR 0052 §1-§3).
+#
+# This is the port of `docker-compose.yml`: 13 containers, 11 volumes, one network, the same images,
+# the same healthchecks, the same 17 ordering gates. `kontra up` shells to the host `pulumi` and
+# converges this file. Nothing else reads it.
+#
+#   pulumi login file://~/.kontra/state
+#   pulumi -C control/pulumi stack select --create local
+#   pulumi -C control/pulumi config set workspaces "$PWD/workspaces"
+#   pulumi -C control/pulumi up
+#
+# THE STACK IS `local` AND NOT `kontra-control/local`. A two-segment name is parsed as
+# `<org>/<stack>`, and a `file://` backend has exactly one organization, spelled `organization` —
+# measured on 3.244.0: `stack select kontra-control/local` against `file://…` dies with
+#     error: organization name must be 'organization'
+# which names neither the project nor the fix. The project already comes from `name:` below, so the
+# CLI only ever picks the stack; the fully-qualified spelling of the same stack is
+# `organization/kontra-control/local` and it resolves to this one.
+#
+# ── WHY YAML AND NOT TYPESCRIPT ─────────────────────────────────────────────────────────────────
+#
+# ADR 0052 fact 2. A YAML program resolves providers as BINARY PLUGINS, so the host needs `pulumi`
+# and nothing else — no Node, no `@pulumi/*` package, no Automation API. That is the whole reason a
+# Go CLI can converge this at all. ADR 0019's engine stays inline TypeScript because a Fleet's
+# desired state is computed per converge from a Run's arguments; the control stack has no arguments,
+# it is a static topology, so it can be a file. DO NOT introduce a Node dependency here — doing so
+# silently re-adds a host prerequisite the installer promises it does not have.
+#
+# ── THE ORDERING, AND THE ONE TRAP IN IT ────────────────────────────────────────────────────────
+#
+# `depends_on: condition: service_healthy` IS `healthcheck:` + `wait: true` + `dependsOn`. The
+# provider's own words: "the Docker container is waited for being healthy state after creation. This
+# requires your container to have a healthcheck, otherwise this provider will error."
+#
+#   compose gate                      here
+#   ────────────────────────────────  ──────────────────────────────────────────────────────────
+#   service_healthy                   healthcheck + wait: true (+ waitTimeout) on the dependency,
+#                                     dependsOn on the dependent
+#   service_started                   dependsOn alone, wait: false on the dependency
+#   service_completed_successfully     mustRun: false + attach: true — the create call blocks until
+#                                     the container exits and fails on a non-zero code
+#
+# *** waitTimeout DEFAULTS TO 60 SECONDS AND COMPOSE'S GATES HAVE NO TIMEOUT. *** Every `wait: true`
+# below therefore carries an explicit one, computed as
+#
+#     start_period + retries x (interval + timeout)
+#
+# which is the point at which DOCKER gives up and marks the container unhealthy. Setting it there and
+# not lower is deliberate: the error an operator reads should be Docker's "container is unhealthy",
+# naming the probe that failed, and not Pulumi's "timeout while waiting", which names nothing. On a
+# first boot — empty postgres volume, `auto-setup` creating 4 databases and 60-odd tables — temporal
+# needs minutes, and at the 60 s default this port fails as an intermittent flake and gets diagnosed
+# as a Pulumi problem. These numbers are ceilings, not expectations: a warm boot is ~40 s for all 13.
+#
+# ── WHAT THE COMPOSE FILE HAD THAT YAML CANNOT HAVE ─────────────────────────────────────────────
+#
+# `x-orchestrator-env: &orchestrator-env` merged 24 variables into three services with `<<:`. YAML's
+# merge key merges MAPPINGS, and this provider's `envs` is a SEQUENCE of `KEY=value` strings, so the
+# anchor has no equivalent. Pulumi YAML has no list-concatenation builtin either (`fn::join` returns
+# a string). The single source is therefore `orchestratorEnv` below plus `fn::split` per role — one
+# block scalar, spliced, split back into a list. Verified: `KONTRA_EXPLORE_TOKEN=` survives the round
+# trip as PRESENT-AND-EMPTY, which is the property the compose comment insists on (both that token
+# and `KONTRA_RETENTION_COLLECT` are fail-closed reads of a missing variable, so an omitted variable
+# and an empty one are different answers).
+#
+# ── WHY THE THREE HOST BIND MOUNTS BECAME `uploads` ─────────────────────────────────────────────
+#
+# compose bind-mounts `./control/images/{postgres-init.sh,logship.sh,logline.py}`. §3's install is
+# `curl … | sh` then `kontra up` — THERE IS NO CHECKOUT, so there is no `./control/images`. Those
+# three become `uploads`, whose content is read with `fn::readFile` at program load: a missing asset
+# is then a hard error naming the file, instead of postgres coming up healthy with no
+# `kontra_ducklake` database, or logship following nothing and drawing an empty logs rail. (That
+# second failure is not hypothetical: `.github/workflows/ci.yml` and
+# `scripts/install-cluster.macos.sh` both copy `postgres-init.sh` into their temp dir and NOT
+# `logship.sh`/`logline.py`, so logship is already broken in both harnesses today.)
+#
+# `fn::readFile` rather than an inlined block scalar for a second reason: `logship.sh` interpolates
+# four `${…}` expressions of its own, three of them shell defaults —
+#     71  LOGS_URL="${KONTRA_LOGS_URL:-http://victorialogs:9428}"
+#     72  TENANT="${KONTRA_NAMESPACE:-default}"
+#    106  PARSER="${KONTRA_LOGSHIP_PARSER:-/logline.py}"
+# Pasted into this file those are Pulumi interpolations against config keys that do not exist, and
+# the program fails to load. `fn::readFile`'s result is runtime data and is never interpolated. Paths
+# resolve against this file's directory (verified). (`postgres-init.sh` and `logline.py` have no `${`
+# at all, so only one of the three assets is actually load-bearing for this choice — and the rule has
+# to hold for all three anyway, because the next edit to any of them is not ours to see.)
+#
+# ── WHAT DID NOT SURVIVE, ON PURPOSE ────────────────────────────────────────────────────────────
+#
+# `DIGITALOCEAN_TOKEN` and `KONTRA_CLOUD_CREDENTIAL` are passed to `orchestrator-infra` EMPTY and
+# have no config key. ADR 0052 §4 and `infra/credential.ts` negative 4: provider credentials never
+# become Pulumi stack config, and `pulumiState.test.ts` guards that with a non-vacuous control case.
+# A cloud token reaches the infra worker through the secret store on the `secrets-store` volume,
+# resolved by `resolveProviderEnv` inside the activity that is about to converge — the last hop.
+# Adding either as a config key here would put the credential back exactly where 0034 took it from,
+# and no existing test would notice.
+
+name: kontra-control
+runtime: yaml
+description: >-
+  The kontra local control plane — 13 containers, health-gated, on one private Docker network.
+  Converged by the host Pulumi engine (ADR 0052 §1); the only project that engine will accept.
+
+# ── CONFIG ──────────────────────────────────────────────────────────────────────────────────────
+#
+# Every default here is the value `docker compose --env-file .env.quickstart config` resolves to, so
+# a bare `pulumi up` and the documented compose invocation produce the same topology. The two knobs
+# with no default are the two a program cannot guess.
+config:
+  # THE PUBLISH ADDRESS, AND IT IS THE SECURITY CONTROL. Compose spelled this
+  # `${KONTRA_BIND:-127.0.0.1}` at six `ports:` sites and nowhere else — it is never passed to a
+  # container (`docker compose config | grep -c KONTRA_BIND` → 0). A published Docker port is DNATed
+  # in PREROUTING and ACCEPTed in FORWARD, so it never traverses `ufw-user-input`: the publish
+  # address is the control and a host firewall is not.
+  #
+  # `scripts/assert-loopback-publish.py` walks every container's `.NetworkSettings.Ports` and exits
+  # non-zero unless every non-empty HostIp is `127.0.0.1` — and also exits non-zero on ZERO bindings,
+  # because that check had been vacuous. It must keep passing against this program.
+  #
+  # ADR 0052 §4 adds a coupling: the admin password is now `changeme`, and the control plane must
+  # REFUSE to serve on a non-loopback bind while it still is. Widening this before changing that must
+  # fail closed.
+  bind:
+    type: string
+    default: 127.0.0.1
+
+  # The six published ports, one per compose `ports:` entry. `victoriametrics`, `victorialogs` and
+  # `orchestrator-infra` have none and get none — see the refusals written on each below.
+  postgresPort:
+    type: integer
+    default: 5432
+  temporalPort:
+    type: integer
+    default: 7233
+  kvPort:
+    type: integer
+    default: 6379
+  registryPort:
+    type: integer
+    default: 5000
+  s3Port:
+    type: integer
+    default: 8333
+  apiPort:
+    type: integer
+    default: 8088
+
+  # ── THE FOUR KONTRA-OWNED IMAGE REFS ──────────────────────────────────────────────────────────
+  #
+  # One key each so the CI track can point them at `ghcr.io/medmahmoudi26` on ADR 0038's single tag
+  # without touching this program (ADR 0052 §3: "the install is a pull, not a build").
+  #
+  # MEASURED, and it is the fact that makes one set of refs serve both tracks: `docker.RemoteImage`
+  # RESOLVES A LOCALLY PRESENT IMAGE WITHOUT CONSULTING A REGISTRY. `pulumi up` against
+  # `name: kontra-host:1` — a tag that cannot exist on docker.io — returned `sha256:643204e0…` in
+  # well under a second (0.15 / 0.35 / 0.53 s across three runs; the spread is wall clock, the sha is
+  # the fact). So the `RemoteImage` resources below behave as `pull_policy: never` when the
+  # image was built here and as a pull when it was not, which is exactly the two tracks. The old
+  # `KONTRA_PULL_POLICY` knob has nothing left to do and is gone.
+  kontraImage:
+    type: string
+    default: kontra:latest
+  orchestratorImage:
+    type: string
+    default: kontra-orchestrator:latest
+  hostImage:
+    type: string
+    default: kontra-host:1
+  # NO CONTAINER RUNS THIS ONE, and it is here anyway. `kontra deploy` COPYs the actor-agnostic
+  # handler out of it into every actor image (`cli/deploy.go`, `cli/serve.go:197`), so an install
+  # that has not got it turns the first `kontra deploy` into a build. It appears in no compose
+  # service, which is why `make image` building it and not `kontra-orchestrator:latest` reads as
+  # arbitrary until you know this.
+  workerBaseImage:
+    type: string
+    default: kontra-worker-base:1
+
+  # ── WHERE THE OPERATOR'S CODE IS. REQUIRED, DELIBERATELY. ──────────────────────────────────────
+  #
+  # Compose could write `${KONTRA_WORKSPACES:-${PWD}/workspaces}` because it knew where the operator
+  # ran the command. This program does not: `${pulumi.cwd}` is wherever the program was materialised,
+  # which on an installed machine is not a checkout. A default would be a bind mount pointing at a
+  # directory nobody can find, and the symptom is a workspace selector with nothing in it.
+  #
+  # MOUNTED AT THE SAME ABSOLUTE PATH INSIDE AND OUT, in all three consumers. A Source id is
+  # literally `at:<absolute path>` (ADR 0049 made the filesystem the registry, so there is no stored
+  # path to look up), and that id crosses the queue hop from `orchestrator-api` to
+  # `orchestrator-infra`. Two roles that disagree about what the path means fail with
+  # `no registered source "at:/…/workflows/canary"` — an id minted from a folder the API can see,
+  # handed to the role that cannot.
+  workspaces:
+    type: string
+
+  network:
+    type: string
+    default: kontra
+  namespace:
+    type: string
+    default: default
+
+  # KONTRA_REGISTRY is `127.0.0.1:5000` and NOT `registry:5000`: the value is handed to a Docker
+  # daemon, and the daemon that pulls an actor image is the HOST's, which has no `registry` in its
+  # resolver. The published port is what makes the two agree.
+  registryAddress:
+    type: string
+    default: 127.0.0.1:5000
+  trustRegistries:
+    type: string
+    default: 127.0.0.1:5000
+  trustUnsigned:
+    type: string
+    default: 127.0.0.1:5000
+
+  duckdbMemoryLimit:
+    type: string
+    default: 512MB
+  metricsRetention:
+    type: string
+    default: "6"
+  logsRetention:
+    type: string
+    default: "6"
+  unitsRetentionDays:
+    type: string
+    default: "7"
+  logsUrl:
+    type: string
+    default: http://victorialogs:9428
+  probeQueue:
+    type: string
+    default: kontra-probe
+
+  # Both fail-closed reads. Empty is the closed state and the variable is still PRESENT — see the
+  # header. `checkBearer` answers 503 and names the variable that turns it on; `retentionCollects()`
+  # treats anything but an affirmative as a dry run, "the failure direction that keeps data".
+  exploreToken:
+    type: string
+    default: ""
+  retentionCollect:
+    type: string
+    default: ""
+
+  # The passphrase that encrypts the INFRA engine's state on the `pulumi-state` volume — ADR 0019's
+  # engine, not this one. `local-dev` is compose's default verbatim; an operator overrides it with
+  # `pulumi config set --secret kontra-control:infraPassphrase <x>`, which stores it encrypted even
+  # though this declaration is not marked secret.
+  #
+  # NOT `secret: true`, and that is a measurement rather than a preference: pulumi 3.244.0 refuses a
+  # secret key that carries a plaintext default —
+  #   error: validating stack config: Stack 'x' with configuration key 'passphrase' must be
+  #   encrypted as it's secret
+  # so `secret: true` here would make the program unconvergeable until somebody set it, which is a
+  # worse trade than matching what compose already ships in a tracked file.
+  #
+  # This is NOT the host engine's own passphrase. ADR 0052 §4: that one is the single secret the host
+  # engine holds, it lives in the OS keychain, and because of §1 it protects a topology and not an
+  # account.
+  infraPassphrase:
+    type: string
+    default: local-dev
+
+  # Directory holding the three files `uploads` reads, relative to this file. Whatever materialises
+  # this program on an installed machine must materialise these beside it:
+  #   postgres-init.sh  logship.sh  logline.py
+  assetsDir:
+    type: string
+    default: ../images
+
+variables:
+  # ── THE 24 VARIABLES COMPOSE CALLED `*orchestrator-env` ───────────────────────────────────────
+  #
+  # Written once, spliced into `orchestrator-api`, `orchestrator-infra` and `cli` by `fn::split`.
+  # Keep this list identical to `docker-compose.yml`'s `x-orchestrator-env` until that file is
+  # deleted (ADR 0052 Consequences), because a variable that reaches two of the three roles is the
+  # trap `.env.quickstart` records for the five that used to sit there reaching nothing.
+  #
+  # KONTRA_IMAGE / KONTRA_HOST_IMAGE are the TAGS, not the `imageId`s the containers below run. The
+  # control plane starts Workers by name through the Docker socket, so a digest here would be a name
+  # the Warden cannot pass to `docker run` as written.
+  orchestratorEnv: |-
+    KONTRA_HOME=/var/lib/kontra
+    KONTRA_ADDRESS=temporal:7233
+    KONTRA_NAMESPACE=${namespace}
+    KONTRA_S3_ENDPOINT=http://seaweed:8333
+    KONTRA_S3_BUCKET=kontra
+    KONTRA_S3_REGION=us-east-1
+    KONTRA_S3_ACCESS_KEY=kontra
+    KONTRA_S3_SECRET_KEY=kontra
+    KONTRA_REDIS_HOST=redis:6379
+    KONTRA_REGISTRY=${registryAddress}
+    KONTRA_ORCHESTRATOR_URL=http://orchestrator-api:8088
+    KONTRA_CONTROLLER=orchestrator-api
+    KONTRA_DUCKLAKE_CATALOG=postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra
+    KONTRA_MATERIALIZATION_DB=postgres://kontra:kontra@postgres:5432/kontra_ducklake
+    KONTRA_DUCKDB_MEMORY_LIMIT=${duckdbMemoryLimit}
+    KONTRA_WORKSPACES=${workspaces}
+    KONTRA_IMAGE=${kontraImage}
+    KONTRA_HOST_IMAGE=${hostImage}
+    KONTRA_TRUST_REGISTRIES=${trustRegistries}
+    KONTRA_TRUST_UNSIGNED=${trustUnsigned}
+    KONTRA_EXPLORE_TOKEN=${exploreToken}
+    KONTRA_LOGS_URL=${logsUrl}
+    KONTRA_RETENTION_COLLECT=${retentionCollect}
+    KONTRA_UNITS_RETENTION_DAYS=${unitsRetentionDays}
+
+resources:
+  # ── THE PROVIDER, PINNED ──────────────────────────────────────────────────────────────────────
+  #
+  # ADR 0052 Consequences: "Pulumi version skew between the host CLI and the cluster's
+  # `@pulumi/pulumi` is now a real axis." Measured on this box: host CLI 3.244.0,
+  # `control/orchestrator/node_modules/@pulumi/pulumi` 3.256.0, `@pulumi/docker` 4.11.2. Pinning the
+  # plugin here is what makes the container's engine and the host's engine agree about what a
+  # `docker:index:Container` is — the `healthcheck`/`wait`/`waitTimeout` contract the whole ordering
+  # rests on is 4.11's, and it is the version ADR 0052 fact 1 was established against.
+  #
+  # `pulumi plugin install resource docker 4.11.2` is a hard prerequisite: it is NOT part of a stock
+  # Pulumi install, and before this work the host had only `digitalocean` and `random`. `get.sh`
+  # installs it; `kontra doctor` reports it.
+  dockerProvider:
+    type: pulumi:providers:docker
+    options:
+      version: 4.11.2
+
+  # ── THE NETWORK ───────────────────────────────────────────────────────────────────────────────
+  #
+  # One bridge, fixed name `kontra`. Every container below joins it with an `aliases` entry equal to
+  # its COMPOSE SERVICE NAME, and those aliases are load-bearing rather than cosmetic: compose gave
+  # each container two DNS names (its `container_name` AND its service name) and every in-cluster URL
+  # in the stack uses the second — `temporal:7233`, `postgres:5432`, `redis:6379`, `seaweed:8333`,
+  # `orchestrator-api:8088`, `victorialogs:9428`, `victoriametrics:8428`. This provider gives a
+  # container only its `name`, so without the alias each of those resolves to nothing.
+  #
+  # `victoriametrics` is the sharpest of them: `panels/metrics.ts` hard-codes
+  # `http://victoriametrics:8428` as DEFAULT_METRICS_URL and `metrics.test.ts` asserts that exact
+  # string, so the `loads` chip would report `unknown` forever and the test would still pass.
+  net:
+    type: docker:index:Network
+    properties:
+      name: ${network}
+    options:
+      provider: ${dockerProvider}
+
+  # ── IMAGES ────────────────────────────────────────────────────────────────────────────────────
+  #
+  # Compose pulls a missing image; this provider's `Container` does not — `ContainerCreate` fails
+  # with "No such image". So every image is a `RemoteImage`, which is also what makes issue 03's
+  # cold-machine acceptance criterion reachable. `keepLocally: true` on all of them: a `pulumi
+  # destroy` must not delete `kontra:latest` out from under a `docker build` cache, and verified —
+  # after destroying a stack holding `kontra-host:1`, the image was still in the daemon.
+  #
+  # Nine third-party images, all pinned by the compose file except `registry:2`, which floats there
+  # and floats here.
+  imgPostgres:
+    type: docker:index:RemoteImage
+    properties: { name: "postgres:16-alpine", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgBusybox:
+    type: docker:index:RemoteImage
+    properties: { name: "busybox:1.36", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgTemporal:
+    type: docker:index:RemoteImage
+    properties: { name: "temporalio/auto-setup:1.27.2", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgRedis:
+    type: docker:index:RemoteImage
+    properties: { name: "redis:7-alpine", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgRegistry:
+    type: docker:index:RemoteImage
+    properties: { name: "registry:2", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgSeaweed:
+    type: docker:index:RemoteImage
+    properties: { name: "chrislusf/seaweedfs:3.80", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgVictoriaMetrics:
+    type: docker:index:RemoteImage
+    properties: { name: "victoriametrics/victoria-metrics:v1.111.0", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgVictoriaLogs:
+    type: docker:index:RemoteImage
+    properties: { name: "victoriametrics/victoria-logs:v1.9.1-victorialogs", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgPython:
+    type: docker:index:RemoteImage
+    properties: { name: "python:3.12-alpine", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+
+  # The four kontra-owned ones. `imgKontra` must resolve before `imgOrchestrator` can be BUILT —
+  # `Dockerfile.orchestrator` is `FROM ${SPA_IMAGE} AS spa-src` — but at converge time both are
+  # already-built artifacts and the order does not bind here.
+  imgKontra:
+    type: docker:index:RemoteImage
+    properties: { name: "${kontraImage}", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgOrchestrator:
+    type: docker:index:RemoteImage
+    properties: { name: "${orchestratorImage}", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgHost:
+    type: docker:index:RemoteImage
+    properties: { name: "${hostImage}", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  imgWorkerBase:
+    type: docker:index:RemoteImage
+    properties: { name: "${workerBaseImage}", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+
+  # ── VOLUMES ───────────────────────────────────────────────────────────────────────────────────
+  #
+  # NAMED `kontra_<name>`, WHICH IS THE NAME COMPOSE ALREADY GAVE THEM. Compose prefixes a named
+  # volume with the project name, so an operator who has ever run this stack has their data in
+  # `kontra_seaweed-data` and `kontra_postgres-data`. `docker volume create` is idempotent, so
+  # keeping the names means `kontra up` ADOPTS that data; renaming them would hand the same operator
+  # an empty control plane that looks like a clean install. Measured on this box, six days into one
+  # compose stack: 41 GB across the 12 `kontra_` volumes — 34 GB of it `seaweed-data`, 6.2 GB
+  # `registry-data`.
+  #
+  # `retainOnDelete: true` ON EVERY ONE. It is what makes `kontra down` behave like
+  # `docker compose down` rather than `down -v`: Pulumi drops the volume from state and leaves the
+  # data on disk. There is deliberately NO flag here that destroys them — `paths.ts` already warns
+  # that `down -v` orphans Machines, and ADR 0052 Consequences extends that warning to this root.
+  # Deleting a volume is `docker volume rm` typed by a person.
+  volPostgresData:
+    type: docker:index:Volume
+    properties: { name: "kontra_postgres-data" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  volRedisData:
+    type: docker:index:Volume
+    properties: { name: "kontra_redis-data" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  volRegistryData:
+    type: docker:index:Volume
+    properties: { name: "kontra_registry-data" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  volSeaweedData:
+    type: docker:index:Volume
+    properties: { name: "kontra_seaweed-data" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  volVictoriaMetricsData:
+    type: docker:index:Volume
+    properties: { name: "kontra_victoriametrics-data" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  volVictoriaLogsData:
+    type: docker:index:Volume
+    properties: { name: "kontra_victorialogs-data" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  # THE CLI'S HOME, and that ownership is why it is `:ro` in both orchestrator containers. It also
+  # carries `runtime.env`, which `orchestrator-entrypoint.sh` sources — that is how
+  # KONTRA_RUN_TOKEN / KONTRA_PANEL_TOKEN reach the API without appearing in any env list here.
+  volKontraHome:
+    type: docker:index:Volume
+    properties: { name: "kontra_kontra-home" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  # ITS OWN VOLUME BECAUSE IT WAS ON THE CONTAINER'S OVERLAY LAYER. `server.ts` defaults the SQLite
+  # DB to `orchestrator.db` relative to its WORKDIR (/src/control/orchestrator in the image), so
+  # every recreate destroyed the actors, workflows, graphs, scratches and SOURCES tables. Measured:
+  # after one recreate, /api/workflows answered `"registered": []` for a catalog that had two
+  # workflows in it, and nothing said anything — the console simply drew an empty list. `kontra-home`
+  # cannot hold it because that volume is mounted `:ro` here on purpose.
+  volOrchestratorDb:
+    type: docker:index:Volume
+    properties: { name: "kontra_orchestrator-db" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  # SHARED RW BY api AND infra, because they are two halves of one flow: the api WRITES a secret and
+  # infra RESOLVES it at the last hop when a Fleet comes up. A store only one of them can see is a
+  # credential that saves and then cannot be found — which is what `keyring.ts` defaulting to
+  # `${KONTRA_HOME}/secrets` produced, every `PUT /api/secrets/:name` failing with
+  # `ENOENT: … mkdir '/var/lib/kontra/secrets'` on a read-only mount.
+  volSecretsStore:
+    type: docker:index:Volume
+    properties: { name: "kontra_secrets-store" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  volTemporalDynamicconfig:
+    type: docker:index:Volume
+    properties: { name: "kontra_temporal-dynamicconfig" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+  # ADR 0019's engine state — dockerFleet Machines AND Dataset stacks. `retainOnDelete` matters most
+  # here: destroying this volume orphans every Machine Pulumi was tracking, and `stack export` is the
+  # only answer once it is gone.
+  volPulumiState:
+    type: docker:index:Volume
+    properties: { name: "kontra_pulumi-state" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true }
+
+  # ══ LEVEL 0 ════════════════════════════════════════════════════════════════════════════════════
+  # Seven containers with no dependencies. They converge in parallel; level 1 starts when their
+  # gates are satisfied.
+
+  postgres:
+    type: docker:index:Container
+    properties:
+      name: kontra-postgres
+      image: ${imgPostgres.imageId}
+      restart: unless-stopped
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["postgres"]
+      envs:
+        - POSTGRES_USER=kontra
+        - POSTGRES_PASSWORD=kontra
+        - POSTGRES_DB=postgres
+      volumes:
+        - volumeName: ${volPostgresData.name}
+          containerPath: /var/lib/postgresql/data
+      # WAS A BIND MOUNT OF ./control/images/postgres-init.sh — see the header on why it is an
+      # upload. `uploads` are written after create and BEFORE start, so the file is in place when
+      # postgres's entrypoint scans /docker-entrypoint-initdb.d, and it runs only on the first boot
+      # of an empty `kontra_postgres-data`. Nothing gates on it: `KONTRA_DUCKLAKE_CATALOG` and
+      # `KONTRA_MATERIALIZATION_DB` in orchestrator-api simply name a database that is not there.
+      #
+      # ── `permissions: "0755"` AND NOT `executable: true`, AND THE DIFFERENCE IS 0744 ──────────
+      #
+      # MEASURED, both ways, in a throwaway container: `executable: true` produces `-rwxr--r--`
+      # (0744); the host file is 0755 and the bind mount gave the container `-rwxr-xr-x`.
+      #
+      # That one bit decides which BRANCH of the postgres entrypoint runs. `docker-entrypoint.sh`
+      # does `if [ -x "$f" ]; then "$f"; else . "$f"; fi` for every `*.sh` in initdb.d, and it
+      # evaluates that test after dropping to the `postgres` user — for whom a root-owned 0744 file
+      # is not executable. So 0744 SOURCES this script into the entrypoint's own shell instead of
+      # running it in a subshell, and `set -eu` on its second line then applies to the rest of the
+      # entrypoint. The entrypoint runs `set -Eeo pipefail` and deliberately NOT `-u`; adding `-u`
+      # to it mid-flight turns its next unset-variable read into a fatal error, AFTER the cluster has
+      # been created. A first boot that half-succeeds is worse than one that fails.
+      uploads:
+        - file: /docker-entrypoint-initdb.d/01-ducklake.sh
+          content:
+            fn::readFile: ${assetsDir}/postgres-init.sh
+          permissions: "0755"
+      ports:
+        - internal: 5432
+          external: ${postgresPort}
+          ip: ${bind}
+          protocol: tcp
+      healthcheck:
+        # `-d postgres`, and the missing word was not cosmetic. `pg_isready -U kontra` with no
+        # database asks for one NAMED AFTER THE USER — libpq's default — and there is no `kontra`
+        # database here. The probe still reported healthy, because a FATAL about a missing database
+        # is still proof the server answered. What it cost was the log: one
+        # `FATAL: database "kontra" does not exist` every 5s, 1295 of them in the first half day,
+        # which is the haystack every real postgres error then has to be found in.
+        tests: ["CMD-SHELL", "pg_isready -U kontra -d postgres"]
+        interval: 5s
+        timeout: 5s
+        retries: 20
+      wait: true
+      # 20 x (5 + 5) = 200, no start_period. First boot also runs initdb and the ducklake script.
+      waitTimeout: 210
+    options:
+      provider: ${dockerProvider}
+
+  # ── THE ONE-SHOT, AND THE ONLY `service_completed_successfully` IN THE STACK ───────────────────
+  #
+  # `auto-setup` ships an empty docker.yaml, and Nexus operations refuse to leave Scheduled while
+  # `component.nexusoperations.callback.endpoint.template` is the default "unset". Written by a
+  # one-shot so the install needs no host-side config file — which matters more here than it did in
+  # compose, because §3's install has no checkout to put one in.
+  #
+  # `mustRun: false` + `attach: true` is the whole translation of the gate: the create call blocks
+  # until the container exits and fails on a non-zero code, so `temporal`'s `dependsOn` below is
+  # "after this SUCCEEDED" and not "after this was created". `mustRun: false` is also what stops the
+  # provider from treating an exited container as a failure on every subsequent converge — the
+  # second `pulumi up` sees it stopped and reports no change.
+  #
+  # `{{.NamespaceName}}` IS SAFE HERE. Pulumi interpolates `${…}` only, and there is no `$` anywhere
+  # in this script — which is the one thing to check before pasting any shell into this file.
+  temporalConfig:
+    type: docker:index:Container
+    properties:
+      name: kontra-temporal-config
+      image: ${imgBusybox.imageId}
+      restart: "no"
+      mustRun: false
+      attach: true
+      logs: true
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["temporal-dynamicconfig"]
+      volumes:
+        - volumeName: ${volTemporalDynamicconfig.name}
+          containerPath: /config
+      command:
+        - /bin/sh
+        - -c
+        - |
+          cat > /config/docker.yaml << 'EOF'
+          component.nexusoperations.callback.endpoint.template:
+            - value: "http://temporal:7243/namespaces/{{.NamespaceName}}/nexus/callback"
+          component.nexusoperations.limit.operation.concurrency:
+            - value: 2000
+          component.callbacks.allowedAddresses:
+            - value:
+                - Pattern: "*"
+                  AllowInsecure: true
+          EOF
+    options:
+      provider: ${dockerProvider}
+
+  redis:
+    type: docker:index:Container
+    properties:
+      name: kontra-redis
+      image: ${imgRedis.imageId}
+      restart: unless-stopped
+      command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["redis"]
+      volumes:
+        - volumeName: ${volRedisData.name}
+          containerPath: /data
+      ports:
+        - internal: 6379
+          external: ${kvPort}
+          ip: ${bind}
+          protocol: tcp
+      healthcheck:
+        tests: ["CMD", "redis-cli", "ping"]
+        interval: 5s
+        timeout: 3s
+        retries: 10
+      wait: true
+      # 10 x (5 + 3) = 80.
+      waitTimeout: 90
+    options:
+      provider: ${dockerProvider}
+
+  registry:
+    type: docker:index:Container
+    properties:
+      name: kontra-registry
+      image: ${imgRegistry.imageId}
+      restart: unless-stopped
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["registry"]
+      volumes:
+        - volumeName: ${volRegistryData.name}
+          containerPath: /var/lib/registry
+      ports:
+        - internal: 5000
+          external: ${registryPort}
+          ip: ${bind}
+          protocol: tcp
+      healthcheck:
+        tests: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
+        interval: 5s
+        timeout: 5s
+        retries: 10
+      wait: true
+      # 10 x (5 + 5) = 100.
+      waitTimeout: 110
+    options:
+      provider: ${dockerProvider}
+
+  # One process: master + volume + filer + S3 (replaces four Seaweed services).
+  #
+  # `-ip=seaweed` IS THE SERVICE NAME AND THE FILER ADVERTISES IT. S3 redirects carry that host, so
+  # it must match the network alias below or a redirected GET goes to a name nothing resolves.
+  # Only 8333 is published; 9333 (master) and 8080 (volume) stay on the network.
+  seaweed:
+    type: docker:index:Container
+    properties:
+      name: kontra-seaweed
+      image: ${imgSeaweed.imageId}
+      restart: unless-stopped
+      command:
+        - server
+        - -dir=/data
+        - -ip=seaweed
+        - -ip.bind=0.0.0.0
+        - -master.port=9333
+        - -volume.port=8080
+        - -filer
+        - -s3
+        - -s3.port=8333
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["seaweed"]
+      volumes:
+        - volumeName: ${volSeaweedData.name}
+          containerPath: /data
+      ports:
+        - internal: 8333
+          external: ${s3Port}
+          ip: ${bind}
+          protocol: tcp
+      healthcheck:
+        tests:
+          - CMD-SHELL
+          - wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null && wget -q -O- http://127.0.0.1:8333/ >/dev/null
+        interval: 5s
+        timeout: 5s
+        retries: 30
+        startPeriod: 20s
+      wait: true
+      # 20 + 30 x (5 + 5) = 320. A cold start also preallocates volume files.
+      waitTimeout: 330
+    options:
+      provider: ${dockerProvider}
+
+  # ── THE BACKEND THE AGENT HAS BEEN SHIPPING TO SINCE BEFORE IT EXISTED (ADR 0050 §1) ──────────
+  #
+  # `machine.ts` installs `vmagent` on EVERY Machine and writes its remote-write target, and until
+  # this service nothing listened. Measured on `kf-webcrawl-01`, every 60 seconds, for the whole life
+  # of the Fleet: `dial tcp4 10.124.0.2:8428: connect: connection refused`. Every fleet metric ever
+  # collected was discarded.
+  #
+  # NO `ports:`, DELIBERATELY — the refusal compose carries, kept. Nothing on the host needs to reach
+  # this and a published Docker port is DNATed in PREROUTING. The CLOUD Fleet case still wants this
+  # on the VPC address ONLY, loopback + VPC and never `eth0`, and that publish is deliberately not
+  # written here because guessing a VPC address in a file that ships to everyone is how `0.0.0.0`
+  # gets typed.
+  #
+  # It has ZERO edges in the dependency graph, in or out. It is reached only at runtime, by name.
+  victoriaMetrics:
+    type: docker:index:Container
+    properties:
+      name: kontra-victoriametrics
+      image: ${imgVictoriaMetrics.imageId}
+      restart: unless-stopped
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["victoriametrics"]
+      command:
+        - -storageDataPath=/victoria-metrics-data
+        # RETENTION IS SET, NOT INHERITED. The default is one month; a Fleet that ran a campaign
+        # three months ago is exactly the one somebody asks about.
+        - -retentionPeriod=${metricsRetention}
+        # Loopback would be wrong INSIDE the container: the orchestrator dials it across the
+        # network. The container is not published, so this listens on the network only.
+        - -httpListenAddr=:8428
+      volumes:
+        - volumeName: ${volVictoriaMetricsData.name}
+          containerPath: /victoria-metrics-data
+      healthcheck:
+        tests: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8428/health"]
+        interval: 10s
+        timeout: 5s
+        retries: 10
+        startPeriod: 10s
+      wait: true
+      # 10 + 10 x (10 + 5) = 160.
+      waitTimeout: 170
+    options:
+      provider: ${dockerProvider}
+
+  # ── WHERE A MACHINE'S LAST WORDS GO (ADR 0050 §1) ─────────────────────────────────────────────
+  #
+  # NOT PUBLISHED, AND THIS ONE MATTERS MORE THAN THE METRICS STORE. VictoriaLogs has NO
+  # AUTHENTICATION: its multi-tenancy is an `AccountID`/`ProjectID` REQUEST HEADER, so the header is
+  # an authorisation decision made by whoever sets it. Anything that can reach this port can read
+  # every tenant's logs by setting a different number. The orchestrator proxies it and stamps the
+  # tenant header server-side. Do not add a port.
+  victoriaLogs:
+    type: docker:index:Container
+    properties:
+      name: kontra-victorialogs
+      image: ${imgVictoriaLogs.imageId}
+      restart: unless-stopped
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["victorialogs"]
+      command:
+        - -storageDataPath=/victoria-logs-data
+        - -retentionPeriod=${logsRetention}
+        - -httpListenAddr=:9428
+        # A LIVE TAIL HOLDS A SELECT SLOT FOR ITS WHOLE LIFE, and the default pool is sized to
+        # GOMAXPROCS — four here. That default is right for point queries and wrong for
+        # `/select/logsql/tail`, which by design holds one open until the viewer closes the tab.
+        #
+        # MEASURED: `vl_concurrent_select_capacity 4`, `vl_concurrent_select_current 3`,
+        # `vl_concurrent_select_limit_reached_total 8` with three console tabs of tails open. The
+        # FOURTH viewer takes the last slot and every `/api/logs/query` then queues past
+        # `-search.maxQueueDuration` (10s) and 503s — including the run page's logs rail, which has
+        # nothing to do with anyone's tail. 64, because an idle tail costs a blocked goroutine and
+        # no CPU, so the pool is sized to CONCURRENT VIEWERS and not to cores.
+        - -search.maxConcurrentRequests=64
+      volumes:
+        - volumeName: ${volVictoriaLogsData.name}
+          containerPath: /victoria-logs-data
+      healthcheck:
+        tests: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9428/health"]
+        interval: 10s
+        timeout: 5s
+        retries: 10
+        startPeriod: 10s
+      wait: true
+      # 10 + 10 x (10 + 5) = 160.
+      waitTimeout: 170
+    options:
+      provider: ${dockerProvider}
+
+  # ══ LEVEL 1 ════════════════════════════════════════════════════════════════════════════════════
+
+  # postgres HEALTHY + temporalConfig EXITED 0. The second gate is the `attach: true` above: that
+  # container's create does not return until it has exited, so plain resource ordering carries it.
+  #
+  # The config volume is mounted at a DIFFERENT path than the writer used — /config there,
+  # /etc/temporal/config/dynamicconfig here — which is why `DYNAMIC_CONFIG_FILE_PATH` is relative.
+  temporal:
+    type: docker:index:Container
+    properties:
+      name: kontra-temporal
+      image: ${imgTemporal.imageId}
+      restart: unless-stopped
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["temporal"]
+      envs:
+        - DB=postgres12
+        - DB_PORT=5432
+        - POSTGRES_USER=kontra
+        - POSTGRES_PWD=kontra
+        - POSTGRES_SEEDS=postgres
+        - BIND_ON_IP=0.0.0.0
+        - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/docker.yaml
+      volumes:
+        - volumeName: ${volTemporalDynamicconfig.name}
+          containerPath: /etc/temporal/config/dynamicconfig
+      ports:
+        - internal: 7233
+          external: ${temporalPort}
+          ip: ${bind}
+          protocol: tcp
+      healthcheck:
+        tests: ["CMD", "temporal", "operator", "cluster", "health"]
+        interval: 10s
+        timeout: 10s
+        retries: 30
+        startPeriod: 40s
+      wait: true
+      # 40 + 30 x (10 + 10) = 640. THE LONGEST GATE IN THE STACK AND THE ONE THE 60 s DEFAULT BREAKS:
+      # on a first boot `auto-setup` creates four databases and their schemas before the frontend
+      # answers `operator cluster health` at all. This is a ceiling, not an expectation — a warm boot
+      # is well inside `start_period`.
+      waitTimeout: 660
+    options:
+      provider: ${dockerProvider}
+      dependsOn:
+        - ${postgres}
+        - ${temporalConfig}
+
+  # LOCAL WORKERS HAVE NO vlagent, so their stdout reaches the console's logs rail only if something
+  # ships it. On a Fleet Machine that job belongs to vlagent; here it belongs to this.
+  #
+  # A SERVICE AND NOT A `docker exec`, because it had been solved by patching a running container and
+  # that fix died the next time one was recreated — leaving an empty rail, which reads exactly like a
+  # Run that logged nothing.
+  #
+  # NO HEALTHCHECK, therefore `wait: false`. Nothing depends on it; it is a graph leaf.
+  logship:
+    type: docker:index:Container
+    properties:
+      name: kontra-logship
+      image: ${imgPython.imageId}
+      restart: unless-stopped
+      wait: false
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["logship"]
+      envs:
+        # Does NOT get the shared block — two variables, on purpose.
+        #
+        # KONTRA_LOGSHIP_MATCH IS GONE. It named four containers, which is an enumeration of an open
+        # set: a fifth actor's logs were absent and nothing said so. Selection is by label now
+        # (`KONTRA_WORKER`, which the Warden stamps on every Worker, and `kontra.logs=true`), so a
+        # new actor is covered the day it exists.
+        - KONTRA_LOGS_URL=${logsUrl}
+        - KONTRA_NAMESPACE=${namespace}
+      volumes:
+        # READ-ONLY. This service only ever reads container stdout; it has no reason to be able to
+        # start, stop or exec anything, and the socket is the whole host if it can.
+        - hostPath: /var/run/docker.sock
+          containerPath: /var/run/docker.sock
+          readOnly: true
+      # THE TWO SCRIPTS, UPLOADED RATHER THAN BIND-MOUNTED — see the header. This also fixes
+      # something the bind mount got wrong: editing `logship.sh` on the host changed the file under a
+      # process that had already read it, so the fix appeared to be live and was not. An upload is
+      # ForceNew, so an edit REPLACES this container and the running shipper is the shipper in the
+      # repo.
+      #
+      # `logline.py` is its own file and not a heredoc inside the script because nothing could
+      # import a heredoc, and a syntax error in it read as "this run logged nothing".
+      # `tests/test_logline.py` is what runs it now, and it can only do that because it is a file.
+      #
+      # 0644, matching the host files, and NOT executable — see the note on postgres's upload for why
+      # the mode is written out rather than left to `executable`. Neither of these needs an exec bit:
+      # the entrypoint below runs `/bin/sh /logship.sh` explicitly, and `logline.py` is read by it.
+      uploads:
+        - file: /logship.sh
+          content:
+            fn::readFile: ${assetsDir}/logship.sh
+          permissions: "0644"
+        - file: /logline.py
+          content:
+            fn::readFile: ${assetsDir}/logline.py
+          permissions: "0644"
+      # ENTRYPOINT, NOT COMMAND. This provider distinguishes the two and the image's own CMD must not
+      # survive; `command` is unset here for that reason.
+      entrypoints: ["/bin/sh", "-c", "apk add --no-cache docker-cli curl >/dev/null && exec /bin/sh /logship.sh"]
+    options:
+      provider: ${dockerProvider}
+      dependsOn:
+        - ${victoriaLogs}
+
+  # ══ LEVEL 2 ════════════════════════════════════════════════════════════════════════════════════
+
+  # First boot creates the S3 bucket, prints the console login, seeds hello/, then watches the
+  # current workspace. `docker exec kontra-cli …` still works while watch is PID 1.
+  #
+  # ── THE SOFT CYCLE. READ THIS BEFORE CHANGING ANYTHING HERE. ──────────────────────────────────
+  #
+  # `orchestrator-api` depends on this container, and this container's own PID-1 script BLOCKS for up
+  # to 120 seconds polling `http://orchestrator-api:8088/api/health` before it execs
+  # `kontra workspace watch`. compose does not deadlock only because its gate is `service_started`
+  # and because this service has NO healthcheck, so there is nothing to wait on.
+  #
+  # The translation of `service_started` is `dependsOn` alone with `wait: false` HERE. Do not give
+  # this container a healthcheck that probes the API, and do not set `wait: true` on it — either turns
+  # the soft cycle into a real deadlock. (`wait: true` would error out of the provider anyway: there
+  # is no healthcheck for it to wait on.)
+  #
+  # NOT LABELLED `kontra.logs`, and that is why: this is the container that prints the console login,
+  # and logship must not ship it.
+  #
+  # IMPLICIT ORDERING NOT IN ANY `dependsOn`: this script is where the S3 bucket `kontra` gets
+  # created (PUT http://seaweed:8333/kontra, 30 attempts, treating 409/500 as already-present) and
+  # where `kontra workspace seed` runs. `orchestrator-api` and `orchestrator-probe` both set
+  # KONTRA_S3_BUCKET=kontra, so the bucket is their prerequisite even though the graph does not say
+  # so — which is the second reason nothing may be reordered ahead of this.
+  cli:
+    type: docker:index:Container
+    properties:
+      name: kontra-cli
+      image: ${imgKontra.imageId}
+      restart: unless-stopped
+      wait: false
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["cli"]
+      envs:
+        fn::split:
+          - "\n"
+          - |-
+            ${orchestratorEnv}
+            KONTRA_SDK_ROOT=/opt/kontra
+      volumes:
+        # READ-WRITE. This volume is the CLI's, which is why both orchestrators mount it `:ro`.
+        - volumeName: ${volKontraHome.name}
+          containerPath: /var/lib/kontra
+        - hostPath: ${workspaces}
+          containerPath: ${workspaces}
+        # Host-level Docker authority. Acceptable for a single-operator laptop; not tenant
+        # isolation. Do not expose this stack as a shared service.
+        - hostPath: /var/run/docker.sock
+          containerPath: /var/run/docker.sock
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          python3 - <<'PY'
+          import time, urllib.error, urllib.request
+          req = urllib.request.Request("http://seaweed:8333/kontra", method="PUT")
+          for attempt in range(30):
+              try:
+                  urllib.request.urlopen(req, timeout=10)
+                  print("seaweed: created bucket kontra")
+                  break
+              except urllib.error.HTTPError as e:
+                  if e.code in (409, 500):
+                      print("seaweed: bucket kontra already present")
+                      break
+                  if attempt == 29:
+                      raise
+                  time.sleep(1)
+              except Exception:
+                  if attempt == 29:
+                      raise
+                  time.sleep(1)
+          PY
+          kontra workspace seed
+          python3 - <<'PY'
+          import time, urllib.request
+          for attempt in range(120):
+              try:
+                  urllib.request.urlopen("http://orchestrator-api:8088/api/health", timeout=2)
+                  break
+              except Exception:
+                  if attempt == 119:
+                      raise SystemExit("cli: timed out waiting for orchestrator-api")
+                  time.sleep(1)
+          PY
+          exec kontra workspace watch
+    options:
+      provider: ${dockerProvider}
+      dependsOn:
+        - ${postgres}
+        - ${seaweed}
+        - ${temporal}
+        - ${registry}
+
+  # ══ LEVEL 3 ════════════════════════════════════════════════════════════════════════════════════
+
+  # API + materializer in one process (queues stay distinct). Infra stays separate (Pulumi).
+  orchestratorApi:
+    type: docker:index:Container
+    properties:
+      name: kontra-api
+      image: ${imgOrchestrator.imageId}
+      restart: unless-stopped
+      # A STABLE HOSTNAME, BECAUSE A WORKER'S TEMPORAL IDENTITY IS `<pid>@<hostname>@<queue>`.
+      #
+      # Served Workers run in THIS container, so pollers on their queues identify as
+      # `531@<hostname>`. Left to Docker that is a container id which changes on every recreate, and
+      # `panels/local.ts:localHost` deliberately refuses an id-shaped name — it "identifies nothing
+      # an operator can act on". The poller chip then could not attribute a poller to the node it was
+      # drawing: `poller: none — polled by 2 worker(s) (98291999cb49, …) but none from localhost`, in
+      # red, about two workers that were up and polling. ADR 0052 §6 also joins its four sources on
+      # this field, so it is now load-bearing in a second place.
+      hostname: kontra-api
+      # SHIP THIS CONTAINER'S LOGS. The control plane's own processes were excluded from the shipper
+      # by the name list that preceded the labels, so the components making the authorisation
+      # decisions were the ones with no retained logs — the exact inversion an audit asks about.
+      labels:
+        - label: kontra.logs
+          value: "true"
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["orchestrator-api"]
+      envs:
+        fn::split:
+          - "\n"
+          - |-
+            ${orchestratorEnv}
+            KONTRA_ORCHESTRATOR_ROLES=api,materializer
+            KONTRA_WORKER_ROLE=api
+            KONTRA_ORCHESTRATOR_DB=/var/lib/kontra-db/orchestrator.db
+            KONTRA_SECRETS_DIR=/var/lib/kontra-secrets
+      volumes:
+        - volumeName: ${volKontraHome.name}
+          containerPath: /var/lib/kontra
+          readOnly: true
+        - volumeName: ${volSecretsStore.name}
+          containerPath: /var/lib/kontra-secrets
+        - volumeName: ${volOrchestratorDb.name}
+          containerPath: /var/lib/kontra-db
+        - hostPath: ${workspaces}
+          containerPath: ${workspaces}
+      ports:
+        - internal: 8088
+          external: ${apiPort}
+          ip: ${bind}
+          protocol: tcp
+      healthcheck:
+        tests:
+          - CMD
+          - node
+          - -e
+          - fetch('http://127.0.0.1:8088/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+        interval: 10s
+        timeout: 5s
+        retries: 20
+        startPeriod: 20s
+      wait: true
+      # 20 + 20 x (10 + 5) = 320.
+      waitTimeout: 330
+    options:
+      provider: ${dockerProvider}
+      dependsOn:
+        # `service_started` on cli — see the soft cycle above. The other four are `service_healthy`,
+        # carried by each of those containers' own `wait: true`.
+        - ${cli}
+        - ${temporal}
+        - ${redis}
+        - ${seaweed}
+        - ${registry}
+
+  # THE PULUMI ENGINE OF ADR 0019, and the container that holds the read-write Docker socket.
+  #
+  # NO PUBLISHED PORT, AND THAT IS THE POINT. This held 8090 for the Dashboard streamer, whose own
+  # comment admitted it "carries no credential of its own beyond the panel ticket" — the
+  # least-authenticated listener in the stack, in the one container with the read-write socket and
+  # the cloud credential. Do not publish a port here.
+  #
+  # `hostname` IS NOT SET, unlike the api's: no Worker identity is minted in this container.
+  orchestratorInfra:
+    type: docker:index:Container
+    properties:
+      name: kontra-infra
+      image: ${imgOrchestrator.imageId}
+      restart: unless-stopped
+      labels:
+        - label: kontra.logs
+          value: "true"
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["orchestrator-infra"]
+      envs:
+        fn::split:
+          - "\n"
+          - |-
+            ${orchestratorEnv}
+            KONTRA_ORCHESTRATOR_ROLES=infra
+            KONTRA_WORKER_ROLE=infra
+            KONTRA_INFRA_QUEUE=kontra-infra
+            KONTRA_PULUMI_STATE_DIR=/data/pulumi-state
+            KONTRA_PULUMI_WORK_DIR=/data/pulumi
+            PULUMI_CONFIG_PASSPHRASE=${infraPassphrase}
+            KONTRA_SECRETS_DIR=/var/lib/kontra-secrets
+            DIGITALOCEAN_TOKEN=
+            KONTRA_CLOUD_CREDENTIAL=
+      volumes:
+        - volumeName: ${volKontraHome.name}
+          containerPath: /var/lib/kontra
+          readOnly: true
+        - volumeName: ${volSecretsStore.name}
+          containerPath: /var/lib/kontra-secrets
+        - volumeName: ${volPulumiState.name}
+          containerPath: /data
+        # THE WORKSPACE, READ-ONLY — unlike the api's — because `serve` runs HERE now and could not
+        # see the code. `serveDevWorkflow` moved the serve verb onto this role, since starting a
+        # Worker means starting a CONTAINER and the socket is here (ADR 0036). What moved with it was
+        # the need to RESOLVE the folder: `SourceStore.get` is a directory read, and this container
+        # had `KONTRA_WORKSPACES` without the mount it names.
+        #
+        # `:ro` costs the serve path nothing: this role resolves the folder and then asks Docker to
+        # bind-mount it into the Worker, and THAT mount is resolved by the daemon against the HOST
+        # filesystem, not through this container's view. So read-only keeps the socket-holding
+        # container off the write path for source.
+        - hostPath: ${workspaces}
+          containerPath: ${workspaces}
+          readOnly: true
+        # Host-level Docker authority — read-write here. See `cli`.
+        - hostPath: /var/run/docker.sock
+          containerPath: /var/run/docker.sock
+      healthcheck:
+        # A LIVENESS-ONLY PROBE. It proves nothing about the worker; it exists so `service_healthy`
+        # and `--wait` had something to gate on, and here so `wait: true` is legal at all.
+        tests: ["CMD", "node", "-e", "process.exit(0)"]
+        interval: 30s
+        timeout: 5s
+        retries: 5
+      wait: true
+      # 5 x (30 + 5) = 175, no start_period — and the 30 s interval means the FIRST check is 30 s
+      # after start, which is already half the provider's 60 s default on its own.
+      waitTimeout: 180
+    options:
+      provider: ${dockerProvider}
+      dependsOn:
+        - ${temporal}
+        - ${cli}
+
+  # ══ LEVEL 4 ════════════════════════════════════════════════════════════════════════════════════
+
+  orchestratorProbe:
+    type: docker:index:Container
+    properties:
+      name: kontra-probe
+      image: ${imgHost.imageId}
+      restart: unless-stopped
+      labels:
+        - label: kontra.logs
+          value: "true"
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["orchestrator-probe"]
+      # NOT the shared block — a hand-written seven. This image is `kontra-host:1`, which carries the
+      # actor-host runtime and none of the orchestrator's config surface.
+      envs:
+        - KONTRA_ADDRESS=temporal:7233
+        - KONTRA_S3_ENDPOINT=http://seaweed:8333
+        - KONTRA_S3_BUCKET=kontra
+        - KONTRA_ORCHESTRATOR_URL=http://orchestrator-api:8088
+        - KONTRA_PROBE_QUEUE=${probeQueue}
+        - KONTRA_WORKER_ROLE=probe
+        # STRUCTURED, because nothing reads this container's stdout with its eyes. `logs.py` has
+        # shipped identity-stamped JSON since ADR 0050 §1 and no deployment had ever asked for it,
+        # which is why the shipper was recovering a run id from the message text with a regex.
+        - KONTRA_LOG_FORMAT=json
+      command: ["python3", "-m", "kontra.probe"]
+      healthcheck:
+        tests: ["CMD", "python3", "-c", "raise SystemExit(0)"]
+        interval: 30s
+        timeout: 5s
+        retries: 5
+      wait: true
+      # 5 x (30 + 5) = 175.
+      waitTimeout: 180
+    options:
+      provider: ${dockerProvider}
+      dependsOn:
+        - ${temporal}
+        - ${seaweed}
+        - ${orchestratorApi}
+
+outputs:
+  # `kontra up` ends by printing the credentials file path and the console URL — ON EVERY BOOT, not
+  # only the first, because the path is what an operator looks for on the second day (ADR 0052 §3).
+  # The URL is built from the two knobs that decide it, so a changed bind or port cannot leave the
+  # printed line pointing somewhere nothing is listening.
+  consoleUrl: http://${bind}:${apiPort}
+  bind: ${bind}
+  network: ${net.name}
+
+  # The four kontra-owned refs, resolved. `kontra doctor` reads these to answer "which images is this
+  # control plane actually running", which on the ghcr track is the difference between the published
+  # tag and whatever a stale local build left behind.
+  images:
+    kontra: ${imgKontra.name}
+    orchestrator: ${imgOrchestrator.name}
+    host: ${imgHost.name}
+    workerBase: ${imgWorkerBase.name}
+
+  # The one-shot's exit code, exported because that is what makes
+  # `service_completed_successfully` VISIBLE rather than merely enforced — a reader of the stack can
+  # see that the dynamic config was written, instead of inferring it from temporal being up.
+  temporalConfigExitCode: ${temporalConfig.exitCode}

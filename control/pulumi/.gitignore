@@ -1,0 +1,10 @@
+# STACK CONFIG FILES ARE PER-MACHINE HERE, which is why they are ignored rather than committed as
+# Pulumi's own docs suggest. `kontra-control:workspaces` is an absolute host path — the same path on
+# both sides of every bind mount, because a Source id is `at:<absolute path>` — so a committed
+# `Pulumi.local.yaml` would be one operator's home directory in everybody else's install.
+#
+# `Pulumi.yaml` itself is NOT matched: the pattern needs a stack segment between the two dots.
+Pulumi.*.yaml
+
+# `pulumi stack export`/`import` scratch and any accidental local backend.
+.pulumi/
