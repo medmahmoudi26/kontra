@@ -21,6 +21,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,7 +31,6 @@ import (
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 	"github.com/medmahmoudi26/kontra/cli/internal/config"
-	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 )
 
 // codecEnv is the environment the claim-check codec reads, forwarded to a served worker.
@@ -122,37 +122,73 @@ func pythonFor(root, override string) string {
 	return "python3"
 }
 
-// confirmTmuxWorker turns a worker that died on boot into an error, instead of a success.
+// confirmWorker turns a worker that died on boot into an error, instead of a success.
 //
-// `tmux.Start` succeeding means tmux CREATED the session, which is not the same claim as "the
-// worker is running" — the gap between them is every import error, every missing dependency, every
-// wrong interpreter. Without this the two are indistinguishable from outside: the command prints
-// the attach line for a session that no longer exists, and whatever python wrote on its way out is
-// gone with it.
+// A `docker run --detach` that returns an id means the container was CREATED, which is not the same
+// claim as "the worker is running" — the gap between them is every import error, every missing
+// dependency, every wrong interpreter. Without this the two are indistinguishable from outside: the
+// command prints a container id for something that is already gone.
 //
-// The window is held open by tmux.Hold, so a dead worker leaves `[exited N]` on screen and that
-// text is the report. The session is killed on the way out so the next attempt is not refused for
-// already existing — the operator is fixing the cause, not clearing the wreckage.
-func confirmTmuxWorker(session, window, interpreter string) error {
+// THE CONTAINER'S OWN LOG IS THE REPORT, and it is strictly better than the two things this
+// replaced. A tmux window had to be held open to keep a dead worker's output on screen, and the
+// session was killed on the way out so the next attempt would not be refused — taking the output
+// with it. A pid file outlived that but had to be written, rotated and reaped by us. A stopped
+// container keeps its log until something removes it, and `--rm` does not fire on a container that
+// never started successfully.
+//
+// NOT REMOVED ON FAILURE, deliberately. The next serve replaces the pair (`devDriver.Start`), so a
+// retry is never refused, and leaving the corpse means `docker logs` still answers after this error
+// has scrolled away.
+func confirmWorker(ctx context.Context, ref, interpreter string) error {
 	const grace = 2500 * time.Millisecond
 	deadline := time.Now().Add(grace)
 	for {
-		if !tmux.HasSession(session) {
-			return fmt.Errorf("worker vanished immediately: tmux session %q is gone.\n"+
-				"  the interpreter was %s — if that is not where temporalio is installed, set "+
-				"KONTRA_PYTHON or pass --python", session, interpreter)
+		running, err := containerRunning(ctx, ref)
+		if err != nil {
+			// A failure to ASK is not a dead worker. Reported as itself rather than as a boot failure,
+			// which would send somebody reading their own code for a fault in the engine.
+			return fmt.Errorf("could not confirm the worker started: %w", err)
 		}
-		pane, _ := exec.Command("tmux", "capture-pane", "-p", "-t", session+":"+window).Output()
-		if idx := strings.Index(string(pane), "[exited "); idx >= 0 {
-			_ = exec.Command("tmux", "kill-session", "-t", session).Run()
-			return fmt.Errorf("worker exited on startup (interpreter %s):\n%s",
-				interpreter, indentTail(string(pane), 12))
+		if !running {
+			tail := containerTail(ctx, ref)
+			if strings.TrimSpace(tail) == "" {
+				return fmt.Errorf("worker exited immediately and wrote nothing (interpreter %s).\n"+
+					"  if that is not where temporalio is installed in the control-plane image, this is a\n"+
+					"  `--mode local` job — that one runs against this checkout\n"+
+					"  logs: docker logs %s", interpreter, ref)
+			}
+			return fmt.Errorf("worker exited on startup (interpreter %s):\n%s\n  logs: docker logs %s",
+				interpreter, indentTail(tail, 12), ref)
 		}
 		if time.Now().After(deadline) {
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// containerRunning asks the runtime, which is the only thing that knows.
+func containerRunning(ctx context.Context, ref string) (bool, error) {
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}", ref).CombinedOutput()
+	if err != nil {
+		// A container that has been removed is not running, and that is an answer rather than a
+		// failure to ask.
+		if strings.Contains(string(out), "No such object") {
+			return false, nil
+		}
+		return false, fmt.Errorf("docker inspect %s: %v: %s", ref, err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
+}
+
+// containerTail is whatever the dead container printed, best effort: this is already an error path
+// and a second error here would replace the reason with the failure to read it.
+func containerTail(ctx context.Context, ref string) string {
+	out, err := exec.CommandContext(ctx, "docker", "logs", "--tail", "40", ref).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 // indentTail returns the last n non-empty lines, indented, for quoting inside an error.

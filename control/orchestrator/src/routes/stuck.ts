@@ -38,7 +38,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import { pollIsFresh, type QueueState } from '../panels/pollers';
+import { pollIsFresh, type QueueState } from '../pollers';
 import { listOpenExecutions } from '../temporalClient';
 
 /** One open execution and whether anything is polling the queue it is waiting on. */

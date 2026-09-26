@@ -11,7 +11,7 @@
  * request would open a connection per poll of every workflow on the page, and the page polls, which
  * is why the singleton lives in `buildServer` and arrives here as a getter rather than a value.
  *
- * The machinery already existed and had no way out of the process — `panels/pollers.ts` is what
+ * The machinery already existed and had no way out of the process — `pollers.ts` is what
  * `fleet.ready()` uses through the `queuePollers` activity, precisely so a run does not
  * dispatch into a queue nobody serves and then report as slow. This is that read, over HTTP.
  */
@@ -19,7 +19,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import type { Repo } from '../db/repo';
-import { describeQueue, type QueueDescriber } from '../panels/pollers';
+import { describeQueue, type QueueDescriber } from '../pollers';
 import { QUEUE_RE } from '../workflowControl';
 import { errMessage } from './errors';
 

@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { stuckExecutions } from './stuck';
-import type { QueueState } from '../panels/pollers';
+import type { QueueState } from '../pollers';
 
 const NOW = 1_789_000_000_000;
 

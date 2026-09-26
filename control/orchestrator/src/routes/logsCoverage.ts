@@ -44,7 +44,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { EXPLORE_TOKEN_VARS, checkBearer } from '../auth';
-import { describeQueue, type QueueDescriber } from '../panels/pollers';
+import { describeQueue, type QueueDescriber } from '../pollers';
 import type { Repo } from '../db/repo';
 import { logsBase, tenant, tenantHeaders } from './logs';
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildServer } from './server';
 import { Repo } from './db/repo';
-import type { PollerInfo, QueueDescriber } from './panels/pollers';
+import type { PollerInfo, QueueDescriber } from './pollers';
 
 /**
  * `GET /api/queues/:queue/pollers` — the third state a workflow can be in.

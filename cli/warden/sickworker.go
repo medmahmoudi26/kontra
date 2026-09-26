@@ -629,3 +629,29 @@ func (w *warden) Judge(ctx context.Context, spec Spec, h workerHandle) workerVer
 	}
 	return v
 }
+
+// VerdictFor is the last thing the reconcile loop concluded about a Worker. READ, NEVER MEASURED:
+// a caller must not scrape, because a second scraper on a different cadence would produce a second
+// window and the two would disagree about the same Worker in the same minute.
+//
+// IT LIVED IN `panereport.go` UNTIL THE MONITOR WENT, which is why it is a method on `warden` rather
+// than on `WorkerHealth`: the reporter had a `*warden` and no judge of its own. The two "cannot
+// tell" answers below are the ones that must never read as "well" — `healthCannotTell` with a reason
+// is a Worker nothing has judged yet, not a Worker that passed.
+func (w *warden) VerdictFor(id string) workerVerdict {
+	if w.health == nil {
+		return workerVerdict{
+			Verdict: healthCannotTell,
+			Reason:  "disabled",
+			Detail:  "this Warden has no health judge, so nothing here decides a Worker is sick",
+		}
+	}
+	if v, ok := w.health.Verdict(id); ok {
+		return v
+	}
+	return workerVerdict{
+		Verdict: healthCannotTell,
+		Reason:  "samples",
+		Detail:  "this Warden has not judged " + id + " yet — its first reading is on the next reconcile turn",
+	}
+}

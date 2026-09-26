@@ -205,10 +205,13 @@ type warden struct {
 	// in particular why its evidence is not `logs()`.
 	health *WorkerHealth
 
-	// report is the outbound pane-and-telemetry snapshot. Nil-able for the same reason, and dialled
-	// BY the Machine like every other arrow in ADR 0037's diagram. Nothing here rides workflow
-	// history — see go.
-	report *PaneReporter
+	// THE OUTBOUND SNAPSHOT IS GONE WITH THE MONITOR. A `*PaneReporter` sat here and POSTed this
+	// Machine's telemetry and a screenful per Worker, once per interval, to the only thing that ever
+	// read it: the wall. `health` above is untouched — it is the reconcile loop's evidence
+	// (sickworker.go), not a report — and a droplet's CPU and memory still reach VictoriaMetrics
+	// through vmagent, which was always the durable path. A docker Fleet has no vmagent, so a local
+	// Warden's Machine telemetry is now unreported; that is a gap to close with an agent, not by
+	// reviving a POST whose only consumer was a terminal.
 }
 
 type wardenRestart struct {
@@ -1022,10 +1025,6 @@ func wardenServe(args []string) error {
 			"registry allowlist and no signature applies to this Machine")
 	}
 	go wardenServeAttach(ctx, w, id, drv.driverName())
-	// The pane and telemetry snapshot, on its own cadence and its own goroutine. SEPARATE FROM THE
-	// RECONCILE TURN on purpose: a Controller that is slow to accept a report must not slow down the
-	// loop that keeps Workers running, and a report is worthless the moment it is late anyway.
-	go w.report.Run(ctx)
 	return w.run(ctx)
 }
 
@@ -1058,7 +1057,6 @@ func newServeWarden(id *wardenIdentity, drv workerDriver, interval time.Duration
 	// in `wardenServe` gave that same property, and cost the one this constructor exists to buy:
 	// a `serve` that forgot a field stayed green across the whole suite.
 	w.health = NewWorkerHealth(w.now)
-	w.report = NewPaneReporter(w)
 	// THE EGRESS POLICY IS BUILT ONLY FOR `podman`, AND THAT IS NOT A CONVENIENCE. warden_egress.go:
 	// the `process` driver has no container, no pod network namespace and therefore no traffic to
 	// attach a rule to that is not simply the Machine's own — a policy there would govern the Warden,

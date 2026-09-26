@@ -46,7 +46,7 @@ import { getConnection } from './temporalClient';
  * dispatches to a name nobody created and waits. `shared/conformance/queues.json` §endpoint is what holds
  * the four sides to one answer, and `queues.conformance.test.ts` is this package's arm.
  *
- * NOT a comment counting the peers: this one said "THE FIFTH", `panels/pollers.ts` said "a
+ * NOT a comment counting the peers: this one said "THE FIFTH", `pollers.ts` said "a
  * fourth" and `sdk/go/catalog` said "a SIXTH", all at once, all of a different set — which is
  * exactly what a bookkeeping scheme nothing can execute is worth.
  *

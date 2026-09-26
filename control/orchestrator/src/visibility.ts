@@ -19,6 +19,8 @@ import {
 } from '@temporalio/common';
 import { temporal } from '@temporalio/proto';
 
+import { SERVE_DEV_WORKFLOW } from './queues';
+
 /** temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD — all four SAs are
  *  small scalars, so Keyword (exact match / equality-filterable) is the right type. */
 const KEYWORD = temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD;
@@ -52,7 +54,7 @@ const ALL = [KontraTenant, KontraRunId, KontraActor, KontraTag];
  * WHAT THIS FIXES. `KontraTenant` was registered on the namespace and written by NOTHING. Two
  * readers took it, so every `tenant` this control plane reported was the empty string. `startRun`
  * was fixed first (ADR 0046's prerequisite); the INFRA side never goes through `startRun`, so
- * `leaseWorkflow`, `stackWorkflow`, `tmuxSessionWorkflow` and the Probe were still unstamped — and
+ * `leaseWorkflow`, `stackWorkflow` and the Probe were still unstamped — and
  * those are exactly the perpetual executions a meter has to attribute.
  *
  * AT START, NEVER BY UPSERT. Attributes on `start` ride inside `WorkflowExecutionStarted` and write
@@ -108,7 +110,7 @@ export const NAMESPACE_DIVISION = 'TemporalNamespaceDivision';
  * Every workflow type KONTRA ITSELF starts. Not runs — infrastructure.
  *
  * This is the whole list, and it is short because only two processes start workflows: the handler
- * starts one `ActorService.Run` per dispatch, and the infra worker hosts the three in
+ * starts one `ActorService.Run` per dispatch, and the infra worker hosts the two in
  * `workflows/infra.ts`. Everything else executing on this cluster is somebody's caller workflow.
  *
  * Temporal's OWN system executions are not here and must not be: they are excluded by namespace
@@ -124,7 +126,16 @@ export const NAMESPACE_DIVISION = 'TemporalNamespaceDivision';
 export const KONTRA_INTERNAL_WORKFLOW_TYPES = [
   'kontra.v1.ActorService.Run',
   'stackWorkflow',
-  'tmuxSessionWorkflow',
+  /**
+   * PRESSING SERVE — and the one entry here that now has a SHOWING half to agree with.
+   *
+   * Every other type on this list is hidden and then unlisted anywhere; this one is hidden HERE and
+   * drawn on the Actors page, by `temporalClient.listServes`, as that folder's serve history. The
+   * two read the same constant for the reason `queues.ts` sets out at {@link SERVE_DEV_WORKFLOW}:
+   * a literal here and a literal there fail in opposite directions, and the history's direction —
+   * "nothing has ever served this", about a folder served forty times — is the silent one.
+   */
+  SERVE_DEV_WORKFLOW,
   'sweepDatasetsWorkflow',
   /**
    * ONE PER **MACHINE**, AND IT NEVER CLOSES — the shape this list's failure direction was written
@@ -254,6 +265,32 @@ export function buildDispatchQuery(
   const clauses = [`WorkflowType = '${sqlQuote(workflowType)}'`];
   if (filter.tenant) clauses.push(`KontraTenant = '${sqlQuote(filter.tenant)}'`);
   return clauses.join(' AND ');
+}
+
+/**
+ * Every execution recorded under ONE workflow id — what a reused id's HISTORY is.
+ *
+ * THE THIRD QUERY IN THIS FILE, AND THE ONLY ONE THAT NARROWS TO A SINGLE SUBJECT. Discovery
+ * subtracts kontra's own types; the dispatch query takes one type across the cluster; this takes
+ * one type under one id, which is the shape you need the moment a workflow id is deliberately
+ * REUSED. Two are: `kontra-fleet/<stack>` is every operation on that stack, and
+ * `serve-dev/at:<folder>` is every press of Serve on that folder (`queues.ts:serveDevWorkflowId`).
+ * Asking Temporal for that id alone answers with whichever ran LAST — the property `fetchRunHistory`
+ * documents — so a history has to be a LIST query and cannot be a describe.
+ *
+ * `WorkflowId` IS A SYSTEM SEARCH ATTRIBUTE, present on every visibility backend with nothing to
+ * register — the same standing as `ExecutionStatus`, which `buildRunDiscoveryQuery` already filters
+ * on, and `TemporalNamespaceDivision`, which it already reads. Only equality is used, and there is
+ * deliberately no `ORDER BY`, for the reason written at length above: SQLite visibility (what
+ * `temporal start-dev` and CI run) rejects `ORDER BY` outright, so every caller in this module
+ * sorts client-side.
+ *
+ * NO NAMESPACE-DIVISION CLAUSE, unlike discovery. That clause exists to keep Temporal's own
+ * subsystem executions out of a list defined by SUBTRACTION; this query names one type and one id
+ * that kontra itself started, so there is nothing for a subsystem to leak through.
+ */
+export function buildWorkflowIdQuery(workflowType: string, workflowId: string): string {
+  return `${buildDispatchQuery(workflowType)} AND WorkflowId = '${sqlQuote(workflowId)}'`;
 }
 
 /** Narrow a run list by the caller workflow's own execution status. */

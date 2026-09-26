@@ -697,9 +697,20 @@ function bytesToText(raw: unknown): string {
   return '';
 }
 
-/** Temporal's failure proto keeps a human message beside the (possibly claim-checked) payload.
- *  Nested causes are walked, because the useful sentence is usually the innermost one. */
-function failureMessage(raw: unknown): string {
+/**
+ * Temporal's failure proto keeps a human message beside the (possibly claim-checked) payload.
+ * Nested causes are walked, because the useful sentence is usually the innermost one.
+ *
+ * EXPORTED BECAUSE A SECOND READER ARRIVED. `temporalClient.listServes` reads the close event of a
+ * failed serve-dev execution to answer "why did Serve not start a Worker" — the same proto, on the
+ * same raw gRPC path, wanting the same sentence. A local copy there would be a second walker over a
+ * recursive shape, and the two would disagree on the day one of them learned about `cause` and the
+ * other did not. That is the drift `index.ts` says this package exists to prevent.
+ *
+ * IT READS NO PAYLOAD, which is what makes it safe on both call sites: `message` is a plain string
+ * field on the failure proto, beside the `details` payload that this never touches (ADR 0007).
+ */
+export function failureMessage(raw: unknown): string {
   const f = raw as { message?: unknown; cause?: unknown; applicationFailureInfo?: unknown } | null;
   if (!f || typeof f !== 'object') return '';
   const own = str(f.message);

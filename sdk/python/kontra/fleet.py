@@ -146,9 +146,6 @@ from typing import Any, Mapping
 # cross-language literal in the SDK, so `tests/test_fleet_client.py` pins the table.
 INFRA_QUEUE = "kontra-infra"
 STACK_WORKFLOW = "stackWorkflow"
-#: The session converge, on the same worker as the stack — `activities/infra.ts`.
-CONVERGE_SESSIONS_ACTIVITY = "convergeFleetSessions"
-
 #: The two **Lease** calls (ADR 0037), on the caller queue beside the two reads above —
 #: `control/orchestrator/src/activities/lease.ts`. Written independently here, like everything else that crosses.
 HOLD_LEASE_ACTIVITY = "holdFleetLease"
@@ -1034,66 +1031,6 @@ class Fleet:
                 # (see `_placement`), and a log line that raised would turn a successful converge
                 # into a failed one at the last statement.
                 "placed": ", ".join(p.ref for p in placements) or "nothing",
-            },
-        )
-        await self._converge_sessions()
-
-    async def _converge_sessions(self) -> None:
-        """Give every **Machine** a tmux session, so its pane has something to show.
-
-        WHY THE SCOPE ASKS AND THE PROGRAM DOES NOT. ADR 0020 made session existence a Temporal
-        converge rather than an argument on the provision, and `programs/fleet.ts` says so where
-        somebody would reach for it: *"There is deliberately no `tmux` arg"*. The consequence went
-        unwritten for a release: `kontra fleet up --tmux` could create a session and `fleet.up()`
-        structurally could not, so every workflow-raised **Machine** drew "no session — Converge
-        session" on the Monitor forever. That reads as an error while being the DESIGNED state,
-        which is worse than either, and the operator's only path was a button.
-
-        The converge is still a converge — this starts the same `tmuxSessionWorkflow` the Monitor's
-        button starts. What changes is that a **Run** no longer has to be told to press it.
-
-        IT CANNOT FAIL THE RUN, and that is deliberate rather than defensive. A pane is an
-        observability affordance and the **Workers** are already polling: a **Fleet** whose sessions
-        did not converge still produces every row of its output. Raising here would turn a cosmetic
-        miss into a failed provision — and the sessions are converged AFTER `_up` is set, so a
-        **Fleet** that reached this line is a **Fleet** that exists and will be torn down by the
-        scope regardless of what happens next.
-        """
-        # Imported HERE, like every other Temporal reference in this file: the module is resolved
-        # inside the workflow sandbox at call time, and a top-level import would make `kontra`
-        # unimportable outside one.
-        from temporalio import workflow
-        from temporalio.common import RetryPolicy
-
-        # A HOLD WITH NOTHING PLACED HAS NO SESSION TO CONVERGE. `machinesFromStack` names only
-        # Machines carrying a placement, so this would cost an activity round-trip to be told
-        # "the stack names no Machines with a placement" — once per bare `hold()`, and again on
-        # every `place()` that follows. The sessions are converged by the placement's own converge.
-        if not self._placements:
-            return
-
-        try:
-            out = dict(
-                await workflow.execute_activity(
-                    CONVERGE_SESSIONS_ACTIVITY,
-                    {"stackFqn": self.fqn},
-                    task_queue=INFRA_QUEUE,
-                    start_to_close_timeout=timedelta(minutes=2),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                or {}
-            )
-        except Exception as exc:  # noqa: BLE001 - a pane is never worth a failed Run
-            workflow.logger.info("sessions not converged", extra={"fqn": self.fqn, "why": str(exc)})
-            return
-        refused = out.get("refused") or []
-        workflow.logger.info(
-            "sessions converged",
-            extra={
-                "fqn": self.fqn,
-                "machines": len(out.get("converged") or []),
-                # NAMED, not counted. "2 refused" tells an operator nothing they can act on.
-                "refused": "; ".join(f"{r.get('machine')}: {r.get('why')}" for r in refused) or "none",
             },
         )
 

@@ -12,7 +12,6 @@
  * THE SURFACES, and where each lives:
  *
  *   routes/pulse.ts       liveness: this process (`/api/health`) and the cluster (`/api/pulse`)
- *   routes/panels.ts      the same-origin Dashboard proxy, so the SPA holds no panel token
  *   routes/catalog.ts     actor registration and the catalog the design surfaces are typed against
  *   routes/scratch.ts     the two opaque-document surfaces: Scratches and `/api/graphs`
  *   routes/runs.ts        a Run's lifecycle: list, start, read, stamp, stop, progress, heartbeats
@@ -74,7 +73,7 @@ import { registerSlotRoutes } from './secrets/slotRoutes';
 import { slotStore, type SlotStore } from './secrets/slotStore';
 import { secretStore, type SecretStore } from './secrets/store';
 import { describeExposure, setRegisteredFolders } from './workflowControl';
-import { describeQueue, temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
+import { describeQueue, temporalQueueDescriber, type QueueDescriber } from './pollers';
 import { ObjectStore } from './codec/objectStore';
 import { DatasetRecordStore, datasetRecordStore } from './data/datasetRecords';
 import { RunWorkflowStore, runWorkflowStore } from './data/runWorkflows';
@@ -92,7 +91,6 @@ import { registerLogsRoutes } from './routes/logs';
 import { registerLogsCoverageRoutes } from './routes/logsCoverage';
 import { registerAuditRoutes } from './routes/audit';
 import { registerLoginRoutes } from './routes/login';
-import { registerPanelRoutes } from './routes/panels';
 import { registerPollerRoutes } from './routes/pollers';
 import { registerProbeRoutes } from './routes/probe';
 import { registerPulseRoutes } from './routes/pulse';
@@ -120,11 +118,12 @@ import { registerWorkflowRoutes } from './routes/workflows';
  * Matching the FIRST segment is the point: everything after it is an id whose bytes are not ours to
  * predict — a Terminal id carries a colon and, on tmux, a dot, and a dataset name may carry one too.
  *
- * `runs` AND `scratch` ARE RETIRED SURFACES AND ARE STILL SERVED. A run is reached through the
- * workflow that produced it and Scratch became a workflow's own tab, but `/runs/<id>` is in
- * somebody's notes and still names a run — the console REDIRECTS it. A redirect is code, and code
- * has to load: drop either segment here and a cold load of `/runs/sweep-v1.2` 404s on the dot
- * before the shell that would forward it ever runs.
+ * `runs`, `scratch` AND `monitor` ARE RETIRED SURFACES AND ARE STILL SERVED. A run is reached
+ * through the workflow that produced it, Scratch became a workflow's own tab, and the Monitor was
+ * deleted outright — but `/runs/<id>` is in somebody's notes and still names a run, and `/monitor`
+ * is in somebody's tab. The console REDIRECTS all three. A redirect is code, and code has to load:
+ * drop any of these segments here and a cold load of `/runs/sweep-v1.2` 404s on the dot before the
+ * shell that would forward it ever runs.
  *
  * ── ONE SET AGAIN (ADR 0048 §7) ─────────────────────────────────────────────────────────────────
  *
@@ -139,13 +138,13 @@ export const SPA_SURFACES: ReadonlySet<string> = new Set([
   'workflows',
   'actors',
   'datasets',
-  'monitor',
   'logs',
   'secrets',
   'settings',
   // retired, still addressable — see above
   'runs',
   'scratch',
+  'monitor',
 ]);
 
 /**
@@ -335,7 +334,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // `onRoute` fires for every route as it is registered, so this list is the routes that EXIST —
   // not a second list somebody has to remember to update. `docs/openapi.json` is generated from it
   // and `openapi.test.ts` fails when the two disagree, which is what makes a route that quietly
-  // moved a red build rather than a 404 nobody sees until a panel is empty.
+  // moved a red build rather than a 404 nobody sees until a surface is empty.
   //
   // Registered FIRST, before any route is added, because the hook only sees what comes after it.
   const routes: RegisteredRoute[] = [];
@@ -366,7 +365,6 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerLoginRoutes(app);
   // The operator trail, beside the sign-in that is its first entry (`audit.ts`).
   registerAuditRoutes(app);
-  registerPanelRoutes(app);
   registerCatalogRoutes(app, repo);
   registerScratchRoutes(app, repo);
   registerRunRoutes(app, { runs, runWorkflows, queueDescriber });

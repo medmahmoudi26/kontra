@@ -144,7 +144,7 @@ function sources(dir: string, out: string[] = []): string[] {
 
 describe('every connection in this package goes through one function', () => {
   // `Connection.connect(` and `NativeConnection.connect(`, however the module was imported —
-  // `panels/pollers.ts` reaches it through a lazy `require` as `client.Connection.connect`, which a
+  // `pollers.ts` reaches it through a lazy `require` as `client.Connection.connect`, which a
   // sweep for the bare identifier misses. That site was found by this rule, not by the change.
   const CONNECT = /(?:^|[^\w.])(?:\w+\.)?(?:Native)?Connection\.connect\(/g;
 
@@ -172,7 +172,7 @@ describe('every connection in this package goes through one function', () => {
     }
     // The count is asserted before the content: a regex that stopped matching would otherwise
     // report a clean sweep over nothing.
-    expect(sites.length, 'no Temporal connect sites found — the pattern stopped matching').toBeGreaterThanOrEqual(8);
+    expect(sites.length, 'no Temporal connect sites found — the pattern stopped matching').toBeGreaterThanOrEqual(7);
     expect(bare, 'a Temporal connection that bypasses temporalConnectOptions').toEqual([]);
   });
 

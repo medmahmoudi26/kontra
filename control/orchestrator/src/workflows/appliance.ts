@@ -13,12 +13,10 @@
  * anywhere, which is exactly the invisible failure ADR 0031 §4 says must not be how the appliance
  * says "no provisioner here". So: register it, refuse in one second, name the limitation.
  *
- * THE TWO THAT STAY ARE NOT PROVISIONING (ADR 0034 §2, quoting ADR 0031 §4). `tmuxSessionWorkflow`
- * is session existence on a Machine — Fleet authority, and what the Monitor's panes are built on;
- * the appliance's case for it is the LOCAL pane, a served worker's `kontra-wf-<queue>` session on
- * the operator's own host, which needs neither the SSH key nor a cloud token.
- * `sweepDatasetsWorkflow` is the retention sweep, hosted here because this is the controller-pinned
- * workflow host, with its one activity proxied onto `DATASET_QUEUE`.
+ * THE ONE THAT STAYS IS NOT PROVISIONING (ADR 0034 §2, quoting ADR 0031 §4). `sweepDatasetsWorkflow`
+ * is the retention sweep, hosted here because this is the controller-pinned workflow host, with its
+ * one activity proxied onto `DATASET_QUEUE`. `tmuxSessionWorkflow` used to sit beside it — session
+ * existence on a Machine, which the Monitor's panes were built on — and went when the Monitor did.
  *
  * KEEP THIS MODULE'S IMPORT GRAPH AS THIN AS ITS PEERS'. Everything reachable from here is bundled
  * into the workflow sandbox, where there is no filesystem, no client and no Node built-in — and a
@@ -30,8 +28,7 @@
 import { ApplicationFailure } from '@temporalio/common';
 import type { StackWorkflowInput } from './stack';
 
-export { tmuxSessionWorkflow, recreate, kill, addWindow, getSessionState } from './tmuxSession';
-export type { TmuxSessionInput, TmuxSessionResult } from './tmuxSession';
+export { serveDevWorkflow } from './serveDev';
 
 export { sweepDatasetsWorkflow } from './retention';
 export type { SweepDatasetsWorkflowInput } from './retention';

@@ -43,7 +43,7 @@
 import { randomUUID } from 'node:crypto';
 import { ControlRefused } from './workflowControl';
 import { endpointName, listEndpoints, sharedQueue } from './nexusRegistry';
-import { describeQueue, pollIsFresh, temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
+import { describeQueue, pollIsFresh, temporalQueueDescriber, type QueueDescriber } from './pollers';
 import { PROBE_WORKFLOW, probeQueue } from './queues';
 import { NAMESPACE, getClient } from './temporalClient';
 import { runWorkflowStore, type RunWorkflowStore } from './data/runWorkflows';

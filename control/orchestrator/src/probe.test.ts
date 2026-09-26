@@ -19,7 +19,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { ControlRefused } from './workflowControl';
-import { POLL_FRESH_MS, type QueueDescriber } from './panels/pollers';
+import { POLL_FRESH_MS, type QueueDescriber } from './pollers';
 import { PROBE_QUEUE, PROBE_WORKFLOW } from './queues';
 import {
   PROBE_FIELDS,

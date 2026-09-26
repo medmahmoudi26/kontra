@@ -113,8 +113,12 @@ func TestTheRetiredWordSweepReadsTheTree(t *testing.T) {
 	if len(sources) < 20 {
 		t.Fatalf("only %d non-test Go sources under cli/ — the walk is broken", len(sources))
 	}
-	if _, ok := sources["panels.go"]; !ok {
-		t.Error("the walk did not reach panels.go, which is where the word actually survived")
+	// THE ANCHOR MOVED WHEN ITS FILE DID. It was `panels.go` — where the word actually survived, in
+	// a `CAMPAIGN` column header — and that file went with the Monitor. `fleet.go` is the successor
+	// for the same reason the guard exists: it is where `--campaign` was removed, where the prose
+	// explaining the retirement lives, and the file a reader looks in for the word's replacement.
+	if _, ok := sources["fleet.go"]; !ok {
+		t.Error("the walk did not reach fleet.go, which is where the retirement is explained")
 	}
 
 	// …and the pattern must find the literals it is about to judge.

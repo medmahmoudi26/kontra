@@ -1,45 +1,38 @@
 /**
- * The `poller` signal: Temporal pollers on the actor's shared queue (ADR 0020, slice 3).
+ * The `poller` signal: who is actually polling a Temporal task queue.
  *
  * This is `cli/workers.go` transplanted, and the transplant is deliberate rather than
- * convenient — `collectWorkers`/`describeQueue` exist because REGISTRATION SAYS AN ACTOR EXISTS AND
- * ONLY A POLLER SAYS IT CAN RUN, and the distinction that command was written to surface must
- * survive the move to a tile:
+ * convenient — `describeQueue` exists because REGISTRATION SAYS AN ACTOR EXISTS AND ONLY A POLLER
+ * SAYS IT CAN RUN, and the distinction that command was written to surface must survive the move:
  *
- *   live     at least one poller identity, attributable to this Machine
+ *   live     at least one poller identity on the queue
  *   none     the queue is registered and NOTHING is polling it — the classic trap
- *   unknown  we could not ask, or could not attribute the answer to this Machine
+ *   unknown  we could not ask
  *
  * `unknown` is never `none`. "We could not ask Temporal" and "nothing is polling" are different
  * facts about the world, and `heartbeat.ts` records what conflating them costs: a renamed field
  * defaulting to 0 leaves a monitor showing `0/0` forever while looking like a measurement.
  * `cli/workers.go` holds the same line — a dial failure there is a loud error, never `(none)`.
  *
- * WHAT THE MOVE ADDS, AND WHY IT HAS TO. `kontra workers list` reports per QUEUE; a Terminal is per
- * MACHINE, and every Machine placed with the same actor and version polls ONE shared queue. So a
- * queue-level `live` painted on every tile is exactly the round-3 shape ADR 0020 exists to catch:
- * nine healthy handlers would render the tenth, whose `kontra-handler.service` is dead, green.
- * Attribution comes from the poller identity, which neither `runtime/handler/main.go` (`client.Dial` with no
- * `Identity`) nor the Python host overrides, so both SDK defaults apply and both carry the host:
- * Go `<pid>@<hostname>@<queue>`, Python `<pid>@<hostname>`. When an identity cannot be parsed we
- * report `unknown` rather than guessing in either direction.
+ * IT USED TO LIVE UNDER `panels/` AND ANSWER A SECOND QUESTION. Alongside the fold below it carried
+ * `pollerFor`, `hostIsMachine`, `describeFleetQueues` and `queueForMachine` — per-MACHINE
+ * attribution, which existed so a Monitor tile could say whether THIS box's handler was the one
+ * polling. The Monitor is gone and that half went with it; what is left is the queue-level fact,
+ * which is what every one of this module's callers was already asking for (`routes/runs.ts`,
+ * `routes/pollers.ts`, `routes/stuck.ts`, `routes/logsCoverage.ts`, `workflowControl.ts`,
+ * `activities/fleet.ts`, `probe.ts`, `server.ts`).
  *
- * The Temporal client is behind `QueueDescriber` and the real one is required LAZILY, the way
- * `discovery.ts` requires `infra/state`: `heartbeat.ts` records that importing the client transitively
- * fails to resolve `@temporalio/proto` under vitest, and a test that fakes this seam has no reason to
- * make this process resolve a gRPC stack at all.
+ * The Temporal client is behind `QueueDescriber` and the real one is required LAZILY: `heartbeat.ts`
+ * records that importing the client transitively fails to resolve `@temporalio/proto` under vitest,
+ * and a test that fakes this seam has no reason to make this process resolve a gRPC stack at all.
  */
 
-// THE PURE HALF MOVED TO @kontra/core (queues.ts): sharedQueue, POLL_FRESH_MS and pollIsFresh
-// have no dependencies, and the console needs them while this module reaches infra/stacks.
+// THE PURE HALF LIVES IN @kontra/core (queues.ts): sharedQueue, POLL_FRESH_MS and pollIsFresh have
+// no dependencies, and the console needs them too. Re-exported here so this module stays the one
+// import site for "everything about pollers".
 export { sharedQueue, POLL_FRESH_MS, pollIsFresh, identityHost } from '@kontra/core/queues';
-// …and imported as well as re-exported, because this module CALLS it (line ~263). A bare
-// `export … from` re-exports without binding the name locally.
-import { sharedQueue, identityHost } from '@kontra/core/queues';
 
-import type { MachineTarget } from './discovery';
-import type { TerminalHealth } from './types';
-import { temporalConnectOptions, type TemporalConnectOptions } from '../temporalTls';
+import { temporalConnectOptions, type TemporalConnectOptions } from './temporalTls';
 
 
 /** `temporal.api.enums.v1.TaskQueueType`. WORKFLOW + ACTIVITY, folded; NEXUS (3) is skipped for
@@ -135,141 +128,6 @@ export async function describeQueue(d: QueueDescriber, queue: string): Promise<Q
   let lastPoll = 0;
   for (const t of seen.values()) if (t > lastPoll) lastPoll = t;
   return { queue, identities, workers, lastPoll };
-}
-
-/** What a node that is THIS BOX can legitimately be called. `discovery.ts` names the local node
- *  `localhost`; a Worker running on it identifies itself with `os.hostname()`, which is whatever the
- *  box is actually called. Both denote the same machine. */
-const LOCAL_LABELS = new Set(['localhost', '127.0.0.1', '::1']);
-
-/**
- * A Machine name matches a poller host when the host's first dot-label equals it, so an FQDN
- * (`kf-crawl-01.internal`) still attributes. DigitalOcean sets a droplet's hostname from its name,
- * and `programs/fleet.ts` names them `kf-<role>-NN` explicitly for exactly this kind of correlation.
- *
- * THE LOCAL NODE IS THE EXCEPTION, and it was a permanent false alarm. A `local` Terminal's node is
- * literally `localhost`, but its Worker identifies itself by `os.hostname()` — on this controller,
- * `main-droplet`. `'main-droplet' === 'localhost'` is false, so a local actor that was polling
- * perfectly reported `poller: NONE — polled by 1 worker(s) (main-droplet) but none from localhost,
- * its kontra-handler.service is probably down`. Every local pane, always, in red, saying a service
- * was down while it was up.
- *
- * This is the same shape as the `loads` and `reachable` bugs beside it: a fleet-shaped assumption
- * applied to a node that is not a Machine. `hostName` is a parameter rather than a call to
- * `os.hostname()` so the rule is testable without depending on what the test host is called.
- */
-export function hostIsMachine(host: string, machine: string, hostName?: string): boolean {
-  const full = host.trim().toLowerCase();
-  const label = (full.split('.')[0] ?? '').toLowerCase();
-  const node = machine.trim().toLowerCase();
-  if (label === node) return true;
-  if (!LOCAL_LABELS.has(node)) return false;
-  // The node IS this box, so its own hostname attributes to it — as does another spelling of local.
-  // Match the WHOLE host for those: `127.0.0.1` has dots and its first label is `127`.
-  if (LOCAL_LABELS.has(full)) return true;
-  if (hostName === undefined) return false;
-  return label === (hostName.split('.')[0] ?? '').toLowerCase();
-}
-
-export interface PollerVerdict {
-  poller: TerminalHealth['poller'];
-  detail?: string;
-}
-
-/**
- * One Machine's verdict on one queue's folded state.
- *
- * The order of these branches IS the contract. Read top to bottom: could we ask, is anything
- * polling at all, is any of it this Machine's, and — only if none of it is — do we understand the
- * identities well enough to say so.
- */
-export function pollerFor(
-  machine: string,
-  q: QueueState | undefined,
-  hostName?: string
-): PollerVerdict {
-  if (!q) {
-    return {
-      poller: 'unknown',
-      detail: `no shared queue for ${machine} — the stack carries no actor placement, so there is nothing to poll`,
-    };
-  }
-  if (q.error !== undefined) {
-    return {
-      poller: 'unknown',
-      detail: `could not ask Temporal about queue ${q.queue}: ${q.error}`,
-    };
-  }
-  if (q.identities.length === 0) {
-    // The whole point of `kontra workers list`. Nothing polls this queue from anywhere, so this
-    // Machine's handler certainly does not, and no attribution is needed to say it.
-    return {
-      poller: 'none',
-      detail: `queue ${q.queue} is registered but nothing is polling it — no handler is running anywhere in the fleet`,
-    };
-  }
-
-  const hosts = q.identities.map(identityHost);
-  for (const host of hosts) {
-    if (host !== undefined && hostIsMachine(host, machine, hostName)) return { poller: 'live' };
-  }
-
-  const named = hosts.filter((h): h is string => h !== undefined);
-  if (named.length === 0) {
-    return {
-      poller: 'unknown',
-      detail:
-        `${q.identities.length} worker(s) poll queue ${q.queue}, but no identity names a host ` +
-        `(${q.identities.slice(0, 3).join(', ')}), so ${machine}'s own handler cannot be confirmed`,
-    };
-  }
-  return {
-    poller: 'none',
-    detail:
-      `queue ${q.queue} is polled by ${named.length} worker(s) (${uniqueSorted(named).slice(0, 4).join(', ')}) ` +
-      `but none from ${machine} — its kontra-handler.service is probably down`,
-  };
-}
-
-function uniqueSorted(values: string[]): string[] {
-  return [...new Set(values)].sort();
-}
-
-/**
- * Describe every queue the given Machines need, ONCE per queue.
- *
- * Twelve Machines placed with one actor share one queue, and one describe answers for all of them.
- * Machines with no placement contribute no queue and get no entry — `pollerFor` reads a missing
- * entry as `unknown`.
- */
-export async function describeFleetQueues(
-  d: QueueDescriber,
-  machines: readonly MachineTarget[]
-): Promise<Map<string, QueueState>> {
-  const queues = new Set<string>();
-  for (const m of machines) {
-    if (m.actor === '') continue;
-    queues.add(sharedQueue(m.actor, m.version));
-  }
-  const out = new Map<string, QueueState>();
-  await Promise.all(
-    [...queues].map(async (queue) => {
-      out.set(queue, await describeQueue(d, queue));
-    })
-  );
-  return out;
-}
-
-/** The queue a Machine's tile asks about, or undefined when it has no placement. */
-export function queueForMachine(m: MachineTarget): string | undefined {
-  if (m.actor === '') return undefined;
-  // A mode whose session name carries the actor but NOT its version cannot name the shared queue:
-  // `sharedQueue(actor, '')` is `<actor>-shared`, a real but DIFFERENT queue, and describing it would
-  // report `poller: none` for a healthy local Worker. `health.ts` turns this undefined into `unknown`
-  // with the reason. The fleet keeps its behaviour exactly: its placement comes from stack outputs,
-  // where an empty version means the same thing it always did.
-  if (m.version === '' && (m.mode ?? 'fleet') !== 'fleet') return undefined;
-  return sharedQueue(m.actor, m.version);
 }
 
 // --- the real describer -------------------------------------------------------------------------

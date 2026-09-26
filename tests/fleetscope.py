@@ -72,8 +72,6 @@ class FleetScope:
         #: Fail `resolveBundle`. THE ADR'S OWN EXAMPLE of a `place()` that fails after a successful
         #: `hold()` — "no room, image will not pull, digest unsigned" — and the one `fleet.up()`
         #: structurally cannot reach, because it resolves before a Machine exists.
-        self.sessions_fail: str = ""
-        self.sessions_refused: list = []
         self.machines_named: list = ["kf-nscheck-01", "kf-nscheck-02"]
         self.resolve_fails = resolve_fails
         #: How many Machines a converge reports. Non-zero so the standing-Machine count in
@@ -208,15 +206,6 @@ class FleetScope:
                     "lease": arg["lease"],
                     "leases": self.leases,
                     "expiresAt": 1_756_569_600_000,
-                }
-            if name == fleet.CONVERGE_SESSIONS_ACTIVITY:
-                # The session converge is an OBSERVABILITY affordance, so this fake can be told to
-                # fail and the scope must survive it — see `test_fleet_sessions.py`.
-                if self.sessions_fail:
-                    raise RuntimeError(self.sessions_fail)
-                return {
-                    "converged": [m for m in sorted(self.machines_named)],
-                    "refused": list(self.sessions_refused),
                 }
             if name == fleet.DROP_LEASE_ACTIVITY:
                 return {"workflowId": "kontra-lease/" + str(arg["stackFqn"]), "delivered": True}

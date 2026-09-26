@@ -86,11 +86,6 @@ def test_place_converges_the_artifact_onto_machines_that_are_already_standing():
         "stackWorkflow",  # capacity
         fleet.RESOLVE_BUNDLE_ACTIVITY,  # which Artifact
         "stackWorkflow",  # placement
-        # SESSIONS FOLLOW THE PLACEMENT AND ONLY THE PLACEMENT. `machinesFromStack` names only
-        # Machines carrying one, so converging after the CAPACITY stackWorkflow above would ask
-        # about a stack with nothing on it — and a bare `hold()` therefore skips it entirely,
-        # which is why this list has one session converge and not two.
-        fleet.CONVERGE_SESSIONS_ACTIVITY,
         fleet.DROP_LEASE_ACTIVITY,
     ], scope.summary()
     placed = _child_args(scope)[-1]

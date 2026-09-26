@@ -11,8 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"net/http"
-	"os"
 	"strings"
 	"text/tabwriter"
 
@@ -90,15 +88,6 @@ func cmdDoctor(args []string) error {
 		}
 	}
 
-	// The Dashboard streamer's base URL comes from `panels.go`'s resolver — one source of truth for
-	// KONTRA_PANEL_URL and KONTRA_PANEL_PORT. Its fallback is `localhost`, though, and doctor's own
-	// rule (see hostOf) is that every row points at the host the orchestrator is on, so a remote
-	// `--api` does not quietly probe the operator's laptop. An explicit KONTRA_PANEL_URL still wins.
-	panelsURL := panelURL()
-	if os.Getenv("KONTRA_PANEL_URL") == "" && orchHost != "localhost" {
-		panelsURL = ui(orchHost, cliutil.EnvOr("KONTRA_PANEL_PORT", defaultPanelPort))
-	}
-	panelsOK, panelsStat := panelsHealth(panelsURL)
 	metricsAddr, metricsOK, metricsStat := metricsHealth()
 
 	services := []svcRow{
@@ -106,18 +95,11 @@ func cmdDoctor(args []string) error {
 		{"orchestrator", "catalog + run/dataset API, web UI", *apiURL, httpOK(*apiURL + "/api/health"), ""},
 		{"temporal", "workflow engine (gRPC)", config.TemporalAddress(), tcpUp(config.TemporalAddress()), ""},
 		{"seaweedfs", "S3 object store", ui(orchHost, portSeaweedS3), httpAnswers(ui(orchHost, portSeaweedS3)), ""},
-		{"panels", "Dashboard streamer (forked child of orchestrator-infra)", panelsURL, panelsOK, panelsStat},
 		{"metrics", "VictoriaMetrics — what every Machine's vmagent pushes to", metricsAddr, metricsOK, metricsStat},
 	}
 
 	consoles := []uiRow{
 		{"Orchestrator", *apiURL, "graphs · runs · SQL-queryable datasets"},
-		// TWO ORIGINS, and the table says both: the Dashboard is the SPA's third view, so the link is
-		// the SPA's, while its bytes come from the streamer's own URL (ADR 0020 — panel bytes never
-		// touch the event loop serving the CLI's DuckDB queries). "read-only" and "lossy" are stated
-		// on purpose: a wall that looks like a log invites someone to treat a Terminal as evidence for
-		// what a Worker did, and the Manifest, the journal and the lake are the record.
-		{"Dashboard", *apiURL, "Dashboard tab — read-only Terminals over the Fleet's tmux; lossy, NOT the record (streams from " + panelsURL + ")"},
 		{"Temporal", ui(tempHost, portTemporalUI), "workflow executions & history"},
 		{"SeaweedFS", ui(orchHost, portSeaweedUI) + "/buckets/kontra/", "object / blob browser"},
 	}
@@ -325,29 +307,6 @@ func metricsHealth() (addr string, ok bool, stat string) {
 }
 
 func ui(host, port string) string { return "http://" + host + ":" + port }
-
-// panelsHealth probes the Dashboard streamer, and distinguishes SWITCHED OFF from DOWN.
-//
-// The streamer fails closed: with no KONTRA_PANEL_TOKEN configured, every panel route answers 503
-// and serves nothing (auth.ts's own behaviour, reused). That is a deliberate configuration, not a
-// fault, and reporting it as "DOWN" would send an operator looking for a crashed process. A
-// connection refused, on the other hand, really is down — or the port is not published.
-func panelsHealth(base string) (bool, string) {
-	resp, err := statusHTTP.Get(base + "/api/panels/health")
-	if err != nil {
-		// The port is named from panels.go's constant, not spelled again here.
-		return false, "DOWN (is " + cliutil.EnvOr("KONTRA_PANEL_PORT", defaultPanelPort) + " published?)"
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return true, ""
-	case http.StatusServiceUnavailable:
-		return false, "disabled (set KONTRA_PANEL_TOKEN)"
-	default:
-		return false, fmt.Sprintf("HTTP %d", resp.StatusCode)
-	}
-}
 
 // renderDoctor prints the Services table and the Web-consoles table.
 func renderDoctor(services []svcRow, consoles []uiRow) {

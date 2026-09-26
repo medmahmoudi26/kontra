@@ -13,9 +13,11 @@ import { describe, expect, it } from 'vitest';
 import {
   KONTRA_INTERNAL_WORKFLOW_TYPES,
   buildRunDiscoveryQuery,
+  buildWorkflowIdQuery,
   registerSearchAttributes,
 } from './visibility';
 import { LEASE_WORKFLOW } from './lease';
+import { SERVE_DEV_WORKFLOW, serveDevWorkflowId } from './queues';
 
 /** A stand-in Connection that records every addSearchAttributes call — the one seam registration
  *  reaches. Registration must be idempotent and self-healing, so an AlreadyExists is swallowed;
@@ -87,5 +89,49 @@ describe('the internal workflow types', () => {
     // A type name that disagrees with the registration excludes NOTHING and fails silently — the
     // list would look right and the Runs page would still carry the rows.
     expect(KONTRA_INTERNAL_WORKFLOW_TYPES).toContain(LEASE_WORKFLOW);
+  });
+
+  /**
+   * THE HIDING HALF AND THE SHOWING HALF MUST NAME THE SAME TYPE.
+   *
+   * serve-dev is the one entry on this list that is drawn somewhere else: the Actors page reads a
+   * folder's serve history through `temporalClient.listServes`, which queries this type by name.
+   * Two literals would fail in opposite directions — the Runs page filling with infrastructure
+   * (wrong and loud) or the history reporting "nothing has ever served this" about a folder served
+   * all week (wrong and silent). Pinning the exclusion against the shared constant is what makes
+   * the second one impossible.
+   */
+  it('hides serve-dev under the same name `queues.ts` starts and lists it under', () => {
+    expect(KONTRA_INTERNAL_WORKFLOW_TYPES).toContain(SERVE_DEV_WORKFLOW);
+    // …and the exclusion really reaches the query, not just the array.
+    expect(buildRunDiscoveryQuery(KONTRA_INTERNAL_WORKFLOW_TYPES)).toContain(
+      `'${SERVE_DEV_WORKFLOW}'`
+    );
+  });
+});
+
+/**
+ * The query behind a REUSED workflow id's history — `serve-dev/at:<folder>` and `kontra-fleet/<stack>`
+ * are both one id with many executions under it.
+ */
+describe('buildWorkflowIdQuery', () => {
+  it('narrows to one type AND one id, so a folder sees only its own serves', () => {
+    const q = buildWorkflowIdQuery(SERVE_DEV_WORKFLOW, serveDevWorkflowId('at:/w/actors/desync'));
+    expect(q).toBe(
+      "WorkflowType = 'serveDevWorkflow' AND WorkflowId = 'serve-dev/at:/w/actors/desync'"
+    );
+  });
+
+  it('has no ORDER BY — SQLite visibility rejects it outright', () => {
+    // The scar this file's neighbours carry: `temporal start-dev` and CI run SQLite visibility,
+    // which refuses ORDER BY, so every listing in `temporalClient.ts` sorts client-side instead.
+    expect(buildWorkflowIdQuery(SERVE_DEV_WORKFLOW, 'serve-dev/at:/w')).not.toMatch(/ORDER BY/i);
+  });
+
+  it("escapes a quote in the id rather than ending the literal early", () => {
+    // A folder path can legally contain an apostrophe (`/w/mo's actors/x`), and the id is that path.
+    // Unescaped it would close the string literal and hand the rest of the path to the parser.
+    const q = buildWorkflowIdQuery(SERVE_DEV_WORKFLOW, "serve-dev/at:/w/mo's actors/x");
+    expect(q).toContain("'serve-dev/at:/w/mo''s actors/x'");
   });
 });

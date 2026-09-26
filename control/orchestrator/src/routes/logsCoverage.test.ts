@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { QueueDescriber } from '../panels/pollers';
+import type { QueueDescriber } from '../pollers';
 import { coverage } from './logsCoverage';
 
 /** Just enough `Repo` for the queue set. The real one carries thirty other things. */

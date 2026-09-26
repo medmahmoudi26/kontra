@@ -262,7 +262,7 @@ func assertNoRuntimeAccess(args []string) error {
 
 // podmanPod is the pod holding one Worker's pair. `kontra-` prefixed so a Machine's pods are
 // separable from anything else on it at a glance, and `<name>-<version>` because that is the identity
-// every other surface already prints (workerHandle.id, tmux.Session, queues.Shared).
+// every other surface already prints (workerHandle.id, cliutil.ActorWorkerName, queues.Shared).
 func podmanPod(name, version string) string { return "kontra-" + name + "-" + version }
 
 // podmanContainer is one half's container. The pod name plus the part, so `podman ps` reads as the
