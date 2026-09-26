@@ -72,8 +72,18 @@ def fail(title: str, *lines: str) -> None:
 
 
 def main(argv: list[str]) -> None:
-    if len(argv) != 2:
+    if len(argv) == 2 and argv[1] in ("-h", "--help"):
         print(__doc__)
+        sys.exit(0)
+    if len(argv) != 2:
+        # A USAGE ERROR GOES TO STDERR AS ONE LINE, and `--help` is what prints the docstring.
+        #
+        # This printed `__doc__` to stdout and exited 2 for both cases. In a CI log that is sixty
+        # lines of prose about bind mounts under a red X, which reads as "the self-containedness check
+        # is broken" — the check reporting its own findings and the check being called wrong look
+        # identical. They are different failures and only one of them is about the install.
+        print(f"usage: {os.path.basename(argv[0])} <install-dir>", file=sys.stderr)
+        print("       --help for what this asserts and why", file=sys.stderr)
         sys.exit(2)
     install = os.path.abspath(argv[1])
 
