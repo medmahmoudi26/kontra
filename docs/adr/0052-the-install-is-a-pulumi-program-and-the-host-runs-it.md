@@ -280,6 +280,65 @@ we cannot attribute is `unknown`, not `none`; that bucket is where a developer's
 It reads only. `dashboard.ts`'s rule stands: converging goes through Temporal so the operation has an
 id, a retry policy and a record.
 
+### 7. `kontra update` is the same converge, and a volume delete is a refusal
+
+An install nobody can upgrade is an install people pin and abandon. `kontra update` re-resolves the
+image digests, previews, and converges — the same program, the same engine, a different desired
+state. It is not a second code path.
+
+**Its whole safety rests on one property of the thing it is built from, and that property cuts both
+ways.** §1's own warning applies here at its sharpest: *Pulumi's desired state is TOTAL.* A converge
+that no longer mentions a volume does not leave it alone — it deletes it. On a Fleet that costs a
+Machine; here it costs every Dataset the install has ever produced.
+
+So the volumes are graded, in the program, by what losing one actually costs — and **ten of the
+eleven are protected**, because protection is free and the only cost is having to unprotect
+deliberately.
+
+**`seaweed-data` and `postgres-data` are ONE unit.** Postgres holds the DuckLake *catalog* — which
+files are live — plus the materialization ledger and the Dataset records carrying tags and renames.
+Seaweed holds the parquet those rows point at, plus `cas/`, `units/` and `history/`. Protect one and
+not the other and you get a catalog pointing at nothing, or gigabytes of files nothing can find.
+`data/maintenance.ts`'s reclamation chain assumes the catalog is the authority for liveness, so an
+out-of-band loss on either side breaks that assumption **silently**. They are protected together or
+the protection means nothing.
+
+Two that look like cache and are not. **`redis-data`** carries `object_state` and `global_state` —
+cross-Session durable author state with no other home (`kontra-global:{actor}:{key}`); only
+`unit_state` is scratch, and that is safe because Units are idempotent. **`registry-data`** holds the
+digests Placements are pinned to (ADR 0011's `expected_digest`): rebuilding an image yields a *new*
+digest, so a Fleet recorded against the old one can never be re-run as recorded. It is rebuildable
+as software and not rebuildable as the thing a Run referenced.
+
+`temporal-dynamicconfig` is the only genuinely rebuildable volume — a config file that lives in the
+repo — and it is the only one left unprotected, with a comment beside it saying so. An unprotected
+volume must read as a decision rather than as an oversight.
+
+**The dangerous case is replacement, not deletion.** A converge that creates a volume under a new
+name and orphans the old one contains no delete at all: a check looking for destructive operations
+passes, the stack comes up healthy and empty, and the data sits on disk where nobody looks. So
+`kontra update` asserts **identity** — each volume still named what it was, still attached to the
+same service — rather than inferring safety from what a plan does not contain. A thing that looks
+healthy while being wrong is worse than a thing that fails.
+
+**`pulumi-state` is the one whose loss is not local.** It is the record of every Machine the control
+plane owns. Losing it does not lose data — it loses *the ability to destroy cloud Machines that are
+still billing*, which `infra/paths.ts` already names: a `down -v` that took it "would orphan every
+machine we own". It is therefore protected, and it is the one volume `kontra update` exports before
+it converges, because a protected resource is safe from Pulumi and not from `rm`.
+
+`protect: true` is not documentation: Pulumi refuses to delete a protected resource and fails the
+converge, so the program cannot express the destructive plan at all, for any caller — `kontra up`,
+`kontra update`, or a person running `pulumi` by hand with the wrong stack selected. The identity
+assertion above is what covers the failure protection cannot see. Both name the volume when they
+refuse, because a person who trips either should be told which one and why rather than handed a
+provider error about a resource URN.
+
+What it does not decide: **schema migration**. Temporal's auto-setup owns its own; `orchestrator-db`
+and the DuckLake catalog do not, and nothing here says what happens when an image expects a shape
+the volume does not have. Naming that before a migration exists would put a word on a decision
+nobody has made.
+
 ## Consequences
 
 - **Docker is no longer the only host prerequisite.** `pulumi` joins it. The installer resolves both
