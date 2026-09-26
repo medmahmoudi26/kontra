@@ -81,22 +81,83 @@ x-orchestrator-env: &orchestrator-env
   # Where the logs proxy reads from. In-compose and unpublished by default; a deployment with its
   # own OpenTelemetry-compatible store re-points this one variable (ADR 0050 §1).
   KONTRA_LOGS_URL: ${KONTRA_LOGS_URL:-http://victorialogs:9428}
+  # ── WHETHER RETENTION ACTUALLY DELETES ANYTHING ──────────────────────────────────────────────
+  #
+  # OFF BY DEFAULT, AND THAT DEFAULT FILLS DISKS. `sweepDatasetsWorkflow` (ADR 0029 §5) is armed
+  # hourly at boot by `retention.ts`, but a firing with no mode resolves this variable on the worker
+  # holding the lake, and `retentionCollects()` treats anything but an affirmative as a DRY RUN —
+  # "the failure direction that keeps data". So an installation that never sets it sweeps every
+  # hour, reports what it would delete, and deletes nothing, for its whole life.
+  #
+  # MEASURED, on this box, 2026-09-24: SeaweedFS full at 154 GB. `/vol/status` reported 0.1% of
+  # bytes deleted — so a vacuum would reclaim nothing, because NOTHING HAS EVER BEEN COLLECTED. The
+  # visible symptom was not a disk alert: actor runs failed with `CancelledError: Activity
+  # cancelled`, because `put_subunit` blocked on an object store that could not allocate, missed its
+  # heartbeat, and was retried forever. `cli/appliance/bundle/hydrate.go` warns about exactly this
+  # shape — "a full disk on this system does not fail loudly".
+  #
+  # PASSED THROUGH EMPTY RATHER THAN OMITTED, for the reason `KONTRA_EXPLORE_TOKEN` above records:
+  # an operator who sets it in `.env` should not then have to discover that no `environment:` block
+  # carried it. Setting it to `1`/`true`/`yes`/`on` is what makes the sweep collect — a deliberate
+  # act, because it deletes Datasets past their retention.
+  KONTRA_RETENTION_COLLECT: ${KONTRA_RETENTION_COLLECT:-}
 
-# ── ONE TMUX SERVER, TWO CONTAINERS ────────────────────────────────────────────────────────────
+  # ── HOW LONG A RUN'S RAW UNIT BLOBS ARE KEPT ───────────────────────────────────────────────────
+  #
+  # `units/` is one object per pushed record — the raw working, not the answer. MEASURED on this box
+  # 2026-09-24: 254,801 objects, 7.56 GiB, 99.1% of the entire object store, all of it written in the
+  # preceding SIX DAYS, and nothing had ever collected any of it because `sweepUnits` was referenced
+  # by four comments and a wiki table and did not exist.
+  #
+  # THE LIBRARY DEFAULT IS 90 DAYS AND IS WRONG FOR THIS DEPLOYMENT. At ~1.25 GiB/day that is ~112
+  # GiB of unit blobs before the first object is ever eligible, on a 154 GB disk. The default stays
+  # at the documented number because silently disagreeing with the wiki is worse; the number that
+  # applies HERE is set here.
+  #
+  # SEVEN DAYS is a week of raw evidence for any run somebody wants to re-examine, and it is well
+  # past the point where a run's rows are in the lake. A run still materializing keeps its blobs
+  # whatever this says — `resolveBatch` reads them on retry, so the sweep will not touch a run whose
+  # ledger is not `complete`.
+  #
+  # ── THIS DRIVES TWO MECHANISMS, AND THE STORE'S IS THE REAL ONE ────────────────────────────────
+  #
+  #   1. AN S3 LIFECYCLE RULE on `units/`, written idempotently at bucket-ensure
+  #      (`codec/objectStore.ts:ensureLifecycle`). This is what actually keeps the prefix bounded,
+  #      and it costs no runtime: SeaweedFS turns it into a filer path TTL, segregates those writes
+  #      into their own volumes (verified: `ttl:260`), and unlinks each volume WHOLE when it expires.
+  #   2. `sweepUnits`, the in-repo backstop, for the objects written BEFORE the rule existed (a filer
+  #      TTL is stamped at write time, so the 254,801 already here carry `ttlSec: 0` forever) and for
+  #      stores with no lifecycle support.
+  #
+  # THE STORE'S VERSION IS NOT MERELY CHEAPER, IT IS THE ONE THAT FREES DISK. Deleting objects
+  # individually marks them dead inside a volume and the `.dat` file does not shrink — measured here,
+  # `deleted_bytes: 4,326,291` against `total size: 8,409,664,672`, 0.05% and never reclaimed.
+  # Recovering that needs `volume.vacuum`, which COPIES each volume and therefore needs as much free
+  # disk as the volume it rewrites, on the disk that is already full. An expired TTL volume is just
+  # unlinked. It is also the only thing that addresses the real amplification on this box: ~1 GiB of
+  # live objects sitting in 26 GiB of preallocated volumes that never shrink.
+  #
+  # DO NOT SET THIS BELOW 1. Sub-day values are refused rather than floored, because S3 expiry is
+  # day-granular and `0.5` would floor to 0 — "expire everything now", written by somebody who meant
+  # the opposite. The window is also the only thing protecting a materialization retry, which is
+  # bounded in HOURS by its Temporal retry policy: days beats hours, and nothing checks the ledger.
+  KONTRA_UNITS_RETENTION_DAYS: ${KONTRA_UNITS_RETENTION_DAYS:-7}
+
+# ── THERE IS NO SHARED TMUX SOCKET, AND ITS REMOVAL WAS A SECURITY FIX ─────────────────────────
 #
-# `serve` creates a tmux session in orchestrator-api (that is where the CLI, python3 and the SDK
-# are). The Dashboard's `local` mode runs `list-panes` from the PANELS STREAMER, which is a forked
-# child of orchestrator-infra. Two containers, two tmux servers, and the Monitor was therefore
-# empty for every worker the Serve button had just started — a wall that reports nothing is
-# indistinguishable from a worker that failed to boot, which is the one thing ADR 0020 says a tile
-# may never do.
+# This used to be `x-tmux-socket`, a volume both orchestrator containers mounted so they could
+# speak to ONE tmux server. api started it, infra was a client, and the Monitor needed both halves
+# to agree about which sessions existed.
 #
-# TMUX_TMPDIR moves the socket onto a shared volume, so both containers speak to the SAME server.
-# api starts it (it is the only one that creates sessions) and infra is a read-only client.
-# Restarting api kills that server and leaves a stale socket; MEASURED — tmux answers
-# `list-sessions` with exit 1 (which local.ts already reads as "no sessions") and the next
-# `new-session` starts a fresh server over it.
-x-tmux-socket: &tmux-socket /run/kontra-tmux
+# A tmux client can run `tmux new-session -d '<anything>'`, and that command executes inside
+# whichever container is running the SERVER. Ownership of the server was decided by a race, not by
+# policy: restarting api killed it and left the socket file behind, and the next `new-session` —
+# from either container — started a fresh server over it. So the writable rendezvous between the
+# HTTP-facing container and the one holding the read-write Docker socket was a cross-container
+# code-execution path that nothing enforced the direction of.
+#
+# The Monitor is gone, so the socket is gone with it. Do not reintroduce a shared writable socket
+# between these two containers; the role split below is the privilege boundary.
 
 x-kontra-home: &kontra-home
   - kontra-home:/var/lib/kontra
@@ -398,8 +459,6 @@ services:
       # instead — which is what tells a Run's history that `kontra-api` started it and not the
       # infra container sharing the image. Not an address: nothing routes on this.
       KONTRA_WORKER_ROLE: api
-      # `serve` starts the tmux server here; see x-tmux-socket.
-      TMUX_TMPDIR: *tmux-socket
       # ON A VOLUME, BECAUSE IT WAS ON THE CONTAINER'S OWN FILESYSTEM. `server.ts` defaults this to
       # `orchestrator.db` relative to its WORKDIR, which in this image is /src/control/orchestrator
       # — an overlay layer. So the actors, workflows, graphs, scratches and SOURCES tables were
@@ -414,7 +473,6 @@ services:
       - kontra-home:/var/lib/kontra:ro
       - secrets-store:/var/lib/kontra-secrets
       - orchestrator-db:/var/lib/kontra-db
-      - tmux-sock:/run/kontra-tmux
       - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"
@@ -450,22 +508,6 @@ services:
       # See the api's. This is the role that holds the cloud credential, so it is the one whose
       # name on a history event an auditor will be reading.
       KONTRA_WORKER_ROLE: infra
-      # The panels streamer is a child of THIS container and reads the server api started.
-      TMUX_TMPDIR: *tmux-socket
-      # ...so "the local node" is orchestrator-api, NOT this container. The streamer would otherwise
-      # label local Terminals with its own `os.hostname()` and match pollers against it — the wrong
-      # box, since every local session lives in api. See the `hostname:` note on orchestrator-api.
-      KONTRA_PANEL_LOCAL_HOST: kontra-api
-      # BOTH SPELLINGS OF THE SAME ORIGIN, because the browser's is whichever the operator typed.
-      #
-      # `panels.ts:DEFAULT_ORIGIN` is `http://localhost:8088` alone, and the console reaches the
-      # streamer DIRECTLY on 8090 (`panelsClient.ts:22`) rather than through the API — deliberately,
-      # to keep panel bytes off the event loop serving DuckDB queries. That makes this a genuine
-      # cross-origin request, so the allow-list decides it. Open the console on `127.0.0.1:8088`
-      # instead of `localhost:8088` — the same server, and the address the compose port mapping
-      # actually names — and the default refuses the socket while every other page works.
-      KONTRA_PANEL_ORIGIN: >-
-        http://localhost:${KONTRA_API_PORT:-8088},http://127.0.0.1:${KONTRA_API_PORT:-8088}
       KONTRA_INFRA_QUEUE: kontra-infra
       KONTRA_PULUMI_STATE_DIR: /data/pulumi-state
       KONTRA_PULUMI_WORK_DIR: /data/pulumi
@@ -477,30 +519,33 @@ services:
     volumes:
       - kontra-home:/var/lib/kontra:ro
       - secrets-store:/var/lib/kontra-secrets
-      - tmux-sock:/run/kontra-tmux
       - pulumi-state:/data
+      # THE WORKSPACE, READ-ONLY — because `serve` runs HERE now and could not see the code.
+      #
+      # `serveDevWorkflow` moved the serve verb off the API and onto this role, since starting a
+      # Worker means starting a CONTAINER and the socket is here (ADR 0036). What moved with it was
+      # the need to RESOLVE the folder: `SourceStore.get` is a directory read — ADR 0049 made the
+      # filesystem the registry, so there is no stored path to look up — and this container had the
+      # `KONTRA_WORKSPACES` variable without the mount it names. Every serve failed with
+      # `no registered source "at:/root/oss/kontra/workspaces/default/workflows/canary"`: the id the
+      # API minted from a folder it can see, handed to a role that cannot.
+      #
+      # THE SAME PATH ON BOTH SIDES, exactly as the API mounts it. A Source id is `at:<absolute
+      # path>`, so the two roles must agree on what that path means or the id is not portable
+      # between them — which is what the hop across the queue makes it.
+      #
+      # READ-ONLY, unlike the API's. Nothing here writes a caller's code: this role resolves the
+      # folder and then asks Docker to bind-mount it into the Worker, and THAT mount is resolved by
+      # the daemon against the HOST filesystem, not through this container's view. So `:ro` costs
+      # the serve path nothing and keeps the socket-holding container off the write path for source.
+      - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}:ro
       # Host-level Docker authority — see the file header.
       - /var/run/docker.sock:/var/run/docker.sock
-    # THE DASHBOARD'S OWN PORT, AND ITS ABSENCE WAS THE WHOLE BUG.
-    #
-    # The console does NOT reach the Monitor through the API. `panelsClient.ts:22` opens
-    # `ws://<host>:8090/api/panels/ws` straight at the streamer, deliberately — panel frames are a
-    # firehose and routing them through 8088 would put them on the event loop that serves the CLI's
-    # DuckDB queries. So the browser needs 8090 reachable from the HOST, and nothing published it.
-    #
-    # `control/orchestrator/src/routes/panels.ts:78` already asserted this mapping existed —
-    # "docker-compose.yml publishes 127.0.0.1:8090:8090" — and it did not. A comment describing a
-    # line that was never written is worse than no comment: it is where someone debugging stops
-    # looking. The observable failure was the Monitor alone refusing to connect, with every other
-    # page healthy: `the Dashboard socket failed (http://localhost:8090)`.
-    #
-    # MEASURED before this line: `curl http://localhost:8090/` from the host answered 000
-    # (unreachable), while the streamer inside the container binds 0.0.0.0 (`panels/server.ts:307`)
-    # and was listening the whole time. Same loopback default as every other published port here —
-    # the streamer carries no credential of its own beyond the panel ticket, so it must not be on a
-    # routable address by accident.
-    ports:
-      - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_PANEL_PORT:-8090}:8090"
+    # NO PUBLISHED PORT, AND THAT IS THE POINT. This container held 8090 for the Dashboard
+    # streamer, whose own comment admitted it "carries no credential of its own beyond the panel
+    # ticket" — the least-authenticated listener in the stack, in the one container with the
+    # read-write Docker socket and the cloud credential. The Monitor is gone, so the port is gone,
+    # and this role is now reachable only over the Compose network. Do not publish a port here.
     healthcheck:
       test: ["CMD", "node", "-e", "process.exit(0)"]
       interval: 30s
@@ -633,7 +678,6 @@ volumes:
   # and orchestrator-infra RESOLVES it at the last hop when a fleet comes up. A store only one of
   # them can see is a credential that saves and then cannot be found.
   secrets-store:
-  tmux-sock:
   temporal-dynamicconfig:
   pulumi-state:
     # `docker compose down` keeps this. `down -v` destroys Pulumi dockerFleet state AND Datasets.
