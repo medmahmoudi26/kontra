@@ -25,8 +25,8 @@ name: publish
 # `images.json` and `images.env` on the release name every image as `repo@sha256:…`, never as a tag.
 # `control/orchestrator/src/infra/CONTEXT.md:228` is the reason it matters for the third-party half:
 # "a reference with no host is Docker Hub, whose hundred manifest reads an hour are per *address*,
-# not per account". Nine anonymous Docker Hub pulls per install, from a public quickstart, behind
-# corporate NAT or on a shared CI runner, is a rate limit somebody else's install spends. So the nine
+# not per account". Eight anonymous Docker Hub pulls per install, from a public quickstart, behind
+# corporate NAT or on a shared CI runner, is a rate limit somebody else's install spends. So the eight
 # images `docker-compose.yml` names are mirrored to the same registry as ours and pinned.
 #
 # `latest` is pushed by nothing here. A floating tag in a registry is a thing an install can resolve
@@ -172,14 +172,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          # `${KONTRA_IMAGE:-kontra:latest}` → `kontra=KONTRA_IMAGE`. The `:-` default carries the
-          # tag, which is stripped: this workflow decides the tag, compose only decides the name.
+          # `${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}` → `kontra=KONTRA_IMAGE`.
+          #
+          # COMPOSE DECIDES THE NAME. THIS WORKFLOW DECIDES THE REGISTRY AND THE TAG. The `:-` default
+          # carries all three, and only the middle one is read here — which is why retagging or
+          # re-homing an image is not a change to this job, and renaming one is.
+          #
+          # THE SECOND `sed` IS LOAD-BEARING and was added when compose's defaults stopped being bare
+          # local tags. The quickstart is `curl docker-compose.yml && docker compose up -d` with no
+          # `.env`, so every default in that file has to be a reference a stranger's Docker can
+          # actually resolve — `ghcr.io/<owner>/<name>:dev`, not `kontra-orchestrator:latest`. But
+          # `[^:}]+` above has no `:` to stop at inside `ghcr.io/owner/name`, so it captures the whole
+          # path and `$2` became `ghcr.io/medmahmoudi26/kontra-orchestrator`. The `case` in the
+          # `images` job matches bare names, so all five would have fallen through to its `*)` arm and
+          # failed the build with "an image this workflow does not know how to build" — naming a
+          # registry path, which is the least actionable form of that error.
+          #
+          # It strips an optional leading path, so a bare name still passes through unchanged and a
+          # checkout that has not moved to qualified defaults derives exactly what it did before.
           #
           # NEWLINE-SEPARATED UNTIL THE OUTPUT, then joined with spaces once. A job output cannot hold
           # a newline, and getting the entries back apart by leaving `$var` unquoted for the shell to
           # split is the thing that works until one of these names contains a glob character.
           compose_pairs=$(grep -hoE '\$\{KONTRA_[A-Z_]*IMAGE:-[^}]+\}' docker-compose.yml \
             | sed -E 's/^\$\{(KONTRA_[A-Z_]*IMAGE):-([^:}]+)(:[^}]*)?\}$/\2=\1/' \
+            | sed -E 's#^([^=]*/)?([^/=]+)=#\2=#' \
             | sort -u)
 
           # `const workerBaseImage = "kontra-worker-base:1"` — cli/deploy.go:89.
@@ -511,6 +528,15 @@ jobs:
               kontra-worker-base)
                 build_one "$name" -f control/images/Dockerfile.workerbase
                 ;;
+              # The shipper and its parser, baked rather than bind-mounted. It appears in this table
+              # because compose stopped naming `python:3.12-alpine` and started naming
+              # `${KONTRA_LOGSHIP_IMAGE:-…}`, which also moves it off the `mirror` list above — the
+              # derivation in `plan` sorts that out on its own, and this is the hand-written half it
+              # cannot derive. See control/images/Dockerfile.logship for why logline.py could not
+              # take the `configs:` treatment postgres-init.sh got.
+              kontra-logship)
+                build_one "$name" -f control/images/Dockerfile.logship
+                ;;
               *)
                 echo "::error::the install references a kontra-owned image '$name' that this workflow does not know how to build."
                 echo "::error::add it to the case statement in .github/workflows/publish.yml, beside a Dockerfile under control/images/."
@@ -671,7 +697,7 @@ jobs:
           retention-days: 7
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
-  # mirror — the nine third-party images, copied whole, recorded by digest.
+  # mirror — the eight third-party images, copied whole, recorded by digest.
   #
   # WHY NOT `docker pull` + `docker tag` + `docker push`. That is the obvious three lines and it is
   # wrong in a way nobody notices until an arm64 install: `docker pull postgres:16-alpine` on an
@@ -714,7 +740,7 @@ jobs:
       # THE TARGET PATH IS A MECHANICAL TRANSFORM OF THE SOURCE, not a table of renames. Strip the
       # implicit `docker.io/`, add the implicit `library/` that a single-segment name carries, and
       # prefix `mirror/`. One rule means "which upstream is this" is answerable from the mirrored
-      # reference alone — and there is no second list of nine names to drift out of date.
+      # reference alone — and there is no second list of eight names to drift out of date.
       #
       # THE MIRRORED TAG IS THE UPSTREAM TAG, DELIBERATELY. It is not what anything resolves: the
       # digest recorded below is. Keeping the tag makes the mirror readable by a human comparing it
@@ -846,9 +872,11 @@ jobs:
               "# Append to the .env beside docker-compose.yml. Every reference is a digest: these",
               "# lines cannot be repointed, and `docker compose pull` will fetch exactly these bytes.",
               "#",
-              "# KONTRA_PULL_POLICY is `never` in .env.quickstart because the images used to be local",
-              "# (docker-compose.yml:441 and friends default it to `never` too). With published",
-              "# images `never` means compose refuses to fetch what it does not have, so it moves.",
+              "# KONTRA_PULL_POLICY is already `missing` in .env.quickstart and in compose's own",
+              "# defaults — it moved there when the install stopped being a clone. It is restated",
+              "# below anyway, because an operator appending this file to a .env they wrote before",
+              "# that change still has `never` in it, and `never` with published images means compose",
+              "# refuses to fetch what it does not already have.",
               "",
           ]
           for name in sorted(kontra):
@@ -864,10 +892,10 @@ jobs:
           lines += ["KONTRA_PULL_POLICY=missing", ""]
 
           # THE MIRROR IS LISTED AND COMMENTED OUT, WHICH IS THE HONEST SHAPE. docker-compose.yml
-          # names its nine third-party images literally (`image: postgres:16-alpine`, line 168) with
+          # names its eight third-party images literally (`image: postgres:16-alpine`, line 168) with
           # no `${…}` to override, so there is nothing an .env can do with these digests today —
           # issue 03's Pulumi program is what consumes them. Writing them here as live variables
-          # would be nine lines that look like they are doing something and are not, which is the
+          # would be eight lines that look like they are doing something and are not, which is the
           # shape trustpolicy.go:561-568 refuses for the same reason.
           lines += [
               "# The mirrored third-party images. NOT variables: docker-compose.yml names these",

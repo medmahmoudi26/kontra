@@ -136,17 +136,36 @@ release: console
 #
 # THE CONTEXT IS THE PARENT DIRECTORY because the console is a separate repository and `link:` is a
 # filesystem path — both checkouts have to be visible to one build.
+# ── THE TAGS THESE TARGETS WRITE ARE THE TAGS THE INSTALL RESOLVES ──────────────────────────────
+#
+# They used to be `kontra:latest` and `kontra-worker-base:1`. `docker-compose.yml` and
+# `control/pulumi/Pulumi.yaml` now default to `ghcr.io/medmahmoudi26/<name>:dev`, because the
+# quickstart is two `curl`s and `docker compose up -d` and a bare name only resolves on a machine
+# that has already built it.
+#
+# A LOCAL BUILD HAS TO WRITE THE SAME STRING OR THE LOCAL TRACK QUIETLY BECOMES A REGISTRY PULL.
+# Docker resolves by name, and `ghcr.io/medmahmoudi26/kontra:dev` and `kontra:latest` are two names
+# for the same bytes — so building the second and running the first sends the daemon to ghcr.io for
+# an image that is already on the disk. MEASURED before these moved: this machine held
+# `kontra:latest`, `kontra-orchestrator:latest`, `kontra-host:1` and `kontra-worker-base:1`, and not
+# one `ghcr.io/medmahmoudi26/*`. That is why `Pulumi.yaml`'s "RemoteImage resolves a locally present
+# image without consulting a registry" still holds: it holds per NAME, not per image.
+#
+# Overridable, and the override is what CI uses to build a tag before it exists.
+KONTRA_IMAGE ?= ghcr.io/medmahmoudi26/kontra:dev
+KONTRA_WORKER_BASE_IMAGE ?= ghcr.io/medmahmoudi26/kontra-worker-base:dev
+
 image: $(CONSOLE)
 	DOCKER_BUILDKIT=1 docker build -f control/images/Dockerfile.selfcontained \
 	  --build-arg VERSION=$(VERSION) \
-	  -t "$${KONTRA_IMAGE:-kontra:latest}" "$(dir $(CURDIR))"
+	  -t "$(KONTRA_IMAGE)" "$(dir $(CURDIR))"
 	$(MAKE) worker-base
 	@echo
-	@echo "  docker compose -f docker-compose.quickstart.yml up -d"
+	@echo "  docker compose up -d"
 	@echo "  open http://127.0.0.1:8088"
 
 worker-base:
-	docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
+	docker build -f control/images/Dockerfile.workerbase -t "$(KONTRA_WORKER_BASE_IMAGE)" .
 
 # `make image-from-release` — the OLDER path, kept because it is the one that proves the container
 # and the published tarball are the same bytes. It needs the host toolchain; `make image` does not.
@@ -157,7 +176,7 @@ image-from-release: release
 	  tarball=$$(ls build/release/kontra_*.tar.gz); \
 	  echo "==> image from $$tarball"; \
 	  docker build -f control/images/Dockerfile.appliance --build-arg TARBALL="$$tarball" \
-	    -t "$${KONTRA_IMAGE:-kontra:latest}" .
+	    -t "$(KONTRA_IMAGE)" .
 	@echo
 	@echo "  docker compose up -d      # the control plane"
 	@echo "  open http://127.0.0.1:8088"

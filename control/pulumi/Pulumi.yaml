@@ -145,10 +145,26 @@ config:
     type: integer
     default: 8088
 
-  # ── THE FOUR KONTRA-OWNED IMAGE REFS ──────────────────────────────────────────────────────────
+  # ── THE FIVE KONTRA-OWNED IMAGE REFS ──────────────────────────────────────────────────────────
   #
   # One key each so the CI track can point them at `ghcr.io/medmahmoudi26` on ADR 0038's single tag
   # without touching this program (ADR 0052 §3: "the install is a pull, not a build").
+  #
+  # THEY ARE REGISTRY-QUALIFIED NOW, AND THAT IS THE QUICKSTART'S DOING. `docker-compose.yml` is the
+  # artifact of record: two `curl`s and `docker compose up -d`, no clone and no build. A bare
+  # `kontra-orchestrator:latest` only resolves on a machine that has already built it, and a stranger
+  # who never builds gets `pull access denied` naming an image that tells them nothing. So compose's
+  # defaults carry the registry, and these match them — `parity.py` compares the two, and the whole
+  # point of it is that the two harnesses run the same images.
+  #
+  # THE PARAGRAPH BELOW STILL HOLDS, BUT ONLY IF THE LOCAL BUILD TAGS THE QUALIFIED NAME. A
+  # `RemoteImage` resolves out of the daemon by the name it is given, and `ghcr.io/…/kontra:dev` and
+  # `kontra:latest` are two different names for the same bytes. So `make image` had to move with
+  # these defaults — it tags `$${KONTRA_IMAGE:-…}` and that default is now qualified — or a
+  # developer who has built everything still sends the daemon looking for a tag it does not have,
+  # and the local track silently becomes a registry pull. MEASURED before the change: this machine
+  # held `kontra:latest`, `kontra-orchestrator:latest`, `kontra-host:1` and `kontra-worker-base:1`
+  # and not one `ghcr.io/medmahmoudi26/*`.
   #
   # MEASURED, and it is the fact that makes one set of refs serve both tracks: `docker.RemoteImage`
   # RESOLVES A LOCALLY PRESENT IMAGE WITHOUT CONSULTING A REGISTRY. `pulumi up` against
@@ -159,21 +175,30 @@ config:
   # `KONTRA_PULL_POLICY` knob has nothing left to do and is gone.
   kontraImage:
     type: string
-    default: kontra:latest
+    default: ghcr.io/medmahmoudi26/kontra:dev
   orchestratorImage:
     type: string
-    default: kontra-orchestrator:latest
+    default: ghcr.io/medmahmoudi26/kontra-orchestrator:dev
   hostImage:
     type: string
-    default: kontra-host:1
+    default: ghcr.io/medmahmoudi26/kontra-host:dev
+  # THE SHIPPER, WHICH USED TO BE STOCK `python:3.12-alpine` PLUS TWO BIND MOUNTS. It has its own
+  # image now (`control/images/Dockerfile.logship`) because a `curl` install has no
+  # `control/images/` to mount from, and because the old entrypoint ran `apk add docker-cli curl` on
+  # every boot. The parser could not take the `configs:`/`uploads` treatment postgres-init.sh gets:
+  # it is a file precisely so `tests/test_logline.py` can import it.
+  logshipImage:
+    type: string
+    default: ghcr.io/medmahmoudi26/kontra-logship:dev
   # NO CONTAINER RUNS THIS ONE, and it is here anyway. `kontra deploy` COPYs the actor-agnostic
   # handler out of it into every actor image (`cli/deploy.go`, `cli/serve.go:197`), so an install
   # that has not got it turns the first `kontra deploy` into a build. It appears in no compose
   # service, which is why `make image` building it and not `kontra-orchestrator:latest` reads as
-  # arbitrary until you know this.
+  # arbitrary until you know this — and why `parity.py` cannot see it: with no container to attach
+  # it to, nothing in that file compares this key against anything.
   workerBaseImage:
     type: string
-    default: kontra-worker-base:1
+    default: ghcr.io/medmahmoudi26/kontra-worker-base:dev
 
   # ── WHERE THE OPERATOR'S CODE IS. REQUIRED, DELIBERATELY. ──────────────────────────────────────
   #
@@ -348,8 +373,9 @@ resources:
   # destroy` must not delete `kontra:latest` out from under a `docker build` cache, and verified —
   # after destroying a stack holding `kontra-host:1`, the image was still in the daemon.
   #
-  # Nine third-party images, all pinned by the compose file except `registry:2`, which floats there
-  # and floats here.
+  # Eight third-party images, all pinned by the compose file except `registry:2`, which floats there
+  # and floats here. It was nine until logship stopped being stock `python:3.12-alpine` and became a
+  # kontra-owned image — which also takes one anonymous Docker Hub pull off every install.
   imgPostgres:
     type: docker:index:RemoteImage
     properties: { name: "postgres:16-alpine", keepLocally: true }
@@ -382,12 +408,7 @@ resources:
     type: docker:index:RemoteImage
     properties: { name: "victoriametrics/victoria-logs:v1.9.1-victorialogs", keepLocally: true }
     options: { provider: "${dockerProvider}" }
-  imgPython:
-    type: docker:index:RemoteImage
-    properties: { name: "python:3.12-alpine", keepLocally: true }
-    options: { provider: "${dockerProvider}" }
-
-  # The four kontra-owned ones. `imgKontra` must resolve before `imgOrchestrator` can be BUILT —
+  # The five kontra-owned ones. `imgKontra` must resolve before `imgOrchestrator` can be BUILT —
   # `Dockerfile.orchestrator` is `FROM ${SPA_IMAGE} AS spa-src` — but at converge time both are
   # already-built artifacts and the order does not bind here.
   imgKontra:
@@ -405,6 +426,14 @@ resources:
   imgWorkerBase:
     type: docker:index:RemoteImage
     properties: { name: "${workerBaseImage}", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  # WAS `imgPython`, pointing at stock `python:3.12-alpine`. Renamed rather than repointed because
+  # the name said what it was and it is no longer that; `parity.py` resolves a container's image
+  # through its one `RemoteImage` dependency, so a stale name here would read as third-party in a
+  # file whose whole job is telling the two apart.
+  imgLogship:
+    type: docker:index:RemoteImage
+    properties: { name: "${logshipImage}", keepLocally: true }
     options: { provider: "${dockerProvider}" }
 
   # ── VOLUMES ───────────────────────────────────────────────────────────────────────────────────
@@ -510,24 +539,37 @@ resources:
       # of an empty `kontra_postgres-data`. Nothing gates on it: `KONTRA_DUCKLAKE_CATALOG` and
       # `KONTRA_MATERIALIZATION_DB` in orchestrator-api simply name a database that is not there.
       #
-      # ── `permissions: "0755"` AND NOT `executable: true`, AND THE DIFFERENCE IS 0744 ──────────
+      # ── `permissions: "0555"` — THE EXEC BIT IS LOAD-BEARING, THE WRITE BIT WAS INHERITED ─────
       #
-      # MEASURED, both ways, in a throwaway container: `executable: true` produces `-rwxr--r--`
-      # (0744); the host file is 0755 and the bind mount gave the container `-rwxr-xr-x`.
-      #
-      # That one bit decides which BRANCH of the postgres entrypoint runs. `docker-entrypoint.sh`
+      # THE EXEC BIT DECIDES WHICH BRANCH OF SOMEBODY ELSE'S ENTRYPOINT RUNS. `docker-entrypoint.sh`
       # does `if [ -x "$f" ]; then "$f"; else . "$f"; fi` for every `*.sh` in initdb.d, and it
       # evaluates that test after dropping to the `postgres` user — for whom a root-owned 0744 file
-      # is not executable. So 0744 SOURCES this script into the entrypoint's own shell instead of
-      # running it in a subshell, and `set -eu` on its second line then applies to the rest of the
-      # entrypoint. The entrypoint runs `set -Eeo pipefail` and deliberately NOT `-u`; adding `-u`
-      # to it mid-flight turns its next unset-variable read into a fatal error, AFTER the cluster has
-      # been created. A first boot that half-succeeds is worse than one that fails.
+      # is not executable. Without the bit this script is SOURCED into the entrypoint's own shell,
+      # and `set -eu` on its second line then applies to the rest of first boot. That entrypoint
+      # runs `set -Eeo pipefail` and deliberately NOT `-u`.
+      #
+      # MEASURED, with a second always-non-executable probe script reading `$-` from inside that
+      # shell: at 0444 `PROBE: -u LEAKED into the entrypoint shell`, at 0755 `PROBE: -u clean`. Both
+      # still complete on postgres:16-alpine — and line 3 of that entrypoint is upstream's own
+      # `# TODO swap to -Eeuo pipefail above (after handling all potentially-unset variables)`, so
+      # the release that lands it turns a harmless leak into a first boot that dies AFTER the
+      # cluster exists. `parity.py` compares this mode against compose's for exactly that reason.
+      #
+      # `executable: true` WOULD NOT DO. Measured in a throwaway container: it produces `-rwxr--r--`
+      # (0744), which is not executable to the `postgres` user and is therefore the sourcing branch.
+      # The mode is written out so the bit that matters is not left to a convenience flag.
+      #
+      # WAS 0755, MATCHING THE HOST FILE — `control/images/postgres-init.sh` is 0755 and the bind
+      # mount this replaced gave the container `-rwxr-xr-x`. Neither harness bind-mounts it now
+      # (compose carries it as a `configs:` entry with inline content), so "match the host file" has
+      # nothing left to match. 0555 is what injected, immutable content should be: executable,
+      # because that is the whole argument above, and writable by nobody, because nothing in this
+      # container has any business editing it.
       uploads:
         - file: /docker-entrypoint-initdb.d/01-ducklake.sh
           content:
             fn::readFile: ${assetsDir}/postgres-init.sh
-          permissions: "0755"
+          permissions: "0555"
       ports:
         - internal: 5432
           external: ${postgresPort}
@@ -854,7 +896,7 @@ resources:
     type: docker:index:Container
     properties:
       name: kontra-logship
-      image: ${imgPython.imageId}
+      image: ${imgLogship.imageId}
       restart: unless-stopped
       wait: false
       networksAdvanced:
@@ -875,31 +917,25 @@ resources:
         - hostPath: /var/run/docker.sock
           containerPath: /var/run/docker.sock
           readOnly: true
-      # THE TWO SCRIPTS, UPLOADED RATHER THAN BIND-MOUNTED — see the header. This also fixes
-      # something the bind mount got wrong: editing `logship.sh` on the host changed the file under a
-      # process that had already read it, so the fix appeared to be live and was not. An upload is
-      # ForceNew, so an edit REPLACES this container and the running shipper is the shipper in the
-      # repo.
+      # NO `uploads:`, AND NO `entrypoints:`. BOTH ABSENCES ARE THE CHANGE.
       #
-      # `logline.py` is its own file and not a heredoc inside the script because nothing could
-      # import a heredoc, and a syntax error in it read as "this run logged nothing".
-      # `tests/test_logline.py` is what runs it now, and it can only do that because it is a file.
+      # This service used to upload `/logship.sh` and `/logline.py` into a stock `python:3.12-alpine`
+      # and then name an entrypoint that `apk add`ed the shipper's two tools before running it. All
+      # three are in `control/images/Dockerfile.logship` now, for a reason that started on the compose
+      # side and applies identically here: a `curl` install has no `control/images/` to read from.
+      # `${assetsDir}` solved that for this program and could have kept solving it — but two harnesses
+      # carrying the same two files by two different mechanisms is the drift `parity.py` exists to
+      # catch, and the honest fix is for neither to carry them.
       #
-      # 0644, matching the host files, and NOT executable — see the note on postgres's upload for why
-      # the mode is written out rather than left to `executable`. Neither of these needs an exec bit:
-      # the entrypoint below runs `/bin/sh /logship.sh` explicitly, and `logline.py` is read by it.
-      uploads:
-        - file: /logship.sh
-          content:
-            fn::readFile: ${assetsDir}/logship.sh
-          permissions: "0644"
-        - file: /logline.py
-          content:
-            fn::readFile: ${assetsDir}/logline.py
-          permissions: "0644"
-      # ENTRYPOINT, NOT COMMAND. This provider distinguishes the two and the image's own CMD must not
-      # survive; `command` is unset here for that reason.
-      entrypoints: ["/bin/sh", "-c", "apk add --no-cache docker-cli curl >/dev/null && exec /bin/sh /logship.sh"]
+      # WHAT IS LOST, STATED RATHER THAN DISCOVERED: an upload is ForceNew, so editing `logship.sh`
+      # REPLACED this container and the running shipper was always the shipper in the repo. That was
+      # a real property and it is gone — an image rebuild is now the step that makes an edit live.
+      # In exchange the same bytes reach compose, this program and a bare `docker run`, and the image
+      # is where the version of them is decided.
+      #
+      # The healthcheck comes with the image too (`/tmp/logship-alive`, touched every 5s by the poll
+      # loop). It is deliberately NOT restated here: compose does not restate it either, and a
+      # healthcheck written into one harness and not the other is exactly what the checks below report.
     options:
       provider: ${dockerProvider}
       dependsOn:

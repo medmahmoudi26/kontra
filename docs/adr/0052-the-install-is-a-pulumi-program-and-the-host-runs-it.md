@@ -2,10 +2,17 @@
 
 ## Status
 
-**Accepted, 2026-09-26.** Amends **0047**: the supported local install is still one topology, but it
-is converged by Pulumi rather than by `docker compose`, and Docker is no longer the only host
-prerequisite. It does not reopen **0047**'s reasons for splitting the appliance back into services —
-those services stay, with the same healthchecks, on the same private network.
+**Accepted, 2026-09-26. §3 revised the same day — see §3a.**
+
+Amends **0047**: the supported local install is still one topology, converged two ways. `docker
+compose` is the quickstart and the artifact of record (§3a); Pulumi is the operator path and adds
+lifecycle, secrets, `update` and cloud Fleets (§3). **Docker remains the only prerequisite for the
+quickstart**; `pulumi` is a prerequisite for the operator path alone. It does not reopen **0047**'s
+reasons for splitting the appliance back into services — those services stay, with the same
+healthchecks, on the same private network.
+
+The original §3 made `pulumi` a prerequisite for *everyone*, which is the one claim in this ADR that
+turned out to be wrong, and §3 is left standing with the reasoning intact rather than edited away.
 
 Amends **0019**: there is now a *second* Pulumi engine, with a different program shape and a
 different mutex. **0019**'s engine — inline Automation API TypeScript, its own PID, a Temporal Entity
@@ -181,6 +188,12 @@ stronger than the fleet case that already has it.
 
 ### 3. One command installs, and the same command is CI
 
+> **REVISED THE SAME DAY IT WAS ACCEPTED, and the revision is §3a below. What follows is the
+> operator path, which is unchanged and still correct. What changed is that it is no longer the
+> *quickstart*.** The reasoning is kept rather than rewritten because the mistake is instructive:
+> this section optimised the install for the person who will run kontra, and a public repository is
+> judged by the person deciding whether to try it.
+
 ```
 curl -fsSL https://raw.githubusercontent.com/medmahmoudi26/kontra/main/get.sh | sh
 kontra up                                   # 13 services, healthy, ~40 s
@@ -205,6 +218,75 @@ an install that works.
 
 `kontra up` ends by printing the credentials file path and the console URL — **on every boot**, not
 only the first. The path is what an operator looks for on the second day.
+
+### 3a. `docker-compose.yml` is the artifact of record, and the quickstart is one `curl`
+
+```
+curl -O https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/docker-compose.yml
+docker compose up -d --wait
+```
+
+No clone, no build, no binary, no `.env`, and **no `pulumi`**. This is what §3 got wrong: it made
+`pulumi` a host prerequisite for the first sixty seconds, and the first sixty seconds is the only part
+of an install most readers of a public repository ever run. Windmill is the shape that made this
+obvious — three `curl`s and `docker compose up -d`, and nothing to install to find out whether you
+want it.
+
+**Two doors, one desired state.** `kontra up` is better than compose at lifecycle, at secrets, at
+`update`, and at cloud Fleets, and it stays the operator path for exactly those reasons. It is worse
+at evaluation. Neither is a fallback for the other, and the thing that keeps them from becoming two
+installs is `control/pulumi/parity.py`: it resolves `docker compose config` and `pulumi preview --json`
+and diffs them service by service. That check is the reason this is an amendment rather than a
+contradiction.
+
+**What parity compares, and what it deliberately does not.** It compares service topology, images
+**modulo registry and tag**, volumes, networks, and the files that land in each container as a
+`(path, bytes, mode)` triple. It does not compare tags or registries, because each harness's pinning
+policy is its own: compose floats `:dev` so `docker compose pull` takes a fix, a release pins digests
+through `images.env`, and the Pulumi program has no pull policy at all because `RemoteImage` infers
+one. Comparing those is comparing two correct answers to different questions; comparing the image
+*name* is the parity invariant.
+
+**Three properties the compose file had to gain, and all three were bugs before they were features:**
+
+1. **It carries every file it needs.** Three host paths were bind-mounted out of the checkout, and
+   Docker does not fail on a bind-mount source that does not exist — it creates an empty *directory*
+   there. So each one was an install that came up healthy and was broken somewhere it did not mention:
+   a missing `postgres-init.sh` meant no DuckLake catalog, and the failure surfaced on the first
+   Dataset write. The SQL is now an inline `configs:` entry; the log shipper and its parser are baked
+   into `kontra-logship`, because `tests/test_logline.py` loads the parser by path and it has to stay
+   a file.
+2. **Every default is a reference a stranger can pull.** They were bare local tags with
+   `pull_policy: never` — correct for a machine that had already built them, and for anybody else a
+   `pull access denied` naming neither cause nor fix. `publish.yml` derives the image *names* out of
+   these defaults, so the registry and tag are stripped there rather than omitted here.
+3. **A missing file fails the install instead of passing it.** `install-cluster.macos.sh` copied one
+   of the three scripts and not the other two, so logship crash-looped — and logship had no
+   healthcheck, so `docker compose up -d --wait` never waited on it and the script exited 0. It had
+   been passing while shipping zero logs, which is indistinguishable from runs that logged nothing.
+   The image now carries a healthcheck that asserts the poll loop is *turning*, not that the process
+   exists, and `scripts/assert-install-is-self-contained.py` fails CI if a host path comes back.
+
+**And a mode bit is load-bearing, which is the finding worth carrying forward.** A `configs:` entry
+with no explicit mode gets 0444, and postgres's entrypoint `.`-sources a `*.sh` it cannot execute
+rather than running it. That runs the init script's `set -eu` in the entrypoint's own shell — a shell
+deliberately written `set -Eeo pipefail` with upstream's own `TODO swap to -Eeuo pipefail above
+(after handling all potentially-unset variables)` beside it. Measured both ways: at 0444 `-u` leaks
+past `docker_process_init_files` into the rest of first boot; at 0555 it does not. Nothing fails on
+`postgres:16-alpine` today, so this is latent with two triggers — that upstream TODO, and anybody
+adding a second init script — and both produce a first boot that dies *after* the cluster exists.
+Compose says 0555, the Pulumi program uploads 0755, parity compares the mode, and an omitted mode is
+an error rather than a default.
+
+**What this costs.** Compose's `:dev` floats, which §3's `publish.yml` calls a hazard — *"a floating
+tag in a registry is a thing an install can resolve by accident, and what this install resolves is a
+digest."* Both are right about different audiences: a release promises reproducibility and pins
+digests, and a quickstart promises that `docker compose pull` gets you the current thing. Pinning the
+quickstart would mean editing the install to take a fix.
+
+It also means the compose install has no `update` beyond `docker compose pull && up -d`, which
+replaces containers and keeps volumes and verifies nothing. §7's `kontra update` is where the
+verification lives, and it does not exist yet on this path.
 
 ### 4. The credentials file seeds the store; it is never the store
 

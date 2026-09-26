@@ -1,8 +1,28 @@
-# kontra local cluster (ADR 0047). From a clone after building images (see README Install):
+# kontra local cluster (ADR 0047). THIS FILE IS THE WHOLE INSTALL:
 #
-#   mkdir -p workspaces          # your code lives here, beside this file
-#   docker compose --env-file .env.quickstart up -d --wait
+#   curl -O https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/docker-compose.yml
+#   docker compose up -d --wait
 #   docker compose logs cli | grep -A4 'console login'
+#
+# No clone, no build, no binary, and NO `.env` — every `${…:-default}` in here resolves to something
+# a stranger's Docker can pull. `.env.quickstart` is the second curl only if you want to move a port,
+# change the bind address, or set the admin password to something other than `changeme`.
+#
+# ── WHAT IT TOOK TO BE ONE FILE, so nobody puts it back ─────────────────────────────────────────
+#
+# Three host paths used to be bind-mounted in here, and Docker does not fail on a bind-mount source
+# that does not exist — it silently creates a DIRECTORY there. So each one was an install that came
+# up looking healthy and was broken somewhere it did not mention:
+#
+#   postgres-init.sh   -> now a compose `configs:` entry with inline `content:` (see the bottom of
+#                         this file). Six lines of SQL, nothing imports it.
+#   logship.sh         -> now baked into `kontra-logship` (control/images/Dockerfile.logship). It is
+#   logline.py            an image and not a `configs:` entry because `tests/test_logline.py` loads
+#                         the parser BY PATH, and it is a file in the first place because it used to
+#                         be a heredoc where nothing could import it.
+#
+# `workspaces/` is the one host path left, and it does not need to exist: the `cli` service runs
+# `kontra workspace seed` on boot, so an empty directory becomes a seeded one.
 #
 # YOUR CODE LIVES IN `workspaces/` BESIDE THIS FILE, and that is the whole registration: a folder
 # under `<workspace>/actors/` or `<workspace>/workflows/` is served, and nothing else is recorded
@@ -67,8 +87,30 @@ x-orchestrator-env: &orchestrator-env
   # actually get trades a clean DuckDB error for the OOM killer taking the whole API.
   KONTRA_DUCKDB_MEMORY_LIMIT: ${KONTRA_DUCKDB_MEMORY_LIMIT:-512MB}
   KONTRA_WORKSPACES: *workspaces
-  KONTRA_IMAGE: ${KONTRA_IMAGE:-kontra:latest}
-  KONTRA_HOST_IMAGE: ${KONTRA_HOST_IMAGE:-kontra-host:1}
+  # ── THE DEFAULTS NAME A REGISTRY, AND THAT IS WHAT MAKES THE INSTALL ONE `curl` ────────────────
+  #
+  # These used to default to `kontra:latest` and `kontra-host:1` — bare local tags that resolve on
+  # exactly one machine: one that has already run `make image` and three hand-typed `docker build`s.
+  # For anybody else the failure was `pull access denied for kontra-orchestrator, repository does not
+  # exist or may require 'docker login'`, which names neither the real cause nor the fix.
+  #
+  # Every `${KONTRA_*_IMAGE:-…}` default in this file is therefore a fully-qualified, pullable
+  # reference, which means the file works with NO `.env` beside it. `.env.quickstart` is knobs
+  # (bind address, ports, password), not a prerequisite.
+  #
+  # `:dev` FLOATS, AND `publish.yml` SAYS FLOATING TAGS ARE A HAZARD. Both are true and they are
+  # about different audiences. That comment — "a floating tag in a registry is a thing an install can
+  # resolve by accident, and what this install resolves is a digest" — is about a RELEASE, where
+  # `images.env` pins every reference to `repo@sha256:…` and reproducibility is the promise. The
+  # quickstart's promise is the opposite one: `docker compose pull && up -d` should get you the
+  # current thing. A digest here would mean editing this file to take a fix.
+  #
+  # AND THE NAME IS WHAT `publish.yml` READS OUT OF THESE LINES, not the tag and not the registry.
+  # Its `plan` job greps `${KONTRA_*_IMAGE:-…}` here to learn which images it owns, strips the
+  # registry and the tag, and maps the bare name to a Dockerfile. So renaming an image is a change to
+  # this line; retagging or re-homing one is not.
+  KONTRA_IMAGE: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
+  KONTRA_HOST_IMAGE: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
   KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:5000}
   KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:5000}
   # THE READ TOKEN FOR THE TWO SURFACES THAT READ A RUN'S CONTENT: the query workbench and the logs
@@ -174,7 +216,42 @@ services:
       POSTGRES_DB: postgres
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./control/images/postgres-init.sh:/docker-entrypoint-initdb.d/01-ducklake.sh:ro
+    # A COMPOSE CONFIG, NOT A BIND MOUNT, so this file needs nothing beside it.
+    #
+    # It used to be `./control/images/postgres-init.sh:…:ro`, and that one line is what made the
+    # install a clone. Docker does not fail on a bind-mount source that does not exist — it creates
+    # a DIRECTORY there. So a curl'd compose file got an empty directory mounted at
+    # `/docker-entrypoint-initdb.d/01-ducklake.sh`, postgres tried to source it, and the DuckLake
+    # catalog database was never created. Every Dataset write then failed against a database that
+    # did not exist, several services deep from anything that mentioned postgres.
+    #
+    # The one-shot beside `temporal` already made this argument (see `temporal-dynamicconfig`:
+    # "written by a one-shot so the install does not need a host-side config file"). This is the
+    # same rule applied to the service that needed it most.
+    configs:
+      - source: ducklake-init
+        target: /docker-entrypoint-initdb.d/01-ducklake.sh
+        # THE EXEC BIT IS LOAD-BEARING, AND IT IS NOT ABOUT THIS SCRIPT'S NEEDS.
+        #
+        # This was 0444 first, on the reasoning that postgres's entrypoint `.`-sources a `*.sh` it
+        # cannot execute (`docker-entrypoint.sh:183`, `if [ -x "$f" ]; then "$f"; else . "$f"; fi`),
+        # so the exec bit was decoration. Sourcing works. What it also does is run this script's
+        # `set -eu` IN THE ENTRYPOINT'S OWN SHELL — and that shell is deliberately `set -Eeo
+        # pipefail` with no `-u`, carrying the upstream comment "TODO swap to -Eeuo pipefail above
+        # (after handling all potentially-unset variables)".
+        #
+        # So `-u` leaks past `docker_process_init_files` into `docker_temp_server_stop`, `unset
+        # PGPASSWORD` and the rest of first boot. MEASURED both ways with a second always-sourced
+        # probe script reading `$-`: at 0444 `-u` is set in the entrypoint shell afterwards, at 0555
+        # it is clean. On postgres:16-alpine today neither mode fails — both reach "init process
+        # complete" with `kontra_ducklake` present — so this is latent, with two triggers: the bump
+        # that upstream TODO promises, and anybody adding a second init script. Both produce a first
+        # boot that dies AFTER the cluster exists, which is the worst shape this can take.
+        #
+        # 0555 also makes the two harnesses take the same branch. `control/pulumi/Pulumi.yaml:513`
+        # uploads it `permissions: "0755"` and had already worked this out; compose sourcing while
+        # Pulumi executed was two installs running different halves of somebody else's entrypoint.
+        mode: 0555
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_POSTGRES_PORT:-5432}:5432"
     healthcheck:
@@ -394,8 +471,21 @@ services:
   # and that fix died the next time one was recreated — leaving an empty rail, which reads exactly
   # like a Run that logged nothing.
   logship:
-    image: python:3.12-alpine
+    # ITS OWN IMAGE, AND THE TWO REASONS ARE DIFFERENT.
+    #
+    # 1. It carried `./control/images/logship.sh` and `./control/images/logline.py` as bind mounts,
+    #    which is two more files a `curl` install does not have. `scripts/install-cluster.macos.sh`
+    #    copied only `postgres-init.sh` and not these two, so in that path Docker created empty
+    #    DIRECTORIES at both targets; `logship.sh` correctly refused to start without its parser and
+    #    said so — and logship has no healthcheck, so `up -d --wait` never looked. That script has
+    #    been passing while shipping zero logs. Hence the healthcheck below, which is the half of
+    #    this fix that survives the next mount somebody forgets.
+    # 2. It ran `apk add --no-cache docker-cli curl` in its ENTRYPOINT, on every single boot. A
+    #    quickstart that reaches out to the Alpine mirrors before it can ship a log line fails on a
+    #    laptop behind a proxy, and fails at the one moment the operator has nothing to read.
+    image: ${KONTRA_LOGSHIP_IMAGE:-ghcr.io/medmahmoudi26/kontra-logship:dev}
     container_name: kontra-logship
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
     restart: unless-stopped
     depends_on:
       victorialogs:
@@ -411,17 +501,28 @@ services:
     volumes:
       # READ-ONLY. This service only ever reads container stdout; it has no reason to be able to
       # start, stop or exec anything, and the socket is the whole host if it can.
+      #
+      # THE SCRIPT AND THE PARSER USED TO BE MOUNTED HERE. They are in the image now — the parser
+      # especially, because it is a file precisely so `tests/test_logline.py` can import it, and
+      # inlining it as a compose config would have put a second uncoverable copy of it in this file.
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./control/images/logship.sh:/logship.sh:ro
-      # THE PARSER, AS ITS OWN FILE. It used to be a heredoc inside the script, where nothing could
-      # import it and a syntax error read as "this run logged nothing". `tests/test_logline.py` is
-      # what runs it now, and it can only do that because it is a file.
-      - ./control/images/logline.py:/logline.py:ro
-    entrypoint: ["/bin/sh", "-c", "apk add --no-cache docker-cli curl >/dev/null && exec /bin/sh /logship.sh"]
+    # NO `healthcheck:` HERE, AND ITS ABSENCE IS THE DECISION.
+    #
+    # `Dockerfile.logship` carries one, so compose, the Pulumi program and a bare `docker run` all
+    # inherit the same expression without any of them restating it — and `control/pulumi/parity.py`
+    # compares the two harnesses' service definitions, so a healthcheck written into only this file
+    # is a difference it would report. What it checks is the poll loop TURNING
+    # (`/tmp/logship-alive`, touched every 5s), not the process existing: this service's worst
+    # failure was a live process with a dead loop.
+    #
+    # It matters here because `docker compose up -d --wait` needs something to wait ON. Without a
+    # healthcheck anywhere, a crash-looping shipper is briefly "running" and --wait is satisfied,
+    # which is how `scripts/install-cluster.macos.sh` has been going green over a shipper that never
+    # started.
 
   # API + materializer in one process (queues stay distinct). Infra stays separate (Pulumi).
   orchestrator-api:
-    image: ${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:latest}
+    image: ${KONTRA_ORCHESTRATOR_IMAGE:-ghcr.io/medmahmoudi26/kontra-orchestrator:dev}
     container_name: kontra-api
     # A STABLE HOSTNAME, BECAUSE A WORKER'S TEMPORAL IDENTITY IS `<pid>@<hostname>`.
     #
@@ -438,7 +539,7 @@ services:
     # were the ones with no retained logs — the exact inversion an audit asks about.
     labels:
       kontra.logs: 'true'
-    pull_policy: ${KONTRA_PULL_POLICY:-never}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
     restart: unless-stopped
     depends_on:
       cli:
@@ -490,12 +591,12 @@ services:
       start_period: 20s
 
   orchestrator-infra:
-    image: ${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:latest}
+    image: ${KONTRA_ORCHESTRATOR_IMAGE:-ghcr.io/medmahmoudi26/kontra-orchestrator:dev}
     container_name: kontra-infra
     # See the api's. This is the role that holds the cloud credential.
     labels:
       kontra.logs: 'true'
-    pull_policy: ${KONTRA_PULL_POLICY:-never}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
     restart: unless-stopped
     depends_on:
       temporal:
@@ -553,11 +654,11 @@ services:
       retries: 5
 
   orchestrator-probe:
-    image: ${KONTRA_HOST_IMAGE:-kontra-host:1}
+    image: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
     container_name: kontra-probe
     labels:
       kontra.logs: 'true'
-    pull_policy: ${KONTRA_PULL_POLICY:-never}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
     restart: unless-stopped
     depends_on:
       temporal:
@@ -588,9 +689,9 @@ services:
   # First boot prints the console login, seeds hello/, then watches the current workspace.
   # `docker compose exec cli …` still works while watch is PID 1.
   cli:
-    image: ${KONTRA_IMAGE:-kontra:latest}
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
     container_name: kontra-cli
-    pull_policy: ${KONTRA_PULL_POLICY:-never}
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -652,6 +753,27 @@ services:
 networks:
   default:
     name: kontra
+
+# ── EVERY FILE THIS INSTALL NEEDS IS IN THIS FILE ────────────────────────────────────────────────
+#
+# `content:` inlines a config instead of reading it from the host, which is what lets the whole
+# install be `curl` + `docker compose up -d`. It needs Compose v2.23+; `x-compose-min` above says so
+# and the quickstart CI job asserts the runner has it.
+#
+# WHAT DOES *NOT* BELONG HERE: anything with a test. `control/images/logline.py` is loaded by path in
+# `tests/test_logline.py`, and the comment on its old mount records why it is a file at all — a
+# syntax error in a heredoc read as "this run logged nothing". Inlining it here would put a second
+# copy of a parser in a place nothing can import, so it goes in an image instead (see `logship`).
+# Six lines of SQL with no test is the case `content:` is for.
+configs:
+  ducklake-init:
+    content: |
+      #!/bin/sh
+      set -eu
+      # CREATE DATABASE IF NOT EXISTS is not valid in Postgres; ignore "already exists".
+      psql -v ON_ERROR_STOP=1 --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" <<'SQL'
+      SELECT 'CREATE DATABASE kontra_ducklake' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'kontra_ducklake')\gexec
+      SQL
 
 volumes:
   postgres-data:

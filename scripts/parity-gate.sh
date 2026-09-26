@@ -507,10 +507,18 @@ esac
 # from the same container, which is what pins the cause on the firewall rather than on docker.
 #
 # So it is a probe, not a hope, and it runs in a CONTAINER because that is the only thing that
-# answers the question a container is about to ask. `kontra-host:1` is the base image `kontra
+# answers the question a container is about to ask. The Python host is the base image `kontra
 # deploy` has just guaranteed exists, and it carries a python3.
+#
+# RESOLVED THE SAME WAY `cli/deploy.go:hostImage()` RESOLVES IT, not hardcoded. This said
+# `kontra-host:1`, which was the name `deploy` looked for as long as nothing else said otherwise —
+# and `docker-compose.yml` now sets `KONTRA_HOST_IMAGE=ghcr.io/medmahmoudi26/kontra-host:dev`, so the
+# image `deploy` guarantees and the image this line ran were two different names. Docker resolves by
+# name, so the guarantee stopped covering the probe, and the failure would have read as "a container
+# cannot reach Temporal" — a firewall verdict — when the truth was a missing image.
+HOST_IMAGE="${KONTRA_HOST_IMAGE:-kontra-host:1}"
 info "can a container reach $BIND:$P_TEMPORAL?"
-if docker run --rm --network bridge kontra-host:1 python3 -c "
+if docker run --rm --network bridge "$HOST_IMAGE" python3 -c "
 import socket, sys
 s = socket.socket(); s.settimeout(5)
 try:

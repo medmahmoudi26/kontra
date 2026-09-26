@@ -551,21 +551,54 @@ jobs:
             --build-arg SPA_IMAGE=kontra:ci -t kontra-orchestrator:ci .
           docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
           docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
+          # The log shipper and its parser. It is an image rather than two bind mounts because
+          # `tests/test_logline.py` loads the parser BY PATH and it must stay a file — see
+          # control/images/Dockerfile.logship. Built here so the compose `up` below has it; without
+          # it, `pull_policy: never` fails on a missing image, which is the honest failure.
+          docker build -f control/images/Dockerfile.logship -t kontra-logship:ci .
 
-      - name: compose files into a fresh install directory
+      # ONE FILE IN THE INSTALL DIRECTORY, AND THE COUNT IS THE ASSERTION.
+      #
+      # This step used to `cp control/images/postgres-init.sh` in beside the compose file, because
+      # compose bind-mounted it. That is the whole reason the install was a clone: a bind-mount source
+      # Docker cannot find is not an error, it is a silently-created empty DIRECTORY, so the failure
+      # landed on the first Dataset write against a DuckLake catalog that was never created.
+      #
+      # The mount is gone — `docker-compose.yml` carries the script as a `configs:` entry with inline
+      # `content:`, and the log shipper's two scripts moved into `kontra-logship`. So this directory
+      # now holds exactly what a stranger's `curl` puts in theirs, and the `find` below FAILS THE BUILD
+      # if that stops being true. Without it, somebody adds a mount, CI copies whatever it needs, and
+      # the quickstart is broken for everybody except CI.
+      - name: a fresh install directory, holding only what a curl would put there
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/install/control/images" "$RUNNER_TEMP/workspaces"
+          mkdir -p "$RUNNER_TEMP/install" "$RUNNER_TEMP/workspaces"
           cp docker-compose.quickstart.yml "$RUNNER_TEMP/install/docker-compose.yml"
           cp .env.quickstart "$RUNNER_TEMP/install/.env"
-          cp control/images/postgres-init.sh "$RUNNER_TEMP/install/control/images/postgres-init.sh"
+
+          # THE IMAGES ARE THE ONE THING CI OVERRIDES, and it is not cheating: compose's defaults are
+          # `ghcr.io/medmahmoudi26/*:dev`, which is what a stranger pulls. This job builds the images
+          # from THIS commit, so it has to point at them or it would be testing the last publish
+          # instead of the change in front of it. `publish.yml`'s `anonymous pull` job is what proves
+          # the registry half. Everything else here is untouched defaults.
           {
             echo "KONTRA_IMAGE=kontra:ci"
             echo "KONTRA_ORCHESTRATOR_IMAGE=kontra-orchestrator:ci"
             echo "KONTRA_HOST_IMAGE=kontra-host:1"
+            echo "KONTRA_LOGSHIP_IMAGE=kontra-logship:ci"
             echo "KONTRA_PULL_POLICY=never"
             echo "KONTRA_WORKSPACES=$RUNNER_TEMP/workspaces"
           } >> "$RUNNER_TEMP/install/.env"
+
+      # THE CHECK IS A SCRIPT AND NOT A STEP, for the same reason `control/images/logline.py` is a
+      # file: a multi-line checker embedded in a YAML block scalar is something nothing can run
+      # locally and nothing can test. `scripts/install-cluster.macos.sh` runs this same file.
+      #
+      # It asserts three things — only the curl'd files on disk, no bind mount but the socket and the
+      # workspace, and an explicit `mode` on every `configs:` entry. The third one is not about
+      # self-containedness and its reason is in the script's own docstring.
+      - name: the install directory holds nothing a curl would not have
+        run: python3 scripts/assert-install-is-self-contained.py "$RUNNER_TEMP/install"
 
       - name: docker compose up -d --wait
         working-directory: ${{ runner.temp }}/install

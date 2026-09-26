@@ -1,0 +1,95 @@
+# kontra-logship — the shipper and its parser, in the image instead of on the host.
+#
+# ── WHY THIS FILE EXISTS ────────────────────────────────────────────────────────────────────────
+#
+# `docker-compose.yml` used to run stock `python:3.12-alpine` and bind-mount two files into it:
+#
+#     ./control/images/logship.sh   -> /logship.sh
+#     ./control/images/logline.py   -> /logline.py
+#
+# That works from a checkout and only from a checkout. The quickstart is now two `curl`s and a
+# `docker compose up -d` — there is no `control/images/` in the directory the operator is standing
+# in, and Docker's answer to a bind mount whose source does not exist is to CREATE IT, as an empty
+# directory. `exec /bin/sh /logship.sh` then fails on a directory, the container restarts, and it
+# restarts forever.
+#
+# THAT FAILURE IS ALREADY SHIPPING AND IT IS SILENT. `scripts/install-cluster.macos.sh:16` copies
+# `postgres-init.sh` and not the other two, so its temp directory reproduces exactly this. logship
+# has no healthcheck, so `docker compose up -d --wait` never waits on it, and the script goes green
+# having started a shipper that ships nothing. An empty logs rail is indistinguishable from a Run
+# that logged nothing — which is the one confusion `logship.sh`'s header, `routes/logs.ts`'s
+# `unreachable`, and this whole service exist to prevent. `control/pulumi/Pulumi.yaml:72-75` says
+# the same thing about the same two files: "logship is already broken in both harnesses today."
+#
+# `control/pulumi/README.md:291` names the fix and assigns it here: "Issue 16 baking the two logship
+# scripts into an image removes two of the three."
+#
+# ── WHY NOT INLINE THEM INTO COMPOSE, WHICH IS WHAT `postgres-init.sh` GETS ─────────────────────
+#
+# `postgres-init.sh` is six lines, nothing imports it, and a compose `configs:` entry with
+# `content:` carries it with no image to build. `logline.py` cannot take that treatment:
+# `tests/test_logline.py` loads it from `control/images/logline.py` BY PATH, and it is a file in the
+# first place because it used to be a heredoc inside a shell function inside a compose entrypoint,
+# where nothing could import it and a syntax error read as "this run logged nothing". Inlining it
+# into compose re-creates the bug the comment above that mount is a tombstone for. So the file stays
+# a file, on disk, testable — and the image is how it reaches a container.
+#
+# ── IT ALSO REMOVES A NETWORK CALL FROM EVERY BOOT ──────────────────────────────────────────────
+#
+# The entrypoint it replaces was:
+#
+#     /bin/sh -c "apk add --no-cache docker-cli curl >/dev/null && exec /bin/sh /logship.sh"
+#
+# — an `apk` fetch on every single start, including every restart of a crash-loop. In a quickstart
+# that is a stranger's laptop reaching Alpine's CDN before their logs work at all, on a machine that
+# may be behind a proxy that does not allow it. Installed at build time it is paid once, by CI.
+
+FROM python:3.12-alpine
+
+# 3.12-alpine AND NOT 3.13-slim, which is what `Dockerfile.pyworker` uses. This image is replacing
+# an entrypoint that ran stock `python:3.12-alpine`, and changing the interpreter in the same commit
+# that changes the packaging would mean a parser that broke could be either. The version moves on
+# its own or not at all.
+
+# `docker-cli` for `docker ps` / `docker inspect` / `docker logs -f`, `curl` for the one POST per
+# line. Both were installed at runtime by the entrypoint this image replaces; the set is unchanged.
+RUN apk add --no-cache docker-cli curl
+
+# The build context is the repository root — `publish.yml`'s `build_one` ends every `docker buildx
+# build` with `.` — so these are repo-relative and the two files are the same two `tests/` reads.
+COPY control/images/logship.sh /logship.sh
+COPY control/images/logline.py /logline.py
+
+# NOT EXECUTABLE, AND THAT IS DELIBERATE, matching the 0644 the Pulumi program uploads them with
+# (`Pulumi.yaml:886-896`). The entrypoint below names the interpreter, and `logline.py` is only ever
+# read by `python3 "$PARSER"`. An exec bit on either would be decoration.
+
+# ── THE HEALTHCHECK IS THE POINT OF THE WHOLE EXERCISE ──────────────────────────────────────────
+#
+# It lives in the IMAGE rather than in `docker-compose.yml` so it travels: compose, the Pulumi
+# program, and a bare `docker run` all get it, and none of them has to know the expression. That
+# also keeps `control/pulumi/parity.py` quiet — it compares the two harnesses' service definitions,
+# and a healthcheck written into only one of them is a difference it would report.
+#
+# WHAT IT CHECKS IS THE LOOP TURNING, NOT THE PROCESS EXISTING. `pgrep logship.sh` would pass for a
+# shipper wedged on a `docker ps` that never returns, which is the shape this service has failed in
+# before (`logship.sh`'s note on `/tmp/following-*` surviving a restart: "it is silent, it survives
+# a restart meant to fix it"). The poll loop touches `/tmp/logship-alive` every five seconds; this
+# asks whether that happened in the last minute — twelve missed polls of slack, so an unhealthy
+# verdict means stopped rather than slow.
+#
+# `--start-period=20s` covers `apk`-free startup plus the first poll. With `retries=3` at a 15s
+# interval, a wedge is reported in about 45 seconds and `docker compose up -d --wait` can no longer
+# go green over a shipper that never started.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+  CMD find /tmp/logship-alive -mmin -1 2>/dev/null | grep -q . || exit 1
+
+# ENTRYPOINT AND NO CMD. The script takes no arguments and reads its whole configuration from the
+# environment (`KONTRA_LOGS_URL`, `KONTRA_NAMESPACE`, `KONTRA_LOGSHIP_PARSER`), so a CMD could only
+# ever be passed to `sh` as a second script to run instead.
+#
+# ROOT, because the only thing it opens is `/var/run/docker.sock`, whose group is `docker` with a
+# gid that differs per host — a `USER` here would have to guess it and would fail closed on the
+# hosts it guessed wrong. The containment is on the mount instead: compose and the Pulumi program
+# both mount that socket READ-ONLY, and this process never starts, stops or execs anything.
+ENTRYPOINT ["/bin/sh", "/logship.sh"]

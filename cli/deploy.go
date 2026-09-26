@@ -86,7 +86,31 @@ func registryAddress(flagVal string) string {
 // it every time. Rebuilt only when handler/ changes:
 //
 //	docker rmi kontra-worker-base:1
+//
+// THE CONSTANT IS THE DEFAULT, NOT THE ANSWER — see workerBase() below. It stays a literal because
+// `.github/workflows/publish.yml` greps this line for the image name it has to build
+// (`workerBaseImage = "…"`), which is also why the name and the tag are spelled here rather than
+// assembled.
 const workerBaseImage = "kontra-worker-base:1"
+
+// workerBase resolves THE worker base reference, the same way hostImage() resolves the Python host.
+//
+// IT IS AN ENVIRONMENT VARIABLE BECAUSE A LOCAL BUILD AND THE INSTALL HAVE TO AGREE ON A NAME.
+// `Makefile`'s `worker-base` target tags whatever `KONTRA_WORKER_BASE_IMAGE` says, and it defaults to
+// `ghcr.io/medmahmoudi26/kontra-worker-base:dev` so a `make image` writes the name the published
+// install resolves. With this function absent, that target wrote one name and this file looked for
+// another: Docker resolves by NAME, so `deploy` found nothing at :500, fell through to :510, and
+// recompiled the Go handler on a machine that had just built it. Not a failure — the fallback is
+// real and it works — but a silent minute, and `make worker-base` became work with no consumer.
+//
+// The same split is why `publish.yml` publishes `kontra-worker-base:<version>` at all: without a
+// variable, a published worker base is a name nothing ever asks for.
+func workerBase() string {
+	if v := strings.TrimSpace(os.Getenv("KONTRA_WORKER_BASE_IMAGE")); v != "" {
+		return v
+	}
+	return workerBaseImage
+}
 
 // imageAPI is the slice of the Docker client deploy needs — a tiny interface so tests
 // can fake it and never touch a daemon.
@@ -497,7 +521,7 @@ func registryProbeBases(reg string) []string {
 // Context = the REPO ROOT (needs handler/ + infra/); the Dockerfile is injected.
 func ensureWorkerBase(ctx context.Context, d imageAPI, progress io.Writer) error {
 	sums, err := d.ImageList(ctx, image.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("reference", workerBaseImage)),
+		Filters: filters.NewArgs(filters.Arg("reference", workerBase())),
 	})
 	if err != nil {
 		return err
@@ -507,16 +531,16 @@ func ensureWorkerBase(ctx context.Context, d imageAPI, progress io.Writer) error
 	}
 	root, err := cliutil.FindRepoRoot("")
 	if err != nil {
-		return fmt.Errorf("worker base %s missing and no repo root to build it (handler/ + infra/): %w", workerBaseImage, err)
+		return fmt.Errorf("worker base %s missing and no repo root to build it (handler/ + infra/): %w", workerBase(), err)
 	}
-	fmt.Fprintf(os.Stderr, "worker base %s missing — building it once (compiles the handler; cached after this)\n", workerBaseImage)
+	fmt.Fprintf(os.Stderr, "worker base %s missing — building it once (compiles the handler; cached after this)\n", workerBase())
 	tarCtx, err := archive.TarWithOptions(root, &archive.TarOptions{ExcludePatterns: dockerignore(root)})
 	if err != nil {
 		return err
 	}
 	tarCtx = injectFile(tarCtx, "Dockerfile.kontra-worker-base", []byte(workerBaseDockerfile()))
 	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "Dockerfile.kontra-worker-base", workerBaseImage)
+	return buildImage(ctx, d, progress, tarCtx, "Dockerfile.kontra-worker-base", workerBase())
 }
 
 // workerBaseDockerfile compiles the handler (-p=1: serial, so the memory-heavy temporal+aws
@@ -578,7 +602,7 @@ COPY --from=%[2]s /kontra/entrypoint.sh /kontra/entrypoint.sh
 RUN chmod +x /kontra/entrypoint.sh /kontra/handler
 %[3]s
 ENTRYPOINT ["/kontra/entrypoint.sh"]
-`, hostTag, workerBaseImage, env)
+`, hostTag, workerBase(), env)
 }
 
 // buildGoActor builds a Go actor's HOST image by COMPILING it. Unlike a Python actor (which

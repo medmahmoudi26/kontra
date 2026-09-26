@@ -144,6 +144,19 @@ follow() {
 # TWO LABEL FILTERS, UNIONED. `docker ps` ANDs multiple `--filter label=`, so asking for both in
 # one call would match nothing — the two sets are disjoint by design.
 while :; do
+  # THE LIVENESS MARKER, TOUCHED BEFORE THE POLL RATHER THAN AFTER IT.
+  #
+  # `Dockerfile.logship`'s HEALTHCHECK asks whether this file was written in the last minute, which
+  # is twelve turns of this loop. Checking for the PROCESS instead would pass for a shipper wedged
+  # on a `docker ps` that never returns — and a wedge is the shape this service has failed in
+  # before (see the `/tmp/following-*` note above: silent, and it survives the restart meant to fix
+  # it). What has to be observable is the loop TURNING.
+  #
+  # Before the poll, so the marker means "this iteration started" rather than "the last `docker ps`
+  # returned". A hang inside the `for` stops refreshing it either way; putting it after would also
+  # make a permanently-failing `docker ps` look like progress, since the loop would still reach the
+  # bottom.
+  : > /tmp/logship-alive
   for c in $( { docker ps --filter label=KONTRA_WORKER --format '{{.Names}}' 2>/dev/null || true
                 docker ps --filter label=kontra.logs=true --format '{{.Names}}' 2>/dev/null || true
               } | sort -u ); do

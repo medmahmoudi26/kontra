@@ -25,15 +25,22 @@ That teardown is a replayable step in a program Temporal finishes whether or not
 > **What that means concretely, so you can decide rather than guess:**
 >
 > - **The API moves between minor versions.** `0.x` is what `0.x` is for. Pin an exact version.
-> - **Documented commands may be ahead of, or behind, the code.** The install path is being
->   rewritten right now (ADR 0052) and the README is not yet the last word on it.
+> - **Documented commands may be ahead of, or behind, the code.** The install above is real and
+>   tested; the `kontra up` half of ADR 0052 is still landing, so anything you read about that
+>   command may be ahead of the code.
+> - **The images the install pulls have not been published yet.** `:dev` is built by
+>   `.github/workflows/publish.yml`, which has never run — there is no tag. Until one exists, use
+>   the from-a-clone path below. This is the last thing between the two commands above and working.
 > - **Boundaries described in the [Security Model](../../wiki/Security-Model) are partly built.**
 >   The data plane has no tenant boundary: any actor on any Machine can read every Dataset on that
 >   control plane. Run one control plane per tenant, and read that page before running untrusted
 >   actors.
 > - **`docker compose down -v` destroys every Dataset and the Pulumi state that tracks Machines you
 >   own** — including cloud Machines it will then be unable to find or destroy.
-> - **There is no upgrade path yet.** `kontra update` is designed (ADR 0052 §7) and not shipped.
+> - **Upgrading is `docker compose pull && docker compose up -d`, and nothing verifies it.** That
+>   replaces containers and keeps volumes, so it is the intended path — but there is no schema
+>   migration and no check that an image and the volume it opens agree. `kontra update`, which adds
+>   both, is designed (ADR 0052 §7) and not shipped.
 >
 > Issues and discussion are very welcome. Production dependency is not advised.
 
@@ -55,31 +62,81 @@ The only actor here is `testdata/fixtureactor/`, which exists so kontra's own te
 
 ## Install
 
-One path. Clone, build the images, Compose cluster on <http://127.0.0.1:8088> (ADR 0047).
-Docker is the only host prerequisite.
+One file. Docker is the only prerequisite — no clone, no build, no `kontra` binary.
+
+```bash
+curl -O https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/docker-compose.yml
+docker compose up -d --wait
+docker compose logs cli | grep -A4 'console login'
+```
+
+The console is on <http://127.0.0.1:8088> (ADR 0047). Sign in as `admin` with the password that
+last line printed.
+
+`docker-compose.yml` is the whole install: every default in it resolves to a published image, and
+the two scripts it used to need from a checkout are now an inline `configs:` entry and an image. It
+creates `./workspaces` for your code beside itself and seeds `hello/` into it on first boot, so
+there is nothing to make first.
+
+<details>
+<summary><b>Optional:</b> a second file, for ports, the bind address, and the query workbench</summary>
+
+```bash
+curl -o .env https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/.env.quickstart
+```
+
+Every knob is in there with a comment. The four people actually come for are `KONTRA_BIND` (read
+the note beside it), the port block if something on your machine already holds 8088,
+`KONTRA_EXPLORE_TOKEN` to turn on the query workbench and the logs rail, and `KONTRA_WORKSPACES` to
+keep your code somewhere other than `./workspaces`.
+
+It is fetched as `.env` because a repository cannot ship a tracked `.env` without a developer's own
+ignored one shadowing it.
+
+</details>
+
+<details>
+<summary><b>From a clone instead</b> — contributors, and anyone running unpublished code</summary>
+
+The published images are built from `dev`. To run what is in your working tree, build them under the
+**same names the install resolves** and tell compose not to reach for a registry:
 
 ```bash
 git clone https://github.com/medmahmoudi26/kontra-console.git
 git clone https://github.com/medmahmoudi26/kontra.git
-mkdir -p workspaces
 cd kontra
-make image
-docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
-docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
-docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
-docker compose --env-file .env.quickstart up -d --wait
-docker compose logs cli | grep -A4 'console login'
+R=ghcr.io/medmahmoudi26
+
+make image                                            # needs kontra-console beside this checkout (the SPA)
+docker build -f control/images/Dockerfile.orchestrator --build-arg SPA_IMAGE=$R/kontra:dev -t $R/kontra-orchestrator:dev .
+docker build -f control/images/Dockerfile.pyworker  -t $R/kontra-host:dev .
+docker build -f control/images/Dockerfile.logship   -t $R/kontra-logship:dev .
+
+cp .env.quickstart .env
+echo 'KONTRA_PULL_POLICY=never' >> .env
+docker compose up -d --wait
 ```
 
-That prints the password on a **first** boot. On any later boot — a recreate, an image upgrade —
-it prints which user exists and says the password cannot be recovered, because only the hash is
-kept. `docker compose exec cli kontra user add <name>` is the way back in.
+**Build under the qualified names, not bare ones.** Docker resolves by *name*, so
+`ghcr.io/medmahmoudi26/kontra:dev` and `kontra:latest` are two names for the same bytes — build the
+second and the install still goes to the registry for the first. `make image` and `make worker-base`
+already write the qualified names (`KONTRA_IMAGE` / `KONTRA_WORKER_BASE_IMAGE` override them), which
+is why `make image` is enough for two of the five.
 
-Named workspaces live in `workspaces/` beside `kontra/` and `kontra-console/` (not inside
-either repo). Seed creates `hello/` when that folder is empty. Pick another workspace in the
-console rail after login.
+`KONTRA_PULL_POLICY=never` is the rest of it: it stops compose quietly running a published image over
+the one you just built. It is the only line the `.env` needs for this.
 
-Sign in as `admin` with the password that line printed.
+`scripts/install-cluster.macos.sh` runs this whole path and asserts the result — login, seed,
+loopback, the log shipper, and the DuckLake catalog.
+
+</details>
+
+That `grep` prints the password on a **first** boot. On any later boot — a recreate, an image
+upgrade — it prints which user exists and says the password cannot be recovered, because only the
+hash is kept. `docker compose exec cli kontra user add <name>` is the way back in.
+
+Each child of `workspaces/` is one workspace and `.current` picks it; the console's top-right
+selector writes that file. Pick another after login.
 
 Serve and start the seeded hello workflow (discovery does not run it for you):
 
@@ -94,10 +151,13 @@ into Dataset `hello`, and destroys the Fleet on scope exit.
 `docker compose down` keeps Datasets and Pulumi state. **`down -v` throws both away** — every
 Dataset this control plane recorded, and any local Fleet Pulumi still thought it owned.
 
-The one line in `.env` that matters for security is `KONTRA_BIND=127.0.0.1` — read the note beside
-it before widening it. `orchestrator-infra` mounts the host Docker socket so `dockerFleet` can
-create Warden containers. That is host-level Docker authority, fine on a single-operator laptop,
-not tenant isolation.
+**Every published port binds `127.0.0.1` by default**, which is the one security control this
+install has. Docker publishes a port by DNAT in `PREROUTING`, so a host firewall does not protect
+it — widening `KONTRA_BIND` to `0.0.0.0` exposes Postgres, Temporal, Redis, the registry and the
+console to the network, and `ufw` will not stop it. Read the note beside that variable first.
+
+`orchestrator-infra` mounts the host Docker socket so `dockerFleet` can create Warden containers.
+That is host-level Docker authority, fine on a single-operator laptop, not tenant isolation.
 
 **[First run](docs/first-run.md)**: cluster → hello Dataset → secrets → a cloud fleet if you need one.
 
