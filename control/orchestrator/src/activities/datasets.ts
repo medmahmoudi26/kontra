@@ -32,7 +32,12 @@ import {
 // THIS record — the same store the control-plane routes and the retention sweeper read — and only
 // THEN mirrors to the `KontraTag` search attribute. The mirror is the projection; this is the truth.
 import { datasetRecordStore, type DatasetRecordStore } from '../data/datasetRecords';
-import { promoteInto, writeDatasetParquet, type LakeConfig } from '../data/parquet';
+import {
+  RESERVED_OUTPUT_COLUMNS,
+  promoteInto,
+  writeDatasetParquet,
+  type LakeConfig,
+} from '../data/parquet';
 import { pageDataset, type DatasetPage } from '../data/queryEngine';
 
 /** What a caller asks for: one page of one dataset. */
@@ -329,19 +334,56 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
         datasetStateKey(input.dataset),
         Buffer.from(JSON.stringify({ state: 'open' satisfies DatasetState }), 'utf8')
       );
-      const out = await writeDatasetParquet(
-        store,
-        {
-          sha256: input.sha256,
-          actor: input.dataset,
-          version: input.version || null,
-          runId: input.runId,
-          node: input.machine || null,
-          runStartedAt: input.runStartedAt,
-        },
-        lake
-      );
-      return { rows: out.rows };
+      try {
+        const out = await writeDatasetParquet(
+          store,
+          {
+            sha256: input.sha256,
+            actor: input.dataset,
+            version: input.version || null,
+            runId: input.runId,
+            node: input.machine || null,
+            runStartedAt: input.runStartedAt,
+          },
+          lake
+        );
+        return { rows: out.rows };
+      } catch (err) {
+        /*
+         * A BINDER ERROR HERE IS THE AUTHOR'S SCHEMA, AND NO NUMBER OF RETRIES WILL FIX IT.
+         *
+         * `pageDataset` has had this guard since the query path burned two hours on attempt 22 of a
+         * column that was never going to appear. `publishBatch` did not, and it is the one an author
+         * actually hits: an `emits=` type that declares `node` fails with `Duplicate column name
+         * "node" in INSERT`, eight attempts deep, while the run sits at RUNNING. Nothing reaches the
+         * actor's log (the push succeeded) and nothing reaches the workflow's (it is still awaiting
+         * the dispatch), so the only way to see it is `temporal workflow describe | jq
+         * .pendingActivities`. GitHub #22.
+         *
+         * AND THE MESSAGE ANSWERS THE QUESTION THE ERROR RAISES. "Duplicate column name" tells an
+         * author a name is taken; it does not tell them WHICH names are taken, and there was nowhere
+         * to look it up. {@link RESERVED_OUTPUT_COLUMNS} is that list, so the failure carries it.
+         */
+        const msg = err instanceof Error ? err.message : String(err);
+        const dup = /Duplicate column name "([^"]+)"/i.exec(msg);
+        if (dup) {
+          const field = dup[1] as string;
+          const reserved = RESERVED_OUTPUT_COLUMNS.includes(field);
+          throw ApplicationFailure.nonRetryable(
+            reserved
+              ? `output field ${JSON.stringify(field)} collides with a column the framework stamps ` +
+                `on every row — rename it. The reserved names are: ` +
+                `${RESERVED_OUTPUT_COLUMNS.join(', ')}. (${msg})`
+              : `output field ${JSON.stringify(field)} is declared twice in this Actor's emits ` +
+                `type — rename one. (${msg})`,
+            'DatasetSchemaRejected'
+          );
+        }
+        if (isDeterministicSqlError(err)) {
+          throw ApplicationFailure.nonRetryable(msg, 'DatasetWriteRejected');
+        }
+        throw err;
+      }
     },
 
     /**

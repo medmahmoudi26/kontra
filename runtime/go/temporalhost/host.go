@@ -11,9 +11,15 @@
 // one backing workflow per id, blocking on its activity. So a map plus a mutex is the whole of
 // it, and no cluster-wide registry is needed or would help.
 //
-// HEARTBEATS ARE THE LIVENESS CHECK. A batch beats per committed unit, so a stuck unit stops
-// beating and HeartbeatTimeout catches it. Without that, StartToCloseTimeout is the only bound
-// and it cannot tell a long batch from a wedged one.
+// HEARTBEATS ARE THE LIVENESS CHECK, AND THEY NO LONGER MEAN "A UNIT COMMITTED". A batch beats per
+// committed unit AND on a timer derived from the bound Temporal is enforcing (see the keepalive in
+// RunBatch), because a Unit that legitimately runs for 45 minutes used to send nothing and be killed
+// for silence while it was working — measured, three `hunt` runs, 0 rows each (GitHub #19).
+//
+// SO SILENCE NO LONGER MEANS STUCK, and that is a deliberate trade rather than an oversight. A
+// wedged Unit now beats until StartToCloseTimeout catches it an hour later instead of the heartbeat
+// catching it in two minutes. What keeps the two distinguishable is the `alive` counter on the
+// timer beat: it rises while `done` does not, so a reader can still tell slow from stopped.
 package temporalhost
 
 import (
@@ -23,6 +29,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
@@ -159,6 +166,37 @@ func newActivities(name, version string, spawn spawnFn, maxLive int) *Activities
 	}
 }
 
+// keepaliveEvery is how often a long Unit says it is still alive, derived from the bound Temporal
+// is enforcing on this attempt rather than named as a second constant.
+//
+// A THIRD OF THE WINDOW, so two consecutive ticks can be lost to scheduling, a slow RecordHeartbeat
+// or a busy event loop and the attempt still lives. Halving it would leave no margin at all; a
+// tenth would beat thirty times a Unit for no added safety.
+//
+// ZERO MEANS NO KEEPALIVE, and that is the correct reading of an absent bound: with no
+// HeartbeatTimeout there is nothing to miss, so beating on a timer would be noise Temporal stores in
+// the activity's mutable state on every tick. A negative value cannot arrive from Temporal but is
+// folded into the same answer rather than producing a Ticker that panics.
+// heartbeatBoundOf reports the HeartbeatTimeout Temporal is enforcing, or 0 when there is no
+// activity behind this context.
+//
+// SEPARATE FROM {@link keepaliveEvery} so the arithmetic stays testable without an activity: the
+// SDK's `GetInfo` panics off the activity path, so a test that wanted to check the interval would
+// otherwise have to fake a whole Temporal context to divide a duration by three.
+func heartbeatBoundOf(ctx context.Context) time.Duration {
+	if !activity.IsActivity(ctx) {
+		return 0
+	}
+	return activity.GetInfo(ctx).HeartbeatTimeout
+}
+
+func keepaliveEvery(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 0
+	}
+	return timeout / 3
+}
+
 // RunBatch runs one batch on the instance pinned to req.ActorID.
 func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*engine.RunBatchResp, error) {
 	if req.ActorID == "" {
@@ -225,6 +263,70 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 	// and the verb, the sink and the topic naming are all gone with it. A Method narrates through
 	// the host's logger, which carries the run, the Worker identity and the Temporal context on
 	// every line, and reports what it found through the output Dataset. Both outlive the run.
+
+	/*
+	 * ── KEEPALIVE: BEAT ON A TIMER, NOT ONLY ON A COMMIT (GitHub #19) ───────────────────────────
+	 *
+	 * Both beats above are EVENT-DRIVEN: `SetHeartbeat` fires when a Unit commits, `SetProgress`
+	 * when the author's healthcheck reports. A Unit that legitimately runs for longer than the
+	 * heartbeat bound fires neither, so the attempt is killed for silence while it is working.
+	 *
+	 * MEASURED: `hunt`'s sweep dispatches one Unit per host against that host's whole technique
+	 * class — 3,630 techniques x 3 oracle writes = 10,890 requests, paced at 250ms, ~45 minutes of
+	 * wall clock. Against a two-minute bound the first beat was due 43 minutes after the attempt had
+	 * already been killed. Three runs died this way (`hunt-1789736693`, `-1789738508`,
+	 * `-1789742802`) — 75 minutes, 0 rows, and no error on the parent: `/api/runs` said `running`
+	 * and the Nexus operation carried `attempt: 1, lastFailure: none`. No polite pacing fits 10,890
+	 * requests into two minutes, so the bound was wrong for the workload rather than the reverse.
+	 *
+	 * THE INTERVAL IS DERIVED, NOT NAMED. `activity.GetInfo` knows the bound Temporal is actually
+	 * enforcing on THIS attempt — including a per-dispatch `heartbeat_seconds` override — so the
+	 * keepalive follows it automatically and there is no second constant to keep in step. A third
+	 * of the window is the usual margin: two ticks may be lost to scheduling and the attempt still
+	 * lives. This is the `lambdaworker` shape the issue cites, where `ShutdownDeadlineBuffer` is
+	 * derived from `WorkerStopTimeout` rather than written down.
+	 *
+	 * WHAT THIS GIVES UP, STATED PLAINLY. "Silence for this long means stuck, not busy" was the
+	 * whole design of the bound, and a keepalive means a genuinely WEDGED Unit now beats forever
+	 * instead of being killed in two minutes. That is a real loss and it is the right trade: the
+	 * failure it prevents was measured and cost three runs, and the failure it admits is still
+	 * caught — by `runStartToClose` (one hour), an hour later. What keeps it diagnosable is that the
+	 * tick carries `alive`, a counter that rises while `done` does not: a reader can tell a Unit
+	 * that is working slowly from one that has stopped, which a bare repeat of the counts could not.
+	 */
+	// `activity.GetInfo` PANICS outside an activity context — unlike `RecordHeartbeat`, which is a
+	// tolerant no-op, which is why the beats above can be wired unconditionally. `RunBatch` is
+	// called directly by this package's own tests (and by anything embedding the host), so asking
+	// first is not defensive padding: without it, adding a keepalive turns every such call into a
+	// panic. `host_test.go:TestRunBatchNamesTheMachineItRanOn` is what found that.
+	if every := keepaliveEvery(heartbeatBoundOf(ctx)); every > 0 {
+		stop := make(chan struct{})
+		var alive int64
+		ticker := time.NewTicker(every)
+		go func() {
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					alive++
+					lk2.Lock()
+					beat := map[string]any{"alive": alive}
+					for k, v := range last {
+						beat[k] = v
+					}
+					lk2.Unlock()
+					// Best-effort: outside an activity, or after the attempt is gone, this is a
+					// no-op. Liveness must never be the thing that fails a batch.
+					activity.RecordHeartbeat(ctx, beat)
+				}
+			}
+		}()
+		defer close(stop)
+	}
 
 	resp, err := a.RunBatch(ctx, req)
 	if err != nil {

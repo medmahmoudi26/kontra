@@ -343,6 +343,73 @@ describe('publishBatch — provenance, with nothing substituted for it', () => {
     );
     expect(grouped).toEqual(machines.map((m) => [m, 1n]));
   });
+
+  describe('publishBatch refuses a schema it can never write', () => {
+    it('names the five reserved columns, so the SELECT and the check cannot drift', async () => {
+      const { RESERVED_OUTPUT_COLUMNS } = await import('../data/parquet');
+      expect([...RESERVED_OUTPUT_COLUMNS]).toEqual(['version', 'dt', 'node', 'run_id', 'run_started_at']);
+    });
+
+    it('REPRODUCES the collision and refuses it once, instead of retrying it eight times', async () => {
+      // The literal shape from the issue: an output record carrying a field the framework also
+      // stamps. Against a real DuckLake, so the Binder Error is DuckDB's and not a fixture's.
+      const cfg = { ...lakeCfg(), sourceUri: manifest([{ label: 'a', slept: 1, node: 'mine' }]) };
+      const acts = createDatasetActivities({ store: store(), lake: cfg });
+
+      await expect(
+        acts.publishBatch({
+          dataset: 'beat',
+          sha256: 'unused-when-sourceUri-is-set',
+          runId: 'canary-1',
+          runStartedAt: 1_700_000_000_000,
+          machine: 'kf-01',
+          version: '1.0.0',
+        })
+      ).rejects.toMatchObject({
+        // NON-RETRYABLE is the half that stops the eight attempts. Without it the run sits at
+        // RUNNING while an activity re-issues SQL that cannot ever bind.
+        nonRetryable: true,
+        type: 'DatasetSchemaRejected',
+      });
+    });
+
+    it('answers the question the binder error raises: WHICH names are reserved', async () => {
+      // "Duplicate column name" tells an author a name is taken. It does not say which names are
+      // taken, and there was nowhere to look it up — that gap is most of the hour this cost.
+      const cfg = { ...lakeCfg(), sourceUri: manifest([{ label: 'a', node: 'mine' }]) };
+      const acts = createDatasetActivities({ store: store(), lake: cfg });
+
+      const err = await acts
+        .publishBatch({
+          dataset: 'beat2',
+          sha256: 'unused-when-sourceUri-is-set',
+          runId: 'canary-2',
+          runStartedAt: 1_700_000_000_000,
+        })
+        .then(() => null, (e: unknown) => e as Error);
+
+      expect(err).toBeTruthy();
+      const msg = String((err as Error).message);
+      expect(msg).toContain('"node"');
+      expect(msg).toContain('rename it');
+      for (const c of ['version', 'dt', 'node', 'run_id', 'run_started_at']) expect(msg).toContain(c);
+    });
+
+    it('leaves a non-deterministic failure retryable, which is what retries are for', async () => {
+      // The dangerous direction. Marking a transient fault non-retryable kills runs that would have
+      // recovered on their own, so only DuckDB's named deterministic classes are refused.
+      const cfg = { ...lakeCfg(), sourceUri: manifest([{ host: 'a.example' }]) };
+      const acts = createDatasetActivities({ store: store(), lake: cfg });
+      // A clean publish still succeeds — non-vacuous proof the guard is not swallowing good writes.
+      const out = await acts.publishBatch({
+        dataset: 'fine',
+        sha256: 'unused-when-sourceUri-is-set',
+        runId: 'canary-3',
+        runStartedAt: 1_700_000_000_000,
+      });
+      expect(out.rows).toBe(1);
+    });
+  });
 });
 
 describe('promoteDataset — the accepting act, with the producing Run’s provenance intact', () => {
@@ -651,3 +718,16 @@ describe('resolveBatch', () => {
     expect(second.ref!.sha256).toBe(first.ref!.sha256);
   });
 });
+
+/**
+ * THE RESERVED-COLUMN COLLISION — GitHub #22, and the eight retries it used to cost.
+ *
+ * An `emits=` type that declares `node` fails at INSERT time with `Duplicate column name "node"`,
+ * in the materializer, LONG after the Method returned successfully. Nothing reaches the actor's log
+ * (the push succeeded) and nothing reaches the workflow's (it is still awaiting the dispatch), so
+ * the only way to see it was `temporal workflow describe | jq .pendingActivities` — at attempt 8,
+ * with the run still reading RUNNING.
+ *
+ * `isDeterministicSqlError` was written for exactly this class and wired into `pageDataset` only.
+ * The activity an author actually hits had no guard at all.
+ */

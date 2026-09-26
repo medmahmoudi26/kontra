@@ -87,6 +87,14 @@ class MissingPushKey(Exception):
     silent duplication/loss the three inference attempts each produced."""
 
 
+class BatchAlreadyTaken(Exception):
+    """Raised when a Method empties its Batch with `take_all()` (or the `units` alias) and then
+    iterates it with `async for`. Both are supported ways to consume a Batch; doing both runs the
+    loop body ZERO times and reports success, which is the silent failure GitHub #23 records —
+    `20/20 unit(s)`, COMPLETED in 17s where the work takes 80, and an empty dataset as the only
+    symptom. An author error, named where it is made, like {@link MissingPushKey}."""
+
+
 def _tail_index(key: str) -> int:
     """The synthetic Unit index a tail record commits under — a pure function of its KEY, so the
     SAME out-of-loop push lands on the SAME blob key across an isolation re-invoke or a
@@ -222,7 +230,9 @@ class Dataset:
 class Batch:
     """The Units handed to one Method call, as the iterator the author loops over."""
 
-    __slots__ = ("_sink", "_pending", "_held", "current", "_takes", "_tail_slots", "_push_err")
+    __slots__ = (
+        "_sink", "_pending", "_held", "current", "_takes", "_tail_slots", "_push_err", "_taken_all",
+    )
 
     def __init__(self, sink: Any, items, takes: Any = None) -> None:
         self._sink = sink
@@ -247,6 +257,10 @@ class Batch:
         # would be lost for good (ADR 0028 §consequence 5). A MissingPushKey is NOT held here: it is
         # an author error, raised at the call site, not a store failure to surface later.
         self._push_err: Optional[BaseException] = None
+        # Set by `take_all()` (and its `units` alias). Its ONLY job is to let `__anext__` tell
+        # "this Batch is finished" from "somebody emptied this Batch and is now looping over it" —
+        # two states that are identical in `_pending` and mean opposite things. See `__anext__`.
+        self._taken_all = False
 
     @property
     def pending(self) -> int:
@@ -269,15 +283,45 @@ class Batch:
 
     @property
     def units(self) -> List[Unit]:
-        """Every remaining Unit at once, for an author who runs them concurrently themselves.
+        """DEPRECATED SPELLING of {@link take_all}. It reads like a length and it EMPTIES the Batch.
+
+        Kept because `webcrawl` and others call it, and because breaking a working Method to fix a
+        naming mistake is the wrong trade. New code should say `take_all()`, which cannot be
+        mistaken for a property: `len(batch.take_all())` looks like the destructive thing it is,
+        and `len(batch.units)` looks like a question.
+
+        Reading this and then writing `async for unit in batch` is now an ERROR rather than a silent
+        empty loop — see {@link take_all} and `__anext__`.
+        """
+        return self.take_all()
+
+    def take_all(self) -> List[Unit]:
+        """TAKE every remaining Unit at once, for an author who runs them concurrently themselves.
+
+        THE NAME IS A VERB BECAUSE THE CALL IS A MUTATION. Spelled `units`, this looked like a
+        property you could measure, and `of = len(batch.units)` before an `async for` handed out the
+        whole Batch and left the loop nothing to iterate — the Method then completed, committed and
+        returned successfully having run no author code at all. Measured on `canary-1789931619`:
+        `20/20 unit(s), 0 beat(s)`, COMPLETED in 17s where the work takes 80, and the only symptom
+        was an empty output dataset, which reads exactly like a filter that matched nothing.
 
         Taking the Batch this way gives up per-Unit commit: with no position there is nothing to
         commit by, so the whole Batch commits when the Method returns. Pushes made from the
         spawned tasks have no current Unit, so each REQUIRES an explicit `key=` (ADR 0028) — under
         real parallelism their arrival order is non-deterministic, so a positional identity was
         never knowable — and folds into results by that key at Method exit.
+
+        MIXING THIS WITH `async for` IS REFUSED, not silently honoured. See `__anext__`.
         """
-        return [self._hand_out() for _ in range(len(self._pending))]
+        taken = [self._hand_out() for _ in range(len(self._pending))]
+        # SET ONLY WHEN SOMETHING WAS ACTUALLY TAKEN. Taking nothing is not taking: on an empty
+        # Batch a following `async for` would have run zero times regardless, so flagging it would
+        # turn a Method that is correct on every input into one that crashes on the empty one —
+        # the worst shape of intermittent failure, and a strictly worse bug than the one this
+        # guard exists to catch.
+        if taken:
+            self._taken_all = True
+        return taken
 
     async def _push(self, rec: Any, key: Optional[str] = None) -> None:
         """One `await dataset.push(x)`, already reduced to JSON. Make it durable NOW, attributed
@@ -327,6 +371,30 @@ class Batch:
         if done is not None:
             await self._commit(done)
         if not self._pending:
+            # EMPTY BECAUSE IT IS FINISHED, OR EMPTY BECAUSE SOMEBODY TOOK IT? `_pending` cannot
+            # tell those apart and they mean opposite things, so the flag does.
+            #
+            # A Method that called `take_all()` (or read the `units` alias) and then wrote
+            # `async for unit in batch` used to get a clean `StopAsyncIteration` on the first
+            # step: the loop body never ran, the Batch committed, and the Method returned
+            # SUCCESSFULLY having executed no author code. Nothing failed anywhere — the only
+            # trace was an output dataset that stayed empty, which is indistinguishable from a
+            # filter that matched nothing. It cost about an hour to find (GitHub #23).
+            #
+            # This is a programming error, and naming it at the moment it is made is the same
+            # posture `MissingPushKey` already takes for the other half of this API. It is raised
+            # only when the loop is entered AFTER a take — a `take_all()` with no loop is the
+            # supported concurrent pattern and is untouched, and an ordinary exhausted loop never
+            # sets the flag.
+            if self._taken_all and self.current is None:
+                raise BatchAlreadyTaken(
+                    "this Batch was emptied by take_all() (or its `units` alias) and then iterated "
+                    "with `async for`, which would run the loop body zero times and report success. "
+                    "Use ONE of them: `async for unit in batch` to take Units one at a time with "
+                    "per-Unit commit, or `take_all()` to take them all and run them concurrently "
+                    "yourself. If you wanted the size, read `batch.pending` BEFORE taking, or "
+                    "`len(...)` the list take_all() returned."
+                )
             raise StopAsyncIteration
         self.current = self._hand_out()
         return self.current

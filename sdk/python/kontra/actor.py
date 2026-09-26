@@ -259,6 +259,40 @@ class MethodRegistration:
         return doc.split("\n\n", 1)[0].strip()
 
 
+#: The columns the framework stamps on every output row, and therefore the field names an
+#: ``emits=`` type may not declare.
+#:
+#: THE WRITE IS ``SELECT u.*, … AS version, … AS dt, … AS node, … AS run_id, … AS run_started_at``
+#: (``control/orchestrator/src/data/parquet.ts``, where the same set is
+#: ``RESERVED_OUTPUT_COLUMNS``). ``u.*`` is the author's record, so a field of the same name
+#: arrives twice and DuckDB refuses the INSERT.
+#:
+#: RESTATED HERE RATHER THAN IMPORTED because the two live in different languages and different
+#: processes; the pair is held together by `tests/test_reserved_emits_fields.py`, which is also
+#: the only thing that would notice the orchestrator adding a sixth column.
+RESERVED_OUTPUT_FIELDS: tuple[str, ...] = ("version", "dt", "node", "run_id", "run_started_at")
+
+
+def _reserved_emits_fields(emits: Optional[type]) -> list[str]:
+    """Which reserved names this ``emits=`` type declares, in the order they are reserved.
+
+    QUIET ON ANYTHING IT CANNOT READ. A type with no introspectable fields — a bare ``dict``, a
+    ``TypedDict`` on an old runtime, something exotic — returns nothing and registers as it always
+    did. Refusing to serve an actor because this helper could not parse its type would turn a
+    diagnostic into an outage, and the materializer still catches the collision either way.
+    """
+    if emits is None:
+        return []
+    names: set[str] = set()
+    ann = getattr(emits, "__annotations__", None)
+    if isinstance(ann, dict):
+        names.update(str(k) for k in ann)
+    fields = getattr(emits, "__dataclass_fields__", None)
+    if isinstance(fields, dict):
+        names.update(str(k) for k in fields)
+    return [r for r in RESERVED_OUTPUT_FIELDS if r in names]
+
+
 class Actor:
     """The shared, mutable namespace the author's `self` refers to. One instance
     per session, created on the dedicated worker; holds non-serializable resources
@@ -617,6 +651,28 @@ class ActorRegistry:
                 raise TypeError(
                     f"@actor.method {f.__name__} is a generator; a Method pushes with "
                     "`await dataset.push(x)` and returns nothing (ADR 0028 §3)"
+                )
+            reserved = _reserved_emits_fields(emits)
+            if reserved:
+                # CAUGHT AT IMPORT, for the same reason the generator check above is: an actor
+                # that cannot possibly materialise should not register, let alone serve.
+                #
+                # Without this the collision surfaces as `Binder Error: Duplicate column name
+                # "node" in INSERT` — in the materializer, inside a retrying activity, LONG after
+                # the Method returned successfully. Nothing reaches the actor's log (the push
+                # succeeded) or the workflow's (it is still awaiting the dispatch), so the only way
+                # to see it was `temporal workflow describe | jq .pendingActivities`, at attempt 8,
+                # with the run still reading RUNNING (GitHub #22).
+                #
+                # `node` is the one that actually happens. It is not an exotic name for an actor on
+                # a fleet — it is the obvious one for "which machine produced this row", which is
+                # precisely what the framework is also recording.
+                fields = ", ".join(repr(r) for r in reserved)
+                raise TypeError(
+                    f"@actor.method {f.__name__}: emits type {getattr(emits, '__name__', emits)!r} "
+                    f"declares {fields}, which the framework stamps on every output row — the "
+                    f"materializer would refuse the INSERT. Rename the field(s). Reserved names: "
+                    f"{', '.join(RESERVED_OUTPUT_FIELDS)}."
                 )
             dispatch_name = name or f.__name__
             clash = self.methods.get(dispatch_name)

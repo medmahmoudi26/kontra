@@ -111,6 +111,32 @@ const META = `__ducklake_metadata_${LAKE}`;
 const OUTPUT_SCHEMA = 'output';
 
 /**
+ * The column names the framework stamps on every output row, and therefore the names an author's
+ * `emits=` type may NOT declare.
+ *
+ * THEY ARE APPENDED TO `u.*`, which is why a collision is a duplicate rather than an override: the
+ * write is `SELECT u.*, … AS version, … AS dt, … AS node, … AS run_id, … AS run_started_at`, so a
+ * field of the same name arrives twice and DuckDB refuses the INSERT.
+ *
+ * `node` IS THE ONE THAT ACTUALLY HAPPENS (GitHub #22). It is not an exotic name for an actor on a
+ * fleet — it is the obvious one for "which machine produced this row", which is exactly what the
+ * framework is also recording. The failure was invisible at author time (no schema check),
+ * invisible at Method time (the push succeeds), and surfaced as a binder error inside an activity
+ * that retried it eight times while the run sat at RUNNING.
+ *
+ * EXPORTED SO THE DIAGNOSIS CAN NAME THEM. `activities/datasets.ts` turns the duplicate-column
+ * binder error into a sentence listing this set, because the author's real question on reading
+ * "Duplicate column name" is "which names am I not allowed to use?" — and nothing answered it.
+ */
+export const RESERVED_OUTPUT_COLUMNS: readonly string[] = [
+  'version',
+  'dt',
+  'node',
+  'run_id',
+  'run_started_at',
+];
+
+/**
  * Operator-loaded lists (scope, seeds) — `kontra db`. A SEPARATE top-level directory from
  * actor output, because they are separate things: one is what you feed a run, the other is
  * what a run produced. Mixing them is what made "which of these is my scope?" a question.
@@ -886,6 +912,10 @@ async function insertBatch(conn: DuckDBConnection, b: InsertBatch): Promise<numb
   // outside the domain entirely, which is what lets a reader tell "nothing wrote this" from
   // "this is the value". It also survives the CREATE: the table's shape comes from this SELECT,
   // and `CAST(NULL AS VARCHAR)` types the column exactly as the literal branch does.
+  // THE FIVE NAMES AN AUTHOR CANNOT USE, stated once so the check and the SELECT cannot drift.
+  // `u.*` expands to the author's fields and these five are appended, so an `emits=` type that
+  // declares any of them produces `Binder Error: Duplicate column name "…" in INSERT` — inside a
+  // retrying activity, hours after the Method returned successfully (GitHub #22).
   const select =
     `SELECT u.*, ` +
     `${varcharOrNull(b.version)} AS version, ` +
