@@ -373,9 +373,21 @@ ways.** §1's own warning applies here at its sharpest: *Pulumi's desired state 
 that no longer mentions a volume does not leave it alone — it deletes it. On a Fleet that costs a
 Machine; here it costs every Dataset the install has ever produced.
 
-So the volumes are graded, in the program, by what losing one actually costs — and **ten of the
-eleven are protected**, because protection is free and the only cost is having to unprotect
-deliberately.
+So the volumes are graded, in the program, by what losing one actually costs — and **eight of the
+eleven are protected**. All eleven carry `retainOnDelete: true`; protection is the stronger claim on
+top of it, and it is spent only where loss is unrecoverable.
+
+> **This said ten, and the implementation argued it down to eight. The implementation is right.**
+> The ten came from "protection is free and the only cost is having to unprotect deliberately",
+> which is true of each volume in isolation and false of the set. `victorialogs-data` and
+> `victoriametrics-data` are retention-bounded by this program's own config (`metricsRetention` and
+> `logsRetention` are 6), so what they hold is already scheduled to be discarded — and they are the
+> two an operator legitimately reclaims disk from. A protected resource cannot be deleted by the
+> engine at all: the remedy is `pulumi state unprotect <urn>`, typed against a URN in a state
+> directory `kontra` owns. **Making the routine case require that command is what teaches an operator
+> to reach for it** — and the next volume they reach for it on is `seaweed-data`. Protecting only the
+> eight that hold something nothing else holds keeps `state unprotect` rare enough to stay
+> frightening. Habituation is the failure mode, and it is not one "protection is free" can see.
 
 **`seaweed-data` and `postgres-data` are ONE unit.** Postgres holds the DuckLake *catalog* — which
 files are live — plus the materialization ledger and the Dataset records carrying tags and renames.
@@ -393,8 +405,10 @@ digest, so a Fleet recorded against the old one can never be re-run as recorded.
 as software and not rebuildable as the thing a Run referenced.
 
 `temporal-dynamicconfig` is the only genuinely rebuildable volume — a config file that lives in the
-repo — and it is the only one left unprotected, with a comment beside it saying so. An unprotected
-volume must read as a decision rather than as an oversight.
+repo. It and the two retention-bounded ones above are the three left unprotected, and **each carries
+a written reason beside it**. An unprotected volume must read as a decision rather than as an
+oversight, which is the rule that matters more than the count: the three are not "the ones we did not
+get to".
 
 **The dangerous case is replacement, not deletion.** A converge that creates a volume under a new
 name and orphans the old one contains no delete at all: a check looking for destructive operations

@@ -451,22 +451,112 @@ resources:
   # data on disk. There is deliberately NO flag here that destroys them — `paths.ts` already warns
   # that `down -v` orphans Machines, and ADR 0052 Consequences extends that warning to this root.
   # Deleting a volume is `docker volume rm` typed by a person.
+  #
+  # ── `protect: true` ON EIGHT OF THE ELEVEN, AND IT IS THE GUARANTEE RATHER THAN DOCUMENTATION ───
+  #
+  # ADR 0052 §1's warning at its sharpest: PULUMI'S DESIRED STATE IS TOTAL. A converge that no longer
+  # mentions a volume does not leave it alone, it deletes it — and `retainOnDelete` answers a
+  # different question. It decides what happens WHEN a delete runs; `protect` decides whether one can
+  # be PLANNED at all.
+  #
+  # MEASURED on pulumi 3.244.0, the way §7 asks for it to be measured rather than assumed — THIS
+  # volume block, verbatim options and all, converged against a scratch `file://` backend with the
+  # docker names prefixed so nothing real was touched; then `volSeaweedData` hand-deleted out of a copy
+  # of the program and that copy previewed against the same stack:
+  #
+  #      -  docker:index:Volume volSeaweedData delete[retain]
+  #         error: Preview failed: resource
+  #         "urn:pulumi:local::kontra-control::docker:index/volume:Volume::volSeaweedData" cannot be
+  #         deleted because it is protected.
+  #      Resources: 12 unchanged, 2 errored                                             (exit 1)
+  #
+  # The control that makes that mean something: the SAME edit applied to the unprotected
+  # `volTemporalDynamicconfig` previews as `- 1 to delete`, 12 unchanged, and exits 0.
+  #
+  # TWO THINGS IN THAT OUTPUT ARE THE REASON THIS IS HERE. First, it failed in `preview` — before any
+  # converge, so the destructive plan cannot be expressed at all, for ANY caller: `kontra up`,
+  # `kontra update`, or a person standing in this directory running `pulumi` with the wrong stack
+  # selected. That is why the guarantee lives in the program and not in the CLI. Second, the step it
+  # refused is `delete[retain]` — retainOnDelete did NOT make the delete plannable. It would have left
+  # the bytes on the disk and dropped the volume out of state, and a stack that no longer knows a volume
+  # exists is a stack whose next `up` creates an empty one beside 34 GB nobody looks at. Both options
+  # are here because they answer different questions.
+  #
+  # AND IT COSTS SOMETHING REAL, WHICH IS THE HONEST OTHER HALF OF "protection is free": A PLAIN
+  # `pulumi destroy` ON THIS STACK NOW FAILS OUTRIGHT. Measured on a scratch stack of one container, one
+  # network and two volumes, one protected — `error: preview failed`, `- 3 to delete, 2 errored`, and
+  # THE CONTAINER WAS STILL RUNNING afterwards. `pulumi destroy --exclude-protected` is the form that
+  # works (container and network deleted, both volumes kept, "There are still 3 protected resources
+  # associated with this stack"), and `kontra control down` passes it —
+  # `cli/internal/hostengine/engine.go`'s `Destroy` carries that measurement. Anybody driving this
+  # program by hand needs the same flag, or protection reads as an install that cannot be removed.
+  #
+  # IT REFUSES A REPLACE TOO, measured separately because §7's sharpest line is "the dangerous case is
+  # replacement, not deletion". Changing a declared volume's docker `name` forces a replacement rather
+  # than a delete, and on the same stack that came back
+  #
+  #      +- docker:index:Volume volSeaweedData replace[retain] [diff: ~name]
+  #         error: unable to replace resource "urn:…::volSeaweedData" as it is currently marked for
+  #         protection. To unprotect the resource, remove the `protect` flag …
+  #
+  # WHAT PROTECTION STRUCTURALLY CANNOT SEE is a volume MOVED TO ANOTHER SERVICE: that plan is a
+  # container update with no volume step in it at all, so there is nothing to refuse. The stack comes
+  # up healthy, the service that wrote the data starts on an empty disk, and the old bytes are attached
+  # to something that will never read them. `cli/internal/hostengine/volumes.go` asserts volume
+  # IDENTITY against `pulumi stack export` for that case, for the three unprotected volumes above,
+  # and for a state somebody ran `pulumi state unprotect` against — and it also translates the
+  # refusals here, because both of them name a URN and offer `unprotect` as the remedy, and a person
+  # who trips this needs the volume's name and a migration.
+  #
+  # THE GRADE IS WHAT LOSING ONE COSTS. Eight hold something nothing else holds; the three left
+  # unprotected each carry a comment saying why, because an unprotected volume must read as a
+  # decision and not as an oversight. §7 graded the two observability volumes protected as well, on
+  # "protection is free"; they are unprotected here and the comment beside them is the argument.
   volPostgresData:
     type: docker:index:Volume
     properties: { name: "kontra_postgres-data" }
-    options: { provider: "${dockerProvider}", retainOnDelete: true }
+    # HALF OF ONE UNIT WITH SEAWEED — the DuckLake catalog (which files are live), the
+    # materialization ledger, and the Dataset records carrying tags and renames. Protect this and
+    # not seaweed and there are gigabytes of parquet nothing can find; protect seaweed and not this
+    # and the catalog points at nothing. `data/maintenance.ts`'s reclamation chain assumes the
+    # catalog is the authority for liveness, so an out-of-band loss on either side breaks that
+    # assumption SILENTLY. They are protected together or the protection means nothing.
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
   volRedisData:
     type: docker:index:Volume
     properties: { name: "kontra_redis-data" }
-    options: { provider: "${dockerProvider}", retainOnDelete: true }
+    # IT LOOKS LIKE A CACHE AND IT IS NOT. `object_state` and `global_state` are cross-Session
+    # durable author state with no other home (`kontra-global:{actor}:{key}`). Only `unit_state` is
+    # scratch, and that one is safe to lose because Units are idempotent — which is precisely why
+    # this volume reads as disposable to anybody who has only seen the Unit half of it.
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
   volRegistryData:
     type: docker:index:Volume
     properties: { name: "kontra_registry-data" }
-    options: { provider: "${dockerProvider}", retainOnDelete: true }
+    # REBUILDABLE AS SOFTWARE, NOT REBUILDABLE AS THE THING A RUN REFERENCED. Actors are pinned by
+    # OCI digest (ADR 0011, `expected_digest`), and rebuilding an image yields a NEW digest — so a
+    # Fleet recorded against the old one can never be re-run as recorded. Measured on this box: 6.2
+    # GB of it.
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
   volSeaweedData:
     type: docker:index:Volume
     properties: { name: "kontra_seaweed-data" }
-    options: { provider: "${dockerProvider}", retainOnDelete: true }
+    # THE OTHER HALF OF THE UNIT — the parquet the catalog's rows point at, plus `cas/`, `units/` and
+    # `history/`. The largest volume here by an order of magnitude (34 GB of the 41 measured above).
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
+  # ── THE TWO OBSERVABILITY VOLUMES ARE DELIBERATELY UNPROTECTED ─────────────────────────────────
+  #
+  # Both are RETENTION-BOUNDED BY THIS PROGRAM'S OWN CONFIG: `metricsRetention` and `logsRetention`
+  # are 6 (`:242`, `:245`), so what they hold is already scheduled to be thrown away. Losing one
+  # costs DIAGNOSIS and not integrity — ADR 0025 puts a Run's durable story in `history/`, on
+  # seaweed, precisely because logs age out — and nothing in the reclamation chain reads either.
+  #
+  # AND PROTECTION IS NOT QUITE FREE HERE, WHICH IS THE WHOLE DISAGREEMENT WITH §7. These are the two
+  # an operator legitimately reclaims disk from, and a protected resource cannot be deleted by the
+  # engine at all: the remedy is `pulumi state unprotect <urn>` typed against a URN, in a state
+  # directory `kontra` owns. Making the routine case require that teaches an operator to reach for
+  # `state unprotect` — and the next volume they reach for it on is `seaweed-data`. Protecting the
+  # eight that hold something nothing else holds keeps that command rare enough to be frightening.
   volVictoriaMetricsData:
     type: docker:index:Volume
     properties: { name: "kontra_victoriametrics-data" }
@@ -481,7 +571,10 @@ resources:
   volKontraHome:
     type: docker:index:Volume
     properties: { name: "kontra_kontra-home" }
-    options: { provider: "${dockerProvider}", retainOnDelete: true }
+    # Console login hashes, the four service tokens in `runtime.env`, and every hydrated bundle. The
+    # tokens can be re-minted; the console user cannot be recovered, and `kontra init` printing a
+    # fresh password is not the same installation.
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
   # ITS OWN VOLUME BECAUSE IT WAS ON THE CONTAINER'S OVERLAY LAYER. `server.ts` defaults the SQLite
   # DB to `orchestrator.db` relative to its WORKDIR (/src/control/orchestrator in the image), so
   # every recreate destroyed the actors, workflows, graphs, scratches and SOURCES tables. Measured:
@@ -491,7 +584,10 @@ resources:
   volOrchestratorDb:
     type: docker:index:Volume
     properties: { name: "kontra_orchestrator-db" }
-    options: { provider: "${dockerProvider}", retainOnDelete: true }
+    # The actors, workflows, graphs, scratches and SOURCES tables — the run records. The measurement
+    # above is what losing it looks like from the outside: /api/workflows answered
+    # `"registered": []` for a catalog with two workflows in it, and nothing said anything.
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
   # SHARED RW BY api AND infra, because they are two halves of one flow: the api WRITES a secret and
   # infra RESOLVES it at the last hop when a Fleet comes up. A store only one of them can see is a
   # credential that saves and then cannot be found — which is what `keyring.ts` defaulting to
@@ -500,7 +596,16 @@ resources:
   volSecretsStore:
     type: docker:index:Volume
     properties: { name: "kontra_secrets-store" }
-    options: { provider: "${dockerProvider}", retainOnDelete: true }
+    # Every credential the install holds, encrypted under `.master.key` which lives in here beside
+    # them (`secrets/keyring.ts`). There is no second copy anywhere: a Run names a SecretRef and this
+    # is what resolves it.
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
+  # ── THE ONE GENUINELY REBUILDABLE VOLUME, AND SO THE THIRD LEFT UNPROTECTED ─────────────────────
+  #
+  # It holds one config file that lives in the repository, written by `temporal-config` on its way
+  # past (`:720`) and read by `temporal` (`:954`). Delete it and the next converge writes it again.
+  # It is the only volume here that a `docker volume rm` costs nothing at all, and §7 names it as the
+  # only one — the two above are this program's own addition and argue their case there.
   volTemporalDynamicconfig:
     type: docker:index:Volume
     properties: { name: "kontra_temporal-dynamicconfig" }
@@ -511,7 +616,12 @@ resources:
   volPulumiState:
     type: docker:index:Volume
     properties: { name: "kontra_pulumi-state" }
-    options: { provider: "${dockerProvider}", retainOnDelete: true }
+    # THE ONE WHOSE LOSS IS NOT LOCAL, and the reason `kontra update` exports before it converges.
+    # Losing this loses no data — it loses THE ABILITY TO DESTROY CLOUD MACHINES THAT ARE STILL
+    # BILLING, which `infra/paths.ts` already names: a teardown that took it "would orphan every
+    # machine we own". Every other volume on this list costs its own contents; this one costs money
+    # that keeps being spent, in an account this program cannot see, on Machines nothing can find.
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
 
   # ══ LEVEL 0 ════════════════════════════════════════════════════════════════════════════════════
   # Seven containers with no dependencies. They converge in parallel; level 1 starts when their

@@ -101,6 +101,41 @@ const usageText = `kontra — local control surface
                #   manual signal/terminate console, for the failures kontra's own surfaces
                #   cannot yet show. Its codec address is derived, never configured.
   kontra infra up|down|status [--repo <dir>]       # the compose control plane (the other topology)
+  kontra control up [--preview] [--json] [--stack local] [--workspaces <dir>]
+        [--bind 127.0.0.1] [--api-port 8088] [--program <dir>]
+               # THE HOST ENGINE (ADR 0052 §1): converges kontra-control — 13 containers on
+               # one private Docker network, declared as Pulumi YAML — by shelling to the host
+               # pulumi. Its state is file://<.kontra>/state, and the backend is ASSERTED
+               # before any operation: a failed "pulumi login" does not stop pulumi, it
+               # creates an ephemeral Pulumi Cloud account and deploys THERE.
+               # ONE PROJECT, AND EVERY OTHER IS REFUSED. --stack kontra-fleet/<tag> is not
+               #   honoured here — a Fleet goes API -> Temporal -> infra worker so it leaves a
+               #   Lease, a run record and an audit trail; this path would leave none.
+               # --preview: the same converge through "pulumi preview". Prints per-operation
+               #   counts, NAMES what would be replaced, and exits 0 only when the converge is
+               #   a no-op, so CI can gate on it. Takes no lock.
+  kontra control down [--stack local]              # destroy the containers and the network; KEEPS
+               # all 11 volumes (retainOnDelete) and the Pulumi state. "compose down", not "down -v".
+  kontra update [--check] [--to <tag>] [--stack local] [--program <dir>] [--workspaces <dir>]
+               # MOVE THIS INSTALLATION TO NEWER IMAGES (ADR 0052 §7). The SAME converge as
+               # "kontra control up" — same program, same engine, same lock, same volume gate —
+               # with a different desired state. An install nobody can upgrade is one people
+               # pin and abandon.
+               # EVERY VOLUME IS ACCOUNTED FOR BEFORE ANYTHING IS APPLIED, twice: eight of the
+               #   eleven carry protect: true in the program, so pulumi refuses to PLAN their
+               #   deletion (measured — it fails in preview, for any caller). And the identity
+               #   of every volume this install has is asserted against "pulumi stack export":
+               #   still named what it was, still attached to the same service. Not redundant —
+               #   a volume MOVED to another service is a plan with no volume step in it at all,
+               #   nothing refuses it, and the stack comes up healthy and empty.
+               # "pulumi stack export" is written before every converge and its path printed,
+               #   for kontra_pulumi-state: it records every cloud Machine the control plane
+               #   owns, so losing it loses the ability to destroy Machines that keep billing.
+               # --check: preview only, exits non-zero if anything would change, so CI can gate.
+               # --to: one release tag for every kontra-owned image, read out of the program.
+               # NO SCHEMA MIGRATION, deliberately (§7). An image expecting a shape its volume
+               #   does not have fails its own health gate and fails the converge with that
+               #   error in it — loud, where a half-migration is data nothing can read.
   kontra serve --actor <dir> [--mode local|dev|docker] [--engine py|go] [--python <bin>]
                [--redis <host:port>] [--replicas N] [--network <name>] [--watch]
                # serve the actor HERE (actor + handler), no image build — it waits for a dispatch
@@ -297,6 +332,19 @@ func dispatch(args []string) error {
 		err = cmdUp(args[1:])
 	case "infra":
 		err = cmdInfra(args[1:])
+	case "control":
+		// THE HOST ENGINE (ADR 0052 §1-§2): `kontra-control` as a Pulumi YAML program, converged by
+		// shelling to the host `pulumi`. It is a third word for a third topology only until issue 08
+		// retires the appliance — §2 spells this command `kontra up`, and it cannot be spelled that way
+		// while `case "up":` above routes to `cli/up.go` and eight assertions in `cli/up_test.go` pin
+		// that behaviour. `cli/control.go`'s header records the one-line swap and why it is one line.
+		err = cmdControl(args[1:])
+	case "update":
+		// ADR 0052 §7. A TOP-LEVEL WORD AND NOT `kontra control update`, because §7 spells it
+		// `kontra update` and because the noun an operator is updating is the installation, not one
+		// subsystem of it — the word has to survive issue 08 retiring `control` back into `up`, and
+		// `cli/update.go` ends in the same `converge` this case's neighbour does.
+		err = cmdUpdate(args[1:])
 	case "build":
 		err = cmdBuild(args[1:])
 	case "bundle":
