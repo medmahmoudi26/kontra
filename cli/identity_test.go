@@ -11,11 +11,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 	"strings"
 	"testing"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/queues"
-	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 )
 
 // THE QUEUE IS DERIVED, AND IT MUST NOT COLLIDE WITH AN ACTOR'S.
@@ -212,19 +213,20 @@ func TestWorkflowSessionIsTheContract(t *testing.T) {
 		"recon/my.workflow.py": "my_workflow",
 	}
 	for file, want := range cases {
-		if got := workflowSession(file); got != want {
-			t.Errorf("workflowSession(%q) = %q, want %q", file, got, want)
+		if got := workflowWorkerName(file); got != want {
+			t.Errorf("workflowWorkerName(%q) = %q, want %q", file, got, want)
 		}
 	}
-	if workflowSession("nscheck/workflow.py") == workflowSession("ping/workflow.py") {
+	if workflowWorkerName("nscheck/workflow.py") == workflowWorkerName("ping/workflow.py") {
 		t.Error("two workflow folders must not share a session — the second serve would be refused")
 	}
 
-	// A workflow and an actor CAN now share a session name, and that is fine: they are told apart
-	// by `@kontra`, which carries the kind. The old `wf-` prefix existed only because a name was
-	// the only signal there was.
-	if tmux.KontraWorkflowTag("nscheck") == tmux.KontraSessionTag("nscheck", "0.1.0") {
-		t.Error("a workflow tag is indistinguishable from an actor tag")
+	// A workflow and an actor CAN share a base name, and that is fine: an Actor's Worker carries its
+	// VERSION (`cliutil.ActorWorkerName`) and a workflow's does not, so the two container names do
+	// not collide. The old `wf-` prefix existed only because the name was the only signal there was;
+	// `@kontra`, which carried the kind, went with the Monitor that read it.
+	if workflowWorkerName("nscheck/workflow.py") == cliutil.ActorWorkerName("nscheck", "0.1.0") {
+		t.Error("a workflow worker is indistinguishable from an actor's")
 	}
 }
 
@@ -276,7 +278,7 @@ func TestWorkflowFileOfResolvesAFolder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("workflowFileOf(%q): %v", spelling, err)
 		}
-		if got := workflowSession(file); got != "nscheck" {
+		if got := workflowWorkerName(file); got != "nscheck" {
 			t.Errorf("serve %q lands in session %q, want nscheck — one workflow, one worker", spelling, got)
 		}
 	}

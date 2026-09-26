@@ -1,14 +1,15 @@
 /**
  * REGISTERED FOLDERS — where an operator's own Actors and Workflows live on disk (src/sources.ts).
  *
- * Seven routes: list and register a folder, forget one, list what is in it, read one of its files,
- * serve its worker on this machine, and generate the caller workflow that would dispatch one of
- * its Methods.
+ * Eight routes: list and register a folder, forget one, list what is in it, read one of its files,
+ * serve its worker on this machine, read what its PAST serves did, and generate the caller workflow
+ * that would dispatch one of its Methods.
  *
  * WHAT IT NEEDS: the {@link SourceStore}, which reads its list through the same `Repo` the catalog
  * does, so a registration survives a restart the way an actor's catalog entry does. `ensureEndpoint`
- * and `removeEndpoint` reach Temporal's Nexus registry from inside the two write handlers; nothing
- * is dialled by registering these routes.
+ * and `removeEndpoint` reach Temporal's Nexus registry from inside the two write handlers, and
+ * `listServes` reads the visibility index from inside the serve-history handler; nothing is dialled
+ * by registering these routes.
  *
  * ADMISSION: listing and reading are open, like every read on this API. REGISTERING, FORGETTING AND
  * SERVING ARE NOT, and take the same `checkOptionalBearer` + `RUN_TOKEN_VARS` as `serve` and
@@ -31,6 +32,7 @@ import { ensureEndpoint, removeEndpoint } from '../nexusRegistry';
 import { watchDir } from '../schemaWatch';
 import { MARKER, SourceMissing, SourceRefused, defaultRoot, filesIn, resolveInside } from '../sources';
 import type { SourceStore } from '../sourceStore';
+import { listServes } from '../temporalClient';
 import { ControlRefused, RUN_TOKEN_VARS } from '../workflowControl';
 import { errMessage } from './errors';
 
@@ -339,6 +341,55 @@ export function registerSourceRoutes(app: FastifyInstance, sources: SourceStore)
       }
       if (err instanceof ControlRefused) return reply.code(400).send({ error: err.message });
       return reply.code(502).send({ error: `could not serve: ${errMessage(err)}` });
+    }
+  });
+
+  /**
+   * WHAT HAPPENED THE LAST TIMES THIS FOLDER WAS SERVED — the showing half of serve-dev.
+   *
+   * A serve is a `serveDevWorkflow` execution (`workflows/serveDev.ts`), and `visibility.ts` keeps
+   * that type off the Runs page on purpose: it is kontra's own infrastructure, not a caller's Run,
+   * and a wall of these would bury what somebody actually ran. But hiding was ALL that existed. No
+   * surface in this control plane could answer "when was this actor last served, and did it work",
+   * so a serve that died on an import error left a Serve button that looked pressed, an actor
+   * nothing was polling, and the sentence explaining why held only in an execution nobody listed.
+   *
+   * A SIBLING OF THE SERVE VERB, not of the Runs list — `POST …/serve` writes the history this
+   * reads, under an id both derive from `queues.ts:serveDevWorkflowId`. Hanging it off the folder
+   * is what makes it answerable at all: the workflow id IS the folder, so there is nothing to look
+   * up and no second index to keep.
+   *
+   * BOTH KINDS, because both can be served. `workflowControl.serveWorkflow` starts the same type
+   * under the same id shape for a Workflow folder, so scoping this to `actor` would have left half
+   * the serves on this control plane unreadable for no reason anyone could state.
+   *
+   * THE ID IS RESOLVED THROUGH THE STORE BEFORE IT REACHES A QUERY, and that ordering is the
+   * security property rather than a convenience. `:id` is caller-controlled and ends up inside a
+   * visibility query string; `sources.get` answers only for ids the store itself minted from the
+   * workspace listing, so nothing a caller invents is ever interpolated — the same "an id names
+   * something we issued, or it names nothing" rule `activities/serveDev.ts` is built on.
+   *
+   * NOT LIVE, AND IT SHOULD NOT BE. A history is a record; the thing that IS live beside it on the
+   * Actors page is the poller state, which has its own route. A timer here would poll Temporal once
+   * per open tab to re-read rows that cannot change.
+   */
+  app.get('/api/sources/:kind/:id/serves', async (req, reply) => {
+    const { kind, id } = req.params as { kind: string; id: string };
+    if (kind !== 'actor' && kind !== 'workflow') {
+      return reply.code(404).send({ error: `${kind}: not a kind of source` });
+    }
+    const source = sources.get(kind, decodeURIComponent(id));
+    if (!source) return reply.code(404).send({ error: `${id}: no such registered folder` });
+    const { limit } = req.query as Partial<{ limit: string }>;
+    const n = limit ? Number.parseInt(limit, 10) : undefined;
+    try {
+      return await listServes(source.id, Number.isFinite(n) ? (n as number) : undefined);
+    } catch (err) {
+      // 502 AND NOT AN EMPTY LIST. `{ serves: [], capped: false }` is the answer for a folder
+      // nobody has ever served, and the page says exactly that about it — so answering the same
+      // shape for a cluster that could not be reached would print "nothing has served this yet"
+      // over an actor that has been served all week.
+      return reply.code(502).send({ error: `could not list serves: ${errMessage(err)}` });
     }
   });
 

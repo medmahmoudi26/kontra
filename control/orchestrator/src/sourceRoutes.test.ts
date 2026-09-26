@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +6,61 @@ import type { FastifyInstance } from 'fastify';
 import { Repo } from './db/repo';
 import { codeRoot } from './sources';
 import { buildServer } from './server';
+
+/*
+ * THE SERVE ROUTE ASKS THE INFRA ROLE, SO THE QUEUE IS WHAT THIS MOCKS.
+ *
+ * `serveActor` used to shell out to the CLI here; it starts `serveDevWorkflow` on `kontra-infra`
+ * instead, because a serve-dev Worker is a container and starting one needs the Docker socket —
+ * which the API process does not have and must not get.
+ *
+ * WITHOUT THIS THESE TESTS DIAL A REAL TEMPORAL AND TIME OUT AT 30s EACH, reported as assertion
+ * failures rather than as a missing stub. That is how they failed when the hop landed.
+ */
+const executed = vi.hoisted(() => ({
+  result: { worker: 'probe', queue: 'probe-0.1.0', detail: '' },
+}));
+
+/**
+ * THE SERVE-HISTORY READ, stubbed at the seam the route uses.
+ *
+ * `listServes` reaches Temporal through a module-level memoized client, so stubbing `getClient`
+ * (as the serve verb above does) does NOT reach it — the real function calls the module's own
+ * binding and would dial a cluster that is not there. Stubbing the exported function is what makes
+ * this file about the ROUTE: which ids it admits, which it refuses, and what it does with the
+ * answer.
+ *
+ * WHAT THE READ ITSELF DOES IS PINNED IN `serveHistory.test.ts`, which drives the real `listServes`
+ * against a fake `@temporalio/client` — the query it narrows with, the ordering, the cap and the
+ * close-event read for a failure's sentence. Asserting those here would assert on this stub.
+ *
+ * `asked` records the arguments, because the one thing the route owns about the read is WHICH
+ * FOLDER it asks about: a handler that passed the wrong id would return a perfectly well-formed
+ * history belonging to somebody else.
+ */
+const serveHistory = vi.hoisted(() => ({
+  asked: [] as Array<{ sourceId: string; limit?: number }>,
+  answer: { serves: [] as unknown[], capped: false },
+  fail: null as Error | null,
+}));
+
+vi.mock('./temporalClient', async (orig) => ({
+  // PARTIAL, not a whole-module replacement: `server.ts` pulls several bindings out of this module
+  // and a factory returning only `getClient` leaves the rest `undefined` — which fails at boot,
+  // far from here, in a way that reads as a broken server rather than a stubbed one.
+  ...(await orig<typeof import('./temporalClient')>()),
+  getClient: vi.fn(async () => ({
+    workflow: {
+      execute: async () => executed.result,
+      start: async (_t: string, o: { workflowId: string }) => ({ workflowId: o.workflowId }),
+    },
+  })),
+  listServes: vi.fn(async (sourceId: string, limit?: number) => {
+    serveHistory.asked.push({ sourceId, limit });
+    if (serveHistory.fail) throw serveHistory.fail;
+    return serveHistory.answer;
+  }),
+}));
 
 let app: FastifyInstance;
 let tmp: string;
@@ -16,6 +71,11 @@ beforeEach(() => {
   prevHome = process.env.KONTRA_HOME;
   process.env.KONTRA_HOME = path.join(tmp, 'home');
   app = buildServer({ repo: new Repo(':memory:'), webRoot: '' });
+  // The stub is module-level state, so a history left behind by one test would be another test's
+  // "this folder has been served" — the exact false positive the empty case asserts against.
+  serveHistory.asked = [];
+  serveHistory.answer = { serves: [], capped: false };
+  serveHistory.fail = null;
 });
 
 afterEach(async () => {
@@ -289,10 +349,10 @@ describe('POST /api/sources/actor/:id/serve', () => {
     app.inject({ method: 'POST', url: `/api/sources/actor/${encodeURIComponent(id)}/serve` });
 
   it('answers with the session the workbench then looks for a pane by', async () => {
-    // `true` stands in for the CLI — the route's contract is what it returns, not what `kontra serve
-    // --actor` does. The session is `<name>-<version>` with tmux's own rewriting applied, which is
-    // the string `cli/internal/tmux/tmux.go`, `cli/fleet.go` and `panels/discovery.ts` also mint.
-    process.env.KONTRA_BIN = 'true';
+    // The route's contract is what it RETURNS, not how the Worker got started. The session is
+    // `<name>-<version>` folded — the string `cliutil.ActorWorkerName` and
+    // `shared/core/src/panels/tmux.ts:actorSession` both mint, pinned across them by
+    // `shared/conformance/queues.json` §tmux_session.
     const id = idOf(actorFolder('probe'));
     const res = await serve(id);
     expect(res.statusCode).toBe(200);
@@ -300,7 +360,10 @@ describe('POST /api/sources/actor/:id/serve', () => {
       actor: 'probe',
       version: '0.1.0',
       session: 'probe-0_1_0',
-      attach: 'tmux attach -t probe-0_1_0',
+      // `attach` NAMES THE WORKER. It was `tmux attach -t …`, which only ever worked from a shell on
+      // the box; a serve-dev Worker's output is its container's stdout, shipped to the Logs surface
+      // by the `KONTRA_WORKER` label, so the useful value is the name to search by.
+      attach: 'probe',
     });
   });
 
@@ -324,9 +387,10 @@ describe('POST /api/sources/actor/:id/serve', () => {
   });
 
   it('takes no placement — there is nothing in the request to choose one with', async () => {
-    // THE ANTI-FEATURE, pinned at the seam. `serveActor` passes `--mode local`; a body that could
-    // ask for anything else would make an edit and a fleet deployment one field apart.
-    process.env.KONTRA_BIN = 'true';
+    // THE ANTI-FEATURE, pinned at the seam. The request that crosses to the infra role carries a
+    // source id and a kind and nothing else; a body that could ask for a placement would make an
+    // edit and a fleet deployment one field apart — and would hand the socket-holding role an
+    // instruction from the HTTP surface, which is the thing the hop exists to prevent.
     const id = idOf(actorFolder('probe'));
     const res = await app.inject({
       method: 'POST',
@@ -336,6 +400,99 @@ describe('POST /api/sources/actor/:id/serve', () => {
     // Ignored, not honoured: the serve succeeds and the answer says nothing about a mode.
     expect(res.statusCode).toBe(200);
     expect(Object.keys(res.json() as object)).toEqual(['actor', 'version', 'path', 'session', 'attach']);
+  });
+});
+
+/**
+ * THE SHOWING HALF OF SERVE-DEV, at the route.
+ *
+ * `visibility.ts` keeps `serveDevWorkflow` off the Runs page, correctly — it is kontra's own
+ * infrastructure and not a caller's Run. What did not exist was anywhere that answered "when was
+ * this folder served, and did it work", so a serve that died on an import error left a button that
+ * looked pressed and an actor nothing was polling, with the reason held only in an execution
+ * nobody listed.
+ *
+ * WHAT THESE PIN IS THE ROUTE: which ids it admits, which it refuses before anything reaches a
+ * query, that a caller's `?limit` is honoured, and that an unreachable cluster is not reported as
+ * an empty history. `serveHistory.test.ts` drives the read itself.
+ */
+describe('GET /api/sources/:kind/:id/serves', () => {
+  const serves = (id: string, qs = '') =>
+    app.inject({ method: 'GET', url: `/api/sources/actor/${encodeURIComponent(id)}/serves${qs}` });
+
+  it('answers an EMPTY history rather than a 404 for a folder nobody has served', async () => {
+    // A folder that exists and has never been served is not an error, and the page says exactly
+    // that about it. 404 here would be indistinguishable from "no such folder", which is the one
+    // other thing this route says.
+    const res = await serves(idOf(actorFolder('probe')));
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ serves: [], capped: false });
+  });
+
+  it('asks about THIS folder, by the id the serve verb starts under', async () => {
+    // `at:<path>` is the Source id (`sourceStore.ts`), and `queues.ts:serveDevWorkflowId` turns it
+    // into the workflow id both start sites write. A handler that passed the wrong one would return
+    // a perfectly well-formed history belonging to somebody else.
+    const dir = actorFolder('probe');
+    await serves(idOf(dir));
+    expect(serveHistory.asked).toEqual([{ sourceId: `at:${dir}`, limit: undefined }]);
+  });
+
+  it('passes a caller\'s limit through, and only when it is a number', async () => {
+    const id = idOf(actorFolder('probe'));
+    await serves(id, '?limit=3');
+    await serves(id, '?limit=all');
+    expect(serveHistory.asked.map((a) => a.limit)).toEqual([3, undefined]);
+  });
+
+  it('hands back what the read answered, cap flag and all', async () => {
+    // The flag is the contract the page draws its "showing the last N of more" sentence from — a
+    // silent slice reads as the whole history.
+    serveHistory.answer = {
+      serves: [{ execId: 'e-1', status: 'failed', startedAt: 10, closedAt: 20, failure: 'boom' }],
+      capped: true,
+    };
+    const res = await serves(idOf(actorFolder('probe')));
+    expect(res.json()).toEqual(serveHistory.answer);
+  });
+
+  it('404s a folder nobody registered, so an id cannot be read into a query', async () => {
+    // The id reaches a visibility query STRING. Resolving it through the store first means only ids
+    // the store minted from the workspace listing are ever interpolated — the same "an id names
+    // something we issued, or it names nothing" rule the serve hop is built on.
+    expect((await serves('at:/not/in/the/workspace')).statusCode).toBe(404);
+    expect(serveHistory.asked).toEqual([]);
+  });
+
+  it('404s a kind that is not one', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/sources/dataset/at%3A%2Fx/serves' });
+    expect(res.statusCode).toBe(404);
+    expect(serveHistory.asked).toEqual([]);
+  });
+
+  it('502s an unreachable cluster instead of reporting an empty history', async () => {
+    // THE DIRECTION THAT MATTERS. `{ serves: [], capped: false }` is the answer for a folder nobody
+    // has served, and the page prints "nothing has served this yet" for it — so answering the same
+    // shape for a cluster nobody could reach would print that over an actor served all week.
+    serveHistory.fail = new Error('connect ECONNREFUSED 127.0.0.1:7233');
+    const res = await serves(idOf(actorFolder('probe')));
+    expect(res.statusCode).toBe(502);
+    expect((res.json() as { error: string }).error).toContain('could not list serves');
+  });
+
+  it('serves a WORKFLOW folder too — both kinds start the same type under the same id shape', async () => {
+    // `workflowControl.serveWorkflow` starts `serveDevWorkflow` under `serve-dev/at:<dir>` for a
+    // Workflow folder, so scoping this route to actors would leave half the serves on this control
+    // plane unreadable for no reason anyone could state.
+    const dir = path.join(codeRoot('workflow'), 'sweep');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'workflow.py'), '# code\n');
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sources/workflow/${encodeURIComponent(`at:${dir}`)}/serves`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(serveHistory.asked).toEqual([{ sourceId: `at:${dir}`, limit: undefined }]);
   });
 });
 

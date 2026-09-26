@@ -20,7 +20,7 @@ import { OpenTelemetryWorkflowClientInterceptor } from '@temporalio/interceptors
 import type { RunStatus } from '../contract/types';
 import { dataConverter } from './codec/dataConverter';
 import { type HeartbeatDetail, type NodeHeartbeat, heartbeatRow } from './heartbeat';
-import { HistoryReducer, type RawHistoryEvent, type RunHistory } from './history';
+import { HistoryReducer, failureMessage, type RawHistoryEvent, type RunHistory } from './history';
 import { inFlightOf, type InFlight } from './runActivity';
 import { startTracing, tracingEnabled } from './otel';
 import {
@@ -29,8 +29,10 @@ import {
   KontraTenant,
   buildDispatchQuery,
   buildRunDiscoveryQuery,
+  buildWorkflowIdQuery,
   registerSearchAttributes,
 } from './visibility';
+import { SERVE_DEV_WORKFLOW, serveDevWorkflowId } from './queues';
 import { temporalConnectOptions } from './temporalTls';
 import { clientIdentity } from './workerIdentity';
 
@@ -497,6 +499,183 @@ export async function listFleetOperations(limit = 50): Promise<FleetOperationRow
   }
   // Client-side for the same reason as `listRuns`: SQLite visibility rejects ORDER BY.
   return rows.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/**
+ * ONE PRESS OF SERVE, as Temporal still holds it.
+ *
+ * Deliberately NOT a `RunRow`, for the reason {@link FleetOperationRow} is not one and states: a
+ * serve is not a **Run**. It dispatches no Actor, writes no Dataset, and `visibility.ts` excludes
+ * its type from the Runs page precisely because a wall of these would bury what a caller ran.
+ * Folding it into that list with `dispatches: 0` would make the number meaningless rather than zero.
+ */
+export interface ServeRow {
+  /**
+   * Temporal's run id for this ONE execution — the only thing that tells two serves of one folder
+   * apart, because the workflow id IS the folder (`queues.ts:serveDevWorkflowId`). Never called a
+   * run id: a **Run** is its caller workflow's id (ADR 0023 §12).
+   */
+  execId: string;
+  status: RunStatus;
+  startedAt: number;
+  /** 0 while the serve is still in flight. */
+  closedAt: number;
+  /**
+   * WHY THIS SERVE DID NOT PRODUCE A WORKER, in Temporal's own words — and the whole reason a
+   * history is worth keeping at all.
+   *
+   * `status` CANNOT CARRY IT. `mapStatus` collapses FAILED, TERMINATED and TIMED_OUT into the one
+   * word `failed`, which is right for a run list and useless here: the three sentences behind those
+   * are "the CLI exited non-zero and here is its stderr", "somebody killed it", and "two minutes
+   * elapsed and the image was probably still pulling" (`workflows/serveDev.ts` sets that budget).
+   * Those are three different afternoons.
+   *
+   * ABSENT ON A SERVE THAT WORKED, and absent — rather than a placeholder — when the close event
+   * could not be read: a closed execution whose history retention has passed is an ordinary answer
+   * on this path, and inventing a reason for it would be the confident wrong kind.
+   */
+  failure?: string;
+}
+
+/** A folder's serve history, and whether the scan saw all of it. */
+export interface ServeScan {
+  /** Newest first. */
+  serves: ServeRow[];
+  /**
+   * The scan stopped at its cap — this folder has been served more times than are listed.
+   *
+   * REPORTED RATHER THAN IMPLIED, on the same terms as {@link OpenRunScan.capped}. A silent slice
+   * of a history reads as the whole history, and "this actor has been served twice" is a different
+   * claim from "here are the last two of many".
+   */
+  capped: boolean;
+}
+
+/** How many serves one history read may examine, whatever the caller asks for. The close-event read
+ *  below is one RPC per non-completed row, so this is the bound on that fan-out and not merely a
+ *  page size — see {@link listServes}. */
+export const SERVE_SCAN_LIMIT = 25;
+
+/** What a caller gets when it does not say. A compact panel beside an actor, not an archive. */
+const SERVE_DEFAULT_LIMIT = 10;
+
+/**
+ * EVERY SERVE OF ONE FOLDER, newest first, with the failures explained.
+ *
+ * ── WHY THIS EXISTS ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Pressing Serve starts `serveDevWorkflow`, and `visibility.ts` keeps that type off the Runs page —
+ * correctly, because it is kontra's own infrastructure and not a caller's Run. But the hiding was
+ * the whole of it: nowhere in this control plane could answer "when was this actor last served, and
+ * did it work". A serve that failed on an import error left the operator with a Serve button that
+ * looked pressed and an actor nothing was polling, with the sentence explaining why held only in a
+ * Temporal execution nobody was listing.
+ *
+ * ── ONE QUERY, ONE ID ───────────────────────────────────────────────────────────────────────────
+ *
+ * The id is derived, not discovered: `serveDevWorkflowId(sourceId)` is the same function both start
+ * sites call, so this cannot address a folder they did not write. It is REUSED across serves —
+ * that is what makes one folder's serves mutually exclusive — so the history is a LIST of
+ * executions under one id. A describe would answer with whichever ran last and call it the history.
+ *
+ * ── WHAT THE FAILURE COSTS ──────────────────────────────────────────────────────────────────────
+ *
+ * The visibility record carries status and both timestamps and NOT the failure message, so the
+ * reason needs the close event. That is one `getWorkflowExecutionHistory` with
+ * `historyEventFilterType: CLOSE_EVENT` — Temporal answering "the last event" without sending the
+ * ones before it — which is the same targeted read `fetchRunIO` makes and for the same reason: no
+ * page, and no payload decode, so no blob GET (ADR 0007).
+ *
+ * IT IS PAID ONLY FOR ROWS THAT NEED IT. A running serve has no close event and a completed one has
+ * nothing to explain, so the fan-out is bounded by the number of FAILED serves in the page, itself
+ * bounded by {@link SERVE_SCAN_LIMIT}. A folder that has always served cleanly costs exactly one RPC.
+ *
+ * Sorted here rather than with a visibility `ORDER BY`, like every other listing in this module:
+ * SQLite visibility rejects `ORDER BY` outright. Temporal returns executions newest-first by
+ * default, which is what makes the cap take the newest ones; the sort is the defensive half.
+ */
+export async function listServes(
+  sourceId: string,
+  limit = SERVE_DEFAULT_LIMIT
+): Promise<ServeScan> {
+  const client = await getClient();
+  const cap = Math.min(Math.max(limit, 1), SERVE_SCAN_LIMIT);
+  const workflowId = serveDevWorkflowId(sourceId);
+  const serves: ServeRow[] = [];
+  let capped = false;
+  for await (const info of client.workflow.list({
+    query: buildWorkflowIdQuery(SERVE_DEV_WORKFLOW, workflowId),
+  })) {
+    if (serves.length >= cap) {
+      capped = true;
+      break;
+    }
+    // NO DEDUPE BY WORKFLOW ID, unlike `listRuns` — the opposite rule, for the opposite reason.
+    // There the id IS the Run, so a reused id collapses to its newest execution; here the id is the
+    // FOLDER and every execution under it is a separate press of the button, which is the thing
+    // being listed.
+    serves.push({
+      execId: info.runId ?? '',
+      status: mapStatus(info.status),
+      startedAt: info.startTime?.getTime() ?? 0,
+      closedAt: info.closeTime?.getTime() ?? 0,
+    });
+  }
+  serves.sort((a, b) => b.startedAt - a.startedAt);
+  for (const row of serves) {
+    if (row.status === 'running' || row.status === 'completed') continue;
+    const why = await closeReason(client, workflowId, row.execId);
+    if (why) row.failure = why;
+  }
+  return { serves, capped };
+}
+
+/**
+ * The sentence on a closed execution's LAST event. One RPC, no page, no payload.
+ *
+ * THREE SOURCES, IN THE ORDER A READER WANTS THEM. The failure proto's message is the real answer
+ * when there is one — `failureMessage` walks the nested `cause` chain and JOINS it, returning
+ * `${own}: ${cause}`, so an activity that threw `serve-dev failed (exit 1): ModuleNotFoundError…`
+ * reads as `Activity task failed: serve-dev failed (exit 1): ModuleNotFoundError…`. The SDK's
+ * wrapper is KEPT as the prefix, not stripped: the innermost sentence is what a person needs and
+ * the outer frames are what say where it came from, and `serveHistory.test.ts` asserts the joined
+ * form. (This comment previously claimed the wrapper was discarded. It never was.) A termination
+ * carries no failure at all,
+ * only the operator's `reason`. And a workflow that ran out its two-minute budget carries neither,
+ * where the WORD is the whole of the information — which is exactly the case `status` alone cannot
+ * express, since `mapStatus` files a timeout under `failed` beside a crash.
+ *
+ * NEVER THROWS, AND ANSWERS `''` FOR "COULD NOT ASK". A closed execution whose history has aged out
+ * of retention is ordinary, and a history read that failed must cost the caller a reason and not
+ * the row — the status and the timestamps are already in hand and are the half that survives
+ * retention in the visibility index longest.
+ */
+async function closeReason(
+  client: Awaited<ReturnType<typeof getClient>>,
+  workflowId: string,
+  execId: string
+): Promise<string> {
+  try {
+    const res = await client.workflowService.getWorkflowExecutionHistory({
+      namespace: NAMESPACE,
+      execution: { workflowId, ...(execId ? { runId: execId } : {}) },
+      // 2 = CLOSE_EVENT, in the numeric form `fetchRunIO` uses and for the reason it records: the
+      // enum's export path has moved between SDK minors and this is a stable wire value.
+      historyEventFilterType: 2,
+      waitNewEvent: false,
+    });
+    const last = (res.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
+    if (!last) return '';
+    const failed = last.workflowExecutionFailedEventAttributes as { failure?: unknown } | undefined;
+    const message = failureMessage(failed?.failure);
+    if (message) return message;
+    const killed = last.workflowExecutionTerminatedEventAttributes as { reason?: unknown } | undefined;
+    const reason = typeof killed?.reason === 'string' ? killed.reason.trim() : '';
+    if (reason) return reason;
+    return closedAsOf(last) ?? '';
+  } catch {
+    return '';
+  }
 }
 
 export type { NodeHeartbeat } from './heartbeat';

@@ -422,7 +422,7 @@ examples/python/workflows/ for runnable ones to copy.
 
 The Workflows page lists this directory. Its two buttons are these two commands:
 
-    kontra workflow serve <folder> --tmux
+    kontra workflow serve <folder> --mode dev
     kontra workflow start <folder>
 
 The queue is DERIVED from the folder's content (wf-<name>-<digest>), never typed — serve and start

@@ -40,10 +40,8 @@
 
 import { NativeConnection, Worker } from '@temporalio/worker';
 
-import * as panelActivities from './activities/panels';
 import { acquireCatalogLock } from './data/catalogLock';
 import { runMaterializer } from './materializer';
-import { main as runPanels } from './panels';
 import { infraQueue } from './queues';
 import { armRetentionSchedule } from './retention';
 import { assertDistinctQueues, queueAssignments, resolveRoles, ROLES_VAR, type Role } from './roles';
@@ -76,21 +74,6 @@ export async function runInfra(): Promise<void> {
   const namespace = process.env.KONTRA_NAMESPACE ?? 'default';
   const queue = infraQueue();
 
-  // THE DASHBOARD STREAMER FIRST, AND NEVER AWAITED PAST ITS LISTEN. `infra.ts` forks it before
-  // touching Temporal for a reason that survives the merge: the Monitor's read path is SSH and a
-  // tmux socket, so a Temporal outage should cost the converge button and not the whole wall.
-  // `runPanels` resolves once its port is bound and leaves the server alive.
-  //
-  // NOT A FORKED CHILD ANY MORE (ADR 0031 §4). It was forked because Pulumi's process-global
-  // handlers would have turned an unhandled rejection in panel code into a failed `up` — "no
-  // engine, no fork". One less PID is also one less thing for the binary to orphan.
-  await runPanels().catch((err) => {
-    // A streamer that cannot bind must not take the control plane with it — the Monitor goes
-    // blank, everything else keeps working, and the reason is in the log rather than in an exit
-    // code nobody sees.
-    log(`infra role: the Dashboard streamer did not start: ${message(err)}`);
-  });
-
   // An explicit connection, not the default. `connection: undefined` silently means
   // localhost:7233 — right on a laptop and always wrong in a container, where the failure reads as
   // an unrelated tonic transport error against ::1.
@@ -101,9 +84,12 @@ export async function runInfra(): Promise<void> {
     // fail a `fleet.up()`, it would hang one — the task is taken, no such type is found, the task
     // fails, and Temporal retries it forever. See `workflows/appliance.ts`.
     workflowsPath: require.resolve('./workflows/appliance'),
-    // The panel activities only. `activities/infra.ts` is the Pulumi half and is not imported by
-    // this file at all, so nothing here can resolve a cloud credential even by mistake.
-    activities: { ...panelActivities },
+    // NO ACTIVITIES, AND THAT IS THE WHOLE SET. This role registered the panel activities and
+    // nothing else; the Monitor is gone and `activities/infra.ts` is the Pulumi half, which this
+    // file deliberately does not import so nothing here can resolve a cloud credential even by
+    // mistake. An empty set is stated rather than omitted: the field's absence would read as an
+    // oversight, and the next person to add an activity should have to decide it belongs here.
+    activities: {},
     taskQueue: queue,
     namespace,
     connection,

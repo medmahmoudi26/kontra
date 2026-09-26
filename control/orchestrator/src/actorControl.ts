@@ -25,8 +25,10 @@ import { hostname } from 'node:os';
 import { cliDetail, ControlRefused, kontraBin, serveEnv } from './workflowControl';
 import { ACTOR_TOKEN_VAR } from './secrets/identity';
 import { secretStore } from './secrets/store';
-import { actorSession } from './panels/tmux';
+import { actorSession } from '@kontra/core/panels/tmux';
 import type { Source } from './sources';
+import { getClient } from './temporalClient';
+import { SERVE_DEV_WORKFLOW, infraQueue, serveDevWorkflowId } from './queues';
 
 export interface ActorServeResult {
   actor: string;
@@ -62,39 +64,55 @@ export async function serveActor(
   }
   const session = actorSession(source.name, source.version);
 
-  /* RESTART IS THE ONLY WAY AN EDIT REACHES A RUNNING WORKER, and it is the operator's choice
-     rather than this function's. A worker holds the code it imported at boot: pressing Serve after
-     an edit, on a session that is already up, would otherwise be answered "already serving" — true,
-     and the most misleading true sentence on the page, because the edit is not live and everything
-     on screen says it is. Killing first is destructive (in-flight Units on that worker die with
-     it), so it happens only when asked. A session that is not there is not a failure to report. */
-  if (restart) await run('tmux', ['kill-session', '-t', session], source.path, serveEnv());
-
-  // argv ARRAY, no shell. The path came from a registration that resolved it against the
-  // filesystem, and the name is bounded above — there is no interpolation for either to escape.
-  // `serve`, not `run`. The CLI verb was renamed and `run` is a REDIRECT there, not an alias, so
-  // this argv would have exited 1 with a sentence about the new spelling — a serve button that
-  // reports "serve failed (exit 1)" for a word only this file still says.
-  const argv = ['serve', '--actor', source.path, '--mode', 'local', '--tmux'];
-  const { code, stdout, stderr } = await run(kontraBin(), argv, source.path, {
-    ...serveEnv(),
-    ...actorIdentityEnv(source.name),
-  });
-  if (code !== 0) {
-    const detail = cliDetail(stderr, stdout);
-    /* ALREADY SERVING IS A STATE, NOT AN ERROR MESSAGE TO READ. The CLI refuses an existing
-       session and says so perfectly well in a terminal, where the next line is a command you can
-       type. On a page there is no next line — so the refusal is re-thrown as something the UI can
-       branch on and answer with a button, and the sentence names the consequence of pressing it
-       rather than a tmux invocation the reader cannot run from here. */
-    if (/already exists/i.test(detail)) {
+  /*
+   * ── THE SERVE RUNS ON kontra-infra ────────────────────────────────────────────────────────────
+   *
+   * Same reason as `serveWorkflow`, and the reasoning is written out there: a serve-dev Worker is a
+   * container, starting one needs the Docker socket, and a read-write socket on THIS process — the
+   * one with the published port and the untrusted HTTP input — is root on the host. The infra role
+   * already holds it and publishes no port. An id crosses the queue; every argument is derived on
+   * the far side.
+   *
+   * RESTART IS NO LONGER A FLAG, AND NOT BECAUSE IT STOPPED MATTERING. It used to shell
+   * `tmux kill-session` first, which assumed this container and the worker shared a tmux server and
+   * made "replace what is there" two commands that could half-happen. `devDriver.Start` replaces the
+   * pair itself, so pressing Serve after an edit IS the restart — which is the behaviour this button
+   * always wanted. The parameter is kept in the signature and ignored, so a caller that still passes
+   * it is not broken; it is the CLI's business now.
+   *
+   * Killing first is still destructive — in-flight Units on that worker die with it — and that is
+   * stated on the button rather than gated behind a second press: a worker holds the code it
+   * imported at boot, so the alternative is a page that says "already serving" while showing an edit
+   * that is not live, which is the most misleading true sentence this surface can produce.
+   */
+  void restart;
+  let served: { worker: string; queue: string; detail: string };
+  try {
+    const client = await getClient();
+    // THE TYPE AND THE ID COME FROM `queues.ts`, and that is not tidiness. The Actors page now
+    // draws this folder's serve HISTORY by asking Temporal for exactly this type under exactly this
+    // id (`temporalClient.listServes`); a literal here that drifted from the literal there would
+    // make the history report "nothing has ever served this" about a folder served forty times.
+    const sourceId = `at:${source.path}`;
+    served = await client.workflow.execute(SERVE_DEV_WORKFLOW, {
+      taskQueue: infraQueue(),
+      workflowId: serveDevWorkflowId(sourceId),
+      workflowIdConflictPolicy: 'FAIL',
+      args: [{ sourceId, kind: 'actor' as const }],
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    /* ALREADY SERVING IS A STATE, NOT AN ERROR MESSAGE TO READ. Temporal refuses a second concurrent
+       serve of one folder by workflow id; on a page there is no next line to type, so the refusal is
+       re-thrown as something the UI can branch on and answer with a button. */
+    if (/already started|already exists|WorkflowExecutionAlreadyStarted/i.test(detail)) {
       throw new AlreadyServing(
-        `a worker is already serving ${source.name} in tmux session ${session}. Restart it to pick up code you have edited — the worker holds what it imported at boot, and anything in flight on it dies with it.`
+        `a serve of ${source.name} is already running. Wait for it to finish, then press Serve again — it replaces the worker, and anything in flight on the old one dies with it.`
       );
     }
-    throw new ControlRefused(`serve failed (exit ${code}): ${detail || 'no output'}`);
+    throw new ControlRefused(`serve failed: ${detail || 'no output'}`);
   }
-  return { actor: source.name, version: source.version, path: source.path, session, attach: `tmux attach -t ${session}` };
+  return { actor: source.name, version: source.version, path: source.path, session, attach: served.worker };
 }
 
 /**

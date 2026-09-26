@@ -19,7 +19,7 @@
 //
 // Everything below the queues is what the queues are derived FROM: the marker that makes a folder
 // a workflow, the resolution from what an operator typed to the file python is handed, the
-// manifest, the content digests, and the tmux session name. One resolution feeds all of them,
+// manifest, the content digests, and the worker name. One resolution feeds all of them,
 // which is what makes `serve nscheck`, `serve nscheck/`, `serve nscheck.py` and
 // `serve nscheck/workflow.py` one worker on one queue in one session instead of four.
 package main
@@ -34,7 +34,6 @@ import (
 	"strings"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
-	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 )
 
 // --- the actor's queue -------------------------------------------------------------------------
@@ -187,34 +186,33 @@ func readWorkflowManifest(file string) workflowManifest {
 	return m
 }
 
-// workflowSession is the tmux session a served workflow worker runs in: THE WORKFLOW'S NAME, taken
+// workflowWorkerName is what a served workflow worker is ADDRESSED BY: THE WORKFLOW'S NAME, taken
 // from the file it is served from — `enumerate_scope.py` runs in `enumerate_scope`.
 //
-// IT IS HERE, BESIDE THE QUEUE, AND NOT IN tmux.go, because it is derived from the same resolved
-// file the queue is and shares `workflowMarker` with it. `tmux.Session` is an ACTOR's session and
-// lives with the tmux mechanics; the two are held together by shared/conformance/queues.json §tmux_session
+// IT IS HERE, BESIDE THE QUEUE, because it is derived from the same resolved file the queue is and
+// shares `workflowMarker` with it.
 // rather than by being adjacent.
 //
 // IT USED TO BE `kontra-wf-<queue>`, and both halves of that were compensating for the same thing.
 // The `kontra-` prefix was how `panels/local.ts` found local Terminals at all, so a session named
 // anything an operator would recognise was invisible to the Monitor; and `wf-` existed to keep a
 // workflow served on a queue named after an actor from colliding with that actor's own session.
-// Discovery is the `@kontra` tmux option now, and it carries the KIND — so neither prefix has
+// Discovery is the registry entry's `Tag` now, and it carries the KIND — so neither prefix has
 // anything left to do, and the collision cannot happen because the two kinds are distinguishable
 // without their names being.
 //
 // THE FILE, NOT THE QUEUE. A queue is a routing decision an operator makes per session; the file is
-// what is being served. Naming the session after the queue meant `tmux attach -t kontra-wf-recon`
+// what is being served. Naming the worker after the queue meant addressing it as `kontra-wf-recon`
 // for a file called `nscheck.py`, and two files served on one queue still collided — which the old
 // comment claimed as the point, but the collision it detects is "two workers on one queue", and
 // that is a property of the QUEUE, not something a session name should be spent on.
 //
 // AND THE FOLDER, when the file is that folder's `workflow.py`. Every workflow folder holds a file
 // of that one name, so the stem alone named all of them `workflow`: `nscheck/workflow.py` and
-// `ping/workflow.py` served into ONE session, the second serve was refused as "already exists"
-// against the first one's worker, and the Monitor — which finds a pane by this name — showed one
-// pane for two workflows.
-func workflowSession(file string) string {
+// `ping/workflow.py` served under ONE name, the second serve was refused as "already running"
+// against the first one's worker, and anything listing workers showed one
+// worker for two workflows.
+func workflowWorkerName(file string) string {
 	base := filepath.Base(file)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
 	if base == strings.TrimSuffix(workflowMarker, filepath.Ext(workflowMarker)) {
@@ -224,8 +222,9 @@ func workflowSession(file string) string {
 			base = parent
 		}
 	}
-	// tmux rewrites `.` and `:` to `_` at creation, and a name can carry either — `my.workflow.py`.
-	base = tmux.SafeName(base)
+	// `.` and `:` become `_`, inherited from the tmux scheme this replaced so the same workflow
+	// keeps the same name — and separators go too, because this is a filename now.
+	base = cliutil.SafeWorkerName(base)
 	if base == "" || base == "_" {
 		return "workflow"
 	}

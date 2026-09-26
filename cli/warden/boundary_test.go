@@ -34,7 +34,6 @@ var allowed = map[string]string{
 	"cli/internal/corpus":                 "the conformance corpora, driven by both arms",
 	"cli/internal/ociref":                 "the OCI reference grammar — a Bundle's address",
 	"cli/internal/queues":                 "the task-queue derivation, one of four language arms",
-	"cli/internal/tmux":                   "sessions, which exist on a Machine and on the control box",
 	"cli/internal/trustpolicy":            "what may run here, and who signed it",
 	"cli/internal/trustpolicy/cosignstub": "a fake cosign, shared so both arms fake it the same way",
 }

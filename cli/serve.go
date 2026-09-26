@@ -51,19 +51,29 @@ import (
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"github.com/medmahmoudi26/kontra/cli/internal/queues"
-	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 	"github.com/medmahmoudi26/kontra/cli/warden"
 )
 
-// The three modes, spelled the same here, in the streamer's Terminal ids and in
-// `kontra panels list`. One vocabulary: a mode is a place a Worker runs.
+// The four modes. One vocabulary: a mode is a PLACE a Worker runs.
+//
+// `dev` IS LOCAL'S SIBLING, NOT DOCKER'S, and the grouping below is where that matters. It needs
+// everything `local` needs — the manifest, the repo root, both argvs, both environments — and
+// differs in exactly one thing: the driver. `docker` and `fleet` need none of that, because they
+// hand a published Artifact to something else. So `dev` takes the local branch and swaps the driver
+// at the end of it, which is why there is no `runDev` beside `runElsewhere`.
 const (
 	modeLocal  = "local"
+	modeDev    = "dev"
 	modeDocker = "docker"
 	modeFleet  = "fleet"
 )
 
-var runModes = []string{modeLocal, modeDocker, modeFleet}
+var runModes = []string{modeLocal, modeDev, modeDocker, modeFleet}
+
+// elsewhere reports whether a mode hands the Worker to something that is not this checkout. It is
+// the test that decides how much of `cmdServe` runs, and it is a function rather than
+// `mode != modeLocal` because that spelling silently swallowed `dev` the moment it existed.
+func elsewhere(mode string) bool { return mode == modeDocker || mode == modeFleet }
 
 // checkRunMode refuses an unknown mode by name rather than falling back to local. A typo that
 // silently ran the Worker HERE — on a laptop, against the production Temporal — is the failure this
@@ -75,8 +85,10 @@ func checkRunMode(mode string) error {
 		}
 	}
 	return fmt.Errorf("unknown --mode %q — one of %s.\n"+
-		"  local:  the actor and handler on this machine (add --tmux for a detached session)\n"+
-		"  docker: a managed worker container on this host's engine\n"+
+		"  local:  the actor and handler as processes on this machine, in the foreground\n"+
+		"  dev:    serve-dev — the same two, in containers, from THIS folder on a bind mount.\n"+
+		"          Returns immediately; re-run it to reload after an edit\n"+
+		"  docker: a managed worker container from a PUBLISHED image (`kontra deploy` first)\n"+
 		"  fleet:  a Machine, which `kontra fleet` owns", mode, strings.Join(runModes, ", "))
 }
 
@@ -93,7 +105,7 @@ func runElsewhere(mode, actorDir string, m actorManifest, replicas int, network 
 	if mode == modeFleet {
 		return fmt.Errorf("`kontra serve --mode fleet` is not a shortcut for the two commands that place a Worker on a Machine:\n"+
 			"    kontra fleet up --count <N> --role <role>            # make the Machines (this spends money)\n"+
-			"    kontra fleet deploy --actor %s [--tmux]   # build the Bundle and place the Worker\n"+
+			"    kontra fleet deploy --actor %s               # build the Bundle and place the Worker\n"+
 			"  Then `kontra panels list` shows them as fleet:<machine>/kontra-%s/{actor,handler}.\n"+
 			"  The mode exists in ids and in the Dashboard; the PLACEMENT verb is `kontra fleet`, which owns the\n"+
 			"  stack, the key and the converge — this command will not grow a second implementation of it.",
@@ -110,7 +122,7 @@ func runElsewhere(mode, actorDir string, m actorManifest, replicas int, network 
 	// EXPLICITLY would have been ignored by a value comparison — measured, and it started a container
 	// while looking like it had refused. Visit reports what was typed, which is the actual question.
 	var localOnly []string
-	local := map[string]bool{"python": true, "engine": true, "tmux": true, "redis": true}
+	local := map[string]bool{"python": true, "engine": true, "redis": true}
 	fs.Visit(func(f *flag.Flag) {
 		if local[f.Name] {
 			localOnly = append(localOnly, "--"+f.Name)
@@ -147,10 +159,6 @@ func runElsewhere(mode, actorDir string, m actorManifest, replicas int, network 
 	fmt.Fprintf(cliio.Stdout, "\n  logs:     docker logs -f %s\n", firstOr(res.Workers, "<container>"))
 	fmt.Fprintf(cliio.Stdout, "  workers:  kontra workers list\n")
 	fmt.Fprintf(cliio.Stdout, "  stop:     kontra serve --actor %s --mode docker --replicas 0\n", actorDir)
-	// A container carries no tmux session, so it has no Terminal to watch yet — said here rather
-	// than left for someone to discover from an empty wall.
-	fmt.Fprintf(cliio.Stdout, "\n  A worker container has no tmux session, so `kontra panels list` shows it with SESSION=NO-TMUX:\n")
-	fmt.Fprintf(cliio.Stdout, "  nothing creates one inside the image. `--mode local --tmux` is the mode with live Terminals today.\n")
 	fmt.Fprintf(cliio.Stdout, "\ndispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
 	return nil
 }
@@ -223,8 +231,6 @@ func cmdServe(args []string) error {
 	// durable state (the commit map, session_state) lives there.
 	redis := fs.String("redis", cliutil.EnvOr("KONTRA_REDIS_HOST", "127.0.0.1:6379"),
 		"host:port of the Redis holding actor state")
-	useTmux := fs.Bool("tmux", false,
-		"run the worker in a detached tmux session (one window per process) instead of the foreground")
 	mode := fs.String("mode", modeLocal,
 		"where to run the worker: local (this machine) | docker (a managed worker container) | fleet (a Machine)")
 	replicas := fs.Int("replicas", 1, "--mode docker only: how many worker containers to run (0 stops them)")
@@ -247,7 +253,7 @@ func cmdServe(args []string) error {
 		return err
 	}
 	if *actorDir == "" {
-		return errors.New("usage: kontra serve --actor <dir> [--mode local|docker|fleet]")
+		return errors.New("usage: kontra serve --actor <dir> [--mode local|dev|docker|fleet]")
 	}
 	if err := checkRunMode(*mode); err != nil {
 		return err
@@ -256,7 +262,7 @@ func cmdServe(args []string) error {
 	// means something in the OTHER mode must be refused rather than ignored. `fs.Visit` reports
 	// what was typed, so `--network bridge` — which happens to be the resolved default — is still
 	// caught.
-	if *mode == modeLocal {
+	if !elsewhere(*mode) {
 		typedNetwork := false
 		fs.Visit(func(f *flag.Flag) {
 			if f.Name == "network" {
@@ -264,7 +270,7 @@ func cmdServe(args []string) error {
 			}
 		})
 		if typedNetwork {
-			return errors.New("--network only applies to --mode docker; a local worker is two processes on this machine and has no container network")
+			return errors.New("--network only applies to --mode docker; local and dev workers take the control plane's own network")
 		}
 	}
 	m, err := readManifest(*actorDir)
@@ -274,7 +280,7 @@ func cmdServe(args []string) error {
 	// `--mode` is resolved BEFORE anything local is prepared: the two other modes need the manifest
 	// and nothing else, and `findRepoRoot` below is a local-mode requirement (it runs handler/ from
 	// source) that would otherwise fail for a mode that never touches this checkout's handler.
-	if *mode != modeLocal {
+	if elsewhere(*mode) {
 		// REFUSED RATHER THAN IGNORED. `--watch` re-execs a pair this process supervises; docker and
 		// fleet hand the worker to something else, so honouring it would mean watching files here
 		// and reloading nothing. A flag that is silently a no-op is worse than one that is absent.
@@ -380,9 +386,10 @@ func cmdServe(args []string) error {
 	// on a **Machine** through the same four verbs, with `podman` behind them instead. driver.go
 	// holds the seam and the reasoning; nothing about what this command does changed when it grew one.
 	//
-	// The `--tmux` choice belongs to the DRIVER and not to the spec: the same actor and the same
-	// handler run either way, and the only difference is who is their parent.
-	drv := warden.NewProcessDriver(cliio.Stdout, os.Stderr, *useTmux)
+	// WHO HOLDS THE PAIR IS THE DRIVER'S BUSINESS AND NOT THE SPEC'S: the same actor and the same
+	// handler run under every one of them, and the only difference is who their parent is. That is
+	// why `--mode dev` above swaps this line and nothing else.
+	drv := warden.NewProcessDriver(cliio.Stdout, os.Stderr)
 	spec := warden.Spec{
 		Name:    m.Name,
 		Version: m.Version,
@@ -406,13 +413,50 @@ func cmdServe(args []string) error {
 			config.TemporalAddress())
 	}
 
-	if *watch {
-		if *useTmux {
-			// `--tmux` detaches and this command RETURNS; there would be no process left to notice a
-			// save. Refused rather than quietly producing a session nobody reloads.
-			return fmt.Errorf("--watch and --tmux are exclusive: --tmux detaches and this command " +
-				"exits, so nothing would be left watching. Run --watch in the foreground")
+	// serve-dev: the same spec, in containers, and this command RETURNS.
+	//
+	// AFTER `announce` AND BEFORE THE PROCESS DRIVER, because everything above is the ARGUMENT — which
+	// interpreter, which two argvs, which environment — and it is identical for both. The only thing
+	// that differs is who holds the pair, which is the whole reason `workerDriver` is a seam.
+	if *mode == modeDev {
+		if *watch {
+			// `--watch` re-execs a pair THIS process supervises, and serve-dev leaves nothing here to
+			// supervise. The reload is the command itself: `Start` replaces a pair of the same name,
+			// so running it again is what picks up an edit.
+			return fmt.Errorf("--watch applies to --mode local only; serve-dev returns immediately, " +
+				"so nothing would be left watching. Re-run `--mode dev` to reload after an edit")
 		}
+		dev, err := warden.NewDevDriver(ctx)
+		if err != nil {
+			return err
+		}
+		// `--replicas 0` IS THE STOP VERB, spelled the way `--mode docker` spells it. serve-dev has no
+		// other count — a pair is one pair — so any other value is refused rather than rounded down to
+		// "the pair", which would make `--replicas 3` look like it did something.
+		if *replicas == 0 {
+			dev.Remove(ctx, m.Name, m.Version)
+			fmt.Fprintf(cliio.Stdout, "%s@%s — serve-dev pair stopped\n", m.Name, m.Version)
+			return nil
+		}
+		if *replicas != 1 {
+			return fmt.Errorf("--replicas %d does not apply to --mode dev: a serve-dev Worker is one "+
+				"pair holding one folder. Use 0 to stop it, or --mode docker to run several", *replicas)
+		}
+		h, err := dev.Start(ctx, spec)
+		if err != nil {
+			return err
+		}
+		announce()
+		for _, half := range h.Halves {
+			fmt.Fprintf(cliio.Stdout, "  %s  %s\n", half.Part, half.Ref)
+		}
+		fmt.Fprintf(cliio.Stdout, "\n  reload:   kontra serve --actor %s --mode dev   (replaces this pair)\n", *actorDir)
+		fmt.Fprintf(cliio.Stdout, "  stop:     kontra serve --actor %s --mode dev --replicas 0\n", *actorDir)
+		fmt.Fprintf(cliio.Stdout, "\ndispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
+		return nil
+	}
+
+	if *watch {
 		return serveWatchLoop(ctx, drv, spec, absActor, announce)
 	}
 
@@ -422,11 +466,6 @@ func cmdServe(args []string) error {
 	}
 
 	announce()
-	if *useTmux {
-		tmux.PrintHelp(cliio.Stdout, tmux.Session(m.Name, m.Version), []string{"actor", "handler"})
-		fmt.Fprintf(cliio.Stdout, "\ndispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
-		return nil
-	}
 	fmt.Fprintf(cliio.Stdout, "dispatch with:\n  kontra actor %s dispatch --input <dataset|file>\n", m.Name)
 
 	select {

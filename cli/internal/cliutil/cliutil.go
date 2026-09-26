@@ -119,3 +119,58 @@ func FindRepoRoot(override string) (string, error) {
 		dir = parent
 	}
 }
+
+// SafeWorkerName makes a Worker name usable as a container name and as a filename.
+//
+// IT INHERITS THE TMUX SCHEME AND OUTLIVED IT. `.` and `:` became `_` because tmux's
+// `session_check_name()` rewrote them silently at creation, so a name that addressed a session
+// addresses the same Worker now and an operator's muscle memory survives every mechanism change
+// underneath it. Both substitutions are still load-bearing on their own terms: a `:` is not a legal
+// byte in a container name, and `shared/conformance/queues.json` §tmux_session pins the folding
+// across three languages, so changing it renames every Worker at once.
+//
+// THE SEPARATORS ARE THIS FUNCTION'S OWN ADDITION, because these names reach a filesystem: `a/b`
+// was a legal tmux session name and here it would be a path, writing into a directory that does not
+// exist or — worse — one that does.
+//
+// `shared/core/src/panels/tmux.ts:tmuxSafeName` is the TypeScript peer for the first two.
+func SafeWorkerName(name string) string {
+	return strings.NewReplacer(".", "_", ":", "_", "/", "_", `\`, "_").Replace(name)
+}
+
+// foldWorkerName is the Worker-name fold that `shared/conformance/queues.json` §tmux_session pins,
+// and it is NARROWER than {@link SafeWorkerName} on purpose.
+//
+// TWO RULES, AND CONFLATING THEM WOULD BREAK THE CORPUS. This one folds `.` and `:` and nothing
+// else, because that is exactly what tmux's `session_check_name()` did and what three languages now
+// agree on. `SafeWorkerName` additionally folds separators, because the names IT produces reach a
+// filesystem or a container name, where a `/` is a path rather than a character. A single function
+// doing both would either start folding separators the corpus says survive, or stop folding ones a
+// filename cannot hold.
+func foldWorkerName(name string) string {
+	return strings.NewReplacer(".", "_", ":", "_").Replace(name)
+}
+
+// ActorWorkerName is what an Actor's Worker is called: `<actor>-<version>`, folded.
+//
+// THE FALLBACK IS THE CONTRACT'S, not this function's convenience. A name that folds to "" or "_"
+// identifies nothing, and anything looked up by it matches whatever else in the inventory happens to
+// have no name — so it is `actor`, which is what `shared/core/src/panels/tmux.ts:actorSession`
+// answers on the other side of the language boundary. This function used to return the unusable
+// string; `shared/conformance/queues.json` §tmux_session is what found it and what holds the two
+// together now. The `fleet` fallback in `fleetSessionName` is a DIFFERENT domain and the corpus
+// says why.
+//
+// IT WAS `tmux.Session` AND THE SCHEME OUTLIVED TMUX. The folding began as a workaround for a
+// silent rewrite at session creation; it is now simply the naming rule, and a `:` is not a legal
+// byte in a container name either. Changing it renames every Worker at once.
+func ActorWorkerName(actor, version string) string {
+	name := foldWorkerName(actor)
+	if version != "" {
+		name = foldWorkerName(actor + "-" + version)
+	}
+	if name == "" || name == "_" {
+		return "actor"
+	}
+	return name
+}

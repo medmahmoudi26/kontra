@@ -23,6 +23,16 @@ type dockerDriver struct {
 	bin   string
 	net   string
 	trust trustpolicy.Policy
+	// standalonePID gives each Worker its OWN PID namespace instead of this process's.
+	//
+	// THE ZERO VALUE IS THE WARDEN'S BEHAVIOUR, DELIBERATELY. This was spelled `sharePID bool` and
+	// read the other way round, which put the Warden's containment guarantee — a destroyed Machine
+	// takes its Workers with it — behind a field that a struct literal defaults to OFF. It is not a
+	// hypothetical: `warden_local_test.go` builds `&dockerDriver{bin: …, net: …}` directly and
+	// silently lost the `--pid` flag the moment the field existed. A safety property must not depend
+	// on every future caller remembering to switch it on, so the default is now "share" and the one
+	// driver that cannot share (serve-dev — see `runFlags`) opts out by name.
+	standalonePID bool
 }
 
 var _ workerDriver = (*dockerDriver)(nil)
@@ -119,11 +129,19 @@ func (d *dockerDriver) runFlags(net, containerName, label, digest string, extraL
 	for _, l := range extraLabels {
 		flags = append(flags, "--label", l)
 	}
-	// Share the Warden's PID namespace so Pulumi `docker rm -f` (SIGKILL, no
-	// SIGTERM) of the Machine also kills sibling Workers. Docker destroy does
-	// not run the Warden's shutdown hook.
-	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
-		flags = append(flags, "--pid", "container:"+host)
+	// Share the Warden's PID namespace so Pulumi `docker rm -f` (SIGKILL, no SIGTERM) of the Machine
+	// also kills sibling Workers. Docker destroy does not run the Warden's shutdown hook.
+	//
+	// A WARDEN ONLY, AND THE GUARD IS NOT DEFENSIVE. `container:<hostname>` resolves because a Warden
+	// IS a container whose hostname is its name. serve-dev is started by whatever the operator is
+	// typing in — often a shell on the host, where `os.Hostname()` is the BOX — and docker answers
+	// `No such container: main-droplet` and refuses to start anything. Measured, on the first real
+	// serve-dev run. There is nothing to fix by looking up a different name either: a serve-dev
+	// Worker has no Machine to be destroyed with, so it wants its own PID namespace.
+	if !d.standalonePID {
+		if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+			flags = append(flags, "--pid", "container:"+host)
+		}
 	}
 	return flags
 }

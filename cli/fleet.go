@@ -34,12 +34,7 @@ import (
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
-	"github.com/medmahmoudi26/kontra/cli/internal/config"
-	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
-	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/sdk/client"
 
-	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 )
 
 // fleetProject is the Pulumi project the orchestrator's dispatch table knows. A stack outside
@@ -134,7 +129,6 @@ type fleetFlags struct {
 	size     *string
 	control  *string
 	api      *string
-	tmux     *bool
 	// force is `down`'s override of the Lease guard (ADR 0037). Registered on the shared set with
 	// every other flag, and meaningful on `down` alone.
 	force   *bool
@@ -156,7 +150,6 @@ func fleetFlagSet(name string) *fleetFlags {
 		size:     fs.String("size", "", "override the Machine size from actor.json"),
 		control:  fs.String("controller", "", "address the Machines call home on (default: KONTRA_CONTROLLER)"),
 		api:      fs.String("api", orchestratorURL(), "orchestrator base URL"),
-		tmux:     fs.Bool("tmux", false, "ALSO converge an attachable tmux session on each Machine after placement (`tmux attach -t kontra-<actor>`, or the Dashboard)"),
 		force:    fs.Bool("force", false, "`down` only: destroy the Fleet even though Runs still hold Leases on it"),
 		timeout:  fs.Duration("timeout", 30*time.Minute, "how long to wait for the converge"),
 	}
@@ -649,241 +642,6 @@ func progressLine(p map[string]any) string {
 	return ""
 }
 
-// --- tmux session converge (ADR 0020) -------------------------------------------------------
-//
-// `--tmux` now means "also converge a tmux session on each Machine after placement". The session
-// is a Temporal workflow whose id IS the Machine (`tmux-<machine>`, conflict policy FAIL), on the
-// infra queue — the only worker holding the fleet SSH key, and the only place session creation
-// belongs, because reaching a Machine is Fleet authority.
-//
-// The CLI dials Temporal directly for this, exactly as `kontra workers list` does, rather than
-// going through the orchestrator's infra routes: those routes exist to pick WHICH STACK to
-// converge, and a session is not a stack.
-
-// tmuxWindow mirrors the workflow's window shape. Deliberately unused by the CLI: an empty window
-// list means "the defaults", and the defaults are decided server-side (journals, never the Worker).
-// Sending commands from here would make the CLI decide what runs as root on a Machine, which is the
-// authority `machine.ts` refuses to hand a caller.
-type tmuxWindow struct {
-	Name    string `json:"name"`
-	Command string `json:"command"`
-}
-
-// tmuxSessionInput is tmuxSessionWorkflow's argument, JSON-shaped for the TS worker.
-type tmuxSessionInput struct {
-	Machine string       `json:"machine"`
-	Host    string       `json:"host"`
-	Session string       `json:"session"`
-	Windows []tmuxWindow `json:"windows"`
-}
-
-// tmuxSessionResult is what the workflow returns.
-type tmuxSessionResult struct {
-	Machine string   `json:"machine"`
-	Session string   `json:"session"`
-	Windows []string `json:"windows"`
-	Created bool     `json:"created"`
-}
-
-// tmuxSessionTargets derives one converge per Machine from the stack outputs the converge just
-// returned. Pure, so the mapping is testable with no fleet and no Temporal.
-//
-// The session name is {@link fleetSessionName}.
-func tmuxSessionTargets(outputs map[string]any) []tmuxSessionInput {
-	raw, err := json.Marshal(outputs["inventory"])
-	if err != nil {
-		return nil
-	}
-	var inv map[string]struct {
-		Name     string `json:"name"`
-		Host     string `json:"host"`
-		PublicIP string `json:"publicIp"`
-		Tag      string `json:"tag"`
-		// Pre-rename checkpoints. A live fleet must not lose its label to a field name changing.
-		Role string `json:"role"`
-	}
-	if json.Unmarshal(raw, &inv) != nil {
-		return nil
-	}
-	// The same rule `panels/discovery.ts:sessionNameFor` applies, written independently on this
-	// side like every other cross-language literal in this repo, and held to one answer by
-	// fleet_tmux_test.go.
-	actor, _ := outputs["actorName"].(string)
-	version, _ := outputs["actorVersion"].(string)
-	tag, _ := outputs["tag"].(string)
-	if tag == "" {
-		tag, _ = outputs["role"].(string)
-	}
-	// A PACKED MACHINE'S SESSION IS NAMED AFTER THE FLEET, NOT AFTER ONE OF ITS WORKERS. A tmux
-	// session is per MACHINE (ADR 0020) and the scalars in these outputs describe only the FIRST
-	// placement, so on a Fleet running two `nscheck-0.1.0` would be a Machine's name claiming it
-	// belongs to one Actor while a second one is running on it. The tag is the honest answer and is
-	// already the fallback `fleetSessionName` uses for a Machine with no placement at all.
-	if placed, ok := placementsOutput(outputs); ok && len(placed) > 1 {
-		actor, version = "", ""
-	}
-	session := fleetSessionName(actor, version, tag)
-	out := make([]tmuxSessionInput, 0, len(inv))
-	for _, name := range sortedKeys(inv) {
-		m := inv[name]
-		machine := m.Name
-		if machine == "" {
-			machine = name
-		}
-		// The private VPC address is how the Controller reaches a Machine; the public one is the
-		// fallback, because that is what the placement command actually dials today.
-		host := m.Host
-		if host == "" {
-			host = m.PublicIP
-		}
-		if machine == "" || host == "" {
-			continue
-		}
-		out = append(out, tmuxSessionInput{
-			Machine: machine,
-			Host:    host,
-			Session: session,
-			// Empty: the workflow's own defaults decide what a window runs.
-			Windows: []tmuxWindow{},
-		})
-	}
-	return out
-}
-
-// fleetSessionName is the tmux session a Machine's Terminals attach to: `<actor>-<version>`.
-//
-// NO `kontra-` PREFIX any more. It was two things at once and did neither well: the Monitor's
-// discovery mechanism for local sessions — which is a tmux user option now, and one that can also
-// say what KIND a session is — and a namespace inside a tmux server, which is not worth a prefix on
-// every name an operator types.
-//
-// THE VERSION IS THE SUBSTANTIVE HALF. `kontra-webcrawl` said which Actor was on a Machine and not
-// which BUILD, so two fleets running two versions of one Actor produced two identical session
-// names and `tmux attach -t kontra-webcrawl` was ambiguous the moment a deploy was in flight.
-//
-// Falls back to the fleet's tag for a Machine with no placement, and to `fleet` for one with
-// neither. THAT FALLBACK DIFFERS FROM tmux.Session's `actor` ON PURPOSE and the difference is
-// recorded in shared/conformance/queues.json §tmux_session rather than left as two literals nobody can
-// tell from a typo: this names a MACHINE, which still has Terminals when no Actor is placed on
-// it, and calling such a session `actor` would be a lie about what is running there.
-//
-// A NAME THE WHITELIST REFUSES IS REPLACED, NEVER REPAIRED. This string is interpolated into a
-// command run as root on a remote Machine, and there is no safe way to rewrite an unsafe one.
-// `panels/discovery.ts:sessionNameFor` has held that line since ADR 0020; this side did not, and
-// the corpus is what found it — `web crawl; reboot` produced `web crawl; reboot-0_1_0` here and
-// `fleet` there, for the same Machine, so the converge threw on a name the Monitor had already
-// decided was `fleet`.
-func fleetSessionName(actor, version, tag string) string {
-	// tmux.SafeName because tmux rewrites `.` and `:` to `_` at creation — see its comment for what
-	// an unsanitised `<actor>-<version>` costs.
-	base := "fleet"
-	switch {
-	case actor != "" && version != "":
-		base = tmux.SafeName(actor + "-" + version)
-	case actor != "":
-		base = tmux.SafeName(actor)
-	case tag != "":
-		base = tmux.SafeName(tag)
-	}
-	if !safeSessionName.MatchString(base) {
-		return "fleet"
-	}
-	return base
-}
-
-// safeSessionName is `panels/ids.ts:SAFE.session`, written independently on this side like every
-// other cross-language literal here: what tmux itself allows, minus every shell metacharacter.
-var safeSessionName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
-
-// tmuxConverger is the Temporal seam — an interface so tests never dial anything, the same shape
-// `queueDescriber` has in workers.go.
-type tmuxConverger interface {
-	Converge(ctx context.Context, in tmuxSessionInput) (tmuxSessionResult, error)
-	Close()
-}
-
-// newTmuxConverger dials Temporal ($KONTRA_ADDRESS / $KONTRA_NAMESPACE); a func var so tests can
-// swap it out.
-var newTmuxConverger = func() (tmuxConverger, error) {
-	conn, err := temporaltls.ConnectionOptions(nil)
-	if err != nil {
-		return nil, err
-	}
-	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace(), ConnectionOptions: conn})
-	if err != nil {
-		return nil, err
-	}
-	return &temporalTmuxConverger{c: c, queue: cliutil.EnvOr("KONTRA_INFRA_QUEUE", "kontra-infra")}, nil
-}
-
-type temporalTmuxConverger struct {
-	c     client.Client
-	queue string
-}
-
-func (t *temporalTmuxConverger) Close() { t.c.Close() }
-
-func (t *temporalTmuxConverger) Converge(ctx context.Context, in tmuxSessionInput) (tmuxSessionResult, error) {
-	var out tmuxSessionResult
-	run, err := t.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		// The id IS the Machine: one writer per Machine, structurally. Two concurrent converges
-		// would race on `has-session` and leave duplicate windows.
-		ID:                       "tmux-" + in.Machine,
-		TaskQueue:                t.queue,
-		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
-	}, "tmuxSessionWorkflow", in)
-	if err != nil {
-		return out, err
-	}
-	// Waited on, not fired and forgotten: a converge that failed (no tmux package, a Machine still
-	// booting) has to be visible here, because the silent version of this is exactly the failure
-	// ADR 0020 deleted.
-	if err := run.Get(ctx, &out); err != nil {
-		return out, err
-	}
-	return out, nil
-}
-
-// convergeSessions runs the session converge for every Machine in the inventory. Best-effort per
-// Machine and never fatal to the deploy: the actor is already placed and running by the time this
-// runs, and a Machine that cannot be given a view is not a Machine that cannot work.
-func convergeSessions(st *stackOpStatus, timeout time.Duration) error {
-	if st.Result == nil {
-		return nil
-	}
-	targets := tmuxSessionTargets(st.Result.Outputs)
-	if len(targets) == 0 {
-		fmt.Fprintln(cliio.Stdout, "--tmux: no machines in the inventory, nothing to converge")
-		return nil
-	}
-	d, err := newTmuxConverger()
-	if err != nil {
-		return fmt.Errorf("--tmux: cannot reach temporal at %s: %w", config.TemporalAddress(), err)
-	}
-	defer d.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	failed := 0
-	for _, in := range targets {
-		res, err := d.Converge(ctx, in)
-		if err != nil {
-			failed++
-			fmt.Fprintf(cliio.Stdout, "  %s: session converge FAILED: %v\n", in.Machine, err)
-			continue
-		}
-		verb := "already had"
-		if res.Created {
-			verb = "created"
-		}
-		fmt.Fprintf(cliio.Stdout, "  %s: %s session %s [%s]\n", in.Machine, verb, res.Session,
-			strings.Join(res.Windows, " "))
-	}
-	fmt.Fprintf(cliio.Stdout, "--tmux: %d/%d machines have an attachable session — `tmux attach -t %s` on the "+
-		"Machine, or the Dashboard in the orchestrator UI\n", len(targets)-failed, len(targets), targets[0].Session)
-	return nil
-}
-
 // --- subcommands ----------------------------------------------------------------------------
 
 func fleetUp(args []string) error {
@@ -927,9 +685,6 @@ func fleetUp(args []string) error {
 	}
 	if err := printFleet(st); err != nil {
 		return err
-	}
-	if *f.tmux {
-		return convergeSessions(st, *f.timeout)
 	}
 	return nil
 }
@@ -980,11 +735,6 @@ func fleetDeployCmd(args []string) error {
 	}
 	if err := printFleet(st); err != nil {
 		return err
-	}
-	// AFTER placement, and only on request. The session follows the Worker's journals, so
-	// converging it before the units exist would create windows onto nothing.
-	if *f.tmux {
-		return convergeSessions(st, *f.timeout)
 	}
 	return nil
 }

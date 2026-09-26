@@ -5,7 +5,7 @@
  * THIS DOES NOT PUT EXECUTION BACK IN THE ORCHESTRATOR (ADR 0023 §12). Both verbs are the
  * operator's own terminal commands, reached from a page instead of a shell:
  *
- *   serve   spawns `kontra workflow serve <folder> --tmux` (the queue is derived, not passed). The worker is an ordinary
+ *   serve   spawns `kontra workflow serve <folder> --detach` (the queue is derived, not passed). The worker is an ordinary
  *           local process in an ordinary tmux session; this process does not host it, supervise
  *           it, or know what is in it. It exits and the worker keeps running.
  *   start   is `client.workflow.start` — the same call `kontra workflow start` makes. The caller's
@@ -43,8 +43,8 @@ import {
   statSync,
 } from 'node:fs';
 import * as path from 'node:path';
-import { tmuxSafeName } from './panels/tmux';
-import { describeQueue, temporalQueueDescriber, type QueueDescriber } from './panels/pollers';
+import { tmuxSafeName } from '@kontra/core/panels/tmux';
+import { describeQueue, temporalQueueDescriber, type QueueDescriber } from './pollers';
 import { runWorkflowStore } from './data/runWorkflows';
 import {
   DESCRIPTION_FILE,
@@ -57,6 +57,7 @@ import {
   workspaceRoot,
 } from './sources';
 import { tenantAttributes } from './visibility';
+import { SERVE_DEV_WORKFLOW, infraQueue, serveDevWorkflowId } from './queues';
 import { NAMESPACE, getClient } from './temporalClient';
 import { toActorRef } from './secrets/slotRoutes';
 import { slotStore } from './secrets/slotStore';
@@ -645,13 +646,35 @@ export async function serveWorkflow(input: ServeInput): Promise<ServeResult> {
    * long-lived re-registering process is a choice rather than the point.
    */
   const session = workflowSession(rel);
-  if (input.restart === true) {
-    // The kill is best-effort: a session that is not there is the state we want anyway, and
-    // `tmux kill-session` on a missing target is an error this must not turn into a refusal.
-    await run('tmux', ['kill-session', '-t', session], root, serveEnv()).catch(() => undefined);
-  }
-
-  const argv = ['workflow', 'serve', rel, '--tmux', '--watch'];
+  /**
+   * `--restart` IS THE CLI'S JOB NOW, not a kill this process performs first.
+   *
+   * This used to shell out to `tmux kill-session` before serving. Two things were wrong with that
+   * even while tmux was the mechanism: it assumed the orchestrator and the worker shared a tmux
+   * server, and it made "replace what is there" a sequence of two commands that could half-happen.
+   * The CLI owns the registry, so it owns the replacement — `supervise.Stop` is a no-op on a name
+   * that is not running, which is the same best-effort the kill was reaching for.
+   */
+  /*
+   * ── THE SERVE RUNS ON kontra-infra, NOT HERE ──────────────────────────────────────────────────
+   *
+   * A serve-dev Worker is a CONTAINER (ADR 0036), and starting one needs `/var/run/docker.sock`.
+   * This process must not have that socket: it is the container with the published port and the
+   * HTTP surface that parses untrusted input, and a read-write Docker socket there is root on the
+   * host — anything holding it can `docker run -v /:/host`. docker-compose.yml says it in its own
+   * header ("host-level Docker authority… Not tenant isolation") and logship mounts the socket
+   * READ-ONLY with the line "the socket is the whole host if it can".
+   *
+   * `kontra-infra` already holds it, already spends real money through this same queue
+   * (`infraRoutes.ts:startStackOp`), and publishes NO port — it is reachable only over the Compose
+   * network. So the work moves to the authority instead of the authority moving to the work. This
+   * change adds no privilege anywhere; it gives one existing privilege one more caller.
+   *
+   * AN ID CROSSES, NOT A COMMAND. If this could say "run this path with these flags", it would have
+   * the socket by proxy and the hop would buy nothing but a millisecond. What goes over the queue is
+   * a source id and a kind; `activities/serveDev.ts` resolves that id against the registration store
+   * and derives every argument on the far side. An id naming nothing is a refusal, not a path.
+   */
   /**
    * `--repo`, WHEN THIS PROCESS KNOWS WHERE THE CHECKOUT IS.
    *
@@ -668,16 +691,54 @@ export async function serveWorkflow(input: ServeInput): Promise<ServeResult> {
    * ABSENT IS LEFT ALONE. Where nothing says, the CLI's own search is correct: on an appliance or a
    * developer's machine it walks up from a real checkout and finds it.
    */
-  const env = serveEnv();
-  const sdkRoot = (env.KONTRA_SDK_ROOT ?? '').trim();
-  if (sdkRoot) argv.push('--repo', sdkRoot);
-  const { code, stdout, stderr } = await run(kontraBin(), argv, root, env);
-  if (code !== 0) {
-    const detail = cliDetail(stderr, stdout);
-    throw new ControlRefused(`serve failed (exit ${code}): ${detail || 'no output'}`);
+  const sourceId = `at:${path.dirname(file)}`;
+  let served: { worker: string; queue: string; detail: string };
+  try {
+    const client = await getClient();
+    served = await client.workflow.execute(SERVE_DEV_WORKFLOW, {
+      taskQueue: infraQueue(),
+      // ONE SERVE PER FOLDER AT A TIME. The id is the workflow id, so two presses of Serve cannot
+      // race two starts against each other — Temporal refuses the second rather than a check
+      // somebody remembered to write. `FAIL` and not `USE_EXISTING`: this caller wants an answer
+      // about the serve IT asked for, not a handle on somebody else's.
+      //
+      // DERIVED IN `queues.ts` NOW, because there is a READER of this id: the Actors page lists a
+      // folder's serve history by asking for this type under this id, and a second spelling of
+      // either would make that history silently empty.
+      workflowId: serveDevWorkflowId(sourceId),
+      workflowIdConflictPolicy: 'FAIL',
+      args: [{ sourceId, kind: 'workflow' as const }],
+    });
+  } catch (err) {
+    // THE INFRA ROLE MAY SIMPLY NOT BE RUNNING, and that reads as a hang otherwise: the workflow is
+    // accepted onto a queue nobody polls and this await never returns. Named here, because "Serve
+    // did nothing" is the least actionable sentence this surface can produce.
+    throw new ControlRefused(`serve failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+  const stdout = served.detail;
 
-  return { file: rel, queue, session, attach: `tmux attach -t ${session}` };
+  /**
+   * `attach` IS NOW WHERE THE WORKER'S OUTPUT IS, not a command to run somewhere else.
+   *
+   * It used to be `tmux attach -t <session>` — an instruction that only worked from a shell on the
+   * box, which for a container install is nowhere the operator is. The log path is the same fact
+   * without that condition, and the structured half of the same output is already on the Logs
+   * surface. The FIELD keeps its name because the console's `ServeResult` reads it.
+   */
+  /*
+   * `attach` NAMES THE WORKER, and the field has now outlived two mechanisms.
+   *
+   * It was `tmux attach -t <session>` — an instruction that only worked from a shell on the box,
+   * which for a container install is nowhere the operator is. It then became a log FILE path,
+   * written by a pid registry this process kept; that registry is gone with the bare-process serve.
+   * A serve-dev Worker's output goes where every other Worker's goes — its container's stdout,
+   * which logship ships to VictoriaLogs by the `KONTRA_WORKER` label — so what a caller needs is
+   * the NAME to search by, not a path to a file on a machine they cannot reach.
+   *
+   * THE FIELD KEEPS ITS NAME because the console's `ServeResult` reads it; what changed is that it
+   * now holds something an operator can act on from a browser.
+   */
+  return { file: rel, queue, session, attach: served.worker };
 }
 
 /**
@@ -1205,7 +1266,7 @@ export function describeExposure(): { open: boolean; detail: string } {
   };
 }
 
-/** Spawn and collect. Bounded output and a timeout: `serve --tmux` returns immediately, so
+/** Spawn and collect. Bounded output and a timeout: `serve --detach` returns immediately, so
  *  anything slow here is a `kontra` that is not going to answer. */
 function run(
   bin: string,

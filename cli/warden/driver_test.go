@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
 )
 
 // requireProcTable skips where the process driver cannot enumerate — see
@@ -342,67 +341,8 @@ func TestLogsRefusesWhenTheRuntimeKeptNothing(t *testing.T) {
 	if !errors.Is(err, errNoRetainedLogs) {
 		t.Errorf("the refusal must be recognisable, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--tmux") {
+	if !strings.Contains(err.Error(), "--mode dev") {
 		t.Errorf("the refusal must say where a log WOULD be kept, got: %v", err)
-	}
-}
-
-// A HALF HELD IN TMUX OUTLIVES ITS OWN DEATH, and the process table alone gets this wrong. `tmux.Hold`
-// keeps the window open after the command exits, with the exit status on screen, because "a window
-// that disappears is the worst possible report of a crash-on-boot" — so the wrapping shell is still
-// running and still carries the label. A `list` that stopped at the process table would report a
-// Worker that crashed on boot as healthy, forever, which is the same lie as reading from memory.
-func TestListForgetsAHalfThatDiedInsideItsTmuxWindow(t *testing.T) {
-	requireProcTable(t)
-	if !tmux.Available() {
-		t.Skip("tmux is not installed")
-	}
-	d := &ProcessDriver{out: io.Discard, err: io.Discard, tmux: true}
-	name, version := "tmuxcrash", fixtureVersion("0.0.6")
-	session := tmux.Session(name, version)
-	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", session).Run() })
-	if tmux.HasSession(session) {
-		t.Fatalf("tmux session %s is already there; this test would adopt somebody else's", session)
-	}
-
-	h, err := d.Start(context.Background(), Spec{
-		Name:    name,
-		Version: version,
-		// The actor crashes on boot the way a missing dependency does; the handler keeps serving.
-		Actor:   ProcSpec{Dir: t.TempDir(), Argv: []string{"sh", "-c", "exit 3"}, Env: os.Environ()},
-		Handler: ProcSpec{Dir: t.TempDir(), Argv: []string{"sh", "-c", "sleep 600"}, Env: os.Environ()},
-	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	got := waitForWorker(t, d, name, version,
-		func(h workerHandle) bool { _, ok := h.half(partActor); return !ok },
-		"the pair with its crashed actor dropped")
-	if _, ok := got.half(partHandler); !ok {
-		t.Errorf("the handler half was dropped along with the crashed actor: %v", got)
-	}
-
-	// THE WINDOW IS STILL THERE, which is the whole reason this is hard: the shell holding it is
-	// alive and labelled. If it were gone, this test would pass against a driver with no pane check
-	// at all.
-	if !tmux.HasSession(session) {
-		t.Fatal("the session closed itself, so nothing here tested the pane check")
-	}
-	half, _ := h.half(partActor)
-	if syscall.Kill(atoi(t, half.Ref), 0) != nil {
-		t.Fatalf("the actor pane's shell (pid %s) is gone, so nothing here tested the pane check", half.Ref)
-	}
-
-	// …and its output is still readable, which is what the window is being kept open FOR.
-	rc, err := d.logs(context.Background(), h)
-	if err != nil {
-		t.Fatalf("logs on a Worker whose half crashed: %v", err)
-	}
-	body, _ := io.ReadAll(rc)
-	_ = rc.Close()
-	if !strings.Contains(string(body), "[exited 3]") {
-		t.Errorf("the crashed half's exit status is not in the log:\n%s", body)
 	}
 }
 
@@ -413,71 +353,6 @@ func atoi(t *testing.T, s string) int {
 		t.Fatalf("not a pid: %q", s)
 	}
 	return n
-}
-
-// THE TMUX PATH IS THE SAME DRIVER, and this pins the two things that only hold if the label reaches
-// the pane: `list` finds a Worker held in a session, and `logs` reads what it printed.
-//
-// It is also the only proof that `tmux new-session -e` carries the label at all — a pane inherits
-// the tmux SERVER's environment, so a variable set on the client reaches it not at all (tmux.go).
-func TestTmuxHeldWorkerIsListedAndItsScrollbackIsTheLog(t *testing.T) {
-	requireProcTable(t)
-	if !tmux.Available() {
-		t.Skip("tmux is not installed")
-	}
-	d := &ProcessDriver{out: io.Discard, err: io.Discard, tmux: true}
-	name, version := "tmuxheld", fixtureVersion("0.0.5")
-	session := tmux.Session(name, version)
-	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", session).Run() })
-	if tmux.HasSession(session) {
-		t.Fatalf("tmux session %s is already there; this test would adopt somebody else's", session)
-	}
-
-	marker := "slice01-" + strconv.Itoa(os.Getpid())
-	say := func(who string) ProcSpec {
-		return ProcSpec{Dir: t.TempDir(), Argv: []string{"sh", "-c", "echo " + marker + "-" + who + "; sleep 600"}, Env: os.Environ()}
-	}
-	h, err := d.Start(context.Background(), Spec{Name: name, Version: version, Actor: say("actor"), Handler: say("handler")})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	if len(h.Halves) != 2 {
-		t.Errorf("start read back %d pane pids, want 2: %v", len(h.Halves), h.Halves)
-	}
-
-	waitForWorker(t, d, name, version, workerHandle.whole, "a pair held in a tmux session")
-
-	var body string
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		rc, err := d.logs(context.Background(), h)
-		if err != nil {
-			t.Fatalf("logs: %v", err)
-		}
-		b, _ := io.ReadAll(rc)
-		_ = rc.Close()
-		body = string(b)
-		if strings.Contains(body, marker+"-actor") && strings.Contains(body, marker+"-handler") {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	for _, want := range []string{"== actor ==", marker + "-actor", "== handler ==", marker + "-handler"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the log is missing %q:\n%s", want, body)
-		}
-	}
-
-	// AND STOP KILLS THE SESSION, not the pane's shell: `tmux.Hold` runs the command under
-	// `sh -c`, so signalling the pid the handle carries would leave the command running with
-	// nothing watching it.
-	if err := d.Stop(context.Background(), h, 2*time.Second); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	if tmux.HasSession(session) {
-		t.Errorf("tmux session %s survived stop", session)
-	}
-	waitForNoWorker(t, d, name)
 }
 
 // fixtureVersion makes a fixture's identity unique to THIS test process.

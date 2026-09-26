@@ -43,15 +43,6 @@ type TmuxCase struct {
 	Machine string `json:"machine"`
 }
 
-// SessionKindCase is one row of §session_kind — which `@kontra` tags the Monitor will admit
-// (ADR 0043). `Known` is the answer both languages must agree on.
-type SessionKindCase struct {
-	Why   string `json:"why"`
-	Tag   string `json:"tag"`
-	Kind  string `json:"kind"`
-	Known bool   `json:"known"`
-}
-
 type Queues struct {
 	Shared struct {
 		Cases []Case `json:"cases"`
@@ -59,9 +50,6 @@ type Queues struct {
 	TmuxSession struct {
 		Cases []TmuxCase `json:"cases"`
 	} `json:"tmux_session"`
-	SessionKind struct {
-		Cases []SessionKindCase `json:"cases"`
-	} `json:"session_kind"`
 }
 
 // ../shared/conformance/queues.json — cli -> <repo root>.
@@ -75,17 +63,16 @@ func LoadQueues(t *testing.T) *Queues {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("parse the corpus: %v", err)
 	}
-	if len(doc.Shared.Cases) < 6 || len(doc.TmuxSession.Cases) < 8 || len(doc.SessionKind.Cases) < 9 {
-		t.Fatalf("the corpus shrank: shared=%d tmux=%d session_kind=%d",
-			len(doc.Shared.Cases), len(doc.TmuxSession.Cases), len(doc.SessionKind.Cases))
+	if len(doc.Shared.Cases) < 6 || len(doc.TmuxSession.Cases) < 8 {
+		t.Fatalf("the corpus shrank: shared=%d tmux=%d",
+			len(doc.Shared.Cases), len(doc.TmuxSession.Cases))
 	}
 	blob := string(raw)
-	// `agent:claude` and `Actor:` are §session_kind's two REFUSALS that look like acceptances — a
-	// plausible kind that is not ours, and a case-folded one. A corpus that lost them would still
-	// pass every row it kept, which is the failure shape this guard exists for.
+	// The adversarial rows, named so a corpus that quietly lost one cannot pass every row it kept.
+	// §session_kind's refusals used to be here too; that section was ADR 0043's wall vocabulary —
+	// which `@kontra` tags the Monitor would admit — and went with the Monitor.
 	for _, want := range []string{
 		"my actor", "-shared", "web crawl; reboot", `"fleet"`, `"actor"`,
-		"agent:claude", "Actor:probe", `"watch:repl"`,
 	} {
 		if !strings.Contains(blob, want) {
 			t.Errorf("the corpus no longer exercises %q", want)

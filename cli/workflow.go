@@ -38,7 +38,7 @@ import (
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
-	"github.com/medmahmoudi26/kontra/cli/internal/tmux"
+	"github.com/medmahmoudi26/kontra/cli/warden"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 )
@@ -213,26 +213,28 @@ func workflowPause(args []string) error {
 	if name == "" {
 		return errors.New("usage: kontra workflow pause <file.py|session>")
 	}
-	session := workflowSession(name)
-	if !tmux.HasSession(session) {
-		return fmt.Errorf("no served worker in tmux session %q — `kontra workflow serve %s --tmux` starts one", session, name)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	dev, err := warden.NewDevDriver(ctx)
+	if err != nil {
+		return err
 	}
-	// C-c, to the WINDOW the serve command created. Not the session: a session's "current window"
-	// is whatever somebody last looked at, and interrupting the wrong pane is unrecoverable.
-	if out, err := exec.Command("tmux", "send-keys", "-t", session+":workflow", "C-c").CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux send-keys: %v: %s", err, strings.TrimSpace(string(out)))
+	worker := workflowWorkerName(name)
+	if err := dev.Pause(ctx, worker, ""); err != nil {
+		return err
 	}
-	fmt.Fprintf(cliio.Stdout, "paused %s — the worker stopped polling; the run makes no progress and resumes from history.\n", session)
+	fmt.Fprintf(cliio.Stdout, "paused %s — the worker stopped polling; the run makes no progress and resumes from history.\n", worker)
 	fmt.Fprint(cliio.Stdout, "  activities already dispatched KEEP RUNNING, and ScheduleToStart/StartToClose timers keep\n"+
 		"  ticking — a long pause fails a run rather than holding it.\n")
 	fmt.Fprintf(cliio.Stdout, "  resume:  kontra workflow resume %s\n", name)
-	fmt.Fprintf(cliio.Stdout, "  watch:   tmux attach -t %s\n", session)
+	fmt.Fprintf(cliio.Stdout, "  logs:    kontra logs --part workflow\n")
 	return nil
 }
 
 func workflowResume(args []string) error {
 	fs := flag.NewFlagSet("workflow resume", flag.ContinueOnError)
-	python := fs.String("python", "", "interpreter to run the file with")
+	// NO `--python`. Resume is SIGCONT on the process that is already there, holding the
+	// interpreter it was served with; a flag that could not change anything would be a lie.
 	name, rest := leadingPositional(args)
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -243,49 +245,40 @@ func workflowResume(args []string) error {
 	if name == "" {
 		return errors.New("usage: kontra workflow resume <folder|file.py>")
 	}
-	// RESOLVED FIRST, AND THE SESSION NAMED OFF THE RESOLUTION. Resume respawns the pane with
-	// `python <file>`, so a folder has to become its `workflow.py` regardless — and naming the
-	// session from that same file is what makes every spelling of one workflow reach the session
-	// serve created. Off the raw argument, `kontra workflow resume .` from inside the folder names
-	// nothing at all (`.` has no stem) while the worker sits in a session named after the folder.
+	// RESOLVED FIRST, AND THE WORKER NAMED OFF THE RESOLUTION. A folder has to become its
+	// `workflow.py` regardless, and naming the worker from that same file is what makes every
+	// spelling of one workflow reach the worker serve created. Off the raw argument,
+	// `kontra workflow resume .` from inside the folder names nothing at all (`.` has no stem)
+	// while the worker is recorded under the folder's name.
 	file, err := workflowFileOf(name)
 	if err != nil {
 		return fmt.Errorf("%w — resume needs the workflow serve was given", err)
 	}
-	session := workflowSession(file)
-	if !tmux.HasSession(session) {
-		return fmt.Errorf("no session %q to resume — `kontra workflow serve %s --tmux` starts one", session, name)
-	}
-
-	root, err := cliutil.FindRepoRoot("")
-	if err != nil {
-		return fmt.Errorf("kontra workflow resume needs the checkout (it puts actorkit on PYTHONPATH): %w", err)
-	}
-	py := pythonFor(root, *python)
-
-	// RESPAWN, not send-keys. After a C-c the pane is sitting in `tmux.Hold`'s trailing `read`, so
-	// typing the command back into it would run it inside that wrapper and lose the hold. `-k` kills
-	// what is in the pane and starts the command fresh, in the same window, keeping the scrollback
-	// an operator paused in order to read.
-	argv := tmux.Hold([]string{py, file})
-	cmd := []string{"respawn-pane", "-k", "-t", session + ":workflow"}
-	// The SAME derivation serve uses. A resume that recomputed the queue differently would respawn
-	// the pane onto another queue and leave the run it was resuming unserved. Editing the folder
-	// between serve and resume moves the digest and therefore the queue — a resumed worker then
-	// polls a NEW queue and the live run stays put; restarting for new code is an explicit re-serve.
-	resumeQueue, err := queueForWorkflow(file)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	dev, err := warden.NewDevDriver(ctx)
 	if err != nil {
 		return err
 	}
-	for _, kv := range serveEnvDelta(root, resumeQueue) {
-		cmd = append(cmd, "-e", kv)
+	worker := workflowWorkerName(file)
+
+	/*
+	 * SIGCONT, NOT A RESPAWN — and this is where the mechanism change pays.
+	 *
+	 * The tmux implementation killed the pane and started `python <file>` fresh, which meant it had
+	 * to re-derive the task queue. Its own comment named the hazard: the queue is built on the
+	 * folder's CONTENT DIGEST, so editing anything between pause and resume moves it, and the
+	 * "resumed" worker polls a queue the paused run is not waiting on. The run stays stuck and
+	 * nothing says so.
+	 *
+	 * A frozen container cannot drift. It is the same container holding the same code it imported at
+	 * boot, polling the same queue it has polled since.
+	 */
+	if err := dev.Unpause(ctx, worker, ""); err != nil {
+		return err
 	}
-	cmd = append(cmd, argv)
-	if out, err := exec.Command("tmux", cmd...).CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux respawn-Pane: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	fmt.Fprintf(cliio.Stdout, "resumed %s — the worker is polling again and the run continues from history.\n", session)
-	fmt.Fprintf(cliio.Stdout, "  watch:   tmux attach -t %s\n", session)
+	fmt.Fprintf(cliio.Stdout, "resumed %s — the worker is polling again and the run continues from history.\n", worker)
+	fmt.Fprintf(cliio.Stdout, "  logs:    kontra logs --part workflow\n")
 	return nil
 }
 
@@ -294,35 +287,67 @@ func workflowResume(args []string) error {
 // workflowServeArgs parses the command line, resolves the workflow file, and locates the
 // checkout root. It is the pure, testable front half of `workflowServe`: every refusal that
 // can be decided from the filesystem happens here.
-func workflowServeArgs(args []string) (target, file, root, py string, useTmux, watch bool, err error) {
+func workflowServeArgs(args []string) (target, file, root, py, mode string, watch bool, err error) {
 	fs := flag.NewFlagSet("workflow serve", flag.ContinueOnError)
 	repo := fs.String("repo", "", "repo root containing docker-compose.yml (default: walk up from CWD)")
-	python := fs.String("python", "", "python interpreter (default: .venv/bin/python, else python3)")
-	useTmuxPtr := fs.Bool("tmux", false, "run the worker in a DETACHED tmux session and return, instead of holding this terminal")
+	python := fs.String("python", "", "python interpreter (default: .venv/bin/python, else python3) — --mode local only")
+	modePtr := fs.String("mode", modeLocal, "where the worker runs: `local` (this terminal, foreground) or `dev` (serve-dev: a container holding this folder, returns immediately)")
 	watchPtr := fs.Bool("watch", false, "stay up and RE-REGISTER the contract on every save, so the browser form tracks your editor")
 
 	target, rest := leadingPositional(args)
 	if err = fs.Parse(rest); err != nil {
-		return "", "", "", "", false, false, err
+		return "", "", "", "", "", false, err
 	}
 	if target == "" && fs.NArg() == 1 {
 		target = fs.Arg(0)
 	}
 	if target == "" {
-		return "", "", "", "", false, false, errors.New("usage: kontra workflow serve <folder|file.py>")
+		return "", "", "", "", "", false, errors.New("usage: kontra workflow serve <folder|file.py> [--mode local|dev]")
+	}
+	// ONLY TWO OF THE FOUR. `docker` needs a published worker image and `fleet` places on Machines;
+	// neither exists for a caller workflow, which is somebody's file and not an Artifact. Named
+	// rather than silently accepted, because `--mode fleet` reaching the local branch would run it
+	// here while reading as a placement.
+	if *modePtr != modeLocal && *modePtr != modeDev {
+		return "", "", "", "", "", false, fmt.Errorf("unknown --mode %q for a workflow — `local` or `dev`.\n"+
+			"  A caller workflow is a file you are editing, not a published Artifact, so `docker` and\n"+
+			"  `fleet` (which place one) do not apply to it", *modePtr)
 	}
 
 	file, err = workflowFileOf(target)
 	if err != nil {
-		return "", "", "", "", false, false, err
+		return "", "", "", "", "", false, err
+	}
+	// THE SDK COMES FROM THE IMAGE IN dev, AND FROM THE CHECKOUT IN local.
+	//
+	// serve-dev mounts the WORKFLOW FOLDER and nothing else, so a PYTHONPATH derived from this host's
+	// checkout would point at directories the container does not have — `from kontra import
+	// workflows` then fails on a path that exists perfectly well outside. `Dockerfile.orchestrator`
+	// sets `KONTRA_SDK_ROOT=/opt/kontra` and asserts `/opt/kontra/sdk/python/kontra` is there, so
+	// that is the root, and `python3` is its interpreter.
+	//
+	// Somebody iterating on the SDK ITSELF wants `--mode local`, which runs against this tree. That
+	// is the line between the two: dev is for the author of the workflow, local for the author of
+	// kontra.
+	if *modePtr == modeDev {
+		return target, file, devSDKRoot, devPython, *modePtr, *watchPtr, nil
 	}
 	root, err = sdkRootForServe(*repo)
 	if err != nil {
-		return "", "", "", "", false, false, err
+		return "", "", "", "", "", false, err
 	}
 	py = pythonFor(root, *python)
-	return target, file, root, py, *useTmuxPtr, *watchPtr, nil
+	return target, file, root, py, *modePtr, *watchPtr, nil
 }
+
+// Where the SDK and its interpreter live INSIDE the control-plane image — `Dockerfile.orchestrator`
+// sets the first as `KONTRA_SDK_ROOT` and installs the second, and its own build step asserts both.
+// Stated here rather than read from the environment: this process may be running on a host with a
+// checkout, and what these name is the CONTAINER serve-dev is about to start.
+const (
+	devSDKRoot = "/opt/kontra"
+	devPython  = "python3"
+)
 
 func sdkRootForServe(explicit string) (string, error) {
 	if explicit != "" {
@@ -351,7 +376,7 @@ func hasSDK(root string) bool {
 // `from kontra import workflows` resolves to THIS tree, not to whatever is pip-installed) and
 // the Temporal/S3 env the codec reads. The module itself calls workflows.serve().
 func workflowServe(args []string) error {
-	target, file, root, py, useTmux, watch, err := workflowServeArgs(args)
+	target, file, root, py, mode, watch, err := workflowServeArgs(args)
 	if err != nil {
 		return err
 	}
@@ -370,36 +395,78 @@ func workflowServe(args []string) error {
 	delta := append(serveEnvDelta(root, serveQueue), watchEnv(watch)...)
 	env := append(os.Environ(), delta...)
 
-	// --tmux: hand the terminal back, and leave the worker somewhere it can be WATCHED.
+	// serve-dev: the worker in a container holding this folder, and this command RETURNS.
 	//
-	// The same gesture `kontra serve --tmux` makes for an actor's Worker, for the same reason — and
-	// with one more consequence here. A local `kontra-*` session IS the Dashboard's inventory
-	// (`control/orchestrator/src/panels/local.ts`), so serving this way is also what makes the workflow
-	// worker appear as a Terminal without anything else being registered.
-	//
-	if useTmux {
-		session := workflowSession(file)
-		if err := tmux.Start(session, tmux.KontraWorkflowTag(session), []tmux.Proc{{
-			Window: "workflow",
-			Dir:    root,
-			Env:    delta,
-			Argv:   []string{py, file},
-		}}); err != nil {
+	// THIS REPLACED `--tmux` AND THEN `--detach`, and the two dead ends are worth one sentence each.
+	// tmux held the worker in a detached session that was answering four questions, three of which
+	// already had better answers: whether anything is serving is the task queue's POLLERS, what the
+	// worker printed is the Logs surface, and how to stop it is this command with `--replicas 0`.
+	// `--detach` then answered the fourth — surviving the shell — with `setsid` and a registry of
+	// pids, which was ~400 lines re-deriving what a container runtime already does, and which left
+	// the worker running as a bare process inside whichever container invoked it. A container
+	// answers all four (ADR 0036: one Target, and it is a container), so that is what this does.
+	if mode == modeDev {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		dev, err := warden.NewDevDriver(ctx)
+		if err != nil {
 			return err
 		}
-		if err := confirmTmuxWorker(session, "workflow", py); err != nil {
+		name := workflowWorkerName(file)
+		/*
+		 * THE CONTAINER'S COMMAND IS THIS SAME VERB IN `--mode local`, and the recursion is the point
+		 * rather than a trick.
+		 *
+		 * Running `python <file>` directly would mean computing the interpreter, the PYTHONPATH and
+		 * the SDK root OUT HERE for a filesystem that is IN THERE — and those differ: this process may
+		 * be on a host with a checkout, while the container has the image's `/opt/kontra`. Every one
+		 * of those is already resolved correctly by `workflowServeArgs` when it runs inside, so the
+		 * container runs the command and the command resolves its own world.
+		 *
+		 * `--watch` SURVIVES BECAUSE OF IT. A watcher has to be a process that outlives the save, and
+		 * serve-dev leaves none out here — but the container's PID 1 is exactly that, and the folder
+		 * is mounted, so an edit on the operator's disk is an edit the loop inside sees. That is the
+		 * whole "fast debugging" case: save, and the Worker re-execs in a container you did not have
+		 * to rebuild.
+		 */
+		inner := []string{"kontra", "workflow", "serve", filepath.Base(file), "--mode", modeLocal}
+		if watch {
+			inner = append(inner, "--watch")
+		}
+		// ONE HALF, NOT A PAIR. A caller workflow is a single process; the driver skips a half with
+		// no argv rather than starting an empty container that would exit at once and read as a
+		// crash-looping handler.
+		spec := warden.Spec{
+			Name: name,
+			Actor: warden.ProcSpec{
+				// THE FOLDER, mounted at itself and entered. `filepath.Base` above is then enough to
+				// name the file, and nothing in the argv is a path that means two different things on
+				// the two sides of the mount.
+				Dir:  filepath.Dir(file),
+				Argv: inner,
+				Env:  cliutil.Derive(delta),
+			},
+		}
+		h, err := dev.Start(ctx, spec)
+		if err != nil {
 			return err
 		}
-		tmux.PrintHelp(cliio.Stdout, session, []string{"workflow"})
-		// `start` TAKES THE FOLDER, never the queue. It re-derives the same queue from the same
-		// folder and refuses if this code is not the one being served, so the queue below is a FACT
-		// to read (a check that serve and start agree), not a string anybody pastes into a flag.
-		if m := readWorkflowManifest(file); m.Workflow != "" {
-			fmt.Fprintf(cliio.Stdout, "\nstart one:  kontra workflow start %s\n", target)
-		} else {
-			fmt.Fprintf(cliio.Stdout, "\nstart one:  register the folder (kontra workflow register --init) so start can cliutil.Derive its queue\n")
+		fmt.Fprintf(cliio.Stdout, "serving %s\n", name)
+		for _, half := range h.Halves {
+			fmt.Fprintf(cliio.Stdout, "  container:  %s\n", half.Ref)
 		}
 		fmt.Fprintf(cliio.Stdout, "queue:      %s\n", serveQueue)
+		fmt.Fprintf(cliio.Stdout, "logs:       kontra logs --part workflow\n")
+		fmt.Fprintf(cliio.Stdout, "reload:     kontra workflow serve %s --mode dev   (replaces it)\n", target)
+		fmt.Fprintf(cliio.Stdout, "stop:       kontra workflow unserve %s\n", target)
+		// `start` TAKES THE FOLDER, never the queue. It re-derives the same queue from the same
+		// folder and refuses if this code is not the one being served, so the queue above is a FACT
+		// to read (a check that serve and start agree), not a string anybody pastes into a flag.
+		if m := readWorkflowManifest(file); m.Workflow != "" {
+			fmt.Fprintf(cliio.Stdout, "start one:  kontra workflow start %s\n", target)
+		} else {
+			fmt.Fprintf(cliio.Stdout, "start one:  register the folder (kontra workflow register --init) so start can derive its queue\n")
+		}
 		return nil
 	}
 
@@ -509,7 +576,7 @@ func workflowStart(args []string) error {
 		return fmt.Errorf("no worker is serving this folder's code — queue %q has no pollers.\n"+
 			"  Copy-pasting a queue from an old chat cannot fix this: the queue is derived from the\n"+
 			"  folder's content digest, so serve THIS code and start will find it:\n"+
-			"    kontra workflow serve %s --tmux", queue, target)
+			"    kontra workflow serve %s --mode dev", queue, target)
 	}
 
 	arg, hasArg, err := parseWorkflowInput(*input)

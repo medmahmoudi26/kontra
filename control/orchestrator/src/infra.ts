@@ -15,36 +15,28 @@
  * NAME. {@link adoptLegacyCloudToken} below is the one-time bridge for an installation whose token
  * is still in a `.env`.
  *
- * SINCE ADR 0020 it carries two more jobs, both for that same reason.
- *
- * It runs the SESSION CONVERGE (`tmuxSessionWorkflow`): session existence on a Machine is Fleet
- * authority and this is the only process holding `KONTRA_SSH_KEY`.
- *
- * And it FORKS AND SUPERVISES the Dashboard streamer (`dist/src/panels.js`) instead of hosting it.
- * ADR 0019's process-global hazard was re-measured on @pulumi/pulumi 3.256.0 and it fails silently:
- * an unhandled rejection injected two seconds into an inline `up()` made `up()` throw, reporting
- * the foreign error as `error: [runtime] Unhandled exception`, and **the process survived every
- * time**. So a co-located streamer would not crash this container — it would fail
- * `kontra fleet deploy`, blame panel code, and leave this process reporting healthy. The handlers
- * are process-global and not container-global, so a fork is the whole fix: same container, same
- * read-only key mount, same Fleet authority, different PID.
- *
- * Which is why nothing below AWAITS anything the child produces. {@link superviseChild} has no
- * async surface at all.
+ * IT USED TO CARRY TWO MORE JOBS AND BOTH WERE THE MONITOR'S. It ran the session converge
+ * (`tmuxSessionWorkflow`) because session existence on a Machine was Fleet authority, and it forked
+ * and supervised the Dashboard streamer so that ADR 0019's process-global Pulumi hazard could not
+ * blame panel code for a failed `fleet deploy`. The Monitor is gone — a read-only terminal over a
+ * tmux socket was machine-local, unsearchable and not the record — so both jobs went with it, and
+ * with them the shared tmux socket that let this container and the API's reach each other's
+ * processes.
  *
  *   node dist/src/infra.js
  */
 
-import { fork } from 'node:child_process';
 import { Client, Connection } from '@temporalio/client';
 import { NativeConnection, Worker } from '@temporalio/worker';
 import * as infraActivities from './activities/infra';
-import * as panelActivities from './activities/panels';
+import * as serveDevActivities from './activities/serveDev';
 import { dataConverter } from './codec/dataConverter';
 import { adoptLegacyCloudToken } from './infra/credential';
 import { assertBackend, backendUrl } from './infra/workspace';
-import { superviseChild, type Supervisor } from './panels/supervisor';
 import { infraQueue } from './queues';
+import { configureServeDev } from './activities/serveDev';
+import { SourceStore } from './sourceStore';
+import { kontraBin, serveEnv } from './workflowControl';
 import { armRetentionSchedule } from './retention';
 import { temporalConnectOptions } from './temporalTls';
 import { identityFor } from './workerIdentity';
@@ -55,31 +47,6 @@ import { identityFor } from './workerIdentity';
  * string. Resolved once at load, exactly as the `const` it replaces was.
  */
 const INFRA_QUEUE = infraQueue();
-
-/**
- * Fork the streamer and keep it forked.
- *
- * `require.resolve` rather than a path literal so a missing build fails here, loudly, instead of
- * producing a child that exits instantly forever. Returns synchronously: the supervisor is a
- * handle, never a promise, so there is nothing on this path for the Pulumi engine's handlers to
- * catch on.
- */
-export function supervisePanels(): Supervisor {
-  const modulePath = require.resolve('./panels');
-  return superviseChild({
-    spawn: () =>
-      fork(modulePath, [], {
-        // The child inherits the key mount, the state directory and the Temporal address from this
-        // environment — it is the same container by design. It does NOT get a Pulumi engine.
-        env: process.env,
-        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-      }),
-    log: (line, extra) => {
-      // eslint-disable-next-line no-console
-      console.log(`[infra] panels: ${line}${extra ? ` ${JSON.stringify(extra)}` : ''}`);
-    },
-  });
-}
 
 async function main(): Promise<void> {
   // Fail closed at boot rather than at the first provision: a misconfigured backend does not
@@ -93,40 +60,37 @@ async function main(): Promise<void> {
   // NAME it was given, so a rotation takes effect on the next converge with no restart.
   await adoptLegacyCloudToken();
 
-  // Fork the streamer FIRST, and never await it.
-  //
-  // Before Temporal, deliberately: the Dashboard's read path is SSH and a Pulumi checkpoint, so a
-  // Temporal outage should cost the converge button, not the whole wall. `assertBackend()` above is
-  // the one thing that must pass first — a process refusing to start should not leave a child
-  // holding a published port.
-  const panels = supervisePanels();
+  /*
+   * WIRE serve-dev's ONE SEAM — how a source id becomes a folder.
+   *
+   * HERE AND NOT INSIDE THE ACTIVITY, because this is the boundary that makes the id-only rule a
+   * property rather than a promise. The activity is handed a `resolve` that can only answer from
+   * THIS control plane's registration store; there is no spelling of `ServeDevInput` that reaches a
+   * path the operator never registered, and no way for a caller to substitute a different resolver.
+   *
+   * `kind` IS CHECKED AGAINST THE STORE, not taken from the request. A caller naming a workflow id
+   * with `kind: 'actor'` would otherwise pick the actor verb for a workflow folder — not a privilege
+   * escape, but a confusing failure, and the store already knows which it is.
+   */
+  const sources = new SourceStore();
+  configureServeDev({
+    resolve: async (sourceId) => {
+      for (const kind of ['workflow', 'actor'] as const) {
+        const got = sources.get(kind, sourceId);
+        if (got !== undefined) return { name: got.name, path: got.path, kind: got.kind };
+      }
+      return null;
+    },
+    kontraBin,
+    serveEnv,
+  });
 
-  // MEASURED, not assumed: without these handlers, `timeout 20 node dist/src/infra.js` left
-  // `dist/src/panels.js` running. Node's default for SIGTERM/SIGINT with no listener is to terminate
-  // immediately, so the `finally` below never runs and the child is ORPHANED — still holding port
-  // 8090 and the read-only fleet key. In a container that is masked by the runtime reaping the
-  // namespace; on a laptop it is a stale streamer nobody can see.
-  //
-  // The worker's own shutdown is deliberately unchanged by this: it had no signal handling before
-  // this slice either, and making a `pulumi up` shut down gracefully is a separate change with
-  // consequences for the lock (see activities/infra.ts).
-  const onSignal = (signal: NodeJS.Signals): void => {
-    // eslint-disable-next-line no-console
-    console.log(`[infra] ${signal} — stopping the panels child`);
-    // Exit only once the child is actually gone. `stop` escalates SIGTERM to SIGKILL and calls back
-    // either way, so this cannot hang — and it cannot exit early and orphan a child that is still
-    // shutting down, which is the whole point of handling the signal at all.
-    panels.stop({ done: () => process.exit(0) });
-  };
-  process.once('SIGTERM', () => onSignal('SIGTERM'));
-  process.once('SIGINT', () => onSignal('SIGINT'));
-
-  try {
-    await runWorker();
-  } finally {
-    // And whatever else ends the worker ends the child too.
-    panels.stop();
-  }
+  // NO SIGNAL HANDLERS, WHICH IS WHERE THIS STARTED. They existed for exactly one reason — a
+  // forked streamer that Node's default SIGTERM would have orphaned, still holding port 8090 and
+  // the read-only fleet key. There is no child now, so the default is right again, and this process
+  // ends the way every other worker here does. Making a `pulumi up` shut down gracefully is a
+  // separate change with consequences for the lock (see activities/infra.ts).
+  await runWorker();
 }
 
 async function runWorker(): Promise<void> {
@@ -139,10 +103,11 @@ async function runWorker(): Promise<void> {
   const connection = await NativeConnection.connect(temporalConnectOptions({ address }));
 
   const worker = await Worker.create({
-    // A BUNDLE, not a single file: `stackWorkflow` and `tmuxSessionWorkflow` share this queue
-    // because both need the cloud credential or the fleet key, and neither may run anywhere else.
+    // A BUNDLE, not a single file. `stackWorkflow` needs the cloud credential, `serveDevWorkflow`
+    // needs the Docker socket, and `sweepDatasetsWorkflow` is controller-pinned — three workflows
+    // that share this queue because each needs an authority this role holds and the API does not.
     workflowsPath: require.resolve('./workflows/infra'),
-    activities: { ...infraActivities, ...panelActivities },
+    activities: { ...infraActivities, ...serveDevActivities },
     taskQueue: INFRA_QUEUE,
     namespace,
     connection,

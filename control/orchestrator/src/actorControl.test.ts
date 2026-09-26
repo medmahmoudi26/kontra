@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -6,6 +6,39 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { callerFor, serveActor } from './actorControl';
 import type { Source } from './sources';
+
+/** What `serveActor` handed the infra queue, and what it got back. See the mock below. */
+const executed = vi.hoisted(() => ({
+  type: undefined as string | undefined,
+  opts: undefined as Record<string, unknown> | undefined,
+  fail: undefined as Error | undefined,
+  result: { worker: 'probe', queue: 'probe-0.1.0', detail: '' },
+}));
+
+/*
+ * THE SERVE IS A HOP NOW AND NOT A SPAWN, so this mocks the queue rather than the CLI.
+ *
+ * `serveActor` used to shell `kontra serve --actor … --mode local --tmux` from this process. It asks
+ * `kontra-infra` instead, because starting a serve-dev container needs the Docker socket and this
+ * process — the one with the published port and the untrusted HTTP input — must not have one.
+ *
+ * WITHOUT THIS MOCK THESE TESTS DIAL A REAL TEMPORAL AND TIME OUT AT 30s, which is how they failed
+ * when the hop landed: four cases, thirty seconds each, reported as assertion failures rather than
+ * as a missing stub.
+ */
+vi.mock('./temporalClient', () => ({
+  NAMESPACE: 'test-namespace',
+  getClient: vi.fn(async () => ({
+    workflow: {
+      execute: async (type: string, opts: Record<string, unknown>) => {
+        executed.type = type;
+        executed.opts = opts;
+        if (executed.fail) throw executed.fail;
+        return executed.result;
+      },
+    },
+  })),
+}));
 
 describe('serveActor', () => {
   const made: string[] = [];
@@ -27,43 +60,49 @@ describe('serveActor', () => {
     };
   }
 
+  beforeEach(() => {
+    executed.type = undefined;
+    executed.opts = undefined;
+    executed.fail = undefined;
+    executed.result = { worker: 'probe', queue: 'probe-0.1.0', detail: '' };
+  });
+
   afterEach(() => {
     if (prevBin === undefined) delete process.env.KONTRA_BIN;
     else process.env.KONTRA_BIN = prevBin;
     for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  it('reports the session and the attach command on success', async () => {
-    // `true` stands in for the CLI: this asserts the spawn/exit-0 path and what comes back from
-    // it, not what `kontra serve --actor` does — that is the CLI's own tests' job.
-    process.env.KONTRA_BIN = 'true';
+  it('reports the worker name and what to search logs by, on success', async () => {
     const got = await serveActor(folder('probe'));
+    // The Worker name, folded — `shared/conformance/queues.json` §tmux_session pins it across three
+    // languages and the fold outlived the tmux that caused it (a `:` is not legal in a container
+    // name either).
     expect(got.session).toBe('probe-0_1_0');
-    expect(got.attach).toBe('tmux attach -t probe-0_1_0');
-    // The attach command must name the session the Monitor will find the pane under, or the
-    // console and the terminal are two different workers.
-    expect(got.attach).toContain(got.session);
+    // `attach` NAMES THE WORKER. It was `tmux attach -t …`, which only ever worked from a shell on
+    // the box — nowhere the operator is on a container install. A serve-dev Worker's output is its
+    // container's stdout, shipped by the `KONTRA_WORKER` label, so the useful value is the name to
+    // search Logs by.
+    expect(got.attach).toBe('probe');
   });
 
-  it('spawns the verb the CLI actually has — `serve`, not the renamed `run`', async () => {
-    // THE ARGV IS A CONTRACT ACROSS TWO LANGUAGES, and nothing in TypeScript checks it. `run`
-    // became `serve` in cli/main.go, where the old word is a REDIRECT and not an alias — so this
-    // array would have kept passing every test in this file and started failing the moment the CLI
-    // was rebuilt, with `serve failed (exit 1)` and a sentence about a verb only this file said.
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'kontra-argv-'));
-    made.push(dir);
-    const log = path.join(dir, 'argv');
-    const bin = path.join(dir, 'record');
-    writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$@" > "${log}"\n`, { mode: 0o755 });
-    process.env.KONTRA_BIN = bin;
-
+  it('asks the infra role, and the request carries an ID and a kind — never a path or an argv', async () => {
+    /*
+     * THE SECURITY PROPERTY, ASSERTED RATHER THAN DESCRIBED. The hop exists because this process has
+     * no Docker socket and must not get one; it is only worth anything if the API cannot say WHAT to
+     * run, or it has the socket by proxy. So an id and a kind cross, and nothing else. If somebody
+     * ever adds an `image`, an `argv` or a `path` to this payload, this test is what says no.
+     */
     await serveActor(folder('probe'));
-
-    const argv = readFileSync(log, 'utf8').trim().split('\n');
-    expect(argv[0]).toBe('serve');
-    // The rest of the line is the local-only contract this button is deliberately limited to: one
-    // machine, in a session the Monitor can find.
-    expect(argv).toEqual(['serve', '--actor', expect.any(String), '--mode', 'local', '--tmux']);
+    expect(executed.type).toBe('serveDevWorkflow');
+    expect(executed.opts?.taskQueue).toBe('kontra-infra');
+    const args = executed.opts?.args as Array<Record<string, unknown>>;
+    expect(Object.keys(args[0] ?? {}).sort()).toEqual(['kind', 'sourceId']);
+    expect(args[0]?.kind).toBe('actor');
+    expect(String(args[0]?.sourceId)).toMatch(/^at:\//);
+    // Keyed by the folder, so two presses cannot race two starts: Temporal refuses the second.
+    expect(String(executed.opts?.workflowId)).toMatch(/^serve-dev\/at:\//);
+    expect(executed.opts?.workflowIdConflictPolicy).toBe('FAIL');
   });
 
   it('says a folder that has gone away is gone, rather than blaming the binary', async () => {
@@ -85,16 +124,19 @@ describe('serveActor', () => {
     await expect(serveActor(listed)).rejects.toThrow(/is not on this machine any more/);
   });
 
-  it('fails the serve when the CLI exits non-zero, carrying its last lines', async () => {
+  it('fails the serve when the infra side refuses, carrying what it said', async () => {
     // A worker that dies at import — a stray tab, a missing package — is exactly what this button
-    // exists to make visible, and the evidence is the last thing the command printed.
-    process.env.KONTRA_BIN = 'false';
-    await expect(serveActor(folder('probe'))).rejects.toThrow(/serve failed \(exit 1\)/);
+    // exists to make visible, and the evidence is the last thing the container printed.
+    executed.fail = new Error('worker exited on startup: IndentationError: unexpected indent');
+    await expect(serveActor(folder('probe'))).rejects.toThrow(/serve failed/);
+    await expect(serveActor(folder('probe'))).rejects.toThrow(/IndentationError/);
   });
 
-  it('surfaces a missing binary as a fixable message, not a bare errno', async () => {
-    process.env.KONTRA_BIN = 'kontra-does-not-exist-anywhere';
-    await expect(serveActor(folder('probe'))).rejects.toThrow(/KONTRA_BIN/);
+  it('answers a concurrent serve of the same folder as a STATE the page can act on', async () => {
+    // On a page there is no next line to type, so Temporal's id conflict is re-thrown as something
+    // the UI can branch on and answer with a button — not a raw gRPC message.
+    executed.fail = new Error('WorkflowExecutionAlreadyStarted: serve-dev/at:/x');
+    await expect(serveActor(folder('probe'))).rejects.toThrow(/already running/);
   });
 });
 

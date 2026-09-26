@@ -101,14 +101,16 @@ const usageText = `kontra — local control surface
                #   manual signal/terminate console, for the failures kontra's own surfaces
                #   cannot yet show. Its codec address is derived, never configured.
   kontra infra up|down|status [--repo <dir>]       # the compose control plane (the other topology)
-  kontra serve --actor <dir> [--mode local|docker] [--engine py|go] [--python <bin>]
-               [--redis <host:port>] [--tmux] [--replicas N] [--network <name>] [--watch]
+  kontra serve --actor <dir> [--mode local|dev|docker] [--engine py|go] [--python <bin>]
+               [--redis <host:port>] [--replicas N] [--network <name>] [--watch]
                # serve the actor HERE (actor + handler), no image build — it waits for a dispatch
                # --watch: RE-EXEC the pair on save. Nothing builds and nothing uploads — local mode
                #   runs python <dir>/actor.py from the directory, the Go handler is generic, and the
                #   queue is <name>-<version> off the manifest so an edit does not move it. In-flight
-               #   Units are DRAINED before the swap. Foreground only (not with --tmux).
-               # --tmux: detached tmux session, one window per process (attach to watch)
+               #   Units are DRAINED before the swap. Local mode only.
+               # --mode dev: serve-dev — the same pair in CONTAINERS holding this folder on a bind
+               #   mount, from the control plane's own image. Returns immediately; re-run it to
+               #   reload after an edit, --replicas 0 to stop. What it printed is kontra logs.
                # --mode docker: N managed worker CONTAINERS, wired to whichever control plane
                #   this box runs (kontra up's bound addresses, else the compose service names)
                # --network: docker mode only. "host" is the answer when a host firewall drops a
@@ -155,7 +157,7 @@ const usageText = `kontra — local control surface
   kontra workflow register <dir> [--init] [--workflow <Class>] [--json]
                # DECLARE it, without serving or running it: records the path, the manifest,
                # the version and a content digest, and creates the Actor's Nexus endpoint
-  kontra workflow serve <folder|file.py> [--repo <dir>] [--python <bin>] [--tmux] [--watch]
+  kontra workflow serve <folder|file.py> [--mode local|dev] [--repo <dir>] [--python <bin>] [--watch]
                # run YOUR Temporal workflows here; they dispatch deployed Actors
                # the queue is DERIVED from the folder's content, never typed (no --queue)
                # --repo: checkout root containing docker-compose.yml (default: walk up from CWD)
@@ -180,8 +182,7 @@ const usageText = `kontra — local control surface
   kontra fleet up --count N --actor <dir> [--tag <t>] [--fleet <name>]
                # converge Machines through Pulumi, as a Temporal workflow on the Controller
                # a Fleet is named after what it places: <actor>-<version>
-  kontra fleet deploy --actor <dir> [--image <ref>] [--tmux]   # place the Artifact
-               # --tmux: an attachable session on each Machine (systemd still supervises)
+  kontra fleet deploy --actor <dir> [--image <ref>]   # place the Artifact
   kontra fleet preview | status | down [--fleet <name>]
   kontra warden join --controller https://<controller>:8443 --token <kw1....>
                # ON A MACHINE (ADR 0037): exchange a one-time token for an mTLS identity that
@@ -193,7 +194,6 @@ const usageText = `kontra — local control surface
                # actually holds. Outbound only — a Machine opens no listening socket.
   kontra warden status                             # who this Machine is, and what is running on it
   kontra warden ca serve|token|list [--dir <dir>]  # ON THE CONTROLLER: the Fleet CA and enrolment
-  kontra panels list [--url <streamer>]            # read-only Terminals + 5 health signals (KONTRA_PANEL_URL/_TOKEN)
   kontra dataset list                              # every dataset: standalone (loaded) + output (actor-produced)
   kontra dataset query <name> --sql "SELECT ..."   # query any dataset; runs on the orchestrator (--local for here)
   kontra dataset create|anew <file.csv|.jsonl|.parquet> <name>   # load a standalone dataset (anew = append new rows)
@@ -327,8 +327,6 @@ func dispatch(args []string) error {
 		// under one word because they are two ends of ONE protocol, and a reader who finds one has
 		// to be able to find the other.
 		err = warden.Command(args[1:])
-	case "panels":
-		err = cmdPanels(args[1:])
 	case "dataset", "ds":
 		err = cmdDataset(args[1:])
 	case "db":

@@ -54,6 +54,15 @@ import {
 /** What `startRun` handed Temporal, captured — so the search attributes can be asserted. */
 const started = vi.hoisted(() => ({ opts: undefined as Record<string, unknown> | undefined }));
 
+/** What `serveWorkflow` handed the infra queue, and what it got back. See the mock below. */
+const executed = vi.hoisted(() => ({
+  type: undefined as string | undefined,
+  opts: undefined as Record<string, unknown> | undefined,
+  /** Settable per test: a throw here is how the infra side reports a refusal. */
+  fail: undefined as Error | undefined,
+  result: { worker: 'nscheck', queue: '', detail: '' },
+}));
+
 vi.mock('./temporalClient', () => ({
   // `NAMESPACE` IS EXPORTED BY THE REAL MODULE AND MUST BE HERE TOO. A factory that returns only
   // `getClient` leaves every other binding `undefined`, and the tenant stamp below would write
@@ -65,6 +74,22 @@ vi.mock('./temporalClient', () => ({
       start: async (_type: string, opts: { workflowId: string }) => {
         started.opts = opts as unknown as Record<string, unknown>;
         return { workflowId: opts.workflowId };
+      },
+      /*
+       * `execute`, BECAUSE THE SERVE IS A HOP NOW AND NOT A SPAWN.
+       *
+       * `serveWorkflow` used to shell `kontra workflow serve` from THIS process; it asks
+       * `kontra-infra` to do it instead, over the queue those two already share, because starting a
+       * container needs the Docker socket and this process must not have one. So what a test of
+       * this function can assert is the REQUEST — and the request is the security property: an id
+       * and a kind, never a path or an argv. What the far side then runs is
+       * `activities/serveDev.test.ts`'s subject.
+       */
+      execute: async (type: string, opts: Record<string, unknown>) => {
+        executed.type = type;
+        executed.opts = opts;
+        if (executed.fail) throw executed.fail;
+        return executed.result;
       },
     },
   })),
@@ -81,6 +106,12 @@ beforeEach(() => {
   writeFileSync(path.join(root, 'examples', 'python', 'workflows', 'nscheck.py'), '# workflow\n');
   writeFileSync(path.join(outside, 'secrets.py'), '# not yours\n');
   process.env.KONTRA_WORKFLOW_ROOT = root;
+  // THE HOP'S RECORDER IS MODULE STATE, so a failure left set by one case would fail every case
+  // after it — the shape of flake this file's `afterEach` already guards the provider against.
+  executed.type = undefined;
+  executed.opts = undefined;
+  executed.fail = undefined;
+  executed.result = { worker: 'nscheck', queue: '', detail: '' };
 });
 
 afterEach(() => {
@@ -502,41 +533,37 @@ describe('serveWorkflow', () => {
     await expect(serveWorkflow({ file: 'bare' })).rejects.toThrow(/derive a queue|--init/);
   });
 
-  /**
-   * A stand-in for the CLI that RECORDS ITS ARGV — `true` proves the exit-0 path and says nothing
-   * about what was passed, which is exactly what the `--repo` case is about.
-   */
-  function recordingBin(): () => string[] {
-    const log = path.join(root, 'argv.log');
-    const bin = path.join(root, 'fake-kontra.sh');
-    writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$@" > ${log}\nexit 0\n`);
-    chmodSync(bin, 0o755);
-    process.env.KONTRA_BIN = bin;
-    return () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []);
-  }
-
-  it('passes --repo when a checkout is configured, because a container has none to walk up to', async () => {
-    // MEASURED ON A LIVE INSTALL. The cwd is `~/.kontra/workflows` inside the container, so the
-    // CLI's walk-up finds no checkout and refuses — "needs the checkout ... (pass --repo <dir>)" —
-    // which made the console's Serve button unpressable in the only topology most people run.
-    const argv = recordingBin();
-    process.env.KONTRA_SERVE_ENV = 'KONTRA_ADDRESS=1.2.3.4:7233 KONTRA_SDK_ROOT=/srv/checkout';
+  it('asks the infra role, and the request carries an ID and a kind — never a path or an argv', async () => {
+    /*
+     * THE SECURITY PROPERTY, ASSERTED RATHER THAN DESCRIBED.
+     *
+     * This process has no Docker socket and must not get one: it is the container with the
+     * published port and the untrusted HTTP input, and a read-write socket here is root on the
+     * host. `kontra-infra` holds it and publishes no port, so the serve goes there. That hop is
+     * only worth anything if the API cannot say WHAT to run — otherwise it has the socket by proxy.
+     *
+     * So: an id and a kind cross, and nothing else. If somebody ever adds an `image`, an `argv` or
+     * a `path` to this payload, this test is what says no.
+     */
     servable('nscheck');
     await serveWorkflow({ file: 'nscheck' });
-    // `--watch` rides on every console-started worker: a worker holds the contract it imported at
-    // boot, so without it the Workflows form describes the code as it was when Serve was pressed.
-    expect(argv()).toEqual(
-      ['workflow', 'serve', 'nscheck/workflow.py', '--tmux', '--watch', '--repo', '/srv/checkout']);
+
+    expect(executed.type).toBe('serveDevWorkflow');
+    expect(executed.opts?.taskQueue).toBe('kontra-infra');
+    const args = executed.opts?.args as Array<Record<string, unknown>>;
+    expect(Object.keys(args[0] ?? {}).sort()).toEqual(['kind', 'sourceId']);
+    expect(args[0]?.kind).toBe('workflow');
+    expect(String(args[0]?.sourceId)).toMatch(/^at:.*nscheck$/);
   });
 
-  it('passes no --repo when nothing says where the checkout is', async () => {
-    // The CLI's own search is right on a developer's machine and on the appliance: it walks up from
-    // a real checkout. An empty `--repo ""` would turn that working case into a refusal.
-    const argv = recordingBin();
-    process.env.KONTRA_SERVE_ENV = 'KONTRA_ADDRESS=1.2.3.4:7233';
+  it('keys the serve by the folder, so two presses cannot race two starts', async () => {
+    // Temporal refuses a second execution with a live id, which is a structural guard rather than
+    // a check somebody remembered to write. `FAIL` and not `USE_EXISTING`: the caller wants an
+    // answer about the serve IT asked for.
     servable('nscheck');
     await serveWorkflow({ file: 'nscheck' });
-    expect(argv()).toEqual(['workflow', 'serve', 'nscheck/workflow.py', '--tmux', '--watch']);
+    expect(String(executed.opts?.workflowId)).toMatch(/^serve-dev\/at:.*nscheck$/);
+    expect(executed.opts?.workflowIdConflictPolicy).toBe('FAIL');
   });
 
   it('reports a missing file as a missing workflow, not a queue problem', async () => {
@@ -549,7 +576,6 @@ describe('serveWorkflow', () => {
     // A flat file has no manifest to version it, so it carries `0.0.0` — STATED, not hashed. It
     // used to be digested by its own bytes, which made the queue move on every edit; a flat file is
     // the shape a folder replaces and does not get a second identity scheme of its own.
-    process.env.KONTRA_BIN = 'true';
     const got = await serveWorkflow({ file: 'examples/python/workflows/nscheck.py' });
     expect(got.queue).toBe('wf-nscheck-0.0.0');
     expect(got.session).toBe('nscheck');
@@ -572,15 +598,17 @@ describe('serveWorkflow', () => {
     expect(workflowQueue('nscheck', '')).toBe('');
   });
 
-  it('reports the session, attach command, and the DERIVED queue on success', async () => {
-    // `true` stands in for the CLI: this asserts the spawn/exit-0 path and what is returned from
-    // it, not what `kontra` does — that is `cli/workflow_test.go`'s job.
-    process.env.KONTRA_BIN = 'true';
+  it('reports the worker name, WHAT TO SEARCH LOGS BY, and the DERIVED queue on success', async () => {
     servable('nscheck');
+    executed.result = { worker: 'nscheck', queue: 'wf-nscheck-0.1.0', detail: '' };
     const got = await serveWorkflow({ file: 'nscheck' });
     // The FOLDER names the session, not the queue.
     expect(got.session).toBe('nscheck');
-    expect(got.attach).toBe('tmux attach -t nscheck');
+    // `attach` NAMES THE WORKER, and the field has outlived two mechanisms: `tmux attach -t …` only
+    // ever worked from a shell on the box, and the log FILE that replaced it was written by a pid
+    // registry that no longer exists. A serve-dev Worker's output is its container's stdout, which
+    // logship ships by the `KONTRA_WORKER` label — so what a caller needs is the name to search by.
+    expect(got.attach).toBe('nscheck');
     // The path comes back RELATIVE to the checkout — the file the CLI was handed.
     expect(got.file).toBe(path.join('nscheck', 'workflow.py'));
     // The queue is the derived one: `wf-<name>-<version>` off the manifest — the SAME shape an
@@ -591,11 +619,10 @@ describe('serveWorkflow', () => {
     expect(got.queue).toBe('wf-nscheck-0.1.0');
   });
 
-  it('serves a FOLDER, and two folders land in two sessions', async () => {
+  it('serves a FOLDER, and two folders land under two worker names', async () => {
     // What `kontra workflow serve` is handed is the RESOLVED file, so the CLI's own independently
     // derived session name is taken from the same string this one is — and the page then goes
     // looking for a pane by a name the worker really is in.
-    process.env.KONTRA_BIN = 'true';
     servable('nscheck');
     servable('ping', { cls: 'Ping' });
 
@@ -610,7 +637,6 @@ describe('serveWorkflow', () => {
     // Two folders, two queues — the digest binds each queue to its own folder's content.
     expect(first.queue).not.toBe(second.queue);
     expect(first.file).toBe(path.join('nscheck', 'workflow.py'));
-    expect(first.attach).toBe('tmux attach -t nscheck');
   });
 
   it('reaches one folder, and one session, from all three spellings of it', async () => {
@@ -618,7 +644,6 @@ describe('serveWorkflow', () => {
     // the docs, `nscheck` is what the page sends, `nscheck/workflow.py` is what an operator types
     // after a tab-completion — and each one that produced a different session would be a second
     // worker on the same queue, with the Monitor showing whichever pane it found first.
-    process.env.KONTRA_BIN = 'true';
     servable('nscheck');
 
     const rel = path.join('nscheck', 'workflow.py');
@@ -635,18 +660,14 @@ describe('serveWorkflow', () => {
     }
   });
 
-  it('surfaces a missing binary as a fixable message, not a bare errno', async () => {
-    process.env.KONTRA_BIN = 'kontra-does-not-exist-anywhere';
+  it('surfaces an infra-side refusal as a failure, and names it', async () => {
+    // A serve that could not happen must not read as one that did. The likeliest cause in practice
+    // is that the infra role is not running at all — the workflow is accepted onto a queue nobody
+    // polls and the await never returns — so whatever comes back is reported rather than swallowed.
     servable('nscheck');
-    await expect(serveWorkflow({ file: 'nscheck' })).rejects.toThrow(/KONTRA_BIN/);
-  });
-
-  it('fails the serve when the CLI exits non-zero', async () => {
-    // `kontra workflow serve --tmux` refuses when the session already exists, because two workers
-    // on one queue are rivals. That refusal must reach the caller as a failure.
-    process.env.KONTRA_BIN = 'false';
-    servable('nscheck');
+    executed.fail = new Error('worker exited on startup: ModuleNotFoundError: no module named foo');
     await expect(serveWorkflow({ file: 'nscheck' })).rejects.toThrow(/serve failed/);
+    await expect(serveWorkflow({ file: 'nscheck' })).rejects.toThrow(/ModuleNotFoundError/);
   });
 });
 
@@ -697,7 +718,7 @@ describe('startRun', () => {
   /** A describer that reports `n` distinct pollers on any queue, without touching Temporal. An
    *  `error` makes the describe THROW, which is how `describeQueue` learns Temporal could not be
    *  asked (a state that must read as unknown, not as zero). */
-  function pollers(n: number, error?: string): import('./panels/pollers').QueueDescriber {
+  function pollers(n: number, error?: string): import('./pollers').QueueDescriber {
     return {
       pollers: async () => {
         if (error !== undefined) throw new Error(error);
