@@ -19,8 +19,25 @@ That teardown is a replayable step in a program Temporal finishes whether or not
 
 ---
 
-> [!WARNING]
-> **kontra is `0.x` and the API will move.** It is used in production by its authors and is not yet stable for anyone else. Pin an exact version, read the release notes, and expect breaking changes between minors until `1.0`. See [Versioning](#versioning).
+> [!CAUTION]
+> ## kontra is unstable, in active development, and not ready for production use by anyone but its authors.
+>
+> **What that means concretely, so you can decide rather than guess:**
+>
+> - **The API moves between minor versions.** `0.x` is what `0.x` is for. Pin an exact version.
+> - **Documented commands may be ahead of, or behind, the code.** The install path is being
+>   rewritten right now (ADR 0052) and the README is not yet the last word on it.
+> - **Boundaries described in the [Security Model](../../wiki/Security-Model) are partly built.**
+>   The data plane has no tenant boundary: any actor on any Machine can read every Dataset on that
+>   control plane. Run one control plane per tenant, and read that page before running untrusted
+>   actors.
+> - **`docker compose down -v` destroys every Dataset and the Pulumi state that tracks Machines you
+>   own** — including cloud Machines it will then be unable to find or destroy.
+> - **There is no upgrade path yet.** `kontra update` is designed (ADR 0052 §7) and not shipped.
+>
+> Issues and discussion are very welcome. Production dependency is not advised.
+
+See [Versioning](#versioning) for what a minor bump is allowed to break.
 
 ---
 

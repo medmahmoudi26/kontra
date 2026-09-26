@@ -314,15 +314,16 @@ jobs:
       # `_sibling/` nesting is not decoration: kontra-console resolves `@kontra/core` as
       # `link:../kontra/core`, so it needs a directory named `kontra` beside it.
       #
-      # `secrets.KONTRA_CONSOLE_TOKEN` is read access to a PRIVATE repository. Absent, this step
-      # fails with a 404 on a repository that exists (the reading ci.yml:465-467 records) — not with
-      # anything that says "token".
+      # NO TOKEN. kontra-console was private and this step needed `secrets.KONTRA_CONSOLE_TOKEN` —
+      # read access to another repository, which the built-in GITHUB_TOKEN does not grant. It went
+      # PUBLIC on 2026-09-26, so an anonymous checkout resolves and the secret is one fewer thing an
+      # operator has to be told about. If it is ever made private again this fails with a 404 on a
+      # repository that exists (ci.yml records that reading) — not with anything that says "token".
       - name: check out the console
         uses: actions/checkout@v4
         with:
           repository: medmahmoudi26/kontra-console
           path: _sibling/kontra-console
-          token: ${{ secrets.KONTRA_CONSOLE_TOKEN }}
       - name: put this checkout where `link:../kontra/shared/core` expects it
         run: ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/_sibling/kontra"
       - uses: pnpm/action-setup@v4
