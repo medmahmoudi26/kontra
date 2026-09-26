@@ -9,13 +9,14 @@
  *
  * **TASK QUEUES DO NOT MERGE WHEN PROCESSES DO.** A queue is HOW WORK IS ROUTED; a process is only
  * WHERE IT RUNS (ADR 0023 §6 — the queue name is the address). `queues.ts` already argues the
- * materializer/paging split on tuning grounds — a caller's page read must not queue behind a
- * forty-minute decode — and that argument does not care how many processes exist.
+ * dataset/infra split on routing grounds — the infra queue is deliberately serialised to one
+ * Pulumi update at a time, and a dataset read behind a sixty-minute converge reads as a hang —
+ * and that argument does not care how many processes exist.
  *
- * WHICH IS WHY {@link assertDistinctQueues} EXISTS. Three queue names come from three environment
+ * WHICH IS WHY {@link assertDistinctQueues} EXISTS. The queue names come from environment
  * variables, and once they are polled by one process nothing else notices when two of them are the
- * same string. The failure is silent and total: one worker's poller wins each task, so a
- * materialization lands on a worker with no `materializeNode` and fails the task, forever, while
+ * same string. The failure is silent and total: one worker's poller wins each task, so work lands
+ * on a worker that does not register the activity and fails the task, forever, while
  * every surface reports a healthy process. This is the invisible-failure mode this product exists
  * to remove, so it is a boot refusal instead — before a connection, before a poll.
  *
@@ -24,7 +25,7 @@
  * `ActorProbe` tasks it cannot run — the same failure, one container further away.
  */
 
-import { datasetQueue, infraQueue, materializerQueue, probeQueue } from './queues';
+import { datasetQueue, infraQueue, probeQueue } from './queues';
 
 /** The three roles, in the order `main.ts` starts them. */
 export const ROLES = ['api', 'materializer', 'infra'] as const;
@@ -88,15 +89,13 @@ export interface QueueAssignment {
 export function queueAssignments(roles: readonly Role[]): QueueAssignment[] {
   const rows: QueueAssignment[] = [];
   if (roles.includes('materializer')) {
+    // ONE ROW, NOT TWO. This role served `kontra-materializer` as well until 2026-09-26, when
+    // both that queue and the three activities behind it were removed as uncalled — see
+    // `queues.ts` for the measurement. `kontra-datasets` now carries the typed-output WRITE
+    // (`publishBatch`) as well as the reads, which is why the purpose below is no longer "paging".
     rows.push({
       role: 'materializer',
-      purpose: 'typed-output materialization',
-      queue: materializerQueue(),
-      variable: 'KONTRA_MATERIALIZER_QUEUE',
-    });
-    rows.push({
-      role: 'materializer',
-      purpose: 'dataset paging',
+      purpose: 'dataset write, paging and retention',
       queue: datasetQueue(),
       variable: 'KONTRA_DATASET_QUEUE',
     });

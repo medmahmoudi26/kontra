@@ -40,7 +40,7 @@ import type { FastifyInstance } from 'fastify';
 import { audit, callerOf } from '../audit';
 import { EXPLORE_TOKEN_VARS, checkBearer, checkOptionalBearer } from '../auth';
 import { InvalidRunWorkflowError, type RunWorkflowStore } from '../data/runWorkflows';
-import type { QueueDescriber } from '../panels/pollers';
+import type { QueueDescriber } from '../pollers';
 import type { RunLifecycle } from '../runs';
 import { NAMESPACE, describeRunHeartbeats, getClient } from '../temporalClient';
 import { STREAM_HEADERS } from './runStream';

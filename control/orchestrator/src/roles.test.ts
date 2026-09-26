@@ -61,19 +61,20 @@ describe('the queues do not merge when the processes do', () => {
     // The API is a Temporal CLIENT: it starts workflows onto queues other roles serve, and polls
     // nothing. A row for it would be a queue nobody is on.
     expect(queueAssignments(['api'])).toEqual([]);
+    // TWO QUEUES, NOT THREE. `kontra-materializer` and its three activities were removed as
+    // uncalled on 2026-09-26 (`queues.ts` carries the measurement); the materializer role now
+    // serves `kontra-datasets` alone, which carries the typed-output write as well as the reads.
     expect(queueAssignments([...ROLES]).map((q) => q.queue)).toEqual([
-      'kontra-materializer',
       'kontra-datasets',
       'kontra-infra',
     ]);
   });
 
   it('resolves them the way the workers do, through the environment', () => {
-    vi.stubEnv('KONTRA_MATERIALIZER_QUEUE', 'other-materializer');
+    vi.stubEnv('KONTRA_DATASET_QUEUE', 'other-datasets');
     vi.stubEnv('KONTRA_INFRA_QUEUE', 'other-infra');
     expect(queueAssignments([...ROLES]).map((q) => q.queue)).toEqual([
-      'other-materializer',
-      'kontra-datasets',
+      'other-datasets',
       'other-infra',
     ]);
   });
@@ -83,7 +84,10 @@ describe('the queues do not merge when the processes do', () => {
   });
 
   it('REFUSES TO BOOT when two roles were handed one queue, naming both variables', () => {
-    vi.stubEnv('KONTRA_DATASET_QUEUE', 'kontra-materializer');
+    // The collision that remains after the materializer queue went: dataset vs infra. It is the
+    // dangerous one — the infra worker is deliberately serialised to one Pulumi update at a time,
+    // so a dataset read that landed there would queue behind a sixty-minute converge.
+    vi.stubEnv('KONTRA_INFRA_QUEUE', 'kontra-datasets');
     let err: unknown;
     try {
       assertDistinctQueues([...ROLES]);
@@ -92,14 +96,9 @@ describe('the queues do not merge when the processes do', () => {
     }
     const msg = err instanceof Error ? err.message : String(err);
     // The only actionable half of a collision message is which two variables to edit.
-    expect(msg).toMatch(/KONTRA_MATERIALIZER_QUEUE/);
     expect(msg).toMatch(/KONTRA_DATASET_QUEUE/);
-    expect(msg).toMatch(/kontra-materializer/);
-  });
-
-  it('catches the infra queue colliding too, not just the materializer pair', () => {
-    vi.stubEnv('KONTRA_INFRA_QUEUE', 'kontra-datasets');
-    expect(() => assertDistinctQueues([...ROLES])).toThrow(/KONTRA_INFRA_QUEUE/);
+    expect(msg).toMatch(/KONTRA_INFRA_QUEUE/);
+    expect(msg).toMatch(/kontra-datasets/);
   });
 
   it('does not fire when the roles that would collide are not both served', () => {
@@ -119,25 +118,19 @@ describe('the queues do not merge when the processes do', () => {
   });
 });
 
-describe('the appliance bundle: the same three types, one of which refuses', () => {
-  it('registers all three workflow types, exactly as the compose bundle does', () => {
+describe('the appliance bundle: the same two types, one of which refuses', () => {
+  it('registers both workflow types, exactly as the compose bundle does', () => {
     // If it ever exported fewer, the missing type would not fail its caller — it would hang it.
-    for (const type of ['stackWorkflow', 'tmuxSessionWorkflow', 'sweepDatasetsWorkflow'] as const) {
+    for (const type of ['stackWorkflow', 'sweepDatasetsWorkflow'] as const) {
       expect(typeof (appliance as unknown as Record<string, unknown>)[type]).toBe('function');
       expect(typeof (compose as unknown as Record<string, unknown>)[type]).toBe('function');
     }
   });
 
-  it('keeps the Monitor’s signals and query, which is the surface the carve-out exists for', () => {
-    const mod = appliance as unknown as Record<string, { name?: string }>;
-    expect(mod.getSessionState?.name).toBe('getSessionState');
-    for (const signal of ['recreate', 'kill', 'addWindow']) expect(mod[signal]).toBeDefined();
-  });
-
   it('is NOT the provisioner — the two bundles export different implementations', () => {
     expect(appliance.stackWorkflow).not.toBe(compose.stackWorkflow);
-    // …and the tmux workflow IS the same one, because nothing about it changed.
-    expect(appliance.tmuxSessionWorkflow).toBe(compose.tmuxSessionWorkflow);
+    // …and the sweep IS the same one, because nothing about it changed.
+    expect(appliance.sweepDatasetsWorkflow).toBe(compose.sweepDatasetsWorkflow);
   });
 
   it('refuses immediately, non-retryably, naming the limitation and what to do instead', async () => {
@@ -179,7 +172,7 @@ describe('the appliance bundle: the same three types, one of which refuses', () 
       // is what the worker uses at runtime against `dist/`, and it does not resolve a `.ts` here.
       workflowsPath: path.join(__dirname, 'workflows', 'appliance.ts'),
     });
-    for (const type of ['stackWorkflow', 'tmuxSessionWorkflow', 'sweepDatasetsWorkflow']) {
+    for (const type of ['stackWorkflow', 'sweepDatasetsWorkflow']) {
       expect(bundle.code).toContain(type);
     }
     // `./stack` is imported for its TYPES only, so the preflight that reads a cloud credential is

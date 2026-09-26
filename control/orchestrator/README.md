@@ -67,7 +67,7 @@ Three roles, each pinned by its task queue — and since ADR 0031 §1 a role is 
 
 ```
 api           the HTTP API above + the built SPA (one origin); polls no queue, it is a client
-materializer  the ONLY writer of typed DuckLake output — kontra-materializer + kontra-datasets
+materializer  the ONLY writer of typed DuckLake output — kontra-datasets (one queue since 2026-09-26)
 infra         the controller-pinned queue: the Monitor's session converge + the retention sweep
 ```
 
@@ -138,7 +138,6 @@ pnpm run serve     # API + SPA on :8088
 | `KONTRA_ORCHESTRATOR_DB` | `orchestrator.db` | SQLite catalog + design store (`:memory:` for none) |
 | `KONTRA_MATERIALIZATION_DB` | `$KONTRA_ORCHESTRATOR_DB` | the materialization status store (postgres:// in production) |
 | `KONTRA_ORCHESTRATOR_ROLES` | `api,materializer,infra` | which roles this process serves |
-| `KONTRA_MATERIALIZER_QUEUE` | `kontra-materializer` | the materializer role's task queue |
 | `KONTRA_INFRA_QUEUE` | `kontra-infra` | the provisioning worker's task queue |
 | `KONTRA_S3_ENDPOINT` | _(unset)_ | object store; unset ⇒ codec passthrough |
 | `KONTRA_S3_BUCKET` / `KONTRA_S3_PREFIX` / `KONTRA_S3_THRESHOLD` / `KONTRA_S3_REGION` / `KONTRA_S3_ACCESS_KEY` / `KONTRA_S3_SECRET_KEY` | see [src/codec/objectStore.ts](src/codec/objectStore.ts) | shared with the Python side |

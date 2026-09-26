@@ -1,20 +1,21 @@
 /**
- * The TYPESCRIPT ARM of `shared/conformance/queues.json` — all four derivations this package owns.
+ * The TYPESCRIPT ARM of `shared/conformance/queues.json` — the derivations this package owns.
  *
- * WHY ONE FILE AND NOT FOUR. The Actor's task queue, its Nexus endpoint and its tmux session name
- * are three rules with three different answers to the same question ("what is this Actor called
- * here?"), and this package derives them in four places: `nexusRegistry.ts` (endpoint + shared
- * queue), `panels/pollers.ts` (shared queue), `panels/tmux.ts` (the Worker's session) and
- * `panels/discovery.ts` (a Machine's session). Each used to be pinned by its own hand-written
- * table of examples beside it, and the tables did not know about each other — so the one property
- * that matters most across them was untestable in any of the four files: A QUEUE NAME IS NOT
- * SANITISED AND AN ENDPOINT NAME IS, and a derivation that shared one rule between them routes to
- * a queue nobody polls.
+ * WHY ONE FILE AND NOT THREE. The Actor's task queue, its Nexus endpoint and its Worker name are
+ * three rules with three different answers to the same question ("what is this Actor called
+ * here?"), and this package derives them in `nexusRegistry.ts` (endpoint + shared queue),
+ * `pollers.ts` (shared queue) and `@kontra/core/panels/tmux` (the Worker name). Each used to be
+ * pinned by its own hand-written table of examples beside it, and the tables did not know about
+ * each other — so the one property that matters most across them was untestable in any of them:
+ * A QUEUE NAME IS NOT SANITISED AND AN ENDPOINT NAME IS, and a derivation that shared one rule
+ * between them routes to a queue nobody polls.
+ *
+ * IT USED TO HAVE TWO MORE ARMS, both the Monitor's: a fleet Machine's session name
+ * (`panels/discovery.ts`) and ADR 0043's session-kind vocabulary, which decided what the wall would
+ * show. Both went when the Monitor did.
  *
  * THE FAILURE THESE GUARD, in the code's own words: the actor registers, polls a queue nobody
- * schedules onto, and reports as a healthy idle Worker while every run hangs to StartToClose. For
- * the session name it is ADR 0020's forbidden tile — a Machine whose Worker is running perfectly,
- * drawn as one with NO SESSION.
+ * schedules onto, and reports as a healthy idle Worker while every run hangs to StartToClose.
  */
 
 import { readFileSync } from 'node:fs';
@@ -22,18 +23,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { endpointName, sharedQueue as endpointQueue } from './nexusRegistry';
-import { sharedQueue as pollerQueue } from './panels/pollers';
-import {
-  actorSession,
-  actorSessionTag,
-  isKnownSessionKind,
-  kontraSessionKind,
-  SESSION_KINDS,
-  watchSessionTag,
-  workflowSessionTag,
-} from './panels/tmux';
-import { sessionNameFor } from './panels/discovery';
-import { isKontraSession } from './panels/local';
+import { sharedQueue as pollerQueue } from './pollers';
+import { actorSession } from '@kontra/core/panels/tmux';
 
 type QueueCase = { why: string; name: string; version: string; expect: string };
 type TmuxCase = {
@@ -44,7 +35,6 @@ type TmuxCase = {
   worker: string;
   machine: string;
 };
-type SessionKindCase = { why: string; tag: string; kind: string; known: boolean };
 
 const corpus = JSON.parse(
   readFileSync(join(__dirname, '../../../shared/conformance/queues.json'), 'utf8')
@@ -52,7 +42,6 @@ const corpus = JSON.parse(
   shared: { cases: QueueCase[] };
   endpoint: { servable: string; cases: QueueCase[] };
   tmux_session: { cases: TmuxCase[] };
-  session_kind: { cases: SessionKindCase[] };
 };
 
 describe('the corpus itself', () => {
@@ -63,12 +52,8 @@ describe('the corpus itself', () => {
     expect(corpus.shared.cases.length).toBeGreaterThanOrEqual(6);
     expect(corpus.endpoint.cases.length).toBeGreaterThanOrEqual(10);
     expect(corpus.tmux_session.cases.length).toBeGreaterThanOrEqual(8);
-    expect(corpus.session_kind.cases.length).toBeGreaterThanOrEqual(9);
     const blob = JSON.stringify(corpus);
-    // `agent:claude` and `Actor:probe` are §session_kind's refusals that LOOK like acceptances. A
-    // corpus that lost them would pass every row it kept while admitting the thing ADR 0043 refuses.
-    for (const token of ['my actor', 'café', 'naïve', '📦', '-shared', 'fleet', 'actor',
-                         'agent:claude', 'Actor:probe', 'watch:repl']) {
+    for (const token of ['my actor', 'café', 'naïve', '📦', '-shared', 'fleet', 'actor']) {
       expect(blob, `the corpus no longer exercises ${token}`).toContain(token);
     }
     expect(corpus.shared.cases.some((c) => c.version === '')).toBe(true);
@@ -77,7 +62,7 @@ describe('the corpus itself', () => {
 
 describe('the shared task queue', () => {
   // TWO DERIVATIONS IN THIS PACKAGE, asserted against the same rows: `nexusRegistry.ts` points the
-  // endpoint at this queue and `panels/pollers.ts` describes it to find out whether anything is
+  // endpoint at this queue and `pollers.ts` describes it to find out whether anything is
   // polling. If they disagree, the poller tile reports `none` for a queue that is being served.
   for (const c of corpus.shared.cases) {
     it(c.why, () => {
@@ -126,75 +111,19 @@ describe('a queue name is not sanitised and an endpoint name is', () => {
   });
 });
 
-describe('the tmux session name', () => {
-  // TWO DOMAINS, TWO ANSWERS PER ROW. `worker` is an Actor's Worker — a name and a version and
-  // nothing else. `machine` is a fleet Machine's session, which is also given the fleet's tag,
-  // because a `fleet up` with no Actor placed on it still has Terminals. Their fallbacks differ on
-  // purpose and the corpus says why; what must not differ is either one from its Go peer.
+describe('the Worker name', () => {
+  // ONE DOMAIN NOW, NOT TWO. The `machine` half of every row was a fleet Machine's tmux session,
+  // derived by `panels/discovery.ts:sessionNameFor`, and it went with the Monitor. `cli/fleet.go`
+  // still pins that column, so the corpus keeps it and the Go arm keeps asserting it; this arm
+  // asserts the half TypeScript still derives.
+  //
+  // THE SCHEME OUTLIVES TMUX and that is why this is still here. `actorSession` is what the Serve
+  // button calls the Worker it started, and its `.`/`:` folding is now an inherited naming rule
+  // rather than a workaround for tmux's silent `session_check_name()` rewrite. Changing it renames
+  // every Worker, so it does not change.
   for (const c of corpus.tmux_session.cases) {
     it(c.why, () => {
       expect(actorSession(c.actor, c.version)).toBe(c.worker);
-      expect(sessionNameFor(c.actor, c.version, c.tag)).toBe(c.machine);
     });
   }
-
-  it('records a reason for every row where the two answers differ', () => {
-    // A case whose reason is not written down is one nobody can tell from a typo when it goes red
-    // (shared/conformance/README.md). These are the rows that would read as a bug on sight.
-    const differ = corpus.tmux_session.cases.filter((c) => c.worker !== c.machine);
-    expect(differ.length).toBeGreaterThan(0);
-    for (const c of differ) expect(c.why.length).toBeGreaterThan(30);
-  });
-});
-
-describe('the session kind vocabulary (ADR 0043)', () => {
-  // THE READER'S ARM. The CLI writes `@kontra`; this side decides whether the wall shows what it
-  // finds. A kind one writes and the other does not know is a Worker running perfectly whose tile is
-  // absent — ADR 0020's one forbidden failure — and a kind this side admits that nothing writes is a
-  // door nobody meant to leave open.
-  for (const c of corpus.session_kind.cases) {
-    it(c.why, () => {
-      expect(kontraSessionKind(c.tag)).toBe(c.kind);
-      expect(isKnownSessionKind(c.tag)).toBe(c.known);
-    });
-  }
-
-  it('is the gate discovery actually consults, not a parallel opinion', () => {
-    // `isKnownSessionKind` being right buys nothing if `isKontraSession` does not call it. A tagged
-    // session is admitted EXACTLY when its kind is known; the session NAME is held constant and
-    // deliberately not `kontra-`, so the legacy prefix cannot be what answers.
-    for (const c of corpus.session_kind.cases) {
-      if (c.tag === '') continue; // untagged is the prefix's business, asserted below
-      expect(isKontraSession({ session: 'some-session', kontra: c.tag }), c.tag).toBe(c.known);
-    }
-  });
-
-  it('still admits an untagged legacy Worker by name, and nothing else', () => {
-    // ADR 0020: a live Worker drawn as absent is the one thing a tile may never say. A Worker that
-    // predates tagging has a `kontra-` name and no tag, so the prefix stays — and it is the NARROWER
-    // door, which is the half worth pinning.
-    expect(isKontraSession({ session: 'kontra-webcrawl', kontra: '' })).toBe(true);
-    expect(isKontraSession({ session: 'kontra-webcrawl' })).toBe(true);
-    expect(isKontraSession({ session: 'my-own-session', kontra: '' })).toBe(false);
-    expect(isKontraSession({ session: 'my-own-session' })).toBe(false);
-  });
-
-  it('admits every tag kontra itself writes', () => {
-    // The vocabulary is only useful if the writers stay inside it. These are the TypeScript writers;
-    // `cli/queues_conformance_test.go` holds the Go ones against the same set.
-    const written = [actorSessionTag('probe', '0.1.0'), workflowSessionTag('hunt'), watchSessionTag('repl')];
-    expect(written).toHaveLength(SESSION_KINDS.length);
-    expect(new Set(written.map(kontraSessionKind))).toEqual(new Set(SESSION_KINDS));
-    for (const tag of written) expect(isKnownSessionKind(tag), tag).toBe(true);
-  });
-
-  it('carries the refusals that look like acceptances', () => {
-    // A corpus of only-valid rows passes a function that returns true unconditionally — which is
-    // precisely the pre-0043 behaviour this change removes. These are the rows that catch it.
-    const refused = corpus.session_kind.cases.filter((c) => !c.known).map((c) => c.tag);
-    expect(refused).toContain('agent:claude'); // a plausible kind that is not ours
-    expect(refused).toContain('Actor:probe:0.1.0'); // case-folded
-    expect(refused).toContain('anything'); // no colon at all
-    expect(corpus.session_kind.cases.filter((c) => c.known).length).toBeGreaterThanOrEqual(3);
-  });
 });

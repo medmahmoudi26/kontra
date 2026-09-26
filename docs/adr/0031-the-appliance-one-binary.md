@@ -118,10 +118,11 @@ under UX v2's feet while UX v2 builds on top. The binary owns Temporal, the obje
 the codec and the registry; the Node orchestrator ships as a pinned runtime plus prebuilt native
 addons, extracted copy-on-write from the CAS on first run.
 
-**Task queues do not merge when processes do.** `kontra-materializer`, `kontra-datasets` and
-`kontra-infra` stay three queues in one process, because a queue is *how work is routed* and a
+**Task queues do not merge when processes do.** `kontra-datasets` and
+`kontra-infra` stay separate queues in one process, because a queue is *how work is routed* and a
 process is only *where it runs* (**0023** §6 followed to its end: the queue name is the address).
-`queues.ts` already argues the split for the first two on tuning grounds — a caller's page read must
+(There were three; `kontra-materializer` was removed on 2026-09-26 as uncalled — see `queues.ts`.)
+`queues.ts` already argues the remaining split on routing grounds — a caller's page read must
 not queue behind a forty-minute decode — and that argument does not care how many processes exist.
 
 **What is lost, and it is not nothing.** `queues.ts` says materializer placement is "enforced by

@@ -32,29 +32,34 @@
  * override is a call, and a workflow may import a name from here but must never call one.
  */
 
-/**
- * Typed-output materialization. Served ONLY by the isolated materializer worker, which runs
- * off-controller with its own cgroup, its own DuckDB memory budget and one slot. Embedded DuckDB
- * is the largest memory consumer in this system and the controller is a 4 GB host that also runs
- * Temporal, SeaweedFS and Postgres — so the placement is enforced by routing rather than by
- * convention.
- */
-export const MATERIALIZER_QUEUE = 'kontra-materializer';
-
-/** The materialization queue in effect. See {@link MATERIALIZER_QUEUE}. */
-export function materializerQueue(): string {
-  return process.env.KONTRA_MATERIALIZER_QUEUE || MATERIALIZER_QUEUE;
-}
-
-/**
- * Dataset PAGING — `workflows.dataset(name).batches(...)` on the caller's side.
+/*
+ * `MATERIALIZER_QUEUE` / `materializerQueue()` WERE HERE AND ARE GONE (2026-09-26).
  *
- * Served by the same worker as materialization (it already holds the DuckLake attach and an
- * ObjectStore), but on its OWN queue, because the two workloads want opposite tuning. A
- * materialization is one bounded, memory-hungry decode at a time; paging is a short read that a
- * caller's loop blocks on, once per page, and a caller stuck behind a 40-minute decode would
- * look like a hung workflow. Separate queues is what lets the slot counts diverge without
- * either side being renamed.
+ * `kontra-materializer` carried `declareMaterialization`, `materializeNode` and
+ * `recordMaterializationFailure`, whose own file header recorded that nothing in this repository
+ * called them: the v1 graph interpreter was their only caller and ADR 0023 §1 took materialization
+ * off the interpreter. Measured before removal — a live poller on the queue, an add rate and a
+ * dispatch rate of zero, and every activity a real run schedules landing on `kontra-datasets`.
+ *
+ * `KONTRA_MATERIALIZER_QUEUE` is therefore no longer read. Typed output still goes into DuckLake —
+ * `publishBatch` -> `writeDatasetParquet`, on {@link DATASET_QUEUE} — so the ROLE keeps its name;
+ * what went was one queue and three activities, not the job.
+ */
+
+/**
+ * THE DATASET QUEUE — and since the removal above, the only queue the materializer role serves.
+ *
+ * It began as dataset PAGING alone (`workflows.dataset(name).batches(...)`), split off from the
+ * decode queue because the two wanted opposite tuning. The decode queue is gone and the split
+ * outlived it: everything that needs the DuckLake attach and an ObjectStore is here now —
+ * `publishBatch` (the typed-output WRITE), the page reads, the two fleet reads, the three Lease
+ * calls, and the retention sweep with its reclamation chain.
+ *
+ * WHICH MAKES ITS SLOT COUNT LOAD-BEARING IN A WAY THE NAME DOES NOT SUGGEST. `KONTRA_DATASET_SLOTS`
+ * governs all of it, and at one slot a single stuck activity stops publishes, page reads, lease
+ * holds and retention together — measured on 2026-09-25, when a closed shared DuckDB handle held
+ * the only slot and the next run's `publishBatch` sat at `ACTIVITY_TASK_SCHEDULED` against a
+ * poller Temporal reported as healthy.
  */
 export const DATASET_QUEUE = 'kontra-datasets';
 
@@ -83,6 +88,49 @@ export const INFRA_QUEUE = 'kontra-infra';
 /** The controller-pinned queue in effect. See {@link INFRA_QUEUE}. */
 export function infraQueue(): string {
   return process.env.KONTRA_INFRA_QUEUE || INFRA_QUEUE;
+}
+
+/**
+ * SERVE-DEV — the second workload on {@link INFRA_QUEUE}, and the two strings its halves agree on.
+ *
+ * WHY A TYPE NAME AND AN ID LIVE IN THE QUEUE FILE. The same reasoning that put `PROBE_WORKFLOW`
+ * below: what is being recorded is a ROUTING CONTRACT — the queue to start it on, the type to
+ * start, and the id to start it under — and those three are one fact with three spellings. Here the
+ * fact has FOUR readers, which is what made a shared home necessary rather than merely tidy:
+ *
+ *   - `actorControl.serveActor`    starts it       (`serve-dev/at:<folder>`)
+ *   - `workflowControl.serveWorkflow` starts it    (the same id, derived from the workflow's dir)
+ *   - `visibility.ts`              HIDES it from the Runs page, by type
+ *   - `temporalClient.listServes`  SHOWS it on the Actors page, by type AND id
+ *
+ * The last two are the halves of one feature and they fail in opposite directions. A type name
+ * that drifts from the start site makes the exclusion stop excluding — a wall of `serveDevWorkflow`
+ * rows on the Runs page, wrong but loud. The SAME drift makes the history stop finding anything —
+ * an actor that has been served forty times reporting "nothing has served this yet", which is wrong
+ * and SILENT, and is the failure this const exists to make impossible.
+ *
+ * NO ENVIRONMENT OVERRIDE, unlike every queue above it. A queue name is overridable so a second
+ * control plane can share a cluster; a workflow TYPE is what the worker registered
+ * (`workflows/infra.ts`), and an override would only ever route a start to a type nobody serves.
+ */
+export const SERVE_DEV_WORKFLOW = 'serveDevWorkflow';
+
+/**
+ * The workflow id one folder's serves run under: `serve-dev/` + the Source id, which is
+ * `at:<absolute folder path>` (`sourceStore.ts`).
+ *
+ * DERIVED, LIKE THE LEASE'S (`lease.ts:leaseWorkflowId`). Nothing allocates it, so the read half
+ * can address a folder's serve history with nothing to look up — and, more to the point, cannot
+ * address a DIFFERENT one than the write half wrote.
+ *
+ * THE ID IS ALSO THE CONCURRENCY RULE. Both start sites pass `workflowIdConflictPolicy: 'FAIL'`, so
+ * one folder can have one serve in flight and Temporal is what refuses the second — a property of
+ * this string rather than of a check somebody remembered to write. It follows that the id is REUSED
+ * across every serve of a folder, which is why the history below is a list of EXECUTIONS under one
+ * id and never a list of ids.
+ */
+export function serveDevWorkflowId(sourceId: string): string {
+  return `serve-dev/${sourceId}`;
 }
 
 /**

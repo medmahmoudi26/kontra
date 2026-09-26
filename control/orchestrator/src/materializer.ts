@@ -2,16 +2,21 @@
  * The MATERIALIZER worker — a separate process, on a separate host, with a separate
  * memory budget (ADR 0017, plan §1).
  *
- * It hosts exactly one thing: the activities that decode a node's output into typed
- * DuckLake rows. It hosts NO workflows, so nothing schedules work here and nothing here can
- * schedule work elsewhere. That is the whole design:
- * embedded DuckDB is the largest memory consumer in this system, and the controller is a
- * 4 GB host that also runs Temporal, SeaweedFS and Postgres. Production materialization does
- * not run there.
+ * It holds the DuckLake writer: `publishBatch` turns a Batch into typed parquet rows, and the
+ * dataset reads, the fleet/Lease calls and the retention sweep sit beside it. It hosts NO
+ * workflows, so nothing schedules work here and nothing here can schedule work elsewhere. That is
+ * the whole design: embedded DuckDB is the largest memory consumer in this system, and the
+ * controller is a 4 GB host that also runs Temporal, SeaweedFS and Postgres.
+ *
+ * IT USED TO HOST TWO WORKERS AND ONE OF THEM WAS DEAD. `kontra-materializer` served
+ * `materializeNode` and its two siblings, which nothing had called since ADR 0023 §1 took
+ * materialization off the graph interpreter — measured at removal: a live poller, zero tasks ever.
+ * Both the queue and the activities are gone (2026-09-26); `kontra-datasets` is the one queue this
+ * process serves.
  *
  * SINCE ADR 0031 §1 IT IS ALSO A ROLE, not only a process. `main.ts` can run {@link
  * runMaterializer} beside the API and the infra role in one PID, and the appliance does. What that
- * costs is stated where the cost lands: the two QUEUES below are unchanged, and so are the DuckDB
+ * costs is stated where the cost lands: the QUEUE below is unchanged, and so are the DuckDB
  * memory limit and the slot count — but boundary 1, the cgroup, is a property of a container and
  * does not survive the merge. One process means one heap. On a laptop that is the right trade; on
  * the 4 GB controller it is not, which is why compose still runs this role with `mem_limit`
@@ -41,12 +46,11 @@ import { OpenTelemetryActivityInboundInterceptor } from '@temporalio/interceptor
 import { createDatasetActivities } from './activities/datasets';
 import * as fleetActivities from './activities/fleet';
 import * as leaseActivities from './activities/lease';
-import { createMaterializerActivities } from './activities/materialize';
 import { createRetentionActivities } from './activities/retention';
 import { ObjectStore } from './codec/objectStore';
 import { materializationStore } from './data/materializationStore';
 import { startTracing, tracingEnabled } from './otel';
-import { datasetQueue, materializerQueue } from './queues';
+import { datasetQueue } from './queues';
 import { temporalConnectOptions } from './temporalTls';
 import { identityFor } from './workerIdentity';
 
@@ -73,42 +77,30 @@ function pagerSlots(): number {
 export async function runMaterializer(): Promise<void> {
   startTracing();
   const status = materializationStore();
-  // Fail at BOOT on a misconfigured status store rather than at the first node of a
-  // run. A materializer that cannot record status is worse than one that is down:
-  // it would decode successfully and leave every run stuck in `finalizing`.
+  // Fail at BOOT on a misconfigured status store rather than at the first publish of a run. A
+  // process that cannot record status is worse than one that is down: it would write rows and
+  // leave the materialization dimension (ADR 0017) reporting nothing about them. The ledger is
+  // also what `data/retention.ts` and `sweepUnits` read to decide whether a Run is still
+  // producing, so an unreadable one makes retention unsafe as well as uninformative.
   await status.ensureSchema();
 
   const connection = await NativeConnection.connect(temporalConnectOptions());
   try {
-    const worker = await Worker.create({
-      connection,
-      namespace: process.env.KONTRA_NAMESPACE ?? 'default',
-      taskQueue: materializerQueue(),
-      // Activities only, and deliberately no `workflowsPath`: this host is sized for one
-      // bounded decode at a time, so it must not be able to pick up a workflow — its own
-      // or anyone's — even by accident.
-      activities: createMaterializerActivities({ store: new ObjectStore(), status }),
-      maxConcurrentActivityTaskExecutions: slots(),
-      // NAMED, AND THIS PROCESS IS WHY THE FIELD MATTERS. The decoder and the pager below share a
-      // pid and a hostname, so at the SDK default they are ONE identity on two queues — and these
-      // two have opposite shapes (a 40-minute decode, a sub-second page read). "Which one is
-      // wedged" has to be answerable from a poller listing.
-      identity: identityFor(materializerQueue()),
-      // The materializer reads payloads from the object store by ref; it is never handed
-      // one through Temporal, so it needs no claim-check data converter.
-      ...(tracingEnabled
-        ? {
-            interceptors: {
-              activity: [(ctx) => ({ inbound: new OpenTelemetryActivityInboundInterceptor(ctx) })],
-            },
-          }
-        : {}),
-    });
-
-    // The dataset PAGER shares this process — it wants the same DuckLake attach, the same
-    // ObjectStore and the same "no claim-check converter" posture — but its OWN queue and its
-    // own slot count. A caller's `batches()` loop blocks on one page read at a time, and
-    // queueing that behind a 40-minute decode would present as a hung workflow.
+    /*
+     * THE DATASET WORKER — and since 2026-09-26 the ONLY worker this process runs.
+     *
+     * A SECOND WORKER SERVED `kontra-materializer` HERE AND HAD NOTHING TO DO. It registered
+     * `declareMaterialization` / `materializeNode` / `recordMaterializationFailure`, whose own file
+     * header had said for some time that "nothing in this repository" called them: the v1 graph
+     * interpreter was their only caller and materialization stopped being interpreter-driven at
+     * ADR 0023 §1. Measured before removal — a live poller on `kontra-materializer`, and an add
+     * rate and dispatch rate of exactly zero. Every activity a real run schedules lands here
+     * instead: `publishBatch`, `resolveBundle`, `queuePollers`, `holdFleetLease`, `dropFleetLease`.
+     *
+     * THE ROLE KEEPS ITS NAME and that is not an oversight: this process is still the only writer
+     * of typed output into DuckLake — `publishBatch` -> `writeDatasetParquet` — so "materializer"
+     * describes what it does. What was dead was one queue and three activities, not the job.
+     */
     const pager = await Worker.create({
       connection,
       namespace: process.env.KONTRA_NAMESPACE ?? 'default',
@@ -143,7 +135,7 @@ export async function runMaterializer(): Promise<void> {
         : {}),
     });
 
-    await Promise.all([worker.run(), pager.run()]);
+    await pager.run();
   } finally {
     await connection.close();
   }

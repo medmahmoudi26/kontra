@@ -216,10 +216,16 @@ in production on its **own host**. Embedded DuckDB is the largest memory consume
 and the controller is a 4 GB box already running Temporal, SeaweedFS and Postgres —
 production materialization does not belong on it.
 
-**Placement is enforced by routing, not by convention.** The interpreter dispatches the
-materialization activity to the Temporal task queue `kontra-materializer` and does not poll that
-queue; the materializer worker registers **activities only** — no `workflowsPath` — so it cannot run
-the interpreter even by accident. Moving it is therefore a deployment fact, not a code change: run
+**Placement is enforced by routing, not by convention.** A caller's workflow dispatches
+`publishBatch` to the Temporal task queue `kontra-datasets` and does not poll it; the materializer
+worker registers **activities only** — no `workflowsPath` — so it cannot run a workflow even by
+accident.
+
+> Until 2026-09-26 this read `materializeNode` on a `kontra-materializer` queue. Both were removed
+> as uncalled: ADR 0023 §1 took materialization off the graph interpreter, which had been their only
+> caller, and nothing replaced it. Measured before removal — a live poller on that queue with an add
+> rate and a dispatch rate of zero, while every activity a real run scheduled landed on
+> `kontra-datasets`. Moving it is therefore a deployment fact, not a code change: run
 the same image with `command: ["node", "dist/src/materializer.js"]` on a worker host, point
 `KONTRA_ADDRESS` at the controller, and work follows.
 
@@ -227,7 +233,7 @@ The `orchestrator-materializer` service in `docker-compose.yml` is the single-ho
 (and what `kontra infra up` brings up). On a fleet, run that service definition on a worker instead:
 
 ```sh
-docker run -d --name kontra-materializer \
+docker run -d --name kontra-materializer \  # container name only; the queue is kontra-datasets
   -e KONTRA_ADDRESS=<controller>:7233 \
   -e KONTRA_S3_ENDPOINT=http://<controller>:8333 \
   -e KONTRA_MATERIALIZATION_DB='postgresql://kontra:…@<pg-host>:5432/kontra_ducklake' \
@@ -275,7 +281,6 @@ docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}'
 
 | Env var | Purpose | Default |
 |---|---|---|
-| `KONTRA_MATERIALIZER_QUEUE` | the task queue it polls | `kontra-materializer` |
 | `KONTRA_MATERIALIZER_SLOTS` | concurrent activity slots — multiplies peak RSS | `1` |
 | `KONTRA_DUCKDB_MEMORY_LIMIT` | DuckDB buffer-manager budget (NOT an RSS cap) | `256MB` |
 | `KONTRA_DUCKDB_THREADS` | DuckDB worker threads | `1` |

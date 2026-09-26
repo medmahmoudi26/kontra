@@ -1,7 +1,7 @@
 // db.go — `kontra db list|create|anew|delete`: operator-owned datasets in the DuckLake catalog.
 //
-// Actor OUTPUT becomes a dataset automatically (the materializer's materializeNode activity, on
-// the kontra-materializer queue; read it back with `kontra explore <run>`). This command covers
+// Actor OUTPUT becomes a dataset automatically (the materializer role's publishBatch activity, on
+// the kontra-datasets queue; read it back with `kontra explore <run>`). This command covers
 // the other direction: the lists an operator brings IN — a scope export, a
 // wordlist, a set of targets — so they live in the same catalog, are queryable with the same
 // SQL, and can be handed to `kontra actor … dispatch` without a scratch file in /tmp.
