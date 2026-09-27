@@ -558,32 +558,30 @@ jobs:
 
           spa_image="$REGISTRY/kontra:$VERSION-$ARCH"
 
-          # `--provenance=false --sbom=false`, AND THE PUSH FAILS WITHOUT THEM.
+          # `--provenance=false --sbom=false`, AND IT IS NOT WHAT FIXES THE PUSH.
           #
-          # MEASURED on `0.0.0-test3`: every layer pushed ("pushing layers 0.3s done") and then the
-          # manifest was refused —
+          # These flags were added on the theory that buildx's default attestations were the cause of
+          # `denied: permission_denied: read_package` on `0.0.0-test3`, because the export is an OCI
+          # INDEX over an image manifest plus an `attestation manifest` and pushing an index makes the
+          # registry resolve its children. **`0.0.0-test4` disproved that**: identical failure, same
+          # error, same tag shape, with both flags in place.
           #
-          #     ERROR: failed to push ghcr.io/medmahmoudi26/kontra:0.0.0-test3-amd64:
-          #            denied: permission_denied: read_package
+          # THE REAL CAUSE IS THE REPOSITORY'S TOKEN CEILING. `repos/…/actions/permissions/workflow`
+          # reported `default_workflow_permissions: "read"`, and a workflow's `permissions:` block can
+          # only narrow that ceiling, never raise it — so this job's declared `packages: write` was
+          # never granted and the token holds read alone, which is why the denial NAMES `read_package`.
+          # The `mirror` job survives the same ceiling with the same `github.token` because `skopeo
+          # copy` writes a new package without reading the target first; buildx resolves the
+          # destination tag before pushing, and that read is what gets refused.
           #
-          # — on both arches, for a package that did not exist yet. Blob WRITES succeeded, so this is
-          # not `packages: write` missing. What differs is the shape of what is pushed: with
-          # attestations on (buildx's default), the export is an OCI INDEX over an image manifest plus
-          # an `attestation manifest` (both appear in that log), and pushing an index makes the
-          # registry resolve its children — a READ against a package whose ACL does not exist yet.
-          # The `mirror` job in this same workflow, authenticating with the same `github.token` as the
-          # same `github.actor`, pushed eight brand-new packages in the same run without trouble,
-          # because `skopeo copy` writes a plain manifest and never an index.
-          #
-          # IT IS ALSO WHAT THIS JOB IS SUPPOSED TO PRODUCE. The header above says "PER-ARCH TAGS ONLY
-          # HERE … the manifest list over them is `manifests` below, because neither runner can write
-          # it alone." An attestation index sitting at `<version>-<arch>` is a manifest list where the
-          # design calls for a single-platform image, and `manifests` then builds a list whose members
-          # are themselves lists. Turning attestations off makes the artifact match the sentence.
-          #
-          # NO PROVENANCE IS LOST THAT ANYTHING READS. `manifests` signs every list keyless with
-          # cosign and `pin` records digests into `images.json`/`images.env`; the buildx attestation
-          # was a third claim nothing in this repository verifies.
+          # THE FLAGS STAY, ON THEIR OWN MERITS. The header above says "PER-ARCH TAGS ONLY HERE … the
+          # manifest list over them is `manifests` below, because neither runner can write it alone."
+          # An attestation index sitting at `<version>-<arch>` is a manifest list where the design
+          # calls for a single-platform image, which would leave `manifests` building a list whose
+          # members are themselves lists. Nothing is lost that anything here reads: `manifests` signs
+          # every list keyless with cosign and `pin` records digests into `images.json`/`images.env`,
+          # so the buildx attestation was a third provenance claim no part of this repository
+          # verifies.
           build_one() {
             name="$1"; shift
             ref="$REGISTRY/$name:$VERSION-$ARCH"

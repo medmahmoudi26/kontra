@@ -1,5 +1,19 @@
 name: ci
 
+# READ-ONLY, DECLARED RATHER THAN INHERITED.
+#
+# The repository's Actions setting is the CEILING for every workflow token, and `publish.yml`
+# needs it raised to `write` so it can push container images — a workflow's `permissions:` block
+# can only narrow that ceiling, never raise it, which is why a declared `packages: write` was
+# being refused as `read_package`. Raising it would otherwise hand a write-scoped token to every
+# job in this file that declares nothing, so this file declares.
+#
+# Nothing here needs write. The only two token uses are `buf-setup-action`'s `github_token`,
+# which exists to avoid anonymous rate limits on plugin downloads, and the public checkout of
+# `kontra-console`. Both are reads.
+permissions:
+  contents: read
+
 # Four seams, four independent jobs:
 #   python  — install the sdk/python seam, ruff + non-e2e pytest, incl. the codec corpus
 #   ts      — orchestrator pnpm install + vitest (incl. the TS conformance test)
@@ -474,9 +488,13 @@ jobs:
       - name: check out the console (the SPA is another repository since ADR 0038)
         uses: actions/checkout@v4
         with:
+          # NO `token:`. `kontra-console` is a public repository, so the default `GITHUB_TOKEN`
+          # reads it — and `secrets.KONTRA_CONSOLE_TOKEN`, which used to be here, resolves to the
+          # EMPTY STRING once the secret is gone. `actions/checkout` with an empty token does not fall
+          # back to the default one; it fails, in seconds, before anything interesting has run.
+          # `publish.yml:376-380` checks the same repository out the same way.
           repository: medmahmoudi26/kontra-console
           path: _sibling/kontra-console
-          token: ${{ secrets.KONTRA_CONSOLE_TOKEN }}
 
       - name: put this checkout where `link:../kontra/shared/core` expects it
         run: ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/_sibling/kontra"

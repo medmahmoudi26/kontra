@@ -1,5 +1,19 @@
 name: appliance
 
+# READ-ONLY, DECLARED RATHER THAN INHERITED.
+#
+# The repository's Actions setting is the CEILING for every workflow token, and `publish.yml`
+# needs it raised to `write` so it can push container images — a workflow's `permissions:` block
+# can only narrow that ceiling, never raise it, which is why a declared `packages: write` was
+# being refused as `read_package`. Raising it would otherwise hand a write-scoped token to every
+# job in this file that declares nothing, so this file declares.
+#
+# Nothing here needs write. The only two token uses are `buf-setup-action`'s `github_token`,
+# which exists to avoid anonymous rate limits on plugin downloads, and the public checkout of
+# `kontra-console`. Both are reads.
+permissions:
+  contents: read
+
 # THE FOUR PLATFORM ARTIFACT SETS (ADR 0031 §6, PRD decision 7, issue 17).
 #
 # The PRD calls this the riskiest work in the appliance and it is right, but not for the reason it
