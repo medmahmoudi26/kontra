@@ -558,30 +558,55 @@ jobs:
 
           spa_image="$REGISTRY/kontra:$VERSION-$ARCH"
 
-          # `--provenance=false --sbom=false`, AND IT IS NOT WHAT FIXES THE PUSH.
+          # ── `denied: permission_denied: read_package`, AND THE TWO ANSWERS THAT WERE WRONG ─────────
           #
-          # These flags were added on the theory that buildx's default attestations were the cause of
-          # `denied: permission_denied: read_package` on `0.0.0-test3`, because the export is an OCI
-          # INDEX over an image manifest plus an `attestation manifest` and pushing an index makes the
-          # registry resolve its children. **`0.0.0-test4` disproved that**: identical failure, same
-          # error, same tag shape, with both flags in place.
+          # `0.0.0-test3` through `-test5` all failed here with
           #
-          # THE REAL CAUSE IS THE REPOSITORY'S TOKEN CEILING. `repos/…/actions/permissions/workflow`
-          # reported `default_workflow_permissions: "read"`, and a workflow's `permissions:` block can
-          # only narrow that ceiling, never raise it — so this job's declared `packages: write` was
-          # never granted and the token holds read alone, which is why the denial NAMES `read_package`.
-          # The `mirror` job survives the same ceiling with the same `github.token` because `skopeo
-          # copy` writes a new package without reading the target first; buildx resolves the
-          # destination tag before pushing, and that read is what gets refused.
+          #     ERROR: failed to push ghcr.io/medmahmoudi26/kontra:<version>-amd64:
+          #            denied: permission_denied: read_package
           #
-          # THE FLAGS STAY, ON THEIR OWN MERITS. The header above says "PER-ARCH TAGS ONLY HERE … the
-          # manifest list over them is `manifests` below, because neither runner can write it alone."
-          # An attestation index sitting at `<version>-<arch>` is a manifest list where the design
-          # calls for a single-platform image, which would leave `manifests` building a list whose
-          # members are themselves lists. Nothing is lost that anything here reads: `manifests` signs
-          # every list keyless with cosign and `pin` records digests into `images.json`/`images.env`,
-          # so the buildx attestation was a third provenance claim no part of this repository
-          # verifies.
+          # Two plausible causes were tried and each was DISPROVED by the next run, which is why they
+          # are written down rather than quietly deleted:
+          #
+          #   1. buildx's default attestations. The export is an OCI INDEX over an image manifest plus
+          #      an `attestation manifest`, and pushing an index makes the registry resolve its
+          #      children. `--provenance=false --sbom=false` changed nothing — `-test4` failed
+          #      identically.
+          #   2. the repository's token ceiling. `actions/permissions/workflow` really did report
+          #      `default_workflow_permissions: "read"`, and a `permissions:` block can only narrow a
+          #      ceiling, never raise it. Raising it to `write` changed nothing — `-test5` failed
+          #      identically.
+          #
+          # THE CAUSE IS THAT ONE PACKAGE ALREADY EXISTED. Probed against the registry with a real
+          # credential, where `NAME_UNKNOWN` and `DENIED` finally separate:
+          #
+          #     medmahmoudi26/kontra                DENIED        <- exists, not accessible to this repo
+          #     medmahmoudi26/kontra-orchestrator   NAME_UNKNOWN
+          #     medmahmoudi26/kontra-host           NAME_UNKNOWN
+          #     medmahmoudi26/kontra-logship        NAME_UNKNOWN
+          #     medmahmoudi26/kontra-worker-base    NAME_UNKNOWN
+          #
+          # A GHCR package created outside Actions carries its own ACL and is linked to no repository,
+          # so a repo-scoped `GITHUB_TOKEN` cannot read it however wide the ceiling is. The fix is in
+          # the package's own settings — "Manage Actions access", add this repository with the Write
+          # role — and it cannot be done from a workflow or from the REST API for a user-namespace
+          # package. It is a one-time human step, like the visibility flip the `pull` job below
+          # already documents.
+          #
+          # WHY IT TOOK THE OTHER FOUR DOWN WITH IT: `kontra` is built FIRST and outside the loop
+          # (see the ORDER note above — the orchestrator image takes its SPA from it), so four images
+          # that would have been created without trouble were never attempted.
+          #
+          # ANONYMOUS PULL, INCIDENTALLY, IS NOT A PROBLEM ON THIS ACCOUNT. The eight mirrored images
+          # answered an unauthenticated `tags/list` with HTTP 200 the moment they were pushed, so new
+          # packages here are created PUBLIC rather than private.
+          #
+          # THE FLAGS STAY, ON THEIR OWN MERITS, having been cleared of fixing anything. The header
+          # says "PER-ARCH TAGS ONLY HERE … the manifest list over them is `manifests` below". An
+          # attestation index at `<version>-<arch>` is a manifest list where the design calls for a
+          # single-platform image, which would leave `manifests` building a list whose members are
+          # themselves lists. Nothing is lost that anything here reads: `manifests` signs every list
+          # keyless with cosign and `pin` records digests into `images.json`/`images.env`.
           build_one() {
             name="$1"; shift
             ref="$REGISTRY/$name:$VERSION-$ARCH"
