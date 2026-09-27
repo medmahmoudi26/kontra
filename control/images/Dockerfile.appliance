@@ -123,6 +123,42 @@ RUN chmod +x /usr/local/bin/kontra-entrypoint \
  && apt-get install -y --no-install-recommends docker.io python3 python3-pip python3-venv \
  && pip3 install --break-system-packages --no-cache-dir temporalio redis boto3 pydantic \
  && rm -rf /var/lib/apt/lists/*
+
+# ── THE DuckDB CLI, BECAUSE THIS IMAGE IS ALSO AN `spa-src` ─────────────────────────────────────
+#
+# `Dockerfile.selfcontained` installs this and explains at length why the version is pinned to the
+# orchestrator's `@duckdb/node-api`: two engines, one DuckLake catalog, and a catalog format
+# versioned with DuckDB, so the older of the two refuses what the newer wrote. Read that comment;
+# this is the same decision and `tests/test_duckdb_pin.py` holds all of them to one version.
+#
+# IT IS HERE BECAUSE `Dockerfile.orchestrator:77` IS `COPY --from=spa-src /usr/local/bin/duckdb`,
+# AND THIS FILE CAN BE THAT `spa-src`. `make image` tags `selfcontained` as the kontra image and
+# `publish.yml`/`make image-from-release` tag THIS one, so "the kontra image" is two files and only
+# one of them carried duckdb. MEASURED on `0.0.0-test6`: `kontra`, `kontra-host` and
+# `kontra-logship` pushed, then the orchestrator build died with
+#
+#     ERROR: failed to calculate checksum of ref …: "/usr/local/bin/duckdb": not found
+#
+# The pin test checked both ENDS of that chain — selfcontained installs it, orchestrator copies it —
+# and never that they were the same chain, which is why a green suite said nothing. It now asserts
+# every file that can serve as `spa-src`.
+ARG TARGETARCH
+ARG DUCKDB_VERSION=1.5.4
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) duckarch=amd64 ;; \
+      arm64) duckarch=arm64 ;; \
+      *) echo "no duckdb build for TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl unzip; \
+    curl -fsSL -o /tmp/duckdb.zip \
+      "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-${duckarch}.zip"; \
+    unzip -q /tmp/duckdb.zip -d /tmp/duckdb; \
+    install -m 0755 /tmp/duckdb/duckdb /usr/local/bin/duckdb; \
+    rm -rf /tmp/duckdb /tmp/duckdb.zip; \
+    rm -rf /var/lib/apt/lists/*; \
+    duckdb --version
 ENV PYTHONPATH=/opt/kontra/sdk/python:/opt/kontra/runtime/python
 ENV KONTRA_SDK_ROOT=/opt/kontra
 CMD ["kontra", "version"]

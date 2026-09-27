@@ -31,7 +31,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ORCH_PKG = ROOT / "control" / "orchestrator" / "package.json"
 SELFCONTAINED = ROOT / "control" / "images" / "Dockerfile.selfcontained"
+APPLIANCE = ROOT / "control" / "images" / "Dockerfile.appliance"
 ORCHESTRATOR_IMAGE = ROOT / "control" / "images" / "Dockerfile.orchestrator"
+
+# EVERY FILE THAT CAN BE THE ORCHESTRATOR'S `spa-src`, which is to say every file that gets tagged as
+# "the kontra image". `make image` tags `selfcontained`; `publish.yml` and `make image-from-release`
+# tag `appliance`. `Dockerfile.orchestrator:77` copies `/usr/local/bin/duckdb` out of whichever one it
+# was handed, so all of them have to carry it — and for a long time only the first did.
+SPA_SOURCES = {"Dockerfile.selfcontained": SELFCONTAINED, "Dockerfile.appliance": APPLIANCE}
 
 
 def _embedded_version() -> str:
@@ -47,10 +54,14 @@ def _embedded_version() -> str:
     return m.group(1)
 
 
-def _cli_version() -> str:
-    m = re.search(r"^ARG DUCKDB_VERSION=(\S+)", SELFCONTAINED.read_text(), re.M)
-    assert m, "Dockerfile.selfcontained no longer declares ARG DUCKDB_VERSION"
+def _cli_version_in(path: Path) -> str:
+    m = re.search(r"^ARG DUCKDB_VERSION=(\S+)", path.read_text(), re.M)
+    assert m, f"{path.name} no longer declares ARG DUCKDB_VERSION"
     return m.group(1)
+
+
+def _cli_version() -> str:
+    return _cli_version_in(SELFCONTAINED)
 
 
 def test_the_two_engines_are_pinned_to_one_duckdb_version() -> None:
@@ -70,10 +81,35 @@ def test_the_image_actually_installs_it() -> None:
     answered "duckdb not found on PATH — install it and retry" inside a container whose promise is
     that Docker is the only prerequisite.
     """
-    body = SELFCONTAINED.read_text()
-    assert "duckdb_cli-linux-" in body, "the selfcontained image no longer downloads the DuckDB CLI"
-    assert "install -m 0755 /tmp/duckdb/duckdb /usr/local/bin/duckdb" in body, (
-        "the DuckDB CLI is downloaded but not put on PATH — `duckdbBin()` looks there first"
+    for name, path in SPA_SOURCES.items():
+        body = path.read_text()
+        assert "duckdb_cli-linux-" in body, f"{name} no longer downloads the DuckDB CLI"
+        assert "install -m 0755 /tmp/duckdb/duckdb /usr/local/bin/duckdb" in body, (
+            f"{name} downloads the DuckDB CLI but does not put it on PATH — "
+            "`duckdbBin()` looks there first"
+        )
+
+
+def test_every_spa_source_installs_the_same_duckdb() -> None:
+    """The chain was checked at both ends and never in the middle.
+
+    `test_the_image_actually_installs_it` asserted `Dockerfile.selfcontained` installs the CLI and
+    `test_the_orchestrator_image_carries_it_too` asserted the orchestrator COPYs it from `spa-src`.
+    Neither asked whether the `spa-src` actually handed over was a file that installs it — and
+    `publish.yml` hands over `Dockerfile.appliance`, which did not. MEASURED on `0.0.0-test6`: three
+    images pushed, then
+
+        ERROR: failed to calculate checksum of ref ...: "/usr/local/bin/duckdb": not found
+
+    with a fully green test suite. So the versions are compared ACROSS the sources too: two files
+    that both install a CLI but disagree on which one reproduce the split-catalog failure the pin
+    exists to prevent, and it would surface as a DuckLake error at the far end of a dataset write.
+    """
+    versions = {name: _cli_version_in(path) for name, path in SPA_SOURCES.items()}
+    assert len(set(versions.values())) == 1, (
+        f"the files that can be the orchestrator's `spa-src` pin different DuckDB CLI versions: "
+        f"{versions}. They share one DuckLake catalog with the orchestrator's embedded engine, so "
+        f"they are one decision and have to move in one commit."
     )
 
 
