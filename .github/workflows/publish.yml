@@ -1129,7 +1129,13 @@ jobs:
           done
 
           if [ -n "$private" ]; then
-            echo "::error::these packages are not anonymously readable — GHCR packages are PRIVATE on first push:"
+            # NOT "GHCR packages are PRIVATE on first push", WHICH IS WHAT THIS SAID AND IS NOT TRUE
+            # HERE. Measured on `0.0.0-test9`: twelve of the thirteen references pulled anonymously the
+            # moment they were pushed, including four kontra images created by that very run. What
+            # fails this gate in practice is a package that ALREADY EXISTED and is private — its
+            # visibility predates the workflow and a push does not change it. Saying "private on first
+            # push" sends an operator looking for a setting on twelve packages that are already fine.
+            echo "::error::these packages are not anonymously readable, so a stranger's install cannot pull them:"
             for p in $private; do
               # `ghcr.io/<owner>/mirror/library/postgres` is ONE package named `mirror/library/postgres`,
               # and GitHub's settings URL percent-encodes the slashes in a package name. Printing the
