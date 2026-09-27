@@ -285,27 +285,66 @@ jobs:
   #
   # RUNNER AVAILABILITY IS A CONSTRAINT, NOT A DETAIL (appliance.yml:59-64). `ubuntu-24.04-arm` is
   # free for public repositories and billable for private ones; macOS is billable everywhere at ten
-  # linux minutes per minute. A label this repository cannot use fails with "no runner matching the
-  # labels", which is the right failure — the alternative is a matrix that silently ships three
-  # platforms out of four.
+  # linux minutes per minute.
+  #
+  # ── AN UNAVAILABLE LABEL DOES NOT FAIL. IT QUEUES, AND IT QUEUES FOREVER. ───────────────────────
+  #
+  # This comment used to say a label the repository cannot use "fails with `no runner matching the
+  # labels`, which is the right failure". MEASURED, on the first dispatch this workflow ever had:
+  # that is not what happens. `darwin/amd64` asked for `macos-13` — a runner image GitHub has retired
+  # — and the job sat at `status: queued` with `steps: []` for eighteen minutes, until it was
+  # cancelled. There is no error, no annotation and nothing in the log, because the job never
+  # started. It would have burned the full `timeout-minutes` and then failed with a timeout, which
+  # names the symptom and not the cause.
+  #
+  # And it took the whole publish with it: `images` needed this job, so four container images that
+  # have no macOS dependency at all were blocked behind a macOS runner that was never coming. The
+  # mirror finished, the three other binaries finished, and the thing an install actually pulls did
+  # not get built.
+  #
+  # THE FIX, AND WHAT IS DELIBERATELY NOT FIXED YET.
+  #
+  # `macos-13` -> `macos-15-intel`, the current Intel label. **That label has not been verified on
+  # this account** — it is the documented replacement, and the failure mode above is silent, so the
+  # per-platform `timeout` below exists to make a second wrong guess cost twenty minutes instead of
+  # an hour. Twenty is far more than a `CGO_ENABLED=0` Go build needs and far less than not knowing.
+  #
+  # WHAT IS NOT FIXED: `images` still `needs: [plan, binaries]`, so a macOS runner can still block
+  # four container images that have no macOS dependency — the container builds consume
+  # `kontra_<version>_linux_<arch>.tar.gz` and nothing else. The right change is to split this matrix
+  # so only the linux half gates `images`, and it is not made here because GitHub Actions has no
+  # anchors: two jobs means either 110 duplicated lines or a composite action, and neither belongs in
+  # the same change as a one-token label fix whose outcome decides whether it is urgent. If
+  # `macos-15-intel` resolves, the split is an improvement; if it does not, it is the fix.
+  #
+  # Either way the native-build rule stands. All four are built and RUN on the machine they are for —
+  # `cli/release.go:28-32` is explicit that cross-building works and that CI does it natively anyway,
+  # because "a cross-built artifact nobody has ever executed is a claim".
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   binaries:
     name: ${{ matrix.platform }}
     needs: plan
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # PER-PLATFORM, because the two failure modes are different. A linux build that hangs is a build
+    # problem and 60 minutes is a fair rope; a macOS job that has not started is a LABEL problem, and
+    # every minute past the first few is spent learning nothing.
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
+            timeout: 60
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
+            timeout: 60
           - platform: darwin/amd64
-            runner: macos-13
+            runner: macos-15-intel
+            timeout: 20
           - platform: darwin/arm64
             runner: macos-14
+            timeout: 20
     steps:
       - uses: actions/checkout@v4
         with:
