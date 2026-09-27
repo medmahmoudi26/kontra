@@ -23,11 +23,15 @@ name: publish
 # ── EVERY REFERENCE THIS WORKFLOW PUBLISHES IS A DIGEST ─────────────────────────────────────────
 #
 # `images.json` and `images.env` on the release name every image as `repo@sha256:…`, never as a tag.
-# `control/orchestrator/src/infra/CONTEXT.md:228` is the reason it matters for the third-party half:
-# "a reference with no host is Docker Hub, whose hundred manifest reads an hour are per *address*,
-# not per account". Eight anonymous Docker Hub pulls per install, from a public quickstart, behind
-# corporate NAT or on a shared CI runner, is a rate limit somebody else's install spends. So the eight
-# images `docker-compose.yml` names are mirrored to the same registry as ours and pinned.
+# THE THIRD-PARTY HALF IS NOT MIRRORED, AND THAT IS A REVERSAL. `control/orchestrator/src/infra/
+# CONTEXT.md:228` makes a real argument for mirroring — "a reference with no host is Docker Hub, whose
+# hundred manifest reads an hour are per *address*, not per account" — and eight anonymous pulls per
+# install, behind corporate NAT or on a shared runner, do spend a budget shared with strangers.
+#
+# A `mirror` job acted on it and published eight `mirror/…` packages that NOTHING RESOLVED, because
+# `docker-compose.yml` names the eight literally with no `${…}` to override. Zero consumers, measured
+# after `0.0.0-test9`. It is gone; `plan` carries the full reasoning and what would have to land first
+# for it to come back. Windmill pulls `postgres:18` from Docker Hub at far higher install volume.
 #
 # `latest` is pushed by nothing here. A floating tag in a registry is a thing an install can resolve
 # by accident, and what this install resolves is a digest.
@@ -70,8 +74,7 @@ on:
   #
   # `git tag` in this repository returns zero tags and `release.yml` has never run once
   # (release-please.yml:5-8). Every path below — the keyless certificate chain, the GHCR push, the
-  # skopeo mirror, the anonymous pull — is unexercised until a tag exists, and a first tag is a bad
-  # place to find out. `install-appliance.sh:25-33` invented `KONTRA_BASE_URL` for exactly this
+  # anonymous pull — is unexercised until a tag exists, and a first tag is a bad place to find out. `install-appliance.sh:25-33` invented `KONTRA_BASE_URL` for exactly this
   # problem and said why: "this file can be run before it is published… That is how it is tested, and
   # the test is the reason the variable is here rather than a convenience."
   #
@@ -114,7 +117,6 @@ jobs:
       registry: ${{ steps.v.outputs.registry }}
       kontra_images: ${{ steps.names.outputs.kontra_images }}
       compose_vars: ${{ steps.names.outputs.compose_vars }}
-      mirror: ${{ steps.names.outputs.mirror }}
     steps:
       - uses: actions/checkout@v4
 
@@ -245,47 +247,27 @@ jobs:
             exit 1
           fi
 
-          # ── THE MIRROR LIST: every `image:` in compose that is NOT one of ours ─────────────────
+          # ── THERE IS NO MIRROR LIST ANY MORE, AND THAT IS THE POINT ───────────────────────────
           #
-          # An `image:` line with no `${…}` in it is a third-party reference the install pulls
-          # anonymously. Three shapes are handled rather than assumed away:
+          # This job used to derive every third-party `image:` out of compose so a `mirror` job could
+          # copy them to `ghcr.io/<owner>/mirror/…`, against Docker Hub's anonymous rate limit: "a
+          # reference with no host is Docker Hub, whose hundred manifest reads an hour are per *address*,
+          # not per account", so eight pulls per install spend a budget shared with strangers.
           #
-          #   already at our registry  skipped — mirroring a mirror is a loop
-          #   already carrying @sha256 skipped — it is pinned, there is nothing left to pin
-          #   no tag at all            REFUSED — an untagged reference means `:latest`, and silently
-          #                            mirroring somebody's moving tag is the exact trap this job is
-          #                            here to close
-          registry="${{ steps.v.outputs.registry }}"
-          mirror=""
-          while read -r ref; do
-            [ -n "$ref" ] || continue
-            case "$ref" in
-              "$registry"/*|ghcr.io/*) continue ;;
-              *@*) continue ;;
-            esac
-            base="${ref##*/}"
-            case "$base" in
-              *:*) ;;
-              *)
-                echo "::error::docker-compose.yml names '$ref' with no tag — that is :latest, and it will not be mirrored blind"
-                exit 1
-                ;;
-            esac
-            mirror="${mirror}${ref}"$'\n'
-          done < <(grep -hoE '^[[:space:]]+image:[[:space:]]+[^$[:space:]]+' docker-compose.yml \
-                   | awk '{print $2}' | sort -u)
-
-          mirror=$(printf '%s' "$mirror" | grep . | sort -u)
-          mcount=$(printf '%s\n' "$mirror" | grep -c . || true)
-          if [ "$mcount" -lt 1 ]; then
-            echo "::error::no third-party images derived from docker-compose.yml — the grep stopped matching"
-            exit 1
-          fi
-
+          # THE REASONING WAS FINE AND THE WIRING NEVER HAPPENED. `docker-compose.yml` names
+          # `postgres:16-alpine` and the other seven literally, with no `${…}` to override, so nothing
+          # could ever resolve a mirrored copy. The job's own comment admitted it — "there is nothing an
+          # .env can do with these digests today" — and the `0.0.0-test9` publish duly created eight
+          # packages with zero consumers. Publishing what nothing resolves is the same shape as the five
+          # blank variables `.env.quickstart` deleted: a knob that looks like a knob and is not.
+          #
+          # Windmill pulls `postgres:18` from Docker Hub at far higher install volume. So the mirror
+          # returns only on evidence of a real rate limit, and when it does the missing half comes
+          # FIRST: a `${…}` per third-party service in compose, so the copies are reachable before they
+          # exist.
           {
             echo "kontra_images=$(printf '%s' "$names" | tr '\n' ' ')"
             echo "compose_vars=$(printf '%s' "$compose_pairs" | tr '\n' ' ')"
-            echo "mirror=$(printf '%s' "$mirror" | tr '\n' ' ')"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -294,10 +276,6 @@ jobs:
             echo "| kontra-owned ($count) |"
             echo "| --- |"
             for n in $names; do echo "| \`$n\` |"; done
-            echo
-            echo "| mirrored from Docker Hub ($mcount) |"
-            echo "| --- |"
-            for m in $mirror; do echo "| \`$m\` |"; done
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -325,8 +303,7 @@ jobs:
   #
   # And it took the whole publish with it: `images` needed this job, so four container images that
   # have no macOS dependency at all were blocked behind a macOS runner that was never coming. The
-  # mirror finished, the three other binaries finished, and the thing an install actually pulls did
-  # not get built.
+  # three other binaries finished, and the thing an install actually pulls did not get built.
   #
   # `macos-13` -> `macos-15-intel`, WHICH RESOLVES. Measured on the second dispatch: the job started
   # within thirty seconds and ran eighteen steps, so the Intel label is live and the retired one was
@@ -665,9 +642,8 @@ jobs:
                 ;;
               # The shipper and its parser, baked rather than bind-mounted. It appears in this table
               # because compose stopped naming `python:3.12-alpine` and started naming
-              # `${KONTRA_LOGSHIP_IMAGE:-…}`, which also moves it off the `mirror` list above — the
-              # derivation in `plan` sorts that out on its own, and this is the hand-written half it
-              # cannot derive. See control/images/Dockerfile.logship for why logline.py could not
+              # `${KONTRA_LOGSHIP_IMAGE:-…}`, so `plan` derives it as one of ours; this is the
+              # hand-written half that derivation cannot supply. See control/images/Dockerfile.logship for why logline.py could not
               # take the `configs:` treatment postgres-init.sh got.
               kontra-logship)
                 build_one "$name" -f control/images/Dockerfile.logship
@@ -684,8 +660,9 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   # manifests — one multi-arch list per image, and a keyless signature over each list digest.
   #
-  # `docker buildx imagetools create` is the right tool here and the wrong one in `mirror` below, for
-  # one reason: its sources have to already be in the destination registry. Here they are — `images`
+  # `docker buildx imagetools create` is the right tool here for one reason, and it is the reason a
+  # cross-registry copy needs something else: its sources have to already be in the destination
+  # registry. Here they are — `images`
   # pushed both per-arch tags to this same repository — so the list is assembled by reference and no
   # layer moves.
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -832,107 +809,16 @@ jobs:
           retention-days: 7
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
-  # mirror — the eight third-party images, copied whole, recorded by digest.
-  #
-  # WHY NOT `docker pull` + `docker tag` + `docker push`. That is the obvious three lines and it is
-  # wrong in a way nobody notices until an arm64 install: `docker pull postgres:16-alpine` on an
-  # amd64 runner resolves the manifest LIST to one platform, and pushing it publishes a
-  # single-architecture image under a name every arch will resolve. The failure is
-  # `exec format error` on somebody else's laptop.
-  #
-  # WHY NOT `docker buildx imagetools create`. Its sources must already exist in the registry the new
-  # manifest is created in. These are on Docker Hub and the target is ghcr.io.
-  #
-  # SO: `skopeo copy --all`, which copies every manifest in the list. It is apt-installable on the
-  # runner image, and if it is not there the job REFUSES rather than falling back on one of the two
-  # wrong options above.
-  # ═══════════════════════════════════════════════════════════════════════════════════════════════
-  mirror:
-    name: mirror Docker Hub
-    needs: plan
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: skopeo, or nothing
-        run: |
-          set -euo pipefail
-          if ! command -v skopeo >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends skopeo
-          fi
-          skopeo --version
-
-      # `--password-stdin` rather than a flag: an argument is visible in `ps` to everything else on
-      # the runner, and this is the same token the whole job holds.
-      - name: log in to ghcr
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: printf '%s' "$GH_TOKEN" | skopeo login --username "${{ github.actor }}" --password-stdin ghcr.io
-
-      # THE TARGET PATH IS A MECHANICAL TRANSFORM OF THE SOURCE, not a table of renames. Strip the
-      # implicit `docker.io/`, add the implicit `library/` that a single-segment name carries, and
-      # prefix `mirror/`. One rule means "which upstream is this" is answerable from the mirrored
-      # reference alone — and there is no second list of eight names to drift out of date.
-      #
-      # THE MIRRORED TAG IS THE UPSTREAM TAG, DELIBERATELY. It is not what anything resolves: the
-      # digest recorded below is. Keeping the tag makes the mirror readable by a human comparing it
-      # to `docker-compose.yml`, and it makes a re-run of this job idempotent instead of accumulating
-      # a tag per release for bytes that never changed.
-      - name: copy, all architectures, and record the digest
-        shell: bash
-        env:
-          REGISTRY: ${{ needs.plan.outputs.registry }}
-          MIRROR: ${{ needs.plan.outputs.mirror }}
-        run: |
-          set -euo pipefail
-          : > digests-mirror.tsv
-          for ref in $MIRROR; do
-            name="${ref%:*}"
-            tag="${ref##*:}"
-            case "$name" in
-              */*) path="$name" ;;
-              *)   path="library/$name" ;;
-            esac
-            dst="$REGISTRY/mirror/$path:$tag"
-            echo "==> docker.io/$path:$tag -> $dst"
-            skopeo copy --all "docker://docker.io/$path:$tag" "docker://$dst"
-
-            # THE DIGEST IS THE HASH OF THE MANIFEST BYTES, and it is computed rather than read out
-            # of a field. `skopeo inspect` without `--raw` resolves a manifest list to ONE platform
-            # and reports that platform's digest, which would pin the mirror to whatever
-            # architecture this runner happens to be. `--raw | sha256sum` is the definition.
-            digest=$(skopeo inspect --raw "docker://$dst" | sha256sum | awk '{print "sha256:"$1}')
-            case "$digest" in
-              sha256:????????????????????????????????????????????????????????????????) ;;
-              *)
-                echo "::error::computed '$digest' as the manifest digest of $dst"
-                exit 1
-                ;;
-            esac
-            printf '%s\t%s\n' "$ref" "$REGISTRY/mirror/$path@$digest" >> digests-mirror.tsv
-          done
-          cat digests-mirror.tsv
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: digests-mirror
-          path: digests-mirror.tsv
-          retention-days: 7
-
-  # ═══════════════════════════════════════════════════════════════════════════════════════════════
   # pin — the two digest lists become the two files an install reads.
   #
-  # `images.json` is for issue 03's Pulumi program, which needs the whole set including the mirror.
+  # `images.json` is for issue 03's Pulumi program, which needs the whole kontra-owned set.
   # `images.env` is for `docker compose`, which needs nothing new to consume it: the variables are
   # the ones `docker-compose.yml` already interpolates, so an install is
   # `cat images.env >> .env` and no code changes hands.
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   pin:
     name: images.json and images.env
-    needs: [plan, manifests, mirror]
+    needs: [plan, manifests]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -977,7 +863,6 @@ jobs:
               return out
 
           kontra = read("digests/digests-kontra.tsv")
-          mirror = read("digests/digests-mirror.tsv")
 
           version, tag = os.environ["VERSION"], os.environ["TAG"]
           doc = {
@@ -987,7 +872,6 @@ jobs:
               "registry": os.environ["REGISTRY"],
               "workflow": os.environ["GITHUB_WORKFLOW_REF"],
               "kontra": kontra,
-              "mirror": mirror,
           }
           with open("images.json", "w") as fh:
               json.dump(doc, fh, indent=2, sort_keys=True)
@@ -1026,20 +910,10 @@ jobs:
                   lines.append(f"#   {kontra[name]}")
           lines += ["KONTRA_PULL_POLICY=missing", ""]
 
-          # THE MIRROR IS LISTED AND COMMENTED OUT, WHICH IS THE HONEST SHAPE. docker-compose.yml
-          # names its eight third-party images literally (`image: postgres:16-alpine`, line 168) with
-          # no `${…}` to override, so there is nothing an .env can do with these digests today —
-          # issue 03's Pulumi program is what consumes them. Writing them here as live variables
-          # would be eight lines that look like they are doing something and are not, which is the
-          # shape trustpolicy.go:561-568 refuses for the same reason.
-          lines += [
-              "# The mirrored third-party images. NOT variables: docker-compose.yml names these",
-              "# literally, so pinning them needs the Pulumi program (issue 03) or an edit to compose.",
-          ]
-          for src in sorted(mirror):
-              lines.append(f"#   {src:52s} {mirror[src]}")
-          lines.append("")
-
+          # NO THIRD-PARTY SECTION. It used to list the eight mirrored images as comments, which was
+          # the honest shape for copies nothing could resolve — and the honest thing now is not to make
+          # the copies. `docker-compose.yml` names the eight literally from Docker Hub, and `plan` says
+          # why the mirror is gone rather than fixed.
           with open("images.env", "w") as fh:
               fh.write("\n".join(lines))
 
@@ -1105,9 +979,8 @@ jobs:
           refs=$(python3 -c '
           import json
           d = json.load(open("images.json"))
-          for group in ("kontra", "mirror"):
-              for ref in d[group].values():
-                  print(ref)
+          for ref in d["kontra"].values():
+              print(ref)
           ')
           [ -n "$refs" ] || { echo "::error::images.json listed no references"; exit 1; }
 
@@ -1137,10 +1010,11 @@ jobs:
             # push" sends an operator looking for a setting on twelve packages that are already fine.
             echo "::error::these packages are not anonymously readable, so a stranger's install cannot pull them:"
             for p in $private; do
-              # `ghcr.io/<owner>/mirror/library/postgres` is ONE package named `mirror/library/postgres`,
-              # and GitHub's settings URL percent-encodes the slashes in a package name. Printing the
-              # raw name gives a 404 on the page that fixes the error, which is the least helpful
-              # possible way to report a manual step.
+              # A PACKAGE NAME CAN CONTAIN SLASHES and GitHub's settings URL percent-encodes them;
+              # printing the raw name gives a 404 on the very page that fixes the error, which is the
+              # least helpful possible way to report a manual step. Nothing this workflow publishes has
+              # a slash in its name today — the `mirror/library/postgres` shape that needed this went
+              # with the mirror job — so the encoding is precautionary rather than exercised.
               pkg=$(printf '%s' "${p#*/*/}" | sed 's|/|%2F|g')
               echo "::error::  $p  ->  https://github.com/users/$OWNER/packages/container/$pkg/settings"
             done
@@ -1151,6 +1025,10 @@ jobs:
 
           # A LOOP OVER AN EMPTY LIST REPORTS SUCCESS BY HAVING HAD NO WORK TO DO — the shape
           # install-appliance.sh:133-137 and :185-188 both guard against.
+          # FIVE IS NOW THE EXACT COUNT, NOT A FLOOR WITH ROOM UNDER IT. Before the mirror job went it
+          # was five owned plus eight copies, so `-ge 5` had thirteen references to be satisfied by and
+          # could have passed while every kontra image was missing. It is the whole set now, which makes
+          # the check tight: one image failing to publish fails here.
           [ "$checked" -ge 5 ] || { echo "::error::checked only $checked references — images.json is too small to be a whole release"; exit 1; }
           echo "$checked references pull anonymously and match their recorded digests"
 
