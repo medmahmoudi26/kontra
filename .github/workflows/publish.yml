@@ -199,8 +199,21 @@ jobs:
             | sed -E 's#^([^=]*/)?([^/=]+)=#\2=#' \
             | sort -u)
 
-          # `const workerBaseImage = "kontra-worker-base:1"` — cli/deploy.go:89.
-          worker_base=$(grep -oE 'workerBaseImage = "[^"]+"' cli/deploy.go \
+          # `const workerBaseImage = "kontra-worker-base:1"` — cli/deploy.go.
+          #
+          # ANCHORED TO `^const`, AND THAT ANCHOR IS THE WHOLE FIX FOR A REAL FAILURE. This grep was
+          # unanchored, so it matched the SAME TEXT INSIDE A COMMENT: a note added to deploy.go saying
+          # "publish.yml greps this line for the image name" quoted the pattern as
+          # `workerBaseImage = "…"`, and the grep dutifully returned the ellipsis as a second image
+          # name. `0.0.0-test7` then pushed all five images correctly and failed at the bottom of the
+          # loop with `the install references a kontra-owned image '…' that this workflow does not
+          # know how to build` — a perfect error message about a name that never existed.
+          #
+          # A `const` declaration is at column zero and a comment is not, so the anchor separates them
+          # exactly. The same class of mistake as the `cli/appliance` grep that matched three comment
+          # lines and reversed the codec audit in ADR 0052 §2: in a repository where the comments
+          # discuss the greps, a grep must say where it expects to match.
+          worker_base=$(grep -oE '^const workerBaseImage = "[^"]+"' cli/deploy.go \
             | sed -E 's/.*"([^"]+)".*/\1/' | cut -d: -f1)
 
           names=$(
@@ -208,10 +221,23 @@ jobs:
             | grep . | sort -u
           )
 
+          # SHAPE GUARD, WHICH CATCHES THIS WHATEVER THE SOURCE. The anchor above fixes the one
+          # derivation that went wrong; this refuses anything that is not a legal image name from
+          # EITHER derivation, so the next stray match fails here with the offending string rather
+          # than four jobs later in a `case` statement. An OCI repository name component is lowercase
+          # alphanumerics with `.`, `_` and `-` separators — an ellipsis is none of those.
+          bad=$(printf '%s\n' "$names" | grep -vE '^[a-z0-9]+([._-][a-z0-9]+)*$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::derived something that is not an image name: $(printf '%s' "$bad" | tr '\n' ' ')"
+            echo "::error::one of the two greps above matched text it should not have — a comment, or prose quoting the pattern."
+            echo "::error::all derived names were: $(printf '%s' "$names" | tr '\n' ' ')"
+            exit 1
+          fi
+
           # VACUITY GUARD. Every derivation above is a grep, and a grep that stops matching returns
           # zero lines and exit 1 under `pipefail` only if it is the last command in the pipe — it is
-          # not. So the count is asserted: four is what `make image` plus the README's three
-          # hand-typed `docker build`s produce today (README.md:49-53, Makefile:139-149).
+          # not. So the count is asserted. It is a FLOOR and not an equality, which is why it could not
+          # catch the ellipsis: six names passed a `-lt 4` check as happily as five.
           count=$(printf '%s\n' "$names" | grep -c . || true)
           if [ "$count" -lt 4 ]; then
             echo "::error::derived only $count kontra-owned image names ($names) — expected at least 4."

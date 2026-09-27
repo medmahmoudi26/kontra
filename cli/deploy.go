@@ -87,10 +87,15 @@ func registryAddress(flagVal string) string {
 //
 //	docker rmi kontra-worker-base:1
 //
-// THE CONSTANT IS THE DEFAULT, NOT THE ANSWER — see workerBase() below. It stays a literal because
-// `.github/workflows/publish.yml` greps this line for the image name it has to build
-// (`workerBaseImage = "…"`), which is also why the name and the tag are spelled here rather than
-// assembled.
+// THE CONSTANT IS THE DEFAULT, NOT THE ANSWER — see workerBase() below. It stays a literal, spelled
+// out rather than assembled, because `.github/workflows/publish.yml` reads the declaration below to
+// learn which image it has to build.
+//
+// AND THIS COMMENT MUST NOT RESTATE THE PATTERN THAT GREP LOOKS FOR. It used to quote it, and the
+// grep was unanchored, so it matched the quotation too and handed the workflow an ellipsis as a
+// second image name — `0.0.0-test7` pushed all five images and then failed with "the install
+// references a kontra-owned image '…' that this workflow does not know how to build". The grep is
+// anchored to `^const` now, so a comment cannot match it; this note stays wordy instead.
 const workerBaseImage = "kontra-worker-base:1"
 
 // workerBase resolves THE worker base reference, the same way hostImage() resolves the Python host.
