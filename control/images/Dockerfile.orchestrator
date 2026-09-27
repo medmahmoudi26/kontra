@@ -28,13 +28,46 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY shared/core ./shared/core
 COPY shared/conformance ./shared/conformance
 COPY control/orchestrator ./control/orchestrator
+# ── THE PLUGIN VERSIONS COME FROM THE INSTALLED SDKs, NOT FROM "latest" ─────────────────────────
+#
+# `pulumi plugin install resource docker` with no version asks the GitHub API for the newest release,
+# ANONYMOUSLY. On a shared CI runner that is a rate limit somebody else already spent:
+#
+#     error: Unable to resolve package from name: unable to get the latest version of "docker":
+#     rate limit exceeded: 403 HTTP error fetching plugin from
+#     https://api.github.com/repos/pulumi/pulumi-docker/releases/latest
+#
+# MEASURED on `0.0.0-test8`, where `images arm64` installed all three and pushed five images while
+# `images amd64` was refused on the first one. Two arches of the same commit, one build reproducible
+# and the other not — which is the shape a rate limit always takes and the reason it cannot be
+# retried away.
+#
+# AND "latest" WAS WRONG EVEN WHEN IT WORKED. The SDK is pinned in `package.json` (`@pulumi/docker`,
+# `@pulumi/digitalocean`, `@pulumi/command`) and the plugin is the binary provider that SDK drives, so
+# resolving the plugin separately lets the image ship a provider the code was never written against.
+#
+# SO THE VERSION IS READ OUT OF THE SDK THAT WAS JUST INSTALLED. `pnpm install --frozen-lockfile` has
+# already resolved the lockfile by this point, so `require('@pulumi/docker/package.json').version` is
+# the exact version this image will drive — one decision in one place, no API call, and no second file
+# to forget. `control/pulumi/Pulumi.yaml`'s own plugin pins are a separate harness and `parity.py` is
+# what keeps the two honest.
+#
+# THE npm VERSION IS THE RIGHT SOURCE FOR THESE THREE, CHECKED RATHER THAN ASSUMED. Some Pulumi SDKs
+# ship a `pulumi-plugin.json` naming the plugin version independently of the package version, and that
+# file would be the authority where it exists. None of these three ships one — verified against the
+# installed tree at 4.11.2 / 4.78.1 / 1.2.1, all of which are real plugin releases. If a future SDK
+# starts shipping it, read it here in preference.
 RUN corepack enable \
  && pnpm install --frozen-lockfile \
  && pnpm --filter @kontra/core run build \
  && pnpm --filter @kontra/backend run build \
- && pulumi plugin install resource docker \
- && pulumi plugin install resource digitalocean \
- && pulumi plugin install resource command
+ && cd control/orchestrator \
+ && for p in docker digitalocean command; do \
+      v=$(node -p "require('@pulumi/$p/package.json').version") \
+        || { echo "no @pulumi/$p installed — the plugin version is read from the SDK" >&2; exit 1; }; \
+      echo "==> pulumi plugin install resource $p v$v (from @pulumi/$p)"; \
+      pulumi plugin install resource "$p" "$v"; \
+    done
 
 WORKDIR /src/control/orchestrator
 ENV NODE_ENV=production
