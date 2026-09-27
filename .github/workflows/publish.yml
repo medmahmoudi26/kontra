@@ -302,22 +302,27 @@ jobs:
   # mirror finished, the three other binaries finished, and the thing an install actually pulls did
   # not get built.
   #
-  # THE FIX, AND WHAT IS DELIBERATELY NOT FIXED YET.
+  # `macos-13` -> `macos-15-intel`, WHICH RESOLVES. Measured on the second dispatch: the job started
+  # within thirty seconds and ran eighteen steps, so the Intel label is live and the retired one was
+  # the whole cause.
   #
-  # `macos-13` -> `macos-15-intel`, the current Intel label. **That label has not been verified on
-  # this account** — it is the documented replacement, and the failure mode above is silent, so the
-  # per-platform `timeout` below exists to make a second wrong guess cost twenty minutes instead of
-  # an hour. Twenty is far more than a `CGO_ENABLED=0` Go build needs and far less than not knowing.
+  # ── AND A 20-MINUTE CAP WAS THE WRONG ANSWER TO IT. ────────────────────────────────────────────
   #
-  # WHAT IS NOT FIXED: `images` still `needs: [plan, binaries]`, so a macOS runner can still block
-  # four container images that have no macOS dependency — the container builds consume
-  # `kontra_<version>_linux_<arch>.tar.gz` and nothing else. The right change is to split this matrix
-  # so only the linux half gates `images`, and it is not made here because GitHub Actions has no
-  # anchors: two jobs means either 110 duplicated lines or a composite action, and neither belongs in
-  # the same change as a one-token label fix whose outcome decides whether it is urgent. If
-  # `macos-15-intel` resolves, the split is an improvement; if it does not, it is the fix.
+  # The first attempt at this set `timeout-minutes` to 20 for the macOS legs, reasoning that twenty
+  # minutes is "far more than a CGO_ENABLED=0 Go build needs". That was measured wrong on the next
+  # run: `darwin/amd64` was still building at 20:00 and the cap CANCELLED IT — and because
+  # `images` needed the whole matrix, the four container images were skipped again. A cap aimed at a
+  # job that never starts also caps the job that is merely slow, and it cannot tell them apart.
   #
-  # Either way the native-build rule stands. All four are built and RUN on the machine they are for —
+  # The Intel runner is the long pole by a wide margin: `darwin/arm64` on `macos-14` finished in ~3.5
+  # minutes and `darwin/amd64` had not finished in 20. Both do the same work — checkout, the console
+  # checkout, `pnpm install`, the SPA build, the bundle, then the release and its smoke run.
+  #
+  # So the cap goes back to 60 for every platform, and the decoupling moves to where it belongs: see
+  # `images` below, which no longer lets a macOS result decide whether container images get built.
+  # A bad label now costs an hour of the RELEASE half and nothing of the install half.
+  #
+  # The native-build rule is untouched. All four are built and RUN on the machine they are for —
   # `cli/release.go:28-32` is explicit that cross-building works and that CI does it natively anyway,
   # because "a cross-built artifact nobody has ever executed is a claim".
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -325,26 +330,19 @@ jobs:
     name: ${{ matrix.platform }}
     needs: plan
     runs-on: ${{ matrix.runner }}
-    # PER-PLATFORM, because the two failure modes are different. A linux build that hangs is a build
-    # problem and 60 minutes is a fair rope; a macOS job that has not started is a LABEL problem, and
-    # every minute past the first few is spent learning nothing.
-    timeout-minutes: ${{ matrix.timeout }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
-            timeout: 60
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
-            timeout: 60
           - platform: darwin/amd64
             runner: macos-15-intel
-            timeout: 20
           - platform: darwin/arm64
             runner: macos-14
-            timeout: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -468,6 +466,27 @@ jobs:
   images:
     name: images ${{ matrix.arch }}
     needs: [plan, binaries]
+    # A macOS RESULT MUST NOT DECIDE WHETHER CONTAINER IMAGES GET BUILT, and twice it did.
+    #
+    # `needs: [plan, binaries]` with the default `if` means every leg of that matrix must SUCCEED, so
+    # a macOS runner that was never allocated (`macos-13`, retired) and then one that was cancelled by
+    # too short a cap both skipped this job — and with it `manifests`, `pin` and `pull`. Two dispatches
+    # published eight mirrored third-party images and zero kontra-owned ones, for a reason that had
+    # nothing to do with any of them.
+    #
+    # These builds consume `kontra_<version>_linux_<arch>.tar.gz` and nothing else: `Dockerfile.
+    # appliance` takes the linux tarball as a `--build-arg` and the other three take no tarball at
+    # all. A darwin artifact is not an input here, so a darwin failure is not a reason to stop.
+    #
+    # `needs` IS KEPT, so this still WAITS for the matrix and the linux artifacts exist before the
+    # download. What changes is only that a non-success is no longer fatal. `plan` is still required
+    # explicitly — it computes the version, the registry and the image names, and without it there is
+    # nothing to build. If the LINUX legs are what failed, the `ls` in the build step below fails
+    # loudly on a missing tarball, which is the honest place for that error.
+    #
+    # NOT `always()`: that would run this after somebody cancels the run. `!cancelled()` keeps a
+    # cancel meaning cancel.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
