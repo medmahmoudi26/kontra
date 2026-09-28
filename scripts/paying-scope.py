@@ -73,10 +73,23 @@ def main() -> None:
                     help="one header line stamped on every desync request, e.g. "
                          "'X-Bug-Bounty: HackerOne-medmahmoudi'. REPEAT the flag for more; there "
                          "is deliberately no in-string separator (see _header_block).")
+    ap.add_argument("--exclude", action="append", default=[], dest="excluded",
+                    help="a program handle to leave out of the scope entirely. REPEAT the flag "
+                         "for more. An excluded program is not written, not crawled and not "
+                         "probed — it is as if the platform never listed it.")
     ap.add_argument("--out", required=True, help="path prefix for the two JSONL files")
     args = ap.parse_args()
 
     block = _header_block(args.headers)
+    # EXCLUSIONS ARE APPLIED HERE, BEFORE ANYTHING IS CLASSIFIED, so an excluded program cannot
+    # reach a crawler or a scanner by any path — not through `scope`, not through the wildcard
+    # expansion, not through a stale row somebody re-imports next week. Handles are compared
+    # case-insensitively because that is how a human types one.
+    #
+    # THE COUNT IS PRINTED even when it is zero. A scope that silently dropped a program nobody
+    # asked it to drop, or silently kept one somebody did, is the same failure in two directions —
+    # and this file is the authorisation list, which is the one place to be loud.
+    omit = {h.strip().lower() for h in args.excluded if h.strip()}
     cur = connect().cursor()
     cur.execute(
         """SELECT p.handle, t.target, t.category, t.in_scope, t.is_bbp,
@@ -99,6 +112,9 @@ def main() -> None:
             continue
         kind, seed = classify(target)
 
+        if handle.lower() in omit:
+            dropped["excluded"] += 1
+            continue
         if not in_scope:
             excluded.append({
                 "program": handle, "target": target, "kind": kind,
@@ -143,6 +159,12 @@ def main() -> None:
 
     kinds = Counter(r["kind"] for r in scope)
     progs = {r["program"] for r in scope}
+    if omit:
+        print(f"  OMITTED {len(omit)} program(s) by request: {', '.join(sorted(omit))}",
+              file=sys.stderr)
+        still = sorted(omit & {r["program"].lower() for r in scope})
+        if still:
+            sys.exit(f"REFUSING: {', '.join(still)} was excluded and is still in the scope")
     print(f"{args.platform}: {len(progs)} program(s), {len(scope)} scope row(s)", file=sys.stderr)
     for k in sorted(kinds):
         print(f"  {k:14} {kinds[k]}", file=sys.stderr)
