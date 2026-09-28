@@ -1231,6 +1231,30 @@ def _close_retry():
     return RetryPolicy(maximum_attempts=3)
 
 
+def _publish_retry():
+    """A bounded retry for the publish, for the same reason the close has one.
+
+    WHY A CEILING AT ALL, when a publish really should succeed. Temporal's default is UNLIMITED
+    attempts, and a publish can fail for a reason that never improves: the materializer holds a
+    node's whole insert in ONE transaction, and uncommitted rows cannot be evicted or spilled, so
+    a large enough node fails on memory identically forever. campaign-1790599185 sat on attempt 40+
+    of the same batch, each attempt raising the same `Out of Memory Error` at ~95% of whatever
+    ceiling it was given. An activity that cannot succeed and will not stop is worse than one that
+    fails: `surface` ALREADY handles a lost batch — it logs `crawl batch voided in lane N — that
+    scope page has no surface` and carries on — but that path only runs when the activity gives up.
+    Unbounded retries turn a recoverable lost page into a permanently wedged program, and because
+    `campaign` waits on every program before it starts hunting, one wedge stalls the whole run.
+
+    EIGHT, NOT THREE. A publish is worth more perseverance than a close: it carries rows nobody
+    else holds, and its common failures (a busy materializer, a transient catalog error) really do
+    clear. Eight attempts with the default backoff spends several minutes on a blip and still gives
+    up long before it can hold a 462-program campaign open.
+    """
+    from temporalio.common import RetryPolicy
+
+    return RetryPolicy(maximum_attempts=8)
+
+
 
 async def _resolved_ref(batch: "Batch") -> Mapping[str, Any]:
     """The ref to hand the next Method — dereferenced when this Batch is another Method's output.
@@ -1301,7 +1325,7 @@ KONTRA_TAG_ATTRIBUTE = "KontraTag"
 
 async def _publish_batch(
     name: str, version: str, batch: "Batch", timeout: timedelta
-) -> int:
+) -> "tuple[int, str]":
     """Append one Batch's rows to the named Dataset and return how many landed — the one write
     to the lake, shared by `DatasetWriter.publish` and `DatasetHandle.publish` so the open-writer
     and bare-handle destinations a Method call accepts (ADR 0028 §2) go through byte-identical
@@ -1317,7 +1341,7 @@ async def _publish_batch(
     if not isinstance(batch, Batch):
         raise TypeError(f"publish takes a Batch, got {type(batch).__name__}")
     if not batch.n:
-        return 0
+        return 0, ""
 
     from temporalio import workflow
 
@@ -1334,8 +1358,19 @@ async def _publish_batch(
         },
         task_queue=DATASET_QUEUE,
         start_to_close_timeout=timeout,
+        # Bounded — see `_publish_retry`. Without this the activity inherits Temporal's unlimited
+        # default and a batch that can never be materialized retries until somebody notices.
+        retry_policy=_publish_retry(),
     )
-    return int(out.get("rows") or 0)
+    # `dt` COMES BACK FROM THE ORCHESTRATOR AND IS NEVER RECOMPUTED HERE.
+    #
+    # It is the partition these rows landed in, and a caller that wants to read back only its own
+    # rows needs exactly this string. Deriving it on this side would mean a second spelling of
+    # `dtPartition` (control/orchestrator/src/data/parquet.ts) — second-precision, colons
+    # substituted, minted from the SERVER's run_started_at — and a version that differs by one
+    # character does not raise. It matches no partition and returns zero rows, which reads as "the
+    # run produced nothing". So the format has one owner and this is a passenger.
+    return int(out.get("rows") or 0), str(out.get("dt") or "")
 
 
 async def _publish_to(destination: Any, batch: "Batch") -> None:
@@ -1454,6 +1489,10 @@ class DatasetWriter:
         self.version = version
         self._timeout = timeout
         self.rows = 0
+        #: The partition this writer's rows landed in, learned from the first publish and never
+        #: computed here — see `_publish_batch`. Empty until something has been written. A caller
+        #: that wants to read back only what it wrote passes this to `catalog.dataset(name, dt=…)`.
+        self.dt = ""
         self._closed = False
         #: The author's tag (ADR 0029 §4), declared on the destination via `dataset(name, tag=…)`
         #: and applied ONCE — the first publish writes the record and mirrors to `KontraTag`, and
@@ -1520,7 +1559,8 @@ class DatasetWriter:
         first publish; `_apply_tag_once` keeps a streaming, per-chunk publish from re-paying it.
         """
         await self._apply_tag_once()
-        added = await _publish_batch(self.name, self.version, batch, self._timeout)
+        added, dt = await _publish_batch(self.name, self.version, batch, self._timeout)
+        self.dt = dt or self.dt
         self.rows += added
         return added
 
@@ -1673,6 +1713,24 @@ class DatasetHandle:
         self.tag = tag
         self._tagged = False
 
+    def _learn_dt(self, dt: str) -> None:
+        """Remember the partition a publish through this handle landed in.
+
+        A **Dataset** several **Runs** append to holds everybody's rows, so the natural next thing
+        a Method does — read back what it just wrote — reads everybody's. `self.dt` is already the
+        read scope (`scope["dt"] = self.dt` below), it just had no way to be filled in except by
+        the author typing a partition string they had no way to know.
+
+        Now a publish teaches it, so a handle that has written is automatically scoped to its own
+        run's partition and needs no author change at all.
+
+        AN EXPLICIT `dt=` ALWAYS WINS. A caller who addressed a partition on purpose is reading
+        someone else's rows deliberately — a later sweep comparing itself against an earlier one —
+        and a publish must not quietly retarget them. So this fills a vacancy and never overwrites.
+        """
+        if dt and not self.dt:
+            self.dt = dt
+
     def __repr__(self) -> str:  # pragma: no cover - debugging affordance
         scope = f"@{self.version}" if self.version else ""
         return f"<kontra dataset {self.name}{scope}>"
@@ -1699,7 +1757,9 @@ class DatasetHandle:
         `_publish_batch`, so a row's Machine and Actor version do not depend on which destination
         form the caller reached for. An author's `tag` (ADR 0029 §4) is applied once here too."""
         await self._apply_tag_once()
-        return await _publish_batch(self.name, self.version, batch, timeout)
+        rows, dt = await _publish_batch(self.name, self.version, batch, timeout)
+        self._learn_dt(dt)
+        return rows
 
     async def _apply_tag_once(self) -> None:
         """Write the record and mirror the tag, at most once for this handle — the record write
@@ -1815,6 +1875,7 @@ class DatasetHandle:
         query: str = "",
         force_size: bool = False,
         start: int = 0,
+        via: tuple[str, str] = ("", ""),
         timeout: timedelta = timedelta(minutes=5),
     ) -> AsyncIterator[Batch]:
         """Page this Dataset into Batches — the caller's loop, one page at a time.
@@ -1824,6 +1885,12 @@ class DatasetHandle:
 
         Each yielded Batch is a REF. No row enters your workflow, so a 40k-unit dataset costs
         your history a handful of ~110-byte refs rather than the payload (ADR 0007).
+
+        `via=(actor, version)` is what makes `batch.rows()` work on the result. Dereferencing a ref
+        is `kontra.fetch_blob`, which only an ACTOR HOST registers, so a page with no actor on it
+        has no queue to ask — see the note at the yield. Name an Actor that is currently serving
+        and the rows come back; leave it unset when the page is going straight into a Method, which
+        is almost always.
 
         `order_by` IS REQUIRED, and it is a correctness requirement rather than a nicety: a
         materialized dataset stamps no row id, so LIMIT/OFFSET over it has no defined row order
@@ -1885,6 +1952,13 @@ class DatasetHandle:
                 },
                 task_queue=DATASET_QUEUE,
                 start_to_close_timeout=timeout,
+                # Bounded for the same reason the publish is — see `_publish_retry`. A read can
+                # fail permanently too: a Dataset whose catalog still lists a Parquet file the
+                # object store no longer holds answers `HTTP 404 ... NoSuchKey` on EVERY attempt,
+                # and no number of retries conjures the bytes back. campaign-1790599185 had three
+                # programs stuck this way at once — visa on attempt 111, aig-bbp 67, manulife 12 —
+                # each reading a `dt=2026-09-20` partition orphaned by the 2026-09-28 lake wipe.
+                retry_policy=_publish_retry(),
             )
             n = int(page.get("n") or 0)
             if first and n == 0:
@@ -1895,7 +1969,21 @@ class DatasetHandle:
                 )
             first = False
             if n:
-                yield Batch.from_ref(page.get("ref") or {})
+                # `via` NAMES WHO CAN DEREFERENCE THE PAGE, and without it `rows()` is unusable.
+                #
+                # A page is a REF, and turning one back into rows is `kontra.fetch_blob` — an
+                # activity the ACTOR HOST registers, on `<actor>-<version>`. A Dataset page has no
+                # actor, so `Batch._fetch` built the queue name from two empty strings and
+                # scheduled onto the literal `"-shared"`. Nothing polls that: the activity sits
+                # there, the workflow waits on it forever, and the only symptom is a run that
+                # stops making progress with no error anywhere. Measured on campaign-1790561012,
+                # which hung on its own program list.
+                #
+                # So the caller names an Actor it knows is serving — any of them; the blob plane is
+                # shared and every actor host registers the same fetch. Unset keeps the old
+                # behaviour, which is correct for the overwhelmingly common case: pass the page
+                # straight to a Method and never look inside it.
+                yield Batch.from_ref(page.get("ref") or {}, actor=via[0], version=via[1])
             if page.get("done", True):
                 return
             offset += n

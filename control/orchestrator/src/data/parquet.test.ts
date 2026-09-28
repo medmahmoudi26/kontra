@@ -322,9 +322,24 @@ describe('writeDatasetParquet — integrity', () => {
     ).rejects.toThrow();
   });
 
-  it('leaves NO partial rows behind when a later batch fails', async () => {
-    // All-or-nothing per node. A first batch that committed while a second failed would be
-    // a `failed` status over rows that are actually queryable — the worst of both.
+  it('KEEPS the batches that committed when a later batch fails, and resumes from them', async () => {
+    /*
+     * THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is the point.
+     *
+     * It read "leaves NO partial rows behind when a later batch fails — all-or-nothing per node",
+     * and that guarantee is what one `BEGIN`…`COMMIT` around every batch bought. It cost the
+     * largest memory consumer in this system: uncommitted rows cannot be evicted or spilled, so
+     * `batchSize` bounded nothing. Measured on campaign-1790599185, 1.4 GiB/1.4 GiB against a
+     * 1536MB `memory_limit` from ~4 MB of source objects.
+     *
+     * The old comment's fear — "a `failed` status over rows that are actually queryable" — is real
+     * and is answered somewhere better. A **Dataset** is `open` while a **Run** appends, `sealed`
+     * when the caller declares it complete, and `abandoned` if the **Run** died first, so a partial
+     * **Dataset** can never be read as a finished one. That holds through `kill -9`, which a
+     * transaction does not.
+     *
+     * So: committed batches SURVIVE, and the retry does not double-insert them.
+     */
     const good = Array.from({ length: 3 }, (_, i) => ctx.unit(`u${i}.json`, [{ host: `h${i}` }]));
     const src = ctx.manifest([...good, { $ref: { key: 'zz-gone.json', sha256: 'a'.repeat(64), size: 1 } }]);
     await expect(
@@ -332,16 +347,94 @@ describe('writeDatasetParquet — integrity', () => {
     ).rejects.toThrow(/missing/);
 
     const tbl = safeName(SEL.actor);
-    const exists = await query(
-      ctx,
-      `SELECT count(*) FROM (SHOW ALL TABLES) WHERE database='${LAKE}' ` +
-        `AND schema='${OUTPUT_SCHEMA}' AND name='${tbl}'`
+    // The first batch (u0, u1) committed; the second (u2 + the missing ref) did not.
+    const after = await query(ctx, `SELECT count(*) FROM ${T(tbl)}`);
+    expect(Number(after[0]![0])).toBe(2);
+
+    // AND THE RETRY IS NOT A SECOND INSERT. Same selector, same manifest — so the same publish —
+    // which reads the mark, skips step 1, and dies on step 2 again. Four rows here would mean the
+    // per-batch commit had traded an OOM for silent duplication.
+    await expect(
+      writeDatasetParquet(ctx.store, SEL, { ...ctx.cfg, batchSize: 2, sourceUri: src })
+    ).rejects.toThrow(/missing/);
+    const retried = await query(ctx, `SELECT count(*) FROM ${T(tbl)}`);
+    expect(Number(retried[0]![0])).toBe(2);
+  });
+
+  it('closes a batch on BYTES, not only on unit count', async () => {
+    /*
+     * WHY THIS TEST EXISTS: `campaign-smoke-1790626548`, program `bumble`, 39 assets — one of the
+     * SMALLEST programs in the set — hit the same `1.4 GiB/1.4 GiB` wall as the 4,098-unit node
+     * that motivated the per-batch commit. Selecting smaller programs could never have helped,
+     * because `batchSize` counts UNIT OBJECTS and a unit is an author's record: 256 of them is
+     * kilobytes for a DNS sweep and hundreds of megabytes for a crawl carrying HTTP bodies.
+     *
+     * So a batch closes on units OR bytes. Six fat units under a count limit of 256 and a byte
+     * budget of two units' worth must produce three steps, not one.
+     */
+    const fat = 'x'.repeat(4096);
+    const units = Array.from({ length: 6 }, (_, i) =>
+      ctx.unit(`fat${i}.json`, [{ host: `h${i}`, body: fat }])
     );
-    // Either the table was never created, or it exists and holds nothing for this run.
-    if (Number(exists[0]![0]) > 0) {
-      const rows = await query(ctx, `SELECT count(*) FROM ${T(tbl)}`);
-      expect(Number(rows[0]![0])).toBe(0);
-    }
+    const src = ctx.manifest(units);
+
+    const out = await writeDatasetParquet(ctx.store, SEL, {
+      ...ctx.cfg,
+      batchSize: 256, // deliberately not the limit that bites
+      batchBytes: 9000, // ~two units' worth of source
+      sourceUri: src,
+    });
+    expect(out.rows).toBe(6);
+
+    // Three steps, so the byte budget — not the count — decided the batching.
+    const steps = await query(
+      ctx,
+      `SELECT max(steps_done) FROM ${LAKE}.kontra_internal."publish_progress"`
+    );
+    expect(Number(steps[0]![0])).toBe(3);
+  });
+
+  it('never produces an empty batch when one unit exceeds the whole byte budget', async () => {
+    // The degenerate case the loop has to survive: if a single unit is larger than the budget,
+    // taking "as many as fit" takes zero and the walk never advances. One oversized unit is a
+    // batch of one — the smallest step that still makes progress.
+    const huge = 'y'.repeat(20_000);
+    const src = ctx.manifest([
+      ctx.unit('huge.json', [{ host: 'big', body: huge }]),
+      ctx.unit('small.json', [{ host: 'small' }]),
+    ]);
+    const out = await writeDatasetParquet(ctx.store, SEL, {
+      ...ctx.cfg,
+      batchBytes: 1024,
+      sourceUri: src,
+    });
+    expect(out.rows).toBe(2);
+  });
+
+  it('resumes a publish that already finished without inserting anything twice', async () => {
+    // The activity that commits every step and then dies before its result reaches Temporal. The
+    // retry must be a no-op that still REPORTS the node's total, not a re-insert and not a zero.
+    const units = Array.from({ length: 5 }, (_, i) => ctx.unit(`r${i}.json`, [{ host: `r${i}` }]));
+    const src = ctx.manifest(units);
+
+    const first = await writeDatasetParquet(ctx.store, SEL, {
+      ...ctx.cfg,
+      batchSize: 2,
+      sourceUri: src,
+    });
+    expect(first.rows).toBe(5);
+
+    const again = await writeDatasetParquet(ctx.store, SEL, {
+      ...ctx.cfg,
+      batchSize: 2,
+      sourceUri: src,
+    });
+    expect(again.rows).toBe(5);
+    // It reports the total it carried, and it fetched nothing to do it.
+    expect(again.objectGets).toBe(1);
+
+    const rows = await query(ctx, `SELECT count(*) FROM ${T(safeName(SEL.actor))}`);
+    expect(Number(rows[0]![0])).toBe(5);
   });
 });
 
