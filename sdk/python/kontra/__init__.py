@@ -37,16 +37,34 @@ THEY ARE NOT INTERCHANGEABLE. A LOG LINE costs no history, is not capped, and re
 where it can be queried across runs — and it is still there tomorrow. `ask` costs history AND STOPS
 THE RUN until a human moves it. Confusing the two turns a status line into a stalled run.
 
-THERE IS NO `progress` AND NO `stream`, and the reason is not the one that removed the wrappers
-below. They were not redundant with a log line — they published TYPED STATE, which a sentence
-genuinely cannot carry. What they published onto was a Temporal Workflow Stream, which lives in the
-WORKFLOW'S MEMORY and dies with the workflow. So everything sent through them was unreadable the
-moment the run ended, and a run that takes under a minute is already over by the time somebody has
-opened a browser and signed in: measured on the canary, the console pane's ordinary state was an
-empty box. A typed channel nobody can read is worse than no channel, because it looks like one.
+THERE IS NO `stream`, and the reason is not the one that removed the wrappers below. It was not
+redundant with a log line — it published TYPED STATE, which a sentence genuinely cannot carry. What
+it published onto was a Temporal Workflow Stream, which lives in the WORKFLOW'S MEMORY and dies with
+the workflow. So everything sent through it was unreadable the moment the run ended, and a run that
+takes under a minute is already over by the time somebody has opened a browser and signed in:
+measured on the canary, the console pane's ordinary state was an empty box. A typed channel nobody
+can read is worse than no channel, because it looks like one.
 
-They come back when there is a durable store under them. `KontraFlow` went with them — it existed
-only to construct the stream at workflow-init time — so a workflow now inherits from nothing.
+`KontraFlow` went with it — it existed only to construct the stream at workflow-init time — so a
+workflow now inherits from nothing.
+
+`progress` CAME BACK, on the condition that removal set: *they come back when there is a durable
+store under them.* There is one, and it is the store this header recommends two paragraphs up — a
+log record's `extra=` fields are not prose, and the formatter in `runtime/python/internals/logs.py`
+writes each scalar as its own JSON key for vlagent to parse and VictoriaLogs to index, under a
+retention that has nothing to do with Temporal's.
+
+So the verb no longer owns a transport. It owns a SCHEMA, and the schema was already in production
+undeclared: MEASURED across six workflows, 68 hand-built logger calls carrying `incomplete` ×27,
+`axis` ×27, `phase` ×20, `program` ×16 — with the console's rail already filtering on a field that
+no code defined.
+
+    from kontra import progress
+
+    progress("crawl", "pages", total=380, program=program)            # the denominator, up front
+    progress("crawl", "pages", done=i, total=380, program=program)    # where the Run has got to
+
+The existing log lines stay. An author who emits nothing behaves exactly as they do today.
 
 THERE IS NO `note` AND NO `partial` either. Both were wrappers over the logger and both are gone:
 `note` was `logger.info`, `partial` was `logger.warning` plus one field. `workflow.logger` is the
@@ -106,9 +124,13 @@ imports `secrets` lazily, inside `.get()`, so the network half stays out of the 
 
 `say` WAS A THIRD SUCH MODULE and is deleted. It held `progress` and `KontraFlow`, and nothing
 imports it any more. `narrate.say` and `speak` were removed by ADR 0050 §2; `note` and `partial`
-followed them; `progress`, `stream` and `KontraFlow` followed those. A caller of any of them
-becomes `workflow.logger.info(...)`, or `workflow.logger.warning(..., extra={"incomplete": True})`
-where the sentence is a claim about the RESULT rather than about where the run has got to.
+followed them; `progress`, `stream` and `KontraFlow` followed those. A caller of `speak`, `note` or
+`partial` becomes `workflow.logger.info(...)`, or `workflow.logger.warning(..., extra={"incomplete":
+True})` where the sentence is a claim about the RESULT rather than about where the run has got to.
+
+`progress` now lives in `kontra/facts.py` — the module, not `say`, and the schema, not the stream.
+It is NOT called `progress.py`, because a submodule of that name would bind onto this package and
+shadow the verb the moment anything imported it; that file's header explains the order-dependence.
 """
 
 from kontra import catalog, fleet
@@ -128,7 +150,7 @@ from kontra.version import CONTRACT_VERSION
 #: `dir(kontra)` listed a name that raised, and `from kontra import *` failed outright. A surface
 #: that names something it will not provide is worse than one that never mentioned it. That is the
 #: mistake `progress`/`stream`/`KontraFlow` were removed from all three places to avoid repeating.
-_VERBS = ("ask",)
+_VERBS = ("ask", "progress")
 
 #: The two INPUT TYPES an author declares on a Method — `takes=File`. Lazy for the same reason the
 #: verbs are, and a different dependency: `blobs` imports pydantic at module scope, which
@@ -158,6 +180,15 @@ def __getattr__(name: str) -> object:
         from kontra.hitl import ask
 
         return ask
+    if name == "progress":
+        # Lazy for the same reason `ask` is, and a milder version of it: `progress` imports
+        # temporalio INSIDE its call rather than at module scope, so this one is really about
+        # keeping the two verbs resolved the same way — a reader who finds one here should find
+        # the other, and a name in `_VERBS` that `__getattr__` did not handle is the exact
+        # half-done removal the comment on `_VERBS` is about.
+        from kontra.facts import progress
+
+        return progress
     if name in _INPUT_TYPES:
         from kontra import blobs
 
@@ -189,12 +220,22 @@ __all__ = [
     # `workflow.logger.warning(..., extra={"incomplete": True})` replaced them, and `incomplete` is
     # still what the console's logs rail filters on independently of the level.
     #
-    # `progress`, `stream` and `KontraFlow` followed them, and for a different reason: not that a
-    # log line could say the same thing, but that NOTHING COULD READ THEM. They published onto a
-    # Temporal Workflow Stream, which lives in the workflow's memory and dies with the workflow —
-    # so a run under a minute long had nothing left to subscribe to by the time a browser had
-    # loaded. They come back when there is a durable store under them.
+    # `stream` and `KontraFlow` went for a different reason: not that a log line could say the same
+    # thing, but that NOTHING COULD READ THEM. They published onto a Temporal Workflow Stream, which
+    # lives in the workflow's memory and dies with the workflow — so a run under a minute long had
+    # nothing left to subscribe to by the time a browser had loaded. They come back when there is a
+    # durable store under them.
     "ask",
+    # `progress` IS THE ONE THAT CAME BACK, on the condition that sentence set. It no longer owns a
+    # transport — it owns the SCHEMA, and rides the log record, whose `extra=` fields the formatter
+    # turns into indexed VictoriaLogs keys under a retention unrelated to Temporal's. The store the
+    # old verb needed was the one the header was already recommending four lines above it.
+    #
+    # It is not the wrapper-over-the-logger that `note` and `partial` were, either: those added a
+    # dict to a call the author already knew how to spell, whereas 68 hand-built lines across six
+    # workflows were measured spelling ONE undeclared schema six different ways, with the console's
+    # rail already filtering on a field none of them defined.
+    "progress",
     "catalog",
     "fleet",
     "param",

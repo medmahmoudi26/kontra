@@ -120,6 +120,33 @@ async function runWorker(): Promise<void> {
     // moment later — whereas a converge racing an `up` on the same Machine is a Machine being
     // rebuilt under a session that was just created on it.
     maxConcurrentActivityTaskExecutions: 1,
+    /**
+     * HOW OFTEN A CONVERGE'S HEARTBEAT DETAILS REACH THE SERVER — 2 seconds, not 60.
+     *
+     * `stackUp` heartbeats `{op, urn}` on every one of Pulumi's `resourcePreEvent`s, and that detail
+     * is the only thing on this control plane that can say which resource the engine is on. The SDK
+     * THROTTLES heartbeats, and the throttle is derived rather than defaulted: with an
+     * `ActivityOptions.heartbeatTimeout` set — `workflows/stack.ts` sets 2 minutes — it is
+     * `heartbeatTimeout * 0.8`, capped by `maxHeartbeatThrottleInterval`, whose default is 60 s. So
+     * every detail between one flush and the next is buffered and superseded, and the "live" cursor
+     * was a once-a-minute sample.
+     *
+     * MEASURED on `kontra-docker-fleet/cursorproof`, a five-second converge creating five resources,
+     * polled at 250 ms: exactly ONE cursor was ever visible — `pulumi:pulumi:Stack`, the first
+     * resource — and the four Containers that followed never appeared at all. On a DigitalOcean
+     * Fleet, where a converge runs for minutes, the same throttle means a cursor that names the
+     * resource from up to a minute ago while claiming to be current.
+     *
+     * THE COST IS ONE RPC EVERY TWO SECONDS, PER IN-FLIGHT CONVERGE, AND THERE IS AT MOST ONE:
+     * `maxConcurrentActivityTaskExecutions: 1` above. Half an RPC a second against the cluster that
+     * is already serving this converge's workflow tasks.
+     *
+     * IT DOES NOT WEAKEN THE TIMEOUT. `heartbeatTimeout` stays 2 minutes and keeps its meaning — the
+     * throttle governs only how often buffered details are flushed, so a lower value makes a wedged
+     * converge detectable sooner, never later.
+     */
+    maxHeartbeatThrottleInterval: '2s',
+    defaultHeartbeatThrottleInterval: '2s',
     // NAMED. This is the one Worker that holds the cloud credential, so "which Worker converged
     // this stack" is a question with an auditor behind it — and the answer has to be a value
     // Temporal recorded on `ActivityTaskStarted`, not one reconstructed from a deploy log.

@@ -26,6 +26,7 @@ import {
   queryEngineOpens,
   resetQueryEngines,
   runQuery,
+  viewLayerBuilds,
 } from './queryEngine';
 import { LAKE, STANDALONE_SCHEMA, lakeConnection, resetLakeConnections, resolveLakeConfig, writeDatasetParquet, type LakeConfig } from './parquet';
 
@@ -62,11 +63,18 @@ async function writeOutput(ctx: Ctx, results: unknown[]): Promise<void> {
     $ref: { key: name, sha256: createHash('sha256').update(body).digest('hex'), size: body.length },
   };
   const src = join(mkdtempSync(join(tmpdir(), 'kontra-qsrc-')), 'blob.json');
-  writeFileSync(src, JSON.stringify({ results: [ref], failures: [] }));
+  const manifest = JSON.stringify({ results: [ref], failures: [] });
+  writeFileSync(src, manifest);
   await writeDatasetParquet(
     ctx.store,
     {
-      sha256: 'unused',
+      // THE MANIFEST'S OWN ADDRESS, and it used to be the literal `'unused'`. That was harmless
+      // for exactly as long as nothing read it: `publishIdentity` now digests the whole selector
+      // to decide whether a publish is a RETRY, so a helper that writes a different manifest under
+      // a constant address is claiming every write is the same write. It was — measured — and the
+      // three freshness tests below failed on a lake that had silently stopped taking rows. The
+      // production caller passes `input.sha256` (activities/datasets.ts), so this now matches it.
+      sha256: createHash('sha256').update(manifest).digest('hex'),
       actor: 'crawl4ai',
       version: '1.0.0',
       runId: 'r1',
@@ -545,6 +553,119 @@ describe('freshness against a file catalog', () => {
     await q();
     await q();
     expect(queryEngineOpens() - before).toBe(2); // one commit, one rebuild — not one per query
+  });
+});
+
+/**
+ * THE BARE-NAME LAYER IS BUILT ON A COMMIT, NOT ON A QUERY (issue 01).
+ *
+ * `refreshViews` used to run `listDatasets` — around a second against the live catalog — plus one
+ * `CREATE OR REPLACE VIEW` per dataset, of which this install has 152, before every single query.
+ * `SELECT 1` paid all of it. These tests hold the cache to the property the per-query rebuild was
+ * protecting: a Dataset that appears mid-session must still resolve by bare name on the next query.
+ */
+describe('the bare-name view layer', () => {
+  let ctx: Ctx;
+  beforeEach(() => {
+    resetLakeConnections();
+    resetQueryEngines();
+    ctx = lake();
+  });
+
+  it('builds once across many queries at one catalog generation, and again after it moves', async () => {
+    await writeOutput(ctx, [{ url: 'a' }]);
+    const before = viewLayerBuilds();
+
+    const q = () => runQuery(ctx.store, 'SELECT 1', { lake: ctx.cfg, ...OPEN });
+    await q();
+    await q();
+    await q();
+    // The acceptance criterion, as a number: `SELECT 1` does not scale with the dataset count,
+    // because after the first query it touches neither `listDatasets` nor a single CREATE VIEW.
+    expect(viewLayerBuilds() - before).toBe(1);
+
+    await writeOutput(ctx, [{ url: 'b' }]);
+    await q();
+    await q();
+    expect(viewLayerBuilds() - before).toBe(2); // one commit, one rebuild
+  });
+
+  it('resolves a Dataset created after the layer was cached, with no restart', async () => {
+    await writeOutput(ctx, [{ url: 'a' }]);
+    await runQuery(ctx.store, 'SELECT count(*) FROM crawl4ai', { lake: ctx.cfg, ...OPEN });
+
+    await writeList(ctx, 'scope_paid', `SELECT 'a.com' AS host`);
+
+    // Not `querySchema`, which reads the cached listing — the bare NAME has to resolve, which is
+    // the thing a view provides and the thing the rebuild existed to guarantee.
+    const res = await runQuery(ctx.store, 'SELECT host FROM scope_paid', { lake: ctx.cfg, ...OPEN });
+    expect(res.rows).toEqual([['a.com']]);
+  });
+
+  /**
+   * A DROPPED DATASET STOPS RESOLVING, which is a fix rather than a preservation. `CREATE OR
+   * REPLACE VIEW` only ever adds, so the per-query rebuild left a dropped Dataset's view standing
+   * over a lake table that no longer existed — the operator got "table does not exist" naming the
+   * LAKE table for a bare name `dataset list` had already stopped showing. The layer now drops it.
+   */
+  it('stops resolving a Dataset that has been dropped', async () => {
+    await writeOutput(ctx, [{ url: 'a' }]);
+    await writeList(ctx, 'scope_paid', `SELECT 'a.com' AS host`);
+    expect(
+      (await runQuery(ctx.store, 'SELECT host FROM scope_paid', { lake: ctx.cfg, ...OPEN })).rows
+    ).toEqual([['a.com']]);
+
+    const c = await lakeConnection(ctx.store, resolveLakeConfig(ctx.store, ctx.cfg));
+    await c.run(`DROP TABLE ${LAKE}.${STANDALONE_SCHEMA}."scope_paid"`);
+
+    await expect(
+      runQuery(ctx.store, 'SELECT host FROM scope_paid', { lake: ctx.cfg, ...OPEN })
+    ).rejects.toThrow(/scope_paid/);
+  });
+
+  /**
+   * THE ONE A CACHE WOULD HAVE BROKEN SILENTLY. `applyScope` narrows ONE dataset's view with a
+   * partition-pruning WHERE, and the per-query rebuild washed it out for free. A cached layer has
+   * no such eraser, so an unscoped query following a scoped one would have answered the unscoped
+   * question through the scoped view: fewer rows, no error, nothing to notice.
+   */
+  it('does not leak a scope into the query that follows it', async () => {
+    await writeOutput(ctx, [{ url: 'a' }]);
+    const all = await runQuery(ctx.store, 'SELECT count(*) FROM crawl4ai', { lake: ctx.cfg, ...OPEN });
+
+    const scoped = await runQuery(ctx.store, 'SELECT count(*) FROM crawl4ai', {
+      lake: ctx.cfg,
+      scope: { name: 'crawl4ai', version: 'no-such-version' },
+      ...OPEN,
+    });
+    expect(scoped.rows).toEqual([[0]]); // the scope pruned every partition away
+
+    const again = await runQuery(ctx.store, 'SELECT count(*) FROM crawl4ai', { lake: ctx.cfg, ...OPEN });
+    expect(again.rows).toEqual(all.rows);
+  });
+
+  it('still prunes to a partition when a scope IS asked for', async () => {
+    await writeOutput(ctx, [{ url: 'a' }]);
+    const scoped = await runQuery(ctx.store, 'SELECT count(*) FROM crawl4ai', {
+      lake: ctx.cfg,
+      scope: { name: 'crawl4ai', version: '1.0.0' },
+      ...OPEN,
+    });
+    expect(scoped.rows).toEqual([[1]]);
+  });
+
+  /** Standalone wins, matching `kontra dataset query` — and it must keep winning on a CACHE HIT,
+   *  where nothing re-sorts the datasets because nothing rebuilds. */
+  it('keeps standalone winning a name collision across a cached layer', async () => {
+    await writeOutput(ctx, [{ url: 'a' }]);
+    const c = await lakeConnection(ctx.store, resolveLakeConfig(ctx.store, ctx.cfg));
+    await c.run(`CREATE SCHEMA IF NOT EXISTS ${LAKE}.${STANDALONE_SCHEMA}`);
+    await c.run(`CREATE OR REPLACE TABLE ${LAKE}.${STANDALONE_SCHEMA}."crawl4ai" AS SELECT 'list' AS src`);
+
+    const first = await runQuery(ctx.store, 'SELECT src FROM crawl4ai', { lake: ctx.cfg, ...OPEN });
+    expect(first.rows).toEqual([['list']]);
+    const second = await runQuery(ctx.store, 'SELECT src FROM crawl4ai', { lake: ctx.cfg, ...OPEN });
+    expect(second.rows).toEqual([['list']]);
   });
 });
 

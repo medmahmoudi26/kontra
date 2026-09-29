@@ -48,8 +48,14 @@ export function registerRowStreamRoute(
   // of what is actually committed, not a side channel. Its own ring and cap, deliberately not the
   // `/api/events` state ring (which a large row scan would evict). Nothing is polled until a browser
   // subscribes, and it is torn down with the server.
+  //
+  // `get` IS THE SAME STORE AS `list`, and that identity is the point (issue 05): a row may only be
+  // shown once its blob is committed and listed, so the window cannot report a row the durable path
+  // does not hold. It reads at most `ROW_TAIL_WINDOW` blobs per poll, bounded by
+  // `ROW_TAIL_WINDOW_BYTES`, and re-reads only what is new since the last one.
   const rowTail = new RowTailHub({
     list: (prefix) => store.list(prefix),
+    get: (key) => store.get(key),
     ...(caps.maxRuns !== undefined ? { maxRuns: caps.maxRuns } : {}),
     ...(caps.maxSinks !== undefined ? { maxSinks: caps.maxSinks } : {}),
   });

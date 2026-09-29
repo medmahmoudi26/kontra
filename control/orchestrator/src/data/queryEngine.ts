@@ -61,6 +61,7 @@ import type { ObjectStore } from '../codec/objectStore';
 import { listDatasets, schemaOf, type DatasetColumn, type DatasetInfo } from './datasets';
 import {
   LAKE,
+  META,
   OUTPUT_SCHEMA,
   STANDALONE_SCHEMA,
   catalogFilePath,
@@ -285,6 +286,98 @@ async function engine(store: ObjectStore, cfg: LakeConfig, harden: boolean): Pro
 }
 
 /**
+ * The bare-name views built on ONE connection, and the catalog state they were built from.
+ *
+ * A WeakMap KEYED ON THE CONNECTION, which is what makes the generation half of the invalidation
+ * free rather than something this code has to remember. The views are objects inside that
+ * connection's in-memory database; when {@link catalogGeneration} moves, {@link engine} builds a
+ * new connection, and a new connection has no entry here and none of the views. So "rebuild the
+ * layer whenever the engine is rebuilt" is not a rule enforced anywhere — it is the only thing
+ * that can happen. Nothing to leak either: the entry dies with the connection it describes.
+ */
+interface ViewLayer {
+  /** {@link lakeFingerprint} when these views were built. */
+  fingerprint: string;
+  /** What {@link listDatasets} answered then — reused, so a hit costs no metadata query. */
+  datasets: DatasetInfo[];
+  /** The view names created, so one that has since vanished can be DROPPED rather than left. */
+  names: string[];
+  /** {@link scopeKey} of the scope currently folded into one of those views; `''` for none. */
+  scopeKey: string;
+}
+
+const viewLayers = new WeakMap<DuckDBConnection, ViewLayer>();
+
+/**
+ * How many times the bare-name layer has been BUILT, as opposed to reused.
+ *
+ * The companion to {@link queryEngineOpens}, and it exists for the same reason: the layer used to
+ * be rebuilt unconditionally, so there was nothing to observe. Now there is a condition, and a
+ * condition that silently stops holding costs `listDatasets` (~1 s on the live catalog) plus one
+ * `CREATE OR REPLACE VIEW` per dataset (152 of them) on EVERY query, while still answering
+ * correctly — a regression no assertion about results would catch.
+ */
+let viewBuilds = 0;
+export function viewLayerBuilds(): number {
+  return viewBuilds;
+}
+
+/**
+ * What the lake looks like RIGHT NOW, cheaply enough to ask before every query.
+ *
+ * TWO PROBES, BECAUSE THE TWO CATALOG BACKENDS GO STALE IN OPPOSITE WAYS and neither probe alone
+ * covers both. They are complementary rather than redundant:
+ *
+ *   the TABLE SET (`duckdb_tables()`) moves when a Dataset is created, dropped or renamed. On a
+ *   POSTGRES catalog this is the whole mechanism — every statement asks the server again, so a
+ *   table written a second ago is visible here immediately, and {@link catalogGeneration} answers
+ *   `''` forever because there is no file to stat.
+ *
+ *   the SNAPSHOT ID moves on every commit, including one that only adds a partition to a table
+ *   that already existed — which the table set cannot see. That is what keeps `querySchema`'s
+ *   `version`/`dt` from going stale on a Postgres catalog while the sidebar is open.
+ *
+ * On a FILE catalog both probes are frozen at ATTACH, exactly as {@link catalogGeneration}
+ * describes — and that is precisely the case where the generation has already moved and the
+ * connection this is running on no longer exists. Each backend is covered by the mechanism that
+ * can see it.
+ *
+ * BEST-EFFORT ON THE SNAPSHOT HALF, AND IT FAILS TOWARDS REBUILDING. If the metadata catalog is
+ * not attached under the name this expects, the probe answers a token that cannot match a cached
+ * one, so the layer is rebuilt — the old behaviour, which is slow and right, rather than an
+ * exception thrown from the middle of a query route.
+ */
+async function lakeFingerprint(c: DuckDBConnection, cfg: LakeConfig): Promise<string> {
+  const tables = await c.runAndReadAll(
+    `SELECT schema_name, table_name FROM duckdb_tables() ` +
+      `WHERE database_name = ${lit(LAKE)} ORDER BY schema_name, table_name`
+  );
+  const names = tables
+    .getRows()
+    .map((r) => `${String(r[0])}.${String(r[1])}`)
+    .join(',');
+
+  let snapshot: string;
+  try {
+    const res = await c.runAndReadAll(
+      `SELECT max(snapshot_id) FROM ${META}.${cfg.metaSchema}.ducklake_snapshot`
+    );
+    snapshot = String(res.getRows()[0]?.[0] ?? '');
+  } catch {
+    // Unattached, renamed, or a backend that does not keep this table: answer something no cached
+    // fingerprint can equal, so the caller rebuilds rather than trusting a probe that did not run.
+    snapshot = `?${viewBuilds}`;
+  }
+  return `${snapshot}\0${names}`;
+}
+
+/** The identity of a scope, for comparing the one a layer carries against the one asked for. */
+function scopeKey(scope?: QueryScope): string {
+  if (!scope || (!scope.version && !scope.dt)) return '';
+  return `${scope.name}\0${scope.version ?? ''}\0${scope.dt ?? ''}`;
+}
+
+/**
  * Expose every dataset as a BARE NAME in the default schema, so an operator writes
  * `FROM crawl4ai` rather than `FROM lake.output.crawl4ai`.
  *
@@ -292,9 +385,21 @@ async function engine(store: ObjectStore, cfg: LakeConfig, harden: boolean): Pro
  * because someone who just loaded a list means that list — so a query drafted in the workbench
  * runs unchanged in the CLI, and can be pasted into `kontra dispatch --query`.
  *
- * Rebuilt per query rather than cached: views are catalog-only (no file is opened), a dispatch
- * that finishes mid-session shows up immediately, and there is no invalidation to get wrong.
  * The views live in the writable in-memory database, NOT in the read-only lake.
+ *
+ * ── IT USED TO BE REBUILT PER QUERY, AND THE REASON GIVEN WAS GOOD ──────────────────────────────
+ *
+ * The comment this replaces said: *"Rebuilt per query rather than cached: views are catalog-only
+ * (no file is opened), a dispatch that finishes mid-session shows up immediately, and there is no
+ * invalidation to get wrong."* Every clause of that is true. What it did not price is the scale it
+ * would meet — on the live install the rebuild is `listDatasets` (MEASURED around a second on its
+ * own) plus 152 `CREATE OR REPLACE VIEW` statements, paid by `SELECT 1` as surely as by a scan,
+ * which made the query surface feel like a slow protocol when the cost was ours.
+ *
+ * So the trade is taken the other way and the invalidation is the work: {@link lakeFingerprint}
+ * for what changed inside the catalog, connection identity for what changed about the catalog
+ * itself. A dispatch that finishes mid-session still shows up on the next query, which is the
+ * property the rebuild existed to protect and the one the tests hold this to.
  */
 async function refreshViews(
   c: DuckDBConnection,
@@ -303,11 +408,28 @@ async function refreshViews(
   cfg: LakeConfig,
   scope?: QueryScope
 ): Promise<DatasetInfo[]> {
+  const fingerprint = await lakeFingerprint(c, cfg);
+  const cached = viewLayers.get(c);
+  if (cached && cached.fingerprint === fingerprint) {
+    await rescope(c, cached, scope);
+    return cached.datasets;
+  }
+
+  viewBuilds += 1;
   const datasets = await listDatasets(store, {}, lake);
   await reattachIfStale(c, cfg, datasets);
   const seen = new Set<string>();
-  // standalone first so it wins a name collision, matching the CLI's resolution order.
-  for (const d of [...datasets].sort((a, b) => a.kind.localeCompare(b.kind))) {
+  // STANDALONE FIRST, so it wins a name collision — `cli/dataset_test.go` asserts
+  // "resolution order must be [standalone, output]" and `cli/dataset.go` gives the reason:
+  // an operator who just `dataset create`d a list means that list.
+  //
+  // THIS SORT USED TO SAY `a.kind.localeCompare(b.kind)` AND MEANT THE OPPOSITE. The kinds are
+  // spelled `output` and `standalone`, `o` sorts before `s`, and the first `seen` wins — so the
+  // console resolved a collision to output while the CLI resolved it to standalone, and a query
+  // drafted in the workbench answered a different question when pasted into `kontra dataset
+  // query`. Ranked explicitly rather than re-sorted, so renaming a kind cannot invert it again.
+  const rank = (k: DatasetInfo['kind']): number => (k === 'standalone' ? 0 : 1);
+  for (const d of [...datasets].sort((a, b) => rank(a.kind) - rank(b.kind))) {
     if (seen.has(d.name)) continue;
     seen.add(d.name);
     await c.run(
@@ -315,8 +437,59 @@ async function refreshViews(
         `SELECT * FROM ${LAKE}.${schemaOf(d.kind)}."${d.name.replace(/"/g, '""')}"`
     );
   }
-  if (scope && (scope.version || scope.dt)) await applyScope(c, datasets, scope);
+
+  // A DATASET THAT HAS GONE TAKES ITS VIEW WITH IT. `CREATE OR REPLACE` only ever adds, so a
+  // dropped or renamed Dataset used to leave a view standing over a lake table that no longer
+  // exists — and the operator got DuckDB's "table does not exist" naming the LAKE table, for a
+  // bare name `kontra dataset list` had already stopped showing. Dropping it means the name stops
+  // resolving, which is the honest answer.
+  for (const name of cached?.names ?? []) {
+    if (!seen.has(name)) await c.run(`DROP VIEW IF EXISTS "${name.replace(/"/g, '""')}"`);
+  }
+
+  const layer: ViewLayer = {
+    // Re-probed rather than reused: `reattachIfStale` may have just DETACHed and re-ATTACHed, and
+    // a layer stamped with the pre-reattach fingerprint would miss on the very next query.
+    fingerprint: await lakeFingerprint(c, cfg),
+    datasets,
+    names: [...seen],
+    scopeKey: '',
+  };
+  viewLayers.set(c, layer);
+  await rescope(c, layer, scope);
   return datasets;
+}
+
+/**
+ * Move a cached layer from the scope it carries to the one this query asked for.
+ *
+ * THE PART THAT WOULD HAVE BEEN A SILENT BUG. `applyScope` narrows ONE dataset's view with a
+ * partition-pruning WHERE, and the per-query rebuild used to wash that out for free — the next
+ * query recreated every view unscoped before doing anything else. A cached layer has no such
+ * eraser, so a `--dt 2026-08-03` query followed by an unscoped one would have answered the
+ * unscoped question with the scoped view still in place: fewer rows, no error, no indication.
+ * Two statements at most, and only when the scope actually differs.
+ */
+async function rescope(c: DuckDBConnection, layer: ViewLayer, scope?: QueryScope): Promise<void> {
+  const want = scopeKey(scope);
+  if (want === layer.scopeKey) return;
+
+  if (layer.scopeKey) {
+    const prev = layer.scopeKey.split('\0')[0]!;
+    const d = layer.datasets.find((x) => x.name === prev);
+    if (d) {
+      const q = d.name.replace(/"/g, '""');
+      await c.run(
+        `CREATE OR REPLACE VIEW "${q}" AS SELECT * FROM ${LAKE}.${schemaOf(d.kind)}."${q}"`
+      );
+    }
+  }
+  // Set before the apply, not after: `applyScope` throws for an unknown name or a standalone
+  // list, and a layer that says it is unscoped while carrying a scope is the one state this
+  // cache must never be in. Overstating the scope costs one redundant statement; understating it
+  // costs a wrong answer.
+  layer.scopeKey = want;
+  if (scope && want) await applyScope(c, layer.datasets, scope);
 }
 
 /** Redefine one dataset's view with a partition-pruning WHERE. */
@@ -457,6 +630,95 @@ export async function runQuery(
       elapsedMs: Date.now() - started,
       truncated,
     };
+  } catch (err) {
+    throw friendlyError(err);
+  }
+}
+
+/** One chunk of a streamed result, plus the head that precedes it. */
+export interface QueryStreamSink {
+  head: (columns: DatasetColumn[]) => void | Promise<void>;
+  rows: (rows: unknown[][]) => void | Promise<void>;
+}
+
+/**
+ * Operator SQL with NO ROW CEILING, handed out as it arrives (issue 02).
+ *
+ * ── WHY THE CAP EXISTED AND WHY IT CAN GO ───────────────────────────────────────────────────────
+ *
+ * {@link runQuery} answers a whole JSON body, so every row it returns is alive in V8 at once, and
+ * `QUERY_MAX_ROWS` is what stopped a scan of a real Dataset from becoming the API's heap. The
+ * ceiling was never a statement about the lake — MEASURED against the same DuckLake through
+ * Arrow Flight, the widest table on this install returns 29,825 rows in 316 ms — it was a
+ * statement about buffering. So the fix is to stop buffering rather than to raise the number:
+ * `conn.stream()` yields one chunk at a time and retains nothing, each chunk is written to the
+ * socket and dropped, and the peak is one chunk rather than one result.
+ *
+ * This is the same `stream()`/`fetchChunk()` pair the materializer uses to page unit refs, and it
+ * is here for the same reason it is there — not for speed, but so that the ceiling on what can be
+ * answered stops being the size of a Node heap.
+ *
+ * ── WHAT DOES **NOT** MOVE, AND THE REASON IS THE WHOLE SLICE ───────────────────────────────────
+ *
+ * Execution stays on THIS connection — hardened, `READ_ONLY`, `disabled_filesystems`,
+ * `lock_configuration` — and does not move to Porter, even though Porter is what made the
+ * measurement above. `porter serve` takes twelve flags and not one of them is a sandbox control,
+ * so a statement that is merely read-only is not thereby safe there: `read_text('/etc/passwd')`
+ * and `read_csv('http://169.254.169.254/…')` are both SELECTs, and the header of this file records
+ * that the second one was measured LEAVING THE BOX before `HTTPFileSystem` was banned. Delegating
+ * operator-typed SQL would have traded every control in this module for a wire format.
+ *
+ * Porter still earns its place on SQL this codebase composed, where there is no statement from a
+ * person to defend against. `docs/THREAT_MODEL.md` §4 carries the decision.
+ *
+ * ── OFFSET IS WRAPPED, LIMIT IS THE CALLER'S ────────────────────────────────────────────────────
+ *
+ * An `offset` still wraps the statement, so resuming a long read does not depend on the query
+ * having its own. There is deliberately no `limit`: a caller that wants fewer rows writes one, and
+ * a caller that wants all of them is the reason this function exists.
+ */
+export async function streamQuery(
+  store: ObjectStore,
+  sql: string,
+  opts: { offset?: number } & EngineOptions,
+  sink: QueryStreamSink
+): Promise<{ rows: number; elapsedMs: number }> {
+  const text = sql.trim().replace(/;\s*$/, '');
+  if (!text) throw new Error('no SQL to run');
+  if (!lakeEnabled(store, opts.lake ?? {})) throw new Error('no lake configured');
+
+  const cfg = resolveLakeConfig(store, opts.lake ?? {});
+  let c: DuckDBConnection;
+  try {
+    c = await engine(store, cfg, opts.harden ?? true);
+    await refreshViews(c, store, opts.lake ?? {}, cfg, opts.scope);
+  } catch (err) {
+    throw friendlyError(err);
+  }
+
+  const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+  const started = Date.now();
+  let n = 0;
+  try {
+    const res = await c.stream(
+      offset > 0 ? `SELECT * FROM (${text}) AS _q OFFSET ${offset}` : text
+    );
+    const types = res.columnTypes();
+    await sink.head(res.columnNames().map((name, i) => ({ name, type: String(types[i]) })));
+    for (;;) {
+      const chunk = await res.fetchChunk();
+      if (!chunk || chunk.rowCount === 0) break;
+      // Column-wise out of the chunk and row-wise into the sink: `getColumnValues` is one call per
+      // column rather than one per cell, and the row shape is what every consumer already reads.
+      const cols = Array.from({ length: chunk.columnCount }, (_, i) => chunk.getColumnValues(i));
+      const rows: unknown[][] = [];
+      for (let i = 0; i < chunk.rowCount; i += 1) {
+        rows.push(cols.map((v) => jsonSafe(v[i])));
+      }
+      n += rows.length;
+      await sink.rows(rows);
+    }
+    return { rows: n, elapsedMs: Date.now() - started };
   } catch (err) {
     throw friendlyError(err);
   }
