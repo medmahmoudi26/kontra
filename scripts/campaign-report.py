@@ -663,6 +663,17 @@ GET /search?q=<span class="inj">%C4%8E%C4%8B</span>X-Injected:&#x20;1 HTTP/1.1  
         "argument: each step the campaign moved through, how long it took, and what was still in "
         "flight when the shot was taken. Rendering the full 462-program list above is what pushes "
         "this below the fold, so it is framed separately rather than cropped out of the record.")}
+  {shot(S, "01c-infrastructure", "<b>What it ran on.</b> One chassis per Droplet, the Actor placed "
+        "on each, and whether that Worker was actually polling &mdash; read from Pulumi's checkpoint "
+        "and the converge's own heartbeat. A box says the machine <i>exists</i>; the card inside "
+        "says the Worker is <i>serving</i>. They are separate reads and neither stands in for the "
+        "other: a checkpoint is written when a stack converges and never again, so a machine that "
+        "died an hour ago still reads healthy there. "
+        "<b>Count it carefully.</b> Twelve machines are provisioned across the run &mdash; four "
+        "recon, four splitting, four smuggling &mdash; but only eight are ever up at once, because "
+        "the recon Fleet is released the moment crawling ends instead of idling through the hunt. "
+        "Cost is summed per Fleet rather than off a wall clock, because a Droplet bills by the "
+        "hour ROUNDED UP: three Fleets held twenty minutes each is three billed hours, not one.")}
   {shot(S, "02-run-output", "<b>The four numbers, as the run reported them.</b> One card per key of "
         "the returned object, each carrying the type and description the workflow declared.")}
 </section>

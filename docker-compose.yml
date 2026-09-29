@@ -924,9 +924,38 @@ services:
       KONTRA_SDK_ROOT: /opt/kontra
       KONTRA_ADDRESS: temporal:7233
       KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
+    # WHERE THE PROCESS STARTS IS PART OF THE GO ACTOR BUILD'S INPUT, so it is stated rather than
+    # inherited. `FindRepoRoot("")` (cli/internal/cliutil) walks UP FROM CWD looking for
+    # docker-compose.yml; with no `working_dir` the process starts at `/` and the walk fails even
+    # with the repo mounted below. Mounting the root is necessary and NOT sufficient — measured:
+    # `docker exec kontra-cli kontra deploy --actor …` still failed after the mount, and the same
+    # command under `-w /root/oss/kontra` built and pushed desync@1.3.3.
+    working_dir: ${KONTRA_REPO:-${PWD}}
     volumes:
       - kontra-home:/var/lib/kontra
       - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}
+      # THE REPO ROOT, READ-ONLY, BECAUSE A GO ACTOR CANNOT BE BUILT WITHOUT IT.
+      #
+      # `buildGoActor` (cli/deploy.go) uses the REPO ROOT as the Docker build context, not the actor
+      # dir, because a Go actor's go.mod `replace`s point outside itself — `=> ../../../sdk/go` and
+      # `=> ../../../runtime/go` — so the whole module tree has to be in the context. It finds that
+      # root with `FindRepoRoot("")`, which walks up from CWD looking for docker-compose.yml.
+      #
+      # With only `workspaces/` mounted, that walk ends at a directory that does not exist in this
+      # container and the build fails with `no docker-compose.yml found walking up from CWD`. The
+      # image cannot supply it either: `kontra:dev` ships /opt/kontra/{sdk,runtime}/python and NO Go
+      # tree at all. So the Go actor path was structurally impossible here, and `workspace watch`
+      # retried it forever — desync, dnsfacts, linkfind, nscheck, nuclei and subfinder, every loop.
+      #
+      # THE VISIBLE COST WAS NOT A BUILD ERROR, which is why it survived: the actors kept running,
+      # on whichever bundle was published last. desync sat on 1.3.2 while two fixes to its source
+      # went nowhere — 8,680 of 8,700 split vectors shipped with a blank explanation because the
+      # `foldNote` rebuild never happened. A deploy pipeline that cannot deploy but leaves the old
+      # version serving reads exactly like one that has nothing to do.
+      #
+      # `:ro` because building is a read of the tree and nothing in this container should ever write
+      # to the checkout.
+      - ${KONTRA_REPO:-${PWD}}:${KONTRA_REPO:-${PWD}}:ro
       - /var/run/docker.sock:/var/run/docker.sock
     command:
       - /bin/sh

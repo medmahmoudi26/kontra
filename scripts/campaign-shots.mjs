@@ -119,6 +119,30 @@ if (RUN) {
     await shot('01b-run-progress', 'the phases the campaign moved through, and what was in flight');
   }
 
+  // ── THE MACHINES, AS MACHINES ──────────────────────────────────────────────────────────────
+  //
+  // The Infrastructure region: one chassis per Droplet, the Actors placed on each, and what each
+  // Worker is doing. It is the only frame in this deck that shows WHAT THE CAMPAIGN RAN ON rather
+  // than what it found, and the numbers beside it — machines, regions, $/h — are the ones the run
+  // has to be able to defend.
+  //
+  // IT IS SHOT SEPARATELY AND IT MAY LEGITIMATELY BE ABSENT: the region renders nothing for a run
+  // that started no Fleet, and a campaign whose Fleets have been released shows them torn down
+  // rather than up. Reported either way instead of failing, because "no rack" is a true statement
+  // about some runs and this script must not invent one.
+  const rack = page.getByTestId('run-rack');
+  if (await rack.count()) {
+    await rack.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(900);
+    const boxes = await rack.getByTestId('rack-machine').count().catch(() => 0);
+    const fleets = await rack.getByTestId('rack-fleet').count().catch(() => 0);
+    await rack.screenshot({ path: `${SHOTS}/01c-infrastructure.png` });
+    note('01c-infrastructure', `the Machines this run provisioned: ${fleets} Fleet(s), ${boxes} Machine(s), with the Actors placed on each`);
+    console.log(`  rack   ${fleets} fleet(s), ${boxes} machine(s)`);
+  } else {
+    console.log('  rack   absent — this run started no Fleet child');
+  }
+
   // The four numbers, read back off the rendered cards rather than off the API — a slide claims
   // what the page SHOWS, so this records exactly that.
   const fields = {};
