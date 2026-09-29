@@ -17,18 +17,21 @@ the one thing a first run should NOT do.
 
 ── ONE CHANNEL FOR "WHERE IS IT", AND IT IS THE LOG ────────────────────────────────────────────────
 
-This workflow used to also publish `progress(...)` records on their own topic, and the actor
-published typed `Sweep` records on another, for a console pane that drew both. Both are gone.
+This workflow used to publish `progress(...)` onto a Temporal Workflow Stream, which lives in the
+workflow's MEMORY and dies with the workflow. The run finishes in under a minute, so by the time
+anybody had loaded the console and signed in there was nothing left to subscribe to — the pane's
+ordinary state was an empty box, which reads as a broken feature. That verb was removed, and the
+removal said it would come back "when there is a durable store under it".
 
-A Workflow Stream lives in the workflow's MEMORY and dies with the workflow. The run finishes in
-under a minute, so by the time anybody has loaded the console and signed in there is nothing left
-to subscribe to — the pane's ordinary state was an empty box, which reads as a broken feature. The
-log goes to VictoriaLogs and the rows go to the lake, and both are still there tomorrow. A first
-run must not be the demo of a channel that is usually empty.
+IT IS BACK, AND THE STORE IS THE LOG. `progress(...)` no longer owns a transport; it owns a SCHEMA
+and rides the log record, whose `extra=` fields the formatter turns into indexed VictoriaLogs keys
+under a retention unrelated to Temporal's. So `done`/`total`/`phase`/`axis`/`incomplete` are numbers
+and flags a reader can filter on rather than prose to parse back, and a run that finished last week
+still answers. The typed `Sweep` records on their own topic stay gone — those were the pane's, and
+the pane is not coming back.
 
-So: `workflow.logger` says what the RUN is doing, the actor's logger says what the SWEEP is doing,
-and the Dataset says what came of it. The verbs come back when there is a durable store behind
-them.
+So: `progress` says HOW FAR, `workflow.logger` says what the RUN is doing, the actor's logger says
+what the SWEEP is doing, and the Dataset says what came of it.
 
 ── WHY IT IS NOT FASTER THAN IT IS ─────────────────────────────────────────────────────────────────
 
@@ -54,12 +57,12 @@ from pydantic import Field
 from temporalio import workflow
 from typing_extensions import Annotated, TypedDict
 
-from kontra import catalog, fleet
+from kontra import catalog, fleet, progress
 from kontra.fleet import docker_fleet, do_fleet
 
 #: The Actor this run places and calls. One actor, deliberately: a first run should have exactly
 #: one moving part to point at.
-ACTOR = ("canary", "1.0.0")
+ACTOR = ("canary", "1.1.1")
 
 #: What a run sweeps when nothing is passed. Names rather than hostnames, because nothing is
 #: resolved — a reader who sees `example.com` here will reasonably assume DNS is involved.
@@ -205,6 +208,11 @@ class Canary:
         workflow.logger.info(
             "canary: %d target(s) x %d step(s) = %d record(s), on %d %s machine(s)",
             len(targets), steps, total, machines, provider)
+        # THE DENOMINATOR AS A FACT, not only as a sentence. `progress` rides the log record's
+        # `extra=`, which the formatter turns into indexed VictoriaLogs fields — so the console can
+        # read `done`/`total` as numbers instead of parsing them back out of prose, and it is still
+        # there tomorrow because the log store outlives the execution.
+        progress("sweep", "records", total=total, program="canary")
         workflow.logger.info("canary: bringing the Fleet up")
 
         rows: list = []
@@ -273,9 +281,16 @@ class Canary:
                     workflow.logger.error(
                         "canary: sweep voided — %s", voided,
                         extra={"incomplete": True, "axis": "targets", "phase": "sweep"})
+                    # The same failure as a FACT. `incomplete` is what the console's rail filters
+                    # on independently of level, and it reaches it from here as a declared field
+                    # rather than a hand-spelled `extra=` dict.
+                    progress("sweep", "targets", done=len(rows), total=total, program="canary",
+                             incomplete=True, detail=f"sweep voided — {voided}")
 
             workflow.logger.info(
                 "canary: sweep finished — %d of %d row(s) into %s", len(rows), total, out.name)
+            progress("sweep", "records", done=len(rows), total=total, program="canary",
+                     detail=f"into {out.name}")
 
         # The scope has exited here, which means the Lease is dropped and the Machines are gone.
         workflow.logger.info("canary: fleet released — %d machine(s) destroyed", machines)

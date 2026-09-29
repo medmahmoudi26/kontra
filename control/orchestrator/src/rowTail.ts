@@ -166,10 +166,17 @@ export const ROW_TAIL_MAX_SINKS = 64;
 /**
  * How many recent rows a snapshot carries, and the hard byte budget that outranks the count.
  *
- * FIVE, because this answers "what is landing" and not "show me the data" — the second question is
- * the Datasets page, which can page and query. A window big enough to browse would make every
- * snapshot a payload and put this stream back in the category the header spends a paragraph
- * keeping it out of.
+ * IT WAS FIVE, and the argument for five was "this answers what is landing, not show me the data".
+ * That argument is right about the PURPOSE and was using the wrong lever to enforce it: the reader
+ * asked to choose a tail depth and the default they wanted was ten, which five cannot serve at all.
+ *
+ * FIFTY IS THE CEILING, NOT THE SIZE. The byte budget below is what actually bounds a snapshot, and
+ * it is unchanged — a window of fifty narrow rows and a window of five wide ones cost the same 16 KB,
+ * because the bound that binds is bytes. Raising the row count therefore buys a deeper tail on cheap
+ * rows and changes nothing at all on expensive ones, which is the shape this wanted in the first
+ * place. The client picks how many of them to DRAW (default ten); this is the most it may ask for.
+ *
+ * It is still not "show me the data" — that is the Datasets page, which can page and query.
  *
  * 16 KB IS THE BOUND THAT ACTUALLY BINDS. One crawl row carrying full request/response header JSON
  * is kilobytes on its own, so five of them is not five of a hostname row — without a byte budget
@@ -177,7 +184,7 @@ export const ROW_TAIL_MAX_SINKS = 64;
  * the issue names. A row larger than the whole budget is skipped rather than truncated: half a JSON
  * object is not a row, and a window that lies about its contents is worse than a shorter one.
  */
-export const ROW_TAIL_WINDOW = 5;
+export const ROW_TAIL_WINDOW = 50;
 export const ROW_TAIL_WINDOW_BYTES = 16 * 1024;
 
 /** Why a subscription was refused. Two different sentences because they have two different fixes:

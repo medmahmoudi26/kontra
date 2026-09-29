@@ -30,11 +30,13 @@ import { Client, Connection } from '@temporalio/client';
 import { NativeConnection, Worker } from '@temporalio/worker';
 import * as infraActivities from './activities/infra';
 import * as serveDevActivities from './activities/serveDev';
+import * as buildActorActivities from './activities/buildActor';
 import { dataConverter } from './codec/dataConverter';
 import { adoptLegacyCloudToken } from './infra/credential';
 import { assertBackend, backendUrl } from './infra/workspace';
 import { infraQueue } from './queues';
 import { configureServeDev } from './activities/serveDev';
+import { configureBuildActor } from './activities/buildActor';
 import { SourceStore } from './sourceStore';
 import { kontraBin, serveEnv } from './workflowControl';
 import { armRetentionSchedule } from './retention';
@@ -85,6 +87,21 @@ async function main(): Promise<void> {
     serveEnv,
   });
 
+  // The BUILD half, wired off the same store for the same reason. `resolve` looks only at the
+  // actor kind here — `buildActor` refuses anything else anyway, and asking the workflow store
+  // first would let a workflow folder's id resolve to a row the activity then rejects, which
+  // reports "not an actor" about a lookup that should simply have missed.
+  configureBuildActor({
+    resolve: async (sourceId) => {
+      const got = sources.get('actor', sourceId);
+      return got === undefined
+        ? null
+        : { name: got.name, path: got.path, kind: got.kind, version: got.version };
+    },
+    kontraBin,
+    serveEnv,
+  });
+
   // NO SIGNAL HANDLERS, WHICH IS WHERE THIS STARTED. They existed for exactly one reason — a
   // forked streamer that Node's default SIGTERM would have orphaned, still holding port 8090 and
   // the read-only fleet key. There is no child now, so the default is right again, and this process
@@ -107,7 +124,7 @@ async function runWorker(): Promise<void> {
     // needs the Docker socket, and `sweepDatasetsWorkflow` is controller-pinned — three workflows
     // that share this queue because each needs an authority this role holds and the API does not.
     workflowsPath: require.resolve('./workflows/infra'),
-    activities: { ...infraActivities, ...serveDevActivities },
+    activities: { ...infraActivities, ...serveDevActivities, ...buildActorActivities },
     taskQueue: INFRA_QUEUE,
     namespace,
     connection,

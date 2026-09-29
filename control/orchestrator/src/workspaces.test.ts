@@ -1,18 +1,11 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MemoryStore, ObjectStore } from './codec/objectStore';
 import { resolveLakeConfig } from './data/parquet';
-import {
-  assertWorkspaceName,
-  createWorkspace,
-  describeWorkspaces,
-  useWorkspace,
-  workspaceAddress,
-  workspaceRoot,
-} from './workspaces';
+import { activeLakeWorkspace, assertWorkspaceName, createWorkspace, describeWorkspaces, useWorkspace, workspaceAddress, workspaceRoot } from './workspaces';
 
 function tmpParent(): string {
   const dir = path.join(os.tmpdir(), `kontra-ws-${process.pid}-${Math.random().toString(16).slice(2)}`);
@@ -150,6 +143,13 @@ describe('resolveLakeConfig honours a workspace address', () => {
   afterEach(() => {
     delete process.env.KONTRA_LAKE_WORKSPACE;
     delete process.env.KONTRA_DUCKLAKE_CATALOG;
+    delete process.env.KONTRA_WORKSPACES;
+  });
+
+  // `.current` is now the primary answer (see `activeLakeWorkspace`), so a stray workspaces mount
+  // would silently supply one to every case below. Cleared for each.
+  beforeEach(() => {
+    delete process.env.KONTRA_WORKSPACES;
   });
 
   /**
@@ -275,5 +275,83 @@ describe('a workspace address scopes the LOCAL data path as well as the bucket',
   it('leaves the local path exactly as it was when no workspace is in force', () => {
     process.env.KONTRA_DUCKLAKE_DATA_PATH = '/var/lib/kontra/lake';
     expect(resolveLakeConfig(local).dataPath).toBe('/var/lib/kontra/lake');
+  });
+});
+
+
+/**
+ * THE LAKE ADDRESS FOLLOWS `.current`, AND THE VARIABLE IS ONLY AN OVERRIDE.
+ *
+ * Before this, `KONTRA_LAKE_WORKSPACE` was the only input, so an install could serve one
+ * workspace's code (`.current`) against another workspace's lake (the variable) with both answers
+ * individually valid and nothing comparing them. That is the drift `workspaceAddress` is a
+ * derivation to avoid, reintroduced one layer up.
+ */
+describe('which workspace the lake belongs to', () => {
+  const store = new ObjectStore({
+    backing: new MemoryStore(),
+    prefix: 'kontra',
+    endpoint: 'http://seaweed:8333',
+    bucket: 'kontra',
+  });
+
+  function parentWith(current: string): string {
+    const dir = mkdirSync(path.join(os.tmpdir(), `kontra-ws-${Date.now()}-${Math.random()}`), {
+      recursive: true,
+    }) as unknown as string;
+    const root = dir ?? '';
+    mkdirSync(path.join(root, current), { recursive: true });
+    writeFileSync(path.join(root, '.current'), `${current}\n`, 'utf8');
+    return root;
+  }
+
+  beforeEach(() => {
+    delete process.env.KONTRA_LAKE_WORKSPACE;
+    delete process.env.KONTRA_WORKSPACES;
+    delete process.env.KONTRA_DUCKLAKE_CATALOG;
+  });
+  afterEach(() => {
+    delete process.env.KONTRA_LAKE_WORKSPACE;
+    delete process.env.KONTRA_WORKSPACES;
+    delete process.env.KONTRA_DUCKLAKE_CATALOG;
+  });
+
+  it('reads `.current` when no variable is set', () => {
+    process.env.KONTRA_WORKSPACES = parentWith('bugbounty');
+    expect(activeLakeWorkspace()).toBe('bugbounty');
+  });
+
+  it('lets the variable override `.current`', () => {
+    process.env.KONTRA_WORKSPACES = parentWith('bugbounty');
+    process.env.KONTRA_LAKE_WORKSPACE = 'scraping';
+    expect(activeLakeWorkspace()).toBe('scraping');
+  });
+
+  it('is empty — the legacy address — when neither says', () => {
+    expect(activeLakeWorkspace()).toBe('');
+    expect(resolveLakeConfig(store).dataPath).toBe('s3://kontra/kontra/');
+  });
+
+  /** The whole point: switching the active workspace moves the lake with it. */
+  it('resolves the lake to whatever `.current` names', () => {
+    process.env.KONTRA_DUCKLAKE_CATALOG = 'postgres:dbname=kontra_ducklake host=postgres';
+    process.env.KONTRA_WORKSPACES = parentWith('bugbounty');
+    const a = resolveLakeConfig(store);
+    expect(a.dataPath).toBe('s3://ws-bugbounty/');
+    expect(a.catalog).toContain('dbname=kontra_ducklake_ws_bugbounty');
+
+    process.env.KONTRA_WORKSPACES = parentWith('scraping');
+    const b = resolveLakeConfig(store);
+    expect(b.dataPath).toBe('s3://ws-scraping/');
+    expect(b.catalog).toContain('dbname=kontra_ducklake_ws_scraping');
+  });
+
+  /** A parent with no `.current` is not a workspace layout — legacy address, not a guess. */
+  it('falls back to the legacy address when `.current` is absent', () => {
+    const dir = path.join(os.tmpdir(), `kontra-ws-empty-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    process.env.KONTRA_WORKSPACES = dir;
+    expect(activeLakeWorkspace()).toBe('');
+    expect(resolveLakeConfig(store).dataPath).toBe('s3://kontra/kontra/');
   });
 });

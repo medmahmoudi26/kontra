@@ -25,9 +25,30 @@ import {
 } from '../catalog';
 import { compareWithPreceding } from '../compat';
 import type { Repo } from '../db/repo';
+import { listBuiltImages } from '../images';
 
 export function registerCatalogRoutes(app: FastifyInstance, repo: Repo): void {
   app.get('/api/actors', async () => repo.listActors());
+
+  /**
+   * WHAT HAS BEEN BUILT — read from the registry, never from the Docker daemon.
+   *
+   * UNAUTHENTICATED, like `GET /api/actors` directly above it, and for the same reason: it is a
+   * listing of names and versions this control plane already publishes on the Actors page. It
+   * carries no credential, no path and no host detail — `images.ts` returns the registry's base URL
+   * and the repositories it holds, which an operator on this network can read from the registry
+   * itself. The BUILD verb is authenticated (`routes/sources.ts`); showing is not the same grant.
+   *
+   * NEVER FAILS THE REQUEST OVER AN ABSENT REGISTRY. An install can run without one, and a first
+   * run has nothing built — `unreachable` is a sentence beside an empty list so the page can tell
+   * "nothing yet" from "the registry is down", which look identical and mean opposite things.
+   */
+  app.get('/api/images', async (req) => {
+    // `facts=0` skips one manifest round trip per tag. The Actors page wants the digest, so it does
+    // not pass it; a caller that only needs names can.
+    const withFacts = (req.query as { facts?: string } | undefined)?.facts !== '0';
+    return listBuiltImages({ withFacts });
+  });
 
   /**
    * REGISTRATION IS SCREENED (src/catalog.ts), on the way in and against what is already stored.

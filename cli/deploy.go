@@ -8,12 +8,15 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -545,7 +548,7 @@ func ensureWorkerBase(ctx context.Context, d imageAPI, progress io.Writer) error
 	}
 	tarCtx = injectFile(tarCtx, "Dockerfile.kontra-worker-base", []byte(workerBaseDockerfile()))
 	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "Dockerfile.kontra-worker-base", workerBase())
+	return buildImage(ctx, d, progress, tarCtx, "Dockerfile.kontra-worker-base", workerBase(), nil)
 }
 
 // workerBaseDockerfile compiles the handler (-p=1: serial, so the memory-heavy temporal+aws
@@ -588,7 +591,7 @@ func buildWorker(ctx context.Context, d imageAPI, progress io.Writer, m actorMan
 	df := workerDockerfile(hostTag, m, engine)
 	buildCtx := emptyTarWith("Dockerfile.kontra-worker", []byte(df))
 	defer buildCtx.Close()
-	return buildImage(ctx, d, progress, buildCtx, "Dockerfile.kontra-worker", tag)
+	return buildImage(ctx, d, progress, buildCtx, "Dockerfile.kontra-worker", tag, nil)
 }
 
 // workerDockerfile assembles a worker from the actor host image + the cached worker base.
@@ -649,7 +652,7 @@ func buildGoActor(ctx context.Context, d imageAPI, progress io.Writer, actorDir,
 	}
 	tarCtx = injectFile(tarCtx, "Dockerfile.kontra-go-actor", []byte(goActorDockerfile(rel, name, runtimeExtra)))
 	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "Dockerfile.kontra-go-actor", tag)
+	return buildImage(ctx, d, progress, tarCtx, "Dockerfile.kontra-go-actor", tag, nil)
 }
 
 // goActorDockerfile compiles the actor at repo-relative path `rel` into a STATIC binary and
@@ -807,9 +810,68 @@ func readManifest(dir string) (actorManifest, error) {
 	return m, nil
 }
 
-// ensureBase builds kontra-host:1 (infra/Dockerfile.pyworker) if the daemon lacks it.
-// Context = the REPO ROOT (the Dockerfile COPYs sdk/python), honoring the root
-// .dockerignore — the engine API does not read it for us the way the docker CLI does.
+// sdkLabel carries a digest of the Python the base image bakes in, so ensureBase can tell a
+// current base from a stale one. The tag cannot answer that question: `kontra-host:1` is a MAJOR
+// tag on purpose (Dockerfile.pyworker says so — per-actor images pin it and survive base patches),
+// so it is the same string before and after any SDK edit.
+const sdkLabel = "org.kontra.sdk"
+
+// sdkDigest hashes every file the base image COPYs — sdk/python and runtime/python — so an edit
+// to any of them changes the answer. Paths go into the hash beside contents, so that adding,
+// deleting or renaming a module counts as a change even when the bytes are a permutation.
+//
+// __pycache__ is skipped: it is build output, it is in .dockerignore, and its mtime-keyed .pyc
+// names would otherwise make the digest differ from itself between two runs over one tree.
+func sdkDigest(root string) (string, error) {
+	h := sha256.New()
+	for _, seam := range []string{"sdk/python", "runtime/python"} {
+		dir := filepath.Join(root, seam)
+		err := filepath.WalkDir(dir, func(p string, e fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if e.IsDir() {
+				if e.Name() == "__pycache__" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			// Length-prefixed, so "a" + "bc" and "ab" + "c" cannot collide.
+			fmt.Fprintf(h, "%s\x00%d\x00", filepath.ToSlash(rel), len(b))
+			h.Write(b)
+			return nil
+		})
+		if err != nil {
+			return "", fmt.Errorf("digest %s: %w", seam, err)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ensureBase builds kontra-host:1 (infra/Dockerfile.pyworker) when the daemon lacks it OR when
+// the one it has bakes a different SDK than the checkout.
+//
+// IT USED TO STOP AT "the daemon has an image with that name", AND THAT SILENTLY PINNED EVERY
+// ACTOR TO WHATEVER SDK WAS CURRENT THE DAY THE BASE WAS FIRST BUILT. Measured 2026-09-29: this
+// machine's `kontra-host:1` was eight days old, so `kontra/canary-worker:1.1.0` — built minutes
+// earlier, from a checkout where `say.py` was long deleted and `facts.py` long added — still
+// carried a `kontra` package with `say.py` and no `facts.py`. `from kontra import progress`
+// therefore bound to the DELETED `say.progress(**fields)` rather than the current
+// `facts.progress(phase, axis, ...)`, and every unit of every run died at the first call with
+// `TypeError: progress() takes 0 positional arguments but 2 were given`. The failure presents as
+// an actor bug ("units permanently dropped"), three layers away from the deploy that caused it,
+// and no amount of rebuilding the ACTOR fixes it — the stale bytes are in its FROM.
+//
+// Context = the REPO ROOT (the Dockerfile COPYs sdk/python), honoring the root .dockerignore —
+// the engine API does not read it for us the way the docker CLI does.
 func ensureBase(ctx context.Context, d imageAPI, progress io.Writer) error {
 	sums, err := d.ImageList(ctx, image.ListOptions{
 		Filters: filters.NewArgs(filters.Arg("reference", hostImage())),
@@ -817,20 +879,40 @@ func ensureBase(ctx context.Context, d imageAPI, progress io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(sums) > 0 {
-		return nil
+	root, rootErr := cliutil.FindRepoRoot("")
+	// No checkout means no digest to compare and nothing to build from. An existing base is then
+	// the best available answer and is used as-is — a cluster install has no repo (the Dockerfile
+	// says as much), so this is the normal path there, not a degraded one.
+	if rootErr != nil {
+		if len(sums) > 0 {
+			return nil
+		}
+		return fmt.Errorf("base image %s missing and no repo root to build it from: %w", hostImage(), rootErr)
 	}
-	root, err := cliutil.FindRepoRoot("")
+	want, err := sdkDigest(root)
 	if err != nil {
-		return fmt.Errorf("base image %s missing and no repo root to build it from: %w", hostImage(), err)
+		return err
 	}
-	fmt.Fprintf(os.Stderr, "base image %s missing — building it from %s\n", hostImage(), root)
+	if len(sums) > 0 {
+		if got := sums[0].Labels[sdkLabel]; got == want {
+			return nil
+		} else if got == "" {
+			fmt.Fprintf(os.Stderr, "base image %s predates the SDK stamp — rebuilding it from %s\n",
+				hostImage(), root)
+		} else {
+			fmt.Fprintf(os.Stderr, "base image %s bakes SDK %s, checkout is %s — rebuilding it from %s\n",
+				hostImage(), got[:12], want[:12], root)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "base image %s missing — building it from %s\n", hostImage(), root)
+	}
 	tarCtx, err := archive.TarWithOptions(root, &archive.TarOptions{ExcludePatterns: dockerignore(root)})
 	if err != nil {
 		return err
 	}
 	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "control/images/Dockerfile.pyworker", hostImage())
+	return buildImage(ctx, d, progress, tarCtx, "control/images/Dockerfile.pyworker", hostImage(),
+		map[string]string{sdkLabel: want})
 }
 
 // buildActor builds the per-actor image from the actor dir. A Dockerfile in the dir
@@ -859,13 +941,16 @@ func buildActor(ctx context.Context, d imageAPI, progress io.Writer, dir, name, 
 		tarCtx = injectFile(tarCtx, "Dockerfile", []byte(df))
 	}
 	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "Dockerfile", tag)
+	return buildImage(ctx, d, progress, tarCtx, "Dockerfile", tag, nil)
 }
 
-func buildImage(ctx context.Context, d imageAPI, progress io.Writer, buildCtx io.Reader, dockerfile, tag string) error {
+// buildImage builds one tag. `labels` is stamped onto the result and may be nil; ensureBase uses
+// it to record which SDK the layer actually contains, since the tag cannot say.
+func buildImage(ctx context.Context, d imageAPI, progress io.Writer, buildCtx io.Reader, dockerfile, tag string, labels map[string]string) error {
 	resp, err := d.ImageBuild(ctx, buildCtx, types.ImageBuildOptions{
 		Tags:       []string{tag},
 		Dockerfile: dockerfile,
+		Labels:     labels,
 		Remove:     true,
 		Version:    types.BuilderV1, // classic builder — no BuildKit session needed
 	})

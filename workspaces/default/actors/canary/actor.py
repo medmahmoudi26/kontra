@@ -46,7 +46,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from kontra import actor, param
+from kontra import actor, param, progress
 
 #: THE ACTOR'S OWN LOGGER, and the demo is incomplete without one.
 #:
@@ -226,6 +226,12 @@ class Canary:
                 log.info(
                     "canary: %s %s (step %d/%d, %.1f ms) — %d row(s) so far",
                     probe.target, phase, step + 1, steps, latency, self._found)
+                # THE SAME FACT, TYPED, beside the sentence. The line above is what a person reads
+                # on the rail; this is what a surface can filter and count on — `done`/`total` as
+                # numbers, `phase` and `axis` as their own indexed fields, `program` on every one.
+                # An author writes one call; the formatter turns `extra=` into VictoriaLogs keys.
+                progress("sweep", "steps", done=step + 1, total=steps, program=probe.target,
+                         rows=self._found, worker=worker)
 
                 await dataset.push(
                     Signal(

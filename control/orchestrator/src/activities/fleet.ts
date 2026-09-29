@@ -24,6 +24,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { runLog } from './runLog';
 
 import { describeQueue, sharedQueue, temporalQueueDescriber, type QueueDescriber } from '../pollers';
 
@@ -187,7 +188,20 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
   ).replace(/\/+$/, '');
 
   const url = bundleManifestUrl(registry, input.actor, input.version);
+  // THIRTY-THREE SECONDS OF SILENCE MEASURED HERE (canary-1790684761). This function reads a
+  // manifest, verifies a digest and resolves a worker image, and said nothing at all while it did
+  // — so the run page could only show "Hold the Fleet lease, in flight" and two zeroes. See
+  // `runLog.ts` for why these lines carry `run_id` and the ordinary request log does not.
+  runLog('bundle', `resolving ${input.actor}@${input.version} from ${registry}`, {
+    actor: input.actor,
+    actor_version: input.version,
+    registry,
+  });
   const workerImage = await resolveWorkerImage(registry, input.actor, input.version);
+  runLog('bundle', workerImage ? `worker image ${workerImage}` : 'no worker image published', {
+    actor: input.actor,
+    worker_image: workerImage ?? '',
+  });
   let res: Response | undefined;
   try {
     res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT } });

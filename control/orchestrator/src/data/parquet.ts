@@ -42,7 +42,7 @@ import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
 import type { ObjectStore } from '../codec/objectStore';
 // From `../workspaces`, which is a pure derivation over a NAME — no lookup table, no I/O, and no
 // import cycle: `workspaces.ts` reaches nothing in `data/`.
-import { workspaceAddress } from '../workspaces';
+import { activeLakeWorkspace, workspaceAddress } from '../workspaces';
 import { applianceDataDir } from './dataDir';
 import { MATERIALIZATION_SCHEMA_VERSION } from './materialization';
 
@@ -403,7 +403,10 @@ export function resolveLakeConfig(store: ObjectStore, override: Partial<LakeConf
   // `../workspaces`). Reading it here would hand `workspaceAddress` a filesystem path, which is not
   // a legal workspace name — so an install that still sets the legacy variable would have had every
   // lake resolution throw. Caught before it shipped; the name is distinct on purpose.
-  const workspace = (override.workspace ?? process.env.KONTRA_LAKE_WORKSPACE ?? '').trim();
+  // `.current` FIRST, `KONTRA_LAKE_WORKSPACE` AS THE OVERRIDE — see `activeLakeWorkspace`. Reading
+  // the variable alone let the install serve one workspace's code against another's lake, because
+  // each answer was separately valid and nothing compared them.
+  const workspace = (override.workspace ?? activeLakeWorkspace()).trim();
   const address = workspace === '' ? null : workspaceAddress(workspace);
 
   //
@@ -592,6 +595,69 @@ export async function lakeConnection(store: ObjectStore, cfg: LakeConfig): Promi
     connections.delete(cacheKey); // never cache a rejection — see the comment above
     throw err;
   }
+}
+
+/** The aliases a migration connection attaches its two lakes under. */
+export const MIGRATE_SRC = 'src_lake';
+export const MIGRATE_DST = 'dst_lake';
+
+/**
+ * One connection with TWO DuckLakes attached, for moving a workspace's data between addresses
+ * (issue 10). The source is attached READ_ONLY, so a migration cannot write to the lake it is
+ * reading — the single most valuable property this function has.
+ *
+ * IT IS NOT CACHED, AND THAT IS THE POINT. `lakeConnection` memoizes per (catalog, dataPath)
+ * because ordinary traffic wants one warm attach; a migration is a one-shot with a different
+ * alias map, and handing it a pooled connection would leave `src_lake`/`dst_lake` attached to
+ * every later caller of the same key. The caller closes it.
+ *
+ * Both configs go through `resolveLakeConfig`, so the addresses a migration reads and writes are
+ * the SAME derivation every other caller uses — a migration that computed its own addresses could
+ * move data somewhere the running orchestrator never looks, which is the failure mode that makes a
+ * successful-looking migration indistinguishable from data loss.
+ */
+export async function migrationConnection(
+  store: ObjectStore,
+  from: Partial<LakeConfig>,
+  to: Partial<LakeConfig>
+): Promise<{ conn: DuckDBConnection; src: LakeConfig; dst: LakeConfig }> {
+  const src = resolveLakeConfig(store, from);
+  const dst = resolveLakeConfig(store, to);
+  if (src.catalog === dst.catalog && src.dataPath === dst.dataPath) {
+    throw new Error(
+      `migration source and destination are the same address (${src.catalog} @ ${src.dataPath}) — ` +
+        'nothing to move, and copying a lake onto itself would double every row'
+    );
+  }
+  ensureCatalogDir(src.catalog);
+  ensureCatalogDir(dst.catalog);
+  const c = await (await DuckDBInstance.create()).connect();
+  await c.run(`SET memory_limit='${dst.memoryLimit}'`);
+  await c.run(`SET threads=${dst.threads}`);
+  await c.run('SET preserve_insertion_order=false');
+  if (dst.tempDirectory) {
+    mkdirSync(path.resolve(dst.tempDirectory), { recursive: true });
+    await c.run(`SET temp_directory='${sqlLiteral(dst.tempDirectory)}'`);
+  }
+  await c.run(`SET max_temp_directory_size='${dst.maxTempSize}'`);
+  if (src.s3 || dst.s3) await c.run(s3Setup(store));
+  await c.run('INSTALL ducklake; LOAD ducklake;');
+  await c.run('INSTALL json; LOAD json;');
+  if (src.catalog.startsWith('postgres:') || dst.catalog.startsWith('postgres:')) {
+    await c.run('INSTALL postgres; LOAD postgres;');
+  }
+  await c.run(
+    `ATTACH IF NOT EXISTS 'ducklake:${src.catalog}' AS ${MIGRATE_SRC} ` +
+      `(DATA_PATH '${src.dataPath}', DATA_INLINING_ROW_LIMIT 0, READ_ONLY)`
+  );
+  await c.run(
+    `ATTACH IF NOT EXISTS 'ducklake:${dst.catalog}' AS ${MIGRATE_DST} ` +
+      `(DATA_PATH '${dst.dataPath}', DATA_INLINING_ROW_LIMIT 0)`
+  );
+  for (const schema of [OUTPUT_SCHEMA, STANDALONE_SCHEMA, INTERNAL_SCHEMA]) {
+    await c.run(`CREATE SCHEMA IF NOT EXISTS ${MIGRATE_DST}.${schema}`);
+  }
+  return { conn: c, src, dst };
 }
 
 /** Escape a single-quoted SQL literal. Every interpolation below goes through this. */

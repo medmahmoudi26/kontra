@@ -171,6 +171,35 @@ export function workspaceRoot(env: NodeJS.ProcessEnv = process.env): string {
   return (env.KONTRA_WORKSPACE ?? '').trim();
 }
 
+/**
+ * WHICH WORKSPACE'S LAKE THIS INSTALL READS AND WRITES (issue 10, ADR 0051).
+ *
+ * ── ONE QUESTION, ONE ANSWER ────────────────────────────────────────────────────────────────────
+ *
+ * `KONTRA_LAKE_WORKSPACE` was slice 08's switch, and as a SECOND way of saying which workspace is
+ * active it could disagree with the first. `.current` says `bugbounty` while the variable says
+ * `default` and the install serves one workspace's code against another's data — silently, because
+ * both answers are individually valid. Two sources of truth for one question is the drift this
+ * codebase already refuses elsewhere (`workspaceAddress` is a derivation precisely so "a function
+ * cannot drift").
+ *
+ * So `.current` is the answer, and the variable is an OVERRIDE for the cases that have no
+ * `.current` to read: a cluster install with no workspaces mount, a migration pointing at an
+ * address deliberately, and the tests.
+ *
+ * ── AND IT STILL RETURNS '' WHEN NOTHING SAYS ───────────────────────────────────────────────────
+ *
+ * Empty means the LEGACY address, unchanged — which is what an install with no named-workspace
+ * layout has always used and must keep using. Deriving `ws-<something>` from a guess would point a
+ * working install at an empty catalog, and an empty catalog reads exactly like the 2026-09-28 wipe.
+ */
+export function activeLakeWorkspace(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = (env.KONTRA_LAKE_WORKSPACE ?? '').trim();
+  if (explicit) return explicit;
+  const parent = workspacesParent(env);
+  return parent ? readCurrentName(parent) : '';
+}
+
 export function readCurrentName(parent: string): string {
   const file = path.join(parent, CURRENT_FILE);
   if (!existsSync(file)) return '';

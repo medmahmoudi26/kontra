@@ -20,6 +20,7 @@
  */
 
 import { Client, Connection, WorkflowNotFoundError } from '@temporalio/client';
+import { runLog } from './runLog';
 
 import { dataConverter } from '../codec/dataConverter';
 import {
@@ -169,6 +170,9 @@ export async function holdFleetLease(
   if (!input?.stackFqn) throw new Error('holdFleetLease: no stackFqn — a Lease is a claim on a Fleet');
   if (!input?.lease) throw new Error('holdFleetLease: no lease id');
   const workflowId = leaseWorkflowId(input.stackFqn);
+  // THE RUN PAGE HAS NOTHING ELSE TO SHOW YET. This is the first activity of a Fleet run and it
+  // held for 29 seconds on canary-1790684761 while the rail sat empty — see `runLog.ts`.
+  runLog('fleet', `claiming capacity on ${input.stackFqn}`, { stack: input.stackFqn, lease: input.lease });
 
   return withClient(client, async (client) => {
     const start = (stamp: boolean) => client.workflow.signalWithStart(LEASE_WORKFLOW, {
