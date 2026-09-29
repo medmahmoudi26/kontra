@@ -1,8 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
+import { MemoryStore, ObjectStore } from './codec/objectStore';
+import { resolveLakeConfig } from './data/parquet';
 import {
   assertWorkspaceName,
   createWorkspace,
@@ -127,5 +129,151 @@ describe('workspace names are bucket names', () => {
     for (const name of ['bugbounty', 'default', 'scraping']) {
       expect(() => assertWorkspaceName(name)).not.toThrow();
     }
+  });
+});
+
+/**
+ * THE ADDRESS, CONSUMED (issue 08).
+ *
+ * `workspaceAddress` derived all three addresses and nothing read it — the gap the issue names.
+ * These hold the wiring in `resolveLakeConfig`, and specifically the two properties that make it
+ * safe to land before issue 10 moves any bytes.
+ */
+describe('resolveLakeConfig honours a workspace address', () => {
+  const store = new ObjectStore({
+    backing: new MemoryStore(),
+    prefix: 'kontra',
+    endpoint: 'http://seaweed:8333',
+    bucket: 'kontra',
+  });
+
+  afterEach(() => {
+    delete process.env.KONTRA_LAKE_WORKSPACE;
+    delete process.env.KONTRA_DUCKLAKE_CATALOG;
+  });
+
+  /**
+   * THE DEFAULT IS THE LEGACY ADDRESS, BYTE FOR BYTE. This install holds 152 datasets there, and
+   * resolving to `ws-…` before the bytes have moved would answer every query from an empty
+   * catalog — datasets not gone but unreachable, which reads exactly like the 2026-09-28 wipe.
+   */
+  it('changes nothing at all when no workspace is in force', () => {
+    const cfg = resolveLakeConfig(store);
+    expect(cfg.dataPath).toBe('s3://kontra/kontra/');
+    expect(cfg.dataPath).not.toContain('ws-');
+    expect(cfg.catalog).not.toContain('ws_');
+  });
+
+  it('gives a workspace its own bucket and its own catalog database', () => {
+    process.env.KONTRA_DUCKLAKE_CATALOG = 'postgres:dbname=kontra_ducklake host=postgres';
+    process.env.KONTRA_LAKE_WORKSPACE = 'bugbounty';
+
+    const cfg = resolveLakeConfig(store);
+    expect(cfg.dataPath).toBe('s3://ws-bugbounty/');
+    expect(cfg.catalog).toContain('dbname=kontra_ducklake_ws_bugbounty');
+    // The bucket moves WITH the catalog, never apart from it: two catalogs sharing one bucket
+    // makes `ducklake_delete_orphaned_files` a cross-workspace deletion machine.
+    expect(cfg.dataPath).toContain('ws-bugbounty');
+  });
+
+  /** TOTAL, with no exception for `default` — a special case inside an address function is a
+   *  filter wearing an address's clothes. */
+  it('derives `default` the same way as any other name', () => {
+    process.env.KONTRA_DUCKLAKE_CATALOG = 'postgres:dbname=kontra_ducklake host=postgres';
+    process.env.KONTRA_LAKE_WORKSPACE = 'default';
+    const cfg = resolveLakeConfig(store);
+    expect(cfg.dataPath).toBe('s3://ws-default/');
+    expect(cfg.catalog).toContain('dbname=kontra_ducklake_ws_default');
+  });
+
+  /** Two workspaces cannot land on one address — the whole point, asserted rather than assumed. */
+  it('gives two workspaces disjoint addresses', () => {
+    process.env.KONTRA_DUCKLAKE_CATALOG = 'postgres:dbname=kontra_ducklake host=postgres';
+    process.env.KONTRA_LAKE_WORKSPACE = 'bugbounty';
+    const a = resolveLakeConfig(store);
+    process.env.KONTRA_LAKE_WORKSPACE = 'scraping';
+    const b = resolveLakeConfig(store);
+
+    expect(a.dataPath).not.toBe(b.dataPath);
+    expect(a.catalog).not.toBe(b.catalog);
+  });
+
+  /** An explicit override still wins — it is how a test points at a local directory. */
+  it('lets an explicit override beat the derived address', () => {
+    process.env.KONTRA_LAKE_WORKSPACE = 'bugbounty';
+    const cfg = resolveLakeConfig(store, { dataPath: '/tmp/x/', catalog: '/tmp/cat.ducklake' });
+    expect(cfg.dataPath).toBe('/tmp/x/');
+    expect(cfg.catalog).toBe('/tmp/cat.ducklake');
+  });
+
+  /** A name that is not a legal bucket name is refused HERE, not at the first write. */
+  it('refuses an illegal workspace name rather than deriving a broken address', () => {
+    process.env.KONTRA_LAKE_WORKSPACE = 'Client_A';
+    expect(() => resolveLakeConfig(store)).toThrow();
+  });
+});
+
+/**
+ * THE NAME COLLISION THAT WOULD HAVE BROKEN EVERY LAKE RESOLUTION.
+ *
+ * `KONTRA_WORKSPACE` already exists and means the code ROOT DIRECTORY — `cli/workspace.go` reads it,
+ * and `workspaceRoot` above falls back to it. The lake address switch was briefly spelled with that
+ * name, which would have handed `workspaceAddress` a filesystem path on any install still setting
+ * the legacy variable, and a path is not a legal workspace name. Two variables, two meanings, and
+ * this is what keeps them apart.
+ */
+describe('the lake workspace switch does not collide with the legacy code-root variable', () => {
+  const store = new ObjectStore({
+    backing: new MemoryStore(),
+    prefix: 'kontra',
+    endpoint: 'http://seaweed:8333',
+    bucket: 'kontra',
+  });
+
+  afterEach(() => {
+    delete process.env.KONTRA_WORKSPACE;
+    delete process.env.KONTRA_LAKE_WORKSPACE;
+  });
+
+  it('ignores KONTRA_WORKSPACE, which holds a directory and not a name', () => {
+    process.env.KONTRA_WORKSPACE = '/srv/kontra/workspaces';
+    // Would throw if this were read as a workspace name.
+    const cfg = resolveLakeConfig(store);
+    expect(cfg.dataPath).toBe('s3://kontra/kontra/');
+  });
+
+  it('still reads the legacy variable for what it actually means', () => {
+    expect(workspaceRoot({ KONTRA_WORKSPACE: '/srv/legacy' })).toBe('/srv/legacy');
+  });
+});
+
+/**
+ * AND THE LOCAL LAKE TOO — an appliance runs a FILE catalog, so two workspaces get two catalogs.
+ * Two catalogs over one data directory is the same cross-workspace deletion hazard as two over one
+ * bucket: `ducklake_delete_orphaned_files` does not care whether the store is S3 or a folder.
+ */
+describe('a workspace address scopes the LOCAL data path as well as the bucket', () => {
+  const local = new ObjectStore({ backing: new MemoryStore(), prefix: '' });
+
+  afterEach(() => {
+    delete process.env.KONTRA_LAKE_WORKSPACE;
+    delete process.env.KONTRA_DUCKLAKE_DATA_PATH;
+  });
+
+  it('puts each workspace under its own directory', () => {
+    process.env.KONTRA_DUCKLAKE_DATA_PATH = '/var/lib/kontra/lake';
+    process.env.KONTRA_LAKE_WORKSPACE = 'bugbounty';
+    const a = resolveLakeConfig(local);
+    process.env.KONTRA_LAKE_WORKSPACE = 'scraping';
+    const b = resolveLakeConfig(local);
+
+    expect(a.dataPath).toBe('/var/lib/kontra/lake/ws-bugbounty/');
+    expect(b.dataPath).toBe('/var/lib/kontra/lake/ws-scraping/');
+    expect(a.catalog).not.toBe(b.catalog);
+  });
+
+  it('leaves the local path exactly as it was when no workspace is in force', () => {
+    process.env.KONTRA_DUCKLAKE_DATA_PATH = '/var/lib/kontra/lake';
+    expect(resolveLakeConfig(local).dataPath).toBe('/var/lib/kontra/lake');
   });
 });

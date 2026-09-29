@@ -40,11 +40,28 @@ import path from 'node:path';
 import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
 
 import type { ObjectStore } from '../codec/objectStore';
+// From `../workspaces`, which is a pure derivation over a NAME — no lookup table, no I/O, and no
+// import cycle: `workspaces.ts` reaches nothing in `data/`.
+import { workspaceAddress } from '../workspaces';
 import { applianceDataDir } from './dataDir';
 import { MATERIALIZATION_SCHEMA_VERSION } from './materialization';
 
 /** Where a DuckLake lives: its catalog metadata store and the data-file storage root. */
 export interface LakeConfig {
+  /**
+   * WHICH WORKSPACE'S LAKE THIS IS (issue 08, ADR 0051).
+   *
+   * Set, every address below is derived from it by `workspaceAddress` — its own bucket and its own
+   * catalog DATABASE (not a schema: the metadata schema follows the backend and is `public` for
+   * every Postgres catalog, so two DuckLakes in one database would put their metadata tables in
+   * the same place).
+   *
+   * Absent, the legacy address is used unchanged, which is what this install runs on today. The
+   * derivation is TOTAL — `default` derives `ws-default` like anything else, with no special case,
+   * because a special case inside an address function is a filter wearing an address's clothes.
+   * What is conditional is whether the address is CONSULTED, not what it resolves to.
+   */
+  workspace?: string;
   /**
    * DuckLake catalog metadata store — a local DuckDB file in the appliance's data directory
    * ({@link defaultCatalogPath}), interpolated straight into `ATTACH 'ducklake:<catalog>'`.
@@ -357,10 +374,57 @@ export function resolveLakeConfig(store: ObjectStore, override: Partial<LakeConf
   //     standalone/<dataset>/…parquet
   // Nothing derives a path by string-building, and there is no `datasets/` middle segment
   // whose only job was to hold hashed table names.
-  const dataPath = override.dataPath ?? (s3
-    ? `s3://${store.bucket}/${store.prefix ? `${store.prefix}/` : ''}`
-    : process.env.KONTRA_DUCKLAKE_DATA_PATH ?? './');
-  const catalog = resolveCatalog(override.catalog);
+  //
+  // ── THE WORKSPACE ADDRESS, WHEN ONE IS IN FORCE (issue 08) ─────────────────────────────────
+  //
+  // A Workspace is the isolation boundary (ADR 0051), and isolation is BY ADDRESS, never by
+  // filter: a `WHERE workspace = ?` on a shared table is one forgotten clause away from not
+  // existing, and the forgotten clause reads as an ordinary result. A separate bucket and catalog
+  // fail the other way — get the address wrong and you see nothing, loudly.
+  //
+  // THE LAKE AND THE OBJECT STORE MOVE TOGETHER, which is why one branch sets both.
+  // `ducklake_delete_orphaned_files` deletes files under a catalog's data path that "the catalog
+  // never knew about" — precisely what another workspace's parquet looks like — so two catalogs
+  // sharing a bucket would make lake maintenance a cross-workspace deletion machine.
+  //
+  // ── AND WHY IT IS OFF UNTIL SOMETHING TURNS IT ON ──────────────────────────────────────────
+  //
+  // Deriving the address is safe; MOVING TO IT is not, and they are not the same act. This
+  // install holds 152 datasets at the legacy address, so resolving to `ws-<name>` before those
+  // bytes are there would answer every query from an empty catalog — the datasets would not be
+  // gone, they would be unreachable, which reads exactly like the 2026-09-28 wipe. Relocating
+  // them is issue 10: a dry run a human reads, a verified rollback, and no run in flight.
+  //
+  // So the derivation lands here, total and tested, and the switch is `KONTRA_LAKE_WORKSPACE`
+  // being set. Unset — the state of this install — every value below is byte-for-byte what it was.
+  //
+  // NOT `KONTRA_WORKSPACE`, WHICH IS ALREADY TAKEN AND MEANS SOMETHING ELSE ENTIRELY: it is the
+  // legacy variable naming the code ROOT DIRECTORY (`cli/workspace.go`, and `workspaceRoot()` in
+  // `../workspaces`). Reading it here would hand `workspaceAddress` a filesystem path, which is not
+  // a legal workspace name — so an install that still sets the legacy variable would have had every
+  // lake resolution throw. Caught before it shipped; the name is distinct on purpose.
+  const workspace = (override.workspace ?? process.env.KONTRA_LAKE_WORKSPACE ?? '').trim();
+  const address = workspace === '' ? null : workspaceAddress(workspace);
+
+  //
+  // THE LOCAL CASE GETS ITS OWN DIRECTORY FOR THE SAME REASON THE S3 CASE GETS ITS OWN BUCKET.
+  // An appliance runs a FILE catalog (ADR 0031 §1b), so `workspaceAddress` names `ws-<n>.ducklake`
+  // — separate catalogs. Leaving them on one data directory would recreate precisely the hazard
+  // this branch exists to close: `ducklake_delete_orphaned_files` deletes files under a catalog's
+  // data path that "the catalog never knew about", and another workspace's parquet is exactly
+  // that. Two catalogs over one store is the deletion machine whether the store is a bucket or a
+  // folder.
+  const localRoot = (process.env.KONTRA_DUCKLAKE_DATA_PATH ?? './').replace(/\/*$/, '/');
+  const dataPath =
+    override.dataPath ??
+    (s3
+      ? address !== null
+        ? `s3://${address.bucket}/`
+        : `s3://${store.bucket}/${store.prefix ? `${store.prefix}/` : ''}`
+      : address !== null
+        ? `${localRoot}${address.bucket}/`
+        : process.env.KONTRA_DUCKLAKE_DATA_PATH ?? './');
+  const catalog = resolveCatalog(override.catalog ?? address?.catalog);
   return {
     catalog,
     dataPath,
