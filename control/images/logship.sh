@@ -160,8 +160,25 @@ while :; do
   for c in $( { docker ps --filter label=KONTRA_WORKER --format '{{.Names}}' 2>/dev/null || true
                 docker ps --filter label=kontra.logs=true --format '{{.Names}}' 2>/dev/null || true
               } | sort -u ); do
-    if [ ! -f "/tmp/following-$c" ]; then
-      : > "/tmp/following-$c"
+    # THE MARKER HOLDS THE CONTAINER ID, NOT JUST THE NAME — and that is the whole fix.
+    #
+    # A compose recreate gives the NEW container the SAME NAME. The marker is keyed on the name, so
+    # it survived, this loop read "already following", and the shipper followed NOTHING for that
+    # service until somebody noticed. MEASURED 2026-09-29: after `docker compose up -d
+    # orchestrator-api orchestrator-infra`, logship's own log showed no `following kontra-api` line
+    # at all, and a canary Run's fleet phase went dark — `claiming capacity` and `resolving
+    # canary@…` simply never reached the rail, because `docker logs -f` had been attached to a
+    # container that no longer existed. The run page was correct and empty.
+    #
+    # IT IS SILENT, WHICH IS WHY IT NEEDS THE ID. Nothing errors: the old `follow` exits, its
+    # cleanup may or may not run depending on how it died, and the loop's "not a file" test reads
+    # `true` either way. Comparing the id turns "same name" into "same container", so a recreate is
+    # a change this loop can see. The header above already warned that a restart could leave the
+    # shipper following nothing forever; this is that hazard, reached by a different door.
+    id="$(docker inspect -f '{{.Id}}' "$c" 2>/dev/null || true)"
+    was="$(cat "/tmp/following-$c" 2>/dev/null || true)"
+    if [ -z "$was" ] || [ "$was" != "$id" ]; then
+      printf '%s' "$id" > "/tmp/following-$c"
       ( follow "$c"; rm -f "/tmp/following-$c" ) &
     fi
   done
