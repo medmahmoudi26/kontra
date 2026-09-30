@@ -326,6 +326,24 @@ class Canary:
         # write is a warning, never a reason to fail a Run that did its work. Deliberately NOT
         # marked `incomplete` — that claims the SWEEP has gaps, which is a different and more
         # serious statement than a marker that did not land.
+        #
+        # ── AND IT RACES WITH A CONCURRENT CANARY, WHICH IS A REAL HOLE, NOT A THEORETICAL ONE ──
+        #
+        # `_state.json` is ONE OBJECT PER LOGICAL DATASET NAME — `datasets/<name>/_state.json` —
+        # not one per partition. Every canary Run writes `canary_signals`, so two overlapping Runs
+        # share a marker, and the first to finish seals the name while the second is still
+        # appending to it. A false `sealed` is worse than the `open` it replaces: `open` understates
+        # and a reader checks, `sealed` says THE DATA IS WHOLE and a reader stops looking.
+        #
+        # It is left as-is here rather than half-guarded, because the guard does not belong in each
+        # caller. `closeDataset` (the activity) is the one place that knows the write is happening
+        # and is where "refuse to seal a Dataset another Run is still writing" has to live — the
+        # same rule `data/sealFinishedDatasets.ts` applies to the historical reconciliation, which
+        # requires EVERY contributing Run to be terminal before it will write a word.
+        #
+        # Safe for this workflow as it stands: a canary is a single short Run somebody starts by
+        # hand to watch. Not safe as a pattern to copy into a caller that runs concurrently with
+        # itself on a shared Dataset name.
         try:
             await out.seal() if complete else await out.abandon()
         except Exception as err:  # noqa: BLE001
