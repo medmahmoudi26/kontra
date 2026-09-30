@@ -308,6 +308,31 @@ class Canary:
             workflow.logger.info(
                 "canary: complete — %d record(s) in %s, Machines destroyed", len(rows), out.name)
 
+        # ── SAY THAT NOBODY IS WRITING TO THIS ANY MORE ────────────────────────────────────────
+        #
+        # `publishBatch` rewrites the Dataset's marker to `open` on EVERY append, and `sealed` is
+        # only ever written by an explicit close — which run output never performed. So every
+        # Dataset on an install claimed a writer was still appending to it, for ever, including
+        # ones whose Run had finished hours earlier. `open` is the claim that MORE IS COMING, and
+        # anything deciding "is this safe to read as whole" believes it.
+        #
+        # THE WORD DEPENDS ON HOW THIS RUN ENDED, because the three states are three different
+        # sentences. `sealed` is finished on purpose. `abandoned` is stopped short — which is what
+        # a voided sweep or a short row count is, and calling that `sealed` would be the
+        # comfortable lie. `open` stays the honest answer for a CRASH, which is why neither is
+        # written on a path that raises: nobody said, and that is true.
+        #
+        # BEST EFFORT, LOUDLY. The rows are already committed and durable; a marker that will not
+        # write is a warning, never a reason to fail a Run that did its work. Deliberately NOT
+        # marked `incomplete` — that claims the SWEEP has gaps, which is a different and more
+        # serious statement than a marker that did not land.
+        try:
+            await out.seal() if complete else await out.abandon()
+        except Exception as err:  # noqa: BLE001
+            workflow.logger.warning(
+                "canary: could not mark %s as %s — the rows are committed either way: %s",
+                out.name, "sealed" if complete else "abandoned", err)
+
         return {
             "targets": targets,
             "steps": steps,
