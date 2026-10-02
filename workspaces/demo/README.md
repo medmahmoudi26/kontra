@@ -23,6 +23,56 @@ url  ──▶  webcrawl.crawl   ──▶  demo_http_events     one row per req
 
 ---
 
+## What it looks like
+
+Every image below is a capture of this workspace running against `https://voapi.8x8.com` — the run
+is `demo-voapi-3`, and the numbers in the captions are that run's.
+
+### The workflow: one URL in
+
+![The demo workflow — the input is a URL, and both Actors are placed on one Fleet](../../docs/demo/demo-workflow.png)
+
+`url` is the whole input. `also_probe` is the authorisation boundary. Below it, capacity first and
+work second: `place` twice puts both Actors on every Machine, and `ready()` is not optional because
+`place` returns while the container is still starting.
+
+### The two Actors
+
+![The crawler's typed contract — a Seed is one URL, an HttpEvent is one request or one response](../../docs/demo/demo-crawler.png)
+
+![The smuggler's two Methods — split takes an Exchange, smuggle takes a Target, both emit detect.Row](../../docs/demo/demo-smuggler.png)
+
+`split` takes a crawled **Exchange**, so its injection points are the headers this host actually
+reads. `smuggle` takes a **Target**, a door to knock on, because a length disagreement is a property
+of the two parsers in front of a host rather than of any one request.
+
+### The run
+
+![The run page — demo-voapi-3, completed, 35 of 35 steps in 23m 51s](../../docs/demo/demo-run.png)
+
+35 of 35 steps in 23m 51s. The Fleet reports **0 machines because it has already been destroyed** —
+the Lease dropped when the scope exited, which is the property a shell script cannot give you.
+
+### Where to inject
+
+![Every header of the captured exchange, both directions](../../docs/demo/demo-crawl.png)
+
+The **request** headers are what the splitting axis injects into. The **response** headers name
+**two different parsers on one connection**, which is the precondition for everything here:
+`server: cloudflare` in front, and `x-application-context: voi-router:7443` — the back end naming
+itself. The page answered `403`; a host that refuses a browser still answers a scanner.
+
+### What was proven
+
+![11 proofs on voapi.8x8.com — 3 CL.0 gadgets and 8 lossy-Unicode newlines](../../docs/demo/demo-findings.png)
+
+Eleven proofs, answered in 48 ms over data already on disk. Three are `CL.0`, where whitespace hides
+a second `Content-Length` from one parser and not the other — a tab before the name, tabs around the
+colon, and an obs-fold. Eight are the splitting axis finding **codepoints whose low byte is `0x0A`**,
+which a lossy narrowing turns into a newline — up to `U+1F60A`, an emoji.
+
+---
+
 ## Run it
 
 ```sh
