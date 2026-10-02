@@ -31,13 +31,50 @@ Each one gates a different surface, and they are deliberately not interchangeabl
 | Variable | Gates | Blank means |
 |---|---|---|
 | `KONTRA_STATE_TOKEN` | `/api/fleet`, `/api/infra`, `/api/uploads` | that surface is **disabled** (`503`) |
-| `KONTRA_EXPLORE_TOKEN` | `/api/datasets/query`, `/api/explore`, `/api/logs` | disabled (`503`) |
-| `KONTRA_RUN_TOKEN` | `workflow serve/start/stop`, dataset tag/rename | the Run surface is **OPEN** to anyone who can reach the API |
-| `KONTRA_PANEL_TOKEN` | the panel surface | disabled (`503`) |
+| `KONTRA_EXPLORE_TOKEN` | `/api/datasets/query`, `/api/explore`, `/api/logs` | falls back to `KONTRA_STATE_TOKEN`; disabled (`503`) if that is blank too |
+| `KONTRA_RUN_TOKEN` | **writes** on `/api/runs` and `/api/workflows`, dataset tag/rename | the Run surface is **OPEN** to anyone who can reach the API |
+| `KONTRA_SECRETS_TOKEN` | `/api/audit` | falls back to `KONTRA_STATE_TOKEN` |
 
 ```sh
 kontra token mint <state|explore|panel|run>   # fill a BLANK token in an existing config
 ```
+
+### The variable lists are a fallback chain, not an accept-list
+
+This is the subtlety that costs an afternoon. A route names an *ordered list* of variables, and
+`configuredToken()` returns **the first one that is set** — that single value is then the only token
+that route accepts:
+
+```ts
+EXPLORE_TOKEN_VARS = ['KONTRA_EXPLORE_TOKEN', 'KONTRA_STATE_TOKEN']
+```
+
+Read that as *"use the explore token; if nobody set one, use the state token"* — **not** as "either
+token works". On an install where `KONTRA_EXPLORE_TOKEN` is set, the state token is **rejected** on
+`/api/datasets/query`. Measured on a live install:
+
+| route | state | explore | run | none |
+|---|---|---|---|---|
+| `POST /api/datasets/query` | `401` | `200` | `401` | `401` |
+| `GET /api/infra/stacks` | `200` | `401` | `401` | `401` |
+| `GET /api/runs/<id>` | `404` | `404` | `404` | `404` |
+
+### Reads on `/api/runs` are open by design
+
+That bottom row is not a bug. `routes/runs.ts` gates every **write** with `checkOptionalBearer` +
+`RUN_TOKEN_VARS` and deliberately leaves the reads ungated — a read "can never perturb the run", and
+gating it would cost an operator who set the token every status check. `GET /api/runs/<id>`
+answering `404` without a credential means *that run does not exist*, not that you were let in by
+accident.
+
+> The generated OpenAPI spec lists the whole `/api/runs` prefix under `runToken`, which over-claims
+> for the read routes. `everyOpenPathIsActuallyOpen` in the suite catches the opposite direction —
+> a path documented as open that actually `401`s — and nothing yet checks this one.
+
+### `KONTRA_PANEL_TOKEN`
+
+Minted by `kontra init` and `kontra token mint panel`, and present in `runtime.env` — but **no route
+in the orchestrator reads it**. Treat it as reserved.
 
 ### A console session beats all four
 
