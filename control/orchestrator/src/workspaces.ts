@@ -214,7 +214,13 @@ export function writeCurrentName(parent: string, name: string): void {
 export function assertWorkspaceName(name: string): void {
   if (!NAME_RE.test(name) || name === '.' || name === '..') {
     throw new WorkspaceRefused(
-      `workspace name ${JSON.stringify(name)}: use letters, digits, . _ - (1–64 chars, start alnum)`
+      // THE MESSAGE NAMES THE RULE `NAME_RE` ACTUALLY ENFORCES. It used to read "use letters,
+      // digits, . _ -" — all three of which this regex refuses — so a reader holding
+      // `demo_workspace` was told their name was legal by the error rejecting it.
+      `workspace name ${JSON.stringify(name)}: use lowercase letters, digits and dashes ` +
+        `(2–60 chars, start and end alphanumeric). No underscore, dot or uppercase — see ` +
+        `catalogDbName: the hyphen-to-underscore mapping is only injective while underscores ` +
+        `are illegal here`
     );
   }
 }

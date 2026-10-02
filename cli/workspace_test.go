@@ -21,15 +21,35 @@ func TestWatchDeployAlreadyPresentIsSettled(t *testing.T) {
 	}
 }
 
+// TestValidateWorkspaceName pins this rule to the one the CONTROL PLANE enforces.
+//
+// `control/orchestrator/src/workspaces.ts` derives an S3 bucket, a DuckLake catalog and a Temporal
+// namespace from a workspace name, and its `NAME_RE` is `^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$`. This
+// validator used to be strictly looser, which meant `kontra workspace use demo_workspace`
+// SUCCEEDED and the first Dataset write of the first Run then died inside an Actor activity.
+//
+// The underscore case is the one that costs an isolation guarantee rather than only a confusing
+// error: `catalogDbName` maps hyphens to underscores for Postgres, and that is injective only
+// while underscores are illegal — otherwise `a-b` and `a_b` share one catalog database.
 func TestValidateWorkspaceName(t *testing.T) {
-	if err := validateWorkspaceName("hello"); err != nil {
-		t.Fatal(err)
+	for _, ok := range []string{"hello", "demo", "bug-bounty", "w2", "a1"} {
+		if err := validateWorkspaceName(ok); err != nil {
+			t.Fatalf("%q must be accepted: %v", ok, err)
+		}
 	}
-	if err := validateWorkspaceName("../x"); err == nil {
-		t.Fatal("path traversal must fail")
-	}
-	if err := validateWorkspaceName(".hidden"); err == nil {
-		t.Fatal("dot-prefix must fail")
+	for _, bad := range []string{
+		"../x",           // path traversal
+		".hidden",        // dot-prefix
+		"demo_workspace", // underscore — collides with the hyphen mapping in catalogDbName
+		"Demo",           // uppercase — not a legal S3 bucket name
+		"demo.workspace", // dot — not legal in a Postgres identifier unquoted
+		"a",              // one character — cannot address a bucket
+		"-demo",          // must start alphanumeric
+		"demo-",          // must end alphanumeric
+	} {
+		if err := validateWorkspaceName(bad); err == nil {
+			t.Fatalf("%q must be refused — the control plane refuses it", bad)
+		}
 	}
 }
 
@@ -60,20 +80,24 @@ func TestSeedCreatesHelloChildUnderParent(t *testing.T) {
 func TestWorkspaceUseAndList(t *testing.T) {
 	parent := t.TempDir()
 	t.Setenv("KONTRA_WORKSPACES", parent)
-	if err := os.Mkdir(filepath.Join(parent, "a"), 0o755); err != nil {
+	// TWO CHARACTERS MINIMUM. These were "a" and "b", which the CONTROL PLANE has never accepted
+	// — its `NAME_RE` is `^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$`, so a one-character name cannot
+	// address a bucket or a catalog. The names here are arbitrary; they just have to be names a
+	// real install could use.
+	if err := os.Mkdir(filepath.Join(parent, "alpha"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(parent, "b"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(parent, "beta"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCurrentName(parent, "a"); err != nil {
+	if err := writeCurrentName(parent, "alpha"); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdWorkspaceUse([]string{"b"}); err != nil {
+	if err := cmdWorkspaceUse([]string{"beta"}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := readCurrentName(parent)
-	if got != "b" {
+	if got != "beta" {
 		t.Fatalf("got %q", got)
 	}
 }

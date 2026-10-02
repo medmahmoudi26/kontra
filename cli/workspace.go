@@ -31,7 +31,28 @@ const (
 	workspaceUsage = "usage: kontra workspace path|seed|watch|list|use|create"
 )
 
-var workspaceNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+// THE SAME RULE THE CONTROL PLANE ENFORCES, and it has to be, because this one does not get the
+// last word. `control/orchestrator/src/workspaces.ts` derives a workspace's three addresses — S3
+// bucket, DuckLake catalog, Temporal namespace — from this name, and its `NAME_RE` is
+// `^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$`: no underscore, no dot, no uppercase.
+//
+// That strictness is load-bearing rather than fussy. `catalogDbName` turns hyphens into
+// underscores because an unquoted Postgres identifier cannot hold a hyphen, and that substitution
+// is INJECTIVE ONLY BECAUSE UNDERSCORES ARE FORBIDDEN — if both were legal, `a-b` and `a_b` would
+// land on one database and two workspaces would share a catalog, which is the isolation failure
+// that module exists to prevent.
+//
+// THIS REGEX USED TO BE `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`, which accepted all three characters
+// the control plane refuses. The failure that bought this comment: `kontra workspace use
+// demo_workspace` SUCCEEDED, every subsequent command read the workspace fine, and then the first
+// Dataset write of the first Run died inside an Actor activity with
+//
+//	workspace name "demo_workspace": use letters, digits, . _ - (1–64 chars, start alnum)
+//
+// — a message that names `_` as legal while rejecting it, raised two layers below the command that
+// made the bad choice. A name you can select and cannot write to is worse than one that is refused
+// at the point of selection, so this refuses it there.
+var workspaceNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$`)
 
 func cmdWorkspace(args []string) error {
 	if len(args) == 0 {
@@ -171,7 +192,13 @@ func writeCurrentName(parent, name string) error {
 
 func validateWorkspaceName(name string) error {
 	if !workspaceNameRe.MatchString(name) {
-		return fmt.Errorf("workspace name %q: use letters, digits, . _ - (1–64 chars, start alnum)", name)
+		// THE MESSAGE NAMES THE RULE THAT IS ACTUALLY ENFORCED. It used to read "use letters,
+		// digits, . _ -", which told a reader holding `demo_workspace` that their name was fine.
+		return fmt.Errorf("workspace name %q: use lowercase letters, digits and dashes "+
+			"(2–60 chars, start and end alphanumeric). No underscore, dot or uppercase: the name "+
+			"becomes an S3 bucket, a Postgres catalog and a Temporal namespace, and the "+
+			"hyphen-to-underscore mapping those need is only unambiguous while underscores are "+
+			"illegal here", name)
 	}
 	if name == "." || name == ".." {
 		return fmt.Errorf("workspace name %q is reserved", name)
