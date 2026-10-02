@@ -9,7 +9,7 @@ import (
 /*
 THE CHECK WHOSE ABSENCE COST TWO REPORTS.
 
-On 2026-09-18 this engine produced 40 `is_proof` leads and two HTML reports against 8x8 and
+On 2026-09-18 this engine produced 40 `is_proof` leads and two HTML reports against a program and
 PayPal. Both were retracted the next day, by one test run by hand: send the same request with a
 plain `Content-Length: 0` and see whether it behaves the same. On paypalobjects.com it fired 3
 times in 6 while the obfuscated attacks fired 1 and 2 — the gadget was doing nothing, the server

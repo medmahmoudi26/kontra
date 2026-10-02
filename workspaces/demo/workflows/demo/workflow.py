@@ -41,10 +41,15 @@ from kontra.fleet import docker_fleet, do_fleet
 WEBCRAWL = ("webcrawl", "0.2.3")
 DESYNC = ("desync", "1.3.3")
 
-#: The URL a run probes when nothing is passed. A real host, on a program that authorises this
-#: testing, because a demo whose default target is `example.com` proves the plumbing and nothing
-#: about the technique.
-DEFAULT_URL = "https://voapi.8x8.com"
+#: The URL a run probes when nothing is passed, and it is DELIBERATELY NOT A REAL HOST.
+#:
+#: This workflow sends attack traffic. A published demo that ships pointed at somebody's live
+#: service is a demo that attacks them the first time anyone presses Run without reading the form —
+#: and `example.com` is reserved by RFC 2606 precisely so that cannot happen by accident.
+#:
+#: The cost is honest and small: a run left on the default proves the pipeline and finds nothing,
+#: because there is nothing there to find. Put your own authorised target in `url`.
+DEFAULT_URL = "https://api.example.com"
 
 #: The four Datasets. NAMES ARE FIXED rather than suffixed per target: the host is a column on
 #: every row (`program`), and "show me every finding this demo has ever produced" should be a
@@ -118,7 +123,7 @@ class DemoInput(TypedDict, total=False):
 # ─────────────────────────────────────────────────────────────────── pure helpers, no imports
 
 def _split_url(raw: str) -> tuple[str, str, int, str]:
-    """`https://voapi.8x8.com/api?x=1` -> `("https", "voapi.8x8.com", 443, "/api")`.
+    """`https://api.example.com/api?x=1` -> `("https", "api.example.com", 443, "/api")`.
 
     HAND-ROLLED RATHER THAN `urllib.parse`, because this runs in a Temporal workflow sandbox where
     the import surface is deliberately small and every line of a workflow body has to replay to the
@@ -217,7 +222,7 @@ class Demo:
             # NON-RETRYABLE, so a typo FAILS the run with a readable reason instead of wedging the
             # workflow task in a retry loop nobody can read.
             raise ApplicationError(
-                f"{raw!r} has no usable hostname — pass something like https://voapi.8x8.com",
+                f"{raw!r} has no usable hostname — pass something like https://api.example.com",
                 type="BadURL", non_retryable=True)
 
         seed = f"{scheme}://{host}:{port}{path}" if port not in (80, 443) else f"{scheme}://{host}{path}"

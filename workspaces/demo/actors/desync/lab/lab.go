@@ -1,4 +1,4 @@
-// Package lab is a local reproduction of the voapi.8x8.com bug class, so the scanner can
+// Package lab is a local reproduction of the api.example.com bug class, so the scanner can
 // be proven against a target whose ground truth is known.
 //
 //	client ──▶ frontend ──▶ backend

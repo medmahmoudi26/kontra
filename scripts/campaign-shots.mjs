@@ -5,7 +5,7 @@
 //
 // WHY THIS IS A STANDALONE SCRIPT AND NOT A PLAYWRIGHT SPEC. `pnpm test:e2e` boots an ephemeral
 // vite dev server and deliberately points /api at a port nothing listens on, so every spec renders
-// against `page.route` stubs — the PNGs it leaves in test-results/ are fixtures (8x8.com hosts,
+// against `page.route` stubs — the PNGs it leaves in test-results/ are fixtures (example hosts,
 // `sweep-42`), not this install's data. A talk needs the real run, so this drives :8088 directly,
 // which is the pattern e2e/canary.mjs already uses.
 //

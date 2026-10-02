@@ -86,23 +86,23 @@ def test_bounty_flag_is_carried_but_never_filters(monkeypatch, capsys):
     The per-asset bounty flag rides along; it must not decide what is emitted.
 
     HackerOne marks eligibility per ASSET, so a paying program routinely publishes in-scope,
-    Critical assets that pay nothing — 8x8 does exactly that with `voapi.8x8.com` and with
-    `*.8x8.com` itself. Scope is decided in extract-scope.sql; dropping unpaid assets here would
+    Critical assets that pay nothing — the program does exactly that with `api.example.com` and with
+    `*.example.com` itself. Scope is decided in extract-scope.sql; dropping unpaid assets here would
     silently re-impose the narrower rule one layer down, where nobody would look for it.
     """
     rows = _rows(
-        "voapi.8x8.com\th1\t8x8-bounty\thttps://hackerone.com/8x8-bounty\t0\n"
-        "*.8x8.com\th1\t8x8-bounty\thttps://hackerone.com/8x8-bounty\t0\n"
-        "admin.8x8.com\th1\t8x8-bounty\thttps://hackerone.com/8x8-bounty\t1\n",
+        "api.example.com\th1\texample-bounty\thttps://hackerone.com/example-bounty\t0\n"
+        "*.example.com\th1\texample-bounty\thttps://hackerone.com/example-bounty\t0\n"
+        "admin.example.com\th1\texample-bounty\thttps://hackerone.com/example-bounty\t1\n",
         monkeypatch, capsys,
     )
     assert len(rows) == 3, "an unpaid asset must still be emitted"
     by_target = {r["target"]: r for r in rows}
-    assert by_target["voapi.8x8.com"]["bounty"] is False
-    assert by_target["admin.8x8.com"]["bounty"] is True
+    assert by_target["api.example.com"]["bounty"] is False
+    assert by_target["admin.example.com"]["bounty"] is True
     # …and the unpaid wildcard still classifies as expandable, so subfinder gets the apex.
-    assert by_target["*.8x8.com"]["kind"] == "wildcard"
-    assert by_target["*.8x8.com"]["seed"] == "8x8.com"
+    assert by_target["*.example.com"]["kind"] == "wildcard"
+    assert by_target["*.example.com"]["seed"] == "example.com"
 
 
 def test_missing_bounty_column_defaults_false(monkeypatch, capsys):

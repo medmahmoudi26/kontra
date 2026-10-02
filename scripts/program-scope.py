@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build ONE program's scope as a kontra Dataset, in the shape both actors can eat.
 
-    python3 scripts/program-scope.py 8x8-bounty --as 8x8 --paid-only \
-        --include voapi.8x8.com --out /tmp/scope
+    python3 scripts/program-scope.py example-bounty --as the program --paid-only \
+        --include api.example.com --out /tmp/scope
 
 Writes two JSONL files — `<out>.scope.jsonl` and `<out>.excluded.jsonl` — for
 `kontra db create`. It reads bbscope's Postgres directly, which is the same source
@@ -15,9 +15,9 @@ a crawler wants — `{target, seed, kind, platform, program, program_url, bounty
 `seed` and no `host`, so `desync` cannot read it: its `Target` is
 `{program, host, port, scheme, sni, host_header, endpoint, header_block, class}`.
 
-The recon-enriched `scope_8x8` had the opposite problem — a `host` and no `seed` — which is why
+The recon-enriched `scope_example` had the opposite problem — a `host` and no `seed` — which is why
 `webcrawl` could never crawl it (`_crawl_seed` reads `unit.value.get("seed")`, gets "", and pushes
-"not an http(s) url"), why `http_events_8x8` was never written, and why `exchanges_8x8` had to be
+"not an http(s) url"), why `http_events_example` was never written, and why `exchanges_example` had to be
 loaded by hand outside any Run.
 
 So this emits the UNION. Units cross the wire as dicts — nothing constructs the declared
@@ -35,7 +35,7 @@ ever ran. A second copy is a second place for that to regress.
 
 `bbscope_scope` carries `in_scope = 1` rows only, so the published dataset cannot answer "is this
 host carved out?" — and the answer matters most exactly where a wildcard expands. `*.wavecell.com`
-is a PAYING 8x8 wildcard, and `8x8.wavecell.com`, `feedback.wavecell.com` and `www.wavecell.com`
+is a PAYING the program wildcard, and `the program.wavecell.com`, `feedback.wavecell.com` and `www.wavecell.com`
 are each explicitly out of scope: subfinder will return all three. So the `in_scope = 0` rows are
 written as their own Dataset, to be subtracted AFTER expansion, where the exclusion applies.
 """
@@ -162,7 +162,7 @@ def _header_block(lines: list[str]) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("handle", help="the platform handle, e.g. 8x8-bounty")
+    ap.add_argument("handle", help="the platform handle, e.g. example-bounty")
     ap.add_argument("--as", dest="program", required=True,
                     help="short program name; becomes the scope_<name> suffix and the `program` column")
     ap.add_argument("--paid-only", action="store_true",
@@ -221,7 +221,7 @@ def main() -> None:
                 category, first, last)
         # THE MARKER RIDES ON THE SCOPE ROW, not on a run's params, because `header_block` is a
         # per-TARGET slot in desync's request template and the required header differs per
-        # program — PayPal wants `X-PP-BB`, 8x8 wants its username appended to `User-Agent`. A
+        # program — PayPal wants `X-PP-BB`, the program wants its username appended to `User-Agent`. A
         # row that names its own program can carry its own marker; a run-wide param could not,
         # and a scan that mixes two programs would stamp one of them wrongly.
         if args.headers:

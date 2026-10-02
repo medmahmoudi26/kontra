@@ -7,7 +7,7 @@ import (
 
 // THE MARKER HAS TO SURVIVE RENDERING, and this is the only place that can prove it.
 //
-// Both programs require a per-request identifying header — PayPal `X-PP-BB`, 8x8 its username
+// Both programs require a per-request identifying header — PayPal `X-PP-BB`, a program its username
 // appended to `User-Agent` — and the way this scan carries them is the `${header_block}` slot,
 // filled from the scope row. A slot that silently dropped its binding would send the whole sweep
 // unattributed while every dataset column still said the marker was configured.
@@ -22,7 +22,7 @@ func TestTheHeaderBlockSlotReachesTheWire(t *testing.T) {
 	}
 
 	raw, _, err := rows[0].RenderAutoCL(Bindings{
-		Host:        "voapi.8x8.com",
+		Host:        "api.example.com",
 		Endpoint:    "/",
 		HeaderBlock: marker,
 		Random:      "847213",

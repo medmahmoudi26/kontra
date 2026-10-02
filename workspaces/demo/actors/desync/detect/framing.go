@@ -182,7 +182,7 @@ type FramingSignals struct {
 	// sent ONLY inside the body of request 2. A server that names it in the answer to request 3
 	// read that body as a request line. There is no other way for those bytes to be there.
 	//
-	// Found on voapi.8x8.com, 2026-09-05:
+	// Found on api.example.com, 2026-09-05:
 	//	  Could not find resource for full path: http://localhost:8080/918722-kontra
 	CanaryReflected bool `json:"canary_reflected"`
 }

@@ -175,7 +175,7 @@ def _field(value, name: str, default: str = "") -> str:
     `AttributeError: 'Seed' object has no attribute 'get'` on the very first seed.
 
     That is not a new bug — this method has read `.get()` since 0.1.0 — and it is the reason
-    `http_events_<program>` has never existed and `exchanges_8x8` had to be loaded by hand
+    `http_events_<program>` has never existed and `exchanges_<program>` had to be loaded by hand
     outside any Run. It survived because the tests build batches with `stub_batch([{...}])`,
     which yields plain dicts: the suite supplied the one input shape production never sends.
     `test_webcrawl.py` now passes `takes=Seed` so the stub coerces the way the host does.

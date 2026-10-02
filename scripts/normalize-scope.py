@@ -12,8 +12,8 @@ Writes JSONL on stdout: {target, seed, kind, platform, program, program_url, bou
 `bounty` is HackerOne's PER-ASSET `eligible_for_bounty`, carried through so a run can narrow
 to paying assets at dispatch time without re-deriving scope. It is deliberately NOT a scope
 filter here: scope is decided in scripts/extract-scope.sql, which keeps every asset a paying
-program accepts submissions on. The two flags are genuinely different — 8x8 publishes
-`voapi.8x8.com` and `*.8x8.com` as in-scope, Critical, and worth no bounty. Absent (a 4-column
+program accepts submissions on. The two flags are genuinely different — the program publishes
+`api.example.com` and `*.example.com` as in-scope, Critical, and worth no bounty. Absent (a 4-column
 line) it defaults to False.
 
 The classification is the safety boundary, and it refuses more than it accepts:

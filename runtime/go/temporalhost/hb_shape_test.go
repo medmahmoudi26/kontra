@@ -15,7 +15,7 @@ func TestTheHeartbeatPayloadRoundTripsAsJSON(t *testing.T) {
 	authors := map[string]any{
 		"hosts": int64(4), "probes": int64(20), "signals": int64(3),
 		"controls": int64(3), "withdrawn": int64(2), "erratic": int64(0),
-		"at": "voapi.8x8.com/api/v1/session",
+		"at": "api.example.com/api/v1/session",
 	}
 	out := map[string]any{"progress": authors}
 	for k, v := range last {
@@ -39,7 +39,7 @@ func TestTheHeartbeatPayloadRoundTripsAsJSON(t *testing.T) {
 	}
 	// `withdrawn` is the number this engine most needs to surface: how many claims the matched
 	// control killed. If it cannot cross the wire the operator cannot see the oracle working.
-	if p["withdrawn"] != float64(2) || p["at"] != "voapi.8x8.com/api/v1/session" {
+	if p["withdrawn"] != float64(2) || p["at"] != "api.example.com/api/v1/session" {
 		t.Fatalf("author keys mangled: %s", b)
 	}
 }

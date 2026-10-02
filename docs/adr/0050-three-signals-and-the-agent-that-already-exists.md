@@ -19,7 +19,7 @@ fact.
 **There is no observability backend at all.** `machine.ts` installs `vmagent` on every **Machine**,
 writes its unit, its scrape config and its remote-write target — and nothing listens. There is no
 VictoriaMetrics container, nothing in `docker-compose.yml`, nothing on `:8428`. Measured on
-`kf-webcrawl-01` during the 8x8 campaign, every 60 seconds, for the life of the **Fleet**:
+`kf-webcrawl-01` during one campaign, every 60 seconds, for the life of the **Fleet**:
 
     couldn't send a block with size 575 bytes to "1:secret-url":
       Post "http://10.124.0.2:8428/api/v1/write": dial tcp4 10.124.0.2:8428: connect: connection refused
@@ -68,8 +68,8 @@ defend as history events. The remaining third are a different thing — the work
 own result is INCOMPLETE:
 
     seed_limit 200 reached — the crawl is PARTIAL by request
-    exchanges_8x8 has no lifecycle record — written outside a Run … not the same as empty
-    exchanges_8x8 is still open — this reads a partial crawl as whole
+    exchanges_example has no lifecycle record — written outside a Run … not the same as empty
+    exchanges_example is still open — this reads a partial crawl as whole
     splitting axis ABANDONED … everything past this point in url order is UNSCANNED, not clean
 
 As narration those are buried in one Run's history, findable only by someone already reading that

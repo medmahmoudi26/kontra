@@ -112,7 +112,7 @@ type Row struct {
 	// A desync lead is a CLAIM ABOUT A DIFFERENCE, so the difference has to be readable. Carrying
 	// only the mutated bytes makes every reader reconstruct the normal request from a vector id
 	// and a point id before they can see what actually changed — and the fold rows carried
-	// neither, so `sent_raw` was empty on the entire axis that found the voapi chain.
+	// neither, so `sent_raw` was empty on the entire axis that found the the target chain.
 	//
 	// OriginalRequest is what a normal client sends. TriggeredRequest is what produced the
 	// signal. Diffing them is the first thing a human does and the first thing a triage agent

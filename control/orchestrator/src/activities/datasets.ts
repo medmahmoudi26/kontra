@@ -532,7 +532,7 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
         });
       } catch (err) {
         // A MALFORMED QUERY IS NOT A FLAKE, and retrying one is how a run spends hours looking
-        // alive while doing nothing. MEASURED: `hunt` paged `scope_8x8` with
+        // alive while doing nothing. MEASURED: `hunt` paged `scope_example` with
         // `WHERE kind NOT IN (…)` against a scope built without that column, and Temporal retried
         //
         //   Binder Error: Referenced column "kind" not found in FROM clause!

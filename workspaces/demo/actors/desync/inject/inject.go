@@ -279,7 +279,7 @@ func Enumerate(u unit.Exchange, o Options) []Point {
 // kindRank breaks a tie inside one provenance tier, and the order is the measured one.
 //
 // `path_suffix` stays FIRST and that is deliberate: the URL-decode-and-reforward gadget in the
-// path is the vector this scanner has actually confirmed — every voapi.8x8.com bypass was a
+// path is the vector this scanner has actually confirmed — every api.example.com bypass was a
 // percent-encoded codepoint in the path, not in a header. Demoting it to make room for headers
 // would trade a proven vector for a promising one.
 //

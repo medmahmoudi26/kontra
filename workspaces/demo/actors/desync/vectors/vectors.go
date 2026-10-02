@@ -1,7 +1,7 @@
 // Package vectors is the FLAMER stage: it generates the malformed encodings that a
 // vulnerable stack may fold into a bare CR or LF.
 //
-// THE RULE. Every confirmed bypass in the 8x8 voapi report chain — spanning 2023-03 to
+// THE RULE. Every confirmed bypass in the a program the target report chain — spanning 2023-03 to
 // 2025-12, five separate patches, six paid criticals — obeys one rule:
 //
 //	a codepoint whose LEAST-SIGNIFICANT BYTE is 0x0A (or 0x0D)
@@ -166,7 +166,7 @@ var known = map[rune]string{
 	0x000D:  "raw CR",
 	0x010A:  "Ċ — Frans Rosen / H1 #2704607",
 	0x010D:  "č — PortSwigger flamer request-format docs (folds to CR)",
-	0x070A:  "܊ Syriac — newest voapi.8x8.com bypass, unreported",
+	0x070A:  "܊ Syriac — newest api.example.com bypass, unreported",
 	0x0B0A:  "ଊ Oriya — H1 #3340283",
 	0x560A:  "嘊 — H1 #2095676",
 	0x1F60A: "😊 — H1 #3340283 (astral, same rule)",

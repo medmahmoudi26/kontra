@@ -13,7 +13,7 @@ func TestRulePredictsEveryKnownBypass(t *testing.T) {
 	want := map[string]string{
 		"%0A":          "raw LF",
 		"%C4%8A":       "U+010A",
-		"%DC%8A":       "U+070A — the unreported voapi bypass",
+		"%DC%8A":       "U+070A — the unreported the target bypass",
 		"%E0%AC%8A":    "U+0B0A",
 		"%E5%98%8A":    "U+560A",
 		"%F0%9F%98%8A": "U+1F60A",

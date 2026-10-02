@@ -28,7 +28,7 @@ func rowFor(t *testing.T, variantPrefix string) Row {
 	return Row{}
 }
 
-var binds = Bindings{Host: "voapi.8x8.com", Endpoint: "/api/v1/session", Random: "539915"}
+var binds = Bindings{Host: "api.example.com", Endpoint: "/api/v1/session", Random: "539915"}
 
 func TestTheControlIsTheAttackMinusItsGadget(t *testing.T) {
 	r := rowFor(t, "obs-fold-")

@@ -33,9 +33,9 @@ var CLObfuscation = Family{
 		// `\tContent-Length: 101`  — #2357178, #2358526
 		{"before-name", func(n, h, v string) string { return h + n + ": " + v }},
 		{"in-name", func(n, h, v string) string { return splitName(n, h) + ": " + v }},
-		// `Content-Length : 31`   — smuggler.py's "space1", and the left half of #2431300
+		// `Content-Length : 31`   — smuggler.py's "space1", and the left half of #<redacted>
 		{"after-name", func(n, h, v string) string { return n + h + ": " + v }},
-		// `Content-Length\t:\t31` — #2431300
+		// `Content-Length\t:\t31` — #<redacted>
 		{"around-colon", func(n, h, v string) string { return n + h + ":" + h + v }},
 		// `Content-Length: +31`   — #2444112, #2456548, #2509057, #2509198, #2413017
 		{"before-value", func(n, h, v string) string { return n + ": " + h + v }},

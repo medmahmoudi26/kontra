@@ -399,7 +399,7 @@ services:
     #
     #     operation error S3: PutObject … StatusCode: 500 … api error InternalError
     #
-    # and retrying for ever: demo-voapi-3 spent four attempts and fourteen minutes there.
+    # and retrying for ever: demo-run-3 spent four attempts and fourteen minutes there.
     #
     # Preallocation buys contiguity for a workload this is not: these volumes hold Parquet written
     # once and read whole, on a filesystem that is already extent-based.

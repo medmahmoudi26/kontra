@@ -577,7 +577,7 @@ func randHex(n int) string {
 }
 
 const schemaDoc = `foldscan.target/v1        (validator stdin)
-  url          string   required   e.g. "https://voapi.8x8.com/"
+  url          string   required   e.g. "https://api.example.com/"
   host_header  string   optional   override Host (probe a backend IP directly)
   notes        string   optional   free-form provenance
 

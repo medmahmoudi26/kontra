@@ -16,10 +16,10 @@ func obs(sigCount int) FramingObs {
 		return []byte("HTTP/1.1 " + status + "\r\nServer: " + tag + "\r\n\r\n" + strings.Repeat("x", n))
 	}
 	return FramingObs{
-		Schema: SchemaFraming, Axis: AxisSmuggle, Host: "voapi.8x8.com", Port: 443,
+		Schema: SchemaFraming, Axis: AxisSmuggle, Host: "api.example.com", Port: 443,
 		Variant: "obs-fold-20-preserve", HeaderLine: "Content-Length \r\n : 33",
 		SentRaw:     []byte("POST /?cb=1 HTTP/1.1\r\nContent-Length \r\n : 33\r\n\r\nGET /1-kontra HTTP/1.1\r\nX: X\r\n\r\n"),
-		NormalRaw:   []byte("GET /?cb=1 HTTP/1.1\r\nHost: voapi.8x8.com\r\n\r\n"),
+		NormalRaw:   []byte("GET /?cb=1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n"),
 		Pre:         StepSummary{Label: "pre", Status: 200, BodySHA: "sha-pre", BodyLen: 200_000, RespRaw: body("200 OK", "pre", 200_000)},
 		Attack:      StepSummary{Label: "attack", Status: 400, BodySHA: "sha-atk", BodyLen: 20_000, RespRaw: body("400 Bad Request", "attack", 20_000)},
 		Post:        StepSummary{Label: "post", Status: 200, BodySHA: "sha-post", BodyLen: 200_000, RespRaw: body("200 OK", "post", 200_000)},
@@ -175,7 +175,7 @@ func TestNothingSentIsNotAnElision(t *testing.T) {
 func TestElideIsSafeOnASplitAxisRow(t *testing.T) {
 	for _, sig := range []int{0, 2} {
 		r := RowFromSplit(Observation{
-			URL:     "https://voapi.8x8.com/search?q=1",
+			URL:     "https://api.example.com/search?q=1",
 			Signals: Signals{Count: sig, ControlUsed: sig > 0, StatusChanged: sig > 0},
 		})
 		if r.Smuggle != nil {

@@ -254,7 +254,7 @@ func TestTheCapKeepsHeadersOnAQueryHeavyPage(t *testing.T) {
 	}
 }
 
-// The proven vector is not traded away for the promising one: every confirmed voapi.8x8.com
+// The proven vector is not traded away for the promising one: every confirmed api.example.com
 // bypass was a percent-encoded codepoint in the PATH.
 func TestPathSuffixOutranksHeadersWithinTheRequestTier(t *testing.T) {
 	pts := Enumerate(testUnit(t), DefaultOptions())

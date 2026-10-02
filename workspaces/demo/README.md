@@ -25,8 +25,10 @@ url  ──▶  webcrawl.crawl   ──▶  demo_http_events     one row per req
 
 ## What it looks like
 
-Every image below is a capture of this workspace running against `https://voapi.8x8.com` — the run
-is `demo-voapi-3`, and the numbers in the captions are that run's.
+Every image below is a capture of this workspace against a live target. **The host is redacted** —
+it is a real service with the primitives below still open, so the figures name it `api.example.com`
+and the run `demo-run-3`. Everything else is exactly what the console showed: the techniques, the
+gadgets, the counts and the timings are the run's own.
 
 ### The workflow: one URL in
 
@@ -48,7 +50,7 @@ of the two parsers in front of a host rather than of any one request.
 
 ### The run
 
-![The run page — demo-voapi-3, completed, 35 of 35 steps in 23m 51s](../../docs/demo/demo-run.png)
+![The run page — completed, 35 of 35 steps in 23m 51s](../../docs/demo/demo-run.png)
 
 35 of 35 steps in 23m 51s. The Fleet reports **0 machines because it has already been destroyed** —
 the Lease dropped when the scope exited, which is the property a shell script cannot give you.
@@ -58,15 +60,15 @@ the Lease dropped when the scope exited, which is the property a shell script ca
 ![Every header of the captured exchange, both directions](../../docs/demo/demo-crawl.png)
 
 The **request** headers are what the splitting axis injects into. The **response** headers name
-**two different parsers on one connection**, which is the precondition for everything here:
-`server: cloudflare` in front, and `x-application-context: voi-router:7443` — the back end naming
-itself. The page answered `403`; a host that refuses a browser still answers a scanner.
+**two different parsers on one connection**, which is the precondition for everything here: a CDN in
+front and an application router behind it, each naming itself in a header. The page answered `403`;
+a host that refuses a browser still answers a scanner.
 
 ### What was proven
 
-![11 proofs on voapi.8x8.com — 3 CL.0 gadgets and 8 lossy-Unicode newlines](../../docs/demo/demo-findings.png)
+![11 proofs — 3 CL.0 gadgets and 8 lossy-Unicode newlines](../../docs/demo/demo-findings.png)
 
-Eleven proofs, answered in 48 ms over data already on disk. Three are `CL.0`, where whitespace hides
+Eleven proofs, answered in 36 ms over data already on disk. Three are `CL.0`, where whitespace hides
 a second `Content-Length` from one parser and not the other — a tab before the name, tabs around the
 colon, and an obs-fold. Eight are the splitting axis finding **codepoints whose low byte is `0x0A`**,
 which a lossy narrowing turns into a newline — up to `U+1F60A`, an emoji.
@@ -129,7 +131,7 @@ iframes. Those hosts belong to other people and are almost never in anybody's au
 Widening it is opt-in and explicit:
 
 ```json
-{"url": "https://voapi.8x8.com", "also_probe": ["api.8x8.com"]}
+{"url": "https://api.example.com", "also_probe": ["api.example.com"]}
 ```
 
 Only put a host in `also_probe` that you are authorised to test.
@@ -140,7 +142,7 @@ Only put a host in `also_probe` that you are authorised to test.
 
 | field | default | what it decides |
 |---|---|---|
-| `url` | `https://voapi.8x8.com` | the one URL the run starts from; its host is the only host probed |
+| `url` | `https://api.example.com` | the one URL the run starts from; its host is the only host probed |
 | `also_probe` | `[]` | extra hostnames you are authorised to probe |
 | `depth` | `1` | links followed from the seed; `0` is the seed page alone |
 | `max_pages` | `8` | pages visited total — the knob that decides how long the run takes |

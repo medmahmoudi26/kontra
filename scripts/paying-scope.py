@@ -26,7 +26,7 @@ nobody scoped.
 ── WHAT `--paid` MEANS HERE ────────────────────────────────────────────────────────────────────
 
 `is_bbp` is HackerOne's PER-ASSET `eligible_for_bounty`, so "paying program" and "paying asset"
-are different questions and this answers the second. 8x8 publishes `voapi.8x8.com` as in-scope,
+are different questions and this answers the second. the program publishes `api.example.com` as in-scope,
 Critical, and worth no bounty; a campaign aimed at paying scope should not spend its rate limit
 there. The program-level view is derived: a program is in this Dataset because at least one of
 its assets pays.

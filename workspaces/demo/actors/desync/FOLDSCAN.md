@@ -1,7 +1,7 @@
 # foldscan
 
 Detects CR/LF injection reachable through **lossy Unicode narrowing** — the bug class behind
-six paid criticals on one 8x8 host between 2023 and 2025.
+six paid criticals on one a program host between 2023 and 2025.
 
 ## The rule
 
@@ -54,7 +54,7 @@ of a crawler-fed scanner, and it is why the input is a unit.
 wrong produces a scanner that is busy and blind.
 
 **Two-phase, so cost stays bounded.** Each point is screened with two high-prior vectors;
-only a point that reacts earns the full sweep. On voapi that was 4 points → 1 live, saving
+only a point that reacts earns the full sweep. On the target that was 4 points → 1 live, saving
 87 requests.
 
 ## Pipeline

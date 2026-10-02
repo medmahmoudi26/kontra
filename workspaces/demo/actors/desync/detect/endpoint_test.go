@@ -21,7 +21,7 @@ Three things had to be true for that to be invisible, and one test each:
 
 func TestTheRowSaysWhichPathItProbed(t *testing.T) {
 	r := RowFromSmuggle(FramingObs{
-		Host: "voapi.8x8.com", Endpoint: "/api/v1/session", Variant: "obs-fold-20",
+		Host: "api.example.com", Endpoint: "/api/v1/session", Variant: "obs-fold-20",
 	})
 	if r.Endpoint != "/api/v1/session" {
 		t.Fatalf("endpoint = %q, want /api/v1/session — a row that cannot say where it looked "+
@@ -35,12 +35,12 @@ func TestTheRowSaysWhichPathItProbed(t *testing.T) {
 // the entire reason the column was added.
 func TestBothAxesSpellTheEndpointTheSameWay(t *testing.T) {
 	for _, tc := range []struct{ url, want string }{
-		{"https://voapi.8x8.com/api/v1/session", "/api/v1/session"},
+		{"https://api.example.com/api/v1/session", "/api/v1/session"},
 		// THE QUERY IS PART OF THE ENDPOINT. `/search?q=` and `/search` routinely reach different
 		// code, and on this axis the query string is frequently where the payload went.
-		{"https://voapi.8x8.com/search?q=1&lang=en", "/search?q=1&lang=en"},
+		{"https://api.example.com/search?q=1&lang=en", "/search?q=1&lang=en"},
 		// A bare origin means root, spelled the way the smuggling axis spells it — not "".
-		{"https://voapi.8x8.com", "/"},
+		{"https://api.example.com", "/"},
 	} {
 		got := RowFromSplit(Observation{URL: tc.url}).Endpoint
 		if got != tc.want {

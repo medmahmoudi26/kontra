@@ -3,9 +3,9 @@
 // THE BET. Nine findings across five programs are members of ONE family, found by hand between
 // 2023 and 2026:
 //
-//	\tContent-Length: 101        #2357178 vcc-*.8x8.com   #2358526 citrix-waap
-//	Content-Length \r\n : 31     #2356849 vcc-*.8x8.com   (obs-fold)
-//	Content-Length\t:\t31        #2431300 voapi.8x8staging.com
+//	\tContent-Length: 101        #2357178 vcc-*.a program.com   #2358526 citrix-waap
+//	Content-Length \r\n : 31     #2356849 vcc-*.a program.com   (obs-fold)
+//	Content-Length\t:\t31        #<redacted> staging.example.com
 //	Content-Length: +31          #2444112 cdn.agoda.net   #2456548 playtika
 //	                             #2509057 #2509198 fusionfabric.cloud
 //	content-length: +29          #2413017 playtika        (lowercased)

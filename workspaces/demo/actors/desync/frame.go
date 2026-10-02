@@ -33,7 +33,7 @@ import (
 // through the edge.
 type Target struct {
 	Program string `json:"program"`
-	Host    string `json:"host"` // 'voapi.8x8.com' or a bare '217.163.57.101'
+	Host    string `json:"host"` // 'api.example.com' or a bare '203.0.113.10'
 	Port    int    `json:"port"`
 	Scheme  string `json:"scheme"`
 
@@ -395,7 +395,7 @@ func corpus(s *kontra.Session, b *kontra.Batch, ds *kontra.Dataset) error {
 	// BOTH AXES, OR THE CORPUS DESCRIBES HALF AN ENGINE.
 	//
 	// `techniques` published the framing families and nothing else, so it held 7 rows — all
-	// `axis = framing` — while the fold axis was the one that found the voapi chain. A reader
+	// `axis = framing` — while the fold axis was the one that found the the target chain. A reader
 	// asking "what does desync@1.0.0 send?" got an answer that omitted every payload behind the
 	// campaign's actual finding, and a finding could not be traced to the vector that produced it
 	// because the vector was not in the table.
