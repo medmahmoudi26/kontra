@@ -385,7 +385,25 @@ services:
     image: chrislusf/seaweedfs:3.80
     container_name: kontra-seaweed
     restart: unless-stopped
-    command: "server -dir=/data -ip=seaweed -ip.bind=0.0.0.0 -master.port=9333 -volume.port=8080 -filer -s3 -s3.port=8333"
+    # `-master.volumePreallocate=false` IS NOT A TUNING KNOB HERE, IT IS WHAT KEEPS WRITES WORKING.
+    #
+    # With the default (true) every new volume is `fallocate`d to its full 1 GiB before it holds a
+    # single byte, so a volume file reserves a gibibyte of blocks past EOF and `du --apparent-size`
+    # disagrees with `du` by the whole reservation. Measured on this install: 43 GB allocated
+    # against 4.1 GB of actual objects — 39 GB reserved and empty.
+    #
+    # The way it fails is worse than the waste. Once the filesystem is down to less than 1 GiB free
+    # the master can no longer create ANY volume — "No more free space left" on volume grow, in a
+    # loop — so every S3 PutObject answers 500 InternalError while the store still has room for the
+    # object. The symptom lands two layers away, as Actor batches failing on
+    #
+    #     operation error S3: PutObject … StatusCode: 500 … api error InternalError
+    #
+    # and retrying for ever: demo-voapi-3 spent four attempts and fourteen minutes there.
+    #
+    # Preallocation buys contiguity for a workload this is not: these volumes hold Parquet written
+    # once and read whole, on a filesystem that is already extent-based.
+    command: "server -dir=/data -ip=seaweed -ip.bind=0.0.0.0 -master.port=9333 -volume.port=8080 -master.volumePreallocate=false -filer -s3 -s3.port=8333"
     volumes:
       - seaweed-data:/data
     ports:

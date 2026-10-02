@@ -824,6 +824,15 @@ resources:
         - -ip.bind=0.0.0.0
         - -master.port=9333
         - -volume.port=8080
+        # NOT A TUNING KNOB — it is what keeps writes working. With the default (true) every new
+        # volume is `fallocate`d to a full 1 GiB before holding a byte, so the reservation sits
+        # past EOF and `du` disagrees with `du --apparent-size` by the whole of it (measured: 43 GB
+        # allocated against 4.1 GB of objects). Below 1 GiB free the master can then create NO
+        # volume at all — "No more free space left" in a loop — and every S3 PutObject answers 500
+        # while the store still has room. The symptom surfaces two layers away as Actor batches
+        # retrying on `PutObject … InternalError`. Kept in step with docker-compose.yml, which
+        # carries the same flag and the long version of this note.
+        - -master.volumePreallocate=false
         - -filer
         - -s3
         - -s3.port=8333
