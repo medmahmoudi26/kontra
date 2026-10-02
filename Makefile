@@ -154,6 +154,7 @@ release: console
 # Overridable, and the override is what CI uses to build a tag before it exists.
 KONTRA_IMAGE ?= ghcr.io/medmahmoudi26/kontra:dev
 KONTRA_WORKER_BASE_IMAGE ?= ghcr.io/medmahmoudi26/kontra-worker-base:dev
+KONTRA_PORTER_IMAGE ?= ghcr.io/medmahmoudi26/kontra-porter:dev
 
 image: $(CONSOLE)
 	DOCKER_BUILDKIT=1 docker build -f control/images/Dockerfile.selfcontained \
@@ -166,6 +167,15 @@ image: $(CONSOLE)
 
 worker-base:
 	docker build -f control/images/Dockerfile.workerbase -t "$(KONTRA_WORKER_BASE_IMAGE)" .
+
+# PORTER — Arrow Flight SQL over the lake. Built separately from `image` because it shares nothing
+# with the orchestrator: a different language, a different base, and a source tree fetched from
+# upstream rather than from this repo. Folding it into `make image` would make every console change
+# rebuild a Go server that did not change.
+porter:
+	docker build -f control/images/Dockerfile.porter -t "$(KONTRA_PORTER_IMAGE)" .
+	@echo
+	@echo "  docker compose up -d porter"
 
 # `make image-from-release` — the OLDER path, kept because it is the one that proves the container
 # and the published tarball are the same bytes. It needs the host toolchain; `make image` does not.

@@ -1,5 +1,5 @@
 /**
- * THE INFRA SURFACE (ADR 0019) — five routes, and the two functions behind the first two of them.
+ * THE INFRA SURFACE (ADR 0019) — six routes, and the three functions behind the first three of them.
  *
  * The routes only ever START a workflow and read its status. They never touch Pulumi and they
  * never see a credential — the engine lives in `orchestrator-infra`, reached by task queue.
@@ -27,6 +27,9 @@
 
 import type { FastifyInstance } from 'fastify';
 import { WorkflowNotFoundError } from '@temporalio/client';
+import { defaultPayloadConverter, type Payload } from '@temporalio/common';
+
+import { dataConverter } from './codec/dataConverter';
 
 import { checkBearer } from './auth';
 import { INFRA_DASHBOARD_HTML } from './infra/dashboard';
@@ -34,6 +37,7 @@ import { LEASE_QUERY, leaseWorkflowId, type FleetLeaseSet } from './lease';
 // From `infra/paths`, NOT `infra/workspace`: the latter imports the Pulumi Automation API at
 // its top, and this is a string parse. See that file's header.
 import { parseFqn } from './infra/paths';
+import { readHistory } from './infra/history';
 import { listStacks, readStack } from './infra/state';
 import { errMessage } from './routes/errors';
 import { NAMESPACE, getClient } from './temporalClient';
@@ -95,8 +99,32 @@ export async function startStackOp(
 export interface StackOpStatus {
   fqn: string;
   status: string;
-  /** Last heartbeat from the engine — which resource it is on. Absent once terminal. */
+  /**
+   * The WORKFLOW's own progress — `{phase, op}`, and `{result, changes}` once it is done.
+   *
+   * THIS FIELD'S COMMENT USED TO SAY "last heartbeat from the engine — which resource it is on",
+   * AND IT NEVER CARRIED ONE. `getProgress` is a query handler over a variable `stackWorkflow`
+   * assigns four times (`starting`, `running`, `done`, `compensating`); the per-resource detail
+   * `stackUp` emits — `last = {op, urn}` on every `resourcePreEvent` — is an ACTIVITY heartbeat,
+   * which Temporal stores on the pending activity and never delivers to the workflow. So the one
+   * fact the comment promised was in the other half of the response all along, undecoded. See
+   * {@link cursor}.
+   */
   progress?: Record<string, unknown>;
+  /**
+   * WHICH RESOURCE THE ENGINE IS ON, RIGHT NOW — the activity heartbeat, decoded.
+   *
+   * `{op, urn}`, e.g. `{op: 'create', urn: 'urn:pulumi:recon-s4::kontra-fleet::…::kf-recon-03'}`.
+   * A converge is minutes of silence punctuated by these, and until now nothing outside the Pulumi
+   * process could see one: the run page said `Bring the Fleet up · 214s` and could not say that
+   * three Droplets existed and the fourth was being made.
+   *
+   * ABSENT WHENEVER IT WOULD BE A GUESS — no activity pending (between attempts, or terminal), no
+   * details yet (the first thirty seconds, before the first `resourcePreEvent`), or a payload this
+   * process could not decode. Never an empty object: "the engine is on nothing" and "we have not
+   * been told" are different, and only one of them is ever true while a converge runs.
+   */
+  cursor?: Record<string, unknown>;
   result?: unknown;
 }
 
@@ -115,6 +143,11 @@ export async function readStackOp(fqn: string): Promise<StackOpStatus> {
   } catch {
     /* terminal or not yet queryable */
   }
+  // Same posture, and more so: this reads a proto bag off `describe`'s raw response, so anything
+  // missing or shaped differently yields no cursor rather than a throw on a status route.
+  const cursor = await heartbeatCursor(desc.raw);
+  if (cursor) out.cursor = cursor;
+
   if (desc.status.name === 'COMPLETED') {
     try {
       out.result = await handle.result();
@@ -122,6 +155,80 @@ export async function readStackOp(fqn: string): Promise<StackOpStatus> {
       /* surfaced via status */
     }
   }
+  return out;
+}
+
+/**
+ * The newest pending activity's heartbeat details, decoded.
+ *
+ * ── WHY THIS IS A PROTO WALK AND NOT AN SDK CALL ────────────────────────────────────────────────
+ *
+ * `@temporalio/client` gives no typed accessor for heartbeat details on a describe — they arrive as
+ * `pendingActivities[].heartbeatDetails`, a `Payloads` message on the raw response. `runActivity.ts`
+ * already walks the same bag for the same reason and its header says why the reading is structural
+ * and defensive: the collections are optional, and `pendingNexusOperations` only exists on servers
+ * new enough to have it. Anything absent here yields `undefined`.
+ *
+ * ── THE CODEC RUNS BEFORE THE CONVERTER ─────────────────────────────────────────────────────────
+ *
+ * The payload is claim-checked like every other payload this cluster writes. `{op, urn}` is a couple
+ * of hundred bytes, so it rides inline and the codec is a passthrough for it — but calling `decode`
+ * is what makes that a property of the DATA rather than an assumption about its size, and a heartbeat
+ * that ever did get claim-checked would otherwise decode to a pointer this route printed as the
+ * resource being built.
+ *
+ * ── ONE ACTIVITY, THE LAST ONE TO HEARTBEAT ────────────────────────────────────────────────────
+ *
+ * `orchestrator-infra` runs at `maxConcurrentActivityTaskExecutions: 1`, so a converging stack has
+ * exactly one pending activity in practice. Picking the freshest `lastHeartbeatTime` rather than the
+ * first entry keeps that an observation instead of a dependency: a retry that left a stale entry
+ * behind must not be reported as the resource being worked on now.
+ */
+async function heartbeatCursor(raw: unknown): Promise<Record<string, unknown> | undefined> {
+  const bag = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const pending = Array.isArray(bag.pendingActivities) ? bag.pendingActivities : [];
+
+  let best: { at: number; payloads: unknown } | undefined;
+  for (const item of pending) {
+    const act = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+    const payloads = (act.heartbeatDetails as { payloads?: unknown } | undefined)?.payloads;
+    if (!Array.isArray(payloads) || payloads.length === 0) continue;
+    const at = heartbeatMs(act.lastHeartbeatTime);
+    if (best === undefined || at >= best.at) best = { at, payloads };
+  }
+  if (best === undefined) return undefined;
+
+  try {
+    const decoded = await decodePayloads(best.payloads as Payload[]);
+    const value = decoded.length === 0 ? undefined : defaultPayloadConverter.fromPayload(decoded[0]!);
+    // A heartbeat that is not an object is not a cursor. `stackUp` sends `{op, urn}` or `{changes}`,
+    // and the second of those is a real frame with no resource in it — the caller decides what to do
+    // with a cursor that names none, and inventing one here would be worse than saying nothing.
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Proto Timestamp → epoch ms. `seconds` arrives as a number or a protobufjs Long, which is the
+ *  same reading `runActivity.ts:tsToMs` does — written again rather than imported, because that
+ *  module's copy is private to its own reduction and this one has a single caller. */
+function heartbeatMs(ts: unknown): number {
+  if (!ts || typeof ts !== 'object') return 0;
+  const t = ts as { seconds?: unknown; nanos?: unknown };
+  const secs = Number((t.seconds ?? 0).toString());
+  const nanos = Number((t.nanos ?? 0).toString());
+  const ms = (Number.isFinite(secs) ? secs : 0) * 1000 + Math.floor((Number.isFinite(nanos) ? nanos : 0) / 1e6);
+  return ms > 0 ? ms : 0;
+}
+
+/** Run the cluster's payload codecs over raw payloads, in order. One codec today (the claim check);
+ *  the loop is what keeps that a fact about the configuration rather than about this function. */
+async function decodePayloads(payloads: Payload[]): Promise<Payload[]> {
+  let out = payloads;
+  for (const codec of dataConverter.payloadCodecs) out = await codec.decode(out);
   return out;
 }
 
@@ -237,6 +344,45 @@ export function registerInfraRoutes(app: FastifyInstance): void {
       return state;
     } catch (err) {
       return reply.code(502).send({ error: `could not read stack: ${errMessage(err)}` });
+    }
+  });
+
+  /**
+   * WHAT THIS STACK HAS CONVERGED, one record per `up`, `preview` or `destroy` (issue 13).
+   *
+   * A SIBLING OF `/state`, NOT A FIELD ON IT, because the two answer different questions: a
+   * checkpoint says what EXISTS right now and is rewritten in place, so it cannot say that a Fleet
+   * was torn down and stood up again this afternoon — or that the teardown FAILED, which is a
+   * Droplet still being billed. `infra/history.ts` says the rest.
+   *
+   * SAME TOKEN as its two siblings, for the reason stated above them: the answer is a record of what
+   * this control plane has provisioned and when, which is an operational map.
+   *
+   * IT DOES NOT 404 FOR A STACK THAT NEVER CONVERGED. `/state` does, correctly — a document that is
+   * not there. A history is a SET and the empty set is a real answer, and the console keys off that
+   * difference: a 404 here can only mean the route is not served, and it draws no strip at all
+   * rather than asserting that a stack has never converged.
+   */
+  app.get('/api/infra/stacks/:fqn/history', async (req, reply) => {
+    const denied = checkBearer(req.headers.authorization, INFRA_ROUTE_TOKEN_VARS);
+    if (denied) return reply.code(denied.code).send(denied.body);
+    const { fqn } = req.params as { fqn: string };
+    const { limit } = (req.query ?? {}) as { limit?: string };
+    let parsed: string;
+    try {
+      // `parseFqn` BEFORE ANY PATH IS BUILT. It is the same guard the two routes above use and here
+      // it is doing more work: this handler joins the project and the stack into a DIRECTORY name,
+      // so a `..` that reached it would list one. The parse rejects every character that could.
+      const ref = parseFqn(decodeURIComponent(fqn));
+      parsed = `${ref.project}/${ref.stack}`;
+    } catch {
+      return reply.code(400).send({ error: 'stack must be <project>/<stack>' });
+    }
+    try {
+      const n = limit === undefined ? undefined : Number.parseInt(limit, 10);
+      return { records: await readHistory(parsed, Number.isFinite(n) ? { limit: n } : {}) };
+    } catch (err) {
+      return reply.code(502).send({ error: `could not read converge records: ${errMessage(err)}` });
     }
   });
 

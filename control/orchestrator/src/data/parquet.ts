@@ -33,17 +33,35 @@
  * payload bytes flow S3 → embedded DuckDB → parquet inside the materializer process.
  */
 
+import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
 import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
 
 import type { ObjectStore } from '../codec/objectStore';
+// From `../workspaces`, which is a pure derivation over a NAME — no lookup table, no I/O, and no
+// import cycle: `workspaces.ts` reaches nothing in `data/`.
+import { activeLakeWorkspace, workspaceAddress } from '../workspaces';
 import { applianceDataDir } from './dataDir';
 import { MATERIALIZATION_SCHEMA_VERSION } from './materialization';
 
 /** Where a DuckLake lives: its catalog metadata store and the data-file storage root. */
 export interface LakeConfig {
+  /**
+   * WHICH WORKSPACE'S LAKE THIS IS (issue 08, ADR 0051).
+   *
+   * Set, every address below is derived from it by `workspaceAddress` — its own bucket and its own
+   * catalog DATABASE (not a schema: the metadata schema follows the backend and is `public` for
+   * every Postgres catalog, so two DuckLakes in one database would put their metadata tables in
+   * the same place).
+   *
+   * Absent, the legacy address is used unchanged, which is what this install runs on today. The
+   * derivation is TOTAL — `default` derives `ws-default` like anything else, with no special case,
+   * because a special case inside an address function is a filter wearing an address's clothes.
+   * What is conditional is whether the address is CONSULTED, not what it resolves to.
+   */
+  workspace?: string;
   /**
    * DuckLake catalog metadata store — a local DuckDB file in the appliance's data directory
    * ({@link defaultCatalogPath}), interpolated straight into `ATTACH 'ducklake:<catalog>'`.
@@ -84,6 +102,24 @@ export interface LakeConfig {
    * canary gate tunes it per workload rather than raising the worker class first.
    */
   batchSize?: number;
+  /**
+   * SOURCE BYTES one batch may cover, whichever limit it reaches first.
+   *
+   * A COUNT IS NOT A BOUND ON MEMORY, and this is the lesson `campaign-smoke-1790626548` taught.
+   * The per-batch commit made peak state proportional to ONE batch instead of a whole node, which
+   * is the fix — but `batchSize` counts UNIT OBJECTS, and a unit is an author's record. An actor
+   * emitting HTTP exchanges puts request and response bodies in one, so 256 of them is kilobytes
+   * for a DNS sweep and hundreds of megabytes for a crawl. `bumble` — 39 assets, one of the
+   * SMALLEST programs in the set — hit the same 1.4 GiB/1.4 GiB wall as the 4,098-unit node that
+   * motivated all of this. Selecting smaller programs never could have helped: the bound was on
+   * the wrong quantity.
+   *
+   * So a batch closes on units OR bytes. The manifest already carries each unit's `size`, so this
+   * costs no extra read — the number was being discarded.
+   *
+   * Override with `KONTRA_MATERIALIZE_BATCH_BYTES`.
+   */
+  batchBytes?: number;
   /** DuckDB `memory_limit` for this connection. NOT an RSS cap — the cgroup is. */
   memoryLimit?: string;
   /** DuckDB worker threads. One by default: the materializer is a single-slot worker. */
@@ -143,8 +179,37 @@ export const RESERVED_OUTPUT_COLUMNS: readonly string[] = [
  */
 const STANDALONE_SCHEMA = 'standalone';
 
+/**
+ * Where this module keeps its OWN bookkeeping — not a **Dataset**, and deliberately not in a
+ * schema that lists as one.
+ *
+ * `data/datasets.ts:397` filters the listing to `schema_name IN (output, standalone)`, so a table
+ * here is invisible to every dataset surface: the console listing, `kontra dataset list`, the
+ * catalog reads and the retention sweep. That is the point. The alternative — a `_kontra_`-prefixed
+ * table beside the user's output — is one forgotten prefix filter away from an operator seeing an
+ * internal table in their own dataset list, and a name filter is exactly the kind of boundary
+ * ADR 0051 §3 says to prefer an address over.
+ */
+const INTERNAL_SCHEMA = 'kontra_internal';
+
+/** The publish high-water mark. See {@link readPublishMark}. */
+const PROGRESS_TABLE = 'publish_progress';
+
 /** Default units per verify+insert batch. Override with `KONTRA_MATERIALIZE_BATCH`. */
 export const DEFAULT_BATCH_SIZE = 256;
+
+/**
+ * Default SOURCE bytes per batch — 8 MiB, and the margin is deliberately enormous.
+ *
+ * MEASURED INFLATION IS THE REASON. ~4 MB of unit objects reached 2.3 GiB of uncommitted state:
+ * `read_json` with `union_by_name=true` over N separate files infers and holds per-file schema
+ * state across a 40-column union, and none of it is evictable before the commit. That is roughly
+ * 500× — so a bound expressed in source bytes has to sit far below anything that looks safe.
+ *
+ * 8 MiB of source against a 1536MB `memory_limit` leaves a wide margin at the observed ratio, and
+ * the per-batch commit means exceeding it costs a retry of ONE batch rather than a whole node.
+ */
+export const DEFAULT_BATCH_BYTES = 8 * 1024 * 1024;
 
 /**
  * The dispatch-time partition value: `2026-08-03T19-42-07`.
@@ -309,10 +374,60 @@ export function resolveLakeConfig(store: ObjectStore, override: Partial<LakeConf
   //     standalone/<dataset>/…parquet
   // Nothing derives a path by string-building, and there is no `datasets/` middle segment
   // whose only job was to hold hashed table names.
-  const dataPath = override.dataPath ?? (s3
-    ? `s3://${store.bucket}/${store.prefix ? `${store.prefix}/` : ''}`
-    : process.env.KONTRA_DUCKLAKE_DATA_PATH ?? './');
-  const catalog = resolveCatalog(override.catalog);
+  //
+  // ── THE WORKSPACE ADDRESS, WHEN ONE IS IN FORCE (issue 08) ─────────────────────────────────
+  //
+  // A Workspace is the isolation boundary (ADR 0051), and isolation is BY ADDRESS, never by
+  // filter: a `WHERE workspace = ?` on a shared table is one forgotten clause away from not
+  // existing, and the forgotten clause reads as an ordinary result. A separate bucket and catalog
+  // fail the other way — get the address wrong and you see nothing, loudly.
+  //
+  // THE LAKE AND THE OBJECT STORE MOVE TOGETHER, which is why one branch sets both.
+  // `ducklake_delete_orphaned_files` deletes files under a catalog's data path that "the catalog
+  // never knew about" — precisely what another workspace's parquet looks like — so two catalogs
+  // sharing a bucket would make lake maintenance a cross-workspace deletion machine.
+  //
+  // ── AND WHY IT IS OFF UNTIL SOMETHING TURNS IT ON ──────────────────────────────────────────
+  //
+  // Deriving the address is safe; MOVING TO IT is not, and they are not the same act. This
+  // install holds 152 datasets at the legacy address, so resolving to `ws-<name>` before those
+  // bytes are there would answer every query from an empty catalog — the datasets would not be
+  // gone, they would be unreachable, which reads exactly like the 2026-09-28 wipe. Relocating
+  // them is issue 10: a dry run a human reads, a verified rollback, and no run in flight.
+  //
+  // So the derivation lands here, total and tested, and the switch is `KONTRA_LAKE_WORKSPACE`
+  // being set. Unset — the state of this install — every value below is byte-for-byte what it was.
+  //
+  // NOT `KONTRA_WORKSPACE`, WHICH IS ALREADY TAKEN AND MEANS SOMETHING ELSE ENTIRELY: it is the
+  // legacy variable naming the code ROOT DIRECTORY (`cli/workspace.go`, and `workspaceRoot()` in
+  // `../workspaces`). Reading it here would hand `workspaceAddress` a filesystem path, which is not
+  // a legal workspace name — so an install that still sets the legacy variable would have had every
+  // lake resolution throw. Caught before it shipped; the name is distinct on purpose.
+  // `.current` FIRST, `KONTRA_LAKE_WORKSPACE` AS THE OVERRIDE — see `activeLakeWorkspace`. Reading
+  // the variable alone let the install serve one workspace's code against another's lake, because
+  // each answer was separately valid and nothing compared them.
+  const workspace = (override.workspace ?? activeLakeWorkspace()).trim();
+  const address = workspace === '' ? null : workspaceAddress(workspace);
+
+  //
+  // THE LOCAL CASE GETS ITS OWN DIRECTORY FOR THE SAME REASON THE S3 CASE GETS ITS OWN BUCKET.
+  // An appliance runs a FILE catalog (ADR 0031 §1b), so `workspaceAddress` names `ws-<n>.ducklake`
+  // — separate catalogs. Leaving them on one data directory would recreate precisely the hazard
+  // this branch exists to close: `ducklake_delete_orphaned_files` deletes files under a catalog's
+  // data path that "the catalog never knew about", and another workspace's parquet is exactly
+  // that. Two catalogs over one store is the deletion machine whether the store is a bucket or a
+  // folder.
+  const localRoot = (process.env.KONTRA_DUCKLAKE_DATA_PATH ?? './').replace(/\/*$/, '/');
+  const dataPath =
+    override.dataPath ??
+    (s3
+      ? address !== null
+        ? `s3://${address.bucket}/`
+        : `s3://${store.bucket}/${store.prefix ? `${store.prefix}/` : ''}`
+      : address !== null
+        ? `${localRoot}${address.bucket}/`
+        : process.env.KONTRA_DUCKLAKE_DATA_PATH ?? './');
+  const catalog = resolveCatalog(override.catalog ?? address?.catalog);
   return {
     catalog,
     dataPath,
@@ -321,12 +436,27 @@ export function resolveLakeConfig(store: ObjectStore, override: Partial<LakeConf
     sourceUri: override.sourceUri,
     blobBase: override.blobBase ?? `s3://${store.bucket}/`,
     batchSize: override.batchSize ?? intFromEnv('KONTRA_MATERIALIZE_BATCH', DEFAULT_BATCH_SIZE),
+    batchBytes:
+      override.batchBytes ?? intFromEnv('KONTRA_MATERIALIZE_BATCH_BYTES', DEFAULT_BATCH_BYTES),
     // 256 MB inside a 512 MB cgroup (plan §1). DuckDB's own setting bounds its buffer
     // manager, not the process — the cgroup is the hard boundary, and this sits under it
     // so DuckDB spills to the temp volume before the kernel reaches for the OOM killer.
     memoryLimit: override.memoryLimit ?? process.env.KONTRA_DUCKDB_MEMORY_LIMIT ?? '256MB',
     threads: override.threads ?? intFromEnv('KONTRA_DUCKDB_THREADS', 1),
-    tempDirectory: override.tempDirectory ?? process.env.KONTRA_DUCKDB_TEMP_DIR,
+    // A DEFAULT, BECAUSE THE ALTERNATIVE IS SILENTLY NOT SPILLING AT ALL.
+    //
+    // `SET temp_directory` is only issued when this resolves, so leaving it undefined does not mean
+    // "spill somewhere sensible" — it means DuckDB has NOWHERE to spill and fails outright the
+    // moment a query needs more than `memory_limit`. The comment above promises the opposite
+    // ("spills to the temp volume before the kernel reaches for the OOM killer"), and with
+    // KONTRA_DUCKDB_TEMP_DIR unset — which is how this install ran — that promise was never kept:
+    // campaign-1790599185 took 6 `Out of Memory Error: could not allocate block of size 1.1 MiB
+    // (1.4 GiB/1.4 GiB used)` in ten minutes against a 1536MB limit, while the container itself was
+    // holding 287 MiB of a 7.7 GiB allowance. Nothing was out of memory; DuckDB just had no floor
+    // to put anything on.
+    //
+    // `maxTempSize` still bounds it, so this trades an unbounded failure for a bounded one.
+    tempDirectory: override.tempDirectory ?? process.env.KONTRA_DUCKDB_TEMP_DIR ?? '/tmp/duckdb-spill',
     maxTempSize: override.maxTempSize ?? process.env.KONTRA_DUCKDB_MAX_TEMP_SIZE ?? '2GB',
   };
 }
@@ -346,6 +476,29 @@ const connections = new Map<string, Promise<DuckDBConnection>>();
 /** Test seam: drop cached connections so a fresh config attaches cleanly. */
 export function resetLakeConnections(): void {
   connections.clear();
+}
+
+/**
+ * Throw away one cached connection, so the next caller attaches a fresh one.
+ *
+ * A DuckDB connection does not recover from every error. An aborted transaction leaves it
+ * answering `Current transaction is aborted (please ROLLBACK)` to everything, and an internal
+ * error leaves it answering `We encountered an internal error, please try again` — in both cases
+ * to CALLERS THAT DID NOTHING WRONG, because this cache hands the same object to all of them. The
+ * observed shape (`.scratch/materializer-shared-connection`) is a history-archive job failing and
+ * a completely unrelated dataset's publish failing forever afterwards.
+ *
+ * So a caller that sees an error discards the connection rather than returning it to the pool.
+ * Re-ATTACHing the catalog costs real time, which is why the cache exists — but paying it once per
+ * failure is the difference between a transient error and a process that can never write again.
+ */
+export function discardLakeConnection(store: ObjectStore, override: Partial<LakeConfig> = {}): void {
+  // RESOLVED THE SAME WAY `lakeConnection` RESOLVES IT, because the cache is keyed on the
+  // RESOLVED (catalog, dataPath) and callers hold a partial. Deleting with the partial's raw
+  // values would miss the entry and leave the poisoned connection in place — a no-op that reads
+  // as a fix, which is worse than not having one.
+  const cfg = resolveLakeConfig(store, override);
+  connections.delete(`${cfg.catalog}\0${cfg.dataPath}`);
 }
 
 /** The `SET s3_…` block pointing DuckDB's httpfs at the same store the codec uses. */
@@ -397,7 +550,13 @@ export async function lakeConnection(store: ObjectStore, cfg: LakeConfig): Promi
     // anyway. Nothing downstream could have depended on arrival order, so this gives up a
     // guarantee the schema never made.
     await c.run('SET preserve_insertion_order=false');
-    if (cfg.tempDirectory) await c.run(`SET temp_directory='${sqlLiteral(cfg.tempDirectory)}'`);
+    if (cfg.tempDirectory) {
+      // MADE TO EXIST FIRST, for `ensureCatalogDir`'s reason one line up: DuckDB reports a spill
+      // into a missing directory as an IO Error from inside the query that needed to spill, which
+      // reads as "the publish failed" rather than "the spill path is wrong".
+      mkdirSync(path.resolve(cfg.tempDirectory), { recursive: true });
+      await c.run(`SET temp_directory='${sqlLiteral(cfg.tempDirectory)}'`);
+    }
     await c.run(`SET max_temp_directory_size='${cfg.maxTempSize}'`);
     if (cfg.s3) await c.run(s3Setup(store));
     await c.run('INSTALL ducklake; LOAD ducklake;');
@@ -413,6 +572,19 @@ export async function lakeConnection(store: ObjectStore, cfg: LakeConfig): Promi
     );
     await c.run(`CREATE SCHEMA IF NOT EXISTS ${LAKE}.${OUTPUT_SCHEMA}`);
     await c.run(`CREATE SCHEMA IF NOT EXISTS ${LAKE}.${STANDALONE_SCHEMA}`);
+    await c.run(`CREATE SCHEMA IF NOT EXISTS ${LAKE}.${INTERNAL_SCHEMA}`);
+    // The high-water mark lives IN THE LAKE, which is the whole of why resume is exact — see
+    // {@link readPublishMark}. Created here rather than lazily at first publish so a publish
+    // never pays a DDL round-trip inside the transaction it is trying to keep small.
+    await c.run(
+      `CREATE TABLE IF NOT EXISTS ${LAKE}.${INTERNAL_SCHEMA}."${PROGRESS_TABLE}" (` +
+        // `pub` is the identity the resume keys on; `run_id`, `tbl` and `dt` are carried so a
+        // human reading this table can tell what a row is about without recomputing a digest.
+        `run_id VARCHAR, tbl VARCHAR, dt VARCHAR, pub VARCHAR, ` +
+        // `marked_at`, NOT `at` — `AT` is a DuckDB keyword (`AT (VERSION => …)`, its time-travel
+        // clause) and an unquoted column of that name is a parser error inside CREATE TABLE.
+        `steps_done BIGINT, rows_done BIGINT, marked_at TIMESTAMPTZ)`
+    );
     return c;
   })();
 
@@ -423,6 +595,69 @@ export async function lakeConnection(store: ObjectStore, cfg: LakeConfig): Promi
     connections.delete(cacheKey); // never cache a rejection — see the comment above
     throw err;
   }
+}
+
+/** The aliases a migration connection attaches its two lakes under. */
+export const MIGRATE_SRC = 'src_lake';
+export const MIGRATE_DST = 'dst_lake';
+
+/**
+ * One connection with TWO DuckLakes attached, for moving a workspace's data between addresses
+ * (issue 10). The source is attached READ_ONLY, so a migration cannot write to the lake it is
+ * reading — the single most valuable property this function has.
+ *
+ * IT IS NOT CACHED, AND THAT IS THE POINT. `lakeConnection` memoizes per (catalog, dataPath)
+ * because ordinary traffic wants one warm attach; a migration is a one-shot with a different
+ * alias map, and handing it a pooled connection would leave `src_lake`/`dst_lake` attached to
+ * every later caller of the same key. The caller closes it.
+ *
+ * Both configs go through `resolveLakeConfig`, so the addresses a migration reads and writes are
+ * the SAME derivation every other caller uses — a migration that computed its own addresses could
+ * move data somewhere the running orchestrator never looks, which is the failure mode that makes a
+ * successful-looking migration indistinguishable from data loss.
+ */
+export async function migrationConnection(
+  store: ObjectStore,
+  from: Partial<LakeConfig>,
+  to: Partial<LakeConfig>
+): Promise<{ conn: DuckDBConnection; src: LakeConfig; dst: LakeConfig }> {
+  const src = resolveLakeConfig(store, from);
+  const dst = resolveLakeConfig(store, to);
+  if (src.catalog === dst.catalog && src.dataPath === dst.dataPath) {
+    throw new Error(
+      `migration source and destination are the same address (${src.catalog} @ ${src.dataPath}) — ` +
+        'nothing to move, and copying a lake onto itself would double every row'
+    );
+  }
+  ensureCatalogDir(src.catalog);
+  ensureCatalogDir(dst.catalog);
+  const c = await (await DuckDBInstance.create()).connect();
+  await c.run(`SET memory_limit='${dst.memoryLimit}'`);
+  await c.run(`SET threads=${dst.threads}`);
+  await c.run('SET preserve_insertion_order=false');
+  if (dst.tempDirectory) {
+    mkdirSync(path.resolve(dst.tempDirectory), { recursive: true });
+    await c.run(`SET temp_directory='${sqlLiteral(dst.tempDirectory)}'`);
+  }
+  await c.run(`SET max_temp_directory_size='${dst.maxTempSize}'`);
+  if (src.s3 || dst.s3) await c.run(s3Setup(store));
+  await c.run('INSTALL ducklake; LOAD ducklake;');
+  await c.run('INSTALL json; LOAD json;');
+  if (src.catalog.startsWith('postgres:') || dst.catalog.startsWith('postgres:')) {
+    await c.run('INSTALL postgres; LOAD postgres;');
+  }
+  await c.run(
+    `ATTACH IF NOT EXISTS 'ducklake:${src.catalog}' AS ${MIGRATE_SRC} ` +
+      `(DATA_PATH '${src.dataPath}', DATA_INLINING_ROW_LIMIT 0, READ_ONLY)`
+  );
+  await c.run(
+    `ATTACH IF NOT EXISTS 'ducklake:${dst.catalog}' AS ${MIGRATE_DST} ` +
+      `(DATA_PATH '${dst.dataPath}', DATA_INLINING_ROW_LIMIT 0)`
+  );
+  for (const schema of [OUTPUT_SCHEMA, STANDALONE_SCHEMA, INTERNAL_SCHEMA]) {
+    await c.run(`CREATE SCHEMA IF NOT EXISTS ${MIGRATE_DST}.${schema}`);
+  }
+  return { conn: c, src, dst };
 }
 
 /** Escape a single-quoted SQL literal. Every interpolation below goes through this. */
@@ -454,6 +689,8 @@ export class MaterializationIntegrityError extends Error {
 interface UnitRef {
   key: string;
   sha256: string;
+  /** Source bytes this unit object holds, from the manifest. 0 when the manifest omitted it. */
+  size: number;
 }
 
 /** What one node's materialization produced — the numbers the status record stores. */
@@ -472,6 +709,17 @@ export interface MaterializeResult {
   objectGets: number;
   /** Inline result entries taken straight from the (already verified) manifest. */
   inlineUnits: number;
+  /**
+   * The partition these rows landed in — `dtPartition(runStartedAt)`, ALREADY COMPUTED here.
+   *
+   * RETURNED SO NOBODY ELSE SPELLS IT. A caller that wants to read back only its own rows needs
+   * this exact string, and the one thing it must not do is derive it a second time:
+   * {@link dtPartition} is second-precision, colon-substituted and minted from the SERVER's
+   * `run_started_at`, and a reimplementation that differs by one character does not error — it
+   * matches no partition and returns ZERO ROWS, silently, which reads as "the run produced
+   * nothing". So the value crosses the wire from the process that owns the format.
+   */
+  dt: string;
 }
 
 export interface MaterializeSelector {
@@ -550,6 +798,7 @@ export async function writeDatasetParquet(
   const dt = dtPartition(sel.runStartedAt);
   const src = cfg.sourceUri ?? `s3://${store.bucket}/${store.casKey(sel.sha256)}`;
   const batchSize = cfg.batchSize ?? DEFAULT_BATCH_SIZE;
+  const batchBytes = cfg.batchBytes ?? DEFAULT_BATCH_BYTES;
 
   let objectGets = 0;
 
@@ -584,82 +833,180 @@ export async function writeDatasetParquet(
   }
 
   // --- 2. page the refs (refs only — no payload crosses into Node) ----------------------
-  const entries = await conn.runAndReadAll(
+  //
+  // STREAMED IN CHUNKS, AND SORTED BY DUCKDB RATHER THAN BY V8.
+  //
+  // This was `runAndReadAll(...).getRows()`, which built the whole ref list TWICE before the loop
+  // could start: `DuckDBResultReader` retains every chunk it has read in a private array, and
+  // `getRows()` then copies all of them into a second, fully-materialized JS array. One blob per
+  // pushed record means a large node's ref list is not small — 4,098 here, but it grows with the
+  // **Dataset**, and both copies are live at the same moment.
+  //
+  // `conn.stream()` hands back a real streaming `DuckDBResult` whose `fetchChunk()` yields one
+  // chunk at a time and retains nothing, so the only surviving copy is `refs` itself — the array
+  // the batching genuinely needs. Note `readUntil()` is NOT the fix and looks like it is: it reads
+  // in bounded steps but accumulates into the same private `chunks`, so memory still grows.
+  //
+  // The ORDER BY moves the sort to DuckDB, which can spill it; `refs.sort()` could not. The
+  // ordering requirement itself is unchanged and load-bearing — a batch's contents must not depend
+  // on unnest order, or two attempts of the same node would read different objects into different
+  // batches, and step k of a resume would not be step k of the original.
+  //
+  // This is NOT what fixed the publish OOM — that was the node-wide transaction below, and this
+  // list was measured at ~4 MB when the process reached 2.3 GiB. It is the next thing that would
+  // have become the ceiling.
+  const entries = await conn.stream(
     `WITH d AS (SELECT ${quoteJson(String(resultsJson))} AS s)
      SELECT json_extract_string(e, '$."$ref".key')    AS key,
-            json_extract_string(e, '$."$ref".sha256') AS sha
-       FROM d, unnest(CAST(d.s AS JSON[])) AS t(e)`
+            json_extract_string(e, '$."$ref".sha256') AS sha,
+            json_extract(e, '$."$ref".size')          AS size
+       FROM d, unnest(CAST(d.s AS JSON[])) AS t(e)
+      ORDER BY key`
   );
   const refs: UnitRef[] = [];
   let inlineUnits = 0;
-  for (const row of entries.getRows()) {
-    const key = row[0];
-    const sha = row[1];
-    if (typeof key === 'string' && typeof sha === 'string') refs.push({ key, sha256: sha });
-    else inlineUnits += 1;
+  for (;;) {
+    const chunk = await entries.fetchChunk();
+    if (!chunk || chunk.rowCount === 0) break;
+    const keys = chunk.getColumnValues(0);
+    const shas = chunk.getColumnValues(1);
+    const sizes = chunk.getColumnValues(2);
+    for (let i = 0; i < chunk.rowCount; i += 1) {
+      const key = keys[i];
+      const sha = shas[i];
+      if (typeof key === 'string' && typeof sha === 'string') {
+        // A manifest that omits `size` yields 0, which makes the byte budget a no-op for that
+        // unit rather than a wrong answer — the count bound still applies. Old manifests predate
+        // nothing here (`size` has always been written), so this is belt-and-braces.
+        const n = Number(sizes[i]);
+        refs.push({ key, sha256: sha, size: Number.isFinite(n) && n > 0 ? n : 0 });
+      } else inlineUnits += 1;
+    }
   }
-  // Deterministic order: a batch's contents must not depend on DuckDB's unnest order, or
-  // two attempts of the same node would read different objects into different batches.
-  refs.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
   if (refs.length === 0 && inlineUnits === 0) {
     // A genuinely empty node. Nothing to infer a schema from, so no table is created —
     // but this is a SUCCESS, and the caller records it as `complete` with zero rows.
-    return { tbl: null, rows: 0, bytes: 0, snapshotId: null, refObjects: 0, objectGets, inlineUnits: 0 };
+    // `dt` is reported even here: an empty node still HAS a partition it would have written to,
+    // and a caller scoping a read wants the same string whether or not any rows arrived.
+    return { tbl: null, rows: 0, bytes: 0, snapshotId: null, refObjects: 0, objectGets, inlineUnits: 0, dt };
   }
 
   // --- 3/4/5. verify, type, insert — one transaction for the whole node -----------------
   const base = cfg.blobBase ?? `s3://${store.bucket}/`;
-  let rows = 0;
-  let created = false;
-  await conn.run('BEGIN TRANSACTION');
-  try {
-    if (inlineUnits > 0) {
-      // Inline entries live inside the manifest, whose sha256 is already verified above —
-      // they need no second integrity check.
-      rows += await insertBatch(conn, {
+
+  /*
+   * ── ONE TRANSACTION PER STEP, NOT ONE PER NODE — AND WHY THE ATOMICITY HAD TO GO ──────────────
+   *
+   * This used to be `BEGIN` here, every batch, `COMMIT` at the end: "either every batch lands or
+   * none does". That sentence was true and it was the single largest memory consumer in this
+   * system. Uncommitted rows CANNOT BE EVICTED OR SPILLED, so `batchSize` never bounded peak
+   * memory — it only decided how many times the process walked toward the same wall.
+   *
+   * MEASURED on campaign-1790599185: 1.4 GiB/1.4 GiB used against a 1536MB `memory_limit`, and
+   * 2.3 GiB/2.3 GiB against 2560MB — always ~95% of whatever ceiling it was given, with the spill
+   * directory EMPTY even once `temp_directory` was correctly set (the fix one screen up). ~4 MB of
+   * source objects — a 1.2 MB manifest and 4,098 unit blobs averaging under 3 KB — inflated past
+   * 2.3 GiB purely as uncommitted transaction state. That is the exact signature
+   * `lakeConnection` already documents for `preserve_insertion_order`, in a second costume:
+   * raising a ceiling it cannot evict under only moves the wall.
+   *
+   * WHAT REPLACES THE GUARANTEE IS STRONGER, NOT WEAKER. A transaction protects against a
+   * half-written table only while the process lives; kill -9 mid-`COMMIT` and it protects nothing.
+   * The **Dataset** state machine protects against the same thing and survives the process dying:
+   * a **Dataset** is `open` while a **Run** appends, `sealed` when the caller declares it complete,
+   * and `abandoned` if the **Run** died first — so a partial **Dataset** can never be read as a
+   * finished one. Committing per step leaves exactly that state on a crash, which is the truth.
+   *
+   * ── AND THE MARK IS IN THE LAKE, WHICH IS THE WHOLE OF WHY RESUME IS EXACT ────────────────────
+   *
+   * Per-step commit without a resume point would DOUBLE-INSERT: a retrying activity re-runs steps
+   * that already landed. So each step commits its own high-water mark IN THE SAME TRANSACTION as
+   * its rows. One transaction domain covers both, so there is no ledger-versus-lake divergence to
+   * reconcile — the pair is atomic or neither happened.
+   *
+   * It works because the step numbering is REPLAY-STABLE, and that property already exists and is
+   * already load-bearing: `refs.sort()` above says "a batch's contents must not depend on DuckDB's
+   * unnest order, or two attempts of the same node would read different objects into different
+   * batches". That sort was written for integrity; this cashes it in. Step k holds the same refs on
+   * every attempt, so "steps 1..k are durable" is exact rather than approximate.
+   *
+   * THE MARK IS NEVER CLEANED UP ON SUCCESS, deliberately. An activity that commits everything and
+   * then dies before its result reaches Temporal is retried — and a cleared mark would re-insert
+   * the entire node. Keeping it makes the whole activity idempotent, not just its middle.
+   */
+  const pub = publishIdentity(sel);
+  const mark = await readPublishMark(conn, pub);
+  let rows = mark.rowsDone;
+  // A committed step means the table exists and is partitioned; nothing needs re-creating.
+  let created = mark.stepsDone > 0;
+  let step = 0;
+
+  /**
+   * Run one step in its own transaction: verify, insert, stamp the mark, commit.
+   *
+   * `created` is promoted only AFTER the commit. `insertBatch` calls `onCreate` from inside the
+   * transaction, and a rollback takes the CREATE with it — so trusting the callback directly would
+   * leave a later step believing in a table that does not exist.
+   */
+  const runStep = async (source: string, verify: UnitRef[] | null, gets: number): Promise<void> => {
+    step += 1;
+    // Already durable. Not re-read, not re-verified, not re-inserted — and the object GETs it
+    // would have cost are not counted, because they did not happen.
+    if (step <= mark.stepsDone) return;
+    let createdHere = false;
+    await conn.run('BEGIN TRANSACTION');
+    try {
+      if (verify) objectGets += await verifyBatch(conn, base, verify);
+      const added = await insertBatch(conn, {
         tbl,
         runId: sel.runId,
         version: sel.version,
         dt,
         node: sel.node,
         runStartedAt: sel.runStartedAt,
-        source: inlineSelect(src, shape),
+        source,
         ensureCreated: !created,
         onCreate: () => {
-          created = true;
+          createdHere = true;
         },
       });
-      objectGets += 1;
+      objectGets += gets;
+      await writePublishMark(conn, sel, tbl, dt, pub, step, rows + added);
+      await conn.run('COMMIT');
+      rows += added;
+      if (createdHere) created = true;
+    } catch (err) {
+      await conn.run('ROLLBACK').catch(() => undefined);
+      throw err;
     }
+  };
 
-    for (let i = 0; i < refs.length; i += batchSize) {
-      const batch = refs.slice(i, i + batchSize);
-      objectGets += await verifyBatch(conn, base, batch);
-      rows += await insertBatch(conn, {
-        tbl,
-        runId: sel.runId,
-        version: sel.version,
-        dt,
-        node: sel.node,
-        runStartedAt: sel.runStartedAt,
-        source: refSelect(base, batch),
-        ensureCreated: !created,
-        onCreate: () => {
-          created = true;
-        },
-      });
-      objectGets += batch.length;
+  // Inline entries live inside the manifest, whose sha256 is already verified above — they need
+  // no second integrity check, which is why they pass `null` rather than a ref list.
+  if (inlineUnits > 0) await runStep(inlineSelect(src, shape), null, 1);
+
+  // A batch closes on UNITS or BYTES, whichever comes first — see `LakeConfig.batchBytes`. The
+  // walk stays a pure function of the (sorted) ref list and the two limits, so step k holds the
+  // same refs on every attempt and the resume mark above stays exact.
+  for (let i = 0; i < refs.length; ) {
+    let end = i;
+    let bytes = 0;
+    while (end < refs.length && end - i < batchSize) {
+      // Always take at least one, or a single unit larger than the whole budget would produce an
+      // empty batch and loop forever. One oversized unit is a batch of one — the smallest thing
+      // that can still make progress, and the honest bound when the author's record IS the ceiling.
+      if (end > i && bytes + refs[end]!.size > batchBytes) break;
+      bytes += refs[end]!.size;
+      end += 1;
     }
-
-    await conn.run('COMMIT');
-  } catch (err) {
-    await conn.run('ROLLBACK').catch(() => undefined);
-    throw err;
+    const batch = refs.slice(i, end);
+    await runStep(refSelect(base, batch), batch, batch.length);
+    i = end;
   }
 
   const { bytes, snapshotId } = await partitionStats(conn, cfg.metaSchema, tbl, dt);
-  return { tbl, rows, bytes, snapshotId, refObjects: refs.length, objectGets, inlineUnits };
+  return { tbl, rows, bytes, snapshotId, refObjects: refs.length, objectGets, inlineUnits, dt };
 }
 
 /** What a promotion asks for: fill a durable Dataset from a query over another one. */
@@ -943,6 +1290,93 @@ async function insertBatch(conn: DuckDBConnection, b: InsertBatch): Promise<numb
   await evolveSchema(conn, b.tbl, select);
   const res = await conn.runAndReadAll(`INSERT INTO ${LAKE}.${OUTPUT_SCHEMA}."${b.tbl}" BY NAME ${select}`);
   return Number(res.getRows()[0]?.[0] ?? 0);
+}
+
+/**
+ * THE IDENTITY A RESUME KEYS ON: a digest over everything that decides this publish's output.
+ *
+ * (run, table, dt) IS NOT ENOUGH, and the test suite says so in three places. One **Run** publishes
+ * to one table repeatedly — a new **Actor** version is a PARTITION of the same table, not a new
+ * table (`parquet.test.ts:479`), and `dt` is `dtPartition(runStartedAt)`, which is constant for a
+ * **Run**. So keying on those three makes a second, legitimately different publish look like a
+ * retry of the first and skip every step: measured as one version landing where two were expected,
+ * and as one row where three Machines were written.
+ *
+ * The manifest sha256 alone is not enough either. It identifies the BYTES, and the selector stamps
+ * five more columns onto every row (`version`, `dt`, `node`, `run_id`, `run_started_at`) — so two
+ * publishes of identical units under different `node` values are different output from the same
+ * manifest, which is exactly `parquet.test.ts:181`.
+ *
+ * So the key is the WHOLE selector. Same selector means the same rows, which is the definition of
+ * a retry; any difference means output that must land. Cheap and total — no field can be added to
+ * {@link MaterializeSelector} without being covered, because the digest is taken over the record.
+ */
+function publishIdentity(sel: MaterializeSelector): string {
+  return createHash('sha256')
+    .update(
+      [
+        sel.runId,
+        sel.actor,
+        sel.version ?? '',
+        sel.node ?? '',
+        String(sel.runStartedAt),
+        sel.sha256,
+      // NUL-joined, the same idiom `lakeConnection`'s cache key uses, and for the same reason: it
+      // is the one byte none of these fields can contain, so no combination of values can collide
+      // by running into its neighbour. Written as the ESCAPE, never as a literal NUL — a real one
+      // in the source makes grep call this file binary and silently skip it.
+      ].join('\0')
+    )
+    .digest('hex');
+}
+
+/** How far a previous attempt at this publish got. Zeroes mean "nothing is durable yet". */
+interface PublishMark {
+  /** Steps whose rows AND whose mark are committed. Steps 1..stepsDone must not be re-run. */
+  stepsDone: number;
+  /** Rows the committed steps inserted, so a resumed attempt reports the node's total. */
+  rowsDone: number;
+}
+
+/**
+ * Read the high-water mark for one (run, table, dt).
+ *
+ * APPEND-ONLY, READ AS A MAXIMUM. Each step INSERTs a row rather than updating one, because
+ * DuckLake has no upsert and a delete-then-insert would double this table's file churn for no
+ * gain. `ORDER BY steps_done DESC LIMIT 1` is the read, and it is correct even with rows from
+ * several attempts interleaved: a step number only ever appears after that step's rows committed,
+ * so the largest one is the furthest anything ever got.
+ *
+ * Keyed by {@link publishIdentity} — see there for why the obvious keys are all wrong.
+ */
+async function readPublishMark(conn: DuckDBConnection, pub: string): Promise<PublishMark> {
+  const r = await conn.runAndReadAll(
+    `SELECT steps_done, rows_done FROM ${LAKE}.${INTERNAL_SCHEMA}."${PROGRESS_TABLE}" ` +
+      `WHERE pub = '${sqlLiteral(pub)}' ORDER BY steps_done DESC LIMIT 1`
+  );
+  const row = r.getRows()[0];
+  if (!row) return { stepsDone: 0, rowsDone: 0 };
+  return { stepsDone: Number(row[0] ?? 0), rowsDone: Number(row[1] ?? 0) };
+}
+
+/**
+ * Stamp the mark for a step. CALLED INSIDE THAT STEP'S TRANSACTION — never outside it, or the two
+ * stores can disagree and the resume is a guess.
+ */
+async function writePublishMark(
+  conn: DuckDBConnection,
+  sel: MaterializeSelector,
+  tbl: string,
+  dt: string,
+  pub: string,
+  steps: number,
+  rows: number
+): Promise<void> {
+  await conn.run(
+    `INSERT INTO ${LAKE}.${INTERNAL_SCHEMA}."${PROGRESS_TABLE}" VALUES (` +
+      `'${sqlLiteral(sel.runId)}', '${sqlLiteral(tbl)}', '${sqlLiteral(dt)}', ` +
+      `'${sqlLiteral(pub)}', ${Math.floor(steps)}, ${Math.floor(rows)}, now())`
+  );
 }
 
 /** Add any column the batch has and the table lacks, using the batch's inferred type. */

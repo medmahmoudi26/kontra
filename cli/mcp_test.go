@@ -19,6 +19,8 @@ import (
 	"github.com/docker/docker/api/types/network"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	enumspb "go.temporal.io/api/enums/v1"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 // fixedTime keeps list_workers' lastPoll deterministic across the test.
@@ -37,7 +39,17 @@ func (f *fakeMCPDescriber) Close() {}
 type fakeMCPDocker struct{}
 
 func (fakeMCPDocker) ImageList(context.Context, image.ListOptions) ([]image.Summary, error) {
-	return []image.Summary{{}}, nil // non-empty → ensureBase/ensureWorkerBase skip the build
+	// Non-empty AND carrying the checkout's own SDK digest, so ensureBase reads the base as
+	// current and skips the build. Present-but-unlabelled is no longer enough: that is exactly
+	// the stale base ensureBase now exists to catch, and returning it here would tar the whole
+	// repo on every run of this test.
+	lbl := map[string]string{}
+	if root, err := cliutil.FindRepoRoot(""); err == nil {
+		if d, err := sdkDigest(root); err == nil {
+			lbl[sdkLabel] = d
+		}
+	}
+	return []image.Summary{{Labels: lbl}}, nil
 }
 func (fakeMCPDocker) ImageBuild(_ context.Context, _ io.Reader, _ types.ImageBuildOptions) (types.ImageBuildResponse, error) {
 	return types.ImageBuildResponse{Body: io.NopCloser(strings.NewReader(`{"stream":"built one layer\n"}`))}, nil

@@ -39,12 +39,47 @@ export interface RowTally {
   lastChunkAt: number | null;
 }
 
+/**
+ * A bounded look at the rows THEMSELVES — what is landing, not just how much (issue 05).
+ *
+ * "How many" is most of the way to "is this run doing the right thing" and not all of it. A crawl
+ * reporting 1,187 rows is indistinguishable from a crawl reporting 1,187 rows of the same 403 page,
+ * and telling them apart cost a navigation to another surface and a query.
+ *
+ * BOUNDED IN BYTES AS WELL AS IN ROWS, and the byte bound is the one that matters. A count cap
+ * alone means a Run whose rows are full HTTP header JSON carries orders of magnitude more per
+ * snapshot than one emitting hostnames — so the wide Run would evict the ring, and the panel would
+ * cost the most exactly where the rows were least readable. The size comes off the LIST, so an
+ * oversized blob is skipped WITHOUT being fetched.
+ */
+export interface RowWindow {
+  /** The newest committed rows, oldest-first. Parsed unit objects, exactly as stored. */
+  recent: unknown[];
+  /** True when {@link ROW_TAIL_WINDOW_BYTES} cut the window short of {@link ROW_TAIL_WINDOW} rows.
+   *  Surfaced so the UI can say why it is showing three rows instead of five, rather than letting a
+   *  wide-rowed Run look like a quiet one. */
+  clipped: boolean;
+}
+
 /** A tally stamped with the run it is about, a per-run monotonic seq (the SSE `id:`) and when the
  *  poll took it. This is what a subscriber receives. */
 export interface RowTailSnapshot extends RowTally {
   runId: string;
   seq: number;
   at: number;
+  /**
+   * The row window, when this snapshot was just minted — ABSENT ON A REPLAY, deliberately.
+   *
+   * The ring exists to answer a reconnect and holds {@link ROW_TAIL_RING} entries per Run. Storing
+   * a window in each would put `ringCap × ROW_TAIL_WINDOW_BYTES` behind every watched Run — 1 MB
+   * each, 64 MB across {@link ROW_TAIL_MAX_RUNS}, on a controller that has 512 MB for everything.
+   * So ring entries are stripped to counts and the window rides only the live emission: a client
+   * resuming gets the counts it missed and the rows on the next poll, which is two seconds away.
+   *
+   * That is also why this is optional rather than an empty array. `[]` would say "the window was
+   * empty"; absent says "this snapshot is not carrying one", and those are different claims.
+   */
+  window?: RowWindow;
 }
 
 /**
@@ -128,6 +163,30 @@ export const ROW_TAIL_MAX_RUNS = 64;
  */
 export const ROW_TAIL_MAX_SINKS = 64;
 
+/**
+ * How many recent rows a snapshot carries, and the hard byte budget that outranks the count.
+ *
+ * IT WAS FIVE, and the argument for five was "this answers what is landing, not show me the data".
+ * That argument is right about the PURPOSE and was using the wrong lever to enforce it: the reader
+ * asked to choose a tail depth and the default they wanted was ten, which five cannot serve at all.
+ *
+ * FIFTY IS THE CEILING, NOT THE SIZE. The byte budget below is what actually bounds a snapshot, and
+ * it is unchanged — a window of fifty narrow rows and a window of five wide ones cost the same 16 KB,
+ * because the bound that binds is bytes. Raising the row count therefore buys a deeper tail on cheap
+ * rows and changes nothing at all on expensive ones, which is the shape this wanted in the first
+ * place. The client picks how many of them to DRAW (default ten); this is the most it may ask for.
+ *
+ * It is still not "show me the data" — that is the Datasets page, which can page and query.
+ *
+ * 16 KB IS THE BOUND THAT ACTUALLY BINDS. One crawl row carrying full request/response header JSON
+ * is kilobytes on its own, so five of them is not five of a hostname row — without a byte budget
+ * the wide Run costs ~100× the narrow one per snapshot, which is precisely the eviction asymmetry
+ * the issue names. A row larger than the whole budget is skipped rather than truncated: half a JSON
+ * object is not a row, and a window that lies about its contents is worse than a shorter one.
+ */
+export const ROW_TAIL_WINDOW = 50;
+export const ROW_TAIL_WINDOW_BYTES = 16 * 1024;
+
 /** Why a subscription was refused. Two different sentences because they have two different fixes:
  *  one means the appliance is watching too many Runs, the other means too many readers are on this
  *  one. */
@@ -152,12 +211,29 @@ export interface RowTailDeps {
   /** LIST the durable path — full keys with size/mtime. The server passes `store.list`; a test
    *  passes its own so it controls exactly what the object store "holds". */
   list: (prefix: string) => Promise<ListedObject[]>;
+  /**
+   * READ one unit blob — the same durable path {@link list} counts, and nothing else.
+   *
+   * OPTIONAL, AND ITS ABSENCE IS A FEATURE: without it the tail behaves exactly as it did before
+   * the window existed, counts and all. That is what lets a caller that does not want per-poll GETs
+   * (or a test that is only asserting the arithmetic) opt out by simply not passing one.
+   *
+   * It is the SAME source as the count on purpose. A side channel where the actor pushed rows as it
+   * produced them would show a row the durable store does not hold — the divergence family this
+   * module's header exists to refuse — so a row may only be shown once its blob is committed and
+   * listed.
+   */
+  get?: (key: string) => Promise<Uint8Array | null>;
   /** Injected clock, so a test stamps deterministic `at`s. */
   now?: () => number;
   /** How often to poll a watched Run. */
   pollMs?: number;
   /** Per-run ring size. */
   ringCap?: number;
+  /** Rows in the window. See {@link ROW_TAIL_WINDOW}. */
+  windowRows?: number;
+  /** Bytes in the window — the bound that outranks the count. See {@link ROW_TAIL_WINDOW_BYTES}. */
+  windowBytes?: number;
   /** The TOTAL cap on watched Runs. See {@link ROW_TAIL_MAX_RUNS}. */
   maxRuns?: number;
   /** The cap on subscribers to any ONE Run. See {@link ROW_TAIL_MAX_SINKS}. */
@@ -179,6 +255,56 @@ interface RunState {
   sinks: Set<(e: RowTailEvent) => void>;
   cancel: Cancel | null;
   polling: boolean;
+  /** The blobs currently in the window, keyed so a steady stream re-GETs only what is new. ONE per
+   *  Run and not per snapshot — see {@link RowTailSnapshot.window} for why the ring has none. */
+  cached: Map<string, unknown>;
+}
+
+/**
+ * The newest row blobs a LIST found, newest LAST, bounded by count and then by bytes.
+ *
+ * SORTED BY mtime AND THEN BY KEY, because mtime alone is not a total order: a chunk commits many
+ * blobs in the same millisecond and S3 reports whole-second granularity on some backends, so ties
+ * are the normal case rather than the edge one. Without the key tie-break the window's contents
+ * would shuffle between two polls that found identical objects, and the panel would flicker through
+ * rows at random. The key is a content hash, so the tie-break is arbitrary but STABLE, which is the
+ * property that matters.
+ *
+ * The byte budget is applied newest-first — a reader wants the latest rows, so when the budget runs
+ * out it is the OLDEST of the candidates that is dropped.
+ */
+export function windowCandidates(
+  objects: readonly ListedObject[],
+  rows: number,
+  bytes: number
+): { keys: string[]; clipped: boolean } {
+  const blobs = objects.filter((o) => isRowBlob(o.key));
+  blobs.sort((a, b) => {
+    const at = a.lastModified ? a.lastModified.getTime() : 0;
+    const bt = b.lastModified ? b.lastModified.getTime() : 0;
+    if (at !== bt) return at - bt;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  });
+
+  const picked: string[] = [];
+  let used = 0;
+  let clipped = false;
+  // Newest first for the budget, then reversed — so the window reads oldest-to-newest like a log.
+  for (let i = blobs.length - 1; i >= 0 && picked.length < rows; i -= 1) {
+    const o = blobs[i]!;
+    // The size comes off the LIST, so an oversized blob costs no GET at all. A blob the store did
+    // not size is assumed to fit: refusing it would hide rows on a backend that reports no size
+    // (the in-memory test store), and the parse below still bounds what is kept.
+    const size = typeof o.size === 'number' && o.size > 0 ? o.size : 0;
+    if (size > 0 && used + size > bytes) {
+      clipped = true;
+      break;
+    }
+    used += size;
+    picked.push(o.key);
+  }
+  picked.reverse();
+  return { keys: picked, clipped };
 }
 
 /**
@@ -200,9 +326,12 @@ interface RunState {
 export class RowTailHub {
   private readonly runs = new Map<string, RunState>();
   private readonly list: (prefix: string) => Promise<ListedObject[]>;
+  private readonly get: ((key: string) => Promise<Uint8Array | null>) | undefined;
   private readonly now: () => number;
   private readonly pollMs: number;
   private readonly ringCap: number;
+  private readonly windowRows: number;
+  private readonly windowBytes: number;
   private readonly maxRuns: number;
   private readonly maxSinks: number;
   private readonly schedule: (tick: () => void, ms: number) => Cancel;
@@ -211,9 +340,12 @@ export class RowTailHub {
 
   constructor(deps: RowTailDeps) {
     this.list = deps.list;
+    this.get = deps.get;
     this.now = deps.now ?? Date.now;
     this.pollMs = deps.pollMs ?? ROW_TAIL_POLL_MS;
     this.ringCap = deps.ringCap ?? ROW_TAIL_RING;
+    this.windowRows = deps.windowRows ?? ROW_TAIL_WINDOW;
+    this.windowBytes = deps.windowBytes ?? ROW_TAIL_WINDOW_BYTES;
     this.maxRuns = deps.maxRuns ?? ROW_TAIL_MAX_RUNS;
     this.maxSinks = deps.maxSinks ?? ROW_TAIL_MAX_SINKS;
     this.schedule =
@@ -270,7 +402,15 @@ export class RowTailHub {
     }
     let state = this.runs.get(runId);
     if (!state) {
-      state = { ring: [], seq: 0, last: null, sinks: new Set(), cancel: null, polling: false };
+      state = {
+        ring: [],
+        seq: 0,
+        last: null,
+        sinks: new Set(),
+        cancel: null,
+        polling: false,
+        cached: new Map(),
+      };
       this.runs.set(runId, state);
     }
     state.sinks.add(sink);
@@ -336,8 +476,21 @@ export class RowTailHub {
       const tally = tallyRows(objects);
       if (state.last !== null && tallyEqual(state.last, tally)) return; // coalesced: no new seq
       state.last = tally;
-      const snapshot: RowTailSnapshot = { runId, seq: ++state.seq, at: this.now(), ...tally };
-      state.ring.push(snapshot);
+
+      const window = await this.readWindow(state, objects);
+      const snapshot: RowTailSnapshot = {
+        runId,
+        seq: ++state.seq,
+        at: this.now(),
+        ...tally,
+        ...(window ? { window } : {}),
+      };
+      // STRIPPED ON THE WAY INTO THE RING — see `RowTailSnapshot.window`. The live emission below
+      // carries the rows; the replay copy carries the counts, and keeping the window out of 64
+      // entries per Run is what keeps this panel's memory a function of watched Runs rather than of
+      // how long they have been watched.
+      const { window: _dropped, ...stored } = snapshot;
+      state.ring.push(stored);
       if (state.ring.length > this.ringCap) state.ring.shift();
       for (const sink of state.sinks) sink({ kind: 'snapshot', snapshot });
     } catch (err) {
@@ -345,6 +498,53 @@ export class RowTailHub {
     } finally {
       state.polling = false;
     }
+  }
+
+  /**
+   * Fetch what the window needs and nothing it already has.
+   *
+   * `null` when no `get` was injected — the tail then behaves exactly as it did before windows
+   * existed, which is what keeps this an addition rather than a requirement.
+   *
+   * A BLOB THAT FAILS TO READ OR PARSE IS SKIPPED, not fatal and not rendered. A unit blob is
+   * written whole and content-addressed, so a failure here is a store hiccup or a half-written
+   * object — and the one moment a half-written object exists is mid-chunk, which is exactly when
+   * somebody is watching. Dropping one row from a five-row window is a far better answer than
+   * tearing down the stream that was reporting the Run.
+   */
+  private async readWindow(
+    state: RunState,
+    objects: readonly ListedObject[]
+  ): Promise<RowWindow | null> {
+    const get = this.get;
+    if (!get) return null;
+
+    const { keys, clipped } = windowCandidates(objects, this.windowRows, this.windowBytes);
+    const recent: unknown[] = [];
+    const next = new Map<string, unknown>();
+    let used = 0;
+    for (const key of keys) {
+      let unit = state.cached.get(key);
+      if (unit === undefined) {
+        try {
+          const body = await get(key);
+          if (!body) continue;
+          // The budget again, on what actually arrived: a store that reported no size in the LIST
+          // gets checked here instead, so an unsized backend cannot smuggle a megabyte row through.
+          if (used + body.byteLength > this.windowBytes) continue;
+          used += body.byteLength;
+          unit = JSON.parse(Buffer.from(body).toString('utf8'));
+        } catch {
+          continue; // see the docstring
+        }
+      }
+      next.set(key, unit);
+      recent.push(unit);
+    }
+    // The cache is exactly the window, so it cannot outgrow it: keys that fell out are dropped here
+    // rather than accumulating for the life of the Run.
+    state.cached = next;
+    return { recent, clipped };
   }
 
   /** Which Runs are currently watched — for tests and for a health surface. */
@@ -368,6 +568,16 @@ export function rowTailFrame(event: RowTailEvent): string {
     return `event: resync\ndata: ${JSON.stringify({ runId: event.runId })}\n\n`;
   }
   const s = event.snapshot;
-  const data = JSON.stringify({ runId: s.runId, rows: s.rows, lastChunkAt: s.lastChunkAt, at: s.at });
+  // `recent` and `clipped` are LIFTED OUT of the window rather than nested, so the frame stays one
+  // flat object — and are OMITTED entirely on a snapshot that carries none (a replay), because
+  // `recent: []` would tell a client the Run had committed nothing while the count beside it said
+  // otherwise. Absent is the honest shape for "not carrying rows"; see `RowTailSnapshot.window`.
+  const data = JSON.stringify({
+    runId: s.runId,
+    rows: s.rows,
+    lastChunkAt: s.lastChunkAt,
+    at: s.at,
+    ...(s.window ? { recent: s.window.recent, clipped: s.window.clipped } : {}),
+  });
   return `id: ${s.seq}\ndata: ${data}\n\n`;
 }

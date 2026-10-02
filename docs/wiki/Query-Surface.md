@@ -334,7 +334,7 @@ SELECT * FROM lake.output."crawl4ai" WHERE version = '1.0.0' AND dt = '2026-08-0
 | **What did it find?** | `kontra dataset query <name>` · `kontra explore <actor>` — DuckDB on your workstation ([[Data-Plane]] §4) |
 | **Is it moving?** | The Dashboard's **Monitor** and **Datasets** surfaces — http://localhost:8088 — over the bounded summaries below |
 | **Is the output queryable yet?** | `GET /api/runs/:id/lifecycle` |
-| **What is streaming right now, before materialization?** | `kontra monitor --run-id <id> --query "SELECT * FROM run LIMIT 20"` — one view over the run's raw `units/` blobs |
+| **What is streaming right now, before materialization?** | `kontra runs --run-id <id> --query "SELECT * FROM run LIMIT 20"` — one view over the run's raw `units/` blobs |
 | **Why did that node fail / where is the history?** | Temporal Web UI — http://localhost:8233 |
 | **Is the stack up, are there pollers?** | `kontra doctor` · `kontra infra status` · `kontra workers list` |
 
@@ -365,4 +365,6 @@ The summary refresh is deliberately **best-effort** — it feeds dashboards, not
 
 `kontra dataset`/`db` rewrite a bare `host=safedeps-postgres` in `KONTRA_DUCKLAKE_CATALOG` to `host=localhost`, because that name is a compose-network name the host cannot resolve; `--catalog` overrides it verbatim. `--data-path` overrides the lake root per invocation — it must match what the catalog recorded or DuckLake refuses to attach.
 
-Both token-gated endpoints **fail closed**: with no token configured they return `503` and serve nothing. Presigning without authentication would make the per-dispatch scoping claim false by construction. The rest of the API is unauthenticated — that predates this work and is recorded, not fixed, here.
+Both token-gated endpoints **fail closed**: with no token configured they return `503` and serve nothing. Presigning without authentication would make the per-dispatch scoping claim false by construction.
+
+The rest of the API is **no longer unauthenticated** — that sentence was true when this page was written and is not now. `/api/fleet`, `/api/infra` and `/api/uploads` take the state token; `/api/explore` and `/api/logs` take the explore token; writes on `/api/runs` and `/api/workflows` take the run token; and a console session (ADR 0045) admits all of them. What is still open by design: **reads** on `/api/runs`, on the stated grounds that a read cannot perturb a run. See [[Configuration]] for the matrix, and [[Security-Model]] for the boundary the tokens do *not* draw — the data plane still has no tenant boundary.

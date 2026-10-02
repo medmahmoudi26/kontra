@@ -68,10 +68,28 @@ x-orchestrator-env: &orchestrator-env
   KONTRA_S3_ACCESS_KEY: kontra
   KONTRA_S3_SECRET_KEY: kontra
   KONTRA_REDIS_HOST: redis:6379
-  KONTRA_REGISTRY: ${KONTRA_REGISTRY:-127.0.0.1:5000}
+  # NOT `127.0.0.1:5000`, AND THE REASON IS WHICH WORKER READS IT.
+  #
+  # `resolveBundle` — the activity that turns `actor@version` into a layer digest — runs on the
+  # `kontra-datasets` queue, which this role serves, NOT on the infra queue that converges the
+  # stack. So pointing only orchestrator-infra at a reachable registry fixed nothing: the resolve
+  # still ran here, `fetch('http://127.0.0.1:5000/...')` hit this container's own loopback, threw,
+  # and the function fell through to its container-image branch and returned `bundleSha: ''`. The
+  # converge then died a minute later with `machine actor bundleSha="" is not safe to place on a
+  # Machine` — a message about a symptom two hops from the cause. Measured on campaign-1790559287.
+  #
+  # The VPC address is reachable from every container AND from a Droplet in the Controller's VPC,
+  # so one value is correct for both the manifest read here and the blob URL a Machine is handed.
+  KONTRA_REGISTRY: ${KONTRA_REGISTRY:-${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
   KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
   KONTRA_CONTROLLER: orchestrator-api
   KONTRA_DUCKLAKE_CATALOG: postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra
+  # WHERE OPERATOR SQL IS EXECUTED, now that it is not executed here. The orchestrator still owns
+  # the surface — the bearer check, `readonlySql.ts` validation, and the `harden`/`scope`
+  # constraints all stay on this side — and hands the validated statement to Porter over the
+  # compose network. Unset falls back to the in-process DuckDB, so an install without the Porter
+  # service still answers queries, just with the old per-request engine and the 500-row cap.
+  KONTRA_PORTER_URL: ${KONTRA_PORTER_URL:-grpc+tcp://porter:32010}
   KONTRA_MATERIALIZATION_DB: postgres://kontra:kontra@postgres:5432/kontra_ducklake
   # DuckDB's ceiling for the MATERIALIZER. The default is 256MB (data/parquet.ts), and a crawl
   # batch carrying full HTTP header JSON does not fit in it:
@@ -86,6 +104,11 @@ x-orchestrator-env: &orchestrator-env
   # that this is NOT an RSS cap — the cgroup is — so setting it above what the container can
   # actually get trades a clean DuckDB error for the OOM killer taking the whole API.
   KONTRA_DUCKDB_MEMORY_LIMIT: ${KONTRA_DUCKDB_MEMORY_LIMIT:-512MB}
+  # WHERE DUCKDB SPILLS. Without it the `SET temp_directory` in `parquet.ts` is never issued, and
+  # "nowhere to spill" does not degrade gracefully — DuckDB fails outright the moment a query needs
+  # more than `memory_limit`. `/var/lib/kontra` is mounted read-only here, so this has to be a
+  # writable path inside the container; `max_temp_directory_size` still bounds what lands in it.
+  KONTRA_DUCKDB_TEMP_DIR: ${KONTRA_DUCKDB_TEMP_DIR:-/tmp/duckdb-spill}
   KONTRA_WORKSPACES: *workspaces
   # ── THE DEFAULTS NAME A REGISTRY, AND THAT IS WHAT MAKES THE INSTALL ONE `curl` ────────────────
   #
@@ -111,8 +134,11 @@ x-orchestrator-env: &orchestrator-env
   # this line; retagging or re-homing one is not.
   KONTRA_IMAGE: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
   KONTRA_HOST_IMAGE: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
-  KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:5000}
-  KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:5000}
+  # Both addresses: `127.0.0.1:5000` is how this host's own tooling spells the registry, and the
+  # VPC address is how a fleet Machine does. A Bundle trusted under one spelling and fetched under
+  # the other is a Bundle that is refused on the Machine, after the provision has been paid for.
+  KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:5000,${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
+  KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:5000,${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
   # THE READ TOKEN FOR THE TWO SURFACES THAT READ A RUN'S CONTENT: the query workbench and the logs
   # proxy (ADR 0050 §1, issue #17). Both are `checkBearer` — FAIL-CLOSED — so with this unset they
   # answer 503 and say which variable turns them on, rather than opening. That is why it is passed
@@ -312,6 +338,8 @@ services:
       - temporal-dynamicconfig:/etc/temporal/config/dynamicconfig
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
+      # VPC ALSO, so a fleet Machine can reach this: temporal — the Worker polls its task queue.
+      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
     healthcheck:
       test: ["CMD", "temporal", "operator", "cluster", "health"]
       interval: 10s
@@ -328,6 +356,8 @@ services:
       - redis-data:/data
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_KV_PORT:-6379}:6379"
+      # VPC ALSO, so a fleet Machine can reach this: redis   — the Session/state store.
+      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_KV_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -342,6 +372,8 @@ services:
       - registry-data:/var/lib/registry
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"
+      # VPC ALSO, so a fleet Machine can reach this: registry — where a Machine fetches its Bundle layer.
+      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}:5000"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
       interval: 5s
@@ -358,6 +390,8 @@ services:
       - seaweed-data:/data
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_S3_PORT:-8333}:8333"
+      # VPC ALSO, so a fleet Machine can reach this: seaweed — the S3 object store units are written to.
+      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_S3_PORT:-8333}:8333"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null && wget -q -O- http://127.0.0.1:8333/ >/dev/null"]
       interval: 5s
@@ -520,6 +554,68 @@ services:
     # which is how `scripts/install-cluster.macos.sh` has been going green over a shipper that never
     # started.
 
+  # ── PORTER — ARROW FLIGHT SQL OVER THE LAKE, AND WHY IT HAS NO PUBLISHED PORT ─────────────────
+  #
+  # The read path used to build a whole DuckDB per question. `queryEngine.ts` called
+  # `DuckDBInstance.create()` on every request, so `SELECT 1` cost ~1,800 ms before any row was
+  # touched, and the answer was capped at `QUERY_DEFAULT_ROWS` (500) with a hard ceiling of
+  # `QUERY_MAX_ROWS` (5,000). Measured against this service: the same full-table scan returns
+  # 9,159 rows in 58 ms, and the widest table streams 29,825 rows in 316 ms across 160 record
+  # batches with the first arriving at 81 ms. The console can paint as rows land instead of waiting
+  # for one truncated response.
+  #
+  # NOT BECAUSE ARROW IS SMALLER — it is not. Arrow buffers measured 198 bytes/row against JSON's
+  # 180. The win is completeness and streaming, and roughly 1.8 s of it is simply not rebuilding
+  # the engine per query.
+  #
+  # ── IT CARRIES NO CREDENTIAL, SO THE NETWORK IS THE BOUNDARY ──────────────────────────────────
+  #
+  # `porter serve` has twelve flags and not one is auth or TLS; inside its container it binds every
+  # interface. THIS SERVICE THEREFORE PUBLISHES NO HOST PORT, and adding one would put an
+  # unauthenticated arbitrary-SQL engine over every engagement's data on the host's network — the
+  # exact thing the header of this file says loopback exists to prevent.
+  #
+  # `victorialogs` above has the same property and the same answer: no `ports:`, reachable only on
+  # this network, with the orchestrator as the authenticated front door. `routes/logs.ts` explains
+  # that arrangement at length and every word of it applies here. The orchestrator keeps
+  # `readonlySql.ts` validation and the `harden`/`scope` constraints; Porter only executes.
+  #
+  # DO NOT ADD A `ports:` ENTRY TO THIS SERVICE.
+  porter:
+    image: ${KONTRA_PORTER_IMAGE:-ghcr.io/medmahmoudi26/kontra-porter:dev}
+    container_name: kontra-porter
+    hostname: porter
+    pull_policy: ${KONTRA_PULL_POLICY:-missing}
+    restart: unless-stopped
+    labels:
+      kontra.logs: 'true'
+    environment:
+      # One set of credentials describes one object store — the entrypoint turns these into a
+      # DuckDB persistent secret because Porter has no S3 configuration of its own.
+      KONTRA_S3_ENDPOINT: http://seaweed:8333
+      KONTRA_S3_BUCKET: kontra
+      KONTRA_S3_REGION: us-east-1
+      KONTRA_S3_ACCESS_KEY: kontra
+      KONTRA_S3_SECRET_KEY: kontra
+      # THE `postgres://` FORM, not the `postgres:dbname=…` string the orchestrator uses. DuckDB's
+      # ATTACH takes a libpq keyword string; Porter's flag wants a URL. Same database, two
+      # spellings, and they are kept as separate variables so neither is silently reformatted into
+      # something the other end cannot parse.
+      KONTRA_DUCKLAKE_CATALOG_URL: postgres://kontra:kontra@postgres:5432/kontra_ducklake
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweed:
+        condition: service_healthy
+    healthcheck:
+      # The status server, not the Flight port — gRPC does not answer a plain TCP probe usefully,
+      # and a listening socket is not the same fact as an attached catalog.
+      test: ["CMD-SHELL", "duckdb -c 'SELECT 1' > /dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
   # API + materializer in one process (queues stay distinct). Infra stays separate (Pulumi).
   orchestrator-api:
     image: ${KONTRA_ORCHESTRATOR_IMAGE:-ghcr.io/medmahmoudi26/kontra-orchestrator:dev}
@@ -570,13 +666,34 @@ services:
       # here on purpose — so this is its own.
       KONTRA_ORCHESTRATOR_DB: /var/lib/kontra-db/orchestrator.db
       KONTRA_SECRETS_DIR: /var/lib/kontra-secrets
+      # WHERE THE CHECKPOINTS ARE — and this role READS them, it never converges one.
+      #
+      # THE WHOLE `/api/infra/*` READ SURFACE WAS ANSWERING "NO STACKS". `registerInfraRoutes` is
+      # registered HERE (`server.ts`), and `infra/state.ts` reads `<stateDir>/.pulumi/stacks/…` off
+      # local disk — its header assumes "this host's disk", which is true on an appliance where one
+      # process is every role and false in this compose file, where `pulumi-state` was mounted on
+      # `orchestrator-infra` alone. So `listStacks()` hit a path that does not exist in this
+      # container and returned `[]`, which the surface renders as "nothing has ever been converged".
+      # MEASURED 2026-09-29 with thirteen converged Fleets on the volume: `GET /api/infra/stacks`
+      # answered `{"stacks":[]}`. That is the empty-list-as-an-answer failure this repository keeps
+      # finding — `infra/state.ts` degrades to `[]` for a never-converged backend on purpose, and
+      # with the volume missing there is no way to tell that apart from a misconfigured one.
+      KONTRA_PULUMI_STATE_DIR: /data/pulumi-state
     volumes:
       - kontra-home:/var/lib/kontra:ro
       - secrets-store:/var/lib/kontra-secrets
       - orchestrator-db:/var/lib/kontra-db
+      # READ-ONLY, AND THAT IS THE POINT OF MOUNTING IT HERE AT ALL. Exactly one process may write a
+      # checkpoint — `orchestrator-infra`, whose workflow id IS the stack fqn, which is what makes a
+      # second concurrent writer structurally impossible (ADR 0019). `:ro` keeps that true at the
+      # filesystem: this role can render the estate and cannot corrupt it, and no engine, no cloud
+      # credential and no lock is added to the API's process by giving it the bytes to read.
+      - pulumi-state:/data:ro
       - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"
+      # VPC ALSO, so a fleet Machine can reach this: api     — the Controller a Machine registers with.
+      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_API_PORT:-8088}:8088"
     healthcheck:
       test:
         [
@@ -617,10 +734,48 @@ services:
       DIGITALOCEAN_TOKEN: ${DIGITALOCEAN_TOKEN:-}
       KONTRA_CLOUD_CREDENTIAL: ${KONTRA_CLOUD_CREDENTIAL:-}
       KONTRA_SECRETS_DIR: /var/lib/kontra-secrets
+      # THE FLEET SSH KEY, AND THE FAILURE IT EXISTS TO STOP.
+      #
+      # `programs/fleet.ts:privateKey()` reads `KONTRA_SSH_KEY ?? '/root/.ssh/id_rsa'` AT CONVERGE
+      # TIME — deliberately, because a private key baked into config is a private key in every
+      # backup of the Pulumi state. Neither the variable nor the file existed in this container,
+      # and the way that fails is the expensive way: a machines-only converge needs no SSH and
+      # SUCCEEDS, so four Droplets come up; the placement converge then needs to run the install
+      # over SSH, dies with ENOENT, and `place()` raises with four Machines up and nothing on them.
+      # Measured on campaign-1790558895 — provisioned, billed, destroyed, having run nothing.
+      #
+      # The path below is a MOUNT POINT, not the host path, and the key is bind-mounted read-only
+      # beneath. It must be the private half of a key DigitalOcean has, because the Droplets are
+      # created with `sshKeyIds` and only those keys can log in — see KONTRA_FLEET_SSH_KEY_IDS,
+      # whose default is the account's `macbook-pro` and `axiom_rsa` ids.
+      KONTRA_SSH_KEY: ${KONTRA_SSH_KEY:-/var/lib/kontra-ssh/fleet_key}
+      # THE ADDRESSES A MACHINE IS TOLD TO CALL HOME ON — and they are this role's alone.
+      #
+      # The shared env block sets `KONTRA_CONTROLLER: orchestrator-api` and
+      # `KONTRA_REGISTRY: 127.0.0.1:5000`. Both are correct INSIDE the compose network and both are
+      # nonsense on a Droplet: `orchestrator-api` resolves nowhere, and `127.0.0.1:5000` is the
+      # Droplet's own loopback, where nothing is listening. `activities/fleet.ts` builds the
+      # Bundle's blob URL and the registration address from exactly these two variables, so a
+      # Machine provisioned with them fetches nothing and registers nothing — it comes up clean and
+      # idle, and the run burns `ready()`'s full ten-minute timeout before raising FleetNotReady.
+      #
+      # The VPC address is the one a Droplet in the Controller's own VPC can route to, and the
+      # services are published there alongside loopback (see each `ports:` block). NOT the public
+      # address: a published Docker port is DNATed in PREROUTING, so eth0 would put Temporal, Redis
+      # and the object store on the internet.
+      KONTRA_CONTROLLER: ${KONTRA_VPC_BIND:-10.124.0.2}
+      KONTRA_REGISTRY: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
+      # The Bundle is unsigned and served from the Controller's own registry, so the Machine has to
+      # be told that address is trusted — under the name it will actually see it by.
+      KONTRA_TRUST_REGISTRIES: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
+      KONTRA_TRUST_UNSIGNED: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
     volumes:
       - kontra-home:/var/lib/kontra:ro
       - secrets-store:/var/lib/kontra-secrets
       - pulumi-state:/data
+      # READ-ONLY, and only on this role. `orchestrator-infra` is the only process that converges a
+      # stack, which is the same reason it is the only one holding the cloud credential.
+      - ${KONTRA_SSH_KEY_HOST:-/root/.ssh/axiom_rsa}:/var/lib/kontra-ssh/fleet_key:ro
       # THE WORKSPACE, READ-ONLY — because `serve` runs HERE now and could not see the code.
       #
       # `serveDevWorkflow` moved the serve verb off the API and onto this role, since starting a
@@ -652,6 +807,68 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
+
+  # ── THE CAMPAIGN'S WORKFLOW WORKER, AS A CONTAINER SO ITS LOGS ARE SHIPPED ──────────────────
+  #
+  # `kontra workflow serve --tmux` runs the worker on the HOST, and `logship` selects what to
+  # follow by container LABEL — so a host-served workflow has no container, no label, and its
+  # `workflow.logger` lines reach VictoriaLogs through nothing at all. The run page's log rail is
+  # then empty for the whole campaign, which reads as "this run said nothing" rather than "nobody
+  # is shipping what it said". Measured on campaign-1790562159: /api/logs/query answered with an
+  # empty result set, not an error.
+  #
+  # Running it here fixes that by construction: one labelled container, stdout followed like every
+  # other Worker's. It also puts the worker on the compose network, which is why the addresses
+  # below are service names rather than the host's published ports.
+  campaign-worker:
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
+    container_name: kontra-campaign-worker
+    restart: unless-stopped
+    labels:
+      # THE ONE LINE THAT MAKES THE LOG RAIL WORK — see control/images/logship.sh.
+      kontra.logs: "true"
+    depends_on:
+      temporal:
+        condition: service_healthy
+      orchestrator-api:
+        condition: service_healthy
+    environment:
+      <<: *orchestrator-env
+      # The claim-check codec needs a reachable object store or results over 128 KiB do not decode.
+      KONTRA_S3_ENDPOINT: http://seaweed:8333
+      # ── THE LINE THAT PUTS THIS RUN ON THE RUN PAGE'S LOG RAIL ────────────────────────────
+      #
+      # `runtime/python/internals/logs.py` is OFF unless asked, and the reason is good: a developer
+      # watching a tmux pane wants the human form. A CONTAINER is the other case — nobody reads its
+      # stdout directly, `logship` does, and its parser has a dedicated branch for kontra's own JSON
+      # ("the emitter already stamped the run, the worker, the level and the time"). Without this
+      # the worker ships readable text whose workflow id is buried in a Python dict repr inside the
+      # message, so `run_id:"campaign-…"` — the query the console's rail runs — matches nothing and
+      # the rail is empty for the whole campaign.
+      KONTRA_LOG_FORMAT: json
+    volumes:
+      # THE SAME PATH INSIDE AND OUT, exactly as the other roles mount it: a Source id is
+      # `at:<absolute path>`, so the two sides must agree on what that path means.
+      - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}:ro
+      # READ-WRITE, unlike the roles above. `kontra workflow serve` writes `runtime.env` here on
+      # start — the addresses it resolved, so a pane or a re-exec sees the same ones — and a `:ro`
+      # mount makes the worker exit before it registers anything:
+      #   error: open /var/lib/kontra/runtime.env: read-only file system
+      - kontra-home:/var/lib/kontra
+      # THE CHECKOUT'S RUNTIME OVER THE IMAGE'S, read-only. The image carries a built SDK at
+      # /opt/kontra, so a fix to `runtime/python` in this checkout is invisible to the worker until
+      # the image is rebuilt — and a log-plumbing fix that needs an image rebuild to take effect is
+      # one nobody applies mid-campaign. Mounting the source keeps the worker on the code being
+      # reviewed. Drop this line once the image is rebuilt from the same tree.
+      - ./runtime/python:/opt/kontra/runtime/python:ro
+      # AND THE SDK, which is a SEPARATE tree from the runtime and was the half I missed. The
+      # workflow-facing API — `catalog.Dataset`, `fleet` — lives here, so mounting only
+      # `runtime/python` left the worker on the image's `catalog.py` and every metric read failed
+      # with `DatasetHandle.batches() got an unexpected keyword argument 'via'`, swallowed into a
+      # warning and a zero. Both trees or neither.
+      - ./sdk/python:/opt/kontra/sdk/python:ro
+    working_dir: /root/oss/kontra
+    command: ["kontra", "workflow", "serve", "workspaces/bugbounty/workflows/campaign"]
 
   orchestrator-probe:
     image: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
@@ -707,9 +924,38 @@ services:
       KONTRA_SDK_ROOT: /opt/kontra
       KONTRA_ADDRESS: temporal:7233
       KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
+    # WHERE THE PROCESS STARTS IS PART OF THE GO ACTOR BUILD'S INPUT, so it is stated rather than
+    # inherited. `FindRepoRoot("")` (cli/internal/cliutil) walks UP FROM CWD looking for
+    # docker-compose.yml; with no `working_dir` the process starts at `/` and the walk fails even
+    # with the repo mounted below. Mounting the root is necessary and NOT sufficient — measured:
+    # `docker exec kontra-cli kontra deploy --actor …` still failed after the mount, and the same
+    # command under `-w /root/oss/kontra` built and pushed desync@1.3.3.
+    working_dir: ${KONTRA_REPO:-${PWD}}
     volumes:
       - kontra-home:/var/lib/kontra
       - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}
+      # THE REPO ROOT, READ-ONLY, BECAUSE A GO ACTOR CANNOT BE BUILT WITHOUT IT.
+      #
+      # `buildGoActor` (cli/deploy.go) uses the REPO ROOT as the Docker build context, not the actor
+      # dir, because a Go actor's go.mod `replace`s point outside itself — `=> ../../../sdk/go` and
+      # `=> ../../../runtime/go` — so the whole module tree has to be in the context. It finds that
+      # root with `FindRepoRoot("")`, which walks up from CWD looking for docker-compose.yml.
+      #
+      # With only `workspaces/` mounted, that walk ends at a directory that does not exist in this
+      # container and the build fails with `no docker-compose.yml found walking up from CWD`. The
+      # image cannot supply it either: `kontra:dev` ships /opt/kontra/{sdk,runtime}/python and NO Go
+      # tree at all. So the Go actor path was structurally impossible here, and `workspace watch`
+      # retried it forever — desync, dnsfacts, linkfind, nscheck, nuclei and subfinder, every loop.
+      #
+      # THE VISIBLE COST WAS NOT A BUILD ERROR, which is why it survived: the actors kept running,
+      # on whichever bundle was published last. desync sat on 1.3.2 while two fixes to its source
+      # went nowhere — 8,680 of 8,700 split vectors shipped with a blank explanation because the
+      # `foldNote` rebuild never happened. A deploy pipeline that cannot deploy but leaves the old
+      # version serving reads exactly like one that has nothing to do.
+      #
+      # `:ro` because building is a read of the tree and nothing in this container should ever write
+      # to the checkout.
+      - ${KONTRA_REPO:-${PWD}}:${KONTRA_REPO:-${PWD}}:ro
       - /var/run/docker.sock:/var/run/docker.sock
     command:
       - /bin/sh

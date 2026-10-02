@@ -34,6 +34,7 @@ import {
 import { datasetRecordStore, type DatasetRecordStore } from '../data/datasetRecords';
 import {
   RESERVED_OUTPUT_COLUMNS,
+  discardLakeConnection,
   promoteInto,
   writeDatasetParquet,
   type LakeConfig,
@@ -161,6 +162,30 @@ function unitRefOf(entry: unknown): UnitRef | null {
 function isDeterministicSqlError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /\b(Binder|Parser|Catalog|Conversion|Syntax) Error\b/i.test(msg);
+}
+
+/**
+ * A promise-chain mutex for lake WRITES.
+ *
+ * One publish at a time, process-wide, because `lakeConnection` caches ONE DuckDB connection per
+ * (catalog, dataPath) and a DuckDB connection has ONE transaction context. Two concurrent writers
+ * on it do not race for throughput, they corrupt each other: the second gets `cannot start a
+ * transaction within a transaction`, and from then on every statement — including unrelated
+ * datasets' — gets `Current transaction is aborted (please ROLLBACK)`.
+ *
+ * THE CHAIN MUST SURVIVE A REJECTED PREDECESSOR. `publishing.then(run, run)` runs the next job on
+ * either outcome, and the stored link swallows the rejection — without that, one bad publish
+ * stalls every later one, which is the same failure in a different costume.
+ *
+ * The queue is not a throughput loss: DuckDB executes one transaction at a time whether or not
+ * callers wait politely. See `.scratch/materializer-shared-connection/ISSUE.md`.
+ */
+let publishing: Promise<unknown> = Promise.resolve();
+
+function publishSerially<T>(run: () => Promise<T>): Promise<T> {
+  const mine = publishing.then(run, run);
+  publishing = mine.catch(() => undefined);
+  return mine;
 }
 
 export function createDatasetActivities(deps: DatasetDeps = {}) {
@@ -329,11 +354,28 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
      * value that reads as measured. Unrecorded is now SQL NULL, which no producer can ever
      * emit, so a reader can tell "nothing wrote this" from "this is the value".
      */
-    async publishBatch(input: PublishBatchInput): Promise<{ rows: number }> {
+    async publishBatch(input: PublishBatchInput): Promise<{ rows: number; dt: string }> {
       await store.put(
         datasetStateKey(input.dataset),
         Buffer.from(JSON.stringify({ state: 'open' satisfies DatasetState }), 'utf8')
       );
+      // SERIALIZED, BECAUSE THE LAKE CONNECTION IS SHARED AND HAS ONE TRANSACTION CONTEXT.
+      //
+      // `lakeConnection` caches one connection per (catalog, dataPath) and hands the same object
+      // to every caller, and Temporal runs activities concurrently by default. Two publishes in
+      // flight therefore produce `TransactionContext Error: cannot start a transaction within a
+      // transaction`, after which EVERY statement on that connection — including unrelated
+      // datasets' — fails with `Current transaction is aborted (please ROLLBACK)`. Nothing rolls
+      // back, so the activity retries forever against a connection that can never succeed, and the
+      // run reads as a slow crawl rather than a stuck write.
+      //
+      // Measured on campaign-1790599185: four programs x four lanes, `publishBatch` at attempt 113
+      // with the aborted-transaction message, row counts frozen for half an hour.
+      //
+      // Concurrency buys nothing here — DuckDB executes one transaction at a time regardless — so
+      // queueing costs throughput nothing and turns corruption into a wait. See
+      // `.scratch/materializer-shared-connection/ISSUE.md`.
+      return publishSerially(async () => {
       try {
         const out = await writeDatasetParquet(
           store,
@@ -347,7 +389,17 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
           },
           lake
         );
-        return { rows: out.rows };
+        // `dt` RIDES BACK WITH THE ROW COUNT so a caller can read only its own partition.
+        //
+        // A **Dataset** that several **Runs** append to holds everybody's rows, and the natural
+        // next thing a Method does is read back what it just wrote. Scoping that read needs the
+        // partition string — and the ONE thing the caller must not do is compute it itself.
+        // `dtPartition` is second-precision, colon-substituted and derived from the SERVER-minted
+        // `run_started_at`; a second spelling that differs anywhere matches no partition and
+        // returns zero rows with no error, which is indistinguishable from a run that produced
+        // nothing. So the value comes from the process that owns the format, and the SDKs pass it
+        // through rather than re-deriving it.
+        return { rows: out.rows, dt: out.dt };
       } catch (err) {
         /*
          * A BINDER ERROR HERE IS THE AUTHOR'S SCHEMA, AND NO NUMBER OF RETRIES WILL FIX IT.
@@ -364,6 +416,12 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
          * author a name is taken; it does not tell them WHICH names are taken, and there was nowhere
          * to look it up. {@link RESERVED_OUTPUT_COLUMNS} is that list, so the failure carries it.
          */
+        // THE CONNECTION IS DISCARDED, NOT RETURNED TO THE POOL. Serializing is only half the
+        // fix: an aborted transaction or a DuckDB internal error leaves the shared connection
+        // answering the same error to CALLERS THAT DID NOTHING WRONG, forever. Dropping it here
+        // means the next publish re-ATTACHes a clean one — which costs real time, and is the
+        // difference between a transient failure and a process that can never write again.
+        discardLakeConnection(store, lake);
         const msg = err instanceof Error ? err.message : String(err);
         const dup = /Duplicate column name "([^"]+)"/i.exec(msg);
         if (dup) {
@@ -384,6 +442,7 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
         }
         throw err;
       }
+      });
     },
 
     /**

@@ -98,6 +98,29 @@ Machine it runs on and the tenant credentials on it.
 **A Dataset's tag is a delete authority with no second factor.** Untagging hands it to the retention
 sweep one tick later. Gated by EP2's token, and nothing else.
 
+**Porter executes arbitrary SQL over every workspace's data, with no credential.** `porter serve`
+takes twelve flags and not one of them is authentication, TLS, or a sandbox control — no
+`READ_ONLY`, no `disabled_filesystems`, no `lock_configuration`, no `memory_limit`. Inside its
+container it binds every interface.
+
+*The control, and it is the only one:* the service publishes **no host port**, so it is reachable
+only on the compose network, with the orchestrator as the authenticated front door — the posture
+`victorialogs` already has. Enforced by `control/orchestrator/src/compose.test.ts`, which fails if a
+`ports:` entry appears on either service, rather than by the comment that used to say so.
+
+*The acceptance:* one operator, one host, on a stack that already accepts a privileged component
+holding the Docker socket. A bearer proxy in front of Porter would add a hop without changing who
+can reach the network; upstreaming auth is slower than today's problem deserves. Decided 2026-09-29.
+
+*What it does NOT cover, and why operator SQL does not go through it:* the hardened in-process
+engine (`data/queryEngine.ts`) refuses local file reads, refuses arbitrary outbound HTTP, and cannot
+have any of that turned back on by the statement it is running — each control measured, not assumed.
+Porter has no equivalent, so a statement that is merely *read-only* is not thereby *safe* there:
+`read_text('/etc/passwd')` and `read_csv('http://169.254.169.254/…')` are both SELECTs. Operator-typed
+SQL therefore stays on the hardened engine. Porter is given only SQL this codebase composed.
+
+*Revisit before:* any hosted install, any second operator, or any published port.
+
 ## 5. Incident, 2026-09-12 — and what it says about this model
 
 The Controller was compromised for three days. The vector was **EP1**, and specifically **not**

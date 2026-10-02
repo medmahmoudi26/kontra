@@ -277,6 +277,114 @@ describe('the query workbench routes', () => {
     expect((await post('SELECT 1', null)).statusCode).toBe(503);
     expect((await post('SELECT 1', TOKEN)).statusCode).toBe(503);
   });
+
+  /**
+   * THE ROW CEILING IS GONE ON THE STREAMING ROUTE (issue 02).
+   *
+   * `QUERY_MAX_ROWS` is 5,000 and it bounded the API's heap, not the lake — every scan of a real
+   * Dataset on this install came back truncated. These assert the property that replaces it: a
+   * result larger than the old ceiling arrives in full, in frames, with nothing called truncated.
+   */
+  describe('the streaming query route', () => {
+    const stream = (sql: string, token: string | null = TOKEN, body: Record<string, unknown> = {}) =>
+      ctx.app.inject({
+        method: 'POST',
+        url: '/api/datasets/query/stream',
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+        payload: { sql, ...body },
+      });
+
+    /** One NDJSON frame per line. */
+    const frames = (payload: string): Array<Record<string, any>> =>
+      payload
+        .split('\n')
+        .filter((l) => l.trim() !== '')
+        .map((l) => JSON.parse(l));
+
+    it('returns every row of a result four times the old ceiling, with no truncation', async () => {
+      const res = await stream('SELECT i FROM range(20000) AS t(i)');
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toMatch(/x-ndjson/);
+
+      const f = frames(res.payload);
+      const rows = f.flatMap((x) => x.rows ?? []);
+      expect(rows.length).toBe(20000);
+      expect(rows[0]).toEqual([0]);
+      expect(rows[19999]).toEqual([19999]);
+      // The word does not appear at all — there is nothing left to truncate.
+      expect(res.payload).not.toContain('truncated');
+    });
+
+    /**
+     * The frames are ordered and disjoint: a reader switches on which key is present, and the
+     * head arrives before any row so a table can paint its columns before it has data.
+     */
+    it('frames the result as columns, then rows, then done', async () => {
+      const f = frames((await stream('SELECT i FROM range(5) AS t(i)')).payload);
+      expect(f[0].columns).toEqual([{ name: 'i', type: 'BIGINT' }]);
+      expect(f[f.length - 1].done.rows).toBe(5);
+      expect(f[f.length - 1].done.elapsedMs).toBeGreaterThanOrEqual(0);
+      // No frame carries two of the three shapes.
+      for (const x of f) {
+        expect(Object.keys(x).length).toBe(1);
+      }
+    });
+
+    it('arrives in more than one frame, so a table can paint before the end', async () => {
+      const f = frames((await stream('SELECT i FROM range(20000) AS t(i)')).payload);
+      expect(f.filter((x) => x.rows).length).toBeGreaterThan(1);
+    });
+
+    it('resolves a bare dataset name, exactly as the buffered route does', async () => {
+      const f = frames((await stream('SELECT target FROM scope_paid ORDER BY target')).payload);
+      expect(f.flatMap((x) => x.rows ?? [])).toEqual([['a.com'], ['b.com']]);
+    });
+
+    it('skips with offset', async () => {
+      const f = frames(
+        (await stream('SELECT target FROM scope_paid ORDER BY target', TOKEN, { offset: 1 })).payload
+      );
+      expect(f.flatMap((x) => x.rows ?? [])).toEqual([['b.com']]);
+    });
+
+    /** Privileged like the other three — it reads every dataset. */
+    it('is bearer-gated', async () => {
+      expect((await stream('SELECT 1', null)).statusCode).toBe(401);
+      expect((await stream('SELECT 1', 'b'.repeat(64))).statusCode).toBe(401);
+    });
+
+    /** Nothing has been committed to yet, so a bad query is still a plain 400. */
+    it('answers 400 for a query that fails BEFORE the first frame', async () => {
+      const res = await stream('SELECT * FROM no_such_dataset');
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/no_such_dataset/);
+      expect((await stream('   ')).statusCode).toBe(400);
+    });
+
+    /**
+     * WHICH FAILURES ARE PRE-HEAD, MEASURED RATHER THAN ASSUMED — because it decides whether the
+     * caller sees a status code or an error frame, and the answer was not what it looked like.
+     *
+     * A row that cannot be evaluated does NOT surface part way through. MEASURED on
+     * `@duckdb/node-api` 1.5.4: a cast failing at row 150,000 of 200,000 throws from `stream()`
+     * itself, before a single chunk is fetched — DuckDB validates the pipeline up front. So a bad
+     * projection is a 400 like any other bad query, and this pins that.
+     *
+     * The in-band `{"error"}` frame is therefore NOT for malformed SQL. It is for a read that
+     * fails after rows have already gone out, which on this install is a real and recent shape:
+     * the 2026-09-28 wipe left 94 catalog partitions pointing at parquet objects that no longer
+     * exist, and those fail when the missing object is OPENED — chunks in. That case cannot be a
+     * 400, because the 200 and ten thousand rows are already on the wire.
+     */
+    it('answers 400 for a row error, which DuckDB raises before the first chunk', async () => {
+      const res = await stream(
+        `SELECT CAST(CASE WHEN i < 15000 THEN '1' ELSE 'not-a-number' END AS INTEGER) AS q
+           FROM range(20000) AS t(i)`
+      );
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/Conversion/i);
+    });
+  });
 });
 
 /**

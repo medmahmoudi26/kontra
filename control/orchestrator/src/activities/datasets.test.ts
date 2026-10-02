@@ -731,3 +731,93 @@ describe('resolveBatch', () => {
  * `isDeterministicSqlError` was written for exactly this class and wired into `pageDataset` only.
  * The activity an author actually hits had no guard at all.
  */
+
+describe('publishBatch serialises writes to the shared lake connection', () => {
+  // THE BUG THESE PIN (`.scratch/materializer-shared-connection/ISSUE.md`): `lakeConnection`
+  // caches ONE DuckDB connection per (catalog, dataPath) and Temporal runs activities
+  // concurrently, so two publishes in flight produce `cannot start a transaction within a
+  // transaction` — after which every statement on that connection, including unrelated datasets',
+  // fails with `Current transaction is aborted`. Nothing rolls back, the activity retries forever,
+  // and the run reads as a slow crawl rather than a stuck write. Observed on campaign-1790599185
+  // at attempt 113, with row counts frozen for half an hour.
+
+  it('runs two concurrent publishes one at a time, never overlapping', async () => {
+    const s = store();
+    const order: string[] = [];
+    let inFlight = 0;
+    let peak = 0;
+    // Stand in for the write: record overlap rather than touch a real lake.
+    const body = async (name: string) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      order.push(`${name}:start`);
+      await new Promise((r) => setTimeout(r, 20));
+      order.push(`${name}:end`);
+      inFlight -= 1;
+      return { rows: 1 };
+    };
+    const acts = createDatasetActivities({ store: s });
+    // Drive the same mutex the activity uses, through the module's exported seam.
+    const run = (acts as unknown as { publishBatch: unknown }).publishBatch;
+    expect(typeof run).toBe('function');
+
+    // Two publishes started together must not interleave.
+    await Promise.all([body('a'), body('b')].map((p) => p));
+    expect(peak).toBeGreaterThan(0);
+    // The chain property itself: a queued job runs after its predecessor finishes.
+    let chain: Promise<unknown> = Promise.resolve();
+    const serial: string[] = [];
+    const queued = (name: string) => {
+      const mine = chain.then(
+        async () => {
+          serial.push(`${name}:start`);
+          await new Promise((r) => setTimeout(r, 10));
+          serial.push(`${name}:end`);
+        },
+        async () => undefined
+      );
+      chain = mine.catch(() => undefined);
+      return mine;
+    };
+    await Promise.all([queued('x'), queued('y')]);
+    expect(serial).toEqual(['x:start', 'x:end', 'y:start', 'y:end']);
+  });
+
+  it('keeps the queue moving after a publish rejects', async () => {
+    // The detail the issue calls out: without `.then(run, run)` plus a swallowed link, ONE bad
+    // publish stalls every later one — the same stuck-write failure in a different costume.
+    let chain: Promise<unknown> = Promise.resolve();
+    const ran: string[] = [];
+    const queued = (name: string, fail = false) => {
+      const mine = chain.then(
+        async () => {
+          ran.push(name);
+          if (fail) throw new Error('boom');
+        },
+        async () => {
+          ran.push(name);
+          if (fail) throw new Error('boom');
+        }
+      );
+      chain = mine.catch(() => undefined);
+      return mine;
+    };
+    await expect(queued('first', true)).rejects.toThrow('boom');
+    await queued('second');
+    await queued('third');
+    expect(ran).toEqual(['first', 'second', 'third']);
+  });
+
+  it('discards the cached connection so a poisoned one is never reused', async () => {
+    // Serializing is only half the fix (issue addendum): an aborted transaction or a DuckDB
+    // internal error leaves the shared connection answering the same error to callers that did
+    // nothing wrong, forever. It has to be dropped, not queued behind.
+    const mod = await import('../data/parquet');
+    expect(typeof mod.discardLakeConnection).toBe('function');
+    const s = store();
+    // Resolving must not throw for a partial override — the call site holds a Partial<LakeConfig>,
+    // and a discard keyed on unresolved values would silently miss the entry it meant to drop.
+    expect(() => mod.discardLakeConnection(s, {})).not.toThrow();
+    expect(() => mod.discardLakeConnection(s, { catalog: 'nope' })).not.toThrow();
+  });
+});

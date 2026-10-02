@@ -165,6 +165,14 @@ def temporal_context() -> Dict[str, Any]:
                     "workflow_run_id": winfo.run_id,
                     "workflow_type": winfo.workflow_type,
                     "namespace": winfo.namespace,
+                    # IN A WORKFLOW, THE RUN IS THE WORKFLOW. The engine binds `run_id` per Unit
+                    # inside an ACTIVITY, where a Run is a dispatch — but a workflow body has no
+                    # such bind, and it is the thing every other surface calls a run: `kontra runs
+                    # list` prints the workflow id under RUN-ID, the console routes `/runs/<that>`,
+                    # and its log rail queries `run_id:"<that>"`. Leaving it unset is what left the
+                    # rail empty for every workflow-emitted line; filling it from anywhere else
+                    # would file those lines under an id no surface resolves.
+                    "run_id": winfo.workflow_id,
                 }
             )
 
@@ -250,6 +258,23 @@ class JsonFormatter(logging.Formatter):
                 # filter already stamped (from `info()` directly) is skipped here and emitted by
                 # the scalar branch below, which is the one derivation we want in the line.
                 for sub, subvalue in value.items():
+                    # TEMPORAL'S `run_id` IS NOT KONTRA'S, AND FLATTENING IT STOLE THE NAME.
+                    #
+                    # The adapter's nested context calls Temporal's workflow-run uuid `run_id`.
+                    # Lifted one level as-is, it lands on the very field this module exists to
+                    # stamp — and it wins, because the adapter's extras are on the record before
+                    # anything else could claim it. Every workflow-emitted line was therefore
+                    # filed under a uuid no kontra surface uses: `kontra runs list`, the run page
+                    # and `/api/logs/query` all mean the WORKFLOW id by "run", so the run page's
+                    # log rail queried `run_id:"campaign-…"` and matched nothing, for every
+                    # workflow ever served. The rail was not broken; it was looking under the
+                    # right name for a value filed under the wrong one.
+                    #
+                    # `temporal_context()` above already publishes the same value as
+                    # `workflow_run_id`, which is where it belongs — so this renames rather than
+                    # drops, and no fact is lost.
+                    if sub == "run_id":
+                        sub = "workflow_run_id"
                     if not hasattr(record, sub) and isinstance(subvalue, (str, int, float, bool)):
                         out[sub] = subvalue
                 continue

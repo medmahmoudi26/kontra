@@ -18,6 +18,7 @@ import {
   rowTailFrame,
   tallyEqual,
   tallyRows,
+  windowCandidates,
   type RowTailEvent,
   type RowTailSnapshot,
 } from './rowTail';
@@ -359,6 +360,238 @@ describe('RowTailHub is bounded in total, and per run', () => {
     // The last unsubscribe drops the run, so the appliance can watch a different one. A cap that
     // only ever counted up would turn into a permanent refusal after enough runs had been opened.
     expect(hub.refusalFor('b')).toBeNull();
+    hub.close();
+  });
+});
+
+/**
+ * THE WINDOW: the tail carries what is landing, not only how much (issue 05).
+ *
+ * "1,187 rows" and "1,187 rows of the same 403 page" are the same number, and telling them apart is
+ * most of "is this run doing the right thing". These hold the three properties that make the window
+ * safe to add to a stream whose whole design is about not becoming a payload.
+ */
+describe('RowTailHub — the bounded row window', () => {
+  /** A blob with a real size, so the byte budget has something to bind on. */
+  function sized(runId: string, n: number, at: number, size: number): ListedObject {
+    return { ...unit(runId, n, at), size };
+  }
+
+  function windowHub(
+    objects: ListedObject[],
+    bodies: Record<string, unknown>,
+    opts: { windowRows?: number; windowBytes?: number } = {}
+  ) {
+    const reads: string[] = [];
+    const hub = new RowTailHub({
+      list: async () => objects,
+      get: async (key) => {
+        reads.push(key);
+        const body = bodies[key];
+        return body === undefined ? null : new TextEncoder().encode(JSON.stringify(body));
+      },
+      now: () => 1_000,
+      schedule: () => () => {},
+      ...opts,
+    });
+    return { hub, reads };
+  }
+
+  it('carries the newest rows, oldest-first, alongside the count', async () => {
+    const objects = [sized('r', 1, 1000, 10), sized('r', 2, 2000, 10), sized('r', 3, 3000, 10)];
+    const bodies = Object.fromEntries(objects.map((o, i) => [o.key, { host: `h${i + 1}` }]));
+    const { hub } = windowHub(objects, bodies, { windowRows: 2 });
+
+    const got: RowTailEvent[] = [];
+    hub.subscribe('r', (e) => got.push(e));
+    await hub.poll('r');
+
+    const snap = snapshotsOf(got).at(-1)!;
+    expect(snap.rows).toBe(3); // the COUNT is still every committed row
+    expect(snap.window?.recent).toEqual([{ host: 'h2' }, { host: 'h3' }]); // the window is the newest two
+    hub.close();
+  });
+
+  /**
+   * THE BOUND THAT ACTUALLY BINDS. A count cap alone lets a Run emitting full header JSON carry
+   * orders of magnitude more per snapshot than one emitting hostnames — the eviction asymmetry the
+   * issue names. The size comes off the LIST, so an oversized blob costs no GET at all.
+   */
+  it('clips on bytes before it clips on rows, and says so', async () => {
+    const objects = [sized('r', 1, 1000, 400), sized('r', 2, 2000, 400), sized('r', 3, 3000, 400)];
+    const bodies = Object.fromEntries(objects.map((o, i) => [o.key, { i }]));
+    const { hub, reads } = windowHub(objects, bodies, { windowRows: 5, windowBytes: 900 });
+
+    const got: RowTailEvent[] = [];
+    hub.subscribe('r', (e) => got.push(e));
+    await hub.poll('r');
+
+    const snap = snapshotsOf(got).at(-1)!;
+    expect(snap.window?.recent).toHaveLength(2); // 2 x 400 fits in 900, a third does not
+    expect(snap.window?.clipped).toBe(true);
+    expect(reads).toHaveLength(2); // and the one that did not fit was never fetched
+    hub.close();
+  });
+
+  it('a wide run cannot carry more bytes per snapshot than a narrow one', async () => {
+    const narrow = [sized('n', 1, 1000, 100), sized('n', 2, 2000, 100), sized('n', 3, 3000, 100)];
+    const wide = [sized('w', 1, 1000, 9_000), sized('w', 2, 2000, 9_000), sized('w', 3, 3000, 9_000)];
+    const budget = 10_000;
+
+    expect(windowCandidates(narrow, 5, budget).keys).toHaveLength(3);
+    const w = windowCandidates(wide, 5, budget);
+    expect(w.keys).toHaveLength(1);
+    expect(w.clipped).toBe(true);
+  });
+
+  /** A chunk commits many blobs in one millisecond and some backends report whole seconds, so ties
+   *  are the normal case. Without a stable tie-break the window reshuffles between identical polls
+   *  and the panel flickers through rows at random. */
+  it('orders ties by key, so two identical polls agree', async () => {
+    const tied = [sized('r', 3, 1000, 10), sized('r', 1, 1000, 10), sized('r', 2, 1000, 10)];
+    const a = windowCandidates(tied, 2, 1_000);
+    const b = windowCandidates([...tied].reverse(), 2, 1_000);
+    expect(a.keys).toEqual(b.keys);
+  });
+
+  /** The window is read from the SAME store the count is — it cannot report a row the durable path
+   *  does not hold. A key that is gone is skipped, never invented. */
+  it('cannot report a row the store does not hold', async () => {
+    const objects = [sized('r', 1, 1000, 10), sized('r', 2, 2000, 10)];
+    const { hub } = windowHub(objects, { [objects[1]!.key]: { host: 'only-this-one' } });
+
+    const got: RowTailEvent[] = [];
+    hub.subscribe('r', (e) => got.push(e));
+    await hub.poll('r');
+
+    expect(snapshotsOf(got).at(-1)!.window?.recent).toEqual([{ host: 'only-this-one' }]);
+    hub.close();
+  });
+
+  /** A half-written object exists exactly mid-chunk, which is exactly when somebody is watching.
+   *  Dropping one row beats tearing down the stream that was reporting the Run. */
+  it('skips a blob that will not parse rather than failing the poll', async () => {
+    const objects = [sized('r', 1, 1000, 10), sized('r', 2, 2000, 10)];
+    const hub = new RowTailHub({
+      list: async () => objects,
+      get: async (key) =>
+        new TextEncoder().encode(key === objects[0]!.key ? '{"half-writ' : '{"ok":true}'),
+      now: () => 1_000,
+      schedule: () => () => {},
+    });
+    const got: RowTailEvent[] = [];
+    hub.subscribe('r', (e) => got.push(e));
+    await hub.poll('r');
+
+    const snap = snapshotsOf(got).at(-1)!;
+    expect(snap.rows).toBe(2); // the count is unaffected — it is a LIST, not a read
+    expect(snap.window?.recent).toEqual([{ ok: true }]);
+    hub.close();
+  });
+
+  it('re-reads only what is new since the last poll', async () => {
+    let objects = [sized('r', 1, 1000, 10), sized('r', 2, 2000, 10)];
+    const bodies: Record<string, unknown> = {};
+    for (const o of objects) bodies[o.key] = { k: o.key };
+    const reads: string[] = [];
+    const hub = new RowTailHub({
+      list: async () => objects,
+      get: async (key) => {
+        reads.push(key);
+        return new TextEncoder().encode(JSON.stringify(bodies[key] ?? { k: key }));
+      },
+      now: () => 1_000,
+      schedule: () => () => {},
+      windowRows: 3,
+    });
+    hub.subscribe('r', () => {});
+    await hub.poll('r');
+    expect(reads).toHaveLength(2);
+
+    const third = sized('r', 3, 3000, 10);
+    objects = [...objects, third];
+    await hub.poll('r');
+    expect(reads).toHaveLength(3); // the two it already had were not fetched again
+    expect(reads[2]).toBe(third.key);
+    hub.close();
+  });
+
+  /**
+   * THE RING STAYS COUNTS-ONLY. `ringCap x ROW_TAIL_WINDOW_BYTES` behind every watched Run is 64 MB
+   * across the run cap, on a controller with 512 MB for everything — so a replayed snapshot carries
+   * the counts and the next live poll carries the rows.
+   */
+  it('keeps the window out of the ring, so a replay is counts-only', async () => {
+    let objects = [sized('r', 1, 1000, 10)];
+    const bodies: Record<string, unknown> = { [objects[0]!.key]: { a: 1 } };
+    const hub = new RowTailHub({
+      list: async () => objects,
+      get: async (key) => new TextEncoder().encode(JSON.stringify(bodies[key] ?? {})),
+      now: () => 1_000,
+      schedule: () => () => {},
+    });
+    hub.subscribe('r', () => {});
+    await hub.poll('r');
+    const second = sized('r', 2, 2000, 10);
+    bodies[second.key] = { b: 2 };
+    objects = [...objects, second];
+    await hub.poll('r');
+
+    // A second reader resuming from seq 1 replays seq 2 out of the ring.
+    const replayed: RowTailEvent[] = [];
+    hub.subscribe('r', (e) => replayed.push(e), { lastEventId: 1 });
+    const snap = snapshotsOf(replayed).at(-1)!;
+    expect(snap.rows).toBe(2);
+    expect(snap.window).toBeUndefined();
+    hub.close();
+  });
+
+  /** `recent: []` would say the Run had committed nothing while the count beside it said otherwise.
+   *  Absent is the honest shape for "this snapshot is not carrying rows". */
+  it('omits recent from the frame entirely when there is no window', () => {
+    const frame = rowTailFrame({
+      kind: 'snapshot',
+      snapshot: { runId: 'r', seq: 4, at: 10, rows: 9, lastChunkAt: 5 },
+    });
+    expect(frame).not.toContain('recent');
+    expect(JSON.parse(frame.split('data: ')[1]!)).toEqual({
+      runId: 'r',
+      rows: 9,
+      lastChunkAt: 5,
+      at: 10,
+    });
+  });
+
+  it('puts recent and clipped flat on the frame when there is one', () => {
+    const frame = rowTailFrame({
+      kind: 'snapshot',
+      snapshot: {
+        runId: 'r',
+        seq: 5,
+        at: 10,
+        rows: 9,
+        lastChunkAt: 5,
+        window: { recent: [{ host: 'a.com' }], clipped: true },
+      },
+    });
+    expect(JSON.parse(frame.split('data: ')[1]!)).toMatchObject({
+      recent: [{ host: 'a.com' }],
+      clipped: true,
+    });
+  });
+
+  /** Without a `get` the tail is exactly what it was before windows existed — which is what makes
+   *  this an addition rather than a requirement on every caller. */
+  it('behaves exactly as before when no reader is injected', async () => {
+    const objects = [sized('r', 1, 1000, 10)];
+    const hub = new RowTailHub({ list: async () => objects, now: () => 1, schedule: () => () => {} });
+    const got: RowTailEvent[] = [];
+    hub.subscribe('r', (e) => got.push(e));
+    await hub.poll('r');
+
+    const snap = snapshotsOf(got).at(-1)!;
+    expect(snap.rows).toBe(1);
+    expect(snap.window).toBeUndefined();
     hub.close();
   });
 });

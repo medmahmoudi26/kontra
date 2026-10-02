@@ -9,6 +9,13 @@
 **Author**
 - [[Writing-Actors-Python]]
 - [[Writing-Actors-Go]]
+- [[Writing-Workflows]]
+
+**Reference**
+- [[Glossary]]
+- [[CLI-Reference]]
+- [[Configuration]]
+- [[Contracts]]
 
 **Understand**
 - [[Execution-Model]]
@@ -21,7 +28,6 @@
 - [[Deployment]]
 - [[Fleet-and-the-Warden]]
 - [[Security-Model]]
-- [[Contracts]]
 - [[ADRs]]
 
 ---

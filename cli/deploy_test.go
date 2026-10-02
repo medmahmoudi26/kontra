@@ -8,12 +8,19 @@
 package main
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 func TestWorkerBaseDockerfile(t *testing.T) {
@@ -268,5 +275,132 @@ func TestDeploySummaryIsOneShape(t *testing.T) {
 	}
 	if strings.Contains(out, "bundle") || strings.Contains(out, "activities") {
 		t.Errorf("the bundle vocabulary retired with the kind:\n%s", out)
+	}
+}
+
+// fakeBaseDocker records whether ensureBase decided to build, and with which labels.
+type fakeBaseDocker struct {
+	labels map[string]string // what ImageList reports on the existing base ("" summary = absent)
+	absent bool
+	built  int
+	stamp  map[string]string // labels the build was asked to stamp
+}
+
+func (f *fakeBaseDocker) ImageList(context.Context, image.ListOptions) ([]image.Summary, error) {
+	if f.absent {
+		return nil, nil
+	}
+	return []image.Summary{{Labels: f.labels}}, nil
+}
+func (f *fakeBaseDocker) ImageBuild(_ context.Context, _ io.Reader, o types.ImageBuildOptions) (types.ImageBuildResponse, error) {
+	f.built++
+	f.stamp = o.Labels
+	return types.ImageBuildResponse{Body: io.NopCloser(strings.NewReader(`{"stream":"ok\n"}`))}, nil
+}
+func (f *fakeBaseDocker) ImageTag(context.Context, string, string) error { return nil }
+func (f *fakeBaseDocker) ImagePush(context.Context, string, image.PushOptions) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+// TestEnsureBaseRebuildsOnSDKChange pins the bug that made every actor run the SDK of whatever
+// day its base was first built: ensureBase stopped at "an image with that name exists". The tag
+// is a MAJOR tag by design and so says nothing about contents, which is why the check has to be
+// the digest. See ensureBase's comment for what it cost — `from kontra import progress` binding
+// to a function deleted eight days earlier, and every unit of every run dying on it.
+func TestEnsureBaseRebuildsOnSDKChange(t *testing.T) {
+	root, err := cliutil.FindRepoRoot("")
+	if err != nil {
+		t.Skipf("no repo root: %v", err)
+	}
+	current, err := sdkDigest(root)
+	if err != nil {
+		t.Fatalf("sdkDigest: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		d     fakeBaseDocker
+		build bool
+	}{
+		{"absent", fakeBaseDocker{absent: true}, true},
+		{"stale", fakeBaseDocker{labels: map[string]string{sdkLabel: strings.Repeat("a", 64)}}, true},
+		{"unstamped", fakeBaseDocker{labels: map[string]string{}}, true},
+		{"current", fakeBaseDocker{labels: map[string]string{sdkLabel: current}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := tc.d
+			if err := ensureBase(context.Background(), &d, io.Discard); err != nil {
+				t.Fatalf("ensureBase: %v", err)
+			}
+			if got := d.built > 0; got != tc.build {
+				t.Fatalf("built=%v, want %v", got, tc.build)
+			}
+			if tc.build && d.stamp[sdkLabel] != current {
+				t.Fatalf("stamped %q, want the checkout digest %q", d.stamp[sdkLabel], current)
+			}
+		})
+	}
+}
+
+// TestSDKDigestTracksTheSourceTheBaseBakes: the digest has to move when any file under either
+// COPYd seam moves, and has to be stable otherwise. A digest that ignores additions or renames
+// would let a NEW module (facts.py was exactly that) stay invisible to every actor.
+func TestSDKDigestTracksTheSourceTheBaseBakes(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{"sdk/python/kontra", "runtime/python/internals"} {
+		if err := os.MkdirAll(filepath.Join(root, p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mod := filepath.Join(root, "sdk/python/kontra/__init__.py")
+	if err := os.WriteFile(mod, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := sdkDigest(root)
+	if err != nil {
+		t.Fatalf("sdkDigest: %v", err)
+	}
+	if again, _ := sdkDigest(root); again != first {
+		t.Fatal("digest is not stable over an unchanged tree")
+	}
+
+	// A __pycache__ entry is build output and must not move the digest — otherwise every run
+	// after an import would report the base as stale and rebuild it.
+	cache := filepath.Join(root, "sdk/python/kontra/__pycache__")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "__init__.cpython-313.pyc"), []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := sdkDigest(root); got != first {
+		t.Fatal("__pycache__ moved the digest")
+	}
+
+	// An edit moves it.
+	if err := os.WriteFile(mod, []byte("x = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edited, _ := sdkDigest(root)
+	if edited == first {
+		t.Fatal("editing a module did not move the digest")
+	}
+
+	// So does ADDING one — the case that actually bit. facts.py was new, not edited.
+	added := filepath.Join(root, "sdk/python/kontra/facts.py")
+	if err := os.WriteFile(added, []byte("def progress(): pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withNew, _ := sdkDigest(root)
+	if withNew == edited {
+		t.Fatal("adding a module did not move the digest")
+	}
+
+	// And so does DELETING one — say.py was removed in the same change.
+	if err := os.Remove(added); err != nil {
+		t.Fatal(err)
+	}
+	if back, _ := sdkDigest(root); back != edited {
+		t.Fatal("deleting the added module did not restore the digest")
 	}
 }

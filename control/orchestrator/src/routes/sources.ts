@@ -32,7 +32,8 @@ import { ensureEndpoint, removeEndpoint } from '../nexusRegistry';
 import { watchDir } from '../schemaWatch';
 import { MARKER, SourceMissing, SourceRefused, defaultRoot, filesIn, resolveInside } from '../sources';
 import type { SourceStore } from '../sourceStore';
-import { listServes } from '../temporalClient';
+import { BUILD_ACTOR_WORKFLOW, buildActorWorkflowId, infraQueue } from '../queues';
+import { getClient, listServes } from '../temporalClient';
 import { ControlRefused, RUN_TOKEN_VARS } from '../workflowControl';
 import { errMessage } from './errors';
 
@@ -341,6 +342,53 @@ export function registerSourceRoutes(app: FastifyInstance, sources: SourceStore)
       }
       if (err instanceof ControlRefused) return reply.code(400).send({ error: err.message });
       return reply.code(502).send({ error: `could not serve: ${errMessage(err)}` });
+    }
+  });
+
+  /**
+   * BUILD THIS ACTOR'S IMAGE — `kontra deploy --actor`, run where the Docker socket is.
+   *
+   * SAME AUTHENTICATION AS SERVE, because it grants the same thing one step earlier: a caller who
+   * can build can push an image a Fleet will then pull and run. `checkOptionalBearer` +
+   * `RUN_TOKEN_VARS` is the posture the register and serve routes already take, and splitting it
+   * here would make the weaker of the two the real one.
+   *
+   * THE REQUEST CARRIES NOTHING BUT THE ID. No tag, no registry, no Dockerfile, no flags — see
+   * `activities/buildActor.ts` for why that is the whole security property rather than a style
+   * choice. This route resolves `:id` through the store before anything crosses the queue, so a
+   * caller cannot name a folder the control plane never registered.
+   *
+   * IT WAITS FOR THE BUILD. A 202-and-poll would be kinder to the socket and worse for the person:
+   * the answer to "did my actor build" is the CLI's output, and the page has nowhere to show it if
+   * the request has already returned. The workflow's own 30-minute budget is the bound.
+   */
+  app.post('/api/sources/actor/:id/build', async (req, reply) => {
+    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
+    if (denied) return reply.code(denied.code).send(denied.body);
+    const { id } = req.params as { id: string };
+    const sourceId = decodeURIComponent(id);
+    const source = sources.get('actor', sourceId);
+    if (!source) return reply.code(404).send({ error: `${id}: no such registered folder` });
+    try {
+      const client = await getClient();
+      return await client.workflow.execute(BUILD_ACTOR_WORKFLOW, {
+        taskQueue: infraQueue(),
+        workflowId: buildActorWorkflowId(sourceId),
+        // FAIL, not USE_EXISTING: two concurrent builds of one folder write the same image tag, and
+        // the caller wants an answer about the build it asked for. A build already in flight is a
+        // STATE the page can render, so it comes back as 409 rather than as a failure.
+        workflowIdConflictPolicy: 'FAIL',
+        args: [{ sourceId }],
+      });
+    } catch (err) {
+      const detail = errMessage(err);
+      if (/already started|already exists|WorkflowExecutionAlreadyStarted/i.test(detail)) {
+        return reply.code(409).send({
+          error: `a build of ${source.name} is already running — wait for it to finish, then press Build again`,
+          building: true,
+        });
+      }
+      return reply.code(502).send({ error: `could not build: ${detail}` });
     }
   });
 

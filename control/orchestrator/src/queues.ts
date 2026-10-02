@@ -134,6 +134,29 @@ export function serveDevWorkflowId(sourceId: string): string {
 }
 
 /**
+ * BUILDING AN ACTOR IMAGE — the second caller of the API→infra channel, for the same reason as the
+ * first. `kontra deploy` drives `docker build` and `docker push`, which needs the Docker socket,
+ * and `kontra-api` is the container with the published port and the untrusted HTTP input. It has
+ * no socket and must not get one, so the build moves to the authority rather than the authority
+ * moving to the build. See `activities/serveDev.ts` for the whole argument; nothing here is new
+ * privilege, it is one existing privilege gaining one more caller.
+ */
+export const BUILD_ACTOR_WORKFLOW = 'buildActorWorkflow';
+
+/**
+ * The workflow id one folder's builds run under.
+ *
+ * SEPARATE FROM `serveDevWorkflowId`, so a build and a serve of the same folder do not refuse each
+ * other. They are different operations on one directory and there is no reason pressing Build
+ * should be blocked by a serve that is already running — but two concurrent BUILDS of one folder
+ * write the same image tag, so those must still collide. Same-prefix-different-verb gives exactly
+ * that: `FAIL` on this id refuses a second build of this folder and nothing else.
+ */
+export function buildActorWorkflowId(sourceId: string): string {
+  return `build-actor/${sourceId}`;
+}
+
+/**
  * THE ACTOR PROBE (ADR 0033) — a kontra-owned queue that serves exactly ONE workflow type.
  *
  * That constraint is part of the line, not an implementation note. A kontra queue serving

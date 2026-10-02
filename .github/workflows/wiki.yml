@@ -1,0 +1,66 @@
+# Publish `docs/wiki/` to the repository's GitHub wiki.
+#
+# THE WIKI IS A SEPARATE GIT REPO (`<repo>.wiki.git`) and nothing links the two, so a wiki edited
+# in its own UI drifts from the tree that is reviewed. Keeping the source in `docs/wiki/` and
+# pushing it from here makes the repo the single writer: a wiki change arrives through a pull
+# request like any other, and the published pages cannot disagree with what was merged.
+#
+# ONE-TIME SETUP, AND IT CANNOT BE AUTOMATED. GitHub does not create `<repo>.wiki.git` until the
+# first page exists, and there is no REST endpoint for wiki pages — so the very first page has to
+# be saved from the web UI once. Until then this job fails with "Repository not found", which is
+# the honest error rather than a silent skip.
+
+name: wiki
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'docs/wiki/**'
+      - '.github/workflows/wiki.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # One writer at a time. Two pushes racing on a wiki repo produce a rejected non-fast-forward,
+  # and the loser's pages are simply absent until someone notices.
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone the wiki
+        run: |
+          set -eu
+          if ! git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki 2>clone.err; then
+            echo "::error::could not clone ${{ github.repository }}.wiki.git"
+            echo "::error::Enable Settings → Features → Wikis, then save one page from the web UI."
+            echo "::error::GitHub does not create the wiki repo until a first page exists."
+            cat clone.err
+            exit 1
+          fi
+
+      - name: Mirror docs/wiki into it
+        run: |
+          set -eu
+          # DELETE FIRST, so a page removed from the tree is removed from the wiki. A copy-only
+          # sync leaves renamed pages published for ever under both names, and the stale one still
+          # ranks in the wiki's own search.
+          find wiki -maxdepth 1 -name '*.md' -delete
+          cp docs/wiki/*.md wiki/
+          cd wiki
+          git add -A
+          if git diff --cached --quiet; then
+            echo "wiki already matches docs/wiki — nothing to push"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "docs: sync wiki from ${GITHUB_SHA::7}"
+          git push

@@ -17,18 +17,21 @@ the one thing a first run should NOT do.
 
 ── ONE CHANNEL FOR "WHERE IS IT", AND IT IS THE LOG ────────────────────────────────────────────────
 
-This workflow used to also publish `progress(...)` records on their own topic, and the actor
-published typed `Sweep` records on another, for a console pane that drew both. Both are gone.
+This workflow used to publish `progress(...)` onto a Temporal Workflow Stream, which lives in the
+workflow's MEMORY and dies with the workflow. The run finishes in under a minute, so by the time
+anybody had loaded the console and signed in there was nothing left to subscribe to — the pane's
+ordinary state was an empty box, which reads as a broken feature. That verb was removed, and the
+removal said it would come back "when there is a durable store under it".
 
-A Workflow Stream lives in the workflow's MEMORY and dies with the workflow. The run finishes in
-under a minute, so by the time anybody has loaded the console and signed in there is nothing left
-to subscribe to — the pane's ordinary state was an empty box, which reads as a broken feature. The
-log goes to VictoriaLogs and the rows go to the lake, and both are still there tomorrow. A first
-run must not be the demo of a channel that is usually empty.
+IT IS BACK, AND THE STORE IS THE LOG. `progress(...)` no longer owns a transport; it owns a SCHEMA
+and rides the log record, whose `extra=` fields the formatter turns into indexed VictoriaLogs keys
+under a retention unrelated to Temporal's. So `done`/`total`/`phase`/`axis`/`incomplete` are numbers
+and flags a reader can filter on rather than prose to parse back, and a run that finished last week
+still answers. The typed `Sweep` records on their own topic stay gone — those were the pane's, and
+the pane is not coming back.
 
-So: `workflow.logger` says what the RUN is doing, the actor's logger says what the SWEEP is doing,
-and the Dataset says what came of it. The verbs come back when there is a durable store behind
-them.
+So: `progress` says HOW FAR, `workflow.logger` says what the RUN is doing, the actor's logger says
+what the SWEEP is doing, and the Dataset says what came of it.
 
 ── WHY IT IS NOT FASTER THAN IT IS ─────────────────────────────────────────────────────────────────
 
@@ -54,12 +57,12 @@ from pydantic import Field
 from temporalio import workflow
 from typing_extensions import Annotated, TypedDict
 
-from kontra import catalog, fleet
+from kontra import catalog, fleet, progress
 from kontra.fleet import docker_fleet, do_fleet
 
 #: The Actor this run places and calls. One actor, deliberately: a first run should have exactly
 #: one moving part to point at.
-ACTOR = ("canary", "1.0.0")
+ACTOR = ("canary", "1.1.1")
 
 #: What a run sweeps when nothing is passed. Names rather than hostnames, because nothing is
 #: resolved — a reader who sees `example.com` here will reasonably assume DNS is involved.
@@ -167,8 +170,13 @@ class Canary:
     THE FIRST PARAGRAPH OF THIS DOCSTRING IS THE WORKFLOW'S DESCRIPTION, everywhere. `catalog.py`
     derives it with `first_paragraph(cls.__doc__)` and publishes it on the descriptor beside
     `input` and `output`, so it is what the console's launch form prints above the fields and what
-    `kontra workflow ls` prints beside the name. A `@workflow.defn` class with no docstring reaches
-    every reader as a bare type name — which is the state this one was in.
+    the console's Workflows page shows beside the name. A `@workflow.defn` class with no docstring
+    reaches every reader as a bare type name — which is the state this one was in.
+
+    (It said `kontra workflow ls` here, and there is no such subcommand — `kontra workflow` takes
+    register|serve|start|pause|resume|cancel|terminate|replay|history and errors on anything else.
+    A comment naming a command that does not exist is one somebody types once and distrusts the
+    rest of the file afterwards.)
 
     It is the CLASS's docstring and not `run`'s, because `run`'s belongs to the signature: it is
     where the argument's defaulting is explained, and that is a note for somebody editing this file
@@ -205,6 +213,11 @@ class Canary:
         workflow.logger.info(
             "canary: %d target(s) x %d step(s) = %d record(s), on %d %s machine(s)",
             len(targets), steps, total, machines, provider)
+        # THE DENOMINATOR AS A FACT, not only as a sentence. `progress` rides the log record's
+        # `extra=`, which the formatter turns into indexed VictoriaLogs fields — so the console can
+        # read `done`/`total` as numbers instead of parsing them back out of prose, and it is still
+        # there tomorrow because the log store outlives the execution.
+        progress("sweep", "records", total=total, program="canary")
         workflow.logger.info("canary: bringing the Fleet up")
 
         rows: list = []
@@ -273,9 +286,16 @@ class Canary:
                     workflow.logger.error(
                         "canary: sweep voided — %s", voided,
                         extra={"incomplete": True, "axis": "targets", "phase": "sweep"})
+                    # The same failure as a FACT. `incomplete` is what the console's rail filters
+                    # on independently of level, and it reaches it from here as a declared field
+                    # rather than a hand-spelled `extra=` dict.
+                    progress("sweep", "targets", done=len(rows), total=total, program="canary",
+                             incomplete=True, detail=f"sweep voided — {voided}")
 
             workflow.logger.info(
                 "canary: sweep finished — %d of %d row(s) into %s", len(rows), total, out.name)
+            progress("sweep", "records", done=len(rows), total=total, program="canary",
+                     detail=f"into {out.name}")
 
         # The scope has exited here, which means the Lease is dropped and the Machines are gone.
         workflow.logger.info("canary: fleet released — %d machine(s) destroyed", machines)
@@ -292,6 +312,49 @@ class Canary:
         else:
             workflow.logger.info(
                 "canary: complete — %d record(s) in %s, Machines destroyed", len(rows), out.name)
+
+        # ── SAY THAT NOBODY IS WRITING TO THIS ANY MORE ────────────────────────────────────────
+        #
+        # `publishBatch` rewrites the Dataset's marker to `open` on EVERY append, and `sealed` is
+        # only ever written by an explicit close — which run output never performed. So every
+        # Dataset on an install claimed a writer was still appending to it, for ever, including
+        # ones whose Run had finished hours earlier. `open` is the claim that MORE IS COMING, and
+        # anything deciding "is this safe to read as whole" believes it.
+        #
+        # THE WORD DEPENDS ON HOW THIS RUN ENDED, because the three states are three different
+        # sentences. `sealed` is finished on purpose. `abandoned` is stopped short — which is what
+        # a voided sweep or a short row count is, and calling that `sealed` would be the
+        # comfortable lie. `open` stays the honest answer for a CRASH, which is why neither is
+        # written on a path that raises: nobody said, and that is true.
+        #
+        # BEST EFFORT, LOUDLY. The rows are already committed and durable; a marker that will not
+        # write is a warning, never a reason to fail a Run that did its work. Deliberately NOT
+        # marked `incomplete` — that claims the SWEEP has gaps, which is a different and more
+        # serious statement than a marker that did not land.
+        #
+        # ── AND IT RACES WITH A CONCURRENT CANARY, WHICH IS A REAL HOLE, NOT A THEORETICAL ONE ──
+        #
+        # `_state.json` is ONE OBJECT PER LOGICAL DATASET NAME — `datasets/<name>/_state.json` —
+        # not one per partition. Every canary Run writes `canary_signals`, so two overlapping Runs
+        # share a marker, and the first to finish seals the name while the second is still
+        # appending to it. A false `sealed` is worse than the `open` it replaces: `open` understates
+        # and a reader checks, `sealed` says THE DATA IS WHOLE and a reader stops looking.
+        #
+        # It is left as-is here rather than half-guarded, because the guard does not belong in each
+        # caller. `closeDataset` (the activity) is the one place that knows the write is happening
+        # and is where "refuse to seal a Dataset another Run is still writing" has to live — the
+        # same rule `data/sealFinishedDatasets.ts` applies to the historical reconciliation, which
+        # requires EVERY contributing Run to be terminal before it will write a word.
+        #
+        # Safe for this workflow as it stands: a canary is a single short Run somebody starts by
+        # hand to watch. Not safe as a pattern to copy into a caller that runs concurrently with
+        # itself on a shared Dataset name.
+        try:
+            await out.seal() if complete else await out.abandon()
+        except Exception as err:  # noqa: BLE001
+            workflow.logger.warning(
+                "canary: could not mark %s as %s — the rows are committed either way: %s",
+                out.name, "sealed" if complete else "abandoned", err)
 
         return {
             "targets": targets,

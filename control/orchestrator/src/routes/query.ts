@@ -33,6 +33,7 @@ import {
   exportQuery,
   querySchema,
   runQuery,
+  streamQuery,
 } from '../data/queryEngine';
 import { errMessage } from './errors';
 
@@ -84,6 +85,92 @@ export function registerQueryRoutes(app: FastifyInstance, deps: QueryRouteDeps):
       // A bad query is the OPERATOR'S input, not a server fault — 400 with the engine's message,
       // so the workbench can print it under the editor instead of showing a broker error.
       return reply.code(400).send({ error: errMessage(err) });
+    }
+  });
+
+  /**
+   * THE SAME QUERY, WITH NO ROW CEILING — newline-delimited JSON, written as it arrives.
+   *
+   * `POST /api/datasets/query` answers a whole body, so its 5,000-row cap is really a cap on the API's
+   * heap rather than on the lake. This one streams: one chunk out of DuckDB, one write to the
+   * socket, nothing retained. The measurement that made it worth building is not size — Arrow
+   * came to 198 bytes/row against JSON's 180 — it is that a scan of a live Dataset could not be
+   * answered at all, and now can.
+   *
+   * THE FRAMING IS ONE OBJECT PER LINE, and the shapes are deliberately disjoint so a reader
+   * switches on which key is present rather than on position:
+   *
+   *   {"columns":[{name,type},…]}   exactly once, first — the Arrow-equivalent schema head
+   *   {"rows":[[…],[…]]}            zero or more, one per DuckDB chunk
+   *   {"done":{rows,elapsedMs}}     exactly once, last, on success
+   *   {"error":"…"}                 instead of `done`, when it failed PART WAY THROUGH
+   *
+   * THE ERROR LINE IS THE POINT OF THE SHAPE. A read that fails after ten chunks has already sent
+   * a 200 and ten thousand rows, so it cannot become a 400 — the status line is long gone. Saying
+   * so in the body lets the table keep what arrived and show why it stopped; the alternative is a
+   * short result that looks complete.
+   *
+   * WHICH FAILURES LAND WHERE IS MEASURED, NOT ASSUMED, and it is not the obvious split. A row
+   * that cannot be evaluated — a bad cast, a type error — throws from `stream()` BEFORE any chunk
+   * (measured on `@duckdb/node-api` 1.5.4 with the failure at row 150,000 of 200,000), so malformed
+   * SQL is a plain 400 like everywhere else. The in-band frame is for a read that breaks once it is
+   * already underway, which on this install is a live shape rather than a hypothetical: the
+   * 2026-09-28 wipe left 94 catalog partitions pointing at parquet that no longer exists, and those
+   * fail when the missing object is opened — chunks in, long past the status line.
+   */
+  app.post('/api/datasets/query/stream', async (req, reply) => {
+    const denied = checkBearer(req.headers.authorization, EXPLORE_TOKEN_VARS);
+    if (denied) {
+      if (denied.code === 401) req.log?.warn?.({ path: req.url, ip: req.ip }, 'workbench: rejected');
+      return reply.code(denied.code).send(denied.body);
+    }
+    const { sql, offset, scope } = (req.body ?? {}) as Partial<{
+      sql: string;
+      offset: number;
+      scope: { name: string; version?: string; dt?: string };
+    }>;
+    if (typeof sql !== 'string' || !sql.trim()) {
+      return reply.code(400).send({ error: 'sql is required' });
+    }
+
+    let open = false;
+    // BACKPRESSURE IS RESPECTED RATHER THAN ASSUMED. Without the drain wait a fast lake and a slow
+    // client grow Node's socket buffer without bound, which is the very heap this route exists to
+    // stop filling — the cap would simply have moved from rows to bytes.
+    const write = (obj: unknown): Promise<void> =>
+      new Promise((resolve, reject) => {
+        const ok = reply.raw.write(`${JSON.stringify(obj)}\n`, (err) =>
+          err ? reject(err) : ok ? resolve() : undefined
+        );
+        if (!ok) reply.raw.once('drain', resolve);
+      });
+
+    try {
+      const summary = await streamQuery(
+        store,
+        sql,
+        { offset, lake, harden, scope },
+        {
+          head: async (columns) => {
+            reply.hijack();
+            reply.raw.writeHead(200, {
+              'content-type': 'application/x-ndjson',
+              'cache-control': 'no-store',
+            });
+            open = true;
+            await write({ columns });
+          },
+          rows: (rows) => write({ rows }),
+        }
+      );
+      await write({ done: summary });
+      reply.raw.end();
+      return reply;
+    } catch (err) {
+      if (!open) return reply.code(400).send({ error: errMessage(err) });
+      await write({ error: errMessage(err) }).catch(() => undefined);
+      reply.raw.end();
+      return reply;
     }
   });
 

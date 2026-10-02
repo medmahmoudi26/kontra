@@ -1,0 +1,155 @@
+# PORTER — Arrow Flight SQL over the DuckLake, as a kontra service.
+#
+# Upstream ships a Dockerfile and it is not enough for this stack, in three ways that each cost a
+# boot:
+#
+#   1. IT INSTALLS ONE OF THE TWO DRIVERS IT REQUIRES. `internal/adbc/manager.go` declares
+#      `requiredDrivers = {duckdb, flightsql}` and refuses to start without both; upstream's image
+#      builds only the DuckDB ADBC shim. Both are installed here, with `dbc`, which is the tool
+#      Porter's own error message names.
+#
+#   2. IT LOOKS FOR THEM SOMEWHERE `dbc` DOES NOT INSTALL. Porter scans
+#      `os.UserCacheDir()/porter/adbc/<driver>/<version>/<os_arch>/`, while `dbc` writes
+#      `<config>/adbc/drivers/<driver>_<os>_<arch>_v<version>/`. The two layouts are linked below
+#      rather than hoped about — this is the failure that reads as "Missing required ADBC drivers"
+#      immediately after a successful install.
+#
+#   3. IT CANNOT REACH OUR OBJECT STORE. Porter has NO S3 configuration of any kind — no endpoint,
+#      key, secret, path-style or SSL flag — and our lake is SeaweedFS on a custom endpoint with
+#      path-style addressing. The entrypoint writes a DuckDB PERSISTENT SECRET from the same
+#      `KONTRA_S3_*` variables every other service reads, so one set of credentials still describes
+#      the store. Without it Porter starts, attaches the catalog, and 403s on every scan.
+#
+# ONE MORE THING IT DOES NOT DO: authenticate. There is no credential on the Flight port, so this
+# service publishes NO host port and is reachable only on the compose network — the same posture
+# `victorialogs` has, for the same reason, with the orchestrator as the authenticated front door.
+# Do not add a `ports:` entry to it.
+
+# ---- build ----
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential g++ libc6-dev pkg-config curl unzip ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG PORTER_REF=f1fbbd4
+RUN git clone https://github.com/TFMV/porter.git . && git checkout ${PORTER_REF}
+
+RUN go mod download
+RUN CGO_ENABLED=1 go build -o /out/porter ./cmd/porter
+
+# THE DUCKDB ADBC SHIM, kept from upstream because the reasoning is theirs and correct: the ADBC
+# driver manager dlopen()s a library exporting `AdbcDriverInit`, and libduckdb exports
+# `duckdb_adbc_init` instead. This is the three-line bridge between the two names.
+#
+# PINNED TO THE VERSION KONTRA'S OWN WRITER USES. `@duckdb/node-api` is 1.5.4 and upstream's
+# Dockerfile pins 1.5.1 — two DuckDB versions over one DuckLake is a difference that shows up as a
+# catalog-compatibility error long after the build, so they are held together here on purpose.
+ARG DUCKDB_VERSION=1.5.4
+RUN arch="$(uname -m)" \
+ && case "$arch" in x86_64) a=amd64 ;; aarch64|arm64) a=arm64 ;; *) echo "unsupported: $arch" >&2; exit 1 ;; esac \
+ && curl -fsSL -o /tmp/libduckdb.zip \
+      "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-${a}.zip" \
+ && unzip -o /tmp/libduckdb.zip -d /usr/local/lib \
+#
+# ── WHY THIS IS A dlopen SHIM AND NOT A LINKED ONE ─────────────────────────────────────────────
+#
+# The obvious shim — link against libduckdb, forward the call — builds fine and then crash-loops,
+# and the error blames a path nobody asked for:
+#
+#     INFO resolved required adbc drivers duckdbPath=/root/.cache/porter/adbc/duckdb/1.5.4/…
+#     Error: dlsym(AdbcDuckdbInit) failed: /usr/local/lib/libduckdb.so: undefined symbol
+#
+# Porter RESOLVES the cache path and then the ADBC driver manager opens the driver BY BASENAME, so
+# `libduckdb.so` is looked up on the loader's search path and `/usr/local/lib/libduckdb.so` — the
+# real 70 MB library, which exports `duckdb_adbc_init` and no `Adbc*Init` at all — wins before the
+# cache copy is ever considered. Renaming the cache copy is not available: that filename is what
+# Porter scans for. An explicit `-soname` does not help either; it was tried, and the manager is
+# not resolving by soname.
+#
+# So the shim TAKES the name instead of competing with it. It is installed at
+# `/usr/local/lib/libduckdb.so` — the path that wins — and the real library moves to
+# `/usr/local/lib/duckdb/`, off the default search path, where only this shim looks for it. Because
+# the lookup is a runtime `dlopen` there is no DT_NEEDED on `libduckdb.so`, which is what stops the
+# shim from resolving its own dependency to itself now that they share a basename.
+#
+# BOTH ENTRYPOINTS ARE EXPORTED. The manager asks for the driver-specific `AdbcDuckdbInit` first and
+# falls back to the generic `AdbcDriverInit`; exporting only the second is the other half of why the
+# first build failed.
+ && mkdir -p /usr/local/lib/duckdb \
+ && mv /usr/local/lib/libduckdb.so /usr/local/lib/duckdb/libduckdb.so \
+ && printf '%s\n' \
+      '#include <dlfcn.h>' \
+      'typedef int (*init_fn)(int, void *, void *);' \
+      'static init_fn resolve(void) {' \
+      '    static init_fn fn = 0;' \
+      '    if (!fn) {' \
+      '        void *h = dlopen("/usr/local/lib/duckdb/libduckdb.so", RTLD_NOW | RTLD_GLOBAL);' \
+      '        if (h) fn = (init_fn) dlsym(h, "duckdb_adbc_init");' \
+      '    }' \
+      '    return fn;' \
+      '}' \
+      'extern "C" int AdbcDriverInit(int version, void *driver, void *error) {' \
+      '    init_fn fn = resolve();' \
+      '    return fn ? fn(version, driver, error) : 1;' \
+      '}' \
+      'extern "C" int AdbcDuckdbInit(int version, void *driver, void *error) {' \
+      '    init_fn fn = resolve();' \
+      '    return fn ? fn(version, driver, error) : 1;' \
+      '}' > /tmp/shim.cpp \
+ && g++ -shared -fPIC -o /usr/local/lib/libduckdb.so /tmp/shim.cpp -ldl \
+ && cp /usr/local/lib/libduckdb.so /usr/local/lib/libduckdb_adbc.so \
+ && rm /tmp/libduckdb.zip /tmp/shim.cpp
+
+# THE FLIGHTSQL DRIVER, via `dbc` — the tool Porter's error message tells an operator to run, so
+# the image and the error agree. Fetched at build time so the running container pulls nothing.
+RUN curl -fsSL https://dbc.columnar.tech/install.sh -o /tmp/dbc.sh \
+ && sh /tmp/dbc.sh \
+ && /root/.local/bin/dbc install flightsql
+
+# THE LAYOUT PORTER ACTUALLY SCANS. `dbc` writes `<driver>_<os>_<arch>_v<version>/`; Porter reads
+# `<driver>/<version>/<os_arch>/`. Translating here is what turns "Missing required ADBC drivers"
+# — thrown one line after a successful install — into a server that boots.
+RUN set -eu; \
+    cache=/out/adbc-cache; \
+    fs="$(find /root/.config/adbc/drivers -name 'libadbc_driver_flightsql.so' | head -1)"; \
+    fsver="$(basename "$(dirname "$fs")" | sed 's/.*_v//')"; \
+    mkdir -p "$cache/duckdb/${DUCKDB_VERSION}/linux_amd64" "$cache/flightsql/${fsver}/linux_amd64"; \
+    cp /usr/local/lib/libduckdb_adbc.so "$cache/duckdb/${DUCKDB_VERSION}/linux_amd64/libduckdb.so"; \
+    cp "$fs" "$cache/flightsql/${fsver}/linux_amd64/libflightsql.so"
+
+# ---- runtime ----
+FROM debian:bookworm-slim
+
+# `duckdb` (the CLI) is here for exactly one job: writing the persistent S3 secret at boot. It is
+# the same binary family as the library Porter loads, so the secret it writes is one Porter reads.
+ARG DUCKDB_VERSION=1.5.4
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates libstdc++6 libgcc-s1 curl unzip \
+ && curl -fsSL -o /tmp/duckdb_cli.zip \
+      "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip" \
+ && unzip -o /tmp/duckdb_cli.zip -d /usr/local/bin \
+ && chmod +x /usr/local/bin/duckdb \
+ && rm /tmp/duckdb_cli.zip \
+ && apt-get purge -y unzip && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/porter                    /usr/local/bin/porter
+# THE SHIM takes the name on the loader's search path; THE REAL LIBRARY sits off it, in
+# `duckdb/`, where only the shim's `dlopen` looks. Both have to cross into the runtime stage —
+# copying the shim alone leaves it resolving a library that is not in the image, which fails at the
+# first query rather than at boot. See the shim's own comment in the build stage.
+COPY --from=build /usr/local/lib/libduckdb.so       /usr/local/lib/libduckdb.so
+COPY --from=build /usr/local/lib/libduckdb_adbc.so  /usr/local/lib/libduckdb_adbc.so
+COPY --from=build /usr/local/lib/duckdb/libduckdb.so /usr/local/lib/duckdb/libduckdb.so
+COPY --from=build /out/adbc-cache                /root/.cache/porter/adbc
+RUN ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/local/lib
+COPY control/images/porter-entrypoint.sh /usr/local/bin/porter-entrypoint
+RUN chmod +x /usr/local/bin/porter-entrypoint
+
+# NO EXPOSE, AND NO PORTS IN COMPOSE. The Flight port carries no credential; the compose network is
+# the boundary. See the header.
+ENTRYPOINT ["/usr/local/bin/porter-entrypoint"]

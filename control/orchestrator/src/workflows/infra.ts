@@ -19,6 +19,11 @@ export type { StackOp, StackWorkflowInput } from './stack';
 // not run here.
 export { serveDevWorkflow } from './serveDev';
 
+// The BUILD channel (`activities/buildActor.ts`), on this queue for the reason serve-dev is: this
+// is the process holding the Docker socket. It exports no query, so it cannot collide with
+// `getProgress`.
+export { buildActorWorkflow } from './buildActor';
+
 export { sweepDatasetsWorkflow } from './retention';
 export type { SweepDatasetsWorkflowInput } from './retention';
 

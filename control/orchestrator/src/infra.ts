@@ -30,11 +30,13 @@ import { Client, Connection } from '@temporalio/client';
 import { NativeConnection, Worker } from '@temporalio/worker';
 import * as infraActivities from './activities/infra';
 import * as serveDevActivities from './activities/serveDev';
+import * as buildActorActivities from './activities/buildActor';
 import { dataConverter } from './codec/dataConverter';
 import { adoptLegacyCloudToken } from './infra/credential';
 import { assertBackend, backendUrl } from './infra/workspace';
 import { infraQueue } from './queues';
 import { configureServeDev } from './activities/serveDev';
+import { configureBuildActor } from './activities/buildActor';
 import { SourceStore } from './sourceStore';
 import { kontraBin, serveEnv } from './workflowControl';
 import { armRetentionSchedule } from './retention';
@@ -85,6 +87,21 @@ async function main(): Promise<void> {
     serveEnv,
   });
 
+  // The BUILD half, wired off the same store for the same reason. `resolve` looks only at the
+  // actor kind here — `buildActor` refuses anything else anyway, and asking the workflow store
+  // first would let a workflow folder's id resolve to a row the activity then rejects, which
+  // reports "not an actor" about a lookup that should simply have missed.
+  configureBuildActor({
+    resolve: async (sourceId) => {
+      const got = sources.get('actor', sourceId);
+      return got === undefined
+        ? null
+        : { name: got.name, path: got.path, kind: got.kind, version: got.version };
+    },
+    kontraBin,
+    serveEnv,
+  });
+
   // NO SIGNAL HANDLERS, WHICH IS WHERE THIS STARTED. They existed for exactly one reason — a
   // forked streamer that Node's default SIGTERM would have orphaned, still holding port 8090 and
   // the read-only fleet key. There is no child now, so the default is right again, and this process
@@ -107,7 +124,7 @@ async function runWorker(): Promise<void> {
     // needs the Docker socket, and `sweepDatasetsWorkflow` is controller-pinned — three workflows
     // that share this queue because each needs an authority this role holds and the API does not.
     workflowsPath: require.resolve('./workflows/infra'),
-    activities: { ...infraActivities, ...serveDevActivities },
+    activities: { ...infraActivities, ...serveDevActivities, ...buildActorActivities },
     taskQueue: INFRA_QUEUE,
     namespace,
     connection,
@@ -120,6 +137,33 @@ async function runWorker(): Promise<void> {
     // moment later — whereas a converge racing an `up` on the same Machine is a Machine being
     // rebuilt under a session that was just created on it.
     maxConcurrentActivityTaskExecutions: 1,
+    /**
+     * HOW OFTEN A CONVERGE'S HEARTBEAT DETAILS REACH THE SERVER — 2 seconds, not 60.
+     *
+     * `stackUp` heartbeats `{op, urn}` on every one of Pulumi's `resourcePreEvent`s, and that detail
+     * is the only thing on this control plane that can say which resource the engine is on. The SDK
+     * THROTTLES heartbeats, and the throttle is derived rather than defaulted: with an
+     * `ActivityOptions.heartbeatTimeout` set — `workflows/stack.ts` sets 2 minutes — it is
+     * `heartbeatTimeout * 0.8`, capped by `maxHeartbeatThrottleInterval`, whose default is 60 s. So
+     * every detail between one flush and the next is buffered and superseded, and the "live" cursor
+     * was a once-a-minute sample.
+     *
+     * MEASURED on `kontra-docker-fleet/cursorproof`, a five-second converge creating five resources,
+     * polled at 250 ms: exactly ONE cursor was ever visible — `pulumi:pulumi:Stack`, the first
+     * resource — and the four Containers that followed never appeared at all. On a DigitalOcean
+     * Fleet, where a converge runs for minutes, the same throttle means a cursor that names the
+     * resource from up to a minute ago while claiming to be current.
+     *
+     * THE COST IS ONE RPC EVERY TWO SECONDS, PER IN-FLIGHT CONVERGE, AND THERE IS AT MOST ONE:
+     * `maxConcurrentActivityTaskExecutions: 1` above. Half an RPC a second against the cluster that
+     * is already serving this converge's workflow tasks.
+     *
+     * IT DOES NOT WEAKEN THE TIMEOUT. `heartbeatTimeout` stays 2 minutes and keeps its meaning — the
+     * throttle governs only how often buffered details are flushed, so a lower value makes a wedged
+     * converge detectable sooner, never later.
+     */
+    maxHeartbeatThrottleInterval: '2s',
+    defaultHeartbeatThrottleInterval: '2s',
     // NAMED. This is the one Worker that holds the cloud credential, so "which Worker converged
     // this stack" is a question with an auditor behind it — and the answer has to be a value
     // Temporal recorded on `ActivityTaskStarted`, not one reconstructed from a deploy log.
