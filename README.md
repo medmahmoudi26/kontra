@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/kontra-logo-dark.svg">
+  <img src=".github/assets/kontra-logo-light.svg" alt="kontra" width="238" height="48">
+</picture>
+
 # kontra
 
 **Run a job over a batch of inputs, across a fleet you don't have to babysit.**
@@ -246,9 +251,12 @@ The **[wiki](../../wiki)** is the manual — start at [Getting Started](../../wi
 
 | | |
 |---|---|
+| [Glossary](../../wiki/Glossary) | the vocabulary, and the pairs it is easy to confuse |
 | [First Run](../../wiki/First-Run) | nothing → an actor → a workflow → a fleet, one step at a time |
 | [Getting Started](../../wiki/Getting-Started) · [Dev Cycle](../../wiki/Dev-Cycle) | install, run one, iterate |
 | [Writing Actors: Python](../../wiki/Writing-Actors-Python) · [Go](../../wiki/Writing-Actors-Go) | the authoring surface |
+| [Writing Workflows](../../wiki/Writing-Workflows) | the only dispatcher — input shapes, Fleet scopes, Method calls |
+| [CLI Reference](../../wiki/CLI-Reference) · [Configuration](../../wiki/Configuration) | every verb; every token, image pin and manifest field |
 | [Execution Model](../../wiki/Execution-Model) · [Durability](../../wiki/Durability-and-Failures) | what happens when things break |
 | [Data Plane](../../wiki/Data-Plane) · [Query Surface](../../wiki/Query-Surface) | where records go and how to ask |
 | [Fleet & the Warden](../../wiki/Fleet-and-the-Warden) | machines, Leases, and running code you did not write |

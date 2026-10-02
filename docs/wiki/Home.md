@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/.github/assets/kontra-logo-dark.svg">
+  <img src="https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/.github/assets/kontra-logo-light.svg" alt="kontra" width="238" height="48">
+</picture>
+
 # Kontra
 
 Kontra runs a **job over a batch of inputs**. You write the job once — a small Python (or Go) file with one unit-processing function — and Kontra runs it over your inputs in parallel, retries failures, isolates bad units, offloads large data to object storage, and resumes from where it stopped if anything crashes. Your actor process *is* a **[Temporal](https://temporal.io) activity worker** (durable state on Redis); a single Go **handler** owns the backing workflow, schedules each batch onto the actor, and owns the retry/resume-from-committed reload. An **orchestrator** composes many such jobs into a visual workflow graph, and every run's output lands as a SQL-queryable dataset.
@@ -20,22 +25,33 @@ Kontra runs a **job over a batch of inputs**. You write the job once — a small
 
 | You want to… | Read |
 |---|---|
+| Look a word up | [[Glossary]] |
 | Run something in 5 minutes | [[Getting-Started]] |
 | Write a Python actor | [[Writing-Actors-Python]] |
 | Write a Go actor | [[Writing-Actors-Go]] |
 | Understand how a run executes | [[Execution-Model]] |
-| Drive actors from your own workflow | [[Execution-Model]] · `sdk/python/kontra/catalog.py` |
+| Drive Actors from your own workflow | [[Writing-Workflows]] |
 | Understand failure handling & recovery | [[Durability-and-Failures]] |
-| Drive Actors from your own workflow | [[Execution-Model]] |
 | Understand storage & datasets | [[Data-Plane]] |
 | Query a run's output / read its lifecycle | [[Query-Surface]] |
 | Watch what a Worker is printing, across the fleet | [[Dashboard]] |
 | Deploy the stack (local / remote workers) | [[Deployment]] |
 | Follow the day-to-day loop | [[Dev-Cycle]] |
+| Look up a CLI verb | [[CLI-Reference]] |
+| Configure tokens, images, manifests | [[Configuration]] |
 | Tour the examples | [[Examples]] |
 | The cross-language contracts & compat gates | [[Contracts]] |
 | Decision records | [[ADRs]] |
 
 ## Scope
 
-Kontra is currently **local-first and single-author**: no auth, no multi-tenancy, minimal operational overhead. Security hardening (auth, sandboxing, secrets) is a cloud-era concern, deliberately out of scope for now.
+Kontra is **local-first**: it is designed to run whole on one box, and the Compose topology binds to
+loopback by default because loopback is the security control for services that have none of their own.
+
+It is no longer *unauthenticated*. The API is gated by four separate tokens — state, explore, run and
+panel — and the console signs in against a scrypt-hashed account in `~/.kontra/config.yaml` to mint a
+session (ADR 0045). What each one admits, and which surfaces are open by design, is in
+[[Security-Model]] and [[Configuration]].
+
+What is still out of scope: multi-tenancy, and sandboxing actor code from the Machine it runs on.
+[[Fleet-and-the-Warden]] is explicit that the Warden runs code you did not write.
