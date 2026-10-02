@@ -3,8 +3,6 @@
   <img src=".github/assets/kontra-logo-light.svg" alt="kontra" width="238" height="48">
 </picture>
 
-# kontra
-
 **Run a job over a batch of inputs, across a fleet you don't have to babysit.**
 
 You write the job once — a small Python or Go file whose **Methods** each take a whole **Batch** and push records to the caller's **Dataset**. kontra runs it across a fleet, retries failures, isolates bad units, offloads large payloads to object storage, and resumes from the last committed **Unit** if anything crashes. Your actor *is* a [Temporal](https://temporal.io) activity worker: it polls its own task queue and keeps durable state in Redis, while a single Go handler owns the workflow and the exactly-once reload.
