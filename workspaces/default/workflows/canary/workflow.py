@@ -170,8 +170,13 @@ class Canary:
     THE FIRST PARAGRAPH OF THIS DOCSTRING IS THE WORKFLOW'S DESCRIPTION, everywhere. `catalog.py`
     derives it with `first_paragraph(cls.__doc__)` and publishes it on the descriptor beside
     `input` and `output`, so it is what the console's launch form prints above the fields and what
-    `kontra workflow ls` prints beside the name. A `@workflow.defn` class with no docstring reaches
-    every reader as a bare type name — which is the state this one was in.
+    the console's Workflows page shows beside the name. A `@workflow.defn` class with no docstring
+    reaches every reader as a bare type name — which is the state this one was in.
+
+    (It said `kontra workflow ls` here, and there is no such subcommand — `kontra workflow` takes
+    register|serve|start|pause|resume|cancel|terminate|replay|history and errors on anything else.
+    A comment naming a command that does not exist is one somebody types once and distrusts the
+    rest of the file afterwards.)
 
     It is the CLASS's docstring and not `run`'s, because `run`'s belongs to the signature: it is
     where the argument's defaulting is explained, and that is a note for somebody editing this file

@@ -92,7 +92,7 @@ A `#` comment cannot help you here: **comments do not exist at runtime.**
 
 **2. The *class* docstring is the description.** It is derived with `first_paragraph(cls.__doc__)`
 and published on the descriptor, so it is what the console's launch form prints above the fields and
-what `kontra workflow ls` prints beside the name. A `@workflow.defn` class with no docstring reaches
+what the Workflows page shows beside the name. A `@workflow.defn` class with no docstring reaches
 every reader as a bare type name.
 
 Use `run`'s docstring for notes to whoever edits the file — not for whoever is deciding to press Run.

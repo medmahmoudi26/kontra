@@ -334,7 +334,7 @@ SELECT * FROM lake.output."crawl4ai" WHERE version = '1.0.0' AND dt = '2026-08-0
 | **What did it find?** | `kontra dataset query <name>` · `kontra explore <actor>` — DuckDB on your workstation ([[Data-Plane]] §4) |
 | **Is it moving?** | The Dashboard's **Monitor** and **Datasets** surfaces — http://localhost:8088 — over the bounded summaries below |
 | **Is the output queryable yet?** | `GET /api/runs/:id/lifecycle` |
-| **What is streaming right now, before materialization?** | `kontra monitor --run-id <id> --query "SELECT * FROM run LIMIT 20"` — one view over the run's raw `units/` blobs |
+| **What is streaming right now, before materialization?** | `kontra runs --run-id <id> --query "SELECT * FROM run LIMIT 20"` — one view over the run's raw `units/` blobs |
 | **Why did that node fail / where is the history?** | Temporal Web UI — http://localhost:8233 |
 | **Is the stack up, are there pollers?** | `kontra doctor` · `kontra infra status` · `kontra workers list` |
 
