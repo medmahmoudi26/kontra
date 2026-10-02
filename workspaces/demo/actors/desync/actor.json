@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "kontra.actor.v1",
+  "name": "desync",
+  "version": "1.3.3",
+  "targets": {
+    "container": {
+      "memory": "1g",
+      "cpus": 2
+    },
+    "machine": {
+      "size": "s-2vcpu-4gb",
+      "region": "sfo3",
+      "image": "ubuntu-22-04-x64"
+    }
+  }
+}

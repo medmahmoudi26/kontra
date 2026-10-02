@@ -136,8 +136,12 @@ backend.db-wal
 # Never commit operator workspace trees if someone creates them inside the checkout by mistake.
 /workspaces.kontra/
 
-# ONE WORKSPACE SHIPS, AND IT IS THE SEEDED ONE. `workspaces/default` is what a first-time
-# install runs — the canary actor and the workflows that drive it — so it is tracked on purpose.
+# TWO WORKSPACES SHIP. `workspaces/default` is what a first-time install runs — the canary actor
+# and the workflows that drive it — and `workspaces/demo` is the worked example: one URL in,
+# desync findings out, over the same two Actors the methodology report is written about.
+#
+# `demo`, NOT `demo_workspace`: a workspace name becomes an S3 bucket, a Postgres catalog and a
+# Temporal namespace, and underscores are illegal in all three (see cli/workspace.go).
 # Every other workspace is an OPERATOR's: `bugbounty` and `scraping` were tracked until
 # 2026-09-26 and are not the project's to publish. A new workspace is ignored by default, which
 # is the right way round: adding one should take a deliberate negation here, not a deliberate
@@ -145,6 +149,7 @@ backend.db-wal
 /workspaces/*
 !/workspaces/.current
 !/workspaces/default/
+!/workspaces/demo/
 
 # A compiled Go actor lands beside its source with the folder name and no extension —
 # `go build` in workspaces/<ws>/actors/<name>/ writes ./<name>. One reached a commit that way
