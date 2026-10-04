@@ -526,6 +526,102 @@ class FleetNotReady(Exception):
         )
 
 
+class NotServing(Exception):
+    """`serving()` gave up waiting for Workers somebody ELSE was supposed to provide.
+
+    DISTINCT FROM {@link FleetNotReady} BECAUSE THE DIAGNOSIS IS DIFFERENT, not because the wait is.
+    A Run that reaches `FleetNotReady` owns the Machines and should go look at the handler on one of
+    them. A Run that reaches this one owns NOTHING: it was started attached, on the assertion that
+    capacity already exists, and the assertion was false. The thing to go and look at is whoever was
+    meant to hold the Fleet — it never came up, or it has already been torn down.
+    """
+
+    def __init__(self, actor: str, version: str, queue: str, want: int, got: int,
+                 error: str = "") -> None:
+        self.actor, self.version, self.queue = actor, version, queue
+        self.want, self.got, self.error = want, got, error
+        why = f"last describe failed: {error}" if error else f"{got}/{want} polling"
+        super().__init__(
+            f"nothing is serving {actor}@{version}: {why} on {queue}. This Run is ATTACHED, so it "
+            f"holds no Lease and provisions nothing — some other Run or `kontra fleet up` has to "
+            f"have placed this Actor first. `kontra workers list` shows the same view."
+        )
+
+
+async def _pollers(actor: str, version: str) -> tuple[int, str]:
+    """One measurement of how many Workers poll `<actor>@<version>`: `(count, error)`.
+
+    THE PAYLOAD IS THE ACTOR AND NOTHING ELSE — no stack, no tag, no Lease — which is the whole
+    reason {@link serving} can exist. A queue is addressed by `(name, version)` and polled by
+    whoever is running that Artifact, so asking how many pollers it has is a question about the
+    world rather than about any Fleet.
+
+    `count` IS 0 WHEN `error` IS SET and the caller must check `error` first. "Could not ask" is not
+    a measurement of zero, and the two callers both keep that distinction by refusing to record a
+    count they did not get — see `ready()`'s `measured` dict.
+    """
+    # LAZILY, like every other `temporalio` name in this module: `kontra.fleet` is imported by
+    # ordinary caller code as well as by workflow code, and a module-scope SDK import would make
+    # the former depend on the latter.
+    from temporalio import workflow
+
+    from kontra.catalog import shared_queue
+
+    out = await workflow.execute_activity(
+        QUEUE_POLLERS_ACTIVITY,
+        {"actor": actor, "version": version},
+        task_queue=CALLER_QUEUE,
+        start_to_close_timeout=timedelta(seconds=30),
+        summary=f"pollers on {shared_queue(actor, version)}",
+    )
+    error = str((out or {}).get("error") or "")
+    return (0 if error else int((out or {}).get("pollers") or 0)), error
+
+
+async def serving(
+    actor: str,
+    version: str,
+    *,
+    at_least: int = 1,
+    timeout: timedelta = timedelta(minutes=5),
+    poll: timedelta = timedelta(seconds=10),
+) -> int:
+    """Wait until somebody's Workers are polling `<actor>@<version>`. Returns how many.
+
+    THE READINESS GATE FOR A RUN THAT HOLDS NOTHING. `Fleet.ready()` is this plus a placement, and
+    it refuses without one — so until this existed, the only Run that could gate itself was the Run
+    that had provisioned its own capacity and therefore needed the gate least.
+
+    An ATTACHED Run makes the stronger claim: that capacity it cannot see is already up. When that
+    is false nothing raises today. The Batch is dispatched to a queue nobody polls and simply sits
+    there until `ScheduleToStart` fires, so the symptom is a Run that hangs before its first probe
+    and a timeout on an activity that never started. `campaign/workflow.py` records exactly that
+    failure. One line at the top of an attached path turns it into a named error with the actor in
+    it, minutes earlier.
+
+    It is deliberately NOT part of `catalog.actor(...)`. Dispatch stays one verb and capacity stays
+    another (ADR 0037); a Method call that silently waited for pollers would fuse them, and would
+    also pay this check on every call rather than once per Run.
+
+    Raises {@link NotServing} on timeout, carrying the actor and what was observed.
+    """
+    if at_least < 1:
+        raise ValueError(f"at_least must be positive, got {at_least}")
+    from temporalio import workflow
+
+    from kontra.catalog import shared_queue
+
+    queue = shared_queue(actor, version)
+    deadline = workflow.now() + timeout
+    while True:
+        count, error = await _pollers(actor, version)
+        if not error and count >= at_least:
+            return count
+        if workflow.now() >= deadline:
+            raise NotServing(actor, version, queue, at_least, count, error)
+        await workflow.sleep(poll)
+
+
 class Fleet:
     """Held capacity, for the length of the `async with`. Built by `hold()` or `up()`; never
     directly."""
@@ -1297,19 +1393,16 @@ class Fleet:
             #: which is also the shape `queuePollers` uses on the other side of the wire.
             measured: dict[str, int] = {}
             for p in targets:
-                out = await workflow.execute_activity(
-                    QUEUE_POLLERS_ACTIVITY,
-                    {"actor": p.actor, "version": p.version},
-                    task_queue=CALLER_QUEUE,
-                    start_to_close_timeout=timedelta(seconds=30),
-                    summary=f"pollers on {self.queue_for(p)}",
-                )
-                errors[p.actor] = str((out or {}).get("error") or "")
+                # ONE MEASUREMENT, SHARED WITH `serving()`. Both gates ask the same question of the
+                # same activity, so the question lives in one function — otherwise the attached
+                # path and the holding path could drift on what "polling" means.
+                count, error = await _pollers(p.actor, p.version)
+                errors[p.actor] = error
                 # A COUNT FROM A FAILED DESCRIBE IS NOT A MEASUREMENT EITHER. `panels/pollers.ts`
                 # drops a half-fold rather than returning a smaller number, but this side must not
                 # depend on that: an error field wins over whatever `pollers` says beside it.
-                if not errors[p.actor]:
-                    measured[p.actor] = int((out or {}).get("pollers") or 0)
+                if not error:
+                    measured[p.actor] = count
             # EACH PLACEMENT AGAINST ITS OWN NUMBER. A packed **Fleet** may carry one Artifact on
             # every **Machine** beside another on two of them, and comparing both to one target is
             # either a gate that never opens or one that opens early — which is a dispatch into a
@@ -1766,9 +1859,11 @@ def inventory_hosts(inventory: Mapping[str, Any]) -> list[str]:
 __all__ = [
     "up",
     "hold",
+    "serving",
     "Fleet",
     "Placement",
     "FleetNotReady",
+    "NotServing",
     "PlacementFailed",
     "DigitalOcean",
     "do_fleet",

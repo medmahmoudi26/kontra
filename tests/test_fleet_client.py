@@ -731,3 +731,90 @@ def test_scale_is_still_required_when_no_provider_object_is_given():
 def test_a_provider_object_of_the_wrong_type_is_named_as_such():
     with pytest.raises(TypeError, match="must be a DigitalOcean"):
         fleet.up({"machines": 4}, actor="nscheck", version="0.1.0")
+
+
+# ---------------------------------------------------------------------------------------------
+# `serving()` — the same gate, for a Run that holds nothing.
+#
+# `ready()` protects the Run that provisioned its own capacity. An ATTACHED Run makes the stronger
+# claim — that capacity it cannot see is already up — and until `serving()` existed it was the one
+# caller with no way to check. The failure was silent in the worst way: the Batch reached a queue
+# nobody polls and waited for ScheduleToStart, so a false assertion read as a slow run.
+#
+# Every discipline `ready()` has is asserted again here rather than assumed from the shared
+# `_pollers`, because the two gates are reached by different code paths and a regression in either
+# one is invisible at runtime.
+# ---------------------------------------------------------------------------------------------
+
+
+def serving(**kw):
+    """Drive `serving()` to completion — the module-level twin of the `ready` helper above."""
+    return asyncio.run(fleet.serving(kw.pop("actor", "desync"), kw.pop("version", "1.3.3"), **kw))
+
+
+def test_serving_opens_on_one_poller_and_asks_only_about_the_actor(gate):
+    """THE PAYLOAD IS THE WHOLE POINT. If this ever carried a fleet, a tag or a lease, `serving()`
+    would be asking about capacity it does not hold and an attached Run could not use it."""
+    calls = gate([{"pollers": 1}])
+    assert serving() == 1
+    assert len(calls) == 1, "a satisfied gate must not poll again"
+    assert calls[0][0] == fleet.QUEUE_POLLERS_ACTIVITY
+    assert calls[0][1] == {"actor": "desync", "version": "1.3.3"}
+    assert calls[0][2]["task_queue"] == fleet.CALLER_QUEUE
+
+
+def test_serving_waits_until_a_worker_appears(gate):
+    """The attached case is a race with whoever is provisioning, so arriving early must wait."""
+    calls = gate([{"pollers": 0}, {"pollers": 0}, {"pollers": 2}])
+    assert serving() == 2
+    assert len(calls) == 3
+
+
+def test_serving_names_the_actor_when_nothing_ever_polls(gate):
+    """The error has to say WHICH artifact, because an attached Run's whole problem is that the
+    capacity belongs to somebody else and the reader has to go find them."""
+    gate([{"pollers": 0}])
+    with pytest.raises(fleet.NotServing) as e:
+        serving(timeout=timedelta(seconds=30))
+    assert "desync@1.3.3" in str(e.value)
+    assert e.value.actor == "desync" and e.value.version == "1.3.3"
+    assert e.value.got == 0 and e.value.want == 1
+    assert not e.value.error, "no describe failed, so the count is a real measurement"
+
+
+def test_serving_does_not_read_a_failed_describe_as_zero(gate):
+    """COULD-NOT-ASK IS NOT A MEASUREMENT — the same rule `ready()` keeps.
+
+    A failed DescribeTaskQueue reports no pollers. Reading that as "nothing is polling" would end
+    the wait with a confident wrong diagnosis; the error has to survive to the exception so the
+    reader is sent to Temporal rather than to a Worker that is running fine.
+    """
+    gate([{"error": "describe failed: unavailable"}])
+    with pytest.raises(fleet.NotServing) as e:
+        serving(timeout=timedelta(seconds=30))
+    assert e.value.error == "describe failed: unavailable"
+    assert "describe failed" in str(e.value)
+
+
+def test_serving_does_not_open_on_a_count_that_came_with_an_error(gate):
+    """And the other direction: a count beside an error is not evidence either. `panels/pollers.ts`
+    drops a half-fold rather than returning a smaller number, but this side must not depend on
+    that — an error field wins over whatever `pollers` says next to it."""
+    gate([{"pollers": 9, "error": "describe failed"}])
+    with pytest.raises(fleet.NotServing):
+        serving(timeout=timedelta(seconds=30))
+
+
+def test_serving_honours_at_least(gate):
+    """One poller is enough to dispatch, not enough to parallelise. A caller that needs width says
+    so, and the gate holds until the width is there."""
+    calls = gate([{"pollers": 1}, {"pollers": 1}, {"pollers": 4}])
+    assert serving(at_least=4) == 4
+    assert len(calls) == 3
+
+
+def test_serving_refuses_a_nonpositive_at_least():
+    """`at_least=0` is a gate that opens on nothing, which is the same as no gate and reads like
+    one that works."""
+    with pytest.raises(ValueError, match="at_least must be positive"):
+        serving(at_least=0)
