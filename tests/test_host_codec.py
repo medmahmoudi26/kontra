@@ -25,12 +25,62 @@ from internals.codec import DEFAULT_THRESHOLD, ClaimCheckCodec
 from internals.temporal import host
 
 
-def test_the_host_builds_its_client_with_a_data_converter():
-    src = inspect.getsource(host.serve_async)
-    assert "data_converter" in src, (
-        "the actor host must pass a data_converter to Client.connect, or every batch over "
-        f"{DEFAULT_THRESHOLD} bytes fails to decode"
-    )
+def test_the_client_is_built_with_the_claim_check_codec(monkeypatch):
+    """What reaches `Client.connect`, not what the source says.
+
+    THIS USED TO GREP `host.serve_async` FOR THE STRING "data_converter", once per host. That
+    passes on a host that spells it and says nothing about the client that is actually built — and
+    it broke the moment the construction moved into `internals/temporal/connect.py`, which is the
+    shape a text assertion always fails in: the code got better and the test got worse.
+
+    Both hosts now connect through `connect()`, so asserting here covers the actor host, the
+    workflow host, the per-Session worker and `catalog.client()` at once. Without the codec every
+    payload over DEFAULT_THRESHOLD comes back as `Unknown payload encoding binary/claim-check-v1`.
+    """
+    import asyncio
+
+    from temporalio.client import Client
+
+    from internals.temporal import connect as kconnect
+
+    seen: dict = {}
+
+    async def fake_connect(address, **kw):
+        seen["address"] = address
+        seen.update(kw)
+        return object()
+
+    monkeypatch.setattr(Client, "connect", staticmethod(fake_connect))
+    asyncio.run(kconnect.connect("nscheck-0.1.0-sessions"))
+
+    dc = seen.get("data_converter")
+    assert dc is not None, "no data_converter reached Client.connect"
+    assert isinstance(dc.payload_codec, ClaimCheckCodec), dc.payload_codec
+    # The identity rides on the CLIENT as well as the Worker — half of what a process did is
+    # otherwise attributed to `<pid>@<hostname>` and the other half to the worker's name.
+    assert seen.get("identity"), "the client must carry this process's Temporal identity"
+
+
+def test_a_caller_can_override_what_the_client_is_built_with(monkeypatch):
+    """Defaulted, not forced. `**kwargs` reaching `Client.connect` is what lets a test or another
+    process build a client kontra did not anticipate — the whole point of exposing the object."""
+    import asyncio
+
+    from temporalio.client import Client
+
+    from internals.temporal import connect as kconnect
+
+    seen: dict = {}
+
+    async def fake_connect(address, **kw):
+        seen.update(kw)
+        return object()
+
+    monkeypatch.setattr(Client, "connect", staticmethod(fake_connect))
+    asyncio.run(kconnect.connect("q", identity="mine", data_converter="theirs"))
+
+    assert seen["identity"] == "mine"
+    assert seen["data_converter"] == "theirs"
 
 
 def test_the_converter_carries_the_claim_check_codec():

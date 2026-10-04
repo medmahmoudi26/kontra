@@ -136,6 +136,34 @@ The task queue is `wf-<name>-<version>` off the manifest — adding a class does
 
 ---
 
+## Running and testing without a Fleet
+
+**A Fleet is capacity. A Worker is a poller. Testing needs the second and never the first.**
+
+`serve()` blocks forever, which is exactly what a test, a notebook or another process cannot use.
+The builders hand back the real `temporalio` objects instead:
+
+```python
+client = await catalog.client()                       # a real temporalio.client.Client
+worker = catalog.worker(client, workflows=[Mine], task_queue=q)   # a real temporalio.worker.Worker
+async with worker:                                    # start, use, stop
+    out = await client.execute_workflow(Mine.run, arg, id=..., task_queue=q)
+```
+
+and the actor side is the twin — `actor.worker(client)`, because an Actor is a Temporal activity
+worker and nothing about it requires kontra's process.
+
+Both default the two things that are not optional (the claim-check codec, the sandbox passthrough)
+and forward `**kwargs` to Temporal untouched, so every `Worker` and `Client` option is yours —
+including `workflow_runner=UnsandboxedWorkflowRunner()` when you want to step through a workflow in
+a debugger.
+
+**One gotcha, and it is Temporal's, not kontra's:** a workflow defined in a script's `__main__`
+fails sandbox validation, because the sandbox re-imports the module. Put workflows in an importable
+module and import them into the runner.
+
+Use `catalog.serve()` for a process whose job is to serve. Use the builders for everything else.
+
 ## Determinism, briefly
 
 - A workflow body must replay to the same command sequence. No wall-clock, no `random`, no I/O —

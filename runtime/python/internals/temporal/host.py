@@ -47,7 +47,6 @@ log = logging.getLogger("kontra.host")
 # workflow's pane behaving the same way, which is the property that makes either of them worth
 # looking at.
 from internals.temporal.wfhost import _configure_logging  # noqa: E402
-from internals.temporal.tlsconfig import connect_tls
 
 # Per-process activation. Keyed by actor id, which is the run/node the handler derives — so two
 # nodes of one run get two instances (two browsers), and a retry of the SAME node reuses the
@@ -365,7 +364,8 @@ def _install_blob_reader() -> None:
     blobs.set_blob_reader(read)
 
 
-async def serve_async(registry, *, address: str = "", namespace: str = "") -> None:
+async def serve_async(registry, *, address: str = "", namespace: str = "",
+                      **worker_kwargs) -> None:
     # LOGGING FIRST, and for the reason `wfhost._configure_logging` records at length: Python emits
     # nothing until a handler exists, so an actor author's `logging.getLogger(__name__).info(...)`
     # — and the SDK's own warnings about activity failures and retries — were discarded. `print()`
@@ -391,20 +391,15 @@ async def serve_async(registry, *, address: str = "", namespace: str = "") -> No
     # TLS from the environment, in one place for every client in this repository — see
     # `internals/temporal/tlsconfig.py`. `False` when nothing is configured, which is what the
     # SDK means by no TLS and what this call passed before.
-    tls = connect_tls()
-    # THE CLIENT CARRIES THE IDENTITY TOO, and not only the Worker. A client identity is what the
-    # server records against the calls this process MAKES — starting a workflow, signalling a
-    # stream, completing an activity — where the Worker's is what it records against tasks this
-    # process TAKES. Left at the default, half of what a Machine did would be attributed to
-    # `<pid>@<hostname>` and the other half to the identity below, which is one Worker wearing two
-    # names in one Run's history.
-    client = await Client.connect(
-        address,
-        namespace=namespace,
-        data_converter=casstore.data_converter(),
-        tls=tls,
-        identity=workerid.worker_identity(queue),
-    )
+    # ONE CONSTRUCTION, shared with the workflow host and with `catalog.client()` — see
+    # `internals/temporal/connect.py`. It carries the identity onto the CLIENT as well as the
+    # Worker, because the two record different halves of the same story: the client's identity is
+    # on the calls this process MAKES (starting a workflow, completing an activity), the Worker's
+    # on the tasks it TAKES. Left at the default, half of what a Machine did is attributed to
+    # `<pid>@<hostname>` and the other half to the Worker's name.
+    from internals.temporal.connect import connect as kontra_connect
+
+    client = await kontra_connect(queue, address=address, namespace=namespace)
     metrics.serve(registry.actor_name, version)  # /metrics on its own port
     publish_catalog(registry)                    # self-register so the actor is dispatchable
     _install_blob_reader()                       # what `kontra.File.read()` calls
@@ -417,15 +412,17 @@ async def serve_async(registry, *, address: str = "", namespace: str = "") -> No
     # the real queue off `activity.info()` — which on a Session's worker is the Session's own, not
     # this one. This names the fallback for boot, shutdown, and the polling-with-nothing-in-flight
     # lines that are exactly the ones explaining a Worker that never picked anything up.
-    logs.bind_worker(queue)
+    from internals.temporal.connect import actor_worker
+
     identity = workerid.worker_identity(queue)
-    worker = Worker(
+    # EVERY `Worker` OPTION IS REACHABLE, the same as on the workflow side: `**worker_kwargs` goes
+    # straight through, and the two numbers below are defaults rather than a ceiling.
+    worker = actor_worker(
         client,
+        registry,
         task_queue=queue,
-        activities=build_activities(registry, sessions=live_sessions(registry)),
         max_concurrent_activities=max(4, max_parallel_sessions()),
-        identity=identity,
-        build_id=workerid.build_id(),
+        **worker_kwargs,
     )
     log.info("[host] %s@%s serving on %s (%s) as %s, %d live Sessions max",
              registry.actor_name, version, queue, address, identity, max_parallel_sessions())

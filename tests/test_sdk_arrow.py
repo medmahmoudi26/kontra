@@ -41,9 +41,24 @@ RUNTIME_PKG = "internals"
 #: are permitted at exactly these two places and nowhere else. Adding to this list is the reviewable
 #: event — it means a second place in the author surface now needs the engine, which is the claim
 #: that has to be argued rather than assumed.
+#: The entry-point handoffs: the lines where an author stops writing code and asks the engine for a
+#: running thing. Each one imports the runtime INSIDE its body, so `import kontra` never reaches it.
+#:
+#: THE SET GREW WHEN `serve()` STOPPED BEING THE ONLY DOOR, and the four below are the same act at
+#: two levels of control. `serve()` builds a worker and runs it forever; `client()` and `worker()`
+#: build the Temporal objects and hand them back, which is what makes an Actor or a workflow
+#: runnable from a test, a notebook or somebody else's process — with or without a Fleet, because a
+#: Fleet is capacity and a Worker is a poller. The handoff is identical in kind: author code asking
+#: the runtime to wire a Temporal client with the claim-check codec and the sandbox passthrough.
+#:
+#: ADDING TO THIS SET IS A DECISION, NOT A FORMALITY. Anything here is a place the author surface
+#: depends on the runtime; the test exists so that dependency is written down rather than acquired.
 ALLOWED_HANDOFFS = {
     ("actor.py", "serve"),        # Actor.serve()          -> internals.temporal.host.serve
+    ("actor.py", "worker"),       # Actor.worker()         -> internals.temporal.connect.actor_worker
     ("catalog.py", "serve"),      # catalog.serve()        -> internals.temporal.wfhost.serve_workflows
+    ("catalog.py", "client"),     # catalog.client()       -> internals.temporal.connect.connect
+    ("catalog.py", "worker"),     # catalog.worker()       -> internals.temporal.connect.workflow_worker
 }
 
 #: Infrastructure clients an author surface must not carry. Temporal is deliberately absent: the

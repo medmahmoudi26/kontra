@@ -2094,6 +2094,75 @@ def _temp_dataset(*, timeout: timedelta = timedelta(minutes=30)) -> "TempDataset
 # spellable at all — a function cannot be subscripted.
 
 
+async def client(
+    *,
+    task_queue: str = "",
+    address: str = "",
+    namespace: str = "",
+    **kwargs: Any,
+):
+    """A connected `temporalio.client.Client`, wired the way kontra needs it. The REAL object.
+
+        client = await catalog.client()
+        handle = await client.start_workflow(Hunt.run, arg, id="hunt-1", task_queue="wf-hunt-0.1.0")
+
+    WHY THIS IS NOT JUST `Client.connect`. Two defaults are not optional and not guessable:
+
+      * the **claim-check data converter** — without it everything works until a payload passes
+        128 KiB and then dies with `Unknown payload encoding binary/claim-check-v1`. A demo
+        passes; a real batch does not.
+      * **Temporal's three-field identity**, carried on the client as well as on any Worker you
+        build with it, so the calls this process MAKES and the tasks it TAKES are attributed to
+        one name instead of two.
+
+    TLS, address and namespace come from the environment and are overridable. `**kwargs` reaches
+    `Client.connect` untouched.
+
+    THIS IS THE DOOR THAT MAKES KONTRA TESTABLE WITHOUT A FLEET. A Fleet is capacity; a Client is a
+    connection. Starting a workflow, querying a Run, draining a queue from a notebook or a pytest
+    fixture needs the second and never the first.
+    """
+    from internals.temporal.connect import connect as _connect
+
+    return await _connect(task_queue, address=address, namespace=namespace, **kwargs)
+
+
+def worker(client, *, workflows: Sequence[type], task_queue: str = "", **kwargs: Any):
+    """A `temporalio.worker.Worker` for your workflows. Returns it; **does not run it**.
+
+        client = await catalog.client()
+        w = catalog.worker(client, workflows=[Hunt, Sweep], task_queue="wf-hunt-0.1.0",
+                           interceptors=[MyInterceptor()], max_cached_workflows=200)
+        async with w:
+            ...                      # your test does its thing while the worker polls
+
+    EVERY `Worker` OPTION IS REACHABLE. `serve()` names four of forty-three parameters and runs the
+    worker itself, so until this existed an interceptor, a tuner or a shutdown timeout was a kontra
+    feature request. Here the sandbox runner, the identity and the build id are *defaults* —
+    `kwargs.setdefault` — so a debugger session can pass `workflow_runner=UnsandboxedWorkflowRunner()`
+    and a test can pass anything at all.
+
+    RETURNING RATHER THAN RUNNING is the point. `Worker` is an async context manager, which is what
+    lets a test start one, drive a workflow against it and shut it down — the thing a function that
+    blocks forever can never be used for.
+
+    `task_queue` falls back to $KONTRA_WORKFLOW_QUEUE, the queue `kontra workflow serve` derives
+    from the folder's manifest.
+    """
+    import os as _os
+
+    from internals.temporal.connect import workflow_worker
+
+    task_queue = task_queue or _os.environ.get("KONTRA_WORKFLOW_QUEUE", "")
+    if not task_queue:
+        raise ValueError(
+            "worker() needs a task_queue — it is the address your workflows answer on. Pass "
+            "task_queue=, or set KONTRA_WORKFLOW_QUEUE (which `kontra workflow serve <folder>` "
+            "sets to the queue derived from the folder's manifest)"
+        )
+    return workflow_worker(client, workflows=workflows, task_queue=task_queue, **kwargs)
+
+
 def _defns_in_caller(depth: int = 2) -> list[type]:
     """Every `@workflow.defn` class bound in the calling module, in definition order.
 

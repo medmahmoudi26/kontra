@@ -771,6 +771,29 @@ class ActorRegistry:
         # TASK QUEUE this worker polls, and the handler derives the same string from its
         # workflow. A mismatch is an actor that registers, polls nothing and looks idle. Read
         # directly — no manifest/jsonschema (build-time validation, not a runtime dependency).
+        self._resolve_identity()
+        # No app_port: the actor is a Temporal activity worker now, not an HTTP app a sidecar
+        # calls back into. Its address is a task queue, derived from the identity just read.
+        serve(self)
+
+    def _resolve_identity(self) -> None:
+        """Read `(name, version)` off the actor.json beside this actor.py.
+
+        EXTRACTED SO `serve()` AND `worker()` CANNOT DISAGREE. They both derive the task queue from
+        these two fields, and the handler derives the same string from its workflow — a mismatch is
+        an actor that registers, polls nothing and looks idle. One copy of the rule is the only way
+        that stays true.
+
+        Read directly, with no manifest/jsonschema: that is build-time validation, not a runtime
+        dependency.
+        """
+        # Locally, as `serve()` imported them before this was extracted — `sys` and `json` are not
+        # module-scope names here, and taking them from the caller's frame is how the extraction
+        # first shipped a host that died on boot with `NameError: name 'sys' is not defined`.
+        import json
+        import sys
+        from pathlib import Path
+
         actor_dir = self.actor_dir or Path(sys.argv[0]).resolve().parent
         self.actor_dir = actor_dir
         aj = actor_dir / "actor.json"
@@ -780,9 +803,35 @@ class ActorRegistry:
             self.version = m.get("version", self.version)
         elif self.actor_name == "actor":
             self.actor_name = actor_dir.name
-        # No app_port: the actor is a Temporal activity worker now, not an HTTP app a sidecar
-        # calls back into. Its address is a task queue, derived from the identity just read.
-        serve(self)
+
+    def worker(self, client, *, task_queue: str = "", **kwargs):
+        """A `temporalio.worker.Worker` serving this Actor's Methods. Returns it; does not run it.
+
+            client = await catalog.client()
+            w = actor.worker(client)
+            async with w:
+                ...                 # drive a Method from a test while this polls
+
+        THE ACTOR TWIN OF `catalog.worker`, and it exists for the same reason: `actor.serve()`
+        blocks forever, which is exactly what a test, a notebook or somebody else's process cannot
+        use. An Actor is a Temporal activity worker — there is nothing about it that requires being
+        inside kontra's process, or requires a Fleet. A Fleet is capacity; this is a poller.
+
+        `task_queue` defaults to this Actor's own sessions queue, which is the one the handler
+        derives and dispatches to. Pass your own only if you know why.
+
+        `**kwargs` reaches `Worker` untouched, so every option is yours.
+        """
+        from internals.temporal.connect import actor_worker
+        from internals.temporal.host import task_queue as sessions_queue
+
+        self._resolve_identity()
+        return actor_worker(
+            client,
+            self,
+            task_queue=task_queue or sessions_queue(self.actor_name, self.version),
+            **kwargs,
+        )
 
     def run(self) -> None:
         """Deprecated alias for `actor.serve()`; kept one release (same policy as

@@ -35,14 +35,11 @@ import os
 from typing import Any, Sequence
 
 from internals import workerid
-from internals.temporal.tlsconfig import connect_tls
+# Re-exported from `connect`, which is where the Worker that uses it is now built; kept as a name
+# here because `--watch` and the tests reference it.
+from internals.temporal.connect import DEFAULT_PASSTHROUGH  # noqa: F401
 
 log = logging.getLogger("kontra.wfhost")
-
-# Passed through the workflow sandbox by default: the SDK seam itself. Everything else stays
-# sandboxed, which is the point of the sandbox — this is the one module we know is safe because
-# we wrote it and it holds no mutable global state.
-DEFAULT_PASSTHROUGH = ("kontra", "actorkit")
 
 
 def _configure_logging() -> None:
@@ -136,20 +133,13 @@ async def serve_workflows_async(
     passthrough_modules: Sequence[str] = (),
     max_concurrent_activities: int | None = None,
     watch: bool = False,
+    **worker_kwargs: Any,
 ) -> None:
     # FIRST, before anything can log. A worker that configured logging after connecting would
     # discard whatever the connection said on the way — which is exactly the material you want when
     # the address is wrong.
     _configure_logging()
 
-    from temporalio.client import Client
-    from temporalio.worker import Worker
-    from temporalio.worker.workflow_sandbox import (
-        SandboxedWorkflowRunner,
-        SandboxRestrictions,
-    )
-
-    from internals import casstore
     from internals.catalog import publish_workflow_catalog
 
     if not workflows:
@@ -168,24 +158,19 @@ async def serve_workflows_async(
     address = address or os.environ.get("KONTRA_ADDRESS", "localhost:7233")
     namespace = namespace or os.environ.get("KONTRA_NAMESPACE", "default")
 
-    tls = connect_tls()  # see `internals/temporal/tlsconfig.py`
+    # see `internals/temporal/connect.py` — one construction, shared with the actor host and with
+    # `catalog.client()` / `catalog.worker()`, so a Worker built by an author in a test is wired
+    # exactly like the one this function runs.
     # The identity this process answers to, on the client AND on the worker below — see
     # `internals/workerid.py` for why it is Temporal's own three-field shape and not a scheme of
     # ours. A WORKFLOW host is the one place this matters most to an author: the workflow's own
     # `workflow.logger` lines carry it, so "my run logged nothing" becomes "this laptop's worker
     # logged nothing" without anybody having to guess which of three terminals is serving.
     # The fallback queue for records written outside any task — see the actor host's call site.
-    from internals import logs
+    from internals.temporal.connect import connect as kontra_connect
 
-    logs.bind_worker(task_queue)
     identity = workerid.worker_identity(task_queue)
-    client = await Client.connect(
-        address,
-        namespace=namespace,
-        data_converter=casstore.data_converter(),
-        tls=tls,
-        identity=identity,
-    )
+    client = await kontra_connect(task_queue, address=address, namespace=namespace)
 
     # SELF-REGISTRATION, exactly where the actor host does it (`internals/temporal/host.py`).
     #
@@ -204,23 +189,21 @@ async def serve_workflows_async(
     # reports `running` forever.
     publish_workflow_catalog(workflows, queue=task_queue)
 
-    runner = SandboxedWorkflowRunner(
-        restrictions=SandboxRestrictions.default.with_passthrough_modules(
-            *DEFAULT_PASSTHROUGH, *passthrough_modules
-        )
-    )
-    kwargs: dict[str, Any] = {}
-    if max_concurrent_activities is not None:
-        kwargs["max_concurrent_activities"] = max_concurrent_activities
+    from internals.temporal.connect import workflow_worker
 
-    worker = Worker(
+    kwargs: dict[str, Any] = dict(worker_kwargs)
+    if max_concurrent_activities is not None:
+        kwargs.setdefault("max_concurrent_activities", max_concurrent_activities)
+
+    # EVERY `Worker` OPTION IS REACHABLE FROM HERE. `serve()` used to name four of forty-three and
+    # the other thirty-nine needed an edit to this file to use, so an interceptor or a cache size
+    # was a kontra feature request rather than a caller's decision.
+    worker = workflow_worker(
         client,
+        workflows=workflows,
         task_queue=task_queue,
-        workflows=list(workflows),
-        activities=list(activities),
-        workflow_runner=runner,
-        identity=identity,
-        build_id=workerid.build_id(),
+        activities=activities,
+        passthrough_modules=passthrough_modules,
         **kwargs,
     )
     names = ", ".join(getattr(w, "__name__", str(w)) for w in workflows)
