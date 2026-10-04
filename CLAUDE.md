@@ -20,6 +20,14 @@ Same two branches, same rule, in all five repositories: `kontra`, `kontra-actors
 
 ## Agent skills
 
+### Workflows
+
+**These are plain Temporal workflows. There is no kontra workflow framework — use Temporal's own
+primitives rather than inventing structure.** A workflow is a unit of history and retry: decompose
+with child workflows and `continue_as_new`, never with helper methods or a context object, and never
+by turning a paging loop into an activity. Read `docs/agents/workflows.md` **before** writing or
+restructuring anything under `workspaces/*/workflows/`.
+
 ### Issue tracker
 
 Issues and PRDs live as markdown files under `.scratch/<feature-slug>/` in this repo. See `docs/agents/issue-tracker.md`.
