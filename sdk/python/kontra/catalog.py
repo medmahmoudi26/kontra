@@ -2094,8 +2094,45 @@ def _temp_dataset(*, timeout: timedelta = timedelta(minutes=30)) -> "TempDataset
 # spellable at all — a function cannot be subscripted.
 
 
+def _defns_in_caller(depth: int = 2) -> list[type]:
+    """Every `@workflow.defn` class bound in the calling module, in definition order.
+
+    ── WHY THE NAMESPACE AND NOT `__module__` ──────────────────────────────────────────────────
+
+    The obvious filter — "classes defined in this file" — is wrong here, and wrong in the way that
+    hangs a Run rather than failing. `campaign/workflow.py` IMPORTS the children it starts:
+
+        from surface.workflow import Surface
+        from hunt.workflow import Hunt, DESYNC
+
+    Their `__module__` is `surface.workflow`, so a definition-site filter registers `Campaign`
+    alone and drops exactly the two types the campaign exists to start. Temporal then refuses the
+    child with "workflow type Hunt is not registered" — or, on a queue another worker also polls,
+    it simply waits.
+
+    ── THE ASYMMETRY THAT DECIDES THE RULE ─────────────────────────────────────────────────────
+
+    Registering a type nobody starts costs nothing: a worker advertises it and is never asked.
+    FAILING to register one that is started costs a hung Run with a reason two layers from the
+    edit that caused it. So this is deliberately permissive — if a workflow class is bound in the
+    module that calls `serve()`, it is served. An explicit list is still honoured for the caller
+    who wants to serve less than they imported.
+    """
+    import sys as _sys
+
+    from temporalio import workflow as _wf
+
+    ns = _sys._getframe(depth).f_globals
+    out: list[type] = []
+    for obj in ns.values():
+        if isinstance(obj, type) and _wf._Definition.from_class(obj) is not None:
+            if obj not in out:  # the same class under two names is one registration
+                out.append(obj)
+    return out
+
+
 def serve(
-    workflows: Sequence[type],
+    workflows: Sequence[type] | None = None,
     *,
     task_queue: str = "",
     activities: Sequence[Any] = (),
@@ -2107,7 +2144,15 @@ def serve(
     """Run YOUR workflows on THIS machine — the local half of the deal.
 
         if __name__ == "__main__":
-            catalog.serve([Recon], task_queue="recon")
+            catalog.serve()                      # every @workflow.defn in this file
+            catalog.serve([Recon])               # or name them, to serve less than you imported
+
+    OMITTING THE LIST IS THE NORMAL SPELLING, and it is what makes a child workflow cheap to add.
+    Temporal needs every type a worker may be asked to run registered up front, so a phase split
+    out into its own `@workflow.defn` has to reach this call — and when the list is typed by hand,
+    the edit that adds the class and the edit that serves it are two edits, one of which fails
+    silently later. See {@link _defns_in_caller} for why discovery reads the module NAMESPACE and
+    not the definition site.
 
     Wired the one way that matters: the client carries the claim-check codec, so an actor result
     over 128 KiB decodes instead of dying on `Unknown payload encoding binary/claim-check-v1`.
@@ -2129,6 +2174,11 @@ def serve(
     hold two workflows.
     """
     from internals.temporal.wfhost import serve_workflows
+
+    # Discovered from the CALLER's frame, so this has to happen here rather than inside
+    # `serve_workflows` — one frame further in and it would scan this module instead.
+    if workflows is None:
+        workflows = _defns_in_caller()
 
     serve_workflows(
         workflows,
