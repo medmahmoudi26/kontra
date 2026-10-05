@@ -667,4 +667,4 @@ class Demo:
 
 
 if __name__ == "__main__":
-    catalog.serve([Demo])
+    catalog.serve()
