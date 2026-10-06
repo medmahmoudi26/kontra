@@ -427,7 +427,14 @@ def main() -> int:
     for pkey, svc in SERVICES.items():
         for dep, spec in (compose["services"][svc].get("depends_on") or {}).items():
             edges += 1
-            dkey = next(k for k, v in SERVICES.items() if v == dep)
+            # A BARE `next()` HERE TURNED A REPORT INTO A TRACEBACK. The moment compose gained a
+            # service this map does not know AND something depended on it, StopIteration replaced the
+            # whole report — so the container-count, volume-name and published-port mismatches this
+            # harness exists to name all went unprinted. A missing service is a finding, not a crash.
+            dkey = next((k for k, v in SERVICES.items() if v == dep), None)
+            if dkey is None:
+                bad(f"{svc} -> {dep}: compose depends_on a service absent from this map and from Pulumi")
+                continue
             d = containers[dkey]["inputs"]
             cond = spec["condition"]
             if cond == "service_healthy":

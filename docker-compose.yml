@@ -400,7 +400,11 @@ services:
     restart: "no"
     volumes:
       - registry-config:/out
+      # READ-ONLY, AND ONLY TO REFUSE. `registry:2`'s store is mounted here so this one-shot can see
+      # whether an unmigrated install is about to be handed an empty registry.
+      - registry-data:/old:ro
     environment:
+      KONTRA_REGISTRY_MIGRATION: ${KONTRA_REGISTRY_MIGRATION:-}
       KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}
       KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}
       KONTRA_REGISTRY_PULL_PASSWORD: ${KONTRA_REGISTRY_PULL_PASSWORD:-}
@@ -413,7 +417,35 @@ services:
         set -eu
         set +u; a="$${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}"; r="$${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}"
         p="$${KONTRA_REGISTRY_PULL_PASSWORD:-}"; cve="$${KONTRA_REGISTRY_CVE:-}"
-        ret="$${KONTRA_REGISTRY_RETENTION:-dryrun}"; set -u
+        ret="$${KONTRA_REGISTRY_RETENTION:-dryrun}"; mig="$${KONTRA_REGISTRY_MIGRATION:-}"; set -u
+        # AN UNMIGRATED STORE STOPS THE INSTALL, BECAUSE THE ALTERNATIVE IS SILENT.
+        #
+        # zot reads `zot-data`; `registry:2` wrote `registry-data`. The layouts are different, so a
+        # swap with no migration presents an EMPTY registry — and nothing in this system tells an
+        # empty registry from a fresh one. Measured: `GET /api/images` answers 200 with `[]` and no
+        # `unreachable` flag, the console's drift reads `unknown` and draws `?`, `kontra doctor` has
+        # no registry check at all, and `versionDeployed()` — the `--override` guard — returns false
+        # for every version, so version immutability stops guarding without a word.
+        #
+        # What is at stake is not rebuildable in the sense that matters: ADR 0052 records that this
+        # volume "holds the digests Placements are pinned to … rebuilding an image yields a NEW
+        # digest, so a Fleet recorded against the old one can never be re-run as recorded."
+        if [ -d /old/docker/registry/v2/repositories ] \
+           && [ -n "$$(ls -A /old/docker/registry/v2/repositories 2>/dev/null || true)" ] \
+           && [ ! -f /old/.kontra-migrated-to-zot ]; then
+          n=$$(ls -A /old/docker/registry/v2/repositories 2>/dev/null | wc -l)
+          echo "refusing: this install still has a registry:2 store that has not been migrated." >&2
+          echo "" >&2
+          echo "  $$n repository trees in the old volume; zot reads a different one and would start empty." >&2
+          echo "  An empty registry is indistinguishable from a fresh install on every surface that" >&2
+          echo "  reports one, and the digests in it are what Placements are pinned to." >&2
+          echo "" >&2
+          echo "  Run:  kontra registry migrate" >&2
+          echo "  Or, to start a deliberately empty registry and keep the old volume untouched:" >&2
+          echo "        KONTRA_REGISTRY_MIGRATION=skip docker compose up -d" >&2
+          [ "$$mig" = "skip" ] || exit 1
+          echo "  KONTRA_REGISTRY_MIGRATION=skip was set; continuing with an empty registry." >&2
+        fi
         # RETENTION REPORTS BEFORE IT DELETES, AND THE DEFAULT IS THE REPORTING ONE.
         #
         # "keep the 5 most recently pushed" is only safe once something protects a version that is
@@ -483,6 +515,11 @@ services:
           # bcrypt is what zot's htpasswd loader accepts and busybox cannot produce one, so the
           # plaintext goes to `registry-htpasswd` and is deleted there.
           printf '%s\n%s\n%s\n' "push-actors:$$a" "push-runtimes:$$r" "pull:$$p" > /out/users
+          # NO `adminPolicy`. One granting `push-runtimes` read/create/update/delete would make it
+          # registry-ROOT — including delete over `actors/**` — and that credential is the one spec
+          # §6.1 hands to `kontra runtime build`, i.e. to whoever is iterating on a runtime. The
+          # least-trusted of the three would have been the most powerful. Each role is scoped to the
+          # prefix it owns instead, and delete goes no wider than that prefix.
           cat >> /out/config.json << 'EOF'
           "http": {
             "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"],
@@ -500,15 +537,27 @@ services:
                 "**": { "defaultPolicy": [], "policies": [
                   { "users": ["pull","push-actors","push-runtimes"], "actions": ["read"] }
                 ] }
-              },
-              "adminPolicy": { "users": ["push-runtimes"], "actions": ["read","create","update","delete"] }
+              }
             }
           },
         EOF
         else
           rm -f /out/users
+          # NO AUTH, BUT STILL NO DELETE. zot accepts an unauthenticated
+          # `DELETE /v2/<repo>/manifests/<digest>` and answers 202; `registry:2` answered 405
+          # UNSUPPORTED. Measured both ways. Without this block the swap quietly converts an
+          # append-only store into one where anything that can reach the port can erase the Bundle a
+          # Machine is about to pull — and the VPC overlay publishes that port to the fleet network.
+          # `create`/`update` stay so every existing push path keeps working with no credential.
           cat >> /out/config.json << 'EOF'
-          "http": { "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"] },
+          "http": {
+            "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"],
+            "accessControl": {
+              "repositories": {
+                "**": { "anonymousPolicy": ["read","create","update"], "defaultPolicy": [] }
+              }
+            }
+          },
         EOF
         fi
         # CVE scanning downloads a vulnerability database, so it is opt-in (spec §6.1). This heredoc
@@ -1180,17 +1229,16 @@ configs:
 volumes:
   postgres-data:
   redis-data:
-  # `registry-data` IS DELIBERATELY NOT LISTED HERE, and the omission is the safe direction.
+  # `registry:2`'s store. zot's layout is not the same one, so zot gets `zot-data` and this keeps the
+  # old bytes until `kontra registry migrate` has moved them and the operator removes it (spec §6.3).
   #
-  # It is `registry:2`'s store, and zot's on-disk layout is not the same one — pointing zot at it
-  # would present an empty registry sitting on top of the old bytes. So zot gets `zot-data` and the
-  # old volume is left where it is for `kontra registry migrate` to read, after which the operator
-  # removes it (spec §6.3).
-  #
-  # Compose DROPS a top-level volume no service mounts (measured: it disappears from
-  # `docker compose config`), so declaring it would not protect it anyway — and being outside the
-  # project is what keeps `docker compose down -v` from taking the only copy of every actor image
-  # that has not been migrated yet.
+  # IT IS DECLARED, AND THAT IS A REVERSAL. Leaving it out looked safer — compose drops a volume no
+  # service mounts, and an undeclared volume survives `down -v`. But undeclared also means unmounted
+  # and unbounded: ADR 0052 left this volume without `protect: true` precisely BECAUSE retention
+  # bounded it, and `docker volume prune` does not spare a volume merely for being unreferenced. It
+  # is mounted read-only into `registry-config` now, which both keeps it in the project and is what
+  # lets that one-shot refuse to start an unmigrated install.
+  registry-data:
   zot-data:
   registry-config:
   seaweed-data:
