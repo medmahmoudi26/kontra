@@ -404,7 +404,7 @@ drove load to 7.4 during a DuckDB extraction and OOM-killed the report generator
 
 ## Replacing an actor mid-run
 
-The handler's workflow owns retry = **exactly-once reload** (see [[Durability-and-Failures]]): if the actor dies mid-batch, its activity stops heartbeating, `HeartbeatTimeout` fires, and the retry lands on the same actor id (on whichever worker is polling the sessions queue) and replays its per-unit state from Redis, so the run completes. Self-asserting demo:
+The handler's workflow owns retry = **exactly-once reload** (see [[Durability-and-Failures]]): if the actor dies mid-batch, its activity stops heartbeating, `HeartbeatTimeout` fires, and the retry lands on the same actor id (on whichever worker is polling the sessions queue) and replays its per-unit state from Redis, so the run completes — which holds only while that state is still there: the hash has a 24 h TTL, so the store runs `noeviction` rather than `volatile-lru`, under which a TTL'd key is exactly what gets evicted first. Self-asserting demo:
 
 ```sh
 kontra workflow serve workflows/dnssweep.py

@@ -74,8 +74,11 @@ legible from the command that started it.
 - `campaign-worker` is deleted. Its own comment asked for this, and it served
   `workspaces/bugbounty`, which is not in the repository.
 - `.env.quickstart` gains `KONTRA_REPO` (`cli/envexample_test.go` was red on it) and its VPC block now
-  documents the overlay instead of describing a binding `docker-compose.quickstart.yml` never had —
-  that file has always published six loopback ports and substitutes `KONTRA_VPC_BIND` nowhere.
+  documents the overlay instead of the binding it used to describe.
+- **`docker-compose.quickstart.yml` is a symlink to `docker-compose.yml`.** One file, two names, so
+  there is no second stack to fix and no second posture to keep in step. Worth stating because the
+  two names read as two files, and a reader who assumes otherwise will look for a quickstart stack
+  that was never separate.
 - **`server.ts`'s `0.0.0.0` default is deliberately left alone.** `cli/up.go:50` already closes it to
   loopback and `cli/orchestrator_test.go:69` pins the override direction, so changing the default
   would move an invariant that is currently tested into one that is not.

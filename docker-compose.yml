@@ -350,7 +350,30 @@ services:
     image: redis:7-alpine
     container_name: kontra-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
+    # ── `noeviction`, AND IT IS A CORRECTNESS SETTING, NOT A TUNING ONE ─────────────────────────
+    #
+    # This was `volatile-lru`, which evicts keys THAT HAVE A TTL. Every volatile key in kontra's
+    # keyspace is one actor's state hash (`kontra-actor:<actorId>`) carrying a 24 h TTL, and that
+    # hash is where the engine keeps its per-unit commit markers and resume scratch
+    # (`runtime/go/statekv`, `runtime/python/internals/statekv.py`).
+    #
+    # So under memory pressure Redis silently deleted the record of which Units had committed. A
+    # retry then reads an absent commit map and re-runs work that already finished, or finds a
+    # half-evicted one and skips work that did not. `kontra-global:*` carries no TTL precisely
+    # because the appliance's own keyspace says evicting one "does not degrade a run, it silently
+    # corrupts it" — the actor hash had the same property and none of the protection.
+    #
+    # `noeviction` turns that into a refused write, which reaches the actor as an error it can
+    # retry or fail on. Loud and recoverable beats silent and wrong. The appliance KV already
+    # refuses rather than evicting its last protected key (`cli/appliance/kv/keyspace.go`); this
+    # makes the Compose store agree with it.
+    #
+    # Measured on the install this was found on: 1.46 MiB of 512 MiB in use, 79 keys, and
+    # `evicted_keys:0` — so the hazard was latent and this costs nothing today.
+    #
+    # `--appendfsync always` fsyncs each write instead of batching a second's worth, because the
+    # window `everysec` leaves is a window where a commit marker is acknowledged and then lost.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
     volumes:
       - redis-data:/data
     ports:

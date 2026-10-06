@@ -101,3 +101,44 @@ describe('the compose network is Porter’s boundary', () => {
     });
   });
 });
+
+/**
+ * REDIS MUST NOT EVICT, and this is a correctness assertion rather than a tuning one.
+ *
+ * `volatile-lru` evicts keys THAT HAVE A TTL. Every volatile key in kontra's keyspace is one
+ * actor's state hash (`kontra-actor:<actorId>`) carrying a 24 h TTL, and that hash is where the
+ * engine keeps its per-unit commit markers and resume scratch (`runtime/go/statekv`,
+ * `runtime/python/internals/statekv.py`). So memory pressure silently deleted the record of which
+ * Units had committed, and a retry then re-ran finished work or skipped unfinished work.
+ *
+ * `cli/appliance/kv/keyspace.go` already refuses rather than evicting its last protected key,
+ * saying evicting one "does not degrade a run, it silently corrupts it". The actor hash had the
+ * same property and none of the protection. These assertions are what keep the Compose store
+ * agreeing with the appliance.
+ */
+describe('the state store refuses rather than forgetting', () => {
+  const redis = (): string[] => composeService(yaml(), 'redis');
+
+  it('runs redis with maxmemory-policy noeviction', () => {
+    const command = redis().join(' ');
+    expect(command).toContain('noeviction');
+    // The specific policy that caused this, named so a revert is recognisable rather than merely
+    // different.
+    expect(command).not.toContain('volatile-lru');
+    expect(command).not.toContain('allkeys-lru');
+  });
+
+  it('fsyncs every write, so an acknowledged commit marker is on disk', () => {
+    // `appendonly yes` alone leaves `appendfsync everysec`, and that second is a window where a
+    // commit marker is acknowledged and then lost to a crash.
+    const command = redis().join(' ');
+    expect(command).toContain('--appendonly');
+    expect(command).toContain('--appendfsync');
+    expect(command).toContain('always');
+  });
+
+  /** NON-VACUOUS: a helper that returned nothing would pass both assertions above. */
+  it('is reading a real redis service block', () => {
+    expect(redis().join(' ')).toContain('redis-server');
+  });
+});
