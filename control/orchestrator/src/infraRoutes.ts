@@ -7,12 +7,18 @@
  * The workflow id IS the stack fqn. That is what makes concurrent `up`s on one stack
  * impossible: a second POST does not start a second writer, it collides with the first.
  *
- * TOKEN-GATED FROM THE FIRST COMMIT, WITHOUT EXCEPTION. These routes reach a process holding
+ * TOKEN-GATED, AND THE MUTATION ASKS FOR A SCOPE ON TOP. These routes reach a process holding
  * `DIGITALOCEAN_TOKEN`, on the one machine running the control plane; the rest of this API is
  * unauthenticated (auth.ts records that), so an ungated infra route would hand anyone who can reach
  * `:8088` the ability to spend money and stand up attack infrastructure. `checkBearer`, not the run
  * surface's opt-in `checkOptionalBearer` — with no token configured this surface 503s rather than
  * opening.
+ *
+ * A CONSOLE SESSION IS NOT A WAY IN TO THE MUTATION. `POST /api/infra/stacks/:fqn/:op` requires the
+ * `infra` scope, which no sign-in mints, so it is reachable by `KONTRA_STATE_TOKEN` alone. The five
+ * GETs stay on the default `console` scope on purpose: the console's Infra page and the run page's
+ * Fleet strip read them, and reading which Machines exist is not the capability worth gating.
+ * `infraRoutes.test.ts` holds both halves. See ADR 0054.
  *
  * WHAT IT NEEDS: nothing injected. `getClient` dials Temporal from inside a handler, and the
  * Pulumi checkpoint reads (`infra/state.ts`) parse files on this host's disk. The one route with no
@@ -32,6 +38,7 @@ import { defaultPayloadConverter, type Payload } from '@temporalio/common';
 import { dataConverter } from './codec/dataConverter';
 
 import { checkBearer } from './auth';
+import { INFRA_SCOPE } from './auth/session';
 import { INFRA_DASHBOARD_HTML } from './infra/dashboard';
 import { LEASE_QUERY, leaseWorkflowId, type FleetLeaseSet } from './lease';
 // From `infra/paths`, NOT `infra/workspace`: the latter imports the Pulumi Automation API at
@@ -281,9 +288,21 @@ export function registerInfraRoutes(app: FastifyInstance): void {
   // any proxy will hold a connection — so this returns an operation id and the caller polls,
   // exactly as the run surface already does.
   app.post('/api/infra/stacks/:fqn/:op', async (req, reply) => {
-    const denied = checkBearer(req.headers.authorization, INFRA_ROUTE_TOKEN_VARS);
+    // THE ONE MUTATING ROUTE ON THIS SURFACE, and the only one that asks for the `infra` scope.
+    //
+    // A console session used to reach it: `checkBearer` admitted any live session before it looked
+    // at `INFRA_ROUTE_TOKEN_VARS` at all, so a browser credential could converge a cloud stack on an
+    // install with no `KONTRA_STATE_TOKEN` set. No mint path grants `infra`, so this is now reachable
+    // by the service token alone.
+    //
+    // The five GETs beside it stay on the default `console` scope deliberately. They are what the
+    // console's Settings › Infra page and the run page's Fleet strip read, and reading which Machines
+    // exist is not the capability that was leaking — spending money is.
+    const denied = checkBearer(req.headers.authorization, INFRA_ROUTE_TOKEN_VARS, INFRA_SCOPE);
     if (denied) {
-      if (denied.code === 401) req.log?.warn?.({ path: req.url, ip: req.ip }, 'infra: rejected');
+      if (denied.code === 401 || denied.code === 403) {
+        req.log?.warn?.({ path: req.url, ip: req.ip, code: denied.code }, 'infra: rejected');
+      }
       return reply.code(denied.code).send(denied.body);
     }
     const { fqn, op } = req.params as { fqn: string; op: string };

@@ -14,7 +14,7 @@
  */
 
 import { timingSafeEqual } from 'node:crypto';
-import { bearerOf, sessions } from './auth/session';
+import { CONSOLE_SCOPE, bearerOf, sessions } from './auth/session';
 
 /** Env vars consulted for the explore/presign surface, in order of preference. */
 export const EXPLORE_TOKEN_VARS = ['KONTRA_EXPLORE_TOKEN', 'KONTRA_STATE_TOKEN'] as const;
@@ -57,17 +57,25 @@ export interface AuthFailure {
  */
 export function checkBearer(
   authorization: string | undefined,
-  vars: readonly string[]
+  vars: readonly string[],
+  scope: string = CONSOLE_SCOPE
 ): AuthFailure | null {
-  // A CONSOLE SESSION ADMITS EVERYTHING THE CONSOLE DOES, and is checked FIRST because a browser
-  // has nothing else to send. Signing in against the credential in `~/.kontra/config.yaml` is where
-  // that token comes from; it replaced a bearer BAKED INTO THE BUNDLE at build time, which is a
-  // credential in a build artifact and broke on every rotation.
+  // A CONSOLE SESSION IS CHECKED FIRST because a browser has nothing else to send — but it is
+  // checked AGAINST A SCOPE, which is the half that was missing. This line used to admit any live
+  // session before `vars` was consulted at all, so one browser credential reached
+  // `POST /api/infra/stacks/:fqn/up` — a route that provisions machines and spends money — on an
+  // install with no `KONTRA_STATE_TOKEN` configured at all.
   //
-  // A session is NOT a service token and the distinction is what makes this safe: `KONTRA_STATE_TOKEN`
-  // admits the infra routes and can spend money, while a session is minted per sign-in, expires, and
-  // dies with the process.
-  if (sessions.verify(bearerOf(authorization))) return null;
+  // 403 AND NOT 401, and not a fall-through to the token compare. 401 means "prove who you are",
+  // and the console clears its token on one, so a scope refusal spelled 401 would sign the operator
+  // out and read as a restart. Falling through would be worse: a session would then be compared
+  // against the service token, miss, and get 401 anyway — the right answer by accident, and only
+  // while the two strings differ.
+  const live = sessions.look(bearerOf(authorization));
+  if (live) {
+    if (live.scopes.includes(scope)) return null;
+    return { code: 403, body: { error: `forbidden: this session does not carry the ${scope} scope` } };
+  }
   const token = configuredToken(vars);
   if (!token) {
     return {
@@ -99,9 +107,16 @@ export function checkBearer(
  */
 export function checkOptionalBearer(
   authorization: string | undefined,
-  vars: readonly string[]
+  vars: readonly string[],
+  scope: string = CONSOLE_SCOPE
 ): AuthFailure | null {
-  if (sessions.verify(bearerOf(authorization))) return null;
+  // The same scope question as the fail-closed twin. It is asked here too so that an opt-in route
+  // can never become the way a scope is reached — the posture differs, the identity rule does not.
+  const live = sessions.look(bearerOf(authorization));
+  if (live) {
+    if (live.scopes.includes(scope)) return null;
+    return { code: 403, body: { error: `forbidden: this session does not carry the ${scope} scope` } };
+  }
   const token = configuredToken(vars);
   if (!token) return null;
   if (!timingSafeEqualStr(authorization ?? '', `Bearer ${token}`)) {

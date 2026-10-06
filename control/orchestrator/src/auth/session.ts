@@ -42,15 +42,38 @@ export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
  */
 export const MAX_SESSIONS = 512;
 
+/**
+ * What a session is allowed to reach.
+ *
+ * A session proves WHO is asking; a scope says WHAT that buys. The two were the same thing while
+ * the only credential a browser had admitted everything, and `infra` is the case that shows why
+ * they cannot be: signing in to read a run is not a mandate to converge a cloud stack.
+ *
+ * Deliberately a plain string set rather than a role enum — there are exactly two values and a
+ * role table would be a vocabulary before it is a need.
+ */
+export const CONSOLE_SCOPE = 'console';
+export const INFRA_SCOPE = 'infra';
+
+/** What a sign-in mints. NO PATH GRANTS `infra`, which is what keeps it a service-token capability. */
+export const DEFAULT_SESSION_SCOPES: readonly string[] = [CONSOLE_SCOPE];
+
 export interface Session {
   token: string;
   /** Which console user signed in. Carried so a future audit line can name somebody. */
   user: string;
   expiresAt: number;
+  scopes: readonly string[];
+}
+
+/** A live session as the admission code reads it — the user, and what they may reach. */
+export interface SessionView {
+  user: string;
+  scopes: readonly string[];
 }
 
 export class SessionBook {
-  private live = new Map<string, { user: string; expiresAt: number }>();
+  private live = new Map<string, { user: string; expiresAt: number; scopes: readonly string[] }>();
 
   constructor(
     private readonly now: () => number = () => Date.now(),
@@ -62,7 +85,7 @@ export class SessionBook {
   }
 
   /** Mint a session for a user who has already proved who they are. */
-  mint(user: string): Session {
+  mint(user: string, scopes: readonly string[] = DEFAULT_SESSION_SCOPES): Session {
     this.sweep();
     if (this.live.size >= MAX_SESSIONS) {
       // Drop the oldest rather than refuse: the caller authenticated, and a full book must not lock
@@ -73,8 +96,8 @@ export class SessionBook {
     // 32 bytes of CSPRNG, base64url so it survives a header untouched.
     const token = randomBytes(32).toString('base64url');
     const expiresAt = this.now() + this.ttlMs;
-    this.live.set(token, { user, expiresAt });
-    return { token, user, expiresAt };
+    this.live.set(token, { user, expiresAt, scopes });
+    return { token, user, expiresAt, scopes };
   }
 
   /**
@@ -88,6 +111,18 @@ export class SessionBook {
    * is not signed out at hour twelve for having been there since the morning.
    */
   verify(candidate: string | undefined | null): string | null {
+    return this.look(candidate)?.user ?? null;
+  }
+
+  /**
+   * The live session behind a bearer — the user AND what it may reach.
+   *
+   * ONE SCAN, NOT TWO. Admission needs both halves, and calling `verify` then looking the scopes up
+   * separately would walk the book twice: two constant-time scans and two TTL slides per request,
+   * where the second slide is on a session the first already extended. `verify` is kept as the thin
+   * caller of this so the existing readers (audit, logout) do not move.
+   */
+  look(candidate: string | undefined | null): SessionView | null {
     this.sweep();
     if (!candidate) return null;
     for (const [token, entry] of this.live) {
@@ -97,7 +132,7 @@ export class SessionBook {
         return null;
       }
       entry.expiresAt = this.now() + this.ttlMs;
-      return entry.user;
+      return { user: entry.user, scopes: entry.scopes };
     }
     return null;
   }
