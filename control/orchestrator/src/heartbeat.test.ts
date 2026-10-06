@@ -86,3 +86,57 @@ describe('heartbeatRow: the author healthcheck map', () => {
     expect('progress' in row).toBe(false);
   });
 });
+
+/**
+ * THE CHECKPOINT IS THE DURABLE HALF OF A BEAT, and these are the rows built from it.
+ *
+ * `done: 2` does not say WHICH two, so nothing can resume from the counters. The checkpoint says
+ * which, in the encoding every SDK shares (`shared/conformance/checkpoint.json`), and it rides in
+ * the activity's own history rather than in a cache that can evict it (ADR 0059).
+ */
+describe('a row built from a checkpoint', () => {
+  const beat = (checkpoint: unknown, rest: Record<string, unknown> = {}) =>
+    heartbeatRow({ node: 'n7', total: 10, ...rest, checkpoint }, 'fallback', 1, 1234);
+
+  it('counts the set rather than the counter the actor sent', () => {
+    // The counters are derived twice — once by the actor for display, once from the set a retry
+    // resumes from. Where they disagree it is the counters that are wrong.
+    const row = beat(
+      { v: 1, batch_id: 'b1', done: [[0, 6]], failed: [7, 8] },
+      { done: 999, isolated: 999 }
+    );
+    expect(row.done).toBe(7);
+    expect(row.isolated).toBe(2);
+  });
+
+  it('falls back to the counters when there is no checkpoint', () => {
+    // An older SDK beats without one, and that is a normal actor rather than a broken one.
+    const row = heartbeatRow({ node: 'n7', done: 4, total: 10, isolated: 1 }, 'fallback', 1, 1234);
+    expect(row.done).toBe(4);
+    expect(row.isolated).toBe(1);
+  });
+
+  it('falls back when the checkpoint is a version it cannot read', () => {
+    // Refused rather than partly believed — and a refusal must not zero the row, or an operator
+    // sees a node that has done nothing when it has done everything.
+    const row = beat({ v: 2, batch_id: 'b1', done: [[0, 6]], failed: [] }, { done: 7, isolated: 0 });
+    expect(row.done).toBe(7);
+  });
+
+  it('reports a node that isolated everything as isolated, not as idle', () => {
+    // A node that dropped every Unit and a node that legitimately found nothing render identically
+    // without this — which is the reason `isolated` exists at all.
+    const row = beat({ v: 1, batch_id: 'b1', done: [], failed: [0, 1, 2] }, { total: 3 });
+    expect(row.done).toBe(0);
+    expect(row.isolated).toBe(3);
+    expect(row.total).toBe(3);
+  });
+
+  it('keeps the total from the beat, because a checkpoint does not carry one', () => {
+    // A checkpoint says what finished, never how many there were. Deriving the total from it would
+    // make every node look complete the moment it committed its last known Unit.
+    const row = beat({ v: 1, batch_id: 'b1', done: [[0, 1]], failed: [] }, { total: 50 });
+    expect(row.total).toBe(50);
+    expect(row.done).toBe(2);
+  });
+});

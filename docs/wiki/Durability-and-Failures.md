@@ -152,6 +152,31 @@ A committed Unit is keyed by the **Batch's content hash plus its index** (§17),
 number: a hash does not know its scope died, so it survives a reopened scope, and two Batches
 under one Session cannot read each other's slots.
 
+### Where the commit map lives, and where it is going
+
+In Redis today, in the actor's state hash. That hash has a 24 h TTL, and until ADR 0059 the store ran
+`maxmemory-policy volatile-lru` — which evicts keys *that have a TTL*, so under memory pressure the
+first thing dropped was the record of what had committed. A retry then re-ran finished work or skipped
+unfinished work, and nothing raised. The store now runs `noeviction` and refuses the write instead.
+
+**A copy also rides in the activity's heartbeat** (ADR 0060), where it is part of the run's own history
+and no cache can lose it:
+
+```json
+{"v":1,"batch_id":"b1","done":[[0,1]],"failed":[4],"manifest_ref":""}
+```
+
+`done` is a **range set** — merged inclusive `[lo, hi]` pairs — because a heartbeat payload is bounded
+and a per-unit list of 10,000 integers would be a batch-size ceiling in disguise. `batch_id` is the
+Batch's content hash and it is a **guard**: unit indices are positions within one batch, so a reader
+discards a checkpoint whose id does not match rather than applying it by index to units it never saw.
+A version the reader does not know is discarded whole for the same reason. The encoding is pinned
+across both SDKs and the orchestrator by `shared/conformance/checkpoint.json`.
+
+The heartbeat copy is authoritative for *progress* now — what the run page shows comes from it, which
+is why a node that isolated Units reaches its total instead of looking stuck. It is not yet what a
+retry resumes from; that still reads Redis.
+
 ## What a commit holds
 
 With `KONTRA_S3_ENDPOINT` set, each pushed record is written to the object store **at push

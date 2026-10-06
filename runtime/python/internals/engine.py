@@ -40,6 +40,7 @@ from kontra import param
 from kontra.retry import NonRetryableError, SessionLost
 
 from kontra.batch import Batch, Dataset
+from internals.checkpoint import Checkpoint as _Checkpoint
 from internals import logs, workerid
 from internals.globalstore import GlobalStore, object_prefix
 from internals.redis_kv import redis_kv_from_env
@@ -777,9 +778,41 @@ def build_session_factory(registry, *, store="env"):
                     "done": committed,
                     "total": total,
                     "isolated": len(self._fail_slots),
+                    # THE CHECKPOINT RIDES ALONG, AND IT IS THE DURABLE HALF.
+                    #
+                    # The four counters above are a progress display: they say how many, never
+                    # WHICH, so nothing can resume from them. The checkpoint says which, in
+                    # `shared/conformance/checkpoint.json`'s canonical encoding, and heartbeat
+                    # details live in the activity's own history — so this is the one copy of the
+                    # commit map that a cache cannot lose (ADR 0059).
+                    #
+                    # `batch_id` is the batch's CONTENT HASH, which is what makes the checkpoint
+                    # safe to act on: a stale one from another batch is discarded by the reader
+                    # rather than applied by index to units it never saw.
+                    #
+                    # IT DOES NOT YET REPLACE THE REDIS COMMIT MAP, and the reason is `commit`:
+                    # that map holds each Unit's OUTPUT, not merely a done-marker, and an output
+                    # does not fit in a heartbeat payload. Replacing it needs the outputs addressed
+                    # by a manifest in the unit store first — which is what `manifest_ref` is for,
+                    # and why it is in the contract before it is in use.
+                    "checkpoint": self._checkpoint().to_details(),
                 })
             except Exception:
                 pass
+
+        def _checkpoint(self):
+            """This batch's progress, in the cross-SDK encoding.
+
+            Built from `self._slots` and `self._fail_slots` rather than maintained alongside them:
+            two structures tracking one fact drift, and the drift would be a checkpoint that
+            disagrees with the commits it describes.
+            """
+            ck = _Checkpoint(batch_id=self._bid)
+            for i in self._slots:
+                ck.commit(i)
+            for i in self._fail_slots:
+                ck.isolate(i)
+            return ck
 
         async def _progress_beat(self, run_id="", node_id="", total=0):
             # Beat @actor.healthcheck output to the orchestrator so the CLI/UI can stream live

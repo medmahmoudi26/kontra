@@ -866,7 +866,7 @@ def test_heartbeat_speaks_the_orchestrator_s_field_names():
     assert out["done"] is True
     assert beats, "a batch that committed units must have beaten at least once"
     for b in beats:
-        assert set(b) == {"node", "done", "total", "isolated"}, b
+        assert set(b) == {"node", "done", "total", "isolated", "checkpoint"}, b
         assert b["node"] == "n7"
         assert b["total"] == 3
 
@@ -874,6 +874,24 @@ def test_heartbeat_speaks_the_orchestrator_s_field_names():
     # A node that isolates everything must never look identical to one that found nothing.
     assert beats[-1]["done"] == 2
     assert beats[-1]["isolated"] == 1
+
+    # THE CHECKPOINT SAYS WHICH, WHICH IS WHAT THE COUNTERS ABOVE CANNOT.
+    #
+    # `done: 2, isolated: 1` is a progress display — nothing can resume from it, because it does
+    # not say which two committed. The checkpoint does, in the encoding every SDK and the
+    # orchestrator share (`shared/conformance/checkpoint.json`), and it rides in the activity's own
+    # history rather than in a cache that can evict it (ADR 0059).
+    ck = beats[-1]["checkpoint"]
+    assert ck["v"] == 1, ck
+    assert ck["batch_id"], "a checkpoint with no batch id is one a reader must discard"
+    # Units 0 and 2 committed; unit 1 was the poison. `done` is a RANGE SET, so two
+    # non-contiguous commits are two one-wide ranges rather than a list of indices.
+    assert ck["done"] == [[0, 0], [2, 2]], ck
+    assert ck["failed"] == [1], ck
+
+    # And it must be the SAME batch id throughout: a checkpoint whose id changed mid-batch is one
+    # every beat after the change describes a batch the reader has not seen.
+    assert len({b["checkpoint"]["batch_id"] for b in beats}) == 1
 
 
 def test_a_second_batch_on_a_reused_actor_id_does_not_replay_the_first():
