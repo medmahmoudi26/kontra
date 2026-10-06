@@ -405,13 +405,26 @@ services:
       KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}
       KONTRA_REGISTRY_PULL_PASSWORD: ${KONTRA_REGISTRY_PULL_PASSWORD:-}
       KONTRA_REGISTRY_CVE: ${KONTRA_REGISTRY_CVE:-}
+      KONTRA_REGISTRY_RETENTION: ${KONTRA_REGISTRY_RETENTION:-dryrun}
     command:
       - /bin/sh
       - -c
       - |
         set -eu
         set +u; a="$${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}"; r="$${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}"
-        p="$${KONTRA_REGISTRY_PULL_PASSWORD:-}"; cve="$${KONTRA_REGISTRY_CVE:-}"; set -u
+        p="$${KONTRA_REGISTRY_PULL_PASSWORD:-}"; cve="$${KONTRA_REGISTRY_CVE:-}"
+        ret="$${KONTRA_REGISTRY_RETENTION:-dryrun}"; set -u
+        # RETENTION REPORTS BEFORE IT DELETES, AND THE DEFAULT IS THE REPORTING ONE.
+        #
+        # "keep the 5 most recently pushed" is only safe once something protects a version that is
+        # OLDER than those 5 and still placed on a Machine — which is what the `inuse-` tags are for
+        # and what acceptance test 7 pins. Until the reconciler that writes them exists, enforcing
+        # would delete a running actor's image. zot's dryRun logs every would-delete instead.
+        case "$$ret" in
+          dryrun) dryrun=true ;;
+          enforce) dryrun=false ;;
+          *) echo "refusing: KONTRA_REGISTRY_RETENTION must be dryrun or enforce, got '$$ret'" >&2; exit 1 ;;
+        esac
         set_count=0
         [ -n "$$a" ] && set_count=$$((set_count+1)) || true
         [ -n "$$r" ] && set_count=$$((set_count+1)) || true
@@ -444,18 +457,25 @@ services:
             "gcDelay": "1h",
             "gcInterval": "6h",
             "retention": {
-              "dryRun": false,
               "delay": "24h",
               "policies": [
-                { "repositories": ["actors/*-cache"], "deleteUntagged": true,
+                { "repositories": ["actors/*-cache", "*-cache"], "deleteUntagged": true,
                   "keepTags": [{ "mostRecentlyPushedCount": 1 }] },
-                { "repositories": ["actors/**"], "deleteUntagged": true,
-                  "keepTags": [{ "patterns": ["^inuse-"] }, { "mostRecentlyPushedCount": 5 }] },
                 { "repositories": ["kontra-runtimes/**"], "deleteUntagged": true,
                   "keepTags": [{ "patterns": ["^[0-9]+$$"] },
                                { "patterns": ["^[0-9]+\\.[0-9]+\\.[0-9]+$$"], "mostRecentlyPushedCount": 3 }] },
+                { "repositories": ["bundles/**"], "deleteUntagged": true,
+                  "keepTags": [{ "patterns": [".*"] }] },
+                { "repositories": ["actors/**", "*"], "deleteUntagged": true,
+                  "keepTags": [{ "patterns": ["^inuse-"] }, { "mostRecentlyPushedCount": 5 }] },
                 { "repositories": ["**"], "deleteUntagged": true, "keepTags": [{ "patterns": [".*"] }] }
-              ]
+              ],
+        EOF
+        # `dryRun` LAST, in its own unquoted heredoc. JSON does not care about key order, and this is
+        # what lets the policies above keep a quoted heredoc — the only form in which `^[0-9]+$` and
+        # `\\.` survive unmangled.
+        cat >> /out/config.json << EOF
+              "dryRun": $$dryrun
             }
           },
         EOF
