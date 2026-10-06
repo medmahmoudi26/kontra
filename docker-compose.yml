@@ -400,9 +400,10 @@ services:
     restart: "no"
     volumes:
       - registry-config:/out
-      # READ-ONLY, AND ONLY TO REFUSE. `registry:2`'s store is mounted here so this one-shot can see
-      # whether an unmigrated install is about to be handed an empty registry.
+      # READ-ONLY, AND ONLY TO COMPARE. Both stores are mounted here so this one-shot can see whether
+      # an unmigrated install is about to be handed an empty registry. Neither is written.
       - registry-data:/old:ro
+      - zot-data:/zot:ro
     environment:
       KONTRA_REGISTRY_MIGRATION: ${KONTRA_REGISTRY_MIGRATION:-}
       KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}
@@ -430,10 +431,19 @@ services:
         # What is at stake is not rebuildable in the sense that matters: ADR 0052 records that this
         # volume "holds the digests Placements are pinned to … rebuilding an image yields a NEW
         # digest, so a Fleet recorded against the old one can never be re-run as recorded."
-        if [ -d /old/docker/registry/v2/repositories ] \
-           && [ -n "$$(ls -A /old/docker/registry/v2/repositories 2>/dev/null || true)" ] \
-           && [ ! -f /old/.kontra-migrated-to-zot ]; then
-          n=$$(ls -A /old/docker/registry/v2/repositories 2>/dev/null | wc -l)
+        #
+        # THE CHECK IS THE STATE ITSELF, NOT A MARKER FILE. zot keeps one directory per repository at
+        # the top of its store beside `cache.db`/`meta.db`, and `registry:2` keeps
+        # `docker/registry/v2/repositories/<name>`. So "the old store has repositories and the new one
+        # has none" is readable without anything having to remember to write a flag — and it stops
+        # refusing by itself the moment the copy has landed.
+        old_n=0; new_n=0
+        [ -d /old/docker/registry/v2/repositories ] &&
+          old_n=$$(ls -A /old/docker/registry/v2/repositories 2>/dev/null | wc -l) || true
+        [ -d /zot ] &&
+          new_n=$$(find /zot -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l) || true
+        if [ "$$old_n" -gt 0 ] && [ "$$new_n" -eq 0 ]; then
+          n="$$old_n"
           echo "refusing: this install still has a registry:2 store that has not been migrated." >&2
           echo "" >&2
           echo "  $$n repository trees in the old volume; zot reads a different one and would start empty." >&2
