@@ -4,9 +4,9 @@ Date: 2026-10-06
 
 ## Status
 
-**Accepted** for the rendering engine, the redaction rule, the store and the run-end lifecycle. The
-routes, the CLI and the console are the same decision's later halves and will amend this ADR as they
-land, in the manner of **0054** amending **0045** — a section that says "not yet decided" is more
+**Accepted** for the rendering engine, the redaction rule, the store, the run-end lifecycle and the
+HTTP surface. The CLI and the console are the same decision's later halves and will amend this ADR as
+they land, in the manner of **0054** amending **0045** — a section that says "not yet decided" is more
 useful than one that guesses.
 
 ## Context
@@ -287,9 +287,77 @@ release in the name.
   — which would have put a decoded multi-megabyte result into a UNIQUE-indexed column, and both
   backends would have accepted it.
 
+### 11. `report:reveal` is a browser lock, not a capability boundary — and the spec reads the other way
+
+§7.2 puts the unredacted bytes behind "a scope beyond `console`". Measured in `auth.ts`, a scope cannot
+carry that weight:
+
+```ts
+const live = sessions.look(bearerOf(authorization));
+if (live) {
+  if (live.scopes.includes(scope)) return null;
+  return { code: 403, … };
+}
+// the service-token compare happens here, and never consults `scope`
+```
+
+A caller holding the token is unaffected by any scope. So the reveal route is built the way ADR 0054
+built `infra`:
+
+- **`STATE_TOKEN_VARS` is the authority** — one variable, no fallback, fail-closed, so an install with
+  no token configured answers 503 and serves nothing.
+- **`REPORT_REVEAL_SCOPE` keeps browsers out**, and no mint path grants it, so no sign-in can produce a
+  session that reveals.
+
+Saying "the scope gates it" would read as a guarantee it does not give. If a browser must ever reveal,
+that needs per-user authorisation data, which exists nowhere today: a scope on `ConsoleUser`, the CLI's
+`AuthUser`, and a `kontra user` flag to set it.
+
+**And the audit is not transactional.** `audit()` never throws — a full volume loses the line and the
+action still happens (`audit.ts`). "No reveal without a record" is therefore not a property this gives.
+Both outcomes are recorded and the refusal is audited before the gate, which is the most that mechanism
+supports.
+
+### 12. The generated spec can publish a gate that does not exist, and the report surface would have hit it
+
+`openapi.ts`'s `GATES` table is a longest-prefix match over the raw route URL, not derived from the
+handler. Without an entry, every `/api/runs/:runId/report*` path would inherit `/api/runs`'s
+`runToken` — the wrong token, published as fact, over routes that check `EXPLORE_TOKEN_VARS`. And
+`openapi.test.ts` would not catch it: it verifies that paths documented as OPEN are open, never that a
+documented gate is the real one.
+
+So the four `GATES` entries are part of this change, and the eleven `POSTURE` entries in
+`auth/apiGate.ts` are the half that is actually enforced — `apiSurface.test.ts` boots the real server
+and proves each `gated` route refuses an anonymous caller, in both directions. That assertion is what
+makes a posture claim worth reading.
+
+`EXPLORE_TOKEN_VARS` is the list for the report and the thread, by content: its own header says the
+surface it guards "routinely contains targets and sometimes secrets", and a report is a rendering of
+exactly that.
+
+### 13. Preview rebuilds the context; it does not read a stored one
+
+§6.2 says preview "uses the stored run context". The snapshot stores the rendered TREE, not the inputs
+that produced it, and storing those would be a second copy of every Run's input and result — which is
+what the claim-check codec exists to avoid. So preview rebuilds the context from the same reads the
+sweep uses, through the same `contextForRun`. Two assemblers would mean previewing a change to a
+document the preview is not showing.
+
+A Run whose metadata has aged out of Temporal therefore gets **409 `state: 'gone'`** rather than a
+preview against an invented context. A report already rendered for it stays readable.
+
+**`current_template` answers 501.** §4.6 defines re-rendering from today's `report.md` as a separate
+action, and §9 above is why it cannot be done: nothing maps a run id to a folder. A pinned re-render
+dressed as `current_template` would look like success and produce the wrong document, so the route says
+what is missing and names `POST /report/preview`, which takes a template text directly.
+
+**Preview is the one rate-limited route here,** because it is the one that spends unbounded CPU on
+request. There was no rate limiter in this codebase to copy — `routes/rowStream.ts` caps concurrency,
+not rate — so it is a sliding window per socket address with an injectable cap. With `trustProxy` off
+that address is the proxy behind a proxy, which makes it a brake on accidental load rather than a
+per-user quota; `rowStream.ts` says the same of itself and so does this.
+
 ## What this revision does not decide
 
-The routes and their scopes — including whether `report:reveal` can be a session scope at all, given
-that `checkBearer` consults a scope only for a live session and a service token bypasses it entirely;
-the `serve` lint; the MCP tools; the console page. Each will amend this ADR when it is built rather
-than be guessed at here.
+The `serve` lint, `kontra report preview`, the three MCP tools, and the console page. Each will amend
+this ADR when it is built rather than be guessed at here.

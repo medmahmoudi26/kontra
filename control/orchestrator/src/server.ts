@@ -65,11 +65,14 @@ import { Repo } from './db/repo';
 import { SourceStore } from './sourceStore';
 import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
-import { fetchRunClose, fetchRunIO, listRuns, type RunDescription } from './temporalClient';
+import { describeRun as describeRunById, fetchRunClose, fetchRunIO, listRuns, type RunDescription } from './temporalClient';
 import { HistoryArchive, startHistoryArchiver } from './historyArchive';
 import { startInuseReconciler } from './images/inuseReconciler';
 import { installApiGate } from './auth/apiGate';
-import { startReportRenderer } from './report/sweep';
+import { contextForRun, startReportRenderer } from './report/sweep';
+import { reportStore, type ReportStore } from './report/store';
+import { render as renderReportInHost } from './report/renderHost';
+import { registerReportRoutes } from './routes/report';
 import { registerInfraRoutes } from './infraRoutes';
 import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
@@ -212,6 +215,11 @@ export interface ServerOptions {
   queueDescriber?: QueueDescriber;
   /** Operational summary tables the dashboards read. Injectable for tests. */
   summaries?: SummaryStore;
+  /**
+   * The four report tables (ADR 0055). Injectable so a route test reaches a report without the
+   * process-wide store, which on a fresh test process would open the real database file.
+   */
+  reports?: ReportStore;
   /** DuckLake overrides for the explore manifest (tests point this at a local lake). */
   lake?: Partial<LakeConfig>;
   /**
@@ -381,6 +389,41 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerRunRoutes(app, { runs, runWorkflows, queueDescriber });
   registerHistoryRoutes(app, archive);
   registerHitlRoutes(app, { runs, archive });
+
+  /* A RUN'S REPORT, ITS EXPORTS, ITS BYTES AND THE THREAD UNDER IT (ADR 0055).
+     The context builder is the sweep's own, shared rather than reimplemented: a preview that assembled
+     its context differently would be previewing a change to a document it is not showing. */
+  const reports = opts.reports ?? reportStore();
+  registerReportRoutes(app, {
+    reports,
+    render: (request) => renderReportInHost(request, { onNote: (note) => app.log.info(note) }),
+    context: async (runId) => {
+      const described = await describeRunById(runId);
+      if (!described) return undefined;
+      const io = await fetchRunIO(runId);
+      if (!io) return undefined;
+      const built = await contextForRun(
+        {
+          runId,
+          status: described.status,
+          startedAt: described.startedAt,
+          closedAt: described.closedAt,
+          type: described.type,
+        },
+        io,
+        {
+          store: reports,
+          now: Date.now,
+          close: (id) => fetchRunClose(id),
+          identity: async (id) => {
+            const found = await runWorkflowStore().get(id);
+            return found ? { workflow: found.workflow, version: found.version } : undefined;
+          },
+        }
+      );
+      return built.context;
+    },
+  });
   registerLogsRoutes(app);
   // Which Workers are running and NOT logging — the check every silent shipper failure needed.
   registerLogsCoverageRoutes(app, queueDescriber, repo);

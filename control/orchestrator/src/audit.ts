@@ -76,10 +76,22 @@ export type AuditAction =
   | 'secret.bind'
   | 'secret.unbind'
   /** Data that stops existing. */
-  | 'dataset.delete';
+  | 'dataset.delete'
+  /**
+   * A report block's UNREDACTED bytes were read — or the attempt was refused (ADR 0055).
+   *
+   * THE ONLY READ IN THIS UNION, and it earns the exception: every other member is a mutation, and the
+   * argument against auditing reads (`routes/audit.ts`) is that a trail fills with its own reflection.
+   * This read hands a credential to a person. Both outcomes are recorded, and the refusal is the more
+   * interesting one.
+   */
+  | 'report.reveal';
 
 /*
  * WHAT IS NOT IN THAT UNION YET, STATED RATHER THAN IMPLIED.
+ *
+ * `report.reveal` JOINED IT WITH ITS CALL SITE, as this block's rule requires: the member and
+ * `routes/report.ts`'s two `audit()` calls landed in the same commit.
  *
  * A vocabulary listing actions nothing emits reads as coverage, which is the one thing an audit
  * trail must never fake. Every member above has a call site; these do not, and each has a reason:

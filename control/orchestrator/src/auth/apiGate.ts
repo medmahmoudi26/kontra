@@ -107,6 +107,23 @@ export const POSTURE: Readonly<Record<string, Posture>> = {
   'GET /api/runs/:runId/io': 'legacy',
   'GET /api/runs/:runId/phase': 'legacy',
   'GET /api/runs/:runId/progress': 'legacy',
+  /* THE REPORT SURFACE (ADR 0055) — every entry `gated`, and each one really calls `checkBearer`:
+     `EXPLORE_TOKEN_VARS` for the report and the thread, because that list's own header says the surface
+     it guards "routinely contains targets and sometimes secrets" and a report is a rendering of exactly
+     that; `STATE_TOKEN_VARS` plus the `report:reveal` scope for the unredacted bytes. A console session
+     is admitted through the `console` scope, which is what lets the report page and the feedback
+     composer work in a browser. */
+  'GET /api/runs/:runId/report': 'gated',
+  'GET /api/runs/:runId/report/versions': 'gated',
+  'POST /api/runs/:runId/report/render': 'gated',
+  'POST /api/runs/:runId/report/preview': 'gated',
+  'GET /api/runs/:runId/report/export': 'gated',
+  'GET /api/runs/:runId/report/blocks/:blockId/raw': 'gated',
+  'POST /api/runs/:runId/report/blocks/:blockId/reveal': 'gated',
+  'GET /api/runs/:runId/feedback': 'gated',
+  'POST /api/runs/:runId/feedback': 'gated',
+  'PATCH /api/feedback/:id': 'gated',
+  'DELETE /api/feedback/:id': 'gated',
   'GET /api/runs/:runId/stream': 'legacy',
   'GET /api/scratch': 'legacy',
   'GET /api/scratch/:id': 'legacy',

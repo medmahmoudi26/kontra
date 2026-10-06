@@ -55,6 +55,21 @@ export const MAX_SESSIONS = 512;
 export const CONSOLE_SCOPE = 'console';
 export const INFRA_SCOPE = 'infra';
 
+/**
+ * What a caller needs to read a report block's UNREDACTED bytes (ADR 0055).
+ *
+ * NOT IN {@link DEFAULT_SESSION_SCOPES} AND NO PATH GRANTS IT, which is ADR 0054's argument for
+ * `infra` applied again: a browser cannot reveal a credential, because nothing can mint a session
+ * carrying this.
+ *
+ * AND IT IS NOT THE ROUTE'S AUTHORITY. `checkBearer` compares a scope only inside the live-session
+ * branch — a caller holding the service token falls through to the token compare and the scope is
+ * never consulted. So this keeps BROWSERS out and `STATE_TOKEN_VARS`, a one-variable list with no
+ * fallback, is what actually gates the route. Calling this the boundary would read as a guarantee it
+ * does not give.
+ */
+export const REPORT_REVEAL_SCOPE = 'report:reveal';
+
 /** What a sign-in mints. NO PATH GRANTS `infra`, which is what keeps it a service-token capability. */
 export const DEFAULT_SESSION_SCOPES: readonly string[] = [CONSOLE_SCOPE];
 

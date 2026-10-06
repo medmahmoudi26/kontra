@@ -140,7 +140,6 @@ export async function sweepFinishedRuns(deps: SweepDeps = {}): Promise<ReportSwe
     if (!isReportable(run)) continue;
     out.closed += 1;
     try {
-      const pinned = await store.template(run.runId);
       const io = deps.io ? await deps.io(run.runId) : undefined;
       if (!io) {
         // Temporal described it a moment ago and cannot serve its metadata now. Counted and NAMED,
@@ -150,30 +149,12 @@ export async function sweepFinishedRuns(deps: SweepDeps = {}): Promise<ReportSwe
         if (out.goneIds.length < SKIPPED_IDS_CAP) out.goneIds.push(run.runId);
         continue;
       }
-      const status = statusWord(run.status);
-      const close = status === 'completed' ? undefined : await deps.close?.(run.runId);
-      const identity = await deps.identity?.(run.runId);
-
-      const template = pinned?.templateText ?? DEFAULT_TEMPLATE;
-      const templateHash = pinned?.templateHash ?? defaultTemplateId(deps.version);
-
-      const context = buildContext({
-        runId: run.runId,
-        status: run.status,
-        startedAt: run.startedAt,
-        closedAt: run.closedAt,
-        ...(run.type === undefined ? {} : { type: run.type }),
-        identity,
-        pinned,
-        input: io.input,
-        output: io.output,
-        error: close,
-        // The version number is not known until the insert allocates it, and it is in the context
-        // because §2.4 promises `report.version`. Rendered as the number this render WILL be, which
-        // the idempotency key deliberately excludes — see `renderKey`.
-        version: await store.nextVersion(run.runId),
-        now: now(),
+      const built = await contextForRun(run, io, {
+        ...deps,
+        store,
+        now,
       });
+      const { template, templateHash, context } = built;
 
       /* THE KEY IS CHECKED BEFORE THE RENDER AND THE ROW IS WRITTEN AFTER IT, in ONE insert.
          The first version of this claimed the key first and inserted the snapshot second, which found
@@ -188,12 +169,9 @@ export async function sweepFinishedRuns(deps: SweepDeps = {}): Promise<ReportSwe
         continue;
       }
 
-      if (!pinned) out.noTemplate += 1;
-      const withDefault: TemplateContext = pinned
-        ? context
-        : { ...context, default: defaultContext(context.run as unknown as Record<string, unknown>, context.result) };
+      if (!built.pinned) out.noTemplate += 1;
 
-      const result = await renderOne({ template, context: withDefault });
+      const result = await renderOne({ template, context });
       if (!result.ok) {
         out.errored += 1;
         await store.declareVersion({
@@ -208,7 +186,7 @@ export async function sweepFinishedRuns(deps: SweepDeps = {}): Promise<ReportSwe
         continue;
       }
 
-      const snapshot: ReportSnapshot = pinned
+      const snapshot: ReportSnapshot = built.pinned
         ? result.snapshot
         : {
             ...result.snapshot,
@@ -305,4 +283,55 @@ export function startReportRenderer(deps: SweepDeps = {}): () => void {
 /** A short digest of a template's text — what `report_template.template_hash` holds. */
 export function templateHash(text: string): string {
   return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
+}
+
+/**
+ * The template and the context for one Run — the one place either is assembled.
+ *
+ * SHARED WITH THE PREVIEW ROUTE, which is why it is exported and why it takes a Run row rather than
+ * reaching for one. §6.2 says a preview "uses the stored run context"; the snapshot holds the rendered
+ * TREE and not the inputs that produced it, and storing those would be a second copy of every Run's
+ * input and result — exactly what the claim-check codec exists to avoid. So a preview rebuilds the
+ * context the same way the sweep does, from the same reads, through this function. Two assemblers would
+ * mean a preview that renders differently from the version it is previewing a change to, which is the
+ * one thing a preview must not do.
+ */
+export async function contextForRun(
+  run: SweepRun,
+  io: { input?: unknown; output?: unknown },
+  deps: SweepDeps & { store: ReportStore; now: () => number }
+): Promise<{ template: string; templateHash: string; context: TemplateContext; pinned: boolean }> {
+  const pinned = await deps.store.template(run.runId);
+  const status = statusWord(run.status);
+  const close = status === 'completed' ? undefined : await deps.close?.(run.runId);
+  const identity = await deps.identity?.(run.runId);
+  const context = buildContext({
+    runId: run.runId,
+    status: run.status,
+    startedAt: run.startedAt,
+    closedAt: run.closedAt,
+    ...(run.type === undefined ? {} : { type: run.type }),
+    identity,
+    pinned,
+    input: io.input,
+    output: io.output,
+    error: close,
+    // The version number is not known until the insert allocates it, and it is in the context because
+    // §2.4 promises `report.version`. Rendered as the number this render WILL be, which the idempotency
+    // key deliberately excludes — see `renderKey`.
+    version: await deps.store.nextVersion(run.runId),
+    now: deps.now(),
+  });
+  const withDefault: TemplateContext = pinned
+    ? context
+    : {
+        ...context,
+        default: defaultContext(context.run as unknown as Record<string, unknown>, context.result),
+      };
+  return {
+    template: pinned?.templateText ?? DEFAULT_TEMPLATE,
+    templateHash: pinned?.templateHash ?? defaultTemplateId(deps.version),
+    context: withDefault,
+    pinned: pinned !== undefined,
+  };
 }

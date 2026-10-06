@@ -72,6 +72,28 @@ const GATES: ReadonlyArray<{
   { prefix: '/api/datasets/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/images/', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
   { prefix: '/api/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
+  /* THE REPORT SURFACE (ADR 0055), and these entries exist because the generator would otherwise
+     MANUFACTURE A LIE. The match is longest-prefix over the raw Fastify url, so without them every
+     report path inherits `/api/runs`'s runToken — the wrong token, published as fact, over routes that
+     actually check `EXPLORE_TOKEN_VARS`. `everyOpenPathIsActuallyOpen` would not catch it: it only
+     verifies that paths documented as OPEN are open, never that a documented gate is the real one.
+     The same privilege as the query workbench and the log surface, for the same stated reason: a report
+     is a rendering of a Run's output, which "routinely contains targets and sometimes secrets". */
+  { prefix: '/api/runs/:runId/report', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
+  { prefix: '/api/runs/:runId/feedback', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
+  { prefix: '/api/feedback', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
+  /* THE UNREDACTED BYTES, and the only route on this surface with a different authority. One variable,
+     no fallback — the shape `INFRA_ROUTE_TOKEN_VARS` has — plus the `report:reveal` scope, which keeps
+     BROWSERS out and is not the boundary: `checkBearer` compares a scope only for a live session, so a
+     service-token caller is unaffected by it. The token is the gate; the scope is the browser lock. */
+  {
+    prefix: '/api/runs/:runId/report/blocks/:blockId/reveal',
+    scheme: 'stateToken',
+    vars: STATE_TOKEN_VARS,
+    describe:
+      'KONTRA_STATE_TOKEN, and a session additionally needs the `report:reveal` scope — which no ' +
+      'sign-in grants, so this route is service-token-only in practice.',
+  },
   { prefix: '/api/probe', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/sources', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   // WRITES BYTES TO THE OBJECT STORE, so it is fail-closed on the state token like `/api/fleet`
