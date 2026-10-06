@@ -10,6 +10,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { DEFAULTS } from '../auth/loginGuard';
 import { hashPassword } from '../auth/password';
 import { SessionBook, bearerOf } from '../auth/session';
 import { consoleUsers, CONSOLE_USERS_VAR } from '../auth/users';
@@ -35,6 +36,22 @@ afterEach(async () => {
 
 async function withUser(name: string, password: string): Promise<void> {
   const password_hash = await hashPassword(password);
+  process.env[CONSOLE_USERS_VAR] = encodeUsers([{ name, password_hash }]);
+}
+
+/**
+ * A user whose hash is CHEAP to verify, for the tests that exercise the attempt counter.
+ *
+ * Those tests spend the whole budget, so at the real N=32768 they run scrypt dozens of times and
+ * the file becomes the slowest in the suite — measured at 20s. What they are asserting is the
+ * guard's bookkeeping and the shape of its refusal, neither of which depends on the work factor.
+ * The cost parameters are what `auth/password.ts` reads out of the hash string, so a cheap one
+ * exercises exactly the same code path.
+ *
+ * The tests above, which are about the credential itself, keep the real cost.
+ */
+async function withCheapUser(name: string, password: string): Promise<void> {
+  const password_hash = await hashPassword(password, { N: 2, r: 1, p: 1 });
   process.env[CONSOLE_USERS_VAR] = encodeUsers([{ name, password_hash }]);
 }
 
@@ -152,5 +169,137 @@ describe('parsing what the CLI exports', () => {
     expect(bearerOf('bearer abc')).toBe('abc');
     expect(bearerOf('Basic abc')).toBeUndefined();
     expect(bearerOf(undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * VOLUME, which the properties above say nothing about.
+ *
+ * Every test here uses its own `remoteAddress`. The guard is a module singleton with a per-source
+ * budget, so sharing an address across tests would let one spend another's — and the symptom would
+ * be an unrelated test 429ing, which is a bad afternoon.
+ */
+describe('too many sign-ins', () => {
+  it('429s past the attempt budget, and says when to come back', async () => {
+    await withCheapUser('admin', PASSWORD);
+    const ip = '10.9.0.1';
+    const attempt = () =>
+      app.inject({
+        method: 'POST',
+        url: '/api/login',
+        remoteAddress: ip,
+        payload: { user: 'admin', password: 'wrong' },
+      });
+
+    for (let i = 0; i < DEFAULTS.attempts; i++) {
+      expect((await attempt()).statusCode, `attempt ${i + 1} of the budget`).toBe(401);
+    }
+    const over = await attempt();
+    expect(over.statusCode).toBe(429);
+    expect(Number(over.headers['retry-after'])).toBeGreaterThan(0);
+  });
+
+  /**
+   * THE LIMIT MUST NOT BE AN ORACLE. If a throttled response differed from a refused one, an
+   * attacker would learn where the limit is — and worse, a per-name limit would make "does this
+   * account exist" answerable by watching which keys throttle. The body is identical on purpose.
+   */
+  it('answers a throttled attempt with the same body as a refused one', async () => {
+    await withCheapUser('admin', PASSWORD);
+    const ip = '10.9.0.2';
+    const attempt = () =>
+      app.inject({
+        method: 'POST',
+        url: '/api/login',
+        remoteAddress: ip,
+        payload: { user: 'admin', password: 'wrong' },
+      });
+
+    let refusedBody: unknown;
+    for (let i = 0; i < DEFAULTS.attempts; i++) refusedBody = (await attempt()).json();
+    const throttled = await attempt();
+    expect(throttled.statusCode).toBe(429);
+    expect(throttled.json()).toEqual(refusedBody);
+  });
+
+  /**
+   * 429 AND NOT 401. `packages/core/src/run/session.ts` clears the console's token on a 401, so
+   * answering a rate limit with one would sign the operator out of the whole console and read to
+   * them as "the orchestrator restarted".
+   */
+  it('does not sign the console out when it throttles', async () => {
+    await withCheapUser('admin', PASSWORD);
+    const ip = '10.9.0.3';
+    for (let i = 0; i < DEFAULTS.attempts; i++) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/login',
+        remoteAddress: ip,
+        payload: { user: 'admin', password: 'wrong' },
+      });
+    }
+    const throttled = await app.inject({
+      method: 'POST',
+      url: '/api/login',
+      remoteAddress: ip,
+      payload: { user: 'admin', password: 'wrong' },
+    });
+    expect(throttled.statusCode).not.toBe(401);
+    expect(throttled.statusCode).toBe(429);
+  });
+
+  /** One address cannot spend another's budget — the operator keeps working while someone grinds. */
+  it('budgets each address separately', async () => {
+    await withCheapUser('admin', PASSWORD);
+    for (let i = 0; i < DEFAULTS.attempts + 1; i++) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/login',
+        remoteAddress: '10.9.0.4',
+        payload: { user: 'admin', password: 'wrong' },
+      });
+    }
+    const elsewhere = await app.inject({
+      method: 'POST',
+      url: '/api/login',
+      remoteAddress: '10.9.0.5',
+      payload: { user: 'admin', password: PASSWORD },
+    });
+    expect(elsewhere.statusCode).toBe(200);
+  });
+
+  /**
+   * FORGIVEN ON SUCCESS. An operator who fumbles a generated password up to the budget and then
+   * gets it right must not spend the rest of the window locked out of their own box — the password
+   * is generated and long, so fumbling it is the expected case, not the suspicious one.
+   */
+  it('forgives an address that signs in successfully', async () => {
+    await withCheapUser('admin', PASSWORD);
+    const ip = '10.9.0.6';
+    // One short of the budget, then the real password.
+    for (let i = 0; i < DEFAULTS.attempts - 1; i++) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/login',
+        remoteAddress: ip,
+        payload: { user: 'admin', password: 'wrong' },
+      });
+    }
+    const good = await app.inject({
+      method: 'POST',
+      url: '/api/login',
+      remoteAddress: ip,
+      payload: { user: 'admin', password: PASSWORD },
+    });
+    expect(good.statusCode).toBe(200);
+
+    // The budget is back: a fresh wrong attempt is a 401, not a 429.
+    const after = await app.inject({
+      method: 'POST',
+      url: '/api/login',
+      remoteAddress: ip,
+      payload: { user: 'admin', password: 'wrong' },
+    });
+    expect(after.statusCode).toBe(401);
   });
 });

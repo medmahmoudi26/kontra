@@ -34,6 +34,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { audit } from '../audit';
 import { verifyPassword } from '../auth/password';
+import { loginGuard } from '../auth/loginGuard';
 import { bearerOf, sessions } from '../auth/session';
 import { consoleUsers, type ConsoleUser } from '../auth/users';
 
@@ -89,7 +90,37 @@ export function registerLoginRoutes(app: FastifyInstance): void {
           '`kontra user add <name>` adds another.',
       });
     }
-    const name = await authenticate(users, user, password);
+    // THE GUARD RUNS BEFORE ANY SCRYPT. It bounds attempts per source and concurrent verifications
+    // per process; see `auth/loginGuard.ts` for why the second one protects the whole control plane
+    // and not just this route.
+    const outcome = await loginGuard.attempt(req.ip, () => authenticate(users, user, password));
+    if ('reason' in outcome) {
+      // A THROTTLED ATTEMPT IS AN AUDIT EVENT TOO. It is the only trace a flood leaves that
+      // outlives the container's stdout, and distinguishing the two reasons matters to whoever
+      // reads it: `too-many-attempts` is someone guessing, `busy` is the box shedding load.
+      audit(
+        {
+          action: 'login',
+          outcome: 'refused',
+          who: user,
+          via: 'anonymous',
+          target: `console:${outcome.reason}`,
+          ip: req.ip,
+        },
+        req.log
+      );
+      // 429 AND NOT 401. The console clears its token on a 401, so answering a rate limit with one
+      // would sign the operator out while telling them nothing about why.
+      //
+      // THE BODY IS THE SAME `REFUSED` SHAPE in the guessing case: a distinct message would confirm
+      // to an attacker that they had found the limit, and the limit is the only feedback this route
+      // gives that does not depend on the password.
+      return reply
+        .code(429)
+        .header('retry-after', String(outcome.retryAfterSeconds))
+        .send(outcome.reason === 'busy' ? { error: 'busy: too many sign-ins in flight' } : REFUSED);
+    }
+    const name = outcome.value;
     if (!name) {
       // A FAILED SIGN-IN IS AN AUDIT EVENT, and it was previously only a pino line — which lives
       // as long as the container's stdout buffer and is retained by nothing. Repeated refusals
@@ -106,6 +137,9 @@ export function registerLoginRoutes(app: FastifyInstance): void {
       );
       return reply.code(401).send(REFUSED);
     }
+    // FORGIVEN ON SUCCESS: an operator who fumbles a generated password nine times and then gets
+    // it right must not spend the rest of the window locked out of their own box.
+    loginGuard.forgive(req.ip);
     const session = sessions.mint(name);
     audit(
       { action: 'login', outcome: 'allowed', who: name, via: 'session', target: 'console', ip: req.ip },
