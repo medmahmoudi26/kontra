@@ -217,6 +217,10 @@ const usageText = `kontra — local control surface
                # the run makes no progress and resumes from history; dispatched activities keep
                # running, and its timeouts keep ticking — a long pause fails a run, it does not hold one
   kontra workflow history <run-id> [-o FILE]       # save a run's history as JSON (shareable, replayable)
+  kontra report preview <run-id> [--template report.md] [--open]
+               # render a report template against a FINISHED run and print the Markdown
+               # nothing is stored; workflow serve lints report.md, this shows what it SAYS
+               # a workflow puts things in its report by RETURNING them
   kontra workflow replay <workflow.py> (--run-id ID | --history FILE) [--json]
                # REPLAY a recorded history against the code on disk. NO CLOCK: no heartbeat, no
                #   StartToClose, nothing times out while you sit on a breakpoint — unlike attaching
@@ -382,6 +386,8 @@ func dispatch(args []string) error {
 		err = cmdDeploy(args[1:])
 	case "serve":
 		err = cmdServe(args[1:])
+	case "report":
+		err = reportCmd(args[1:])
 	case "workers":
 		err = cmdWorkers(args[1:])
 	case "workflow", "wf":

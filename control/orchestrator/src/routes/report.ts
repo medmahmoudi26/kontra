@@ -231,9 +231,15 @@ export function registerReportRoutes(app: FastifyInstance, deps: ReportRouteDeps
       }
       const result = await deps.render({ template: body.template, context });
       if (!result.ok) return reply.code(200).send({ runId, preview: true, status: 'error', error: result.error });
-      // `preview: true` IS PART OF THE BODY and not only a banner in the console: a client that stored
-      // this response would otherwise have something indistinguishable from a version.
-      return reply.code(200).send({ runId, preview: true, status: 'ok', snapshot: result.snapshot });
+      /* `preview: true` IS PART OF THE BODY and not only a banner in the console: a client that stored
+         this response would otherwise have something indistinguishable from a version.
+         THE MARKDOWN RIDES ALONG so the CLI can print a preview without a second serialiser. `kontra
+         report preview` writes Markdown to stdout (§6.2), and the alternative — a Go walker over the
+         same mdast — would be two implementations of one rendering that must agree forever. The console
+         ignores this field and walks the tree. */
+      return reply
+        .code(200)
+        .send({ runId, preview: true, status: 'ok', snapshot: result.snapshot, markdown: toMarkdown(result.snapshot) });
     } catch (err) {
       return reply.code(502).send({ error: `could not preview: ${errMessage(err)}` });
     }

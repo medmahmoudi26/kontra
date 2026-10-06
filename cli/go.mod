@@ -251,4 +251,11 @@ require (
 
 require gopkg.in/yaml.v2 v2.4.0
 
+require (
+	github.com/osteele/liquid v1.9.2 // indirect
+	github.com/osteele/tuesday v1.1.1 // indirect
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
+)
+
 replace github.com/medmahmoudi26/kontra/sdk/go => ../sdk/go
