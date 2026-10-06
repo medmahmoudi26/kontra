@@ -190,12 +190,12 @@ describe('the size of the exposure, stated out loud', () => {
     expect({ legacy: count('legacy'), worker: count('worker') }).toEqual({ legacy: 54, worker: 4 });
   });
 
-  it('and 68 routes that do refuse, which is the half that works', () => {
+  it('and 69 routes that do refuse, which is the half that works', () => {
     const count = (p: Posture) => Object.values(POSTURE).filter((v) => v === p).length;
-    // 49 when this gate landed, plus the image surface's 8 and the report surface's 11 (ADR 0055).
+    // 49 when this gate landed, plus the image surface's 8 and the report surface's 12 (ADR 0055).
     // This number going UP is the direction that needs no justification; it going DOWN is the edit
     // worth noticing.
-    expect({ gated: count('gated'), public: count('public') }).toEqual({ gated: 68, public: 4 });
+    expect({ gated: count('gated'), public: count('public') }).toEqual({ gated: 69, public: 4 });
   });
 });
 

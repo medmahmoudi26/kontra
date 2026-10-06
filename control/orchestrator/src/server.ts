@@ -143,6 +143,12 @@ import { registerWorkflowRoutes } from './routes/workflows';
 export const SPA_SURFACES: ReadonlySet<string> = new Set([
   'catalog',
   'workflows',
+  // A **Report** is addressed in its own right (ADR 0055): `/reports` is every report this control
+  // plane has rendered and `/reports/<runId>` is one. It is here as well as in the console's nav
+  // because a COLD LOAD of either address reaches this server first, and a surface the nav offers
+  // that this set does not name is a link that 404s on a reload — invisible in-app, where navigation
+  // never leaves the document.
+  'reports',
   'actors',
   'datasets',
   'logs',
@@ -396,6 +402,8 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   const reports = opts.reports ?? reportStore();
   registerReportRoutes(app, {
     reports,
+    identities: async (runIds) =>
+      (await runWorkflowStore().list(runIds)).map((r) => ({ runId: r.runId, workflow: r.workflow })),
     render: (request) => renderReportInHost(request, { onNote: (note) => app.log.info(note) }),
     context: async (runId) => {
       const described = await describeRunById(runId);

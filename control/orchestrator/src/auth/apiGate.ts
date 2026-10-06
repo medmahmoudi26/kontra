@@ -113,6 +113,7 @@ export const POSTURE: Readonly<Record<string, Posture>> = {
      that; `STATE_TOKEN_VARS` plus the `report:reveal` scope for the unredacted bytes. A console session
      is admitted through the `console` scope, which is what lets the report page and the feedback
      composer work in a browser. */
+  'GET /api/reports': 'gated',
   'GET /api/runs/:runId/report': 'gated',
   'GET /api/runs/:runId/report/versions': 'gated',
   'POST /api/runs/:runId/report/render': 'gated',

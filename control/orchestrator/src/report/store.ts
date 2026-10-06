@@ -91,6 +91,22 @@ export interface ReportVersion {
 /** A version without its snapshot — what the version list serves. */
 export type VersionSummary = Omit<ReportVersion, 'snapshotJson'>;
 
+/** One Run's report, as the Reports surface lists it: the newest version and how many there are. */
+export interface ReportListRow {
+  runId: string;
+  version: number;
+  status: VersionStatus;
+  templateHash: string;
+  renderedAt: number;
+  renderedBy: string;
+  /** How many versions this Run's report has. Filled by {@link ReportStore.listDetail}. */
+  versions: number;
+  /** The workspace the Run ran in, when a template was pinned. Absent for an unpinned Run. */
+  workspace?: string;
+  /** The caller workflow's manifest name, filled by the route from `run_workflow`. */
+  workflow?: string;
+}
+
 export interface FeedbackNote {
   id: string;
   runId: string;
@@ -400,6 +416,76 @@ export class ReportStore {
       if (r.error_text !== null && r.error_text !== undefined) out.errorText = String(r.error_text);
       return out;
     });
+  }
+
+  /**
+   * The newest version of every Run's report, newest first — what the Reports surface lists.
+   *
+   * ONE ROW PER RUN, via a correlated subquery that both backends support. The alternative, pulling
+   * every version and reducing in TypeScript, would read N versions to show one and would make the
+   * `limit` mean something different from what a caller asked for.
+   *
+   * NO WORKFLOW NAME HERE, deliberately. It lives in `run_workflow`, a different store in this same
+   * family, and a join across two stores' tables would couple them in SQL where they are only coupled
+   * by a run id. The route enriches instead — `withDatasetNames` in `data/datasets.ts` is the same
+   * shape for the same reason, and it degrades to "no name" rather than to no row.
+   */
+  async listReports(opts: { limit?: number } = {}): Promise<ReportListRow[]> {
+    await this.init();
+    const limit = opts.limit && opts.limit > 0 ? Math.min(opts.limit, 500) : 200;
+    const t = this.t('report_version');
+    const rows = await this.driver.all(
+      `SELECT v.run_id, v.version, v.status, v.template_hash, v.rendered_at, v.rendered_by
+         FROM ${t} v
+        WHERE v.version = (SELECT MAX(w.version) FROM ${t} w WHERE w.run_id = v.run_id)
+        ORDER BY v.rendered_at DESC
+        LIMIT ${limit}`,
+      []
+    );
+    return rows.map((r) => ({
+      runId: String(r.run_id),
+      version: num(r.version),
+      status: String(r.status) as VersionStatus,
+      templateHash: String(r.template_hash),
+      renderedAt: num(r.rendered_at),
+      renderedBy: String(r.rendered_by ?? ''),
+      versions: 0,
+    }));
+  }
+
+  /**
+   * How many versions each of these Runs has, and which workspace it ran in.
+   *
+   * A SECOND STATEMENT RATHER THAN A WIDER FIRST ONE: the listing above is one row per Run by
+   * construction, and counting versions in the same query would need a second aggregate over the same
+   * table. Two cheap statements beat one clever one, and this one is skipped entirely for an empty page.
+   */
+  async listDetail(runIds: readonly string[]): Promise<Map<string, { versions: number; workspace: string }>> {
+    const out = new Map<string, { versions: number; workspace: string }>();
+    const ids = [...new Set(runIds)].filter((id) => id !== '');
+    if (ids.length === 0) return out;
+    await this.init();
+    for (const page of chunkBinds(ids)) {
+      const holes = page.map(() => '?').join(', ');
+      const counts = await this.driver.all(
+        `SELECT run_id, COUNT(*) AS n FROM ${this.t('report_version')}
+          WHERE run_id IN (${holes}) GROUP BY run_id`,
+        [...page]
+      );
+      for (const r of counts) {
+        out.set(String(r.run_id), { versions: num(r.n), workspace: '' });
+      }
+      const spaces = await this.driver.all(
+        `SELECT run_id, workspace FROM ${this.t('report_template')} WHERE run_id IN (${holes})`,
+        [...page]
+      );
+      for (const r of spaces) {
+        const id = String(r.run_id);
+        const found = out.get(id);
+        if (found) found.workspace = String(r.workspace ?? '');
+      }
+    }
+    return out;
   }
 
   /** Which of these Runs have a report at all — one statement per page of ids, never one per Run. */

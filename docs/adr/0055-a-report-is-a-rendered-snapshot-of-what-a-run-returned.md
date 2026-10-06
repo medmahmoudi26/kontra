@@ -380,21 +380,52 @@ disagree about a template that renders correctly, an author must be able to proc
 §6.1 asks for line AND column; `liquid.SourceError` carries a line and no column, and inventing one
 would be worse than saying so.
 
-### 15. The report is a PAGE at `/runs/<id>/report`, not the run detail's default tab
+### 15. A Report is its own SURFACE, not a tab and not a page under `/runs/<id>`
 
-§9.1 asks for a tab, defaulting to the report when one exists. The run detail is one 1,718-line
-component with **no page-level tab strip** — the two `role="tablist"` strips in that repo are both
-in-component and in-memory, neither reflected in the URL — so there is nothing to add a tab to, and
-restructuring that component is a blast radius this feature should not take on days before a demo. The
-design prototype also shows a standalone page.
+§9.1 asks for the report to be "the default tab" of the run detail. This went through three
+arrangements and the first two were both worse than the third.
 
-So `/runs/<id>/report` is an address that round-trips, which is the property that actually matters: an
-operator can paste it. The console has no router; `parseAddress` previously REFUSED every second
-segment under a run, and that refusal is now narrowed by exactly one word rather than opened to a
-wildcard — a typo'd tab is still `null`.
+1. **A tab.** The run detail is one 1,700-line component with no page-level tab strip — its two
+   `role="tablist"` strips are in-component and in-memory, neither in the URL — so there was nothing
+   to add a tab to.
+2. **A page under the run's address**, `/runs/<id>/report`, linked from the run page's header. That
+   put a second control beside `‹ Runs`, competing for the one position an operator's eye already has
+   a job for, and it made `/runs/<id>/…` mean two things. It also shipped a bug: see §19.
+3. **Its own surface.** `/reports` lists every report this control plane has rendered;
+   `/reports/<runId>` is one.
 
-Honouring §9.1 properly means giving the run detail a real tab strip, which is worth doing on its own
-and not as a rider on this.
+The third is right on the merits and not only on the mechanics. A report answers a different question
+from the run page — what the run FOUND, not what it DID — and it has a different lifetime: it outlives
+the Run's Parquet under normal retention and outlives Temporal's history entirely, so it is the thing
+somebody comes back to days later and the thing they forward. An artefact with its own lifetime and
+its own question gets its own address.
+
+The run page keeps its header unchanged and links DOWN to the report from the end of its record, which
+is the reading order: input, phases, output, then what the run said about all of it. The link is an
+anchor rather than a button, because a report is an address somebody pastes — middle-click,
+copy-link and open-in-new-tab all have to work.
+
+**Adding a surface costs four lists, and three of them are copies that cannot import each other:**
+`DECLARED` in the console's `state/surfaces.ts`, `SURFACES` in its `lib/surfaces.ts` (the nav), and
+`SPA_SURFACES` in the orchestrator's `server.ts` — the last because a COLD LOAD of `/reports` reaches
+the server first, and a surface the nav offers that the server does not serve is a link that 404s on a
+reload and only on a reload. Each list has a test asserting a count, so adding a surface fails on every
+side rather than silently on none. `GET /api/reports` is the fourth.
+
+### 19. The bug the second arrangement shipped
+
+`formatAddress` tested `address.tab === null` before appending the segment, so a caller that passed no
+tab at all got `undefined` through the strict comparison and produced `/runs/<id>/undefined`. Two
+callers did exactly that — the Workflows surface, which is how starting a run navigates to it, and the
+Runs surface's own row click. Both ways into the Runs surface were broken, not just a test.
+
+Three things are worth keeping from it. The comparison is truthiness now, and both callers pass their
+field explicitly, because one line should not be the only thing between a user and a dead URL. The
+`tab` field no longer exists at all, which is the better fix — the arrangement that needed it was
+replaced. And the reason it was not caught: `svelte-check` was being run from the repository root with
+no `--tsconfig`, which is a different and much smaller project than the one `pnpm typecheck` uses. The
+correct invocation catches it in a `.svelte` file exactly as `tsc` does in a `.ts` one. There is no
+tooling gap; there was a wrong command.
 
 ### 16. No syntax highlighting, because the markers are the half that carries meaning
 

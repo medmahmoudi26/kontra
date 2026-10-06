@@ -51,6 +51,15 @@ import { runIdOf } from './runId';
 
 export interface ReportRouteDeps {
   reports: ReportStore;
+  /**
+   * The caller-workflow identity of a page of Runs (`data/runWorkflows.ts`).
+   *
+   * ENRICHMENT, NOT A JOIN. The identity lives in a different store in the same family, coupled to a
+   * report by a run id and by nothing else; joining their tables in SQL would couple them in a way
+   * neither owns. Optional, and a Run with no recorded identity simply has no workflow name — the
+   * same degradation `withDatasetNames` makes, and for the same reason: a listing must still list.
+   */
+  identities?: (runIds: readonly string[]) => Promise<Array<{ runId: string; workflow: string }>>;
   /** The renderer. Injected so a test can assert a preview without a worker or an object store. */
   render: (request: { template: string; context: Record<string, unknown> }) => Promise<RenderResponse>;
   /**
@@ -99,6 +108,48 @@ export function registerReportRoutes(app: FastifyInstance, deps: ReportRouteDeps
     const n = Number.parseInt(raw, 10);
     return Number.isFinite(n) && n > 0 ? n : undefined;
   };
+
+  /**
+   * EVERY RUN THAT HAS A REPORT, newest first — the Reports surface's listing.
+   *
+   * NOT UNDER `/api/runs`, because it is not about one Run: it is the question "what has this control
+   * plane found", which is the question the surface exists to answer. A path under `/api/runs` would
+   * also inherit that prefix's `runToken` in the generated spec, which is the wrong gate.
+   */
+  app.get('/api/reports', async (req, reply) => {
+    if (!admit(req, reply)) return undefined;
+    const raw = (req.query as { limit?: string } | undefined)?.limit;
+    const limit = raw ? Math.min(Number(raw) || 200, 500) : undefined;
+    try {
+      const rows = await reports.listReports({ ...(limit ? { limit } : {}) });
+      if (rows.length === 0) return { reports: [] };
+      const ids = rows.map((r) => r.runId);
+      const detail = await reports.listDetail(ids);
+      const names = new Map<string, string>();
+      if (deps.identities) {
+        // BEST EFFORT. A failure here costs every row its workflow name and costs the listing nothing
+        // else, so it is caught rather than allowed to 502 a page that is otherwise complete.
+        try {
+          for (const row of await deps.identities(ids)) names.set(row.runId, row.workflow);
+        } catch {
+          // The rows below simply carry no workflow name.
+        }
+      }
+      return {
+        reports: rows.map((r) => {
+          const extra = detail.get(r.runId);
+          return {
+            ...r,
+            versions: extra?.versions ?? 1,
+            ...(extra?.workspace ? { workspace: extra.workspace } : {}),
+            ...(names.get(r.runId) ? { workflow: names.get(r.runId) } : {}),
+          };
+        }),
+      };
+    } catch (err) {
+      return reply.code(502).send({ error: `could not list reports: ${errMessage(err)}` });
+    }
+  });
 
   // --- the report ------------------------------------------------------------------------------
 

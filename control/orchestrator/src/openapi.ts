@@ -79,6 +79,7 @@ const GATES: ReadonlyArray<{
      verifies that paths documented as OPEN are open, never that a documented gate is the real one.
      The same privilege as the query workbench and the log surface, for the same stated reason: a report
      is a rendering of a Run's output, which "routinely contains targets and sometimes secrets". */
+  { prefix: '/api/reports', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
   { prefix: '/api/runs/:runId/report', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
   { prefix: '/api/runs/:runId/feedback', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },
   { prefix: '/api/feedback', scheme: 'exploreToken', vars: EXPLORE_TOKEN_VARS },

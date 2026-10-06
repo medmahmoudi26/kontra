@@ -56,6 +56,7 @@ async function build(opts: { previewCap?: { max?: number; windowMs?: number } } 
   app = Fastify();
   registerReportRoutes(app, {
     reports: store,
+    identities: async (ids) => ids.map((runId) => ({ runId, workflow: 'enrich' })),
     render: async (request) => {
       rendered.push({ template: request.template });
       if (request.template.includes('BOOM')) return { ok: false, error: 'undefined variable: nope' };
@@ -104,6 +105,7 @@ afterEach(async () => {
 
 describe('the gate', () => {
   const paths: Array<[string, string]> = [
+    ['GET', '/api/reports'],
     ['GET', `/api/runs/${RUN}/report`],
     ['GET', `/api/runs/${RUN}/report/versions`],
     ['POST', `/api/runs/${RUN}/report/render`],
@@ -464,5 +466,89 @@ describe('ACCEPTANCE 19: feedback', () => {
 
   it('404s for a note that never existed', async () => {
     expect((await app.inject({ method: 'PATCH', url: '/api/feedback/nope', headers: explore, payload: { body: 'x' } })).statusCode).toBe(404);
+  });
+});
+
+describe('the Reports listing', () => {
+  it('is empty, not an error, when nothing has been rendered', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/reports', headers: explore });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().reports).toEqual([]);
+  });
+
+  it('lists the NEWEST version of each run, newest first, with a version count', async () => {
+    await seed();
+    await store.declareVersion({
+      runId: RUN,
+      status: 'ok',
+      templateHash: 'sha256:aaa',
+      renderKey: 'k2',
+      snapshotJson: '{}',
+      renderedBy: 'mohamed',
+      at: 2_000,
+    });
+    await store.declareVersion({
+      runId: 'other-1',
+      status: 'error',
+      templateHash: 'h',
+      renderKey: 'k',
+      errorText: 'boom',
+      renderedBy: 'sweep',
+      at: 3_000,
+    });
+    const rows = (await app.inject({ method: 'GET', url: '/api/reports', headers: explore })).json()
+      .reports as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(2);
+    // Newest first by rendered_at.
+    expect(rows[0]!.runId).toBe('other-1');
+    expect(rows[0]!.status).toBe('error');
+    // ONE ROW PER RUN even though this one has two versions, and the count says so.
+    expect(rows[1]!.runId).toBe(RUN);
+    expect(rows[1]!.version).toBe(2);
+    expect(rows[1]!.versions).toBe(2);
+    expect(rows[1]!.renderedBy).toBe('mohamed');
+  });
+
+  it('carries the workflow name the identity store knows, and the workspace the template pinned', async () => {
+    await store.pinTemplate({
+      runId: RUN,
+      templateHash: 'h',
+      templateText: 't',
+      source: 'workspace',
+      workspace: 'demo',
+    });
+    await seed();
+    const rows = (await app.inject({ method: 'GET', url: '/api/reports', headers: explore })).json()
+      .reports as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({ workflow: 'enrich', workspace: 'demo' });
+  });
+
+  it('still lists when the identity lookup fails, because a listing must list', async () => {
+    await app.close();
+    store = new ReportStore({ url: ':memory:' });
+    await store.ensureSchema();
+    app = Fastify();
+    registerReportRoutes(app, {
+      reports: store,
+      identities: async () => {
+        throw new Error('the identity store is down');
+      },
+      render: async () => ({ ok: true, snapshot: SNAPSHOT, bytes: 1, secrets: [] }),
+      context: async () => ({}),
+      now: () => 1,
+    });
+    await app.ready();
+    await seed();
+    const res = await app.inject({ method: 'GET', url: '/api/reports', headers: explore });
+    expect(res.statusCode).toBe(200);
+    const rows = res.json().reports as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.workflow).toBeUndefined();
+  });
+
+  it('caps the page rather than trusting a limit', async () => {
+    await seed();
+    const res = await app.inject({ method: 'GET', url: '/api/reports?limit=99999', headers: explore });
+    expect(res.statusCode).toBe(200);
   });
 });
