@@ -80,7 +80,7 @@ x-orchestrator-env: &orchestrator-env
   #
   # The VPC address is reachable from every container AND from a Droplet in the Controller's VPC,
   # so one value is correct for both the manifest read here and the blob URL a Machine is handed.
-  KONTRA_REGISTRY: ${KONTRA_REGISTRY:-${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
+  KONTRA_REGISTRY: ${KONTRA_REGISTRY:-127.0.0.1:${KONTRA_REGISTRY_PORT:-5000}}
   KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
   KONTRA_CONTROLLER: orchestrator-api
   KONTRA_DUCKLAKE_CATALOG: postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra
@@ -137,8 +137,8 @@ x-orchestrator-env: &orchestrator-env
   # Both addresses: `127.0.0.1:5000` is how this host's own tooling spells the registry, and the
   # VPC address is how a fleet Machine does. A Bundle trusted under one spelling and fetched under
   # the other is a Bundle that is refused on the Machine, after the provision has been paid for.
-  KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:5000,${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
-  KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:5000,${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
+  KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:${KONTRA_REGISTRY_PORT:-5000}}
+  KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:${KONTRA_REGISTRY_PORT:-5000}}
   # THE READ TOKEN FOR THE TWO SURFACES THAT READ A RUN'S CONTENT: the query workbench and the logs
   # proxy (ADR 0050 §1, issue #17). Both are `checkBearer` — FAIL-CLOSED — so with this unset they
   # answer 503 and say which variable turns them on, rather than opening. That is why it is passed
@@ -339,7 +339,6 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
       # VPC ALSO, so a fleet Machine can reach this: temporal — the Worker polls its task queue.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
     healthcheck:
       test: ["CMD", "temporal", "operator", "cluster", "health"]
       interval: 10s
@@ -357,7 +356,6 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_KV_PORT:-6379}:6379"
       # VPC ALSO, so a fleet Machine can reach this: redis   — the Session/state store.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_KV_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -373,7 +371,6 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"
       # VPC ALSO, so a fleet Machine can reach this: registry — where a Machine fetches its Bundle layer.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}:5000"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
       interval: 5s
@@ -409,7 +406,6 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_S3_PORT:-8333}:8333"
       # VPC ALSO, so a fleet Machine can reach this: seaweed — the S3 object store units are written to.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_S3_PORT:-8333}:8333"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null && wget -q -O- http://127.0.0.1:8333/ >/dev/null"]
       interval: 5s
@@ -424,7 +420,7 @@ services:
   # every 60 seconds, for the whole life of the Fleet:
   #
   #   couldn't send a block with size 575 bytes to "1:secret-url":
-  #     Post "http://10.124.0.2:8428/api/v1/write": dial tcp4 10.124.0.2:8428: connect: connection refused
+  #     Post "http://<controller>:8428/api/v1/write": dial tcp4 <controller>:8428: connect: connection refused
   #
   # Every fleet metric ever collected was discarded. This is the smallest change that turns a
   # silently-broken pipeline into a working one.
@@ -711,7 +707,6 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"
       # VPC ALSO, so a fleet Machine can reach this: api     — the Controller a Machine registers with.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_API_PORT:-8088}:8088"
     healthcheck:
       test:
         [
@@ -781,19 +776,14 @@ services:
       # services are published there alongside loopback (see each `ports:` block). NOT the public
       # address: a published Docker port is DNATed in PREROUTING, so eth0 would put Temporal, Redis
       # and the object store on the internet.
-      KONTRA_CONTROLLER: ${KONTRA_VPC_BIND:-10.124.0.2}
-      KONTRA_REGISTRY: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
       # The Bundle is unsigned and served from the Controller's own registry, so the Machine has to
       # be told that address is trusted — under the name it will actually see it by.
-      KONTRA_TRUST_REGISTRIES: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
-      KONTRA_TRUST_UNSIGNED: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
     volumes:
       - kontra-home:/var/lib/kontra:ro
       - secrets-store:/var/lib/kontra-secrets
       - pulumi-state:/data
       # READ-ONLY, and only on this role. `orchestrator-infra` is the only process that converges a
       # stack, which is the same reason it is the only one holding the cloud credential.
-      - ${KONTRA_SSH_KEY_HOST:-/root/.ssh/axiom_rsa}:/var/lib/kontra-ssh/fleet_key:ro
       # THE WORKSPACE, READ-ONLY — because `serve` runs HERE now and could not see the code.
       #
       # `serveDevWorkflow` moved the serve verb off the API and onto this role, since starting a
@@ -825,69 +815,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-
-  # ── THE CAMPAIGN'S WORKFLOW WORKER, AS A CONTAINER SO ITS LOGS ARE SHIPPED ──────────────────
-  #
-  # `kontra workflow serve --tmux` runs the worker on the HOST, and `logship` selects what to
-  # follow by container LABEL — so a host-served workflow has no container, no label, and its
-  # `workflow.logger` lines reach VictoriaLogs through nothing at all. The run page's log rail is
-  # then empty for the whole campaign, which reads as "this run said nothing" rather than "nobody
-  # is shipping what it said". Measured on campaign-1790562159: /api/logs/query answered with an
-  # empty result set, not an error.
-  #
-  # Running it here fixes that by construction: one labelled container, stdout followed like every
-  # other Worker's. It also puts the worker on the compose network, which is why the addresses
-  # below are service names rather than the host's published ports.
-  campaign-worker:
-    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
-    container_name: kontra-campaign-worker
-    restart: unless-stopped
-    labels:
-      # THE ONE LINE THAT MAKES THE LOG RAIL WORK — see control/images/logship.sh.
-      kontra.logs: "true"
-    depends_on:
-      temporal:
-        condition: service_healthy
-      orchestrator-api:
-        condition: service_healthy
-    environment:
-      <<: *orchestrator-env
-      # The claim-check codec needs a reachable object store or results over 128 KiB do not decode.
-      KONTRA_S3_ENDPOINT: http://seaweed:8333
-      # ── THE LINE THAT PUTS THIS RUN ON THE RUN PAGE'S LOG RAIL ────────────────────────────
-      #
-      # `runtime/python/internals/logs.py` is OFF unless asked, and the reason is good: a developer
-      # watching a tmux pane wants the human form. A CONTAINER is the other case — nobody reads its
-      # stdout directly, `logship` does, and its parser has a dedicated branch for kontra's own JSON
-      # ("the emitter already stamped the run, the worker, the level and the time"). Without this
-      # the worker ships readable text whose workflow id is buried in a Python dict repr inside the
-      # message, so `run_id:"campaign-…"` — the query the console's rail runs — matches nothing and
-      # the rail is empty for the whole campaign.
-      KONTRA_LOG_FORMAT: json
-    volumes:
-      # THE SAME PATH INSIDE AND OUT, exactly as the other roles mount it: a Source id is
-      # `at:<absolute path>`, so the two sides must agree on what that path means.
-      - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}:ro
-      # READ-WRITE, unlike the roles above. `kontra workflow serve` writes `runtime.env` here on
-      # start — the addresses it resolved, so a pane or a re-exec sees the same ones — and a `:ro`
-      # mount makes the worker exit before it registers anything:
-      #   error: open /var/lib/kontra/runtime.env: read-only file system
-      - kontra-home:/var/lib/kontra
-      # THE CHECKOUT'S RUNTIME OVER THE IMAGE'S, read-only. The image carries a built SDK at
-      # /opt/kontra, so a fix to `runtime/python` in this checkout is invisible to the worker until
-      # the image is rebuilt — and a log-plumbing fix that needs an image rebuild to take effect is
-      # one nobody applies mid-campaign. Mounting the source keeps the worker on the code being
-      # reviewed. Drop this line once the image is rebuilt from the same tree.
-      - ./runtime/python:/opt/kontra/runtime/python:ro
-      # AND THE SDK, which is a SEPARATE tree from the runtime and was the half I missed. The
-      # workflow-facing API — `catalog.Dataset`, `fleet` — lives here, so mounting only
-      # `runtime/python` left the worker on the image's `catalog.py` and every metric read failed
-      # with `DatasetHandle.batches() got an unexpected keyword argument 'via'`, swallowed into a
-      # warning and a zero. Both trees or neither.
-      - ./sdk/python:/opt/kontra/sdk/python:ro
-    working_dir: /root/oss/kontra
-    command: ["kontra", "workflow", "serve", "workspaces/bugbounty/workflows/campaign"]
-
   orchestrator-probe:
     image: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
     container_name: kontra-probe
