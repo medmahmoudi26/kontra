@@ -142,3 +142,49 @@ describe('the state store refuses rather than forgetting', () => {
     expect(redis().join(' ')).toContain('redis-server');
   });
 });
+
+/**
+ * THE VPC OVERLAY MUST NOT PUBLISH AN UNAUTHENTICATED STATE STORE.
+ *
+ * In `docker-compose.yml` Redis publishes on loopback and loopback IS the control (ADR 0056).
+ * `docker-compose.vpc.yml` publishes it to the fleet network so a Machine can reach it — and that
+ * store holds every actor's commit map and every `global_state` entry. Without a password, anything
+ * on that VPC can rewrite a running Run's commit map.
+ *
+ * `:?` rather than a default on purpose: a default password is the one an attacker tries first, and
+ * Redis accepts a BLANK `requirepass` as "no password" — so the failure mode of forgetting would be
+ * exactly the exposure.
+ */
+describe('the VPC overlay authenticates the state store', () => {
+  const OVERLAY = join(__dirname, '..', '..', '..', 'docker-compose.vpc.yml');
+  const overlay = (): string => readFileSync(OVERLAY, 'utf8');
+
+  it('sets requirepass on redis', () => {
+    expect(overlay()).toContain('--requirepass');
+  });
+
+  it('takes the password from a variable with NO default', () => {
+    // `${KONTRA_REDIS_PASSWORD:?…}` refuses to start and names the variable. `:-` would silently
+    // substitute, and a blank substitution is an open store.
+    expect(overlay()).toMatch(/KONTRA_REDIS_PASSWORD:\?/);
+    expect(overlay()).not.toMatch(/KONTRA_REDIS_PASSWORD:-/);
+  });
+
+  it('hands the same password to every role that reads the store', () => {
+    // A role that does not get it fails with NOAUTH on its first state access, which names neither
+    // the file nor the variable. Three roles talk to Redis: the API, the CLI and infra.
+    const uses = overlay().match(/KONTRA_REDIS_PASSWORD/g) ?? [];
+    expect(uses.length).toBeGreaterThanOrEqual(4); // one on redis itself + one per role
+  });
+
+  /** NON-VACUOUS: a path that read nothing would pass all three assertions above. */
+  it('is reading the overlay and not an empty string', () => {
+    expect(overlay()).toContain('KONTRA_VPC_BIND');
+    expect(overlay().length).toBeGreaterThan(500);
+  });
+
+  it('leaves the default stack without a password requirement', () => {
+    // The whole point of the split: a bare `docker compose up` must still work with no `.env`.
+    expect(yaml()).not.toContain('requirepass');
+  });
+});

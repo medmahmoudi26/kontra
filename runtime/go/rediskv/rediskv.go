@@ -76,7 +76,13 @@ func FromEnv() *EtagKV {
 	if !strings.Contains(hostPort, ":") {
 		hostPort += ":6379"
 	}
-	return New(redis.NewClient(&redis.Options{Addr: hostPort}))
+	// THE PASSWORD IS OPTIONAL, AND WHERE IT MATTERS IS THE VPC. On the default stack Redis
+	// publishes on loopback and loopback IS the control (ADR 0056). The VPC overlay publishes it to
+	// the fleet network so a Machine can reach the state store — and at that point anything on that
+	// VPC can read every actor's state with no credential. `docker-compose.vpc.yml` sets
+	// `requirepass` and this variable together. Unset means no auth, which is today's behaviour and
+	// what the embedded appliance store expects.
+	return New(redis.NewClient(&redis.Options{Addr: hostPort, Password: os.Getenv("KONTRA_REDIS_PASSWORD")}))
 }
 
 // Get returns (data, etag). data is nil when absent; etag is the read version ("" if none).

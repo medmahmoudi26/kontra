@@ -25,7 +25,37 @@ services:
     ports:
       - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address, e.g. 10.124.0.2}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
 
+  # REDIS ON THE VPC NEEDS A PASSWORD, AND THAT IS THE WHOLE REASON THIS BLOCK IS LONGER THAN THE
+  # OTHERS.
+  #
+  # In the main file Redis publishes on loopback, and loopback IS the control (ADR 0056). Publishing
+  # it here hands the state store to every host on the private network — and it holds every actor's
+  # commit map and every `global_state` entry, with no credential of any kind. "Anything on this VPC
+  # can rewrite a running Run's commit map" is not a posture; it is the absence of one.
+  #
+  # `:?` and not a default: a default password is the one an attacker tries first, and a blank
+  # `requirepass` is accepted by Redis as "no password" — so the failure mode of forgetting is
+  # exactly the exposure. Generate one per controller, like the fleet key:
+  #
+  #   KONTRA_REDIS_PASSWORD=$(openssl rand -hex 32)
+  #
+  # EVERY CLIENT MUST GET THE SAME VALUE, which is why it is in this file's `environment:` blocks
+  # too — `runtime/{python/internals,go}/{redis_kv,rediskv}`, the two `statekv`s and the
+  # orchestrator's `stateStore.ts` all read `KONTRA_REDIS_PASSWORD` and send AUTH only when it is
+  # set. A worker that does not get it fails on its first state write, loudly.
   redis:
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - always
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${KONTRA_REDIS_PASSWORD:?set KONTRA_REDIS_PASSWORD — publishing Redis on a VPC with no password hands every actor's state to the network}
     ports:
       - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_KV_PORT:-6379}:6379"
 
@@ -37,14 +67,24 @@ services:
     ports:
       - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_S3_PORT:-8333}:8333"
 
+  # THE PASSWORD GOES TO EVERY ROLE THAT READS THE STATE STORE, AND THE LIST IS EXPLICIT. A role
+  # that does not get it cannot authenticate, and the symptom is a NOAUTH error on its first state
+  # access — which names neither this file nor the variable.
   orchestrator-api:
     ports:
       - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_API_PORT:-8088}:8088"
+    environment:
+      KONTRA_REDIS_PASSWORD: ${KONTRA_REDIS_PASSWORD:?set KONTRA_REDIS_PASSWORD}
+
+  cli:
+    environment:
+      KONTRA_REDIS_PASSWORD: ${KONTRA_REDIS_PASSWORD:?set KONTRA_REDIS_PASSWORD}
 
   # THE ADDRESSES A MACHINE IS TOLD TO CALL HOME ON, and the key it is reached with. Both belong to
   # this role alone — `orchestrator-infra` is the only process that converges a stack.
   orchestrator-infra:
     environment:
+      KONTRA_REDIS_PASSWORD: ${KONTRA_REDIS_PASSWORD:?set KONTRA_REDIS_PASSWORD}
       KONTRA_CONTROLLER: ${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}
       KONTRA_REGISTRY: ${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND}:${KONTRA_REGISTRY_PORT:-5000}
       KONTRA_TRUST_REGISTRIES: ${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND}:${KONTRA_REGISTRY_PORT:-5000}

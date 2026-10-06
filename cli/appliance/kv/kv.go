@@ -573,6 +573,21 @@ func (cn *conn) dispatch(args []string) bool {
 		default:
 			cn.writeError("ERR wrong number of arguments for 'ping' command")
 		}
+	// AUTH, AND THIS STORE HAS NO PASSWORD TO CHECK AGAINST.
+	//
+	// It exists so the failure is Redis's own sentence rather than this file's "unknown command".
+	// A client configured with `KONTRA_REDIS_PASSWORD` sends AUTH to whatever it is pointed at, and
+	// an operator who points such a client at the appliance has made a configuration mistake with
+	// one cause and one fix — the embedded store is reachable only from the process that embeds it,
+	// so it needs no credential and `requirepass` belongs to the Compose/VPC path.
+	//
+	// Real Redis answers exactly this when no password is set, which is what makes the message
+	// searchable.
+	case "AUTH":
+		cn.writeError("ERR Client sent AUTH, but no password is set — the kontra appliance's " +
+			"embedded key-value store is reachable only from the process that embeds it and has no " +
+			"credential. Unset KONTRA_REDIS_PASSWORD, or point this client at the Compose Redis, " +
+			"which is where requirepass lives (docker-compose.vpc.yml)")
 	case "QUIT":
 		cn.writeSimple("OK")
 		return true
@@ -618,7 +633,7 @@ func (cn *conn) dispatch(args []string) bool {
 // too — so "what does this thing implement" has one answer in one place.
 var supportedCommands = []string{
 	"HGET", "HGETALL", "HMGET", "HSET", "HDEL", "HEXISTS", "DEL", "EXISTS", "TYPE", "EXPIRE",
-	"TTL", "SCAN", "EVAL", "EVALSHA", "SCRIPT LOAD", "HELLO", "PING", "QUIT", "SELECT",
+	"TTL", "SCAN", "EVAL", "EVALSHA", "SCRIPT LOAD", "HELLO", "PING", "AUTH", "QUIT", "SELECT",
 	"CLIENT", "INFO",
 }
 
