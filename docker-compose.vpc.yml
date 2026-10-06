@@ -59,6 +59,19 @@ services:
     ports:
       - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_KV_PORT:-6379}:6379"
 
+  # THE REGISTRY GETS CREDENTIALS HERE, BESIDE THE PUBLISH THAT CREATES THE EXPOSURE — the same
+  # argument as Redis above. On loopback an anonymous registry is what `registry:2` always was. On a
+  # VPC it is a write-anything store for whatever else is on that network, and the thing it would be
+  # handing out is the image a Machine is about to run.
+  #
+  # `:?` and not `:-`: the renderer treats blank as "anonymous", so a default would make forgetting
+  # indistinguishable from choosing. All three, because it refuses a partial set.
+  registry-config:
+    environment:
+      KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:?set KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD — publishing the registry on a VPC with no credential lets the network replace the image a Machine runs}
+      KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:?set KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD}
+      KONTRA_REGISTRY_PULL_PASSWORD: ${KONTRA_REGISTRY_PULL_PASSWORD:?set KONTRA_REGISTRY_PULL_PASSWORD}
+
   registry:
     ports:
       - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_REGISTRY_PORT:-5000}:5000"

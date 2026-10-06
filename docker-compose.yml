@@ -385,17 +385,184 @@ services:
       timeout: 3s
       retries: 10
 
+  # THE CONFIG, THE HTPASSWD AND A HEALTHCHECK BINARY, written by a one-shot — the same argument
+  # `temporal-dynamicconfig` and `ducklake-init` already make: the install stays three paths on disk
+  # (`scripts/assert-install-is-self-contained.py` refuses any other bind mount), so a registry that
+  # needs a config file gets it from a volume rather than from the repo.
+  #
+  # IT RENDERS, IT DOES NOT SELECT. Auth is on when the three passwords are set and off when none
+  # are, because `registry:2` had no auth and loopback is what protected it (the file header). A
+  # config with `http.auth` and an EMPTY htpasswd answers 401 to everything, so "half configured"
+  # must be impossible rather than merely discouraged — hence the refusal below.
+  registry-config:
+    image: busybox:1.36
+    container_name: kontra-registry-config
+    restart: "no"
+    volumes:
+      - registry-config:/out
+    environment:
+      KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}
+      KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}
+      KONTRA_REGISTRY_PULL_PASSWORD: ${KONTRA_REGISTRY_PULL_PASSWORD:-}
+      KONTRA_REGISTRY_CVE: ${KONTRA_REGISTRY_CVE:-}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        set +u; a="$${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}"; r="$${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}"
+        p="$${KONTRA_REGISTRY_PULL_PASSWORD:-}"; cve="$${KONTRA_REGISTRY_CVE:-}"; set -u
+        set_count=0
+        [ -n "$$a" ] && set_count=$$((set_count+1)) || true
+        [ -n "$$r" ] && set_count=$$((set_count+1)) || true
+        [ -n "$$p" ] && set_count=$$((set_count+1)) || true
+        if [ "$$set_count" -ne 0 ] && [ "$$set_count" -ne 3 ]; then
+          echo "refusing: $$set_count of 3 registry passwords are set." >&2
+          echo "Set all of KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD, KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD" >&2
+          echo "and KONTRA_REGISTRY_PULL_PASSWORD, or none. A registry with auth enabled and users" >&2
+          echo "missing answers 401 to every pull, which reads as a broken install, not a locked one." >&2
+          exit 1
+        fi
+        # The healthcheck binary. zot's image carries exactly ONE executable and no shell, so the
+        # probe has to be carried in; busybox is already this install's one-shot image.
+        cp /bin/busybox /out/busybox
+        # THREE HEREDOCS, because the http block is the only part that varies and a config assembled
+        # by `sed` is a config nobody can review.
+        #
+        # `^[0-9]+$$` reaches the file as `^[0-9]+$`: compose interpolates `command:` the same way it
+        # interpolates `ducklake-init`'s `content:`, which is why that one spells `$$POSTGRES_USER`.
+        # `\\.` reaches it as `\.`, and that pair is load-bearing — `\.` is not a legal JSON escape
+        # (JSON allows only \" \\ \/ \b \f \n \r \t \uXXXX), so a single backslash here makes zot
+        # answer "invalid config file" and never bind its port.
+        cat > /out/config.json << 'EOF'
+        {
+          "distSpecVersion": "1.1.1",
+          "storage": {
+            "rootDirectory": "/var/lib/zot",
+            "dedupe": true,
+            "gc": true,
+            "gcDelay": "1h",
+            "gcInterval": "6h",
+            "retention": {
+              "dryRun": false,
+              "delay": "24h",
+              "policies": [
+                { "repositories": ["actors/*-cache"], "deleteUntagged": true,
+                  "keepTags": [{ "mostRecentlyPushedCount": 1 }] },
+                { "repositories": ["actors/**"], "deleteUntagged": true,
+                  "keepTags": [{ "patterns": ["^inuse-"] }, { "mostRecentlyPushedCount": 5 }] },
+                { "repositories": ["kontra-runtimes/**"], "deleteUntagged": true,
+                  "keepTags": [{ "patterns": ["^[0-9]+$$"] },
+                               { "patterns": ["^[0-9]+\\.[0-9]+\\.[0-9]+$$"], "mostRecentlyPushedCount": 3 }] },
+                { "repositories": ["**"], "deleteUntagged": true, "keepTags": [{ "patterns": [".*"] }] }
+              ]
+            }
+          },
+        EOF
+        if [ "$$set_count" -eq 3 ]; then
+          # bcrypt is what zot's htpasswd loader accepts and busybox cannot produce one, so the
+          # plaintext goes to `registry-htpasswd` and is deleted there.
+          printf '%s\n%s\n%s\n' "push-actors:$$a" "push-runtimes:$$r" "pull:$$p" > /out/users
+          cat >> /out/config.json << 'EOF'
+          "http": {
+            "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"],
+            "auth": { "htpasswd": { "path": "/etc/zot/htpasswd" }, "failDelay": 1 },
+            "accessControl": {
+              "repositories": {
+                "actors/**": { "defaultPolicy": [], "policies": [
+                  { "users": ["push-actors"], "actions": ["read","create","update","delete","detectManifestCollision"] },
+                  { "users": ["pull"], "actions": ["read"] }
+                ] },
+                "kontra-runtimes/**": { "defaultPolicy": [], "policies": [
+                  { "users": ["push-runtimes"], "actions": ["read","create","update","delete"] },
+                  { "users": ["pull","push-actors"], "actions": ["read"] }
+                ] },
+                "**": { "defaultPolicy": [], "policies": [
+                  { "users": ["pull","push-actors","push-runtimes"], "actions": ["read"] }
+                ] }
+              },
+              "adminPolicy": { "users": ["push-runtimes"], "actions": ["read","create","update","delete"] }
+            }
+          },
+        EOF
+        else
+          rm -f /out/users
+          cat >> /out/config.json << 'EOF'
+          "http": { "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"] },
+        EOF
+        fi
+        # CVE scanning downloads a vulnerability database, so it is opt-in (spec §6.1). This heredoc
+        # is UNQUOTED so `$$search` expands; it carries no regex, so nothing else can expand by accident.
+        search='{ "enable": true }'
+        [ -n "$$cve" ] && search='{ "enable": true, "cve": { "updateInterval": "24h" } }' || true
+        cat >> /out/config.json << EOF
+          "log": { "level": "info" },
+          "extensions": {
+            "search": $$search,
+            "scrub": { "enable": true, "interval": "24h" },
+            "trust": { "enable": true, "cosign": true }
+          }
+        }
+        EOF
+        auth=off; [ "$$set_count" -eq 3 ] && auth=on || true
+        echo "registry config rendered (auth=$$auth cve=$${cve:-off})"
+
+  # bcrypt needs a hasher busybox does not have. `htpasswd -nbB` from the apache image is the
+  # smallest thing that has one, and its output is accepted by zot (measured).
+  registry-htpasswd:
+    image: httpd:2.4-alpine
+    container_name: kontra-registry-htpasswd
+    restart: "no"
+    depends_on:
+      registry-config:
+        condition: service_completed_successfully
+    volumes:
+      - registry-config:/out
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ ! -f /out/users ]; then rm -f /out/htpasswd; echo "no users: anonymous registry"; exit 0; fi
+        : > /out/htpasswd
+        while IFS=: read -r u p; do
+          [ -n "$$u" ] || continue
+          htpasswd -nbB "$$u" "$$p" >> /out/htpasswd
+        done < /out/users
+        rm -f /out/users
+        # `grep -c .` and not `wc -l`: `htpasswd -nbB` emits a trailing blank line per call, so a
+        # line count says six where three users were written.
+        echo "htpasswd written for $$(grep -c . /out/htpasswd) users"
+
+  # THE SERVICE NAME STAYS `registry`, AND THAT IS NOT COSMETIC.
+  # `control/orchestrator/src/images.ts:62` hardcodes `http://registry:5000` as the HTTP spelling —
+  # `KONTRA_REGISTRY_URL`, the variable that would redirect it, is set by nothing in any compose
+  # file or env file. Renaming this service silently empties `/api/images`. The name is also the
+  # network alias `parity.py` requires, the key in its SERVICES map, and what both `depends_on`
+  # edges and `docker-compose.vpc.yml` name.
+  #
+  # PINNED, where `registry:2` floated (Pulumi.yaml:376 called it "the ONE unpinned third-party
+  # image"). A literal reference is also invisible to `publish.yml`'s `${KONTRA_*IMAGE:-…}` grep,
+  # which is what keeps this out of the images it believes it owns and must know how to build.
   registry:
-    image: registry:2
+    image: ghcr.io/project-zot/zot-linux-amd64:v2.1.21
     container_name: kontra-registry
     restart: unless-stopped
+    depends_on:
+      registry-htpasswd:
+        condition: service_completed_successfully
+    command: ["serve", "/etc/zot/config.json"]
     volumes:
-      - registry-data:/var/lib/registry
+      - zot-data:/var/lib/zot
+      - registry-config:/etc/zot:ro
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"
       # VPC ALSO, so a fleet Machine can reach this: registry — where a Machine fetches its Bundle layer.
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
+      # NOT `/v2/`, WHICH IS THE OLD TARGET AND ANSWERS 401 ONCE AUTH IS ON — a healthcheck that
+      # fails under auth means `orchestrator-api` and `cli` never start, because both gate on
+      # `registry: condition: service_healthy`. `/v2/_zot/ext/mgmt` needs no credential.
+      test: ["CMD", "/etc/zot/busybox", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/_zot/ext/mgmt"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -993,7 +1160,19 @@ configs:
 volumes:
   postgres-data:
   redis-data:
-  registry-data:
+  # `registry-data` IS DELIBERATELY NOT LISTED HERE, and the omission is the safe direction.
+  #
+  # It is `registry:2`'s store, and zot's on-disk layout is not the same one — pointing zot at it
+  # would present an empty registry sitting on top of the old bytes. So zot gets `zot-data` and the
+  # old volume is left where it is for `kontra registry migrate` to read, after which the operator
+  # removes it (spec §6.3).
+  #
+  # Compose DROPS a top-level volume no service mounts (measured: it disappears from
+  # `docker compose config`), so declaring it would not protect it anyway — and being outside the
+  # project is what keeps `docker compose down -v` from taking the only copy of every actor image
+  # that has not been migrated yet.
+  zot-data:
+  registry-config:
   seaweed-data:
   victoriametrics-data:
   victorialogs-data:
