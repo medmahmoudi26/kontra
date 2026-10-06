@@ -58,6 +58,7 @@ import {
 } from '@duckdb/node-api';
 
 import type { ObjectStore } from '../codec/objectStore';
+import { assertSingleRead, type Verdict } from './readonlySql';
 import { listDatasets, schemaOf, type DatasetColumn, type DatasetInfo } from './datasets';
 import {
   LAKE,
@@ -596,13 +597,40 @@ function friendlyError(err: unknown): Error {
  * already ends in its own LIMIT still pages correctly. A query with no ORDER BY has no defined
  * row order, so paging it is only as stable as the query itself — the workbench says so.
  */
+/**
+ * The one place operator SQL is admitted — trim, then judge.
+ *
+ * EVERY SINK BELOW COMPOSES THIS TEXT WITH SQL OF ITS OWN (`SELECT * FROM (<text>) LIMIT n`), and
+ * that composition is the vulnerability: the text can close the parenthesis and open a second
+ * statement, which is how `COPY … TO 's3://elsewhere'` reached a connection holding the install's
+ * credentials. `assertSingleRead` refuses a second statement outright, so the breakout has nowhere
+ * to live regardless of what the wrapper happens to append today.
+ *
+ * `readonlySql` existed for a Postgres-wire front door that was never built, and until this function
+ * its only importer was its own test.
+ */
+function readOnlyText(sql: string): string {
+  const text = sql.trim().replace(/;\s*$/, '');
+  if (!text) throw new Error('no SQL to run');
+  const verdict = assertSingleRead(text);
+  if (!verdict.allowed) throw new ReadOnlyRefusal(verdict);
+  return text;
+}
+
+/** A refusal from the gate, distinguishable from a DuckDB error so a route can answer 400. */
+export class ReadOnlyRefusal extends Error {
+  constructor(readonly verdict: Verdict) {
+    super(verdict.reason);
+    this.name = 'ReadOnlyRefusal';
+  }
+}
+
 export async function runQuery(
   store: ObjectStore,
   sql: string,
   opts: { limit?: number; offset?: number } & EngineOptions = {}
 ): Promise<QueryResult> {
-  const text = sql.trim().replace(/;\s*$/, '');
-  if (!text) throw new Error('no SQL to run');
+  const text = readOnlyText(sql);
   if (!lakeEnabled(store, opts.lake ?? {})) throw new Error('no lake configured');
 
   const cfg = resolveLakeConfig(store, opts.lake ?? {});
@@ -683,8 +711,7 @@ export async function streamQuery(
   opts: { offset?: number } & EngineOptions,
   sink: QueryStreamSink
 ): Promise<{ rows: number; elapsedMs: number }> {
-  const text = sql.trim().replace(/;\s*$/, '');
-  if (!text) throw new Error('no SQL to run');
+  const text = readOnlyText(sql);
   if (!lakeEnabled(store, opts.lake ?? {})) throw new Error('no lake configured');
 
   const cfg = resolveLakeConfig(store, opts.lake ?? {});
@@ -742,8 +769,7 @@ export async function exportQuery(
   token: string,
   opts: EngineOptions = {}
 ): Promise<{ key: string }> {
-  const text = sql.trim().replace(/;\s*$/, '');
-  if (!text) throw new Error('no SQL to run');
+  const text = readOnlyText(sql);
   if (!EXPORT_FORMATS.includes(format)) throw new Error(`unsupported export format ${format}`);
   if (!lakeEnabled(store, opts.lake ?? {})) throw new Error('no lake configured');
 

