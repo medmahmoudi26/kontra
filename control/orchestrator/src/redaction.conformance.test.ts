@@ -7,7 +7,7 @@ import {
   redactHttp,
   redactSentence,
   redactValue,
-} from '@kontra/core';
+} from '@kontra/core/redaction';
 import { describe, expect, it } from 'vitest';
 
 /**

@@ -115,6 +115,14 @@ export interface ReportSnapshot {
   v: 1;
   root: MdNode;
   blocks: Record<string, SnapshotBlock>;
+  /**
+   * Things a reader should know about how this report was made, rather than about what it says.
+   *
+   * IN THE SNAPSHOT AND NOT A COLUMN, because §4.6 says "a warning recorded in the snapshot" and
+   * because a warning belongs with the bytes it qualifies: a snapshot copied, exported or re-read
+   * carries its own caveats. The console shows them above the report.
+   */
+  warnings?: string[];
 }
 
 export class SnapshotTooLargeError extends Error {

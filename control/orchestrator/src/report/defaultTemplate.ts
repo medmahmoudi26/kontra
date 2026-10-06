@@ -31,6 +31,8 @@
  * contract and nothing more, which is why that contract can be published as the whole truth.
  */
 
+import { createHash } from 'node:crypto';
+
 /** A table the default template can render without knowing anything about the shape it came from. */
 export interface DefaultTable {
   title: string;
@@ -197,7 +199,20 @@ This run completed and returned nothing. A workflow puts things in its report by
 *This is the default report: the workflow folder has no \`report.md\`. Adding one replaces this page entirely.*
 `;
 
-/** Identifies the default template in `report_templates.template_hash`, per spec §4.6. */
-export function defaultTemplateId(version: string): string {
-  return `default@${version}`;
+/**
+ * Identifies the default template in `report_template.template_hash`.
+ *
+ * §4.6 asks for `default@<kontra version>`. This defaults instead to `default@<digest of the template
+ * itself>`, and the reason is that the version is the weaker identifier of the two: the point of a
+ * template hash is that re-rendering reproduces a version (acceptance test 12), and a package version
+ * does not change when this template's text does — so two different default reports would both be
+ * `default@0.1.0` and neither would be reproducible from its own name. A content digest changes
+ * exactly when the thing it names changes.
+ *
+ * It still takes an explicit version, because an install that wants its release in the name should be
+ * able to say so, and because that is what the specification asked for.
+ */
+export function defaultTemplateId(version?: string): string {
+  if (version !== undefined && version !== '') return `default@${version}`;
+  return `default@${createHash('sha256').update(DEFAULT_TEMPLATE, 'utf8').digest('hex').slice(0, 12)}`;
 }

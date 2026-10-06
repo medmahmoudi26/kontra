@@ -249,6 +249,15 @@ export const MANIFEST: Record<SourceKind, string> = {
 export const DESCRIPTION_FILE = 'description.md';
 
 /**
+ * The Liquid template a workflow folder reports through, when it has one (ADR 0055).
+ *
+ * BESIDE `description.md` AND READ THE SAME WAY — the folder is the registration (ADR 0049), so a
+ * report template is a file in it rather than a field in `workflow.json`. Optional: most folders have
+ * none and get the default report.
+ */
+export const REPORT_FILE = 'report.md';
+
+/**
  * Read a folder and say what it is, or refuse with the reason.
  *
  * REFUSES RATHER THAN GUESSES. A folder with no marker is not "an empty actor" — it is a path

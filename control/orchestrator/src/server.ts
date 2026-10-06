@@ -65,10 +65,11 @@ import { Repo } from './db/repo';
 import { SourceStore } from './sourceStore';
 import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
-import type { RunDescription } from './temporalClient';
+import { fetchRunClose, fetchRunIO, listRuns, type RunDescription } from './temporalClient';
 import { HistoryArchive, startHistoryArchiver } from './historyArchive';
 import { startInuseReconciler } from './images/inuseReconciler';
 import { installApiGate } from './auth/apiGate';
+import { startReportRenderer } from './report/sweep';
 import { registerInfraRoutes } from './infraRoutes';
 import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
@@ -691,6 +692,29 @@ export async function runApi(): Promise<FastifyInstance> {
   startInuseReconciler({
     listActors: () => inuseRepo.listActors(),
     onError: (err, where) => app.log.warn(`inuse tags: ${where ? `${where}: ` : ''}${errMessage(err)}`),
+    onNote: (note) => app.log.info(note),
+  });
+
+  /* RENDER A REPORT FOR EVERY CLOSED RUN (ADR 0055). Started beside the history archiver, and for the
+     same reasons stated there: not in `buildServer`, so a test or a CLI that builds a server acquires
+     no background loop; failures logged and never thrown, so a report going quiet cannot take the API
+     down with it.
+     IT IS THE SAME DETECTION as the archiver's — one visibility query over closed runs — which is why
+     it lives here rather than in the materializer role the specification names. The materializer is a
+     Temporal Worker with no interval loop and no visibility query; putting a second detection
+     mechanism there would be a second thing to learn and a second thing to get wrong. The RENDER
+     itself goes to a worker thread (`report/renderHost.ts`), so this loop costs the API's event loop
+     nothing but the store reads. */
+  startReportRenderer({
+    list: async () => listRuns(),
+    io: (runId) => fetchRunIO(runId),
+    close: (runId) => fetchRunClose(runId),
+    identity: async (runId) => {
+      const found = await runWorkflowStore().get(runId);
+      return found ? { workflow: found.workflow, version: found.version } : undefined;
+    },
+    onError: (err, runId) =>
+      app.log.warn(`report renderer: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
     onNote: (note) => app.log.info(note),
   });
 

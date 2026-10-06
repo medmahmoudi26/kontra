@@ -655,6 +655,32 @@ async function closeReason(
   workflowId: string,
   execId: string
 ): Promise<string> {
+  const close = await runClose(client, workflowId, execId);
+  // The ROW wants one sentence, and prefers the specific one: a failure message if there is one, else
+  // the terminator's reason, else the bare kind. {@link fetchRunClose} keeps the two apart for callers
+  // that need them apart; this flattens them exactly as it always did.
+  if (!close) return '';
+  return close.message || close.type;
+}
+
+/**
+ * How a Run ended, as a TYPE and a MESSAGE rather than one sentence.
+ *
+ * EXTRACTED FROM `closeReason`, WHICH NOW CALLS IT, so there is one reader of the close event and not
+ * two that agree today. A report's context (§2.4) gives a template `run.error.type` and
+ * `run.error.message` separately — a template that wants to say "TimeoutError" in a heading and the
+ * message in a paragraph cannot do it from a pre-joined string, and joining them here and splitting
+ * them there is how the two spellings would drift.
+ *
+ * `undefined` for a Run that COMPLETED, which is a different answer from a Run whose close event could
+ * not be read: the second returns a type with an empty message, so a report never claims a successful
+ * Run failed because an RPC was slow.
+ */
+async function runClose(
+  client: Awaited<ReturnType<typeof getClient>>,
+  workflowId: string,
+  execId: string
+): Promise<{ type: string; message: string } | undefined> {
   try {
     const res = await client.workflowService.getWorkflowExecutionHistory({
       namespace: NAMESPACE,
@@ -665,17 +691,32 @@ async function closeReason(
       waitNewEvent: false,
     });
     const last = (res.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
-    if (!last) return '';
+    if (!last) return undefined;
+    const kind = closedAsOf(last);
+    if (!kind) return undefined;
     const failed = last.workflowExecutionFailedEventAttributes as { failure?: unknown } | undefined;
     const message = failureMessage(failed?.failure);
-    if (message) return message;
+    if (message) return { type: kind, message };
     const killed = last.workflowExecutionTerminatedEventAttributes as { reason?: unknown } | undefined;
     const reason = typeof killed?.reason === 'string' ? killed.reason.trim() : '';
-    if (reason) return reason;
-    return closedAsOf(last) ?? '';
+    return { type: kind, message: reason };
   } catch {
-    return '';
+    return undefined;
   }
+}
+
+/**
+ * How one Run ended, for a caller that has only its id — the report renderer's single use.
+ *
+ * `undefined` means it completed, is still running, or Temporal could not answer. A caller that needs
+ * to tell those apart has the status from the describe already.
+ */
+export async function fetchRunClose(
+  runId: string,
+  execId?: string
+): Promise<{ type: string; message: string } | undefined> {
+  const client = await getClient();
+  return runClose(client, runId, execId ?? '');
 }
 
 export type { NodeHeartbeat } from './heartbeat';

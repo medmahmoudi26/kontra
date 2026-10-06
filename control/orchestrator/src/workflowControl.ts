@@ -46,9 +46,13 @@ import * as path from 'node:path';
 import { tmuxSafeName } from '@kontra/core/panels/tmux';
 import { describeQueue, temporalQueueDescriber, type QueueDescriber } from './pollers';
 import { runWorkflowStore } from './data/runWorkflows';
+import { defaultTemplateId } from './report/defaultTemplate';
+import { reportStore } from './report/store';
+import { templateHash } from './report/sweep';
 import {
   DESCRIPTION_FILE,
   MANIFEST,
+  REPORT_FILE,
   MARKER,
   defaultRoot,
   firstParagraph,
@@ -805,6 +809,20 @@ export interface RunWorkflowRecorder {
 }
 
 /**
+ * Pins the `report.md` a Run will be reported through — a seam, for the reason the recorder above is
+ * one: a test proves the pin without a database.
+ */
+export interface ReportTemplatePinner {
+  pinTemplate(input: {
+    runId: string;
+    templateHash: string;
+    templateText: string;
+    source: 'workspace' | 'default';
+    workspace?: string;
+  }): Promise<void>;
+}
+
+/**
  * The CREDENTIAL preflight a start is refused by (issue 20; `secrets/slots.ts`).
  *
  * A seam rather than the class, for the reason the recorder above is one: a test proves the
@@ -865,7 +883,8 @@ export async function startRun(
   input: StartInput,
   describer?: QueueDescriber,
   recorder?: RunWorkflowRecorder,
-  gate?: RunSlotGate
+  gate?: RunSlotGate,
+  pinner?: ReportTemplatePinner
 ): Promise<StartResult> {
   const file = resolveWorkflowFile(input.file);
   const queue = workflowQueueFor(file);
@@ -956,6 +975,7 @@ export async function startRun(
   });
 
   const workflow = await stampRunWorkflow(handle.workflowId, manifest, recorder);
+  await pinReportTemplate(handle.workflowId, file, pinner);
   return { runId: handle.workflowId, type, queue, ...(workflow ? { workflow } : {}) };
 }
 
@@ -989,6 +1009,77 @@ async function stampRunWorkflow(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Pin the report template for a Run that has just started — §4.6.
+ *
+ * WHY AT START AND NOT AT RENDER. Editing `report.md` after a Run begins must not change that Run's
+ * report (acceptance test 12), and a report rendered from today's template for a Run that finished
+ * last week is not reproducible. This is ADR 0025's pattern again, exactly as `stampRunWorkflow` is:
+ * what must outlive a changing workspace is snapshotted at the moment it is known.
+ *
+ * THE FOLDER IS ONLY KNOWN HERE. Nothing maps a run id back to a directory — `runWorkflows` records a
+ * manifest name and version, Temporal holds a type, and the id is `<type>-<unixseconds>`. So if this
+ * does not pin, nothing later can find the template at all, and the renderer falls back to the default
+ * report with a warning rather than to a stale file.
+ *
+ * A FOLDER WITH NO `report.md` PINS THE DEFAULT, by name and not by text: `default@<version>`. That
+ * distinguishes "this Run had no template" from "this Run was never pinned", which are different facts
+ * with different fixes — the first is the common case and the second is the gap above.
+ *
+ * SWALLOWS ITS FAILURES, for `stampRunWorkflow`'s reason stated in its own words: the Run is already
+ * running when this is called, and rethrowing would report a started Run as a failed start. The cost
+ * of losing the write is one default report with a warning on it.
+ */
+async function pinReportTemplate(
+  runId: string,
+  file: string,
+  pinner?: ReportTemplatePinner
+): Promise<void> {
+  try {
+    const store = pinner ?? reportStore();
+    const folder = path.dirname(file);
+    const candidate = path.join(folder, REPORT_FILE);
+    const workspace = workspaceOf(folder);
+    if (existsSync(candidate)) {
+      const text = readFileSync(candidate, 'utf8');
+      await store.pinTemplate({
+        runId,
+        templateHash: templateHash(text),
+        templateText: text,
+        source: 'workspace',
+        workspace,
+      });
+      return;
+    }
+    await store.pinTemplate({
+      runId,
+      templateHash: defaultTemplateId(),
+      // THE DEFAULT'S TEXT IS NOT STORED. It ships with the orchestrator, so storing a copy per Run
+      // would be megabytes of identical rows, and a Run pinned to `default@0.1.0` is reproducible from
+      // the version it names. A workspace template is stored because nothing else holds it.
+      templateText: '',
+      source: 'default',
+      workspace,
+    });
+  } catch {
+    // See the header: the Run is already running.
+  }
+}
+
+/**
+ * Which workspace a folder is in, or the empty string.
+ *
+ * READ OFF THE PATH, because that is what a workspace IS here (ADR 0051: the workspace is the
+ * isolation boundary, and it is a directory). A folder outside any `workspaces/` tree — a flat `.py`
+ * somebody served from a checkout — has no workspace, and the empty string says so rather than
+ * inventing `default`.
+ */
+function workspaceOf(folder: string): string {
+  const parts = folder.split(path.sep);
+  const at = parts.lastIndexOf('workspaces');
+  return at >= 0 && at + 1 < parts.length ? parts[at + 1]! : '';
 }
 
 export interface PauseResult {

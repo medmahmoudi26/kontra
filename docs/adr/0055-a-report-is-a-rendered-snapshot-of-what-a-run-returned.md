@@ -4,10 +4,10 @@ Date: 2026-10-06
 
 ## Status
 
-**Accepted** for the rendering engine, which is what this revision covers. Template pinning, the
-store, the routes, the CLI and the console are the same decision's later halves and will amend this
-ADR as they land, in the manner of **0054** amending **0045** — a section that says "not yet decided"
-is more useful than one that guesses.
+**Accepted** for the rendering engine, the redaction rule, the store and the run-end lifecycle. The
+routes, the CLI and the console are the same decision's later halves and will amend this ADR as they
+land, in the manner of **0054** amending **0045** — a section that says "not yet decided" is more
+useful than one that guesses.
 
 ## Context
 
@@ -193,8 +193,103 @@ table above be published as the whole truth.
 - The 5 MiB snapshot cap is measured on the **serialised JSON**, blocks base64 included: a 1 MiB block
   costs 1.37 MiB of snapshot, and a cap applied to the Markdown would let four of them through.
 
+### 7. The four tables are NOT in the orchestrator's own store, and the reason is a process boundary
+
+§7.1 says to use `db/repo.ts`. That store's header records a decision this would reverse — it holds no
+run records at all — and reversing it would be arguable on its own. What is not arguable is where the
+three participants run.
+
+| | |
+|---|---|
+| `repo.ts` is | `node:sqlite` over a FILE, on the `orchestrator-db` volume, which `docker-compose.yml:703` mounts on the **kontra-api service only** |
+| a report is written | where a finished Run is noticed |
+| a report is read | by the API |
+| a report is deleted | inside the retention activity on the dataset queue, which the **materializer** role polls (`roles.ts:91`) |
+
+Those are one container today only because compose runs `api,materializer` together
+(`docker-compose.yml:671`). Split the roles — the entire point of having roles — and a `repo.ts`-backed
+report silently finds no file, or creates an empty one at the relative default `orchestrator.db` and
+reports nothing wrong. So the tables join `data/sql.ts`, Postgres when the writer and reader are
+different hosts and SQLite otherwise, beside `runWorkflows`, `summaries`, `datasetRecords` and the
+materialization ledger. §7.1 offers that as the escape hatch for oversized blobs; the real reason is
+the boundary.
+
+**The cost, stated rather than discovered later.** §7.1 also says a deleted Run's four tables are
+cleaned "in the same transaction". **That family has no transaction primitive at all** — `SqlDriver`
+is `exec`/`run`/`all`/`close`, and the only `tx()` in the orchestrator's TypeScript is `Repo.tx()`, over
+the handle this deliberately does not use. Even on a single-host SQLite install the two families are
+two `DatabaseSync` handles over one file, which cannot share a transaction and will take `SQLITE_BUSY`
+from each other.
+
+So `purgeRun` deletes in a STATED ORDER and the order is the mitigation: **`report_secret` first.** A
+purge that dies half-way has removed the only rows in this system holding an unredacted credential;
+what survives is a redacted snapshot and some feedback, which the next sweep takes. The reverse order
+would leave unredacted bytes behind a version row that no longer exists. For the same reason the report
+arm is **first** of the five in `collectRun`, whose arms are sequential bare awaits with no rollback.
+
+### 8. The render hook attaches where run-end detection actually lives, which is not where §4.5 says
+
+§4.5 names `data/sealFinishedDatasets.ts` and the materializer role. Neither notices anything:
+`sealFinishedDatasets.ts` is a pure decision function whose only importer is its own test, and
+`materializer.ts` is a Temporal Worker registering activities on `kontra-datasets`, hosting no
+workflows.
+
+What notices is `startHistoryArchiver` in `historyArchive.ts` — a `setInterval` in the **api** role
+running one Temporal visibility query over closed runs. The report sweep is that pattern copied
+deliberately: the counters, the `onNote`/`onError` split, the single-flight guard, the capped-page
+warning. It was built for the same problem ("a Dataset outlives the Run; the Run's story does not").
+
+§4.5's actual requirements are met: not in a request path, not inside a workflow. The RENDER goes to a
+worker thread, so the API's event loop is not held by it — which is also the only way acceptance test
+5's "another route answers in under 100 ms during the render" can be true, since Liquid does not yield
+between iterations.
+
+**The worker's honest gap.** The worker entry is a `.js` file that exists in a built image and does not
+exist when the orchestrator runs from TypeScript sources, as vitest does. The host falls back to an
+in-process render and SAYS SO through `onNote`. The in-process path is still bounded by `renderLimit`,
+so the fallback is slower to protect rather than unprotected — but the worker path is exercised by the
+built artifact and by nothing in the unit suite, and test 5 is therefore a property of the image.
+
+### 9. §4.6's fallback cannot be implemented as written
+
+Pinning happens at Run start, in `startRun`, beside the identity stamp `stampRunWorkflow` — ADR 0025's
+pattern, and the folder is only known there. A folder with no `report.md` pins the default BY NAME,
+which distinguishes "this Run had no template" from "this Run was never pinned".
+
+§4.6 says that if the start path cannot pin, the renderer should "fall back to capturing at run end".
+It cannot: **nothing maps a run id to a folder.** `runWorkflows` records a manifest name and version,
+Temporal holds a workflow type, and the id is `<type>-<unixseconds>`. So the fallback is the default
+report plus a warning in the snapshot naming why — which is the better form of §4.6's intent anyway,
+since reading today's `report.md` for a Run that started last week produces a report nobody can
+reproduce, the exact thing pinning exists to prevent.
+
+**Which runs are affected:** one started through `POST /api/runs` is pinned. One started by
+`kontra workflow start` is not — that command dials Temporal directly (`cli/workflow.go`) rather than
+going through the route. Closing it means the CLI POSTing the template alongside the identity it
+already records over `--api`, which is the CLI change's business.
+
+### 10. The default template is named by its own digest, not by the release
+
+§4.6 asks for `default@<kontra version>`. A package version does not change when the template's text
+does, so two different default reports would both be `default@0.1.0` and neither would be reproducible
+from its own name — which defeats acceptance test 12. The default is therefore
+`default@<12 hex of sha256>`, with an explicit version still accepted for an install that wants its
+release in the name.
+
+## Consequences of the storage choice
+
+- A report **outlives the Run's Parquet** under normal retention and dies with the Run when it is
+  collected, which is what §7.1 asks for — by a sweep arm rather than by a cascade, because the
+  database that would cascade is not the one holding the rows.
+- An install whose report store has never been opened must not fail a retention sweep for the absence
+  of a table it would create on first use, so the arm is optional and collection-only, like `summaries`.
+- `render_key` is a sha256, not the canonical JSON it digests. The first version of it returned the JSON
+  — which would have put a decoded multi-megabyte result into a UNIQUE-indexed column, and both
+  backends would have accepted it.
+
 ## What this revision does not decide
 
-Template pinning at Run start and its fallback; the four tables and their retention; where the render
-hook attaches in the materializer; the routes and their scopes; the `serve` lint; the MCP tools; the
-console page. Each will amend this ADR when it is built rather than be guessed at here.
+The routes and their scopes — including whether `report:reveal` can be a session scope at all, given
+that `checkBearer` consults a scope only for a live session and a service token bypasses it entirely;
+the `serve` lint; the MCP tools; the console page. Each will amend this ADR when it is built rather
+than be guessed at here.
