@@ -2,7 +2,7 @@
   "name": "@kontra/backend",
   "version": "0.1.0",
   "private": true,
-  "description": "Kontra visual workflow orchestrator \u2014 Temporal TS worker/client + claim-check codec, byte-compatible with the Python codec.",
+  "description": "Kontra visual workflow orchestrator — Temporal TS worker/client + claim-check codec, byte-compatible with the Python codec.",
   "type": "commonjs",
   "packageManager": "pnpm@10.33.2",
   "engines": {
@@ -47,11 +47,15 @@
     "@temporalio/proto": "1.24.0",
     "@temporalio/worker": "1.24.0",
     "@temporalio/workflow": "1.24.0",
+    "@temporalio/workflow-streams": "1.24.0",
     "ajv": "^8.17.0",
     "fastify": "^5.1.0",
     "ioredis": "^6.0.0",
+    "liquidjs": "10.30.0",
     "pg": "^8.22.0",
-    "@temporalio/workflow-streams": "1.24.0"
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5"
   },
   "devDependencies": {
     "@temporalio/nexus": "1.24.0",

