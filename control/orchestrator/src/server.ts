@@ -67,6 +67,7 @@ import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
 import type { RunDescription } from './temporalClient';
 import { HistoryArchive, startHistoryArchiver } from './historyArchive';
+import { installApiGate } from './auth/apiGate';
 import { registerInfraRoutes } from './infraRoutes';
 import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
@@ -328,6 +329,12 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // 32 MiB body limit (Fastify defaults to 1 MiB): a saved design document carries the whole
   // editor canvas, and the default rejected the larger ones with a broken pipe.
   const app = Fastify({ bodyLimit: 33_554_432, logger: opts.logger ?? false });
+
+  // DENY BY DEFAULT ON `/api/*`. Admission is a call each route makes for itself across 30 files,
+  // so a route that forgets is OPEN and nothing says so. This refuses any `/api` route that has not
+  // declared a posture in `auth/apiGate.ts`, which closes the hole for code nobody has written yet;
+  // `auth/apiSurface.test.ts` holds that table to what the server actually does.
+  installApiGate(app);
 
   // THE ROUTE INVENTORY, DERIVED RATHER THAN MAINTAINED.
   //
