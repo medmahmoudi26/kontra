@@ -1,6 +1,6 @@
 {
- "why": "The three redaction rules both SDKs apply before anything reaches Temporal history. A whole-key match for an ask's fields, and two word-in-a-sentence matches for a narration: a secret-shaped assignment, and a bearer/basic credential. The two kinds must NOT be merged with each other — they are different jobs and both implementations argue so in their headers — but the two LANGUAGES must agree exactly.",
- "why_it_matters": "This is the one parity surface where being wrong is a credential written into workflow history in the clear rather than a formatting difference. The implementations were byte-identical when this corpus was written; the risk is a word added to one side and not the other, which narrate.py's own header already named: 'a word only one of them knows is redacted in one surface and not in the other'. Nothing executable acted on that sentence until now.",
+ "why": "The redaction rules both SDKs apply before anything reaches Temporal history, plus the one the orchestrator applies before anything reaches a stored report. A whole-key match for an ask's fields; two word-in-a-sentence matches for a narration — a secret-shaped assignment, and a bearer/basic credential; and an HTTP-message rule for a report's code blocks. The kinds must NOT be merged with each other — they are different jobs and every implementation argues so in its header — but the LANGUAGES must agree exactly.",
+ "why_it_matters": "This is the one parity surface where being wrong is a credential written into workflow history, or into a report somebody forwards, in the clear rather than a formatting difference. The implementations were byte-identical when this corpus was written; the risk is a word added to one side and not the other, which narrate.py's own header already named: 'a word only one of them knows is redacted in one surface and not in the other'. The http_headers section arrived with a third language and a third writer, and with two measured leaks in the rules that were already here: a multi-valued `Cookie` was half-redacted, which reads as safe, and a JSON body was not redacted at all.",
  "sentence_redacted": "[redacted]",
  "value_redacted": "[redacted by kontra: an ask travels through history in the clear]",
  "sentences": [
@@ -150,6 +150,103 @@
    "why": "an empty object is not an error",
    "input": {},
    "expect": {}
+  }
+ ],
+ "http_headers": [
+  {
+   "why": "the header spec §5 names first, and the commonest credential line there is",
+   "input": "Authorization: Bearer abc.def.ghi",
+   "expect": "Authorization: [redacted]"
+  },
+  {
+   "why": "the proxy variant, matched by the affix class rather than by being named twice",
+   "input": "Proxy-Authorization: Basic dXNlcjpwYXNz",
+   "expect": "Proxy-Authorization: [redacted]"
+  },
+  {
+   "why": "A MULTI-VALUED COOKIE, WHICH THE SENTENCE RULE HALF-REDACTS. Measured before this rule existed: `Cookie: a=1; b=2` became `Cookie: [redacted] b=2` in BOTH languages — the line reads as safe and the second pair is in the clear. This case is the reason the rule exists.",
+   "input": "Cookie: a=1; b=2",
+   "expect": "Cookie: [redacted]"
+  },
+  {
+   "why": "the response direction, where the leak also took the attributes with it",
+   "input": "Set-Cookie: sid=zzz; Path=/; HttpOnly",
+   "expect": "Set-Cookie: [redacted]"
+  },
+  {
+   "why": "a header named in §5 and matched through the hyphen affix: api[_-]?key covers Api-Key",
+   "input": "X-Api-Key: sk-live-0123",
+   "expect": "X-Api-Key: [redacted]"
+  },
+  {
+   "why": "the 12-character floor does NOT apply when a header name is present, so a one-character token is still redacted",
+   "input": "X-Auth-Token: t",
+   "expect": "X-Auth-Token: [redacted]"
+  },
+  {
+   "why": "a header nobody listed, caught because its name ends in a word from the list",
+   "input": "x-amz-security-token: IQoJb3JpZ2lu",
+   "expect": "x-amz-security-token: [redacted]"
+  },
+  {
+   "why": "a lowercase name with no space after the colon: RFC 9112 permits none",
+   "input": "authorization:abc",
+   "expect": "authorization:[redacted]"
+  },
+  {
+   "why": "an ordinary header is untouched, which is what keeps a report readable",
+   "input": "Accept: application/json",
+   "expect": "Accept: application/json"
+  },
+  {
+   "why": "a status line has no colon-separated name and survives whole",
+   "input": "HTTP/1.1 200 OK",
+   "expect": "HTTP/1.1 200 OK"
+  },
+  {
+   "why": "a request line is not a header, so the credential in its query string is caught by the SENTENCE rule instead — this is what §5 means by reusing the existing rules",
+   "input": "GET /x?token=abc123def456 HTTP/1.1",
+   "expect": "GET /x?token=[redacted] HTTP/1.1"
+  },
+  {
+   "why": "an empty header value is left alone rather than being marked redacted, because there was nothing there",
+   "input": "Cookie:",
+   "expect": "Cookie:"
+  },
+  {
+   "why": "A NON-BREAKING SPACE AFTER THE COLON. The whitespace classes here are spelled [ \\t] and not \\s precisely so that all three languages agree on this byte: Go's \\s is ASCII-only while Python's and JavaScript's include U+00A0, and this rule runs over a latin-1 view of raw bytes where byte 0xA0 IS U+00A0. The existing sentence rule diverges on it (Go `token:[redacted]`, Python `token:\\xa0[redacted]`) and nothing catches that; the new rule does not inherit the problem.",
+   "input": "Cookie: a=1",
+   "expect": "Cookie:[redacted]"
+  },
+  {
+   "why": "A JSON BODY, WHICH THE SENTENCE RULE MISSES ENTIRELY. Measured: `{\"password\": \"hunter2\"}` came back untouched, because the closing quote sits between the key and the colon so \\s*[:=]\\s* never matches. An http block holding a login request stored the password in the clear.",
+   "input": "{\"password\": \"hunter2\"}",
+   "expect": "{\"password\": \"[redacted]\"}"
+  },
+  {
+   "why": "the same with no spaces and a following member, which must survive",
+   "input": "{\"api_key\":\"sk-live-0123\",\"n\":1}",
+   "expect": "{\"api_key\":\"[redacted]\",\"n\":1}"
+  },
+  {
+   "why": "a value containing an escaped quote is redacted whole, and the JSON stays valid — the first implementation ate the closing quote and produced `\"[redacted]}`",
+   "input": "{\"password\": \"a\\\"b\"}",
+   "expect": "{\"password\": \"[redacted]\"}"
+  },
+  {
+   "why": "a key that names nothing secret is untouched, so a report keeps its findings",
+   "input": "{\"note\": \"no secret here\"}",
+   "expect": "{\"note\": \"no secret here\"}"
+  },
+  {
+   "why": "a whole request: the request line survives, the credential header goes, the content type stays, and the body's password goes — with every CRLF exactly where it was",
+   "input": "POST /login HTTP/1.1\r\nHost: t.test\r\nAuthorization: Basic dXNlcjpwYXNz\r\nContent-Type: application/json\r\n\r\n{\"password\": \"hunter2\"}",
+   "expect": "POST /login HTTP/1.1\r\nHost: t.test\r\nAuthorization: [redacted]\r\nContent-Type: application/json\r\n\r\n{\"password\": \"[redacted]\"}"
+  },
+  {
+   "why": "applying the rule to its own output changes nothing, which a re-rendered snapshot depends on",
+   "input": "Authorization: [redacted]",
+   "expect": "Authorization: [redacted]"
   }
  ]
 }
