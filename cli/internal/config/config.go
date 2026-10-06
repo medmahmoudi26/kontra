@@ -489,20 +489,29 @@ func InitKontra(w io.Writer) error {
 	if created {
 		fmt.Fprintf(w, "created %s/ — put your credentials in %s/config.yaml\n", rel, rel)
 		if password != "" {
-			// PRINTED ONCE, AND SAID SO. There is no second chance and no recovery path, so the
-			// sentence has to carry that rather than leave it to be discovered.
+			// THE PASSWORD DOES NOT GO TO STDOUT, AND THE 0600 FILE IS WHY.
+			//
+			// `kontra init` runs inside the `cli` container, so anything written here lands in
+			// `docker compose logs` — readable by anyone in the docker group, retained for the life
+			// of the container, and forwarded wherever that install ships its logs. A credential
+			// that config.yaml deliberately stores only as an scrypt hash does not belong in a log
+			// stream, and the old banner put it there on every fresh install.
+			//
+			// THE FILE IS THE CHANNEL; STDOUT IS THE FALLBACK. The order below is the whole
+			// mechanism: write first, print only if the write failed. At that point stdout holds
+			// the one copy in existence, and withholding it would trade a logged password for an
+			// install nobody can log into.
+			saveErr := recordConsolePassword(root, DefaultConsoleUser, password)
 			fmt.Fprintf(w, "\nconsole login:\n\n")
 			fmt.Fprintf(w, "    user      %s\n", DefaultConsoleUser)
-			fmt.Fprintf(w, "    password  %s\n\n", password)
-			// "THIS IS THE ONLY TIME THIS IS SHOWN" was the previous sentence here, and it was true:
-			// the password went to stdout and nowhere else, so a recreated `cli` container took the
-			// only copy with it. It is no longer true, and the line that says where the second copy
-			// lives is the whole point of writing one.
-			if err := recordConsolePassword(root, DefaultConsoleUser, password); err != nil {
-				fmt.Fprintf(w, "NOT saved to %s (%v) — WRITE THE PASSWORD ABOVE DOWN NOW. Only the\n", ConsolePasswordPath(root), err)
-				fmt.Fprintf(w, "hash is stored, and this is the only time it is shown.\n")
+			if saveErr != nil {
+				fmt.Fprintf(w, "    password  %s\n\n", password)
+				fmt.Fprintf(w, "NOT saved to %s (%v) — WRITE THAT PASSWORD DOWN NOW. Only the\n", ConsolePasswordPath(root), saveErr)
+				fmt.Fprintf(w, "hash is stored, so this is the only time it can be shown.\n")
 			} else {
-				fmt.Fprintf(w, "Saved to %s (mode 0600); config.yaml keeps only the hash.\n", ConsolePasswordPath(root))
+				fmt.Fprintf(w, "    password  in %s (mode 0600)\n\n", ConsolePasswordPath(root))
+				fmt.Fprintf(w, "Read it with:  docker compose exec cli cat %s\n", ConsolePasswordPath(root))
+				fmt.Fprintf(w, "config.yaml keeps only the hash, and the password is NOT in the logs.\n")
 			}
 		}
 	} else {
@@ -520,18 +529,26 @@ func InitKontra(w io.Writer) error {
 		// grep while a perfectly good `admin` user sat in config.yaml.
 		//
 		// The phrase "console login" is repeated here deliberately: it is what the documented grep
-		// matches on, so this branch has to carry it to be found at all. It cannot reprint the
-		// password — only the hash is stored, which is the point — so it names the users that exist
-		// and the one command that gets you back in.
+		// matches on, so this branch has to carry it to be found at all. It never prints the
+		// password itself — that is the point of the 0600 file — so it names the users that exist
+		// and where to read the credential.
 		if c, err := LoadConfig(); err == nil && len(c.Auth.Users) > 0 {
 			names := make([]string, 0, len(c.Auth.Users))
 			for _, u := range c.Auth.Users {
 				names = append(names, u.Name)
 			}
-			fmt.Fprintf(w, "\nconsole login — already created, and NOT recoverable:\n\n")
+			fmt.Fprintf(w, "\nconsole login — already created:\n\n")
 			fmt.Fprintf(w, "    user(s)   %s\n\n", strings.Join(names, ", "))
-			fmt.Fprintf(w, "The password was shown once, when this installation was created, and only\n")
-			fmt.Fprintf(w, "the hash is stored. Lost it? `kontra user add <name>` makes another.\n")
+			// RECOVERABLE OR NOT IS A FACT ABOUT THE DISK, SO READ THE DISK. This branch used to
+			// state "NOT recoverable" unconditionally, which stopped being true when the 0600 file
+			// was introduced and sent operators to `user add` while their password sat on disk.
+			if _, statErr := os.Stat(ConsolePasswordPath(root)); statErr == nil {
+				fmt.Fprintf(w, "The password is in %s (mode 0600); config.yaml keeps only the hash.\n", ConsolePasswordPath(root))
+				fmt.Fprintf(w, "Read it with:  docker compose exec cli cat %s\n", ConsolePasswordPath(root))
+			} else {
+				fmt.Fprintf(w, "No %s on this install, and only the hash is stored —\n", ConsolePasswordPath(root))
+				fmt.Fprintf(w, "so the password cannot be recovered. `kontra user add <name>` makes another.\n")
+			}
 		}
 	}
 	// Node processes in the Compose cluster do not parse YAML. They read the same env ApplyConfig
@@ -613,9 +630,11 @@ func recordConsolePassword(root, name, password string) error {
 // The header explains the file to whoever opens it months later, which is the entire audience.
 const consolePasswordHeader = `# kontra console logins, in CLEARTEXT. Mode 0600 — keep it that way.
 #
-# This exists because the password is otherwise printed exactly once, to a container's stdout, and
-# ` + "`docker compose logs cli`" + ` shows only the current container: one recreate and it is gone for good.
-# config.yaml beside this file stores only an scrypt hash, which cannot be reversed.
+# THIS FILE IS THE ONLY PLACE THE PASSWORD EXISTS. config.yaml beside it stores an scrypt hash,
+# which cannot be reversed, and nothing is printed to stdout — ` + "`kontra init`" + ` runs inside the
+# ` + "`cli`" + ` container, so a printed password would live in ` + "`docker compose logs`" + ` for anyone in the
+# docker group to read. Delete this file and the credential is gone: make another account with
+# ` + "`kontra user add <name>`" + `.
 #
 # One TAB-separated "user<TAB>password" line per account, appended as accounts are made.
 `
@@ -893,15 +912,20 @@ func CmdUserAdd(w io.Writer, args []string) error {
 			"(the orchestrator will not see it until this succeeds): %w", path, err)
 	}
 
+	// Same inversion as InitKontra, for the same reason: `user add` is also run as
+	// `docker compose exec cli`, so its output is also a log stream. Write first, print the
+	// plaintext only when the file did not take it.
+	saveErr := recordConsolePassword(root, name, password)
 	fmt.Fprintf(w, "\nconsole login:\n\n")
 	fmt.Fprintf(w, "    user      %s\n", name)
-	fmt.Fprintf(w, "    password  %s\n\n", password)
-	if err := recordConsolePassword(root, name, password); err != nil {
-		// Said out loud rather than swallowed: the password is still on screen, and an operator who
-		// knows the copy did not land is an operator who writes it down themselves.
-		fmt.Fprintf(w, "NOT saved to %s (%v) — keep the password above.\n", ConsolePasswordPath(root), err)
+	if saveErr != nil {
+		// Said out loud rather than swallowed: this is now the only copy, and an operator who knows
+		// the file did not take it is an operator who writes it down themselves.
+		fmt.Fprintf(w, "    password  %s\n\n", password)
+		fmt.Fprintf(w, "NOT saved to %s (%v) — keep the password above.\n", ConsolePasswordPath(root), saveErr)
 	} else {
-		fmt.Fprintf(w, "Also saved to %s (mode 0600).\n", ConsolePasswordPath(root))
+		fmt.Fprintf(w, "    password  in %s (mode 0600)\n\n", ConsolePasswordPath(root))
+		fmt.Fprintf(w, "Read it with:  docker compose exec cli cat %s\n", ConsolePasswordPath(root))
 	}
 	fmt.Fprintf(w, "Restart the orchestrator for it to take effect: docker restart kontra-api\n")
 	return nil

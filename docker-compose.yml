@@ -2,7 +2,7 @@
 #
 #   curl -O https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/docker-compose.yml
 #   docker compose up -d --wait
-#   docker compose logs cli | grep -A4 'console login'
+#   docker compose exec cli cat /var/lib/kontra/console-password
 #
 # No clone, no build, no binary, and NO `.env` — every `${…:-default}` in here resolves to something
 # a stranger's Docker can pull. `.env.quickstart` is the second curl only if you want to move a port,
@@ -848,7 +848,8 @@ services:
       timeout: 5s
       retries: 5
 
-  # First boot prints the console login, seeds hello/, then watches the current workspace.
+  # First boot writes the console login to /var/lib/kontra/console-password (0600, never stdout —
+  # stdout here is `docker compose logs`), seeds hello/, then watches the current workspace.
   # `docker compose exec cli …` still works while watch is PID 1.
   cli:
     image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}

@@ -37,21 +37,17 @@ func TestInstallProducesAWorkingLogin(t *testing.T) {
 	// THE REAL PROPERTY, and the first version of this test got it wrong by grepping for
 	// "password:" — which matches "password_hash:" and fails on a correct file.
 	//
-	// Parse the printed password back out of the install banner, then assert BOTH halves: it
-	// verifies against the stored hash (so the login actually works), and it does not appear in the
-	// file (so the hash is a hash).
-	var password string
-	for _, line := range strings.Split(out.String(), "\n") {
-		if f := strings.Fields(line); len(f) == 2 && f[0] == "password" {
-			password = f[1]
-		}
-	}
+	// The password is read from the 0600 FILE and not the banner, because the banner no longer
+	// carries it — see TestThePasswordNeverReachesStdout. Then assert both halves: it verifies
+	// against the stored hash (so the login actually works), and it does not appear in config.yaml
+	// (so the hash is a hash).
+	password := recordedPassword(t, dir, DefaultConsoleUser)
 	if password == "" {
-		t.Fatal("init did not print a password — an install with no console login")
+		t.Fatal("install recorded no password — an install with no console login")
 	}
 	ok, err := creds.Verify(password, c.Auth.Users[0].PasswordHash)
 	if err != nil || !ok {
-		t.Fatalf("the printed password does not verify against the stored hash: ok=%v err=%v", ok, err)
+		t.Fatalf("the recorded password does not verify against the stored hash: ok=%v err=%v", ok, err)
 	}
 	if strings.Contains(string(raw), password) {
 		t.Error("the PLAINTEXT password reached the config file")
@@ -59,6 +55,108 @@ func TestInstallProducesAWorkingLogin(t *testing.T) {
 	// NON-VACUOUS: if Verify said yes to anything, the assertion above would prove nothing.
 	if wrong, _ := creds.Verify(password+"x", c.Auth.Users[0].PasswordHash); wrong {
 		t.Error("a different password verified")
+	}
+}
+
+// recordedPassword pulls one account's cleartext out of the 0600 file. Shared by the tests below so
+// the parse of that file's `name\tpassword` shape lives in one place.
+func recordedPassword(t *testing.T, root, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(ConsolePasswordPath(root))
+	if err != nil {
+		t.Fatalf("reading %s: %v", ConsolePasswordPath(root), err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
+			continue
+		}
+		if got, pass, ok := strings.Cut(line, "\t"); ok && got == name {
+			return pass
+		}
+	}
+	return ""
+}
+
+// THE PASSWORD IS NOT IN THE LOGS, which is the only assertion that closes this.
+//
+// `kontra init` and `kontra user add` both run inside the `cli` container, so their stdout IS
+// `docker compose logs cli` — readable by anyone in the docker group, retained for the life of the
+// container, and forwarded wherever the install ships its logs. The old banner printed the
+// cleartext there on every fresh install, beside a config.yaml that deliberately stores only an
+// scrypt hash.
+//
+// The 0600 file is the channel now. stdout keeps the plaintext for exactly one case, asserted
+// below: the file write failed, so withholding it would mean an install nobody can log into.
+func TestThePasswordNeverReachesStdout(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("KONTRA_HOME", dir)
+	var out bytes.Buffer
+	if err := InitKontra(&out); err != nil {
+		t.Fatal(err)
+	}
+
+	password := recordedPassword(t, dir, DefaultConsoleUser)
+	if password == "" {
+		t.Fatal("nothing was recorded, so the assertion below would be vacuous")
+	}
+	if strings.Contains(out.String(), password) {
+		t.Errorf("the cleartext password reached stdout, which is `docker compose logs cli`:\n%s", out.String())
+	}
+	// It still has to SAY where the credential is, or the file is a secret from the operator too.
+	if !strings.Contains(out.String(), ConsolePasswordPath(dir)) {
+		t.Errorf("the banner does not name %s, so nothing tells an operator where to look:\n%s",
+			ConsolePasswordPath(dir), out.String())
+	}
+}
+
+// THE ONE CASE THAT STILL PRINTS, and it has to, because the alternative is a login that exists
+// nowhere. An unwritable path is the realistic trigger: a read-only mount, a full disk, or a mode
+// that slipped and tripped `refuseIfReadableByOthers`.
+func TestAFailedSaveFallsBackToStdout(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("KONTRA_HOME", dir)
+
+	// A DIRECTORY where the file belongs: `os.OpenFile` on it fails with EISDIR, so the save errors
+	// while everything before it — config.yaml, the account, the hash — has already succeeded.
+	if err := os.MkdirAll(ConsolePasswordPath(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := InitKontra(&out); err != nil {
+		t.Fatalf("a failed password save must not fail the install: %v", err)
+	}
+	got := out.String()
+	t.Log("\n" + got)
+
+	raw, err := os.ReadFile(dir + "/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Config
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Auth.Users) != 1 {
+		t.Fatalf("no account was created, so there is no password to fall back on: %+v", c.Auth)
+	}
+
+	// The printed password must be the real one — a fallback that prints something that does not
+	// open the account is worse than printing nothing.
+	var printed string
+	for _, line := range strings.Split(got, "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "password" {
+			printed = f[1]
+		}
+	}
+	if printed == "" {
+		t.Fatalf("the save failed and no password was printed — the credential exists nowhere:\n%s", got)
+	}
+	if ok, err := creds.Verify(printed, c.Auth.Users[0].PasswordHash); err != nil || !ok {
+		t.Fatalf("the fallback printed a password that does not open the account: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(got, "NOT saved") {
+		t.Errorf("it did not say the file was not written, so the operator does not know to keep it:\n%s", got)
 	}
 }
 
@@ -98,13 +196,34 @@ func TestASecondInitStillAnswersWhereTheLoginWent(t *testing.T) {
 	if !strings.Contains(got, DefaultConsoleUser) {
 		t.Errorf("it did not name the user that exists:\n%s", got)
 	}
-	if !strings.Contains(got, "kontra user add") {
-		t.Errorf("it did not name the one command that gets you back in:\n%s", got)
+	// WHERE THE CREDENTIAL IS, not how to replace it. The first init wrote the 0600 file, so the
+	// honest answer to "where did the login go" is that path — and this branch used to say "NOT
+	// recoverable" unconditionally, which sent operators to `user add` while their password sat on
+	// disk a directory away.
+	if !strings.Contains(got, ConsolePasswordPath(dir)) {
+		t.Errorf("it did not name the file the password is actually in:\n%s", got)
 	}
-	// It must NOT invent a password: only the hash is stored, and printing anything that looked
-	// like one would be worse than saying nothing.
+	// It must NOT reprint the password: stdout is the log stream, which is the whole reason the
+	// file exists.
+	if pw := recordedPassword(t, dir, DefaultConsoleUser); pw != "" && strings.Contains(got, pw) {
+		t.Errorf("a second init printed the cleartext password:\n%s", got)
+	}
 	if strings.Contains(got, "THIS IS THE ONLY TIME") {
 		t.Errorf("a second init reprinted the first-run banner:\n%s", got)
+	}
+
+	// WITH THE FILE GONE the answer changes, and `user add` is the only one left. Asserting both
+	// directions is what keeps the branch honest — a message hardcoded to either is wrong half the
+	// time.
+	if err := os.Remove(ConsolePasswordPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+	var third bytes.Buffer
+	if err := InitKontra(&third); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(third.String(), "kontra user add") {
+		t.Errorf("with no password file, it did not name the one command that gets you back in:\n%s", third.String())
 	}
 }
 

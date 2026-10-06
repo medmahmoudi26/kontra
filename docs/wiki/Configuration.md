@@ -105,8 +105,11 @@ load-bearing: a stored hash is `scrypt$N$r$p$salt$hash`, it contains `$`, and Co
 exists for, and corrupted into something that still *looks* like a hash — so every login would fail
 as "wrong password" rather than as the configuration error it is.
 
-> `docker compose logs cli | grep -A4 'console login'` shows the password **only on the container
-> that ran `init`**. A recreated `cli` has no such line, and `init` is a no-op the second time.
+> The password is in `/var/lib/kontra/console-password` (mode 0600), not in the logs:
+> `docker compose exec cli cat /var/lib/kontra/console-password`. Stdout was the old channel and was
+> wrong twice over — `docker compose logs cli` shows only the container that ran `init`, so one
+> recreate destroyed the only copy, and until then the credential sat in a log stream readable by
+> anyone in the docker group.
 
 ---
 

@@ -71,7 +71,8 @@ const usageText = `kontra — local control surface
 
   kontra version                                   # which kontra this is; "dev (<rev>)" when unreleased
   kontra init                                      # create ~/.kontra/: config.yaml, workflows/, actors/
-                                                   # GENERATES the console login and prints it ONCE
+                                                   # GENERATES the console login into
+                                                   #   <home>/console-password (0600), never stdout
   kontra user add <name>                           # a second console login; only the hash is stored
   kontra token mint <state|explore|panel|run>      # fill a BLANK token in an EXISTING config
                                                    # run blank means the Run surface is OPEN: serve,

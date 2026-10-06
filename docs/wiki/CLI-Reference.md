@@ -33,8 +33,9 @@ is token-gated** (`KONTRA_EXPLORE_TOKEN` or `KONTRA_STATE_TOKEN`) because it min
 ### `kontra init`
 Creates `~/.kontra/`: `config.yaml`, `workflows/`, `actors/`.
 
-> **It generates the console login and prints it ONCE.** Lost it? `kontra user add <name>`. It also
-> mints the four tokens on a *new* install only.
+> **It generates the console login into `~/.kontra/console-password` (mode 0600), never stdout** —
+> stdout in the Compose install is `docker compose logs cli`. Deleted that file? `kontra user add
+> <name>`. It also mints the four tokens on a *new* install only.
 
 ### `kontra user add <name>`
 A second console login. Only the scrypt hash is stored, so a leaked config yields something to

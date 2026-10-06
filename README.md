@@ -70,11 +70,15 @@ One file. Docker is the only prerequisite — no clone, no build, no `kontra` bi
 ```bash
 curl -O https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/docker-compose.yml
 docker compose up -d --wait
-docker compose logs cli | grep -A4 'console login'
+docker compose exec cli cat /var/lib/kontra/console-password
 ```
 
 The console is on <http://127.0.0.1:8088> (ADR 0047). Sign in as `admin` with the password that
-last line printed.
+last line prints.
+
+The password is **never written to stdout**, because `init` runs in the `cli` container and stdout
+there is `docker compose logs` — readable by anyone in the docker group. It is generated into that
+0600 file instead, and `config.yaml` keeps only an scrypt hash.
 
 `docker-compose.yml` is the whole install: every default in it resolves to a published image, and
 the two scripts it used to need from a checkout are now an inline `configs:` entry and an image. It

@@ -19,11 +19,13 @@ docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:la
 docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
 docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
 docker compose --env-file .env.quickstart up -d --wait
-docker compose logs cli | grep -A4 'console login'
+docker compose exec cli cat /var/lib/kontra/console-password
 ```
 
-Sign in at <http://127.0.0.1:8088> as `admin` with the password that last line printed. Shown once;
-only a hash is kept. Lost it? `docker compose exec cli kontra user add <name>`.
+Sign in at <http://127.0.0.1:8088> as `admin` with the password that last line prints. It is in that
+0600 file and nowhere else — never on stdout, because `init` runs in a container and stdout there is
+`docker compose logs`. `config.yaml` keeps only an scrypt hash. Deleted the file? Make another
+account: `docker compose exec cli kontra user add <name>`.
 
 `docker compose down` keeps Datasets and Pulumi dockerFleet state. **`down -v` destroys both.**
 

@@ -42,13 +42,14 @@ tries, which is why the one-command installs that ship one are not copied here.
 
 ```bash
 go build -o /usr/local/bin/kontra ./cli
-kontra init                   # prints the console login ONCE, and nothing can recover it
+kontra init                   # writes the console login to ~/.kontra/console-password (0600)
 ```
 
 `kontra init` creates `~/.kontra/` at mode 0700, generates the four service tokens and one console
-account, hashes the password into `config.yaml` with scrypt and prints the plaintext **once**. It is
-generated rather than prompted because `init` runs in installers with no terminal — and because a
-default password is worse than no password. A second engineer gets their own with
+account, hashes the password into `config.yaml` with scrypt and writes the plaintext to
+`~/.kontra/console-password` at mode 0600 — **not to stdout**, which in the Compose install is
+`docker compose logs cli`. It is generated rather than prompted because `init` runs in installers
+with no terminal — and because a default password is worse than no password. A second engineer gets their own with
 `kontra user add <name>`; a blank token in an older install is filled by `kontra token mint <key>`.
 
 ## 3. Bring it up
