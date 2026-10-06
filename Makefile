@@ -426,5 +426,5 @@ test-examples-go:
 	@rc=0; for d in $(GO_EXAMPLES); do \
 	  test -f "$$d/go.mod" || continue; \
 	  echo "== $$d"; \
-	  ( cd "$$d" && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test ./... ) || rc=1; \
+	  ( cd "$$d" && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test -count=1 ./... ) || rc=1; \
 	done; exit $$rc

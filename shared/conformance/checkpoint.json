@@ -1,0 +1,278 @@
+{
+ "why": "The Checkpoint an actor carries in its Temporal activity heartbeat, and the resume it implies.",
+ "note": [
+  "THE COMMIT MAP USED TO LIVE IN REDIS, under a 24h TTL, in a hash that `volatile-lru` evicted",
+  "first (ADR 0059). A checkpoint in the heartbeat lives in the activity's own history instead, so",
+  "it survives anything the cache does — but only if both SDKs encode it identically, because the",
+  "writer of a checkpoint and its reader are often different processes and sometimes different",
+  "languages.",
+  "",
+  "`done` IS A RANGE SET BECAUSE A HEARTBEAT IS SMALL. A batch of 10,000 units with every unit",
+  "committed is one range, not ten thousand integers. Temporal's payload limit applies to heartbeat",
+  "details, so a per-unit list is a batch size ceiling in disguise.",
+  "",
+  "CANONICAL FORM IS PART OF THE CONTRACT, not an optimisation: inclusive [lo,hi] pairs, sorted",
+  "ascending, merged so no two ranges touch or overlap (hi + 1 < next.lo). Two implementations that",
+  "agree on membership and disagree on encoding produce different bytes for the same facts, and the",
+  "comparison that would have caught it is the one nobody runs."
+ ],
+ "version": 1,
+ "canonical": [
+  {
+   "why": "empty is empty — not [[0,0]], which would claim unit 0 committed",
+   "add": [],
+   "expect": [],
+   "count": 0
+  },
+  {
+   "why": "one index is a one-wide inclusive range",
+   "add": [0],
+   "expect": [[0, 0]],
+   "count": 1
+  },
+  {
+   "why": "a contiguous run collapses to one range",
+   "add": [0, 1, 2, 3, 4],
+   "expect": [[0, 4]],
+   "count": 5
+  },
+  {
+   "why": "insertion order must not change the encoding — this is the drift that matters",
+   "add": [4, 0, 2, 1, 3],
+   "expect": [[0, 4]],
+   "count": 5
+  },
+  {
+   "why": "a gap stays a gap",
+   "add": [0, 1, 2, 7, 8, 9],
+   "expect": [[0, 2], [7, 9]],
+   "count": 6
+  },
+  {
+   "why": "ADJACENT RANGES MERGE. [0,2] and [3,5] touch, so they are one range, not two",
+   "add": [0, 1, 2, 3, 4, 5],
+   "expect": [[0, 5]],
+   "count": 6
+  },
+  {
+   "why": "a single index bridging two ranges merges all three",
+   "add": [0, 1, 3, 4, 2],
+   "expect": [[0, 4]],
+   "count": 5
+  },
+  {
+   "why": "re-adding a committed index is a no-op, because a retry re-commits what it re-ran",
+   "add": [3, 3, 3],
+   "expect": [[3, 3]],
+   "count": 1
+  },
+  {
+   "why": "re-adding inside an existing range changes nothing",
+   "add": [0, 1, 2, 3, 4, 2, 3],
+   "expect": [[0, 4]],
+   "count": 5
+  },
+  {
+   "why": "one gap of exactly one index does NOT merge — off by one here loses a unit",
+   "add": [0, 2],
+   "expect": [[0, 0], [2, 2]],
+   "count": 2
+  },
+  {
+   "why": "descending input, several gaps",
+   "add": [9, 8, 5, 1, 0],
+   "expect": [[0, 1], [5, 5], [8, 9]],
+   "count": 5
+  },
+  {
+   "why": "a large sparse set stays compact where it can",
+   "add": [0, 1, 2, 3, 100, 101, 500],
+   "expect": [[0, 3], [100, 101], [500, 500]],
+   "count": 7
+  }
+ ],
+ "members": [
+  {
+   "why": "membership inside, at both edges, and outside",
+   "ranges": [[0, 2], [7, 9]],
+   "in": [0, 1, 2, 7, 8, 9],
+   "out": [3, 4, 5, 6, 10, 11]
+  },
+  {
+   "why": "an empty set contains nothing, including 0",
+   "ranges": [],
+   "in": [],
+   "out": [0, 1, 2]
+  },
+  {
+   "why": "a one-wide range contains exactly its index",
+   "ranges": [[5, 5]],
+   "in": [5],
+   "out": [4, 6]
+  }
+ ],
+ "wire": [
+  {
+   "why": "THE BYTES, not just the values. A writer that renders done as [{\"lo\":0,\"hi\":1}] agrees on every membership question and is unreadable to its peers. Compact JSON, keys in this order.",
+   "batch_id": "b1",
+   "commit": [0, 1],
+   "isolate": [4],
+   "manifest_ref": "",
+   "bytes": "{\"v\":1,\"batch_id\":\"b1\",\"done\":[[0,1]],\"failed\":[4],\"manifest_ref\":\"\"}"
+  },
+  {
+   "why": "an empty set is [] and not null — different bytes, and a strict decoder tells them apart",
+   "batch_id": "b",
+   "commit": [],
+   "isolate": [],
+   "manifest_ref": "",
+   "bytes": "{\"v\":1,\"batch_id\":\"b\",\"done\":[],\"failed\":[],\"manifest_ref\":\"\"}"
+  },
+  {
+   "why": "failed is SORTED, because a Go map iterates randomly and an unsorted list makes two encodings of one checkpoint differ",
+   "batch_id": "b2",
+   "commit": [3],
+   "isolate": [9, 1, 5],
+   "manifest_ref": "s3://m/1",
+   "bytes": "{\"v\":1,\"batch_id\":\"b2\",\"done\":[[3,3]],\"failed\":[1,5,9],\"manifest_ref\":\"s3://m/1\"}"
+  }
+ ],
+ "resume": [
+  {
+   "why": "nothing committed: every unit is still to do",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "b1",
+    "done": [],
+    "failed": []
+   },
+   "batch_id": "b1",
+   "units": 5,
+   "todo": [0, 1, 2, 3, 4]
+  },
+  {
+   "why": "a prefix committed: resume after it",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "b1",
+    "done": [[0, 2]],
+    "failed": []
+   },
+   "batch_id": "b1",
+   "units": 5,
+   "todo": [3, 4]
+  },
+  {
+   "why": "a hole in the middle is re-run, because a gap means it never committed",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "b1",
+    "done": [[0, 0], [2, 2], [4, 4]],
+    "failed": []
+   },
+   "batch_id": "b1",
+   "units": 5,
+   "todo": [1, 3]
+  },
+  {
+   "why": "an ISOLATED unit is not re-run — it is a decided failure, and re-running it re-poisons the scope",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "b1",
+    "done": [[0, 1]],
+    "failed": [3]
+   },
+   "batch_id": "b1",
+   "units": 5,
+   "todo": [2, 4]
+  },
+  {
+   "why": "everything accounted for: nothing to do, and the batch is finished",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "b1",
+    "done": [[0, 3]],
+    "failed": [4]
+   },
+   "batch_id": "b1",
+   "units": 5,
+   "todo": []
+  },
+  {
+   "why": "A CHECKPOINT FROM A DIFFERENT BATCH IS DISCARDED ENTIRELY. Unit indices are positions within one batch, so honouring a stale checkpoint would skip units by index in a batch that never ran them — silent data loss, and the exact failure a plain index list invites",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "b0",
+    "done": [[0, 3]],
+    "failed": []
+   },
+   "batch_id": "b1",
+   "units": 5,
+   "todo": [0, 1, 2, 3, 4],
+   "discarded": true
+  },
+  {
+   "why": "an empty batch_id matches nothing, including another empty one — an unidentified checkpoint is not evidence",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "",
+    "done": [[0, 3]],
+    "failed": []
+   },
+   "batch_id": "",
+   "units": 5,
+   "todo": [0, 1, 2, 3, 4],
+   "discarded": true
+  },
+  {
+   "why": "A FUTURE VERSION IS REFUSED, NOT PARTIALLY UNDERSTOOD. A v2 that added a field a v1 reader ignores would have the v1 reader resume from a checkpoint it only half read",
+   "checkpoint": {
+    "v": 2,
+    "batch_id": "b1",
+    "done": [[0, 3]],
+    "failed": []
+   },
+   "batch_id": "b1",
+   "units": 5,
+   "todo": [0, 1, 2, 3, 4],
+   "discarded": true
+  },
+  {
+   "why": "version 0 or absent is not v1 either — it is an encoder that did not say, which is the same risk",
+   "checkpoint": {
+    "v": 0,
+    "batch_id": "b1",
+    "done": [[0, 3]],
+    "failed": []
+   },
+   "batch_id": "b1",
+   "units": 5,
+   "todo": [0, 1, 2, 3, 4],
+   "discarded": true
+  },
+  {
+   "why": "done beyond the batch is ignored rather than refused: a shorter re-dispatch of the same batch id is a bug upstream, and dropping the run over it would turn a recoverable confusion into an outage",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "b1",
+    "done": [[0, 9]],
+    "failed": []
+   },
+   "batch_id": "b1",
+   "units": 3,
+   "todo": []
+  },
+  {
+   "why": "a zero-unit batch has nothing to do and is not an error",
+   "checkpoint": {
+    "v": 1,
+    "batch_id": "b1",
+    "done": [],
+    "failed": []
+   },
+   "batch_id": "b1",
+   "units": 0,
+   "todo": []
+  }
+ ]
+}
