@@ -4,10 +4,8 @@ Date: 2026-10-06
 
 ## Status
 
-**Accepted** for the rendering engine, the redaction rule, the store, the run-end lifecycle and the
-HTTP surface. The CLI and the console are the same decision's later halves and will amend this ADR as
-they land, in the manner of **0054** amending **0045** — a section that says "not yet decided" is more
-useful than one that guesses.
+**Accepted**, in full: the rendering engine, the redaction rule, the store, the run-end lifecycle, the
+HTTP surface, the CLI developer loop and the console page.
 
 ## Context
 
@@ -357,7 +355,85 @@ not rate — so it is a sliding window per socket address with an injectable cap
 that address is the proxy behind a proxy, which makes it a brake on accidental load rather than a
 per-user quota; `rowStream.ts` says the same of itself and so does this.
 
+### 14. The lint is a second Liquid implementation, so it is deliberately narrow
+
+`kontra workflow serve` refuses a `report.md` that cannot work, because a report renders only when a
+run ENDS — a typo is otherwise discovered after however long the work took. `github.com/osteele/liquid`
+parses; LiquidJS renders; they are different implementations of one language and do not agree about
+everything. Measured:
+
+| | osteele/liquid v1.9.2 | LiquidJS 10.30.0 |
+|---|---|---|
+| `{{ x \| nosuchfilter }}` | parses | `ParseError` under `strictFilters` |
+| `{% code "http", v %}` | undefined tag unless registered | the engine's own tag |
+| `{{ result.summary }` | literal text | literal text |
+
+So the lint checks only what both agree on: a syntax error, and a context root outside §2.4. It does
+not check filters, and it does not check `result.<field>` against the workflow's return type — §6.1
+asks for the third and it needs `schemadump.py` extended to dump a return annotation, which is its own
+change. **The refusal says so**, because an author who saw a lint pass would otherwise assume
+`{{ result.missing_field }}` had been checked.
+
+`KONTRA_REPORT_LINT=off` exists because the renderer is the authority: if the two implementations ever
+disagree about a template that renders correctly, an author must be able to proceed.
+
+§6.1 asks for line AND column; `liquid.SourceError` carries a line and no column, and inventing one
+would be worse than saying so.
+
+### 15. The report is a PAGE at `/runs/<id>/report`, not the run detail's default tab
+
+§9.1 asks for a tab, defaulting to the report when one exists. The run detail is one 1,718-line
+component with **no page-level tab strip** — the two `role="tablist"` strips in that repo are both
+in-component and in-memory, neither reflected in the URL — so there is nothing to add a tab to, and
+restructuring that component is a blast radius this feature should not take on days before a demo. The
+design prototype also shows a standalone page.
+
+So `/runs/<id>/report` is an address that round-trips, which is the property that actually matters: an
+operator can paste it. The console has no router; `parseAddress` previously REFUSED every second
+segment under a run, and that refusal is now narrowed by exactly one word rather than opened to a
+wildcard — a typo'd tab is still `null`.
+
+Honouring §9.1 properly means giving the run detail a real tab strip, which is worth doing on its own
+and not as a rider on this.
+
+### 16. No syntax highlighting, because the markers are the half that carries meaning
+
+§9.2 asks for Shiki tokens with markers added after highlighting. There is no highlighter in the
+console and adding one brings a grammar bundle for a cosmetic gain, so a code block renders monospace
+text with the markers and no colour:
+
+| byte | shown as |
+|---|---|
+| `\r` | `␍` **before** the break it caused, so CRLF and bare LF are told apart |
+| `\t` | `→` |
+| other C0, DEL, and every byte ≥ 0x80 | `\xHH` |
+
+Those are evidence. "The response ended its headers with a bare LF" is a finding, and a renderer that
+normalised it would destroy the finding while appearing to show it. Highlighting is not evidence.
+
+The bytes are decoded **latin-1, not UTF-8**, for the reason the redaction rule uses latin-1: a UTF-8
+decode replaces each invalid sequence with U+FFFD and the original byte is gone, so `\xff` could not be
+shown as `\xff`. The cost is that a multi-byte character renders as its bytes; the hex view is where
+those are read, and losing a byte entirely is the worse failure for evidence.
+
+### 17. The prototype's palette is a departure, and the console's tokens win
+
+The design prototype is dark (`#0c0f14` ground, `#11161e` cards, `#d97757` accent, IBM Plex). The
+console's own tokens are a different dark (`--bg: #0b0f14`, `--panel: #111820`, `--accent: #4aa3ff`,
+system fonts). The page takes the prototype's LAYOUT and information architecture — breadcrumb, status
+pill, version selector, export actions, report card, thread with avatar, author, relative time and a
+`via token` label — and the console's colours, because a report page that looked like a different
+product would be the one page in the console that did.
+
+### 18. One bug that only a browser could find
+
+`truncationNote` printed MiB unconditionally, so a 171-byte block truncated out of a 4.1 MiB object
+read **"showing 0.0 MiB of 4.1 MiB"** — a measurement that says nothing about the thing it measures.
+Every unit test passed. It was found by looking at the rendered page, which is the argument for driving
+a UI in a browser rather than trusting a typecheck.
+
 ## What this revision does not decide
 
-The `serve` lint, `kontra report preview`, the three MCP tools, and the console page. Each will amend
-this ADR when it is built rather than be guessed at here.
+Honouring §9.1's tab strip; the `result.<field>` type check in `serve`; a `list_feedback` that can
+answer for a whole workflow; and whether a browser should ever be able to reveal unredacted bytes,
+which needs per-user authorisation data that exists nowhere today.

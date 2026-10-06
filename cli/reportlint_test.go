@@ -176,3 +176,26 @@ func TestEveryReportToolWarnsThatItsContentIsUntrusted(t *testing.T) {
 		}
 	}
 }
+
+// TestTheDocumentedExampleLints keeps `testdata/workflows/reporting/report.md` honest.
+//
+// IT IS THE EXAMPLE THE WIKI POINTS AT, so a template that stopped linting would be a page telling
+// people to write something this command refuses. It also exercises the parts a hand-written case
+// does not: a `{% for %}` over a result field, a `{% code %}` with a claim-checked value, and the
+// `{% else %}` branch that every failed run renders.
+func TestTheDocumentedExampleLints(t *testing.T) {
+	path := filepath.Join("..", "testdata", "workflows", "reporting", reportFile)
+	text, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the documented example is missing: %v", err)
+	}
+	if problems := lintReportTemplate(path, string(text)); len(problems) != 0 {
+		t.Errorf("the documented example does not lint: %v", problems)
+	}
+	// And it must actually exercise the things it is the example OF.
+	for _, want := range []string{"{% if result %}", "{% else %}", "{% for p in result.price_changes", "{% code \"http\""} {
+		if !strings.Contains(string(text), want) {
+			t.Errorf("the example no longer shows %q", want)
+		}
+	}
+}

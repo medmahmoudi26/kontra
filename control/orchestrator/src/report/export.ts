@@ -62,9 +62,27 @@ function textOf(node: MdNode): string {
 export function truncationNote(block: SnapshotBlock): string | undefined {
   if (block.unresolved) return `this block was not read: ${block.unresolved}`;
   if (!block.truncated) return undefined;
-  const mib = (n: number): string => `${(n / (1024 * 1024)).toFixed(1)} MiB`;
-  const shown = Buffer.from(block.b64, 'base64').length;
-  return `showing ${mib(shown)} of ${mib(block.fullBytes)} — the full bytes are downloadable from the report page`;
+  return (
+    `showing ${humanBytes(Buffer.from(block.b64, 'base64').length)} of ${humanBytes(block.fullBytes)}` +
+    ' — the full bytes are downloadable from the report page'
+  );
+}
+
+/**
+ * A size a person reads.
+ *
+ * THE UNIT IS CHOSEN PER VALUE, which the first version did not do: a fixed MiB made a 2 KiB block
+ * truncated out of a 4 MiB object read "showing 0.0 MiB of 4.1 MiB" — a measurement that says nothing
+ * about the thing it measures. Found by looking at the rendered page rather than by a test.
+ *
+ * The console carries the same function (`report/snapshot.ts`'s `humanBytes`) because it is a different
+ * repository; the two are one rule in two spellings, and an exported note and an on-screen note must
+ * read identically or a reader comparing them has to translate.
+ */
+export function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 // --- Markdown ------------------------------------------------------------------------------------
