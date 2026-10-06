@@ -26,6 +26,8 @@
  * field. The seq is per-run monotonic, so a reconnecting client resumes with `Last-Event-ID`.
  */
 
+import { createHash } from 'node:crypto';
+
 import type { ListedObject } from './codec/objectStore';
 import { runPrefix } from './codec/shard';
 
@@ -52,9 +54,22 @@ export interface RowTally {
  * cost the most exactly where the rows were least readable. The size comes off the LIST, so an
  * oversized blob is skipped WITHOUT being fetched.
  */
+/**
+ * One chunk in the window: the stored object, and a stable id for it.
+ *
+ * THE ID IS A HASH OF THE OBJECT KEY, NOT THE KEY. A client needs identity to accumulate a tail
+ * across polls — the window is re-sent whole every poll, so without it every chunk arrives again
+ * and a naive append duplicates. The key would serve, but this endpoint's rule is that no
+ * object-store path leaves the process; a digest dedupes exactly as well and leaks no layout.
+ */
+export interface RowChunk {
+  id: string;
+  row: unknown;
+}
+
 export interface RowWindow {
   /** The newest committed rows, oldest-first. Parsed unit objects, exactly as stored. */
-  recent: unknown[];
+  recent: RowChunk[];
   /** True when {@link ROW_TAIL_WINDOW_BYTES} cut the window short of {@link ROW_TAIL_WINDOW} rows.
    *  Surfaced so the UI can say why it is showing three rows instead of five, rather than letting a
    *  wide-rowed Run look like a quiet one. */
@@ -184,6 +199,16 @@ export const ROW_TAIL_MAX_SINKS = 64;
  * the issue names. A row larger than the whole budget is skipped rather than truncated: half a JSON
  * object is not a row, and a window that lies about its contents is worse than a shorter one.
  */
+/**
+ * A chunk's identity on the wire: 16 hex of sha256 over its object key.
+ *
+ * Stable for the life of the object, which is what lets a client accumulate across polls, and
+ * one-way, so the store's layout does not travel with it.
+ */
+export function chunkId(key: string): string {
+  return createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
 export const ROW_TAIL_WINDOW = 50;
 export const ROW_TAIL_WINDOW_BYTES = 16 * 1024;
 
@@ -520,7 +545,7 @@ export class RowTailHub {
     if (!get) return null;
 
     const { keys, clipped } = windowCandidates(objects, this.windowRows, this.windowBytes);
-    const recent: unknown[] = [];
+    const recent: RowChunk[] = [];
     const next = new Map<string, unknown>();
     let used = 0;
     for (const key of keys) {
@@ -539,7 +564,7 @@ export class RowTailHub {
         }
       }
       next.set(key, unit);
-      recent.push(unit);
+      recent.push({ id: chunkId(key), row: unit });
     }
     // The cache is exactly the window, so it cannot outgrow it: keys that fell out are dropped here
     // rather than accumulating for the life of the Run.

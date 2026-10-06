@@ -408,7 +408,10 @@ describe('RowTailHub — the bounded row window', () => {
 
     const snap = snapshotsOf(got).at(-1)!;
     expect(snap.rows).toBe(3); // the COUNT is still every committed row
-    expect(snap.window?.recent).toEqual([{ host: 'h2' }, { host: 'h3' }]); // the window is the newest two
+    // Each entry now carries a stable id beside the row, which is what lets a client accumulate a
+    // tail across polls instead of redrawing the same window. The ROWS are unchanged.
+    expect(snap.window?.recent.map((c) => c.row)).toEqual([{ host: 'h2' }, { host: 'h3' }]);
+    expect(snap.window?.recent.every((c) => typeof c.id === 'string' && c.id.length === 16)).toBe(true);
     hub.close();
   });
 
@@ -464,7 +467,9 @@ describe('RowTailHub — the bounded row window', () => {
     hub.subscribe('r', (e) => got.push(e));
     await hub.poll('r');
 
-    expect(snapshotsOf(got).at(-1)!.window?.recent).toEqual([{ host: 'only-this-one' }]);
+    expect(snapshotsOf(got).at(-1)!.window?.recent.map((c) => c.row)).toEqual([
+      { host: 'only-this-one' },
+    ]);
     hub.close();
   });
 
@@ -485,7 +490,7 @@ describe('RowTailHub — the bounded row window', () => {
 
     const snap = snapshotsOf(got).at(-1)!;
     expect(snap.rows).toBe(2); // the count is unaffected — it is a LIST, not a read
-    expect(snap.window?.recent).toEqual([{ ok: true }]);
+    expect(snap.window?.recent.map((c) => c.row)).toEqual([{ ok: true }]);
     hub.close();
   });
 
