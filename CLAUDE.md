@@ -7,9 +7,16 @@
 `dev` is the default branch and the base for every pull request. `main` is what has been released —
 it moves only by merging `dev`, and only deliberately.
 
-Branch protection is not available on this repository (it needs GitHub Pro for a private repo), so
-**nothing mechanically stops a push to `main`.** This paragraph is the enforcement. If you find
-yourself on `main`, switch before you commit:
+**`kontra` and `kontra-console` are PUBLIC; `kontra-actors`, `kontra-workflows`, `kontra-cloud` and
+`kontra-runtimes` are private.** Verified 2026-10-07: an unauthenticated `git ls-remote` against
+`kontra` succeeds. Treat anything in those two as published — nothing secret has leaked (`.env` is
+gitignored, no key or token path was ever committed, and the `AKIA…`/`dop_v1_…` literals in the tree
+are documentation examples and sequential fakes), and that is a property to keep rather than assume.
+
+So branch protection IS available: rulesets are free on a public repository, and the sentence that
+used to stand here — that protection needs GitHub Pro for a private repo — was both wrong about these
+two and the reason nothing mechanically stops a push to `main`. Until a ruleset is configured, this
+paragraph is still the only enforcement. If you find yourself on `main`, switch before you commit:
 
 ```sh
 git switch dev        # or: git switch -c <topic> dev
