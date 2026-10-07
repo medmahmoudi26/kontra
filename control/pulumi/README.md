@@ -13,6 +13,17 @@ parity.py     asserts this program and docker-compose.yml still describe the sam
 whoever edits a service will read it. This file is the parts that are about the program as a whole:
 why it has the shape it has, and how it is driven.
 
+## The registry diverges from compose, on purpose
+
+`docker-compose.yml` runs zot v2.1.21 and two render one-shots; this program still runs `registry:2`
+(ADR 0061). Mirroring it would move `kontra_registry-data` between services, which
+`hostengine.CheckVolumeIdentity` refuses by design — so `kontra control up` would start refusing on
+every box this program has already converged.
+
+The consequence, stated plainly: on a box converged by compose, `kontra control up` converges the
+registry **backwards**. Run `python3 control/pulumi/parity.py` to see every line of it. Closing it is
+a volume migration, not an edit.
+
 ## Why this is YAML, and why ADR 0019's engine stays TypeScript
 
 There are now two Pulumi engines in kontra and they do not share a program shape. That is a decision,

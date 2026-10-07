@@ -33,16 +33,28 @@ PROGRAM = os.path.join(REPO, "control", "pulumi")
 
 # Pulumi resource key -> compose service name. The keys are camelCase because Pulumi YAML resource
 # names are referenced as `${name}` and a dash there reads as an operator.
+#
+# EVERY COMPOSE SERVICE BELONGS IN HERE. A service this map does not know is not compared at all: the
+# container-count line below notices, but it names a number and not a service, and a `depends_on`
+# that reaches the unknown name is reported instead of checked. Both are weaker than a comparison.
 SERVICES = {
     "postgres": "postgres",
     "temporalConfig": "temporal-dynamicconfig",
     "temporal": "temporal",
     "redis": "redis",
+    # THE REGISTRY IS THREE SERVICES AND NOT ONE. zot reads a config FILE that is rendered per
+    # install, so `registry-config` writes it (plus the healthcheck binary — zot's image has one
+    # executable and no shell), `registry-htpasswd` turns the plaintext users into bcrypt, and
+    # `registry` serves. Both gates between them are `service_completed_successfully`, which only
+    # has a meaning here if all three are compared.
+    "registryConfig": "registry-config",
+    "registryHtpasswd": "registry-htpasswd",
     "registry": "registry",
     "seaweed": "seaweed",
     "victoriaMetrics": "victoriametrics",
     "victoriaLogs": "victorialogs",
     "logship": "logship",
+    "porter": "porter",
     "orchestratorApi": "orchestrator-api",
     "orchestratorInfra": "orchestrator-infra",
     "orchestratorProbe": "orchestrator-probe",
@@ -86,12 +98,29 @@ SERVICES = {
 # arrives (established by mounting it into a busybox and reading it with `cat -A`). So the compose
 # side is un-escaped here before comparison, and a `$$` that survives into a container would be a
 # bug this check must not hide.
+#
+# THE SAME HOLDS FOR `command:`, WHICH IS WHERE THE REGISTRY'S TWO RENDER ONE-SHOTS LIVE. compose
+# DOES interpolate a command, and `config` re-escapes every literal `$` of the result identically:
+# `registry-config`'s script reaches the shell with 41 single `$` and prints as 41 `$$`. Pulumi YAML's
+# escape is the same `$$` — so the two SOURCE texts are byte-for-byte the same and only the compose
+# side needs un-escaping to compare the script the shell actually runs. Without this the two
+# harnesses could never agree about a script containing a variable, and the check would be
+# permanently red about a difference that is not one.
 COMPOSE_CONFIG_ESCAPE = "$$"
 
 
 def unescape_compose_content(text: str) -> str:
     """`$$` in a compose `content:` is a literal `$` in the file the container sees."""
     return text.replace(COMPOSE_CONFIG_ESCAPE, "$")
+
+
+def compose_command(value) -> list[str] | None:
+    """A resolved compose `command`, un-escaped: the argv the container actually runs."""
+    if not value:
+        return None
+    if isinstance(value, str):  # short syntax, were compose ever to stop normalising it
+        value = [value]
+    return [unescape_compose_content(a) for a in value]
 
 
 # ── IMAGE REFS ARE COMPARED WITHOUT REGISTRY OR TAG ────────────────────────────────────────────
@@ -258,8 +287,9 @@ def main() -> int:
             bad(f"{svc}: restart {p.get('restart')!r} != {c.get('restart')!r}")
         if c.get("hostname") != p.get("hostname"):
             bad(f"{svc}: hostname {p.get('hostname')!r} != {c.get('hostname')!r}")
-        if (c.get("command") or None) != (p.get("command") or None):
-            bad(f"{svc}: command differs\n    compose={c.get('command')!r}\n    pulumi={p.get('command')!r}")
+        ccmd, pcmd = compose_command(c.get("command")), (p.get("command") or None)
+        if ccmd != pcmd:
+            bad(f"{svc}: command differs\n    compose={ccmd!r}\n    pulumi={pcmd!r}")
         if (c.get("entrypoint") or None) != (p.get("entrypoints") or None):
             bad(f"{svc}: entrypoint differs — this provider splits `entrypoints` from `command`")
 
@@ -435,6 +465,14 @@ def main() -> int:
             if dkey is None:
                 bad(f"{svc} -> {dep}: compose depends_on a service absent from this map and from Pulumi")
                 continue
+            # AND THE SAME GUARD ONE LOOKUP LATER, which is where the crash moved to. Being in this
+            # map is a claim that the program SHOULD declare the service; it is not evidence that it
+            # does. A key present here and absent from the program is the finding this harness exists
+            # to print — reaching into `containers` for it turns that finding into a KeyError and
+            # takes every other finding with it.
+            if dkey not in containers:
+                bad(f"{svc} -> {dep}: this map expects Pulumi to declare {dep} and it does not")
+                continue
             d = containers[dkey]["inputs"]
             cond = spec["condition"]
             if cond == "service_healthy":
@@ -466,13 +504,18 @@ def main() -> int:
         bad(f"published port count {published} != compose's {expected_published}")
     notes.append(f"published ports={published}, all bound to {sorted(ips)}")
 
-    # The three written refusals in the compose file. Each is a container with no port, on purpose.
+    # The four written refusals in the compose file. Each is a container with no port, on purpose.
     for key, why in (
         ("victoriaMetrics", "a host firewall does not protect a DNATed port"),
         ("victoriaLogs", "no auth at all — tenancy is a request header"),
         ("orchestratorInfra", "holds the rw docker socket and the cloud credential"),
+        ("porter", "it answers with no credential of its own — the private network is the control"),
     ):
-        if containers[key]["inputs"].get("ports"):
+        # A MISSING KEY IS A FINDING, NOT A KeyError — the same lesson as the bare `next()` above. A
+        # refusal this harness cannot evaluate must say so, or an absent container reads as a pass.
+        if key not in containers:
+            bad(f"{key}: not in this program, so the no-published-port refusal was not checked")
+        elif containers[key]["inputs"].get("ports"):
             bad(f"{key} must have no published port: {why}")
 
     print("\n".join(notes))

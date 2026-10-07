@@ -781,6 +781,26 @@ resources:
     options:
       provider: ${dockerProvider}
 
+  # ── THIS PROGRAM STILL RUNS `registry:2`, AND COMPOSE DOES NOT (ADR 0061) ──────────────────────
+  #
+  # `docker-compose.yml` replaced the registry with zot v2.1.21 plus two render one-shots. This
+  # program was NOT changed to match, deliberately, and the reason is a gate in this repo doing its
+  # job: the compose service mounts `kontra_registry-data` read-only into `registry-config` so an
+  # unmigrated install refuses to start, and moving a volume between services is exactly what
+  # `hostengine.CheckVolumeIdentity` refuses — "Renaming a volume is a migration: copy the data
+  # across and then change the program, in that order." Mirroring the change here would make
+  # `kontra control up` and `kontra update` REFUSE on every installation this program has already
+  # converged, which is worse than the divergence it would close.
+  #
+  # SO THE TWO INSTALL PATHS DISAGREE, AND THIS IS WHERE THAT IS WRITTEN DOWN. On a box converged by
+  # compose, running `kontra control up` converges the registry BACKWARDS: it replaces zot with
+  # `registry:2` pointed at `/var/lib/registry` in the old volume. The images are still in
+  # `kontra_zot-data` and the catalog's digests will not resolve, which reads as an empty registry —
+  # and nothing in this system tells an empty registry from a fresh one.
+  #
+  # `control/pulumi/parity.py` names every line of the divergence rather than hiding it; it is the
+  # only thing that reads both files and it is NOT in CI. Closing this needs a volume migration in
+  # the Pulumi path, not an edit here.
   registry:
     type: docker:index:Container
     properties:
