@@ -460,8 +460,15 @@ services:
         #
         # "keep the 5 most recently pushed" is only safe once something protects a version that is
         # OLDER than those 5 and still placed on a Machine — which is what the `inuse-` tags are for
-        # and what acceptance test 7 pins. Until the reconciler that writes them exists, enforcing
-        # would delete a running actor's image. zot's dryRun logs every would-delete instead.
+        # and what acceptance test 7 pins. The reconciler that writes them is armed in the API role,
+        # so what gates `enforce` now is not whether it exists but whether it has RUN HERE: a tag
+        # appears within ten minutes of the orchestrator starting, and this install's own registry is
+        # the thing to check (`curl .../v2/<actor>/tags/list` shows an `inuse-` tag or it does not).
+        #
+        # And what it protects is NARROWER than the table above implies: only the catalog's current
+        # digest. Placements live in Pulumi stack state rather than a table, so a digest that is on a
+        # Machine and not in the catalog is not tagged (control/orchestrator/src/images/inuse.ts).
+        # zot's dryRun logs every would-delete instead of taking it.
         case "$$ret" in
           dryrun) dryrun=true ;;
           enforce) dryrun=false ;;

@@ -35,6 +35,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # THE LINKS ARE CHECKED BEFORE ANYTHING IS PUBLISHED, because a dead relative link is invisible
+      # in the tree and visible on the wiki: GitHub resolves `../../handler` to `/<owner>/handler`,
+      # which is a 404 on someone else's namespace. The checker found two such targets that had been
+      # in the tree long enough to be quoted in a review. It understands GitHub's `../../wiki/<Page>`
+      # idiom, so a filesystem-only check would have failed the 20 live README links instead.
+      - name: Check the wiki's links
+        run: python3 docs/wiki/linkcheck.py
+
       - name: Clone the wiki
         run: |
           set -eu

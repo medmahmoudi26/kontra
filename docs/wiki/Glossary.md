@@ -113,6 +113,9 @@ The container **Image** spelling of the same idea, built by `kontra deploy --act
 Bundle is fetched by a Warden; an Image is pulled by a Docker daemon. The Actors page lists both
 and labels which is which.
 
+Its layers have names once it is built by buildpacks — see **Actor image** under
+[the image store](#the-image-store).
+
 ### Workspace
 A named directory under `KONTRA_WORKSPACES` holding `actors/` and `workflows/`. It is also an
 **isolation boundary**: each workspace gets its own DuckLake catalog, so a console pointed at the
@@ -120,6 +123,65 @@ wrong workspace shows an empty install rather than someone else's data.
 
 ### Scratch
 A Run's working area for intermediate values that are not Dataset output.
+
+---
+
+## The image store
+
+The nouns of a build. Several of these name parts of **one** image and get swapped for each other, so
+each entry says which part of the stack it is. [[Runtimes]] is the long form.
+
+### Runtime
+The OS plus the system packages an actor runs on, published as a CNB **run image** from
+`kontra-runtimes` (`python`, `python-browser`, `base`, …). Declared in `actor.json` by name and
+**major** (`python-browser:1`), which a build resolves to a digest — with the resolver written in
+`cli/runtimes.go` and no build path calling it yet.
+
+A Runtime is **not** where dependencies go — that is the lockfile — and **not** where an interpreter
+version goes, which is `.python-version`.
+
+> Unrelated to the `runtime/` directory in this repository, which is the host that loads an actor
+> beside it on a Machine. Same word, different axis.
+
+### Builder
+The CNB builder that turns an actor directory into an image. The design is **one builder per install,
+pinned by digest** (`heroku/builder:24`), with every Runtime compatible with it — but nothing in this
+repository pins one yet: `cli/packbuild.go`'s `Builder` field has no caller that sets it, and there is
+no builder constant, variable or `builder.json` here. The pin belongs in `kontra-runtimes`
+([[Writing-a-Runtime]]).
+
+A Builder is **not** a Runtime: the builder is the thing that *does* the build and is thrown away;
+the runtime is what the result sits on and ships inside it.
+
+### Actor image
+The output of a build: **runtime layers, then dependency layers, then the app layer.** Identified by
+digest, exactly as before (ADR 0032) — what buildpacks add is that the layers have names and a
+recorded source.
+
+### Rebase
+Moving an Actor image onto a newer digest of **the same Runtime major**, by rewriting its manifest
+with no rebuild. The result is a **new digest for the same actor version** — so a version maps to a
+*sequence* of digests, and the catalog says which is current.
+
+Rebase is **not** a rebuild: the deps and app layer digests are unchanged, which is both why it is
+cheap and why it is safe to do to every actor at once. Not yet implemented.
+
+### Layer kind
+`runtime`, `deps` (one buildpack layer, for example `heroku/python:venv`) or `app`. To be **read** from
+the image's `io.buildpacks.lifecycle.metadata` label, never guessed — and joined to the manifest through
+`config.rootfs.diff_ids` by index, because the label records uncompressed digests and the manifest
+records compressed ones. Nothing reads it yet: the reader is the Images page
+([[The-Images-Page]]), which is designed and not built.
+
+### `inuse-` tag
+A tag the control plane puts on a digest to exempt it from retention: without it, "keep the 5 most
+recently pushed" deletes the image a running actor was placed from. A reconciler in the orchestrator
+writes them, armed in the API role and running every 10 minutes.
+
+It covers **one** of the three sources the design names — the digest the catalog currently records for
+an actor. A digest that is merely *placed on a Machine*, or referenced by a *run inside its retention
+window*, is not tagged, because neither is readable from a table. Retention therefore still ships in
+`dryrun` ([[Durability-and-Failures]]).
 
 ---
 
@@ -149,6 +211,8 @@ keyed by `runId`.
 |---|---|
 | **Actor** vs **Worker** | the definition vs the process running it |
 | **Bundle** vs **Image** | fetched by a Warden vs pulled by a Docker daemon |
+| **Runtime** vs **Builder** | what the image sits on vs what built it |
+| **Rebase** vs **rebuild** | a new digest with the same deps and app layers vs a new everything |
 | **Batch** vs **Unit** | the collection vs one item of it |
 | **Fleet** vs **Lease** | the capacity vs one Run's claim on it |
 | **Dataset name** vs **run-grain name** | the logical table vs one execution's partition |
@@ -158,4 +222,5 @@ keyed by `runId`.
 
 ---
 
-**See also:** [[Execution-Model]] · [[Data-Plane]] · [[Fleet-and-the-Warden]] · [[Contracts]]
+**See also:** [[Execution-Model]] · [[Data-Plane]] · [[Fleet-and-the-Warden]] · [[Contracts]] ·
+[[Runtimes]]

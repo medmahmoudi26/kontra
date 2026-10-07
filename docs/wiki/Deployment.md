@@ -208,6 +208,92 @@ This is the distributed model: `kontra deploy` once, then `docker pull` + `docke
 image on any droplet (pointed at the controller) and it self-registers + shows up in
 `kontra workers list` — no per-machine runtime install, venv, or repo checkout.
 
+> **This is the path being replaced.** Cloud Native Buildpacks take over the four steps above: the
+> base images become **Runtimes** an actor chooses in `actor.json`, dependencies land in their own
+> reusable layer, and the app layer is the only thing a code change rewrites — 1.44–2.26 GiB per actor
+> image becomes 175.4 MiB, and a one-line change becomes 0.133 MiB of new blobs. The build machinery
+> and the runtime resolution are committed; `kontra deploy` does not call them yet. [[Runtimes]] and
+> [ADR 0061](../adr/0061-buildpacks-runtimes-and-the-image-store.md).
+
+## 2a. The image store
+
+**There are two registries and they are not the same software.**
+
+| | the compose controller | `kontra up` |
+|---|---|---|
+| what it is | **zot**, pinned to the exact version `v2.1.21`, service name `registry` | an in-process registry inside the appliance binary |
+| retention / GC | yes, configured below | **none at all** |
+| search API | yes (zot's GraphQL `search` extension) | no |
+| auth | three optional roles; anonymous by default | none, by design — loopback only |
+
+The service name stays `registry` on purpose: the orchestrator reaches it at `http://registry:5000`,
+by service name, and no env file overrides that ([[Configuration]]).
+
+Its healthcheck targets **`/v2/_zot/ext/mgmt`**, not `/v2/`. That is not cosmetic: `/v2/` answers 401
+once credentials are on, and both `orchestrator-api` and `cli` gate on
+`registry: condition: service_healthy` — a healthcheck that fails under auth means the install never
+comes up.
+
+### Retention, and why it reports before it deletes
+
+| repository | kept |
+|---|---|
+| `actors/*-cache`, `*-cache` | the most recent only |
+| `kontra-runtimes/**` | every `<major>` tag, plus the 3 most recently pushed `<major>.<minor>.<patch>` |
+| `bundles/**` | **every tag** — a Bundle is not an actor image |
+| `actors/**`, `*` | the 5 most recently pushed, **plus every `^inuse-`** |
+| anything else (`**`) | **every tag** — a repository this table does not name is never trimmed |
+| untagged manifests | deleted after 24 h |
+
+Both the current repository shape (bare names like `webcrawl`, and `bundles/`) and the shape the
+buildpack path will create (`actors/<name>`) are named, because a policy keyed only on the future
+naming matched nothing — and inert retention is the one thing this is here to prevent.
+
+`KONTRA_REGISTRY_RETENTION` defaults to **`dryrun`**: zot logs every would-delete instead of deleting,
+so the policy is reviewable before it is live.
+
+The `^inuse-` tags that row depends on **are written** — a reconciler in the orchestrator, armed in the
+API role every start and disarmed only by `KONTRA_INUSE_TAGS=off`. What it tags is **narrower than the
+row implies**: the digest the catalog currently records for each actor, and *not* a Machine's
+placements or an in-retention run's digest. So before flipping to `enforce`, read a `dryrun` pass — and
+note that an install whose `kontra-api` container predates the reconciler has not run one yet.
+[[Durability-and-Failures]] has what is and is not covered, and why.
+
+Storage dedupe is on. The same content that took **7.9 GiB** under `registry:2` takes **4.7 GiB**
+here, before retention removes anything.
+
+### Migrating off `registry:2`
+
+zot's on-disk layout is not `registry:2`'s, so pointing the new service at the old volume presents an
+**empty registry** — and nothing in this system distinguishes an empty registry from a fresh one.
+So an unmigrated install **refuses to start**, naming the repository count it found and the command:
+
+```sh
+kontra registry migrate --from <old host:port> [--to <host:port>] [--dry-run]
+```
+
+`--to` defaults to `--registry` / `KONTRA_REGISTRY`. The same address on both sides is refused by
+name: it would copy every tag onto itself, report success, and leave you believing the old store had
+been drained. **Both sides have to be served** — a volume is not an endpoint — so the copy happens
+while the old `registry:2` is still answering. (The start-up refusal prints `kontra registry migrate`
+with no flags. `--from` is required.)
+
+It copies every repository and tag **by digest**, then re-reads each one at the destination and
+compares. Then it checks that every digest *the catalog* knows about resolves — which is a separate
+pass for a measured reason: 27 of 27 tags copied with matching digests and **two catalog digests still
+did not resolve**, both present in the old store and reachable by no tag, because a later push had
+moved the tag while the catalog kept the older digest. Those digests are what Placements are pinned to.
+
+`KONTRA_REGISTRY_MIGRATION=skip` starts a deliberately empty zot on a box that still has the old
+store. The `registry-data` volume is kept, mounted read-only, until the operator removes it.
+
+> [!WARNING]
+> **The two topologies have to agree about what the registry is.** `docker-compose.yml` and the Pulumi
+> program behind `kontra control up` each declare it, and ADR 0052 says the install *is* the Pulumi
+> program — so a converge against a program that still names `registry:2` and `/var/lib/registry`
+> re-creates the old service on a box that has already migrated, pointing it at the old volume.
+> `control/pulumi/parity.py` is the only check that compares the two, and it is not in CI.
+
 ## 3. The materializer — routed by task queue, placed off the controller
 
 Typed-output materialization runs in its **own process** (`control/orchestrator/src/materializer.ts` →
@@ -435,7 +521,7 @@ kontra workflow start workflows/dnssweep.py --wait \
 | `7233` | Temporal gRPC | every handler, every actor, + dispatch |
 | `8233` | Temporal UI | you |
 | `8333` | SeaweedFS S3 | the handler (codec), the actor (per-unit blobs), the browser (presigned parquet) |
-| `5000` | the OCI registry | `kontra deploy`/`scale` for Images, **and every fleet Machine**, which fetches its Bundle's layer from `/v2/bundles/<actor>/blobs/sha256:<sha>` (ADR 0036). A control plane without one cannot run a fleet run. |
+| `5000` | the OCI registry — zot under compose, an in-process one under `kontra up` (§2a) | `kontra deploy`/`scale` for Images, **and every fleet Machine**, which fetches its Bundle's layer from `/v2/bundles/<actor>/blobs/sha256:<sha>` (ADR 0036). A control plane without one cannot run a fleet run. |
 | `8088` | Orchestrator | the UI + actor self-registration (which IS the schema compat gate — ADR 0027) |
 | `6379` | Redis — the shared state store | every actor process, outbound to the controller |
 | `9110` | the actor's `/metrics` | a local agent (`kontra-vmagent`), which pushes to the controller |

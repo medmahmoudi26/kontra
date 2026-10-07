@@ -10,6 +10,8 @@
 - [[Writing-Actors-Python]]
 - [[Writing-Actors-Go]]
 - [[Writing-Workflows]]
+- [[Runtimes]]
+- [[Writing-a-Runtime]]
 
 **Reference**
 - [[Glossary]]
@@ -23,6 +25,7 @@
 - [[Data-Plane]]
 - [[Query-Surface]]
 - [[Dashboard]]
+- [[The-Images-Page]]
 
 **Operate**
 - [[Deployment]]

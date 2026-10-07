@@ -188,6 +188,53 @@ The record's sha is its identity, so re-pushing the same record on a resume is a
 overwrite — which is why records must be **content-deterministic** (no timestamps, no random ids).
 Store unset ⇒ commits are inline (dev/test). See [[Data-Plane]].
 
+## The image a Placement is pinned to
+
+A Placement resolves to `<repo>@<digest>` and pins **that digest**, not a tag — so what keeps a running
+Fleet runnable is the digest still being in the registry. The registry now has retention, which means it
+is now possible for something to delete it.
+
+**"Keep the 5 most recently pushed" is unsafe on its own.** A version older than those five that is
+still placed on a Machine is exactly the case that breaks: the Machine restarts a Worker, pulls by
+digest, and the digest is gone. Rebuilding does not recover it — a rebuild yields a *new* digest, so a
+Fleet recorded against the old one can never be re-run as recorded.
+
+What makes it safe is an **`inuse-` tag**: retention keeps every tag matching `^inuse-` regardless of
+age, so a tag is how the control plane says *not this one* to a garbage collector that runs inside zot
+with no callback and no way to ask a question. The tag namespace is the only vocabulary the two share.
+
+**A reconciler writes them.** It lives in the orchestrator, is armed in the **API** role on every
+start (the materializer has no periodic loop to join), runs one pass immediately and then every
+10 minutes, and is disarmed only by `KONTRA_INUSE_TAGS=off`. The tag is `inuse-` plus the first 12 hex
+characters of the digest, written on the **bare repository name** (`webcrawl:inuse-…`) — which is what
+the shipped `kontra deploy` pushes to. The policy table names both that and the `actors/<name>` shape
+the buildpack path will create, so neither is left unprotected.
+
+**It covers one of the three things retention needs it to.** The tag is written for the digest the
+catalog currently records for each actor. A digest that is *placed on a Machine*, and a digest a *run
+still inside its retention window* references, are **not** tagged — neither is readable: placements
+live in Pulumi stack state rather than a table, and an enrolled Fleet's assignments are
+operator-authored files that no code path writes.
+
+That gap is narrower than it reads, because a Placement resolves its digest *from the catalog*. So the
+dangerous case is not "placed but untagged", it is a catalog entry whose **tag has since moved**: the
+migration of this install found `desync@177f80c8` and `webcrawl@e09d6df4` recorded in the catalog,
+present in the store, and reachable by no tag at all. Those are exactly the digests the reconciler
+protects.
+
+**Removing a tag is best effort, and the asymmetry is deliberate.** Without a registry credential the
+store permits read, create and update but not delete, so a stale `inuse-` tag can outlive its reason.
+The consequence is retention keeping more than it must — recoverable. Deleting the image a running
+actor was placed from is not.
+
+> [!NOTE]
+> **A running install may hold no `inuse-` tags yet.** The loop arms at process start, so an install
+> whose `kontra-api` container predates the reconciler has never run a pass however long it has been
+> up. Ask the registry rather than the code — `curl -s http://127.0.0.1:5000/v2/<actor>/tags/list`
+> should show an `inuse-` tag beside the version tags — and recreate the container if it does not.
+> Then read a `dryrun` pass before setting `KONTRA_REGISTRY_RETENTION=enforce`. [[Deployment]] §2a has
+> the policy table.
+
 ## Close, determinism, replay
 
 `@actor.close` runs on every exit path of an unscoped dispatch — including a failure, which is

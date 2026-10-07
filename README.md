@@ -85,6 +85,25 @@ the two scripts it used to need from a checkout are now an inline `configs:` ent
 creates `./workspaces` for your code beside itself and seeds `hello/` into it on first boot, so
 there is nothing to make first.
 
+**An actor's OS is a Runtime it names, and the install's registry is where Runtimes live.** A
+**Runtime** is the OS plus the system packages an actor runs on — `python`, `python-browser`, `base` —
+published as a Cloud Native Buildpacks run image under `kontra-runtimes/` and named by major in
+`actor.json` (`"runtime": "python-browser:1"`). They come from a repository of their own,
+`kontra-runtimes`, so adding one is adding a directory there rather than editing kontra;
+`KONTRA_RUNTIMES_PREFIX` points an install at your own fork's registry instead.
+
+**None of that is on the build path yet.** `kontra deploy` still generates a Dockerfile
+`FROM kontra-host:1`, so an `actor.json` with a `runtime` field builds exactly as one without it. The
+`kontra-runtimes` repository does not exist and nothing mirrors runtimes on first boot, so a fresh
+install has none until one is pushed under that prefix. See
+[ADR 0061](docs/adr/0061-buildpacks-runtimes-and-the-image-store.md) for what is landed and what is
+not, and the wiki's [Runtimes](../../wiki/Runtimes) page for the author surface.
+
+Upgrading an install that still has a `registry:2` store needs one command first: the registry is
+**zot** now, its on-disk layout is different, and an unmigrated install **refuses to start** rather
+than presenting an empty registry — `kontra registry migrate --from <old host:port>` copies every
+repository by digest and proves every catalog digest arrived.
+
 <details>
 <summary><b>Optional:</b> a second file, for ports, the bind address, and the query workbench</summary>
 
@@ -257,6 +276,7 @@ The **[wiki](../../wiki)** is the manual — start at [Getting Started](../../wi
 | [First Run](../../wiki/First-Run) | nothing → an actor → a workflow → a fleet, one step at a time |
 | [Getting Started](../../wiki/Getting-Started) · [Dev Cycle](../../wiki/Dev-Cycle) | install, run one, iterate |
 | [Writing Actors: Python](../../wiki/Writing-Actors-Python) · [Go](../../wiki/Writing-Actors-Go) | the authoring surface |
+| [Runtimes](../../wiki/Runtimes) · [Writing a runtime](../../wiki/Writing-a-Runtime) | what an actor is built on, and how to add or fork one |
 | [Writing Workflows](../../wiki/Writing-Workflows) | the only dispatcher — input shapes, Fleet scopes, Method calls |
 | [CLI Reference](../../wiki/CLI-Reference) · [Configuration](../../wiki/Configuration) | every verb; every token, image pin and manifest field |
 | [Execution Model](../../wiki/Execution-Model) · [Durability](../../wiki/Durability-and-Failures) | what happens when things break |
@@ -306,6 +326,8 @@ the git tag prefix that publishes them. Their directory *is* their API. It is wh
 frozen and a binary that is also the operator's.
 
 **The console is not here.** It lives in [kontra-console](https://github.com/medmahmoudi26/kontra-console) and depends on `@kontra/core` — this repository's `shared/core/` — so the two halves read a Run through one set of declarations rather than two (ADR 0041). It ships as a content-addressed artifact the release pins by digest, which is why building kontra does not need it.
+
+**The runtimes are not here either.** A **Runtime** — the OS and system packages an actor is built *on*, as a Cloud Native Buildpacks run image — lives in `kontra-runtimes`: one directory and a `runtime.json` per runtime, published to the install's registry under `kontra-runtimes/`. A separate repository for a sharper reason than the console's: a fork that had to edit *this* repository to add a runtime could not add one, so discovery is a registry query under that prefix and never a list in `cli/`. **The repository is not created yet** ([ADR 0061](docs/adr/0061-buildpacks-runtimes-and-the-image-store.md)), and `cli/runtimes.go`'s resolver — which turns a declared `name:major` into a digest against whatever is published under the prefix — is committed and tested but not yet called by `kontra deploy`.
 
 ### The conformance corpora
 

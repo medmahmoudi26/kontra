@@ -187,8 +187,9 @@ func deployShellCheck(dir string, mode string) deployShellDisposition {
 }
 
 const deployShellMessage = "deploy.sh is no longer run: an actor's system packages come from its " +
-	"runtime now. Pick a runtime that provides what the script installed (`kontra runtime list`), or " +
-	"add one to a fork of kontra-runtimes — `actor.json`'s `runtime` field selects it."
+	"runtime now. Pick a runtime that provides what the script installed, or add one to a fork of " +
+	"kontra-runtimes — `actor.json`'s `runtime` field selects it, and an unknown name is refused with " +
+	"the list of what is published."
 
 // outsideReplace reports the first `replace` directive in an actor's go.mod that points outside the
 // actor's own directory, with its line number, or ("", 0) when there is none.

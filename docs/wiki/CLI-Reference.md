@@ -88,6 +88,16 @@ Converges `kontra-control` — 13 containers on one private Docker network, decl
 >
 > `--check` previews only and exits non-zero if anything would change, so CI can gate on it.
 
+### `kontra registry migrate --from <host:port> [--to <host:port>] [--dry-run]`
+Copies every repository and tag out of a `registry:2` store into **zot**, by digest, then re-reads each
+one at the destination and compares — and then checks that every digest *the catalog* knows about
+resolves, which is a separate pass because a tag that moved leaves the catalog's older digest reachable
+by no tag at all.
+
+`--to` defaults to `--registry` / `KONTRA_REGISTRY`. The same address on both sides is refused by name:
+it would copy every tag onto itself and report success. An install that still has an unmigrated
+`registry:2` store **refuses to start** until this has run ([[Deployment]] §2a).
+
 ---
 
 ## Authoring an Actor
@@ -131,6 +141,11 @@ With no `--push`: `<registry>/bundles/<name>:<version>`, the address a Fleet pla
 
 ### `kontra deploy --actor <dir> [--engine py|go] [--registry host:port]`
 The container-**Image** spelling: builds and pushes a self-contained worker image.
+
+> Cloud Native Buildpacks replace the generated Dockerfile this still uses, and `actor.json`'s
+> `runtime` field is how an actor picks what it is built on. The resolver and the `pack` invocation are
+> committed and tested; **neither is wired into this verb**, so the `runtime` field changes nothing
+> today. `kontra runtime build|test|import` and `kontra rebase` do not exist — [[Runtimes]].
 
 ### `kontra workers list`
 What is polling.
