@@ -67,6 +67,7 @@ import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
 import type { RunDescription } from './temporalClient';
 import { HistoryArchive, startHistoryArchiver } from './historyArchive';
+import { startInuseReconciler } from './images/inuseReconciler';
 import { installApiGate } from './auth/apiGate';
 import { registerInfraRoutes } from './infraRoutes';
 import { registerSecretRoutes } from './secrets/routes';
@@ -670,6 +671,24 @@ export async function runApi(): Promise<FastifyInstance> {
     // `off`, a run that aged out and a page that came back full are ordinary states of a healthy
     // system. They go to `info` so they are READ — routing them through the error channel is how
     // an operator learns to ignore the error channel (issue F5).
+    onNote: (note) => app.log.info(note),
+  });
+
+  // `inuse-` tags, which are what make registry retention safe to ENFORCE: zot keeps the five most
+  // recently pushed tags per repository, and without these a sixth-oldest version a Fleet is still
+  // running is deleted on schedule. Armed here for the same reason the archive above is — the
+  // materializer role has no periodic loop to join, and this is the only in-process reconciler idiom
+  // the codebase has. Failures are noted, never thrown: a registry blip must not take the API down,
+  // and the worst case of this loop going quiet is retention keeping more than it must.
+  //
+  // Its own Repo handle, the way the archiver above takes its own ObjectStore: `buildServer` keeps
+  // the one it built private, and a background loop that outlives a request has no business reaching
+  // into a request-scoped graph. `Repo`'s constructor migration is PRAGMA-guarded and idempotent, so
+  // a second reader of the same file is not a second schema.
+  const inuseRepo = new Repo(process.env.KONTRA_ORCHESTRATOR_DB ?? 'orchestrator.db');
+  startInuseReconciler({
+    listActors: () => inuseRepo.listActors(),
+    onError: (err, where) => app.log.warn(`inuse tags: ${where ? `${where}: ` : ''}${errMessage(err)}`),
     onNote: (note) => app.log.info(note),
   });
 
