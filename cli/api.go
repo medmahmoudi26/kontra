@@ -103,6 +103,16 @@ type actorRecord struct {
 		Name string `json:"name"`
 	} `json:"operations"`
 	Digest string `json:"digest"`
+	// Runtime is what this version's image was BUILT on — read, not written, by this side. `kontra
+	// rebase` compares the digest recorded here against the current digest of `<name>:<major>`, and a
+	// difference is the whole of rebase detection.
+	Runtime *struct {
+		Name   string `json:"name"`
+		Major  uint32 `json:"major"`
+		Digest string `json:"digest"`
+	} `json:"runtime"`
+	// History is the digests this version has already had, newest first. Absent until a rebase.
+	History []string `json:"history"`
 }
 
 // --- HTTP client ---

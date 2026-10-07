@@ -104,7 +104,7 @@ const usageText = `kontra — local control surface
   kontra infra up|down|status [--repo <dir>]       # the compose control plane (the other topology)
   kontra control up [--preview] [--json] [--stack local] [--workspaces <dir>]
         [--bind 127.0.0.1] [--api-port 8088] [--program <dir>]
-               # THE HOST ENGINE (ADR 0052 §1): converges kontra-control — 13 containers on
+               # THE HOST ENGINE (ADR 0052 §1): converges kontra-control — 15 containers on
                # one private Docker network, declared as Pulumi YAML — by shelling to the host
                # pulumi. Its state is file://<.kontra>/state, and the backend is ASSERTED
                # before any operation: a failed "pulumi login" does not stop pulumi, it
@@ -116,14 +116,14 @@ const usageText = `kontra — local control surface
                #   counts, NAMES what would be replaced, and exits 0 only when the converge is
                #   a no-op, so CI can gate on it. Takes no lock.
   kontra control down [--stack local]              # destroy the containers and the network; KEEPS
-               # all 11 volumes (retainOnDelete) and the Pulumi state. "compose down", not "down -v".
+               # all 13 volumes (retainOnDelete) and the Pulumi state. "compose down", not "down -v".
   kontra update [--check] [--to <tag>] [--stack local] [--program <dir>] [--workspaces <dir>]
                # MOVE THIS INSTALLATION TO NEWER IMAGES (ADR 0052 §7). The SAME converge as
                # "kontra control up" — same program, same engine, same lock, same volume gate —
                # with a different desired state. An install nobody can upgrade is one people
                # pin and abandon.
-               # EVERY VOLUME IS ACCOUNTED FOR BEFORE ANYTHING IS APPLIED, twice: eight of the
-               #   eleven carry protect: true in the program, so pulumi refuses to PLAN their
+               # EVERY VOLUME IS ACCOUNTED FOR BEFORE ANYTHING IS APPLIED, twice: nine of the
+               #   thirteen carry protect: true in the program, so pulumi refuses to PLAN their
                #   deletion (measured — it fails in preview, for any caller). And the identity
                #   of every volume this install has is asserted against "pulumi stack export":
                #   still named what it was, still attached to the same service. Not redundant —
@@ -179,6 +179,19 @@ const usageText = `kontra — local control surface
                # looks for them, plus a SHA256SUMS an installer can check. 'all' releases
                # the four; the Go half cross-builds (no cgo) and CI still runs this
                # natively on four runners, because an artifact nobody executed is a claim.
+  kontra rebase [<actor>[@<version>]] [--runtime <name>:<major>] [--dry-run]
+               # MOVE AN IMAGE ONTO A NEWER RUNTIME WITHOUT REBUILDING IT (ADR 0061). "pack rebase"
+               #   rewrites the manifest: the deps and app layers are untouched and only the run-image
+               #   layers below them change. Seconds, not a rebuild per actor.
+               # THE VERSION DOES NOT CHANGE. A version now names a SEQUENCE of digests; the catalog
+               #   keeps the rest in "history" and the "inuse-" reconciler tags all of it, because a
+               #   Lease keeps its old digest until it drops.
+               # With no argument it LISTS what is behind and rebases nothing.
+  kontra registry migrate --from <host:port> [--to <host:port>] [--dry-run]
+               # COPY A registry:2 STORE INTO ZOT, by tag and then by digest. Verifies every catalog
+               #   digest resolves at the destination before it says it is done, and refuses to report
+               #   success while any does not — an untagged manifest the catalog still references is a
+               #   digest a Placement is pinned to.
   kontra deploy --actor <dir> [--engine py|go] [--registry host:port]
                [--controller <host>] [--host-only] [--override]   # the container-Image spelling
   kontra workers list
@@ -346,6 +359,10 @@ func dispatch(args []string) error {
 		// subsystem of it — the word has to survive issue 08 retiring `control` back into `up`, and
 		// `cli/update.go` ends in the same `converge` this case's neighbour does.
 		err = cmdUpdate(args[1:])
+	case "rebase":
+		// Moving an actor image onto a newer digest of the SAME runtime major, by rewriting its manifest.
+		// The version does not change — see ADR 0061 on why a version now names a sequence of digests.
+		err = cmdRebase(args[1:])
 	case "registry":
 		// The OCI store, not the actor catalog. One subcommand today: `migrate`, which moves a
 		// `registry:2` store into zot by digest and proves every catalog digest arrived.

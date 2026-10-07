@@ -380,11 +380,24 @@ export class Repo {
    * operations/schemas already catalogued. Creates a minimal record if the actor is new
    * (the design-tool upload later fills operations, keeping this digest via upsertActor).
    */
-  setActorDigest(input: { key: string; name: string; version: string; digest: string }): ActorRecord {
+  setActorDigest(input: {
+    key: string;
+    name: string;
+    version: string;
+    digest: string;
+    /** What the new image was built ON. A rebase sends it; a worker self-registering does not. */
+    runtime?: ActorRuntimeRecord;
+  }): ActorRecord {
     return this.tx(() => {
       const prev = this.getActor(input.key);
       const rec: ActorRecord = prev
-        ? { ...prev, digest: input.digest, savedAt: Date.now(), ...historyPatch(prev, input.digest) }
+        ? {
+            ...prev,
+            digest: input.digest,
+            savedAt: Date.now(),
+            ...historyPatch(prev, input.digest),
+            ...(input.runtime ? { runtime: input.runtime } : {}),
+          }
         : {
             key: input.key,
             name: input.name,
@@ -393,6 +406,7 @@ export class Repo {
             operations: [],
             digest: input.digest,
             savedAt: Date.now(),
+            ...(input.runtime ? { runtime: input.runtime } : {}),
           };
       this.writeActor(rec);
       return rec;
