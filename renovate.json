@@ -1,0 +1,102 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommits"],
+
+  "_whyThisExists": [
+    "A manual scan on 2026-10-07 found nine call-graph-confirmed vulnerabilities in one Go module,",
+    "eight of which were a single `go` directive behind a fix that had been available for weeks. The",
+    "repository had no dependency automation of any kind, so nothing was going to raise them.",
+    "",
+    "`security.yml` REPORTS; this RESOLVES. Keeping both is the point: a scanner without an update",
+    "path produces a finding somebody has to act on by hand, and an update path without a scanner",
+    "produces upgrades nobody can justify."
+  ],
+
+  "timezone": "Europe/Paris",
+  "schedule": ["* 2-6 * * 1"],
+  "prConcurrentLimit": 4,
+  "prHourlyLimit": 2,
+  "rebaseWhen": "conflicted",
+  "baseBranches": ["dev"],
+  "_whyDev": "`main` is what has been released and moves only by merging `dev` (CLAUDE.md). A bot opening PRs against `main` would be the one writer that ignores that.",
+
+  "labels": ["dependencies"],
+  "semanticCommitType": "chore",
+
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["dependencies", "security"],
+    "schedule": ["at any time"],
+    "prPriority": 10,
+    "_why": "A vulnerability does not wait for the Monday window."
+  },
+
+  "osvVulnerabilityAlerts": true,
+
+  "packageRules": [
+    {
+      "_why": "GROUPED BY ECOSYSTEM, because four languages each producing their own PR stream is how dependency automation gets muted. One PR per ecosystem per week is reviewable; twenty is not.",
+      "matchManagers": ["gomod"],
+      "groupName": "go modules",
+      "postUpdateOptions": ["gomodTidy"]
+    },
+    {
+      "matchManagers": ["npm"],
+      "groupName": "node packages"
+    },
+    {
+      "matchManagers": ["dockerfile", "docker-compose"],
+      "groupName": "container images"
+    },
+    {
+      "_why": "ACTIONS PINNED BY SHA, which is what zizmor asks for and what stops a tag being re-pointed under a workflow that publishes images and signs them with cosign. Renovate keeps the comment beside the SHA readable.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "pinDigests": true
+    },
+    {
+      "_why": "PATCHES AUTO-MERGE WHEN CI IS GREEN, and nothing else does. A patch that passes four test suites is not worth a human; a minor bump to Temporal or DuckDB is.",
+      "matchUpdateTypes": ["patch", "pin", "digest"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "_why": "THE FOUR THAT ARE LOAD-BEARING ENOUGH TO READ ABOUT FIRST. Temporal is the execution model, DuckDB is the lake's engine, Pulumi is one of the two install paths, and the zot image holds every image this install owns. A grouped silent bump to any of them is a debugging session nobody connected to a dependency update.",
+      "matchPackageNames": [
+        "/^@temporalio//",
+        "/^go\\.temporal\\.io//",
+        "/^@duckdb//",
+        "/^@pulumi//",
+        "/project-zot/"
+      ],
+      "groupName": null,
+      "automerge": false,
+      "labels": ["dependencies", "needs-review"]
+    },
+    {
+      "_why": "THE PINNED BUILD TOOLING IS NOT A DEPENDENCY, it is a decision recorded in ADR 0061 with a measured sha256 beside it. Renovate may raise it; it may not merge it, because the checksum in Dockerfile.appliance and the one in kontra-runtimes' builder.json have to move in the same change.",
+      "matchPackageNames": ["buildpacks/pack", "heroku/builder"],
+      "automerge": false,
+      "labels": ["dependencies", "needs-review"]
+    },
+    {
+      "_why": "The fixture actors under runtimes/*/test exist to prove a runtime builds. Pinning them to current versions is churn against files whose whole purpose is to be minimal and stable.",
+      "matchFileNames": ["**/test/pyproject.toml", "**/test/go.mod", "**/testdata/**"],
+      "enabled": false
+    }
+  ],
+
+  "customManagers": [
+    {
+      "_why": "The `go` DIRECTIVE IS THE FIX FOR A STANDARD-LIBRARY VULNERABILITY, and Renovate's gomod manager does not raise it on its own. Eight of the nine findings on 2026-10-07 were exactly this: `go 1.26.4` against fixes in 1.26.6. Every workflow here reads the toolchain from a go.mod via `go-version-file`, so this one line is what moves CI too.",
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)go\\.(mod|work)$/"],
+      "matchStrings": ["^go (?<currentValue>\\d+\\.\\d+\\.\\d+)$"],
+      "depNameTemplate": "golang/go",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^go(?<version>.*)$",
+      "versioningTemplate": "semver"
+    }
+  ]
+}

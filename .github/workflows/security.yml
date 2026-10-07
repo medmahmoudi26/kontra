@@ -1,0 +1,166 @@
+# The scanners that would have caught what a one-off scan just found.
+#
+# WHY THIS FILE EXISTS, AND WHAT IT CAUGHT. A manual `govulncheck` run on 2026-10-07 reported nine
+# call-graph-confirmed vulnerabilities in `runtime/go` alone — eight in the Go standard library at
+# 1.26.4 and one in gRPC — on a repository with no vulnerability scanning of any kind. Eight of the
+# nine were one `go` directive away from fixed. Nothing was going to report them, so nothing did.
+#
+# EVERY JOB HERE RUNS ON PULL REQUESTS AND NIGHTLY, and the split matters: a dependency becomes
+# vulnerable while nobody touches it, so a PR-only gate goes quiet exactly when the risk is arriving.
+#
+# NONE OF THESE NEEDS A SECRET. govulncheck and osv-scanner read a public database; zizmor reads the
+# workflow files in the checkout; CodeQL and Scorecard use the token GitHub already provides.
+
+name: security
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+  schedule:
+    # 04:17 UTC — off the hour, because every scanner in the world runs at :00 and the shared runners
+    # and the OSV database are busiest then.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+# READ-ONLY BY DEFAULT, and each job widens only what it needs. zizmor's first finding on most
+# repositories is a workflow with write-all because one step needed one write.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── GO: CALL-GRAPH AWARE, SO A FINDING IS A FINDING ──────────────────────────────────────────────
+  #
+  # `govulncheck` reports only vulnerabilities your code can actually REACH, which is why its output is
+  # worth gating on: a vulnerable function nobody calls is noise, and a tool that reports it teaches
+  # people to ignore the tool. Four modules, each with its own go.mod.
+  govulncheck:
+    name: govulncheck (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [cli, runtime/go, runtime/handler, sdk/go]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # THE MODULE'S OWN DIRECTIVE, as every other workflow here does it. That is what makes a
+          # toolchain bump fix the standard-library findings everywhere at once instead of being
+          # reverted by a pinned version in a workflow file.
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: govulncheck
+        working-directory: ${{ matrix.module }}
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  # ── EVERY OTHER LOCKFILE ────────────────────────────────────────────────────────────────────────
+  #
+  # osv-scanner covers what govulncheck cannot: pnpm-lock.yaml, uv.lock/requirements, and the Go
+  # modules again without call-graph filtering. Four languages, one tool, no per-ecosystem config.
+  osv:
+    name: osv-scanner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google/osv-scanner-action/osv-scanner-action@v2.2.3
+        with:
+          # `--recursive` so a nested manifest is not missed: this repo has five go.mod, several
+          # package.json and the runtimes fixtures' uv.lock.
+          scan-args: |-
+            --recursive
+            --skip-git
+            ./
+
+  # ── THE WORKFLOWS THEMSELVES ────────────────────────────────────────────────────────────────────
+  #
+  # Six workflow files existed here with nothing auditing them, and they do privileged things: publish
+  # images, sign with cosign, push to a wiki. zizmor finds template-injection via `${{ }}` in `run:`,
+  # over-broad permissions, and unpinned Actions.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: zizmorcore/zizmor-action@v0.2.0
+
+  # ── CODEQL ──────────────────────────────────────────────────────────────────────────────────────
+  #
+  # Free on a public repository, which this one is (verified 2026-10-07 by an unauthenticated
+  # `git ls-remote`). `actions` is in the matrix for the same reason zizmor is above: the workflows are
+  # the privileged surface.
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [go, javascript-typescript, python, actions]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        if: matrix.language == 'go'
+        with:
+          go-version-file: cli/go.mod
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+
+  # ── SECRETS, AS A SECOND PAIR OF EYES ───────────────────────────────────────────────────────────
+  #
+  # GitHub's own secret scanning with push protection is the first and is enabled in repository
+  # settings rather than here. gitleaks is the one that reads HISTORY and catches a pattern GitHub's
+  # providers do not know — a kontra service token, for instance, is not a provider pattern.
+  #
+  # An audit on 2026-10-07 found nothing leaked (`.env` gitignored, no key path ever committed, the
+  # `AKIA…`/`dop_v1_…` literals in the tree being documentation examples and sequential fakes). This
+  # job is what keeps that true rather than true-as-of-a-date.
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # history, which is the half GitHub's push protection cannot see in a PR
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── ONE NUMBER THAT TRACKS ALL OF THE ABOVE ─────────────────────────────────────────────────────
+  scorecard:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ossf/scorecard-action@v2.4.0
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scorecard.sarif
