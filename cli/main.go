@@ -346,6 +346,10 @@ func dispatch(args []string) error {
 		// subsystem of it — the word has to survive issue 08 retiring `control` back into `up`, and
 		// `cli/update.go` ends in the same `converge` this case's neighbour does.
 		err = cmdUpdate(args[1:])
+	case "registry":
+		// The OCI store, not the actor catalog. One subcommand today: `migrate`, which moves a
+		// `registry:2` store into zot by digest and proves every catalog digest arrived.
+		err = cmdRegistry(args[1:])
 	case "build":
 		err = cmdBuild(args[1:])
 	case "bundle":
