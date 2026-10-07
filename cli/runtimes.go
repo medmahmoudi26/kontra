@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
+	"github.com/medmahmoudi26/kontra/cli/internal/trustpolicy"
 )
 
 // runtimesPrefix is where runtimes live. Default: the install's own registry under
@@ -263,4 +265,49 @@ func lastPathElement(s string) string {
 		return s[i+1:]
 	}
 	return s
+}
+
+// --- the runtime goes through the same trust gate an actor image does ---
+
+// admitRuntime puts the resolved runtime through this install's trust policy before a build is given
+// it as `--run-image`.
+//
+// WHY A RUNTIME EARNS THE SAME JUDGEMENT AS AN ACTOR IMAGE, AND ARGUABLY MORE. A Machine refuses to
+// run an actor image whose registry is not allowed or whose signature it cannot accept
+// (`trustpolicy.Policy.Admit`, called by the podman driver before it pulls). A runtime is the BASE of
+// every actor built on it — layered under the deps and the app, present on every Machine that runs any
+// of them — and nothing was asking the same question about it. `pack` pulls it by digest and the
+// Warden never sees it as a reference, so the existing gate could not reach it.
+//
+// THE UNCONFIGURED CASE IS A NOTE AND NOT A PASS, which is this package's own distinction
+// (`ErrUnsigned` vs `ErrUnverifiable`: "one is a decision somebody made and the other is a question
+// nobody could ask"). The zero policy admits NOTHING, so gating unconditionally would refuse every
+// build on an install that has not configured trust — and silently skipping would let an operator
+// believe a runtime had been checked. So it says, once, that it did not ask.
+func admitRuntime(ctx context.Context, r resolvedRuntime, progress io.Writer) error {
+	o := trustpolicy.Options{
+		Registries: os.Getenv(trustpolicy.RegistriesEnv),
+		Unsigned:   os.Getenv(trustpolicy.UnsignedEnv),
+		Key:        os.Getenv(trustpolicy.KeyEnv),
+		Identity:   os.Getenv(trustpolicy.IdentityEnv),
+		Issuer:     os.Getenv(trustpolicy.IssuerEnv),
+	}
+	if o == (trustpolicy.Options{}) {
+		if progress != nil {
+			fmt.Fprintf(progress, "note: no trust policy is configured (%s), so %s was NOT checked — "+
+				"the runtime every actor built here is layered on is being taken on trust\n",
+				trustpolicy.RegistriesEnv, r.Pinned())
+		}
+		return nil
+	}
+	pol, err := trustpolicy.Load(o)
+	if err != nil {
+		return fmt.Errorf("the trust policy this install is configured with cannot be loaded, so the "+
+			"runtime %s cannot be judged: %w", r.Pinned(), err)
+	}
+	if _, err := pol.Admit(ctx, r.Pinned()); err != nil {
+		return fmt.Errorf("runtime %s is not admissible under this install's trust policy, and it would "+
+			"be the base of every actor built on it: %w", r.Pinned(), err)
+	}
+	return nil
 }

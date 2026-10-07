@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/trustpolicy"
 )
 
 // A runtime reference is the third kind of reference this CLI resolves, after an actor image and a
@@ -134,12 +138,97 @@ func TestNextRegistryLink(t *testing.T) {
 	cases := map[string]string{
 		`</v2/_catalog?n=200&last=x>; rel="next"`: "/v2/_catalog?n=200&last=x",
 		`</v2/_catalog?n=200>; rel="prev"`:        "",
-		``:                                       "",
-		`</a>; rel="prev", </b?n=1>; rel="next"`: "/b?n=1",
+		``:                                        "",
+		`</a>; rel="prev", </b?n=1>; rel="next"`:  "/b?n=1",
 	}
 	for header, want := range cases {
 		if got := nextRegistryLink(header); got != want {
 			t.Errorf("%q: got %q want %q", header, got, want)
 		}
+	}
+}
+
+// ── THE RUNTIME GOES THROUGH THE TRUST GATE, OR IT IS SAID THAT IT DID NOT ─────────────────────────
+//
+// A Machine refuses an actor image whose registry is not allowed or whose signature it cannot accept.
+// A runtime is the BASE of every actor built on it and nothing was asking the same question, because
+// `pack` pulls it and the Warden never sees it as a reference.
+
+func TestAnUnconfiguredTrustPolicyIsANoteAndNotAPass(t *testing.T) {
+	// The zero policy admits NOTHING, so gating unconditionally would refuse every build on an install
+	// that has not configured trust. Silently skipping would let an operator believe it was checked.
+	for _, k := range []string{
+		"KONTRA_TRUST_REGISTRIES", "KONTRA_TRUST_UNSIGNED", "KONTRA_TRUST_KEY",
+		"KONTRA_TRUST_IDENTITY", "KONTRA_TRUST_ISSUER",
+	} {
+		t.Setenv(k, "")
+	}
+	var say strings.Builder
+	r := resolvedRuntime{Ref: "127.0.0.1:5000/kontra-runtimes/python:1", Digest: "sha256:" + strings.Repeat("a", 64)}
+	if err := admitRuntime(context.Background(), r, &say); err != nil {
+		t.Fatalf("an unconfigured policy refused the build: %v", err)
+	}
+	for _, want := range []string{"NOT checked", "KONTRA_TRUST_REGISTRIES", r.Pinned()} {
+		if !strings.Contains(say.String(), want) {
+			t.Errorf("the note should mention %q: %s", want, say.String())
+		}
+	}
+}
+
+func TestAnAllowedUnsignedRuntimeIsAdmitted(t *testing.T) {
+	// The shipped quickstart posture: kontra's own registry is allowed and its artifacts are accepted
+	// unsigned, because nothing signs an actor image yet.
+	t.Setenv("KONTRA_TRUST_REGISTRIES", "127.0.0.1:5000")
+	t.Setenv("KONTRA_TRUST_UNSIGNED", "127.0.0.1:5000")
+	t.Setenv("KONTRA_TRUST_KEY", "")
+	t.Setenv("KONTRA_TRUST_IDENTITY", "")
+	t.Setenv("KONTRA_TRUST_ISSUER", "")
+	r := resolvedRuntime{Ref: "127.0.0.1:5000/kontra-runtimes/python:1", Digest: "sha256:" + strings.Repeat("b", 64)}
+	var say strings.Builder
+	if err := admitRuntime(context.Background(), r, &say); err != nil {
+		t.Fatalf("the install's own registry was refused: %v", err)
+	}
+	if say.Len() != 0 {
+		t.Errorf("a configured policy should say nothing on success: %s", say.String())
+	}
+}
+
+func TestARuntimeFromAnUnallowedRegistryIsRefused(t *testing.T) {
+	// The case the gate exists for: a fork points KONTRA_RUNTIMES_PREFIX somewhere this install does
+	// not trust, and that runtime would be layered under every actor on the fleet.
+	t.Setenv("KONTRA_TRUST_REGISTRIES", "127.0.0.1:5000")
+	t.Setenv("KONTRA_TRUST_UNSIGNED", "127.0.0.1:5000")
+	t.Setenv("KONTRA_TRUST_KEY", "")
+	t.Setenv("KONTRA_TRUST_IDENTITY", "")
+	t.Setenv("KONTRA_TRUST_ISSUER", "")
+	r := resolvedRuntime{Ref: "evil.example.com/rt/python:1", Digest: "sha256:" + strings.Repeat("c", 64)}
+	err := admitRuntime(context.Background(), r, nil)
+	if err == nil {
+		t.Fatal("a runtime from a registry this install does not allow was admitted")
+	}
+	// The refusal has to say WHY it matters, or it reads as a typo in a reference.
+	for _, want := range []string{"evil.example.com", "base of every actor"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should mention %q: %v", want, err)
+		}
+	}
+}
+
+func TestARuntimeThatCannotBeVerifiedIsNotReportedAsUnsigned(t *testing.T) {
+	// trustpolicy's own distinction, and the reason it exists: "one is a decision somebody made and
+	// the other is a question nobody could ask". An operator told "unsigned" would go and sign an image
+	// that would then still be refused.
+	t.Setenv("KONTRA_TRUST_REGISTRIES", "127.0.0.1:5000")
+	t.Setenv("KONTRA_TRUST_UNSIGNED", "") // a signature is required
+	t.Setenv("KONTRA_TRUST_KEY", "")
+	t.Setenv("KONTRA_TRUST_IDENTITY", "")
+	t.Setenv("KONTRA_TRUST_ISSUER", "")
+	r := resolvedRuntime{Ref: "127.0.0.1:5000/kontra-runtimes/python:1", Digest: "sha256:" + strings.Repeat("d", 64)}
+	err := admitRuntime(context.Background(), r, nil)
+	if err == nil {
+		t.Fatal("a runtime requiring a signature was admitted with no verifier configured")
+	}
+	if errors.Is(err, trustpolicy.ErrUnsigned) {
+		t.Errorf("reported as UNSIGNED when the question could not be asked: %v", err)
 	}
 }
