@@ -70,6 +70,7 @@ const GATES: ReadonlyArray<{
   { prefix: '/api/workflows/start', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/workflows/stop', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/datasets/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
+  { prefix: '/api/images/', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
   { prefix: '/api/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/probe', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/sources', scheme: 'runToken', vars: RUN_TOKEN_VARS },

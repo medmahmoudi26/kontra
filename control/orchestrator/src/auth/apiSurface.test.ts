@@ -190,9 +190,9 @@ describe('the size of the exposure, stated out loud', () => {
     expect({ legacy: count('legacy'), worker: count('worker') }).toEqual({ legacy: 54, worker: 4 });
   });
 
-  it('and 49 routes that do refuse, which is the half that works', () => {
+  it('and 57 routes that do refuse, which is the half that works', () => {
     const count = (p: Posture) => Object.values(POSTURE).filter((v) => v === p).length;
-    expect({ gated: count('gated'), public: count('public') }).toEqual({ gated: 49, public: 4 });
+    expect({ gated: count('gated'), public: count('public') }).toEqual({ gated: 57, public: 4 });
   });
 });
 

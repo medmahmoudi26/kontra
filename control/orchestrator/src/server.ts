@@ -83,6 +83,7 @@ import type { LakeConfig } from './data/parquet';
 import { MaterializationStore, materializationStore } from './data/materializationStore';
 import { SummaryStore, summaryStore } from './data/summaries';
 import { registerCatalogRoutes } from './routes/catalog';
+import { registerImageRoutes } from './routes/images';
 import { registerDatasetRoutes } from './routes/datasets';
 import { errMessage } from './routes/errors';
 import { registerExploreRoutes } from './routes/explore';
@@ -374,6 +375,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // The operator trail, beside the sign-in that is its first entry (`audit.ts`).
   registerAuditRoutes(app);
   registerCatalogRoutes(app, repo);
+  registerImageRoutes(app, { repo });
   registerScratchRoutes(app, repo);
   registerRunRoutes(app, { runs, runWorkflows, queueDescriber });
   registerHistoryRoutes(app, archive);
