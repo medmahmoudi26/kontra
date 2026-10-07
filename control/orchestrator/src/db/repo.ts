@@ -90,7 +90,29 @@ export interface ActorRecord {
    * `catalog.contract.ts` exempts it by name.
    */
   incompatibilities?: Incompatibility[];
+  /**
+   * What the image was BUILT on: the Runtime by name and major, pinned to the digest the build
+   * resolved. ABSENT when unknown, and absent is not "no runtime" — it is an actor built before this
+   * field existed, or one whose worker was started without the environment that carries it.
+   *
+   * Not a fact the worker discovers. Nothing inside a container can see the run image it was layered
+   * onto, so the deploying CLI records it and the Warden hands it back; the registrar echoes it so a
+   * re-registration preserves it. Stored as JSON text, like `operations`, because it is a structure.
+   *
+   * `major` beside `digest` because they answer different questions: the major is what the author
+   * asked for and the digest is whether it is still current — which is the whole of rebase detection.
+   */
+  runtime?: ActorRuntimeRecord;
+  /** The CNB builder's digest, from the same stamp. Absent when unknown, for the same reason. */
+  builderDigest?: string;
   savedAt: number;
+}
+
+/** The Runtime an Actor image was layered onto, as the catalog keeps it. */
+export interface ActorRuntimeRecord {
+  name: string;
+  major: number;
+  digest: string;
 }
 
 /**
@@ -168,6 +190,8 @@ interface ActorRow {
   digest: string | null;
   source: string | null;
   incompatibilities: string | null;
+  runtime: string | null;
+  builder_digest: string | null;
   saved_at: number;
 }
 
@@ -238,6 +262,14 @@ export class Repo {
       this.db.prepare('PRAGMA table_info(actors)').all() as unknown as Array<{ name: string }>
     ).map((c) => c.name);
     if (!columns.includes('source')) this.db.exec('ALTER TABLE actors ADD COLUMN source TEXT');
+    // The build facts. Same reason as every column below: an installation that has ever registered
+    // an actor is the "table already exists" case, so without these the columns reach only a fresh
+    // database and every existing catalog answers `SELECT *` without them — which reads as "no actor
+    // was ever built on a runtime", and rebase detection would then find nothing to do, forever.
+    if (!columns.includes('runtime')) this.db.exec('ALTER TABLE actors ADD COLUMN runtime TEXT');
+    if (!columns.includes('builder_digest')) {
+      this.db.exec('ALTER TABLE actors ADD COLUMN builder_digest TEXT');
+    }
     // The cross-version finding (src/compat.ts). Every installation that has ever registered an
     // actor is the "table already exists" case, so without this line the column reaches only a
     // fresh database and every existing catalog answers `SELECT *` without it — which reads as
@@ -351,8 +383,8 @@ export class Repo {
   private writeActor(rec: ActorRecord): void {
     this.db
       .prepare(
-        `INSERT INTO actors (key, name, version, schema_version, operations, digest, source, incompatibilities, saved_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO actors (key, name, version, schema_version, operations, digest, source, incompatibilities, runtime, builder_digest, saved_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET
            name = excluded.name,
            version = excluded.version,
@@ -361,6 +393,8 @@ export class Repo {
            digest = excluded.digest,
            source = excluded.source,
            incompatibilities = excluded.incompatibilities,
+           runtime = excluded.runtime,
+           builder_digest = excluded.builder_digest,
            saved_at = excluded.saved_at`
       )
       .run(
@@ -376,6 +410,8 @@ export class Repo {
         rec.incompatibilities && rec.incompatibilities.length > 0
           ? JSON.stringify(rec.incompatibilities)
           : null,
+        rec.runtime ? JSON.stringify(rec.runtime) : null,
+        rec.builderDigest ?? null,
         rec.savedAt
       );
   }
@@ -604,6 +640,10 @@ CREATE TABLE IF NOT EXISTS actors (
   -- What registering this version said about the one before it (src/compat.ts), as JSON; NULL when
   -- nothing was reported. See ActorRecord.incompatibilities; added by migrate().
   incompatibilities TEXT,
+  -- What the image was BUILT on, as JSON; NULL when unknown. See ActorRecord.runtime; added by
+  -- migrate().
+  runtime        TEXT,
+  builder_digest TEXT,
   saved_at       INTEGER NOT NULL
 );
 -- A caller workflow as its worker described it on serve (shared/contracts/kontra/v1/catalog.proto's
@@ -678,6 +718,10 @@ function rowToActor(row: ActorRow): ActorRecord {
   if ((row.incompatibilities ?? null) !== null) {
     rec.incompatibilities = JSON.parse(row.incompatibilities as string) as Incompatibility[];
   }
+  if ((row.runtime ?? null) !== null) {
+    rec.runtime = JSON.parse(row.runtime as string) as ActorRuntimeRecord;
+  }
+  if ((row.builder_digest ?? null) !== null) rec.builderDigest = row.builder_digest as string;
   return rec;
 }
 

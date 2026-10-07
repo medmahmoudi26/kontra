@@ -33,7 +33,11 @@ type AssertEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : ne
  * (ts-proto is configured `snakeToCamel=false` so the generated names line up with the Python
  * dataclasses). One field, two spellings; this line is the only place that knows.
  */
-type StoreName<K extends string> = K extends 'schema_version' ? 'schemaVersion' : K;
+type StoreName<K extends string> = K extends 'schema_version'
+  ? 'schemaVersion'
+  : K extends 'builder_digest'
+    ? 'builderDigest'
+    : K;
 
 /** Every descriptor field is a field the catalog stores. A proto field with nowhere to land is
  *  a descriptor the orchestrator would accept and silently drop on the way to the table. */

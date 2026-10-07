@@ -68,6 +68,38 @@ export interface ActorDescriptor {
    * still the honest answer to where the actor came from.
    */
   source: string;
+  /**
+   * What the image was BUILT ON, and it does not come from the same place the rest of this does.
+   *
+   * Every other field here is something the worker knows about itself. These two are facts about a
+   * BUILD: the run image a buildpack layered onto and the builder that did the layering, neither of
+   * which is visible from inside the running container. The deploying CLI records them, the Warden
+   * hands them back as environment at container start, and the registrar echoes them — so a worker
+   * re-registering does not erase what it cannot independently discover.
+   *
+   * Absent, not empty, when unknown: the catalog keeps a previous value only when the key is missing
+   * (`body.runtime ?? prev.runtime`), so a worker started without them must omit them or every
+   * restart would unpin the runtime an image was built on.
+   */
+  runtime:
+    | ActorRuntime
+    | undefined;
+  /** the CNB builder's digest; json_name is `builderDigest` */
+  builder_digest: string;
+}
+
+/**
+ * The run image an Actor image was layered onto — a Runtime, by name and MAJOR, pinned by digest.
+ *
+ * The major is what an author declares (`python-browser:1`) and the digest is what the build
+ * resolved it to. Both are kept because they answer different questions: the major says which
+ * runtime an actor asked for, and the digest says whether it is still on the current one — which is
+ * the whole of rebase detection.
+ */
+export interface ActorRuntime {
+  name: string;
+  major: number;
+  digest: string;
 }
 
 /**

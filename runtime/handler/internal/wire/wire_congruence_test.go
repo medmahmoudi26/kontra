@@ -112,6 +112,17 @@ func fieldNumber(m proto.Message, name string) protoreflect.FieldNumber {
 	return f.Number()
 }
 
+// jsonName returns the key this field takes on the WIRE, which is what the two hand-written
+// emitters spell — and it is not always the proto field name: proto3 lowerCamelCases by default, so
+// `schema_version` ships as `schemaVersion`.
+func jsonName(m proto.Message, name string) string {
+	f := m.ProtoReflect().Descriptor().Fields().ByName(protoreflect.Name(name))
+	if f == nil {
+		return ""
+	}
+	return f.JSONName()
+}
+
 // The numbers are asserted, not just the names. `buf breaking` is the real guard against a
 // renumber and it is configured ADVISORY in CI while v2 lands (ADR 0023 flag day), so for now a
 // renumber would only print a warning — and a renumbered field re-points every descriptor
@@ -123,9 +134,18 @@ func TestCatalogDescriptorCarriesDescriptionAndSource(t *testing.T) {
 	if got := fieldNumber(&kontrav1.ActorDescriptor{}, "source"); got != 7 {
 		t.Errorf("ActorDescriptor.source is field %d, want 7 (appended after digest=6)", got)
 	}
+	if got := fieldNumber(&kontrav1.ActorDescriptor{}, "runtime"); got != 8 {
+		t.Errorf("ActorDescriptor.runtime is field %d, want 8 (appended after source=7)", got)
+	}
+	if got := fieldNumber(&kontrav1.ActorDescriptor{}, "builder_digest"); got != 9 {
+		t.Errorf("ActorDescriptor.builder_digest is field %d, want 9 (appended after runtime=8)", got)
+	}
 	// The names ARE the wire keys — both SDKs hand-write this JSON — so a field spelled
 	// differently here than in the emitters is a value that arrives and is dropped.
-	for _, name := range []string{"key", "name", "version", "schema_version", "operations", "digest", "source"} {
+	for _, name := range []string{
+		"key", "name", "version", "schema_version", "operations", "digest", "source",
+		"runtime", "builder_digest",
+	} {
 		if fieldNumber(&kontrav1.ActorDescriptor{}, name) == 0 {
 			t.Errorf("ActorDescriptor has no field %q", name)
 		}
@@ -133,6 +153,16 @@ func TestCatalogDescriptorCarriesDescriptionAndSource(t *testing.T) {
 	for _, name := range []string{"name", "params", "input", "output", "description"} {
 		if fieldNumber(&kontrav1.ActorOperation{}, name) == 0 {
 			t.Errorf("ActorOperation has no field %q", name)
+		}
+	}
+	// `builder_digest`'s JSON key is `builderDigest`, and the hand-written emitters spell the JSON
+	// one. A proto3 default json_name is not something to take on trust when two SDKs depend on it.
+	if got := jsonName(&kontrav1.ActorDescriptor{}, "builder_digest"); got != "builderDigest" {
+		t.Errorf("builder_digest's json_name is %q, want \"builderDigest\" — the emitters write that key", got)
+	}
+	for _, name := range []string{"name", "major", "digest"} {
+		if fieldNumber(&kontrav1.ActorRuntime{}, name) == 0 {
+			t.Errorf("ActorRuntime has no field %q", name)
 		}
 	}
 }

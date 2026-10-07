@@ -16,6 +16,8 @@ class ActorDescriptor(_message.Message):
     OPERATIONS_FIELD_NUMBER: _ClassVar[int]
     DIGEST_FIELD_NUMBER: _ClassVar[int]
     SOURCE_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_FIELD_NUMBER: _ClassVar[int]
+    BUILDER_DIGEST_FIELD_NUMBER: _ClassVar[int]
     key: str
     name: str
     version: str
@@ -23,7 +25,19 @@ class ActorDescriptor(_message.Message):
     operations: _containers.RepeatedCompositeFieldContainer[ActorOperation]
     digest: str
     source: str
-    def __init__(self, key: _Optional[str] = ..., name: _Optional[str] = ..., version: _Optional[str] = ..., schema_version: _Optional[str] = ..., operations: _Optional[_Iterable[_Union[ActorOperation, _Mapping]]] = ..., digest: _Optional[str] = ..., source: _Optional[str] = ...) -> None: ...
+    runtime: ActorRuntime
+    builder_digest: str
+    def __init__(self, key: _Optional[str] = ..., name: _Optional[str] = ..., version: _Optional[str] = ..., schema_version: _Optional[str] = ..., operations: _Optional[_Iterable[_Union[ActorOperation, _Mapping]]] = ..., digest: _Optional[str] = ..., source: _Optional[str] = ..., runtime: _Optional[_Union[ActorRuntime, _Mapping]] = ..., builder_digest: _Optional[str] = ...) -> None: ...
+
+class ActorRuntime(_message.Message):
+    __slots__ = ()
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    MAJOR_FIELD_NUMBER: _ClassVar[int]
+    DIGEST_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    major: int
+    digest: str
+    def __init__(self, name: _Optional[str] = ..., major: _Optional[int] = ..., digest: _Optional[str] = ...) -> None: ...
 
 class ActorOperation(_message.Message):
     __slots__ = ()

@@ -75,7 +75,20 @@ type ActorDescriptor struct {
 	// and offer no way to reach any of them. It is the path AS THE WORKER SAW IT, which on a
 	// fleet Machine is `/opt/kontra/actor/<name>` and not a path on the reader's disk; that is
 	// still the honest answer to where the actor came from.
-	Source        string `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"` // appended (7): the numbers here are never reused or renumbered
+	Source string `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"` // appended (7): the numbers here are never reused or renumbered
+	// What the image was BUILT ON, and it does not come from the same place the rest of this does.
+	//
+	// Every other field here is something the worker knows about itself. These two are facts about a
+	// BUILD: the run image a buildpack layered onto and the builder that did the layering, neither of
+	// which is visible from inside the running container. The deploying CLI records them, the Warden
+	// hands them back as environment at container start, and the registrar echoes them — so a worker
+	// re-registering does not erase what it cannot independently discover.
+	//
+	// Absent, not empty, when unknown: the catalog keeps a previous value only when the key is missing
+	// (`body.runtime ?? prev.runtime`), so a worker started without them must omit them or every
+	// restart would unpin the runtime an image was built on.
+	Runtime       *ActorRuntime `protobuf:"bytes,8,opt,name=runtime,proto3" json:"runtime,omitempty"`
+	BuilderDigest string        `protobuf:"bytes,9,opt,name=builder_digest,json=builderDigest,proto3" json:"builder_digest,omitempty"` // the CNB builder's digest; json_name is `builderDigest`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -159,6 +172,86 @@ func (x *ActorDescriptor) GetSource() string {
 	return ""
 }
 
+func (x *ActorDescriptor) GetRuntime() *ActorRuntime {
+	if x != nil {
+		return x.Runtime
+	}
+	return nil
+}
+
+func (x *ActorDescriptor) GetBuilderDigest() string {
+	if x != nil {
+		return x.BuilderDigest
+	}
+	return ""
+}
+
+// The run image an Actor image was layered onto — a Runtime, by name and MAJOR, pinned by digest.
+//
+// The major is what an author declares (`python-browser:1`) and the digest is what the build
+// resolved it to. Both are kept because they answer different questions: the major says which
+// runtime an actor asked for, and the digest says whether it is still on the current one — which is
+// the whole of rebase detection.
+type ActorRuntime struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Major         uint32                 `protobuf:"varint,2,opt,name=major,proto3" json:"major,omitempty"`
+	Digest        string                 `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActorRuntime) Reset() {
+	*x = ActorRuntime{}
+	mi := &file_kontra_v1_catalog_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActorRuntime) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActorRuntime) ProtoMessage() {}
+
+func (x *ActorRuntime) ProtoReflect() protoreflect.Message {
+	mi := &file_kontra_v1_catalog_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActorRuntime.ProtoReflect.Descriptor instead.
+func (*ActorRuntime) Descriptor() ([]byte, []int) {
+	return file_kontra_v1_catalog_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ActorRuntime) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ActorRuntime) GetMajor() uint32 {
+	if x != nil {
+		return x.Major
+	}
+	return 0
+}
+
+func (x *ActorRuntime) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
 // One operation an actor exposes — ONE PER METHOD (ADR 0023 §9).
 //
 // It used to be exactly one, named "run", because an Actor had exactly one entry point. An
@@ -195,7 +288,7 @@ type ActorOperation struct {
 
 func (x *ActorOperation) Reset() {
 	*x = ActorOperation{}
-	mi := &file_kontra_v1_catalog_proto_msgTypes[1]
+	mi := &file_kontra_v1_catalog_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -207,7 +300,7 @@ func (x *ActorOperation) String() string {
 func (*ActorOperation) ProtoMessage() {}
 
 func (x *ActorOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_kontra_v1_catalog_proto_msgTypes[1]
+	mi := &file_kontra_v1_catalog_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -220,7 +313,7 @@ func (x *ActorOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActorOperation.ProtoReflect.Descriptor instead.
 func (*ActorOperation) Descriptor() ([]byte, []int) {
-	return file_kontra_v1_catalog_proto_rawDescGZIP(), []int{1}
+	return file_kontra_v1_catalog_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ActorOperation) GetName() string {
@@ -311,7 +404,7 @@ type WorkflowDescriptor struct {
 
 func (x *WorkflowDescriptor) Reset() {
 	*x = WorkflowDescriptor{}
-	mi := &file_kontra_v1_catalog_proto_msgTypes[2]
+	mi := &file_kontra_v1_catalog_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -323,7 +416,7 @@ func (x *WorkflowDescriptor) String() string {
 func (*WorkflowDescriptor) ProtoMessage() {}
 
 func (x *WorkflowDescriptor) ProtoReflect() protoreflect.Message {
-	mi := &file_kontra_v1_catalog_proto_msgTypes[2]
+	mi := &file_kontra_v1_catalog_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -336,7 +429,7 @@ func (x *WorkflowDescriptor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowDescriptor.ProtoReflect.Descriptor instead.
 func (*WorkflowDescriptor) Descriptor() ([]byte, []int) {
-	return file_kontra_v1_catalog_proto_rawDescGZIP(), []int{2}
+	return file_kontra_v1_catalog_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *WorkflowDescriptor) GetName() string {
@@ -385,7 +478,7 @@ var File_kontra_v1_catalog_proto protoreflect.FileDescriptor
 
 const file_kontra_v1_catalog_proto_rawDesc = "" +
 	"\n" +
-	"\x17kontra/v1/catalog.proto\x12\tkontra.v1\x1a\x1cgoogle/protobuf/struct.proto\"\xe3\x01\n" +
+	"\x17kontra/v1/catalog.proto\x12\tkontra.v1\x1a\x1cgoogle/protobuf/struct.proto\"\xbd\x02\n" +
 	"\x0fActorDescriptor\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -395,7 +488,13 @@ const file_kontra_v1_catalog_proto_rawDesc = "" +
 	"operations\x18\x05 \x03(\v2\x19.kontra.v1.ActorOperationR\n" +
 	"operations\x12\x16\n" +
 	"\x06digest\x18\x06 \x01(\tR\x06digest\x12\x16\n" +
-	"\x06source\x18\a \x01(\tR\x06source\"\xe5\x01\n" +
+	"\x06source\x18\a \x01(\tR\x06source\x121\n" +
+	"\aruntime\x18\b \x01(\v2\x17.kontra.v1.ActorRuntimeR\aruntime\x12%\n" +
+	"\x0ebuilder_digest\x18\t \x01(\tR\rbuilderDigest\"P\n" +
+	"\fActorRuntime\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05major\x18\x02 \x01(\rR\x05major\x12\x16\n" +
+	"\x06digest\x18\x03 \x01(\tR\x06digest\"\xe5\x01\n" +
 	"\x0eActorOperation\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12/\n" +
 	"\x06params\x18\x02 \x01(\v2\x17.google.protobuf.StructR\x06params\x12-\n" +
@@ -422,25 +521,27 @@ func file_kontra_v1_catalog_proto_rawDescGZIP() []byte {
 	return file_kontra_v1_catalog_proto_rawDescData
 }
 
-var file_kontra_v1_catalog_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_kontra_v1_catalog_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_kontra_v1_catalog_proto_goTypes = []any{
 	(*ActorDescriptor)(nil),    // 0: kontra.v1.ActorDescriptor
-	(*ActorOperation)(nil),     // 1: kontra.v1.ActorOperation
-	(*WorkflowDescriptor)(nil), // 2: kontra.v1.WorkflowDescriptor
-	(*structpb.Struct)(nil),    // 3: google.protobuf.Struct
+	(*ActorRuntime)(nil),       // 1: kontra.v1.ActorRuntime
+	(*ActorOperation)(nil),     // 2: kontra.v1.ActorOperation
+	(*WorkflowDescriptor)(nil), // 3: kontra.v1.WorkflowDescriptor
+	(*structpb.Struct)(nil),    // 4: google.protobuf.Struct
 }
 var file_kontra_v1_catalog_proto_depIdxs = []int32{
-	1, // 0: kontra.v1.ActorDescriptor.operations:type_name -> kontra.v1.ActorOperation
-	3, // 1: kontra.v1.ActorOperation.params:type_name -> google.protobuf.Struct
-	3, // 2: kontra.v1.ActorOperation.input:type_name -> google.protobuf.Struct
-	3, // 3: kontra.v1.ActorOperation.output:type_name -> google.protobuf.Struct
-	3, // 4: kontra.v1.WorkflowDescriptor.input:type_name -> google.protobuf.Struct
-	3, // 5: kontra.v1.WorkflowDescriptor.output:type_name -> google.protobuf.Struct
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	2, // 0: kontra.v1.ActorDescriptor.operations:type_name -> kontra.v1.ActorOperation
+	1, // 1: kontra.v1.ActorDescriptor.runtime:type_name -> kontra.v1.ActorRuntime
+	4, // 2: kontra.v1.ActorOperation.params:type_name -> google.protobuf.Struct
+	4, // 3: kontra.v1.ActorOperation.input:type_name -> google.protobuf.Struct
+	4, // 4: kontra.v1.ActorOperation.output:type_name -> google.protobuf.Struct
+	4, // 5: kontra.v1.WorkflowDescriptor.input:type_name -> google.protobuf.Struct
+	4, // 6: kontra.v1.WorkflowDescriptor.output:type_name -> google.protobuf.Struct
+	7, // [7:7] is the sub-list for method output_type
+	7, // [7:7] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_kontra_v1_catalog_proto_init() }
@@ -454,7 +555,7 @@ func file_kontra_v1_catalog_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kontra_v1_catalog_proto_rawDesc), len(file_kontra_v1_catalog_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

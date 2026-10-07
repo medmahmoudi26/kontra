@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import struct_pb2 as google_dot_protobuf_dot_struct__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17kontra/v1/catalog.proto\x12\tkontra.v1\x1a\x1cgoogle/protobuf/struct.proto\"\xe3\x01\n\x0f\x41\x63torDescriptor\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n\x07version\x18\x03 \x01(\tR\x07version\x12%\n\x0eschema_version\x18\x04 \x01(\tR\rschemaVersion\x12\x39\n\noperations\x18\x05 \x03(\x0b\x32\x19.kontra.v1.ActorOperationR\noperations\x12\x16\n\x06\x64igest\x18\x06 \x01(\tR\x06\x64igest\x12\x16\n\x06source\x18\x07 \x01(\tR\x06source\"\xe5\x01\n\x0e\x41\x63torOperation\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12/\n\x06params\x18\x02 \x01(\x0b\x32\x17.google.protobuf.StructR\x06params\x12-\n\x05input\x18\x03 \x01(\x0b\x32\x17.google.protobuf.StructR\x05input\x12/\n\x06output\x18\x04 \x01(\x0b\x32\x17.google.protobuf.StructR\x06output\x12 \n\x0b\x64\x65scription\x18\x05 \x01(\tR\x0b\x64\x65scriptionJ\x04\x08\x06\x10\x07R\x06stream\"\xd6\x01\n\x12WorkflowDescriptor\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12 \n\x0b\x64\x65scription\x18\x02 \x01(\tR\x0b\x64\x65scription\x12-\n\x05input\x18\x03 \x01(\x0b\x32\x17.google.protobuf.StructR\x05input\x12/\n\x06output\x18\x04 \x01(\x0b\x32\x17.google.protobuf.StructR\x06output\x12\x14\n\x05queue\x18\x05 \x01(\tR\x05queue\x12\x14\n\x05\x65rror\x18\x06 \x01(\tR\x05\x65rrorBIZGgithub.com/medmahmoudi26/kontra/runtime/handler/_gen/kontra/v1;kontrav1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17kontra/v1/catalog.proto\x12\tkontra.v1\x1a\x1cgoogle/protobuf/struct.proto\"\xbd\x02\n\x0f\x41\x63torDescriptor\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n\x07version\x18\x03 \x01(\tR\x07version\x12%\n\x0eschema_version\x18\x04 \x01(\tR\rschemaVersion\x12\x39\n\noperations\x18\x05 \x03(\x0b\x32\x19.kontra.v1.ActorOperationR\noperations\x12\x16\n\x06\x64igest\x18\x06 \x01(\tR\x06\x64igest\x12\x16\n\x06source\x18\x07 \x01(\tR\x06source\x12\x31\n\x07runtime\x18\x08 \x01(\x0b\x32\x17.kontra.v1.ActorRuntimeR\x07runtime\x12%\n\x0e\x62uilder_digest\x18\t \x01(\tR\rbuilderDigest\"P\n\x0c\x41\x63torRuntime\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n\x05major\x18\x02 \x01(\rR\x05major\x12\x16\n\x06\x64igest\x18\x03 \x01(\tR\x06\x64igest\"\xe5\x01\n\x0e\x41\x63torOperation\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12/\n\x06params\x18\x02 \x01(\x0b\x32\x17.google.protobuf.StructR\x06params\x12-\n\x05input\x18\x03 \x01(\x0b\x32\x17.google.protobuf.StructR\x05input\x12/\n\x06output\x18\x04 \x01(\x0b\x32\x17.google.protobuf.StructR\x06output\x12 \n\x0b\x64\x65scription\x18\x05 \x01(\tR\x0b\x64\x65scriptionJ\x04\x08\x06\x10\x07R\x06stream\"\xd6\x01\n\x12WorkflowDescriptor\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12 \n\x0b\x64\x65scription\x18\x02 \x01(\tR\x0b\x64\x65scription\x12-\n\x05input\x18\x03 \x01(\x0b\x32\x17.google.protobuf.StructR\x05input\x12/\n\x06output\x18\x04 \x01(\x0b\x32\x17.google.protobuf.StructR\x06output\x12\x14\n\x05queue\x18\x05 \x01(\tR\x05queue\x12\x14\n\x05\x65rror\x18\x06 \x01(\tR\x05\x65rrorBIZGgithub.com/medmahmoudi26/kontra/runtime/handler/_gen/kontra/v1;kontrav1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,9 +34,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'ZGgithub.com/medmahmoudi26/kontra/runtime/handler/_gen/kontra/v1;kontrav1'
   _globals['_ACTORDESCRIPTOR']._serialized_start=69
-  _globals['_ACTORDESCRIPTOR']._serialized_end=296
-  _globals['_ACTOROPERATION']._serialized_start=299
-  _globals['_ACTOROPERATION']._serialized_end=528
-  _globals['_WORKFLOWDESCRIPTOR']._serialized_start=531
-  _globals['_WORKFLOWDESCRIPTOR']._serialized_end=745
+  _globals['_ACTORDESCRIPTOR']._serialized_end=386
+  _globals['_ACTORRUNTIME']._serialized_start=388
+  _globals['_ACTORRUNTIME']._serialized_end=468
+  _globals['_ACTOROPERATION']._serialized_start=471
+  _globals['_ACTOROPERATION']._serialized_end=700
+  _globals['_WORKFLOWDESCRIPTOR']._serialized_start=703
+  _globals['_WORKFLOWDESCRIPTOR']._serialized_end=917
 # @@protoc_insertion_point(module_scope)
