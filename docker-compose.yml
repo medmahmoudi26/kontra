@@ -641,6 +641,13 @@ services:
     volumes:
       - zot-data:/var/lib/zot
       - registry-config:/etc/zot:ro
+      # `registry:2`'s STORE, READ-ONLY, AND NOT BECAUSE ZOT READS IT. It is held here so that a
+      # long-lived container always mounts it: a volume whose only mounter is a one-shot that has
+      # exited is a volume nothing running holds, which is what `docker volume prune` takes — and
+      # until `kontra registry migrate` has run this is the only copy of every actor image. It is
+      # also where an operator looks for the registry's data, which is the reason the Pulumi gate
+      # refuses detaching a volume from the service that wrote it.
+      - registry-data:/legacy:ro
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"
       # VPC ALSO, so a fleet Machine can reach this: registry — where a Machine fetches its Bundle layer.

@@ -648,6 +648,14 @@ jobs:
               kontra-logship)
                 build_one "$name" -f control/images/Dockerfile.logship
                 ;;
+              # Arrow Flight SQL over the DuckLake. It has been derived by `plan` since compose started
+              # naming `${KONTRA_PORTER_IMAGE:-…}` and has never had an arm here, so the `*)` below was
+              # already waiting to fail the next tag — a release break nobody had tripped because
+              # nobody had tagged since. It is also why `control/pulumi/Pulumi.yaml` cannot declare
+              # porter: an install may not depend on an image that is never published.
+              kontra-porter)
+                build_one "$name" -f control/images/Dockerfile.porter
+                ;;
               *)
                 echo "::error::the install references a kontra-owned image '$name' that this workflow does not know how to build."
                 echo "::error::add it to the case statement in .github/workflows/publish.yml, beside a Dockerfile under control/images/."

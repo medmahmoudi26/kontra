@@ -402,13 +402,26 @@ func CheckVolumeIdentity(declared, recorded VolumeSet) error {
 				n, rec.Logical, dec.Logical, rec.Logical, dec.Logical, n))
 			continue
 		}
-		if !sameServices(dec.Services, rec.Services) {
-			findings = append(findings, fmt.Sprintf("%s is still declared and WHAT MOUNTS IT CHANGED: %s -> %s.\n"+
+		// WHAT IS REFUSED IS A VOLUME LEAVING THE SERVICE THAT WROTE IT, not every change to the list.
+		//
+		// The hazard this branch describes is one-directional: a volume handed to a service that did not
+		// write it reads as an empty disk there and as missing data to nobody. A service ADDED beside the
+		// ones that already mount it cannot produce that — the writer keeps its volume, no bytes move,
+		// and the new reader sees exactly what is there.
+		//
+		// The distinction is load-bearing rather than fastidious. Comparing the two lists for EQUALITY
+		// makes "mount the old registry store read-only into the one-shot that checks whether it has been
+		// migrated" indistinguishable from "move the registry's data to a different service" — so the
+		// only way to add a read-only reader is to stop converging. A gate that cannot be satisfied is one
+		// that gets turned off.
+		if lost := servicesLost(dec.Services, rec.Services); len(lost) > 0 {
+			findings = append(findings, fmt.Sprintf("%s is still declared and A SERVICE THAT MOUNTS IT NO "+
+				"LONGER DOES: %s -> %s, losing %s.\n"+
 				"      This is the failure that comes up healthy. A volume attached to a service that is not the\n"+
 				"      one that wrote it reads as an empty disk to the new service and as missing data to\n"+
 				"      nobody — no container fails, no step is destructive, and the old contents sit where\n"+
 				"      nothing looks.",
-				n, mountList(rec.Services), mountList(dec.Services)))
+				n, mountList(rec.Services), mountList(dec.Services), mountList(lost)))
 		}
 	}
 	if len(findings) == 0 {
@@ -531,16 +544,21 @@ func opPhrase(op string) string {
 	}
 }
 
-func sameServices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// servicesLost reports the services in `rec` that `dec` no longer lists — the recorded mounters a
+// converge would take the volume away from. An empty result means every service that had it keeps it,
+// whatever else was added.
+func servicesLost(dec, rec []string) []string {
+	keep := make(map[string]struct{}, len(dec))
+	for _, s := range dec {
+		keep[s] = struct{}{}
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	var lost []string
+	for _, s := range rec {
+		if _, ok := keep[s]; !ok {
+			lost = append(lost, s)
 		}
 	}
-	return true
+	return lost
 }
 
 func mountList(s []string) string {

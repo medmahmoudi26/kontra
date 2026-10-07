@@ -138,6 +138,32 @@ config:
   registryPort:
     type: integer
     default: 5000
+  # ── THE REGISTRY'S OWN SETTINGS (ADR 0061) ────────────────────────────────────────────────────
+  #
+  # All six default to the compose default, which for the three passwords is EMPTY — an anonymous
+  # registry, which is what `registry:2` always was and what the loopback publish is the control for.
+  # A partial set is refused by the renderer itself rather than defaulted, because a config with
+  # `http.auth` and an empty htpasswd answers 401 to everything and reads as a broken install.
+  registryMigration:
+    type: string
+    default: ""
+  registryPushActorsPassword:
+    type: string
+    default: ""
+  registryPushRuntimesPassword:
+    type: string
+    default: ""
+  registryPullPassword:
+    type: string
+    default: ""
+  registryCve:
+    type: string
+    default: ""
+  # `dryrun` reports what retention WOULD delete; `enforce` deletes it. The reporting one is the
+  # default until the `inuse-` reconciler has run on an install — see docs/wiki/Deployment.md.
+  registryRetention:
+    type: string
+    default: "dryrun"
   s3Port:
     type: integer
     default: 8333
@@ -373,8 +399,9 @@ resources:
   # destroy` must not delete `kontra:latest` out from under a `docker build` cache, and verified —
   # after destroying a stack holding `kontra-host:1`, the image was still in the daemon.
   #
-  # Eight third-party images, all pinned by the compose file except `registry:2`, which floats there
-  # and floats here. It was nine until logship stopped being stock `python:3.12-alpine` and became a
+  # Nine third-party images, every one pinned by the compose file and pinned here. It was eight, and
+  # one of them floated: `registry:2`. zot replaced it at an exact version (ADR 0061) and `httpd` came
+  # in beside it to produce bcrypt, which busybox cannot. It was nine until logship stopped being stock `python:3.12-alpine` and became a
   # kontra-owned image — which also takes one anonymous Docker Hub pull off every install.
   imgPostgres:
     type: docker:index:RemoteImage
@@ -392,9 +419,17 @@ resources:
     type: docker:index:RemoteImage
     properties: { name: "redis:7-alpine", keepLocally: true }
     options: { provider: "${dockerProvider}" }
-  imgRegistry:
+  # ZOT, PINNED TO AN EXACT VERSION (ADR 0061). `registry:2` floated here and in compose, and it was
+  # the one third-party image in this program that did; the registry holds every image the install
+  # owns, so a moving tag there is the least appropriate place for one.
+  imgZot:
     type: docker:index:RemoteImage
-    properties: { name: "registry:2", keepLocally: true }
+    properties: { name: "ghcr.io/project-zot/zot-linux-amd64:v2.1.21", keepLocally: true }
+    options: { provider: "${dockerProvider}" }
+  # bcrypt, which busybox cannot produce. The smallest image with an `htpasswd`.
+  imgHttpd:
+    type: docker:index:RemoteImage
+    properties: { name: "httpd:2.4-alpine", keepLocally: true }
     options: { provider: "${dockerProvider}" }
   imgSeaweed:
     type: docker:index:RemoteImage
@@ -538,6 +573,19 @@ resources:
     # Fleet recorded against the old one can never be re-run as recorded. Measured on this box: 6.2
     # GB of it.
     options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
+  # ZOT'S STORE, WHICH IS NOT `registry:2`'s. The two on-disk layouts differ, so pointing zot at
+  # `volRegistryData` would present an empty registry sitting on top of the old bytes — which nothing
+  # in this system distinguishes from a fresh install. `kontra registry migrate` moves them.
+  volZotData:
+    type: docker:index:Volume
+    properties: { name: "kontra_zot-data" }
+    options: { provider: "${dockerProvider}", retainOnDelete: true, protect: true }
+  # The rendered zot config, its htpasswd and the static busybox the healthcheck runs. REBUILDABLE —
+  # the one-shot writes all three on every converge — so it is deliberately not protected.
+  volRegistryConfig:
+    type: docker:index:Volume
+    properties: { name: "kontra_registry-config" }
+    options: { provider: "${dockerProvider}" }
   volSeaweedData:
     type: docker:index:Volume
     properties: { name: "kontra_seaweed-data" }
@@ -781,45 +829,292 @@ resources:
     options:
       provider: ${dockerProvider}
 
-  # ── THIS PROGRAM STILL RUNS `registry:2`, AND COMPOSE DOES NOT (ADR 0061) ──────────────────────
-  #
-  # `docker-compose.yml` replaced the registry with zot v2.1.21 plus two render one-shots. This
-  # program was NOT changed to match, deliberately, and the reason is a gate in this repo doing its
-  # job: the compose service mounts `kontra_registry-data` read-only into `registry-config` so an
-  # unmigrated install refuses to start, and moving a volume between services is exactly what
-  # `hostengine.CheckVolumeIdentity` refuses — "Renaming a volume is a migration: copy the data
-  # across and then change the program, in that order." Mirroring the change here would make
-  # `kontra control up` and `kontra update` REFUSE on every installation this program has already
-  # converged, which is worse than the divergence it would close.
-  #
-  # SO THE TWO INSTALL PATHS DISAGREE, AND THIS IS WHERE THAT IS WRITTEN DOWN. On a box converged by
-  # compose, running `kontra control up` converges the registry BACKWARDS: it replaces zot with
-  # `registry:2` pointed at `/var/lib/registry` in the old volume. The images are still in
-  # `kontra_zot-data` and the catalog's digests will not resolve, which reads as an empty registry —
-  # and nothing in this system tells an empty registry from a fresh one.
-  #
-  # `control/pulumi/parity.py` names every line of the divergence rather than hiding it; it is the
-  # only thing that reads both files and it is NOT in CI. Closing this needs a volume migration in
-  # the Pulumi path, not an edit here.
+  # THE REGISTRY IS THREE RESOURCES, and the two one-shots come first. zot reads a config FILE that is
+  # rendered per install, so one writes it (plus the htpasswd plaintext and the static busybox the
+  # healthcheck runs — zot's image has one executable and no shell) and the next turns the plaintext
+  # into bcrypt. Both are `restart: "no"` with `attach: true` / `mustRun: false`, which is how this
+  # program spells compose's `service_completed_successfully`.
+  registryConfig:
+    type: docker:index:Container
+    properties:
+      name: kontra-registry-config
+      image: ${imgBusybox.imageId}
+      restart: "no"
+      mustRun: false
+      attach: true
+      logs: true
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["registry-config"]
+      envs:
+        - KONTRA_REGISTRY_MIGRATION=${registryMigration}
+        - KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD=${registryPushActorsPassword}
+        - KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD=${registryPushRuntimesPassword}
+        - KONTRA_REGISTRY_PULL_PASSWORD=${registryPullPassword}
+        - KONTRA_REGISTRY_CVE=${registryCve}
+        - KONTRA_REGISTRY_RETENTION=${registryRetention}
+      volumes:
+        - volumeName: ${volRegistryConfig.name}
+          containerPath: /out
+        # BOTH STORES, READ-ONLY, AND ONLY TO COMPARE THEM: old has repositories and new has none means
+        # an unmigrated install, and this one-shot refuses rather than letting it start empty.
+        - volumeName: ${volRegistryData.name}
+          containerPath: /old
+          readOnly: true
+        - volumeName: ${volZotData.name}
+          containerPath: /zot
+          readOnly: true
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          set +u; a="$${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}"; r="$${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}"
+          p="$${KONTRA_REGISTRY_PULL_PASSWORD:-}"; cve="$${KONTRA_REGISTRY_CVE:-}"
+          ret="$${KONTRA_REGISTRY_RETENTION:-dryrun}"; mig="$${KONTRA_REGISTRY_MIGRATION:-}"; set -u
+          # AN UNMIGRATED STORE STOPS THE INSTALL, BECAUSE THE ALTERNATIVE IS SILENT.
+          #
+          # zot reads `zot-data`; `registry:2` wrote `registry-data`. The layouts are different, so a
+          # swap with no migration presents an EMPTY registry — and nothing in this system tells an
+          # empty registry from a fresh one. Measured: `GET /api/images` answers 200 with `[]` and no
+          # `unreachable` flag, the console's drift reads `unknown` and draws `?`, `kontra doctor` has
+          # no registry check at all, and `versionDeployed()` — the `--override` guard — returns false
+          # for every version, so version immutability stops guarding without a word.
+          #
+          # What is at stake is not rebuildable in the sense that matters: ADR 0052 records that this
+          # volume "holds the digests Placements are pinned to … rebuilding an image yields a NEW
+          # digest, so a Fleet recorded against the old one can never be re-run as recorded."
+          #
+          # THE CHECK IS THE STATE ITSELF, NOT A MARKER FILE. zot keeps one directory per repository at
+          # the top of its store beside `cache.db`/`meta.db`, and `registry:2` keeps
+          # `docker/registry/v2/repositories/<name>`. So "the old store has repositories and the new one
+          # has none" is readable without anything having to remember to write a flag — and it stops
+          # refusing by itself the moment the copy has landed.
+          old_n=0; new_n=0
+          [ -d /old/docker/registry/v2/repositories ] &&
+            old_n=$$(ls -A /old/docker/registry/v2/repositories 2>/dev/null | wc -l) || true
+          [ -d /zot ] &&
+            new_n=$$(find /zot -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l) || true
+          if [ "$$old_n" -gt 0 ] && [ "$$new_n" -eq 0 ]; then
+            n="$$old_n"
+            echo "refusing: this install still has a registry:2 store that has not been migrated." >&2
+            echo "" >&2
+            echo "  $$n repository trees in the old volume; zot reads a different one and would start empty." >&2
+            echo "  An empty registry is indistinguishable from a fresh install on every surface that" >&2
+            echo "  reports one, and the digests in it are what Placements are pinned to." >&2
+            echo "" >&2
+            echo "  Run:  kontra registry migrate" >&2
+            echo "  Or, to start a deliberately empty registry and keep the old volume untouched:" >&2
+            echo "        KONTRA_REGISTRY_MIGRATION=skip docker compose up -d" >&2
+            [ "$$mig" = "skip" ] || exit 1
+            echo "  KONTRA_REGISTRY_MIGRATION=skip was set; continuing with an empty registry." >&2
+          fi
+          # RETENTION REPORTS BEFORE IT DELETES, AND THE DEFAULT IS THE REPORTING ONE.
+          #
+          # "keep the 5 most recently pushed" is only safe once something protects a version that is
+          # OLDER than those 5 and still placed on a Machine — which is what the `inuse-` tags are for
+          # and what acceptance test 7 pins. The reconciler that writes them is armed in the API role,
+          # so what gates `enforce` now is not whether it exists but whether it has RUN HERE: a tag
+          # appears within ten minutes of the orchestrator starting, and this install's own registry is
+          # the thing to check (`curl .../v2/<actor>/tags/list` shows an `inuse-` tag or it does not).
+          #
+          # And what it protects is NARROWER than the table above implies: only the catalog's current
+          # digest. Placements live in Pulumi stack state rather than a table, so a digest that is on a
+          # Machine and not in the catalog is not tagged (control/orchestrator/src/images/inuse.ts).
+          # zot's dryRun logs every would-delete instead of taking it.
+          case "$$ret" in
+            dryrun) dryrun=true ;;
+            enforce) dryrun=false ;;
+            *) echo "refusing: KONTRA_REGISTRY_RETENTION must be dryrun or enforce, got '$$ret'" >&2; exit 1 ;;
+          esac
+          set_count=0
+          [ -n "$$a" ] && set_count=$$((set_count+1)) || true
+          [ -n "$$r" ] && set_count=$$((set_count+1)) || true
+          [ -n "$$p" ] && set_count=$$((set_count+1)) || true
+          if [ "$$set_count" -ne 0 ] && [ "$$set_count" -ne 3 ]; then
+            echo "refusing: $$set_count of 3 registry passwords are set." >&2
+            echo "Set all of KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD, KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD" >&2
+            echo "and KONTRA_REGISTRY_PULL_PASSWORD, or none. A registry with auth enabled and users" >&2
+            echo "missing answers 401 to every pull, which reads as a broken install, not a locked one." >&2
+            exit 1
+          fi
+          # The healthcheck binary. zot's image carries exactly ONE executable and no shell, so the
+          # probe has to be carried in; busybox is already this install's one-shot image.
+          cp /bin/busybox /out/busybox
+          # THREE HEREDOCS, because the http block is the only part that varies and a config assembled
+          # by `sed` is a config nobody can review.
+          #
+          # `^[0-9]+$$` reaches the file as `^[0-9]+$`: compose interpolates `command:` the same way it
+          # interpolates `ducklake-init`'s `content:`, which is why that one spells `$$POSTGRES_USER`.
+          # `\\.` reaches it as `\.`, and that pair is load-bearing — `\.` is not a legal JSON escape
+          # (JSON allows only \" \\ \/ \b \f \n \r \t \uXXXX), so a single backslash here makes zot
+          # answer "invalid config file" and never bind its port.
+          cat > /out/config.json << 'EOF'
+          {
+            "distSpecVersion": "1.1.1",
+            "storage": {
+              "rootDirectory": "/var/lib/zot",
+              "dedupe": true,
+              "gc": true,
+              "gcDelay": "1h",
+              "gcInterval": "6h",
+              "retention": {
+                "delay": "24h",
+                "policies": [
+                  { "repositories": ["actors/*-cache", "*-cache"], "deleteUntagged": true,
+                    "keepTags": [{ "mostRecentlyPushedCount": 1 }] },
+                  { "repositories": ["kontra-runtimes/**"], "deleteUntagged": true,
+                    "keepTags": [{ "patterns": ["^[0-9]+$$"] },
+                                 { "patterns": ["^[0-9]+\\.[0-9]+\\.[0-9]+$$"], "mostRecentlyPushedCount": 3 }] },
+                  { "repositories": ["bundles/**"], "deleteUntagged": true,
+                    "keepTags": [{ "patterns": [".*"] }] },
+                  { "repositories": ["actors/**", "*"], "deleteUntagged": true,
+                    "keepTags": [{ "patterns": ["^inuse-"] }, { "mostRecentlyPushedCount": 5 }] },
+                  { "repositories": ["**"], "deleteUntagged": true, "keepTags": [{ "patterns": [".*"] }] }
+                ],
+          EOF
+          # `dryRun` LAST, in its own unquoted heredoc. JSON does not care about key order, and this is
+          # what lets the policies above keep a quoted heredoc — the only form in which `^[0-9]+$` and
+          # `\\.` survive unmangled.
+          cat >> /out/config.json << EOF
+                "dryRun": $$dryrun
+              }
+            },
+          EOF
+          if [ "$$set_count" -eq 3 ]; then
+            # bcrypt is what zot's htpasswd loader accepts and busybox cannot produce one, so the
+            # plaintext goes to `registry-htpasswd` and is deleted there.
+            printf '%s\n%s\n%s\n' "push-actors:$$a" "push-runtimes:$$r" "pull:$$p" > /out/users
+            # NO `adminPolicy`. One granting `push-runtimes` read/create/update/delete would make it
+            # registry-ROOT — including delete over `actors/**` — and that credential is the one spec
+            # §6.1 hands to `kontra runtime build`, i.e. to whoever is iterating on a runtime. The
+            # least-trusted of the three would have been the most powerful. Each role is scoped to the
+            # prefix it owns instead, and delete goes no wider than that prefix.
+            cat >> /out/config.json << 'EOF'
+            "http": {
+              "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"],
+              "auth": { "htpasswd": { "path": "/etc/zot/htpasswd" }, "failDelay": 1 },
+              "accessControl": {
+                "repositories": {
+                  "actors/**": { "defaultPolicy": [], "policies": [
+                    { "users": ["push-actors"], "actions": ["read","create","update","delete","detectManifestCollision"] },
+                    { "users": ["pull"], "actions": ["read"] }
+                  ] },
+                  "kontra-runtimes/**": { "defaultPolicy": [], "policies": [
+                    { "users": ["push-runtimes"], "actions": ["read","create","update","delete"] },
+                    { "users": ["pull","push-actors"], "actions": ["read"] }
+                  ] },
+                  "**": { "defaultPolicy": [], "policies": [
+                    { "users": ["pull","push-actors","push-runtimes"], "actions": ["read"] }
+                  ] }
+                }
+              }
+            },
+          EOF
+          else
+            rm -f /out/users
+            # NO AUTH, BUT STILL NO DELETE. zot accepts an unauthenticated
+            # `DELETE /v2/<repo>/manifests/<digest>` and answers 202; `registry:2` answered 405
+            # UNSUPPORTED. Measured both ways. Without this block the swap quietly converts an
+            # append-only store into one where anything that can reach the port can erase the Bundle a
+            # Machine is about to pull — and the VPC overlay publishes that port to the fleet network.
+            # `create`/`update` stay so every existing push path keeps working with no credential.
+            cat >> /out/config.json << 'EOF'
+            "http": {
+              "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"],
+              "accessControl": {
+                "repositories": {
+                  "**": { "anonymousPolicy": ["read","create","update"], "defaultPolicy": [] }
+                }
+              }
+            },
+          EOF
+          fi
+          # CVE scanning downloads a vulnerability database, so it is opt-in (spec §6.1). This heredoc
+          # is UNQUOTED so `$$search` expands; it carries no regex, so nothing else can expand by accident.
+          search='{ "enable": true }'
+          [ -n "$$cve" ] && search='{ "enable": true, "cve": { "updateInterval": "24h" } }' || true
+          cat >> /out/config.json << EOF
+            "log": { "level": "info" },
+            "extensions": {
+              "search": $$search,
+              "scrub": { "enable": true, "interval": "24h" },
+              "trust": { "enable": true, "cosign": true }
+            }
+          }
+          EOF
+          auth=off; [ "$$set_count" -eq 3 ] && auth=on || true
+          echo "registry config rendered (auth=$$auth cve=$${cve:-off})"
+    options:
+      provider: ${dockerProvider}
+
+  registryHtpasswd:
+    type: docker:index:Container
+    properties:
+      name: kontra-registry-htpasswd
+      image: ${imgHttpd.imageId}
+      restart: "no"
+      mustRun: false
+      attach: true
+      logs: true
+      networksAdvanced:
+        - name: ${net.name}
+          aliases: ["registry-htpasswd"]
+      volumes:
+        - volumeName: ${volRegistryConfig.name}
+          containerPath: /out
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          if [ ! -f /out/users ]; then rm -f /out/htpasswd; echo "no users: anonymous registry"; exit 0; fi
+          : > /out/htpasswd
+          while IFS=: read -r u p; do
+            [ -n "$$u" ] || continue
+            htpasswd -nbB "$$u" "$$p" >> /out/htpasswd
+          done < /out/users
+          rm -f /out/users
+          # `grep -c .` and not `wc -l`: `htpasswd -nbB` emits a trailing blank line per call, so a
+          # line count says six where three users were written.
+          echo "htpasswd written for $$(grep -c . /out/htpasswd) users"
+    options:
+      provider: ${dockerProvider}
+      dependsOn:
+        - ${registryConfig}
+
   registry:
     type: docker:index:Container
     properties:
       name: kontra-registry
-      image: ${imgRegistry.imageId}
+      image: ${imgZot.imageId}
       restart: unless-stopped
+      command: ["serve", "/etc/zot/config.json"]
       networksAdvanced:
         - name: ${net.name}
           aliases: ["registry"]
       volumes:
+        - volumeName: ${volZotData.name}
+          containerPath: /var/lib/zot
+        - volumeName: ${volRegistryConfig.name}
+          containerPath: /etc/zot
+          readOnly: true
+        # `registry:2`'s store stays attached HERE, read-only, and not because zot reads it: a volume
+        # whose only mounter is a one-shot that has exited is a volume nothing running holds, and until
+        # `kontra registry migrate` has run this is the only copy of every actor image.
         - volumeName: ${volRegistryData.name}
-          containerPath: /var/lib/registry
+          containerPath: /legacy
+          readOnly: true
       ports:
         - internal: 5000
           external: ${registryPort}
           ip: ${bind}
           protocol: tcp
       healthcheck:
-        tests: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
+        # NOT `/v2/`, which answers 401 once auth is on — and both `cli` and `orchestrator-api` gate on
+        # this healthcheck, so the old target would mean the install never comes up. The probe is the
+        # static busybox the one-shot left in the config volume, because zot's image has no shell.
+        tests: ["CMD", "/etc/zot/busybox", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/_zot/ext/mgmt"]
         interval: 5s
         timeout: 5s
         retries: 10
@@ -828,6 +1123,8 @@ resources:
       waitTimeout: 110
     options:
       provider: ${dockerProvider}
+      dependsOn:
+        - ${registryHtpasswd}
 
   # One process: master + volume + filer + S3 (replaces four Seaweed services).
   #
