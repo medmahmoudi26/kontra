@@ -1,7 +1,17 @@
-// deploy.go — `kontra deploy --actor <dir>`: build (and optionally push) an actor
-// image via the Docker Engine API. No shell-out to `docker build` — the engine API is
-// the boundary here — and the CLASSIC builder on purpose: no BuildKit session dance,
-// and these Dockerfiles are linear COPY+pip anyway.
+// deploy.go — `kontra deploy --actor <dir>`: build (and optionally push) an actor image.
+//
+// THE DOCKERFILE PATH AND THE BUILDPACK PATH BOTH LIVE HERE, and the file's old rule — "no shell-out
+// to `docker build`, the engine API is the boundary here", with the CLASSIC builder on purpose —
+// still describes the Dockerfile path exactly. It no longer describes the whole file.
+//
+// The buildpack path shells out to a pinned `pack` (cli/packbuild.go says why: the CNB lifecycle is
+// five phases in separate containers with a credential boundary between them, not a build request an
+// Engine API call can express). That is a deliberate change of boundary rather than an erosion of
+// one, and ADR 0061 records it.
+//
+// The classic builder is also what left 28 dangling intermediates averaging 2.2 GiB on the box this
+// was written on. It stays only until the two remaining `runtime.Dockerfile`/`Dockerfile` escape
+// hatches are re-homed onto runtimes; deleting it before then removes both hooks at once.
 package main
 
 import (
@@ -149,6 +159,14 @@ type actorManifest struct {
 	// says which it is — a `go.mod` and a `main.go`, or an `actor.py` — and `engineFor` reads that.
 	// Declaring it is how an author settles a folder that somehow holds both.
 	Engine string `json:"engine"`
+	// Runtime is the run image this actor is built on, as a name and a MAJOR (`python-browser:1`) or
+	// a fully qualified reference. Absent means the default for the engine — `python:1` or `base:1` —
+	// which is what every actor written before runtimes existed gets.
+	//
+	// A MAJOR AND NOT A VERSION, because the point is that the runtime can be patched underneath an
+	// actor without rebuilding it (`kontra rebase`). The digest it resolves to at build time is
+	// recorded in the catalog; the major is what is asked for next time.
+	Runtime string `json:"runtime"`
 }
 
 // engineFor decides which engine an actor folder runs under: the flag, then the manifest, then the

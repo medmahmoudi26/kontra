@@ -48,6 +48,25 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates tzdata \
  && rm -rf /var/lib/apt/lists/*
 
+# THE CNB `pack` BINARY, PINNED AND CHECKSUMMED (ADR 0061).
+#
+# `kontra deploy` builds actor images with Cloud Native Buildpacks, which means the lifecycle, which
+# means `pack`. It is a BINARY and not a Go module on purpose: importing pack pulls its whole
+# dependency graph into a CLI that also ships as a single download, and this image is the one place
+# that needs it.
+#
+# THE CHECKSUM IS THE POINT OF PINNING, not the version string. A tag can be re-pointed; a build that
+# silently used a different lifecycle than the one this was tested against would produce actor images
+# whose layers do not match what the catalog records. Verified rather than trusted, because the
+# download is over the network at image-build time.
+ARG PACK_VERSION=0.40.9
+ARG PACK_SHA256=2f85c3ec624f73f2d3c4a680a2c48fe6755197844730cc4ea5ed05f950fe05a3
+ADD https://github.com/buildpacks/pack/releases/download/v${PACK_VERSION}/pack-v${PACK_VERSION}-linux.tgz /tmp/pack.tgz
+RUN printf '%s  /tmp/pack.tgz\n' "${PACK_SHA256}" | sha256sum -c - \
+ && tar -xzf /tmp/pack.tgz -C /usr/local/bin pack \
+ && rm /tmp/pack.tgz \
+ && /usr/local/bin/pack --version
+
 # THE RELEASE ARTIFACT, WHOLE. The path is a build arg rather than a fixed name because the file is
 # named for its version and platform, and hard-coding either is how an image quietly keeps shipping
 # last month's binary.
