@@ -105,6 +105,24 @@ export interface ActorRecord {
   runtime?: ActorRuntimeRecord;
   /** The CNB builder's digest, from the same stamp. Absent when unknown, for the same reason. */
   builderDigest?: string;
+  /**
+   * The digests this version HAS had, newest first, not counting the current one.
+   *
+   * A version used to name exactly one digest. `kontra rebase` moves an image onto a newer runtime by
+   * rewriting its manifest, which produces a NEW digest for the SAME version — so a version now names
+   * a SEQUENCE, and ADR 0032's "the digest is the identity" needs somewhere to keep the rest of it.
+   *
+   * WITHOUT THIS A REBASE ORPHANS ITS PREDECESSOR IMMEDIATELY. The `inuse-` reconciler tags the
+   * catalog's digests, and retention deletes what carries no such tag — so the digest a Lease is still
+   * running would lose its protection the moment the rebase landed, and an in-flight Run would be
+   * pulling an image retention had taken.
+   *
+   * THE CATALOG'S OWN FACT, like `savedAt` and `incompatibilities`: it is what the store CONCLUDED by
+   * comparing this registration against the row before it. A wire field for it would let a worker
+   * declare its own lineage, which is the one claim on that route nothing could check — so
+   * `catalog.contract.ts` exempts it by name rather than expecting a descriptor to carry it.
+   */
+  history?: string[];
   savedAt: number;
 }
 
@@ -192,6 +210,7 @@ interface ActorRow {
   incompatibilities: string | null;
   runtime: string | null;
   builder_digest: string | null;
+  history: string | null;
   saved_at: number;
 }
 
@@ -270,6 +289,7 @@ export class Repo {
     if (!columns.includes('builder_digest')) {
       this.db.exec('ALTER TABLE actors ADD COLUMN builder_digest TEXT');
     }
+    if (!columns.includes('history')) this.db.exec('ALTER TABLE actors ADD COLUMN history TEXT');
     // The cross-version finding (src/compat.ts). Every installation that has ever registered an
     // actor is the "table already exists" case, so without this line the column reaches only a
     // fresh database and every existing catalog answers `SELECT *` without it — which reads as
@@ -347,6 +367,9 @@ export class Repo {
         digest: a.digest ?? prev?.digest,
         savedAt: Date.now(),
       };
+      const lineage = rememberDigest(prev, rec.digest, a.history);
+      if (lineage) rec.history = lineage;
+      else delete rec.history;
       this.writeActor(rec);
       return rec;
     });
@@ -361,7 +384,7 @@ export class Repo {
     return this.tx(() => {
       const prev = this.getActor(input.key);
       const rec: ActorRecord = prev
-        ? { ...prev, digest: input.digest, savedAt: Date.now() }
+        ? { ...prev, digest: input.digest, savedAt: Date.now(), ...historyPatch(prev, input.digest) }
         : {
             key: input.key,
             name: input.name,
@@ -383,8 +406,8 @@ export class Repo {
   private writeActor(rec: ActorRecord): void {
     this.db
       .prepare(
-        `INSERT INTO actors (key, name, version, schema_version, operations, digest, source, incompatibilities, runtime, builder_digest, saved_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO actors (key, name, version, schema_version, operations, digest, source, incompatibilities, runtime, builder_digest, history, saved_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET
            name = excluded.name,
            version = excluded.version,
@@ -395,6 +418,7 @@ export class Repo {
            incompatibilities = excluded.incompatibilities,
            runtime = excluded.runtime,
            builder_digest = excluded.builder_digest,
+           history = excluded.history,
            saved_at = excluded.saved_at`
       )
       .run(
@@ -412,6 +436,9 @@ export class Repo {
           : null,
         rec.runtime ? JSON.stringify(rec.runtime) : null,
         rec.builderDigest ?? null,
+        // NULL rather than `[]` for a version that has only ever had one digest, so the conformance
+        // round trip hands back the key set the SDKs posted.
+        rec.history && rec.history.length > 0 ? JSON.stringify(rec.history) : null,
         rec.savedAt
       );
   }
@@ -644,6 +671,9 @@ CREATE TABLE IF NOT EXISTS actors (
   -- migrate().
   runtime        TEXT,
   builder_digest TEXT,
+  -- The digests this version has had, newest first, as JSON; NULL when it has only ever had one. See
+  -- ActorRecord.history; added by migrate().
+  history        TEXT,
   saved_at       INTEGER NOT NULL
 );
 -- A caller workflow as its worker described it on serve (shared/contracts/kontra/v1/catalog.proto's
@@ -722,6 +752,7 @@ function rowToActor(row: ActorRow): ActorRecord {
     rec.runtime = JSON.parse(row.runtime as string) as ActorRuntimeRecord;
   }
   if ((row.builder_digest ?? null) !== null) rec.builderDigest = row.builder_digest as string;
+  if ((row.history ?? null) !== null) rec.history = JSON.parse(row.history as string) as string[];
   return rec;
 }
 
@@ -772,4 +803,44 @@ function rowToSource(row: SourceRow): SourceRecord {
     }
   }
   return rec;
+}
+
+/**
+ * The digest being replaced joins the lineage, newest first — the half of `history` the store
+ * concludes rather than reads.
+ *
+ * THREE THINGS IT MUST NOT DO, and each is a way to lose a digest or invent one:
+ *
+ *   - It must not record a digest that is not changing. A re-registration of the same version with
+ *     the same digest is the common case (every worker restart), and appending there would grow an
+ *     unbounded list of one repeated value and push real predecessors past any cap.
+ *   - It must not record `undefined`. A dev worker with no KONTRA_ACTOR_DIGEST posts none, and "the
+ *     previous digest was nothing" is not a digest a Lease can be running.
+ *   - It must not duplicate. A rebase back onto a digest this version already had — a runtime rolled
+ *     forward and then back — would otherwise appear twice and consume two of the kept slots.
+ *
+ * AN EXPLICIT `history` ON THE INPUT WINS, because `kontra rebase` is the one caller that knows the
+ * whole lineage and is replaying it; everything else is a registration and gets this derivation.
+ */
+function rememberDigest(
+  prev: ActorRecord | undefined,
+  next: string | undefined,
+  given: string[] | undefined
+): string[] | undefined {
+  if (given && given.length > 0) return [...given];
+  const was = prev?.digest;
+  const kept = prev?.history ?? [];
+  if (!was || was === next) return kept.length > 0 ? [...kept] : undefined;
+  // `next` is filtered out as well as `was`: history is the digests this version HAS had, NOT counting
+  // the one it has now. A runtime rolled forward and then back would otherwise leave the CURRENT
+  // digest listed as its own predecessor — which reads as two images where there is one, and spends
+  // two of the kept slots on it.
+  const lineage = [was, ...kept.filter((d) => d !== was && d !== next)];
+  return lineage;
+}
+
+/** `rememberDigest` as a spreadable patch, for the paths that build a record by spreading `prev`. */
+function historyPatch(prev: ActorRecord, next: string): { history?: string[] } {
+  const h = rememberDigest(prev, next, undefined);
+  return h ? { history: h } : {};
 }

@@ -151,3 +151,29 @@ describe('the registry client refuses to untag anything it did not write', () =>
     );
   });
 });
+
+describe('a rebased-away digest keeps its protection', () => {
+  // The reason the store keeps a history at all. Retention deletes what carries no `inuse-` tag, and a
+  // Lease keeps its old digest until it drops — so tagging only the current digest means a rebase takes
+  // the image an in-flight Run is still pulling.
+  const WAS = 'sha256:' + 'e'.repeat(64);
+  const NOW = 'sha256:' + 'f'.repeat(64);
+
+  it('tags the current digest and every digest the version has had', () => {
+    const rebased = { ...actor('alpha', '1.0.0', NOW), history: [WAS] } as ActorRecord;
+    const want = desiredInuseTags([rebased]).get('alpha')!;
+    expect([...want.keys()].sort()).toEqual([inuseTagFor(NOW)!, inuseTagFor(WAS)!].sort());
+    expect(want.get(inuseTagFor(WAS)!), 'the tag must point at the predecessor itself').toBe(WAS);
+  });
+
+  it('ignores an unreadable digest in the history without losing the readable ones', () => {
+    // History is data from another process. One bad entry must not cost the rest their protection.
+    const a = { ...actor('alpha', '1.0.0', NOW), history: ['not-a-digest', WAS] } as ActorRecord;
+    const want = desiredInuseTags([a]).get('alpha')!;
+    expect([...want.keys()].sort()).toEqual([inuseTagFor(NOW)!, inuseTagFor(WAS)!].sort());
+  });
+
+  it('still contributes nothing for an actor with no digest and no history', () => {
+    expect(desiredInuseTags([actor('alpha', '1.0.0')]).size).toBe(0);
+  });
+});

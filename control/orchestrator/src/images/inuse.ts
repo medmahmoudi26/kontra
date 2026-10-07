@@ -20,6 +20,11 @@
  * That case is real and was measured: migrating this install found `desync@177f80c8` and
  * `webcrawl@e09d6df4` recorded in the catalog, present in the store, and reachable by no tag at all.
  * Those are exactly the digests this protects.
+ *
+ * AND THE CATALOG MEANS A VERSION'S WHOLE LINEAGE, not just its current digest. `kontra rebase` gives
+ * a version a new digest for the same version; a Lease keeps the old one until it drops. So the
+ * `history` the store records is tagged alongside `digest`, or a rebase would take the image an
+ * in-flight Run is still pulling.
  */
 
 import type { ActorRecord } from '../db/repo';
@@ -86,18 +91,25 @@ export function repoForActor(name: string): string {
 export function desiredInuseTags(actors: readonly ActorRecord[]): Map<string, Map<string, string>> {
   const byRepo = new Map<string, Map<string, string>>();
   for (const a of actors) {
-    if (!a.digest) continue;
-    const tag = inuseTagFor(a.digest);
-    if (!tag) continue;
     const repo = repoForActor(a.name);
-    let tags = byRepo.get(repo);
-    if (!tags) {
-      tags = new Map();
-      byRepo.set(repo, tags);
+    // THE HISTORY IS TAGGED TOO, and that is the whole reason the store keeps one. `kontra rebase`
+    // gives a version a new digest, so without this the digest it replaced loses its tag on the next
+    // pass — and retention takes the image an in-flight Run is still pulling, because a Lease keeps its
+    // old digest until it drops. Protecting a predecessor longer than strictly necessary costs disk;
+    // not protecting it costs a Run.
+    for (const digest of [a.digest, ...(a.history ?? [])]) {
+      if (!digest) continue;
+      const tag = inuseTagFor(digest);
+      if (!tag) continue;
+      let tags = byRepo.get(repo);
+      if (!tags) {
+        tags = new Map();
+        byRepo.set(repo, tags);
+      }
+      // Two versions can record the same digest — a rebuild that changed nothing, or a retag. One tag
+      // protects both, so last write wins and the count is of TAGS, not of catalog rows.
+      tags.set(tag, digest);
     }
-    // Two versions can record the same digest — a rebuild that changed nothing, or a retag. One tag
-    // protects both, so last write wins and the count is of TAGS, not of catalog rows.
-    tags.set(tag, a.digest);
   }
   return byRepo;
 }
