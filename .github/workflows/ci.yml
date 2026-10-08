@@ -831,6 +831,15 @@ jobs:
             # actor and its Worker are started by the orchestrator through the docker socket, not by
             # compose, so `docker compose logs` cannot see them — and the Nexus operation that timed
             # out is handled inside the actor.
+            # THE OBJECT STORE, because `store_blob` is where the run stopped. With the S3 client
+            # restored the error is gone and the activity simply never returns — dispatched, then
+            # two minutes of nothing, then worker shutdown. A hang and an error are different
+            # failures and only one of them is a missing bucket.
+            echo "::group::seaweed's buckets, and whether first boot made one"
+            docker compose exec -T seaweed wget -qO- http://127.0.0.1:8333/ || echo "(seaweed did not answer)"
+            echo "--- the bucket creation line from first boot, wherever it is in history ---"
+            docker compose logs --no-color cli 2>/dev/null | grep -iE "seaweed|bucket" || echo "(nothing about a bucket in cli's whole log)"
+            echo "::endgroup::"
             echo "::group::what the install pushed to its own registry"
             # FROM INSIDE THE REGISTRY CONTAINER, not over a published port — zot is distroless and
             # may not be published at all, and `registry-config` puts a static busybox at
