@@ -75,10 +75,15 @@ seaweed = ["boto3>=1.28"]
 [tool.setuptools]
 # `kontra` WAS LISTED TWICE AND `actorkit` NOT AT ALL, which is the failure the comment above warns
 # about, arriving one step earlier than predicted: not a wheel that drops the alias, an EDITABLE
-# install that never had it. `package-dir` maps `actorkit` onto the `kontra` directory, and a
-# mapping for a package setuptools was not told to build produces nothing and says nothing.
+# install that never had it. Both halves of one bad edit — see the `package-dir` note below for the
+# other half, which pointed the alias at the wrong directory and would have hidden this one.
 packages = ["kontra", "actorkit", "internals", "internals.temporal"]
 
 [tool.setuptools.package-dir]
-actorkit = "kontra"
+# `actorkit = "kontra"` STOOD HERE AND WAS STALE. It pointed the alias package at the author
+# package's directory, so `import actorkit` loaded `kontra/__init__.py` — no deprecation warning, no
+# `sys.modules` aliasing, none of what `actorkit/__init__.py` exists to do. It is a leftover from
+# when the shim lived at the repository root; `sdk/python/actorkit/` is a real directory now, and
+# with no mapping setuptools resolves both packages to their same-named directories, which is what
+# the comment above means by the directory being named after the package.
 internals = "../../runtime/python/internals"
