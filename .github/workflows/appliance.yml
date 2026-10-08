@@ -352,6 +352,22 @@ jobs:
             echo "::error::two builds of the same commit produced different bundles"
             diff <(python3 -m json.tool "$RUNNER_TEMP"/first/*.manifest.json) \
                  <(python3 -m json.tool "$RUNNER_TEMP"/second/*.manifest.json) || true
+            # THE MANIFEST SAYS A COUNT DIFFERS; THIS SAYS WHICH FILES. A diff of two totals
+            # ("33015 files" against "32898") names nothing actionable, and the bundle cannot be
+            # rebuilt on a laptop cheaply enough to find out by hand. The member lists can be
+            # compared without extracting anything.
+            echo "::group::members present in one build and not the other"
+            tar -tzf "$RUNNER_TEMP"/first/*.tar.gz  | sort > "$RUNNER_TEMP/first.list"
+            tar -tzf "$RUNNER_TEMP"/second/*.tar.gz | sort > "$RUNNER_TEMP/second.list"
+            echo "first  $(wc -l < "$RUNNER_TEMP/first.list") members"
+            echo "second $(wc -l < "$RUNNER_TEMP/second.list") members"
+            # Bounded, because a whole-tree divergence would otherwise print 30k lines and the
+            # useful part is the shape: which directory they cluster in.
+            comm -3 "$RUNNER_TEMP/first.list" "$RUNNER_TEMP/second.list" | head -60
+            echo "--- where they cluster (top 3 path segments) ---"
+            comm -3 "$RUNNER_TEMP/first.list" "$RUNNER_TEMP/second.list" \
+              | sed 's/^\t//' | cut -d/ -f1-3 | sort | uniq -c | sort -rn | head -20
+            echo "::endgroup::"
             exit 1
           fi
 
