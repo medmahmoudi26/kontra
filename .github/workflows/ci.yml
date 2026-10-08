@@ -827,7 +827,7 @@ jobs:
                 kontra-hello*)
                   echo "::group::$c — the object store from where the actor stands"
                   docker cp scripts/probe-objectstore.py "$c":/tmp/probe.py >/dev/null 2>&1 || true
-                  timeout 90 docker exec "$c" python3 /tmp/probe.py \
+                  timeout 90 docker exec "$c" python3 -u /tmp/probe.py \
                     || echo "(the probe did not finish in 90s — that IS the answer)"
                   echo "::endgroup::"
                   ;;
