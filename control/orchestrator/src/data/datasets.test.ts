@@ -27,6 +27,8 @@ import {
   NotTemporaryDatasetError,
   previewDataset,
   runFiles,
+  withSharedDatasets,
+  type DatasetInfo,
 } from './datasets';
 import { MATERIALIZATION_SCHEMA_VERSION, type MaterializationRecord } from './materialization';
 import {
@@ -926,5 +928,90 @@ describe('deleteTemporaryDataset', () => {
     const freed = await deleteTemporaryDataset(ctx.store, 'tmp_empty', ctx.cfg);
     expect(freed).toMatchObject({ name: 'tmp_empty', rows: 0, bytes: 0, owner: 'NsCheck-9' });
     expect(await ctx.store.get(datasetOwnerKey('tmp_empty'))).toBeFalsy();
+  });
+});
+
+/**
+ * The SHARE join (ADR 0053) — the third pure join over the listing, beside `withDatasetNames` (the
+ * ledger and the lake) and `withDatasetDeviations` (the Dataset record).
+ *
+ * Pure and total over two plain arrays, so it needs no store and no lake. Tested here rather than
+ * in `sharedDatasets.test.ts` because the function lives beside its two siblings, and the thing
+ * worth pinning is the same thing they pin: WHICH authority is allowed to mark WHICH row.
+ */
+describe('withSharedDatasets', () => {
+  const info = (o: Partial<DatasetInfo> = {}): DatasetInfo => ({
+    kind: 'output',
+    name: 'lame',
+    version: '0.1.0',
+    dt: '2026-10-01T09-00-00',
+    rows: 1,
+    bytes: 0,
+    ...o,
+  });
+
+  it('marks a granted Dataset and leaves the field ABSENT on an ungranted one', () => {
+    // Deviation-only, the rule the tags follow: not shared is no row and therefore no field, never
+    // `shared: false` — so a console that renders the key at all is rendering a real grant.
+    const out = withSharedDatasets(
+      [info(), info({ name: 'other' })],
+      [{ workspace: 'bugbounty', name: 'lame', kind: 'output' }],
+      'bugbounty'
+    );
+    expect(out[0]!.shared).toBe(true);
+    expect('shared' in out[1]!).toBe(false);
+  });
+
+  it('REFUSES a grant from another workspace — the one mistake this join can make', () => {
+    // Two workspaces hold a Dataset called `lame`. Joining on the name alone would badge
+    // `bugbounty`'s row because `scraping` shared its own, which is an exposure claimed over data
+    // nobody opened up.
+    const out = withSharedDatasets(
+      [info()],
+      [{ workspace: 'scraping', name: 'lame', kind: 'output' }],
+      'bugbounty'
+    );
+    expect('shared' in out[0]!).toBe(false);
+  });
+
+  it('REFUSES a grant on the other KIND of the same name', () => {
+    // An output table and a loaded list live in different schemas and can share a name; the grant's
+    // key carries the kind for exactly this reason.
+    const out = withSharedDatasets(
+      [info({ kind: 'output' }), info({ kind: 'standalone', version: undefined, dt: undefined })],
+      [{ workspace: 'bugbounty', name: 'lame', kind: 'standalone' }],
+      'bugbounty'
+    );
+    expect('shared' in out[0]!).toBe(false);
+    expect(out[1]!.shared).toBe(true);
+  });
+
+  it('marks EVERY partition of a granted name, because a grant is table-grain', () => {
+    // The listing's grain is one `(name, version, dt)` partition; a grant licenses
+    // `SELECT … FROM <schema>.<table>`, which reads all of them. Marking only one row would draw a
+    // badge finer than the access it describes.
+    const out = withSharedDatasets(
+      [info({ dt: '2026-10-01T09-00-00' }), info({ dt: '2026-10-02T09-00-00' })],
+      [{ workspace: 'bugbounty', name: 'lame', kind: 'output' }],
+      'bugbounty'
+    );
+    expect(out.map((i) => i.shared)).toEqual([true, true]);
+  });
+
+  it('attaches nothing for an UNNAMED workspace — the legacy address has no grants', () => {
+    // `activeLakeWorkspace()` answers `''` for an install with no `.current` and no
+    // KONTRA_LAKE_WORKSPACE. There is no workspace a grant could be keyed under, and an install
+    // that cannot be addressed cannot share.
+    const out = withSharedDatasets(
+      [info()],
+      [{ workspace: 'bugbounty', name: 'lame', kind: 'output' }],
+      ''
+    );
+    expect('shared' in out[0]!).toBe(false);
+  });
+
+  it('is total: no grants returns the rows unchanged', () => {
+    const rows = [info()];
+    expect(withSharedDatasets(rows, [], 'bugbounty')).toEqual(rows);
   });
 });

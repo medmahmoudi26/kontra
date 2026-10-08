@@ -59,11 +59,25 @@ A **Tenant** IS a Temporal namespace: the only authorisation boundary Temporal h
 A Workspace is a directory; its boundary is Unix file permissions, and those bound who may EDIT the
 code and read the credentials — nothing at runtime.
 
-So two Workspaces on one **Tenant** see each other's **Runs**, **Datasets** and queues completely.
-That is the intended arrangement for two engineers sharing one instance and it is fine, but it has
-to be said out loud, because the intuition runs the other way: the word looks like an isolation
-boundary and is not one. **When separation is actually wanted, the answer is a second Tenant, never
-a second Workspace.**
+So two Workspaces on one **Tenant** see each other's **Runs** and queues completely. That is the
+intended arrangement for two engineers sharing one instance and it is fine, but it has to be said
+out loud, because the intuition runs the other way: the word looks like an isolation boundary and
+mostly is not one.
+
+**CORRECTED: `Datasets` WAS IN THAT LIST AND NO LONGER BELONGS THERE.** This entry read "see each
+other's **Runs**, **Datasets** and queues completely", and **ADR 0051** made the Workspace the
+isolation boundary — isolation by ADDRESS, never by filter — with the LAKE as the first and so far
+only store to honour it. Measured on this install 2026-10-05: four Workspaces, four Postgres
+DuckLake catalogs (`kontra_ducklake_ws_<name>`) and four buckets (`ws-<name>`), derived by
+`workspaceAddress`. A **Dataset** written in one Workspace is not visible in another, and the
+`_Avoid_` above still forbids reading a Workspace as isolating work — which was right when it was
+written and is now wrong about exactly one store. Reading across that boundary takes a deliberate
+grant (**shared Dataset**, **ADR 0053**); nothing is shared by default any more.
+
+**Everything else on ADR 0051's list is still unbuilt, so the warning stands for all of it:**
+Temporal (and therefore **Runs**, queues, schedules, **Leases** and fleet operations), logs,
+metrics, secrets and Pulumi state are all still install-wide. **When separation of those is
+actually wanted, the answer is a second Tenant, never a second Workspace.**
 
 `infra/CONTEXT.md` lists `workspace` among the words **Tenant** avoids, and that stands for the
 namespace it names. This entry is the other thing the word can mean, defined here so the two cannot
@@ -154,6 +168,37 @@ An explicit name an operator stores for a **Run**'s **Dataset**, OVERRIDING the 
 the derived name stands, so a surface shows `rename ?? derived name`. Kept in the **Dataset record**
 beside the tags, keyed by `runId`.
 _Avoid_: alias, title
+
+**shared Dataset**:
+A **Dataset** an operator has marked READABLE from another **Workspace** (**ADR 0053**). The mark is
+a GRANT, held in its own store and keyed on the ADDRESS a reader uses — `(workspace, kind, name)` —
+not on the **Run** that wrote it, because a **standalone** list has no **Run** at all and is the
+most shareable thing on an install, and because a read is `SELECT … FROM <schema>.<table>`, which
+returns every **contributing Run**'s rows under that name. So it is TABLE-GRAIN, unlike a **tag**
+and the **derived name**, which are run-grain; a run-grain grant would license a read wider than its
+own key. Only DEVIATION is stored, as the **Dataset record** does: an unshared **Dataset** has no
+row, and the mark is a PRESENCE rather than a column — a **tag** is a set because two writers must
+converge on a value, a **rename** is a scalar because it is one choice among many strings, and this
+is neither, because its domain is two values and one of them is the absence of the row.
+
+A reader NAMES the owning **Workspace**; there is no default, because a default would make a
+cross-workspace read expressible by leaving a field out. The owning lake is then ATTACHED
+`READ_ONLY` — DuckDB enforcing it on statement type, not this codebase promising it — and the
+reader's own lake is not attached at all, which is what makes "there is no cross-workspace WRITE" a
+property of the connection rather than an intention. The platform grants the READ; the COPY is
+userland's, a workflow in the reading **Workspace** paging the rows and publishing them into its own
+lake through the ordinary path.
+
+**A grant names the OWNER, not the READER.** It says *this may be read from another Workspace*, not
+*that Workspace may read it*, so every **Workspace** on the install can read a granted **Dataset**.
+That follows the install being one **Tenant**: a grant is a statement about the DATA, not an
+agreement between parties who do not trust each other. **And revoking closes the read without
+recalling a copy** — the whole point is that userland clones the rows, so once it has, unsharing
+stops the next read and leaves everything already taken.
+_Avoid_: ACL, permission, grant-to (all three imply a named reader, and there is none), published,
+exported (both imply the bytes left the owning lake; they did not — a reader is admitted to read
+them in place), public, copy (the copy is the clone userland makes afterwards), and any reading in
+which unsharing takes data back
 
 **retention sweep**:
 The periodic collection of UNTAGGED **Datasets** past a TTL this repo owns (**ADR 0029** §3, §5,

@@ -1876,6 +1876,7 @@ class DatasetHandle:
         force_size: bool = False,
         start: int = 0,
         via: tuple[str, str] = ("", ""),
+        allow_empty: bool = False,
         timeout: timedelta = timedelta(minutes=5),
     ) -> AsyncIterator[Batch]:
         """Page this Dataset into Batches — the caller's loop, one page at a time.
@@ -1961,11 +1962,22 @@ class DatasetHandle:
                 retry_policy=_publish_retry(),
             )
             n = int(page.get("n") or 0)
-            if first and n == 0:
+            if first and n == 0 and not allow_empty:
+                # THE DEFAULT STAYS LOUD. An empty first page is almost always a wrong name, a
+                # wrong version/dt scope or a filter that matches nothing, and a silent empty sweep
+                # is the failure this guard exists for — a run that reports clean coverage of
+                # nothing.
+                #
+                # `allow_empty=True` IS FOR THE CALLER WHOSE QUERY IS A QUESTION, not an address:
+                # a phase that selects "the rows that reacted" has "none of them" as a legitimate
+                # and meaningful answer. Opt-in, so saying so is a decision at the call site rather
+                # than an exception caught by its message — and `cachepoison`'s prove phase had
+                # exactly that bug: it carried an `if i == 0` branch documenting "nothing reacted
+                # … that is a RESULT and not a gap" which this raise made unreachable.
                 raise ValueError(
                     f"dataset {self.name!r} returned no rows on its first page — check the "
                     f"name, the version/dt scope, and the filter before treating this as an "
-                    f"empty sweep"
+                    f"empty sweep (pass `allow_empty=True` if no rows is a real answer here)"
                 )
             first = False
             if n:
@@ -1987,6 +1999,102 @@ class DatasetHandle:
             if page.get("done", True):
                 return
             offset += n
+
+
+#: Page a Dataset another WORKSPACE has marked shared (ADR 0053). Served by the same activities
+#: object as `pageDataset`, so it is on the same queue — but it is a different activity on purpose:
+#: it checks the grant and attaches the owning lake READ_ONLY before a row is read.
+PAGE_SHARED_DATASET_ACTIVITY = "pageSharedDataset"
+
+
+async def shared_batches(
+    workspace: str,
+    name: str,
+    size: int,
+    *,
+    order_by: str,
+    kind: str = "standalone",
+    version: str = "",
+    dt: str = "",
+    start: int = 0,
+    via: "tuple[str, str]" = ("", ""),
+    timeout: timedelta = timedelta(minutes=5),
+) -> "AsyncIterator[Batch]":
+    """Page a Dataset that ANOTHER workspace has shared, into Batches (ADR 0053).
+
+        async for batch in catalog.shared_batches(
+                "bugbounty", "scope_h1paid", 500, order_by="host"):
+            await out.publish(batch)
+
+    THE READ IS ADDRESSED, NEVER FILTERED. `workspace` is REQUIRED and is never defaulted to the
+    active one, because a default would make a cross-workspace read expressible by LEAVING A FIELD
+    OUT — and ADR 0051 §3's rule is that isolation is by address: get it wrong and you see nothing,
+    loudly, rather than silently widening a query. `kind` is part of the address too: `output` and
+    `standalone` live in different schemas and may share a name, so a grant on one is not a grant
+    on the other.
+
+    THERE IS NO WRITE COUNTERPART AND THERE WILL NOT BE ONE. The owning lake is attached READ_ONLY
+    at the DuckDB level — the ATTACH itself carries the flag, so DuckDB refuses by statement type
+    rather than this code refusing by intention — and the reader's own lake is not attached at all,
+    which is what makes "there is no cross-workspace WRITE" a property of the connection. The COPY
+    is userland's: page the rows here and publish them into your own lake through the ordinary path.
+
+    AN UNGRANTED DATASET IS A REFUSAL AND NOT AN EMPTY SWEEP, and the message does not distinguish
+    "not shared" from "does not exist" — so this surface cannot be used to ask whether another
+    workspace holds a name.
+
+    `order_by` is required for `batches`'s reason: a materialized Dataset stamps no row id, so
+    LIMIT/OFFSET over it has no defined order and two pages may overlap or skip rows with nothing
+    raising. It is held to a GRAMMAR on the far side rather than trusted, because an ORDER BY is an
+    expression and an expression could read a table no grant named.
+    """
+    if size <= 0:
+        raise ValueError(f"page size must be positive, got {size}")
+    if not workspace:
+        raise ValueError(
+            "shared_batches needs the OWNING workspace. There is no default: a cross-workspace "
+            "read must name its source, or it is not an address"
+        )
+    if kind not in ("output", "standalone"):
+        raise ValueError(f"kind must be 'output' or 'standalone', got {kind!r}")
+
+    from temporalio import workflow
+
+    offset = max(int(start), 0)
+    first = True
+    while True:
+        page = await workflow.execute_activity(
+            PAGE_SHARED_DATASET_ACTIVITY,
+            {
+                "workspace": workspace,
+                "name": name,
+                "kind": kind,
+                "orderBy": order_by,
+                "limit": size,
+                "offset": offset,
+                **({"version": version} if version else {}),
+                **({"dt": dt} if dt else {}),
+            },
+            task_queue=DATASET_QUEUE,
+            start_to_close_timeout=timeout,
+            # BOUNDED, for `batches`'s reason: a read can fail permanently. A grant pointing at a
+            # Dataset the catalog no longer holds fails on EVERY attempt, and no number of retries
+            # conjures the bytes back.
+            retry_policy=_publish_retry(),
+        )
+        n = int(page.get("n") or 0)
+        if first and n == 0:
+            raise ValueError(
+                f"shared dataset {name!r} in workspace {workspace!r} returned no rows on its "
+                f"first page — check the grant, the kind, and the name before treating this as "
+                f"an empty sweep"
+            )
+        first = False
+        if n:
+            yield Batch.from_ref(page.get("ref") or {}, actor=via[0], version=via[1])
+        if page.get("done", True):
+            return
+        offset += n
 
 
 # ---------------------------------------------------------------------------------------------

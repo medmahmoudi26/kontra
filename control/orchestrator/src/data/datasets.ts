@@ -222,6 +222,23 @@ export interface DatasetInfo {
    * "the derived default is used whenever no rename exists" (issue 01, issue 02) reaches the screen.
    */
   renamedTo?: string;
+  /**
+   * TRUE when this Dataset is marked SHARED, so another workspace may READ it (ADR 0053). ABSENT
+   * when it is not — the grant store holds only deviation, so "not shared" is no row and therefore
+   * no field, the same rule the tags follow.
+   *
+   * ATTACHED BY {@link withSharedDatasets}, keyed on `(kind, name)` IN ONE WORKSPACE — not on
+   * `runId`, and that difference is the point. A grant licenses `SELECT … FROM <schema>.<table>`
+   * over another workspace's lake, which reads every **Run**'s rows under that name; a Run-keyed
+   * flag would be a grant whose stored grain is finer than the access it gives, and a standalone
+   * list (which has no Run at all, and is the most shareable kind of Dataset here) could not carry
+   * one. See `data/sharedDatasets.ts`.
+   *
+   * IT IS THE SAME VALUE ON EVERY ROW OF A NAME, because the grain of a grant is the TABLE while
+   * the grain of a listing row is one `(name, version, dt)` partition. The console folds a name's
+   * rows into one group, so this reads as a property of the group — which is what it is.
+   */
+  shared?: boolean;
 }
 
 /** Files belonging to one actor's output for one dispatch. */
@@ -708,6 +725,41 @@ export function withDatasetDeviations(
     if (dev.renamedTo !== undefined) next.renamedTo = dev.renamedTo;
     return next;
   });
+}
+
+/**
+ * Attach the SHARED flag (ADR 0053) to each row whose Dataset this workspace has granted — a THIRD
+ * pure join over a THIRD authority, beside {@link withDatasetNames} (the ledger and the lake) and
+ * {@link withDatasetDeviations} (the Dataset record).
+ *
+ * KEYED ON `(kind, name)` AND SCOPED TO ONE WORKSPACE. The grant store holds rows about every
+ * workspace on the install, so the workspace is passed in and matched — a join that ignored it
+ * would mark `bugbounty`'s `lame` as shared because `scraping` shares a Dataset of the same name,
+ * which is the one mistake this join can make. The workspace comes from the resolved
+ * {@link LakeConfig} of the SAME read that produced `infos`, so the grants joined here belong to the
+ * lake the rows came from.
+ *
+ * AN EMPTY WORKSPACE ATTACHES NOTHING, and that is correct rather than defensive: `''` is the
+ * LEGACY address (no `.current`, no `KONTRA_LAKE_WORKSPACE` — see `activeLakeWorkspace`), and a
+ * lake with no workspace name has nothing a grant could be keyed under. Such an install cannot
+ * share, and the absent field says so.
+ *
+ * Pure and total over two plain arrays, like its two siblings, so it is testable without a store
+ * and best-effort: a row whose grant is not supplied is returned as it arrived, unshared.
+ */
+export function withSharedDatasets(
+  infos: readonly DatasetInfo[],
+  shares: readonly { workspace: string; name: string; kind: DatasetKind }[],
+  workspace: string
+): DatasetInfo[] {
+  if (!workspace || shares.length === 0) return [...infos];
+  const granted = new Set(
+    shares.filter((s) => s.workspace === workspace).map((s) => `${s.kind}\0${s.name}`)
+  );
+  if (granted.size === 0) return [...infos];
+  return infos.map((info) =>
+    granted.has(`${info.kind}\0${info.name}`) ? { ...info, shared: true } : info
+  );
 }
 
 /**

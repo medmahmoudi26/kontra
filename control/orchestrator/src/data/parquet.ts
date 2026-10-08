@@ -395,8 +395,18 @@ export function resolveLakeConfig(store: ObjectStore, override: Partial<LakeConf
   // gone, they would be unreachable, which reads exactly like the 2026-09-28 wipe. Relocating
   // them is issue 10: a dry run a human reads, a verified rollback, and no run in flight.
   //
-  // So the derivation lands here, total and tested, and the switch is `KONTRA_LAKE_WORKSPACE`
-  // being set. Unset — the state of this install — every value below is byte-for-byte what it was.
+  // So the derivation lands here, total and tested, and the switch is a workspace being NAMED.
+  //
+  // CORRECTED: THE SWITCH IS NOT `KONTRA_LAKE_WORKSPACE` ANY MORE, AND THIS SENTENCE SAID IT WAS.
+  // It read "the switch is `KONTRA_LAKE_WORKSPACE` being set. Unset — the state of this install —
+  // every value below is byte-for-byte what it was." Issue 10 made `.current` the answer and the
+  // variable the OVERRIDE (the paragraph below, and `activeLakeWorkspace`), so the variable being
+  // unset no longer means the legacy address: a `KONTRA_WORKSPACES` mount with a `.current` file
+  // derives `ws-<name>` on its own. MEASURED on this install 2026-10-05 — four workspaces under
+  // the mount and `.current` naming `demo` — so the addresses below ARE derived here today, and a
+  // reader taking the old sentence at face value would conclude the opposite of what runs. The
+  // legacy address survives only where nothing names a workspace at all, which is an install with
+  // no mount and no override.
   //
   // NOT `KONTRA_WORKSPACE`, WHICH IS ALREADY TAKEN AND MEANS SOMETHING ELSE ENTIRELY: it is the
   // legacy variable naming the code ROOT DIRECTORY (`cli/workspace.go`, and `workspaceRoot()` in
@@ -429,6 +439,16 @@ export function resolveLakeConfig(store: ObjectStore, override: Partial<LakeConf
         : process.env.KONTRA_DUCKLAKE_DATA_PATH ?? './');
   const catalog = resolveCatalog(override.catalog ?? address?.catalog);
   return {
+    // CARRIED ON THE RESOLVED CONFIG, not only on the override (ADR 0053).
+    //
+    // The derivation above takes `.current`, the override and the environment and collapses them
+    // into ONE answer; a caller holding the result could read the catalog and the data path out of
+    // it but not the NAME they were derived from. That name is the key a cross-workspace grant is
+    // stored under, so the listing had to re-run `override.workspace ?? activeLakeWorkspace()`
+    // itself to know which workspace's grants to join — a second spelling of a resolution that
+    // already happened, free to disagree with the lake the same request read. Undefined when no
+    // address is in force, which is the legacy case and has no workspace to be keyed on.
+    ...(workspace === '' ? {} : { workspace }),
     catalog,
     dataPath,
     s3: override.s3 ?? s3,
@@ -602,19 +622,146 @@ export const MIGRATE_SRC = 'src_lake';
 export const MIGRATE_DST = 'dst_lake';
 
 /**
+ * The alias a CROSS-WORKSPACE READ attaches the owning workspace's lake under (ADR 0053).
+ *
+ * Deliberately not `lake`: a reader that spelled it the same as the process's own lake would make
+ * a statement written for one workspace run unchanged against another, which is precisely the
+ * confusion the address is supposed to make impossible.
+ */
+export const SHARED_SRC = 'shared_lake';
+
+/** One lake to ATTACH on a multi-lake connection, and how. */
+export interface LakeAttach {
+  /** The ATTACH alias. Interpolated, so it must be a bare identifier — asserted below. */
+  alias: string;
+  /** Resolved through {@link resolveLakeConfig}, like every other caller's address. */
+  override: Partial<LakeConfig>;
+  /**
+   * READ_ONLY on the ATTACH itself, which is the only form of this that holds. DuckDB enforces it
+   * on STATEMENT TYPE, so it refuses an INSERT/DROP/CREATE a later edit of this module never
+   * anticipated — a convention ("we only SELECT from the source") protects nothing once a second
+   * function exists.
+   */
+  readOnly: boolean;
+  /** Create the three kontra schemas. Only meaningful on a writable attach. */
+  ensureSchemas?: boolean;
+}
+
+/** An alias is interpolated into ATTACH, so it is held to a bare identifier. Callers pass
+ *  module constants, which is exactly why a drive-by addition must still be checked. */
+const ALIAS_RE = /^[a-z][a-z0-9_]{0,30}$/;
+
+/**
+ * ONE CONNECTION WITH SEVERAL DUCKLAKES ATTACHED — the single way this codebase attaches a lake
+ * under an alias of its own choosing.
+ *
+ * ── WHY IT IS ONE FUNCTION AND NOT TWO ──────────────────────────────────────────────────────────
+ *
+ * {@link migrationConnection} was this, hand-rolled, for two lakes (issue 10); the cross-workspace
+ * read of a SHARED Dataset (ADR 0053) needs one lake attached READ_ONLY under a different alias.
+ * Written twice, the two would have drifted on the thing that matters least visibly and most:
+ * whether the READ_ONLY flag is on the ATTACH or merely in the caller's intentions. The migration's
+ * one genuinely valuable property is that its source CANNOT be written to, and a second attach
+ * path is a second chance to forget it. So there is one, and `readOnly` is a required field rather
+ * than an option with a default — a caller must state which side of the boundary it is on.
+ *
+ * ── IT IS NOT CACHED, AND THAT IS THE POINT ─────────────────────────────────────────────────────
+ *
+ * `lakeConnection` memoizes per (catalog, dataPath) because ordinary traffic wants one warm attach.
+ * These are one-shots with their own alias maps, and handing one a pooled connection would leave
+ * `src_lake`/`shared_lake` attached to every later caller of the same key. THE CALLER CLOSES IT.
+ * The cost is real and already measured elsewhere in this tree: `queryEngine.ts` records ~260 ms
+ * for a DuckDB instance plus three extension loads, and that is what a cross-workspace read pays
+ * per call.
+ *
+ * ── EVERY ADDRESS GOES THROUGH `resolveLakeConfig` ──────────────────────────────────────────────
+ *
+ * So the lake a caller reaches here is the SAME derivation every other caller uses. A function that
+ * computed its own addresses could read or write somewhere the running orchestrator never looks,
+ * which is what makes a successful-looking operation indistinguishable from data loss.
+ *
+ * ── NO TWO ALIASES OVER ONE ADDRESS ─────────────────────────────────────────────────────────────
+ *
+ * Refused outright. Two aliases over one (catalog, dataPath) with different `readOnly` flags is a
+ * read-only boundary with a writable door beside it, and DuckDB would honour both.
+ *
+ * ── THE RESOURCE POSTURE COMES FROM THE LAST ATTACHMENT ─────────────────────────────────────────
+ *
+ * Memory limit, threads and the spill directory are one per connection, and the last attachment is
+ * the one a caller writes into — a write is what needs the budget. With one lake it is that lake's;
+ * with the migration's two it is the DESTINATION's, byte-for-byte what `migrationConnection` set
+ * before this was generalised.
+ */
+export async function attachedLakeConnection(
+  store: ObjectStore,
+  attach: readonly LakeAttach[]
+): Promise<{ conn: DuckDBConnection; lakes: LakeConfig[] }> {
+  if (attach.length === 0) throw new Error('attachedLakeConnection needs at least one lake');
+  const lakes = attach.map((a) => resolveLakeConfig(store, a.override));
+  for (const a of attach) {
+    if (!ALIAS_RE.test(a.alias)) {
+      throw new Error(
+        `lake alias ${JSON.stringify(a.alias)} is not a bare identifier — it is interpolated ` +
+          'into ATTACH and cannot be parameterised'
+      );
+    }
+  }
+  const seen = new Map<string, string>();
+  for (const [i, cfg] of lakes.entries()) {
+    const addr = `${cfg.catalog}\0${cfg.dataPath}`;
+    const first = seen.get(addr);
+    if (first !== undefined) {
+      throw new Error(
+        `lake aliases ${first} and ${attach[i]!.alias} resolve to the same address ` +
+          `(${cfg.catalog} @ ${cfg.dataPath}) — two aliases over one lake would put a writable ` +
+          'door beside a READ_ONLY one'
+      );
+    }
+    seen.set(addr, attach[i]!.alias);
+  }
+
+  // The posture lake: the last attachment. See the header.
+  const posture = lakes[lakes.length - 1]!;
+  for (const cfg of lakes) ensureCatalogDir(cfg.catalog);
+  const c = await (await DuckDBInstance.create()).connect();
+  await c.run(`SET memory_limit='${posture.memoryLimit}'`);
+  await c.run(`SET threads=${posture.threads}`);
+  await c.run('SET preserve_insertion_order=false');
+  if (posture.tempDirectory) {
+    mkdirSync(path.resolve(posture.tempDirectory), { recursive: true });
+    await c.run(`SET temp_directory='${sqlLiteral(posture.tempDirectory)}'`);
+  }
+  await c.run(`SET max_temp_directory_size='${posture.maxTempSize}'`);
+  if (lakes.some((l) => l.s3)) await c.run(s3Setup(store));
+  await c.run('INSTALL ducklake; LOAD ducklake;');
+  await c.run('INSTALL json; LOAD json;');
+  if (lakes.some((l) => l.catalog.startsWith('postgres:'))) {
+    await c.run('INSTALL postgres; LOAD postgres;');
+  }
+  for (const [i, cfg] of lakes.entries()) {
+    const a = attach[i]!;
+    await c.run(
+      `ATTACH IF NOT EXISTS 'ducklake:${cfg.catalog}' AS ${a.alias} ` +
+        `(DATA_PATH '${cfg.dataPath}', DATA_INLINING_ROW_LIMIT 0${a.readOnly ? ', READ_ONLY' : ''})`
+    );
+    if (a.ensureSchemas) {
+      for (const schema of [OUTPUT_SCHEMA, STANDALONE_SCHEMA, INTERNAL_SCHEMA]) {
+        await c.run(`CREATE SCHEMA IF NOT EXISTS ${a.alias}.${schema}`);
+      }
+    }
+  }
+  return { conn: c, lakes };
+}
+
+/**
  * One connection with TWO DuckLakes attached, for moving a workspace's data between addresses
  * (issue 10). The source is attached READ_ONLY, so a migration cannot write to the lake it is
  * reading — the single most valuable property this function has.
  *
- * IT IS NOT CACHED, AND THAT IS THE POINT. `lakeConnection` memoizes per (catalog, dataPath)
- * because ordinary traffic wants one warm attach; a migration is a one-shot with a different
- * alias map, and handing it a pooled connection would leave `src_lake`/`dst_lake` attached to
- * every later caller of the same key. The caller closes it.
- *
- * Both configs go through `resolveLakeConfig`, so the addresses a migration reads and writes are
- * the SAME derivation every other caller uses — a migration that computed its own addresses could
- * move data somewhere the running orchestrator never looks, which is the failure mode that makes a
- * successful-looking migration indistinguishable from data loss.
+ * A thin caller of {@link attachedLakeConnection} since ADR 0053, which generalised the attach so
+ * the cross-workspace read of a shared Dataset could not invent a second one. The same-address
+ * refusal is kept HERE, ahead of the generic one, because the migration's reason for refusing is
+ * specific and worth saying: copying a lake onto itself doubles every row.
  */
 export async function migrationConnection(
   store: ObjectStore,
@@ -629,35 +776,39 @@ export async function migrationConnection(
         'nothing to move, and copying a lake onto itself would double every row'
     );
   }
-  ensureCatalogDir(src.catalog);
-  ensureCatalogDir(dst.catalog);
-  const c = await (await DuckDBInstance.create()).connect();
-  await c.run(`SET memory_limit='${dst.memoryLimit}'`);
-  await c.run(`SET threads=${dst.threads}`);
-  await c.run('SET preserve_insertion_order=false');
-  if (dst.tempDirectory) {
-    mkdirSync(path.resolve(dst.tempDirectory), { recursive: true });
-    await c.run(`SET temp_directory='${sqlLiteral(dst.tempDirectory)}'`);
-  }
-  await c.run(`SET max_temp_directory_size='${dst.maxTempSize}'`);
-  if (src.s3 || dst.s3) await c.run(s3Setup(store));
-  await c.run('INSTALL ducklake; LOAD ducklake;');
-  await c.run('INSTALL json; LOAD json;');
-  if (src.catalog.startsWith('postgres:') || dst.catalog.startsWith('postgres:')) {
-    await c.run('INSTALL postgres; LOAD postgres;');
-  }
-  await c.run(
-    `ATTACH IF NOT EXISTS 'ducklake:${src.catalog}' AS ${MIGRATE_SRC} ` +
-      `(DATA_PATH '${src.dataPath}', DATA_INLINING_ROW_LIMIT 0, READ_ONLY)`
-  );
-  await c.run(
-    `ATTACH IF NOT EXISTS 'ducklake:${dst.catalog}' AS ${MIGRATE_DST} ` +
-      `(DATA_PATH '${dst.dataPath}', DATA_INLINING_ROW_LIMIT 0)`
-  );
-  for (const schema of [OUTPUT_SCHEMA, STANDALONE_SCHEMA, INTERNAL_SCHEMA]) {
-    await c.run(`CREATE SCHEMA IF NOT EXISTS ${MIGRATE_DST}.${schema}`);
-  }
-  return { conn: c, src, dst };
+  const { conn } = await attachedLakeConnection(store, [
+    { alias: MIGRATE_SRC, override: from, readOnly: true },
+    { alias: MIGRATE_DST, override: to, readOnly: false, ensureSchemas: true },
+  ]);
+  return { conn, src, dst };
+}
+
+/**
+ * ONE WORKSPACE'S LAKE, ATTACHED READ_ONLY, FOR A CALLER IN ANOTHER WORKSPACE (ADR 0053).
+ *
+ * The caller NAMES the source workspace and the address is derived from that name by
+ * `workspaceAddress` — there is no filter anywhere in this path, so a wrong name reaches a catalog
+ * that holds nothing and the read answers empty or fails to attach. That is ADR 0051 §3's failure
+ * direction, which is the one this boundary wants.
+ *
+ * READ_ONLY IS ON THE ATTACH, so it is DuckDB enforcing it on statement type rather than this
+ * module promising it. A later route that composed an INSERT against `shared_lake` would be
+ * refused by the engine, not by a review.
+ *
+ * NOTHING ELSE IS ATTACHED. The caller's own lake is absent on purpose: the platform grants READ,
+ * and the copy into the reader's own lake is userland's, through the ordinary publish path. A
+ * connection holding both would make a one-statement cross-workspace WRITE expressible, and ADR
+ * 0053 has none.
+ */
+export async function sharedLakeConnection(
+  store: ObjectStore,
+  workspace: string,
+  override: Partial<LakeConfig> = {}
+): Promise<{ conn: DuckDBConnection; cfg: LakeConfig }> {
+  const { conn, lakes } = await attachedLakeConnection(store, [
+    { alias: SHARED_SRC, override: { ...override, workspace }, readOnly: true },
+  ]);
+  return { conn, cfg: lakes[0]! };
 }
 
 /** Escape a single-quoted SQL literal. Every interpolation below goes through this. */

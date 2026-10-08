@@ -40,6 +40,47 @@ import {
   type LakeConfig,
 } from '../data/parquet';
 import { pageDataset, type DatasetPage } from '../data/queryEngine';
+import { sharedDatasetStore, sharedKind, type SharedDatasetStore } from '../data/sharedDatasets';
+import {
+  NotSharedError,
+  UnsupportedOrderByError,
+  pageSharedDataset as readSharedPage,
+} from '../data/sharedRead';
+
+/**
+ * What a caller in ANOTHER workspace asks for: one page of a SHARED Dataset (ADR 0053).
+ *
+ * NOT an extension of {@link PageDatasetInput}, and the difference is the whole feature: there is
+ * no `sql` field. A same-workspace page accepts caller SQL under the `--query` contract; a
+ * cross-workspace one cannot, because the owning lake is ATTACHED and a statement can address any
+ * table in it by qualified name, grant or no grant. `data/sharedRead.ts` carries the long form.
+ * What is left is an ADDRESS plus the bounded narrowing a partition column allows.
+ */
+export interface PageSharedDatasetInput {
+  /**
+   * The OWNING workspace. Required, never defaulted to the active one — a default would make a
+   * cross-workspace read expressible by leaving a field out, which is the opposite of an address.
+   */
+  workspace: string;
+  /** The shared Dataset's name, as the owning workspace's `kontra dataset list` shows it. */
+  name: string;
+  /** `output` (actor output) or `standalone` (a loaded list). Part of the address: the two live in
+   *  different schemas and can share a name, so a grant on one is not a grant on the other. */
+  kind?: 'output' | 'standalone';
+  /**
+   * REQUIRED, for `pageDataset`'s reason: a materialized Dataset stamps no row id, so LIMIT/OFFSET
+   * over it has no defined order and two pages may overlap or skip rows. Held to a GRAMMAR here
+   * rather than trusted — `assertSimpleOrderBy` — because an ORDER BY is an expression and an
+   * expression could read a table no grant named.
+   */
+  orderBy: string;
+  /** Rows per page. */
+  limit: number;
+  offset?: number;
+  /** Partition narrowing, which PRUNES directories rather than filtering rows. */
+  version?: string;
+  dt?: string;
+}
 
 /** What a caller asks for: one page of one dataset. */
 export interface PageDatasetInput {
@@ -72,6 +113,13 @@ export interface DatasetDeps {
    * already holds the SQL config the status store uses.
    */
   records?: DatasetRecordStore;
+  /**
+   * The cross-workspace SHARE grants (ADR 0053) — what `pageSharedDataset` checks before it
+   * attaches another workspace's lake. Defaults to the process-wide singleton, the SAME store
+   * `PUT /api/datasets/shared/:workspace/:name` writes, so a grant an operator just made is live
+   * for the next page without a restart.
+   */
+  shares?: SharedDatasetStore;
 }
 
 /** Write the author's tag onto a Run's Dataset record. */
@@ -192,6 +240,7 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
   const store = deps.store ?? new ObjectStore();
   const lake = deps.lake ?? {};
   const records = deps.records ?? datasetRecordStore();
+  const shares = deps.shares ?? sharedDatasetStore();
 
   return {
     /**
@@ -546,6 +595,70 @@ export function createDatasetActivities(deps: DatasetDeps = {}) {
         // object store hiccup — stays retryable, because those are exactly the failures a retry is
         // for. Getting this backwards in the other direction would be worse: a non-retryable
         // network blip fails a run that would have succeeded on its own.
+        if (isDeterministicSqlError(err)) {
+          throw ApplicationFailure.nonRetryable(
+            err instanceof Error ? err.message : String(err),
+            'DatasetQueryRejected'
+          );
+        }
+        throw err;
+      }
+    },
+
+    /**
+     * ONE PAGE OF ANOTHER WORKSPACE'S SHARED DATASET, AS A REF (ADR 0053) — the read a clone
+     * workflow runs, and the only activity in this file that touches a lake it does not own.
+     *
+     * THE SAME `{ ref, n, done }` SHAPE `pageDataset` RETURNS, so a workflow iterates a
+     * cross-workspace Dataset with the code it already has for its own, and the history holds
+     * ~110-byte refs rather than rows. The page object is written to THIS process's CAS, which is
+     * the reader's — so the rows are already on the reader's side of the boundary by the time the
+     * workflow sees a pointer to them.
+     *
+     * THE PLATFORM GRANTS THE READ; THE COPY IS USERLAND'S. Nothing here writes to either lake. A
+     * clone workflow pages this and publishes through the ordinary `publishBatch` path into its own
+     * Dataset, which is what keeps "there is no cross-workspace WRITE" true of the mechanism and
+     * not merely of the intention: the connection `readSharedPage` opens has the owning lake
+     * attached READ_ONLY and the reader's lake not attached at all.
+     *
+     * A MISSING GRANT IS NON-RETRYABLE, and that is a judgement worth stating because it is not
+     * obvious. A grant CAN appear — an operator could share the Dataset a minute later — so a retry
+     * is not logically futile. It is operationally the wrong shape: `pageDataset`'s own guard exists
+     * because `hunt` spent two hours at attempt 22 on a column that was never going to appear, and a
+     * workflow blocked on a human granting access is that failure with a person in the loop who has
+     * not been told. Failing with the address in the message puts the request where the operator can
+     * see it; the workflow is restarted after the grant, which is one explicit act instead of an
+     * unbounded wait. A malformed `order_by` is non-retryable for the plainer reason: it will never
+     * parse.
+     *
+     * A GRANT THAT POINTS AT NOTHING STAYS RETRYABLE, and the asymmetry is deliberate. `PUT
+     * /api/datasets/shared/…` records a grant without checking the catalog precisely so an operator
+     * can expose the Dataset a scheduled run is about to write; the table appearing is therefore the
+     * EXPECTED resolution of that state, not a fault, and retrying is what waiting for it looks
+     * like. "No grant" is a decision nobody has made; "no table yet" is a write that has not landed.
+     */
+    async pageSharedDataset(input: PageSharedDatasetInput): Promise<DatasetPage> {
+      try {
+        const { ref, n, done } = await readSharedPage(
+          store,
+          shares,
+          {
+            workspace: input.workspace,
+            name: input.name,
+            kind: sharedKind(input.kind),
+            orderBy: input.orderBy,
+            limit: input.limit,
+            offset: input.offset,
+            version: input.version,
+            dt: input.dt,
+          },
+          lake
+        );
+        return { ref, n, done };
+      } catch (err) {
+        if (err instanceof NotSharedError || err instanceof UnsupportedOrderByError) {
+          throw ApplicationFailure.nonRetryable(err.message, 'SharedDatasetRejected');
+        }
         if (isDeterministicSqlError(err)) {
           throw ApplicationFailure.nonRetryable(
             err instanceof Error ? err.message : String(err),

@@ -76,7 +76,18 @@ export type AuditAction =
   | 'secret.bind'
   | 'secret.unbind'
   /** Data that stops existing. */
-  | 'dataset.delete';
+  | 'dataset.delete'
+  /**
+   * DATA THAT BECOMES READABLE FROM ANOTHER WORKSPACE (ADR 0053) — the two verbs that move the
+   * isolation boundary ADR 0051 draws.
+   *
+   * They belong here for a reason `dataset.delete` does not have: a deletion announces itself the
+   * moment anybody looks for the rows, while a grant is INVISIBLE until somebody uses it. "Who
+   * opened this up, and when" has no other answer. The `target` is the full address
+   * `<workspace>/<kind>/<name>`, because the workspace is what makes the act cross a boundary.
+   */
+  | 'dataset.share'
+  | 'dataset.unshare';
 
 /*
  * WHAT IS NOT IN THAT UNION YET, STATED RATHER THAN IMPLIED.

@@ -78,6 +78,7 @@ import { describeExposure, setRegisteredFolders } from './workflowControl';
 import { describeQueue, temporalQueueDescriber, type QueueDescriber } from './pollers';
 import { ObjectStore } from './codec/objectStore';
 import { DatasetRecordStore, datasetRecordStore } from './data/datasetRecords';
+import { SharedDatasetStore, sharedDatasetStore } from './data/sharedDatasets';
 import { RunWorkflowStore, runWorkflowStore } from './data/runWorkflows';
 import type { LakeConfig } from './data/parquet';
 import { MaterializationStore, materializationStore } from './data/materializationStore';
@@ -85,6 +86,7 @@ import { SummaryStore, summaryStore } from './data/summaries';
 import { registerCatalogRoutes } from './routes/catalog';
 import { registerImageRoutes } from './routes/images';
 import { registerDatasetRoutes } from './routes/datasets';
+import { registerSharedDatasetRoutes } from './routes/sharedDatasets';
 import { errMessage } from './routes/errors';
 import { registerExploreRoutes } from './routes/explore';
 import { registerFleetRoutes } from './routes/fleet';
@@ -181,6 +183,13 @@ export interface ServerOptions {
    * after its Run has closed.
    */
   records?: DatasetRecordStore;
+  /**
+   * The cross-workspace SHARE grants (ADR 0053) — which of this install's Datasets may be READ
+   * from another workspace. Injectable for tests; keyed by the (workspace, kind, name) ADDRESS a
+   * reader uses rather than by a Run, because a grant licenses a whole table and a standalone list
+   * has no Run to be keyed on (`data/sharedDatasets.ts`).
+   */
+  shares?: SharedDatasetStore;
   /**
    * A **Run**'s caller-workflow identity, snapshotted at start (ADR 0029 §2, `data/runWorkflows.ts`)
    * — what the derived Dataset name renders. Injectable for tests; a Run with no row here falls back
@@ -301,6 +310,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // Tags and renames (ADR 0029 §1, §4): SHARED by the dataset record writes and the sweep that
   // reads a tag as the KEEP/COLLECT authority.
   const records = opts.records ?? datasetRecordStore();
+  // The cross-workspace grants (ADR 0053): SHARED by the listing, which draws the badge, and the
+  // shared surface, which writes the grants and admits the read. One store, so a Dataset cannot
+  // show as shared on the page while the read path refuses it.
+  const shares = opts.shares ?? sharedDatasetStore();
   // The caller identity a derived Dataset name renders (ADR 0029 §2): SHARED by the run surface,
   // which stamps it, the dataset listing, which renders it, and the sweep, which reports it.
   const runWorkflows = opts.runWorkflows ?? runWorkflowStore();
@@ -375,6 +388,9 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // The operator trail, beside the sign-in that is its first entry (`audit.ts`).
   registerAuditRoutes(app);
   registerCatalogRoutes(app, repo);
+  // The image store (ADR 0061). It needs the catalog to say what is IN USE and the registry to say what
+  // exists, and it is a separate module from `catalog.ts` because that one's four routes are open by an
+  // argued decision and these eight are not.
   registerImageRoutes(app, { repo });
   registerScratchRoutes(app, repo);
   registerRunRoutes(app, { runs, runWorkflows, queueDescriber });
@@ -389,7 +405,11 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerSourceRoutes(app, sources);
   registerWorkspaceRoutes(app);
   registerProbeRoutes(app, sources);
-  registerDatasetRoutes(app, { store, lake, materialization, records, runWorkflows });
+  registerDatasetRoutes(app, { store, lake, materialization, records, runWorkflows, shares });
+  // THE ONE SURFACE THAT CROSSES THE WORKSPACE BOUNDARY (ADR 0053). Registered beside the dataset
+  // browser because it is the same lake seen from outside, and fail-closed on the explore token
+  // while the browser is open — see `routes/sharedDatasets.ts` for why the two differ.
+  registerSharedDatasetRoutes(app, { store, lake, shares });
   registerRetentionRoutes(app, { store, lake, materialization, records, runWorkflows, summaries });
   registerRowStreamRoute(app, store, opts.rowStreamCaps ?? {});
   // The workbench sandbox. On unless a test explicitly asks otherwise — see ServerOptions.

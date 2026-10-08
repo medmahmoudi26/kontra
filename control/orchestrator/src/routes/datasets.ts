@@ -17,10 +17,15 @@
  *   - `records`         the durable Dataset record — tags and renames. Shared with retention.
  *   - `runWorkflows`    the caller identity a derived name renders (ADR 0029 §2). Shared with the
  *                       run module, which stamps it, and with retention, which reports it.
+ *   - `shares`          the cross-workspace SHARE grants (ADR 0053). Shared with
+ *                       `routes/sharedDatasets.ts`, which writes them and serves the read.
  *
  * EVERY JOIN IN THE LISTING IS BEST-EFFORT AND NONE OF THEM CAN 502 IT. Three authorities can say
  * which Run is behind a row and each is caught separately, so a ledger outage costs the
- * dispatch-matched leg and nothing else. That is the rule to keep when editing this file.
+ * dispatch-matched leg and nothing else. That is the rule to keep when editing this file. The
+ * SHARE join (ADR 0053) is the fourth and follows it: a grant store that cannot be reached leaves
+ * every row unshared, which understates the exposure on the screen and changes nothing about
+ * admission — the read path checks the same store and refuses without it.
  *
  * ADMISSION: the reads and the temp delete are ungated, like the rest of the lake browser — no
  * operator SQL crosses the wire, and no object-store URL leaves the process. The FOUR RECORD WRITES
@@ -45,11 +50,13 @@ import {
   previewDataset,
   withDatasetDeviations,
   withDatasetNames,
+  withSharedDatasets,
 } from '../data/datasets';
 import { type DatasetRecordStore, InvalidDeviationError } from '../data/datasetRecords';
 import type { DispatchRef, MaterializationStore } from '../data/materializationStore';
-import type { LakeConfig } from '../data/parquet';
+import { resolveLakeConfig, type LakeConfig } from '../data/parquet';
 import type { RunWorkflow, RunWorkflowStore } from '../data/runWorkflows';
+import type { SharedDatasetStore } from '../data/sharedDatasets';
 import { RUN_TOKEN_VARS } from '../workflowControl';
 import { errMessage } from './errors';
 import { runIdOf } from './runId';
@@ -60,10 +67,17 @@ export interface DatasetRouteDeps {
   materialization: MaterializationStore;
   records: DatasetRecordStore;
   runWorkflows: RunWorkflowStore;
+  /**
+   * The cross-workspace SHARE grants (ADR 0053). Shared with `routes/sharedDatasets.ts`, which
+   * writes them, so the badge this listing draws and the admission the read path enforces are one
+   * store — a listing that read a second copy could show `shared` over a Dataset no reader is
+   * admitted to, which is this feature's version of reporting success over something it never did.
+   */
+  shares: SharedDatasetStore;
 }
 
 export function registerDatasetRoutes(app: FastifyInstance, deps: DatasetRouteDeps): void {
-  const { store, lake, materialization, records, runWorkflows } = deps;
+  const { store, lake, materialization, records, runWorkflows, shares } = deps;
 
   /**
    * The listing, named and tagged — the three best-effort joins, in one place.
@@ -101,13 +115,35 @@ export function registerDatasetRoutes(app: FastifyInstance, deps: DatasetRouteDe
     } catch {
       /* no identities: every row falls back to the Actor's name and version */
     }
-    const rows = withDatasetNames(infos, dispatches, identities);
+    let rows = withDatasetNames(infos, dispatches, identities);
     try {
       const runIds = rows.map((i) => i.runId).filter((id): id is string => typeof id === 'string');
-      return withDatasetDeviations(rows, await records.list(runIds));
+      rows = withDatasetDeviations(rows, await records.list(runIds));
     } catch {
-      return rows;
+      /* no record store: every row keeps its derived name and carries no tags */
     }
+    try {
+      // THE SHARE BADGE (ADR 0053), keyed on `(kind, name)` in THIS lake's workspace.
+      //
+      // The workspace comes off the RESOLVED config of the read that produced these rows, not from
+      // `activeLakeWorkspace()` again: `resolveLakeConfig` collapses `.current`, the override and
+      // the environment into one answer, and asking a second time is a second chance to get a
+      // different one — which would key the join to a workspace whose lake this listing never read.
+      // Empty means the legacy address, which has no workspace and therefore no grants.
+      const workspace = resolveLakeConfig(store, lake).workspace ?? '';
+      rows = withSharedDatasets(
+        rows,
+        await shares.listFor(
+          workspace,
+          rows.map((i) => ({ kind: i.kind, name: i.name }))
+        ),
+        workspace
+      );
+    } catch {
+      /* no grant store: every row lists unshared, which is the safe direction for a badge about
+         who else can read it — the READ path checks the same store and would still refuse */
+    }
+    return rows;
   }
 
   // --- datasets (the query browser) ---
