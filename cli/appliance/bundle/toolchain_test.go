@@ -237,3 +237,43 @@ func TestPnpmRunsWithTheBuildsOwnNodeOnPath(t *testing.T) {
 		t.Errorf("PATH is %q; the machine's own entries must survive — the build adds to PATH, it does not replace it", path)
 	}
 }
+
+// @kontra/core IS A BUILT DEPENDENCY, and the orchestrator's compile cannot resolve it unbuilt.
+// Same guard as the bootstrap above, for the same reason: never a refresh over a working tree.
+func TestSharedCoreIsNotRebuiltWhenItIsAlreadyBuilt(t *testing.T) {
+	root := t.TempDir()
+	built := filepath.Join(root, "shared", "core", "dist", "cjs", "index.js")
+	if err := os.MkdirAll(filepath.Dir(built), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(built, []byte("module.exports = {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A pnpm that does not exist, so running anything at all is the failure.
+	var said []string
+	tc := &toolchain{Node: "/nonexistent/node", Pnpm: []string{"/nonexistent/node", "/nonexistent/pnpm.cjs"}}
+	if err := buildSharedCore(root, tc, func(f string, a ...any) { said = append(said, f) }); err != nil {
+		t.Fatalf("rebuilt a core that was already built: %v", err)
+	}
+	if len(said) != 0 {
+		t.Errorf("reported work it did not do: %v", said)
+	}
+}
+
+// And when it cannot build, the failure names the directory — this runs on a clean machine, where
+// `TS2307: Cannot find module '@kontra/core/...'` fifty times over is the alternative message.
+func TestSharedCoreReportsAFailedBuildWithItsDirectory(t *testing.T) {
+	root := t.TempDir()
+	tc := &toolchain{Node: "/nonexistent/node", Pnpm: []string{"/nonexistent/node", "/nonexistent/pnpm.cjs"}}
+	err := buildSharedCore(root, tc, func(string, ...any) {})
+	if err == nil {
+		t.Fatal("a core build with no working pnpm reported success")
+	}
+	if !strings.Contains(err.Error(), root) {
+		t.Errorf("the error does not name the directory it tried: %v", err)
+	}
+	if !strings.Contains(err.Error(), "@kontra/core") {
+		t.Errorf("the error does not name what it was building: %v", err)
+	}
+}

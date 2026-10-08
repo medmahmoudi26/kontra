@@ -242,6 +242,41 @@ func bootstrapOrchestratorModules(src string, tc *toolchain, p func(string, ...a
 	return nil
 }
 
+// buildSharedCore compiles `@kontra/core` so the orchestrator's `tsc` can resolve it.
+//
+// AN UNBUILT CORE IS NOT A SLOW PATH, IT IS A HARD FAILURE. `@kontra/core` is a `workspace:*`
+// dependency whose `exports` point into `dist/`, so with no `dist` every import of it is
+// `TS2307: Cannot find module '@kontra/core/contract/datasets'` — once per import, for a reason
+// that names the module and not the missing build.
+//
+// WHICH IS WHY EVERY SCRIPT IN `control/orchestrator/package.json` IS PREFIXED WITH THIS COMMAND.
+// `build`, `typecheck` and `test` all begin `pnpm --filter @kontra/core run build &&`.
+// `stageOrchestrator` does not use those scripts — it runs `tsc` directly to put the output in
+// staging rather than in the checkout — and skipping the prefix with it is how this step came to
+// fail on every clean machine while passing on every developer's.
+//
+// FROM THE WORKSPACE ROOT, because `--filter` resolves against the workspace and
+// `pnpm-workspace.yaml` is at the repository root, not under `control/orchestrator`.
+//
+// Core's `dist` is build INPUT by the same argument `bootstrapOrchestratorModules` makes for
+// node_modules: derived, gitignored, a pure function of committed sources. And likewise only when
+// absent — never a refresh over a tree somebody is working in.
+func buildSharedCore(repoRoot string, tc *toolchain, p func(string, ...any)) error {
+	built := filepath.Join(repoRoot, "shared", "core", "dist", "cjs", "index.js")
+	if _, err := os.Stat(built); err == nil {
+		return nil
+	}
+	p("no shared/core/dist in this checkout — building @kontra/core (pnpm --filter @kontra/core run build)")
+	cmd := tc.pnpmCmd(repoRoot, "--filter", "@kontra/core", "run", "build")
+	if combined, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("building @kontra/core failed in %s: %w\n%s", repoRoot, err, indent(string(combined)))
+	}
+	if _, err := os.Stat(built); err != nil {
+		return fmt.Errorf("@kontra/core reported success but left no %s: %w", built, err)
+	}
+	return nil
+}
+
 // extractTree unpacks a .tar.gz, keeping the members under stripPrefix and dropping that prefix.
 //
 // It refuses a member whose path escapes the destination. That is not a theoretical concern about

@@ -468,6 +468,12 @@ func stageOrchestrator(opts BuildOptions, tc *toolchain, m *Manifest, p func(str
 	if err := bootstrapOrchestratorModules(src, tc, p); err != nil {
 		return err
 	}
+	// BEFORE tsc, NOT AFTER IT. `tsconfig.json` resolves `@kontra/core` through the workspace to
+	// `shared/core`, whose `exports` point at `dist/` — so an unbuilt core fails the compile rather
+	// than slowing it.
+	if err := buildSharedCore(opts.RepoRoot, tc, p); err != nil {
+		return err
+	}
 	tsc := filepath.Join(src, "node_modules", "typescript", "bin", "tsc")
 	if _, err := os.Stat(tsc); err != nil {
 		return fmt.Errorf("control/orchestrator/node_modules/typescript is missing, so there is nothing to compile with: %w", err)
