@@ -72,7 +72,8 @@ import { installApiGate } from './auth/apiGate';
 import { contextForRun, startReportRenderer } from './report/sweep';
 import { reportStore, type ReportStore } from './report/store';
 import { render as renderReportInHost } from './report/renderHost';
-import { registerReportRoutes } from './routes/report';
+import { admitReport, registerReportRoutes } from './routes/report';
+import { registerReportLiveRoute } from './routes/reportLive';
 import { registerInfraRoutes } from './infraRoutes';
 import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
@@ -430,6 +431,54 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         }
       );
       return built.context;
+    },
+  });
+  /* LIVE REPORT MODE (ADR 0062). Registered beside the report surface because it is the same renderer
+     and the same gate — `admitReport` is shared rather than copied, so the documented posture and the
+     enforced one cannot drift. The render goes to the same worker thread the sweep uses, so a live
+     tick costs the API's event loop no more than a stored render does. */
+  registerReportLiveRoute(app, {
+    admit: admitReport,
+    onError: (err, runId) =>
+      app.log.warn(`report live: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
+    resolveRun: async (runId) => {
+      const described = await describeRunById(runId);
+      if (!described) return undefined;
+      return {
+        runStartedAt: described.startedAt,
+        status: described.status,
+        closedAt: described.closedAt,
+      };
+    },
+    renderOnce: async (key) => {
+      const described = await describeRunById(key.runId);
+      if (!described) return { error: `run ${key.runId} is no longer readable` };
+      const io = (await fetchRunIO(key.runId)) ?? {};
+      const built = await contextForRun(
+        {
+          runId: key.runId,
+          status: described.status,
+          startedAt: described.startedAt,
+          closedAt: described.closedAt,
+          type: described.type,
+        },
+        io,
+        {
+          store: reports,
+          now: Date.now,
+          close: (id) => fetchRunClose(id),
+          identity: async (id) => {
+            const found = await runWorkflowStore().get(id);
+            return found ? { workflow: found.workflow, version: found.version } : undefined;
+          },
+        }
+      );
+      const result = await renderReportInHost(
+        { template: built.template, context: built.context as unknown as Record<string, unknown> },
+        { onNote: (note) => app.log.info(note) }
+      );
+      if (!result.ok) return { error: result.error };
+      return { snapshot: result.snapshot };
     },
   });
   registerLogsRoutes(app);
