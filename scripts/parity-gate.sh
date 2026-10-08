@@ -94,16 +94,29 @@ done
 
 UNITS="${KONTRA_GATE_UNITS:-12}"
 REPLICAS="${KONTRA_GATE_REPLICAS:-2}"
-ACTOR_DIR="tests/parity/actor"
 ACTOR_NAME="paritygate"
 ACTOR_VERSION="0.1.0"
-WORKFLOW_DIR="tests/parity/workflow"
 
 GATE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/kontra-parity-XXXXXX")"
 INSTALL_DIR="$GATE_TMP/install"
-WORKSPACES="$GATE_TMP/workspaces"
+# INSIDE THE INSTALL DIRECTORY, WHICH IS WHAT MAKES IT AN INSTALL. `assert-install-is-self-contained`
+# allows a `workspaces/` mount only when it is compose's own default — a directory the install
+# CREATED, under the install — and refuses a host path from anywhere else. A workspaces dir beside
+# the install is the shape of a clone, which is the thing that check exists to stop this becoming.
+WORKSPACES="$INSTALL_DIR/workspaces"
 LOGS="$GATE_TMP/logs"
 mkdir -p "$INSTALL_DIR" "$WORKSPACES" "$LOGS"
+
+# THE FIXTURES LIVE IN THE WORKSPACE, WHERE AN OPERATOR'S CODE LIVES. The repo is NOT mounted into
+# the `cli` container: `docker-compose.yml` mounts `${KONTRA_REPO:-${PWD}}` read-only, and `${PWD}`
+# is the install directory because `dc` runs from there — so the container sees the install, not the
+# checkout. Copying is therefore not a convenience, it is the only way these are visible at all, and
+# it is also what a user does.
+ACTOR_DIR="$WORKSPACES/parity/actors/paritygate"
+WORKFLOW_DIR="$WORKSPACES/parity/workflows/paritygate"
+mkdir -p "$(dirname "$ACTOR_DIR")" "$(dirname "$WORKFLOW_DIR")"
+cp -a "$REPO/tests/parity/actor/." "$ACTOR_DIR/"
+cp -a "$REPO/tests/parity/workflow/." "$WORKFLOW_DIR/"
 
 # THE PROJECT NAME IS THE ISOLATION, so it carries the pid and a timestamp rather than being a
 # constant somebody could run twice. Lower-case and dash-only: compose rejects anything else.
@@ -287,7 +300,11 @@ cp "$REPO/.env.quickstart" "$INSTALL_DIR/.env"
   echo "KONTRA_LOGSHIP_IMAGE=$KONTRA_LOGSHIP_IMAGE"
   echo "KONTRA_PORTER_IMAGE=$KONTRA_PORTER_IMAGE"
   echo "KONTRA_PULL_POLICY=never"
-  echo "KONTRA_REPO=$REPO"
+  # KONTRA_REPO IS DELIBERATELY NOT SET. docker-compose.yml mounts `${KONTRA_REPO:-${PWD}}` into the
+  # `cli` container read-only; naming the checkout here mounts a host path from outside the install,
+  # which `assert-install-is-self-contained.py` refuses by design — "an install that comes up healthy
+  # and is broken somewhere it does not mention". Unset, `${PWD}` is the install directory, because
+  # `dc` runs from there.
   echo "KONTRA_WORKSPACES=$WORKSPACES"
   # THE REGISTRY IS AUTHENTICATED, which is the shape the anonymous default cannot test: `kontra
   # deploy` pushed with an empty credential for as long as the zot accounts existed, and an
@@ -307,7 +324,11 @@ else
 fi
 
 # dc — every compose call, with the project and the install directory, in one place.
-dc() { docker compose -p "$PROJECT" --project-directory "$INSTALL_DIR" "$@"; }
+#
+# IT RUNS FROM THE INSTALL DIRECTORY, and that is not cosmetic: compose substitutes `${PWD}` from the
+# ENVIRONMENT, not from `--project-directory`, so a `${KONTRA_REPO:-${PWD}}` mount would otherwise
+# resolve to wherever this script was invoked — the checkout — and mount it into the container.
+dc() { (cd "$INSTALL_DIR" && docker compose -p "$PROJECT" "$@"); }
 # kli — a kontra command inside the `cli` container. `-T` because there is no tty in CI and
 # compose would otherwise refuse; the repo is mounted at its own path, so `tests/parity/actor` is
 # the same string on both sides.
