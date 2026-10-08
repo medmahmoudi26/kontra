@@ -817,6 +817,21 @@ jobs:
               echo "::group::docker logs $c (last 150) — captured before the reap"
               docker logs --tail 150 "$c" 2>&1 || true
               echo "::endgroup::"
+              # AND, FOR THE ACTOR, THE OBJECT STORE FROM WHERE IT STANDS. `scripts/probe-objectstore.py`
+              # carries the reasoning and the same `KONTRA_S3_*` defaults the Go handler reads; it is
+              # a file and not a `run:` block for the reason beside
+              # `scripts/assert-install-is-self-contained.py` — a checker embedded in YAML is one
+              # nothing can run locally and nothing can test. `timeout` bounds it because the thing
+              # being hunted is a hang.
+              case "$c" in
+                kontra-hello*)
+                  echo "::group::$c — the object store from where the actor stands"
+                  docker cp scripts/probe-objectstore.py "$c":/tmp/probe.py >/dev/null 2>&1 || true
+                  timeout 90 docker exec "$c" python3 /tmp/probe.py \
+                    || echo "(the probe did not finish in 90s — that IS the answer)"
+                  echo "::endgroup::"
+                  ;;
+              esac
             done < /tmp/ps.txt
             # THE SERVICE NAMES COME FROM COMPOSE, because guessing them printed nothing: there is
             # no service called `orchestrator` — the containers are `kontra-api` and `kontra-infra`
