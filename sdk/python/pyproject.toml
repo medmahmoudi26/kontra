@@ -26,6 +26,19 @@ dependencies = [
 dev = ["pytest>=8.0", "PyYAML>=6.0"]
 # Claim-check offload to an S3 store (SeaweedFS S3 gateway locally, S3 in cloud).
 seaweed = ["boto3>=1.28"]
+# WHAT AN ACTOR IMAGE NEEDS BEYOND THE AUTHORING SURFACE, and it is an extra rather than a base
+# dependency because the two imports are LAZY and the comments at them say so:
+# `internals/casstore.py` does `import boto3  # actor-image / [seaweed] extra dep, not a base SDK
+# requirement` and `internals/redis_kv.py` does `import redis.asyncio`. Something authoring an actor,
+# or deriving its schemas, needs neither.
+#
+# IT EXISTS BECAUSE THE IMAGE THAT USED TO SUPPLY THEM IS GONE. The deleted worker base ran
+# `pip3 install temporalio redis boto3 pydantic`, so every actor image had them and nothing had to
+# say so. Under buildpacks an image gets exactly what the actor's requirements name, and the first
+# thing that happened was `ModuleNotFoundError: No module named 'boto3'` from inside `actor.serve()`
+# — the handler half serving happily beside it, so the worker looked half alive and the Warden
+# reported only `hello@0.1.0 is missing`. `cli/packstage.go` requests this extra.
+actor = ["boto3>=1.28", "redis>=5.0"]
 
 # No console script: a Python actor is run by `python3 actor.py` (actor.serve()), and
 # DISPATCH is the orchestrator's job. Kontra ships no dispatch CLI — a DIY trigger is a

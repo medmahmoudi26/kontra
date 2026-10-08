@@ -169,7 +169,12 @@ func stagePythonSDK(staged, sdkRoot string) error {
 	}
 
 	req := filepath.Join(staged, "requirements.txt")
-	line := "./" + stagedSDK + "\n"
+	// THE `[actor]` EXTRA IS NOT OPTIONAL FOR AN ACTOR, despite the name. `internals` imports boto3
+	// and redis LAZILY, at serve time, and the worker base that used to pip-install them is deleted —
+	// so without this the image builds, pushes, starts, and the Python half dies with
+	// `ModuleNotFoundError: No module named 'boto3'` while the handler half serves beside it. See
+	// sdk/python/pyproject.toml.
+	line := "./" + stagedSDK + "[actor]\n"
 	existing, err := firstPresent(staged, dependencyManifests)
 	switch {
 	case err != nil:

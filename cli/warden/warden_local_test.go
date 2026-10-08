@@ -139,3 +139,55 @@ func containsNetwork(args []string, name string) bool {
 	}
 	return false
 }
+
+// A WORKER THAT DIES MUST LEAVE ITS LAST WORDS, and `--rm` was deleting them.
+//
+// Measured on the compose install: a Fleet Machine logged `starting hello@0.1.0 (restart 1)` through
+// `(restart 7)` and `hello@0.1.0 is missing` in between, and the container holding the reason was
+// gone each time before anything could read it — including the install job's own failure dump, which
+// walks `docker ps -a`. The Worker had printed the cause on its first line.
+func TestADeadWorkerKeepsItsLogsUntilItsReplacementStarts(t *testing.T) {
+	d := &dockerDriver{bin: "docker", net: "kontra"}
+	spec := Spec{
+		Name:    "hello",
+		Version: "0.1.0",
+		Image:   "registry:5000/hello@sha256:" + strings.Repeat("a", 64),
+		Actor:   ProcSpec{Env: []string{"KONTRA_ADDRESS=temporal:7233"}},
+		Handler: ProcSpec{Env: []string{"KONTRA_ADDRESS=temporal:7233"}},
+	}
+
+	for _, args := range [][]string{
+		mustRunArgs(t, d, spec, partActor),
+		mustRunImageArgs(t, d, spec),
+	} {
+		for _, a := range args {
+			if a == "--rm" {
+				t.Errorf("--rm deletes the container the moment it exits, which is the log an "+
+					"operator needs: %s", strings.Join(args, " "))
+			}
+		}
+		// Still detached and still named — the name is what the next attempt has to clear.
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "--detach") || !strings.Contains(joined, "--name") {
+			t.Errorf("a worker must still be detached and named: %s", joined)
+		}
+	}
+}
+
+func mustRunArgs(t *testing.T, d *dockerDriver, spec Spec, part workerPart) []string {
+	t.Helper()
+	args, err := d.runArgs(d.net, spec, part, spec.Actor, spec.Image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return args
+}
+
+func mustRunImageArgs(t *testing.T, d *dockerDriver, spec Spec) []string {
+	t.Helper()
+	args, err := d.runImageArgs(d.net, spec, spec.Image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return args
+}

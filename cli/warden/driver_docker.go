@@ -72,6 +72,13 @@ func (d *dockerDriver) Start(ctx context.Context, spec Spec) (workerHandle, erro
 	if net == "" {
 		net = "kontra"
 	}
+	// THE PREVIOUS ATTEMPT'S CORPSE, REMOVED HERE AND NOT WHEN IT DIED. `docker run --name` refuses a
+	// name a stopped container still holds, so keeping the logs (see runFlags) means clearing them at
+	// the last possible moment — which is also the moment their reader has had every chance to read
+	// them. `rm` WITHOUT `--force`, so a container that is somehow still running is left alone rather
+	// than killed by a Warden that had decided it was absent.
+	d.removeExited(ctx, spec.Name, spec.Version)
+
 	if dockerImageEntrypoint(spec) {
 		return d.startImage(ctx, net, spec, digest)
 	}
@@ -116,9 +123,21 @@ func (d *dockerDriver) startImage(ctx context.Context, net string, spec Spec, di
 	}, nil
 }
 
+// NO `--rm`, AND THAT IS THE DIFFERENCE BETWEEN A DIAGNOSABLE WORKER AND A SILENT ONE.
+//
+// A Worker that exits on its own — a missing credential, an unreachable control plane, an actor that
+// raises on import — took its own log with it: `--rm` deletes the container the instant it stops, so
+// by the time this Warden notices the Worker is gone there is nothing left to read. What an operator
+// saw was `starting hello@0.1.0 (restart 1)` … `(restart 7)` and `hello@0.1.0 is missing`, seven
+// times, with no statement anywhere of WHY — measured on the compose install, where the whole cause
+// was one unset variable that the Worker itself had printed on its first line.
+//
+// So the corpse is kept until its replacement is started, which is what `removeExited` below does.
+// `docker logs <container>` then works for an operator, and the install job's own failure dump —
+// which already walks `docker ps -a` — finds it.
 func (d *dockerDriver) runFlags(net, containerName, label, digest string, extraLabels []string) []string {
 	flags := []string{
-		"run", "--detach", "--rm",
+		"run", "--detach",
 		"--network", net,
 		"--name", containerName,
 		"--label", workerLabelVar + "=" + label,
@@ -228,6 +247,17 @@ func (d *dockerDriver) stopNames(ctx context.Context, secs int, h workerHandle) 
 	for name := range names {
 		_, _ = exec.CommandContext(ctx, d.bin, "stop", "--time", fmt.Sprint(secs), name).CombinedOutput()
 		_, _ = exec.CommandContext(ctx, d.bin, "rm", "--force", name).CombinedOutput()
+	}
+}
+
+// removeExited clears the names a previous attempt left behind. Not `--force`: see the call site.
+func (d *dockerDriver) removeExited(ctx context.Context, name, version string) {
+	for _, n := range []string{
+		dockerNetwork(name, version),
+		dockerContainer(name, version, partActor),
+		dockerContainer(name, version, partHandler),
+	} {
+		_, _ = exec.CommandContext(ctx, d.bin, "rm", n).CombinedOutput()
 	}
 }
 

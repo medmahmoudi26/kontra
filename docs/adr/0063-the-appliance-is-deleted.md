@@ -252,6 +252,31 @@ the honest answer — `already deployed`, which `watchDeploySettled` already tre
 state. `flock` and not a lock file's existence: the kernel releases an advisory lock however the
 holder exits, and a stale `O_EXCL` file would leave the next deploy deciding how stale is stale.
 
+**THE WORKER STARTED, HALF OF IT SERVED, AND THE OTHER HALF DIED ON A LAZY IMPORT.** With the image
+building and the Fleet resolving it, the install's starter workflow still timed out —
+`activity error (type: OpenSession, startedEventID: 0): activity ScheduleToStart timeout`, i.e.
+nothing ever polled the queue — and the Machine's log was seven rounds of `starting hello@0.1.0` and
+`hello@0.1.0 is missing` with no reason anywhere. Reproduced by running the built image with the
+Warden's exact flags and the Fleet's exact environment: the handler half serves, and
+`actor.serve()` raises `ModuleNotFoundError: No module named 'boto3'`.
+
+`internals/casstore.py` imports boto3 and `internals/redis_kv.py` imports redis LAZILY, at serve
+time, and both carry comments saying they are actor-image dependencies rather than base SDK ones.
+That was true while the deleted worker base ran `pip3 install temporalio redis boto3 pydantic` —
+every actor image had them and nothing had to say so. A buildpack image gets exactly what the
+actor's requirements name. So `sdk/python/pyproject.toml` gains an `actor` extra holding precisely
+those two, and the stager requests `./vendor/sdk/python[actor]`; the lazy imports and their
+reasoning stay as they are, because something authoring an actor or deriving its schemas needs
+neither.
+
+**AND `--rm` WAS DELETING THE ONLY STATEMENT OF THE CAUSE.** The Warden ran workers with it, so a
+worker that exits on its own takes its log with it — by the time the Warden notices it is gone there
+is nothing to read, which is why seven restarts produced no reason and why the install job's own
+failure dump, which walks `docker ps -a`, found only the Machine. The corpse is now kept until its
+replacement is started (`removeExited`, `rm` without `--force`, so a container somehow still running
+is left alone). This is the file's own recurring failure shape — a worker that looks healthy and runs
+nothing — and it had reached the diagnostics themselves.
+
 **Measured, end to end, on that install:** `hello:0.1.0` built, pushed, confirmed at
 `sha256:b7e77989…`, entrypoint `/cnb/process/worker`, Python 3.12.15 from the pinned
 `.python-version`, and `docker run` starts both halves — `[worker] started: host=17 handler=18`.
