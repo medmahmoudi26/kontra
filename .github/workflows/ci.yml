@@ -694,9 +694,16 @@ jobs:
             || { echo "::error title=no console login in the log::"; tail -50 boot.log; exit 1; }
           grep -q 'console-password' boot.log \
             || { echo "::error title=the banner does not name the 0600 file::"; grep -A6 'console login' boot.log; exit 1; }
-          pw=$(docker compose exec -T cli cat /var/lib/kontra/console-password | tr -d '\r\n')
+          # THE FILE HAS A FORMAT AND PARSING IT IS THE POINT: a `#` header, then one
+          # TAB-separated `user<TAB>password` line per account (`recordConsolePassword`,
+          # cli/internal/config/config.go). `cat` alone returns the header too — 586 characters —
+          # which sails through a length check AND makes the leak check below vacuous, because a
+          # 586-character blob is never in a log either. `cli/internal/config/init_login_test.go`
+          # parses it the same way, skipping `#` and blank lines and cutting on the tab.
+          pw=$(docker compose exec -T cli cat /var/lib/kontra/console-password \
+                 | awk -F'\t' '$1 == "admin" { print $2; exit }' | tr -d '\r')
           [ "${#pw}" -ge 20 ] \
-            || { echo "::error title=the 0600 file holds no password::${#pw} characters"; exit 1; }
+            || { echo "::error title=no admin password parsed from the 0600 file::${#pw} characters"; exit 1; }
           if grep -qF "$pw" boot.log; then
             echo "::error title=the generated password is in docker logs::This is exactly what 3fa34d8 removed."
             exit 1
@@ -708,9 +715,11 @@ jobs:
         run: |
           set -euo pipefail
           # FROM THE FILE, NOT THE LOG, for the reason above — and this is the step that proves the
-          # file is the usable copy rather than merely the private one.
-          pw=$(docker compose exec -T cli cat /var/lib/kontra/console-password | tr -d '\r\n')
-          [ -n "$pw" ] || { echo "::error title=no password in the 0600 file::"; exit 1; }
+          # file is the usable copy rather than merely the private one. Same parse as the step above;
+          # the format is defined by `recordConsolePassword` in cli/internal/config/config.go.
+          pw=$(docker compose exec -T cli cat /var/lib/kontra/console-password \
+                 | awk -F'\t' '$1 == "admin" { print $2; exit }' | tr -d '\r')
+          [ -n "$pw" ] || { echo "::error title=no admin line in the 0600 file::"; exit 1; }
           code=$(curl -s -o resp.json -w '%{http_code}' -X POST http://127.0.0.1:8088/api/login \
                    -H 'content-type: application/json' \
                    --data "$(printf '{"user":"admin","password":"%s"}' "$pw")")
