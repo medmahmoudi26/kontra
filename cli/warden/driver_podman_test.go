@@ -64,12 +64,28 @@ const podmanProbeSource = `package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"syscall"
 	"time"
 )
+
+// dialReason names WHY in one word a test can assert on. "missing" is the only one that means the
+// socket is not in this container's filesystem at all, which is the property the driver guarantees.
+func dialReason(err error) string {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "missing"
+	case errors.Is(err, os.ErrPermission):
+		return "forbidden"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "unlistened"
+	default:
+		return "error"
+	}
+}
 
 func main() {
 	mode := ""
@@ -132,10 +148,15 @@ func main() {
 	case "dial":
 		// Can this container reach the container runtime? Printed one line per path so a partial
 		// answer is still readable.
+		//
+		// WITH THE REASON, because "refused" alone cannot tell this driver's guarantee from the
+		// host's file permissions. A socket ABSENT from the container and one present but
+		// unreadable both fail to dial, and only the first is what the driver promises. The tcp
+		// mode above prints its error for the same reason.
 		for _, s := range os.Args[2:] {
 			c, err := net.DialTimeout("unix", s, 2*time.Second)
 			if err != nil {
-				fmt.Println("refused", s)
+				fmt.Println("refused", s, dialReason(err))
 				continue
 			}
 			c.Close()
@@ -709,17 +730,48 @@ func TestPodmanWorkerCannotReachTheContainerRuntimeSocket(t *testing.T) {
 	// `--entrypoint` here for the same reason the driver passes one: the fixture image declares an
 	// ENTRYPOINT on purpose, so without it this would run the marker mode instead of dialling — and
 	// the control would report the probe as broken when it is fine.
-	mount := live[0] + ":" + live[0]
-	out, err := exec.Command("podman", "run", "--rm", "-v", mount, "--entrypoint", "/probe",
-		image, "dial", live[0]).CombinedOutput()
+	// ON A SOCKET THIS TEST OWNS, not on the runtime socket itself. Mounting the real one is the
+	// obvious way to write this control and it is wrong on any host whose runtime socket is
+	// group-restricted: `/var/run/docker.sock` is `root:docker` mode 0660 and a container's uid is in
+	// no such group, so the dial is refused with the socket mounted ON PURPOSE — a control that fails
+	// indistinguishably from a broken probe. MEASURED on a GitHub runner, where it did exactly that.
+	//
+	// A listener this test created proves the same thing — the probe detects reachability from inside
+	// a container on this host — without depending on anybody's socket permissions. What keeps the
+	// claim below sound is `missing`: the driver's guarantee is that the socket is NOT IN the
+	// container, which is a different refusal from `forbidden`.
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil { // t.TempDir is 0700 and the container is not this uid
+		t.Fatal(err)
+	}
+	ctl := filepath.Join(dir, "control.sock")
+	l, err := net.Listen("unix", ctl)
+	if err != nil {
+		t.Fatalf("could not create the control socket this control depends on: %v", err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	if err := os.Chmod(ctl, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("podman", "run", "--rm", "-v", dir+":/ctl", "--entrypoint", "/probe",
+		image, "dial", "/ctl/control.sock").CombinedOutput()
 	if err != nil {
 		t.Fatalf("the positive control could not run: %v: %s", err, out)
 	}
-	if !strings.Contains(string(out), "REACHED "+live[0]) {
-		t.Fatalf("the probe did not reach %s even with the socket MOUNTED, so it cannot detect a "+
-			"reachable socket and the assertion below would be vacuous:\n%s", live[0], out)
+	if !strings.Contains(string(out), "REACHED /ctl/control.sock") {
+		t.Fatalf("the probe did not reach a socket this test created AND mounted, so it cannot detect "+
+			"a reachable socket at all and the assertion below would be vacuous:\n%s", out)
 	}
-	t.Logf("control 2: with the socket mounted on purpose, the probe reaches it — the probe works")
+	t.Logf("control 2: the probe reaches a socket mounted on purpose — the probe works")
 
 	// THE CLAIM — the same probe, the same sockets, in a Worker this driver started.
 	name, version := "podmansock", fixtureVersion("0.0.2")
@@ -734,6 +786,17 @@ func TestPodmanWorkerCannotReachTheContainerRuntimeSocket(t *testing.T) {
 		}
 		if !strings.Contains(body, "refused "+s) {
 			t.Errorf("the Worker never reported on %s at all, so nothing was tested for it:\n%s", s, body)
+			continue
+		}
+		// `missing`, NOT MERELY `refused`. The driver's promise is that the socket is not in the
+		// container's filesystem. `forbidden` would mean it WAS mounted and only the host's group
+		// permissions kept the workload out — a mount nobody meant to add, passing because of a
+		// property of somebody else's machine, and on a host that runs containers as root it would
+		// not even fail.
+		if !strings.Contains(body, "refused "+s+" missing") {
+			t.Errorf("%s was refused for a reason other than being absent from the container, so the "+
+				"driver appears to have mounted it and only permissions kept the workload out:\n%s",
+				s, body)
 		}
 	}
 }
