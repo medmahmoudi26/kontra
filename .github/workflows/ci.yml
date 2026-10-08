@@ -736,9 +736,17 @@ jobs:
           root="$RUNNER_TEMP/workspaces"
           test -f "$root/hello/actors/hello/actor.json"
           test -f "$root/hello/workflows/hello/workflow.py"
-          echo marker > "$root/hello/KEEP"
+          # THE MARKER IS WRITTEN AND READ INSIDE THE CONTAINER, because that is who owns the
+          # directory. `kontra workspace seed` runs in `cli`, which has no `USER`, so `hello/` is
+          # created by root; this job's user is uid 1001, and `echo marker > …/hello/KEEP` from the
+          # host is `Permission denied`. READING worked — the two `test -f` above pass — which is why
+          # the step looked like a seeding failure and was a permissions one.
+          #
+          # The path is identical on both sides: compose mounts the workspace at the same path inside
+          # and out, because a Source id is `at:<absolute path>` and the two sides have to agree.
+          docker compose exec -T cli sh -c "echo marker > '$root/hello/KEEP'"
           docker compose exec -T cli kontra workspace seed
-          test -f "$root/hello/KEEP"
+          docker compose exec -T cli test -f "$root/hello/KEEP"
 
       - name: discovery registered the starters
         working-directory: ${{ runner.temp }}/install
