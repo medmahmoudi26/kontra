@@ -404,3 +404,48 @@ func TestSDKDigestTracksTheSourceTheBaseBakes(t *testing.T) {
 		t.Fatal("deleting the added module did not restore the digest")
 	}
 }
+
+// THE QUICKSTART INSTALL DIRECTORY IS NOT A CHECKOUT, and `cliutil.FindRepoRoot` cannot tell:
+// it walks up for `docker-compose.yml`, which is the one file a `curl`-only install HAS. So
+// `ensureBase` believed it had source, `sdkDigest` failed on `lstat <install>/sdk/python`, and
+// `kontra deploy` died for every actor in the documented install — on a loop, with nothing ever
+// registering. The no-checkout branch was already right and was never reached.
+func TestAnInstallDirectoryIsNotMistakenForACheckout(t *testing.T) {
+	install := t.TempDir()
+	if err := os.WriteFile(filepath.Join(install, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// What a stranger's `curl` leaves behind, and what `FindRepoRoot` accepts.
+	if root, err := cliutil.FindRepoRoot(install); err != nil || root != install {
+		t.Fatalf("FindRepoRoot(%q) = %q, %v — this test's premise is that it SUCCEEDS here", install, root, err)
+	}
+	if isCheckout(install) {
+		t.Error("an install directory holding only docker-compose.yml was taken for a checkout")
+	}
+}
+
+func TestACheckoutNeedsEverySeamTheBaseImageCopies(t *testing.T) {
+	root := t.TempDir()
+	for i, seam := range sdkSeams {
+		if isCheckout(root) {
+			t.Fatalf("reported a checkout with only %d of %d seams present", i, len(sdkSeams))
+		}
+		if err := os.MkdirAll(filepath.Join(root, seam), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !isCheckout(root) {
+		t.Errorf("a tree holding every one of %v was not taken for a checkout", sdkSeams)
+	}
+	// A FILE WHERE A DIRECTORY BELONGS IS NOT A SEAM. `sdkDigest` walks these, and `WalkDir` over a
+	// regular file succeeds with one entry — so a stray file would digest to something plausible.
+	if err := os.RemoveAll(filepath.Join(root, sdkSeams[0])); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, sdkSeams[0]), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isCheckout(root) {
+		t.Errorf("a regular file at %s was accepted as the seam", sdkSeams[0])
+	}
+}

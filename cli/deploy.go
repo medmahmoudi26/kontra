@@ -840,9 +840,28 @@ const sdkLabel = "org.kontra.sdk"
 //
 // __pycache__ is skipped: it is build output, it is in .dockerignore, and its mtime-keyed .pyc
 // names would otherwise make the digest differ from itself between two runs over one tree.
+// The directories the base image COPYs. Named once so `sdkDigest` and `isCheckout` cannot drift —
+// a seam added to one and not the other would make a non-checkout look like a checkout.
+var sdkSeams = []string{"sdk/python", "runtime/python"}
+
+// isCheckout reports whether `root` actually holds the source the base image is built from.
+//
+// `cliutil.FindRepoRoot` answers a DIFFERENT question — it walks up for `docker-compose.yml`, which
+// is right for its other callers and is also the ONE file a `curl`-only install has. So in a
+// quickstart install directory it returns that directory and reports success, and everything
+// downstream believes it has a checkout.
+func isCheckout(root string) bool {
+	for _, seam := range sdkSeams {
+		if fi, err := os.Stat(filepath.Join(root, seam)); err != nil || !fi.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
 func sdkDigest(root string) (string, error) {
 	h := sha256.New()
-	for _, seam := range []string{"sdk/python", "runtime/python"} {
+	for _, seam := range sdkSeams {
 		dir := filepath.Join(root, seam)
 		err := filepath.WalkDir(dir, func(p string, e fs.DirEntry, err error) error {
 			if err != nil {
@@ -898,6 +917,21 @@ func ensureBase(ctx context.Context, d imageAPI, progress io.Writer) error {
 		return err
 	}
 	root, rootErr := cliutil.FindRepoRoot("")
+	// AND IS IT A CHECKOUT, which is not the same question `FindRepoRoot` answered. It looks for
+	// `docker-compose.yml`; a quickstart install directory holds exactly that and nothing else, so
+	// it came back with the install directory and `sdkDigest` then failed on the seam that is not
+	// there:
+	//
+	//   error: digest sdk/python: lstat <install>/sdk/python: no such file or directory
+	//   workspace watch: deploy <workspace>/hello/actors/hello: exit status 1
+	//
+	// — which is every actor in the documented install, on a loop, with no actor ever registering.
+	// The no-checkout path below was already correct and simply never reached.
+	if rootErr == nil && !isCheckout(root) {
+		root, rootErr = "", fmt.Errorf(
+			"%s has a docker-compose.yml but no %s: an install directory, not a checkout",
+			root, strings.Join(sdkSeams, " or "))
+	}
 	// No checkout means no digest to compare and nothing to build from. An existing base is then
 	// the best available answer and is used as-is — a cluster install has no repo (the Dockerfile
 	// says as much), so this is the normal path there, not a degraded one.
