@@ -620,6 +620,25 @@ func registryReachable(reg string) error {
 	return fmt.Errorf("registry %s is unreachable — nothing answers /v2/ there%s", reg, hint)
 }
 
+// reachableRegistryHost is the address THIS PROCESS can open a socket to for a registry the DOCKER
+// DAEMON knows as `reg`, and it exists because those are not the same string.
+//
+// `kontra deploy` never needed it: every write it makes goes through the mounted socket, so the
+// daemon — on the host — resolves `127.0.0.1:5000` and reaches zot. A client that speaks HTTP
+// ITSELF, like `kontra runtime import`'s copy, is inside the `cli` container, where that address is
+// the container's own loopback and nothing is listening. `registryProbeBases` already knows the
+// three ways in; this picks the one that answers, and falls back to the name it was given so an
+// unreachable registry is reported by the request rather than by a silent substitution.
+func reachableRegistryHost(reg string) string {
+	for _, base := range registryProbeBases(reg) {
+		if httpAnswers(base + "/v2/") {
+			host, _ := registryHost(base)
+			return host
+		}
+	}
+	return reg
+}
+
 // controllerHost resolves the host to print in the run command: --controller wins,
 // else the host from KONTRA_ORCHESTRATOR_URL, else the literal <controller> placeholder
 // (localhost is useless from a remote droplet, so we don't pretend otherwise).

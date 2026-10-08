@@ -124,11 +124,11 @@ func resolveRuntime(reg, declared, engine string) (resolvedRuntime, error) {
 		avail, lerr := listRuntimes(reg)
 		if lerr != nil || len(avail) == 0 {
 			return resolvedRuntime{}, fmt.Errorf("runtime %q (%s) is not in the registry: %w\n"+
-				"  and no runtimes are published under %s.\n"+
-				"  Point KONTRA_RUNTIMES_PREFIX at a registry that has them — the published set is\n"+
-				"  ghcr.io/medmahmoudi26/kontra-runtimes, which reads anonymously — or copy them into\n"+
-				"  this one with `kontra registry migrate`.",
-				declared, ref, derr, runtimesPrefix(reg))
+				"  and NO runtimes are published under %s, so no actor can be built here yet.\n"+
+				"  Copy the published set in with `kontra runtime import` — first boot runs it, and an\n"+
+				"  install with no route to %s needs KONTRA_RUNTIMES_SOURCE pointed at a mirror it can\n"+
+				"  reach. `kontra runtime list` is what this read.",
+				declared, ref, derr, runtimesPrefix(reg), publishedRuntimes)
 		}
 		return resolvedRuntime{}, fmt.Errorf("runtime %q (%s) is not in the registry: %w\n  available: %s",
 			declared, ref, derr, strings.Join(avail, ", "))
@@ -136,12 +136,19 @@ func resolveRuntime(reg, declared, engine string) (resolvedRuntime, error) {
 	return resolvedRuntime{Name: name, Major: major, Ref: ref, Digest: digest}, nil
 }
 
-// listRuntimes names every runtime published under the prefix, as `<name>:<major>`.
+// listRuntimes names every runtime this install can resolve, as `<name>:<major>`.
+func listRuntimes(reg string) ([]string, error) { return runtimesUnder(runtimesPrefix(reg)) }
+
+// runtimesUnder names every runtime published under one prefix, as `<name>:<major>`.
 //
 // It reads the registry's catalog rather than any manifest annotation, because a NAME is all this
 // needs and reading annotations would mean a manifest fetch per repository for a message.
-func listRuntimes(reg string) ([]string, error) {
-	prefix := runtimesPrefix(reg)
+//
+// NOT EVERY REGISTRY WILL BE ENUMERATED. `GET /v2/_catalog` is in the distribution spec and ghcr
+// answers it 403 DENIED — measured — so discovery works against this install's zot and against a
+// mirror, and the published set has to be named rather than found. `kontra runtime import` is where
+// that costs something, and it says so.
+func runtimesUnder(prefix string) ([]string, error) {
 	_, prefixPath, ok := strings.Cut(prefix, "/")
 	if !ok {
 		return nil, fmt.Errorf("runtimes prefix %q names no repository path", prefix)

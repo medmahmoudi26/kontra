@@ -6,13 +6,14 @@ the thing the builder lays your dependencies and your code on top of, not a base
 `FROM` against.
 
 > [!IMPORTANT]
-> **Partly shipped.** The `runtime` field is read from `actor.json` and resolved to a digest by the
-> CLI, the catalog has somewhere to record it, and the registry has retention and credentials for
-> `kontra-runtimes/`. What is **not** built yet: `kontra deploy` does not call the buildpack path
-> (it still generates a Dockerfile), the `kontra-runtimes` repository does not exist, there are no
-> `kontra runtime` verbs, nothing mirrors runtimes on first boot, and `kontra rebase` does not
-> exist. [ADR 0061](../adr/0061-buildpacks-runtimes-and-the-image-store.md) records the decision and
-> what each gap is waiting on.
+> **Shipped.** `kontra deploy` is the buildpack path and nothing else — the generated Dockerfile and
+> its worker-base image are deleted — `kontra runtime import|list` and `kontra rebase` exist, and
+> first boot mirrors the published set into this install's registry.
+> [ADR 0061](../adr/0061-buildpacks-runtimes-and-the-image-store.md) records the decision and
+> [ADR 0063](../adr/0063-the-appliance-is-deleted.md) what wiring it forced.
+>
+> One gap is left and it is in the *packaging*, not here: a tagged release carries no `kontra`
+> binary until GoReleaser lands.
 
 ## Why this exists
 
@@ -76,9 +77,10 @@ Every actor written before runtimes existed therefore keeps building with nothin
 
 Resolution is designed to happen **before the build starts**, and that is deliberate: a typo discovered
 by the lifecycle is a failure several containers deep with a message about a manifest, and discovered
-here it is one line naming the runtimes that do exist. The resolver is written and tested
-(`cli/runtimes.go`), and **`kontra deploy` does not call it yet** — the shipped deploy still takes the
-Dockerfile path, reads `runtime` out of `actor.json` into a struct field, and does nothing with it.
+here it is one line naming the runtimes that do exist. `kontra deploy` resolves `runtime` out of
+`actor.json` (`cli/runtimes.go`), puts the resulting **digest** through the same trust gate an actor
+image goes through, and hands `pack build --run-image` the pinned form — so a build is reproducible
+even if the major tag moves between resolution and the lifecycle's own pull.
 
 ```
 python-browser:1                      →  <KONTRA_RUNTIMES_PREFIX>/python-browser:1  →  @sha256:…
@@ -89,24 +91,32 @@ The two shapes are told apart by asking whether the first path element **looks l
 (it needs a dot, a port, or to be `localhost`) — the same question this repository already answers for
 every other image reference, rather than a second rule invented for runtimes.
 
-`KONTRA_RUNTIMES_PREFIX` defaults to **`ghcr.io/medmahmoudi26/kontra-runtimes`**, which reads
-anonymously — that is what lets a fresh install build the actor it ships, because the install's own
-`kontra-runtimes/` namespace is empty until somebody copies the set into it. Point it at a mirror
-for an airgap (`kontra registry migrate` moves a store), or at a fork's registry to use your own,
-and nothing else changes; see [[Writing-a-Runtime]].
+`KONTRA_RUNTIMES_PREFIX` defaults to the install's own registry under `kontra-runtimes/`, and
+**first boot mirrors the published set into it** (`docker-compose.yml`'s `cli` service) using the
+`push-runtimes` account — the one account allowed to write that namespace, so a compromised actor
+build cannot replace the base every other actor is layered on.
+
+It is copied rather than resolved from ghcr directly, and that is a constraint rather than a
+preference: admitting `ghcr.io` would need `KONTRA_TRUST_REGISTRIES` to include it, and the
+published runtimes are signed per release — identity
+`…/kontra-runtimes/.github/workflows/publish.yml@refs/tags/python/1.0.0` — while the trust policy
+takes one exact `--certificate-identity` and no regexp. One string cannot cover three runtimes
+signed under three tag refs, and adding ghcr to `KONTRA_TRUST_UNSIGNED` would discard a signature
+that exists.
+
+Point the prefix at a fork's registry to use your own, and add that registry to
+`KONTRA_TRUST_REGISTRIES`; see [[Writing-a-Runtime]].
 
 **The digest is what the build is to use and what the catalog has room for**, as
 `runtime: {name, major, digest}` beside `builderDigest`. Both halves are kept because they answer
 different questions: the *major* is what the author asked for, and a digest that differs from the
-major tag's current one **is** rebase detection. The catalog fields and their conformance fixtures are
-in; the registrars only ever *echo* what the deploying CLI sends, and nothing sends them yet
-([[Configuration]]).
+major tag's current one **is** rebase detection. The registrars only ever *echo* what the deploying
+CLI sends, and `kontra deploy` now sends both ([[Configuration]]).
 
 ### The refusals
 
-Each of these is refused **before any build**, by rules that are written and tested in
-`cli/runtimes.go` and that nothing in the shipped `kontra deploy` path reaches yet. Each message says
-what to do instead:
+Each of these is refused **before any build**, by `cli/runtimes.go`, on the path `kontra deploy`
+takes. Each message says what to do instead:
 
 | you wrote | what happens |
 |---|---|
@@ -117,17 +127,21 @@ what to do instead:
 
 ## What ships
 
-| runtime | for | status |
-|---|---|---|
-| `base` | Go actors and plain binaries — the builder's stock run image, re-tagged | **specified, not built** |
-| `python` | the default for a Python actor | present in this install's registry as `kontra-runtimes/python:1`, put there by hand while the build path was measured |
-| `python-browser` | Chromium and the fonts a headless browser needs | **specified, not built** |
+All three are published at `:1` and `:1.0.0`, each keyless-signed, and all three are what first boot
+mirrors:
 
-**Nothing mirrors runtimes on first boot yet**, so a fresh install has none and the first build against
-a bare name refuses with the import command. Until the mirror exists, a runtime is pushed to
-`kontra-runtimes/` by hand and the install picks it up with nothing told: discovery is a **registry
-query** under that prefix, never a list inside kontra. That is load-bearing rather than tidy — a fork
-that had to edit kontra to add a runtime could not add one.
+| runtime | for | published digest of `:1` |
+|---|---|---|
+| `base` | Go actors and plain binaries — the builder's stock run image, re-tagged | `sha256:da6d5c3f…` |
+| `python` | the default for a Python actor | `sha256:712b8d2e…` |
+| `python-browser` | Chromium and the fonts a headless browser needs | `sha256:e1d77faa…` |
+
+**Which runtimes an install mirrors is `KONTRA_RUNTIMES_IMPORT`, and that is configuration rather
+than a list inside kontra** — a fork mirrors its own set by editing one `.env` line. Discovery cannot
+replace it at the source: `GET /v2/_catalog` against ghcr answers **403 DENIED**, measured, so the
+published set has to be named. Against *this install's* registry discovery does work, and it is what
+`kontra runtime list` and every "available: …" message read — never a list inside kontra. That is
+load-bearing rather than tidy: a fork that had to edit kontra to add a runtime could not add one.
 
 ## What a runtime is NOT
 

@@ -158,6 +158,14 @@ const usageText = `kontra — local control surface
                #   digest resolves at the destination before it says it is done, and refuses to report
                #   success while any does not — an untagged manifest the catalog still references is a
                #   digest a Placement is pinned to.
+  kontra runtime import [name:major ...] [--from <prefix>] [--to <registry>] [--dry-run] [--force]
+  kontra runtime list
+               # MIRROR THE PUBLISHED RUN IMAGES INTO THIS INSTALL (ADR 0061, 0063). The local
+               #   kontra-runtimes/ namespace is empty on a fresh install, so the actor it ships could
+               #   not be built; the published set cannot be resolved in place because its per-release
+               #   signing identity is not expressible as one --certificate-identity.
+               # Idempotent, by digest: a runtime already here is left alone, and a major that has MOVED
+               #   upstream is reported rather than rolled under every actor already built on it.
   kontra deploy --actor <dir> [--engine py|go] [--registry host:port]
                [--controller <host>] [--host-only] [--override]   # the container-Image spelling
   kontra workers list
@@ -336,6 +344,10 @@ func dispatch(args []string) error {
 		// The OCI store, not the actor catalog. One subcommand today: `migrate`, which moves a
 		// `registry:2` store into zot by digest and proves every catalog digest arrived.
 		err = cmdRegistry(args[1:])
+	case "runtime":
+		// The run images actors are built ON, not the actor images. `import` mirrors the published
+		// set into this install's registry, which is what makes a fresh install able to build.
+		err = cmdRuntime(args[1:])
 	case "build":
 		err = cmdBuild(args[1:])
 	case "deploy":

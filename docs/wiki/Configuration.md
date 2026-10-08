@@ -187,7 +187,10 @@ and no garbage collection. Everything in this section is the compose one.
 | `KONTRA_INUSE_TAGS_MS` | `600000` (10 min) | the reconciler's interval. A non-numeric or non-positive value falls back to the default rather than failing |
 | `KONTRA_REGISTRY_MIGRATION` | — | `skip` starts a deliberately empty zot on a box that still holds a `registry:2` store |
 | `KONTRA_REGISTRY_CVE` | — | `1` turns on zot's Trivy integration, which downloads a vulnerability database on first boot |
-| `KONTRA_RUNTIMES_PREFIX` | `ghcr.io/medmahmoudi26/kontra-runtimes` | where a bare `name:major` in `actor.json` resolves — the published set, read anonymously ([[Runtimes]]) |
+| `KONTRA_RUNTIMES_PREFIX` | the install's own `<registry>/kontra-runtimes` | where a bare `name:major` in `actor.json` resolves; first boot mirrors the published set into it ([[Runtimes]]) |
+| `KONTRA_RUNTIMES_SOURCE` | `ghcr.io/medmahmoudi26/kontra-runtimes` | where `kontra runtime import` copies FROM. An airgapped install points it at a mirror it can reach; a failed import is reported and does not stop the `cli` service |
+| `KONTRA_RUNTIMES_IMPORT` | `base:1 python:1 python-browser:1` | which runtimes that import copies, space or comma separated. A list in *configuration* and not in the CLI, because adding a runtime must not mean editing kontra — and ghcr answers `/v2/_catalog` with 403, so the set cannot be discovered at the source |
+| `KONTRA_REGISTRY_PUSH_RUNTIMES_USER` | `push-runtimes` | the account that import pushes as. It may write `kontra-runtimes/**` and nothing else, which is what stops an actor build from replacing the base every other actor is layered on |
 | `KONTRA_PACK_BIN` | `/usr/local/bin/pack`, then `/opt/kontra/pack`, then `PATH` | the pinned `pack` `0.40.9`, checksummed into the `kontra` image and copied into the orchestrator image. Set this only to point at your own |
 | `KONTRA_DEPLOY_SH` | — (unset ⇒ warn) | `refuse` makes an actor's `deploy.sh` an error instead of a warning. A buildpack build does not run it, so an actor that depended on it builds fine and is missing whatever it installed ([[Writing-Actors-Python]]) |
 

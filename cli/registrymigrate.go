@@ -29,6 +29,8 @@ import (
 
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/retry"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 )
@@ -222,6 +224,17 @@ func migrateOneTag(ctx context.Context, a migrateTagArgs) migrateRow {
 		return row
 	}
 	dst.PlainHTTP = a.DstPlain
+	// THE DESTINATION IS THIS INSTALL'S ZOT, WHICH MAY HAVE USERS. Written anonymously this
+	// migration fails per tag with a 401 on an install that turned auth on — the same omission
+	// `kontra deploy` had (cli/registryauth.go). The source is the old `registry:2`, which had no
+	// accounts and must not be sent one.
+	if cred := pushCredential(); !cred.anonymous() {
+		dst.Client = &auth.Client{
+			Client:     retry.DefaultClient,
+			Cache:      auth.NewCache(),
+			Credential: auth.StaticCredential(a.DstHost, auth.Credential{Username: cred.User, Password: cred.Password}),
+		}
+	}
 
 	// Copied by TAG in both directions so the destination carries the same name the catalog and a
 	// Placement resolve, and verified by DIGEST below so the name is not the only thing that agreed.

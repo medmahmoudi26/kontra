@@ -110,9 +110,38 @@ unauthenticated manifest read of a *public* repository with `401` and a
 `WWW-Authenticate: Bearer realm=…` challenge. `docker` and `pack` follow it; this CLI did not, so a
 runtime a human can open in a browser reported as "not in the registry". `registryManifestDigest`
 now follows a Bearer challenge to the realm the registry named, for the scope it asked for, sending
-no credential of its own. That is what makes `KONTRA_RUNTIMES_PREFIX`'s new default —
-`ghcr.io/medmahmoudi26/kontra-runtimes`, so a fresh install can build the actor it ships — work at
-all; the local `kontra-runtimes/` namespace is empty until somebody mirrors it.
+no credential of its own.
+
+**THE RUNTIMES ARE MIRRORED IN, NOT RESOLVED WHERE THEY ARE PUBLISHED.** Reading ghcr was the first
+answer: point `KONTRA_RUNTIMES_PREFIX` at `ghcr.io/medmahmoudi26/kontra-runtimes` and a fresh
+install can build the actor it ships. The install refused it, and correctly — `runtime
+ghcr.io/…/python:1@sha256:712b8d2e… is not admissible under this install's trust policy, and it
+would be the base of every actor built on it: image registry is not on this Machine's allowlist`.
+Admitting `ghcr.io` is not expressible: the published runtimes are keyless-signed PER RELEASE —
+measured, identity
+`https://github.com/medmahmoudi26/kontra-runtimes/.github/workflows/publish.yml@refs/tags/python/1.0.0`,
+issuer `https://token.actions.githubusercontent.com` — and `trustpolicy` takes one exact
+`--certificate-identity` with no regexp, so one string cannot cover three runtimes signed under
+three tag refs. Adding ghcr to `KONTRA_TRUST_UNSIGNED` would discard a signature that exists.
+
+So `kontra runtime import` copies them into this install's registry, where the address is already on
+both the allowlist and the unsigned list, and `KONTRA_RUNTIMES_PREFIX` keeps its computed default.
+Three decisions inside it are not obvious:
+
+- **The copy is `oras.Copy`, not the daemon.** `docker pull && tag && push` would have put a docker
+  CLI and a socket in the path and flattened a multi-arch runtime to whatever the local daemon runs.
+- **The destination address is resolved for THIS PROCESS, not for the daemon.** `127.0.0.1:5000` is
+  zot as the host sees it; the copy runs inside the `cli` container, where that is its own loopback.
+  `reachableRegistryHost` picks the way in that answers. Only the transport differs — a manifest is
+  stored under its repository, so the actor build that later pulls through the daemon gets these
+  bytes.
+- **A major that has MOVED at the source is reported, never replaced.** First boot runs the import
+  on every start; silently re-copying would advance the base image under every actor already built
+  here, which ADR 0061 makes `kontra rebase`'s decision and not a side effect of a restart.
+
+`KONTRA_RUNTIMES_IMPORT` names the set, in configuration rather than in Go: 0061 §3.4's invariant is
+that adding a runtime is pushing one. Discovery cannot carry it — `GET /v2/_catalog` against ghcr
+answers **403 DENIED**, measured — so the published set is named and a fork edits one `.env` line.
 
 ## Consequences
 

@@ -38,23 +38,68 @@ const (
 	// defaultPushUser is the account name docker-compose.yml writes. It is a default rather than a
 	// constant because a registry that is not this install's has its own accounts.
 	defaultPushUser = "push-actors"
+
+	runtimesUserEnv     = "KONTRA_REGISTRY_PUSH_RUNTIMES_USER"
+	runtimesPasswordEnv = "KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD"
+	defaultRuntimesUser = "push-runtimes"
+)
+
+// registryRole is one of the install's push accounts: the namespace it may create in, the account
+// docker-compose.yml writes, and the two variables that carry it.
+//
+// THERE ARE TWO BECAUSE THE SEPARATION IS THE POINT. `push-actors` may write `actors/**` and
+// `push-runtimes` may write `kontra-runtimes/**`, so an actor build cannot replace the base every
+// other actor is layered on. A refusal that named the wrong variable would send an operator to set
+// a password that was never consulted, so the role travels with the credential.
+type registryRole struct {
+	Namespace   string
+	DefaultUser string
+	UserVar     string
+	PasswordVar string
+}
+
+var (
+	actorsRole = registryRole{
+		Namespace: "actors", DefaultUser: defaultPushUser,
+		UserVar: pushUserEnv, PasswordVar: pushPasswordEnv,
+	}
+	runtimesRole = registryRole{
+		Namespace: "runtimes", DefaultUser: defaultRuntimesUser,
+		UserVar: runtimesUserEnv, PasswordVar: runtimesPasswordEnv,
+	}
 )
 
 // registryCredential is a username and password for one registry. Empty means anonymous.
 type registryCredential struct {
 	User     string
 	Password string
+	Role     registryRole
 }
 
 func (c registryCredential) anonymous() bool { return c.Password == "" }
 
-// pushCredential reads the credential for the actors namespace out of the environment.
-func pushCredential() registryCredential {
-	user := strings.TrimSpace(os.Getenv(pushUserEnv))
-	if user == "" {
-		user = defaultPushUser
+// role is what the refusals name. A credential built without one is the ACTORS credential: that is
+// the push every install makes, and it is what a caller constructing this struct by hand means.
+func (c registryCredential) role() registryRole {
+	if c.Role.PasswordVar == "" {
+		return actorsRole
 	}
-	return registryCredential{User: user, Password: os.Getenv(pushPasswordEnv)}
+	return c.Role
+}
+
+// pushCredential reads the credential for the actors namespace out of the environment.
+func pushCredential() registryCredential { return credentialFor(actorsRole) }
+
+// runtimesPushCredential reads the credential `kontra runtime import` writes the mirrored runtimes
+// with. A separate account, not a convenience alias — see registryRole.
+func runtimesPushCredential() registryCredential { return credentialFor(runtimesRole) }
+
+func credentialFor(r registryRole) registryCredential {
+	user := strings.TrimSpace(os.Getenv(r.UserVar))
+	if user == "" {
+		user = r.DefaultUser
+	}
+	return registryCredential{User: user, Password: os.Getenv(r.PasswordVar), Role: r}
 }
 
 // registryAdmits asks whether this credential may talk to this registry at all.
@@ -78,6 +123,7 @@ func registryAdmits(reg string, c registryCredential) error {
 			continue
 		}
 		resp.Body.Close()
+		role := c.role()
 		switch {
 		case resp.StatusCode == http.StatusOK:
 			return nil
@@ -85,16 +131,16 @@ func registryAdmits(reg string, c registryCredential) error {
 			return fmt.Errorf("the registry at %s requires a credential and this process has none.\n"+
 				"  Set %s (and %s if the account is not %q). On the compose install those are the\n"+
 				"  same values `registry-config` writes the zot htpasswd from, so the `cli` service\n"+
-				"  has to be given them too.", reg, pushPasswordEnv, pushUserEnv, defaultPushUser)
+				"  has to be given them too.", reg, role.PasswordVar, role.UserVar, role.DefaultUser)
 		case resp.StatusCode == http.StatusUnauthorized:
 			return fmt.Errorf("the registry at %s refused the credential for user %q.\n"+
 				"  The password comes from %s. On the compose install it must match the one\n"+
 				"  `registry-config` wrote the htpasswd from — a recreated registry volume with an\n"+
-				"  old password set, or the reverse, is the usual cause.", reg, c.User, pushPasswordEnv)
+				"  old password set, or the reverse, is the usual cause.", reg, c.User, role.PasswordVar)
 		case resp.StatusCode == http.StatusForbidden:
 			return fmt.Errorf("the registry at %s authenticated user %q and will not let it push.\n"+
-				"  Only %q may create in the actors namespace (docker-compose.yml's accessControl);\n"+
-				"  %s names the account.", reg, c.User, defaultPushUser, pushUserEnv)
+				"  Only %q may create in the %s namespace (docker-compose.yml's accessControl);\n"+
+				"  %s names the account.", reg, c.User, role.DefaultUser, role.Namespace, role.UserVar)
 		default:
 			// NOT AN ERROR, because plenty of registries answer /v2/ with something else and still
 			// work. Reported by the push if it matters; this probe is only here to turn a credential

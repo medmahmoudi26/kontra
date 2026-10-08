@@ -97,11 +97,33 @@ x-orchestrator-env: &orchestrator-env
   # (cli/registryauth.go) only refuses when the registry actually answers 401.
   KONTRA_REGISTRY_PUSH_ACTORS_USER: ${KONTRA_REGISTRY_PUSH_ACTORS_USER:-push-actors}
   KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}
-  # WHERE A BARE `name:major` IN actor.json RESOLVES. It defaults to this install's own registry
-  # under `kontra-runtimes/`, which is empty until somebody mirrors the published set — so a fresh
-  # install could not build the actor it ships. ghcr serves them and reads anonymously, so this is
-  # the default that makes a first `kontra deploy` work; point it at a mirror for an airgap.
-  KONTRA_RUNTIMES_PREFIX: ${KONTRA_RUNTIMES_PREFIX:-ghcr.io/medmahmoudi26/kontra-runtimes}
+  # WHERE A BARE `name:major` IN actor.json RESOLVES — this install's own registry, which is the
+  # default `runtimesPrefix` computes and the one address the trust policy below already admits.
+  #
+  # IT IS NOT ghcr, AND THAT IS NOT A PREFERENCE. Pointing it at the published set directly looked
+  # simpler and is not expressible: `KONTRA_TRUST_REGISTRIES` would have to admit `ghcr.io`, and the
+  # runtimes there are SIGNED per release — identity
+  # `…/kontra-runtimes/.github/workflows/publish.yml@refs/tags/python/1.0.0` — while
+  # `trustpolicy` takes one exact `--certificate-identity` and no regexp. One string cannot cover
+  # three runtimes signed under three tag refs, and the alternative, adding ghcr to
+  # KONTRA_TRUST_UNSIGNED, would throw away a signature that exists. So the published set is
+  # MIRRORED into this registry on first boot (see the `cli` service), where it is local, trusted,
+  # and the same bytes for every actor built here.
+  KONTRA_RUNTIMES_PREFIX: ${KONTRA_RUNTIMES_PREFIX:-}
+  # WHERE THE MIRROR READS FROM, WHICH RUNTIMES IT COPIES, AND WHO WRITES THEM.
+  #
+  # `KONTRA_RUNTIMES_IMPORT` is a LIST IN CONFIGURATION AND NOT IN THE CLI on purpose: adding a
+  # runtime is pushing one to `kontra-runtimes`, and if kontra had to be edited too, a fork could
+  # not add one (ADR 0061 §3.4). Discovery cannot replace it here — `GET /v2/_catalog` against ghcr
+  # answers 403, measured — so an install names the set it mirrors and a fork edits its `.env`.
+  #
+  # `push-runtimes` AND NOT `push-actors`. That account may write `kontra-runtimes/**` and nothing
+  # else, which is what stops an actor build from replacing the base every other actor is layered
+  # on; passing the actors credential here would retire that separation while looking like it held.
+  KONTRA_RUNTIMES_SOURCE: ${KONTRA_RUNTIMES_SOURCE:-ghcr.io/medmahmoudi26/kontra-runtimes}
+  KONTRA_RUNTIMES_IMPORT: ${KONTRA_RUNTIMES_IMPORT:-base:1 python:1 python-browser:1}
+  KONTRA_REGISTRY_PUSH_RUNTIMES_USER: ${KONTRA_REGISTRY_PUSH_RUNTIMES_USER:-push-runtimes}
+  KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}
   KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
   KONTRA_CONTROLLER: orchestrator-api
   KONTRA_DUCKLAKE_CATALOG: postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra
@@ -1247,6 +1269,23 @@ services:
                     raise SystemExit("cli: timed out waiting for orchestrator-api")
                 time.sleep(1)
         PY
+        # ── THE RUNTIMES, MIRRORED IN, BECAUSE AN ACTOR CANNOT BE BUILT WITHOUT ONE ──────────────
+        #
+        # `kontra deploy` layers an actor onto a published run image (ADR 0061) resolved under
+        # `$KONTRA_REGISTRY/kontra-runtimes/`, and that namespace is EMPTY on a fresh install — so
+        # the actor this install ships could not be built at all. The published set reads
+        # anonymously from ghcr and is COPIED here rather than resolved there, because the trust
+        # policy admits this registry and cannot express ghcr's per-release signing identity. ADR
+        # 0063 and cli/runtimeimport.go carry the whole reasoning.
+        #
+        # NOT FATAL, AND NOT SILENT EITHER. An airgapped install has no route to the source and a
+        # mirror of its own; refusing to start the CLI would make that install unusable rather than
+        # degraded. `kontra deploy` is what reports a missing runtime, and it lists what IS
+        # published when it does. The import is idempotent — a runtime already here costs one
+        # manifest HEAD and is left alone — so this runs on every boot and copies on the first.
+        kontra runtime import \
+          || echo "runtimes: import failed — an actor build will say which runtime is missing" >&2
+
         exec kontra workspace watch
 
 networks:
