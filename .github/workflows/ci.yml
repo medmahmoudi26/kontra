@@ -767,7 +767,35 @@ jobs:
           set -euo pipefail
           docker compose exec -d cli sh -c 'kontra workflow serve "$KONTRA_WORKSPACES/hello/workflows/hello"'
           sleep 15
-          docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACES/hello/workflows/hello" --wait --timeout 15m'
+          # ON FAILURE, SAY WHY. `kontra workflow start --wait` reports the server's verdict and
+          # nothing else, so a Nexus operation that times out arrives as
+          #
+          #   nexus operation completed unsuccessfully … operation timed out (type: ScheduleToClose)
+          #
+          # which says a Worker never finished the work and nothing about whether one ever STARTED.
+          # Every answer to that is in logs this step already has access to and was throwing away.
+          # Same shape as the manifest diff in appliance.yml: a gate that reports an outcome with no
+          # evidence costs a whole CI round per hypothesis.
+          if ! docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACES/hello/workflows/hello" --wait --timeout 15m'; then
+            echo "::error title=the starter workflow did not complete::evidence follows"
+            echo "::group::containers (a Worker that never started leaves nothing here)"
+            docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}'
+            echo "::endgroup::"
+            for svc in cli orchestrator registry; do
+              echo "::group::docker compose logs $svc (last 120)"
+              docker compose logs --no-color --tail 120 "$svc" || true
+              echo "::endgroup::"
+            done
+            echo "::group::what the install pushed to its own registry"
+            # FROM INSIDE THE REGISTRY CONTAINER, not over a published port — zot is distroless and
+            # may not be published at all, and `registry-config` puts a static busybox at
+            # /etc/zot/busybox precisely because the healthcheck needs one. An actor image missing
+            # from this catalog and a Worker that never started are different failures.
+            docker compose exec -T registry /etc/zot/busybox wget -qO- \
+              http://127.0.0.1:5000/v2/_catalog || echo "(the registry did not answer)"
+            echo "::endgroup::"
+            exit 1
+          fi
 
       - name: Dataset contains hello world and the Fleet is gone
         working-directory: ${{ runner.temp }}/install
