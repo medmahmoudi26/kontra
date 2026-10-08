@@ -160,9 +160,24 @@ BASE="${KONTRA_GATE_PORT_BASE:-39100}"
 P_TEMPORAL=$((BASE + 1))
 P_S3=$((BASE + 2))
 P_KV=$((BASE + 3))
-P_REGISTRY=$((BASE + 5))
 P_API=$((BASE + 6))
 P_POSTGRES=$((BASE + 8))
+
+# THE REGISTRY IS THE ONE PORT THAT CANNOT MOVE, and that is a property of image references rather
+# than an omission here. An actor image reference is resolved by TWO different things that must
+# agree on the string: the `cli` container (which reads manifests over the compose network) and the
+# HOST's Docker daemon, which `pack` drives through the mounted socket and which is what pulls the
+# run image. Shifting the published port to 39105 moved the host's half only — `KONTRA_REGISTRY`
+# stayed `127.0.0.1:5000` — and the gate failed with
+#
+#   invalid run-image '127.0.0.1:5000/kontra-runtimes/python:1@sha256:712b8d2e…':
+#   Error response from daemon: Get "http://127.0.0.1:5000/v2/": dial tcp: connection refused
+#
+# Moving `KONTRA_REGISTRY` to match would break the other half instead: `registryProbeBases`'s
+# in-network fallback is `registry:<that port>`, and zot listens on 5000 inside the network whatever
+# the host publishes. So the registry keeps the default, and the isolation this gate relies on is
+# the `kontra`-network refusal above — which already means no second install is running.
+P_REGISTRY=5000
 
 # The numbers a kontra installation uses when nobody says otherwise. Reaching any of them means
 # this script is about to talk to something it did not start.
@@ -226,12 +241,16 @@ fi
 ok "nothing is attached to the \`kontra\` network"
 
 for p in "$P_TEMPORAL" "$P_S3" "$P_KV" "$P_REGISTRY" "$P_API" "$P_POSTGRES"; do
-  for d in "${DEFAULT_PORTS[@]}"; do
-    if [ "$p" = "$d" ]; then
-      echo "REFUSING: port $p is a kontra default. Move KONTRA_GATE_PORT_BASE." >&2
-      exit 2
-    fi
-  done
+  # The registry is EXEMPT from the default-port refusal and from nothing else: it has to be 5000
+  # (see above) and it still has to be free, which is the check that actually protects a live stack.
+  if [ "$p" != "$P_REGISTRY" ]; then
+    for d in "${DEFAULT_PORTS[@]}"; do
+      if [ "$p" = "$d" ]; then
+        echo "REFUSING: port $p is a kontra default. Move KONTRA_GATE_PORT_BASE." >&2
+        exit 2
+      fi
+    done
+  fi
   if ! port_free "$p"; then
     echo "REFUSING: port $p is already bound. Something is listening there and this gate will not" >&2
     echo "  join it. Move KONTRA_GATE_PORT_BASE to a free block." >&2
@@ -491,7 +510,14 @@ DIGEST=$(grep -Eo 'sha256:[0-9a-f]{64}' "$LOGS/deploy.log" | head -1)
 if [ -n "$DIGEST" ]; then ok "pushed $ACTOR_NAME:$ACTOR_VERSION → $DIGEST"; else bad "deploy printed no manifest digest"; fi
 # ASKED FROM THE HOST, AT THE PUBLISHED PORT — the same store the push went into, reached by the
 # other of its two addresses. If those two ever stop being one registry, this is where it shows.
-TAGS=$(curl -fsS --max-time 5 "http://127.0.0.1:$P_REGISTRY/v2/$ACTOR_NAME/tags/list" 2>/dev/null)
+#
+# WITH THE CREDENTIAL, because this gate runs the AUTHENTICATED shape: zot's rendered accessControl
+# gives every repository `"defaultPolicy": []`, so an anonymous `tags/list` is 401 and this check
+# would report "the registry does not list the version" about a registry that holds it. Read back
+# from the file this script wrote it to, and never echoed — `--fail` keeps the body out of the log.
+PULL_PW=$(sed -n 's/^KONTRA_REGISTRY_PULL_PASSWORD=//p' "$INSTALL_DIR/.env" | tail -1)
+TAGS=$(curl -fsS --max-time 5 -u "pull:$PULL_PW" \
+         "http://127.0.0.1:$P_REGISTRY/v2/$ACTOR_NAME/tags/list" 2>/dev/null)
 case "$TAGS" in
   *"\"$ACTOR_VERSION\""*) ok "the install's registry holds $ACTOR_NAME:$ACTOR_VERSION" ;;
   *) bad "the registry on :$P_REGISTRY does not list $ACTOR_VERSION (answered: ${TAGS:-nothing})" ;;
