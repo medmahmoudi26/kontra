@@ -14,12 +14,12 @@ BUF=.venv/bin/buf
 #   CLI_DEST=$PWD/cli/kontra ./install.sh
 CLI_DEST="${CLI_DEST:-/usr/local/bin/kontra}"
 
-# The Go this repo is built with. `go.work` says 1.26.4 and Ubuntu 24.04 ships 1.22, so the
+# The Go this repo is built with. `go.work` says 1.26.8 and Ubuntu 24.04 ships 1.22, so the
 # distro package is not an option — this is fetched from upstream and checksummed, the same
 # shape as the buf step below. Bump both the version and its digests together.
-GO_VERSION="${GO_VERSION:-1.26.4}"
-GO_SHA256_amd64=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f
-GO_SHA256_arm64=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768
+GO_VERSION="${GO_VERSION:-1.26.8}"
+GO_SHA256_amd64=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
+GO_SHA256_arm64=211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0
 
 # The one buf plugin that is `local:` rather than `remote:` — see the codegen step below.
 PLUGIN_MOD=github.com/cludden/protoc-gen-go-temporal

@@ -36,7 +36,7 @@
 // ONE DIFFERENCE FROM install.sh, AND IT IS THE POINT OF THIS FILE. There, the version and the
 // digests are three independent shell variables:
 //
-//	GO_VERSION="1.26.4"
+//	GO_VERSION="1.26.8"
 //	GO_SHA256_amd64=1153d3d5...
 //
 // Editing the first and not the second is a one-character mistake that still fetches, still runs,

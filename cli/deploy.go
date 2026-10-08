@@ -588,7 +588,7 @@ func workerBaseDockerfile() string {
 	// the line. Two spellings of one artifact, one of them fixed: the standalone file is what a
 	// human reads and edits, and this is what actually runs.
 	return fmt.Sprintf(`FROM golang:1.25 AS handler-build
-ENV GOTOOLCHAIN=go1.26.4
+ENV GOTOOLCHAIN=go1.26.8
 WORKDIR /src
 COPY sdk/go ./sdk/go
 COPY runtime/go ./runtime/go
@@ -676,14 +676,14 @@ func buildGoActor(ctx context.Context, d imageAPI, progress io.Writer, actorDir,
 // goActorDockerfile compiles the actor at repo-relative path `rel` into a STATIC binary and
 // parks it + its actor.json under /actor/<name>/ in a slim runtime image. GOWORK=off (the
 // example actors are standalone modules outside the root go.work); CGO_ENABLED=0 so the binary
-// runs on any base; golang 1.26.4 matches sdk/go's toolchain directive. At runtime the
+// runs on any base; golang 1.26.8 matches sdk/go's toolchain directive. At runtime the
 // binary self-locates actor.json beside itself (the SDK's resolveIdentity), and the worker
 // entrypoint launches it because the worker image is stamped KONTRA_ACTOR_ENGINE=go.
 // runtimeExtra (from the actor's optional runtime.Dockerfile) is appended to the RUNTIME stage,
 // after the binary and manifest are in place — so an actor can install external tools it shells
 // to without touching the build stage or the /actor/<name>/ layout the entrypoint relies on.
 func goActorDockerfile(rel, name string, runtimeExtra []byte) string {
-	df := fmt.Sprintf(`FROM golang:1.26.4 AS actor-build
+	df := fmt.Sprintf(`FROM golang:1.26.8 AS actor-build
 WORKDIR /src
 COPY . .
 RUN cd %[1]s && GOWORK=off CGO_ENABLED=0 go build -trimpath -o /out/%[2]s .

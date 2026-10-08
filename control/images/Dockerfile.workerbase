@@ -2,7 +2,7 @@
 # `kontra deploy` COPYs these into each actor image. Built once and tagged
 # kontra-worker-base:1 so a cluster install has no checkout to compile from.
 FROM golang:1.25 AS handler-build
-ENV GOTOOLCHAIN=go1.26.4
+ENV GOTOOLCHAIN=go1.26.8
 WORKDIR /src
 # BOTH `replace` TARGETS HAVE TO BE IN THE CONTEXT, and `runtime/go` was missing. The handler's
 # go.mod redirects two modules at local paths — `sdk/go => ../../sdk/go` and `runtime/go => ../go`
