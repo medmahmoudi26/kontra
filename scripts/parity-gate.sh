@@ -498,8 +498,14 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 say "3 · condition 2 — the local actor path"
 
-info "kontra deploy --actor $ACTOR_DIR  (inside the cli container)"
-if ! kli kontra deploy --actor "$ACTOR_DIR" >"$LOGS/deploy.log" 2>&1; then
+# `--override`, BECAUSE THE WATCHER IS ALREADY DEPLOYING THIS ACTOR. `kontra workspace watch` is the
+# `cli` service's main process and it runs `kontra deploy --override` for every actor directory under
+# the workspaces tree — which is where this one had to be created for the container to see it. So by
+# the time this line runs the watcher may have pushed the version already, and without `--override`
+# the gate would be refused by the immutability check it is not here to test. The two deploys no
+# longer OVERLAP (cli/deploylock.go serialises them per version); this is about which of them wins.
+info "kontra deploy --actor $ACTOR_DIR --override  (inside the cli container)"
+if ! kli kontra deploy --actor "$ACTOR_DIR" --override >"$LOGS/deploy.log" 2>&1; then
   bad "kontra deploy failed — see $LOGS/deploy.log"
   tail -30 "$LOGS/deploy.log"
   exit 1
