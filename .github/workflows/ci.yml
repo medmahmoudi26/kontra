@@ -498,11 +498,18 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
+      # THE SAME LINE THE `python` JOB ABOVE USES, and `runtime/python` is deliberately NOT on it:
+      # it carries no pyproject.toml and no setup.py — it is a package tree the images put on
+      # PYTHONPATH, not an installable project. `pip install -e ./runtime/python` answers
+      # `does not appear to be a Python project`, which is what failed this job once.
+      #
+      # NO VENV EITHER. `setup-python` already put an interpreter on PATH, and the gate resolves
+      # `python3` from there; a venv would be a second interpreter for the gate to pick the wrong
+      # one of.
       - name: install the SDK
         run: |
-          python -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e "./sdk/python[dev]" -e ./runtime/python
+          python -m pip install --upgrade pip
+          python -m pip install -e './sdk/python[dev]'
 
       # THE GATE. Its exit code is the job's, and it prints which condition failed and what it
       # measured. Not piped into anything: a pipeline reports its LAST stage's status, which is how
@@ -643,10 +650,19 @@ jobs:
           want=$(grep -oE '^const packVersion = "[^"]+"' "$GITHUB_WORKSPACE/cli/packbuild.go" \
             | sed -E 's/.*"([^"]+)".*/\1/')
           [ -n "$want" ] || { echo "::error::could not read packVersion out of cli/packbuild.go"; exit 1; }
+          # A PREFIX, NOT AN EQUALITY, AND THE DIFFERENCE IS MEASURED RATHER THAN GUESSED.
+          # `pack --version` from the pinned release prints
+          #     0.40.9+git-8210eb1.build-6996
+          # — the version plus build metadata — so `[ "$got" = "0.40.9" ]` is false for the exact
+          # binary this image installs. Matching `<version>` or `<version>+…` still catches 0.39
+          # against 0.40, which is the thing worth catching.
           for svc in cli orchestrator-infra; do
             got=$(docker compose exec -T "$svc" pack --version | tr -d '\r')
             echo "$svc: pack $got (want $want)"
-            [ "$got" = "$want" ] || { echo "::error::$svc has pack $got, cli/packbuild.go expects $want"; exit 1; }
+            case "$got" in
+              "$want"|"$want"+*) ;;
+              *) echo "::error::$svc has pack $got, cli/packbuild.go expects $want"; exit 1 ;;
+            esac
           done
 
       - name: the API answers
