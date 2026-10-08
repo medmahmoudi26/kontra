@@ -58,6 +58,38 @@ const (
 // dependencies and this only appends the SDK; if it has none, one is written.
 var dependencyManifests = []string{"requirements.txt", "pyproject.toml", "Pipfile", "setup.py"}
 
+// stageParent is WHERE the staged context goes, and the answer is not `/tmp`.
+//
+// THE PATH HAS TO SPELL THE SAME INSIDE AND OUTSIDE THIS CONTAINER. `pack` drives the host's daemon
+// through the mounted socket, so every path it hands the lifecycle is resolved by the HOST. The
+// workspaces tree is mounted `${KONTRA_WORKSPACES}:${KONTRA_WORKSPACES}` — the same spelling on both
+// sides, deliberately — and the actor directories under it are what the old build context was. A
+// context in the `cli` container's own `/tmp` has no host counterpart, and what came back was not a
+// missing-file error but
+//
+//	[exporter] ERROR: failed to export: saving image: failed to commit cache: committing cache:
+//	           rename /launch-cache/staging /launch-cache/committed: no such file or directory
+//
+// after a build that had otherwise completely succeeded — on the GitHub runner, and not on the box
+// this was written on, which is what a path that resolves by accident looks like.
+//
+// DOT-PREFIXED, so `workspace watch` and `workspace list` skip it: both enumerate children of this
+// directory and both already ignore a leading dot, which is the same reason `workspace seed` stages
+// as `.seed-*` here rather than in the system temp directory.
+//
+// Empty means os.MkdirTemp's default, which is right for a laptop: no container, no socket, no
+// second spelling of any path.
+func stageParent() string {
+	root := workspacesParent()
+	if root == "" {
+		return ""
+	}
+	if st, err := os.Stat(root); err != nil || !st.IsDir() {
+		return ""
+	}
+	return root
+}
+
 // stageActorBuild copies the actor into a temporary directory, adds everything the image needs that
 // the actor does not carry, and returns the directory to hand `pack`. The caller removes it.
 func stageActorBuild(actorDir string, m actorManifest, engine, sdkRoot string) (string, error) {
@@ -66,7 +98,7 @@ func stageActorBuild(actorDir string, m actorManifest, engine, sdkRoot string) (
 			"from the checkout.\n  The `cli` and `orchestrator-infra` services have it at /opt/kontra, "+
 			"which is where %s and the handler are shipped", stagedSDK)
 	}
-	staged, err := os.MkdirTemp("", "kontra-build-")
+	staged, err := os.MkdirTemp(stageParent(), ".kontra-build-")
 	if err != nil {
 		return "", fmt.Errorf("could not make a build directory: %w", err)
 	}

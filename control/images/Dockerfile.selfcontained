@@ -303,6 +303,14 @@ RUN printf '%s  /tmp/pack.tgz\n' "${PACK_TARBALL_SHA256}" | sha256sum -c - \
  && rm /tmp/pack.tgz \
  && /usr/local/bin/pack --version
 
-RUN test -x /opt/kontra/handler && test -d /opt/kontra/sdk/python/kontra && test -x /usr/local/bin/pack
+# EVERYTHING `kontra deploy` STAGES INTO AN ACTOR IMAGE, ASSERTED HERE. The build context is
+# assembled from this tree (cli/packstage.go): the handler is the actor's workflow half, and the two
+# Python trees have to BOTH be present because the SDK's pyproject maps
+# `internals = "../../runtime/python/internals"` — a vendored SDK with no sibling installs a `kontra`
+# that cannot import its own actor host, and that failure arrives at load() on a Machine.
+RUN test -x /opt/kontra/handler \
+ && test -d /opt/kontra/sdk/python/kontra \
+ && test -d /opt/kontra/runtime/python/internals \
+ && test -x /usr/local/bin/pack
 CMD ["kontra", "version"]
 ENTRYPOINT ["/usr/local/bin/kontra-entrypoint"]

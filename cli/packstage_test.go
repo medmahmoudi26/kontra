@@ -264,3 +264,37 @@ func TestAGoActorGetsNoPythonSDK(t *testing.T) {
 		t.Error("the Procfile must say which engine, or the entrypoint runs python against a binary")
 	}
 }
+
+func TestTheContextIsStagedWhereTheHOSTCanAlsoSeeIt(t *testing.T) {
+	// `pack` drives the host's daemon through the mounted socket, so every path it hands the
+	// lifecycle is resolved by the HOST. The workspaces tree is mounted at the same spelling on both
+	// sides; the `cli` container's own /tmp has no host counterpart. What that cost was not a
+	// missing-file error but `failed to commit cache: rename /launch-cache/staging …: no such file
+	// or directory`, after a build that had otherwise succeeded.
+	t.Setenv("KONTRA_HANDLER_BIN", "")
+	ws := t.TempDir()
+	t.Setenv("KONTRA_WORKSPACES", ws)
+	staged := stage(t, pyActor(t, nil), sdkTree(t), "py")
+
+	if filepath.Dir(staged) != ws {
+		t.Errorf("staged at %q, want a child of the workspaces tree %q", staged, ws)
+	}
+	// Dot-prefixed, because `workspace watch` and `workspace list` enumerate this directory and
+	// both skip a leading dot — otherwise a build context would read as a workspace to deploy.
+	if !strings.HasPrefix(filepath.Base(staged), ".") {
+		t.Errorf("%q would be enumerated as a workspace", filepath.Base(staged))
+	}
+}
+
+func TestWithNoWorkspacesTreeTheSystemTempDirIsFine(t *testing.T) {
+	// A laptop: no container, no socket, no second spelling of any path.
+	t.Setenv("KONTRA_HANDLER_BIN", "")
+	t.Setenv("KONTRA_WORKSPACES", filepath.Join(t.TempDir(), "does-not-exist"))
+	if got := stageParent(); got != "" {
+		t.Errorf("stageParent() = %q, want the system default when the tree is absent", got)
+	}
+	staged := stage(t, pyActor(t, nil), sdkTree(t), "py")
+	if _, err := os.Stat(filepath.Join(staged, "Procfile")); err != nil {
+		t.Errorf("staging must still work: %v", err)
+	}
+}

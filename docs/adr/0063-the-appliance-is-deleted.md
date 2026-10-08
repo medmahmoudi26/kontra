@@ -202,6 +202,17 @@ obvious:
   image built before this keeps working.
 - **A missing handler is a refusal, not a warning.** An image without it starts the actor half,
   polls `<actor>-<version>-sessions`, answers no workflow task, and looks healthy.
+- **The staged copy lives in the workspaces tree, not in `/tmp`.** `pack` drives the HOST's daemon
+  through the mounted socket, so every path it hands the lifecycle is resolved by the host — and
+  `${KONTRA_WORKSPACES}` is mounted at the same spelling on both sides, which is what made the
+  actor directory a usable context in the first place. A context in the `cli` container's own `/tmp`
+  has no host counterpart, and the symptom was not a missing file: it was
+  `[exporter] ERROR: failed to export: saving image: failed to commit cache: committing cache:
+  rename /launch-cache/staging /launch-cache/committed: no such file or directory` after a build
+  that had otherwise completely succeeded — on the GitHub runner, and not on the box this was
+  written on, which is what a path that resolves by accident looks like. The directory is
+  dot-prefixed so `workspace watch` and `workspace list` skip it, the same reason `workspace seed`
+  stages as `.seed-*` there.
 
 **AND `**` HAD TO GRANT `push-actors` CREATE.** Actor images do not live under `actors/`:
 `cli/deploy.go` pushes `<registry>/<name>:<version>` and `cli/scale.go` pulls the same string —
@@ -212,6 +223,20 @@ resource is denied`. Reproduced against a zot carrying this exact policy, which 
 rest of this was proved: v2.1.21 with the install's rendered `accessControl`, three htpasswd
 accounts and `compat: ["docker2s2"]`, on a loopback port. The separation that matters is untouched —
 `kontra-runtimes/**` is the more specific rule, so `push-actors` is read-only there.
+
+**AND TWO DEPLOYS OF ONE ACTOR WERE RACING, WHICH IS THE INSTALL'S NORMAL CASE.** `workspace watch`
+runs `kontra deploy --override` for every actor directory it sees, so the parity gate — which creates
+an actor under the watched tree and then deploys it — had two lifecycles building one image and
+sharing every volume pack keys on the image name. The loser reported `failed to commit cache:
+committing cache: rename /launch-cache/staging /launch-cache/committed: no such file or directory`
+after a build that had detected, installed and exported every layer; the install job, where only the
+watcher deploys, passed the same step. Nothing in that sentence says "concurrent" and the same
+deploy alone succeeds, which is how a race reads as flakiness in somebody else's tool. `kontra
+deploy` now holds an advisory lock per actor VERSION across both the immutability check and the
+build (`cli/deploylock.go`), so the waiter re-reads the registry after the winner pushed and gets
+the honest answer — `already deployed`, which `watchDeploySettled` already treats as the steady
+state. `flock` and not a lock file's existence: the kernel releases an advisory lock however the
+holder exits, and a stale `O_EXCL` file would leave the next deploy deciding how stale is stale.
 
 **Measured, end to end, on that install:** `hello:0.1.0` built, pushed, confirmed at
 `sha256:b7e77989…`, entrypoint `/cnb/process/worker`, Python 3.12.15 from the pinned

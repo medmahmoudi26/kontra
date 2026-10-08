@@ -277,6 +277,20 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 	reg := registryAddress(o.registry)
 	remote := fmt.Sprintf("%s/%s:%s", reg, m.Name, m.Version)
 	cred := pushCredential()
+	// ONE BUILD OF THIS VERSION AT A TIME, AND IT IS HELD ACROSS THE CHECK BELOW AS WELL AS THE
+	// BUILD. `workspace watch` deploys every actor directory it sees, so an operator or a gate
+	// deploying the same actor has two lifecycles sharing one launch-cache volume and one tag
+	// (cli/deploylock.go carries the measured failure). Held across `versionDeployed` too, so the
+	// waiter re-reads the registry AFTER the winner pushed and gets the honest answer — `already
+	// deployed` — rather than both passing a check neither had invalidated yet. Outside the
+	// `--host-only` branch because the caches the lifecycle shares are keyed on the image, not on
+	// whether anyone pushes it.
+	unlock, lerr := lockDeploy(m.Name, m.Version)
+	if lerr != nil {
+		return nil, lerr
+	}
+	defer unlock()
+
 	if !o.hostOnly {
 		// A FOURTH SITE NAMES AN ARTIFACT, and it is checked here for the same reason the other three
 		// are (cli/internal/ociref/ociref.go). `.scratch/warden/issues/15-*` counted three — build, pull, and the
