@@ -32,9 +32,11 @@ jobs:
     name: sdk/python
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -85,14 +87,16 @@ jobs:
       run:
         working-directory: control/orchestrator
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10
 
       # Node 22+: the orchestrator uses node:sqlite (catalog/graphs store) — 20 lacks it.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: pnpm
@@ -114,7 +118,7 @@ jobs:
       #
       # `working-directory` is overridden to the repo root: the editable install path is relative to
       # it, and this job otherwise runs inside `orchestrator/`.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -157,7 +161,9 @@ jobs:
     name: handler + cli
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       # A DOWNGRADE COMPILES, AND THAT IS WHY IT NEEDS A GATE RATHER THAN A COMPILER.
       #
@@ -177,7 +183,7 @@ jobs:
           git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
           python3 scripts/assert-no-dependency-downgrade.py FETCH_HEAD
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: runtime/handler/go.mod
           cache-dependency-path: |
@@ -283,9 +289,11 @@ jobs:
         ports:
           - 5000:5000
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: runtime/handler/go.mod
           cache-dependency-path: |
@@ -340,8 +348,9 @@ jobs:
     name: proto-envelope
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           # THE GATE READS ITS BASELINE OUT OF THIS CLONE, so the clone has to contain one:
           # fetch-depth: 0 brings every branch down as a remote-tracking ref AND the history
           # behind them, which is what `git merge-base HEAD origin/<base>` needs. A shallow
@@ -351,7 +360,7 @@ jobs:
 
       # github_token lets `buf generate` pull the remote plugins (protocolbuffers
       # python/pyi + community ts-proto) without rate-limiting.
-      - uses: bufbuild/buf-setup-action@v1
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
         with:
           github_token: ${{ github.token }}
           # PIN the buf CLI. Every codegen plugin in buf.gen.yaml is already version-pinned,
@@ -364,7 +373,7 @@ jobs:
 
       # protoc-gen-go-temporal is a LOCAL binary plugin (not on the BSR) that buf.gen.yaml
       # invokes for actor_service.proto's Nexus op — install it so `buf generate` succeeds.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: runtime/handler/go.mod
 
@@ -462,16 +471,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       # THE SIBLING LAYOUT, because `Dockerfile.selfcontained`'s context is the parent directory.
       # Two `path:` checkouts and not a symlink: docker will not follow a context symlink that
       # leaves the context.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: _sibling/kontra
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: medmahmoudi26/kontra-console
           path: _sibling/kontra-console
@@ -484,7 +495,7 @@ jobs:
       # HOST — once with no control plane and once against the stack — because the SDK an actor
       # author installs runs on their machine, so the address it is handed has to be the one an
       # operator is given.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: install the SDK
@@ -511,18 +522,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       # THE SIBLING LAYOUT, BECAUSE `Dockerfile.selfcontained`'s CONTEXT IS THE PARENT DIRECTORY.
       # The console resolves `@kontra/core` as `link:../kontra/shared/core` — a filesystem path, not
       # a published package — so both checkouts must be visible to ONE build and both names are
       # load-bearing. Two `path:` checkouts and not a symlink: docker will not follow a context
       # symlink that leaves the context.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: _sibling/kontra
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: medmahmoudi26/kontra-console
           path: _sibling/kontra-console

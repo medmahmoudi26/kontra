@@ -52,7 +52,23 @@ docker build -f "$REPO/control/images/Dockerfile.logship" -t kontra-logship:ci "
 echo "==> kontra-porter:ci"
 docker build -f "$REPO/control/images/Dockerfile.porter" -t kontra-porter:ci "$REPO"
 
+# ── WHAT WAS BUILT, AS AN ASSERTION AND NOT A SUMMARY LINE ──────────────────────────────────────
+#
+# THIS WAS A DECORATIVE `docker images | grep` AND IT FAILED THE WHOLE SCRIPT. Two things met: the
+# `grep` was anchored to two leading spaces from a `--format '  {{.Repository}}…'` template, and
+# DOCKER STRIPS LEADING WHITESPACE FROM A FORMAT STRING — measured with `cat -A`, the lines begin at
+# the repository name. So the anchor could never match, `grep` exited 1 on no match, `pipefail`
+# turned that into the script's exit code, and both CI jobs that call this died AFTER building every
+# image, having printed the word "built:" and nothing else.
+#
+# The lesson is the shape rather than the regex: a line that only REPORTS must not be able to fail
+# the thing it reports on. So this does not report — it asserts, by name, with `docker image
+# inspect`, which cannot match nothing and says which image is absent when one is.
 echo
-echo "built:"
-docker images --format '  {{.Repository}}:{{.Tag}}  {{.Size}}' \
-  | grep -E '^  (kontra|kontra-orchestrator|kontra-logship|kontra-porter):'
+for img in kontra:ci kontra-orchestrator:ci kontra-logship:ci kontra-porter:ci; do
+  size=$(docker image inspect "$img" --format '{{.Size}}' 2>/dev/null) || {
+    echo "::error::$img was not built, and this script claimed to build it" >&2
+    exit 1
+  }
+  printf 'built %-28s %s MB\n' "$img" "$((size / 1000000))"
+done
