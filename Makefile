@@ -3,7 +3,7 @@
 # **THE LOCAL CONTROL PLANE IS THE COMPOSE CLUSTER (ADR 0047).** `make up` starts
 # docker-compose.yml, which includes docker-compose.quickstart.yml. `kontra up` remains in the
 # binary and is not a supported install path.
-.PHONY: up up-d down logs ui api proto-check image worker-base
+.PHONY: up up-d down logs ui api proto-check image
 
 # THERE IS NO `tmux-dir` TARGET ANY MORE, and its absence is the fix rather than a deletion.
 #
@@ -122,7 +122,7 @@ console: $(CONSOLE)
 # filesystem path — both checkouts have to be visible to one build.
 # ── THE TAGS THESE TARGETS WRITE ARE THE TAGS THE INSTALL RESOLVES ──────────────────────────────
 #
-# They used to be `kontra:latest` and `kontra-worker-base:1`. `docker-compose.yml` and
+# They used to be bare local tags like `kontra:latest`. `docker-compose.yml` and
 # `control/pulumi/Pulumi.yaml` now default to `ghcr.io/medmahmoudi26/<name>:dev`, because the
 # quickstart is two `curl`s and `docker compose up -d` and a bare name only resolves on a machine
 # that has already built it.
@@ -131,26 +131,22 @@ console: $(CONSOLE)
 # Docker resolves by name, and `ghcr.io/medmahmoudi26/kontra:dev` and `kontra:latest` are two names
 # for the same bytes — so building the second and running the first sends the daemon to ghcr.io for
 # an image that is already on the disk. MEASURED before these moved: this machine held
-# `kontra:latest`, `kontra-orchestrator:latest`, `kontra-host:1` and `kontra-worker-base:1`, and not
+# `kontra:latest` and `kontra-orchestrator:latest`, and not
 # one `ghcr.io/medmahmoudi26/*`. That is why `Pulumi.yaml`'s "RemoteImage resolves a locally present
 # image without consulting a registry" still holds: it holds per NAME, not per image.
 #
 # Overridable, and the override is what CI uses to build a tag before it exists.
 KONTRA_IMAGE ?= ghcr.io/medmahmoudi26/kontra:dev
-KONTRA_WORKER_BASE_IMAGE ?= ghcr.io/medmahmoudi26/kontra-worker-base:dev
 KONTRA_PORTER_IMAGE ?= ghcr.io/medmahmoudi26/kontra-porter:dev
 
 image: $(CONSOLE)
 	DOCKER_BUILDKIT=1 docker build -f control/images/Dockerfile.selfcontained \
 	  --build-arg VERSION=$(VERSION) \
 	  -t "$(KONTRA_IMAGE)" "$(dir $(CURDIR))"
-	$(MAKE) worker-base
 	@echo
 	@echo "  docker compose up -d"
 	@echo "  open http://127.0.0.1:8088"
 
-worker-base:
-	docker build -f control/images/Dockerfile.workerbase -t "$(KONTRA_WORKER_BASE_IMAGE)" .
 
 # PORTER — Arrow Flight SQL over the lake. Built separately from `image` because it shares nothing
 # with the orchestrator: a different language, a different base, and a source tree fetched from

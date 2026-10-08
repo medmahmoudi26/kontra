@@ -10,7 +10,7 @@ and the fix was applied as `go get …/service/s3@v1.97.3` in every module that 
 scrolls past among thirty others.
 
 WHAT IT COST, because the shape of the failure is the argument for this file. The handler is the one
-module a container build compiles with `GOWORK=off` (`Dockerfile.workerbase`), so its own go.mod is
+module a container build compiles with `GOWORK=off`, so its own go.mod is
 the whole truth there, while every developer's `go build` uses the workspace maximum and compiles
 something else. Nothing failed to build. Instead a real run reached the claim-check store and got
 

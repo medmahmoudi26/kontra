@@ -124,7 +124,10 @@ func resolveRuntime(reg, declared, engine string) (resolvedRuntime, error) {
 		avail, lerr := listRuntimes(reg)
 		if lerr != nil || len(avail) == 0 {
 			return resolvedRuntime{}, fmt.Errorf("runtime %q (%s) is not in the registry: %w\n"+
-				"  and no runtimes are published under %s — mirror them with `kontra runtime import`",
+				"  and no runtimes are published under %s.\n"+
+				"  Point KONTRA_RUNTIMES_PREFIX at a registry that has them — the published set is\n"+
+				"  ghcr.io/medmahmoudi26/kontra-runtimes, which reads anonymously — or copy them into\n"+
+				"  this one with `kontra registry migrate`.",
 				declared, ref, derr, runtimesPrefix(reg))
 		}
 		return resolvedRuntime{}, fmt.Errorf("runtime %q (%s) is not in the registry: %w\n  available: %s",

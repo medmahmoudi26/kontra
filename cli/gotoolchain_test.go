@@ -135,7 +135,16 @@ func TestEveryFunctionalToolchainPinAgreesWithGoWork(t *testing.T) {
 	// THE GUARD AGAINST A GREEN SWEEP THAT SWEPT NOTHING. If a rename or a moved directory means the
 	// patterns match zero files, every assertion above passes by vacuity — which is precisely the
 	// shape of bug this file exists to catch, one level up.
-	const atLeast = 5
+	//
+	// TWO, DOWN FROM SIX, AND THE NUMBER IS THE POINT RATHER THAN A FLOOR TO BE LOWERED AGAIN. Four
+	// of the six pins were build sites that no longer exist: the appliance's bundle pins went with
+	// the appliance, and `Dockerfile.workerbase` plus the two Dockerfiles `cli/deploy.go` generated
+	// went with the classic build path — an actor's Go toolchain now comes from the CNB builder's
+	// buildpack, which is pinned by digest in `cli/packbuild.go` instead of by version here. What is
+	// left is the pair that still compiles Go from this repo: the installer and the one image build.
+	// Raising this back means a new build site, and lowering it again means one fewer place this
+	// test can protect.
+	const atLeast = 2
 	if found < atLeast {
 		t.Fatalf("found only %d functional toolchain pins, expected at least %d — the sweep is "+
 			"matching nothing and would pass whatever the versions were", found, atLeast)

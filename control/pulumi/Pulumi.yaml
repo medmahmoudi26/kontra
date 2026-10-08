@@ -189,7 +189,7 @@ config:
   # these defaults — it tags `$${KONTRA_IMAGE:-…}` and that default is now qualified — or a
   # developer who has built everything still sends the daemon looking for a tag it does not have,
   # and the local track silently becomes a registry pull. MEASURED before the change: this machine
-  # held `kontra:latest`, `kontra-orchestrator:latest`, `kontra-host:1` and `kontra-worker-base:1`
+  # held `kontra:latest` and `kontra-orchestrator:latest`
   # and not one `ghcr.io/medmahmoudi26/*`.
   #
   # MEASURED, and it is the fact that makes one set of refs serve both tracks: `docker.RemoteImage`
@@ -205,9 +205,6 @@ config:
   orchestratorImage:
     type: string
     default: ghcr.io/medmahmoudi26/kontra-orchestrator:dev
-  hostImage:
-    type: string
-    default: ghcr.io/medmahmoudi26/kontra-host:dev
   # THE SHIPPER, WHICH USED TO BE STOCK `python:3.12-alpine` PLUS TWO BIND MOUNTS. It has its own
   # image now (`control/images/Dockerfile.logship`) because a `curl` install has no
   # `control/images/` to mount from, and because the old entrypoint ran `apk add docker-cli curl` on
@@ -216,15 +213,6 @@ config:
   logshipImage:
     type: string
     default: ghcr.io/medmahmoudi26/kontra-logship:dev
-  # NO CONTAINER RUNS THIS ONE, and it is here anyway. `kontra deploy` COPYs the actor-agnostic
-  # handler out of it into every actor image (`cli/deploy.go`, `cli/serve.go:197`), so an install
-  # that has not got it turns the first `kontra deploy` into a build. It appears in no compose
-  # service, which is why `make image` building it and not `kontra-orchestrator:latest` reads as
-  # arbitrary until you know this — and why `parity.py` cannot see it: with no container to attach
-  # it to, nothing in that file compares this key against anything.
-  workerBaseImage:
-    type: string
-    default: ghcr.io/medmahmoudi26/kontra-worker-base:dev
 
   # ── WHERE THE OPERATOR'S CODE IS. REQUIRED, DELIBERATELY. ──────────────────────────────────────
   #
@@ -325,7 +313,7 @@ variables:
   # deleted (ADR 0052 Consequences), because a variable that reaches two of the three roles is the
   # trap `.env.quickstart` records for the five that used to sit there reaching nothing.
   #
-  # KONTRA_IMAGE / KONTRA_HOST_IMAGE are the TAGS, not the `imageId`s the containers below run. The
+  # KONTRA_IMAGE is the TAG, not the `imageId` the containers below run. The
   # control plane starts Workers by name through the Docker socket, so a digest here would be a name
   # the Warden cannot pass to `docker run` as written.
   orchestratorEnv: |-
@@ -346,7 +334,6 @@ variables:
     KONTRA_DUCKDB_MEMORY_LIMIT=${duckdbMemoryLimit}
     KONTRA_WORKSPACES=${workspaces}
     KONTRA_IMAGE=${kontraImage}
-    KONTRA_HOST_IMAGE=${hostImage}
     KONTRA_TRUST_REGISTRIES=${trustRegistries}
     KONTRA_TRUST_UNSIGNED=${trustUnsigned}
     KONTRA_EXPLORE_TOKEN=${exploreToken}
@@ -453,14 +440,6 @@ resources:
   imgOrchestrator:
     type: docker:index:RemoteImage
     properties: { name: "${orchestratorImage}", keepLocally: true }
-    options: { provider: "${dockerProvider}" }
-  imgHost:
-    type: docker:index:RemoteImage
-    properties: { name: "${hostImage}", keepLocally: true }
-    options: { provider: "${dockerProvider}" }
-  imgWorkerBase:
-    type: docker:index:RemoteImage
-    properties: { name: "${workerBaseImage}", keepLocally: true }
     options: { provider: "${dockerProvider}" }
   # WAS `imgPython`, pointing at stock `python:3.12-alpine`. Renamed rather than repointed because
   # the name said what it was and it is no longer that; `parity.py` resolves a container's image
@@ -1634,7 +1613,7 @@ resources:
     type: docker:index:Container
     properties:
       name: kontra-probe
-      image: ${imgHost.imageId}
+      image: ${imgKontra.imageId}
       restart: unless-stopped
       labels:
         - label: kontra.logs
@@ -1642,8 +1621,14 @@ resources:
       networksAdvanced:
         - name: ${net.name}
           aliases: ["orchestrator-probe"]
-      # NOT the shared block — a hand-written seven. This image is `kontra-host:1`, which carries the
-      # actor-host runtime and none of the orchestrator's config surface.
+      # NOT the shared block — a hand-written seven. This runs out of the `kontra` image, for its
+      # python3 and the SDK on PYTHONPATH, and needs none of the orchestrator's config surface.
+      #
+      # THE SAME IMAGE THE CLI RUNS, DELIBERATELY. It had a `kontra-host` of its own, built from a
+      # Dockerfile whose only other job was being the base `kontra deploy` layered actors onto —
+      # and buildpacks layer onto a published runtime instead, so that Dockerfile went. Sharing the
+      # `kontra` image is also the argument `Dockerfile.orchestrator` already makes for taking its
+      # python from there: a second `pip install` would be unpinned in two images and drift.
       envs:
         - KONTRA_ADDRESS=temporal:7233
         - KONTRA_S3_ENDPOINT=http://seaweed:8333
@@ -1680,14 +1665,12 @@ outputs:
   bind: ${bind}
   network: ${net.name}
 
-  # The four kontra-owned refs, resolved. `kontra doctor` reads these to answer "which images is this
+  # The kontra-owned refs, resolved. `kontra doctor` reads these to answer "which images is this
   # control plane actually running", which on the ghcr track is the difference between the published
   # tag and whatever a stale local build left behind.
   images:
     kontra: ${imgKontra.name}
     orchestrator: ${imgOrchestrator.name}
-    host: ${imgHost.name}
-    workerBase: ${imgWorkerBase.name}
 
   # The one-shot's exit code, exported because that is what makes
   # `service_completed_successfully` VISIBLE rather than merely enforced — a reader of the stack can

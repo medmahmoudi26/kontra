@@ -14,7 +14,6 @@ Container definitions for running kontra locally, and the shape the cloud mirror
 
 ## Images
 
-- **`Dockerfile.pyworker`** — the canonical `kontra-host:1` base: the Python runtime only
   (`actorkit` + the Temporal SDK + the S3/seaweed extra), no actor deps. Per-actor images
   are `FROM kontra-host:1` and add only their own deps (`examples/python/<actor>/Dockerfile`).
   The base carries no entrypoint; the build step stamps `ENTRYPOINT ["python3",

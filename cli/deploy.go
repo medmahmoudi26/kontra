@@ -1,32 +1,29 @@
-// deploy.go — `kontra deploy --actor <dir>`: build (and optionally push) an actor image.
+// deploy.go — `kontra deploy --actor <dir>`: build (and optionally publish) an actor image.
 //
-// THE DOCKERFILE PATH AND THE BUILDPACK PATH BOTH LIVE HERE, and the file's old rule — "no shell-out
-// to `docker build`, the engine API is the boundary here", with the CLASSIC builder on purpose —
-// still describes the Dockerfile path exactly. It no longer describes the whole file.
+// ONE BUILD PATH, AND IT IS `pack`. An actor is layered onto a published runtime image by the CNB
+// lifecycle; there is no Dockerfile here, no base image this repo builds, no cached worker base and
+// no handler recompile per deploy. ADR 0061 records the decision and ADR 0063 the removal of what
+// it replaced.
 //
-// The buildpack path shells out to a pinned `pack` (cli/packbuild.go says why: the CNB lifecycle is
-// five phases in separate containers with a credential boundary between them, not a build request an
-// Engine API call can express). That is a deliberate change of boundary rather than an erosion of
-// one, and ADR 0061 records it.
+// IT SHELLS OUT, AND THAT IS A CHANGE OF BOUNDARY RATHER THAN AN EROSION OF ONE. The file's old
+// rule was "no shell-out to `docker build`, the Engine API is the boundary here"; the CNB lifecycle
+// is five phases in separate containers with a credential boundary between them, which is not a
+// build request an Engine API call can express. `cli/packbuild.go` carries the reasoning.
 //
-// The classic builder is also what left 28 dangling intermediates averaging 2.2 GiB on the box this
-// was written on. It stays only until the two remaining `runtime.Dockerfile`/`Dockerfile` escape
-// hatches are re-homed onto runtimes; deleting it before then removes both hooks at once.
+// WHAT THE OLD PATH COST, for the record: the classic builder it used left 28 dangling
+// intermediates averaging 2.2 GiB on the box this was written on, and a Go actor's build context
+// was the REPO ROOT — because its `replace` directives pointed outside the actor — so any edit
+// anywhere invalidated it. The build context is now the actor's own directory, which is why a
+// `replace` that points above it is refused rather than worked around.
 package main
 
 import (
-	"archive/tar"
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,26 +31,13 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	docker "github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/archive"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
-
-// baseImage is the canonical Python host (infra/Dockerfile.pyworker) every
-// Dockerfile-less actor builds FROM. MAJOR tag — see the Dockerfile's comment.
-const baseImage = "kontra-host:1"
-
-func hostImage() string {
-	if v := strings.TrimSpace(os.Getenv("KONTRA_HOST_IMAGE")); v != "" {
-		return v
-	}
-	return baseImage
-}
 
 // defaultRegistryPort is the port actor images are pushed to and pulled from — zot's, and
 // `registry:2`'s before it (docker-compose.yml `KONTRA_REGISTRY_PORT:-5000`).
@@ -92,42 +76,6 @@ func registryAddress(flagVal string) string {
 	return defaultRegistry
 }
 
-// workerBaseImage caches the actor-AGNOSTIC worker parts (the compiled Go handler +
-// entrypoint) so a per-actor deploy COPYs the pre-built handler instead of recompiling
-// it every time. Rebuilt only when handler/ changes:
-//
-//	docker rmi kontra-worker-base:1
-//
-// THE CONSTANT IS THE DEFAULT, NOT THE ANSWER — see workerBase() below. It stays a literal, spelled
-// out rather than assembled, because `.github/workflows/publish.yml` reads the declaration below to
-// learn which image it has to build.
-//
-// AND THIS COMMENT MUST NOT RESTATE THE PATTERN THAT GREP LOOKS FOR. It used to quote it, and the
-// grep was unanchored, so it matched the quotation too and handed the workflow an ellipsis as a
-// second image name — `0.0.0-test7` pushed all five images and then failed with "the install
-// references a kontra-owned image '…' that this workflow does not know how to build". The grep is
-// anchored to `^const` now, so a comment cannot match it; this note stays wordy instead.
-const workerBaseImage = "kontra-worker-base:1"
-
-// workerBase resolves THE worker base reference, the same way hostImage() resolves the Python host.
-//
-// IT IS AN ENVIRONMENT VARIABLE BECAUSE A LOCAL BUILD AND THE INSTALL HAVE TO AGREE ON A NAME.
-// `Makefile`'s `worker-base` target tags whatever `KONTRA_WORKER_BASE_IMAGE` says, and it defaults to
-// `ghcr.io/medmahmoudi26/kontra-worker-base:dev` so a `make image` writes the name the published
-// install resolves. With this function absent, that target wrote one name and this file looked for
-// another: Docker resolves by NAME, so `deploy` found nothing at :500, fell through to :510, and
-// recompiled the Go handler on a machine that had just built it. Not a failure — the fallback is
-// real and it works — but a silent minute, and `make worker-base` became work with no consumer.
-//
-// The same split is why `publish.yml` publishes `kontra-worker-base:<version>` at all: without a
-// variable, a published worker base is a name nothing ever asks for.
-func workerBase() string {
-	if v := strings.TrimSpace(os.Getenv("KONTRA_WORKER_BASE_IMAGE")); v != "" {
-		return v
-	}
-	return workerBaseImage
-}
-
 // imageAPI is the slice of the Docker client deploy needs — a tiny interface so tests
 // can fake it and never touch a daemon.
 type imageAPI interface {
@@ -140,6 +88,11 @@ type imageAPI interface {
 var newDocker = func() (imageAPI, error) {
 	return docker.NewClientWithOpts(docker.FromEnv, docker.WithAPIVersionNegotiation())
 }
+
+// runPackBuild is the seam `kontra deploy`'s own tests build against: `packBuild` shells out to a
+// pinned `pack` and runs a five-phase lifecycle in containers, which a unit test may not do. The
+// end-to-end path is `scripts/parity-gate.sh`'s, against a real install.
+var runPackBuild = packBuild
 
 type actorManifest struct {
 	Name    string `json:"name"`
@@ -275,8 +228,11 @@ type deployOpts struct {
 	actorDir string
 	engine   string // "py" (default) | "go"
 	registry string // "" → defaultRegistry
-	hostOnly bool   // build the host image only; skip the worker bundle + push
+	hostOnly bool   // build the image but do not publish it
 	override bool   // replace an already-deployed version instead of refusing
+	// dockerConfig is a directory holding a `config.json` with the registry push credential, handed
+	// to `pack` as DOCKER_CONFIG. Empty means anonymous, which an authenticated registry refuses.
+	dockerConfig string
 }
 
 // deployResult is the structured outcome of a deploy — what `deploy_actor` returns to an
@@ -316,11 +272,6 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 	if err != nil {
 		return nil, err
 	}
-	d, err := newDocker()
-	if err != nil {
-		return nil, fmt.Errorf("docker engine unreachable: %w", err)
-	}
-
 	// A worker deploy pushes to the registry — resolve it up front so we can refuse an
 	// accidental re-deploy of an existing version BEFORE spending a build.
 	reg := registryAddress(o.registry)
@@ -350,68 +301,74 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 		}
 	}
 
-	// 1) the actor HOST image (the actor itself) — the worker builds FROM it. A Python
-	// actor layers its code on the shared python host base; a Go actor is a compiled binary, so
-	// its host image is built by COMPILING the actor (context = repo root, so the sdk/go and
-	// runtime/go `replace`s resolve) into a slim runtime image. Both yield /actor/<name>/ the worker runs.
-	hostTag := fmt.Sprintf("kontra/%s:%s", m.Name, m.Version)
+	// 1) THE RUNTIME. An actor is layered onto a published runtime image rather than onto a base
+	// this repo builds, and the digest it resolves to is what the catalog records — so a runtime can
+	// be patched underneath an actor and `kontra rebase` can move it without a rebuild (ADR 0061).
+	rt, err := resolveRuntime(reg, m.Runtime, engine)
+	if err != nil {
+		return nil, err
+	}
+	// THE TRUST GATE, BEFORE THE BUILD AND NOT AFTER IT. A runtime the policy would refuse at pull
+	// time must not cost a buildpack build first.
+	if err := admitRuntime(ctx, rt, progress); err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(progress, "runtime %s:%d → %s\n", rt.Name, rt.Major, rt.Pinned())
+
+	// 2) THE TWO REFUSALS THE BUILDPACK LAYOUT NEEDS, both before anything is built.
+	switch deployShellCheck(o.actorDir, os.Getenv("KONTRA_DEPLOY_SH")) {
+	case deployShellRefuse:
+		return nil, errors.New(deployShellMessage)
+	case deployShellWarn:
+		fmt.Fprintf(progress, "warning: %s\n", deployShellMessage)
+	}
 	if engine == "go" {
-		if err := buildGoActor(ctx, d, progress, o.actorDir, m.Name, hostTag); err != nil {
-			return nil, err
+		gomod, rerr := os.ReadFile(filepath.Join(o.actorDir, "go.mod"))
+		if rerr == nil {
+			if directive, line := outsideReplace(string(gomod)); directive != "" {
+				return nil, fmt.Errorf("%s/go.mod:%d points outside the actor's own directory:\n    %s\n"+
+					"  The build context is the actor directory, so a `replace` above it cannot resolve. "+
+					"Vendor what it points at, or publish the module.", o.actorDir, line, directive)
+			}
 		}
-	} else {
-		if err := ensureBase(ctx, d, progress); err != nil {
-			return nil, err
-		}
-		if err := buildActor(ctx, d, progress, o.actorDir, m.Name, hostTag); err != nil {
-			return nil, err
-		}
-	}
-	res := &deployResult{Name: m.Name, Version: m.Version, HostImage: hostTag}
-	if o.hostOnly {
-		return res, nil
 	}
 
-	// 2) the self-contained WORKER image. The actor-agnostic parts (the Go handler and the
-	// entrypoint) live in a cached base built ONCE; the per-actor build just layers this
-	// actor's code on top — no handler recompile per deploy.
-	if err := ensureWorkerBase(ctx, d, progress); err != nil {
-		return nil, err
-	}
-	workerTag := fmt.Sprintf("kontra/%s-worker:%s", m.Name, m.Version)
-	if err := buildWorker(ctx, d, progress, m, engine, hostTag, workerTag); err != nil {
-		return nil, err
-	}
-
-	// 3) push to the registry so any droplet can pull it. `remote` was built and judged before the
-	// build (see the grammar check above), so this is the same string and not a second derivation.
-	if err := d.ImageTag(ctx, workerTag, remote); err != nil {
-		return nil, err
-	}
-	// Local/insecure registry: the engine still requires an X-Registry-Auth header;
-	// base64("{}") is the canonical "no credentials".
-	rc, err := d.ImagePush(ctx, remote, image.PushOptions{
-		RegistryAuth: base64.URLEncoding.EncodeToString([]byte("{}")),
+	// 3) THE BUILD, WHICH IS `pack` AND NOTHING ELSE. One image, published directly by the
+	// lifecycle: there is no separate host image to layer a worker onto any more, so there is no
+	// second build, no cached worker base, and no handler recompile per deploy.
+	//
+	// `--host-only` BECOMES "DO NOT PUBLISH". It used to mean "build the actor image and stop
+	// before the worker image"; with one image the only thing left to stop before is the push, and
+	// that is the useful half — it is what lets an author check a build without claiming a version.
+	res := &deployResult{Name: m.Name, Version: m.Version, HostImage: remote}
+	built, err := runPackBuild(ctx, packOpts{
+		Image:        remote,
+		ActorDir:     o.actorDir,
+		Builder:      pinnedBuilder(),
+		RunImage:     rt.Pinned(),
+		CacheImage:   fmt.Sprintf("%s/%s:cache", reg, m.Name),
+		Registry:     reg,
+		DockerConfig: o.dockerConfig,
+		Publish:      !o.hostOnly,
+		Progress:     progress,
 	})
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
-	pushed, err := streamPushOutput(progress, rc)
-	if err != nil {
-		return nil, fmt.Errorf("push %s: %w", remote, err)
+	if o.hostOnly {
+		return res, nil
 	}
 	res.Image = remote
 	res.Registry = reg
 
-	// THE ADDRESS CHECK, AND IT BELONGS HERE RATHER THAN AT SCALE TIME. The daemon has just
-	// reported a digest for a push it made to `reg` AS IT RESOLVES IT; this asks the registry
-	// THIS PROCESS reaches at `reg` what that tag resolves to now. Agreement means push and pull
-	// are the same registry, which is the property `kontra scale` is about to depend on. A
-	// disagreement is caught one second after the push that caused it, naming the address —
-	// instead of arriving minutes later as `no such image`, which sends an operator to look at
-	// Docker rather than at which registry they are talking to.
-	digest, err := confirmPushed(reg, m.Name, m.Version, remote, pushed)
+	// THE ADDRESS CHECK, AND IT BELONGS HERE RATHER THAN AT SCALE TIME. `pack` has just reported a
+	// digest for what it published to `reg` AS IT RESOLVES IT; this asks the registry THIS PROCESS
+	// reaches at `reg` what that tag resolves to now. Agreement means push and pull are the same
+	// registry, which is the property `kontra scale` is about to depend on. A disagreement is caught
+	// one second after the push that caused it, naming the address — instead of arriving minutes
+	// later as `no such image`, which sends an operator to look at Docker rather than at which
+	// registry they are talking to.
+	digest, err := confirmPushed(reg, m.Name, m.Version, remote, built)
 	if err != nil {
 		return nil, err
 	}
@@ -538,175 +495,6 @@ func registryProbeBases(reg string) []string {
 	return out
 }
 
-// ensureWorkerBase builds the actor-AGNOSTIC worker parts image (kontra-worker-base:1) if
-// absent: a golang stage compiles the Go handler ONCE, and the result — handler + entrypoint —
-// is stashed in a slim image the per-actor build COPYs from. This is what makes a re-deploy fast (no handler recompile) and dodges the
-// memory-heavy compile on every build. Rebuilt only when handler/ changes (docker rmi it).
-// Context = the REPO ROOT (needs handler/ + infra/); the Dockerfile is injected.
-func ensureWorkerBase(ctx context.Context, d imageAPI, progress io.Writer) error {
-	sums, err := d.ImageList(ctx, image.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("reference", workerBase())),
-	})
-	if err != nil {
-		return err
-	}
-	if len(sums) > 0 {
-		return nil
-	}
-	root, err := cliutil.FindRepoRoot("")
-	if err != nil {
-		return fmt.Errorf("worker base %s missing and no repo root to build it (handler/ + infra/): %w", workerBase(), err)
-	}
-	fmt.Fprintf(os.Stderr, "worker base %s missing — building it once (compiles the handler; cached after this)\n", workerBase())
-	tarCtx, err := archive.TarWithOptions(root, &archive.TarOptions{ExcludePatterns: dockerignore(root)})
-	if err != nil {
-		return err
-	}
-	tarCtx = injectFile(tarCtx, "Dockerfile.kontra-worker-base", []byte(workerBaseDockerfile()))
-	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "Dockerfile.kontra-worker-base", workerBase(), nil)
-}
-
-// workerBaseDockerfile compiles the handler (-p=1: serial, so the memory-heavy temporal+aws
-// deps don't OOM a small host) and parks it + the entrypoint in a slim image the per-actor
-// worker COPYs from.
-func workerBaseDockerfile() string {
-	// `runtime/go` IS REQUIRED AND WAS MISSING, and the way it failed is the reason this comment
-	// is here rather than just the line.
-	//
-	// `runtime/handler` imports `runtime/go/codec` and its go.mod `replace`s that module to
-	// `../go`, so the build needs the directory present. It was not copied — but the image is
-	// built ONCE and cached (`ensureWorkerBase` returns early when the tag exists), so the
-	// existing `kontra-worker-base:1` predated the import and nothing failed for as long as
-	// nobody deleted it. The moment one is deleted — which the docs tell you to do, as the way to
-	// pick up a handler or entrypoint change — every deploy on the machine breaks with a bare
-	// `returned a non-zero code: 1`.
-	//
-	// `control/images/Dockerfile.workerbase` is a SECOND COPY of this same image and already has
-	// the line. Two spellings of one artifact, one of them fixed: the standalone file is what a
-	// human reads and edits, and this is what actually runs.
-	return fmt.Sprintf(`FROM golang:1.25 AS handler-build
-ENV GOTOOLCHAIN=go1.26.8
-WORKDIR /src
-COPY sdk/go ./sdk/go
-COPY runtime/go ./runtime/go
-COPY runtime/handler ./runtime/handler
-RUN cd runtime/handler && GOWORK=off go build -p=1 -trimpath -o /out/handler .
-
-FROM alpine:3
-COPY --from=handler-build /out/handler /kontra/handler
-COPY control/images/worker-entrypoint.sh /kontra/entrypoint.sh
-`)
-}
-
-// buildWorker builds the per-actor worker image FAST: FROM the actor host image (so it
-// carries the actor's own deps) and COPY the pre-built parts from kontra-worker-base:1 — no
-// handler recompile. The build context is empty (the Dockerfile only FROMs/COPYs existing
-// images), so this is a handful of quick layers.
-func buildWorker(ctx context.Context, d imageAPI, progress io.Writer, m actorManifest, engine, hostTag, tag string) error {
-	df := workerDockerfile(hostTag, m, engine)
-	buildCtx := emptyTarWith("Dockerfile.kontra-worker", []byte(df))
-	defer buildCtx.Close()
-	return buildImage(ctx, d, progress, buildCtx, "Dockerfile.kontra-worker", tag, nil)
-}
-
-// workerDockerfile assembles a worker from the actor host image + the cached worker base.
-// No golang stage and no handler compile — just COPYs from kontra-worker-base:1.
-//
-// Every worker gets the handler, because there is one deployed kind (ADR 0023 §9): the handler
-// owns the Actor's backing workflow and serves its Nexus op, and an Actor with one Method and
-// no load is still dispatched through it.
-func workerDockerfile(hostTag string, m actorManifest, engine string) string {
-	env := fmt.Sprintf("ENV KONTRA_ACTOR_NAME=%s KONTRA_ACTOR_VERSION=%s KONTRA_ACTOR_ENGINE=%s KONTRA_ACTOR_KIND=%s KONTRA_ACTOR_ENTRY=%s",
-		m.Name, m.Version, engine, m.kindOf(), m.entryFile())
-	return fmt.Sprintf(`FROM %[1]s
-USER root
-COPY --from=%[2]s /kontra/handler /kontra/handler
-COPY --from=%[2]s /kontra/entrypoint.sh /kontra/entrypoint.sh
-RUN chmod +x /kontra/entrypoint.sh /kontra/handler
-%[3]s
-ENTRYPOINT ["/kontra/entrypoint.sh"]
-`, hostTag, workerBase(), env)
-}
-
-// buildGoActor builds a Go actor's HOST image by COMPILING it. Unlike a Python actor (which
-// layers actor.py on the shared python host base), a Go actor is a self-contained binary, so
-// there is no shared Go base: a golang stage compiles the actor and it is parked with its
-// actor.json under /actor/<name>/ in a slim runtime image. The build CONTEXT is the REPO ROOT,
-// not the actor dir, because the actor's go.mod `replace`s — `=> ../../../sdk/go` and, for an
-// actor (not a caller), `=> ../../../runtime/go` — point OUTSIDE the actor dir, so the whole
-// module tree (both SDK seams + the actor) must be in the context. The
-// actor's repo-relative path is computed so the Dockerfile can `cd` into it to build.
-func buildGoActor(ctx context.Context, d imageAPI, progress io.Writer, actorDir, name, tag string) error {
-	root, err := cliutil.FindRepoRoot("")
-	if err != nil {
-		return fmt.Errorf("go actor build needs the repo root (sdk/go + runtime/go + the actor): %w", err)
-	}
-	absActor, err := filepath.Abs(actorDir)
-	if err != nil {
-		return err
-	}
-	rel, err := filepath.Rel(root, absActor)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("go actor dir %s must live under the repo root %s", actorDir, root)
-	}
-	rel = filepath.ToSlash(rel)
-	// Optional per-actor runtime layer. A Go actor that shells to an external tool (subfinder,
-	// masscan, …) needs that binary in its image, and unlike the Python path — where a
-	// Dockerfile in the actor dir wins — buildGoActor always synthesizes. `runtime.Dockerfile`
-	// is the Go-side escape hatch: its contents are appended to the RUNTIME stage only, so the
-	// actor can install what it needs without being able to disturb the build stage or the
-	// /actor/<name>/ layout the entrypoint depends on.
-	var runtimeExtra []byte
-	if b, err := os.ReadFile(filepath.Join(absActor, "runtime.Dockerfile")); err == nil {
-		runtimeExtra = b
-		fmt.Fprintf(os.Stderr, "using %s/runtime.Dockerfile for the runtime stage\n", rel)
-	}
-	tarCtx, err := archive.TarWithOptions(root, &archive.TarOptions{ExcludePatterns: dockerignore(root)})
-	if err != nil {
-		return err
-	}
-	tarCtx = injectFile(tarCtx, "Dockerfile.kontra-go-actor", []byte(goActorDockerfile(rel, name, runtimeExtra)))
-	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "Dockerfile.kontra-go-actor", tag, nil)
-}
-
-// goActorDockerfile compiles the actor at repo-relative path `rel` into a STATIC binary and
-// parks it + its actor.json under /actor/<name>/ in a slim runtime image. GOWORK=off (the
-// example actors are standalone modules outside the root go.work); CGO_ENABLED=0 so the binary
-// runs on any base; golang 1.26.8 matches sdk/go's toolchain directive. At runtime the
-// binary self-locates actor.json beside itself (the SDK's resolveIdentity), and the worker
-// entrypoint launches it because the worker image is stamped KONTRA_ACTOR_ENGINE=go.
-// runtimeExtra (from the actor's optional runtime.Dockerfile) is appended to the RUNTIME stage,
-// after the binary and manifest are in place — so an actor can install external tools it shells
-// to without touching the build stage or the /actor/<name>/ layout the entrypoint relies on.
-func goActorDockerfile(rel, name string, runtimeExtra []byte) string {
-	df := fmt.Sprintf(`FROM golang:1.26.8 AS actor-build
-WORKDIR /src
-COPY . .
-RUN cd %[1]s && GOWORK=off CGO_ENABLED=0 go build -trimpath -o /out/%[2]s .
-FROM debian:12-slim
-COPY --from=actor-build /out/%[2]s /actor/%[2]s/%[2]s
-COPY %[1]s/actor.json /actor/%[2]s/actor.json
-`, rel, name)
-	if len(runtimeExtra) > 0 {
-		df += "\n# --- from " + rel + "/runtime.Dockerfile ---\n" + string(runtimeExtra) + "\n"
-	}
-	return df
-}
-
-// emptyTarWith returns a tar stream containing just one file — a build context that carries
-// only the (injected) Dockerfile, for a build whose Dockerfile pulls everything via FROM /
-// COPY --from and needs no context files.
-func emptyTarWith(name string, data []byte) io.ReadCloser {
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))})
-	_, _ = tw.Write(data)
-	_ = tw.Close()
-	return io.NopCloser(&buf)
-}
-
 // versionDeployed reports whether <name>:<version> already exists in the registry (a prior
 // deploy) — the signal `kontra deploy` refuses to overwrite without --override.
 func versionDeployed(reg, name, version string) bool {
@@ -826,211 +614,6 @@ func readManifest(dir string) (actorManifest, error) {
 	return m, nil
 }
 
-// sdkLabel carries a digest of the Python the base image bakes in, so ensureBase can tell a
-// current base from a stale one. The tag cannot answer that question: `kontra-host:1` is a MAJOR
-// tag on purpose (Dockerfile.pyworker says so — per-actor images pin it and survive base patches),
-// so it is the same string before and after any SDK edit.
-const sdkLabel = "org.kontra.sdk"
-
-// sdkDigest hashes every file the base image COPYs — sdk/python and runtime/python — so an edit
-// to any of them changes the answer. Paths go into the hash beside contents, so that adding,
-// deleting or renaming a module counts as a change even when the bytes are a permutation.
-//
-// __pycache__ is skipped: it is build output, it is in .dockerignore, and its mtime-keyed .pyc
-// names would otherwise make the digest differ from itself between two runs over one tree.
-// The directories the base image COPYs. Named once so `sdkDigest` and `isCheckout` cannot drift —
-// a seam added to one and not the other would make a non-checkout look like a checkout.
-var sdkSeams = []string{"sdk/python", "runtime/python"}
-
-// isCheckout reports whether `root` actually holds the source the base image is built from.
-//
-// `cliutil.FindRepoRoot` answers a DIFFERENT question — it walks up for `docker-compose.yml`, which
-// is right for its other callers and is also the ONE file a `curl`-only install has. So in a
-// quickstart install directory it returns that directory and reports success, and everything
-// downstream believes it has a checkout.
-func isCheckout(root string) bool {
-	for _, seam := range sdkSeams {
-		if fi, err := os.Stat(filepath.Join(root, seam)); err != nil || !fi.IsDir() {
-			return false
-		}
-	}
-	return true
-}
-
-func sdkDigest(root string) (string, error) {
-	h := sha256.New()
-	for _, seam := range sdkSeams {
-		dir := filepath.Join(root, seam)
-		err := filepath.WalkDir(dir, func(p string, e fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if e.IsDir() {
-				if e.Name() == "__pycache__" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			rel, err := filepath.Rel(root, p)
-			if err != nil {
-				return err
-			}
-			b, err := os.ReadFile(p)
-			if err != nil {
-				return err
-			}
-			// Length-prefixed, so "a" + "bc" and "ab" + "c" cannot collide.
-			fmt.Fprintf(h, "%s\x00%d\x00", filepath.ToSlash(rel), len(b))
-			h.Write(b)
-			return nil
-		})
-		if err != nil {
-			return "", fmt.Errorf("digest %s: %w", seam, err)
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// ensureBase builds kontra-host:1 (infra/Dockerfile.pyworker) when the daemon lacks it OR when
-// the one it has bakes a different SDK than the checkout.
-//
-// IT USED TO STOP AT "the daemon has an image with that name", AND THAT SILENTLY PINNED EVERY
-// ACTOR TO WHATEVER SDK WAS CURRENT THE DAY THE BASE WAS FIRST BUILT. Measured 2026-09-29: this
-// machine's `kontra-host:1` was eight days old, so `kontra/canary-worker:1.1.0` — built minutes
-// earlier, from a checkout where `say.py` was long deleted and `facts.py` long added — still
-// carried a `kontra` package with `say.py` and no `facts.py`. `from kontra import progress`
-// therefore bound to the DELETED `say.progress(**fields)` rather than the current
-// `facts.progress(phase, axis, ...)`, and every unit of every run died at the first call with
-// `TypeError: progress() takes 0 positional arguments but 2 were given`. The failure presents as
-// an actor bug ("units permanently dropped"), three layers away from the deploy that caused it,
-// and no amount of rebuilding the ACTOR fixes it — the stale bytes are in its FROM.
-//
-// Context = the REPO ROOT (the Dockerfile COPYs sdk/python), honoring the root .dockerignore —
-// the engine API does not read it for us the way the docker CLI does.
-func ensureBase(ctx context.Context, d imageAPI, progress io.Writer) error {
-	sums, err := d.ImageList(ctx, image.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("reference", hostImage())),
-	})
-	if err != nil {
-		return err
-	}
-	root, rootErr := cliutil.FindRepoRoot("")
-	// AND IS IT A CHECKOUT, which is not the same question `FindRepoRoot` answered. It looks for
-	// `docker-compose.yml`; a quickstart install directory holds exactly that and nothing else, so
-	// it came back with the install directory and `sdkDigest` then failed on the seam that is not
-	// there:
-	//
-	//   error: digest sdk/python: lstat <install>/sdk/python: no such file or directory
-	//   workspace watch: deploy <workspace>/hello/actors/hello: exit status 1
-	//
-	// — which is every actor in the documented install, on a loop, with no actor ever registering.
-	// The no-checkout path below was already correct and simply never reached.
-	if rootErr == nil && !isCheckout(root) {
-		root, rootErr = "", fmt.Errorf(
-			"%s has a docker-compose.yml but no %s: an install directory, not a checkout",
-			root, strings.Join(sdkSeams, " or "))
-	}
-	// No checkout means no digest to compare and nothing to build from. An existing base is then
-	// the best available answer and is used as-is — a cluster install has no repo (the Dockerfile
-	// says as much), so this is the normal path there, not a degraded one.
-	if rootErr != nil {
-		if len(sums) > 0 {
-			return nil
-		}
-		return fmt.Errorf("base image %s missing and no repo root to build it from: %w", hostImage(), rootErr)
-	}
-	want, err := sdkDigest(root)
-	if err != nil {
-		return err
-	}
-	if len(sums) > 0 {
-		if got := sums[0].Labels[sdkLabel]; got == want {
-			return nil
-		} else if got == "" {
-			fmt.Fprintf(os.Stderr, "base image %s predates the SDK stamp — rebuilding it from %s\n",
-				hostImage(), root)
-		} else {
-			fmt.Fprintf(os.Stderr, "base image %s bakes SDK %s, checkout is %s — rebuilding it from %s\n",
-				hostImage(), got[:12], want[:12], root)
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "base image %s missing — building it from %s\n", hostImage(), root)
-	}
-	tarCtx, err := archive.TarWithOptions(root, &archive.TarOptions{ExcludePatterns: dockerignore(root)})
-	if err != nil {
-		return err
-	}
-	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "control/images/Dockerfile.pyworker", hostImage(),
-		map[string]string{sdkLabel: want})
-}
-
-// buildActor builds the per-actor image from the actor dir. A Dockerfile in the dir
-// wins; otherwise the canonical two-liner is synthesized in memory and injected into
-// the context tar — a deps-free actor never has to write one.
-//
-// ponytail: the synthesized Dockerfile stamps no ENTRYPOINT (infra/Dockerfile.pyworker
-// expects the build step to add `ENTRYPOINT ["python3","/actor/<name>/actor.py"]`);
-// compose/actors supplies the command today — stamp it here when bare `docker run`
-// of an actor image must work.
-func buildActor(ctx context.Context, d imageAPI, progress io.Writer, dir, name, tag string) error {
-	tarCtx, err := archive.TarWithOptions(dir, &archive.TarOptions{ExcludePatterns: dockerignore(dir)})
-	if err != nil {
-		return err
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, "Dockerfile")); statErr != nil {
-		df := fmt.Sprintf("FROM %s\nCOPY . /actor/%s/\n", hostImage(), name)
-		// deploy.sh is the actor's dependency install, and it is the SAME script the machine
-		// Target runs over SSH on a bare Machine. Running it here is what keeps the two
-		// Targets honest: an actor whose deps only exist in a Dockerfile cannot be placed on a
-		// Machine, and one whose deps only exist in deploy.sh silently ships a broken image.
-		// KONTRA_TARGET tells the script which side of that it is on.
-		if _, err := os.Stat(filepath.Join(dir, "deploy.sh")); err == nil {
-			df += fmt.Sprintf("ENV KONTRA_TARGET=container\nRUN sh /actor/%s/deploy.sh\n", name)
-		}
-		tarCtx = injectFile(tarCtx, "Dockerfile", []byte(df))
-	}
-	defer tarCtx.Close()
-	return buildImage(ctx, d, progress, tarCtx, "Dockerfile", tag, nil)
-}
-
-// buildImage builds one tag. `labels` is stamped onto the result and may be nil; ensureBase uses
-// it to record which SDK the layer actually contains, since the tag cannot say.
-func buildImage(ctx context.Context, d imageAPI, progress io.Writer, buildCtx io.Reader, dockerfile, tag string, labels map[string]string) error {
-	resp, err := d.ImageBuild(ctx, buildCtx, types.ImageBuildOptions{
-		Tags:       []string{tag},
-		Dockerfile: dockerfile,
-		Labels:     labels,
-		Remove:     true,
-		Version:    types.BuilderV1, // classic builder — no BuildKit session needed
-	})
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if err := streamDockerOutput(progress, resp.Body); err != nil {
-		return fmt.Errorf("build %s: %w", tag, err)
-	}
-	return nil
-}
-
-// dockerignore reads <dir>/.dockerignore into engine exclude patterns.
-func dockerignore(dir string) []string {
-	b, err := os.ReadFile(filepath.Join(dir, ".dockerignore"))
-	if err != nil {
-		return nil
-	}
-	var pats []string
-	for _, line := range strings.Split(string(b), "\n") {
-		l := strings.TrimSpace(line)
-		if l == "" || strings.HasPrefix(l, "#") {
-			continue
-		}
-		pats = append(pats, l)
-	}
-	return pats
-}
-
 // streamDockerOutput prints the engine's JSON message stream (build or push) as plain
 // lines on stdout and turns an in-stream {"error": …} into a Go error.
 func streamDockerOutput(w io.Writer, r io.Reader) error {
@@ -1084,41 +667,4 @@ func streamDockerMessages(w io.Writer, r io.Reader, onAux func(json.RawMessage))
 			onAux(msg.Aux)
 		}
 	}
-}
-
-// injectFile appends one synthetic file to a tar stream (the in-memory Dockerfile).
-// Re-streamed through a pipe so a big actor dir never buffers whole in RAM.
-func injectFile(src io.ReadCloser, name string, data []byte) io.ReadCloser {
-	pr, pw := io.Pipe()
-	go func() {
-		defer src.Close()
-		tr := tar.NewReader(src)
-		tw := tar.NewWriter(pw)
-		err := func() error {
-			for {
-				hdr, e := tr.Next()
-				if e == io.EOF {
-					break
-				}
-				if e != nil {
-					return e
-				}
-				if e := tw.WriteHeader(hdr); e != nil {
-					return e
-				}
-				if _, e := io.Copy(tw, tr); e != nil {
-					return e
-				}
-			}
-			if e := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))}); e != nil {
-				return e
-			}
-			if _, e := tw.Write(data); e != nil {
-				return e
-			}
-			return tw.Close()
-		}()
-		pw.CloseWithError(err)
-	}()
-	return pr
 }

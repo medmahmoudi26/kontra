@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,8 +20,6 @@ import (
 	"github.com/docker/docker/api/types/network"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	enumspb "go.temporal.io/api/enums/v1"
-
-	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 // fixedTime keeps list_workers' lastPoll deterministic across the test.
@@ -33,31 +32,6 @@ func (f *fakeMCPDescriber) Pollers(_ context.Context, queue string, _ enumspb.Ta
 	return f.byQueue[queue], nil
 }
 func (f *fakeMCPDescriber) Close() {}
-
-// fakeMCPDocker is an imageAPI stand-in so deploy_actor never touches a daemon: the base
-// image reads as present (no build), a build streams one line, tag/push are no-ops.
-type fakeMCPDocker struct{}
-
-func (fakeMCPDocker) ImageList(context.Context, image.ListOptions) ([]image.Summary, error) {
-	// Non-empty AND carrying the checkout's own SDK digest, so ensureBase reads the base as
-	// current and skips the build. Present-but-unlabelled is no longer enough: that is exactly
-	// the stale base ensureBase now exists to catch, and returning it here would tar the whole
-	// repo on every run of this test.
-	lbl := map[string]string{}
-	if root, err := cliutil.FindRepoRoot(""); err == nil {
-		if d, err := sdkDigest(root); err == nil {
-			lbl[sdkLabel] = d
-		}
-	}
-	return []image.Summary{{Labels: lbl}}, nil
-}
-func (fakeMCPDocker) ImageBuild(_ context.Context, _ io.Reader, _ types.ImageBuildOptions) (types.ImageBuildResponse, error) {
-	return types.ImageBuildResponse{Body: io.NopCloser(strings.NewReader(`{"stream":"built one layer\n"}`))}, nil
-}
-func (fakeMCPDocker) ImageTag(context.Context, string, string) error { return nil }
-func (fakeMCPDocker) ImagePush(context.Context, string, image.PushOptions) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader("")), nil
-}
 
 // fakeScaleDocker is a STATEFUL containerAPI stand-in: it tracks created worker containers
 // in memory so scale up→down→zero reconciles against a real fleet, no daemon touched.
@@ -320,16 +294,32 @@ func TestMCPListWorkers(t *testing.T) {
 	}
 }
 
-// deploy_actor builds via a FAKE docker engine (no daemon) and, crucially, writes NO docker
-// build output to the process stdout — that's the JSON-RPC channel. host_only skips push.
+// deploy_actor builds through a FAKE `pack` (no lifecycle, no daemon) and, crucially, writes NO
+// build output to the process stdout — that's the JSON-RPC channel. host_only skips the publish.
+//
+// THE RUNTIME LOOKUP IS REAL HTTP, against a stand-in registry, because that is the one thing
+// `deploy` does before building that a fake cannot stand in for without also hiding it: an actor
+// is layered onto a runtime resolved by digest, and a deploy that could not resolve one has
+// nothing to build on.
 func TestMCPDeployActor(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "actor.json"), []byte(`{"name":"echo","version":"0.1.0"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	old := newDocker
-	newDocker = func() (imageAPI, error) { return fakeMCPDocker{}, nil }
-	t.Cleanup(func() { newDocker = old })
+	const runtimeDigest = "sha256:" + "11" + "22334455667788990011223344556677889900112233445566778899001122"
+	t.Setenv("KONTRA_REGISTRY", fakeRegistry(t, http.StatusOK, runtimeDigest))
+
+	// THE BUILD IS FAKED AND ITS OUTPUT IS NOT. `pack` streams minutes of lifecycle output, and the
+	// property under test is where that output goes — so the stand-in writes to the same Progress
+	// writer the real one does.
+	var builtWith packOpts
+	old := runPackBuild
+	runPackBuild = func(_ context.Context, o packOpts) (string, error) {
+		builtWith = o
+		fmt.Fprintln(o.Progress, "[builder] detecting")
+		return runtimeDigest, nil
+	}
+	t.Cleanup(func() { runPackBuild = old })
 
 	s, done := newTestServer(t)
 	defer done()
@@ -346,8 +336,20 @@ func TestMCPDeployActor(t *testing.T) {
 	}
 	var res map[string]any
 	_ = json.Unmarshal([]byte(text), &res)
-	if res["hostImage"] != "kontra/echo:0.1.0" || res["image"] != nil {
-		t.Fatalf("deploy_actor (host_only) result = %v — want hostImage set, image empty", res)
+	if res["image"] != nil {
+		t.Fatalf("deploy_actor (host_only) must not report a published image, got %v", res)
+	}
+	// THE BUILDER AND THE RUN IMAGE ARE BOTH PINNED BY DIGEST, which is the whole reproducibility
+	// claim: the same source built twice has to produce the same image, and the catalog records a
+	// runtime digest it must be able to compare against later.
+	if builtWith.Builder != pinnedBuilder() {
+		t.Errorf("builder = %q, want the pinned %q", builtWith.Builder, pinnedBuilder())
+	}
+	if !strings.HasSuffix(builtWith.RunImage, "@"+runtimeDigest) {
+		t.Errorf("run image = %q, want it pinned to the digest the registry answered", builtWith.RunImage)
+	}
+	if builtWith.Publish {
+		t.Error("host_only must not publish")
 	}
 }
 

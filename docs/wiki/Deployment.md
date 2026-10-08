@@ -171,23 +171,22 @@ actor deployed: beacon@0.2.0
 `KONTRA_REDIS_HOST` is **required**, not an upgrade: a worker started without it points at a
 localhost Redis that is not there and fails on its first commit.
 
-Images built over the Docker Engine API, layered so a re-deploy is cheap:
+ONE IMAGE, BUILT BY CLOUD NATIVE BUILDPACKS (ADR 0061). `kontra deploy` runs a pinned `pack`
+against the actor's own directory and publishes `<registry>/<name>:<version>` directly:
 
-1. `kontra-host:1` (`infra/Dockerfile.pyworker`) — the Python actor runtime: actorkit on
-   `PYTHONPATH` plus `temporalio` / `redis` / `boto3` / `pydantic`. Built once
-   (rebuilt when `sdk/python` or `runtime/python` changes: `docker rmi kontra-host:1`).
-2. `kontra-worker-base:1` — the actor-**agnostic** worker parts: the Go **handler**
-   (compiled here, ONCE) and the entrypoint. Built once (rebuilt when `handler/` changes:
-   `docker rmi kontra-worker-base:1`). This is what keeps deploys fast — the handler compile
-   (memory-heavy) does not run per deploy.
-3. the **host** image `kontra/<name>:<version>` — `FROM kontra-host:1` + the actor's code
-   (a `Dockerfile`-less actor gets a synthesized `COPY`; one with a `Dockerfile` adds its
-   deps). A Go actor is compiled instead, into a slim runtime image. `--host-only` stops here.
-4. the **worker** image `kontra/<name>-worker:<version>`, pushed as `<registry>/<name>:<version>`.
-   `FROM` the host image (so it carries the actor's deps) +
-   `COPY --from=kontra-worker-base:1` (the pre-built handler + entrypoint) —
-   no handler recompile. A single `docker run` is a complete worker, reaching OUT only to the
-   controller (Temporal / S3 / Redis / orchestrator via `KONTRA_*`).
+1. the **runtime** is resolved from `actor.json`'s `runtime` field — a name and a MAJOR
+   (`python:1`, `python-browser:1`, default `python:1` or `base:1` by engine) — and PINNED BY
+   DIGEST. That digest is recorded in the catalog, which is what lets `kontra rebase` move an actor
+   onto a newer digest of the same major without rebuilding it.
+2. the **builder** is `heroku/builder:24`, also pinned by digest, and run with
+   `--trust-builder=false` so the lifecycle's phases stay in separate containers.
+3. the **build context is the actor's own directory**, which is why a `go.mod` `replace` pointing
+   above it is refused: a published actor has to build from its own folder. It also means an edit
+   elsewhere in a checkout no longer invalidates the build.
+4. `--host-only` builds without publishing, for checking a build before claiming a version.
+
+A single `docker run` of the result is a complete worker, reaching OUT only to the controller
+(Temporal / S3 / Redis / orchestrator via `KONTRA_*`).
 
 That worker is **two** processes now (`infra/worker-entrypoint.sh`), and the entrypoint exits
 non-zero the moment either dies so the container restarts — a half-dead worker keeps its Temporal

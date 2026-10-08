@@ -121,13 +121,12 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
 
-      # ── THE FOUR NAMES COME FROM THE INSTALL, NOT FROM THIS FILE ─────────────────────────────
+      # ── THE NAMES COME FROM THE INSTALL, NOT FROM THIS FILE ──────────────────────────────────
       #
-      # Three of them are `docker-compose.yml`'s own `${KONTRA_*_IMAGE:-<default>}` defaults — the
-      # thing an install actually resolves — and the fourth is `cli/deploy.go`'s `workerBaseImage`
-      # constant, because compose never names it. Reading both means a fifth kontra-owned service
-      # appearing in compose is published on the next tag instead of being the one image the install
-      # still has to build by hand.
+      # They are `docker-compose.yml`'s own `${KONTRA_*_IMAGE:-<default>}` defaults — the thing an
+      # install actually resolves. Deriving them means a new kontra-owned service appearing in
+      # compose is published on the next tag instead of being the one image the install still has to
+      # build by hand.
       #
       # THE HAND-WRITTEN HALF IS THE name→Dockerfile TABLE IN `images` BELOW, and it is the only
       # hand-written half. A derived name that table does not know is a hard failure there, named as
@@ -164,26 +163,9 @@ jobs:
             | sed -E 's#^([^=]*/)?([^/=]+)=#\2=#' \
             | sort -u)
 
-          # `const workerBaseImage = "kontra-worker-base:1"` — cli/deploy.go.
-          #
-          # ANCHORED TO `^const`, AND THAT ANCHOR IS THE WHOLE FIX FOR A REAL FAILURE. This grep was
-          # unanchored, so it matched the SAME TEXT INSIDE A COMMENT: a note added to deploy.go saying
-          # "publish.yml greps this line for the image name" quoted the pattern as
-          # `workerBaseImage = "…"`, and the grep dutifully returned the ellipsis as a second image
-          # name. `0.0.0-test7` then pushed all five images correctly and failed at the bottom of the
-          # loop with `the install references a kontra-owned image '…' that this workflow does not
-          # know how to build` — a perfect error message about a name that never existed.
-          #
-          # A `const` declaration is at column zero and a comment is not, so the anchor separates them
-          # exactly. In a repository where the comments discuss the greps, a grep must say where it
-          # expects to match or it will match the discussion.
-          worker_base=$(grep -oE '^const workerBaseImage = "[^"]+"' cli/deploy.go \
-            | sed -E 's/.*"([^"]+)".*/\1/' | cut -d: -f1)
-
-          names=$(
-            { printf '%s\n' "$compose_pairs" | sed -E 's/=.*//'; printf '%s\n' "$worker_base"; } \
-            | grep . | sort -u
-          )
+          # COMPOSE IS THE WHOLE DERIVATION. Every image this install references is named in the
+          # compose file, so there is one source for the list and no second place to keep in step.
+          names=$(printf '%s\n' "$compose_pairs" | sed -E 's/=.*//' | grep . | sort -u)
 
           # SHAPE GUARD, WHICH CATCHES THIS WHATEVER THE SOURCE. The anchor above fixes the one
           # derivation that went wrong; this refuses anything that is not a legal image name from
@@ -205,7 +187,7 @@ jobs:
           count=$(printf '%s\n' "$names" | grep -c . || true)
           if [ "$count" -lt 4 ]; then
             echo "::error::derived only $count kontra-owned image names ($names) — expected at least 4."
-            echo "::error::docker-compose.yml's \${KONTRA_*_IMAGE:-…} defaults or cli/deploy.go's workerBaseImage moved."
+            echo "::error::docker-compose.yml's \${KONTRA_*_IMAGE:-…} defaults moved."
             exit 1
           fi
 
@@ -371,7 +353,6 @@ jobs:
           #     medmahmoudi26/kontra-orchestrator   NAME_UNKNOWN
           #     medmahmoudi26/kontra-host           NAME_UNKNOWN
           #     medmahmoudi26/kontra-logship        NAME_UNKNOWN
-          #     medmahmoudi26/kontra-worker-base    NAME_UNKNOWN
           #
           # A GHCR package created outside Actions carries its own ACL and is linked to no repository,
           # so a repo-scoped `GITHUB_TOKEN` cannot read it however wide the ceiling is. The fix is in
@@ -421,12 +402,6 @@ jobs:
                   -f control/images/Dockerfile.orchestrator \
                   --build-arg SPA_IMAGE="$spa_image"
                 ;;
-              kontra-host)
-                build_one "$name" . -f control/images/Dockerfile.pyworker
-                ;;
-              kontra-worker-base)
-                build_one "$name" . -f control/images/Dockerfile.workerbase
-                ;;
               # The shipper and its parser, baked rather than bind-mounted. It appears in this table
               # because compose stopped naming `python:3.12-alpine` and started naming
               # `${KONTRA_LOGSHIP_IMAGE:-…}`, so `plan` derives it as one of ours; this is the
@@ -446,7 +421,7 @@ jobs:
               *)
                 echo "::error::the install references a kontra-owned image '$name' that this workflow does not know how to build."
                 echo "::error::add it to the case statement in .github/workflows/publish.yml, beside a Dockerfile under control/images/."
-                echo "::error::it was derived from docker-compose.yml's \${KONTRA_*_IMAGE:-…} defaults or cli/deploy.go's workerBaseImage."
+                echo "::error::it was derived from docker-compose.yml's \${KONTRA_*_IMAGE:-…} defaults."
                 exit 1
                 ;;
             esac
@@ -672,10 +647,9 @@ jobs:
               fh.write("\n")
 
           # `name=VAR` pairs, derived by `plan` from compose's own `${KONTRA_*_IMAGE:-…}` defaults.
-          # An image with no variable is not an error here — `kontra-worker-base` has none, because
-          # `cli/deploy.go:89` hard-codes it — but it IS a line in the file saying so, because an
-          # install that silently builds one of four images is the failure this whole workflow is
-          # about.
+          # An image with no variable is not an error here, but it IS a line in the file saying so,
+          # because an install that silently builds some of its images is the failure this whole
+          # workflow is about.
           var_for = dict(
               pair.split("=", 1) for pair in os.environ["COMPOSE_VARS"].split() if "=" in pair
           )

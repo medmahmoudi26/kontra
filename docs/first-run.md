@@ -16,8 +16,6 @@ mkdir -p workspaces
 cd kontra
 make image
 docker build -f control/images/Dockerfile.orchestrator -t kontra-orchestrator:latest .
-docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
-docker build -f control/images/Dockerfile.workerbase -t kontra-worker-base:1 .
 docker compose --env-file .env.quickstart up -d --wait
 docker compose exec cli cat /var/lib/kontra/console-password
 ```

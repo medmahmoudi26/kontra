@@ -181,11 +181,14 @@ are each behind a config key:
 |---|---|---|
 | `kontraImage` | `kontra:latest` | `cli` — and exported as `KONTRA_IMAGE` to all three anchor consumers |
 | `orchestratorImage` | `kontra-orchestrator:latest` | `orchestrator-api` **and** `orchestrator-infra` — one image, two roles |
-| `hostImage` | `kontra-host:1` | `orchestrator-probe` — and exported as `KONTRA_HOST_IMAGE` |
-| `workerBaseImage` | `kontra-worker-base:1` | **nothing** — see below |
+| `logshipImage` | `kontra-logship:dev` | `logship` |
 
-All four are also stack outputs (`images`), so `kontra doctor` can answer *which images is this
-control plane actually running* without shelling to `docker inspect`.
+They are also stack outputs (`images`), so `kontra doctor` can answer *which images is this control
+plane actually running* without shelling to `docker inspect`.
+
+`orchestrator-probe` runs `kontraImage` too: it needs python3 and the SDK on PYTHONPATH, and it had
+a `hostImage` of its own only because that image was also the base `kontra deploy` layered actors
+onto. Buildpacks layer onto a published runtime instead (ADR 0061/0063).
 
 **`RemoteImage` resolves an image that is already in the daemon without consulting a registry, and
 that single fact is why `pull_policy` has no counterpart here.** Re-measured for this README, with the
@@ -217,11 +220,6 @@ Two details that look wrong until you know the reason:
   the right thing to run and the wrong thing to hand onward: the control plane starts Workers by name
   through the Docker socket, so `KONTRA_IMAGE` must be a name the Warden can pass to `docker run` as
   written.
-- **`workerBaseImage` is declared and no container runs it.** `kontra deploy` COPYs the
-  actor-agnostic handler out of it into every actor image (`cli/deploy.go`, `cli/serve.go:197`), so an
-  install that lacks it turns the first `kontra deploy` into a build. It appears in no compose service,
-  which is exactly why `make image` building *it* and not `kontra-orchestrator:latest` reads as
-  arbitrary until you know this.
 
 ## What `kontra up` will run against it
 

@@ -194,7 +194,7 @@ func serveRoot() (string, error) {
 // prebuiltHandler is the compiled handler to run, or "" when the caller should build from source.
 //
 // `<root>/handler` is where a tree that has no `runtime/handler` sources keeps the binary
-// `control/images/Dockerfile.workerbase` builds — the same handler, compiled once at image build
+// `control/images/Dockerfile.selfcontained` builds — the same handler, compiled once at image build
 // instead of on every serve. KONTRA_HANDLER_BIN overrides it, and a value that is set and wrong is
 // a REFUSAL rather than a silent fall back to `go run .`: falling back would answer a typo in a
 // path with an error about a missing Go toolchain.

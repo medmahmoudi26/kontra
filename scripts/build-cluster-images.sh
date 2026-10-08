@@ -37,12 +37,6 @@ echo "==> kontra-orchestrator:ci"
 docker build -f "$REPO/control/images/Dockerfile.orchestrator" \
   --build-arg SPA_IMAGE=kontra:ci -t kontra-orchestrator:ci "$REPO"
 
-echo "==> kontra-host:1"
-docker build -f "$REPO/control/images/Dockerfile.pyworker" -t kontra-host:1 "$REPO"
-
-echo "==> kontra-worker-base:1"
-docker build -f "$REPO/control/images/Dockerfile.workerbase" -t kontra-worker-base:1 "$REPO"
-
 # The log shipper and its parser. It is an image rather than two bind mounts because
 # `tests/test_logline.py` loads the parser BY PATH and it must stay a file — see
 # control/images/Dockerfile.logship. Without it, `pull_policy: never` fails on a missing image.
@@ -61,4 +55,4 @@ docker build -f "$REPO/control/images/Dockerfile.porter" -t kontra-porter:ci "$R
 echo
 echo "built:"
 docker images --format '  {{.Repository}}:{{.Tag}}  {{.Size}}' \
-  | grep -E '^  (kontra|kontra-orchestrator|kontra-host|kontra-worker-base|kontra-logship|kontra-porter):'
+  | grep -E '^  (kontra|kontra-orchestrator|kontra-logship|kontra-porter):'

@@ -553,7 +553,7 @@ if [ ! -f "$ROOT/.bundle-$BUNDLE_SHA" ]; then
 fi
 
 # 4) the ACTOR HOST's runtime. In a container these come from the shared python base image
-#    (infra/Dockerfile.pyworker); a Machine has no base image, so the same set is installed
+#    (the control plane's own image); a Machine has no base image, so the same set is installed
 #    here. Deliberately NOT in the actor's deploy.sh: this is the framework's dependency, not
 #    the actor's, and every actor would otherwise have to repeat it.
 #

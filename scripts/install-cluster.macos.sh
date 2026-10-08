@@ -39,7 +39,7 @@ cp "$root/.env.quickstart" "$tmp/.env"
 {
   echo "KONTRA_WORKSPACES=$ws"
   # Unset means compose's published defaults — the path a stranger takes. Set means local tags.
-  for v in KONTRA_IMAGE KONTRA_ORCHESTRATOR_IMAGE KONTRA_HOST_IMAGE KONTRA_LOGSHIP_IMAGE KONTRA_PULL_POLICY; do
+  for v in KONTRA_IMAGE KONTRA_ORCHESTRATOR_IMAGE KONTRA_LOGSHIP_IMAGE KONTRA_PORTER_IMAGE KONTRA_PULL_POLICY; do
     eval "val=\${$v:-}"
     if [ -n "$val" ]; then echo "$v=$val"; fi
   done

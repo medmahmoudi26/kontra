@@ -150,8 +150,6 @@ its Compose service must never get a `ports:` entry.
 |---|---|
 | `KONTRA_IMAGE` | the CLI / workflow-worker containers |
 | `KONTRA_ORCHESTRATOR_IMAGE` | **the API and infra roles** |
-| `KONTRA_HOST_IMAGE` | the base every actor build starts `FROM` |
-| `KONTRA_WORKER_BASE_IMAGE` | the worker base |
 | `KONTRA_PORTER_IMAGE` | Arrow Flight SQL |
 | `KONTRA_LOGSHIP_IMAGE` | the log shipper |
 
@@ -165,9 +163,10 @@ make a third-party image look like one this repository builds.
 > Building only the first serves old code under a green `up`. Build order is forced:
 > `make image` → then the orchestrator image.
 >
-> **A stale `KONTRA_HOST_IMAGE` pins the SDK.** Every actor build starts from it, so an actor can
-> be running an SDK from the day that base was first built. `cli/deploy.go` stamps the base with
-> `org.kontra.sdk` — a digest over `sdk/python` + `runtime/python` — and rebuilds when it differs.
+> **An actor's SDK comes from its runtime, not from an image this repo builds.** `kontra deploy`
+> layers the actor onto a published runtime (`actor.json`'s `runtime` field, default `python:1`),
+> pinned by digest at build time and recorded in the catalog. `kontra rebase` is how an actor moves
+> onto a newer digest of the same major without rebuilding.
 
 ---
 

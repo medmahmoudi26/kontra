@@ -133,7 +133,6 @@ x-orchestrator-env: &orchestrator-env
   # registry and the tag, and maps the bare name to a Dockerfile. So renaming an image is a change to
   # this line; retagging or re-homing one is not.
   KONTRA_IMAGE: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
-  KONTRA_HOST_IMAGE: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
   # Both addresses: `127.0.0.1:5000` is how this host's own tooling spells the registry, and the
   # VPC address is how a fleet Machine does. A Bundle trusted under one spelling and fetched under
   # the other is a Bundle that is refused on the Machine, after the provision has been paid for.
@@ -1097,8 +1096,13 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
+  # THE SAME IMAGE THE CLI RUNS, for its python3 and the SDK on PYTHONPATH. It had a `kontra-host`
+  # of its own, built from a Dockerfile whose only other job was being the base `kontra deploy`
+  # layered actors onto — and buildpacks layer onto a published runtime instead, so that Dockerfile
+  # went (ADR 0061/0063). Sharing this image is also the argument `Dockerfile.orchestrator` already
+  # makes for taking its python from here: a second `pip install` would be unpinned in two images.
   orchestrator-probe:
-    image: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
     container_name: kontra-probe
     labels:
       kontra.logs: 'true'

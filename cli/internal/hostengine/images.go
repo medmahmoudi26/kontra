@@ -47,10 +47,10 @@ type configDoc struct {
 }
 
 // ImageKeySuffix is what makes a config key an image reference. `kontraImage`, `orchestratorImage`,
-// `hostImage`, `logshipImage`, `workerBaseImage` — the program's own naming, and the reason this is a
-// suffix rather than a list is that the fifth one arrived while this slice was being written
-// (`logshipImage`, when logship stopped being stock `python:3.12-alpine`). A list would have missed
-// it silently and `--to` would have moved four images out of five, which is worse than moving none.
+// `logshipImage` — the program's own naming, and the reason this is a suffix rather than a list is
+// that the set MOVES: `logshipImage` arrived while this slice was being written, and `hostImage`
+// and `workerBaseImage` left with the classic build path. A list would have missed each change
+// silently and `--to` would have moved some images and not others, which is worse than none.
 const ImageKeySuffix = "Image"
 
 // ImageRefs is every kontra-owned image reference the program declares, key -> default reference.

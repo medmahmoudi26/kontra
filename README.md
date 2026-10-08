@@ -135,7 +135,6 @@ R=ghcr.io/medmahmoudi26
 
 make image                                            # needs kontra-console beside this checkout (the SPA)
 docker build -f control/images/Dockerfile.orchestrator --build-arg SPA_IMAGE=$R/kontra:dev -t $R/kontra-orchestrator:dev .
-docker build -f control/images/Dockerfile.pyworker  -t $R/kontra-host:dev .
 docker build -f control/images/Dockerfile.logship   -t $R/kontra-logship:dev .
 
 cp .env.quickstart .env
@@ -145,9 +144,8 @@ docker compose up -d --wait
 
 **Build under the qualified names, not bare ones.** Docker resolves by *name*, so
 `ghcr.io/medmahmoudi26/kontra:dev` and `kontra:latest` are two names for the same bytes — build the
-second and the install still goes to the registry for the first. `make image` and `make worker-base`
-already write the qualified names (`KONTRA_IMAGE` / `KONTRA_WORKER_BASE_IMAGE` override them), which
-is why `make image` is enough for two of the five.
+second and the install still goes to the registry for the first. `make image` already writes the
+qualified name (`KONTRA_IMAGE` overrides it), which is why it is enough on its own.
 
 `KONTRA_PULL_POLICY=never` is the rest of it: it stops compose quietly running a published image over
 the one you just built. It is the only line the `.env` needs for this.

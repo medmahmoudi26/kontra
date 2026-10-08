@@ -174,7 +174,6 @@ port_free() {
 # what stops compose fetching it. A gate that pulled would be gating a published release.
 export KONTRA_IMAGE="${KONTRA_IMAGE:-kontra:ci}"
 export KONTRA_ORCHESTRATOR_IMAGE="${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:ci}"
-export KONTRA_HOST_IMAGE="${KONTRA_HOST_IMAGE:-kontra-host:1}"
 export KONTRA_LOGSHIP_IMAGE="${KONTRA_LOGSHIP_IMAGE:-kontra-logship:ci}"
 export KONTRA_PORTER_IMAGE="${KONTRA_PORTER_IMAGE:-kontra-porter:ci}"
 export KONTRA_PULL_POLICY=never
@@ -236,7 +235,7 @@ fi
 # missing image into `No such image` from the daemon partway through an `up`, which reads like a
 # registry problem. This reads like what it is.
 MISSING=()
-for img in "$KONTRA_IMAGE" "$KONTRA_ORCHESTRATOR_IMAGE" "$KONTRA_HOST_IMAGE" \
+for img in "$KONTRA_IMAGE" "$KONTRA_ORCHESTRATOR_IMAGE" \
            "$KONTRA_LOGSHIP_IMAGE" "$KONTRA_PORTER_IMAGE"; do
   docker image inspect "$img" >/dev/null 2>&1 || MISSING+=("$img")
 done
@@ -271,7 +270,6 @@ cp "$REPO/.env.quickstart" "$INSTALL_DIR/.env"
   echo "KONTRA_POSTGRES_PORT=$P_POSTGRES"
   echo "KONTRA_IMAGE=$KONTRA_IMAGE"
   echo "KONTRA_ORCHESTRATOR_IMAGE=$KONTRA_ORCHESTRATOR_IMAGE"
-  echo "KONTRA_HOST_IMAGE=$KONTRA_HOST_IMAGE"
   echo "KONTRA_LOGSHIP_IMAGE=$KONTRA_LOGSHIP_IMAGE"
   echo "KONTRA_PORTER_IMAGE=$KONTRA_PORTER_IMAGE"
   echo "KONTRA_PULL_POLICY=never"

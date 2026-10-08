@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 // The invocation is asserted without running a build, because the four flags below are each a build
@@ -136,4 +140,47 @@ func TestDeployShellDeprecationHasThreeStates(t *testing.T) {
 
 func writeFileForTest(path, body string) error {
 	return os.WriteFile(path, []byte(body), 0o644)
+}
+
+// THE BUILDER PIN IS COMPARED TO THE CONFORMANCE CORPUS, not merely written down twice.
+//
+// `shared/conformance/catalog.json` carries the `builderDigest` a worker is expected to register,
+// and `cli/packbuild.go` carries the digest a build is actually run against. Those are the two ends
+// of one fact: if they drift, actors are registered against a builder the corpus says they were not
+// built with, and nothing fails — the catalog simply records a value no fixture agrees with.
+//
+// THE CORPUS IS THE SOURCE AND THIS IS THE IMPLEMENTATION, which is the repo's rule for anything
+// with more than one implementation. A bump therefore starts in the JSON.
+func TestTheBuilderDigestMatchesTheConformanceCorpus(t *testing.T) {
+	root, err := cliutil.FindRepoRoot("")
+	if err != nil {
+		t.Skipf("not in a checkout, so the corpus is not here: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "shared", "conformance", "catalog.json"))
+	if err != nil {
+		t.Fatalf("reading the catalog corpus: %v", err)
+	}
+	var corpus struct {
+		Expect struct {
+			BuilderDigest string `json:"builderDigest"`
+		} `json:"expect"`
+	}
+	if err := json.Unmarshal(raw, &corpus); err != nil {
+		t.Fatalf("the catalog corpus is not valid JSON: %v", err)
+	}
+	// THE SHAPE IS ASSERTED BEFORE THE VALUE IS COMPARED. That file's `schemas` block DESCRIBES
+	// `builderDigest` in prose and its `expect` block carries the value, so a reader that picked the
+	// wrong one would compare a sentence to a digest — or, if the key moved, compare "" to "" and
+	// pass. Verified: this guard fired on the first version of this test, which read `cases[]`.
+	got := corpus.Expect.BuilderDigest
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("shared/conformance/catalog.json's `expect.builderDigest` is %q, not a digest — "+
+			"this comparison matched nothing and would pass whatever the pin was", got)
+	}
+	if got != builderDigest {
+		t.Errorf("the corpus expects builderDigest %s and cli/packbuild.go pins %s", got, builderDigest)
+	}
+	if !strings.HasSuffix(pinnedBuilder(), "@"+builderDigest) {
+		t.Errorf("pinnedBuilder() = %q, which does not end in the pinned digest", pinnedBuilder())
+	}
 }

@@ -46,7 +46,7 @@
 
 FROM python:3.12-alpine
 
-# 3.12-alpine AND NOT 3.13-slim, which is what `Dockerfile.pyworker` uses. This image is replacing
+# 3.12-alpine AND NOT 3.13-slim. This image is replacing
 # an entrypoint that ran stock `python:3.12-alpine`, and changing the interpreter in the same commit
 # that changes the packaging would mean a parser that broke could be either. The version moves on
 # its own or not at all.

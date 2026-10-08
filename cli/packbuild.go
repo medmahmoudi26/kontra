@@ -42,6 +42,27 @@ import (
 // works on one machine and not another.
 const packVersion = "0.40.9"
 
+// THE CNB BUILDER, PINNED BY DIGEST (ADR 0061 §"a pinned stock builder").
+//
+// A MOVING TAG WOULD BREAK THE ONE PROPERTY THE CATALOG DEPENDS ON. `heroku/builder:24` advances;
+// two builds of the same source against two different builders produce two different images, and
+// the catalog records a `builderDigest` it has to be able to compare against later. So the digest
+// is the pin and the tag is only there to say what it is.
+//
+// THE DIGEST IS ALSO IN THE CONFORMANCE CORPUS, and that is not duplication — it is the rule.
+// `shared/conformance/catalog.json` carries it as the expected `builderDigest`, and
+// `packbuild_test.go` asserts these two agree, so a bump that lands in one place fails rather than
+// quietly registering actors against a builder the corpus says they were not built with.
+// `renovate.json` refuses to automerge either pin for the same reason.
+const (
+	builderImage  = "heroku/builder:24"
+	builderDigest = "sha256:97aa835c2e0528c623bd500a9e16030dacc08be1cddd34ce78918974de4098c1"
+)
+
+// pinnedBuilder is what `pack --builder` is handed: the reference AND the digest, so the lifecycle
+// pulls exactly what was measured even if the tag has moved since.
+func pinnedBuilder() string { return builderImage + "@" + builderDigest }
+
 // packBinary finds the pinned binary. KONTRA_PACK_BIN wins so an operator can point at their own.
 func packBinary() (string, error) {
 	if p := strings.TrimSpace(os.Getenv("KONTRA_PACK_BIN")); p != "" {
