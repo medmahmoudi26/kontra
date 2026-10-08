@@ -143,6 +143,38 @@ Three decisions inside it are not obvious:
 that adding a runtime is pushing one. Discovery cannot carry it — `GET /v2/_catalog` against ghcr
 answers **403 DENIED**, measured — so the published set is named and a fork edits one `.env` line.
 
+**"AUTH" WAS NOT ONLY ABOUT PUSHING, AND THAT IS WHERE THE 401 ACTUALLY LANDED.** With the three
+passwords set, the rendered `accessControl` gives every repository tree `"defaultPolicy": []` — so
+there is no anonymous READ either, and every registry read in this system was unauthenticated. The
+install proved it: with the runtimes mirrored in, `kontra deploy` still refused with
+`runtime "python:1" (127.0.0.1:5000/kontra-runtimes/python:1) is not in the registry: registry
+127.0.0.1:5000 answered 401 Unauthorized`. Three consequences were silent rather than loud:
+
+- `versionDeployed` skipped every 401 base and answered "not deployed", which turns **version
+  immutability off** on exactly the installs that locked their registry down.
+- `listRuntimes` returned nothing, so the refusal above said "NO runtimes are published" about a
+  registry holding three.
+- The orchestrator's Images surface — `images.ts`, `images/zot.ts` and the `inuse-` reconciler, which
+  *writes* tags — swallows its own failures by design, so an authenticated install showed an empty
+  Images page and protected nothing while retention was armed against it.
+
+So a read carries a credential now, in both languages (`cli/registryauth.go:readCredential`,
+`control/orchestrator/src/images/registryAuth.ts`), with the least-privileged account that is set —
+`pull` before either push account — and **only to this install's registry**, by every spelling
+`registryProbeBases` knows. A read of ghcr still answers its challenge with a token and no
+credential of its own, because sending an install's password to somebody else's registry on the
+strength of a 401 is the leak that a "fix the 401" instinct produces. A tag write picks its account
+by namespace, because `push-actors` and `push-runtimes` cannot write each other's tree and one
+client credential therefore cannot cover both.
+
+**A BARE ADDRESS MEANS PLAIN HTTP ONLY FOR THIS INSTALL.** `registryBase` read every scheme-less
+address as `http://`, which is right for `127.0.0.1:5000` (ADR 0036 keeps loopback without TLS) and
+wrong for a public one: `http://ghcr.io` redirects to HTTPS, the token did not survive the hop, and
+an anonymous read of a PUBLIC image came back `401 unauthorized: authentication required` —
+indistinguishable from a private package. A host that is neither loopback nor one of this install's
+own names is HTTPS, with HTTP kept as a second base so an operator's plain-HTTP VPC registry named
+without a scheme still resolves.
+
 ## Consequences
 
 **A tagged release carries no binary assets until GoReleaser lands.** release-please still creates

@@ -13,6 +13,7 @@
  */
 
 import { INUSE_PREFIX, reconcileInuseTags, type InuseDeps, type InusePass } from './inuse';
+import { registryReadAuth, registryWriteAuth } from './registryAuth';
 
 /** Ten minutes, per the spec. A tag that appears late keeps too much for a while, which is the safe way to be wrong. */
 const DEFAULT_INTERVAL_MS = 10 * 60_000;
@@ -51,7 +52,7 @@ export function registryTagClient(
     async listTags(repo) {
       const res = await fetch(`${base}/v2/${repo}/tags/list?n=200`, {
         signal: signal(),
-        headers: { accept: 'application/json' },
+        headers: { accept: 'application/json', ...registryReadAuth() },
       });
       // A repository with no tags and a repository that does not exist are the same fact to this
       // caller, and neither is an error worth waking anyone for.
@@ -74,17 +75,21 @@ export function registryTagClient(
     async tag(repo, digest, tagName) {
       const got = await fetch(`${base}/v2/${repo}/manifests/${digest}`, {
         signal: signal(),
-        headers: { accept: MANIFEST_ACCEPT },
+        headers: { accept: MANIFEST_ACCEPT, ...registryReadAuth() },
       });
       if (!got.ok) throw new Error(`GET manifest ${repo}@${digest}: ${got.status} ${got.statusText}`);
       const contentType = got.headers.get('content-type');
       if (!contentType) throw new Error(`GET manifest ${repo}@${digest}: no content-type to re-put with`);
       const bytes = new Uint8Array(await got.arrayBuffer());
 
+      // A TAG PUT IS A WRITE, AND THE ACCOUNT DEPENDS ON THE NAMESPACE: `push-actors` may create in
+      // `actors/**` and `push-runtimes` in `kontra-runtimes/**`, and neither may write the other.
+      // Unauthenticated this threw 401 per repository, so `inuse-` protected nothing while
+      // retention was armed against it.
       const put = await fetch(`${base}/v2/${repo}/manifests/${tagName}`, {
         method: 'PUT',
         signal: signal(),
-        headers: { 'content-type': contentType },
+        headers: { 'content-type': contentType, ...registryWriteAuth(repo) },
         body: bytes,
       });
       if (!put.ok) throw new Error(`PUT ${repo}:${tagName}: ${put.status} ${put.statusText}`);
@@ -105,6 +110,7 @@ export function registryTagClient(
       const res = await fetch(`${base}/v2/${repo}/manifests/${tagName}`, {
         method: 'DELETE',
         signal: signal(),
+        headers: { ...registryWriteAuth(repo) },
       });
       if (!res.ok && res.status !== 404) {
         throw new Error(`DELETE ${repo}:${tagName}: ${res.status} ${res.statusText}`);

@@ -148,12 +148,15 @@ func listRuntimes(reg string) ([]string, error) { return runtimesUnder(runtimesP
 // answers it 403 DENIED — measured — so discovery works against this install's zot and against a
 // mirror, and the published set has to be named rather than found. `kontra runtime import` is where
 // that costs something, and it says so.
+// THE HOST IS THE HOST AND NOT THE PREFIX. `registryHost` strips a scheme and nothing else, so it
+// answered `127.0.0.1:5000/kontra-runtimes` here and every request became
+// `http://127.0.0.1:5000/kontra-runtimes/v2/_catalog` — a 404 on every install, reported as "no
+// runtimes are published". `splitPrefix` is the one place that separates the two.
 func runtimesUnder(prefix string) ([]string, error) {
-	_, prefixPath, ok := strings.Cut(prefix, "/")
-	if !ok {
-		return nil, fmt.Errorf("runtimes prefix %q names no repository path", prefix)
+	host, prefixPath, err := splitPrefix(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("runtimes prefix %q %w", prefix, err)
 	}
-	host, _ := registryHost(prefix)
 	repos, err := registryRepositories(host)
 	if err != nil {
 		return nil, err
@@ -213,12 +216,19 @@ func registryTagList(host, repo string) ([]string, error) {
 // `registryProbeBases` knows so the loopback-versus-in-network split is not solved twice.
 func registryJSON(host, path string, into any) (string, error) {
 	var lastErr error
+	// A CATALOG READ NEEDS A CREDENTIAL TOO. With auth on, `_catalog` and `tags/list` are 401 like
+	// everything else, and the symptom is a "no runtimes are published" refusal on an install that
+	// has them.
+	cred := readCredential(host)
 	for _, base := range registryProbeBases(host) {
 		req, err := http.NewRequest(http.MethodGet, base+path, nil)
 		if err != nil {
 			return "", err
 		}
 		req.Header.Set("Accept", "application/json")
+		if !cred.anonymous() {
+			req.SetBasicAuth(cred.User, cred.Password)
+		}
 		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 		if err != nil {
 			lastErr = err

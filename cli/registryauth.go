@@ -42,6 +42,10 @@ const (
 	runtimesUserEnv     = "KONTRA_REGISTRY_PUSH_RUNTIMES_USER"
 	runtimesPasswordEnv = "KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD"
 	defaultRuntimesUser = "push-runtimes"
+
+	pullUserEnv     = "KONTRA_REGISTRY_PULL_USER"
+	pullPasswordEnv = "KONTRA_REGISTRY_PULL_PASSWORD"
+	defaultPullUser = "pull"
 )
 
 // registryRole is one of the install's push accounts: the namespace it may create in, the account
@@ -67,7 +71,54 @@ var (
 		Namespace: "runtimes", DefaultUser: defaultRuntimesUser,
 		UserVar: runtimesUserEnv, PasswordVar: runtimesPasswordEnv,
 	}
+	pullRole = registryRole{
+		Namespace: "pull", DefaultUser: defaultPullUser,
+		UserVar: pullUserEnv, PasswordVar: pullPasswordEnv,
+	}
 )
+
+// ── READING AN AUTHENTICATED REGISTRY, WHICH IS NOT THE SAME PROBLEM AS WRITING ONE ─────────────
+//
+// WITH AUTH ON, THIS INSTALL'S ZOT PERMITS NO ANONYMOUS READ. The rendered `accessControl` gives
+// every repository tree a `"defaultPolicy": []` and names the three accounts explicitly, so a
+// manifest HEAD with no credential is 401 — not only a push. Every read on this path was
+// unauthenticated, which under auth turns "does this tag exist" into an error and, worse, turns
+// `versionDeployed`'s version-immutability check into "no".
+//
+// THE CREDENTIAL IS SENT ONLY TO THIS INSTALL'S REGISTRY. A read reaches ghcr as well, and sending
+// an install's password to somebody else's registry on the strength of a 401 would be a credential
+// leak — ghcr's 401 is answered by the Bearer dance below, with no credential at all.
+//
+// THE LEAST PRIVILEGED ONE THAT IS SET. `pull` may read and nothing else; `push-actors` and
+// `push-runtimes` also carry read over `**`, and are what a service that only has a push credential
+// falls back to.
+
+// readCredential is the credential for reading `reg`, or anonymous when `reg` is not this install's
+// registry or no account is configured.
+func readCredential(reg string) registryCredential {
+	if !isInstallRegistry(reg) {
+		return registryCredential{}
+	}
+	for _, r := range []registryRole{pullRole, actorsRole, runtimesRole} {
+		if c := credentialFor(r); !c.anonymous() {
+			return c
+		}
+	}
+	return registryCredential{}
+}
+
+// isInstallRegistry reports whether `reg` names the registry this install configures — by any of
+// the spellings `registryProbeBases` already knows reach it, because `127.0.0.1:5000`,
+// `registry:5000` and `host.docker.internal:5000` are one registry seen from three places.
+func isInstallRegistry(reg string) bool {
+	host, _ := registryHost(reg)
+	for _, base := range registryProbeBases(registryAddress("")) {
+		if h, _ := registryHost(base); h == host {
+			return true
+		}
+	}
+	return false
+}
 
 // registryCredential is a username and password for one registry. Empty means anonymous.
 type registryCredential struct {

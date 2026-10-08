@@ -15,6 +15,7 @@
  * shared digest, and got both back; asked for one image's own layer and got only that image. That is
  * what `referenced_by`, `size_unique` and the hover-highlight are built on.
  */
+import { registryReadAuth } from './registryAuth';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -62,7 +63,10 @@ export class Zot {
     const res = await fetch(`${this.base}/v2/_zot/ext/search`, {
       method: 'POST',
       signal: this.signal(),
-      headers: { 'content-type': 'application/json' },
+      // A POST, AND STILL A READ. zot's search extension is behind the same accessControl as every
+      // repository, so with auth on an unauthenticated query is 401 — and this one throws, so the
+      // whole Images surface fails rather than degrading.
+      headers: { 'content-type': 'application/json', ...registryReadAuth() },
       body: JSON.stringify({ query }),
     });
     if (!res.ok) throw new Error(`zot search: ${res.status} ${res.statusText}`);
@@ -129,7 +133,7 @@ export class Zot {
   async configBlob(repo: string, configDigest: string): Promise<unknown> {
     const res = await fetch(`${this.base}/v2/${repo}/blobs/${configDigest}`, {
       signal: this.signal(),
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json', ...registryReadAuth() },
     });
     if (!res.ok) throw new Error(`config blob ${repo}@${configDigest}: ${res.status} ${res.statusText}`);
     return res.json();
@@ -148,7 +152,7 @@ export class Zot {
   async annotations(repo: string, reference: string): Promise<Record<string, string>> {
     const res = await fetch(`${this.base}/v2/${repo}/manifests/${reference}`, {
       signal: this.signal(),
-      headers: { accept: MANIFEST_ACCEPT },
+      headers: { accept: MANIFEST_ACCEPT, ...registryReadAuth() },
     });
     if (!res.ok) return {};
     const m = (await res.json()) as { annotations?: Record<string, string> };
@@ -160,7 +164,7 @@ export class Zot {
     const res = await fetch(`${this.base}/v2/${repo}/manifests/${reference}`, {
       method: 'HEAD',
       signal: this.signal(),
-      headers: { accept: MANIFEST_ACCEPT },
+      headers: { accept: MANIFEST_ACCEPT, ...registryReadAuth() },
     });
     if (!res.ok) return '';
     return res.headers.get('docker-content-digest') ?? '';

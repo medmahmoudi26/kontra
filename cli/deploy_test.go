@@ -71,9 +71,24 @@ func TestRegistryProbeBases(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("loopback registry probes: got %v want %v", got, want)
 	}
+	// A PUBLIC HOST IS HTTPS FIRST, AND HTTP IS ONLY THE FALLBACK. Measured: `http://ghcr.io`
+	// redirects to HTTPS and the token does not survive the hop, so an anonymous read of a PUBLIC
+	// image came back `401 unauthorized` — indistinguishable from a private package. The compose
+	// aliases must still not appear: those are three names for this install's own registry.
 	got = registryProbeBases("ghcr.io")
-	if len(got) != 1 || got[0] != "http://ghcr.io" {
-		t.Errorf("remote registry should not grow compose aliases: %v", got)
+	want = []string{"https://ghcr.io", "http://ghcr.io"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("remote registry probes: got %v want %v", got, want)
+	}
+	for _, b := range got {
+		if strings.Contains(b, "host.docker.internal") || strings.Contains(b, "//registry:") {
+			t.Errorf("remote registry should not grow compose aliases: %v", got)
+		}
+	}
+	// An explicit scheme is obeyed and never second-guessed — a plain-HTTP registry on a VPC is an
+	// operator's decision, and so is a TLS one.
+	if got = registryProbeBases("http://10.124.0.2:5000"); strings.Join(got, ",") != "http://10.124.0.2:5000" {
+		t.Errorf("an explicit scheme must be the only base: %v", got)
 	}
 }
 

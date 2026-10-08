@@ -124,6 +124,13 @@ x-orchestrator-env: &orchestrator-env
   KONTRA_RUNTIMES_IMPORT: ${KONTRA_RUNTIMES_IMPORT:-base:1 python:1 python-browser:1}
   KONTRA_REGISTRY_PUSH_RUNTIMES_USER: ${KONTRA_REGISTRY_PUSH_RUNTIMES_USER:-push-runtimes}
   KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}
+  # READING IS NOT FREE EITHER, once auth is on: the rendered accessControl gives every repository
+  # tree `"defaultPolicy": []`, so a manifest HEAD or a `tags/list` with no credential is 401 — and
+  # an unauthenticated `versionDeployed` answers "not deployed", which turns version immutability
+  # OFF on exactly the installs that locked their registry down. `pull` may read and nothing else,
+  # so it is what the CLI reads with; the two push accounts are only the fallback.
+  KONTRA_REGISTRY_PULL_USER: ${KONTRA_REGISTRY_PULL_USER:-pull}
+  KONTRA_REGISTRY_PULL_PASSWORD: ${KONTRA_REGISTRY_PULL_PASSWORD:-}
   KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
   KONTRA_CONTROLLER: orchestrator-api
   KONTRA_DUCKLAKE_CATALOG: postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra

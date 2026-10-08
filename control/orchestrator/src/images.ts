@@ -21,6 +21,7 @@
  * empty list and the caller renders it as a sentence. That distinction matters on a first run,
  * where "nothing built yet" and "the registry is down" look identical and mean opposite things.
  */
+import { registryReadAuth } from './images/registryAuth';
 
 /** One tag in the registry — a thing that could be pulled and placed. */
 export interface BuiltImage {
@@ -73,7 +74,7 @@ function nextLink(res: { headers: { get(name: string): string | null } }): strin
 async function getJson(url: string, timeoutMs: number): Promise<unknown> {
   const res = await fetch(url, {
     signal: AbortSignal.timeout(timeoutMs),
-    headers: { accept: 'application/json' },
+    headers: { accept: 'application/json', ...registryReadAuth() },
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
@@ -100,7 +101,7 @@ async function manifestFacts(
   try {
     const res = await fetch(`${base}/v2/${repo}/manifests/${encodeURIComponent(tag)}`, {
       signal: AbortSignal.timeout(timeoutMs),
-      headers: { accept: MANIFEST_ACCEPT },
+      headers: { accept: MANIFEST_ACCEPT, ...registryReadAuth() },
     });
     if (!res.ok) return {};
     const digest = res.headers.get('docker-content-digest') ?? undefined;
@@ -138,7 +139,10 @@ export async function listBuiltImages(
       seen.add(url);
       const res = await fetch(url, {
         signal: AbortSignal.timeout(timeoutMs),
-        headers: { accept: 'application/json' },
+        // WITH AUTH ON THERE IS NO ANONYMOUS READ — see images/registryAuth.ts. Without this the
+        // catalog is 401, the `catch` below turns it into `unreachable`, and the Images page says
+        // the registry could not be read on an install whose registry is working perfectly.
+        headers: { accept: 'application/json', ...registryReadAuth(opts.env) },
       });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       const body = (await res.json()) as { repositories?: string[] };

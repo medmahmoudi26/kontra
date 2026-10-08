@@ -446,6 +446,9 @@ var registryHTTP = &http.Client{Timeout: 10 * time.Second}
 // IT reports. Returns errNotInRegistry when the registry answers and does not hold it.
 func registryManifestDigest(reg, name, ref string) (string, error) {
 	var last error
+	// AN AUTHENTICATED ZOT PERMITS NO ANONYMOUS READ — see cli/registryauth.go. Empty for any
+	// registry that is not this install's, which is what keeps the credential off ghcr.
+	cred := readCredential(reg)
 	for _, base := range registryProbeBases(reg) {
 		url := base + "/v2/" + name + "/manifests/" + ref
 		ask := func(bearer string) (code int, status, digest string, err error) {
@@ -454,8 +457,11 @@ func registryManifestDigest(reg, name, ref string) (string, error) {
 				return 0, "", "", rerr
 			}
 			req.Header.Set("Accept", manifestAccept)
-			if bearer != "" {
+			switch {
+			case bearer != "":
 				req.Header.Set("Authorization", "Bearer "+bearer)
+			case !cred.anonymous():
+				req.SetBasicAuth(cred.User, cred.Password)
 			}
 			resp, derr := registryHTTP.Do(req)
 			if derr != nil {
@@ -474,7 +480,11 @@ func registryManifestDigest(reg, name, ref string) (string, error) {
 		// unauthenticated read of a PUBLIC repository this way, and the pull everyone calls
 		// anonymous is a client fetching a token from the realm it names and asking again. Without
 		// this the registry reads as "not in the registry" for a reference a human can open.
-		if code == http.StatusUnauthorized {
+		//
+		// NOT WHEN A CREDENTIAL WAS ALREADY SENT. A 401 against one is a wrong password, and
+		// fetching a token for it would replace that sentence with a confusing second failure;
+		// `registryAdmits` is what names the account and the variable.
+		if code == http.StatusUnauthorized && cred.anonymous() {
 			// `resp.Header` is gone by now, so the challenge is re-read on its own request. One
 			// extra HEAD against a registry that has already refused is cheaper than keeping the
 			// response body open across a token exchange.
@@ -531,11 +541,31 @@ func confirmPushed(reg, name, version, remote, pushed string) (string, error) {
 }
 
 // registryBase turns a bare host:port into a URL, leaving an explicit scheme alone.
+//
+// PLAIN HTTP IS FOR THIS INSTALL, NOT FOR EVERY BARE ADDRESS. `127.0.0.1:5000` and the two in-network
+// spellings of it have no TLS and need none (ADR 0036), and that is what a bare address means here.
+// A bare PUBLIC registry is a different thing: `ghcr.io` over HTTP answers a redirect to HTTPS, and
+// what came back from the far side of that hop was `401 unauthorized` on an image that pulls
+// anonymously — a failure that reads like a private package. So a host that is neither loopback nor
+// one of this install's own names is HTTPS, with HTTP kept as the second base for a registry that
+// genuinely has no TLS and was named without a scheme.
 func registryBase(reg string) string {
 	if strings.Contains(reg, "://") {
 		return strings.TrimRight(reg, "/")
 	}
-	return "http://" + strings.TrimRight(reg, "/")
+	bare := strings.TrimRight(reg, "/")
+	if ociref.LoopbackHost(bare) || isInstallRegistryName(bare) {
+		return "http://" + bare
+	}
+	return "https://" + bare
+}
+
+// isInstallRegistryName is the compose-network spelling test, kept separate from `isInstallRegistry`
+// because that one calls `registryProbeBases`, which calls this — and a cycle through a resolver is
+// how a "which address is this" question becomes a stack overflow.
+func isInstallRegistryName(host string) bool {
+	h, _, _ := strings.Cut(host, ":")
+	return h == "registry" || h == "host.docker.internal"
 }
 
 // registryProbeBases is the HTTP view of a registry from THIS process.
@@ -567,15 +597,33 @@ func registryProbeBases(reg string) []string {
 	if host == "127.0.0.1" || host == "localhost" || host == "::1" {
 		add("http://host.docker.internal:" + port)
 		add("http://registry:" + port)
+	} else if !strings.Contains(reg, "://") && !isInstallRegistryName(raw) {
+		// A PUBLIC REGISTRY NAMED WITHOUT A SCHEME IS HTTPS FIRST AND HTTP SECOND. `registryBase`
+		// chose https for it; this keeps a plain-HTTP registry on a VPC working for an operator who
+		// wrote the address without one, rather than making the scheme mandatory in a release that
+		// did not require it before.
+		add("http://" + raw)
 	}
 	return out
 }
 
 // versionDeployed reports whether <name>:<version> already exists in the registry (a prior
 // deploy) — the signal `kontra deploy` refuses to overwrite without --override.
+//
+// THE CREDENTIAL IS WHAT MAKES THIS A GUARD. Unauthenticated against a zot with users, every
+// request here is 401, every base is skipped, and the answer is "not deployed" — so version
+// immutability would be silently off on exactly the installs that locked their registry down.
 func versionDeployed(reg, name, version string) bool {
+	cred := readCredential(reg)
 	for _, base := range registryProbeBases(reg) {
-		resp, err := statusHTTP.Get(base + "/v2/" + name + "/tags/list")
+		req, rerr := http.NewRequest(http.MethodGet, base+"/v2/"+name+"/tags/list", nil)
+		if rerr != nil {
+			continue
+		}
+		if !cred.anonymous() {
+			req.SetBasicAuth(cred.User, cred.Password)
+		}
+		resp, err := statusHTTP.Do(req)
 		if err != nil {
 			continue
 		}

@@ -349,10 +349,16 @@ func registryTags(ctx context.Context, reg, repo string) ([]string, error) {
 // already handles does not need solving twice.
 func registryGetJSON(ctx context.Context, reg, path string, into any) (string, error) {
 	var lastErr error
+	// Empty unless `reg` is this install's zot, so the old `registry:2` named by --from is still
+	// read anonymously — it never had accounts, and sending one would be a credential it cannot use.
+	cred := readCredential(reg)
 	for _, base := range registryProbeBases(reg) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 		if err != nil {
 			return "", err
+		}
+		if !cred.anonymous() {
+			req.SetBasicAuth(cred.User, cred.Password)
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

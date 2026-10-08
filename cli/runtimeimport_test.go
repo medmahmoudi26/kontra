@@ -253,3 +253,99 @@ func TestTheRuntimesRefusalNamesTheRuntimesVariableAndNotTheActorsOne(t *testing
 		t.Errorf("user = %q, want the account docker-compose.yml writes (%q)", c.User, defaultRuntimesUser)
 	}
 }
+
+// ── READING AN AUTHENTICATED REGISTRY ────────────────────────────────────────────────────────────
+//
+// WHAT THESE PIN. With auth on, this install's zot gives every repository tree
+// `"defaultPolicy": []` — so a manifest HEAD with no credential is 401, not only a push. Every read
+// on this path was anonymous, and the two consequences were invisible: a runtime that IS in the
+// registry reads as missing, and `versionDeployed` answers "not deployed" for every version, which
+// turns version immutability off on exactly the installs that locked their registry down.
+
+// authRegistry answers 401 unless the request carries `user:password`, and records what it saw.
+func authRegistry(t *testing.T, user, password, digest string) (addr string, authed *bool) {
+	t.Helper()
+	saw := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if !ok || u != user || p != password {
+			// zot's challenge, which is Basic and NOT Bearer — so a client that only knows the
+			// token dance has no way through.
+			w.Header().Set("WWW-Authenticate", `Basic realm="zot"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		saw = true
+		if strings.HasSuffix(r.URL.Path, "/tags/list") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"actors/probe","tags":["0.2.0"]}`))
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", digest)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	return strings.TrimPrefix(ts.URL, "http://"), &saw
+}
+
+func TestAManifestReadAgainstAnAuthenticatedInstallSendsTheCredential(t *testing.T) {
+	reg, authed := authRegistry(t, "pull", "pw", digestA)
+	t.Setenv("KONTRA_REGISTRY", reg)
+	t.Setenv(pullUserEnv, "pull")
+	t.Setenv(pullPasswordEnv, "pw")
+	got, err := registryManifestDigest(reg, "kontra-runtimes/python", "1")
+	if err != nil {
+		t.Fatalf("an authenticated install must be readable: %v", err)
+	}
+	if got != digestA || !*authed {
+		t.Errorf("digest = %q, credential seen = %v", got, *authed)
+	}
+}
+
+func TestVersionImmutabilityStillHoldsOnAnAuthenticatedInstall(t *testing.T) {
+	reg, _ := authRegistry(t, "pull", "pw", digestA)
+	t.Setenv("KONTRA_REGISTRY", reg)
+	t.Setenv(pullUserEnv, "pull")
+	t.Setenv(pullPasswordEnv, "pw")
+	if !versionDeployed(reg, "actors/probe", "0.2.0") {
+		t.Error("a version that IS in the registry must read as deployed, or --override stops meaning anything")
+	}
+	t.Setenv(pullPasswordEnv, "")
+	t.Setenv(pushPasswordEnv, "")
+	t.Setenv(runtimesPasswordEnv, "")
+	if versionDeployed(reg, "actors/probe", "0.2.0") {
+		t.Error("with no credential this cannot claim to know; the preflight is what refuses")
+	}
+}
+
+func TestTheInstallCredentialIsNeverSentToSomebodyElsesRegistry(t *testing.T) {
+	// A CREDENTIAL LEAK WOULD LOOK LIKE A FIX. Reads reach ghcr as well as this install, and
+	// answering its 401 with the install's password would send the registry secret off the box.
+	t.Setenv("KONTRA_REGISTRY", "127.0.0.1:5000")
+	t.Setenv(pullUserEnv, "pull")
+	t.Setenv(pullPasswordEnv, "pw")
+	if c := readCredential("ghcr.io"); !c.anonymous() {
+		t.Errorf("ghcr must be read anonymously, got user %q", c.User)
+	}
+	for _, spelling := range []string{"127.0.0.1:5000", "registry:5000", "host.docker.internal:5000"} {
+		if c := readCredential(spelling); c.anonymous() {
+			t.Errorf("%q is this install's registry seen from one of three places; it must be authenticated", spelling)
+		}
+	}
+}
+
+func TestTheLeastPrivilegedReadAccountWins(t *testing.T) {
+	t.Setenv("KONTRA_REGISTRY", "127.0.0.1:5000")
+	t.Setenv(pullUserEnv, "pull")
+	t.Setenv(pullPasswordEnv, "readonly")
+	t.Setenv(pushUserEnv, "push-actors")
+	t.Setenv(pushPasswordEnv, "canwrite")
+	if c := readCredential("127.0.0.1:5000"); c.User != "pull" {
+		t.Errorf("reads must use %q while it is set, got %q", defaultPullUser, c.User)
+	}
+	// A service that only has a push credential still has to be able to read.
+	t.Setenv(pullPasswordEnv, "")
+	if c := readCredential("127.0.0.1:5000"); c.User != "push-actors" {
+		t.Errorf("with no pull account the push one is the fallback, got %q", c.User)
+	}
+}

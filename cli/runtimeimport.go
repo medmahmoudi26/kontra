@@ -39,6 +39,7 @@ import (
 	"oras.land/oras-go/v2/registry/remote/retry"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
 
 const runtimeUsage = `usage: kontra runtime import [name:major ...] [--from <prefix>] [--to <registry>] [--dry-run] [--force]
@@ -212,6 +213,23 @@ func runtimesSource(flagVal string) string {
 	return publishedRuntimes
 }
 
+// sourcePlainHTTP decides the SOURCE's transport, and it is deliberately not the rule the
+// destination uses.
+//
+// `registryHost` reads a bare `host:port` as plain HTTP, because that is what this install's own
+// registry is (ADR 0036 keeps loopback without TLS). Applied to a PUBLIC source the same rule is
+// wrong in the expensive direction: measured, it sent `ghcr.io` over HTTP, ghcr redirected to
+// HTTPS, and the token did not survive the hop — so an anonymous read of a public image failed with
+// `401 unauthorized: authentication required`, which reads exactly like a private package.
+//
+// A source is HTTPS unless it says `http://` or is loopback. That is `ociref.PushTransport`'s rule,
+// reused rather than restated.
+func sourcePlainHTTP(prefix string) bool {
+	bare, plain := ociref.PushTransport(prefix)
+	host, _, _ := strings.Cut(bare, "/")
+	return plain(host)
+}
+
 // splitPrefix separates `host[:port]/path/to/namespace` into the host a request goes to and the
 // repository path a name hangs off. A prefix with no path has no namespace to copy into.
 func splitPrefix(prefix string) (host, repos string, err error) {
@@ -345,7 +363,7 @@ func importOneRuntime(ctx context.Context, a importArgs) importRow {
 		row.Err = fmt.Errorf("source reference: %w", err)
 		return row
 	}
-	_, src.PlainHTTP = registryHost(a.SrcPrefix)
+	src.PlainHTTP = sourcePlainHTTP(a.SrcPrefix)
 
 	// THE ADDRESS THE DAEMON USES IS NOT THE ADDRESS THIS PROCESS CAN OPEN. `127.0.0.1:5000` is
 	// zot as the HOST sees it, and this runs in the `cli` container; the copy speaks HTTP itself,
