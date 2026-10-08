@@ -779,8 +779,27 @@ jobs:
           if ! docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACES/hello/workflows/hello" --wait --timeout 15m'; then
             echo "::error title=the starter workflow did not complete::evidence follows"
             echo "::group::containers (a Worker that never started leaves nothing here)"
-            docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}'
+            docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | tee /tmp/ps.txt
             echo "::endgroup::"
+
+            # THE ACTOR'S LOG FIRST, BECAUSE IT IS ABOUT TO BE DELETED. Measured: the listing above
+            # showed `kontra-hello-0.1.0` and `kf-hello-01` Up, and a second `docker ps -a` AFTER
+            # fourteen `compose logs` dumps showed neither — the Fleet is reaped once the run ends,
+            # which is what the next step asserts. So a diagnostic that collects the cheap, permanent
+            # logs first and the volatile one last gets everything except the part that mattered.
+            #
+            # Filtered with `case` and not a `grep` pipeline, and the candidate list is printed, so
+            # an empty result is a FACT rather than a silence — the earlier version iterated zero
+            # times and read exactly like "there was nothing to show".
+            while read -r c _rest; do
+              case "$c" in
+                kontra-hello*|kf-*) ;;
+                *) continue ;;
+              esac
+              echo "::group::docker logs $c (last 150) — captured before the reap"
+              docker logs --tail 150 "$c" 2>&1 || true
+              echo "::endgroup::"
+            done < /tmp/ps.txt
             # THE SERVICE NAMES COME FROM COMPOSE, because guessing them printed nothing: there is
             # no service called `orchestrator` — the containers are `kontra-api` and `kontra-infra`
             # from `orchestrator-api` and `orchestrator-infra` — and `|| true` swallowed the miss,
@@ -794,25 +813,6 @@ jobs:
             # actor and its Worker are started by the orchestrator through the docker socket, not by
             # compose, so `docker compose logs` cannot see them — and the Nexus operation that timed
             # out is handled inside the actor.
-            # NO PIPELINE AND NO grep. The first version was
-            #   for c in $(docker ps -a --format '{{.Names}}' | grep -E '^(kontra-hello|kf-)' || true)
-            # and it iterated ZERO times while `docker ps -a` two groups earlier was listing
-            # `kontra-hello-0.1.0` and `kf-hello-01` as Up. A loop that silently produces nothing is
-            # indistinguishable from "there was nothing to show", which is the same vacuous-pass
-            # shape as the 586-character password — so this filters in the shell with `case` and
-            # prints the candidate list, which makes an empty result a FACT rather than a silence.
-            echo "::group::containers not owned by compose"
-            docker ps -a --format '{{.Names}}' | tee /tmp/names.txt
-            echo "::endgroup::"
-            while read -r c; do
-              case "$c" in
-                kontra-hello*|kf-*) ;;
-                *) continue ;;
-              esac
-              echo "::group::docker logs $c (last 120)"
-              docker logs --tail 120 "$c" 2>&1 || true
-              echo "::endgroup::"
-            done < /tmp/names.txt
             echo "::group::what the install pushed to its own registry"
             # FROM INSIDE THE REGISTRY CONTAINER, not over a published port — zot is distroless and
             # may not be published at all, and `registry-config` puts a static busybox at
