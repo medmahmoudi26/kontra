@@ -159,6 +159,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A DOWNGRADE COMPILES, AND THAT IS WHY IT NEEDS A GATE RATHER THAN A COMPILER.
+      #
+      # `go get pkg@vX` pins exactly X in BOTH directions. Applying one module's advisory fix across
+      # every module that names the package downgraded `runtime/handler`'s S3 client from v1.105.0 to
+      # v1.97.3 — and `runtime/handler` is the one module a container builds with `GOWORK=off`, so
+      # its own go.mod is the whole truth there while every `go build` here uses the workspace
+      # maximum and compiles something else. Nothing failed. A real run then retried
+      # `kontra.store_blob` nine times against `not found: S3100Continue` until the Nexus operation
+      # hit ScheduleToClose, presenting as a hung actor four layers from the line that caused it.
+      #
+      # `--depth=1` is enough: `git show <ref>:<path>` needs the blob, not the history.
+      - name: no dependency goes backwards
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          python3 scripts/assert-no-dependency-downgrade.py FETCH_HEAD
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: runtime/handler/go.mod
