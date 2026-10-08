@@ -391,12 +391,32 @@ cleanup() {
     rm -rf "$GATE_TMP"
   fi
   report
-  exit $rc
+  # THE EXIT CODE IS THE VERDICT, AND IT WAS NOT.
+  #
+  # This said `exit $rc` and the script's last line said `exit 0`, so a run that printed
+  # `PARITY GATE FAILS (9)` — no worker polling, no counts, no Dataset — exited ZERO and the CI check
+  # went GREEN with nine failures on the screen above it. Every assertion in this file is aimed at
+  # "a run that did not do the work reporting success", and the file itself was doing it.
+  #
+  # So the verdict decides, in this order: a non-zero status from the body is a crash and is kept as
+  # itself; otherwise anything short of "reached the end with no failures" is 1.
+  if [ "$rc" != "0" ]; then exit "$rc"; fi
+  if [ "$REACHED_END" != "1" ] || [ ${#FAILURES[@]} -gt 0 ]; then exit 1; fi
+  exit 0
 }
 
 # TEARDOWN IS AN ASSERTION, not a courtesy. "teardown leaves nothing running" is an acceptance
 # criterion, and a gate that tore down without checking would pass while leaking.
 teardown_assertions() {
+  # ONLY ABOUT A STACK THIS GATE STARTED. Every check below reads the machine, so running them when
+  # `compose up` never happened asserts things about somebody ELSE's containers and ports — and the
+  # one that bites is "published ports still bound", which the install's own registry on 5000
+  # satisfies. A refusal before startup (no images, a port taken) would otherwise collect a teardown
+  # failure it could not have caused.
+  if [ "$COMPOSE_UP" != "1" ]; then
+    info "teardown assertions skipped: this run started no stack"
+    return
+  fi
   local containers ports_bound=0 project_left volumes_left
   containers=$(docker ps -aq --filter "label=kontra.actor=$ACTOR_NAME@$ACTOR_VERSION" 2>/dev/null | wc -l | tr -d ' ')
   check "worker containers after teardown" "0" "$containers"
@@ -431,6 +451,28 @@ report() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+# ── THE EXIT-CODE CONTRACT, CHECKABLE WITHOUT A STACK ────────────────────────────────────────
+#
+# `KONTRA_GATE_SELFTEST=<n>` records n synthetic failures and leaves through the ORDINARY path: the
+# same `report`, the same trap, the same verdict. It starts no stack and tears nothing down, so
+# `tests/test_parity_gate_exit_code.py` can assert the one property this file had lost — that a gate
+# which prints FAILS exits non-zero. A gate whose own verdict is untested is the shape of failure
+# every other assertion here is aimed at.
+#
+# It sits after the isolation checks rather than before them because it goes out through `cleanup`,
+# which is defined here. On a box with a stack already up the gate refuses before this line, and the
+# test says so rather than pretending to have run.
+if [ -n "${KONTRA_GATE_SELFTEST:-}" ]; then
+  COMPOSE_UP=0
+  i=0
+  while [ "$i" -lt "$KONTRA_GATE_SELFTEST" ]; do
+    bad "synthetic failure $((i + 1)) (KONTRA_GATE_SELFTEST)"
+    i=$((i + 1))
+  done
+  REACHED_END=1
+  exit 0   # the trap decides, and this is exactly the 0 it has to override
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 say "1 · condition 1a — THE SAME LEG WITH NO CONTROL PLANE (the SDK-side contract)"
@@ -772,5 +814,7 @@ else
 fi
 
 # THE LAST LINE, and the only place this is set. See REACHED_END at the top.
+#
+# NO `exit 0` HERE. It stood here and it was the whole of the bug above: the EXIT trap computes the
+# verdict and exits with it, and a hardcoded success in the body is a success the trap then reported.
 REACHED_END=1
-exit 0
