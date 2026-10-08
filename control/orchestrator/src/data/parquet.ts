@@ -45,6 +45,7 @@ import type { ObjectStore } from '../codec/objectStore';
 import { activeLakeWorkspace, workspaceAddress } from '../workspaces';
 import { installDataDir } from './dataDir';
 import { MATERIALIZATION_SCHEMA_VERSION } from './materialization';
+import { ensureCatalogDatabase } from './catalogdb';
 
 /** Where a DuckLake lives: its catalog metadata store and the data-file storage root. */
 export interface LakeConfig {
@@ -525,8 +526,11 @@ export async function lakeConnection(store: ObjectStore, cfg: LakeConfig): Promi
 
   const opening = (async () => {
     // The catalog's directory before the connection, because a missing parent is an `IO Error`
-    // from inside ATTACH and not a missing-directory message.
+    // from inside ATTACH and not a missing-directory message. And, for a POSTGRES catalog, the
+    // DATABASE — `kontra_ducklake_ws_<workspace>` is derived here and created by nobody else
+    // (data/catalogdb.ts carries the failure that proved it).
     ensureCatalogDir(cfg.catalog);
+    await ensureCatalogDatabase(cfg.catalog);
     const c = await (await DuckDBInstance.create()).connect();
     // Resource posture FIRST, before anything can allocate: a bounded buffer manager, one
     // thread, and a spill directory with a ceiling. Community extensions and autoinstall
@@ -631,6 +635,9 @@ export async function migrationConnection(
   }
   ensureCatalogDir(src.catalog);
   ensureCatalogDir(dst.catalog);
+  // The destination only: a migration SOURCE that does not exist is a migration with nothing to
+  // move, and creating it here would turn that into an empty success.
+  await ensureCatalogDatabase(dst.catalog);
   const c = await (await DuckDBInstance.create()).connect();
   await c.run(`SET memory_limit='${dst.memoryLimit}'`);
   await c.run(`SET threads=${dst.threads}`);
