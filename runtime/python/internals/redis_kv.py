@@ -109,7 +109,7 @@ def redis_kv_from_env() -> RedisEtagKV:
     # variable together, both `${VAR:?}`.
     #
     # UNSET MEANS NO AUTH, which is today's behaviour unchanged — so a loopback install and the
-    # embedded appliance store keep working without one.
+    # embedded state store keep working without one.
     password = os.environ.get("KONTRA_REDIS_PASSWORD") or None
 
     def _factory() -> Any:

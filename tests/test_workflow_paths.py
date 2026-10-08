@@ -13,7 +13,7 @@ same shape:
 Nothing in that file ever contains the string `orchestrator/web`, so the sweep that moved
 `orchestrator/web` to `frontend/` matched nothing here, both hops looked individually plausible, and
 the parity gate died on `cd: web: No such file or directory` — after a five-minute install, in the
-one job that boots a real appliance, which is the slowest possible place to learn it.
+one job that boots a real install, which is the slowest possible place to learn it.
 
 WHAT IT CHECKS. It resolves each step's working directory the way the shell does: the job's
 `defaults.run.working-directory`, overridden by the step's own, then each `cd` in the script applied

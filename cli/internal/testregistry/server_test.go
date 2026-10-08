@@ -1,4 +1,4 @@
-package registry
+package testregistry
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ func startRegistry(t *testing.T) (*Server, string) {
 // startRegistryIn starts one on a FREE port, never the default.
 //
 // `Port: 0` would be the default 5000 — the same rule every other service in this package uses —
-// so a suite run on the development controller would fight the appliance, or the compose registry,
+// so a suite run on the development controller would fight the compose registry,
 // that is already there. This was not a hypothetical: written as `Port: 0`, two tests here talked
 // to something else on 5000 and one of them reported zero bytes served for a pull that had
 // succeeded against a different process.
@@ -697,7 +697,7 @@ func TestTakenPortNamesTheCollision(t *testing.T) {
 	if err == nil {
 		t.Fatal("two registries bound one port")
 	}
-	// The address, because "the appliance is broken" and "you are running two registries" are one
+	// The address, because "the registry is broken" and "you are running two registries" are one
 	// sentence apart.
 	if !strings.Contains(err.Error(), first.Address()) {
 		t.Errorf("the bind failure does not name the address: %v", err)
@@ -713,7 +713,7 @@ func TestTakenPortNamesTheCollision(t *testing.T) {
 // means the same bytes rather than the same name.
 //
 // It is skipped without a daemon rather than failed: this package has to build and test on a box
-// that has never installed Docker, which is the appliance's whole claim (ADR 0032).
+// that has never installed Docker (ADR 0032).
 func TestDockerPushPullRoundTrip(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this one drives a real Docker daemon")
@@ -940,7 +940,7 @@ func TestRegistryOnLoopbackKeepsOneAddress(t *testing.T) {
 	}
 	defer r.Stop()
 	if r.Address() != r.BoundAddress() {
-		t.Fatalf("a loopback appliance must have ONE registry address, got %q and %q", r.Address(), r.BoundAddress())
+		t.Fatalf("a loopback server must have ONE registry address, got %q and %q", r.Address(), r.BoundAddress())
 	}
 	if r.loopbackLn != nil {
 		t.Error("a loopback bind must not open a second listener on the address it already holds")

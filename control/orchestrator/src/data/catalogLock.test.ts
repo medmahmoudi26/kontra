@@ -153,7 +153,7 @@ describe('acquireCatalogLock', () => {
    *
    * A container's hostname is its id, so `docker compose up -d --force-recreate` — the ordinary
    * upgrade — starts a new hostname on the same volume. The old rule answered "another host,
-   * therefore live" and the appliance refused to boot, forever, with `restart: unless-stopped`
+   * therefore live" and the install refused to boot, forever, with `restart: unless-stopped`
    * retrying the refusal. The way out was to `rm` a file inside a named volume belonging to a
    * container that was restarting and so could not be `exec`'d into.
    *

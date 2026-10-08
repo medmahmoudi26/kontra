@@ -16,7 +16,7 @@
  *
  *  - **Management is OPT-IN (`checkOptionalBearer`)** — open when no token is configured, enforced
  *    when one is, exactly like the serve/start control surface. Fail-closed was the first
- *    instinct and it is the wrong one HERE: a store nobody can reach on a default appliance means
+ *    instinct and it is the wrong one HERE: a store nobody can reach on a default install means
  *    credentials stay in `.env`, which is the failure this slice exists to end. What bounds the
  *    damage is the store's own property rather than the door — an unauthenticated caller on the
  *    loopback API can write and destroy secrets, and cannot read one.

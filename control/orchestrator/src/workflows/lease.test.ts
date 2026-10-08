@@ -14,7 +14,7 @@ import {
   type FleetLeaseSet,
 } from '../lease';
 import * as bundleModule from './infra';
-import * as applianceModule from './appliance';
+import * as noProvisionerModule from './noProvisioner';
 import type { HoldersAliveInput, HoldersAliveOutput } from '../activities/lease';
 
 /**
@@ -76,7 +76,7 @@ interface Fakes {
   checkFails?: string;
   /** Holds `stackDestroy` open until the test releases it. */
   destroyHeldOpen?: Promise<void>;
-  /** The teardown refuses the way an appliance's `stackWorkflow` does. */
+  /** The teardown refuses the way the no-provisioner `stackWorkflow` does. */
   destroyRefuses?: string;
 }
 
@@ -547,7 +547,7 @@ describe('the teardown the last drop fires', () => {
 
   it('fails LOUDLY, naming the fix, when the Machines cannot be destroyed', async () => {
     // A **Lease** workflow that could not tear down must not complete quietly — completing says "this Fleet is
-    // gone". It also must not retry a permanent refusal five times: an appliance's `stackWorkflow`
+    // gone". It also must not retry a permanent refusal five times: the no-provisioner `stackWorkflow`
     // refuses non-retryably and will refuse identically in thirty seconds.
     const rec = fresh();
     const fqn = nextFqn();
@@ -674,35 +674,35 @@ describe('what a Lease workflow costs', () => {
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('the workflow bundles', () => {
-  it('both export the Lease workflow, and the appliance exports the REAL one', () => {
+  it('both export the Lease workflow, and the no-provisioner bundle exports the REAL one', () => {
     // A type nobody registered does not fail a `fleet.up()`, it HANGS one: the worker takes the
     // task, finds no such type, fails the task, and Temporal retries for ever. That is the whole
-    // reason `workflows/appliance.ts` registers `stackWorkflow` as a refusal — and the reason the
+    // reason `workflows/noProvisioner.ts` registers `stackWorkflow` as a refusal — and the reason the
     // **Lease** workflow must NOT be a refusal there: it holds no credential and converges nothing.
     expect(typeof (bundleModule as Record<string, unknown>).fleetLeaseWorkflow).toBe('function');
-    expect(typeof (applianceModule as Record<string, unknown>).fleetLeaseWorkflow).toBe('function');
-    expect(applianceModule.fleetLeaseWorkflow).toBe(bundleModule.fleetLeaseWorkflow);
+    expect(typeof (noProvisionerModule as Record<string, unknown>).fleetLeaseWorkflow).toBe('function');
+    expect(noProvisionerModule.fleetLeaseWorkflow).toBe(bundleModule.fleetLeaseWorkflow);
     // …while the provisioner beside it is NOT the same function in the two bundles.
-    expect(applianceModule.stackWorkflow).not.toBe(bundleModule.stackWorkflow);
+    expect(noProvisionerModule.stackWorkflow).not.toBe(bundleModule.stackWorkflow);
   });
 
-  it('the appliance bundle still BUNDLES', async () => {
+  it('the no-provisioner bundle still BUNDLES', async () => {
     /**
      * IMPORTING A MODULE IN NODE IS NOT THE SAME AS BUNDLING IT FOR THE SANDBOX, and the difference
-     * is the hazard `workflows/appliance.ts` names in its own header: "a non-bundleable import does
+     * is the hazard `workflows/noProvisioner.ts` names in its own header: "a non-bundleable import does
      * not error, it makes bundling HANG". `workflows/lease.ts` reaches `../activities/lease` — a
      * module that imports `@temporalio/client` and `queues.ts` — and it is safe only because that
      * import is `import type`, erased before the bundler sees it. The test above passes either way.
      * This one does not.
      */
-    const applianceBundle = await bundleWorkflowCode({
-      workflowsPath: path.join(__dirname, 'appliance.ts'),
+    const installBundle = await bundleWorkflowCode({
+      workflowsPath: path.join(__dirname, 'noProvisioner.ts'),
     });
-    expect(applianceBundle.code.length).toBeGreaterThan(1000);
+    expect(installBundle.code.length).toBeGreaterThan(1000);
     // The client half must not have been dragged in with the types. `Connection.connect` is the
     // call `activities/lease.ts` makes and there is no `process` in a workflow sandbox to make it
     // with; finding it here would mean the erasure did not happen.
-    expect(applianceBundle.code).not.toContain('KONTRA_ADDRESS');
+    expect(installBundle.code).not.toContain('KONTRA_ADDRESS');
   }, 300_000);
 });
 

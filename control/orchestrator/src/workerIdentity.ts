@@ -5,7 +5,7 @@
  *
  * `docker-compose.yml` runs the API and the materializer in ONE container ("queues stay distinct"),
  * and that container runs four Workers: the materializer's decoder, the dataset pager, the infra
- * role's appliance worker and whatever a `serve` starts beside them. Left at the SDK default they
+ * role's install worker and whatever a `serve` starts beside them. Left at the SDK default they
  * all identify as the same `<pid>@<hostname>` — one string for four Workers with four different
  * jobs and four different failure modes. A poller listing then shows the same identity on four
  * queues, and "which Worker stopped polling" is not answerable from it.

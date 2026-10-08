@@ -3,7 +3,7 @@
 ## Status
 
 Approved on 2026-09-14. This design reverses the local packaging decision in ADR 0031. The
-supported first-time installation is a Docker Compose cluster, not a single appliance process.
+supported first-time installation is a Docker Compose cluster, not a single install process.
 Kubernetes is explicitly out of scope.
 
 ## Goals
@@ -21,7 +21,7 @@ Kubernetes is explicitly out of scope.
 ## Non-goals
 
 - Kubernetes, k3d, or another local orchestrator.
-- Keeping the appliance as a second supported installation path.
+- Keeping the install as a second supported installation path.
 - Automatically serving or running user workflows.
 - Automatically overwriting or repairing files in a non-empty workspace.
 - Changing the DigitalOcean Fleet's public behavior.
@@ -47,7 +47,7 @@ Long-lived services:
 - `workspace`: recursive manifest discovery and actor artifact reconciliation.
 
 The existing kontra binary remains the CLI and Warden executable. Its embedded control-plane
-services and appliance install path are retired from user-facing documentation and release gates.
+services and install install path are retired from user-facing documentation and release gates.
 Code may be removed in stages where immediate deletion would make the migration unsafe, but it is
 not a supported topology after this change.
 
@@ -179,12 +179,12 @@ release checklist fallback where hosted macOS runners cannot provide nested Dock
 
 ## Documentation and decisions
 
-- Add an ADR that supersedes ADR 0031's single-appliance packaging decision while retaining its
+- Add an ADR that supersedes ADR 0031's single-install packaging decision while retaining its
   historical measurements.
 - Amend ADR 0034: the local provider is now `dockerFleet`, and it is Pulumi-backed.
 - Update README, Getting Started, First Run, Deployment, and security documentation to one topology.
 - Remove statements that Postgres, Temporal, and SeaweedFS are embedded or have evaporated.
-- Replace appliance installer/release-path gates with the modular cluster clean-install gate.
+- Replace install installer/release-path gates with the modular cluster clean-install gate.
 
 ## Compatibility
 

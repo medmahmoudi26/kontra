@@ -86,8 +86,8 @@ func (e *Engine) Ready() error {
 		return fmt.Errorf("no %s on PATH, and the host engine is that binary — a Pulumi YAML program "+
 			"resolves its providers as binary plugins, so this is the whole toolchain (ADR 0052 §1).\n"+
 			"      curl -fsSL https://get.pulumi.com | sh\n"+
-			"  or let kontra's installer do it, which also pins the docker provider plugin:\n"+
-			"      curl -fsSL https://kontra.sh/get.sh | sh", bin)
+			"  then pin the docker provider plugin, which this engine resolves as a binary:\n"+
+			"      pulumi plugin install resource docker", bin)
 	}
 	e.Bin = path
 	return nil
@@ -105,7 +105,7 @@ func (e *Engine) bin() string {
 // TWO VARIABLES ARE REMOVED FROM THE INHERITED ENVIRONMENT, and that is the belt beside
 // AssertBackend's braces. `PULUMI_BACKEND_URL` is removed and then set to the backend this engine
 // decided on, because an exported one beats everything else including a `pulumi login` (measured,
-// get.sh:307-311) — so restating it is the only way to be sure. `PULUMI_ACCESS_TOKEN` is removed
+// the one-line installer) — so restating it is the only way to be sure. `PULUMI_ACCESS_TOKEN` is removed
 // because there is no backend here it could legitimately authenticate to: AssertBackend already
 // refused the environment that has one, and a caller that got past it by exporting a `file://` URL
 // still has no use for a hosted credential in this process.

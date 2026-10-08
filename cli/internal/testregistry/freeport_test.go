@@ -1,16 +1,13 @@
 // freeport_test.go — the port a test binds when it has to know the number BEFORE the listener
 // exists.
 //
-// A COPY, DELIBERATELY, AND IT IS ONE OF FOUR. The original is appliance/temporalsrv/temporal.go,
-// which is the only NON-test caller in the tree and carries the full reasoning; kv, objstore,
-// registry and codec each need the same answer in their own tests and none of them may import a
-// sibling role to get it. Twelve lines of test scaffolding is the cheaper half of that trade, and
-// it is the copy whose drift cannot reach a shipped binary.
+// A COPY, DELIBERATELY. Twelve lines of test scaffolding is cheaper than a shared test helper
+// package every role has to import, and it is the copy whose drift cannot reach a shipped binary.
 //
 // The dial-and-close dance is temporalio/cli's and is not superstition: on Linux a port released
 // by bind(:0) can be handed to the next bind(:0) within seconds, and closing from the LISTENER's
 // side parks it in TIME_WAIT, which stops that while still allowing an explicit bind.
-package codec
+package testregistry
 
 import (
 	"fmt"

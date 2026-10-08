@@ -6,7 +6,7 @@ package warden
 //
 // THIS IS THE FIRST DISK-SPACE READ IN THE WARDEN, and it is the only one. Nothing else in this package
 // has ever asked; the two `Statfs` call sites elsewhere in the repository
-// (`cli/appliance/bundle/stage.go`, `runtime/handler/internal/cas`) both refuse work rather than
+// (`cli/install/bundle/stage.go`, `runtime/handler/internal/cas`) both refuse work rather than
 // reclaim space. The value here is a TRIGGER and never a quota: it decides when a prune happens, never
 // what the prune removes (see `prunePlan`, which keeps the same policy under pressure).
 

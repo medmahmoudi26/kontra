@@ -87,7 +87,7 @@ export function registerHitlRoutes(app: FastifyInstance, deps: HitlRouteDeps): v
    * was the choice (`describeExposure()` says so out loud); a token turns it on with no other
    * change.
    *
-   * `by` IS ATTRIBUTION AND NOT AUTHENTICATION. The appliance is loopback with no credential, so
+   * `by` IS ATTRIBUTION AND NOT AUTHENTICATION. The install is loopback with no credential, so
    * this records what the client called itself, falling back to this box's `KONTRA_OPERATOR`.
    * Nothing is gated on it, and nothing in this codebase may describe it as proof.
    */

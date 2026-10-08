@@ -4,7 +4,7 @@ package warden
 //
 // ═══ THE ONLY PATH IN KONTRA THAT RECLAIMS DISK, SO ITS DEFAULT ANSWER IS "KEEP" ═══
 //
-// Every other low-disk path here REFUSES work instead (`cli/appliance/bundle/stage.go`,
+// Every other low-disk path here REFUSES work instead (`cli/install/bundle/stage.go`,
 // `runtime/handler/internal/cas`), and that asymmetry is the shape of the rules below: a removal has to
 // be argued for, and anything the Warden does not fully understand is kept. A prune that removes a
 // PLACED image is unrecoverable from the Machine — the Worker stops, the next pull needs the network and

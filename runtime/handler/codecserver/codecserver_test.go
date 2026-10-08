@@ -14,7 +14,7 @@ import (
 	"go.temporal.io/sdk/converter"
 )
 
-// memBacking is the store the appliance provides for real: a map here, a directory there. It is
+// memBacking is the store the install provides for real: a map here, a directory there. It is
 // declared in the test rather than exported because the point of Backing is that a caller in
 // another module can satisfy it, and a test that used an implementation from this module would
 // not be evidence of that.
@@ -74,8 +74,8 @@ func serve(t *testing.T, opts Options) (converter.PayloadCodec, *httptest.Server
 
 // TestServesTheClaimCheckOverHTTP is the contract in one test: over the threshold offloads to the
 // store and comes back byte-identical; under it stays inline and touches no store. The corpus
-// that pins the bytes across three languages runs in ../internal/codec and, for the appliance's
-// own listener, in cli/appliance/codec/codec_test.go.
+// that pins the bytes across three languages runs in ../internal/codec and, for the install's
+// own listener, in cli/install/codec/codec_test.go.
 func TestServesTheClaimCheckOverHTTP(t *testing.T) {
 	store := newMem()
 	cdc, _ := serve(t, Options{Store: store, Threshold: 32})
@@ -152,7 +152,7 @@ func TestPrefixIsTheWritersPrefix(t *testing.T) {
 
 // TestPassthroughWithoutAStore documents the state that is legal and never wanted: no store means
 // a decode hands the `$ref` straight back, which renders in the UI exactly as it did before the
-// codec existed. cli/appliance refuses to start one this way; the SDK's own default is why the
+// codec existed. cli/install refuses to start one this way; the SDK's own default is why the
 // case is here at all.
 func TestPassthroughWithoutAStore(t *testing.T) {
 	cdc, _ := serve(t, Options{Threshold: 4})

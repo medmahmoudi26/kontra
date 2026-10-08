@@ -174,7 +174,7 @@ make a third-party image look like one this repository builds.
 ## The image store
 
 The compose controller's `registry` service is **zot**, pinned to the exact version `v2.1.21`. `kontra up`'s
-appliance has a **different**, in-process registry: unauthenticated, loopback-only, with no retention
+install has a **different**, in-process registry: unauthenticated, loopback-only, with no retention
 and no garbage collection. Everything in this section is the compose one.
 
 | Variable | Default | Notes |

@@ -81,7 +81,7 @@ func FromEnv() *EtagKV {
 	// the fleet network so a Machine can reach the state store — and at that point anything on that
 	// VPC can read every actor's state with no credential. `docker-compose.vpc.yml` sets
 	// `requirepass` and this variable together. Unset means no auth, which is today's behaviour and
-	// what the embedded appliance store expects.
+	// what the embedded state store expects.
 	return New(redis.NewClient(&redis.Options{Addr: hostPort, Password: os.Getenv("KONTRA_REDIS_PASSWORD")}))
 }
 

@@ -1,5 +1,5 @@
 /**
- * The APPLIANCE's `kontra-infra` bundle — the same queue, minus the provisioner (ADR 0031 §4).
+ * The INSTALL's `kontra-infra` bundle — the same queue, minus the provisioner (ADR 0031 §4).
  *
  * `workflows/infra.ts` is the compose controller's bundle and is unchanged. This is the one a
  * process with no Pulumi engine, no state directory, no passphrase and no cloud credential
@@ -10,7 +10,7 @@
  * out does not make `fleet.up()` fail, it makes it HANG: `kontra.fleet.up()` starts the child on
  * this queue, this worker takes the workflow task, finds no such type, and FAILS THE TASK — which
  * Temporal retries, forever. The run shows a workflow that never progresses and no error
- * anywhere, which is exactly the invisible failure ADR 0031 §4 says must not be how the appliance
+ * anywhere, which is exactly the invisible failure ADR 0031 §4 says must not be how the install
  * says "no provisioner here". So: register it, refuse in one second, name the limitation.
  *
  * THE ONE THAT STAYS IS NOT PROVISIONING (ADR 0034 §2, quoting ADR 0031 §4). `sweepDatasetsWorkflow`
@@ -37,10 +37,10 @@ export type { SweepDatasetsWorkflowInput } from './retention';
  * THE **LEASE** LEDGER IS THE REAL ONE HERE, NOT A REFUSAL, and the asymmetry with `stackWorkflow`
  * above is the point. A **Lease** workflow holds no credential and converges nothing: it counts claims and, at
  * zero, asks `stackWorkflow` to destroy — which on this bundle refuses with the sentence above. So
- * an appliance can track who is holding self-enrolled capacity (ADR 0037's *"the appliance gains a
+ * an install can track who is holding self-enrolled capacity (ADR 0037's *"the install gains a
  * **Fleet** without gaining a cloud credential"*) and the one operation it cannot perform fails
  * where it was always going to fail, naming the reason. Registering a refusal HERE instead would
- * make `fleet.up()` fail at the FIRST line of the scope on an appliance that is perfectly capable of
+ * make `fleet.up()` fail at the FIRST line of the scope on an install that is perfectly capable of
  * running the rest of it.
  */
 export { fleetLeaseWorkflow, holdLease, dropLease, getLeases } from './lease';
@@ -56,7 +56,7 @@ export type { StackOp, StackWorkflowInput } from './stack';
 export const NO_PROVISIONER = 'NoProvisioner';
 
 /**
- * What an operator reads when they ask an appliance for Machines.
+ * What an operator reads when they ask an install for Machines.
  *
  * IT NAMES THE FIX, not just the fact. "This control plane has no provisioner" on its own reads as
  * a bug; the second sentence is what makes it a deployment choice somebody can act on. `kontra
@@ -76,7 +76,7 @@ export const NO_PROVISIONER_MESSAGE =
  * flag is set anyway: a caller who adds one must not turn a permanent deployment fact into a loop,
  * and "no provisioner" will not become true on the third attempt.
  *
- * IT REFUSES `destroy` TOO, and that is the right answer rather than a gap. An appliance never
+ * IT REFUSES `destroy` TOO, and that is the right answer rather than a gap. An install never
  * built the fleet it is being asked to tear down — it could not — so there is nothing here to
  * compensate; the Machines, if any exist, belong to the compose controller that made them and are
  * torn down from there.

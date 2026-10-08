@@ -34,7 +34,7 @@
     "pinned": "10.124.0.2:5000/bundles/nscheck@sha256:7f888382253136f4bc3b0fae5ddeb45e4220583f139c1cd67cb95c0febdb96eb"
    },
    {
-    "why": "the single box, where the registry is the appliance's own port on loopback",
+    "why": "the single box, where the registry is the install's own port on loopback",
     "registry": "localhost:5000",
     "name": "webcrawl",
     "version": "0.2.0-rc1",

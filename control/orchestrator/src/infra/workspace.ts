@@ -40,7 +40,7 @@ import { stateDir, type StackRef } from './paths';
  * The stack-naming helpers and the state directory are `./paths`'s now, and re-exported here so
  * every provisioner call site is unchanged. They left because the READ side needs them — the
  * `/infra` dashboard and a route parameter — and importing this module to get them pulled the
- * whole Automation API into the appliance's process (ADR 0031 §1).
+ * whole Automation API into the install's process (ADR 0031 §1).
  */
 export { stateDir, fqn, parseFqn, type StackRef } from './paths';
 

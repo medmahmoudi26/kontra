@@ -365,7 +365,7 @@ resources:
   # rests on is 4.11's, and it is the version ADR 0052 fact 1 was established against.
   #
   # `pulumi plugin install resource docker 4.11.2` is a hard prerequisite: it is NOT part of a stock
-  # Pulumi install, and before this work the host had only `digitalocean` and `random`. `get.sh`
+  # Pulumi install, and before this work the host had only `digitalocean` and `random`. the one-line installer
   # installs it; `kontra doctor` reports it.
   dockerProvider:
     type: pulumi:providers:docker

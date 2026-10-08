@@ -238,7 +238,7 @@ jobs:
         # tests take 610s, and `go test` defaults to a 600-second panic timeout — so the plain
         # command fails here with `panic: test timed out after 10m0s`, naming whichever test was
         # merely UNLUCKY ENOUGH to be running at the deadline rather than anything slow. It is the
-        # appliance tests that cost it: each boots a real Temporal server and hydrates bundles.
+        # the slowest tests that cost it: each boots a real server.
         #
         # A runner is not this box, so the honest statement is that the margin was ten seconds and
         # the default is not a budget anyone chose. If this starts timing out at 30m, something is
@@ -449,12 +449,8 @@ jobs:
   # is the machine that runs it.
   #
   # AND IT RUNS `make test-examples` TWICE, on one commit: the `python` job above runs it with no
-  # control plane (the SDK-side contract, `-m 'not e2e'`), and the gate runs it again with
-  # `E2E=1` against the appliance. Issue 18 asks for that comparison "on the same commit that runs
-  # it against compose"; THE COMPOSE HALF NO LONGER EXISTS — docker-compose.yml lost Temporal, the
-  # object store, the KV, the codec, the registry and orchestrator-api to ADR 0031's earlier
-  # slices, so there is nothing left there to run a suite against. Two runs of one suite, one
-  # control plane apart, is the comparison that is actually available.
+  # control plane (the SDK-side contract, `-m 'not e2e'`), and the gate runs it again with `E2E=1`
+  # against a real one. Issue 18 asks for exactly that comparison on one commit.
   #
   # IT IS THE SLOWEST JOB HERE and it is meant to be: a pnpm install, a vite build, two Go builds
   # and a Docker image. That is the price of a gate that runs something instead of reading it.
@@ -493,11 +489,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      # THE ORCHESTRATOR FROM THE CHECKOUT, not from a bundle. `kontra up --orchestrator=local`
-      # runs `control/orchestrator/dist` directly, which is what makes this job about THIS commit's control
-      # plane; `--orchestrator=bundle` would resolve a 330 MB dependency tree and build a
-      # content-addressed artifact, which `.github/workflows/appliance.yml` already gates four
-      # platforms of. Two different questions, two different jobs.
+      # THE ORCHESTRATOR FROM THE CHECKOUT. `control/orchestrator/dist` is compiled here and run
+      # directly, which is what makes this job about THIS commit's control plane rather than about
+      # whatever a published image happens to carry.
       # THE SPA IS ANOTHER REPOSITORY NOW, and this step has been broken by every previous move of
       # it — which is the reason for the paragraph rather than a line of yaml.
       #
@@ -543,10 +537,10 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
-      # DOCKER, AND THE ADDRESS A CONTAINER CAN REACH. The appliance binds 127.0.0.1 by default
-      # (ADR 0031 §3) and an actor Worker is a container (ADR 0031 §2), whose loopback is its own —
-      # so the gate binds docker0's gateway. Asserted rather than assumed, because a runner image
-      # that changed its bridge subnet would otherwise fail deep inside a dispatch.
+      # DOCKER, AND THE ADDRESS A CONTAINER CAN REACH. An actor Worker is a container, whose
+      # loopback is its own — so a control plane on 127.0.0.1 is unreachable from it and the gate
+      # binds docker0's gateway instead. Asserted rather than assumed, because a runner image that
+      # changed its bridge subnet would otherwise fail deep inside a dispatch.
       - name: docker is here and its bridge gateway is a local address
         run: |
           set -euo pipefail
@@ -570,8 +564,7 @@ jobs:
   # is the only thing that can say whether that sentence is true: the same compose files against
   # images built from this commit.
   #
-  # `--no-spa` because the console is another repository. This job asserts the API, login, seed,
-  # starter Run and loopback publishes — not a browser page.
+  # This job asserts the API, login, seed, starter Run and loopback publishes — not a browser page.
   docker:
     name: the local docker install
     runs-on: ubuntu-latest
@@ -579,24 +572,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      # THE SIBLING LAYOUT, BECAUSE `Dockerfile.selfcontained`'s CONTEXT IS THE PARENT DIRECTORY.
+      # The console resolves `@kontra/core` as `link:../kontra/shared/core` — a filesystem path, not
+      # a published package — so both checkouts must be visible to ONE build and both names are
+      # load-bearing. Two `path:` checkouts and not a symlink: docker will not follow a context
+      # symlink that leaves the context.
+      - uses: actions/checkout@v4
         with:
-          go-version-file: cli/go.mod
-          cache-dependency-path: cli/go.sum
-
-      - name: cut a release for this platform
-        working-directory: cli
-        run: |
-          go run . release --repo .. --platform linux/amd64 \
-            --version 0.0.0-ci --out ../build/release --no-spa
+          path: _sibling/kontra
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: medmahmoudi26/kontra-console
+          path: _sibling/kontra-console
+          persist-credentials: false
 
       - name: build cluster images
         run: |
           set -euo pipefail
-          tarball=$(ls build/release/kontra_*_linux_amd64.tar.gz)
-          echo "==> kontra from $tarball"
-          docker build -f control/images/Dockerfile.appliance \
-            --build-arg TARBALL="$tarball" -t kontra:ci .
+          echo "==> kontra from source, in docker"
+          DOCKER_BUILDKIT=1 docker build -f _sibling/kontra/control/images/Dockerfile.selfcontained \
+            --build-arg VERSION=0.0.0-ci -t kontra:ci _sibling
           docker build -f control/images/Dockerfile.orchestrator \
             --build-arg SPA_IMAGE=kontra:ci -t kontra-orchestrator:ci .
           docker build -f control/images/Dockerfile.pyworker -t kontra-host:1 .
@@ -792,8 +788,7 @@ jobs:
           #
           # which says a Worker never finished the work and nothing about whether one ever STARTED.
           # Every answer to that is in logs this step already has access to and was throwing away.
-          # Same shape as the manifest diff in appliance.yml: a gate that reports an outcome with no
-          # evidence costs a whole CI round per hypothesis.
+          # A gate that reports an outcome with no evidence costs a whole CI round per hypothesis.
           if ! docker compose exec -T cli sh -c 'kontra workflow start "$KONTRA_WORKSPACES/hello/workflows/hello" --wait --timeout 15m'; then
             echo "::error title=the starter workflow did not complete::evidence follows"
             echo "::group::containers (a Worker that never started leaves nothing here)"

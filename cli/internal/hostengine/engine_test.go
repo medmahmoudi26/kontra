@@ -159,7 +159,7 @@ func TestParseSummaryFallsBackToTheSteps(t *testing.T) {
 // --- the environment the child runs under -------------------------------------------------------
 
 // THE ENGINE'S ENVIRONMENT IS BUILT, NOT INHERITED. PULUMI_BACKEND_URL is restated because an exported
-// one beats everything else (measured, get.sh:307-311), and PULUMI_ACCESS_TOKEN is dropped because
+// one beats everything else (measured, the one-line installer), and PULUMI_ACCESS_TOKEN is dropped because
 // there is no backend here it could legitimately authenticate to.
 func TestEngineEnvStatesTheBackendAndDropsTheToken(t *testing.T) {
 	t.Setenv("PULUMI_ACCESS_TOKEN", "pul-deadbeef")

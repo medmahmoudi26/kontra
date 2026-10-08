@@ -4,7 +4,7 @@
 
 The supported path is a Docker Compose cluster (ADR 0047). Clone, build the images, and run
 `docker compose --env-file .env.quickstart up -d --wait` — see the repository README. Docker is the
-only host prerequisite. `kontra up` (the appliance) is not a supported install.
+only host prerequisite. `kontra up` (the install) is not a supported install.
 
 A **development checkout** still uses `install.sh` below: a venv, the editable SDK, the buf
 toolchain and proto codegen. It needs Go, Docker and a clone.
@@ -19,11 +19,12 @@ Creates `.venv` — the SDK, editable (`pip install -e ./sdk/python[dev,seaweed]
 
 Node is **not** needed to run kontra, and the reason changed with v2: the orchestrator used to serve
 from a container, and now it is a supervised child of the `kontra` process, hydrated from a bundle
-that already carries its own Node (ADR 0031). The appliance build fetches and checksums that Node
+that already carries its own Node (ADR 0031). The install build fetches and checksums that Node
 itself, which is why building a release needs Go and nothing else. Node 22 + `corepack enable` for
 pnpm is needed to work on `control/orchestrator/` or `shared/core/`. The console is the separate
 [kontra-console](https://github.com/medmahmoudi26/kontra-console) repository since ADR 0038; a
-release needs its built `dist`, which `kontra release` deliberately does not build for you —
+the image build needs the console's built `dist`, which this repository deliberately does not
+build for you —
 clone it as a sibling and `pnpm run build`, or point at a build you have with
 `KONTRA_CONSOLE_DIST`. Python 3.10+.
 
@@ -82,7 +83,7 @@ codec, the OCI registry and the orchestrator (ADR 0031). The actors are what sta
 each is an actor process plus its Go handler.
 
 `docker-compose.yml` is **not** the local path any more. It survives for the **cloud controller**,
-which holds the Pulumi engine and the cloud credential the appliance deliberately does not ship.
+which holds the Pulumi engine and the cloud credential the install deliberately does not ship.
 
 ```bash
 kontra up        # control plane
@@ -144,7 +145,7 @@ the **actor** runs.
 | Actor | `kontra serve --actor python/<actor>` (the actor + its handler) | `kontra deploy --actor <dir>` then `kontra serve --actor <dir> --mode docker --replicas N` |
 | Reach for it when | hacking on one actor | proving what will run on a fleet |
 
-`scripts/parity-gate.sh` runs the right-hand column end to end against a throwaway appliance and
+`scripts/parity-gate.sh` runs the right-hand column end to end against a throwaway install and
 asserts the unit and drop counts it produces.
 
 ## Next

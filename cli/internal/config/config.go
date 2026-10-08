@@ -579,13 +579,13 @@ func RuntimeEnvPath(root string) string { return filepath.Join(root, "runtime.en
 //
 // WHY A PRODUCT THAT HASHES ITS PASSWORDS ALSO WRITES ONE DOWN. The hash is what protects the
 // account if config.yaml leaks, and that stays. What it cannot do is answer "what is the password"
-// six weeks after install, and this appliance had no answer at all: `kontra init` printed the
+// six weeks after install, and this install had no answer at all: `kontra init` printed the
 // password once into a container's stdout, `docker compose logs cli` shows only the CURRENT
 // container's output, and a recreate therefore destroyed the only copy. The owner of this install
 // lost the `admin` login exactly that way, and nothing in the system could recover it.
 //
 // The threat model is what makes this defensible rather than careless. This is a single-tenant
-// local appliance: the API binds to 127.0.0.1 by default, the file is 0600 in a directory only the
+// local install: the API binds to 127.0.0.1 by default, the file is 0600 in a directory only the
 // operator uses, and `refuseIfReadableByOthers` already refuses to read config.yaml — which holds
 // every service token in cleartext — if its mode has slipped. A machine-local reader who can open
 // this file can already open config.yaml beside it and mint tokens for every gated route. So this

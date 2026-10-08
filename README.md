@@ -306,7 +306,6 @@ control/        WHAT RUNS WHERE `kontra up` RUNS           (AGPL-3.0)
   images/         the container definitions for it
 
 cli/            THE ONE BINARY, WHICH IS BOTH
-  appliance/      the embedded services `kontra up` supervises   (control plane)
   warden/         the Machine agent and its container drivers    (a Machine)
   internal/       what both halves share, and nothing else
 

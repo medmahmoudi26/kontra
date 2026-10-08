@@ -140,7 +140,7 @@ type wardenCA struct {
 	temporal string
 	// temporalTLS says the control plane requires client certificates, so a **Machine** should offer
 	// the identity this CA issued it when it dials Temporal. Off by default: the single box and the
-	// appliance run a Temporal with no TLS at all, and a Warden that offered a certificate to a
+	// install run a Temporal with no TLS at all, and a Warden that offered a certificate to a
 	// plaintext listener would simply fail to connect.
 	temporalTLS bool
 

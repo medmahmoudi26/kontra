@@ -15,7 +15,7 @@ sweep for the old directory matches nothing and every fragment reads correctly o
     five-minute install. `tests/test_workflow_paths.py` is the guard for that one.
   * `Component.Path "control/orchestrator/node_modules"` in the bundle manifest — the reverse case, where the
     rewrite was WRONG because that path describes the extracted artifact and not the repo, and
-    `control/orchestrator/node_modules` is the right answer twice elsewhere in the same file. Eight appliance
+    `control/orchestrator/node_modules` is the right answer twice elsewhere in the same file. Eight install
     jobs each built a correct bundle to report a hash.
 
 A missing corpus is the worst of the three, because a driver that cannot read its fixture is one
@@ -52,7 +52,7 @@ RELATIVE_PATH = re.compile(r"""["'](\.\.(?:/\.\.)*/[\w/-]*conformance/[\w/]+\.js
 #: wrong, and no grep for the old path finds it.
 #:
 #: MEASURED, WHICH IS WHY IT EXISTS. When `conformance/` became `shared/conformance/`, the guard
-#: above caught every literal spelling and `cli/appliance/objstore/s3_test.go` kept opening
+#: above caught every literal spelling and `cli/install/objstore/s3_test.go` kept opening
 #: `filepath.Join("..", "..", "..", "conformance", "blobkey.json")` — one directory short, invisible
 #: to a regex looking for slashes, and red only when that one package's tests were run.
 #:
@@ -152,7 +152,7 @@ def test_the_joined_path_guard_can_see_an_assembled_path() -> None:
 
     NON-VACUOUS BY CONSTRUCTION. A regex that matched nothing would make
     `test_every_relative_corpus_path_resolves` pass exactly as it did while
-    `cli/appliance/objstore/s3_test.go` was opening a file that had not existed since the tree
+    `cli/install/objstore/s3_test.go` was opening a file that had not existed since the tree
     moved — a guard that reports success because it looked at nothing, which is the failure this
     repository has now hit in three different shapes.
 

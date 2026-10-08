@@ -156,7 +156,7 @@ def _why(name: str, code: int) -> str:
 # ─────────────────────────────────────────────────────────────────────────────────────────────
 #
 # `get(name)` above resolves a secret this actor OWNS, by the operator's own name for it. That is
-# the right shape for an actor you wrote, deployed on your own appliance, against secrets you
+# the right shape for an actor you wrote, deployed on your own install, against secrets you
 # created. It is the wrong shape for an actor written by somebody else, and the reason is not
 # security theatre: a third-party author cannot know your inventory, so a hard-coded name is either
 # wrong on every installation but theirs, or is a request to be handed a credential you can name

@@ -71,7 +71,7 @@ Numbered so code comments, issues and reviews can cite them.
 | **EP13** | **Temporal itself.** Plaintext by default; TLS is environment-only and unset locally. Anyone who can reach 7233 in a namespace can poll its queues. | network → task queues | run execution integrity, history |
 | **EP14** | **The payload codec.** Every argument and result passes through it. | codec compromise → all run data | history, run output |
 | **EP15** | **Operator config and deployment defaults** — `.env`, `~/.kontra/config.yaml`, compose files, bind addresses. | a wrong default → any of the above | everything |
-| **EP16** | **Supply chain** — base images, Go/npm/PyPI dependencies, the pinned Node runtime in the appliance bundle. | build input → Controller and Machines | everything |
+| **EP16** | **Supply chain** — base images, Go/npm/PyPI dependencies, the pinned Node runtime in the install bundle. | build input → Controller and Machines | everything |
 
 ## 4. What is NOT defended, and the acceptance
 

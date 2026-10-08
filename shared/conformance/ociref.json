@@ -270,7 +270,7 @@
  },
  "push": {
   "why": "`kontra build --push <ref>` (ADR 0036: kontra owns no registry). The grammar above is necessary and not sufficient: a DESTINATION has two further rules, and both of them refuse references that are perfectly legal to PULL. `expect` is the reference actually published to, which is how the untagged case is pinned.",
-  "transport": "`plainHTTP` is pinned per case because the default INVERTS relative to the conventional address. kontra's own registry — the Controller's :5000, the appliance's bound port — is plain HTTP by construction and `registryHost` keeps that. A --push destination is somebody else's registry reached over the internet, so it is HTTPS unless the operator wrote `http://` or the host is loopback: defaulting it the other way would silently downgrade every push to ghcr, GitLab or Harbor, on the one request that carries an Artifact out of the box.",
+  "transport": "`plainHTTP` is pinned per case because the default INVERTS relative to the conventional address. kontra's own registry — the Controller's :5000, the install's bound port — is plain HTTP by construction and `registryHost` keeps that. A --push destination is somebody else's registry reached over the internet, so it is HTTPS unless the operator wrote `http://` or the host is loopback: defaulting it the other way would silently downgrade every push to ghcr, GitLab or Harbor, on the one request that carries an Artifact out of the box.",
   "actor": {
    "name": "nscheck",
    "version": "0.1.0"

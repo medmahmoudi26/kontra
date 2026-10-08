@@ -1,32 +1,25 @@
-// control.go — `kontra control up|down`, the HOST ENGINE (ADR 0052 §1-§2).
+// control.go — `kontra up|down`, the HOST ENGINE (ADR 0052 §1-§2).
 //
 // This converges `kontra-control` — the local control plane as a Pulumi YAML program,
 // `control/pulumi/Pulumi.yaml`, 13 containers on one private Docker network — by shelling to the host
 // `pulumi`. The engine itself is `cli/internal/hostengine`, which holds the dispatch table, the
 // backend refusal and the exec wiring; this file is the command surface and nothing else.
 //
-// ── WHY THE WORD IS `control` TODAY AND `up` TOMORROW ───────────────────────────────────────────
+// ── THE WORDS ARE `up` AND `down`, AND `control` IS AN ALIAS ───────────────────────────────────
 //
 // ADR 0052 §2 is unambiguous that this IS `kontra up`: "`kontra up` converges `kontra-control` with
-// the host engine", and the appliance "goes". It cannot be spelled that way yet, and the reason is a
-// fact about the switch rather than a preference. `cli/main.go:331` is `case "up": err = cmdUp(...)`,
-// Go refuses a duplicate constant case, and `cli/up.go`'s appliance is pinned by eight assertions in
-// `cli/up_test.go` — `:12`, `:28`, `:44` (which asserts the positional-argument refusal QUOTES the
-// argument), `:55` (which additionally asserts help "still lists the compose one, which is a
-// different topology and not a synonym"), `:69`, `:89`, `:102`, `:122`. Removing the appliance is
-// issue 08 and it is 11,719 lines with a seven-row import audit in the ADR; doing it as a side effect
-// of adding this command would delete another slice's work without its tests.
+// the host engine". It could not be spelled that way while a second topology held the word; it is,
+// now. `cmdControlUp` and `cmdControlDown` take the same `args[1:]` the switch hands every case and
+// parse their own flags, so both spellings reach the same code and neither assumes the word it was
+// reached by.
 //
-// SO THE SWAP IS KEPT TO ONE LINE, ON PURPOSE. `cmdControlUp` takes the same `args[1:]` the switch
-// hands every case and parses `--preview` itself, so issue 08's change to this command is exactly
+// ── THE FLAG SURFACE IS DELIBERATELY TWO KNOBS AND NOT SEVEN ───────────────────────────────────
 //
-//	case "up":
-//	-	err = cmdUp(args[1:])
-//	+	err = cmdControlUp(args[1:])
-//
-// plus the `usageText` block and retiring the appliance's tests. Nothing in this file assumes the word
-// it is reached by. `kontra control up --preview` today is `kontra up --preview` then, character for
-// character after the verb.
+// `Pulumi.yaml:109-292` has 27 config keys. `--bind` and `--api-port` are here because they are the
+// two an operator changes on the day they install — one is the security control, the other is the
+// URL they are about to be handed — and both are passed ONLY when typed (`flagPassed`,
+// `cli/fleet.go:922`), so an untouched flag leaves the program's own default as the single
+// statement of the topology rather than re-asserting it from a Go literal that can drift.
 //
 // ── AND THE EXIT CODE, WHICH IS THE ONE PROMISE `--preview` MAKES TO CI ────────────────────────
 //
@@ -74,7 +67,7 @@ func cmdControl(args []string) error {
 }
 
 func controlUsage() {
-	fmt.Fprint(cliio.Stdout, `kontra control — the control plane, converged by the host Pulumi engine (ADR 0052 §1)
+	fmt.Fprint(cliio.Stdout, `kontra up|down — the control plane, converged by the host Pulumi engine (ADR 0052 §1)
 
   kontra control up [--preview] [--json]           # converge kontra-control: 13 containers, one network
         [--stack local] [--workspaces <dir>]       #   --preview changes nothing and exits 0 only if the
@@ -156,14 +149,13 @@ var errWouldChange = errors.New("the converge would change this installation")
 
 // cmdControlUp converges the control plane, or previews the same converge.
 //
-// THIS IS THE FUNCTION `case "up":` CALLS AFTER ISSUE 08 — see the file header. It therefore takes
-// `args` exactly as the switch hands them and owns its whole flag surface.
+// THIS IS THE FUNCTION `case "up":` CALLS — see the file header. It therefore takes `args` exactly
+// as the switch hands them and owns its whole flag surface.
 //
 // ── THE ORDER OF OPERATIONS IS THE CONTRACT, AND EVERY STEP BEFORE `pulumi` FAILS CLOSED ────────
 //
-//  1. Parse. Positional arguments are refused the way `cli/up.go:68-70` refuses them (and
-//     `up_test.go:44` pins that the refusal QUOTES the argument), because `kontra up local` looks
-//     like it names a stack and does not.
+//  1. Parse. A positional argument is refused and the refusal QUOTES it, because `kontra up local`
+//     looks like it names a stack and does not.
 //  2. Resolve the stack THROUGH THE DISPATCH TABLE. `hostengine.ParseStack` is where a fleet project
 //     is refused, and it happens before the backend is even computed: a request this engine must not
 //     serve should not cause a state directory to be created.
@@ -173,18 +165,6 @@ var errWouldChange = errors.New("the converge would change this installation")
 //  5. Take the lock — CONVERGE ONLY. A preview writes nothing to the backend and takes none.
 //  6. `stack select --create`, then `preview --json` or `up --yes`.
 //
-// ── THE FLAG SURFACE IS DELIBERATELY TWO KNOBS AND NOT SEVEN ───────────────────────────────────
-//
-// `Pulumi.yaml:109-292` has 27 config keys and seven of them are the appliance's flags under a
-// different spelling — `--temporal-port`/`temporalPort`, `--kv-port`/`kvPort`, `--s3-port`/`s3Port`,
-// `--registry-port`/`registryPort`, plus `postgresPort`, which the appliance has no equivalent for.
-// Reconciling that spelling belongs with the change that retires the appliance's flags (issue 08);
-// adding all seven here would mean two commands claiming the same knobs with different names in the
-// same binary. `--bind` and `--api-port` are here because they are the two an operator changes on the
-// day they install — one is the security control, the other is the URL they are about to be handed —
-// and both are passed ONLY when typed (`flagPassed`, `cli/fleet.go:922`), so an untouched flag leaves
-// the program's own default as the single statement of the topology rather than re-asserting it from
-// a Go literal that can drift.
 func cmdControlUp(args []string) error {
 	f := controlFlagSet("up")
 	if err := f.fs.Parse(args); err != nil {

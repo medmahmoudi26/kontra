@@ -68,7 +68,7 @@ repository. That pin is `kontra-runtimes`' to carry, which is one reason the bui
 | | |
 |---|---|
 | builder | `heroku/builder:24` is the intended one. It resolved to `sha256:97aa835c2e0528c623bd500a9e16030dacc08be1cddd34ce78918974de4098c1` when that was measured — a measurement, not a pin. Until something records it, a build handed the *tag* gets whatever the tag points at that day |
-| `pack` | `0.40.9`, downloaded and **SHA256-verified** into the appliance image the release builds — **live**, in `control/images/Dockerfile.appliance`. `make image`'s Dockerfile does not carry it, so a from-clone install needs a `pack` on `PATH` or `KONTRA_PACK_BIN`. The CLI picks the first `pack` it finds and does not check its version, so that pin holds only where the release image is what runs |
+| `pack` | `0.40.9`, downloaded and **SHA256-verified** into the install image the release builds — **live**, in `control/images/Dockerfile.install`. `make image`'s Dockerfile does not carry it, so a from-clone install needs a `pack` on `PATH` or `KONTRA_PACK_BIN`. The CLI picks the first `pack` it finds and does not check its version, so that pin holds only where the release image is what runs |
 
 **Every runtime must be compatible with that builder**, and the check is not a courtesy. A CNB run
 image carries metadata the lifecycle matches against the build image it was built by; a run image from

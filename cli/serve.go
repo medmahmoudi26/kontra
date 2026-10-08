@@ -114,7 +114,7 @@ func runElsewhere(mode, actorDir string, m actorManifest, replicas int, network 
 
 	// --mode docker. The flags that only mean something locally are named rather than ignored: a
 	// worker container's control plane is RESOLVED for it (`resolveWorkerPlane` — the running
-	// appliance's bound addresses, else compose DNS), so a host-shaped `--redis 127.0.0.1:6379`
+	// install's bound addresses, else compose DNS), so a host-shaped `--redis 127.0.0.1:6379`
 	// passed through would point it at its own loopback rather than at this box's.
 	//
 	// `fs.Visit` and NOT a comparison against the default: `--redis`'s default is
@@ -237,14 +237,14 @@ func cmdServe(args []string) error {
 	watch := fs.Bool("watch", false,
 		"--mode local only: re-exec the Worker when a file in the actor directory changes")
 	// THE NETWORK, AND WHY A FLAG RATHER THAN A DEFAULT THAT ALWAYS WORKS. `resolveWorkerPlane`
-	// picks `bridge` against a running appliance and the compose `kontra` network otherwise, and
+	// picks `bridge` against a running install and the compose `kontra` network otherwise, and
 	// that is right on a machine whose firewall lets a container reach the host. MEASURED on a box
 	// with ufw's default `deny (incoming)`: a container's packets to the bridge GATEWAY go through
 	// the host's INPUT chain — unlike a published port, which goes through FORWARD and DOCKER-USER
-	// — so every connection to the appliance times out. The worker container stays up, both
+	// — so every connection to the install times out. The worker container stays up, both
 	// processes keep running, nothing is logged, and `docker ps` shows a healthy replica.
 	// `--network host` is the escape: the container shares this host's network stack, so the
-	// appliance's address is reachable the same way it is from a shell here.
+	// install's address is reachable the same way it is from a shell here.
 	//
 	// IT COSTS THE NETWORK NAMESPACE, which is a real part of what a container gives you, so it is
 	// typed rather than fallen back to.

@@ -22,7 +22,7 @@
  *     is the store's own: revoke the version the token could reach. A per-actor epoch that makes
  *     one identity's tokens invalid is a small change to make when there is a reason to.
  *   - Its `sub` IS ONLY AS TRUE AS THE MACHINE'S CODE-SERVING BOUNDARY. Whoever can serve an actor
- *     on this appliance can serve one that calls itself anything, and be minted that identity. The
+ *     on this install can serve one that calls itself anything, and be minted that identity. The
  *     store trusts the same boundary `auth.ts` records for `serve`; it does not invent a stronger
  *     one and pretend the actor's code was attested.
  */

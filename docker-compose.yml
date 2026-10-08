@@ -33,7 +33,7 @@
 # has to be a directory you can see from the place you ran `docker compose up`.
 #
 # Postgres, Temporal, SeaweedFS, Redis, the registry, and the kontra processes are separate
-# services. The appliance (`kontra up` as one process) is not a supported install path.
+# services. There is no second topology: one process serving the whole control plane is gone.
 #
 # ── THE DOCKER SOCKET ──────────────────────────────────────────────────────────────────────────
 #
@@ -161,7 +161,7 @@ x-orchestrator-env: &orchestrator-env
   # bytes deleted — so a vacuum would reclaim nothing, because NOTHING HAS EVER BEEN COLLECTED. The
   # visible symptom was not a disk alert: actor runs failed with `CancelledError: Activity
   # cancelled`, because `put_subunit` blocked on an object store that could not allocate, missed its
-  # heartbeat, and was retried forever. `cli/appliance/bundle/hydrate.go` warns about exactly this
+  # heartbeat, and was retried forever. A content-addressed hydrate warns about exactly this
   # shape — "a full disk on this system does not fail loudly".
   #
   # PASSED THROUGH EMPTY RATHER THAN OMITTED, for the reason `KONTRA_EXPLORE_TOKEN` above records:
@@ -360,13 +360,12 @@ services:
     # So under memory pressure Redis silently deleted the record of which Units had committed. A
     # retry then reads an absent commit map and re-runs work that already finished, or finds a
     # half-evicted one and skips work that did not. `kontra-global:*` carries no TTL precisely
-    # because the appliance's own keyspace says evicting one "does not degrade a run, it silently
+    # because the state keyspace's own rule says evicting one "does not degrade a run, it silently
     # corrupts it" — the actor hash had the same property and none of the protection.
     #
     # `noeviction` turns that into a refused write, which reaches the actor as an error it can
-    # retry or fail on. Loud and recoverable beats silent and wrong. The appliance KV already
-    # refuses rather than evicting its last protected key (`cli/appliance/kv/keyspace.go`); this
-    # makes the Compose store agree with it.
+    # retry or fail on. Loud and recoverable beats silent and wrong — which is ADR 0059's rule that
+    # a state store refuses rather than forgetting, applied to the store itself.
     #
     # Measured on the install this was found on: 1.46 MiB of 512 MiB in use, 79 keys, and
     # `evicted_keys:0` — so the hazard was latent and this costs nothing today.
@@ -967,7 +966,7 @@ services:
       #
       # THE WHOLE `/api/infra/*` READ SURFACE WAS ANSWERING "NO STACKS". `registerInfraRoutes` is
       # registered HERE (`server.ts`), and `infra/state.ts` reads `<stateDir>/.pulumi/stacks/…` off
-      # local disk — its header assumes "this host's disk", which is true on an appliance where one
+      # local disk — its header assumes "this host's disk", which is true where one
       # process is every role and false in this compose file, where `pulumi-state` was mounted on
       # `orchestrator-infra` alone. So `listStacks()` hit a path that does not exist in this
       # container and returned `[]`, which the surface renders as "nothing has ever been converged".

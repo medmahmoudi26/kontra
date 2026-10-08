@@ -3,7 +3,7 @@ package main
 // version_test.go — the release train's two silent failure modes.
 //
 // Both are the same shape: a value written in one file and consumed in another, where a mismatch
-// produces NO error, just a release that quietly does the wrong thing. `release.yml` had already
+// produces NO error, just a release that quietly does the wrong thing. `publish.yml` had already
 // been sitting armed and unfired for its whole existence because nothing ever created a tag; these
 // exist so the next way it can fail to fire is a red build.
 
@@ -46,7 +46,7 @@ func TestVersionFileMatchesManifest(t *testing.T) {
 		t.Fatalf("version.txt holds %q, which is not a semver release-please can bump", version)
 	}
 	// No leading `v`: release-please stores the bare version and adds the prefix to the TAG only.
-	// A `v` here would produce the tag `vv0.1.0`, which `release.yml` still matches — so this would
+	// A `v` here would produce the tag `vv0.1.0`, which `publish.yml` still matches — so this would
 	// ship, under a name nobody would search for.
 	if strings.HasPrefix(version, "v") {
 		t.Fatalf("version.txt holds %q; it must be bare (0.1.0), the `v` belongs to the tag alone", version)
@@ -66,9 +66,9 @@ func TestVersionFileMatchesManifest(t *testing.T) {
 	}
 }
 
-// THE DRIFT THAT BUILDS NOTHING. `release.yml` fires on a tag glob; release-please decides the tag's
-// shape from `include-component-in-tag`. They live in different files, and a mismatch means a tag is
-// created, no workflow starts, and there is no error anywhere — the release simply does not happen.
+// THE DRIFT THAT BUILDS NOTHING. `publish.yml` fires on a tag glob; release-please decides the
+// tag's shape from `include-component-in-tag`. They live in different files, and a mismatch means a
+// tag is created, no workflow starts, and there is no error anywhere — nothing is published.
 func TestReleaseTriggerMatchesReleasePleaseTag(t *testing.T) {
 	var cfg struct {
 		Packages map[string]struct {
@@ -85,7 +85,7 @@ func TestReleaseTriggerMatchesReleasePleaseTag(t *testing.T) {
 	}
 	if root.IncludeComponentInTag == nil || *root.IncludeComponentInTag {
 		t.Fatalf("include-component-in-tag must be explicitly false, or the tag becomes "+
-			"%q-v0.1.0 and `release.yml`'s `v*` never matches it", root.PackageName)
+			"%q-v0.1.0 and `publish.yml`'s `v*` never matches it", root.PackageName)
 	}
 
 	version := strings.TrimSpace(repoFile(t, "version.txt"))
@@ -96,11 +96,11 @@ func TestReleaseTriggerMatchesReleasePleaseTag(t *testing.T) {
 			return // some trigger pattern matches the tag release-please will push
 		}
 	}
-	t.Fatalf("no tag pattern in release.yml matches %q (patterns: %v) — "+
-		"release-please would tag and nothing would build", tag, releaseTagPatterns(t))
+	t.Fatalf("no tag pattern in publish.yml matches %q (patterns: %v) — "+
+		"release-please would tag and nothing would publish", tag, releaseTagPatterns(t))
 }
 
-// releaseTagPatterns pulls `on.push.tags` out of the release workflow.
+// releaseTagPatterns pulls `on.push.tags` out of the workflow a tag starts.
 //
 // `on` IS PARSED AS THE BOOLEAN TRUE. YAML 1.1 treats `on`, `off`, `yes` and `no` as booleans, so a
 // workflow's top-level `on:` key arrives as `true` rather than the string — and a lookup of "on"
@@ -109,27 +109,27 @@ func TestReleaseTriggerMatchesReleasePleaseTag(t *testing.T) {
 func releaseTagPatterns(t *testing.T) []string {
 	t.Helper()
 	var doc map[interface{}]interface{}
-	if err := yaml.Unmarshal([]byte(repoFile(t, ".github", "workflows", "release.yml")), &doc); err != nil {
-		t.Fatalf("release.yml is not valid YAML: %v", err)
+	if err := yaml.Unmarshal([]byte(repoFile(t, ".github", "workflows", "publish.yml")), &doc); err != nil {
+		t.Fatalf("publish.yml is not valid YAML: %v", err)
 	}
 	on, ok := doc["on"]
 	if !ok {
 		on, ok = doc[true]
 	}
 	if !ok {
-		t.Fatal("release.yml has no `on:` trigger under either spelling")
+		t.Fatal("publish.yml has no `on:` trigger under either spelling")
 	}
 	onMap, ok := on.(map[interface{}]interface{})
 	if !ok {
-		t.Fatalf("release.yml's `on:` is %T, not a mapping", on)
+		t.Fatalf("publish.yml's `on:` is %T, not a mapping", on)
 	}
 	push, ok := onMap["push"].(map[interface{}]interface{})
 	if !ok {
-		t.Fatal("release.yml does not trigger on push at all")
+		t.Fatal("publish.yml does not trigger on push at all")
 	}
 	raw, ok := push["tags"].([]interface{})
 	if !ok || len(raw) == 0 {
-		t.Fatal("release.yml's push trigger names no tags; it would never fire on a release")
+		t.Fatal("publish.yml's push trigger names no tags; it would never fire on a release")
 	}
 	out := make([]string, 0, len(raw))
 	for _, v := range raw {

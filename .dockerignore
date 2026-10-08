@@ -18,23 +18,13 @@ __pycache__
 *.pyc
 *.egg-info
 build
-# EXCEPT THE RELEASE TARBALL, which is the whole build context for the appliance image.
-#
-# `control/images/Dockerfile.appliance` builds the container FROM a release artifact so the
-# container and the download are the same bytes. `build/` is ignored above because it is otherwise
-# a scratch directory, and the two rules met exactly once: `COPY` answered `file not found in build
-# context or excluded by .dockerignore` about a file plainly on disk, which is a sentence worth
-# reading twice before believing the path is wrong.
-#
-# NARROW ON PURPOSE — the tarballs and nothing else under `build/`.
-!build/release/*.tar.gz
 dist
 out
 sdk/python/kontra/v1
 # the example actors live in the seam but are NOT runtime — keep them out of the
 # kontra-host base (its build context is the repo root; the per-actor images build
 # from their own context under examples/python/<name>, unaffected by this).
-# The appliance/CLI image still needs the seeded hello actor (ADR 0047).
+# The CLI image still needs the seeded hello actor (ADR 0047).
 examples/python
 !examples/python/hello
 

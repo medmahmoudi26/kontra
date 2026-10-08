@@ -240,7 +240,7 @@ Four things that are easy to get wrong, all of them measured:
 
 The control plane itself provisions nothing: the Pulumi engine, the fleet SSH key and the cloud
 credential live in the `orchestrator-infra` service of the *development* compose file, off the
-appliance on purpose (ADR 0031 §4, ADR 0034 §1). You need it when a workflow provisions a Fleet, and
+install on purpose (ADR 0031 §4, ADR 0034 §1). You need it when a workflow provisions a Fleet, and
 not before.
 
 ---

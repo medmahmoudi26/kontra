@@ -15,7 +15,7 @@
  * process serves.
  *
  * SINCE ADR 0031 §1 IT IS ALSO A ROLE, not only a process. `main.ts` can run {@link
- * runMaterializer} beside the API and the infra role in one PID, and the appliance does. What that
+ * runMaterializer} beside the API and the infra role in one PID, and the install does. What that
  * costs is stated where the cost lands: the QUEUE below is unchanged, and so are the DuckDB
  * memory limit and the slot count — but boundary 1, the cgroup, is a property of a container and
  * does not survive the merge. One process means one heap. On a laptop that is the right trade; on

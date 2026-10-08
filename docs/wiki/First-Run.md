@@ -12,13 +12,13 @@ order, and every command here is real — nothing is elided and nothing is aspir
   shell. The image is built from a release tarball, so the container and the download are the same
   bytes. `make image` cuts one and builds it.
 - **`kontra infra up`** — `orchestrator-infra`, and only that: the Pulumi engine, the fleet SSH key
-  and the cloud credential, which ADR 0031 §4 keeps off the appliance deliberately — no provider
+  and the cloud credential, which ADR 0031 §4 keeps off the install deliberately — no provider
   plugins and no cloud credential in an artifact whose premise is that a stranger curls it onto a
   laptop. You need it at step 11 and not before.
 
 WHAT COMPOSE IS NOT is the old multi-service topology: nine services left `docker-compose.yml` one
 slice at a time and each departure fixed a bug recorded where the service used to be. Re-splitting
-the appliance reintroduces them; putting it in a container reintroduces none. See [[Deployment]].
+the install reintroduces them; putting it in a container reintroduces none. See [[Deployment]].
 
 This page uses the host path because it is the shortest thing to type. **Every step after step 3 is
 identical either way** — swap `kontra up` for `make image && docker compose up -d` and read on.
@@ -61,7 +61,7 @@ kontra doctor                 # in another shell: what is running, and which act
 
 One process, six services, no containers. It persists to the data directory, so history, objects,
 `global_state` and the lake's catalog all survive a restart. The console is on
-`http://127.0.0.1:8088` — sign in with the account from step 2. Add `--temporal-ui` if you want
+`http://127.0.0.1:8088` — sign in with the account from step 2. Open Temporal's own Web UI if you want
 Temporal's own web console beside it; it is off by default and hydrated from the CAS.
 
 ## 4. A namespace, or the default one
@@ -229,7 +229,7 @@ ledger at the bottom.
 ## 11. A Fleet
 
 **This is where compose comes in**, and the only place it does. Provisioning needs
-`orchestrator-infra` — the Pulumi engine — which the appliance deliberately does not carry, and
+`orchestrator-infra` — the Pulumi engine — which the install deliberately does not carry, and
 which has to stay its own process because Pulumi's Node language host installs process-global
 rejection handlers for the length of every converge (ADR 0019, measured):
 
@@ -297,7 +297,7 @@ draft and are worth naming, because they are the two a walkthrough gets wrong by
   connection for forty Units instead of forty.
 - **`docker compose` WAS not the control plane, and now is.** When this page was written the compose
   file could not give you one — nine services had left it and nothing had replaced them. It runs the
-  appliance in a container now, built from the release tarball, so both paths are the same process
+  install in a container now, built from the release tarball, so both paths are the same process
   and the same bytes. The sentence is kept rather than deleted because the reason it was true is
   still true: the services did not come back.
 

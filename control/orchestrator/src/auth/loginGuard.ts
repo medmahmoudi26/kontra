@@ -36,7 +36,7 @@
  * "which names exist" becomes answerable by watching which keys throttle.
  *
  * `req.ip` is Fastify's socket peer and `trustProxy` is off, so it is the kernel's view of who
- * connected and cannot be set by a header. On a loopback appliance it is usually `127.0.0.1` for
+ * connected and cannot be set by a header. On a loopback install it is usually `127.0.0.1` for
  * everything, which makes the bucket effectively global — and that is the correct behaviour for a
  * single-operator install, not a shortcoming: the attacker and the operator are on the same address,
  * so the budget they share is the one that matters.

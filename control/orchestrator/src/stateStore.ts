@@ -53,7 +53,7 @@ export function createStateReader(host = process.env.KONTRA_REDIS_HOST): StateRe
     // a Machine can reach the state store, and at that point anything on that VPC can read every
     // actor's state with no credential. The overlay sets `requirepass` and this variable together.
     // `undefined` rather than `''` — ioredis sends AUTH for any defined value, and the embedded
-    // appliance store implements no AUTH at all.
+    // state store implements no AUTH at all.
     ...(process.env.KONTRA_REDIS_PASSWORD ? { password: process.env.KONTRA_REDIS_PASSWORD } : {}),
     lazyConnect: true,
     // A dashboard refresh must not queue behind a dead Redis. Fail fast, surface the error.

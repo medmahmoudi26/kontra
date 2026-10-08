@@ -27,7 +27,6 @@ import (
 	docker "github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
-	"github.com/medmahmoudi26/kontra/cli/appliance"
 	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
 
@@ -60,7 +59,7 @@ type scaleOpts struct {
 	network       string // "" → controlPlaneNetwork
 	image         string // "" → resolve (local kontra/<name>-worker:<ver>, else registry)
 	// registry is the address to pull from; "" means registryAddress resolves it — the running
-	// appliance's own, which is the SAME resolution `kontra deploy` pushed to.
+	// install's own, which is the SAME resolution `kontra deploy` pushed to.
 	registry string
 	// controller endpoints baked into each worker's env; "" → the compose service DNS
 	// defaults below (the local control plane).
@@ -125,7 +124,7 @@ func runScale(ctx context.Context, o scaleOpts) (*scaleResult, error) {
 		return nil, fmt.Errorf("log dir %q must be an absolute path (it is a host bind mount)", o.logDir)
 	}
 	// WHICH CONTROL PLANE THESE WORKERS DIAL, resolved once, before a container is created.
-	// Before the appliance there was one answer and it was compose's DNS; there are two now, and
+	// Before the install there was one answer and it was compose's DNS; there are two now, and
 	// picking the wrong one produces a container that runs, polls a name that does not resolve,
 	// and counts as a live replica. See workerPlane.
 	plane, err := resolveWorkerPlane(o)
@@ -385,9 +384,6 @@ func workerMemoryBytes(env string) int64 {
 type workerPlane struct {
 	address, orchestrator, s3, redis string
 	network                          string
-	// appliance is true when these came from a running `kontra up` rather than from the compose
-	// defaults. It is what decides whether the container gets a host-gateway alias.
-	appliance bool
 	// source is one sentence for the summary line: an operator who scales a worker against the
 	// wrong control plane must be able to see it in the output rather than in a poll timeout.
 	source string
@@ -395,23 +391,17 @@ type workerPlane struct {
 
 // resolveWorkerPlane picks the control plane a worker container dials.
 //
-// THERE ARE TWO CONTROL PLANES NOW AND THE OLD DEFAULT SILENTLY NAMES THE DEAD ONE. This function
-// used to be four `if x == "" { x = "<compose-dns>" }` lines inside startWorker, written when
-// `temporal:7233`, `seaweed:8333` and `redis:6379` were compose services on the `kontra` network.
-// None of those three is a service any more — they are the appliance's, in one host process (ADR
-// 0031 §1) — and docker-compose.yml's own header names this function as the caller that had not
-// been fixed yet. A worker handed the old defaults starts, retries a DNS name that does not
-// resolve, and shows up in `docker ps` and in `kontra workers list` as a running replica. That is
-// the same silent-healthy failure as a false `poller: NONE`, and it is why the resolution is one
-// function with one order rather than four defaults:
+// ONE FUNCTION WITH ONE ORDER, rather than four `if x == "" { x = "<compose-dns>" }` lines inside
+// startWorker. A worker handed an address nothing answers on starts, retries a DNS name that does
+// not resolve, and still shows up in `docker ps` and in `kontra workers list` as a running replica
+// — the same silent-healthy failure as a false `poller: NONE`. So the resolution is:
 //
 //	the caller said so             --address/--s3/--redis, or the MCP tool's arguments
-//	a running appliance            the addresses `kontra up` actually BOUND, from its data dir
-//	the compose control plane      the DNS names, for a deployment that still runs one
+//	the compose control plane      the DNS names on the `kontra` network
 //
-// The middle rung is the same mechanism `registryAddress` uses for the image address, reading the
-// same data directory, so a deploy and the scale that follows it cannot disagree about which
-// installation they belong to.
+// There is one control plane again (ADR 0031 superseded): the host-process install is gone, so
+// `temporal:7233`, `orchestrator-api:8088`, `seaweed:8333` and `redis:6379` are compose services
+// and the defaults below name live addresses rather than a retired topology.
 func resolveWorkerPlane(o scaleOpts) (workerPlane, error) {
 	p := workerPlane{
 		address:      o.address,
@@ -420,42 +410,6 @@ func resolveWorkerPlane(o scaleOpts) (workerPlane, error) {
 		redis:        o.redis,
 		network:      o.network,
 		source:       "compose control plane (temporal:7233, orchestrator-api:8088, seaweed:8333, redis:6379)",
-	}
-
-	if dir, err := applianceDataDir(""); err == nil {
-		if e, ok := appliance.ReadEndpoints(dir); ok {
-			// A CONTAINER CANNOT REACH A LOOPBACK BIND, and this is where that is refused rather
-			// than discovered. The check runs whenever an appliance record exists and the worker
-			// is not on the host's own network stack — including when the caller passed every
-			// address by hand, because a hand-typed `127.0.0.1:7233` is the same unreachable
-			// address by a different route.
-			if p.network != "host" {
-				if err := e.ReachableFromContainer(); err != nil {
-					return workerPlane{}, err
-				}
-			}
-			p.appliance = true
-			p.source = "the appliance at " + dir
-			if p.address == "" {
-				p.address = e.Temporal
-			}
-			if p.s3 == "" {
-				p.s3 = e.S3
-			}
-			if p.redis == "" {
-				p.redis = e.KV
-			}
-			if p.orchestrator == "" && e.API != "" {
-				p.orchestrator = e.API
-			}
-			// THE DEFAULT BRIDGE, not `kontra`. That named network is compose's, created by the
-			// stack this topology replaces, so on a machine that has only ever run the binary it
-			// does not exist and ContainerCreate fails with `network kontra not found`. `bridge`
-			// is the daemon's own and is always there.
-			if p.network == "" {
-				p.network = "bridge"
-			}
-		}
 	}
 
 	if p.network == "" {
@@ -519,14 +473,6 @@ func startWorker(ctx context.Context, d containerAPI, name, img, label string, p
 			NetworkMode:   container.NetworkMode(plane.network),
 			RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 			Binds:         binds,
-			// `host.docker.internal` is not a Linux default; this alias is what defines it, and
-			// it is the same one docker-compose.yml gives every service that dials the embedded
-			// Temporal. The resolved addresses above do not need it — they already name an
-			// address the bridge can see — but an operator overriding one with
-			// `--address host.docker.internal:7233`, which is the spelling the compose file
-			// documents, would otherwise get a DNS failure and no clue that the name is the
-			// thing that is missing.
-			ExtraHosts: applianceExtraHosts(plane),
 			// Cap the engine's own json-file log. The default is UNBOUNDED, and a chatty actor on
 			// a large run can fill the host disk through it. The durable copy lives in the bind
 			// mount above; this is just the `docker logs` buffer, so a tight cap costs nothing.
@@ -554,17 +500,6 @@ func startWorker(ctx context.Context, d containerAPI, name, img, label string, p
 		return "", err
 	}
 	return resp.ID, nil
-}
-
-// applianceExtraHosts gives the container the `host.docker.internal` alias when the control plane
-// is a host process. Empty on the compose topology and on `--network host`: the first resolves
-// its services by compose DNS, and the second shares the host's resolver already — and Docker
-// rejects a host-gateway alias on a container with no network of its own.
-func applianceExtraHosts(plane workerPlane) []string {
-	if !plane.appliance || plane.network == "host" {
-		return nil
-	}
-	return []string{"host.docker.internal:host-gateway"}
 }
 
 // workerName / workerIndex are the (name,version,index) ↔ container-name contract. Dots in

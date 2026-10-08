@@ -440,7 +440,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // leave this process is one file to review rather than a needle in this one; see
   // `secrets/routes.ts` for the three admission postures and why they differ.
   //
-  // Built lazily: `secretStore()` computes paths and touches nothing, so an appliance with no
+  // Built lazily: `secretStore()` computes paths and touches nothing, so an install with no
   // secrets has no store directory and no key file until somebody writes the first one.
   const secrets = opts.secrets ?? secretStore();
   registerSecretRoutes(app, secrets);
@@ -601,7 +601,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
  * A marker search rather than a fixed relative path, because this file runs at two DEPTHS —
  * `src/` under vitest and `dist/src/` compiled — and now in two SHAPES as well:
  *
- *   `web/dist`              THE BUNDLE. Inside a hydrated appliance bundle the SPA is a CHILD of
+ *   `web/dist`              THE BUNDLE. Inside a hydrated install bundle the SPA is a CHILD of
  *                           the server: `orchestrator/dist/src/main.js` beside
  *                           `orchestrator/web/dist`. That layout is an artifact contract
  *                           `runtime/handler/internal/hydrate` writes and reads, and it did not move.
@@ -707,7 +707,7 @@ export async function runApi(): Promise<FastifyInstance> {
   // That was right when this was a container: the bind was inside a network namespace and the
   // control was the compose `ports:` entry, eleven of which each named an address deliberately.
   // It is not right now that the process runs on the host. `kontra up --bind` closes five
-  // embedded services onto one address; this listener ignored it, so an appliance told to bind
+  // embedded services onto one address; this listener ignored it, so an install told to bind
   // the docker bridge still answered — unauthenticated — on every interface the machine has,
   // including a public one. MEASURED on a droplet, and it is precisely the exposure ADR 0031 §3
   // says loopback removes.

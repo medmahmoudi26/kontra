@@ -75,7 +75,7 @@
       "labels": ["dependencies", "needs-review"]
     },
     {
-      "_why": "THE PINNED BUILD TOOLING IS NOT A DEPENDENCY, it is a decision recorded in ADR 0061 with a measured sha256 beside it. Renovate may raise it; it may not merge it, because the checksum in Dockerfile.appliance and the one in kontra-runtimes' builder.json have to move in the same change.",
+      "_why": "THE PINNED BUILD TOOLING IS NOT A DEPENDENCY, it is a decision recorded in ADR 0061 with a measured sha256 beside it. Renovate may raise it; it may not merge it, because the checksum in control/images/Dockerfile.selfcontained and the one in kontra-runtimes' builder.json have to move in the same change.",
       "matchPackageNames": ["buildpacks/pack", "heroku/builder"],
       "automerge": false,
       "labels": ["dependencies", "needs-review"]

@@ -1,4 +1,4 @@
-# Console bytes come from the appliance image (`make image` writes kontra-spa.tar.gz).
+# Console bytes come from the `kontra` image (`make image` writes bundles/kontra-spa.tar.gz).
 ARG SPA_IMAGE=kontra:latest
 FROM ${SPA_IMAGE} AS spa-src
 
@@ -74,7 +74,7 @@ ENV NODE_ENV=production
 COPY control/images/orchestrator-entrypoint.sh /usr/local/bin/orchestrator-entrypoint
 RUN chmod +x /usr/local/bin/orchestrator-entrypoint
 
-# CI's `--no-spa` appliance has no archive; GET / then 404s and /api still works.
+# A `kontra` image built with no console has no archive; GET / then 404s and /api still works.
 COPY --from=spa-src /var/lib/kontra/bundles /tmp/kontra-bundles
 RUN mkdir -p web/dist \
  && if [ -f /tmp/kontra-bundles/kontra-spa.tar.gz ]; then \
@@ -84,7 +84,7 @@ RUN mkdir -p web/dist \
     fi \
  && rm -rf /tmp/kontra-bundles /tmp/web /tmp/manifest.json
 
-# ── WHAT `serve` RUNS, TAKEN FROM THE APPLIANCE IMAGE RATHER THAN REBUILT ───────────────────────
+# ── WHAT `serve` RUNS, TAKEN FROM THE `kontra` IMAGE RATHER THAN REBUILT ────────────────────────
 #
 # `serveWorkflow` (control/orchestrator/src/workflowControl.ts) shells out to the CLI instead of
 # reimplementing it, and `createWorkspace` (workspaces.ts) seeds from /opt/kontra/seed. Neither

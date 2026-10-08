@@ -61,7 +61,7 @@ const GATES: ReadonlyArray<{
   // THE AUDIT TRAIL, AND IT IS THE ONE SURFACE ON THIS TOKEN THAT FAILS CLOSED.
   //
   // The rest of the secrets surface uses `checkOptionalBearer` — "require the token if one is
-  // configured" — which is right for a Settings page that must work on a fresh appliance, and is
+  // configured" — which is right for a Settings page that must work on a fresh install, and is
   // why `/api/secrets` and `/api/slots` are correctly absent from this table: unconfigured, they
   // ARE open. `/api/audit` uses `checkBearer`, so it 401s whether or not a token is set, and a
   // world-readable audit log is not a trade worth making for convenience on first boot.

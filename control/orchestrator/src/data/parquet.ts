@@ -43,7 +43,7 @@ import type { ObjectStore } from '../codec/objectStore';
 // From `../workspaces`, which is a pure derivation over a NAME — no lookup table, no I/O, and no
 // import cycle: `workspaces.ts` reaches nothing in `data/`.
 import { activeLakeWorkspace, workspaceAddress } from '../workspaces';
-import { applianceDataDir } from './dataDir';
+import { installDataDir } from './dataDir';
 import { MATERIALIZATION_SCHEMA_VERSION } from './materialization';
 
 /** Where a DuckLake lives: its catalog metadata store and the data-file storage root. */
@@ -63,7 +63,7 @@ export interface LakeConfig {
    */
   workspace?: string;
   /**
-   * DuckLake catalog metadata store — a local DuckDB file in the appliance's data directory
+   * DuckLake catalog metadata store — a local DuckDB file in the install's data directory
    * ({@link defaultCatalogPath}), interpolated straight into `ATTACH 'ducklake:<catalog>'`.
    *
    * `KONTRA_DUCKLAKE_CATALOG` IS ALIVE AND UNSET, AND THAT IS THE WHOLE STATEMENT (ADR 0031 §1b).
@@ -290,7 +290,7 @@ export function catalogFilePath(catalog: string): string | null {
 }
 
 /**
- * The default catalog: ONE FILE, in the appliance's data directory (ADR 0031 §1b).
+ * The default catalog: ONE FILE, in the install's data directory (ADR 0031 §1b).
  *
  * The name is `datasets.ducklake` and the directory is the one `kontra up` owns, because the
  * previous default — the bare relative name `orchestrator-datasets.ducklake` — resolved against
@@ -299,7 +299,7 @@ export function catalogFilePath(catalog: string): string | null {
  * recreate would silently start a new, empty lake beside a bucket full of parquet.
  */
 export function defaultCatalogPath(): string {
-  return path.join(applianceDataDir(), 'datasets.ducklake');
+  return path.join(installDataDir(), 'datasets.ducklake');
 }
 
 /**
@@ -340,7 +340,7 @@ export function resolveCatalog(override?: string): string {
  * THE WRITER AND THE BOOT LOCK CALL THIS; THE READER DOES NOT. `catalogLock.ts` needs it for the
  * same reason and one step earlier — on a FRESH install nothing has created the data directory yet,
  * and a boot guard that died with `ENOENT: … datasets.ducklake.lock` would make the first start of
- * a new appliance fail on the very mechanism meant to protect the second one. The workbench's
+ * a new install fail on the very mechanism meant to protect the second one. The workbench's
  * READ_ONLY connection is the exception: it must keep failing on a catalog nobody has written —
  * `queryEngine.ts:friendlyError` turns that into "no datasets yet", which is the truth, and
  * creating a lake as a side effect of reading one would replace a correct answer with an empty
@@ -411,7 +411,7 @@ export function resolveLakeConfig(store: ObjectStore, override: Partial<LakeConf
 
   //
   // THE LOCAL CASE GETS ITS OWN DIRECTORY FOR THE SAME REASON THE S3 CASE GETS ITS OWN BUCKET.
-  // An appliance runs a FILE catalog (ADR 0031 §1b), so `workspaceAddress` names `ws-<n>.ducklake`
+  // An install runs a FILE catalog (ADR 0031 §1b), so `workspaceAddress` names `ws-<n>.ducklake`
   // — separate catalogs. Leaving them on one data directory would recreate precisely the hazard
   // this branch exists to close: `ducklake_delete_orphaned_files` deletes files under a catalog's
   // data path that "the catalog never knew about", and another workspace's parquet is exactly

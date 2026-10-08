@@ -5,7 +5,7 @@ their TTL, which is what retention exists to do. Both defects that made it possi
 
 ## What happened
 
-An agent building the appliance's orchestrator bundle had, as an acceptance criterion, "running the
+An agent building the install's orchestrator bundle had, as an acceptance criterion, "running the
 orchestrator from an unpacked bundle serves the API and completes a run". To satisfy it, it ran a
 workflow against the live local stack — with isolated ports and three isolated queue names. It chose
 `sweepDatasetsWorkflow`. The run completed:

@@ -38,7 +38,7 @@ Temporal activity worker.
 
 ## 0. Which topology, and why there are two
 
-| | **the appliance** — `kontra up` | **the controller** — `docker-compose.yml` |
+| | **the install** — `kontra up` | **the controller** — `docker-compose.yml` |
 |---|---|---|
 | What it is for | local development, and any install that runs no cloud fleet | the deployment that runs **cloud runs** |
 | What it is | one process, one data directory | `orchestrator-infra` (Pulumi, the fleet key, the cloud credential) + `orchestrator-probe`, beside a `kontra up` |
@@ -50,7 +50,7 @@ Temporal activity worker.
 Nine services left `docker-compose.yml` one slice at a time and every one left a block behind
 saying where it went; that file's header is the authority on what survives and why.
 
-**Running both on one box** — the parity window, and a real case: the appliance runs all three
+**Running both on one box** — the parity window, and a real case: the install runs all three
 orchestrator roles because it ships no Pulumi engine, so tell it to leave the third one to compose,
 and give it an address the containers can reach.
 
@@ -62,17 +62,17 @@ The clusters are decoupled by design: the control plane knows nothing about whic
 
 ### 0a. Worker containers, the bind address, and the one firewall rule nobody expects
 
-An actor Worker is a **container** (ADR 0031 §2) and the appliance binds **loopback** (§3), and a
+An actor Worker is a **container** (ADR 0031 §2) and the install binds **loopback** (§3), and a
 container's loopback is its own. So the local actor path needs an address the container can reach:
 
 ```sh
 kontra up --bind 172.17.0.1        # docker0's gateway. Host-local; there is no route to it from off-box.
 ```
 
-`kontra deploy` and `kontra serve --mode docker` then resolve everything from the appliance's own
+`kontra deploy` and `kontra serve --mode docker` then resolve everything from the install's own
 `<data-dir>/endpoints.json` — Temporal, the object store, the state store, the API — so there is
 nothing to keep in step by hand. `kontra serve --mode docker` **refuses** a loopback-bound
-appliance by name rather than starting workers that poll nothing.
+install by name rather than starting workers that poll nothing.
 
 **The registry is the exception, and it is deliberate.** `kontra up` serves it on the bind address
 *and* on `127.0.0.1`, and publishes the loopback one — because the registry's client is this host's
@@ -101,7 +101,6 @@ which of the two topologies it proved.
 
 ```sh
 kontra up                     # start it; Ctrl-C stops the child first, then the services
-kontra up --temporal-ui       # also Temporal's own Web UI, hydrated from the CAS (opt-in)
 kontra up --bind 172.17.0.1   # an address worker CONTAINERS can reach (their loopback is their own)
 ```
 
@@ -221,7 +220,7 @@ image on any droplet (pointed at the controller) and it self-registers + shows u
 
 | | the compose controller | `kontra up` |
 |---|---|---|
-| what it is | **zot**, pinned to the exact version `v2.1.21`, service name `registry` | an in-process registry inside the appliance binary |
+| what it is | **zot**, pinned to the exact version `v2.1.21`, service name `registry` | an in-process registry inside the install binary |
 | retention / GC | yes, configured below | **none at all** |
 | search API | yes (zot's GraphQL `search` extension) | no |
 | auth | three optional roles; anonymous by default | none, by design — loopback only |

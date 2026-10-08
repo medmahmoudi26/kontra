@@ -41,7 +41,6 @@ import (
 	"oras.land/oras-go/v2/content/memory"
 	"oras.land/oras-go/v2/registry/remote"
 
-	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
@@ -302,7 +301,7 @@ func buildGoActorBinary(actorDir, name string) (string, error) {
 // request `curl` already makes. On this side the library is the cheap half of the trade: oras-go/v2
 // is 3.3 MB of module cache and its three dependencies (image-spec, go-digest, x/sync) are already
 // in cli/go.sum at the versions it wants, so it adds no module this binary did not already build.
-// That is the opposite finding to `appliance/registry/server.go`'s refusal of `distribution`
+// That is the opposite finding to `cli/internal/testregistry/server.go`'s refusal of `distribution`
 // (measured there at 233 MB), and the difference is the whole reason both decisions are written
 // down: the server would have had to reimplement a storage driver, the client makes a handful of
 // requests and gets the upload-Location handling — absolute versus relative, chunked fallback —
@@ -548,10 +547,10 @@ func pushDestination(pushFlag, registryFlag, controllerFlag, name, version strin
 			"  reads at 100 per hour PER IP, so one Fleet pulling one actor exhausts it for every build on\n"+
 			"  that address.\n"+
 			"  Name a host: `--push ghcr.io/<org>/%s:%s`, a GitLab or Harbor address, or `localhost:5000`\n"+
-			"  for the single box (`kontra up` serves one on :%d).\n"+
+			"  for the single box (the install serves one on :%d).\n"+
 			"  A host with no dot and no port is not one — `myregistry/x` is a Docker Hub user called\n"+
 			"  `myregistry`, which is what a reference this command PRINTS would resolve to.",
-			dest.Tagged(), named, bundleRepo(name), version, registry.DefaultPort)
+			dest.Tagged(), named, bundleRepo(name), version, defaultRegistryPort)
 	}
 	return dest, nil
 }
@@ -657,15 +656,15 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 				"plain HTTP, say so:\n    --push http://%s", dest.Domain, dest.Tagged())
 		}
 		return nil, fmt.Errorf("pushing %s: %w\n  a Bundle needs an OCI registry the Machines can also reach; "+
-			"`kontra up` serves one on :%d, and --push <ref> names another%s",
-			art.ref(), err, registry.DefaultPort, hint)
+			"the install serves one on :%d, and --push <ref> names another%s",
+			art.ref(), err, defaultRegistryPort, hint)
 	}
 	return art, nil
 }
 
 // registryHost splits an operator's registry string into the host:port a reference is built from
 // and whether to speak plain HTTP. A bare `host:port` is plain HTTP — that is what every address
-// in this system has always been, and it is what `kontra up` serves — while an explicit `https://`
+// in this system has always been, and it is what the install serves — while an explicit `https://`
 // is honoured, because the day a Bundle is pushed to somebody else's registry is slice 07's.
 func registryHost(reg string) (host string, plainHTTP bool) {
 	switch {
@@ -690,8 +689,7 @@ func registryHost(reg string) (host string, plainHTTP bool) {
 //	--registry           the operator said so
 //	KONTRA_REGISTRY      the environment said so
 //	<controller>:5000    the Controller the Machines will be told to fetch from
-//	the appliance        the address `kontra up` BOUND, for a single box with no controller
-//	localhost:5000       nothing is running; say the conventional thing
+//	localhost:5000       nothing said; say the conventional thing
 //
 // THE CONTROLLER RUNG CLOSES A LIVE SPLIT. `kontra fleet deploy` pushed to
 // `KONTRA_S3_ENDPOINT` or `localhost:8333` while telling Machines to fetch from
@@ -705,12 +703,7 @@ func bundleRegistry(flagVal, controllerFlag string) string {
 		return v
 	}
 	if host := explicitController(controllerFlag); host != "" {
-		return fmt.Sprintf("%s:%d", host, registry.DefaultPort)
-	}
-	if dir, err := applianceDataDir(""); err == nil {
-		if addr, ok := registry.ReadAddress(dir); ok {
-			return addr
-		}
+		return fmt.Sprintf("%s:%d", host, defaultRegistryPort)
 	}
 	return defaultRegistry
 }
@@ -722,7 +715,7 @@ func bundleRegistry(flagVal, controllerFlag string) string {
 //
 // The fallback is the one rung it deliberately does not follow. A guess must never select a
 // registry — pushing 65 MiB into a host nobody configured is a connection refused, and on a single
-// box with no controller at all the appliance's own bound address is the right answer instead.
+// box with no controller at all the conventional loopback address is the right answer instead.
 func explicitController(flagVal string) string {
 	if v := strings.TrimSpace(flagVal); v != "" {
 		return v

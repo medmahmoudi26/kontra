@@ -2,23 +2,17 @@ name: publish
 
 # WHAT A TAG SHIPS (ADR 0052 §3, issues 10 and 16).
 #
-# Two artifact kinds move on the ONE tag ADR 0038 already defines, and there is no second version
-# axis: the per-platform `kontra` binaries on the GitHub release, and the control plane's own
-# container images at `ghcr.io/<owner>`. `kontra up` is supposed to be seconds; today the documented
-# install runs `make image` plus three hand-typed `docker build`s first (README.md:49-53), which is
-# the difference between seconds and minutes and the whole reason this file exists.
+# This workflow publishes the control plane's own container images at `ghcr.io/<owner>`, on the ONE
+# tag ADR 0038 already defines. The install is supposed to be seconds; the alternative is `make
+# image` plus three hand-typed `docker build`s first, which is the difference between seconds and
+# minutes and the whole reason this file exists.
 #
-# ── THE TWO HALVES FAIL INDEPENDENTLY, AND THE RELEASE IS ORDERED LAST ──────────────────────────
+# ── IMAGES ONLY. THE HOST BINARIES ARE SOMEBODY ELSE'S JOB, AND TODAY NOBODY'S ──────────────────
 #
-# Issue 16's last acceptance criterion is "a release that publishes a binary without its matching
-# images fails". That is a statement about ORDER, not about a check: `gh release create` is the very
-# last thing this workflow does, and it is downstream of the image push, the digest pin and the
-# anonymous-pull probe. A workflow that created the release first and pushed images afterwards would
-# pass every test in this file and still leave a published binary whose `kontra up` cannot pull.
-#
-# The reverse exposure is accepted deliberately: image tags can exist for a version that never got a
-# release. An image tag nothing references is inert; a release referencing images that do not exist
-# is the failure an operator hits on their first install.
+# This workflow publishes no host binary and attaches nothing to the GitHub release. release-please
+# creates the tag and the release; GoReleaser is what will publish `kontra` and `kontra-warden` onto
+# it. Until that exists a tagged release carries images and no downloadable binary — stated here
+# because an empty assets list reads like a failed upload rather than a gap. See ADR 0063.
 #
 # ── EVERY REFERENCE THIS WORKFLOW PUBLISHES IS A DIGEST ─────────────────────────────────────────
 #
@@ -36,47 +30,18 @@ name: publish
 # `latest` is pushed by nothing here. A floating tag in a registry is a thing an install can resolve
 # by accident, and what this install resolves is a digest.
 #
-# ── IT OVERLAPS `release.yml`, ON PURPOSE, AND THAT IS TEMPORARY ────────────────────────────────
-#
-# `release.yml` still triggers on `v*` and still creates the release and pushes
-# `ghcr.io/<owner>/kontra:<version>` and `:latest` from `Dockerfile.appliance`. It could not simply be
-# edited out of the way: `cli/version_test.go:112` reads `.github/workflows/release.yml` by name and
-# `t.Fatalf`s if it is missing or empty, and `cli/appliance/bundle/pins_test.go:362` reads it too.
-# Deleting or renaming it breaks a test. Issue 08 removes the appliance and takes that job with it.
-#
-# Until then, two consequences, both stated rather than discovered:
-#
-#   * The GitHub release may already exist by the time this workflow reaches it. The publish step is
-#     therefore create-or-upload rather than `gh release create` alone, which would abort with
-#     "release already exists" and throw away the signatures — the one artifact `release.yml` does
-#     not produce.
-#   * Both workflows push `<registry>/kontra:<version>`. Whichever lands second wins the TAG. It
-#     cannot change what a DIGEST names, and the install resolves digests, so the collision is
-#     survivable rather than silent. `release.yml` also moves `:latest`; nothing here does.
-#
-#   * And it doubles the four native builds on every tag, including two billable macOS runners at ten
-#     linux minutes per minute (appliance.yml:59-64). That cost is real and ends with issue 08.
-#
-# ── `- platform:` IS SAFE IN THIS FILE AND WOULD NOT BE IN THE OTHER TWO ────────────────────────
-#
-# `cli/appliance/bundle/pins_test.go:362-388` regex-scans `^\s*-\s*platform:\s*(\S+)$` out of exactly
-# two filenames — `.github/workflows/appliance.yml` and `.github/workflows/release.yml` — and errors
-# on a platform missing from `Platforms()` AND on an extra one. This file is neither of those names,
-# so its matrix is unconstrained by that test. The matrix below is still the same four, because
-# `cli/appliance/bundle/pins.go:146-153` is the one list, and the completeness check in `release`
-# derives from the matrix for the same reason release.yml:155-161 gives: a hard-coded four beside a
-# matrix of four is how a platform gets added in one place and silently never released.
+# ONE WORKFLOW PER TAG. Nothing else triggers on `v*`, so nothing races this file for the image tag
+# and no tag pays for the native builds twice. `:latest` is pushed by nothing: a floating tag is a
+# thing an install can resolve by accident, and what this install resolves is a digest.
 
 on:
   push:
     tags: ["v*"]
   # THE ESCAPE HATCH, AND WHY IT IS A VERSION INPUT RATHER THAN A DRY-RUN FLAG.
   #
-  # `git tag` in this repository returns zero tags and `release.yml` has never run once
-  # (release-please.yml:5-8). Every path below — the keyless certificate chain, the GHCR push, the
-  # anonymous pull — is unexercised until a tag exists, and a first tag is a bad place to find out. `install-appliance.sh:25-33` invented `KONTRA_BASE_URL` for exactly this
-  # problem and said why: "this file can be run before it is published… That is how it is tested, and
-  # the test is the reason the variable is here rather than a convenience."
+  # `git tag` in this repository returns zero tags (release-please.yml:5-8). Every path below — the
+  # keyless certificate chain, the GHCR push, the anonymous pull — is unexercised until a tag
+  # exists, and a first tag is a bad place to find that out.
   #
   # A dispatch really does push to ghcr.io — a dry run that pushed nothing would prove nothing about
   # the half of this file that is a registry. What it cannot do is create a GitHub release, because
@@ -88,8 +53,8 @@ on:
         description: "version to build and publish, no leading v (use 0.0.0-testN — this DOES push to ghcr.io)"
         required: true
 
-# NEVER CANCEL A PUBLISH IN FLIGHT. `cancel-in-progress: true` — which `appliance.yml:51-53` uses,
-# correctly, for a workflow that only computes digests — would here stop a run between the
+# NEVER CANCEL A PUBLISH IN FLIGHT. `cancel-in-progress: true`, which is correct for a workflow
+# that only computes digests, would here stop a run between the
 # `kontra-orchestrator` push and the `kontra-host` push and leave the registry holding a version that
 # is three-quarters shipped. Two tags in flight queue instead.
 concurrency:
@@ -122,14 +87,12 @@ jobs:
 
       # ONE NUMBER, AND IT IS THE TAG WITH ITS `v` OFF.
       #
-      # `cli/release.go:314-330` would derive this itself from `git describe`, and `release.yml`
-      # lets it. This passes it explicitly because the derivation needs `fetch-depth: 0` on four
-      # runners to be right, and when it is wrong it is not an error — it is a release named
-      # `kontra_ad8871a-dirty_linux_amd64.tar.gz`, which is a name nobody can report a bug against.
+      # PASSED EXPLICITLY RATHER THAN DERIVED. A `git describe` derivation needs `fetch-depth: 0`
+      # to be right, and when it is wrong it is not an error — it is an artifact named
+      # `kontra_ad8871a-dirty_…`, which is a name nobody can report a bug against.
       #
-      # The tarball name is bare (`cli/release.go:222`) and the git tag keeps its `v`, which is why
-      # `install-appliance.sh:89` has a `bare=${version#v}` in it. Both spellings are outputs here so
-      # that nothing downstream strips a prefix a second time.
+      # The git tag keeps its `v` and every other spelling is bare. Both are outputs here so that
+      # nothing downstream strips a prefix a second time.
       - name: the version
         id: v
         run: |
@@ -212,9 +175,8 @@ jobs:
           # know how to build` — a perfect error message about a name that never existed.
           #
           # A `const` declaration is at column zero and a comment is not, so the anchor separates them
-          # exactly. The same class of mistake as the `cli/appliance` grep that matched three comment
-          # lines and reversed the codec audit in ADR 0052 §2: in a repository where the comments
-          # discuss the greps, a grep must say where it expects to match.
+          # exactly. In a repository where the comments discuss the greps, a grep must say where it
+          # expects to match or it will match the discussion.
           worker_base=$(grep -oE '^const workerBaseImage = "[^"]+"' cli/deploy.go \
             | sed -E 's/.*"([^"]+)".*/\1/' | cut -d: -f1)
 
@@ -279,210 +241,29 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
-  # binaries — four platforms, each built and RUN on the machine it is for.
-  #
-  # The same argument release.yml:3-15 makes, unchanged: an artifact users download should have been
-  # executed by the machine that made it. `appliance.yml`'s `cross` job proves the cross-build is
-  # byte-identical, so a single linux runner could produce all four — but a linux runner
-  # cross-building a macOS release can only look at headers, and "does this binary execute here at
-  # all" is the one question that matters to somebody who just ran curl | sh.
-  #
-  # RUNNER AVAILABILITY IS A CONSTRAINT, NOT A DETAIL (appliance.yml:59-64). `ubuntu-24.04-arm` is
-  # free for public repositories and billable for private ones; macOS is billable everywhere at ten
-  # linux minutes per minute.
-  #
-  # ── AN UNAVAILABLE LABEL DOES NOT FAIL. IT QUEUES, AND IT QUEUES FOREVER. ───────────────────────
-  #
-  # This comment used to say a label the repository cannot use "fails with `no runner matching the
-  # labels`, which is the right failure". MEASURED, on the first dispatch this workflow ever had:
-  # that is not what happens. `darwin/amd64` asked for `macos-13` — a runner image GitHub has retired
-  # — and the job sat at `status: queued` with `steps: []` for eighteen minutes, until it was
-  # cancelled. There is no error, no annotation and nothing in the log, because the job never
-  # started. It would have burned the full `timeout-minutes` and then failed with a timeout, which
-  # names the symptom and not the cause.
-  #
-  # And it took the whole publish with it: `images` needed this job, so four container images that
-  # have no macOS dependency at all were blocked behind a macOS runner that was never coming. The
-  # three other binaries finished, and the thing an install actually pulls did not get built.
-  #
-  # `macos-13` -> `macos-15-intel`, WHICH RESOLVES. Measured on the second dispatch: the job started
-  # within thirty seconds and ran eighteen steps, so the Intel label is live and the retired one was
-  # the whole cause.
-  #
-  # ── AND A 20-MINUTE CAP WAS THE WRONG ANSWER TO IT. ────────────────────────────────────────────
-  #
-  # The first attempt at this set `timeout-minutes` to 20 for the macOS legs, reasoning that twenty
-  # minutes is "far more than a CGO_ENABLED=0 Go build needs". That was measured wrong on the next
-  # run: `darwin/amd64` was still building at 20:00 and the cap CANCELLED IT — and because
-  # `images` needed the whole matrix, the four container images were skipped again. A cap aimed at a
-  # job that never starts also caps the job that is merely slow, and it cannot tell them apart.
-  #
-  # The Intel runner is the long pole by a wide margin: `darwin/arm64` on `macos-14` finished in ~3.5
-  # minutes and `darwin/amd64` had not finished in 20. Both do the same work — checkout, the console
-  # checkout, `pnpm install`, the SPA build, the bundle, then the release and its smoke run.
-  #
-  # So the cap goes back to 60 for every platform, and the decoupling moves to where it belongs: see
-  # `images` below, which no longer lets a macOS result decide whether container images get built.
-  # A bad label now costs an hour of the RELEASE half and nothing of the install half.
-  #
-  # The native-build rule is untouched. All four are built and RUN on the machine they are for —
-  # `cli/release.go:28-32` is explicit that cross-building works and that CI does it natively anyway,
-  # because "a cross-built artifact nobody has ever executed is a claim".
-  # ═══════════════════════════════════════════════════════════════════════════════════════════════
-  binaries:
-    name: ${{ matrix.platform }}
-    needs: plan
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-          - platform: darwin/amd64
-            runner: macos-15-intel
-          - platform: darwin/arm64
-            runner: macos-14
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Not for `git describe` — `plan` computes the version and it is passed in below. It is for
-          # `debug.ReadBuildInfo`'s `vcs.revision` (cli/internal/buildinfo/buildinfo.go:49-56), which
-          # is what a non-release build reports and what makes a wrong `-X` visible.
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: runtime/handler/go.mod
-          cache-dependency-path: cli/go.sum
-
-      # ── THE SPA, WHICH IS THE ONE THING THE RELEASE DOES NOT BUILD ITSELF ────────────────────
-      #
-      # These six steps are release.yml:58-95 verbatim in shape, and the duplication is deliberate
-      # rather than factored: that file is on its way out with issue 08 and a composite action used
-      # by one workflow is indirection bought with nothing.
-      #
-      # `kontra release` archives a vite output; producing it is the console's own toolchain with its
-      # own lockfile, and folding a browser bundler into the thing whose whole claim is that it needs
-      # nothing but Go is not a trade worth making. It is another repository since ADR 0038, and the
-      # `_sibling/` nesting is not decoration: kontra-console resolves `@kontra/core` as
-      # `link:../kontra/core`, so it needs a directory named `kontra` beside it.
-      #
-      # NO TOKEN. kontra-console was private and this step needed `secrets.KONTRA_CONSOLE_TOKEN` —
-      # read access to another repository, which the built-in GITHUB_TOKEN does not grant. It went
-      # PUBLIC on 2026-09-26, so an anonymous checkout resolves and the secret is one fewer thing an
-      # operator has to be told about. If it is ever made private again this fails with a 404 on a
-      # repository that exists (ci.yml records that reading) — not with anything that says "token".
-      - name: check out the console
-        uses: actions/checkout@v4
-        with:
-          repository: medmahmoudi26/kontra-console
-          path: _sibling/kontra-console
-      - name: put this checkout where `link:../kontra/shared/core` expects it
-        run: ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/_sibling/kontra"
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-      - name: build @kontra/core (the console links it out of this checkout)
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm --filter @kontra/core run build
-      - name: build the SPA
-        working-directory: _sibling/kontra-console
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
-      - name: point the release at the console's dist
-        run: echo "KONTRA_CONSOLE_DIST=$GITHUB_WORKSPACE/_sibling/kontra-console/dist" >> "$GITHUB_ENV"
-
-      - name: release this platform
-        working-directory: cli
-        shell: bash
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          go run . release --repo .. --platform "$PLATFORM" --version "$VERSION" --out "$RUNNER_TEMP/release"
-
-      # ── `kontra version` MUST ANSWER THE TAG, AND THIS IS NOT A TAUTOLOGY ───────────────────
-      #
-      # The version reaches the binary through the linker and nowhere else: `version` is `""` in the
-      # source (buildinfo.go:31) and `-X …buildinfo.version=` is added by `cli/release.go:167-170`.
-      # `-X` ON AN UNKNOWN SYMBOL IS NOT AN ERROR — the linker ignores it, the build succeeds, and
-      # every release forever reports `dev (abc123)`. buildinfo.go:78-84 says so and says why its own
-      # test builds a real binary instead of asserting on a string.
-      #
-      # So the comparison is exact rather than a grep, and it is made on the binary UNPACKED FROM THE
-      # TARBALL a user downloads, on the platform it was built for. `kontra version` prints the bare
-      # version and nothing else (cli/main.go:272), so anything other than equality is a finding.
-      - name: run the released binary out of its own tarball
-        shell: bash
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/check"
-          tar -xzf "$RUNNER_TEMP"/release/kontra_*.tar.gz -C "$RUNNER_TEMP/check"
-          cd "$RUNNER_TEMP/check"
-          # 2>&1 because `usage()` writes to STDERR on purpose — piped stdout is for JSONL output —
-          # so `| head` on stdout alone would print nothing and check nothing.
-          ./kontra help 2>&1 | head -3
-          ls -la bundles
-          ./kontra bundle verify bundles/kontra-orchestrator-*.tar.gz
-          got=$(./kontra version)
-          if [ "$got" != "$VERSION" ]; then
-            echo "::error::the released binary calls itself '$got', not '$VERSION'."
-            echo "::error::the -X in cli/release.go:167-170 did not reach cli/internal/buildinfo.version — a wrong symbol path is silently ignored by the linker."
-            exit 1
-          fi
-          echo "kontra version == $got"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: binaries-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/release/kontra_*.tar.gz
-          retention-days: 7
-
-  # ═══════════════════════════════════════════════════════════════════════════════════════════════
   # images — the four kontra-owned images, one arch per runner, NATIVELY.
   #
-  # NO QEMU, AND THAT IS THE WHOLE REASON THIS IS A MATRIX. `release.yml:212` sets up
-  # `docker/setup-qemu-action` and cross-builds arm64 on an amd64 runner, which is fine for
-  # `Dockerfile.appliance`: it unpacks a tarball and apt-installs. It is not fine for the other
-  # three. `Dockerfile.orchestrator` runs `pnpm install --frozen-lockfile`, three `pulumi plugin
-  # install`s and two `pnpm run build`s; `Dockerfile.workerbase` compiles the Go handler. Emulated,
-  # those are the difference between minutes and an hour of an emulated CPU. `ubuntu-24.04-arm` runs
-  # them at native speed, and `appliance.yml`/`release.yml` already depend on that label existing.
+  # NO QEMU, AND THAT IS THE WHOLE REASON THIS IS A MATRIX. Cross-building arm64 on an amd64 runner
+  # under `docker/setup-qemu-action` is the difference between minutes and an hour of an emulated
+  # CPU for every image here: `Dockerfile.selfcontained` runs both pnpm installs, the SPA build and
+  # the Go build; `Dockerfile.orchestrator` runs `pnpm install --frozen-lockfile`, three `pulumi
+  # plugin install`s and two `pnpm run build`s. `ubuntu-24.04-arm` runs them at native speed.
   #
   # PER-ARCH TAGS ONLY HERE. `<version>-amd64` and `<version>-arm64` are pushed by this job; the
   # manifest list over them is `manifests` below, because neither runner can write it alone.
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   images:
     name: images ${{ matrix.arch }}
-    needs: [plan, binaries]
+    needs: [plan]
     # A macOS RESULT MUST NOT DECIDE WHETHER CONTAINER IMAGES GET BUILT, and twice it did.
     #
-    # `needs: [plan, binaries]` with the default `if` means every leg of that matrix must SUCCEED, so
-    # a macOS runner that was never allocated (`macos-13`, retired) and then one that was cancelled by
-    # too short a cap both skipped this job — and with it `manifests`, `pin` and `pull`. Two dispatches
-    # published eight mirrored third-party images and zero kontra-owned ones, for a reason that had
-    # nothing to do with any of them.
+    # Depending on a four-platform host-build matrix with the default `if` meant every leg had to
+    # SUCCEED: a macOS runner that was never allocated (`macos-13`, retired) and then one that was
+    # cancelled by too short a cap each skipped this job — and with it `manifests`, `pin` and `pull`.
+    # Two dispatches published zero kontra-owned images for a reason that had nothing to do with any
+    # of them. Nothing here consumes a host artifact now, so there is no such edge left to sever.
     #
-    # These builds consume `kontra_<version>_linux_<arch>.tar.gz` and nothing else: `Dockerfile.
-    # appliance` takes the linux tarball as a `--build-arg` and the other three take no tarball at
-    # all. A darwin artifact is not an input here, so a darwin failure is not a reason to stop.
-    #
-    # `needs` IS KEPT, so this still WAITS for the matrix and the linux artifacts exist before the
-    # download. What changes is only that a non-success is no longer fatal. `plan` is still required
+    # `plan` is still required
     # explicitly — it computes the version, the registry and the image names, and without it there is
     # nothing to build. If the LINUX legs are what failed, the `ls` in the build step below fails
     # loudly on a missing tarball, which is the honest place for that error.
@@ -506,14 +287,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # `build/release/` AND NOT ANYWHERE ELSE. `.dockerignore:20` ignores `build/`, and
-      # `.dockerignore:29-30` re-admits exactly `!build/release/*.tar.gz` — the comment above it
-      # records the day those two rules met and `COPY` answered "file not found in build context".
-      - uses: actions/download-artifact@v4
+      # THE CONSOLE, AS A SIBLING, BECAUSE THE BUILD CONTEXT IS THE PARENT DIRECTORY.
+      # `Dockerfile.selfcontained` resolves `@kontra/core` as `link:../kontra/shared/core` — a
+      # filesystem path, not a published package — so both checkouts must be visible to ONE build
+      # and both directory names are load-bearing. Two `path:` checkouts and not a symlink: docker
+      # does not follow a context symlink that leaves the context.
+      - uses: actions/checkout@v4
         with:
-          pattern: binaries-*
-          merge-multiple: true
-          path: build/release
+          path: _sibling/kontra
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: medmahmoudi26/kontra-console
+          path: _sibling/kontra-console
+          persist-credentials: false
 
       - uses: docker/setup-buildx-action@v3
 
@@ -537,15 +324,15 @@ jobs:
       # ORDER IS LOAD-BEARING: `kontra` FIRST. `Dockerfile.orchestrator:2-3` is
       # `ARG SPA_IMAGE=kontra:latest` / `FROM ${SPA_IMAGE} AS spa-src` — the orchestrator image takes
       # the console bytes, the CLI binary, the duckdb CLI and the pinned Python packages out of the
-      # appliance image rather than installing a second copy of any of them (Dockerfile.orchestrator:
+      # `kontra` image rather than installing a second copy of any of them (Dockerfile.orchestrator:
       # 54-84 argues that at length: a second `pip install` would be unpinned in two images and the
       # drift is a worker dialling a queue nobody else agrees on). So the README's build order is
       # mandatory, and it is mandatory here.
       #
-      # `--build-arg TARBALL=` IS PER-ARCH. Handing `Dockerfile.appliance` a tarball for the other
-      # architecture produces an image that pulls fine and `exec format error`s on first run. The
-      # Dockerfile takes the path as an arg (Dockerfile.appliance:51-55) precisely so this cannot be
-      # a fixed name that quietly keeps shipping last month's binary.
+      # `kontra` IS BUILT FROM SOURCE, IN DOCKER (`Dockerfile.selfcontained`) — the same path
+      # `make image` takes, so the image and a local build are the same recipe. Nothing here unpacks
+      # a prebuilt tarball, which is what removes the hazard an arch-wrong one carried: it pulled
+      # fine and `exec format error`ed on first run.
       - name: build and push, this architecture
         shell: bash
         env:
@@ -555,9 +342,6 @@ jobs:
           NAMES: ${{ needs.plan.outputs.kontra_images }}
         run: |
           set -euo pipefail
-
-          tarball=$(ls build/release/kontra_"$VERSION"_linux_"$ARCH".tar.gz)
-          echo "==> $ARCH from $tarball"
 
           spa_image="$REGISTRY/kontra:$VERSION-$ARCH"
 
@@ -610,19 +394,22 @@ jobs:
           # single-platform image, which would leave `manifests` building a list whose members are
           # themselves lists. Nothing is lost that anything here reads: `manifests` signs every list
           # keyless with cosign and `pin` records digests into `images.json`/`images.env`.
+          # THE CONTEXT IS AN ARGUMENT because `kontra` needs the parent directory (the console is a
+          # sibling) and every other image needs this checkout. A single `.` was correct only while
+          # `kontra` came out of a tarball.
           build_one() {
-            name="$1"; shift
+            name="$1"; ctx="$2"; shift 2
             ref="$REGISTRY/$name:$VERSION-$ARCH"
             echo "==> $ref"
             docker buildx build --platform "linux/$ARCH" \
               --provenance=false --sbom=false \
-              -t "$ref" --push "$@" .
+              -t "$ref" --push "$@" "$ctx"
           }
 
           # kontra first; see above.
-          build_one kontra \
-            -f control/images/Dockerfile.appliance \
-            --build-arg TARBALL="$tarball"
+          build_one kontra _sibling \
+            -f _sibling/kontra/control/images/Dockerfile.selfcontained \
+            --build-arg VERSION="$VERSION"
 
           for name in $NAMES; do
             case "$name" in
@@ -630,15 +417,15 @@ jobs:
                 continue  # done above, and it has to be
                 ;;
               kontra-orchestrator)
-                build_one "$name" \
+                build_one "$name" . \
                   -f control/images/Dockerfile.orchestrator \
                   --build-arg SPA_IMAGE="$spa_image"
                 ;;
               kontra-host)
-                build_one "$name" -f control/images/Dockerfile.pyworker
+                build_one "$name" . -f control/images/Dockerfile.pyworker
                 ;;
               kontra-worker-base)
-                build_one "$name" -f control/images/Dockerfile.workerbase
+                build_one "$name" . -f control/images/Dockerfile.workerbase
                 ;;
               # The shipper and its parser, baked rather than bind-mounted. It appears in this table
               # because compose stopped naming `python:3.12-alpine` and started naming
@@ -646,7 +433,7 @@ jobs:
               # hand-written half that derivation cannot supply. See control/images/Dockerfile.logship for why logline.py could not
               # take the `configs:` treatment postgres-init.sh got.
               kontra-logship)
-                build_one "$name" -f control/images/Dockerfile.logship
+                build_one "$name" . -f control/images/Dockerfile.logship
                 ;;
               # Arrow Flight SQL over the DuckLake. It has been derived by `plan` since compose started
               # naming `${KONTRA_PORTER_IMAGE:-…}` and has never had an arm here, so the `*)` below was
@@ -654,7 +441,7 @@ jobs:
               # nobody had tagged since. It is also why `control/pulumi/Pulumi.yaml` cannot declare
               # porter: an install may not depend on an image that is never published.
               kontra-porter)
-                build_one "$name" -f control/images/Dockerfile.porter
+                build_one "$name" . -f control/images/Dockerfile.porter
                 ;;
               *)
                 echo "::error::the install references a kontra-owned image '$name' that this workflow does not know how to build."
@@ -699,9 +486,8 @@ jobs:
           password: ${{ github.token }}
 
       # THE INSTALLER VERIFIES WHAT IT DOWNLOADS, which is the property `install.sh:175-181`'s buf
-      # step does not have and this repository has written down twice as a mistake not to copy
-      # (release.yml:13-15, cli/release.go:22-26): `/releases/latest/download/` with no version and
-      # no checksum. `cosign-release` is deliberately not pinned here — the action's default for a
+      # step does not have and this repository has written down as a mistake not to copy:
+      # `/releases/latest/download/` with no version and no checksum. `cosign-release` is deliberately not pinned here — the action's default for a
       # given major IS pinned, and a cosign version invented in this file without being run would
       # fail on the first tag, which is worse than tracking the installer's own default.
       - uses: sigstore/cosign-installer@v3
@@ -789,8 +575,8 @@ jobs:
             verified=$((verified + 1))
             echo "verified $name"
           done 3< digests-kontra.tsv
-          # A LOOP OVER AN EMPTY FILE REPORTS SUCCESS BY HAVING HAD NO WORK TO DO — the shape
-          # install-appliance.sh:185-188 guards against. The count is the guard.
+          # A LOOP OVER AN EMPTY FILE REPORTS SUCCESS BY HAVING HAD NO WORK TO DO. The count is the
+          # guard: zero iterations has to fail, not pass quietly.
           expected=$(grep -c . digests-kontra.tsv)
           if [ "$verified" -ne "$expected" ] || [ "$verified" -lt 4 ]; then
             echo "::error::verified $verified of $expected signatures (expected at least 4)"
@@ -1031,8 +817,7 @@ jobs:
             exit 1
           fi
 
-          # A LOOP OVER AN EMPTY LIST REPORTS SUCCESS BY HAVING HAD NO WORK TO DO — the shape
-          # install-appliance.sh:133-137 and :185-188 both guard against.
+          # A LOOP OVER AN EMPTY LIST REPORTS SUCCESS BY HAVING HAD NO WORK TO DO.
           # FIVE IS NOW THE EXACT COUNT, NOT A FLOOR WITH ROOM UNDER IT. Before the mirror job went it
           # was five owned plus eight copies, so `-ge 5` had thirteen references to be satisfied by and
           # could have passed while every kontra image was missing. It is the whole set now, which makes
@@ -1040,174 +825,3 @@ jobs:
           [ "$checked" -ge 5 ] || { echo "::error::checked only $checked references — images.json is too small to be a whole release"; exit 1; }
           echo "$checked references pull anonymously and match their recorded digests"
 
-  # ═══════════════════════════════════════════════════════════════════════════════════════════════
-  # release — SHA256SUMS, the keyless signatures, and the one thing that makes all of it downloadable.
-  #
-  # LAST, AND DOWNSTREAM OF `pull`. See the header: this ordering IS issue 16's "a release that
-  # publishes a binary without its matching images fails".
-  # ═══════════════════════════════════════════════════════════════════════════════════════════════
-  release:
-    name: the release
-    needs: [plan, binaries, pin, pull]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: binaries-*
-          merge-multiple: true
-          path: release
-      - uses: actions/download-artifact@v4
-        with:
-          name: pins
-          path: release
-
-      # ONE SHA256SUMS ACROSS ALL FOUR, written here rather than by each runner, because four files
-      # each containing one line is not a thing `sha256sum -c` can be pointed at — and the whole
-      # point of publishing digests is that checking them is one command. `kontra release` writes one
-      # per invocation covering the platforms IT built (cli/release.go:242-262); this is the union.
-      - name: the digests
-        working-directory: release
-        run: |
-          set -euo pipefail
-          ls -la
-          sha256sum kontra_*.tar.gz | sort -k2 > SHA256SUMS
-          cat SHA256SUMS
-          sha256sum -c SHA256SUMS
-
-      # A PARTIAL RELEASE IS WORSE THAN A FAILED ONE: the platforms that are there install fine, and
-      # the ones that are not fail at curl with a 404 and no explanation.
-      #
-      # THE LIST COMES OUT OF THIS FILE'S OWN MATRIX. Same argument as release.yml:155-161 — a
-      # hard-coded four beside a matrix of four is exactly the drift that lets a platform be added in
-      # one place and silently never released, and `Platforms()` in cli/appliance already has a test
-      # holding the matrix to it, so deriving from the matrix inherits that check for free.
-      - name: a release ships every platform the matrix builds
-        shell: bash
-        run: |
-          set -euo pipefail
-          missing=""
-          seen=0
-          while read -r platform; do
-            seen=$((seen + 1))
-            slug=$(echo "$platform" | tr / _)
-            ls release/kontra_*_"$slug".tar.gz >/dev/null 2>&1 || missing="$missing $platform"
-          done < <(grep -oE '^\s+- platform: \S+' .github/workflows/publish.yml | awk '{print $3}')
-          # THE GREP IS A CHECK THAT CAN PASS VACUOUSLY. Rename the matrix key and it matches
-          # nothing, the loop runs zero times, `missing` stays empty and a one-platform release
-          # passes. So the count is asserted against the four of
-          # `cli/appliance/bundle/pins.go:146-153`.
-          [ "$seen" -eq 4 ] || { echo "::error::read $seen platforms out of this workflow's matrix, expected 4"; exit 1; }
-          if [ -n "$missing" ]; then
-            echo "::error::the release is missing:$missing"
-            exit 1
-          fi
-          echo "every platform in the matrix has a release file"
-
-      - uses: sigstore/cosign-installer@v3
-      - run: cosign version
-
-      # ── A SIGNATURE PER TARBALL, AND ONE OVER THE SET ────────────────────────────────────────
-      #
-      # BOTH, AND THEY ARE NOT REDUNDANT. A per-tarball bundle lets `get.sh` verify the one file it
-      # downloaded without fetching the other three — which is the whole shape of a one-line
-      # installer. The signature over SHA256SUMS is what makes the SET attestable: a release with a
-      # platform removed has a valid signature on every file that remains, and only the signed
-      # manifest of four names notices.
-      #
-      # `--bundle` RATHER THAN `--output-signature`/`--output-certificate`. A bundle carries the
-      # signature, the Fulcio certificate and the Rekor inclusion proof in one file, so verifying is
-      # one argument and not three files a user has to fetch in the right combination.
-      #
-      # AND WHAT A SIGNATURE PROVES IS BOUNDED. ADR 0039 says it plainly and it is worth repeating
-      # where the signing happens: it says these bytes were signed by this workload identity. A
-      # signed backdoor verifies.
-      - name: sign every artifact, keyless, then verify it
-        working-directory: release
-        shell: bash
-        run: |
-          set -euo pipefail
-          identity="https://github.com/${GITHUB_WORKFLOW_REF}"
-          issuer="https://token.actions.githubusercontent.com"
-
-          signed=0
-          for f in kontra_*.tar.gz SHA256SUMS; do
-            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
-            signed=$((signed + 1))
-          done
-          [ "$signed" -eq 5 ] || { echo "::error::signed $signed artifacts, expected 4 tarballs + SHA256SUMS"; exit 1; }
-
-          # VERIFIED HERE, IN THIS RUN. ADR 0039's consequences record that the keyless path is
-          # "unproven end to end" on the development machine. It is proven on this runner or the
-          # release does not happen.
-          for f in kontra_*.tar.gz SHA256SUMS; do
-            cosign verify-blob \
-              --certificate-identity "$identity" \
-              --certificate-oidc-issuer "$issuer" \
-              --bundle "$f.sigstore.json" "$f"
-          done
-
-          # AND A NEGATIVE CONTROL, because "verify returned 0" and "verify checks anything" are
-          # different facts, and a bundle checked against the wrong bytes is the cheapest way to tell
-          # them apart. Same rule as cli/trustpolicy_test.go: every positive carries its refusal.
-          echo tampered > tampered.bin
-          if cosign verify-blob \
-               --certificate-identity "$identity" \
-               --certificate-oidc-issuer "$issuer" \
-               --bundle SHA256SUMS.sigstore.json tampered.bin 2>/dev/null; then
-            echo "::error::verify-blob accepted SHA256SUMS' signature over different bytes — it is checking nothing"
-            exit 1
-          fi
-          rm -f tampered.bin
-          echo "$signed artifacts signed and verified; a tampered payload was refused"
-
-          {
-            echo "### verifying a download"
-            echo
-            echo '```sh'
-            echo "cosign verify-blob \\"
-            echo "  --certificate-identity '$identity' \\"
-            echo "  --certificate-oidc-issuer '$issuer' \\"
-            echo "  --bundle kontra_${VERSION}_linux_amd64.tar.gz.sigstore.json \\"
-            echo "  kontra_${VERSION}_linux_amd64.tar.gz"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-
-      # ── CREATE OR UPLOAD, BECAUSE `release.yml` MAY HAVE GOT HERE FIRST ─────────────────────
-      #
-      # See the header. Both workflows trigger on `v*` and `release.yml` cannot be edited without
-      # breaking `cli/version_test.go:112`. `gh release create` alone would abort with "release
-      # already exists" and drop the signatures on the floor — the one artifact the other workflow
-      # does not produce. `--clobber` overwrites an asset of the same name, which is correct: the
-      # tarballs are the same build of the same tag either way.
-      #
-      # `--verify-tag` on the create path. Without it, `gh` will happily create a release against a
-      # tag that does not exist, which on a `workflow_dispatch` run would invent a `v0.0.0-test1` tag
-      # in the repository as a side effect of a test.
-      #
-      # DISPATCH RUNS SKIP THIS STEP ENTIRELY. There is no tag, so there is nothing to attach a
-      # release to; everything above it — the build, the images, the mirror, the signatures, the
-      # anonymous pull — has already run.
-      - name: publish
-        if: startsWith(github.ref, 'refs/tags/')
-        working-directory: release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          assets=(kontra_*.tar.gz kontra_*.tar.gz.sigstore.json SHA256SUMS SHA256SUMS.sigstore.json images.json images.env)
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists (release.yml is still live — issue 08); uploading into it"
-            gh release upload "$TAG" "${assets[@]}" --clobber
-          else
-            gh release create "$TAG" --verify-tag --generate-notes "${assets[@]}"
-          fi
-          gh release view "$TAG" --json assets --jq '.assets[].name'

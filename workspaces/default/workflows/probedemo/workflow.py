@@ -3,7 +3,7 @@
 The smallest workflow that actually PRODUCES data. `ping` proves the wiring and writes nothing;
 this one writes, so a Run has a Dataset the console can show a table of.
 
-It touches nothing outside this machine: every target is the appliance's own HTTP surface, so the
+It touches nothing outside this machine: every target is the install's own HTTP surface, so the
 Batch exercises the dispatch and the writer without reaching a third party.
 
     kontra workflow serve .kontra/workflows/probedemo --tmux
@@ -18,7 +18,7 @@ from temporalio import workflow
 
 from actorkit import catalog
 
-# The appliance's own surfaces. Harmless by construction — a HEAD against the API that is already
+# The install's own surfaces. Harmless by construction — a HEAD against the API that is already
 # serving this console, rather than somebody else's host.
 TARGETS = [
     {"url": "http://localhost:8088/api/health", "host": "localhost"},
@@ -39,7 +39,7 @@ class ProbeDemo:
         # A PHASE, NOT A UNIT: one sentence for the whole dispatch, not one per target. Six targets
         # would be six seconds and thirty history events for a demo that takes about one, and the
         # same line in a 623-unit sweep is the mistake that only shows up in production.
-        workflow.logger.info(f"probing {len(TARGETS)} appliance endpoints into {into}")
+        workflow.logger.info(f"probing {len(TARGETS)} install endpoints into {into}")
 
         # `head(batch, out)` publishes the Method's output straight into the writer — the Batch's
         # ref IS the manifest, so nothing is reshaped and no rows pass through this workflow.

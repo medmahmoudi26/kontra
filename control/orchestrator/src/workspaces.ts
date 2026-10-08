@@ -130,7 +130,7 @@ export function workspaceAddress(
   const base = (env.KONTRA_DUCKLAKE_CATALOG ?? '').trim();
   const db = catalogDbName(name);
   // Swap `dbname=` in place when a connstring is configured; otherwise name a file catalog, which
-  // is what a single-process appliance runs (ADR 0031 §1b).
+  // is what a single-process install runs (ADR 0031 §1b).
   // The boundary includes `:` as well as whitespace, because the FIRST key sits directly against
   // the scheme — `postgres:dbname=…`, with no space. Anchoring on `(^|\s)` alone misses exactly
   // that case and appends a SECOND `dbname=`, which libpq resolves last-wins, so it happens to

@@ -28,7 +28,7 @@
  * throws `ReferenceError: process is not defined` while the bundle is being imported, which fails the
  * workflow task for EVERY type in the bundle — `stackWorkflow` and `tmuxSessionWorkflow` with it — and
  * a failed workflow task retries forever. The caller sees a run that stays RUNNING with no error
- * anywhere, which is the invisible hang `workflows/appliance.ts` exists to prevent.
+ * anywhere, which is the invisible hang `workflows/noProvisioner.ts` exists to prevent.
  *
  * So the queue is resolved OUTSIDE the sandbox, by the schedule creator (`src/retention.ts`, ordinary
  * Node code that may read `KONTRA_DATASET_QUEUE`), and travels as workflow INPUT — which is written
@@ -65,7 +65,7 @@ const SWEEP_ACTIVITY_OPTIONS: Omit<ActivityOptions, 'taskQueue'> = {
 };
 
 /** The `type` on the refusal, so a caller (or a test) branches on it without matching prose — the same
- *  arrangement as `workflows/appliance.ts`'s `NO_PROVISIONER`. */
+ *  arrangement as `workflows/noProvisioner.ts`'s `NO_PROVISIONER`. */
 export const NO_DATASET_QUEUE = 'NoDatasetQueue';
 
 /** What an operator reads when a sweep was started without being told where to run. It names the

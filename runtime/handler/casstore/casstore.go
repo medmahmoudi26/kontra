@@ -1,16 +1,16 @@
-// Package casstore is the on-disk content-addressed store, exported for the appliance.
+// Package casstore is the on-disk content-addressed store, exported for the install.
 //
 // The store is runtime/handler/internal/cas: sha256 -> store-if-absent on write, publish by
 // os.Link so nothing partial is ever visible under an address, and a working copy by
 // reflink where the filesystem allows it. `internal` is the right home for it — the
 // codec's and the blob plane's addressing rules are this module's business — and it is
-// exactly why this file has to exist. The appliance is a DIFFERENT MODULE (cli/), and
+// exactly why this file has to exist. The install is a DIFFERENT MODULE (cli/), and
 // issue 11 decided its embedded OCI registry stores layers in this store rather than
 // opening a second one. A shared store the sharer cannot import is not shared.
 //
 // TYPE ALIASES, NOT A WRAPPER, and the contrast with codecserver is the reason. That
 // package RESTATES an interface because bytes flow the other way: it accepts a store FROM
-// the appliance, so structural identity is all it needs. Here the appliance takes the
+// the install, so structural identity is all it needs. Here the install takes the
 // store itself, and a restatement would be a second implementation of the publish-by-link
 // concurrency design — the one thing in that file that must exist exactly once. `= cas.Local`
 // makes handler and cli name the same type, so there is nothing left to keep in step.

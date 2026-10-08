@@ -104,7 +104,7 @@ pulumi plugin install resource docker 4.11.2     # HARD PREREQUISITE — see bel
 ls` on this box listed `digitalocean` and `random` and nothing else, and `find /root/.pulumi -name
 '*docker*'` returned nothing. A YAML program that declares `docker:index:Container` with no plugin
 fails at resource registration, which reads as a program error rather than as a missing binary.
-`get.sh` installs it; `kontra doctor` reports it. ADR 0052 §1 also lists `tls` in the host engine's
+The one-line installer installs it; `kontra doctor` reports it. ADR 0052 §1 also lists `tls` in the host engine's
 provider set; nothing here declares it yet and it is still absent.
 
 4.11.2 and not `latest`, because that is the version ADR 0052 fact 1 was established against and the
@@ -226,18 +226,18 @@ Two details that look wrong until you know the reason:
 ## What `kontra up` will run against it
 
 **None of this exists yet, and the honest state is worth stating plainly:** `kontra up` today is the
-appliance — `cli/up.go:1` opens *"up.go — `kontra up`, the appliance"* — which ADR 0052 §2 retires
+install — `cli/up.go:1` opens *"up.go — `kontra up`, the install"* — which ADR 0052 §2 retires
 into this program. Nothing in the repository outside `docs/adr/0052` and this directory contains the
 string `kontra-control` — the one apparent hit, `scripts/provision-controller.sh:139`, is
 `kontra-controller`, a DigitalOcean tag name. Everything below is the contract this file is built to
 satisfy, written down so the Go lane implements the same thing this lane verified.
 
-**`get.sh` has since landed and it holds up its half.** Re-checked: it pins
+**The one-line installer holds up its half.** Re-checked: it pins
 `DOCKER_PLUGIN_VERSION=4.11.2`, runs `pulumi plugin install resource docker` and then *re-reads*
-`pulumi plugin ls` rather than trusting the exit code (`get.sh:725`), and it prints the
+`pulumi plugin ls` rather than trusting the exit code, and it prints the
 `pulumi login file://$KONTRA_HOME/state` warning this file asks for. What it does **not** do is name a
 stack, so the one-segment rule above is still only written here — and `kontra up` is still the
-appliance.
+install.
 
 ```sh
 # 1. THE BACKEND, BEFORE ANYTHING ELSE.

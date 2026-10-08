@@ -233,7 +233,7 @@ func TestASecondInitStillAnswersWhereTheLoginWent(t *testing.T) {
 // ONLY TIME THIS IS SHOWN". In the compose install that stdout belongs to the `cli` container, and
 // `docker compose logs cli` shows only the CURRENT container — so one recreate destroyed the only
 // copy of the credential and config.yaml kept an scrypt hash nobody can reverse. That is how the
-// owner of this appliance lost the `admin` login with no recovery path at all.
+// owner of this install lost the `admin` login with no recovery path at all.
 func TestTheInstallLeavesThePasswordOnDiskInCleartext(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("KONTRA_HOME", dir)
@@ -295,7 +295,7 @@ func TestTheInstallLeavesThePasswordOnDiskInCleartext(t *testing.T) {
 // It wrote config.yaml and returned. The orchestrator has no YAML parser: it reads
 // KONTRA_CONSOLE_USERS out of runtime.env, which orchestrator-entrypoint sources. So the command
 // printed a password, told the operator to restart, and the restart re-sourced an env that still
-// carried only the original user. MEASURED on the live appliance before the fix: config.yaml listed
+// carried only the original user. MEASURED on the live install before the fix: config.yaml listed
 // `med` and `admin`, runtime.env base64-decoded to `admin` alone, and POST /api/login as `med`
 // answered 401 — an operator following the printed instructions, locked out, with no way to tell a
 // typo from a broken command.

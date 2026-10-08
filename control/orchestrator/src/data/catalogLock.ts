@@ -173,7 +173,7 @@ export function acquireCatalogLock(catalog: string = resolveCatalog()): CatalogL
   if (file === null) return null;
 
   // THE DIRECTORY FIRST. On a fresh install nothing has created the data directory yet, so
-  // `openSync(…, 'wx')` would answer ENOENT and the FIRST boot of a new appliance would die on the
+  // `openSync(…, 'wx')` would answer ENOENT and the FIRST boot of a new install would die on the
   // guard that exists to protect the second one.
   ensureCatalogDir(catalog);
 

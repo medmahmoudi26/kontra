@@ -29,7 +29,7 @@ import { runLog } from './runLog';
 import { describeQueue, sharedQueue, temporalQueueDescriber, type QueueDescriber } from '../pollers';
 
 /**
- * The OCI registry port — `cli/appliance/registry.DefaultPort`, which is what `kontra up` serves
+ * The OCI registry port — `cli/install/registry.DefaultPort`, which is what `kontra up` serves
  * and what a Fleet's Machines pull from.
  *
  * Anonymous plain HTTP on the VPC by design, exactly as the object store this replaces was, and

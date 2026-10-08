@@ -22,7 +22,7 @@
 // alternative — a durable session index — buys resumability across a restart of the control plane
 // for a push the client will simply retry. What it would cost is a second thing that can disagree
 // with the directory, which is exactly what index.go is careful not to be.
-package registry
+package testregistry
 
 import (
 	"crypto/rand"

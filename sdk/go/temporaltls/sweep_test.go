@@ -21,7 +21,7 @@ func repoRoot() string {
 	return filepath.Join(filepath.Dir(self), "..", "..", "..")
 }
 
-// `client.Dial(` however the package was named at the import. Not `Dial(` alone: the appliance's
+// `client.Dial(` however the package was named at the import. Not `Dial(` alone: the install's
 // embedded Temporal server has its own Dial and is not a client of anything.
 var dialSite = regexp.MustCompile(`\bclient\.Dial\(`)
 

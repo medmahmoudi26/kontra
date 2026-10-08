@@ -6,7 +6,7 @@
  * suite because the failure it prevents is silent: two pollers on one queue each win some tasks,
  * the one that cannot run them fails them forever, and every surface reports a healthy process.
  *
- * Two: an appliance with no provisioner REGISTERS `stackWorkflow` and refuses inside it. Leaving
+ * Two: a role with no provisioner REGISTERS `stackWorkflow` and refuses inside it. Leaving
  * the type out is the tempting shape and it is the wrong one — a workflow task for an unregistered
  * type is FAILED and retried forever, so `fleet.up()` would hang instead of failing, which is the
  * invisible-failure mode this product exists to remove.
@@ -24,7 +24,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApplicationFailure } from '@temporalio/common';
 
 import { assertDistinctQueues, queueAssignments, resolveRoles, ROLES } from './roles';
-import * as appliance from './workflows/appliance';
+import * as noProvisioner from './workflows/noProvisioner';
 import * as compose from './workflows/infra';
 
 afterEach(() => {
@@ -32,7 +32,7 @@ afterEach(() => {
 });
 
 describe('which roles this process serves', () => {
-  it('defaults to all three — the appliance is one process and a whole control plane', () => {
+  it('defaults to all three, so an operator who names nothing gets a whole control plane', () => {
     expect(resolveRoles(undefined)).toEqual(['api', 'materializer', 'infra']);
     expect(resolveRoles('')).toEqual([...ROLES]);
   });
@@ -118,23 +118,23 @@ describe('the queues do not merge when the processes do', () => {
   });
 });
 
-describe('the appliance bundle: the same two types, one of which refuses', () => {
+describe('the no-provisioner bundle: the same two types, one of which refuses', () => {
   it('registers both workflow types, exactly as the compose bundle does', () => {
     // If it ever exported fewer, the missing type would not fail its caller — it would hang it.
     for (const type of ['stackWorkflow', 'sweepDatasetsWorkflow'] as const) {
-      expect(typeof (appliance as unknown as Record<string, unknown>)[type]).toBe('function');
+      expect(typeof (noProvisioner as unknown as Record<string, unknown>)[type]).toBe('function');
       expect(typeof (compose as unknown as Record<string, unknown>)[type]).toBe('function');
     }
   });
 
   it('is NOT the provisioner — the two bundles export different implementations', () => {
-    expect(appliance.stackWorkflow).not.toBe(compose.stackWorkflow);
+    expect(noProvisioner.stackWorkflow).not.toBe(compose.stackWorkflow);
     // …and the sweep IS the same one, because nothing about it changed.
-    expect(appliance.sweepDatasetsWorkflow).toBe(compose.sweepDatasetsWorkflow);
+    expect(noProvisioner.sweepDatasetsWorkflow).toBe(compose.sweepDatasetsWorkflow);
   });
 
   it('refuses immediately, non-retryably, naming the limitation and what to do instead', async () => {
-    const err = await appliance
+    const err = await noProvisioner
       .stackWorkflow({ stackFqn: 'kontra/fleet/nmap-1', op: 'up' })
       .then(() => undefined)
       .catch((e: unknown) => e);
@@ -143,7 +143,7 @@ describe('the appliance bundle: the same two types, one of which refuses', () =>
     const failure = err as ApplicationFailure;
     // Non-retryable: "no provisioner" will not become true on the third attempt.
     expect(failure.nonRetryable).toBe(true);
-    expect(failure.type).toBe(appliance.NO_PROVISIONER);
+    expect(failure.type).toBe(noProvisioner.NO_PROVISIONER);
     // Names the operation, the limitation, and the deployment that has one.
     expect(failure.message).toMatch(/fleet up kontra\/fleet\/nmap-1/);
     expect(failure.message).toMatch(/no provisioner/);
@@ -151,7 +151,7 @@ describe('the appliance bundle: the same two types, one of which refuses', () =>
   });
 
   it('refuses a teardown too, because it never built the fleet it is being asked to destroy', async () => {
-    const err = await appliance
+    const err = await noProvisioner
       .stackWorkflow({ stackFqn: 'kontra/fleet/nmap-1', op: 'destroy' })
       .catch((e: unknown) => e);
     expect((err as ApplicationFailure).message).toMatch(/fleet destroy/);
@@ -160,7 +160,7 @@ describe('the appliance bundle: the same two types, one of which refuses', () =>
   it('BUNDLES, and carries no line of the provisioner into the sandbox', async () => {
     // THE ONE FAILURE THIS SUITE CANNOT CATCH ANY OTHER WAY. Workflow code is bundled for a
     // sandbox with no filesystem, no client and no Node built-in, and an import that cannot be
-    // bundled does not error — it makes bundling HANG, which surfaces as an appliance that starts
+    // bundled does not error — it makes bundling HANG, which surfaces as a process that starts
     // and never polls. So the guard has to actually run the bundler.
     //
     // NO TEMPORAL SERVER, deliberately: `bundleWorkflowCode` is webpack and nothing else. The
@@ -170,13 +170,13 @@ describe('the appliance bundle: the same two types, one of which refuses', () =>
     const bundle = await bundleWorkflowCode({
       // The SOURCE path, the way the three suites in `src/workflows/` spell it — `require.resolve`
       // is what the worker uses at runtime against `dist/`, and it does not resolve a `.ts` here.
-      workflowsPath: path.join(__dirname, 'workflows', 'appliance.ts'),
+      workflowsPath: path.join(__dirname, 'workflows', 'noProvisioner.ts'),
     });
     for (const type of ['stackWorkflow', 'sweepDatasetsWorkflow']) {
       expect(bundle.code).toContain(type);
     }
     // `./stack` is imported for its TYPES only, so the preflight that reads a cloud credential is
-    // not in here. If this ever fails, the appliance bundle grew a provisioner.
+    // not in here. If this ever fails, the no-provisioner bundle grew a provisioner.
     expect(bundle.code).not.toContain('checkCloudCredential');
   }, 60_000);
 });

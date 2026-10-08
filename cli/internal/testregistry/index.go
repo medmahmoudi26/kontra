@@ -19,7 +19,7 @@
 // EVERY WRITE IS ALL OR NOTHING (writeFileAtomic), and a tag is the reason: a half-written
 // `_tags/<tag>` is a digest that resolves to a truncated address, and the pull it breaks happens
 // on a different machine at a different time.
-package registry
+package testregistry
 
 import (
 	"encoding/json"

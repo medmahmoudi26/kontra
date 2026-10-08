@@ -216,7 +216,7 @@ describe('GET /api/datasets/rows/stream is bounded', () => {
     }
   });
 
-  it('refuses a run past the appliance-wide cap, with a different status and a different sentence', async () => {
+  it('refuses a run past the install-wide cap, with a different status and a different sentence', async () => {
     const ctx = await build({ maxRuns: 1 });
     const held: Array<{ close: () => void; body: Promise<void> }> = [];
     try {
@@ -225,7 +225,7 @@ describe('GET /api/datasets/rows/stream is bounded', () => {
       expect(first.status).toBe(200);
 
       const refused = await fetch(`http://127.0.0.1:${ctx.port}/api/datasets/rows/stream?run=made-up-1`);
-      // 503, not 429: "you have too many" and "this appliance is full" are different problems with
+      // 503, not 429: "you have too many" and "this install is full" are different problems with
       // different fixes, and an operator reading a log needs to be able to tell them apart.
       expect(refused.status).toBe(503);
       expect(await refused.json()).toMatchObject({ error: expect.stringContaining('cap 1') });
@@ -269,7 +269,7 @@ describe('GET /api/datasets/rows/stream is bounded', () => {
       held.close();
       await held.body;
       // One poll interval is 2s; three seconds with no new LIST is the poller being gone rather than
-      // merely slow. A run nobody is watching costs this appliance nothing.
+      // merely slow. A run nobody is watching costs this install nothing.
       await wait(400);
       const settled = counted.calls();
       await wait(3_000);

@@ -39,7 +39,6 @@ import (
 	docker "github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/archive"
 
-	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
@@ -56,10 +55,16 @@ func hostImage() string {
 	return baseImage
 }
 
-// defaultRegistry is the last answer to "which registry", used when nothing else says: the
-// appliance's own port on loopback, spelled the way it has always been spelled here. It is a
-// FALLBACK and not the answer — see registryAddress, which prefers the address the running
-// appliance actually bound.
+// defaultRegistryPort is the port actor images are pushed to and pulled from — zot's, and
+// `registry:2`'s before it (docker-compose.yml `KONTRA_REGISTRY_PORT:-5000`).
+//
+// 5000 and not a new number, because the port is half of an image REFERENCE: every
+// `kontra/<name>:<ver>` already pushed is spelled `localhost:5000/<name>:<ver>`, and moving it
+// would silently orphan all of them.
+const defaultRegistryPort = 5000
+
+// defaultRegistry is the last answer to "which registry", used when nothing else says. It is a
+// FALLBACK and not the answer — see registryAddress.
 const defaultRegistry = "localhost:5000"
 
 // registryAddress resolves THE address, once, for both halves of the round trip.
@@ -72,24 +77,17 @@ const defaultRegistry = "localhost:5000"
 // it, in one order:
 //
 //	--registry            the operator said so
-//	KONTRA_REGISTRY       the environment said so (a second appliance, a remote controller)
-//	the appliance         the address `kontra up` actually BOUND, read from its data directory
-//	defaultRegistry       nothing is running; say the conventional thing and let the
-//	                      reachability check produce the message
-//
-// The third rung is why a `--registry-port` that had to move does not silently orphan every
-// deploy: the port is discovered, not assumed.
+//	KONTRA_REGISTRY       the environment said so — what docker-compose.yml sets for every
+//	                      service, so an install that moved KONTRA_REGISTRY_PORT is followed
+//	                      rather than guessed at
+//	defaultRegistry       nothing said; say the conventional thing and let the reachability
+//	                      check produce the message
 func registryAddress(flagVal string) string {
 	if v := strings.TrimSpace(flagVal); v != "" {
 		return v
 	}
 	if v := strings.TrimSpace(os.Getenv("KONTRA_REGISTRY")); v != "" {
 		return v
-	}
-	if dir, err := applianceDataDir(""); err == nil {
-		if addr, ok := registry.ReadAddress(dir); ok {
-			return addr
-		}
 	}
 	return defaultRegistry
 }
@@ -747,13 +745,13 @@ func registryReachable(reg string) error {
 			return nil
 		}
 	}
-	// THE HINT IS `kontra up`, NOT A `docker run`. The registry is a component of the control
-	// plane and is served from the binary (ADR 0032); telling an operator to hand-start a
-	// `registry:2` container was the shape of the thing this replaced — "a control plane that
-	// asks you to hand-start one of its own components is not installed, it is assembled".
-	hint := "\n  start it:   kontra up   (the registry is served from the appliance)"
+	// THE HINT NAMES THE INSTALL, NOT A `docker run`. The registry is a component of the control
+	// plane (ADR 0032); telling an operator to hand-start a `registry:2` container was the shape of
+	// the thing this replaced — "a control plane that asks you to hand-start one of its own
+	// components is not installed, it is assembled".
+	hint := "\n  start it:   docker compose up -d registry"
 	if reg != defaultRegistry {
-		hint = "\n  this address came from --registry or KONTRA_REGISTRY; unset it to use the appliance's own"
+		hint = "\n  this address came from --registry or KONTRA_REGISTRY; unset it for the install's own"
 	}
 	return fmt.Errorf("registry %s is unreachable — nothing answers /v2/ there%s", reg, hint)
 }

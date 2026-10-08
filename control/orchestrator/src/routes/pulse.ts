@@ -45,7 +45,7 @@ export function registerPulseRoutes(app: FastifyInstance, injected?: PulseDeps):
    * and for why `stalled` is deliberately not among the answers.
    *
    * 502, NEVER A ZERO, WHEN TEMPORAL CANNOT BE REACHED. A chrome badge reading "idle" because the
-   * cluster was unreachable is the exact failure mode this appliance keeps writing defences against
+   * cluster was unreachable is the exact failure mode this install keeps writing defences against
    * — "we could not look" and "nothing is happening" are the two readings it keeps furthest apart —
    * so an unreachable Temporal must arrive at the browser as an error it can render as a sentence.
    */

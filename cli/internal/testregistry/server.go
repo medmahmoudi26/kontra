@@ -1,6 +1,11 @@
-// server.go — the OCI registry the appliance serves from inside the binary, over the SAME
-// content-addressed store everything else hydrates from (ADR 0032, issues 11 and 12). It is what
-// removes `registry` and `registry-data` from docker-compose.yml.
+// server.go — an in-process OCI registry, served over the SAME content-addressed store everything
+// else hydrates from (ADR 0032, issues 11 and 12).
+//
+// TEST-ONLY, AND THE PACKAGE NAME IS THE INVARIANT. zot serves this install's images; nothing in a
+// shipped binary may import this package, which is why it is named `testregistry` and imported
+// only from `_test.go` files. It survives Phase 5 — which deleted the install that used to serve
+// it in production — because `kontra build`'s Bundle push and `kontra deploy`'s manifest round trip
+// need a registry to be tested against, and a unit test may not require a running zot.
 //
 // WHY THE LAYERS AND THE STORE ARE THE SAME THING. An OCI blob is addressed by
 // `sha256:<hex>` over its own bytes, and `runtime/handler/internal/cas` addresses an object by sha256
@@ -15,7 +20,7 @@
 // naming it means already holding its sha256, which is the entire secret. That is deliberate: it
 // is what makes a second actor image sharing the python base upload zero bytes, and it is only
 // safe because this registry is single-tenant and unauthenticated by design, bound to loopback
-// like the rest of the appliance (ADR 0031 §3). MANIFESTS are scoped per repository, because those
+// like every other artifact. MANIFESTS are scoped per repository, because those
 // are what a tag resolves to and a `docker pull kontra/a:1` must never be answered with `b`'s image.
 //
 // NO `distribution` DEPENDENCY, AND THAT IS A DECISION RATHER THAN A SHORTCUT. Its library entry
@@ -32,10 +37,10 @@
 //
 // DELETION IS ABSENT ON PURPOSE. This store has other customers — the hydrated Node runtime, the
 // built SPA, an actor's artifacts — so "delete this layer" is a garbage-collection question about
-// the whole appliance, not a registry operation. Untagging without deleting bytes would be a lie
+// the whole store, not a registry operation. Untagging without deleting bytes would be a lie
 // about reclaimed disk; deleting bytes without asking the other customers is a corruption. The
 // slice that adds retention answers it once, for the store.
-package registry
+package testregistry
 
 import (
 	"bytes"
@@ -96,7 +101,7 @@ var (
 
 // Options configures the embedded registry. DataDir is the only required field.
 type Options struct {
-	// DataDir is the appliance's data directory — the same one Temporal, the object store and
+	// DataDir is the data directory the CAS lives under — the same one
 	// the state store are given. The CAS lives at DataDir/cas and this registry's tag index at
 	// DataDir/registry.
 	DataDir string
@@ -133,7 +138,7 @@ type Server struct {
 	loopbackLn net.Listener
 	// boundAddress is what the `--bind` listener answers on, which is what an operator sees
 	// printed. `address` is what push and pull are told to use, and the two differ exactly when
-	// the appliance was bound somewhere a `docker push` would insist on TLS.
+	// the server was bound somewhere a `docker push` would insist on TLS.
 	boundAddress string
 	cas          *casstore.Local
 	index        *registryIndex
@@ -148,12 +153,12 @@ type Server struct {
 }
 
 // Address is host:port — the registry half of an image reference, and the value push and pull
-// must BOTH resolve to. On an appliance bound off-loopback this is the LOOPBACK address, which is
+// must BOTH resolve to. On a server bound off-loopback this is the LOOPBACK address, which is
 // deliberate: see Start.
 func (r *Server) Address() string { return r.address }
 
 // BoundAddress is what the `--bind` listener answers on. Equal to Address on a loopback
-// appliance; on any other bind it is the second address the same registry serves, for a client
+// server; on any other bind it is the second address the same registry serves, for a client
 // that is not this host's Docker daemon.
 func (r *Server) BoundAddress() string {
 	if r.boundAddress == "" {
@@ -192,7 +197,7 @@ func (r *Server) BytesOut() uint64 { return r.bytesOut.Load() }
 // not have does not auto-pull on create — so two addresses that disagree surface as `no such
 // image`, which sends an operator to look at Docker. One writer, one reader, one string.
 //
-// A KILLED APPLIANCE LEAVES IT BEHIND, and that is the right failure rather than a missing one:
+// A KILLED PROCESS LEAVES IT BEHIND, and that is the right failure rather than a missing one:
 // the next deploy resolves the dead address, cannot reach /v2/ there, and says so NAMING it.
 // Guessing that the file is stale and falling back would produce a push to a second registry that
 // nobody asked for, which is the failure this whole mechanism exists to make impossible.
@@ -220,13 +225,13 @@ func needsLoopbackListener(ip net.IP) bool {
 // Start boots the registry and returns once it is serving.
 func Start(opts Options) (*Server, error) {
 	if opts.DataDir == "" {
-		return nil, errors.New("appliance: DataDir is required (the registry stores layers in the appliance's shared CAS)")
+		return nil, errors.New("testregistry: DataDir is required (the registry stores layers in a shared CAS)")
 	}
 	if opts.BindIP == "" {
 		opts.BindIP = "127.0.0.1"
 	}
 	if net.ParseIP(opts.BindIP) == nil {
-		return nil, fmt.Errorf("appliance: bind address %q is not an IP (use 127.0.0.1, not a hostname)", opts.BindIP)
+		return nil, fmt.Errorf("testregistry: bind address %q is not an IP (use 127.0.0.1, not a hostname)", opts.BindIP)
 	}
 	if opts.Port == 0 {
 		opts.Port = DefaultPort
@@ -241,12 +246,12 @@ func Start(opts Options) (*Server, error) {
 		var err error
 		store, err = casstore.NewLocal(opts.DataDir)
 		if err != nil {
-			return nil, fmt.Errorf("appliance: %w", err)
+			return nil, fmt.Errorf("testregistry: %w", err)
 		}
 	}
 	index, err := newRegistryIndex(filepath.Join(opts.DataDir, "registry"))
 	if err != nil {
-		return nil, fmt.Errorf("appliance: %w", err)
+		return nil, fmt.Errorf("testregistry: %w", err)
 	}
 
 	addr := hostPort(opts.BindIP, opts.Port)
@@ -255,7 +260,7 @@ func Start(opts Options) (*Server, error) {
 		// Named, like every other embedded service's: an operator whose older compose stack is up
 		// with `--profile extras` owns 5000 through the `registry` service this replaces, and two
 		// registries on one port serve different image sets depending on start order.
-		return nil, fmt.Errorf("appliance: cannot listen on %s for the registry — "+
+		return nil, fmt.Errorf("testregistry: cannot listen on %s for the registry — "+
 			"another process (the compose `registry` service, or a hand-started `kontra-registry`?) has it: %w", addr, err)
 	}
 	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
@@ -267,12 +272,12 @@ func Start(opts Options) (*Server, error) {
 	// `kontra deploy` does not speak to this registry itself — it hands an image reference to the
 	// Docker daemon and the DAEMON pushes, and later pulls. And the daemon refuses plain HTTP to
 	// anything it does not consider an insecure registry, a list that by default contains exactly
-	// `127.0.0.0/8` and `::1`. So an appliance bound anywhere else answers a push with
+	// `127.0.0.0/8` and `::1`. So a server bound anywhere else answers a push with
 	//
 	//     http: server gave HTTP response to HTTPS client
 	//
 	// MEASURED, and it is not an edge case: `--bind 172.17.0.1` is REQUIRED for actor Workers,
-	// because a worker container cannot reach this host's loopback (appliance/appliance.go). The
+	// because a worker container cannot reach this host's loopback. The
 	// bind that makes the actor path possible is the bind that broke the deploy half of it.
 	//
 	// A loopback listener costs nothing and is the narrowest possible answer. It is not a
@@ -297,7 +302,7 @@ func Start(opts Options) (*Server, error) {
 		loopbackLn, err = net.Listen("tcp", loopback)
 		if err != nil {
 			_ = ln.Close()
-			return nil, fmt.Errorf("appliance: the registry is bound on %s and also needs %s, because "+
+			return nil, fmt.Errorf("testregistry: the registry is bound on %s and also needs %s, because "+
 				"the Docker daemon will not push plain HTTP to anything but a loopback address — and that "+
 				"port is taken: %w", addr, loopback, err)
 		}
@@ -318,7 +323,7 @@ func Start(opts Options) (*Server, error) {
 		if loopbackLn != nil {
 			_ = loopbackLn.Close()
 		}
-		return nil, fmt.Errorf("appliance: %w", err)
+		return nil, fmt.Errorf("testregistry: %w", err)
 	}
 	r.srv = &http.Server{
 		Handler: r,
@@ -825,7 +830,7 @@ func (r *Server) internal(doing string, err error) *regError {
 }
 
 // uploadError distinguishes a client that stopped sending from a store that could not write. The
-// first is a 400 and the operator's own network; the second is a 500 and the appliance's disk.
+// first is a 400 and the caller's own network; the second is a 500 and this process's disk.
 func (r *Server) uploadError(err error) *regError {
 	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 		return &regError{Status: http.StatusBadRequest, Code: "BLOB_UPLOAD_INVALID",

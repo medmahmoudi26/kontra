@@ -13,7 +13,7 @@ WHAT WAS LOST, said plainly rather than left to be discovered: `make test-exampl
 ran FOUR real actors' suites against the binary. This runs one deliberately-boring actor. It
 still proves the binary serves an actor, routes a Batch to it, and returns records — which is
 what ADR 0031 §5 asks for — but it no longer proves that four different authoring shapes survive
-the appliance. That coverage lives in kontra-actors' CI now, against its own control plane.
+the install. That coverage lives in kontra-actors' CI now, against its own control plane.
 
     kontra up                                       # the control plane
     kontra serve --actor testdata/fixtureactor      # the Container this dispatches to

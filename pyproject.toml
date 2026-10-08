@@ -28,8 +28,8 @@ markers = [
     "e2e: end-to-end tests that start an ephemeral Temporal server (slower; skip with -m 'not e2e')",
     # A SECOND MARKER, because `e2e` was carrying two unrelated meanings and one of them is a
     # browser. `examples/python/crawl4ai` and `examples/python/webcrawl` mark their live tests
-    # `e2e` for Playwright's sake — CI deliberately installs no Chromium — while the appliance's
-    # parity leg needs a Temporal address and no browser at all. Selecting `-m e2e` to turn the
+    # `e2e` for Playwright's sake — CI deliberately installs no Chromium — while the parity gate's
+    # leg needs a Temporal address and no browser at all. Selecting `-m e2e` to turn the
     # second one on turned the first one on too, and the run failed on
     # `BrowserType.launch: Executable doesn't exist`, which says nothing about the control plane.
     #

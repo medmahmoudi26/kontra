@@ -79,8 +79,8 @@ export function datasetQueue(): string {
  * Three workflows share it and only one of them provisions. `tmuxSessionWorkflow` is session
  * existence on a Machine — Fleet authority, and what the Monitor is built on — and
  * `sweepDatasetsWorkflow` is the retention sweep, hosted here because this is the controller-pinned
- * workflow host. So an appliance that has no provisioner still serves this queue, with
- * `stackWorkflow` registered as a REFUSAL (`workflows/appliance.ts`) rather than absent: a type
+ * workflow host. So an install that has no provisioner still serves this queue, with
+ * `stackWorkflow` registered as a REFUSAL (`workflows/noProvisioner.ts`) rather than absent: a type
  * nobody registered does not fail a `fleet.up()`, it hangs it.
  */
 export const INFRA_QUEUE = 'kontra-infra';

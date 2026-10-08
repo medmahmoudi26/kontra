@@ -111,10 +111,10 @@ describe('the compose network is Porter’s boundary', () => {
  * `runtime/python/internals/statekv.py`). So memory pressure silently deleted the record of which
  * Units had committed, and a retry then re-ran finished work or skipped unfinished work.
  *
- * `cli/appliance/kv/keyspace.go` already refuses rather than evicting its last protected key,
+ * `cli/install/kv/keyspace.go` already refuses rather than evicting its last protected key,
  * saying evicting one "does not degrade a run, it silently corrupts it". The actor hash had the
  * same property and none of the protection. These assertions are what keep the Compose store
- * agreeing with the appliance.
+ * agreeing with the install.
  */
 describe('the state store refuses rather than forgetting', () => {
   const redis = (): string[] => composeService(yaml(), 'redis');

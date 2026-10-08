@@ -435,7 +435,7 @@ let shared: SlotStore | null = null;
 
 /**
  * The process-wide slot store. Built on first use for the reason `secretStore()` is: a fresh
- * appliance has no store directory until somebody writes into it, and reading a declaration must
+ * install has no store directory until somebody writes into it, and reading a declaration must
  * not be the act that mints key material.
  */
 export function slotStore(secrets: SecretStore = secretStore()): SlotStore {

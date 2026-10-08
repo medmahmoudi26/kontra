@@ -42,10 +42,10 @@ lifecycles, different failure modes, and different trust boundaries.
   missing or revoked credential that fails at the START of `fleet.up()` naming the secret rather
   than as a provider error minutes into a converge. A **Run** can ask for machines and still cannot
   learn which cloud it is on, which is what keeps "authority to destroy a machine stays with the
-  controller" true below. In the **appliance** (ADR 0031) the same guarantee holds by absence
-  rather than by design: Fleet is out of the binary, so there is no cloud credential in it at all,
-  and `fleet.up()` fails there — legibly — instead of provisioning. The compose controller keeps
-  that job.
+  controller" true below. The API role holds the same guarantee by absence rather than by design:
+  it registers `stackWorkflow` as a refusal (`workflows/noProvisioner.ts`), so there is no cloud
+  credential in that process at all and `fleet.up()` fails there — legibly — instead of
+  provisioning. The infra role keeps that job.
 - **Fleet does not read a Run.** Fleet judges a machine's health from signals on the machine
   itself, never from Execution's view of a **Run** — a **Run** reporting `completed` is
   precisely the condition under which a machine has been found silently sick.

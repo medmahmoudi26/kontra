@@ -31,14 +31,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ORCH_PKG = ROOT / "control" / "orchestrator" / "package.json"
 SELFCONTAINED = ROOT / "control" / "images" / "Dockerfile.selfcontained"
-APPLIANCE = ROOT / "control" / "images" / "Dockerfile.appliance"
 ORCHESTRATOR_IMAGE = ROOT / "control" / "images" / "Dockerfile.orchestrator"
 
-# EVERY FILE THAT CAN BE THE ORCHESTRATOR'S `spa-src`, which is to say every file that gets tagged as
-# "the kontra image". `make image` tags `selfcontained`; `publish.yml` and `make image-from-release`
-# tag `appliance`. `Dockerfile.orchestrator:77` copies `/usr/local/bin/duckdb` out of whichever one it
-# was handed, so all of them have to carry it — and for a long time only the first did.
-SPA_SOURCES = {"Dockerfile.selfcontained": SELFCONTAINED, "Dockerfile.appliance": APPLIANCE}
+# EVERY FILE THAT CAN BE THE ORCHESTRATOR'S `spa-src`, which is to say every file that gets tagged
+# as "the kontra image". There is one: `make image` and `publish.yml` both build
+# `Dockerfile.selfcontained`. `Dockerfile.orchestrator` copies `/usr/local/bin/duckdb` out of
+# whichever image it was handed, so every member here has to carry it.
+#
+# A DICT OF ONE, AND NOT A BARE PATH, because this set has been wrong in both directions: it named
+# `Dockerfile.install`, which has never existed in this tree, so two assertions here raised
+# FileNotFoundError instead of checking anything. A member that stops existing must fail the
+# check below rather than disappear from it.
+SPA_SOURCES = {"Dockerfile.selfcontained": SELFCONTAINED}
 
 
 def _embedded_version() -> str:
@@ -95,9 +99,8 @@ def test_every_spa_source_installs_the_same_duckdb() -> None:
 
     `test_the_image_actually_installs_it` asserted `Dockerfile.selfcontained` installs the CLI and
     `test_the_orchestrator_image_carries_it_too` asserted the orchestrator COPYs it from `spa-src`.
-    Neither asked whether the `spa-src` actually handed over was a file that installs it — and
-    `publish.yml` hands over `Dockerfile.appliance`, which did not. MEASURED on `0.0.0-test6`: three
-    images pushed, then
+    Neither asked whether the `spa-src` actually handed over was a file that installs it — and the
+    one `publish.yml` handed over did not. MEASURED on `0.0.0-test6`: three images pushed, then
 
         ERROR: failed to calculate checksum of ref ...: "/usr/local/bin/duckdb": not found
 

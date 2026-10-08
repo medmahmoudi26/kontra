@@ -60,26 +60,19 @@ Infra state: services, web consoles, actors. The first thing to run when somethi
 
 ## Running the stack
 
-There are **two topologies**, and picking the wrong verb is the common first mistake.
-
-### `kontra up` — the appliance
+### `kontra up [--preview] [--json] [--stack local]` — the host engine
 ```
-kontra up [--data-dir <dir>] [--bind <ip>] [--api-port 8088]
-          [--orchestrator auto|local|bundle|none|<path>] [--temporal-ui]
+kontra up [--preview] [--json] [--stack local] [--workspaces <dir>]
+          [--bind 127.0.0.1] [--api-port 8088] [--program <dir>]
 ```
-Runs Temporal, the object store, the state store, the payload codec and the OCI registry **in this
-process**, with the orchestrator as a supervised child. **No containers.** Persists to `<data-dir>`,
-so history, objects, global state and the lake's catalog survive a restart. Blocks; Ctrl-C stops the
-child first.
+Converges `kontra-control` — 15 containers on one private Docker network, declared as Pulumi YAML —
+by shelling to the host `pulumi`. `kontra control up` is the same command under its older name.
 
-`--temporal-ui` is off by default and hydrates Temporal's own Web UI on loopback — for the failures
-kontra's surfaces cannot yet show (stack traces, pending-activity detail, manual signal/terminate).
+`kontra down [--stack local]` destroys the containers and the network and **keeps every volume**
+(`retainOnDelete`) and the Pulumi state: `compose down`, not `down -v`.
 
-### `kontra infra up|down|status [--repo <dir>]` — the compose control plane
-The other topology: the Docker Compose stack.
-
-### `kontra control up [--preview] [--check] [--to <tag>]` — the host engine
-Converges `kontra-control` — 13 containers on one private Docker network, declared as Pulumi YAML.
+### `kontra infra up|down|status [--repo <dir>]` — the same stack, by compose file
+The compose path, driven from `docker-compose.yml` rather than from the Pulumi program.
 
 > **Every volume is accounted for before anything is applied, twice.** Eight of eleven carry
 > `protect: true` so Pulumi refuses to *plan* their deletion, and the identity of every volume is
@@ -296,28 +289,6 @@ Read and steer this installation's Temporal Schedules.
 > at boot by `orchestrator-infra` and appears here. It **previews and deletes nothing** until
 > `KONTRA_RETENTION_COLLECT=1` is set on the worker holding the lake. `trigger` runs a sweep now, in
 > that same mode.
-
----
-
-## Packaging and release
-
-### `kontra bundle orchestrator [--out <dir>] [--platform goos/goarch|list|all]`
-The appliance bundle (ADR 0031 §2): a pinned Node runtime, the compiled orchestrator and its native
-addons, as one content-addressed `tar.gz` with a manifest naming every component, version and
-digest. **Nothing is fetched that is not checksummed first.**
-
-### `kontra bundle spa [--out <dir>]`
-The built SPA as its own content-addressed tarball — separate because it is platform-neutral and
-changes when a page does.
-
-### `kontra bundle verify <bundle.tar.gz>`
-Re-derive every digest the manifest claims.
-
-### `kontra release [--version <v>] [--platform ...] [--out <dir>]`
-One file per platform: the binary, the orchestrator bundle for that platform and the browser bundle,
-packed where an installed binary already looks, plus a `SHA256SUMS`.
-
-> CI still runs this natively on four runners, because **an artifact nobody executed is a claim**.
 
 ---
 

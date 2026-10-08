@@ -314,7 +314,7 @@ describe('RowTailHub is bounded in total, and per run', () => {
     const { hub } = hubWith({ maxRuns: 2 });
     hub.subscribe('a', () => {});
     hub.subscribe('b', () => {});
-    // The cap is on RUNS, not on tabs: a second browser on a Run this appliance already polls costs
+    // The cap is on RUNS, not on tabs: a second browser on a Run this install already polls costs
     // no new LIST and must not be turned away.
     expect(hub.refusalFor('a')).toBeNull();
     expect(() => hub.subscribe('a', () => {})).not.toThrow();
@@ -357,7 +357,7 @@ describe('RowTailHub is bounded in total, and per run', () => {
     const off = hub.subscribe('a', () => {});
     expect(hub.refusalFor('b')).toBe('too-many-runs');
     off();
-    // The last unsubscribe drops the run, so the appliance can watch a different one. A cap that
+    // The last unsubscribe drops the run, so the install can watch a different one. A cap that
     // only ever counted up would turn into a permanent refusal after enough runs had been opened.
     expect(hub.refusalFor('b')).toBeNull();
     hub.close();

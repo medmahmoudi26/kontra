@@ -95,8 +95,8 @@ SUDO=""
 # died naming a bundle that does not exist and a checkout that was never compiled. Preflight's whole
 # promise is that you learn the WHOLE bill now.
 #
-# `engines.node` is ">=22.13.0" and the appliance pins that exact version
-# (`cli/appliance/bundle/pins.go`), so 22 is the floor rather than a preference.
+# `engines.node` is ">=22.13.0" for the orchestrator (control/orchestrator/package.json), so 22 is
+# the floor rather than a preference.
 NODE_MAJOR_MIN=22
 node_new_enough() {
   need_cmd node || return 1

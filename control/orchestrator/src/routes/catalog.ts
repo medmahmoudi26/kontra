@@ -7,7 +7,7 @@
  *
  * WHAT IT NEEDS: the {@link Repo}, and nothing else. No Temporal, no object store, no lake — a
  * catalog is a table, and the whole point of `buildServer` touching Temporal lazily is that this
- * surface answers on an appliance with no cluster running at all.
+ * surface answers on an install with no cluster running at all.
  *
  * OPEN, ALL FOUR. `auth.ts` records that most of this API is unauthenticated; these predate that
  * record and are named in it. Registration in particular MUST stay open — a worker on a fleet host
