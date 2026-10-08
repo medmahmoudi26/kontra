@@ -68,3 +68,32 @@ func redactPassword(cfg map[string]string) map[string]string {
 	}
 	return out
 }
+
+// A BUNDLE PUSH IS THE THIRD WRITE TO THIS REGISTRY, and it had no credential either —
+// `kontra build --push` answered `requested access to the resource is denied` on an install with
+// accounts. A Bundle is what a Fleet Machine fetches, so that failure lands on placement rather
+// than on the push a human watched.
+func TestABundlePushCarriesTheCredentialForThisInstallOnly(t *testing.T) {
+	t.Setenv("KONTRA_REGISTRY", "127.0.0.1:5000")
+	t.Setenv(pushUserEnv, "push-actors")
+	t.Setenv(pushPasswordEnv, "actpw")
+
+	for _, spelling := range []string{"127.0.0.1:5000", "registry:5000", "host.docker.internal:5000"} {
+		if bundlePushClient(spelling) == nil {
+			t.Errorf("%q is this install's registry seen from one of three places; the push must authenticate", spelling)
+		}
+	}
+	// A third-party registry is the operator's `docker login`. Sending an install's password to an
+	// address it did not issue is the leak a "fix the 401" instinct produces.
+	for _, other := range []string{"ghcr.io", "registry.example.com", "index.docker.io"} {
+		if bundlePushClient(other) != nil {
+			t.Errorf("%q must be pushed to anonymously, not with this install's credential", other)
+		}
+	}
+	// Anonymous install: nil, so oras keeps its own default — which is what follows a public
+	// registry's token challenge.
+	t.Setenv(pushPasswordEnv, "")
+	if bundlePushClient("127.0.0.1:5000") != nil {
+		t.Error("with no password configured the push must stay anonymous")
+	}
+}

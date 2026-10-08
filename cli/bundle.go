@@ -635,18 +635,8 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 			"drifted and shared/conformance/ociref.json is where that gets pinned: %w", dest.Repository(), err)
 	}
 	repo.PlainHTTP = dest.PlainHTTP
-	// THE SAME OMISSION THE ACTOR PUSH HAD. zot refuses an anonymous write once the install has
-	// accounts, so `kontra build --push` to this install's own registry failed with
-	// `requested access to the resource is denied` — and a Bundle is what a Fleet Machine fetches.
-	// Only for this install's registry (cli/registryauth.go): a Bundle pushed to a third-party
-	// registry is the operator's `docker login`, not ours to assume.
-	if cred := pushCredential(); !cred.anonymous() && isInstallRegistry(dest.Ref.Domain) {
-		repo.Client = &auth.Client{
-			Client: retry.DefaultClient,
-			Cache:  auth.NewCache(),
-			Credential: auth.StaticCredential(dest.Ref.Domain,
-				auth.Credential{Username: cred.User, Password: cred.Password}),
-		}
+	if c := bundlePushClient(dest.Ref.Domain); c != nil {
+		repo.Client = c
 	}
 
 	// LayerSHA comes off the DESCRIPTOR, not from `b.SHA`, even though the two are the same hash of
@@ -736,4 +726,28 @@ func explicitController(flagVal string) string {
 		return v
 	}
 	return strings.TrimSpace(os.Getenv("KONTRA_CONTROLLER"))
+}
+
+// bundlePushClient is the credential a Bundle push writes with, or nil for an anonymous one.
+//
+// THE SAME OMISSION THE ACTOR PUSH HAD. zot refuses an anonymous write once the install has
+// accounts, so `kontra build --push` to this install's own registry answered `requested access to
+// the resource is denied` — and a Bundle is what a Fleet Machine fetches, so the failure lands on
+// placement rather than on the push a human watched.
+//
+// ONLY THIS INSTALL'S REGISTRY. A Bundle pushed to ghcr or a team's Harbor is the operator's
+// `docker login`, and sending an install's password to an address it did not issue is the leak that
+// a "fix the 401" instinct produces. nil rather than an empty client, so an anonymous push keeps
+// oras's own default — which is what follows a public registry's token challenge.
+func bundlePushClient(domain string) remote.Client {
+	cred := pushCredential()
+	if cred.anonymous() || !isInstallRegistry(domain) {
+		return nil
+	}
+	return &auth.Client{
+		Client: retry.DefaultClient,
+		Cache:  auth.NewCache(),
+		Credential: auth.StaticCredential(domain,
+			auth.Credential{Username: cred.User, Password: cred.Password}),
+	}
 }
