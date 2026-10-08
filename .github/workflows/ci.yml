@@ -794,11 +794,25 @@ jobs:
             # actor and its Worker are started by the orchestrator through the docker socket, not by
             # compose, so `docker compose logs` cannot see them — and the Nexus operation that timed
             # out is handled inside the actor.
-            for c in $(docker ps -a --format '{{.Names}}' | grep -E '^(kontra-hello|kf-)' || true); do
-              echo "::group::docker logs $c (last 80)"
-              docker logs --tail 80 "$c" 2>&1 || true
+            # NO PIPELINE AND NO grep. The first version was
+            #   for c in $(docker ps -a --format '{{.Names}}' | grep -E '^(kontra-hello|kf-)' || true)
+            # and it iterated ZERO times while `docker ps -a` two groups earlier was listing
+            # `kontra-hello-0.1.0` and `kf-hello-01` as Up. A loop that silently produces nothing is
+            # indistinguishable from "there was nothing to show", which is the same vacuous-pass
+            # shape as the 586-character password — so this filters in the shell with `case` and
+            # prints the candidate list, which makes an empty result a FACT rather than a silence.
+            echo "::group::containers not owned by compose"
+            docker ps -a --format '{{.Names}}' | tee /tmp/names.txt
+            echo "::endgroup::"
+            while read -r c; do
+              case "$c" in
+                kontra-hello*|kf-*) ;;
+                *) continue ;;
+              esac
+              echo "::group::docker logs $c (last 120)"
+              docker logs --tail 120 "$c" 2>&1 || true
               echo "::endgroup::"
-            done
+            done < /tmp/names.txt
             echo "::group::what the install pushed to its own registry"
             # FROM INSIDE THE REGISTRY CONTAINER, not over a published port — zot is distroless and
             # may not be published at all, and `registry-config` puts a static busybox at
