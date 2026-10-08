@@ -40,6 +40,8 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/memory"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/retry"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
@@ -633,6 +635,19 @@ func pushBundleTo(ctx context.Context, dest bundleDest, b *bundle, progress io.W
 			"drifted and shared/conformance/ociref.json is where that gets pinned: %w", dest.Repository(), err)
 	}
 	repo.PlainHTTP = dest.PlainHTTP
+	// THE SAME OMISSION THE ACTOR PUSH HAD. zot refuses an anonymous write once the install has
+	// accounts, so `kontra build --push` to this install's own registry failed with
+	// `requested access to the resource is denied` — and a Bundle is what a Fleet Machine fetches.
+	// Only for this install's registry (cli/registryauth.go): a Bundle pushed to a third-party
+	// registry is the operator's `docker login`, not ours to assume.
+	if cred := pushCredential(); !cred.anonymous() && isInstallRegistry(dest.Ref.Domain) {
+		repo.Client = &auth.Client{
+			Client: retry.DefaultClient,
+			Cache:  auth.NewCache(),
+			Credential: auth.StaticCredential(dest.Ref.Domain,
+				auth.Credential{Username: cred.User, Password: cred.Password}),
+		}
+	}
 
 	// LayerSHA comes off the DESCRIPTOR, not from `b.SHA`, even though the two are the same hash of
 	// the same bytes. The value written here is what a Machine verifies its download against and

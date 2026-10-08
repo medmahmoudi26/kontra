@@ -294,3 +294,37 @@ describe('queuePollers', () => {
     expect(d.closed).toBe(0);
   });
 });
+
+// THE FAILURE THIS PINS COST A CI ROUND AND BLAMED THE WRONG THING. `resolveBundle` falls back to
+// the worker image when there is no Bundle manifest, and that fallback is what the compose install
+// relies on — `kontra deploy` publishes an image, not a Bundle. With auth on, the manifest read was
+// 401, the fallback read "no worker image published", and the install reported
+// `no Bundle published for hello@0.1.0 … Publish it first: kontra deploy --actor <dir>` about an
+// actor whose image it had just built and pushed.
+describe('an authenticated registry', () => {
+  const args = { actor: 'nscheck', version: '0.1.0', controller: '10.124.0.2' };
+
+  it('is read with the credential, on every request', async () => {
+    const fetchMock = serveRegistry();
+    process.env.KONTRA_REGISTRY_PULL_PASSWORD = 'pullpw';
+    try {
+      await resolveBundle(args);
+    } finally {
+      delete process.env.KONTRA_REGISTRY_PULL_PASSWORD;
+    }
+    const expected = `Basic ${Buffer.from('pull:pullpw').toString('base64')}`;
+    const withoutAuth = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.headers?.['authorization' as never] !== expected
+    );
+    expect(withoutAuth.map(([u]) => u)).toEqual([]);
+  });
+
+  it('sends nothing when no account is configured, because that install is anonymous', async () => {
+    const fetchMock = serveRegistry();
+    await resolveBundle(args);
+    for (const [, init] of fetchMock.mock.calls) {
+      const headers = (init as RequestInit | undefined)?.headers as Record<string, string> | undefined;
+      expect(headers?.authorization).toBeUndefined();
+    }
+  });
+});

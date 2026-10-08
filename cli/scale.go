@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -288,10 +287,19 @@ func pullFailure(reg, name, version, img string, cause error) error {
 }
 
 // pullImage pulls a worker image (drains the engine's progress stream, surfacing an in-stream
-// error). base64("{}") is the canonical "no credentials" for a local/insecure registry.
+// error).
+//
+// IT CARRIES THE READ CREDENTIAL, AND `base64("{}")` WAS THE SAME BUG THE PUSH SIDE HAD. That value
+// is the Engine API's canonical "no credentials": correct against a registry with no users, a 401
+// against one with them, and silent about which. An install that turned auth on could therefore
+// build and push an actor image and then fail to START it — `kontra scale` is what pulls, and the
+// daemon it asks has no credential of its own. See cli/registryauth.go; the credential is sent only
+// to this install's registry, so a Fleet image from somewhere else is still pulled as the daemon
+// would pull it.
 func pullImage(ctx context.Context, d containerAPI, ref string) error {
+	reg, _, _ := strings.Cut(ref, "/")
 	rc, err := d.ImagePull(ctx, ref, image.PullOptions{
-		RegistryAuth: base64.URLEncoding.EncodeToString([]byte("{}")),
+		RegistryAuth: registryAuthHeader(reg, readCredential(reg)),
 	})
 	if err != nil {
 		return err

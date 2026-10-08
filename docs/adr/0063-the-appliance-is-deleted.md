@@ -158,6 +158,20 @@ install proved it: with the runtimes mirrored in, `kontra deploy` still refused 
   *writes* tags — swallows its own failures by design, so an authenticated install showed an empty
   Images page and protected nothing while retention was armed against it.
 
+**AND THE LIST OF READERS WAS LONGER THAN THE ONES NAMED `images`.** Two more were found by the
+install rather than by grep, and both failed by returning a plausible WRONG ANSWER:
+
+- `activities/fleet.ts`'s `resolveWorkerImage`. `resolveBundle` falls back to the worker image when
+  there is no Bundle manifest, and that fallback is what the compose install runs on — `kontra
+  deploy` publishes an IMAGE, not a Bundle. Unauthenticated the read was 401, the fallback logged
+  `no worker image published`, and the starter workflow failed with `no Bundle published for
+  hello@0.1.0 … Publish it first: kontra deploy --actor <dir>` about an actor whose image had just
+  been built, pushed and registered. The advice in that sentence is also wrong — `kontra build
+  --push` is what publishes a Bundle — but the sentence should never have been reached.
+- `cli/scale.go`'s `pullImage` sent `base64("{}")`: the same anonymous credential the push side had,
+  missed when the push was fixed. So an install that turned auth on could build an actor image, push
+  it, and then fail to START it, because the daemon doing the pull has no credential of its own.
+
 So a read carries a credential now, in both languages (`cli/registryauth.go:readCredential`,
 `control/orchestrator/src/images/registryAuth.ts`), with the least-privileged account that is set —
 `pull` before either push account — and **only to this install's registry**, by every spelling
@@ -247,6 +261,16 @@ against 1.44–2.26 GiB on the path this replaced, and the layer that a code cha
 the app layer.
 
 ## Consequences
+
+**A FLEET MACHINE STILL FETCHES ITS BUNDLE ANONYMOUSLY, AND THAT IS NOT FIXED HERE.**
+`infra/programs/machine.ts` writes `curl -fsSL "$BUNDLE_URL"` into a Machine's cloud-init — the
+distribution spec's blob endpoint on the Controller's registry, over the VPC — with no credential.
+So an install that has registry accounts AND a Fleet on another box cannot place one: the download
+is a 401 that reads as a missing Bundle. It is not on any path CI exercises (a local docker Fleet
+runs an image the daemon already holds, because `pack` exports into the daemon rather than
+publishing) and the fix is a Machine-scoped credential rather than this install's `pull` password in
+a cloud-init file, which is a design question and not a line change. Named here so the next person
+finds it stated rather than discovering it on a droplet.
 
 **A tagged release carries no binary assets until GoReleaser lands.** release-please still creates
 the tag and the GitHub release, and `publish.yml` still publishes every image, but nothing attaches a

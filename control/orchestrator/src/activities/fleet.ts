@@ -27,6 +27,7 @@ import { createHash } from 'node:crypto';
 import { runLog } from './runLog';
 
 import { describeQueue, sharedQueue, temporalQueueDescriber, type QueueDescriber } from '../pollers';
+import { registryReadAuth } from '../images/registryAuth';
 
 /**
  * The OCI registry port — `cli/install/registry.DefaultPort`, which is what `kontra up` serves
@@ -204,7 +205,7 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
   });
   let res: Response | undefined;
   try {
-    res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT } });
+    res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT, ...registryReadAuth() } });
   } catch {
     res = undefined;
   }
@@ -220,10 +221,17 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
         workerImage,
       };
     }
+    // NEITHER A BUNDLE NOR AN IMAGE, AND THE MESSAGE HAS TO NAME BOTH. `kontra deploy` publishes
+    // the worker IMAGE the branch above falls back to; `kontra build --push` publishes a Bundle.
+    // Telling an operator to run `deploy` when a deploy had already succeeded is what this said
+    // while the image read was failing on a credential, which sent the reader to the wrong half.
     throw new Error(
-      `no Bundle published for ${input.actor}@${input.version} (looked for ` +
-        `${bundleRepo(input.actor)}:${input.version} in the registry at ${registry}). ` +
-        `Publish it first: kontra deploy --actor <dir>`
+      `no Bundle and no worker image for ${input.actor}@${input.version} in the registry at ` +
+        `${registry} (looked for ${bundleRepo(input.actor)}:${input.version} and ` +
+        `${input.actor}:${input.version}). Publish one: \`kontra deploy --actor <dir>\` for the ` +
+        `image, \`kontra build --actor <dir> --push\` for a Bundle. If the install has registry ` +
+        `credentials, this reads with KONTRA_REGISTRY_PULL_USER/PASSWORD — an unset password reads ` +
+        `an authenticated registry as empty.`
     );
   }
   if (!res.ok) throw new Error(`resolving the Bundle at ${url}: HTTP ${res.status}`);
@@ -259,7 +267,9 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
   if (!/^sha256:[a-f0-9]{64}$/.test(cfgDigest)) {
     throw new Error(`${url} has no config blob; nothing there says which engine to run`);
   }
-  const cfgRes = await fetch(bundleBlobUrlByDigest(registry, input.actor, cfgDigest));
+  const cfgRes = await fetch(bundleBlobUrlByDigest(registry, input.actor, cfgDigest), {
+    headers: { ...registryReadAuth() },
+  });
   if (!cfgRes.ok) {
     throw new Error(`reading the bundle config ${cfgDigest} from ${registry}: HTTP ${cfgRes.status}`);
   }
@@ -291,7 +301,7 @@ async function resolveWorkerImage(registry: string, actor: string, version: stri
   for (const base of bases) {
     try {
       const url = `${base}/v2/${actor}/manifests/${version}`;
-      const res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT } });
+      const res = await fetch(url, { headers: { Accept: MANIFEST_ACCEPT, ...registryReadAuth() } });
       if (!res.ok) continue;
       const digest = res.headers.get('docker-content-digest');
       if (!digest || !/^sha256:[a-f0-9]{64}$/.test(digest)) continue;

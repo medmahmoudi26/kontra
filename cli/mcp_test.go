@@ -39,6 +39,7 @@ type fakeScaleDocker struct {
 	created  map[string]string // name → id
 	noLocal  bool              // ImageList returns empty → registry fallback + pull
 	pulled   []string          // refs pulled
+	pullAuth []string          // the X-Registry-Auth each pull carried
 	startErr error             // if set, ContainerStart fails (exercises orphan cleanup)
 }
 
@@ -48,8 +49,9 @@ func (f *fakeScaleDocker) ImageList(context.Context, image.ListOptions) ([]image
 	}
 	return []image.Summary{{}}, nil // local worker image present → kontra/<name>-worker:<ver>
 }
-func (f *fakeScaleDocker) ImagePull(_ context.Context, ref string, _ image.PullOptions) (io.ReadCloser, error) {
+func (f *fakeScaleDocker) ImagePull(_ context.Context, ref string, o image.PullOptions) (io.ReadCloser, error) {
 	f.pulled = append(f.pulled, ref)
+	f.pullAuth = append(f.pullAuth, o.RegistryAuth)
 	return io.NopCloser(strings.NewReader("")), nil
 }
 func (f *fakeScaleDocker) ContainerList(_ context.Context, _ container.ListOptions) ([]types.Container, error) {

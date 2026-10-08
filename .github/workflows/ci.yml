@@ -859,8 +859,18 @@ jobs:
             # may not be published at all, and `registry-config` puts a static busybox at
             # /etc/zot/busybox precisely because the healthcheck needs one. An actor image missing
             # from this catalog and a Worker that never started are different failures.
+            #
+            # WITH THE CREDENTIAL, because this job runs the AUTHENTICATED shape. Anonymously this
+            # printed `wget: server returned error: HTTP/1.1 401 Unauthorized` followed by `(the
+            # registry did not answer)` — a diagnostic stating the opposite of what it had just
+            # observed, in the one place somebody looks to find out whether the image arrived.
+            # Read back from the install's own `.env`, which is where this job generated it — the
+            # step's shell never had it, and `$KONTRA_REGISTRY_PULL_PASSWORD` there would have been
+            # the empty string, i.e. anonymous again with a header on it.
+            pull_pw=$(sed -n 's/^KONTRA_REGISTRY_PULL_PASSWORD=//p' .env | tail -1)
             docker compose exec -T registry /etc/zot/busybox wget -qO- \
-              http://127.0.0.1:5000/v2/_catalog || echo "(the registry did not answer)"
+              --header="Authorization: Basic $(printf 'pull:%s' "$pull_pw" | base64 -w0)" \
+              http://127.0.0.1:5000/v2/_catalog || echo "(the registry refused or did not answer — see the line above)"
             echo "::endgroup::"
             exit 1
           fi
