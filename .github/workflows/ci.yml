@@ -506,10 +506,18 @@ jobs:
       # NO VENV EITHER. `setup-python` already put an interpreter on PATH, and the gate resolves
       # `python3` from there; a venv would be a second interpreter for the gate to pick the wrong
       # one of.
+      # `[seaweed]` IS THE CLAIM-CHECK CLIENT, AND THE HOST IS ONE. The e2e leg dispatches from this
+      # interpreter, so it builds a Temporal client with `casstore.data_converter()` — a
+      # `ClaimCheckCodec` over the install's S3 gateway — and `internals/casstore.py` imports boto3
+      # lazily at `S3CasStore.__init__`. Under `[dev]` alone that import is the first thing the leg
+      # reaches: `ModuleNotFoundError: No module named 'boto3'` against `endpoint=http://127.0.0.1:
+      # 39102`, i.e. the gate failing at its own client rather than at anything it was testing.
+      # `[seaweed]` and not `[actor]` because dispatching is not an actor image: it offloads payloads
+      # and has no Redis state.
       - name: install the SDK
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e './sdk/python[dev]'
+          python -m pip install -e './sdk/python[dev,seaweed]'
 
       # THE GATE. Its exit code is the job's, and it prints which condition failed and what it
       # measured. Not piped into anything: a pipeline reports its LAST stage's status, which is how
@@ -902,19 +910,63 @@ jobs:
             exit 1
           fi
 
+      # THE SERVICE IS `cli`, AND `workspace-init` HAS NEVER EXISTED. The name comes from a plan
+      # (docs/superpowers/plans/2026-09-14-local-cluster-docker-fleet.md) that listed an init-once
+      # service; what shipped instead puts `kontra init` in the `cli` image's ENTRYPOINT
+      # (control/images/entrypoint.sh), so every start of that container runs it and the step above
+      # reads `docker compose logs cli` for the first-boot banner. This step asked compose for a
+      # service it does not have and got `no such service: workspace-init`, exit 1 — invisible until
+      # now because it is the first step after the e2e leg, and nothing had ever got this far.
+      #
+      # AND THE "A NEW LOGIN" ASSERTION WAS BACKWARDS. It failed the job if the second boot
+      # mentioned `console login` at all, but `InitKontra`'s already-set-up branch
+      # (cli/internal/config/config.go) prints that phrase DELIBERATELY, and
+      # init_login_test.go asserts it: the README's recovery line is
+      # `docker compose logs cli | grep -A4 'console login'`, and after a recreate the only logs
+      # left are the new container's, so a silent second boot made the documented command answer
+      # nothing. Saying the phrase is the fix; this step would have failed the fix.
+      #
+      # So what is actually asserted is the title: the CREDENTIAL does not change. Same password,
+      # still signing in, still absent from the log.
       - name: recreating does not rotate the credential
         working-directory: ${{ runner.temp }}/install
         run: |
           set -euo pipefail
-          docker compose up -d --no-deps --force-recreate workspace-init
-          sleep 3
-          docker compose logs --no-color --tail=40 workspace-init > second.log
+          pwfile=/var/lib/kontra/console-password
+          before=$(docker compose exec -T cli cat "$pwfile" \
+                     | awk -F'\t' '$1 == "admin" { print $2; exit }' | tr -d '\r')
+          [ "${#before}" -ge 20 ] || { echo "::error title=no admin password to compare against::"; exit 1; }
+
+          docker compose up -d --no-deps --force-recreate cli
+          # INIT RUNS BEFORE THE COMMAND, so the line is there as soon as the container is, but the
+          # entrypoint still has a seed and a 120s wait for the API behind it — so this waits for the
+          # marker instead of guessing at a sleep.
+          for _ in $(seq 1 30); do
+            docker compose logs --no-color cli > second.log 2>/dev/null || true
+            grep -q 'already set up' second.log && break
+            sleep 2
+          done
           grep -q 'already set up' second.log \
-            || { echo "::error title=second boot re-initialised::"; cat second.log; exit 1; }
+            || { echo "::error title=second boot re-initialised::"; tail -40 second.log; exit 1; }
           grep -q 'console login' second.log \
-            && { echo "::error title=second boot printed a NEW login::"; cat second.log; exit 1; }
-          test -f workspace/actors/hello/actor.json
-          echo "second boot kept the account and the workspace"
+            || { echo "::error title=the documented recovery grep answers nothing after a recreate::"; tail -40 second.log; exit 1; }
+          if grep -qF "$before" second.log; then
+            echo "::error title=the password is in the recreated container's log::"
+            exit 1
+          fi
+
+          after=$(docker compose exec -T cli cat "$pwfile" \
+                    | awk -F'\t' '$1 == "admin" { print $2; exit }' | tr -d '\r')
+          [ "$after" = "$before" ] \
+            || { echo "::error title=recreating rotated the stored password::the 0600 file changed"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8088/api/login \
+                   -H 'content-type: application/json' \
+                   --data "$(printf '{"user":"admin","password":"%s"}' "$before")")
+          [ "$code" = 200 ] \
+            || { echo "::error title=the pre-recreate password no longer signs in::HTTP $code"; exit 1; }
+
+          test -f "$RUNNER_TEMP/workspaces/hello/actors/hello/actor.json"
+          echo "second boot kept the account, the ${#before}-character password and the workspace"
 
       - name: every published port is bound to loopback
         working-directory: ${{ runner.temp }}/install

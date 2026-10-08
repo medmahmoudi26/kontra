@@ -311,6 +311,19 @@ ok "every image under test is present locally"
 PYTHON="${PYTHON:-$REPO/.venv/bin/python}"
 [ -x "$PYTHON" ] || PYTHON="$(command -v python3 || command -v python)"
 
+# THE INTERPRETER THAT DISPATCHES HAS TO BE ABLE TO, which is a precondition like the images above
+# and belongs with them. The e2e leg builds a Temporal client whose payload codec offloads to the
+# install's S3 gateway, so `internals/casstore.py` imports boto3 — lazily, at the first claim check.
+# Without it the gate got as far as `up`, the deploy, the Fleet and the dispatch, then spent its
+# whole verdict on `ModuleNotFoundError: No module named 'boto3'` 0.29s into pytest: the one failure
+# in a round where everything under test had worked.
+if ! "$PYTHON" -c 'import boto3' 2>/dev/null; then
+  echo "REFUSING: $PYTHON cannot import boto3, so the e2e leg cannot claim-check a payload." >&2
+  echo "  Install the extra that declares it:  pip install -e './sdk/python[dev,seaweed]'" >&2
+  exit 2
+fi
+ok "the dispatching interpreter can claim-check ($("$PYTHON" -c 'import boto3; print("boto3 " + boto3.__version__)'))"
+
 # ── THE INSTALL DIRECTORY, HOLDING ONLY WHAT A CURL WOULD PUT THERE ─────────────────────────
 #
 # The same two files `.github/workflows/ci.yml`'s install job copies, and then the same assertion
