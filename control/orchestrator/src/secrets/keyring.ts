@@ -11,7 +11,7 @@
  * than none: a keyfile beside the ciphertext defends the STORE FILE — a copy that leaves the
  * machine in a backup, a volume snapshot, a blob-store sync, a `scp` of `~/.kontra` — and it does
  * not defend against somebody who already has root on the box, who can read the keyfile too. That
- * is the appliance's threat model (ADR 0031 §3: the whole security posture is that there is
+ * is the install's threat model (ADR 0031 §3: the whole security posture is that there is
  * nothing remote to reach), and it is why the backend is an INTERFACE: a KMS or vault
  * implementation moves the key off the machine without changing one caller.
  *
@@ -44,7 +44,7 @@ export function keyFile(dir: string): string {
  * The master key for a store directory: the injected one, or the keyfile, minting it on first use.
  *
  * MINTING ON FIRST USE IS THE DEFAULT AND IT IS NOT A SILENT ONE — the first write to a fresh
- * appliance has to work without an operator having generated key material first, or the store
+ * install has to work without an operator having generated key material first, or the store
  * ships disabled and credentials stay in `.env`, which is the failure this whole slice exists to
  * end. It is written 0600 in a 0700 directory, and a keyfile whose mode is wider than that is
  * REFUSED rather than repaired: a world-readable key is a fact about the machine somebody has to

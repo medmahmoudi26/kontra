@@ -90,7 +90,7 @@ class _Accepted:
         return False
 
 
-def posted(monkeypatch, reg, *, digest: str) -> dict:
+def posted(monkeypatch, reg, *, digest: str, build: dict | None = None) -> dict:
     """Run the REAL emitter with the socket removed and hand back the JSON it would have sent.
 
     Not `operations_of` and not a hand-built body: the descriptor is assembled inside
@@ -106,6 +106,14 @@ def posted(monkeypatch, reg, *, digest: str) -> dict:
     monkeypatch.setattr(C.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("KONTRA_ORCHESTRATOR_URL", "http://orchestrator-api:8088")
     monkeypatch.setenv("KONTRA_ACTOR_DIGEST", digest)
+    # THE BUILD FACTS ARE PINNED THROUGH THE ENVIRONMENT, because that is the only way they ever
+    # arrive: nothing inside a running container can see the run image it was layered onto, so the
+    # emitter echoes what the Warden stamped and a test has to stamp it too.
+    if build:
+        monkeypatch.setenv("KONTRA_RUNTIME_NAME", build["runtime"]["name"])
+        monkeypatch.setenv("KONTRA_RUNTIME_MAJOR", str(build["runtime"]["major"]))
+        monkeypatch.setenv("KONTRA_RUNTIME_DIGEST", build["runtime"]["digest"])
+        monkeypatch.setenv("KONTRA_BUILDER_DIGEST", build["builderDigest"])
     C.publish_catalog(reg)
     assert "body" in sent, "the emitter never POSTed — publish_catalog swallows and prints"
     return sent["body"]
@@ -154,7 +162,12 @@ def project_descriptor(body: dict) -> dict:
 
 
 def test_the_posted_descriptor_is_the_golden_one(monkeypatch):
-    body = posted(monkeypatch, fixture_registry(), digest=EXPECT["digest"])
+    body = posted(
+        monkeypatch,
+        fixture_registry(),
+        digest=EXPECT["digest"],
+        build={"runtime": EXPECT["runtime"], "builderDigest": EXPECT["builderDigest"]},
+    )
     assert project_descriptor(body) == EXPECT
 
 

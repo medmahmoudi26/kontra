@@ -160,9 +160,9 @@ export const ROW_TAIL_POLL_MS = 2_000;
  * a `RunState` and an interval for any string it has not seen. Teardown was already correct; the cap
  * is what was absent, so this is the fix and not a rewrite.
  *
- * 64 IS ABOVE ANY HONEST APPLIANCE AND FAR BELOW A FLOOD. One watched Run is one LIST every
+ * 64 IS ABOVE ANY HONEST INSTALL AND FAR BELOW A FLOOD. One watched Run is one LIST every
  * {@link ROW_TAIL_POLL_MS}, so the ceiling is 32 LISTs a second against the object store — a load a
- * 4 GB controller carries — and nobody reading this appliance's surfaces has 64 Runs open at once.
+ * 4 GB controller carries — and nobody reading this install's surfaces has 64 Runs open at once.
  * A refusal is LOUD ({@link RowTailRefused}) rather than a silently dropped subscription: a stream
  * that quietly never arrives is the failure this whole panel exists to avoid.
  */
@@ -213,7 +213,7 @@ export const ROW_TAIL_WINDOW = 50;
 export const ROW_TAIL_WINDOW_BYTES = 16 * 1024;
 
 /** Why a subscription was refused. Two different sentences because they have two different fixes:
- *  one means the appliance is watching too many Runs, the other means too many readers are on this
+ *  one means the install is watching too many Runs, the other means too many readers are on this
  *  one. */
 export type RowTailRefusal = 'too-many-runs' | 'too-many-readers';
 

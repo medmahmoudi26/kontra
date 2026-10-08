@@ -105,8 +105,11 @@ load-bearing: a stored hash is `scrypt$N$r$p$salt$hash`, it contains `$`, and Co
 exists for, and corrupted into something that still *looks* like a hash — so every login would fail
 as "wrong password" rather than as the configuration error it is.
 
-> `docker compose logs cli | grep -A4 'console login'` shows the password **only on the container
-> that ran `init`**. A recreated `cli` has no such line, and `init` is a no-op the second time.
+> The password is in `/var/lib/kontra/console-password` (mode 0600), not in the logs:
+> `docker compose exec cli cat /var/lib/kontra/console-password`. Stdout was the old channel and was
+> wrong twice over — `docker compose logs cli` shows only the container that ran `init`, so one
+> recreate destroyed the only copy, and until then the credential sat in a log stream readable by
+> anyone in the docker group.
 
 ---
 
@@ -127,6 +130,11 @@ as "wrong password" rather than as the configuration error it is.
 
 > `KONTRA_REGISTRY` and `KONTRA_REGISTRY_URL` are separate on purpose. Keeping them apart is what
 > stops a `10.124.0.2:5000` meant for `docker pull` being handed to `fetch` as a relative URL.
+>
+> **`KONTRA_REGISTRY_URL` is set by no compose or env file**, so the default in the code is the live
+> value: the orchestrator reaches the registry at `http://registry:5000`, by **compose service name**.
+> That is why the registry service kept the name `registry` when zot replaced `registry:2` — renaming
+> it empties `/api/images` with no error anywhere.
 
 ### Binding
 
@@ -142,19 +150,86 @@ its Compose service must never get a `ports:` entry.
 |---|---|
 | `KONTRA_IMAGE` | the CLI / workflow-worker containers |
 | `KONTRA_ORCHESTRATOR_IMAGE` | **the API and infra roles** |
-| `KONTRA_HOST_IMAGE` | the base every actor build starts `FROM` |
-| `KONTRA_WORKER_BASE_IMAGE` | the worker base |
 | `KONTRA_PORTER_IMAGE` | Arrow Flight SQL |
 | `KONTRA_LOGSHIP_IMAGE` | the log shipper |
+
+The registry's own image is named **literally** in `docker-compose.yml`, not through a
+`${KONTRA_*_IMAGE:-…}` default, and that is deliberate: the release workflow derives the set of
+images *kontra owns* by grepping those defaults out of the compose file, so a variable there would
+make a third-party image look like one this repository builds.
 
 > **`make image` does not update the API.** It builds `KONTRA_IMAGE`; the API runs
 > `KONTRA_ORCHESTRATOR_IMAGE`, which is a *different* image built `FROM` the first one for its SPA.
 > Building only the first serves old code under a green `up`. Build order is forced:
 > `make image` → then the orchestrator image.
 >
-> **A stale `KONTRA_HOST_IMAGE` pins the SDK.** Every actor build starts from it, so an actor can
-> be running an SDK from the day that base was first built. `cli/deploy.go` stamps the base with
-> `org.kontra.sdk` — a digest over `sdk/python` + `runtime/python` — and rebuilds when it differs.
+> **An actor's SDK comes from its runtime, not from an image this repo builds.** `kontra deploy`
+> layers the actor onto a published runtime (`actor.json`'s `runtime` field, default `python:1`),
+> pinned by digest at build time and recorded in the catalog. `kontra rebase` is how an actor moves
+> onto a newer digest of the same major without rebuilding.
+
+---
+
+## The image store
+
+The compose controller's `registry` service is **zot**, pinned to the exact version `v2.1.21`. `kontra up`'s
+install has a **different**, in-process registry: unauthenticated, loopback-only, with no retention
+and no garbage collection. Everything in this section is the compose one.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD` | — | the credential a build pushes `actors/**` with |
+| `KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD` | — | CI and `kontra runtime build`, scoped to `kontra-runtimes/**` |
+| `KONTRA_REGISTRY_PUSH_ACTORS_USER` | `push-actors` | the account `kontra deploy` pushes an actor image as |
+| `KONTRA_REGISTRY_PULL_PASSWORD` | — | Machines and the Warden: read everything |
+| `KONTRA_REGISTRY_RETENTION` | `dryrun` | `enforce` deletes; `dryrun` logs what it *would* delete |
+| `KONTRA_INUSE_TAGS` | — (unset ⇒ **on**) | `off` disarms the `inuse-` tag reconciler, the thing that exempts a digest from the row above. Leave retention on `dryrun` while it is off |
+| `KONTRA_INUSE_TAGS_MS` | `600000` (10 min) | the reconciler's interval. A non-numeric or non-positive value falls back to the default rather than failing |
+| `KONTRA_REGISTRY_MIGRATION` | — | `skip` starts a deliberately empty zot on a box that still holds a `registry:2` store |
+| `KONTRA_REGISTRY_CVE` | — | `1` turns on zot's Trivy integration, which downloads a vulnerability database on first boot |
+| `KONTRA_RUNTIMES_PREFIX` | the install's own `<registry>/kontra-runtimes` | where a bare `name:major` in `actor.json` resolves; first boot mirrors the published set into it ([[Runtimes]]) |
+| `KONTRA_RUNTIMES_SOURCE` | `ghcr.io/medmahmoudi26/kontra-runtimes` | where `kontra runtime import` copies FROM. An airgapped install points it at a mirror it can reach; a failed import is reported and does not stop the `cli` service |
+| `KONTRA_RUNTIMES_IMPORT` | `base:1 python:1 python-browser:1` | which runtimes that import copies, space or comma separated. A list in *configuration* and not in the CLI, because adding a runtime must not mean editing kontra — and ghcr answers `/v2/_catalog` with 403, so the set cannot be discovered at the source |
+| `KONTRA_REGISTRY_PUSH_RUNTIMES_USER` | `push-runtimes` | the account that import pushes as. It may write `kontra-runtimes/**` and nothing else, which is what stops an actor build from replacing the base every other actor is layered on |
+| `KONTRA_REGISTRY_PULL_USER` | `pull` | the account the CLI and the orchestrator **read** as. With auth on there is no anonymous read either — every repository tree is `"defaultPolicy": []` — so a manifest HEAD, a `tags/list` and zot's search all need one. Sent only to this install's registry; a public one gets a token and no credential |
+| `KONTRA_PACK_BIN` | `/usr/local/bin/pack`, then `/opt/kontra/pack`, then `PATH` | the pinned `pack` `0.40.9`, checksummed into the `kontra` image and copied into the orchestrator image. Set this only to point at your own |
+| `KONTRA_DEPLOY_SH` | — (unset ⇒ warn) | `refuse` makes an actor's `deploy.sh` an error instead of a warning. A buildpack build does not run it, so an actor that depended on it builds fine and is missing whatever it installed ([[Writing-Actors-Python]]) |
+
+> **Blank is a choice here, not an oversight.** With all three passwords empty the registry accepts
+> **anonymous** pulls and pushes — which is what `registry:2` always did, and the loopback publish is
+> the control for it. Fill **all three** to turn authentication on: a partial set is *refused*,
+> because a registry with auth enabled and no users answers 401 to everything and reads as a broken
+> install rather than a locked one.
+>
+> Under `docker-compose.vpc.yml` the three stop being optional and become `:?` required, beside the
+> publish that creates the exposure — the same treatment `KONTRA_REDIS_PASSWORD` gets.
+
+> **Anonymous still cannot delete.** zot answers an unauthenticated manifest `DELETE` with **202**
+> where `registry:2` answered 405, so even the no-credential rendering carries an `accessControl` of
+> `read`/`create`/`update`. Every existing push path keeps working; erasing a Bundle a Machine is
+> about to pull does not. [[Security-Model]] and `docs/THREAT_MODEL.md` §4 carry the exposure.
+
+> **`KONTRA_REGISTRY_RETENTION` defaults to reporting** because "keep the 5 most recently pushed" is
+> only safe once something protects a version older than those five that is still placed on a Machine.
+> That is what `inuse-` tags are for, and the reconciler that writes them is armed in the API role —
+> but it tags only the digest the **catalog** records for each actor, not a Machine's placements, so the
+> protection is narrower than the policy assumes. `dryrun` stays the default until that gap closes.
+> [[Durability-and-Failures]] has the detail.
+
+### What the catalog records about a build
+
+| Variable | Set by | Read by |
+|---|---|---|
+| `KONTRA_ACTOR_DIGEST` | the Warden, when it pulls by digest | both registrars |
+| `KONTRA_RUNTIME_NAME` · `_MAJOR` · `_DIGEST` | **nothing yet** | both registrars, which *echo* them into the catalog |
+| `KONTRA_BUILDER_DIGEST` | **nothing yet** | the same |
+
+These are not facts a worker can discover: nothing inside a running container can see the run image it
+was layered onto or the builder that layered it. So the **deploying CLI** is what has to record them and
+the worker only ever echoes them back — which is what stops a restart from erasing what it cannot
+independently know. The echo is live in both registrars; the CLI side is not, so a catalog entry today
+carries neither. Both are **omitted when unset**, never sent empty, because the catalog keeps a
+previous value only when the key is absent.
 
 ---
 
@@ -191,6 +266,7 @@ nothing and the rail is empty for the whole run.
   "schemaVersion": "kontra.actor.v1",
   "name": "desync",
   "version": "1.3.3",
+  "runtime": "python:1",
   "targets": {
     "container": { "memory": "1g", "cpus": 2 },
     "machine":   { "size": "s-2vcpu-4gb", "region": "sfo3", "image": "ubuntu-22-04-x64" }
@@ -202,6 +278,7 @@ nothing and the rail is empty for the whole run.
 |---|---|
 | `schemaVersion` | pinned contract — `kontra.actor.v1` |
 | `name` · `version` | identity. Together they derive the **task queue**, so changing either moves the queue |
+| `runtime` | the OS and system packages this Actor runs on, as a name and a **major** (`python-browser:1`) or a fully qualified reference. Absent means `python:1` for a Python actor and `base:1` for a Go one ([[Runtimes]]) |
 | `targets.container` | resources for one Container — `memory`, `cpus` |
 | `targets.machine` | what a Machine must be for this Actor — `size`, `region`, `image` |
 
@@ -231,4 +308,4 @@ No queue field — the task queue is derived from the folder's content. See [[Wr
 
 ---
 
-**See also:** [[CLI-Reference]] · [[Security-Model]] · [[Deployment]] · [[Glossary]]
+**See also:** [[CLI-Reference]] · [[Security-Model]] · [[Deployment]] · [[Glossary]] · [[Runtimes]]

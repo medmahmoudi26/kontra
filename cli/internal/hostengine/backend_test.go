@@ -19,7 +19,7 @@ func TestBackendIsThisInstallationsOwnStateDirectory(t *testing.T) {
 	got := Backend("/home/me/.kontra")
 	want := "file:///home/me/.kontra/state"
 	if got != want {
-		t.Fatalf("Backend = %q, want %q — get.sh:301 and control/pulumi/README.md:243 both spell it "+
+		t.Fatalf("Backend = %q, want %q — control/pulumi/README.md:243 spells it "+
 			"$KONTRA_HOME/state, and a third spelling is two backends for one install", got, want)
 	}
 }
@@ -37,7 +37,7 @@ func TestAssertBackendAnswersTheInstallationsBackendOnACleanShell(t *testing.T) 
 }
 
 // THE ONE SETTING THAT CANNOT BE UNDONE BY ANYTHING THIS COMMAND DOES. Measured on 3.244.0
-// (get.sh:307-311): an exported PULUMI_BACKEND_URL beats a later `pulumi login` AND a set
+// (the one-line installer): an exported PULUMI_BACKEND_URL beats a later `pulumi login` AND a set
 // PULUMI_ACCESS_TOKEN. So a hosted one exported into the shell means the converge goes there, and the
 // only safe answer is to stop.
 func TestAssertBackendRefusesAHostedBackendURL(t *testing.T) {
@@ -57,7 +57,7 @@ func TestAssertBackendRefusesAHostedBackendURL(t *testing.T) {
 }
 
 // An explicitly stated self-managed backend is HONOURED, not overridden. Silently ignoring a setting
-// somebody exported on purpose is its own trap — and it is the escape hatch get.sh:340-342 offers for
+// somebody exported on purpose is its own trap — and it is the escape hatch the one-line installer offers for
 // the token refusal below.
 func TestAssertBackendHonoursAnExplicitSelfManagedBackend(t *testing.T) {
 	root := t.TempDir()

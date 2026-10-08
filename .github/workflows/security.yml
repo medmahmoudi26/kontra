@@ -1,0 +1,264 @@
+# The scanners that would have caught what a one-off scan just found.
+#
+# WHY THIS FILE EXISTS, AND WHAT IT CAUGHT. A manual `govulncheck` run on 2026-10-07 reported nine
+# call-graph-confirmed vulnerabilities in `runtime/go` alone — eight in the Go standard library at
+# 1.26.4 and one in gRPC — on a repository with no vulnerability scanning of any kind. Eight of the
+# nine were one `go` directive away from fixed. Nothing was going to report them, so nothing did.
+#
+# EVERY JOB HERE RUNS ON PULL REQUESTS AND NIGHTLY, and the split matters: a dependency becomes
+# vulnerable while nobody touches it, so a PR-only gate goes quiet exactly when the risk is arriving.
+#
+# NONE OF THESE NEEDS A SECRET. govulncheck and osv-scanner read a public database; zizmor reads the
+# workflow files in the checkout; CodeQL and Scorecard use the token GitHub already provides.
+
+name: security
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+  schedule:
+    # 04:17 UTC — off the hour, because every scanner in the world runs at :00 and the shared runners
+    # and the OSV database are busiest then.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+# READ-ONLY BY DEFAULT, and each job widens only what it needs. zizmor's first finding on most
+# repositories is a workflow with write-all because one step needed one write.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── GO: CALL-GRAPH AWARE, SO A FINDING IS A FINDING ──────────────────────────────────────────────
+  #
+  # `govulncheck` reports only vulnerabilities your code can actually REACH, which is why its output is
+  # worth gating on: a vulnerable function nobody calls is noise, and a tool that reports it teaches
+  # people to ignore the tool. Four modules, each with its own go.mod.
+  govulncheck:
+    name: govulncheck (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [cli, runtime/go, runtime/handler, sdk/go]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          # THE MODULE'S OWN DIRECTIVE, as every other workflow here does it. That is what makes a
+          # toolchain bump fix the standard-library findings everywhere at once instead of being
+          # reverted by a pinned version in a workflow file.
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      # THE JSON IS WHAT THE GATE READS; `scripts/vulngate.py` prints the human-readable half. One
+      # scan, not two, because this is the expensive step — measured at ~5 GiB resident over `cli`.
+      #
+      # THE EXIT CODE IS CLASSIFIED RATHER THAN TRUSTED OR IGNORED. govulncheck exits 3 when it finds
+      # something, and 3 is not a verdict here: two of this repository's advisories have no fixed
+      # version, so the decision is `.github/vuln-allow.json`'s and the gate's. But a scan that DIED
+      # must still fail, and that is not the same thing. An OOM kill exits 137 and leaves a PARTIAL
+      # report — symbol analysis never finished, so every finding comes out module-level and the
+      # report reads exactly like "nothing is reachable". Measured on this repository: a killed run
+      # over `cli` reported 10 advisories, 0 reachable, while CI reported 3 reachable. A bare
+      # `|| true` here would have shipped that as a pass.
+      - name: govulncheck
+        working-directory: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          report="$RUNNER_TEMP/govulncheck-$(echo "${{ matrix.module }}" | tr / -).json"
+          set +e
+          "$(go env GOPATH)/bin/govulncheck" -format json ./... > "$report"
+          rc=$?
+          set -e
+          if [ "$rc" -ge 128 ]; then
+            echo "::error::govulncheck was KILLED by signal $((rc - 128)) — the report in $report is partial and every finding in it will look module-level. This is not a pass."
+            exit 1
+          fi
+          case "$rc" in
+            0|3) : ;;  # 0 = nothing found, 3 = findings; both are complete reports
+            *)   echo "::error::govulncheck exited $rc, which is an error rather than a result"; exit 1 ;;
+          esac
+          [ -s "$report" ] || { echo "::error::govulncheck exited $rc but wrote no report"; exit 1; }
+          python3 "$GITHUB_WORKSPACE/scripts/vulngate.py" \
+            --module "${{ matrix.module }}" \
+            --allow "$GITHUB_WORKSPACE/.github/vuln-allow.json" \
+            < "$report"
+
+  # ── EVERY OTHER LOCKFILE, AS A REPORT AND DELIBERATELY NOT AS A GATE ───────────────────────────
+  #
+  # osv-scanner covers what govulncheck cannot: pnpm-lock.yaml, uv.lock/requirements, and the Go
+  # modules again — but with NO call graph, which is simultaneously its value and the reason it must
+  # not gate. This repository resolves 566 npm and ~460 Go transitive packages. A tool with no
+  # reachability filter over that is red more or less permanently, and the only two ways to green it
+  # are a large ignore file or an unreviewed major-version sweep. Both are worse than the finding.
+  #
+  # AND A PERMANENTLY-RED GATE IS WORSE THAN NO GATE, because it trains people to scroll past the job
+  # above — which IS call-graph aware and whose findings always mean something. This file's own header
+  # makes that argument about govulncheck ("a vulnerable function nobody calls is noise, and a tool
+  # that reports it teaches people to ignore the tool"); wiring this one as an equal gate contradicted
+  # it, and it was wired that way first.
+  #
+  # `continue-on-error` HERE IS NOT `|| true`, and the difference is where the findings land. Every
+  # advisory becomes a code-scanning alert with a severity, a fixed version and a history; it appears
+  # on the pull request and in the Security tab, and it stays open until somebody closes it. What
+  # RESOLVES them is `renovate.json`, which has `osvVulnerabilityAlerts` enabled and schedules
+  # security PRs `at any time` rather than in the Monday window.
+  #
+  # THE SCANNER FAILING STILL FAILS THIS JOB. Only its FINDINGS are non-blocking; an exit code that
+  # means "could not scan" is reported, because a reporter that did not run reports nothing. That is
+  # the same distinction the govulncheck step draws for a killed process.
+  osv:
+    name: osv-scanner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: osv-scanner
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@e92b5d07338d4f0ba0981dffed17c48976ca4730 # v2.2.3
+        with:
+          # `--recursive` so a nested manifest is not missed: this repo has five go.mod, several
+          # package.json and the runtimes fixtures' uv.lock.
+          #
+          # `--skip-git` IS NOT A FLAG ANY MORE, and it was never silently ignored: osv-scanner
+          # answers `Incorrect Usage: flag provided but not defined: -skip-git` and exits 127, so
+          # this job scanned nothing at all on its first run. Scanning a git root is opt-IN now
+          # (`--include-git-root`), which is what the old flag asked to avoid.
+          #
+          # NO GO CALL ANALYSIS, because osv-scanner implements it by running govulncheck — which the
+          # jobs above already do properly, per module, with each module's own toolchain. Here it
+          # instead dies on `workspaces/demo/actors/desync/go.mod`, a standalone module outside
+          # `go.work`: "pattern ./...: directory prefix . does not contain modules listed in
+          # go.work". It is also the step that needs ~5 GiB, which is a second reason not to run it
+          # twice.
+          scan-args: |-
+            --recursive
+            --no-call-analysis=go
+            --format=sarif
+            --output=/github/workspace/osv.sarif
+            ./
+
+      # A SCAN THAT FOUND NOTHING WRITES NOTHING, and `upload-sarif` fails on a missing file — which
+      # would turn a clean result into a red job. An empty run is the honest encoding of "scanned,
+      # found nothing".
+      - name: a SARIF file exists either way
+        run: |
+          set -euo pipefail
+          if [ ! -s osv.sarif ]; then
+            printf '%s' '{"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[]}' > osv.sarif
+            echo "osv-scanner produced no SARIF; uploading an empty run"
+          fi
+          python3 -c 'import json,sys; d=json.load(open("osv.sarif")); print("SARIF runs:", len(d.get("runs", [])), "results:", sum(len(r.get("results") or []) for r in d.get("runs", [])))'
+
+      - uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner
+
+  # ── THE WORKFLOWS THEMSELVES ────────────────────────────────────────────────────────────────────
+  #
+  # Six workflow files existed here with nothing auditing them, and they do privileged things: publish
+  # images, sign with cosign, push to a wiki. zizmor finds template-injection via `${{ }}` in `run:`,
+  # over-broad permissions, and unpinned Actions.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@e673c3917a1aef3c65c972347ed84ccd013ecda4 # v0.2.0
+
+  # ── CODEQL ──────────────────────────────────────────────────────────────────────────────────────
+  #
+  # Free on a public repository, which this one is (verified 2026-10-07 by an unauthenticated
+  # `git ls-remote`). `actions` is in the matrix for the same reason zizmor is above: the workflows are
+  # the privileged surface.
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [go, javascript-typescript, python, actions]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: matrix.language == 'go'
+        with:
+          go-version-file: cli/go.mod
+      - uses: github/codeql-action/init@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+      - uses: github/codeql-action/autobuild@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+      - uses: github/codeql-action/analyze@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+        with:
+          category: /language:${{ matrix.language }}
+
+  # ── SECRETS, AS A SECOND PAIR OF EYES ───────────────────────────────────────────────────────────
+  #
+  # GitHub's own secret scanning with push protection is the first and is enabled in repository
+  # settings rather than here. gitleaks is the one that reads HISTORY and catches a pattern GitHub's
+  # providers do not know — a kontra service token, for instance, is not a provider pattern.
+  #
+  # An audit on 2026-10-07 found nothing leaked (`.env` gitignored, no key path ever committed, the
+  # `AKIA…`/`dop_v1_…` literals in the tree being documentation examples and sequential fakes). This
+  # job is what keeps that true rather than true-as-of-a-date.
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # history, which is the half GitHub's push protection cannot see in a PR
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── ONE NUMBER THAT TRACKS ALL OF THE ABOVE ─────────────────────────────────────────────────────
+  scorecard:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # v2.4.4, NOT v2.4.0: this is a Docker action, and v2.4.0's image is
+      # `gcr.io/openssf/scorecard-action`, which now answers `denied: This API method requires
+      # billing to be enabled` for OpenSSF's GCR project. The pull fails, so the job fails, and the
+      # message is about somebody else's billing. v2.4.4 publishes to `ghcr.io/ossf/scorecard-action`.
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+      - uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+        with:
+          sarif_file: scorecard.sarif

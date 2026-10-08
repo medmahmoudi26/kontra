@@ -123,7 +123,7 @@ describe('the install script', () => {
   });
 
   it('installs the actor HOST runtime, which no base image supplies here', () => {
-    // In a container these come from infra/Dockerfile.pyworker. A Machine has no base image,
+    // In a container these come from the control plane's own image. A Machine has no base image,
     // and the omission surfaces as ModuleNotFoundError in a systemd restart loop — the actor
     // never starts and the placement looks like a converge problem.
     for (const pkg of ['temporalio', 'redis', 'boto3', 'pydantic']) {

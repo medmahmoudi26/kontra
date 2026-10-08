@@ -106,7 +106,7 @@ describe('workspace names are bucket names', () => {
   });
 
   it('falls back to a file catalog when no Postgres connstring is configured', () => {
-    // The appliance (ADR 0031 §1b) runs one process and a file catalog is enough.
+    // The install (ADR 0031 §1b) runs one process and a file catalog is enough.
     expect(workspaceAddress('solo', {}).catalog).toBe('ws-solo.ducklake');
   });
 
@@ -248,7 +248,7 @@ describe('the lake workspace switch does not collide with the legacy code-root v
 });
 
 /**
- * AND THE LOCAL LAKE TOO — an appliance runs a FILE catalog, so two workspaces get two catalogs.
+ * AND THE LOCAL LAKE TOO — an install runs a FILE catalog, so two workspaces get two catalogs.
  * Two catalogs over one data directory is the same cross-workspace deletion hazard as two over one
  * bucket: `ducklake_delete_orphaned_files` does not care whether the store is S3 or a folder.
  */

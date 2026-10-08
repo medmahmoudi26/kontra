@@ -32,13 +32,13 @@ export const ROLES = ['api', 'materializer', 'infra'] as const;
 
 export type Role = (typeof ROLES)[number];
 
-/** The variable that names the roles. Unset means all three — the appliance's whole point. */
+/** The variable that names the roles. Unset means all three — the install's whole point. */
 export const ROLES_VAR = 'KONTRA_ORCHESTRATOR_ROLES';
 
 /**
  * Parse `KONTRA_ORCHESTRATOR_ROLES`.
  *
- * DEFAULTS TO ALL THREE, because the appliance is one process and an operator who names nothing
+ * DEFAULTS TO ALL THREE, because the install is one process and an operator who names nothing
  * should get a whole control plane. A compose controller that keeps a separate provisioner names
  * its own subset (ADR 0034 §1), and naming a subset is the only way to get one — there is no
  * "everything except" spelling, which is how a role gets dropped by a typo.

@@ -1,4 +1,4 @@
-// Package claimcheck is the claim-check Temporal PayloadCodec, exported for the appliance and
+// Package claimcheck is the claim-check Temporal PayloadCodec, exported for the install and
 // the CLI.
 //
 // The implementation is runtime/handler/internal/codec over runtime/handler/internal/objectstore, and `internal`
@@ -16,7 +16,7 @@
 //
 // THE STORE IS THE CALLER'S AND THE KEY LAYOUT IS NOT. `Backing` is four whole-object operations
 // against one bucket, so a caller brings whatever transport it has — the handler brings an S3
-// client, the appliance brings its own object store in-process, and the CLI brings an unsigned
+// client, the install brings its own object store in-process, and the CLI brings an unsigned
 // HTTP GET because it carries no S3 SDK. What none of them brings is the ADDRESS: `New` wraps the
 // backing in the prefix-aware layout, so `cas/<sha[:2]>/<sha>` under the store prefix is derived
 // here, once, for all three. That is the difference between a transport and a fifth codec.

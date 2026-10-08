@@ -1,10 +1,10 @@
 // EVERY Go Temporal client in this repository goes through this package — the half of the change
 // that is not a change, and the half that keeps being true.
 //
-// Six call sites across three modules is the whole difficulty. A version that reaches four of them
-// does not fail loudly: it produces a deployment that mostly works and has one binary talking
-// plaintext to a server that accepts both, which is the worst of the three outcomes because it
-// looks like the good one. So this walks the tree rather than trusting a list.
+// A handful of call sites across three modules is the whole difficulty. A version that reaches all
+// but one does not fail loudly: it produces a deployment that mostly works and has one binary
+// talking plaintext to a server that accepts both, which is the worst of the three outcomes because
+// it looks like the good one. So this walks the tree rather than trusting a list.
 package temporaltls
 
 import (
@@ -21,7 +21,7 @@ func repoRoot() string {
 	return filepath.Join(filepath.Dir(self), "..", "..", "..")
 }
 
-// `client.Dial(` however the package was named at the import. Not `Dial(` alone: the appliance's
+// `client.Dial(` however the package was named at the import. Not `Dial(` alone: the install's
 // embedded Temporal server has its own Dial and is not a client of anything.
 var dialSite = regexp.MustCompile(`\bclient\.Dial\(`)
 
@@ -90,10 +90,34 @@ func TestEveryTemporalClientGoesThroughThisPackage(t *testing.T) {
 			}
 		}
 	}
-	// The count first: a regex that stopped matching would otherwise report a clean sweep over
+	// Non-vacuity first: a regex that stopped matching would otherwise report a clean sweep over
 	// nothing, which is the same failure as an empty walk wearing a different hat.
-	if len(sites) < 6 {
-		t.Fatalf("found %d client.Dial sites, expected at least 6 — the pattern stopped matching", len(sites))
+	//
+	// NAMED FILES AND NOT A COUNT. A bare `len(sites) >= 6` floor is the wrong shape for this: it
+	// goes stale the moment a dial site is legitimately DELETED, and because the floor was a
+	// `Fatalf` the staleness took the bypass assertion below down with it — the guard that matters
+	// stopped running and the failure read as "the pattern stopped matching". That is what happened
+	// at 4419397, which removed the tmux `serve` client and left the floor at six.
+	//
+	// A name says which file went missing, and a site that is ADDED is covered by the bypass check
+	// regardless of whether it is listed here.
+	for _, want := range []string{
+		filepath.Join("runtime", "handler", "main.go"),
+		filepath.Join("runtime", "go", "temporalhost", "host.go"),
+		filepath.Join("cli", "schedule.go"),
+		filepath.Join("cli", "workers.go"),
+		filepath.Join("cli", "claimcheck.go"),
+	} {
+		found := false
+		for _, site := range sites {
+			if strings.HasPrefix(site, want+":") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("no client.Dial site seen in %s — either it moved or the pattern stopped matching", want)
+		}
 	}
 	if len(bare) > 0 {
 		t.Errorf("a Temporal client that bypasses temporaltls.ConnectionOptions:\n  %s",

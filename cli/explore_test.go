@@ -665,7 +665,7 @@ func TestScavengeStaleExploreDirs(t *testing.T) {
 func TestExploreCatalogRequiresItsOwnCredentials(t *testing.T) {
 	srv := newExploreServer(t, func() string { return fixtureBody() })
 	t.Setenv("KONTRA_CATALOG_PG", "")
-	// AND NO APPLIANCE CATALOG on this machine either, which is the other source `crossRunCatalog`
+	// AND NO INSTALL CATALOG on this machine either, which is the other source `crossRunCatalog`
 	// accepts. Without this the test reads the DEVELOPER'S OWN ~/.kontra/data/datasets.ducklake.
 	t.Setenv("KONTRA_HOME", t.TempDir())
 	t.Setenv("KONTRA_EXPLORE_TOKEN", "tok")
@@ -862,7 +862,7 @@ func TestLakeMetaSchemaFollowsTheBackend(t *testing.T) {
 
 // A FILE PATH MUST NOT BE PREFIXED. `ducklake:postgres:/path/to/datasets.ducklake` hands the
 // postgres extension a libpq DSN made of a filename, which is the mirror of the bug
-// ducklakeCatalogDSN was written to prevent — and it is reachable now that the appliance's default
+// ducklakeCatalogDSN was written to prevent — and it is reachable now that the install's default
 // catalog IS a path.
 func TestDucklakeCatalogDSNLeavesAFilePathAlone(t *testing.T) {
 	for _, path := range []string{"/root/.kontra/data/datasets.ducklake", "datasets.ducklake", "./cat.ducklake"} {

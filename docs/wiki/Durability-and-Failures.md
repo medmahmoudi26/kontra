@@ -152,6 +152,31 @@ A committed Unit is keyed by the **Batch's content hash plus its index** (§17),
 number: a hash does not know its scope died, so it survives a reopened scope, and two Batches
 under one Session cannot read each other's slots.
 
+### Where the commit map lives, and where it is going
+
+In Redis today, in the actor's state hash. That hash has a 24 h TTL, and until ADR 0059 the store ran
+`maxmemory-policy volatile-lru` — which evicts keys *that have a TTL*, so under memory pressure the
+first thing dropped was the record of what had committed. A retry then re-ran finished work or skipped
+unfinished work, and nothing raised. The store now runs `noeviction` and refuses the write instead.
+
+**A copy also rides in the activity's heartbeat** (ADR 0060), where it is part of the run's own history
+and no cache can lose it:
+
+```json
+{"v":1,"batch_id":"b1","done":[[0,1]],"failed":[4],"manifest_ref":""}
+```
+
+`done` is a **range set** — merged inclusive `[lo, hi]` pairs — because a heartbeat payload is bounded
+and a per-unit list of 10,000 integers would be a batch-size ceiling in disguise. `batch_id` is the
+Batch's content hash and it is a **guard**: unit indices are positions within one batch, so a reader
+discards a checkpoint whose id does not match rather than applying it by index to units it never saw.
+A version the reader does not know is discarded whole for the same reason. The encoding is pinned
+across both SDKs and the orchestrator by `shared/conformance/checkpoint.json`.
+
+The heartbeat copy is authoritative for *progress* now — what the run page shows comes from it, which
+is why a node that isolated Units reaches its total instead of looking stuck. It is not yet what a
+retry resumes from; that still reads Redis.
+
 ## What a commit holds
 
 With `KONTRA_S3_ENDPOINT` set, each pushed record is written to the object store **at push
@@ -162,6 +187,53 @@ ref commit, so a committed ref always points at written bytes. Redis never holds
 The record's sha is its identity, so re-pushing the same record on a resume is an idempotent
 overwrite — which is why records must be **content-deterministic** (no timestamps, no random ids).
 Store unset ⇒ commits are inline (dev/test). See [[Data-Plane]].
+
+## The image a Placement is pinned to
+
+A Placement resolves to `<repo>@<digest>` and pins **that digest**, not a tag — so what keeps a running
+Fleet runnable is the digest still being in the registry. The registry now has retention, which means it
+is now possible for something to delete it.
+
+**"Keep the 5 most recently pushed" is unsafe on its own.** A version older than those five that is
+still placed on a Machine is exactly the case that breaks: the Machine restarts a Worker, pulls by
+digest, and the digest is gone. Rebuilding does not recover it — a rebuild yields a *new* digest, so a
+Fleet recorded against the old one can never be re-run as recorded.
+
+What makes it safe is an **`inuse-` tag**: retention keeps every tag matching `^inuse-` regardless of
+age, so a tag is how the control plane says *not this one* to a garbage collector that runs inside zot
+with no callback and no way to ask a question. The tag namespace is the only vocabulary the two share.
+
+**A reconciler writes them.** It lives in the orchestrator, is armed in the **API** role on every
+start (the materializer has no periodic loop to join), runs one pass immediately and then every
+10 minutes, and is disarmed only by `KONTRA_INUSE_TAGS=off`. The tag is `inuse-` plus the first 12 hex
+characters of the digest, written on the **bare repository name** (`webcrawl:inuse-…`) — which is what
+the shipped `kontra deploy` pushes to. The policy table names both that and the `actors/<name>` shape
+the buildpack path will create, so neither is left unprotected.
+
+**It covers one of the three things retention needs it to.** The tag is written for the digest the
+catalog currently records for each actor. A digest that is *placed on a Machine*, and a digest a *run
+still inside its retention window* references, are **not** tagged — neither is readable: placements
+live in Pulumi stack state rather than a table, and an enrolled Fleet's assignments are
+operator-authored files that no code path writes.
+
+That gap is narrower than it reads, because a Placement resolves its digest *from the catalog*. So the
+dangerous case is not "placed but untagged", it is a catalog entry whose **tag has since moved**: the
+migration of this install found `desync@177f80c8` and `webcrawl@e09d6df4` recorded in the catalog,
+present in the store, and reachable by no tag at all. Those are exactly the digests the reconciler
+protects.
+
+**Removing a tag is best effort, and the asymmetry is deliberate.** Without a registry credential the
+store permits read, create and update but not delete, so a stale `inuse-` tag can outlive its reason.
+The consequence is retention keeping more than it must — recoverable. Deleting the image a running
+actor was placed from is not.
+
+> [!NOTE]
+> **A running install may hold no `inuse-` tags yet.** The loop arms at process start, so an install
+> whose `kontra-api` container predates the reconciler has never run a pass however long it has been
+> up. Ask the registry rather than the code — `curl -s http://127.0.0.1:5000/v2/<actor>/tags/list`
+> should show an `inuse-` tag beside the version tags — and recreate the container if it does not.
+> Then read a `dryrun` pass before setting `KONTRA_REGISTRY_RETENTION=enforce`. [[Deployment]] §2a has
+> the policy table.
 
 ## Close, determinism, replay
 

@@ -18,7 +18,7 @@ import (
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
-	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
+	registry "github.com/medmahmoudi26/kontra/cli/internal/testregistry"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
@@ -96,7 +96,7 @@ func testBundle(engine string, payload string) *bundle {
 	}
 }
 
-// startTestRegistry is the appliance's own OCI registry, which is what a Bundle is now published
+// startTestRegistry is the install's own OCI registry, which is what a Bundle is now published
 // to. A real registry rather than a stub httptest server: the whole claim of this slice is that a
 // Bundle travels over the distribution API, and a fake that answers whatever the client asks
 // proves nothing about that.

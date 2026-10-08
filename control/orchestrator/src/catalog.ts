@@ -85,6 +85,20 @@ const DESCRIPTOR_SCHEMA = {
     // the wire (the conformance fixture posts one to prove it unpins), so no minLength here.
     digest: { type: 'string' },
     source: { type: 'string' },
+    // WHAT THE IMAGE WAS BUILT ON — echoed by the worker from what the Warden stamped, because
+    // nothing inside a container can see the run image it was layered onto. `name` is required
+    // INSIDE the object: a runtime with no name is not a runtime, and half an object stored over a
+    // whole one loses the digest rebase compares.
+    runtime: {
+      type: 'object',
+      required: ['name'],
+      properties: {
+        name: { type: 'string', minLength: 1 },
+        major: { type: 'integer', minimum: 0 },
+        digest: { type: 'string' },
+      },
+    },
+    builderDigest: { type: 'string' },
     operations: {
       type: 'array',
       items: {
@@ -148,6 +162,8 @@ export function parseDescriptor(body: unknown): Descriptor {
     schemaVersion?: string;
     digest?: string;
     source?: string;
+    runtime?: { name: string; major?: number; digest?: string };
+    builderDigest?: string;
     operations?: Array<Record<string, unknown>>;
   };
 
@@ -200,6 +216,17 @@ export function parseDescriptor(body: unknown): Descriptor {
   // value that unpins. Absence has to survive the trip through here to mean anything.
   if (d.digest !== undefined) rec.digest = d.digest;
   if (d.source !== undefined) rec.source = d.source;
+  // Normalised on the way in so the store holds one shape: a `major` the worker could not parse
+  // arrives as 0 rather than missing, because a reader comparing majors must not have to ask
+  // whether the key is there.
+  if (d.runtime !== undefined) {
+    rec.runtime = {
+      name: d.runtime.name,
+      major: d.runtime.major ?? 0,
+      digest: d.runtime.digest ?? '',
+    };
+  }
+  if (d.builderDigest !== undefined) rec.builderDigest = d.builderDigest;
   return rec;
 }
 

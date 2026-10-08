@@ -111,7 +111,7 @@ export function registerRowStreamRoute(
   // many callers between them watching more Runs than the store should be LISTed for;
   // `ROW_TAIL_MAX_SINKS` stops a flood that puts every connection on the SAME id and so satisfies
   // both of the others. Refusals are status codes an operator can read in a log — 429 for "you have
-  // too many", 503 for "this appliance is full" — never a `200` that then goes silent.
+  // too many", 503 for "this install is full" — never a `200` that then goes silent.
   app.get('/api/datasets/rows/stream', (req, reply) => {
     const { run } = req.query as Partial<{ run: string }>;
     if (!run) {
@@ -120,7 +120,7 @@ export function registerRowStreamRoute(
     // WHO IS ASKING, as well as this process can know it. `req.ip` is the socket's remote address —
     // Fastify's `trustProxy` is off, so no header can forge it. Behind a shared reverse proxy every
     // caller collapses to one address and this degrades into a stricter GLOBAL cap of
-    // ROW_STREAM_MAX_PER_CLIENT, which fails closed: the appliance is loopback and single-tenant, and
+    // ROW_STREAM_MAX_PER_CLIENT, which fails closed: the install is loopback and single-tenant, and
     // a cap that is too tight is recoverable in a way an unbounded poller farm is not.
     const client = req.ip || 'unknown';
     const held = rowStreamsPerClient.get(client) ?? 0;
@@ -137,7 +137,7 @@ export function registerRowStreamRoute(
       return reply.code(503).send({
         error:
           refusal === 'too-many-runs'
-            ? `this appliance is already streaming rows for ${rowTail.activeRuns().length} runs (cap ${rowRunCap}) — try again once one finishes`
+            ? `this install is already streaming rows for ${rowTail.activeRuns().length} runs (cap ${rowRunCap}) — try again once one finishes`
             : `too many readers are already watching ${run} (cap ${rowSinkCap})`,
       });
     }

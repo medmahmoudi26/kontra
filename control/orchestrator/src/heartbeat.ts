@@ -6,6 +6,8 @@
  * does not need the transport.
  */
 
+import { decodeCheckpoint } from './checkpoint';
+
 /** Live per-node heartbeat progress (roadmap platform-x100 #06). */
 export interface NodeHeartbeat {
   node: string;
@@ -53,6 +55,18 @@ export interface HeartbeatDetail {
   /** The author's healthcheck map. Optional like everything else here — an actor that defines no
    * `@actor.healthcheck` beats liveness only, and that is a normal actor, not a broken one. */
   progress?: Record<string, unknown>;
+  /**
+   * WHICH Units committed, not merely how many — the durable half of the beat.
+   *
+   * The counters above cannot be resumed from: `done: 2` does not say which two. This carries the
+   * cross-SDK Checkpoint (`shared/conformance/checkpoint.json`), and because heartbeat details live
+   * in the activity's own history it is the one copy of the commit map a cache cannot lose
+   * (ADR 0059).
+   *
+   * Optional, like everything else here. An older SDK beats without it, and a row built from such a
+   * beat must still be a valid row rather than a hole.
+   */
+  checkpoint?: unknown;
 }
 
 /**
@@ -71,11 +85,19 @@ export function heartbeatRow(
   attempt: number,
   lastBeat: number
 ): NodeHeartbeat {
+  // THE CHECKPOINT WINS OVER THE COUNTERS WHERE IT EXISTS, and this is not redundancy.
+  //
+  // `done` and `isolated` are two numbers an actor computes and sends; the checkpoint is the set
+  // they were computed from. Where both are present they agree, and where they do not it is the
+  // counters that are wrong — they are derived twice, once by the actor for display and once from
+  // the set, and the set is the thing a retry resumes from. Preferring it means the number an
+  // operator reads is the number the run will act on.
+  const ck = decodeCheckpoint(detail.checkpoint);
   return {
     node: detail.node || fallbackNode,
-    done: detail.done ?? 0,
+    done: ck ? ck.done.size : detail.done ?? 0,
     total: detail.total ?? 0,
-    isolated: detail.isolated ?? 0,
+    isolated: ck ? ck.failed.size : detail.isolated ?? 0,
     attempt,
     lastBeat,
     // ABSENT, NOT EMPTY, when the actor beat none. `{}` would read as "healthcheck ran and had

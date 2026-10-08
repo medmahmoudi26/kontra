@@ -44,22 +44,17 @@ func TestControlNamesItsSubcommandsWhenGivenAWrongOne(t *testing.T) {
 // Help is the one surface nothing else checks — see `usageText`'s own comment. A command that reaches
 // the switch and not that block is a command nobody finds.
 func TestControlIsDocumented(t *testing.T) {
-	for _, want := range []string{"kontra control up", "kontra control down", "--preview", "kontra-control"} {
+	for _, want := range []string{"kontra up [", "kontra down [", "--preview", "kontra-control"} {
 		if !strings.Contains(usageText, want) {
 			t.Errorf("usageText does not advertise %q", want)
 		}
 	}
-	// And it says WHICH topology this is, because `kontra up` (the appliance) and `kontra infra up`
-	// (compose) are already two of them in the same help text. Three verbs that all start a control
-	// plane, with nothing saying which is which, is how somebody runs two at once on the same ports.
+	// And it says WHICH topology this is, because `kontra infra up` is a second way to start a
+	// control plane in the same help text. Two verbs that both start one, with nothing saying which
+	// is which, is how somebody runs two at once on the same ports.
 	if !strings.Contains(usageText, "HOST ENGINE") {
-		t.Error("usageText does not say that `kontra control` is the host engine, and this CLI already " +
-			"advertises two other ways to start a control plane")
-	}
-	// The appliance's own help line must still be there: this slice ADDS a topology and retires
-	// nothing (issue 08 does that), and `cli/up_test.go:55` already asserts the compose one survives.
-	if !strings.Contains(usageText, "kontra up [--data-dir") {
-		t.Error("the appliance's help line went missing; removing it belongs to issue 08, with its tests")
+		t.Error("usageText does not say that `kontra up` is the host engine, and this CLI also " +
+			"advertises `kontra infra up`")
 	}
 }
 
@@ -79,20 +74,18 @@ func TestEveryDocumentedControlFlagIsRegistered(t *testing.T) {
 		t.Fatal("no flags are registered at all, so this sweep would pass on any prose")
 	}
 
-	// THE `kontra control` BLOCK OF usageText, AND ONLY IT. Scoped rather than swept over the whole
-	// text for the reason `fleet_documented_flags_test.go:21-24` gives about its own scope: this file
-	// knows one command's flags, and `kontra up [--data-dir …]` on the line above belongs to the
-	// appliance, whose flags this FlagSet has no business registering. A continuation line is any
-	// indented line that does not itself start a new `kontra …` entry.
+	// THE `kontra up` AND `kontra down` BLOCKS OF usageText, AND ONLY THEM. Scoped rather than swept
+	// over the whole text for the reason `fleet_documented_flags_test.go:21-24` gives about its own
+	// scope: this file knows one command's flags. A continuation line is any indented line that does
+	// not itself start a new `kontra …` entry.
 	var prose []string
 	inBlock := false
 	for _, line := range strings.Split(usageText, "\n") {
-		// A BLOCK STARTS ONLY WHERE THE LINE ITSELF IS THE ENTRY, not wherever the words appear. It was
-		// `strings.Contains(line, "kontra control")` and that re-entered this block from inside
-		// `kontra update`'s, which mentions "kontra control up" in prose to say it is the same converge —
-		// so --check and --to were swept as though they were this command's. The same rule is in
-		// `update_test.go`'s copy of this extraction.
-		if strings.HasPrefix(strings.TrimLeft(line, " "), "kontra control") {
+		// A BLOCK STARTS ONLY WHERE THE LINE ITSELF IS THE ENTRY, not wherever the words appear, and
+		// the `[` is load-bearing: a bare "kontra up" prefix also matches `kontra update`, whose
+		// --check and --to would then be swept as though they were this command's. The same rule is
+		// in `update_test.go`'s copy of this extraction.
+		if t := strings.TrimLeft(line, " "); strings.HasPrefix(t, "kontra up [") || strings.HasPrefix(t, "kontra down [") {
 			inBlock, prose = true, append(prose, line)
 			continue
 		}
@@ -107,8 +100,8 @@ func TestEveryDocumentedControlFlagIsRegistered(t *testing.T) {
 	}
 	prose = append(prose, captureStdout(t, controlUsage))
 	if len(prose) < 4 {
-		t.Fatalf("only %d lines of `kontra control` help were found in usageText — the extraction is "+
-			"broken and the assertion below proves nothing", len(prose))
+		t.Fatalf("only %d lines of `kontra up`/`kontra down` help were found in usageText — the "+
+			"extraction is broken and the assertion below proves nothing", len(prose))
 	}
 
 	seen := 0
@@ -159,7 +152,7 @@ func TestControlUpRefusesAFleetStack(t *testing.T) {
 	}
 }
 
-// The appliance refuses positional arguments and `cli/up_test.go:44` asserts the refusal QUOTES the
+// The install refuses positional arguments and `cli/up_test.go:44` asserts the refusal QUOTES the
 // argument. The same rule here, for the same reason: `kontra control up local` looks like it names a
 // stack and does not.
 func TestControlUpRefusesPositionalArguments(t *testing.T) {

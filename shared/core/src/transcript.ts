@@ -120,7 +120,7 @@ export interface Ask {
   /**
    * The operator label on the answer.
    *
-   * SELF-ASSERTED, NEVER AUTHENTICATION. The appliance is loopback with no credential, so there is
+   * SELF-ASSERTED, NEVER AUTHENTICATION. The install is loopback with no credential, so there is
    * no authenticated identity to record. Useful attribution; not proof, and never described as it.
    */
   by?: string;

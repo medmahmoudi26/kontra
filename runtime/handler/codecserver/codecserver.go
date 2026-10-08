@@ -6,7 +6,7 @@
 // IT USED TO BE A CONTAINER, and this package is the whole of what it was. `cmd/codec-server`
 // plus `infra/Dockerfile.codec-server` plus a compose service with a published port existed to
 // give ~40 lines of handler an address. ADR 0031 §1 settles it: "it is an HTTP handler in a
-// container; it becomes an HTTP handler." The appliance (`cli/appliance/codec.go`) serves this
+// container; it becomes an HTTP handler." The install (`cli/install/codec.go`) serves this
 // on a listener it already owns, which is also what collapses the codec's port and the address
 // the UI is told to call from two hand-synced settings into one derived one.
 //
@@ -23,7 +23,7 @@
 // THE STORE IT READS MUST BE THE ONE THE WRITERS WROTE TO. A ref carries a digest, not a
 // location, so a codec pointed at a different bucket or prefix answers "claim-check object
 // missing" for a payload that exists. `Options.Store` and `Options.Prefix` are that pairing, and
-// in the appliance both come from the object store in the same process.
+// in the install both come from the object store in the same process.
 package codecserver
 
 import (
@@ -46,7 +46,7 @@ const DefaultThreshold = codec.DefaultThreshold
 const DefaultUIOrigin = "http://localhost:8233"
 
 // Backing is the key -> bytes store the claim-check objects live in: objectstore.Backing,
-// restated because that package is internal to this module and the appliance — a different
+// restated because that package is internal to this module and the install — a different
 // module — has to be able to pass one. The two are structurally identical on purpose, which is
 // also how they stay that way: New assigns one to the other, so a method added to either and
 // not to this stops compiling here rather than at some caller.

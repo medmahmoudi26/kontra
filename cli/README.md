@@ -6,7 +6,7 @@ Build: `cd cli && go mod tidy && go build -o kontra .` — test with `go test ./
     kontra infra up|down|status [--repo <dir>]              # control-plane compose + health table
     kontra deploy --actor <dir> [--engine py|go] [--registry host:port] [--controller host] [--host-only] [--override]
                                                             # build+push a self-contained worker image; prints pull/run
-                                                            # (refuses an existing version unless --override; handler cached in kontra-worker-base:1)
+                                                            # (refuses an existing version unless --override; built by `pack` onto a pinned runtime)
     kontra workers list                                     # catalog x live Temporal pollers
     kontra actor register <dir> [--init] [--json]           # declare an actor in the catalog
     kontra workflow serve <folder>                          # run YOUR workflows here

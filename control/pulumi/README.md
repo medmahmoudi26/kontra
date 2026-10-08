@@ -1,6 +1,6 @@
 # `kontra-control` — the install, as a Pulumi program
 
-ADR 0052 §1-§3. This directory is the port of `docker-compose.yml`: 13 containers, 11 volumes, one
+ADR 0052 §1-§3. This directory is the port of `docker-compose.yml`: 15 containers, 13 volumes, one
 private network, the same images, the same 10 healthchecks and the same 17 ordering gates.
 `kontra up` shells to the host `pulumi` and converges it.
 
@@ -39,7 +39,7 @@ so `machines` decides *how many resources exist*, and `machines: 0` coerces to a
 and refuses a `workerImage` that is not `repo@sha256:<64 hex>` **before any resource is constructed**.
 None of that is expressible as a document, in any templating language, without inventing one.
 
-**The control stack has no arguments.** It is 13 containers, and it is 13 containers on every box and
+**The control stack has no arguments.** It is 15 containers, and it is 15 containers on every box and
 every converge. A static topology written as a static document is the honest representation of it, and
 what that buys is the reason the ADR calls it fact 2: **a YAML program resolves providers as binary
 plugins, so the host needs `pulumi` and `docker` and nothing else.** No Node, no `@pulumi/*` package,
@@ -104,7 +104,7 @@ pulumi plugin install resource docker 4.11.2     # HARD PREREQUISITE — see bel
 ls` on this box listed `digitalocean` and `random` and nothing else, and `find /root/.pulumi -name
 '*docker*'` returned nothing. A YAML program that declares `docker:index:Container` with no plugin
 fails at resource registration, which reads as a program error rather than as a missing binary.
-`get.sh` installs it; `kontra doctor` reports it. ADR 0052 §1 also lists `tls` in the host engine's
+The one-line installer installs it; `kontra doctor` reports it. ADR 0052 §1 also lists `tls` in the host engine's
 provider set; nothing here declares it yet and it is still absent.
 
 4.11.2 and not `latest`, because that is the version ADR 0052 fact 1 was established against and the
@@ -181,11 +181,14 @@ are each behind a config key:
 |---|---|---|
 | `kontraImage` | `kontra:latest` | `cli` — and exported as `KONTRA_IMAGE` to all three anchor consumers |
 | `orchestratorImage` | `kontra-orchestrator:latest` | `orchestrator-api` **and** `orchestrator-infra` — one image, two roles |
-| `hostImage` | `kontra-host:1` | `orchestrator-probe` — and exported as `KONTRA_HOST_IMAGE` |
-| `workerBaseImage` | `kontra-worker-base:1` | **nothing** — see below |
+| `logshipImage` | `kontra-logship:dev` | `logship` |
 
-All four are also stack outputs (`images`), so `kontra doctor` can answer *which images is this
-control plane actually running* without shelling to `docker inspect`.
+They are also stack outputs (`images`), so `kontra doctor` can answer *which images is this control
+plane actually running* without shelling to `docker inspect`.
+
+`orchestrator-probe` runs `kontraImage` too: it needs python3 and the SDK on PYTHONPATH, and it had
+a `hostImage` of its own only because that image was also the base `kontra deploy` layered actors
+onto. Buildpacks layer onto a published runtime instead (ADR 0061/0063).
 
 **`RemoteImage` resolves an image that is already in the daemon without consulting a registry, and
 that single fact is why `pull_policy` has no counterpart here.** Re-measured for this README, with the
@@ -217,27 +220,22 @@ Two details that look wrong until you know the reason:
   the right thing to run and the wrong thing to hand onward: the control plane starts Workers by name
   through the Docker socket, so `KONTRA_IMAGE` must be a name the Warden can pass to `docker run` as
   written.
-- **`workerBaseImage` is declared and no container runs it.** `kontra deploy` COPYs the
-  actor-agnostic handler out of it into every actor image (`cli/deploy.go`, `cli/serve.go:197`), so an
-  install that lacks it turns the first `kontra deploy` into a build. It appears in no compose service,
-  which is exactly why `make image` building *it* and not `kontra-orchestrator:latest` reads as
-  arbitrary until you know this.
 
 ## What `kontra up` will run against it
 
 **None of this exists yet, and the honest state is worth stating plainly:** `kontra up` today is the
-appliance — `cli/up.go:1` opens *"up.go — `kontra up`, the appliance"* — which ADR 0052 §2 retires
+install — `cli/up.go:1` opens *"up.go — `kontra up`, the install"* — which ADR 0052 §2 retires
 into this program. Nothing in the repository outside `docs/adr/0052` and this directory contains the
 string `kontra-control` — the one apparent hit, `scripts/provision-controller.sh:139`, is
 `kontra-controller`, a DigitalOcean tag name. Everything below is the contract this file is built to
 satisfy, written down so the Go lane implements the same thing this lane verified.
 
-**`get.sh` has since landed and it holds up its half.** Re-checked: it pins
+**The one-line installer holds up its half.** Re-checked: it pins
 `DOCKER_PLUGIN_VERSION=4.11.2`, runs `pulumi plugin install resource docker` and then *re-reads*
-`pulumi plugin ls` rather than trusting the exit code (`get.sh:725`), and it prints the
+`pulumi plugin ls` rather than trusting the exit code, and it prints the
 `pulumi login file://$KONTRA_HOME/state` warning this file asks for. What it does **not** do is name a
 stack, so the one-segment rule above is still only written here — and `kontra up` is still the
-appliance.
+install.
 
 ```sh
 # 1. THE BACKEND, BEFORE ANYTHING ELSE.
@@ -309,7 +307,7 @@ to, so a bare `up` and the documented compose invocation produce the same topolo
 
 ## What survives a `down`
 
-`pulumi destroy` removes the 13 containers and the network and **keeps every volume**: all 11 carry
+`pulumi destroy` removes the 15 containers and the network and **keeps every volume**: 9 of the 13 carry
 `retainOnDelete: true`, so Pulumi drops them from state and leaves the data on disk. That is
 `docker compose down`, not `down -v`.
 
@@ -329,7 +327,7 @@ rename silently orphans.
 `pulumi up` from empty state will **collide**, and it is worth knowing before rather than during.
 Re-measured on this host just now: **all 13 `container_name`s exist** (`docker ps -a` lists 21
 `kontra-*` containers — the other 8 are the Temporal UI and live Workers), the `kontra` network
-exists, and **11 of 11 volumes exist** plus one orphan, `kontra_tmux-sock`, left by the
+exists, and **13 of 13 volumes exist** plus one orphan, `kontra_tmux-sock`, left by the
 shared-tmux-socket removal that the compose file records as a security fix. Volumes and the network
 adopt silently; container names do not — Docker refuses a second container with the same name.
 
@@ -358,8 +356,8 @@ Re-run for this README, not inherited.
 
 | | |
 |---|---|
-| `pulumi preview` | **40 resources plan clean** — 13 containers, 13 images, 11 volumes, 1 network, 1 provider, 1 stack. Every input passed the provider's own `Check`, so no property name is guessed. |
-| `parity.py` | **Passes.** 13 containers / 11 volumes / 13 images / 1 network matched; 17 ordering edges checked; 6 published ports, all `127.0.0.1`; all 10 `waitTimeout`s at or above Docker's budget. 3.4 s. |
+| `pulumi preview` | **44 resources plan clean** — 15 containers, 15 images, 13 volumes, 1 network, 1 provider, 1 stack. Every input passed the provider's own `Check`, so no property name is guessed. |
+| `parity.py` | **13 pre-existing problems, none of them the registry.** 15 containers / 13 volumes / 15 images matched; 21 ordering edges checked; 6 published ports, all `127.0.0.1`. What it reports is `porter`, which is missing here and from its own map, and the orchestrator env/mount drift ADR 0056 already records. |
 | `parity.py` is not vacuous | **Nine mutations of `Pulumi.yaml`, each caught with the right message**, the file checksummed before and restored byte-identical after every one: `temporal` `waitTimeout` 660→60 (*"< Docker's own budget 640 — Pulumi gives up first"*); `bind` default widened to `0.0.0.0` (7 problems — 6 ports plus the loopback assertion); the `victoriametrics` alias renamed to `victoria-metrics`; `KONTRA_S3_BUCKET` dropped from the shared env (caught in **all three** consumers, which is the `fn::split` splice working); `postgres` `restart` flipped to `always`; `cli` given a healthcheck compose does not have; `logship` given `wait: true` with no healthcheck (*"the provider errors on this"*); `temporal`'s `dependsOn` on the one-shot removed; the one-shot's `mustRun: false` + `attach: true` inverted (*"needs attach:true + mustRun:false so the exit code is the gate"*). |
 | the 60 s default is real | Read out of the installed plugin's own schema, not from the ADR: `pulumi package get-schema docker@4.11.2` → `waitTimeout` *"Defaults to `60`"*, and `wait` *"requires your container to have a healthcheck, otherwise this provider will error"*. |
 | `RemoteImage` does not pull a local image | Real `pulumi up` against `name: kontra-host:1` — impossible on docker.io — **created in 0.35 s** and returned `sha256:643204e0…`. |

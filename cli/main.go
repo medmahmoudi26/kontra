@@ -71,7 +71,8 @@ const usageText = `kontra — local control surface
 
   kontra version                                   # which kontra this is; "dev (<rev>)" when unreleased
   kontra init                                      # create ~/.kontra/: config.yaml, workflows/, actors/
-                                                   # GENERATES the console login and prints it ONCE
+                                                   # GENERATES the console login into
+                                                   #   <home>/console-password (0600), never stdout
   kontra user add <name>                           # a second console login; only the hash is stored
   kontra token mint <state|explore|panel|run>      # fill a BLANK token in an EXISTING config
                                                    # run blank means the Run surface is OPEN: serve,
@@ -84,26 +85,10 @@ const usageText = `kontra — local control surface
                                                    #   is how an older installation closes the gap
 
   kontra doctor [--api <url>]                      # infra state: services, web consoles, actors
-  kontra up [--data-dir <dir>] [--bind <ip>] [--temporal-port 7233] [--s3-port 8333]
-               [--kv-port 6379] [--codec-port 18234] [--registry-port 5000]
-               [--orchestrator auto|local|bundle|none|<path>] [--api-port 8088]
-               [--temporal-ui] [--temporal-ui-port 8233]
-               # THE APPLIANCE (ADR 0031): runs Temporal, the object store, the state
-               # store, the payload codec and the OCI registry IN THIS PROCESS, and the
-               # orchestrator as a supervised child hydrated from the bundle. No
-               # containers. Persists to <data-dir>, so history, objects, global_state and
-               # the lake's catalog all survive a restart. Blocks; Ctrl-C stops the child
-               # first, then the services.
-               # --orchestrator: in a compiled checkout, auto runs YOUR build and says so;
-               #   bundle forces the hydrated artifact, none starts the services alone.
-               # --temporal-ui: OFF by default. Hydrates Temporal's own Web UI from the CAS
-               #   and serves it on loopback — stack traces, pending-activity detail and a
-               #   manual signal/terminate console, for the failures kontra's own surfaces
-               #   cannot yet show. Its codec address is derived, never configured.
-  kontra infra up|down|status [--repo <dir>]       # the compose control plane (the other topology)
-  kontra control up [--preview] [--json] [--stack local] [--workspaces <dir>]
+  kontra infra up|down|status [--repo <dir>]       # the compose control plane, by compose file
+  kontra up [--preview] [--json] [--stack local] [--workspaces <dir>]
         [--bind 127.0.0.1] [--api-port 8088] [--program <dir>]
-               # THE HOST ENGINE (ADR 0052 §1): converges kontra-control — 13 containers on
+               # THE HOST ENGINE (ADR 0052 §1): converges kontra-control — 15 containers on
                # one private Docker network, declared as Pulumi YAML — by shelling to the host
                # pulumi. Its state is file://<.kontra>/state, and the backend is ASSERTED
                # before any operation: a failed "pulumi login" does not stop pulumi, it
@@ -114,15 +99,15 @@ const usageText = `kontra — local control surface
                # --preview: the same converge through "pulumi preview". Prints per-operation
                #   counts, NAMES what would be replaced, and exits 0 only when the converge is
                #   a no-op, so CI can gate on it. Takes no lock.
-  kontra control down [--stack local]              # destroy the containers and the network; KEEPS
-               # all 11 volumes (retainOnDelete) and the Pulumi state. "compose down", not "down -v".
+  kontra down [--stack local]                      # destroy the containers and the network; KEEPS
+               # all 13 volumes (retainOnDelete) and the Pulumi state. "compose down", not "down -v".
   kontra update [--check] [--to <tag>] [--stack local] [--program <dir>] [--workspaces <dir>]
                # MOVE THIS INSTALLATION TO NEWER IMAGES (ADR 0052 §7). The SAME converge as
                # "kontra control up" — same program, same engine, same lock, same volume gate —
                # with a different desired state. An install nobody can upgrade is one people
                # pin and abandon.
-               # EVERY VOLUME IS ACCOUNTED FOR BEFORE ANYTHING IS APPLIED, twice: eight of the
-               #   eleven carry protect: true in the program, so pulumi refuses to PLAN their
+               # EVERY VOLUME IS ACCOUNTED FOR BEFORE ANYTHING IS APPLIED, twice: nine of the
+               #   thirteen carry protect: true in the program, so pulumi refuses to PLAN their
                #   deletion (measured — it fails in preview, for any caller). And the identity
                #   of every volume this install has is asserted against "pulumi stack export":
                #   still named what it was, still attached to the same service. Not redundant —
@@ -146,8 +131,8 @@ const usageText = `kontra — local control surface
                # --mode dev: serve-dev — the same pair in CONTAINERS holding this folder on a bind
                #   mount, from the control plane's own image. Returns immediately; re-run it to
                #   reload after an edit, --replicas 0 to stop. What it printed is kontra logs.
-               # --mode docker: N managed worker CONTAINERS, wired to whichever control plane
-               #   this box runs (kontra up's bound addresses, else the compose service names)
+               # --mode docker: N managed worker CONTAINERS, wired to the control plane's own
+               #   compose service names
                # --network: docker mode only. "host" is the answer when a host firewall drops a
                #   container's packets to the bridge gateway — the worker then comes up polling
                #   nothing, and nothing reports it
@@ -160,24 +145,27 @@ const usageText = `kontra — local control surface
                # with no --push: <registry>/bundles/<name>:<version>, which is the address
                #   a Fleet placement resolves. --registry names only that first component.
                # --json: one document on cliio.Stdout (the digest is a field, not a line to grep)
-  kontra bundle orchestrator [--out <dir>] [--platform goos/goarch|list|all]
-               # THE APPLIANCE BUNDLE (ADR 0031 §2): a pinned Node runtime, the compiled
-               # orchestrator and its native addons, as one content-addressed tar.gz with
-               # a manifest naming every component, version and digest. Builds for this
-               # host by default. Nothing is fetched that is not checksummed first.
-               # --platform all builds the four the appliance ships — linux and macOS on
-               #   amd64 and arm64 — from any one of them; every compiled file in each
-               #   tree is checked against the platform its manifest claims.
-  kontra bundle spa [--out <dir>]                  # the built SPA as its own content-addressed
-               # tar.gz. Separate from the orchestrator bundle because it is platform-neutral
-               # and changes when a page does; kontra up hydrates both and prints both digests.
-  kontra bundle verify <bundle.tar.gz>             # re-cliutil.Derive every digest the manifest claims
-  kontra release [--version <v>] [--platform goos/goarch|list|all] [--out <dir>]
-               # ONE FILE PER PLATFORM: the kontra binary, the orchestrator bundle for that
-               # platform and the browser bundle, packed where an installed binary already
-               # looks for them, plus a SHA256SUMS an installer can check. 'all' releases
-               # the four; the Go half cross-builds (no cgo) and CI still runs this
-               # natively on four runners, because an artifact nobody executed is a claim.
+  kontra rebase [<actor>[@<version>]] [--runtime <name>:<major>] [--dry-run]
+               # MOVE AN IMAGE ONTO A NEWER RUNTIME WITHOUT REBUILDING IT (ADR 0061). "pack rebase"
+               #   rewrites the manifest: the deps and app layers are untouched and only the run-image
+               #   layers below them change. Seconds, not a rebuild per actor.
+               # THE VERSION DOES NOT CHANGE. A version now names a SEQUENCE of digests; the catalog
+               #   keeps the rest in "history" and the "inuse-" reconciler tags all of it, because a
+               #   Lease keeps its old digest until it drops.
+               # With no argument it LISTS what is behind and rebases nothing.
+  kontra registry migrate --from <host:port> [--to <host:port>] [--dry-run]
+               # COPY A registry:2 STORE INTO ZOT, by tag and then by digest. Verifies every catalog
+               #   digest resolves at the destination before it says it is done, and refuses to report
+               #   success while any does not — an untagged manifest the catalog still references is a
+               #   digest a Placement is pinned to.
+  kontra runtime import [name:major ...] [--from <prefix>] [--to <registry>] [--dry-run] [--force]
+  kontra runtime list
+               # MIRROR THE PUBLISHED RUN IMAGES INTO THIS INSTALL (ADR 0061, 0063). The local
+               #   kontra-runtimes/ namespace is empty on a fresh install, so the actor it ships could
+               #   not be built; the published set cannot be resolved in place because its per-release
+               #   signing identity is not expressible as one --certificate-identity.
+               # Idempotent, by digest: a runtime already here is left alone, and a major that has MOVED
+               #   upstream is reported rather than rolled under every actor already built on it.
   kontra deploy --actor <dir> [--engine py|go] [--registry host:port]
                [--controller <host>] [--host-only] [--override]   # the container-Image spelling
   kontra workers list
@@ -329,33 +317,39 @@ func dispatch(args []string) error {
 	case "doctor":
 		err = cmdDoctor(args[1:])
 	case "up":
-		err = cmdUp(args[1:])
+		// THE HOST ENGINE (ADR 0052 §1-§2): `kontra-control` as a Pulumi YAML program, converged by
+		// shelling to the host `pulumi`. ADR 0052 §2 always spelled this `kontra up`; the install
+		// held the word until Phase 5 deleted it, and `control` survives below as the alias an
+		// installed script may already say.
+		err = cmdControlUp(args[1:])
 	case "infra":
 		err = cmdInfra(args[1:])
+	case "down":
+		err = cmdControlDown(args[1:])
 	case "control":
-		// THE HOST ENGINE (ADR 0052 §1-§2): `kontra-control` as a Pulumi YAML program, converged by
-		// shelling to the host `pulumi`. It is a third word for a third topology only until issue 08
-		// retires the appliance — §2 spells this command `kontra up`, and it cannot be spelled that way
-		// while `case "up":` above routes to `cli/up.go` and eight assertions in `cli/up_test.go` pin
-		// that behaviour. `cli/control.go`'s header records the one-line swap and why it is one line.
+		// THE OLDER SPELLING, KEPT AS AN ALIAS. `up` and `down` above are the words ADR 0052 §2
+		// uses; a script written against `kontra control up|down` must not start failing for a
+		// rename, so both reach the same two functions.
 		err = cmdControl(args[1:])
 	case "update":
-		// ADR 0052 §7. A TOP-LEVEL WORD AND NOT `kontra control update`, because §7 spells it
-		// `kontra update` and because the noun an operator is updating is the installation, not one
-		// subsystem of it — the word has to survive issue 08 retiring `control` back into `up`, and
-		// `cli/update.go` ends in the same `converge` this case's neighbour does.
+		// ADR 0052 §7. A TOP-LEVEL WORD AND NOT `kontra control update`, because the noun an
+		// operator is updating is the installation, not one subsystem of it — and `cli/update.go`
+		// ends in the same `converge` this case's neighbour does.
 		err = cmdUpdate(args[1:])
+	case "rebase":
+		// Moving an actor image onto a newer digest of the SAME runtime major, by rewriting its manifest.
+		// The version does not change — see ADR 0061 on why a version now names a sequence of digests.
+		err = cmdRebase(args[1:])
+	case "registry":
+		// The OCI store, not the actor catalog. One subcommand today: `migrate`, which moves a
+		// `registry:2` store into zot by digest and proves every catalog digest arrived.
+		err = cmdRegistry(args[1:])
+	case "runtime":
+		// The run images actors are built ON, not the actor images. `import` mirrors the published
+		// set into this install's registry, which is what makes a fresh install able to build.
+		err = cmdRuntime(args[1:])
 	case "build":
 		err = cmdBuild(args[1:])
-	case "bundle":
-		// The APPLIANCE bundle (ADR 0031 §2) — a pinned Node, the compiled orchestrator and its
-		// native addons. `kontra build` produces the other kind, an actor's Bundle for a fleet
-		// Machine; see cli/bundlecmd.go for why one word carries both.
-		err = cmdBundle(args[1:])
-	case "release":
-		// One file per platform: the binary, the orchestrator bundle and the SPA, packed the way
-		// an installed binary already expects to find them (ADR 0031 §2, issue 17).
-		err = cmdRelease(args[1:])
 	case "deploy":
 		err = cmdDeploy(args[1:])
 	case "serve":

@@ -33,8 +33,9 @@ is token-gated** (`KONTRA_EXPLORE_TOKEN` or `KONTRA_STATE_TOKEN`) because it min
 ### `kontra init`
 Creates `~/.kontra/`: `config.yaml`, `workflows/`, `actors/`.
 
-> **It generates the console login and prints it ONCE.** Lost it? `kontra user add <name>`. It also
-> mints the four tokens on a *new* install only.
+> **It generates the console login into `~/.kontra/console-password` (mode 0600), never stdout** —
+> stdout in the Compose install is `docker compose logs cli`. Deleted that file? `kontra user add
+> <name>`. It also mints the four tokens on a *new* install only.
 
 ### `kontra user add <name>`
 A second console login. Only the scrypt hash is stored, so a leaked config yields something to
@@ -59,26 +60,19 @@ Infra state: services, web consoles, actors. The first thing to run when somethi
 
 ## Running the stack
 
-There are **two topologies**, and picking the wrong verb is the common first mistake.
-
-### `kontra up` — the appliance
+### `kontra up [--preview] [--json] [--stack local]` — the host engine
 ```
-kontra up [--data-dir <dir>] [--bind <ip>] [--api-port 8088]
-          [--orchestrator auto|local|bundle|none|<path>] [--temporal-ui]
+kontra up [--preview] [--json] [--stack local] [--workspaces <dir>]
+          [--bind 127.0.0.1] [--api-port 8088] [--program <dir>]
 ```
-Runs Temporal, the object store, the state store, the payload codec and the OCI registry **in this
-process**, with the orchestrator as a supervised child. **No containers.** Persists to `<data-dir>`,
-so history, objects, global state and the lake's catalog survive a restart. Blocks; Ctrl-C stops the
-child first.
+Converges `kontra-control` — 15 containers on one private Docker network, declared as Pulumi YAML —
+by shelling to the host `pulumi`. `kontra control up` is the same command under its older name.
 
-`--temporal-ui` is off by default and hydrates Temporal's own Web UI on loopback — for the failures
-kontra's surfaces cannot yet show (stack traces, pending-activity detail, manual signal/terminate).
+`kontra down [--stack local]` destroys the containers and the network and **keeps every volume**
+(`retainOnDelete`) and the Pulumi state: `compose down`, not `down -v`.
 
-### `kontra infra up|down|status [--repo <dir>]` — the compose control plane
-The other topology: the Docker Compose stack.
-
-### `kontra control up [--preview] [--check] [--to <tag>]` — the host engine
-Converges `kontra-control` — 13 containers on one private Docker network, declared as Pulumi YAML.
+### `kontra infra up|down|status [--repo <dir>]` — the same stack, by compose file
+The compose path, driven from `docker-compose.yml` rather than from the Pulumi program.
 
 > **Every volume is accounted for before anything is applied, twice.** Eight of eleven carry
 > `protect: true` so Pulumi refuses to *plan* their deletion, and the identity of every volume is
@@ -86,6 +80,35 @@ Converges `kontra-control` — 13 containers on one private Docker network, decl
 > plan with no volume step in it, nothing refuses it, and the stack comes up healthy and empty.
 >
 > `--check` previews only and exits non-zero if anything would change, so CI can gate on it.
+
+### `kontra registry migrate --from <host:port> [--to <host:port>] [--dry-run]`
+Copies every repository and tag out of a `registry:2` store into **zot**, by digest, then re-reads each
+one at the destination and compares — and then checks that every digest *the catalog* knows about
+resolves, which is a separate pass because a tag that moved leaves the catalog's older digest reachable
+by no tag at all.
+
+`--to` defaults to `--registry` / `KONTRA_REGISTRY`. The same address on both sides is refused by name:
+it would copy every tag onto itself and report success. An install that still has an unmigrated
+`registry:2` store **refuses to start** until this has run ([[Deployment]] §2a).
+
+---
+
+### `kontra runtime import [name:major ...] [--from <prefix>] [--to <registry>] [--dry-run] [--force]`
+Copies published **run images** into this install's registry under `kontra-runtimes/`, by digest, and
+re-reads each one at the destination before reporting it. First boot runs it, so a fresh install can
+build the actor it ships — `kontra-runtimes/` is empty otherwise, and the published set cannot be
+resolved where it is published: its signing identity is per release and `trustpolicy` takes one exact
+`--certificate-identity`.
+
+Which runtimes: the arguments, else `KONTRA_RUNTIMES_IMPORT`, else whatever `--from`'s catalog lists —
+ghcr answers `/v2/_catalog` with **403**, so there the set has to be named. Idempotent: one already
+present is left alone, and one whose **major has moved upstream** is reported rather than replaced,
+because replacing it would advance the base image under every actor already built here. `--force` is
+how you mean it.
+
+### `kontra runtime list [--registry host:port]`
+The runtimes this install can resolve, as `<name>:<major>`. A registry query under the prefix, never a
+list inside kontra — which is what lets a fork add one by pushing it.
 
 ---
 
@@ -130,6 +153,12 @@ With no `--push`: `<registry>/bundles/<name>:<version>`, the address a Fleet pla
 
 ### `kontra deploy --actor <dir> [--engine py|go] [--registry host:port]`
 The container-**Image** spelling: builds and pushes a self-contained worker image.
+
+> ONE IMAGE, BUILT BY THE CNB LIFECYCLE. `actor.json`'s `runtime` field picks what it is layered on,
+> resolved to a digest before the build and recorded in the catalog. The build context is a STAGED
+> COPY of your directory — your own is never written to — carrying the vendored SDK, the handler and
+> the supervisor the image needs ([[Writing-Actors-Python]]). There is no second image, no cached
+> worker base and no handler recompile per deploy. `--host-only` means "build, do not push".
 
 ### `kontra workers list`
 What is polling.
@@ -280,28 +309,6 @@ Read and steer this installation's Temporal Schedules.
 > at boot by `orchestrator-infra` and appears here. It **previews and deletes nothing** until
 > `KONTRA_RETENTION_COLLECT=1` is set on the worker holding the lake. `trigger` runs a sweep now, in
 > that same mode.
-
----
-
-## Packaging and release
-
-### `kontra bundle orchestrator [--out <dir>] [--platform goos/goarch|list|all]`
-The appliance bundle (ADR 0031 §2): a pinned Node runtime, the compiled orchestrator and its native
-addons, as one content-addressed `tar.gz` with a manifest naming every component, version and
-digest. **Nothing is fetched that is not checksummed first.**
-
-### `kontra bundle spa [--out <dir>]`
-The built SPA as its own content-addressed tarball — separate because it is platform-neutral and
-changes when a page does.
-
-### `kontra bundle verify <bundle.tar.gz>`
-Re-derive every digest the manifest claims.
-
-### `kontra release [--version <v>] [--platform ...] [--out <dir>]`
-One file per platform: the binary, the orchestrator bundle for that platform and the browser bundle,
-packed where an installed binary already looks, plus a `SHA256SUMS`.
-
-> CI still runs this natively on four runners, because **an artifact nobody executed is a claim**.
 
 ---
 

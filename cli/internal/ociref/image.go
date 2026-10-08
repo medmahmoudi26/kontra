@@ -66,7 +66,7 @@ func PinnedDigest(r Ref, ref string) (string, error) {
 // explicit `https://` is honoured, because the day a Bundle is pushed to somebody else's registry is
 // slice 07's." Two different addresses, two different defaults:
 //
-//	the CONVENTIONAL address    kontra's own registry — the Controller's :5000, the appliance's bound
+//	the CONVENTIONAL address    kontra's own registry — the Controller's :5000, the install's bound
 //	                            port. Plain HTTP by construction, anonymous on the VPC, and it is what
 //	                            every address in this system has always been. registryHost keeps that.
 //	a --push DESTINATION        somebody else's, reached over the internet. Defaulting it to plain HTTP

@@ -205,6 +205,12 @@ type warden struct {
 	// in particular why its evidence is not `logs()`.
 	health *WorkerHealth
 
+	// prune names the images this Machine pulled and reclaims the ones nothing needs — the only path in
+	// kontra that frees disk rather than refusing work on it. Nil on a Warden whose driver has no image
+	// store: `process` pulls nothing (ADR 0036), and every test in this package that builds a Warden by
+	// hand gets a loop that reclaims nothing, exactly as it did before. See warden_images.go.
+	prune *imagePrune
+
 	// THE OUTBOUND SNAPSHOT IS GONE WITH THE MONITOR. A `*PaneReporter` sat here and POSTed this
 	// Machine's telemetry and a screenful per Worker, once per interval, to the only thing that ever
 	// read it: the wall. `health` above is untouched — it is the reconcile loop's evidence
@@ -478,6 +484,17 @@ func (w *warden) reconcile(ctx context.Context, desired []Spec) {
 			w.start(want[id])
 		}
 	}
+
+	// THE END OF THE TURN IS WHERE HOUSEKEEPING GOES, and this is the only timer the Warden has: the
+	// loop's own tick, with `pruneDue` deciding that six hours of them have passed. A systemd `.timer`
+	// is not available to be the alternative — the only one this system ever had is disabled and deleted
+	// on every converge (`machine.ts`), with tests pinning that.
+	//
+	// AFTER THE STOPS AND STARTS, so a placement never waits on reclaiming disk, and only on a turn that
+	// HAS an assignment — which is what `run` already guarantees by calling this function at all. A
+	// Warden that cannot name what is placed here must not remove images; `pruneDue` states the same
+	// rule a second time, where a test can hold it.
+	w.pruneImages(ctx, desired)
 }
 
 // halvesOf names which half survived, for the log line that says why a Worker is being stopped.
@@ -572,7 +589,12 @@ func (w *warden) start(spec Spec) {
 		// of those is a fact about one Worker, and a Warden that returned on any of them would take
 		// every OTHER Worker on the Machine down with it.
 		w.logf("could not start %s: %v", id, err)
+		return
 	}
+	// `start` IS THE PULL, SO `start` IS WHERE THE IMAGE GETS ITS NAME. Both image drivers let `run`
+	// fetch what the Machine does not hold, so there is no separate pull verb to hang this on — and an
+	// image with no kontra name is one the prune will never remove (warden_images.go).
+	w.labelImage(spec)
 }
 
 // wellFormed refuses an assignment entry that would not survive contact with a driver.
@@ -1068,6 +1090,11 @@ func newServeWarden(id *wardenIdentity, drv workerDriver, interval time.Duration
 	if drv.driverName() == "podman" {
 		w.egress = newMachineEgress(id.Record, cliio.Stdout)
 	}
+	// THE IMAGE PRUNE IS SET HERE FOR THE REASON THIS CONSTRUCTOR EXISTS. It is nil for a driver with no
+	// image store, which is the `process` driver and every hand-built Warden in this package's tests; a
+	// `wardenServe` that forgot the field would leave every Machine in a Fleet growing its image store
+	// without limit while the whole suite stayed green. See warden_images.go.
+	w.prune = newImagePrune(drv)
 	return w
 }
 
@@ -1242,24 +1269,64 @@ func wardenStatus(args []string) error {
 		fmt.Fprintf(cliio.Stdout, "\nworkers    unknown: %v\n", err)
 		return nil
 	}
+	// THE IMAGE BLOCK IS REACHED WHATEVER THE WORKERS SAY. A Machine with no Workers is exactly the
+	// Machine whose store is worth reading — nothing is placed, so everything named is a candidate — and
+	// a Machine whose runtime will not answer `list` still has a store that can be enumerated. Only the
+	// driver failing to exist takes the block away, because then there is no engine to ask.
 	hs, err := drv.list(context.Background())
-	if err != nil {
+	switch {
+	case err != nil:
 		fmt.Fprintf(cliio.Stdout, "\nworkers    unknown: %v\n", err)
-		return nil
-	}
-	if len(hs) == 0 {
+	case len(hs) == 0:
 		fmt.Fprintf(cliio.Stdout, "\nworkers    none (%s)\n", drv.driverName())
-		return nil
-	}
-	fmt.Fprintf(cliio.Stdout, "\nworkers    (%s)\n", drv.driverName())
-	for _, h := range hs {
-		health := "whole"
-		if !h.whole() {
-			health = halvesOf(h) + " only"
+	default:
+		fmt.Fprintf(cliio.Stdout, "\nworkers    (%s)\n", drv.driverName())
+		for _, h := range hs {
+			health := "whole"
+			if !h.whole() {
+				health = halvesOf(h) + " only"
+			}
+			fmt.Fprintf(cliio.Stdout, "  %-32s %s\n", h.id(), health)
 		}
-		fmt.Fprintf(cliio.Stdout, "  %-32s %s\n", h.id(), health)
 	}
+	printImageStatus(drv, id)
 	return nil
+}
+
+// printImageStatus is §12's `{images, bytes}` and the next prune's plan, and it is the ONE surface a
+// Warden reports them on — see warden_images.go:imageStatus for why there is no outbound channel that
+// could carry them instead.
+//
+// THE ASSIGNMENT IS FETCHED, because the plan is not computable without knowing what is placed here. It
+// is the same inbound-only `GET /warden/assignment` the loop makes, and a failure is reported as the
+// reason the plan is empty rather than as an empty plan — a status that listed images as removable
+// because it could not find out they were placed is the one way a diagnostic here could cost a Fleet
+// its Workers.
+//
+// ONE INTERVAL IS THE WHOLE PATIENCE. `status` is what an operator runs on a Machine that is not doing
+// what they expect, which includes a Machine whose Controller is gone; a diagnostic that hung there
+// would be worst exactly when it is most wanted. The loop asks the same question every five seconds, so
+// five seconds is already as long as the answer is ever worth waiting for.
+func printImageStatus(drv workerDriver, id *wardenIdentity) {
+	ask, cancelAsk := context.WithTimeout(context.Background(), wardenInterval)
+	defer cancelAsk()
+	var desired []Spec
+	told := false
+	if id.Record.Controller != "" {
+		if got, err := (&warden{id: id, http: id.client()}).assignment(ask); err == nil {
+			desired, told = got, true
+		}
+	}
+
+	// THE ENGINE GETS ITS OWN BUDGET, because reading a store of several hundred images is slow on a
+	// Machine that has never been pruned — which is precisely the Machine somebody is running this on.
+	ctx, cancel := context.WithTimeout(context.Background(), pruneTimeout)
+	defer cancel()
+	lines := imageStatus(ctx, drv, desired, told)
+	fmt.Fprintf(cliio.Stdout, "\nimages     %s\n", lines[0])
+	for _, l := range lines[1:] {
+		fmt.Fprintf(cliio.Stdout, "           %s\n", l)
+	}
 }
 
 // --- the Controller's side ----------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"strconv"
 	"testing"
 
 	"github.com/medmahmoudi26/kontra/sdk/go/core"
@@ -168,10 +169,17 @@ func TestDescriptorMatchesCrossSDKFixture(t *testing.T) {
 	fx := readCatalogFixture(t)
 	want := fx.Expect
 
-	// The two facts the descriptor reports about the PROCESS rather than about the actor: the
-	// image it is running and the directory it loaded from. Both are pinned to what the fixture
-	// says, because under `go test` the binary lives in a temp dir named differently every run.
+	// The facts the descriptor reports about the PROCESS rather than about the actor: the image it is
+	// running, the directory it loaded from, and what that image was BUILT on. All pinned to what the
+	// fixture says, because under `go test` the binary lives in a temp dir named differently every
+	// run — and because the build facts are not discoverable from inside a process at all, which is
+	// exactly why they arrive as environment.
 	t.Setenv("KONTRA_ACTOR_DIGEST", want["digest"].(string))
+	rt := want["runtime"].(map[string]any)
+	t.Setenv("KONTRA_RUNTIME_NAME", rt["name"].(string))
+	t.Setenv("KONTRA_RUNTIME_MAJOR", strconv.FormatFloat(rt["major"].(float64), 'f', -1, 64))
+	t.Setenv("KONTRA_RUNTIME_DIGEST", rt["digest"].(string))
+	t.Setenv("KONTRA_BUILDER_DIGEST", want["builderDigest"].(string))
 	restore := actorSource
 	actorSource = func() string { return want["source"].(string) }
 	defer func() { actorSource = restore }()

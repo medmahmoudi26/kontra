@@ -2,6 +2,13 @@
 
 ## Status
 
+**Superseded by 0063, 2026-10-08.** The appliance is deleted: `cli/appliance/` and every command
+that only served it are gone, and the compose install (**0047**) plus the host Pulumi engine
+(**0052**) are the only control plane. The decisions below are kept as the record of what was tried
+and why — several of them outlived the packaging and are cited by live code, notably §1b (the
+DuckLake catalog is a file under the install's data directory) and §4 (a workflow type absent from a
+bundle HANGS rather than failing, so it is registered as a refusal).
+
 **Accepted, 2026-08-25.** Records the nine decisions locked in `.scratch/appliance/PRD.md` before
 slicing, with their reasons and their costs, so that every slice after this one cites a decision
 instead of re-deriving it.

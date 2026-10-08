@@ -1,4 +1,4 @@
-# Console bytes come from the appliance image (`make image` writes kontra-spa.tar.gz).
+# Console bytes come from the `kontra` image (`make image` writes bundles/kontra-spa.tar.gz).
 ARG SPA_IMAGE=kontra:latest
 FROM ${SPA_IMAGE} AS spa-src
 
@@ -74,7 +74,7 @@ ENV NODE_ENV=production
 COPY control/images/orchestrator-entrypoint.sh /usr/local/bin/orchestrator-entrypoint
 RUN chmod +x /usr/local/bin/orchestrator-entrypoint
 
-# CI's `--no-spa` appliance has no archive; GET / then 404s and /api still works.
+# A `kontra` image built with no console has no archive; GET / then 404s and /api still works.
 COPY --from=spa-src /var/lib/kontra/bundles /tmp/kontra-bundles
 RUN mkdir -p web/dist \
  && if [ -f /tmp/kontra-bundles/kontra-spa.tar.gz ]; then \
@@ -84,7 +84,7 @@ RUN mkdir -p web/dist \
     fi \
  && rm -rf /tmp/kontra-bundles /tmp/web /tmp/manifest.json
 
-# ── WHAT `serve` RUNS, TAKEN FROM THE APPLIANCE IMAGE RATHER THAN REBUILT ───────────────────────
+# ── WHAT `serve` RUNS, TAKEN FROM THE `kontra` IMAGE RATHER THAN REBUILT ────────────────────────
 #
 # `serveWorkflow` (control/orchestrator/src/workflowControl.ts) shells out to the CLI instead of
 # reimplementing it, and `createWorkspace` (workspaces.ts) seeds from /opt/kontra/seed. Neither
@@ -102,6 +102,13 @@ RUN mkdir -p web/dist \
 # `/usr/local/lib/python3.11/dist-packages` mean the same thing in both. The RUN below is the check
 # that says so AT BUILD TIME rather than on the operator's first click.
 COPY --from=spa-src /usr/local/bin/kontra /usr/local/bin/kontra
+# `pack` COMES WITH IT, BECAUSE THE INFRA ROLE IS WHAT RUNS `kontra deploy`.
+# `src/activities/buildActor.ts` spawns it here — this is the only role holding the Docker socket —
+# and `kontra deploy` is `pack` now (ADR 0061). Without this the console's build path fails with
+# `no pack binary`, which reads as a missing dependency on the operator's machine rather than a
+# missing layer in this image. Taken from `spa-src` and not re-downloaded, so the two images cannot
+# disagree about which lifecycle built an actor.
+COPY --from=spa-src /usr/local/bin/pack /usr/local/bin/pack
 # THE CLI'S OTHER HALF. `serveWorkflow` spawns `kontra` in THIS container, and a workflow that
 # reaches a dataset verb shells out to `duckdb` (cli/runs.go:duckdbBin) — so shipping the CLI
 # without it is shipping a binary that fails on a subset of its own commands. Copied rather than
@@ -111,9 +118,15 @@ COPY --from=spa-src /usr/local/bin/duckdb /usr/local/bin/duckdb
 COPY --from=spa-src /opt/kontra /opt/kontra
 COPY --from=spa-src /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
 ENV KONTRA_SDK_ROOT=/opt/kontra
+# THIS IMAGE BUILDS ACTORS TOO — `src/activities/buildActor.ts` spawns `kontra deploy` — so it needs
+# everything that stages into an actor image, not only what it runs itself. The handler and BOTH
+# Python trees: the SDK's pyproject maps `internals = "../../runtime/python/internals"`, so one
+# without the other produces an image whose `import kontra` fails at load() on a Machine.
 RUN kontra --version \
  && python3 -c 'import temporalio, redis, boto3, pydantic' \
  && test -f /opt/kontra/seed/workflows/hello/workflow.py \
- && test -d /opt/kontra/sdk/python/kontra
+ && test -d /opt/kontra/sdk/python/kontra \
+ && test -d /opt/kontra/runtime/python/internals \
+ && test -x /opt/kontra/handler
 
 ENTRYPOINT ["/usr/local/bin/orchestrator-entrypoint"]

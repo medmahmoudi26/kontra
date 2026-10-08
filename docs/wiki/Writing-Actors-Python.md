@@ -1,6 +1,11 @@
 # Writing Actors — Python
 
-An actor is a directory with two files. **`actor.json`** names it and states what it needs (the `name` **must equal the directory name**):
+An actor is a directory. **Two files are the actor** — `actor.py` and `actor.json` — and **four more
+will tell the buildpack builder how to build it**: `pyproject.toml`, `uv.lock`, `.python-version` and
+`Procfile`. The [layout](#the-actor-directory-and-where-dependencies-go) at the bottom of this page is
+that target shape, and the shipped `kontra deploy` reads none of those four yet. Start with the two.
+
+**`actor.json`** names it and states what it needs (the `name` **must equal the directory name**):
 
 ```json
 { "schemaVersion": "kontra.actor.v1", "name": "echo", "version": "0.1.0" }
@@ -266,16 +271,90 @@ class Crawler:
 
 Rule of thumb: knobs belong in `params` / the input schema — actors run **zero AI mid-execution**; AI/human-in-the-loop tuning happens *between* runs at the orchestrator.
 
-## Dependencies & images
+## The actor directory, and where dependencies go
 
-- Pure Python → nothing to do; the actor host image is `FROM kontra-host:1` + a COPY of your directory.
-- Native deps → add a `Dockerfile` with **deps only** (no ENTRYPOINT — the image runs `python3 /actor/<name>/actor.py`):
-
-```dockerfile
-FROM kontra-host:1
-COPY . /actor/myactor/
-RUN pip install some-dependency
 ```
+actor.py            your code
+actor.json          identity, and the runtime it needs
+pyproject.toml      dependencies — including kontra-sdk==<pinned>
+uv.lock             what those resolved to. This file is why a code change is cheap
+.python-version     the interpreter. REQUIRED — see below
+Procfile            worker: python actor.py
+```
+
+**Dependencies are declared only through `pyproject.toml` + `uv.lock`** (or `requirements.txt`). The
+builder's Python buildpack understands them, puts them in their own layer, and **reuses that layer
+whenever the lockfile is unchanged** — which is where the whole saving comes from. Measured: a one-line
+change to `actor.py` against an unchanged lockfile adds **0.133 MiB** of new blobs and logs
+`Reusing layer 'heroku/python:venv'`, where the old path reinstalled every dependency including
+Chromium.
+
+> [!IMPORTANT]
+> **`.python-version` is not optional**, and the error if it is missing does not say so usefully.
+> Heroku's Python buildpack refuses a uv project without it: *"When using the package manager uv on
+> Heroku, you must specify your app's Python version with a .python-version file."* Measured — the
+> build failed with exit status 51, and succeeded once the file existed. One line is the whole file:
+>
+> ```
+> 3.12
+> ```
+>
+> Which versions are available comes from the pinned builder, not from kontra.
+
+**`Procfile`** names the process to start. A Python actor is run by Python — the same run-by-language
+boundary as before — so the line is `worker: python actor.py`.
+
+**`actor.json`'s `runtime` field** picks the OS and the system packages: `python:1` by default,
+`python-browser:1` for a headless browser. System packages are chosen there, never installed per actor.
+See [[Runtimes]].
+
+### `deploy.sh` is not run any more
+
+A buildpack build **does not run `deploy.sh`**, so an actor that depended on it would build clean and
+be missing whatever the script installed — a failure at run time, in a container, far from the change
+that caused it. So the author is told at build time: a warning, and a refusal under
+`KONTRA_DEPLOY_SH=refuse` (`cli/packbuild.go`).
+
+Migrating one is a split, and the two halves go to different places:
+
+| what the script did | where it goes now |
+|---|---|
+| `apt-get install` of system libraries, fonts, a browser | a **runtime** that `provides` them |
+| `pip install` of a library | `requirements.txt`, or a `pyproject.toml` you resolve yourself |
+| fetching a binary the actor shells out to | a runtime, for the same reason as apt |
+
+[[Runtimes]] walks through `webcrawl`'s script, which is all three at once.
+
+An author's own `Dockerfile` beside `actor.py` is **no longer an escape hatch** — nothing reads it.
+Native dependencies are a runtime now, and a runtime is a directory in `kontra-runtimes`, which is
+the point: one image provides them for every actor on it instead of each actor installing its own.
+
+### What `kontra deploy` adds to your directory, and why it is a copy
+
+Your directory is what you publish, so **nothing is written into it**. `kontra deploy` stages a copy
+(`cli/packstage.go`) and adds what the image needs and the actor does not carry:
+
+| added to the staged copy | why |
+|---|---|
+| `requirements.txt` | so heroku/python participates in detection. If you ship one it is **extended**, never replaced; a `pyproject.toml` is refused with the line to add, because your resolver would ignore an appended pip requirement |
+| `Procfile` | the process definition, which is the only place a runtime variable can be baked — `pack build --env` is build-time only and a CNB image has no `ENTRYPOINT` to set |
+| `.python-version` | pinned, so two builds of one commit get the same interpreter |
+| the SDK, vendored | `vendor/sdk/python` + `vendor/runtime/python`, installed **by path**. Never by name: `kontra-sdk` is on no index, and `kontra` on PyPI is an unrelated project |
+| `kontra-handler` + `worker-entrypoint.sh` | the workflow half and the supervisor that runs both halves. An image without the handler polls the sessions queue, answers no workflow task, and looks healthy — so a missing one is a refusal |
+
+So a pure-Python actor needs `actor.json` and `actor.py` and nothing else, which is what the shipped
+`hello` is. Add a `requirements.txt` when you have a dependency of your own.
+
+Two consequences of the lifecycle doing the build, worth knowing when you read a container:
+
+- **The app lands at `/workspace`**, not `/actor/<name>/`. The supervisor takes `KONTRA_ACTOR_ROOT`
+  and `KONTRA_HANDLER_BIN` for exactly this reason, both defaulting to the old absolute paths so an
+  image built before the switch keeps working.
+- **The identity rides in the Procfile** — `KONTRA_ACTOR_NAME`, `_VERSION`, `_ENGINE`, `_KIND`,
+  `_ENTRY` — rather than in `ENV` layers. The Warden still sets `KONTRA_ACTOR_NAME` and `_VERSION`
+  from the **assignment** it was given, `KONTRA_NAMESPACE` from the Machine's own certificate and
+  `KONTRA_ACTOR_DIGEST` from the pull; nothing sets the other three at container start, which is why
+  they have to come from the image.
 
 ## When the work is a function
 

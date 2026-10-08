@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# parity-gate.sh — does the binary replace compose for LOCAL DEVELOPMENT? Run it and find out.
+# parity-gate.sh — does the LOCAL DEVELOPMENT PATH work end to end on the compose install?
 #
-# ADR 0031 §5 locks two conditions, and says the second one carries the weight:
+# Two conditions, and the second one carries the weight:
 #
-#   1. an actor's own suite green against the binary
-#   2. the local actor path end to end — deploy → scale → dispatch → a Dataset that queries
+#   1. an actor's own suite green against the control plane
+#   2. the local actor path end to end — deploy → serve → dispatch → a Dataset that queries
 #
-# It also says why condition 1 is not, by itself, evidence of anything: an actor's suite runs
-# in-process against `actorkit.testing` stubs and passes on a bare runner with no control plane,
-# so IT WOULD GO GREEN AGAINST A BINARY THAT NEVER STARTED. This script runs it
-# BOTH ways on one commit — once with no control plane (the SDK-side contract, exactly as CI has
-# always run it) and once with `KONTRA_ADDRESS` pointing at the appliance, which turns the suite's
-# `e2e`-marked tests on. Two runs of one suite is the comparison the ADR asks for; see the
-# `## What this does NOT compare` note at the bottom for the leg that no longer exists.
+# Condition 1 is not, by itself, evidence of anything: an actor's suite runs in-process against
+# `actorkit.testing` stubs and passes on a bare runner with no control plane at all, so IT WOULD GO
+# GREEN AGAINST A CONTROL PLANE THAT NEVER STARTED. This script runs it BOTH ways on one commit —
+# once with every control-plane variable unset, and once with `KONTRA_ADDRESS` pointing at the
+# stack, which turns the suite's `e2e`-marked tests on. Two runs of one suite is the comparison.
 #
 # ── WHAT IT ASSERTS, AND WHY IT IS NOT "THE RUN SAID COMPLETED" ──────────────────────────────
 #
@@ -29,33 +27,53 @@
 # empty" proves nothing unless the same path can be shown to fill it, which is what the `echo`
 # leg does two calls earlier.
 #
-# ── ISOLATION, WHICH IS STRUCTURAL AND NOT A NAMING CONVENTION ───────────────────────────────
+# ── ISOLATION, WHICH IS STRUCTURAL WHERE IT CAN BE AND REFUSED WHERE IT CANNOT ───────────────
 #
 # On 2026-08-26 an agent satisfying a "complete a run" criterion ran a workflow against the live
 # stack with three isolated QUEUE NAMES. One module pinned a queue constant, the isolation did not
 # hold, and the run deleted 223,378 rows of run data
-# (docs/incidents/2026-08-26-sweep-deleted-run-data.md).
+# (docs/incidents/2026-08-26-sweep-deleted-run-data.md). Names are not isolation.
 #
-# Names are not isolation. This script's isolation is that the appliance it starts OWNS ITS OWN
-# EVERYTHING: its own data directory (a fresh mktemp -d), its own embedded Temporal and its
-# database, its own object store, its own catalog and ledger, its own KV, its own registry. There
-# is no shared server for a stray constant to reach. On top of that, every port is chosen outside
-# the defaults and PROVEN FREE before anything binds — so a collision refuses to start rather than
-# quietly joining something that is already running — and `--data-dir` is exported as
-# KONTRA_DATA_DIR, which is the same variable `kontra deploy`, `kontra serve` and the orchestrator
-# child all resolve, so the whole command set points at this instance by construction.
+# THREE OF THE FOUR AXES ARE STRUCTURAL HERE. A unique COMPOSE PROJECT gives this gate its own
+# containers and its own volumes — every volume in docker-compose.yml is declared unnamed, so
+# compose prefixes each with the project. Its install directory and workspaces directory are fresh
+# `mktemp -d`s. Every published port is chosen outside the defaults and PROVEN FREE before compose
+# is invoked, so a collision refuses to start rather than quietly joining something already there.
 #
-# It never runs `sweepDatasetsWorkflow`, and it stops, restarts and removes exactly the containers
-# it created, found by the label it created them with.
+# THE FOURTH AXIS CANNOT BE ISOLATED AND IS THEREFORE REFUSED. `docker-compose.yml:1227-1229`
+# declares `networks: default: name: kontra` — a FIXED name, so `-p` does not scope it and two
+# projects would share one network. That is deliberate in the compose file (a worker container
+# started by `kontra serve --mode docker` attaches to `kontra` by name), and it means this gate
+# must not run beside a live stack. So it asks first: if anything is already attached to the
+# `kontra` network, it exits 2 and says so, rather than starting a second control plane into it.
+#
+# ── WHERE THE COMMANDS RUN, WHICH IS THE WHOLE DIFFERENCE FROM THE OLD GATE ──────────────────
+#
+# Inside the `cli` container, through `docker compose exec -T cli`. That is how the documented
+# install is driven and how `.github/workflows/ci.yml`'s "the local docker install" job drives it,
+# and it removes a class of failure the previous gate spent a hundred lines on: a CLI on the host
+# had to reach a control plane a worker CONTAINER could also reach, which meant binding the docker
+# bridge gateway, probing whether the host firewall dropped container→gateway packets, and falling
+# back to `--network host` when it did. From inside the network there is one set of addresses —
+# compose DNS — and `tests/parity/{actor,workflow}` resolve at the SAME paths in the container as
+# out of it, because the compose file mounts the repo read-only at its own path.
+#
+# It never runs `sweepDatasetsWorkflow`, and it removes exactly the containers it created.
+#
+# ── THE IMAGES ARE AN INPUT, NOT SOMETHING THIS SCRIPT BUILDS ────────────────────────────────
+#
+# Building them here would put a ten-minute `docker build` inside a gate, and the thing under test
+# is the images built from THIS commit — which CI builds in the same job and `make image` builds
+# locally. So the gate REFUSES when they are missing, naming them, rather than pulling `:dev` from
+# ghcr and silently gating last week's release.
 #
 # ── USAGE ────────────────────────────────────────────────────────────────────────────────────
 #
 #   scripts/parity-gate.sh                 # the whole gate
-#   scripts/parity-gate.sh --keep          # leave the appliance up afterwards, to poke at it
-#   KONTRA_GATE_PORT_BASE=41000 …          # move every port at once
+#   scripts/parity-gate.sh --keep          # leave the stack up afterwards, to poke at it
+#   KONTRA_GATE_PORT_BASE=41000 …          # move every published port at once
 #   KONTRA_GATE_UNITS=24 …                 # a wider Batch
-#   KONTRA_GATE_WORKER_NETWORK=host …      # force the worker network; the gate otherwise probes
-#                                          #   the bridge and only falls back when it is blocked
+#   KONTRA_IMAGE=… KONTRA_ORCHESTRATOR_IMAGE=… …   # name the images under test
 #
 # Exit 0 means the gate passes. Anything else prints which condition failed and what it measured.
 
@@ -69,24 +87,54 @@ KEEP=0
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=1 ;;
-    -h|--help) sed -n '2,60p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,80p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
 
 UNITS="${KONTRA_GATE_UNITS:-12}"
 REPLICAS="${KONTRA_GATE_REPLICAS:-2}"
-ACTOR_DIR="tests/parity/actor"
 ACTOR_NAME="paritygate"
 ACTOR_VERSION="0.1.0"
-WORKFLOW_DIR="tests/parity/workflow"
 
-GATE_RUN="parity-$(date +%s)-$$"
 GATE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/kontra-parity-XXXXXX")"
-DATA_DIR="$GATE_TMP/data"
-KONTRA_HOME_DIR="$GATE_TMP/home"
+INSTALL_DIR="$GATE_TMP/install"
+# INSIDE THE INSTALL DIRECTORY, WHICH IS WHAT MAKES IT AN INSTALL. `assert-install-is-self-contained`
+# allows a `workspaces/` mount only when it is compose's own default — a directory the install
+# CREATED, under the install — and refuses a host path from anywhere else. A workspaces dir beside
+# the install is the shape of a clone, which is the thing that check exists to stop this becoming.
+WORKSPACES="$INSTALL_DIR/workspaces"
 LOGS="$GATE_TMP/logs"
-mkdir -p "$DATA_DIR" "$KONTRA_HOME_DIR" "$LOGS"
+mkdir -p "$INSTALL_DIR" "$WORKSPACES" "$LOGS"
+
+# THE FIXTURES LIVE IN THE WORKSPACE, WHERE AN OPERATOR'S CODE LIVES. The repo is NOT mounted into
+# the `cli` container: `docker-compose.yml` mounts `${KONTRA_REPO:-${PWD}}` read-only, and `${PWD}`
+# is the install directory because `dc` runs from there — so the container sees the install, not the
+# checkout. Copying is therefore not a convenience, it is the only way these are visible at all, and
+# it is also what a user does.
+ACTOR_DIR="$WORKSPACES/parity/actors/paritygate"
+WORKFLOW_DIR="$WORKSPACES/parity/workflows/paritygate"
+mkdir -p "$(dirname "$ACTOR_DIR")" "$(dirname "$WORKFLOW_DIR")"
+cp -a "$REPO/tests/parity/actor/." "$ACTOR_DIR/"
+cp -a "$REPO/tests/parity/workflow/." "$WORKFLOW_DIR/"
+# AND THE FIXTURE ACTOR, FOR THE SAME REASON — which this script got wrong. Step 4 served it as
+# `kontra serve --actor testdata/fixtureactor`, a REPO-relative path, inside a container whose
+# working directory is the INSTALL and which has no repo mount: `error: open
+# testdata/fixtureactor/actor.json: no such file or directory`, and then an e2e leg with nothing to
+# dispatch to. The header above says it in as many words — copying is the only way these are
+# visible at all.
+# DOT-PREFIXED, SO THE WATCHER DOES NOT DEPLOY IT. `kontra workspace watch` is the `cli` service's
+# main process and it deploys every actor directory under a workspace; this one is served in LOCAL
+# mode on purpose (step 4's header says why), so a buildpack build of it would be three minutes of
+# work nothing asks for — and a second deploy racing step 3's. `workspace watch` and `workspace
+# list` both skip a leading dot, which is the same property the staged build context relies on.
+FIXTURE_DIR="$WORKSPACES/.fixtures/fixtureactor"
+mkdir -p "$FIXTURE_DIR"
+cp -a "$REPO/testdata/fixtureactor/." "$FIXTURE_DIR/"
+
+# THE PROJECT NAME IS THE ISOLATION, so it carries the pid and a timestamp rather than being a
+# constant somebody could run twice. Lower-case and dash-only: compose rejects anything else.
+PROJECT="kontra-parity-$$-$(date +%s)"
 
 FAILURES=()
 # REACHED_END IS THE HALF A FAILURE LIST CANNOT COVER, and it is here because this script got it
@@ -98,6 +146,7 @@ REACHED_END=0
 # The trap is armed for EXIT and for INT/TERM, so it fires twice on a Ctrl-C — which tore down
 # twice and printed the verdict twice. Once.
 CLEANED=0
+COMPOSE_UP=0
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
@@ -116,33 +165,7 @@ check() {
   fi
 }
 
-# wait_for_pollers <queue> <attempts> <logfile> — is anything actually POLLING that queue?
-#
-# A CONTAINER THAT IS UP IS NOT A WORKER THAT IS POLLING, and the difference is most of the point
-# of this gate. `docker ps` shows a healthy container for one pointed at a control plane that does
-# not exist; only Temporal knows whether anybody is listening.
-#
-# IT READS THE WHOLE ROW, NOT A COLUMN, and that is a correction rather than a preference. The
-# first version took awk's `$4` and compared it against the string `(none)`; what the table
-# actually prints is `(none — registered but no live worker)`, so `$4` is `(none` — which is not
-# equal to `(none)`, so the loop broke on its first pass and reported a live worker that was not
-# there. A gate printing a false green about the exact thing it exists to check.
-POLLERS_ROW=""
-wait_for_pollers() {
-  local queue="$1" attempts="$2" logfile="$3" row=""
-  for _ in $(seq 1 "$attempts"); do
-    "$KONTRA" workers list >"$logfile" 2>&1
-    row=$(grep -E "[[:space:]]${queue}[[:space:]]" "$logfile" | head -1)
-    case "$row" in
-      "" | *"(none"* | *"temporal error"*) sleep 2 ;;
-      *) POLLERS_ROW="$row"; return 0 ;;
-    esac
-  done
-  POLLERS_ROW="$row"
-  return 1
-}
-
-# ── THE PORTS. All non-default, all proven free before anything binds ────────────────────────
+# ── THE PORTS. All non-default, all proven free before compose binds anything ────────────────
 #
 # THE DEFAULTS ARE THE LIVE STACK'S and are refused by name below, not merely avoided by choosing
 # other numbers — a base that happened to land on one would otherwise make this script the thing
@@ -151,25 +174,34 @@ BASE="${KONTRA_GATE_PORT_BASE:-39100}"
 P_TEMPORAL=$((BASE + 1))
 P_S3=$((BASE + 2))
 P_KV=$((BASE + 3))
-P_CODEC=$((BASE + 4))
-P_REGISTRY=$((BASE + 5))
 P_API=$((BASE + 6))
-P_METRICS=$((BASE + 7))
+P_POSTGRES=$((BASE + 8))
+
+# THE REGISTRY IS THE ONE PORT THAT CANNOT MOVE, and that is a property of image references rather
+# than an omission here. An actor image reference is resolved by TWO different things that must
+# agree on the string: the `cli` container (which reads manifests over the compose network) and the
+# HOST's Docker daemon, which `pack` drives through the mounted socket and which is what pulls the
+# run image. Shifting the published port to 39105 moved the host's half only — `KONTRA_REGISTRY`
+# stayed `127.0.0.1:5000` — and the gate failed with
+#
+#   invalid run-image '127.0.0.1:5000/kontra-runtimes/python:1@sha256:712b8d2e…':
+#   Error response from daemon: Get "http://127.0.0.1:5000/v2/": dial tcp: connection refused
+#
+# Moving `KONTRA_REGISTRY` to match would break the other half instead: `registryProbeBases`'s
+# in-network fallback is `registry:<that port>`, and zot listens on 5000 inside the network whatever
+# the host publishes. So the registry keeps the default, and the isolation this gate relies on is
+# the `kontra`-network refusal above — which already means no second install is running.
+P_REGISTRY=5000
 
 # The numbers a kontra installation uses when nobody says otherwise. Reaching any of them means
 # this script is about to talk to something it did not start.
 DEFAULT_PORTS=(7233 8233 8333 8088 8090 6379 5000 18234 9333 8888 8085 5432 55432)
 
-# port_free / has_address — two questions asked WITHOUT A PIPE, and that is not a style choice.
+# port_free — asked WITHOUT A PIPE, and that is not a style choice.
 #
 # `set -o pipefail` at the top of this file plus `cmd | grep -q pattern` is a race, and it bit
 # here: `grep -q` exits the instant it matches, the writer gets SIGPIPE, and pipefail makes the
-# PIPELINE fail even though the match succeeded. `ip -o addr show | grep -q " inet 172.17.0.1/"`
-# therefore reported "not an address on this machine" — intermittently, and more often the more
-# interfaces the box had, because a longer write is likelier to still be in flight. Docker creates
-# a veth per container, so the gate got less reliable exactly as it started doing its job.
-#
-# Capture first, test the string second. There is nothing to signal.
+# PIPELINE fail even though the match succeeded. Capture first, test the string second.
 port_free() {
   # A listener on 0.0.0.0 and one on 127.0.0.1 both take the port from us, and the difference does
   # not matter to a bind that is about to fail — so this asks about the port over any address.
@@ -178,24 +210,61 @@ port_free() {
   [ -z "$listeners" ]
 }
 
-has_address() {
-  local addrs
-  addrs=$(ip -o addr show 2>/dev/null)
-  case "$addrs" in *" inet $1/"*) return 0 ;; *) return 1 ;; esac
-}
+# ── THE IMAGES UNDER TEST ────────────────────────────────────────────────────────────────────
+#
+# `:ci` rather than `:dev`, because `:dev` is what ghcr serves and `pull_policy: never` below is
+# what stops compose fetching it. A gate that pulled would be gating a published release.
+export KONTRA_IMAGE="${KONTRA_IMAGE:-kontra:ci}"
+export KONTRA_ORCHESTRATOR_IMAGE="${KONTRA_ORCHESTRATOR_IMAGE:-kontra-orchestrator:ci}"
+export KONTRA_LOGSHIP_IMAGE="${KONTRA_LOGSHIP_IMAGE:-kontra-logship:ci}"
+export KONTRA_PORTER_IMAGE="${KONTRA_PORTER_IMAGE:-kontra-porter:ci}"
+export KONTRA_PULL_POLICY=never
 
 say "0 · isolation"
-info "data dir      $DATA_DIR"
-info "KONTRA_HOME   $KONTRA_HOME_DIR"
-info "ports         temporal=$P_TEMPORAL s3=$P_S3 kv=$P_KV codec=$P_CODEC registry=$P_REGISTRY api=$P_API"
+info "project       $PROJECT"
+info "install dir   $INSTALL_DIR"
+info "workspaces    $WORKSPACES"
+info "ports         temporal=$P_TEMPORAL s3=$P_S3 kv=$P_KV registry=$P_REGISTRY api=$P_API postgres=$P_POSTGRES"
 
-for p in "$P_TEMPORAL" "$P_S3" "$P_KV" "$P_CODEC" "$P_REGISTRY" "$P_API" "$P_METRICS"; do
-  for d in "${DEFAULT_PORTS[@]}"; do
-    if [ "$p" = "$d" ]; then
-      echo "REFUSING: port $p is a kontra default. Move KONTRA_GATE_PORT_BASE." >&2
-      exit 2
-    fi
-  done
+# NOTHING MAY ALREADY BE ON THE `kontra` NETWORK. See the header: the network name is fixed by the
+# compose file, so this is the one axis `-p` cannot scope, and joining a live stack is the
+# incident. Asked of docker rather than assumed from a pid file.
+# ABSENT IS NOT "UNKNOWN", AND THE DIFFERENCE IS THE WHOLE CHECK. `docker network inspect` EXITS
+# NON-ZERO on a network that does not exist — which is the normal state on a fresh runner, the one
+# machine this gate is meant to run on. `… || echo 0` did not save it: the failing command still
+# wrote a newline to stdout, so the substitution captured "\n0", which is not the string "0", and
+# the gate refused to start because ZERO containers were attached. Measured in CI:
+#     REFUSING: \n0 container(s) are already attached to the `kontra` network
+#     Error response from daemon: network kontra not found
+# Existence is therefore asked FIRST, as its own question, and the count is only read when there is
+# something to count — and then stripped to digits so no stray whitespace can make it a non-number.
+if docker network inspect kontra >/dev/null 2>&1; then
+  ATTACHED=$(docker network inspect kontra --format '{{ len .Containers }}' 2>/dev/null | tr -dc '0-9')
+  ATTACHED=${ATTACHED:-0}
+else
+  ATTACHED=0
+fi
+if [ "$ATTACHED" != "0" ]; then
+  echo "REFUSING: $ATTACHED container(s) are already attached to the \`kontra\` network, so" >&2
+  echo "  something is running there and this gate will not start a second control plane into" >&2
+  echo "  it. docker-compose.yml fixes the network name, so a compose project cannot scope it." >&2
+  docker network inspect kontra --format '{{ range .Containers }}  {{ .Name }}{{ "\n" }}{{ end }}' >&2
+  echo "  Stop it first:  docker compose down" >&2
+  exit 2
+fi
+ok "nothing is attached to the \`kontra\` network"
+
+for p in "$P_TEMPORAL" "$P_S3" "$P_KV" "$P_REGISTRY" "$P_API" "$P_POSTGRES"; do
+  # The registry is EXEMPT from the default-port refusal and from nothing else: it has to be 5000
+  # (see above) and it still has to be free, which is the check that actually protects a live stack.
+  if [ "$p" != "$P_REGISTRY" ]; then
+    for d in "${DEFAULT_PORTS[@]}"; do
+      if [ "$p" = "$d" ]; then
+        echo "REFUSING: port $p is a kontra default. Move KONTRA_GATE_PORT_BASE." >&2
+        exit 2
+      fi
+    done
+  fi
   if ! port_free "$p"; then
     echo "REFUSING: port $p is already bound. Something is listening there and this gate will not" >&2
     echo "  join it. Move KONTRA_GATE_PORT_BASE to a free block." >&2
@@ -205,128 +274,127 @@ for p in "$P_TEMPORAL" "$P_S3" "$P_KV" "$P_CODEC" "$P_REGISTRY" "$P_API" "$P_MET
 done
 ok "every port is free and none is a kontra default"
 
-# THE BIND ADDRESS. Loopback is the appliance's default and is right for every surface an operator
-# touches (ADR 0031 §3) — and it is wrong for exactly one customer, which is the one this gate
-# needs: an actor Worker is a CONTAINER (ADR 0031 §2), and a container's loopback is its own. So
-# the gate binds the docker bridge gateway, which is reachable from this box and from containers
-# on it and from nowhere else. `kontra serve --mode docker` refuses a loopback-bound appliance by
-# name rather than starting workers that poll nothing, so this is not a detail the gate may skip.
-#
-# ASKED OF DOCKER, NOT HARD-CODED. `172.17.0.1` is the usual answer and it is not the only one: a
-# daemon configured with `bip`, a second bridge, or a CI runner with a different default all move
-# it, and a gate that assumed the number would refuse to start on a machine where everything is
-# fine. The daemon knows its own gateway; ask it.
-BIND="${KONTRA_GATE_BIND:-$(docker network inspect bridge --format '{{ (index .IPAM.Config 0).Gateway }}' 2>/dev/null)}"
-BIND="${BIND:-172.17.0.1}"
-if ! has_address "$BIND"; then
-  echo "REFUSING: $BIND is not an address on this machine, so a worker container could not reach" >&2
-  echo "  a control plane bound to it — and it cannot reach loopback either, which is why this" >&2
-  echo "  gate needs a bridge-visible address at all." >&2
-  echo "  docker says its bridge gateway is: $(docker network inspect bridge --format '{{ (index .IPAM.Config 0).Gateway }}' 2>&1)" >&2
-  echo "  this machine has:" >&2
-  ip -o addr show 2>/dev/null | sed 's/^/    /' >&2
-  echo "  Set KONTRA_GATE_BIND to the right one." >&2
+# THE LIST IS DERIVED FROM COMPOSE, NOT RESTATED. `.github/workflows/ci.yml` pays for this lesson
+# in its own install job: `KONTRA_PORTER_IMAGE` was missing from a hand-written list, so porter
+# alone fell back to a `:dev` tag that has never been published and the `up` failed with no error
+# until the very last step. Every `${KONTRA_*_IMAGE:-…}` in the compose file has to be a variable
+# this script exported, and a new one fails HERE, by name.
+UNSET_IMAGE_VARS=()
+while read -r var; do
+  [ -n "${!var:-}" ] || UNSET_IMAGE_VARS+=("$var")
+done < <(grep -oE '\$\{KONTRA_[A-Z_]*IMAGE:-' "$REPO/docker-compose.yml" | sed 's/^\${//;s/:-$//' | sort -u)
+if [ ${#UNSET_IMAGE_VARS[@]} -gt 0 ]; then
+  echo "REFUSING: docker-compose.yml names image override(s) this gate does not set:" >&2
+  for v in "${UNSET_IMAGE_VARS[@]}"; do echo "    $v" >&2; done
+  echo "  Each one needs a line in the exports above and a build in" >&2
+  echo "  scripts/build-cluster-images.sh, or the service falls back to a published :dev tag." >&2
   exit 2
 fi
-ok "bind $BIND is a local address a worker container can reach"
 
-# ── THE BINARY. Built from this checkout, not whatever is on PATH ────────────────────────────
-KONTRA="$GATE_TMP/kontra"
-if [ -n "${KONTRA_GATE_BINARY:-}" ]; then
-  KONTRA="$KONTRA_GATE_BINARY"
-  info "using the binary given in KONTRA_GATE_BINARY: $KONTRA"
-else
-  say "0b · build the binary under test"
-  info "go build ./cli → $KONTRA"
-  if ! (cd "$REPO/cli" && go build -o "$KONTRA" .); then
-    echo "the binary did not build; there is nothing to gate." >&2
-    exit 1
-  fi
-  ok "built $KONTRA ($(stat -c %s "$KONTRA" 2>/dev/null || echo ?) bytes)"
+# EVERY IMAGE, NAMED, BEFORE COMPOSE IS ASKED FOR ANY OF THEM. `pull_policy: never` turns a
+# missing image into `No such image` from the daemon partway through an `up`, which reads like a
+# registry problem. This reads like what it is.
+MISSING=()
+for img in "$KONTRA_IMAGE" "$KONTRA_ORCHESTRATOR_IMAGE" \
+           "$KONTRA_LOGSHIP_IMAGE" "$KONTRA_PORTER_IMAGE"; do
+  docker image inspect "$img" >/dev/null 2>&1 || MISSING+=("$img")
+done
+if [ ${#MISSING[@]} -gt 0 ]; then
+  echo "REFUSING: this gate does not build images, and these are not on this machine:" >&2
+  for m in "${MISSING[@]}"; do echo "    $m" >&2; done
+  echo "  Build them from this commit first — \`make image\` locally, or the build step CI runs" >&2
+  echo "  before this one — or name others with KONTRA_IMAGE / KONTRA_ORCHESTRATOR_IMAGE / …" >&2
+  exit 2
 fi
+ok "every image under test is present locally"
 
 PYTHON="${PYTHON:-$REPO/.venv/bin/python}"
 [ -x "$PYTHON" ] || PYTHON="$(command -v python3 || command -v python)"
 
-# ── the environment every command in this script inherits ────────────────────────────────────
-#
-# ONE PLACE, EXPORTED ONCE. `KONTRA_DATA_DIR` is what `kontra deploy` reads to find this
-# appliance's registry, what `kontra serve --mode docker` reads to find its Temporal, and what the
-# orchestrator child resolves its catalog and ledger from — so a single variable is what makes
-# every command in this file belong to one installation. `KONTRA_HOME` is separate and also ours:
-# it is where `config.yaml` would live, and an inherited one carrying `controller:` would send
-# every address resolution at a machine this gate does not own.
-export KONTRA_DATA_DIR="$DATA_DIR"
-export KONTRA_HOME="$KONTRA_HOME_DIR"
-export KONTRA_ADDRESS="$BIND:$P_TEMPORAL"
-export KONTRA_S3_ENDPOINT="http://$BIND:$P_S3"
-export KONTRA_REDIS_HOST="$BIND:$P_KV"
-export KONTRA_ORCHESTRATOR_URL="http://$BIND:$P_API"
-# KONTRA_REGISTRY IS DELIBERATELY NOT SET, and this is not an omission — it was set here once and
-# it broke the gate. `registryAddress` resolves the flag, then this variable, then THE ADDRESS THE
-# RUNNING APPLIANCE PUBLISHED, and the third rung is the one under test: the appliance publishes
-# its LOOPBACK registry address because the Docker daemon will not push plain HTTP anywhere else
-# (appliance/registry.go). Naming the bind address here overrode that with the very address the
-# daemon refuses, and `kontra deploy` died on
-#     http: server gave HTTP response to HTTPS client
-# — a gate that had pinned the wrong half of its own mechanism. Unset, so the resolution is
-# exercised rather than bypassed.
-unset KONTRA_REGISTRY
-# THE QUERY SURFACE STILL NEEDS A TOKEN, AND THIS IS THE ONE PLACE THAT SAYS SO.
-#
-# `kontra dataset query` prefers the orchestrator (~25× faster: it already holds the catalog open)
-# and that route is bearer-gated, failing CLOSED — `auth.ts` returns 503 with nothing configured
-# rather than defaulting open. With no token the CLI falls back to running DuckDB here, and that
-# path is REFUSED too, for a different reason: the catalog is a file now (ADR 0031 §1b), DuckDB
-# takes an exclusive lock on it, and the control plane is holding it. So on a fresh `kontra up`
-# both routes to a Dataset are shut, and the second one reports a lock conflict naming a PID.
-#
-# Exported BEFORE `kontra up`, so the child inherits the same value the CLI will send. That is the
-# whole mechanism — one variable, both sides — and it is why this is not `--explore-token`.
-export KONTRA_EXPLORE_TOKEN="parity-gate-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-# Not inherited from the operator's shell: a controller name in the environment is exactly how a
-# "isolated" run reaches a stack it did not start.
-unset KONTRA_NAMESPACE KONTRA_S3_BUCKET KONTRA_ORCHESTRATOR_DB KONTRA_MATERIALIZATION_DB KONTRA_DUCKLAKE_CATALOG
+# THE INTERPRETER THAT DISPATCHES HAS TO BE ABLE TO, which is a precondition like the images above
+# and belongs with them. The e2e leg builds a Temporal client whose payload codec offloads to the
+# install's S3 gateway, so `internals/casstore.py` imports boto3 — lazily, at the first claim check.
+# Without it the gate got as far as `up`, the deploy, the Fleet and the dispatch, then spent its
+# whole verdict on `ModuleNotFoundError: No module named 'boto3'` 0.29s into pytest: the one failure
+# in a round where everything under test had worked.
+if ! "$PYTHON" -c 'import boto3' 2>/dev/null; then
+  echo "REFUSING: $PYTHON cannot import boto3, so the e2e leg cannot claim-check a payload." >&2
+  echo "  Install the extra that declares it:  pip install -e './sdk/python[dev,seaweed]'" >&2
+  exit 2
+fi
+ok "the dispatching interpreter can claim-check ($("$PYTHON" -c 'import boto3; print("boto3 " + boto3.__version__)'))"
 
-APPLIANCE_PID=""
-WF_PID=""
-BEACON_PID=""
-# WORKER_NETWORK is empty for "let `resolveWorkerPlane` decide", which is the documented default
-# and resolves to the docker bridge against a running appliance. The pre-flight in step 3 sets it
-# to `host` only when it has PROVEN the bridge cannot reach this appliance.
-WORKER_NETWORK="${KONTRA_GATE_WORKER_NETWORK:-}"
-WORKER_TOPOLOGY="worker containers on the docker bridge, dialling the appliance's bound address"
+# ── THE INSTALL DIRECTORY, HOLDING ONLY WHAT A CURL WOULD PUT THERE ─────────────────────────
+#
+# The same two files `.github/workflows/ci.yml`'s install job copies, and then the same assertion
+# over the result: `scripts/assert-install-is-self-contained.py` is what catches a compose file
+# that has grown a bind mount back, which would make the documented install a clone again.
+cp "$REPO/docker-compose.quickstart.yml" "$INSTALL_DIR/docker-compose.yml"
+cp "$REPO/.env.quickstart" "$INSTALL_DIR/.env"
+{
+  echo ""
+  echo "# ── appended by scripts/parity-gate.sh ──"
+  echo "KONTRA_BIND=127.0.0.1"
+  echo "KONTRA_API_PORT=$P_API"
+  echo "KONTRA_TEMPORAL_PORT=$P_TEMPORAL"
+  echo "KONTRA_S3_PORT=$P_S3"
+  echo "KONTRA_KV_PORT=$P_KV"
+  echo "KONTRA_REGISTRY_PORT=$P_REGISTRY"
+  echo "KONTRA_POSTGRES_PORT=$P_POSTGRES"
+  echo "KONTRA_IMAGE=$KONTRA_IMAGE"
+  echo "KONTRA_ORCHESTRATOR_IMAGE=$KONTRA_ORCHESTRATOR_IMAGE"
+  echo "KONTRA_LOGSHIP_IMAGE=$KONTRA_LOGSHIP_IMAGE"
+  echo "KONTRA_PORTER_IMAGE=$KONTRA_PORTER_IMAGE"
+  echo "KONTRA_PULL_POLICY=never"
+  # KONTRA_REPO IS DELIBERATELY NOT SET. docker-compose.yml mounts `${KONTRA_REPO:-${PWD}}` into the
+  # `cli` container read-only; naming the checkout here mounts a host path from outside the install,
+  # which `assert-install-is-self-contained.py` refuses by design — "an install that comes up healthy
+  # and is broken somewhere it does not mention". Unset, `${PWD}` is the install directory, because
+  # `dc` runs from there.
+  echo "KONTRA_WORKSPACES=$WORKSPACES"
+  # THE REGISTRY IS AUTHENTICATED, which is the shape the anonymous default cannot test: `kontra
+  # deploy` pushed with an empty credential for as long as the zot accounts existed, and an
+  # anonymous registry accepts that. ALL THREE OR NONE — `registry-config` refuses a partial set.
+  # Generated per run, written straight into the file, never echoed.
+  echo "KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD=$(openssl rand -hex 24)"
+  echo "KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD=$(openssl rand -hex 24)"
+  echo "KONTRA_REGISTRY_PULL_PASSWORD=$(openssl rand -hex 24)"
+} >> "$INSTALL_DIR/.env"
+if "$PYTHON" "$REPO/scripts/assert-install-is-self-contained.py" "$INSTALL_DIR" \
+     >"$LOGS/self-contained.log" 2>&1; then
+  ok "the install directory holds nothing a curl would not have"
+else
+  bad "the install directory is not self-contained — see $LOGS/self-contained.log"
+  sed 's/^/     /' "$LOGS/self-contained.log"
+  exit 1
+fi
+
+# dc — every compose call, with the project and the install directory, in one place.
+#
+# IT RUNS FROM THE INSTALL DIRECTORY, and that is not cosmetic: compose substitutes `${PWD}` from the
+# ENVIRONMENT, not from `--project-directory`, so a `${KONTRA_REPO:-${PWD}}` mount would otherwise
+# resolve to wherever this script was invoked — the checkout — and mount it into the container.
+dc() { (cd "$INSTALL_DIR" && docker compose -p "$PROJECT" "$@"); }
+# kli — a kontra command inside the `cli` container. `-T` because there is no tty in CI and
+# compose would otherwise refuse; the repo is mounted at its own path, so `tests/parity/actor` is
+# the same string on both sides.
+kli() { dc exec -T cli "$@"; }
 
 cleanup() {
   local rc=$?
   [ "$CLEANED" = "1" ] && return
   CLEANED=1
   if [ "$KEEP" = "1" ] && [ ${#FAILURES[@]} -gt 0 ]; then
-    say "--keep: leaving the appliance up at $DATA_DIR (pid $APPLIANCE_PID)"
+    say "--keep: leaving $PROJECT up (install dir $INSTALL_DIR)"
     return
   fi
   say "5 · teardown"
-  # The two host workers first: each holds a Temporal connection. Killed by PID, never by
-  # `pkill -f` — a pattern that matches this script's own command line kills the script (exit
-  # 144), and the bracket trick does not save you.
-  for pid_var in WF_PID BEACON_PID; do
-    pid="${!pid_var}"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      # SIGTERM to the PID, and only the PID. `kontra serve` and `kontra workflow serve` both run
-      # their children under a `signal.NotifyContext`, so the cancel travels down; killing a
-      # process GROUP from here would kill this script, which shares it, and a `pkill -f` pattern
-      # matches this script's own command line.
-      kill -TERM "$pid" 2>/dev/null
-      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
-      ok "$pid_var stopped"
-    fi
-  done
-  # The worker containers, BY THE LABEL THIS SCRIPT'S DEPLOY PUT ON THEM — never by a name
-  # pattern, and never `docker ps` filtered by anything broader. Ten containers on this box hold
-  # real data.
-  if [ -n "$APPLIANCE_PID" ] && kill -0 "$APPLIANCE_PID" 2>/dev/null; then
-    "$KONTRA" serve --actor "$ACTOR_DIR" --mode docker --replicas 0 >"$LOGS/scale-down.log" 2>&1 \
+  # THE WORKER CONTAINERS FIRST, BY THE LABEL THIS SCRIPT'S DEPLOY PUT ON THEM — never by a name
+  # pattern, and never `docker ps` filtered by anything broader. They are not compose's, so
+  # `compose down` does not know about them; a gate that skipped this would leak a worker
+  # container per run, which on a developer box is how a laptop ends up with forty of them.
+  if [ "$COMPOSE_UP" = "1" ]; then
+    kli kontra serve --actor "$ACTOR_DIR" --mode docker --replicas 0 >"$LOGS/scale-down.log" 2>&1 \
       && ok "worker containers removed" \
       || info "scale-down reported an error; see $LOGS/scale-down.log"
   fi
@@ -336,41 +404,60 @@ cleanup() {
     docker rm -f $(docker ps -aq --filter "label=kontra.actor=$ACTOR_NAME@$ACTOR_VERSION") >/dev/null 2>&1
     info "force-removed $left leftover worker container(s)"
   fi
-  # The appliance last: it is what the two above were talking to.
-  if [ -n "$APPLIANCE_PID" ] && kill -0 "$APPLIANCE_PID" 2>/dev/null; then
-    kill -TERM "$APPLIANCE_PID" 2>/dev/null
-    for _ in $(seq 1 40); do kill -0 "$APPLIANCE_PID" 2>/dev/null || break; sleep 0.5; done
-    kill -0 "$APPLIANCE_PID" 2>/dev/null && kill -KILL "$APPLIANCE_PID" 2>/dev/null
-    ok "appliance stopped"
+  # The stack last: it is what everything above was talking to. `-v` because the volumes are this
+  # project's own and nothing else can be holding them.
+  if [ "$COMPOSE_UP" = "1" ]; then
+    dc down -v --remove-orphans >"$LOGS/compose-down.log" 2>&1 \
+      && ok "compose project $PROJECT removed, with its volumes" \
+      || info "compose down reported an error; see $LOGS/compose-down.log"
   fi
   teardown_assertions
   if [ "$KEEP" = "1" ]; then
-    info "--keep: the data directory is left at $GATE_TMP"
+    info "--keep: the install directory and logs are left at $GATE_TMP"
   else
     rm -rf "$GATE_TMP"
   fi
   report
-  exit $rc
+  # THE EXIT CODE IS THE VERDICT, AND IT WAS NOT.
+  #
+  # This said `exit $rc` and the script's last line said `exit 0`, so a run that printed
+  # `PARITY GATE FAILS (9)` — no worker polling, no counts, no Dataset — exited ZERO and the CI check
+  # went GREEN with nine failures on the screen above it. Every assertion in this file is aimed at
+  # "a run that did not do the work reporting success", and the file itself was doing it.
+  #
+  # So the verdict decides, in this order: a non-zero status from the body is a crash and is kept as
+  # itself; otherwise anything short of "reached the end with no failures" is 1.
+  if [ "$rc" != "0" ]; then exit "$rc"; fi
+  if [ "$REACHED_END" != "1" ] || [ ${#FAILURES[@]} -gt 0 ]; then exit 1; fi
+  exit 0
 }
 
 # TEARDOWN IS AN ASSERTION, not a courtesy. "teardown leaves nothing running" is an acceptance
-# criterion, and a gate that tore down without checking would pass while leaking a worker
-# container per run — which on a developer box is how a laptop ends up with forty of them.
+# criterion, and a gate that tore down without checking would pass while leaking.
 teardown_assertions() {
-  local containers ports_bound=0
+  # ONLY ABOUT A STACK THIS GATE STARTED. Every check below reads the machine, so running them when
+  # `compose up` never happened asserts things about somebody ELSE's containers and ports — and the
+  # one that bites is "published ports still bound", which the install's own registry on 5000
+  # satisfies. A refusal before startup (no images, a port taken) would otherwise collect a teardown
+  # failure it could not have caused.
+  if [ "$COMPOSE_UP" != "1" ]; then
+    info "teardown assertions skipped: this run started no stack"
+    return
+  fi
+  local containers ports_bound=0 project_left volumes_left
   containers=$(docker ps -aq --filter "label=kontra.actor=$ACTOR_NAME@$ACTOR_VERSION" 2>/dev/null | wc -l | tr -d ' ')
   check "worker containers after teardown" "0" "$containers"
-  for p in "$P_TEMPORAL" "$P_S3" "$P_KV" "$P_CODEC" "$P_REGISTRY" "$P_API"; do
+  project_left=$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | wc -l | tr -d ' ')
+  check "project containers after teardown" "0" "$project_left"
+  # THE VOLUMES TOO, because `down` without `-v` keeps them and the next run of this gate would
+  # then start on the previous run's Postgres. A project-scoped filter: nothing else's volumes can
+  # match a name this script invented.
+  volumes_left=$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | wc -l | tr -d ' ')
+  check "project volumes after teardown" "0" "$volumes_left"
+  for p in "$P_TEMPORAL" "$P_S3" "$P_KV" "$P_REGISTRY" "$P_API" "$P_POSTGRES"; do
     port_free "$p" || { ports_bound=$((ports_bound + 1)); info "still bound: $p"; }
   done
-  check "appliance ports still bound after teardown" "0" "$ports_bound"
-  if [ -n "$APPLIANCE_PID" ]; then
-    if kill -0 "$APPLIANCE_PID" 2>/dev/null; then
-      check "appliance process after teardown" "gone" "still running (pid $APPLIANCE_PID)"
-    else
-      ok "appliance process after teardown = gone"
-    fi
-  fi
+  check "published ports still bound after teardown" "0" "$ports_bound"
 }
 
 report() {
@@ -383,8 +470,7 @@ report() {
     fi
     printf '\nlogs: %s\n' "$LOGS"
   elif [ ${#FAILURES[@]} -eq 0 ]; then
-    printf '\n\033[32m%s\033[0m\n' "PARITY GATE PASSES — the binary serves the local development path."
-    printf '  %s\n' "worker topology proved: $WORKER_TOPOLOGY"
+    printf '\n\033[32m%s\033[0m\n' "PARITY GATE PASSES — the compose install serves the local development path."
   else
     printf '\n\033[31m%s\033[0m\n' "PARITY GATE FAILS (${#FAILURES[@]}):"
     for f in "${FAILURES[@]}"; do printf '  · %s\n' "$f"; done
@@ -393,17 +479,34 @@ report() {
 }
 trap cleanup EXIT INT TERM
 
+# ── THE EXIT-CODE CONTRACT, CHECKABLE WITHOUT A STACK ────────────────────────────────────────
+#
+# `KONTRA_GATE_SELFTEST=<n>` records n synthetic failures and leaves through the ORDINARY path: the
+# same `report`, the same trap, the same verdict. It starts no stack and tears nothing down, so
+# `tests/test_parity_gate_exit_code.py` can assert the one property this file had lost — that a gate
+# which prints FAILS exits non-zero. A gate whose own verdict is untested is the shape of failure
+# every other assertion here is aimed at.
+#
+# It sits after the isolation checks rather than before them because it goes out through `cleanup`,
+# which is defined here. On a box with a stack already up the gate refuses before this line, and the
+# test says so rather than pretending to have run.
+if [ -n "${KONTRA_GATE_SELFTEST:-}" ]; then
+  COMPOSE_UP=0
+  i=0
+  while [ "$i" -lt "$KONTRA_GATE_SELFTEST" ]; do
+    bad "synthetic failure $((i + 1)) (KONTRA_GATE_SELFTEST)"
+    i=$((i + 1))
+  done
+  REACHED_END=1
+  exit 0   # the trap decides, and this is exactly the 0 it has to override
+fi
+
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 say "1 · condition 1a — THE SAME LEG WITH NO CONTROL PLANE (the SDK-side contract)"
 # THE CONTROL FOR 1b, on this commit. The same test file runs against `actorkit.testing`'s stubs
 # with every control-plane variable unset, so it says the actor-facing API has not moved and says
-# NOTHING about the appliance. That is the point of running it here as well as later: one suite,
+# NOTHING about the stack. That is the point of running it here as well as later: one suite,
 # twice, one control plane apart.
-#
-# IT USED TO BE `make test-examples-python`, which ran four real actors' suites. ADR 0038 moved
-# every actor to kontra-actors, so what is comparable in BOTH halves is the fixture leg and only
-# that. The comparison is narrower and it is still a comparison; the four-actor coverage lives in
-# kontra-actors' CI, against its own control plane.
 #
 # The exit code is read directly, never from a pipeline — a pipeline reports its LAST stage's
 # status, so `pytest … | tail` would print failures and exit 0.
@@ -420,63 +523,58 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
-say "2 · the appliance, on its own everything"
-"$KONTRA" up \
-  --data-dir "$DATA_DIR" \
-  --bind "$BIND" \
-  --temporal-port "$P_TEMPORAL" \
-  --metrics-port "$P_METRICS" \
-  --s3-port "$P_S3" \
-  --kv-port "$P_KV" \
-  --codec-port "$P_CODEC" \
-  --registry-port "$P_REGISTRY" \
-  --api-port "$P_API" \
-  --orchestrator "${KONTRA_GATE_ORCHESTRATOR:-auto}" \
-  >"$LOGS/appliance.log" 2>&1 &
-APPLIANCE_PID=$!
-info "kontra up pid $APPLIANCE_PID → $LOGS/appliance.log"
+say "2 · the compose control plane, on its own project"
+info "docker compose -p $PROJECT up -d --wait"
+if ! dc up -d --wait >"$LOGS/compose-up.log" 2>&1; then
+  COMPOSE_UP=1   # some of it may be up; cleanup still has to run
+  bad "docker compose up -d --wait failed — see $LOGS/compose-up.log"
+  tail -40 "$LOGS/compose-up.log"
+  dc ps >>"$LOGS/compose-up.log" 2>&1
+  sed 's/^/     /' <(dc ps 2>&1)
+  exit 1
+fi
+COMPOSE_UP=1
+ok "every service reports healthy"
 
-# READY IS "THE API ANSWERS", not "the process is alive". Everything after this dispatches work,
-# and a control plane that has bound its ports but has not finished hydrating its child would fail
-# the next step with a connection error that reads like a bug in the next step.
+# READY IS "THE API ANSWERS", not "compose said --wait". A healthcheck can pass on a process that
+# has bound its port and not finished opening its catalog, and everything after this dispatches
+# work — so the next step would fail with a connection error that reads like a bug in itself.
 UP=0
-for _ in $(seq 1 240); do
-  if ! kill -0 "$APPLIANCE_PID" 2>/dev/null; then break; fi
-  if curl -fsS --max-time 2 "http://$BIND:$P_API/api/health" >/dev/null 2>&1; then UP=1; break; fi
+for _ in $(seq 1 120); do
+  if curl -fsS --max-time 2 "http://127.0.0.1:$P_API/api/health" >/dev/null 2>&1; then UP=1; break; fi
   sleep 1
 done
 if [ "$UP" != "1" ]; then
-  bad "the appliance never answered on http://$BIND:$P_API/api/health"
-  tail -40 "$LOGS/appliance.log"
+  bad "the API never answered on http://127.0.0.1:$P_API/api/health"
+  dc logs --tail 40 orchestrator-api 2>&1 | sed 's/^/     /'
   exit 1
 fi
-ok "control plane answering at http://$BIND:$P_API"
-if [ -f "$DATA_DIR/endpoints.json" ]; then
-  ok "endpoints published: $(tr -d '\n ' < "$DATA_DIR/endpoints.json")"
-else
-  bad "no $DATA_DIR/endpoints.json — deploy and scale cannot find this appliance"
-fi
+ok "control plane answering at http://127.0.0.1:$P_API"
 
-# EVERY LISTENER HONOURS `--bind`, ASSERTED RATHER THAN ASSUMED. ADR 0031 §3's whole security
-# argument is that there is no remote caller, and a listener on 0.0.0.0 is a remote caller's
-# address on a box with a public interface. The API was the one surface that ignored the flag
-# (`server.ts` hard-coded `0.0.0.0`, a habit from when it was a container behind a `ports:` entry),
-# and the gate would otherwise declare compose retired in favour of something more exposed than
-# what it replaces.
-WIDE=$(ss -ltnH 2>/dev/null | awk -v ports="$P_TEMPORAL $P_S3 $P_KV $P_CODEC $P_REGISTRY $P_API $P_METRICS" '
+# LOOPBACK IS THE SECURITY CONTROL, ASSERTED RATHER THAN ASSUMED. Every `ports:` entry in
+# docker-compose.yml is `${KONTRA_BIND:-127.0.0.1}:…`, and a service that grew a bare `- "8088:8088"`
+# would publish on every interface — which on a box with a public address is a control plane on the
+# internet. The gate would otherwise pass while the install got more exposed, not less.
+WIDE=$(ss -ltnH 2>/dev/null | awk -v ports="$P_TEMPORAL $P_S3 $P_KV $P_REGISTRY $P_API $P_POSTGRES" '
   { split($4, a, ":"); p = a[length(a)]; addr = substr($4, 1, length($4) - length(p) - 1)
     if (index(" " ports " ", " " p " ") && (addr == "0.0.0.0" || addr == "*" || addr == "[::]")) print addr ":" p }')
 if [ -z "$WIDE" ]; then
-  ok "every appliance listener is on $BIND — none on 0.0.0.0"
+  ok "every published port is on 127.0.0.1 — none on 0.0.0.0"
 else
-  bad "an appliance listener ignored --bind and is on every interface: $(echo "$WIDE" | tr '\n' ' ')"
+  bad "a service ignored KONTRA_BIND and published on every interface: $(echo "$WIDE" | tr '\n' ' ')"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 say "3 · condition 2 — the local actor path"
 
-info "kontra deploy --actor $ACTOR_DIR"
-if ! "$KONTRA" deploy --actor "$ACTOR_DIR" >"$LOGS/deploy.log" 2>&1; then
+# `--override`, BECAUSE THE WATCHER IS ALREADY DEPLOYING THIS ACTOR. `kontra workspace watch` is the
+# `cli` service's main process and it runs `kontra deploy --override` for every actor directory under
+# the workspaces tree — which is where this one had to be created for the container to see it. So by
+# the time this line runs the watcher may have pushed the version already, and without `--override`
+# the gate would be refused by the immutability check it is not here to test. The two deploys no
+# longer OVERLAP (cli/deploylock.go serialises them per version); this is about which of them wins.
+info "kontra deploy --actor $ACTOR_DIR --override  (inside the cli container)"
+if ! kli kontra deploy --actor "$ACTOR_DIR" --override >"$LOGS/deploy.log" 2>&1; then
   bad "kontra deploy failed — see $LOGS/deploy.log"
   tail -30 "$LOGS/deploy.log"
   exit 1
@@ -485,82 +583,55 @@ fi
 # tag cannot see (ADR 0032), so the gate asks the registry rather than trusting the summary.
 DIGEST=$(grep -Eo 'sha256:[0-9a-f]{64}' "$LOGS/deploy.log" | head -1)
 if [ -n "$DIGEST" ]; then ok "pushed $ACTOR_NAME:$ACTOR_VERSION → $DIGEST"; else bad "deploy printed no manifest digest"; fi
-# ASKED AT THE ADDRESS THE APPLIANCE PUBLISHED, which is the same one `kontra deploy` just
-# resolved — asking anywhere else would be a different registry's answer.
-REG_ADDR=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["registry"])' "$DATA_DIR/endpoints.json" 2>/dev/null || echo "$BIND:$P_REGISTRY")
-TAGS=$(curl -fsS --max-time 5 "http://$REG_ADDR/v2/$ACTOR_NAME/tags/list" 2>/dev/null)
+# ASKED FROM THE HOST, AT THE PUBLISHED PORT — the same store the push went into, reached by the
+# other of its two addresses. If those two ever stop being one registry, this is where it shows.
+#
+# WITH THE CREDENTIAL, because this gate runs the AUTHENTICATED shape: zot's rendered accessControl
+# gives every repository `"defaultPolicy": []`, so an anonymous `tags/list` is 401 and this check
+# would report "the registry does not list the version" about a registry that holds it. Read back
+# from the file this script wrote it to, and never echoed — `--fail` keeps the body out of the log.
+PULL_PW=$(sed -n 's/^KONTRA_REGISTRY_PULL_PASSWORD=//p' "$INSTALL_DIR/.env" | tail -1)
+TAGS=$(curl -fsS --max-time 5 -u "pull:$PULL_PW" \
+         "http://127.0.0.1:$P_REGISTRY/v2/$ACTOR_NAME/tags/list" 2>/dev/null)
 case "$TAGS" in
-  *"\"$ACTOR_VERSION\""*) ok "the appliance's own registry at $REG_ADDR holds $ACTOR_NAME:$ACTOR_VERSION" ;;
-  *) bad "the registry at $REG_ADDR does not list $ACTOR_VERSION (answered: ${TAGS:-nothing})" ;;
+  *"\"$ACTOR_VERSION\""*) ok "the install's registry holds $ACTOR_NAME:$ACTOR_VERSION" ;;
+  *) bad "the registry on :$P_REGISTRY does not list $ACTOR_VERSION (answered: ${TAGS:-nothing})" ;;
 esac
 
-# ── CAN A CONTAINER REACH THIS APPLIANCE AT ALL? ASKED BEFORE ANY WORKER IS STARTED ─────────
-#
-# THE ANSWER IS NOT ALWAYS YES, AND WHEN IT IS NO NOTHING SAYS SO. MEASURED on this repo's own
-# development box: ufw active, `Default: deny (incoming)`. A container's packets to the bridge
-# GATEWAY traverse the host's INPUT chain — unlike a published port, whose packets go through
-# FORWARD and Docker's DOCKER-USER chain, which is the case everyone knows about — so every
-# connection from a worker to `172.17.0.1:<appliance port>` timed out. What that looked like:
-# `kontra deploy` fine, `kontra serve --mode docker` fine, two containers Up, BOTH processes
-# alive inside them, `/tmp/host.log` and `/tmp/handler.log` zero bytes, no actor in the catalog,
-# no poller on the queue, and `docker ps` reporting two healthy replicas. Port 22 was reachable
-# from the same container, which is what pins the cause on the firewall rather than on docker.
-#
-# So it is a probe, not a hope, and it runs in a CONTAINER because that is the only thing that
-# answers the question a container is about to ask. The Python host is the base image `kontra
-# deploy` has just guaranteed exists, and it carries a python3.
-#
-# RESOLVED THE SAME WAY `cli/deploy.go:hostImage()` RESOLVES IT, not hardcoded. This said
-# `kontra-host:1`, which was the name `deploy` looked for as long as nothing else said otherwise —
-# and `docker-compose.yml` now sets `KONTRA_HOST_IMAGE=ghcr.io/medmahmoudi26/kontra-host:dev`, so the
-# image `deploy` guarantees and the image this line ran were two different names. Docker resolves by
-# name, so the guarantee stopped covering the probe, and the failure would have read as "a container
-# cannot reach Temporal" — a firewall verdict — when the truth was a missing image.
-HOST_IMAGE="${KONTRA_HOST_IMAGE:-kontra-host:1}"
-info "can a container reach $BIND:$P_TEMPORAL?"
-if docker run --rm --network bridge "$HOST_IMAGE" python3 -c "
-import socket, sys
-s = socket.socket(); s.settimeout(5)
-try:
-    s.connect(('$BIND', $P_TEMPORAL))
-except Exception as e:
-    print(e); sys.exit(1)
-" >"$LOGS/reach.log" 2>&1; then
-  ok "a bridge container reaches the appliance — the documented topology"
-else
-  WORKER_NETWORK="host"
-  bad_note=$(cat "$LOGS/reach.log")
-  info ""
-  info "!! A CONTAINER ON THE DOCKER BRIDGE CANNOT REACH THIS APPLIANCE ($bad_note)."
-  info "   This host's firewall drops it: a container's packets to the bridge gateway go through"
-  info "   the INPUT chain, not FORWARD/DOCKER-USER, so a default 'deny (incoming)' blocks them."
-  info "   Nothing in kontra reports this — the worker container comes up and polls nothing."
-  info ""
-  info "   Two remedies, and this gate takes the second because it changes no system state:"
-  info "     1. allow it:  ufw allow in on docker0 to $BIND port $P_TEMPORAL proto tcp   (and each other port)"
-  info "     2. --network host for the workers, which is what follows. It costs the network"
-  info "        namespace, so it is a development answer and not a default."
-  info ""
-  info "   THE BRIDGE TOPOLOGY IS THEREFORE NOT PROVEN BY THIS RUN. Everything below is."
-fi
-
-info "kontra serve --mode docker --replicas $REPLICAS${WORKER_NETWORK:+ --network $WORKER_NETWORK}"
-if ! "$KONTRA" serve --actor "$ACTOR_DIR" --mode docker --replicas "$REPLICAS" \
-      ${WORKER_NETWORK:+--network "$WORKER_NETWORK"} >"$LOGS/scale.log" 2>&1; then
+info "kontra serve --mode docker --replicas $REPLICAS"
+if ! kli kontra serve --actor "$ACTOR_DIR" --mode docker --replicas "$REPLICAS" >"$LOGS/scale.log" 2>&1; then
   bad "kontra serve --mode docker failed — see $LOGS/scale.log"
   tail -30 "$LOGS/scale.log"
   exit 1
 fi
-cat "$LOGS/scale.log" | sed 's/^/     /'
+sed 's/^/     /' "$LOGS/scale.log"
 RUNNING=$(docker ps -q --filter "label=kontra.actor=$ACTOR_NAME@$ACTOR_VERSION" | wc -l | tr -d ' ')
 check "worker containers running" "$REPLICAS" "$RUNNING"
-if [ -n "$WORKER_NETWORK" ]; then
-  WORKER_TOPOLOGY="worker containers on --network $WORKER_NETWORK (the bridge path is blocked on this host; see step 3)"
-fi
 
-# A CONTAINER THAT IS UP IS NOT A WORKER THAT IS POLLING, and the difference is the whole reason
-# this block exists. `docker ps` shows a healthy container for one pointed at a control plane that
-# does not exist; only Temporal knows whether anything is polling the queue.
+# A CONTAINER THAT IS UP IS NOT A WORKER THAT IS POLLING, and the difference is most of the point
+# of this gate. `docker ps` shows a healthy container for one pointed at a control plane that does
+# not exist; only Temporal knows whether anybody is listening.
+#
+# IT READS THE WHOLE ROW, NOT A COLUMN, and that is a correction rather than a preference. The
+# first version took awk's `$4` and compared it against the string `(none)`; what the table
+# actually prints is `(none — registered but no live worker)`, so `$4` is `(none` — which is not
+# equal to `(none)`, so the loop broke on its first pass and reported a live worker that was not
+# there. A gate printing a false green about the exact thing it exists to check.
+POLLERS_ROW=""
+wait_for_pollers() {
+  local queue="$1" attempts="$2" logfile="$3" row=""
+  for _ in $(seq 1 "$attempts"); do
+    kli kontra workers list >"$logfile" 2>&1
+    row=$(grep -E "[[:space:]]${queue}[[:space:]]" "$logfile" | head -1)
+    case "$row" in
+      "" | *"(none"* | *"temporal error"*) sleep 2 ;;
+      *) POLLERS_ROW="$row"; return 0 ;;
+    esac
+  done
+  POLLERS_ROW="$row"
+  return 1
+}
+
 QUEUE="$ACTOR_NAME-$ACTOR_VERSION"
 if wait_for_pollers "$QUEUE" 90 "$LOGS/workers.log"; then
   ok "$QUEUE has live pollers: $POLLERS_ROW"
@@ -573,16 +644,21 @@ else
   done
 fi
 
+# THE WORKFLOW WORKER, DETACHED INSIDE THE CONTAINER, which is what `compose down` later takes
+# with it — so there is no host pid to kill and no `pkill -f` pattern that could match this script.
+#
+# `nohup`, NOT A BARE `&`. The exec session ends the moment this call returns; a backgrounded child
+# that still has the exec's terminal as its stdio can be torn down with it, and what that looks
+# like is the wait below timing out on a worker that was running a second ago.
 info "kontra workflow serve $WORKFLOW_DIR"
-"$KONTRA" workflow serve "$WORKFLOW_DIR" >"$LOGS/workflow-worker.log" 2>&1 &
-WF_PID=$!
+kli sh -c "nohup kontra workflow serve '$WORKFLOW_DIR' >/tmp/workflow-worker.log 2>&1 &" >/dev/null 2>&1
 # WAITED FOR, NOT SLEPT THROUGH. `kontra workflow start` REFUSES a folder whose derived queue has
 # no pollers — deliberately, because a start against an unserved queue sits `running` forever with
 # no error. A fixed sleep that is a second short turns that correct refusal into a gate failure
 # about the wrong thing, so the gate waits for the worker's own "serving" line.
 WF_UP=0
 for _ in $(seq 1 90); do
-  kill -0 "$WF_PID" 2>/dev/null || break
+  kli sh -c 'cat /tmp/workflow-worker.log 2>/dev/null' >"$LOGS/workflow-worker.log" 2>&1
   grep -q "\[wfhost\] ParityGate" "$LOGS/workflow-worker.log" 2>/dev/null && { WF_UP=1; break; }
   sleep 1
 done
@@ -591,17 +667,17 @@ if [ "$WF_UP" != "1" ]; then
   tail -30 "$LOGS/workflow-worker.log"
   exit 1
 fi
-ok "workflow worker up (pid $WF_PID): $(grep -m1 '\[wfhost\]' "$LOGS/workflow-worker.log")"
+ok "workflow worker up: $(grep -m1 '\[wfhost\]' "$LOGS/workflow-worker.log")"
 
 # A NAME PER RUN. The gate asserts an exact row count, and a name reused across runs would make
 # the second run's count the sum of two — which passes `>= units` and hides a leg that produced
 # nothing this time.
 DATASET="paritygate_$(date +%s)"
 info "kontra workflow start $WORKFLOW_DIR --wait --input {\"units\": $UNITS}"
-"$KONTRA" workflow start "$WORKFLOW_DIR" --wait --timeout 15m \
+kli kontra workflow start "$WORKFLOW_DIR" --wait --timeout 15m \
   --input "{\"units\": $UNITS, \"dataset\": \"$DATASET\"}" >"$LOGS/run.log" 2>&1
 RUN_RC=$?
-cat "$LOGS/run.log" | sed 's/^/     /'
+sed 's/^/     /' "$LOGS/run.log"
 if [ "$RUN_RC" != "0" ]; then
   bad "the run did not complete (exit $RUN_RC) — see $LOGS/run.log"
 fi
@@ -664,7 +740,7 @@ fi
 
 # ── THE DATASET. Written, listed, and queried ───────────────────────────────────────────────
 info "kontra dataset list"
-"$KONTRA" dataset list >"$LOGS/datasets.log" 2>&1
+kli kontra dataset list >"$LOGS/datasets.log" 2>&1
 if grep -q "$DATASET" "$LOGS/datasets.log"; then
   ok "Dataset $DATASET is listed"
 else
@@ -681,10 +757,27 @@ fi
 #
 # ONE QUERY, THREE AGGREGATES. Two queries against a Dataset a run may still be writing is the
 # divide-two-counts trap: one scan cannot disagree with itself.
-"$KONTRA" dataset query "$DATASET" \
+#
+# READ OFF THE PRINTED TABLE, NOT `--export`, AND THAT IS A WORKAROUND WITH A BUG BEHIND IT.
+# `kontra dataset query … --export <file>` writes the four bytes `null` for EVERY query on this
+# install — measured, three different SQL shapes, including `SELECT * … LIMIT 2`. The cause is one
+# level down and belongs to the per-workspace isolation work, not here: `exportQuery` COPYs to
+# `${dataPath}exports/<token>.<fmt>`, which for a workspace lake is the `ws-<name>` BUCKET, and
+# `routes/query.ts` then reads the key back through the SHARED ObjectStore, whose bucket is the
+# default one. An ObjectStore is bucket-scoped at construction, so the read cannot find what the
+# write made, `store.get` answers null, and Fastify serialises that as the body.
+#
+# So this counts off the display path, which the install job proves works. Three integers on the
+# line after the rule — `awk` on the third line rather than a header-aware parse, because the
+# alternative is parsing a table whose column order this query itself fixes.
+kli kontra dataset query "$DATASET" \
   --sql "SELECT count(*) AS rows_out, count(DISTINCT id) AS ids, count(DISTINCT worker) AS workers FROM \"$DATASET\"" \
-  --export "$LOGS/rowcount.json" >"$LOGS/rowcount.log" 2>&1
-COUNTS=$("$PYTHON" "$REPO/scripts/lib/one-row.py" "$LOGS/rowcount.json" rows_out ids workers 2>/dev/null || echo "? ? ?")
+  >"$LOGS/rowcount.log" 2>&1
+COUNTS=$(awk 'NR==3 {print $1, $2, $3}' "$LOGS/rowcount.log" 2>/dev/null)
+case "$COUNTS" in
+  [0-9]*' '[0-9]*' '[0-9]*) ;;                 # three integers: the shape this query must produce
+  *) COUNTS="? ? ?" ;;                          # anything else is unparseable, and `?` says so
+esac
 read -r ROWS IDS WORKERS_SEEN <<<"$COUNTS"
 check "rows queryable in Dataset $DATASET" "$UNITS" "${ROWS:-?}"
 # AND THE ROWS ARE THE ROWS THAT WENT IN. A count alone would pass on a Dataset full of the wrong
@@ -692,7 +785,6 @@ check "rows queryable in Dataset $DATASET" "$UNITS" "${ROWS:-?}"
 check "distinct Unit ids in the Dataset" "$UNITS" "${IDS:-?}"
 if [ "${ROWS:-?}" != "$UNITS" ] || [ "${IDS:-?}" != "$UNITS" ]; then
   sed 's/^/     /' "$LOGS/rowcount.log"
-  head -c 500 "$LOGS/rowcount.json" 2>/dev/null | sed 's/^/     /'
 fi
 # WHICH WORKER PRODUCED THE ROWS — a fact, not a fan-out assertion.
 #
@@ -701,69 +793,67 @@ fi
 # worth checking is that the column is populated at all: an empty producer means the ref's meta
 # did not survive the round trip, which is the same missing-metadata class as a lost drop count.
 case "${WORKERS_SEEN:-?}" in
-  ""|"?"|0) bad "the Dataset records no producing worker — the ref's meta did not survive; see $LOGS/rowcount.json" ;;
+  ""|"?"|0) bad "the Dataset records no producing worker — the ref's meta did not survive; see $LOGS/rowcount.log" ;;
   *) info "produced by $WORKERS_SEEN distinct worker(s) out of $REPLICAS replica(s) — one Batch is one dispatch, so 1 is the expected answer" ;;
 esac
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
-say "4 · condition 1b — THE E2E LEG AGAINST THE BINARY"
-# The e2e leg dispatches to a real Worker, so one has to exist. `beacon` is served in LOCAL mode —
-# the actor process and the Go handler on this box — deliberately, and not as a shortcut: the
-# image path is already proven by step 3, and this step is about whether the SDK's own contract
-# holds against the appliance rather than about how the Worker was placed.
-info "kontra serve --actor testdata/fixtureactor (local mode, for the e2e leg)"
-"$KONTRA" serve --actor testdata/fixtureactor >"$LOGS/beacon.log" 2>&1 &
-BEACON_PID=$!
+say "4 · condition 1b — THE E2E LEG AGAINST THIS STACK"
+# The e2e leg dispatches to a real Worker, so one has to exist. The fixture actor is served in
+# LOCAL mode — the actor process and the Go handler, inside the `cli` container — deliberately,
+# and not as a shortcut: the image path is already proven by step 3, and this step is about
+# whether the SDK's own contract holds against the control plane rather than how a Worker was
+# placed.
+info "kontra serve --actor $FIXTURE_DIR (local mode, for the e2e leg)"
+kli sh -c "nohup kontra serve --actor '$FIXTURE_DIR' >/tmp/fixture.log 2>&1 &" >/dev/null 2>&1
 BEACON_QUEUE="fixtureactor-0.1.0"
-if wait_for_pollers "$BEACON_QUEUE" 120 "$LOGS/workers-beacon.log"; then
-  ok "beacon is polling $BEACON_QUEUE: $POLLERS_ROW"
+if wait_for_pollers "$BEACON_QUEUE" 120 "$LOGS/workers-fixture.log"; then
+  ok "the fixture actor is polling $BEACON_QUEUE: $POLLERS_ROW"
 else
-  bad "beacon never started polling $BEACON_QUEUE — the e2e leg below has nothing to dispatch to"
-  sed 's/^/     /' "$LOGS/workers-beacon.log"
-  tail -25 "$LOGS/beacon.log"
+  bad "the fixture actor never started polling $BEACON_QUEUE — the e2e leg below has nothing to dispatch to"
+  sed 's/^/     /' "$LOGS/workers-fixture.log"
+  kli sh -c 'tail -25 /tmp/fixture.log 2>/dev/null' 2>&1 | sed 's/^/     /'
 fi
 
-# The same suite, on the same commit, with a control plane under it. `KONTRA_E2E=1` is what turns
-# the `e2e`-marked tests on; they skip themselves when no KONTRA_ADDRESS is set, so run 1a above
-# and this run differ in exactly one thing.
+# THE SUITE RUNS ON THE HOST, AT THE PUBLISHED PORTS. That is the one thing this leg does from
+# outside the network, and it is right: the SDK an actor author installs runs on their machine,
+# so the address it is handed has to be the one an operator is given.
+#
+# `KONTRA_E2E=1` is what turns the `e2e`-marked tests on; they skip themselves when no
+# KONTRA_ADDRESS is set, so run 1a above and this run differ in exactly one thing.
 E2E_RECEIPT="$LOGS/e2e-receipt"
 : >"$E2E_RECEIPT"
-KONTRA_E2E_RECEIPT="$E2E_RECEIPT" KONTRA_E2E=1 "$PYTHON" -m pytest -q \
-  "$REPO/tests/test_fixture_actor_e2e.py" >"$LOGS/examples-binary.log" 2>&1
+KONTRA_E2E_RECEIPT="$E2E_RECEIPT" KONTRA_E2E=1 \
+  KONTRA_ADDRESS="127.0.0.1:$P_TEMPORAL" \
+  KONTRA_S3_ENDPOINT="http://127.0.0.1:$P_S3" \
+  KONTRA_REDIS_HOST="127.0.0.1:$P_KV" \
+  KONTRA_ORCHESTRATOR_URL="http://127.0.0.1:$P_API" \
+  "$PYTHON" -m pytest -q "$REPO/tests/test_fixture_actor_e2e.py" >"$LOGS/examples-stack.log" 2>&1
 E2E_RC=$?
-E2E_LINE=$(grep -Eo '[0-9]+ (passed|failed|error|skipped)[^,]*' "$LOGS/examples-binary.log" | tr '\n' ' ')
+E2E_LINE=$(grep -Eo '[0-9]+ (passed|failed|error|skipped)[^,]*' "$LOGS/examples-stack.log" | tr '\n' ' ')
 info "pytest said: ${E2E_LINE:-<no counts printed>}"
-# A SUITE THAT SKIPPED EVERY E2E TEST IS NOT A PASS. That is the exact shape of ADR 0031 §5's
-# warning — the examples suite would go green against a binary that never started — so the gate
-# refuses a run in which nothing e2e actually executed.
+# A SUITE THAT SKIPPED EVERY E2E TEST IS NOT A PASS. That is the exact shape of the warning this
+# gate opens with — the examples suite would go green against a control plane that never started —
+# so the gate refuses a run in which nothing e2e actually executed.
 #
 # COUNTED FROM A RECEIPT FILE, NOT FROM THE LOG. The first version grepped the run output for a
 # line the test prints; pytest CAPTURES stdout and replays it only for failures, so a test that
 # PASSED left no line and the gate reported "they all skipped" about the leg that had just proven
-# the binary. The test appends to $KONTRA_E2E_RECEIPT instead — a side effect pytest does not own.
+# the stack. The test appends to $KONTRA_E2E_RECEIPT instead — a side effect pytest does not own.
 E2E_RAN=$(wc -l <"$E2E_RECEIPT" 2>/dev/null | tr -d ' ')
 E2E_RAN=${E2E_RAN:-0}
 if [ "$E2E_RC" != "0" ]; then
-  bad "the e2e leg exited $E2E_RC — see $LOGS/examples-binary.log"
-  tail -40 "$LOGS/examples-binary.log"
+  bad "the e2e leg exited $E2E_RC — see $LOGS/examples-stack.log"
+  tail -40 "$LOGS/examples-stack.log"
 elif [ "$E2E_RAN" = "0" ]; then
-  bad "the e2e leg was green but ran nothing against the binary (it skipped) — see $LOGS/examples-binary.log"
+  bad "the e2e leg was green but ran nothing against the stack (it skipped) — see $LOGS/examples-stack.log"
 else
-  ok "the e2e leg is green, with $E2E_RAN dispatch(es) dialling the appliance:"
+  ok "the e2e leg is green, with $E2E_RAN dispatch(es) dialling this stack:"
   sed 's/^/        /' "$E2E_RECEIPT"
 fi
 
 # THE LAST LINE, and the only place this is set. See REACHED_END at the top.
-REACHED_END=1
-exit 0
-
-# ── What this does NOT compare, said here rather than left to be assumed ─────────────────────
 #
-# Issue 18 asks for `make test-examples` "against the binary, in CI, on the same commit that runs
-# it against compose — so parity is a comparison rather than an assertion". THE COMPOSE HALF OF
-# THAT COMPARISON NO LONGER EXISTS. By the time this gate was written, docker-compose.yml had lost
-# Temporal, the object store, the KV, the codec, the registry and orchestrator-api to ADR 0031's
-# earlier slices; what it still defines is `orchestrator-infra` and `orchestrator-probe`, neither
-# of which is a control plane. There is nothing left to run the suite against, which is not a gap
-# in this script — it is the migration having finished. The comparison that IS runnable is the one
-# above: one suite, one commit, with and without the appliance under it.
+# NO `exit 0` HERE. It stood here and it was the whole of the bug above: the EXIT trap computes the
+# verdict and exits with it, and a hardcoded success in the body is a success the trap then reported.
+REACHED_END=1

@@ -241,7 +241,7 @@ type wardenRecord struct {
 	// TemporalTLS says this Machine must offer its own certificate when it dials the control plane —
 	// the thing that makes the credential this enrolment minted an actual TEMPORAL credential rather
 	// than a note about which namespace to ask for. Off unless the Controller said otherwise, because
-	// the single box and the appliance run a Temporal with no TLS at all.
+	// the single box and the install run a Temporal with no TLS at all.
 	TemporalTLS bool `json:"temporalTls,omitempty"`
 }
 
@@ -390,7 +390,7 @@ func (i *wardenIdentity) client() *http.Client {
 // Machine exactly one namespace, whatever it asks for. kontra's half is that the Machine has one
 // certificate, it names one namespace, and it is offered on every dial.
 //
-// IT IS OFF BY DEFAULT AND THAT IS SAID RATHER THAN HIDDEN. The single box, the appliance and every
+// IT IS OFF BY DEFAULT AND THAT IS SAID RATHER THAN HIDDEN. The single box, the install and every
 // test in this repo run a Temporal with no TLS; offering a certificate to a plaintext listener does
 // not fail closed, it fails to connect at all. So the Controller declares it once, at enrolment
 // (`--temporal-tls`), and a Fleet whose Temporal does not check certificates is a Fleet whose

@@ -29,6 +29,9 @@ Kontra runs a **job over a batch of inputs**. You write the job once — a small
 | Run something in 5 minutes | [[Getting-Started]] |
 | Write a Python actor | [[Writing-Actors-Python]] |
 | Write a Go actor | [[Writing-Actors-Go]] |
+| Pick the OS an actor runs on | [[Runtimes]] |
+| Add or fork a runtime | [[Writing-a-Runtime]] |
+| See what the image store is holding — the console surface, designed and not yet shipped | [[The-Images-Page]] |
 | Understand how a run executes | [[Execution-Model]] |
 | Drive Actors from your own workflow | [[Writing-Workflows]] |
 | Understand failure handling & recovery | [[Durability-and-Failures]] |

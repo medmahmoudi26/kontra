@@ -12,7 +12,7 @@
  *     reintroduces it fails loudly instead of merely getting slower.
  *
  *   AN UNREACHABLE TEMPORAL IS A 502, NEVER A ZERO. A badge reading "idle" because the cluster
- *     could not be asked is the failure this appliance keeps writing defences against.
+ *     could not be asked is the failure this install keeps writing defences against.
  */
 
 import { describe, expect, it, vi } from 'vitest';

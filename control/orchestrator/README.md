@@ -78,10 +78,10 @@ reports as healthy.
 
 Which subset is a deployment fact:
 
-- **The appliance** (`kontra up`) runs all three in one process. It can, because it ships no Pulumi
+- **The install** (`kontra up`) runs all three in one process. It can, because it ships no Pulumi
   engine — the process-global rejection handlers that made `orchestrator-infra` a separate PID
   leave with the engine (ADR 0031 §4). Its infra role registers `stackWorkflow` as a **refusal**
-  ([src/workflows/appliance.ts](src/workflows/appliance.ts)): a type nobody registered does not
+  ([src/workflows/install.ts](src/workflows/install.ts)): a type nobody registered does not
   fail a `fleet.up()`, it hangs one.
 - **The compose controller** runs `api,materializer` in `orchestrator-api` and keeps
   `orchestrator-infra` — `node dist/src/infra.js`, the Pulumi engine and the cloud credential —

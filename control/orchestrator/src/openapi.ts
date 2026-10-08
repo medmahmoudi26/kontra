@@ -61,7 +61,7 @@ const GATES: ReadonlyArray<{
   // THE AUDIT TRAIL, AND IT IS THE ONE SURFACE ON THIS TOKEN THAT FAILS CLOSED.
   //
   // The rest of the secrets surface uses `checkOptionalBearer` — "require the token if one is
-  // configured" — which is right for a Settings page that must work on a fresh appliance, and is
+  // configured" — which is right for a Settings page that must work on a fresh install, and is
   // why `/api/secrets` and `/api/slots` are correctly absent from this table: unconfigured, they
   // ARE open. `/api/audit` uses `checkBearer`, so it 401s whether or not a token is set, and a
   // world-readable audit log is not a trade worth making for convenience on first boot.
@@ -70,6 +70,12 @@ const GATES: ReadonlyArray<{
   { prefix: '/api/workflows/start', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/workflows/stop', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/datasets/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
+  // THE IMAGE STORE (ADR 0061). Eight routes, all of which refuse without a credential — so without
+  // this entry they would be published as OPEN, and `openapi.test.ts` drives every open-documented
+  // route with no credential and fails on a 401/403. The three that CHANGE something additionally
+  // require the `infra` scope, which this document cannot express per-route: it describes the
+  // scheme, and the scope is in the route's own refusal.
+  { prefix: '/api/images/', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
   { prefix: '/api/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/probe', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/sources', scheme: 'runToken', vars: RUN_TOKEN_VARS },

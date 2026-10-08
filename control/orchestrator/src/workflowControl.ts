@@ -688,7 +688,7 @@ export async function serveWorkflow(input: ServeInput): Promise<ServeResult> {
    * is what makes it work with a CLI older than that variable — and the installed binary on the box
    * this was found on was exactly that.
    *
-   * ABSENT IS LEFT ALONE. Where nothing says, the CLI's own search is correct: on an appliance or a
+   * ABSENT IS LEFT ALONE. Where nothing says, the CLI's own search is correct: on an install or a
    * developer's machine it walks up from a real checkout and finds it.
    */
   const sourceId = `at:${path.dirname(file)}`;

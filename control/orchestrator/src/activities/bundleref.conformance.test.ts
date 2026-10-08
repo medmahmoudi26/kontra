@@ -99,7 +99,7 @@ describe('the reference a mirror copies', () => {
 
   it('every registry in the corpus is spelled host:port', () => {
     // The port is half of a reference. `REGISTRY_PORT` is this side's copy of
-    // `cli/appliance/registry.DefaultPort`, and a corpus written against a different one would
+    // `cli/install/registry.DefaultPort`, and a corpus written against a different one would
     // pass every assertion above while describing a registry nobody serves.
     for (const c of corpus.reference.cases) {
       expect(c.registry).toMatch(/^[a-z0-9.-]+:\d+$/);

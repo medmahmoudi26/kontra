@@ -100,10 +100,22 @@ def redis_kv_from_env() -> RedisEtagKV:
     """
     hostport = os.environ.get("KONTRA_REDIS_HOST", "localhost:6379")
     host, _, port = hostport.partition(":")
+    # ── THE PASSWORD IS OPTIONAL, AND WHERE IT MATTERS IS THE VPC ─────────────────────────────
+    #
+    # On the default stack Redis publishes on loopback and loopback IS the control (ADR 0056). The
+    # VPC overlay publishes it to the fleet network so a Machine can reach the state store — and at
+    # that point "anything on this VPC" can read every actor's state and every global_state entry,
+    # with no credential at all. `docker-compose.vpc.yml` therefore sets `requirepass` and this
+    # variable together, both `${VAR:?}`.
+    #
+    # UNSET MEANS NO AUTH, which is today's behaviour unchanged — so a loopback install and the
+    # embedded state store keep working without one.
+    password = os.environ.get("KONTRA_REDIS_PASSWORD") or None
 
     def _factory() -> Any:
         import redis.asyncio as aioredis
 
-        return aioredis.Redis(host=host or "localhost", port=int(port or 6379), db=0)
+        return aioredis.Redis(host=host or "localhost", port=int(port or 6379), db=0,
+                              password=password)
 
     return RedisEtagKV(_factory)

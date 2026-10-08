@@ -17,7 +17,7 @@ exhaustion — loud, but only once a batch was big enough, so small runs passed.
 the ref shape, the metadata decoding and the CAS key so that `kontra workflow start --wait` could
 read an offloaded result — an implementation of this contract whose header cited this corpus and
 whose tests never opened it. It is gone: the CLI reaches the handler's codec through
-`runtime/handler/claimcheck`, the way the appliance already reached the handler's store types through
+`runtime/handler/claimcheck`, the way the install already reached the handler's store types through
 `casstore` and `hydratestore`, and what is left in the CLI is a transport (one unsigned HTTP GET)
 rather than a copy of this contract.
 
@@ -34,17 +34,17 @@ Every implementation runs the **same** [`fixtures.json`](./fixtures.json):
 |----------|------|--------|
 | Go (handler) | [`runtime/handler/internal/codec/conformance_test.go`](../../handler/internal/codec/conformance_test.go) | `go test ./internal/codec/` in `handler/` |
 | Go (runtime) | [`runtime/go/codec/conformance_test.go`](../../runtime/go/codec/conformance_test.go) | `go test ./codec/` in `runtime/go/` |
-| Go (appliance, over HTTP) | [`cli/appliance/codec/codec_test.go`](../../cli/appliance/codec/codec_test.go) | `go test ./appliance/codec/` in `cli/` |
 | Go (the `kontra` binary) | [`cli/claimcheck_test.go`](../../cli/claimcheck_test.go) | `go test .` in `cli/` |
 | Python (actorkit) | [`runtime/python/internals/test_codec_conformance.py`](../../runtime/python/internals/test_codec_conformance.py) | `pytest` |
 | TypeScript | [`control/orchestrator/src/codec/conformance.test.ts`](../../backend/src/codec/conformance.test.ts) | `vitest` (`pnpm test` in `orchestrator/`) |
 
-The two `cli/` arms were added in 2026-08 and are **decode-side**. The appliance's runs every case
-through the served `POST /encode` + `/decode` endpoint a browser calls. The `kontra` binary's runs
-the **offloaded** cases through the codec `kontra workflow start --wait` reads a result with, and
-asserts that the URL that codec builds lands on the `cas_key` recorded here — which is the
-assertion the fifth implementation's own suite could not make, because it rebuilt the address the
-same wrong way the code did.
+The `cli/` arm was added in 2026-08 and is **decode-side**: it runs the **offloaded** cases through
+the codec `kontra workflow start --wait` reads a result with, and asserts that the URL that codec
+builds lands on the `cas_key` recorded here — which is the assertion an implementation's own suite
+could not make, because it rebuilt the address the same wrong way the code did.
+
+A fifth arm served the same cases over `POST /encode` + `/decode` from inside the binary. It went
+with the process that served them; nothing is served from the `kontra` binary now.
 
 ## The `prefixCases` rows, and what six green arms were not saying
 

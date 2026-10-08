@@ -21,7 +21,7 @@
  * contract and the transcript's rendering.
  *
  * NOTHING HERE IS AUTHENTICATION. The `by` on an answer is whatever the answering client said it
- * was: the appliance is loopback with no credential (ADR 0031), so there is no identity to record
+ * was: the install is loopback with no credential (ADR 0031), so there is no identity to record
  * and this module does not invent one. It is attribution — useful on a shared box, and useful
  * reading your own history six weeks later — and no decision in kontra is gated on it. Do not
  * build one that is.
@@ -283,7 +283,7 @@ export async function answerAsk(
 }
 
 /**
- * The operator label this appliance puts on an answer nobody labelled.
+ * The operator label this install puts on an answer nobody labelled.
  *
  * A NAME FROM LOCAL CONFIG, and the honest thing it is: whoever set `KONTRA_OPERATOR` on this box
  * said so about themselves. Unset means unlabelled — an answer attributed to `operator` or to a

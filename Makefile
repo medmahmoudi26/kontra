@@ -3,7 +3,7 @@
 # **THE LOCAL CONTROL PLANE IS THE COMPOSE CLUSTER (ADR 0047).** `make up` starts
 # docker-compose.yml, which includes docker-compose.quickstart.yml. `kontra up` remains in the
 # binary and is not a supported install path.
-.PHONY: up up-d down logs ui api bundle proto-check image release worker-base
+.PHONY: up up-d down logs ui api proto-check image
 
 # THERE IS NO `tmux-dir` TARGET ANY MORE, and its absence is the fix rather than a deletion.
 #
@@ -65,31 +65,22 @@ up-d:
 # checkout, so a console built against a stale `core/dist` is a console that disagrees with the
 # orchestrator it is about to be deployed next to.
 #
-# ABSOLUTE, AND THAT IS A FIX RATHER THAN A STYLE. `release` below runs its compiler from `cli/`,
-# so a relative `../kontra-console` meant two different directories in the same target: the guard
+# ABSOLUTE, AND THAT IS A FIX RATHER THAN A STYLE. A target that runs its compiler from `cli/`
+# made a relative `../kontra-console` mean two different directories in one recipe: the guard
 # checked `<repo>/../kontra-console/dist` and PASSED, and the command that followed looked in
 # `<repo>/cli/../kontra-console/dist` and failed with an unrelated message about a missing SPA. A
 # guard that tests a path its command does not use is worse than no guard — it reports the healthy
 # case and then fails somewhere the operator has no reason to connect to it.
 CONSOLE ?= $(abspath $(CURDIR)/../kontra-console)
 
-# ── THE CONTAINER IMAGE, FROM A RELEASE — the compose install path ─────────────────────────────
-#
-# Two steps and the order is the point: `kontra release` produces exactly what a user downloads,
-# and the image is built FROM that tarball. The container and the download are then the same bytes,
-# which is what makes this "verify our builds" rather than a second way to compile.
-#
-# THE SPA IS THE ONE THING THE RELEASE DOES NOT BUILD ITSELF (its toolchain lives in another
-# repository — ADR 0038), so `KONTRA_CONSOLE_DIST` points at a build you have. `make ui` makes one.
-# `CONSOLE` is defined once, above — a second `?=` here was a no-op that read like the definition.
 PLATFORM ?= linux/amd64
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 
 # ── THE SPA, FROM THE SIBLING CHECKOUT — and this is what makes `make image` one command ────────
 #
-# The console is a separate repository (ADR 0038) and the release ARCHIVES a vite output it does not
-# build. That used to mean three commands nobody had been told about, and a fresh clone died on the
-# first of them with a message that assumed the checkout already existed.
+# The console is a separate repository (ADR 0038) whose vite output this repo does not build. That
+# used to mean three commands nobody had been told about, and a fresh clone died on the first of
+# them with a message that assumed the checkout already existed.
 #
 # IT MUST BE A SIBLING NAMED `kontra-console`, AND THIS CHECKOUT MUST BE NAMED `kontra`. The console
 # resolves `@kontra/core` as `link:../kontra/shared/core` — a filesystem path, not a published
@@ -109,19 +100,12 @@ $(CONSOLE):
 	  exit 1; }
 
 # The HOST-side SPA build. `make image` no longer needs it — it builds the SPA in Docker — but
-# `make ui` (deploy into a running container) and `make image-from-release` still do.
+# `make ui`, which deploys into a running container, still does.
 console: $(CONSOLE)
 	pnpm install --frozen-lockfile
 	pnpm --filter @kontra/core run build
 	cd "$(CONSOLE)" && pnpm install --frozen-lockfile && pnpm run build
 
-release: console
-	cd cli && KONTRA_CONSOLE_DIST="$(CONSOLE)/dist" go run . release \
-	  --repo .. --platform $(PLATFORM) --version $(VERSION) --out ../build/release
-
-# THE TARBALL IS FOUND, NOT NAMED. It carries its version and platform in the filename, and a
-# hard-coded one is how an image quietly keeps shipping last month's binary. Exactly one must match:
-# a `build/release` with two is ambiguous and saying so beats picking.
 # ── THE ONE THAT NEEDS ONLY DOCKER ──────────────────────────────────────────────────────────────
 #
 # Everything is built INSIDE the image: both pnpm installs, the SPA, the Go binary and the
@@ -138,7 +122,7 @@ release: console
 # filesystem path — both checkouts have to be visible to one build.
 # ── THE TAGS THESE TARGETS WRITE ARE THE TAGS THE INSTALL RESOLVES ──────────────────────────────
 #
-# They used to be `kontra:latest` and `kontra-worker-base:1`. `docker-compose.yml` and
+# They used to be bare local tags like `kontra:latest`. `docker-compose.yml` and
 # `control/pulumi/Pulumi.yaml` now default to `ghcr.io/medmahmoudi26/<name>:dev`, because the
 # quickstart is two `curl`s and `docker compose up -d` and a bare name only resolves on a machine
 # that has already built it.
@@ -147,26 +131,22 @@ release: console
 # Docker resolves by name, and `ghcr.io/medmahmoudi26/kontra:dev` and `kontra:latest` are two names
 # for the same bytes — so building the second and running the first sends the daemon to ghcr.io for
 # an image that is already on the disk. MEASURED before these moved: this machine held
-# `kontra:latest`, `kontra-orchestrator:latest`, `kontra-host:1` and `kontra-worker-base:1`, and not
+# `kontra:latest` and `kontra-orchestrator:latest`, and not
 # one `ghcr.io/medmahmoudi26/*`. That is why `Pulumi.yaml`'s "RemoteImage resolves a locally present
 # image without consulting a registry" still holds: it holds per NAME, not per image.
 #
 # Overridable, and the override is what CI uses to build a tag before it exists.
 KONTRA_IMAGE ?= ghcr.io/medmahmoudi26/kontra:dev
-KONTRA_WORKER_BASE_IMAGE ?= ghcr.io/medmahmoudi26/kontra-worker-base:dev
 KONTRA_PORTER_IMAGE ?= ghcr.io/medmahmoudi26/kontra-porter:dev
 
 image: $(CONSOLE)
 	DOCKER_BUILDKIT=1 docker build -f control/images/Dockerfile.selfcontained \
 	  --build-arg VERSION=$(VERSION) \
 	  -t "$(KONTRA_IMAGE)" "$(dir $(CURDIR))"
-	$(MAKE) worker-base
 	@echo
 	@echo "  docker compose up -d"
 	@echo "  open http://127.0.0.1:8088"
 
-worker-base:
-	docker build -f control/images/Dockerfile.workerbase -t "$(KONTRA_WORKER_BASE_IMAGE)" .
 
 # PORTER — Arrow Flight SQL over the lake. Built separately from `image` because it shares nothing
 # with the orchestrator: a different language, a different base, and a source tree fetched from
@@ -177,20 +157,6 @@ porter:
 	@echo
 	@echo "  docker compose up -d porter"
 
-# `make image-from-release` — the OLDER path, kept because it is the one that proves the container
-# and the published tarball are the same bytes. It needs the host toolchain; `make image` does not.
-image-from-release: release
-	@set -eu; \
-	  n=$$(ls build/release/kontra_*.tar.gz 2>/dev/null | wc -l); \
-	  [ "$$n" = 1 ] || { echo "expected exactly one tarball in build/release, found $$n"; exit 1; }; \
-	  tarball=$$(ls build/release/kontra_*.tar.gz); \
-	  echo "==> image from $$tarball"; \
-	  docker build -f control/images/Dockerfile.appliance --build-arg TARBALL="$$tarball" \
-	    -t "$(KONTRA_IMAGE)" .
-	@echo
-	@echo "  docker compose up -d      # the control plane"
-	@echo "  open http://127.0.0.1:8088"
-
 # A `.env` GUARD USED TO BE HERE AND ADR 0045 INVERTED IT. It refused to build without one,
 # because "the SPA would build with an EMPTY explore token" — back when the console authenticated
 # with `VITE_KONTRA_EXPLORE_TOKEN` baked in at build time. The console signs in for a session token
@@ -198,15 +164,15 @@ image-from-release: release
 # the artifact cannot rotate, is identical for every operator, and outlives the container in any
 # image that keeps it. So an absent `.env` is the correct state, and the guard was stopping a fresh
 # clone from building for a reason that had become the opposite of true.
-# WHERE THE CONTAINER ACTUALLY SERVES THE SPA FROM. This said `/app/web/dist`, which is the
-# APPLIANCE's layout and does not exist in `Dockerfile.orchestrator` — its WORKDIR is
+# WHERE THE CONTAINER ACTUALLY SERVES THE SPA FROM. This said `/app/web/dist`, a layout that does
+# not exist in `Dockerfile.orchestrator` — its WORKDIR is
 # /src/control/orchestrator and `server.ts` resolves `web/dist` relative to that. So `make ui`
 # deleted nothing and copied into a path docker created on the fly, and the console in the browser
 # never changed.
 ORCH_WEB := /src/control/orchestrator/web/dist
 
-# AND THE SERVER'S OWN PATH, which had the same phantom. `api` copied into `/app/dist` — the
-# APPLIANCE's layout, absent from `Dockerfile.orchestrator`, whose WORKDIR is
+# AND THE SERVER'S OWN PATH, which had the same phantom. `api` copied into `/app/dist`, absent
+# from `Dockerfile.orchestrator`, whose WORKDIR is
 # /src/control/orchestrator. `docker cp` CREATES a missing destination rather than refusing, so the
 # target printed "deployed and restarted" and restarted the container onto the code it already had.
 # MEASURED: `docker exec kontra-api ls -d /app/dist` -> no such file, while the process runs from
@@ -217,10 +183,9 @@ ORCH_DIST := /src/control/orchestrator/dist
 ui: console
 	@api=$$(docker ps -q --filter label=com.docker.compose.service=orchestrator-api | head -1); \
 	  if [ -z "$$api" ]; then \
-	    echo "no orchestrator-api container (it left docker-compose.yml — ADR 0031 §1)."; \
-	    echo "  the build above IS the deploy for 'kontra up --orchestrator=local'."; \
-	    echo "  for the hydrated bundle instead:  kontra bundle spa  (then restart 'kontra up')"; \
-	    exit 0; \
+	    echo "no orchestrator-api container — start the stack with 'make up-d' first."; \
+	    echo "  the build above produced the SPA; nothing has been deployed."; \
+	    exit 1; \
 	  fi; \
 	  docker exec "$$api" rm -rf $(ORCH_WEB)/assets; \
 	  docker cp "$(CONSOLE)"/dist/. "$$api":$(ORCH_WEB)/ && echo "deployed the SPA to $$api"
@@ -250,12 +215,9 @@ ui: console
 #
 # A restart, not a recreate: hot-copied files survive the former and are lost to the latter.
 #
-# ONE OF THE TWO IS NOT A CONTAINER ANY MORE (ADR 0031 §1, issue 14). `orchestrator-api` left
-# docker-compose.yml, and on the appliance the `tsc` above is the whole deploy: `kontra up
-# --orchestrator=local` runs `control/orchestrator/dist` out of the checkout and prints on every start
-# which orchestrator it chose. So a missing api container is REPORTED and skipped rather than
-# failing the target — a recipe that exits 1 naming a service this file no longer defines is the
-# same silent-mismatch trap that `kontra infra up` reverting a hot-copied container was.
+# A MISSING CONTAINER FAILS THE TARGET. Both roles are compose services again, so "no
+# orchestrator-api" means the stack is not running — and a recipe that prints a note and exits 0 is
+# the silent-mismatch trap `ORCH_DIST` above exists to correct, one level up.
 # `@kontra/core` GOES WITH IT, AND LEAVING IT OUT CRASH-LOOPED THE CONTROL PLANE.
 #
 # The orchestrator imports `@kontra/core` as a workspace link, so `tsc` here compiles against the
@@ -281,12 +243,6 @@ api:
 	@for svc in orchestrator-api orchestrator-infra; do \
 	  cid=$$(docker ps -q --filter label=com.docker.compose.service=$$svc | head -1); \
 	  if [ -z "$$cid" ]; then \
-	    if [ "$$svc" = "orchestrator-api" ]; then \
-	      echo "no orchestrator-api container (it left docker-compose.yml — ADR 0031 §1)."; \
-	      echo "  the tsc above IS the deploy for 'kontra up --orchestrator=local'; restart it to pick it up."; \
-	      echo "  for the hydrated bundle instead:  kontra bundle orchestrator"; \
-	      continue; \
-	    fi; \
 	    echo "no running $$svc container — start the stack with 'make up-d' first"; exit 1; \
 	  fi; \
 	  docker cp control/orchestrator/dist/. "$$cid":$(ORCH_DIST)/ && docker restart "$$cid" >/dev/null && echo "deployed and restarted $$svc ($$cid)"; \
@@ -298,27 +254,6 @@ api:
 	    echo "  file no longer defines. It is polling kontra-materializer beside orchestrator-api's"; \
 	    echo "  own materializer role; recreate the stack ('make up-d') to be rid of it."; \
 	  }
-
-# THE APPLIANCE BUNDLE (ADR 0031 §2) — a pinned Node runtime, the compiled orchestrator and its
-# native addons, as one content-addressed tar.gz with a manifest.
-#
-# NOT PART OF `make up`, and not a dependency of anything here. This target produces an ARTIFACT
-# for the binary to carry; the compose control plane above runs the orchestrator out of an image
-# and needs none of it. Building one takes about four minutes and half a gigabyte of working
-# space, which is not a thing to do as a side effect of another verb.
-#
-# The work is in `kontra bundle orchestrator` rather than in this recipe, because a bundle whose
-# digest is meaningful needs a deterministic tar writer, a digest-verified fetch and a credential
-# scan — none of which fits in a make recipe, and all of which have tests
-# (cli/appliance/*bundle*_test.go).
-#
-#   make bundle                  # build for this host into build/bundles/
-#   make bundle OUT=/mnt/big     # somewhere with more room
-#   make bundle PLATFORM=linux/arm64
-BUNDLE_FLAGS = $(if $(OUT),--out $(OUT)) $(if $(PLATFORM),--platform $(PLATFORM))
-bundle:
-	cd cli && go build -o ../build/kontra-bundler .
-	./build/kontra-bundler bundle orchestrator $(BUNDLE_FLAGS)
 
 down:
 	docker compose down
@@ -392,8 +327,8 @@ PYTHON ?= $(shell command -v python || command -v python3)
 #
 # `e2e` still means "brings its own heavy runtime" — crawl4ai and webcrawl mark their live tests
 # that way for Playwright, and CI installs no Chromium — so E2E=1 does NOT select it. Selecting
-# plain `-m e2e` to reach the appliance leg pulled the browser tests in with it and failed on
-# `BrowserType.launch: Executable doesn't exist`, which says nothing about the binary.
+# plain `-m e2e` to reach the control-plane leg pulled the browser tests in with it and failed on
+# `BrowserType.launch: Executable doesn't exist`, which says nothing about what was being tested.
 EXAMPLES_MARK = $(if $(E2E),-m 'not e2e',-m 'not e2e and not control_plane')
 
 # EXIT 5 IS NOT A FAILURE HERE, AND FINDING THAT OUT COST A GREEN SUITE.
@@ -411,7 +346,7 @@ EXAMPLES_MARK = $(if $(E2E),-m 'not e2e',-m 'not e2e and not control_plane')
 # two are built by completely different commands, not because they are different kinds of gate:
 # both exist to stop an example actor rotting on a green branch. CI runs the halves separately —
 # the Python job has no Go and the Go job has no venv — and `scripts/parity-gate.sh` wants the
-# Python half alone, since its subject is parity against the appliance binary.
+# Python half alone, since its subject is parity against the compose install.
 # test-examples, test-examples-python and test-examples-go MOVED TO kontra-actors (ADR 0038).
 # There are no actors in this repository to run them against — `testdata/fixtureactor` is a
 # fixture, exercised by `tests/test_fixture_actor_e2e.py` and by scripts/parity-gate.sh, not by a
@@ -426,5 +361,5 @@ test-examples-go:
 	@rc=0; for d in $(GO_EXAMPLES); do \
 	  test -f "$$d/go.mod" || continue; \
 	  echo "== $$d"; \
-	  ( cd "$$d" && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test ./... ) || rc=1; \
+	  ( cd "$$d" && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test -count=1 ./... ) || rc=1; \
 	done; exit $$rc

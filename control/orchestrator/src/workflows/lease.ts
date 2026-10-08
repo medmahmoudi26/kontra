@@ -397,7 +397,7 @@ export async function fleetLeaseWorkflow(input: FleetLeaseInput): Promise<FleetL
    * THE SAME WORKFLOW AND THE SAME ID, not the `stackDestroy` activity underneath it, because the
    * id IS the stack (ADR 0019) and that is what makes a second writer structurally impossible. It
    * also means this teardown carries the credential preflight, appears in the Workflows page beside
-   * the `up` that created the **Fleet**, and refuses with a sentence on an appliance rather than
+   * the `up` that created the **Fleet**, and refuses with a sentence on an install rather than
    * looping against a provisioner that does not exist.
    *
    * ABANDON, not the default TERMINATE: if this **Lease** workflow is terminated while the destroy is in
@@ -426,7 +426,7 @@ export async function fleetLeaseWorkflow(input: FleetLeaseInput): Promise<FleetL
         return;
       } catch (err) {
         last = err;
-        // An appliance's `stackWorkflow` refuses non-retryably and will refuse identically in
+        // An install's `stackWorkflow` refuses non-retryably and will refuse identically in
         // thirty seconds. Waiting five times to say so turns one clear sentence into two and a
         // half minutes of a **Fleet** looking like it might yet be collected.
         if (isPermanent(err)) break;
@@ -443,7 +443,7 @@ export async function fleetLeaseWorkflow(input: FleetLeaseInput): Promise<FleetL
   }
 }
 
-/** A failure that will not become a success on the next attempt — an appliance's refusal, a
+/** A failure that will not become a success on the next attempt — an install's refusal, a
  *  credential nobody can read. Matched by the SDK's own flag rather than by message text. */
 function isPermanent(err: unknown): boolean {
   for (let cur: unknown = err, depth = 0; cur && depth < 8; depth += 1) {

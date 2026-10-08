@@ -18,7 +18,7 @@
  * surface it borrows the token from. The optional form is "require the token if one is
  * configured", so on an install where nobody set `KONTRA_SECRETS_TOKEN` it is OPEN — and the
  * generated spec said so out loud: `"Open: no credential is checked"`, on the audit trail. That is
- * the right trade for a Settings page, which must work on a fresh appliance, and the wrong one
+ * the right trade for a Settings page, which must work on a fresh install, and the wrong one
  * here: a world-readable audit log is worse than an audit surface that answers 503 until somebody
  * configures a token. Same posture as `routes/logs.ts` and `explore.ts`, for the same reason.
  *

@@ -71,7 +71,7 @@ Numbered so code comments, issues and reviews can cite them.
 | **EP13** | **Temporal itself.** Plaintext by default; TLS is environment-only and unset locally. Anyone who can reach 7233 in a namespace can poll its queues. | network → task queues | run execution integrity, history |
 | **EP14** | **The payload codec.** Every argument and result passes through it. | codec compromise → all run data | history, run output |
 | **EP15** | **Operator config and deployment defaults** — `.env`, `~/.kontra/config.yaml`, compose files, bind addresses. | a wrong default → any of the above | everything |
-| **EP16** | **Supply chain** — base images, Go/npm/PyPI dependencies, the pinned Node runtime in the appliance bundle. | build input → Controller and Machines | everything |
+| **EP16** | **Supply chain** — base images, Go/npm/PyPI dependencies, the pinned Node runtime in the install bundle. | build input → Controller and Machines | everything |
 
 ## 4. What is NOT defended, and the acceptance
 
@@ -120,6 +120,67 @@ Porter has no equivalent, so a statement that is merely *read-only* is not there
 SQL therefore stays on the hardened engine. Porter is given only SQL this codebase composed.
 
 *Revisit before:* any hosted install, any second operator, or any published port.
+
+**The image store is anonymous by default, and the loopback publish is the control.** With the three
+registry passwords unset — which is the shipped default — zot accepts an unauthenticated pull **and
+push** on `:5000`. That is what `registry:2` always was (**EP11**), and it is what every client in
+this system assumes: `kontra deploy`, `kontra scale`, the orchestrator's fleet activities, the Warden's
+pulls and a Machine's `curl` of its Bundle all send no credential, and the placement wire structurally
+cannot carry one — `shared/conformance/placement.json` forbids a credential field on the type that
+writes cloud-init, because it would be one careless interpolation away from a token in a
+world-readable Bundle. So turning auth on unconditionally would 401 every push and pull in the system
+at once, which is why it is opt-in and why a *partial* credential set is refused rather than
+half-applied.
+
+*The control, and it is the only one:* the port is published on `127.0.0.1` by `KONTRA_BIND`. §5's
+lesson applies verbatim — ufw cannot see a Docker-published port, so **the bind address is the whole
+control**, and it is the control that was missing when this port was found on `0.0.0.0:5000`.
+
+*What the swap to zot widened, measured both ways:* an unauthenticated
+`DELETE /v2/<repo>/manifests/<digest>` answers **202** on zot and the repository is gone;
+`registry:2` answered **405 UNSUPPORTED**. Replacing one with the other therefore converts an
+append-only store into a destructive one, on the port the VPC overlay publishes to the fleet network.
+So **even the anonymous rendering now carries an `accessControl` of `read`/`create`/`update`** and no
+`delete`: every existing push path keeps working with no credential, and erasing the Bundle a Machine
+is about to pull is refused. What that does *not* close: `create`/`update` still mean an anonymous
+caller who can reach the port can **replace a tag**. A Placement pins a digest rather than a tag, which
+is the only reason that is survivable — it is not the same as safe, and it is the reason the Warden's
+cosign verification matters (ADR 0039).
+
+*An unauthenticated information surface, and it cannot simply be closed:* `/v2/_zot/ext/mgmt` needs no
+credential and returns the version, the git commit and the compiled-in extension list.
+
+```
+{"distSpecVersion":"1.1.1","commit":"v2.1.21-6429ce645b13f5a72275d793ae42df51739bb0ca",
+ "releaseTag":"v2.1.21","binaryType":"-events-imagetrust-lint-metrics-mgmt-profile-scrub-search-sync-ui-userprefs"}
+```
+
+It is the **healthcheck target**, and it has to be: `/v2/` answers 401 once credentials are on, and
+both `orchestrator-api` and `cli` gate on `registry: condition: service_healthy` — a check that fails
+under auth means the install never comes up. It is also a **version-disclosure surface**: an exact
+version and commit to look a CVE up against, plus the extension list, on a port the VPC overlay
+publishes to the fleet network.
+
+*Under the VPC overlay the three passwords stop being optional.* `docker-compose.vpc.yml` makes
+`KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD`, `KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD` and
+`KONTRA_REGISTRY_PULL_PASSWORD` `:?` **required**, beside the publish that creates the exposure —
+the same treatment `KONTRA_REDIS_PASSWORD` already gets, and for the same reason: on a VPC an
+anonymous registry is a write-anything store for whatever else is on that network, and what it hands
+out is the image a Machine is about to run. The three roles are separate so that a build which may
+publish an actor cannot replace a runtime underneath every other actor, and there is deliberately no
+`adminPolicy` — one would have made the credential handed to whoever iterates on a runtime the most
+powerful of the three.
+
+*The acceptance:* one operator, one host, loopback — the same acceptance Redis and Porter have, on a
+stack that already accepts a privileged component holding the Docker socket. Credentials exist, are
+tested, and are off by default because no client in the tree has a credential slot yet; adding one in
+every client is the work that makes auth-by-default honest rather than a 401 nobody can act on.
+Decided 2026-10-07.
+
+*Revisit before:* publishing the port anywhere but loopback without all three passwords set; a second
+operator or tenant on the VPC; enabling cosign verification at pull, which changes what a replaced tag
+can achieve and therefore what this entry is accepting; and any zot upgrade, since `ext/mgmt` names the
+version an attacker would look up.
 
 ## 5. Incident, 2026-09-12 — and what it says about this model
 

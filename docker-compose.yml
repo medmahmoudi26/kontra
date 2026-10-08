@@ -2,7 +2,7 @@
 #
 #   curl -O https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/docker-compose.yml
 #   docker compose up -d --wait
-#   docker compose logs cli | grep -A4 'console login'
+#   docker compose exec cli cat /var/lib/kontra/console-password
 #
 # No clone, no build, no binary, and NO `.env` — every `${…:-default}` in here resolves to something
 # a stranger's Docker can pull. `.env.quickstart` is the second curl only if you want to move a port,
@@ -33,7 +33,7 @@
 # has to be a directory you can see from the place you ran `docker compose up`.
 #
 # Postgres, Temporal, SeaweedFS, Redis, the registry, and the kontra processes are separate
-# services. The appliance (`kontra up` as one process) is not a supported install path.
+# services. There is no second topology: one process serving the whole control plane is gone.
 #
 # ── THE DOCKER SOCKET ──────────────────────────────────────────────────────────────────────────
 #
@@ -80,7 +80,57 @@ x-orchestrator-env: &orchestrator-env
   #
   # The VPC address is reachable from every container AND from a Droplet in the Controller's VPC,
   # so one value is correct for both the manifest read here and the blob URL a Machine is handed.
-  KONTRA_REGISTRY: ${KONTRA_REGISTRY:-${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
+  KONTRA_REGISTRY: ${KONTRA_REGISTRY:-127.0.0.1:${KONTRA_REGISTRY_PORT:-5000}}
+  # ── THE PUSH CREDENTIAL, WHICH THE SERVICES THAT PUSH HAD NEVER BEEN GIVEN ─────────────────────
+  #
+  # `registry-config` above generates three zot accounts and a per-repository policy: only
+  # `push-actors` may create in the actors namespace. Nothing passed that account to the two
+  # services that push — `cli` and `orchestrator-infra`, which is where
+  # `src/activities/buildActor.ts` spawns `kontra deploy` — so an install with the three passwords
+  # set could not deploy an actor, and the way it said so was a 401 from inside a builder.
+  #
+  # THE SAME VARIABLE THE HTPASSWD WAS WRITTEN FROM. One secret, read twice, rather than a copy that
+  # can drift: a mismatch here is a registry that authenticates nobody it was configured for.
+  #
+  # EMPTY IS ANONYMOUS AND STAYS SUPPORTED. With no passwords set `registry-htpasswd` writes no
+  # htpasswd and zot serves anonymously, which is the quickstart's default; `registryAdmits`
+  # (cli/registryauth.go) only refuses when the registry actually answers 401.
+  KONTRA_REGISTRY_PUSH_ACTORS_USER: ${KONTRA_REGISTRY_PUSH_ACTORS_USER:-push-actors}
+  KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}
+  # WHERE A BARE `name:major` IN actor.json RESOLVES — this install's own registry, which is the
+  # default `runtimesPrefix` computes and the one address the trust policy below already admits.
+  #
+  # IT IS NOT ghcr, AND THAT IS NOT A PREFERENCE. Pointing it at the published set directly looked
+  # simpler and is not expressible: `KONTRA_TRUST_REGISTRIES` would have to admit `ghcr.io`, and the
+  # runtimes there are SIGNED per release — identity
+  # `…/kontra-runtimes/.github/workflows/publish.yml@refs/tags/python/1.0.0` — while
+  # `trustpolicy` takes one exact `--certificate-identity` and no regexp. One string cannot cover
+  # three runtimes signed under three tag refs, and the alternative, adding ghcr to
+  # KONTRA_TRUST_UNSIGNED, would throw away a signature that exists. So the published set is
+  # MIRRORED into this registry on first boot (see the `cli` service), where it is local, trusted,
+  # and the same bytes for every actor built here.
+  KONTRA_RUNTIMES_PREFIX: ${KONTRA_RUNTIMES_PREFIX:-}
+  # WHERE THE MIRROR READS FROM, WHICH RUNTIMES IT COPIES, AND WHO WRITES THEM.
+  #
+  # `KONTRA_RUNTIMES_IMPORT` is a LIST IN CONFIGURATION AND NOT IN THE CLI on purpose: adding a
+  # runtime is pushing one to `kontra-runtimes`, and if kontra had to be edited too, a fork could
+  # not add one (ADR 0061 §3.4). Discovery cannot replace it here — `GET /v2/_catalog` against ghcr
+  # answers 403, measured — so an install names the set it mirrors and a fork edits its `.env`.
+  #
+  # `push-runtimes` AND NOT `push-actors`. That account may write `kontra-runtimes/**` and nothing
+  # else, which is what stops an actor build from replacing the base every other actor is layered
+  # on; passing the actors credential here would retire that separation while looking like it held.
+  KONTRA_RUNTIMES_SOURCE: ${KONTRA_RUNTIMES_SOURCE:-ghcr.io/medmahmoudi26/kontra-runtimes}
+  KONTRA_RUNTIMES_IMPORT: ${KONTRA_RUNTIMES_IMPORT:-base:1 python:1 python-browser:1}
+  KONTRA_REGISTRY_PUSH_RUNTIMES_USER: ${KONTRA_REGISTRY_PUSH_RUNTIMES_USER:-push-runtimes}
+  KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}
+  # READING IS NOT FREE EITHER, once auth is on: the rendered accessControl gives every repository
+  # tree `"defaultPolicy": []`, so a manifest HEAD or a `tags/list` with no credential is 401 — and
+  # an unauthenticated `versionDeployed` answers "not deployed", which turns version immutability
+  # OFF on exactly the installs that locked their registry down. `pull` may read and nothing else,
+  # so it is what the CLI reads with; the two push accounts are only the fallback.
+  KONTRA_REGISTRY_PULL_USER: ${KONTRA_REGISTRY_PULL_USER:-pull}
+  KONTRA_REGISTRY_PULL_PASSWORD: ${KONTRA_REGISTRY_PULL_PASSWORD:-}
   KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
   KONTRA_CONTROLLER: orchestrator-api
   KONTRA_DUCKLAKE_CATALOG: postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra
@@ -133,12 +183,11 @@ x-orchestrator-env: &orchestrator-env
   # registry and the tag, and maps the bare name to a Dockerfile. So renaming an image is a change to
   # this line; retagging or re-homing one is not.
   KONTRA_IMAGE: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
-  KONTRA_HOST_IMAGE: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
   # Both addresses: `127.0.0.1:5000` is how this host's own tooling spells the registry, and the
   # VPC address is how a fleet Machine does. A Bundle trusted under one spelling and fetched under
   # the other is a Bundle that is refused on the Machine, after the provision has been paid for.
-  KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:5000,${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
-  KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:5000,${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}}
+  KONTRA_TRUST_REGISTRIES: ${KONTRA_TRUST_REGISTRIES:-127.0.0.1:${KONTRA_REGISTRY_PORT:-5000}}
+  KONTRA_TRUST_UNSIGNED: ${KONTRA_TRUST_UNSIGNED:-127.0.0.1:${KONTRA_REGISTRY_PORT:-5000}}
   # THE READ TOKEN FOR THE TWO SURFACES THAT READ A RUN'S CONTENT: the query workbench and the logs
   # proxy (ADR 0050 §1, issue #17). Both are `checkBearer` — FAIL-CLOSED — so with this unset they
   # answer 503 and say which variable turns them on, rather than opening. That is why it is passed
@@ -161,7 +210,7 @@ x-orchestrator-env: &orchestrator-env
   # bytes deleted — so a vacuum would reclaim nothing, because NOTHING HAS EVER BEEN COLLECTED. The
   # visible symptom was not a disk alert: actor runs failed with `CancelledError: Activity
   # cancelled`, because `put_subunit` blocked on an object store that could not allocate, missed its
-  # heartbeat, and was retried forever. `cli/appliance/bundle/hydrate.go` warns about exactly this
+  # heartbeat, and was retried forever. A content-addressed hydrate warns about exactly this
   # shape — "a full disk on this system does not fail loudly".
   #
   # PASSED THROUGH EMPTY RATHER THAN OMITTED, for the reason `KONTRA_EXPLORE_TOKEN` above records:
@@ -339,7 +388,6 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
       # VPC ALSO, so a fleet Machine can reach this: temporal — the Worker polls its task queue.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
     healthcheck:
       test: ["CMD", "temporal", "operator", "cluster", "health"]
       interval: 10s
@@ -351,31 +399,325 @@ services:
     image: redis:7-alpine
     container_name: kontra-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
+    # ── `noeviction`, AND IT IS A CORRECTNESS SETTING, NOT A TUNING ONE ─────────────────────────
+    #
+    # This was `volatile-lru`, which evicts keys THAT HAVE A TTL. Every volatile key in kontra's
+    # keyspace is one actor's state hash (`kontra-actor:<actorId>`) carrying a 24 h TTL, and that
+    # hash is where the engine keeps its per-unit commit markers and resume scratch
+    # (`runtime/go/statekv`, `runtime/python/internals/statekv.py`).
+    #
+    # So under memory pressure Redis silently deleted the record of which Units had committed. A
+    # retry then reads an absent commit map and re-runs work that already finished, or finds a
+    # half-evicted one and skips work that did not. `kontra-global:*` carries no TTL precisely
+    # because the state keyspace's own rule says evicting one "does not degrade a run, it silently
+    # corrupts it" — the actor hash had the same property and none of the protection.
+    #
+    # `noeviction` turns that into a refused write, which reaches the actor as an error it can
+    # retry or fail on. Loud and recoverable beats silent and wrong — which is ADR 0059's rule that
+    # a state store refuses rather than forgetting, applied to the store itself.
+    #
+    # Measured on the install this was found on: 1.46 MiB of 512 MiB in use, 79 keys, and
+    # `evicted_keys:0` — so the hazard was latent and this costs nothing today.
+    #
+    # `--appendfsync always` fsyncs each write instead of batching a second's worth, because the
+    # window `everysec` leaves is a window where a commit marker is acknowledged and then lost.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
     volumes:
       - redis-data:/data
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_KV_PORT:-6379}:6379"
       # VPC ALSO, so a fleet Machine can reach this: redis   — the Session/state store.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_KV_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # THE CONFIG, THE HTPASSWD AND A HEALTHCHECK BINARY, written by a one-shot — the same argument
+  # `temporal-dynamicconfig` and `ducklake-init` already make: the install stays three paths on disk
+  # (`scripts/assert-install-is-self-contained.py` refuses any other bind mount), so a registry that
+  # needs a config file gets it from a volume rather than from the repo.
+  #
+  # IT RENDERS, IT DOES NOT SELECT. Auth is on when the three passwords are set and off when none
+  # are, because `registry:2` had no auth and loopback is what protected it (the file header). A
+  # config with `http.auth` and an EMPTY htpasswd answers 401 to everything, so "half configured"
+  # must be impossible rather than merely discouraged — hence the refusal below.
+  registry-config:
+    image: busybox:1.36
+    container_name: kontra-registry-config
+    restart: "no"
+    volumes:
+      - registry-config:/out
+      # READ-ONLY, AND ONLY TO COMPARE. Both stores are mounted here so this one-shot can see whether
+      # an unmigrated install is about to be handed an empty registry. Neither is written.
+      - registry-data:/old:ro
+      - zot-data:/zot:ro
+    environment:
+      KONTRA_REGISTRY_MIGRATION: ${KONTRA_REGISTRY_MIGRATION:-}
+      KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}
+      KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}
+      KONTRA_REGISTRY_PULL_PASSWORD: ${KONTRA_REGISTRY_PULL_PASSWORD:-}
+      KONTRA_REGISTRY_CVE: ${KONTRA_REGISTRY_CVE:-}
+      KONTRA_REGISTRY_RETENTION: ${KONTRA_REGISTRY_RETENTION:-dryrun}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        set +u; a="$${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}"; r="$${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:-}"
+        p="$${KONTRA_REGISTRY_PULL_PASSWORD:-}"; cve="$${KONTRA_REGISTRY_CVE:-}"
+        ret="$${KONTRA_REGISTRY_RETENTION:-dryrun}"; mig="$${KONTRA_REGISTRY_MIGRATION:-}"; set -u
+        # AN UNMIGRATED STORE STOPS THE INSTALL, BECAUSE THE ALTERNATIVE IS SILENT.
+        #
+        # zot reads `zot-data`; `registry:2` wrote `registry-data`. The layouts are different, so a
+        # swap with no migration presents an EMPTY registry — and nothing in this system tells an
+        # empty registry from a fresh one. Measured: `GET /api/images` answers 200 with `[]` and no
+        # `unreachable` flag, the console's drift reads `unknown` and draws `?`, `kontra doctor` has
+        # no registry check at all, and `versionDeployed()` — the `--override` guard — returns false
+        # for every version, so version immutability stops guarding without a word.
+        #
+        # What is at stake is not rebuildable in the sense that matters: ADR 0052 records that this
+        # volume "holds the digests Placements are pinned to … rebuilding an image yields a NEW
+        # digest, so a Fleet recorded against the old one can never be re-run as recorded."
+        #
+        # THE CHECK IS THE STATE ITSELF, NOT A MARKER FILE. zot keeps one directory per repository at
+        # the top of its store beside `cache.db`/`meta.db`, and `registry:2` keeps
+        # `docker/registry/v2/repositories/<name>`. So "the old store has repositories and the new one
+        # has none" is readable without anything having to remember to write a flag — and it stops
+        # refusing by itself the moment the copy has landed.
+        old_n=0; new_n=0
+        [ -d /old/docker/registry/v2/repositories ] &&
+          old_n=$$(ls -A /old/docker/registry/v2/repositories 2>/dev/null | wc -l) || true
+        [ -d /zot ] &&
+          new_n=$$(find /zot -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l) || true
+        if [ "$$old_n" -gt 0 ] && [ "$$new_n" -eq 0 ]; then
+          n="$$old_n"
+          echo "refusing: this install still has a registry:2 store that has not been migrated." >&2
+          echo "" >&2
+          echo "  $$n repository trees in the old volume; zot reads a different one and would start empty." >&2
+          echo "  An empty registry is indistinguishable from a fresh install on every surface that" >&2
+          echo "  reports one, and the digests in it are what Placements are pinned to." >&2
+          echo "" >&2
+          echo "  Run:  kontra registry migrate" >&2
+          echo "  Or, to start a deliberately empty registry and keep the old volume untouched:" >&2
+          echo "        KONTRA_REGISTRY_MIGRATION=skip docker compose up -d" >&2
+          [ "$$mig" = "skip" ] || exit 1
+          echo "  KONTRA_REGISTRY_MIGRATION=skip was set; continuing with an empty registry." >&2
+        fi
+        # RETENTION REPORTS BEFORE IT DELETES, AND THE DEFAULT IS THE REPORTING ONE.
+        #
+        # "keep the 5 most recently pushed" is only safe once something protects a version that is
+        # OLDER than those 5 and still placed on a Machine — which is what the `inuse-` tags are for
+        # and what acceptance test 7 pins. The reconciler that writes them is armed in the API role,
+        # so what gates `enforce` now is not whether it exists but whether it has RUN HERE: a tag
+        # appears within ten minutes of the orchestrator starting, and this install's own registry is
+        # the thing to check (`curl .../v2/<actor>/tags/list` shows an `inuse-` tag or it does not).
+        #
+        # And what it protects is NARROWER than the table above implies: only the catalog's current
+        # digest. Placements live in Pulumi stack state rather than a table, so a digest that is on a
+        # Machine and not in the catalog is not tagged (control/orchestrator/src/images/inuse.ts).
+        # zot's dryRun logs every would-delete instead of taking it.
+        case "$$ret" in
+          dryrun) dryrun=true ;;
+          enforce) dryrun=false ;;
+          *) echo "refusing: KONTRA_REGISTRY_RETENTION must be dryrun or enforce, got '$$ret'" >&2; exit 1 ;;
+        esac
+        set_count=0
+        [ -n "$$a" ] && set_count=$$((set_count+1)) || true
+        [ -n "$$r" ] && set_count=$$((set_count+1)) || true
+        [ -n "$$p" ] && set_count=$$((set_count+1)) || true
+        if [ "$$set_count" -ne 0 ] && [ "$$set_count" -ne 3 ]; then
+          echo "refusing: $$set_count of 3 registry passwords are set." >&2
+          echo "Set all of KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD, KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD" >&2
+          echo "and KONTRA_REGISTRY_PULL_PASSWORD, or none. A registry with auth enabled and users" >&2
+          echo "missing answers 401 to every pull, which reads as a broken install, not a locked one." >&2
+          exit 1
+        fi
+        # The healthcheck binary. zot's image carries exactly ONE executable and no shell, so the
+        # probe has to be carried in; busybox is already this install's one-shot image.
+        cp /bin/busybox /out/busybox
+        # THREE HEREDOCS, because the http block is the only part that varies and a config assembled
+        # by `sed` is a config nobody can review.
+        #
+        # `^[0-9]+$$` reaches the file as `^[0-9]+$`: compose interpolates `command:` the same way it
+        # interpolates `ducklake-init`'s `content:`, which is why that one spells `$$POSTGRES_USER`.
+        # `\\.` reaches it as `\.`, and that pair is load-bearing — `\.` is not a legal JSON escape
+        # (JSON allows only \" \\ \/ \b \f \n \r \t \uXXXX), so a single backslash here makes zot
+        # answer "invalid config file" and never bind its port.
+        cat > /out/config.json << 'EOF'
+        {
+          "distSpecVersion": "1.1.1",
+          "storage": {
+            "rootDirectory": "/var/lib/zot",
+            "dedupe": true,
+            "gc": true,
+            "gcDelay": "1h",
+            "gcInterval": "6h",
+            "retention": {
+              "delay": "24h",
+              "policies": [
+                { "repositories": ["actors/*-cache", "*-cache"], "deleteUntagged": true,
+                  "keepTags": [{ "mostRecentlyPushedCount": 1 }] },
+                { "repositories": ["kontra-runtimes/**"], "deleteUntagged": true,
+                  "keepTags": [{ "patterns": ["^[0-9]+$$"] },
+                               { "patterns": ["^[0-9]+\\.[0-9]+\\.[0-9]+$$"], "mostRecentlyPushedCount": 3 }] },
+                { "repositories": ["bundles/**"], "deleteUntagged": true,
+                  "keepTags": [{ "patterns": [".*"] }] },
+                { "repositories": ["actors/**", "*"], "deleteUntagged": true,
+                  "keepTags": [{ "patterns": ["^inuse-"] }, { "mostRecentlyPushedCount": 5 }] },
+                { "repositories": ["**"], "deleteUntagged": true, "keepTags": [{ "patterns": [".*"] }] }
+              ],
+        EOF
+        # `dryRun` LAST, in its own unquoted heredoc. JSON does not care about key order, and this is
+        # what lets the policies above keep a quoted heredoc — the only form in which `^[0-9]+$` and
+        # `\\.` survive unmangled.
+        cat >> /out/config.json << EOF
+              "dryRun": $$dryrun
+            }
+          },
+        EOF
+        if [ "$$set_count" -eq 3 ]; then
+          # bcrypt is what zot's htpasswd loader accepts and busybox cannot produce one, so the
+          # plaintext goes to `registry-htpasswd` and is deleted there.
+          printf '%s\n%s\n%s\n' "push-actors:$$a" "push-runtimes:$$r" "pull:$$p" > /out/users
+          # `**` GRANTS push-actors CREATE, AND THAT IS NOT A WIDENING BY ACCIDENT. Actor images do not
+        # live under `actors/`: `cli/deploy.go` pushes `<registry>/<name>:<version>` and
+        # `cli/scale.go` pulls the same string — measured in this install's catalog, which holds
+        # `cachepoison`, `canary`, `desync`, `nscheck` and seven more at the ROOT beside one
+        # `actors/probe`. A Fleet Bundle is `bundles/<name>`, pushed by `kontra build --push`, and
+        # nothing grants that either. So with create on `actors/**` alone, turning auth on made every
+        # deploy and every bundle push fail with `denied: requested access to the resource is
+        # denied` — reproduced against a zot carrying this exact policy.
+        #
+        # The separation that matters is kept and it is the one above: `kontra-runtimes/**` is more
+        # specific, so push-actors is read-only there and cannot replace the base image every other
+        # actor is layered on. `pull` stays read-only everywhere.
+        #
+        # NO `adminPolicy`. One granting `push-runtimes` read/create/update/delete would make it
+          # registry-ROOT — including delete over `actors/**` — and that credential is the one spec
+          # §6.1 hands to `kontra runtime build`, i.e. to whoever is iterating on a runtime. The
+          # least-trusted of the three would have been the most powerful. Each role is scoped to the
+          # prefix it owns instead, and delete goes no wider than that prefix.
+          cat >> /out/config.json << 'EOF'
+          "http": {
+            "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"],
+            "auth": { "htpasswd": { "path": "/etc/zot/htpasswd" }, "failDelay": 1 },
+            "accessControl": {
+              "repositories": {
+                "actors/**": { "defaultPolicy": [], "policies": [
+                  { "users": ["push-actors"], "actions": ["read","create","update","delete","detectManifestCollision"] },
+                  { "users": ["pull"], "actions": ["read"] }
+                ] },
+                "kontra-runtimes/**": { "defaultPolicy": [], "policies": [
+                  { "users": ["push-runtimes"], "actions": ["read","create","update","delete"] },
+                  { "users": ["pull","push-actors"], "actions": ["read"] }
+                ] },
+                "**": { "defaultPolicy": [], "policies": [
+                  { "users": ["push-actors"], "actions": ["read","create","update","delete","detectManifestCollision"] },
+                  { "users": ["pull","push-runtimes"], "actions": ["read"] }
+                ] }
+              }
+            }
+          },
+        EOF
+        else
+          rm -f /out/users
+          # NO AUTH, BUT STILL NO DELETE. zot accepts an unauthenticated
+          # `DELETE /v2/<repo>/manifests/<digest>` and answers 202; `registry:2` answered 405
+          # UNSUPPORTED. Measured both ways. Without this block the swap quietly converts an
+          # append-only store into one where anything that can reach the port can erase the Bundle a
+          # Machine is about to pull — and the VPC overlay publishes that port to the fleet network.
+          # `create`/`update` stay so every existing push path keeps working with no credential.
+          cat >> /out/config.json << 'EOF'
+          "http": {
+            "address": "0.0.0.0", "port": "5000", "realm": "kontra", "compat": ["docker2s2"],
+            "accessControl": {
+              "repositories": {
+                "**": { "anonymousPolicy": ["read","create","update"], "defaultPolicy": [] }
+              }
+            }
+          },
+        EOF
+        fi
+        # CVE scanning downloads a vulnerability database, so it is opt-in (spec §6.1). This heredoc
+        # is UNQUOTED so `$$search` expands; it carries no regex, so nothing else can expand by accident.
+        search='{ "enable": true }'
+        [ -n "$$cve" ] && search='{ "enable": true, "cve": { "updateInterval": "24h" } }' || true
+        cat >> /out/config.json << EOF
+          "log": { "level": "info" },
+          "extensions": {
+            "search": $$search,
+            "scrub": { "enable": true, "interval": "24h" },
+            "trust": { "enable": true, "cosign": true }
+          }
+        }
+        EOF
+        auth=off; [ "$$set_count" -eq 3 ] && auth=on || true
+        echo "registry config rendered (auth=$$auth cve=$${cve:-off})"
+
+  # bcrypt needs a hasher busybox does not have. `htpasswd -nbB` from the apache image is the
+  # smallest thing that has one, and its output is accepted by zot (measured).
+  registry-htpasswd:
+    image: httpd:2.4-alpine
+    container_name: kontra-registry-htpasswd
+    restart: "no"
+    depends_on:
+      registry-config:
+        condition: service_completed_successfully
+    volumes:
+      - registry-config:/out
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ ! -f /out/users ]; then rm -f /out/htpasswd; echo "no users: anonymous registry"; exit 0; fi
+        : > /out/htpasswd
+        while IFS=: read -r u p; do
+          [ -n "$$u" ] || continue
+          htpasswd -nbB "$$u" "$$p" >> /out/htpasswd
+        done < /out/users
+        rm -f /out/users
+        # `grep -c .` and not `wc -l`: `htpasswd -nbB` emits a trailing blank line per call, so a
+        # line count says six where three users were written.
+        echo "htpasswd written for $$(grep -c . /out/htpasswd) users"
+
+  # THE SERVICE NAME STAYS `registry`, AND THAT IS NOT COSMETIC.
+  # `control/orchestrator/src/images.ts:62` hardcodes `http://registry:5000` as the HTTP spelling —
+  # `KONTRA_REGISTRY_URL`, the variable that would redirect it, is set by nothing in any compose
+  # file or env file. Renaming this service silently empties `/api/images`. The name is also the
+  # network alias `parity.py` requires, the key in its SERVICES map, and what both `depends_on`
+  # edges and `docker-compose.vpc.yml` name.
+  #
+  # PINNED, where `registry:2` floated (Pulumi.yaml:376 called it "the ONE unpinned third-party
+  # image"). A literal reference is also invisible to `publish.yml`'s `${KONTRA_*IMAGE:-…}` grep,
+  # which is what keeps this out of the images it believes it owns and must know how to build.
   registry:
-    image: registry:2
+    image: ghcr.io/project-zot/zot-linux-amd64:v2.1.21
     container_name: kontra-registry
     restart: unless-stopped
+    depends_on:
+      registry-htpasswd:
+        condition: service_completed_successfully
+    command: ["serve", "/etc/zot/config.json"]
     volumes:
-      - registry-data:/var/lib/registry
+      - zot-data:/var/lib/zot
+      - registry-config:/etc/zot:ro
+      # `registry:2`'s STORE, READ-ONLY, AND NOT BECAUSE ZOT READS IT. It is held here so that a
+      # long-lived container always mounts it: a volume whose only mounter is a one-shot that has
+      # exited is a volume nothing running holds, which is what `docker volume prune` takes — and
+      # until `kontra registry migrate` has run this is the only copy of every actor image. It is
+      # also where an operator looks for the registry's data, which is the reason the Pulumi gate
+      # refuses detaching a volume from the service that wrote it.
+      - registry-data:/legacy:ro
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_REGISTRY_PORT:-5000}:5000"
       # VPC ALSO, so a fleet Machine can reach this: registry — where a Machine fetches its Bundle layer.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}:5000"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
+      # NOT `/v2/`, WHICH IS THE OLD TARGET AND ANSWERS 401 ONCE AUTH IS ON — a healthcheck that
+      # fails under auth means `orchestrator-api` and `cli` never start, because both gate on
+      # `registry: condition: service_healthy`. `/v2/_zot/ext/mgmt` needs no credential.
+      test: ["CMD", "/etc/zot/busybox", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/_zot/ext/mgmt"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -409,7 +751,6 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_S3_PORT:-8333}:8333"
       # VPC ALSO, so a fleet Machine can reach this: seaweed — the S3 object store units are written to.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_S3_PORT:-8333}:8333"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null && wget -q -O- http://127.0.0.1:8333/ >/dev/null"]
       interval: 5s
@@ -424,7 +765,7 @@ services:
   # every 60 seconds, for the whole life of the Fleet:
   #
   #   couldn't send a block with size 575 bytes to "1:secret-url":
-  #     Post "http://10.124.0.2:8428/api/v1/write": dial tcp4 10.124.0.2:8428: connect: connection refused
+  #     Post "http://<controller>:8428/api/v1/write": dial tcp4 <controller>:8428: connect: connection refused
   #
   # Every fleet metric ever collected was discarded. This is the smallest change that turns a
   # silently-broken pipeline into a working one.
@@ -688,7 +1029,7 @@ services:
       #
       # THE WHOLE `/api/infra/*` READ SURFACE WAS ANSWERING "NO STACKS". `registerInfraRoutes` is
       # registered HERE (`server.ts`), and `infra/state.ts` reads `<stateDir>/.pulumi/stacks/…` off
-      # local disk — its header assumes "this host's disk", which is true on an appliance where one
+      # local disk — its header assumes "this host's disk", which is true where one
       # process is every role and false in this compose file, where `pulumi-state` was mounted on
       # `orchestrator-infra` alone. So `listStacks()` hit a path that does not exist in this
       # container and returned `[]`, which the surface renders as "nothing has ever been converged".
@@ -711,7 +1052,6 @@ services:
     ports:
       - "${KONTRA_BIND:-127.0.0.1}:${KONTRA_API_PORT:-8088}:8088"
       # VPC ALSO, so a fleet Machine can reach this: api     — the Controller a Machine registers with.
-      - "${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_API_PORT:-8088}:8088"
     healthcheck:
       test:
         [
@@ -781,19 +1121,14 @@ services:
       # services are published there alongside loopback (see each `ports:` block). NOT the public
       # address: a published Docker port is DNATed in PREROUTING, so eth0 would put Temporal, Redis
       # and the object store on the internet.
-      KONTRA_CONTROLLER: ${KONTRA_VPC_BIND:-10.124.0.2}
-      KONTRA_REGISTRY: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
       # The Bundle is unsigned and served from the Controller's own registry, so the Machine has to
       # be told that address is trusted — under the name it will actually see it by.
-      KONTRA_TRUST_REGISTRIES: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
-      KONTRA_TRUST_UNSIGNED: ${KONTRA_VPC_BIND:-10.124.0.2}:${KONTRA_REGISTRY_PORT:-5000}
     volumes:
       - kontra-home:/var/lib/kontra:ro
       - secrets-store:/var/lib/kontra-secrets
       - pulumi-state:/data
       # READ-ONLY, and only on this role. `orchestrator-infra` is the only process that converges a
       # stack, which is the same reason it is the only one holding the cloud credential.
-      - ${KONTRA_SSH_KEY_HOST:-/root/.ssh/axiom_rsa}:/var/lib/kontra-ssh/fleet_key:ro
       # THE WORKSPACE, READ-ONLY — because `serve` runs HERE now and could not see the code.
       #
       # `serveDevWorkflow` moved the serve verb off the API and onto this role, since starting a
@@ -825,71 +1160,13 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-
-  # ── THE CAMPAIGN'S WORKFLOW WORKER, AS A CONTAINER SO ITS LOGS ARE SHIPPED ──────────────────
-  #
-  # `kontra workflow serve --tmux` runs the worker on the HOST, and `logship` selects what to
-  # follow by container LABEL — so a host-served workflow has no container, no label, and its
-  # `workflow.logger` lines reach VictoriaLogs through nothing at all. The run page's log rail is
-  # then empty for the whole campaign, which reads as "this run said nothing" rather than "nobody
-  # is shipping what it said". Measured on campaign-1790562159: /api/logs/query answered with an
-  # empty result set, not an error.
-  #
-  # Running it here fixes that by construction: one labelled container, stdout followed like every
-  # other Worker's. It also puts the worker on the compose network, which is why the addresses
-  # below are service names rather than the host's published ports.
-  campaign-worker:
-    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
-    container_name: kontra-campaign-worker
-    restart: unless-stopped
-    labels:
-      # THE ONE LINE THAT MAKES THE LOG RAIL WORK — see control/images/logship.sh.
-      kontra.logs: "true"
-    depends_on:
-      temporal:
-        condition: service_healthy
-      orchestrator-api:
-        condition: service_healthy
-    environment:
-      <<: *orchestrator-env
-      # The claim-check codec needs a reachable object store or results over 128 KiB do not decode.
-      KONTRA_S3_ENDPOINT: http://seaweed:8333
-      # ── THE LINE THAT PUTS THIS RUN ON THE RUN PAGE'S LOG RAIL ────────────────────────────
-      #
-      # `runtime/python/internals/logs.py` is OFF unless asked, and the reason is good: a developer
-      # watching a tmux pane wants the human form. A CONTAINER is the other case — nobody reads its
-      # stdout directly, `logship` does, and its parser has a dedicated branch for kontra's own JSON
-      # ("the emitter already stamped the run, the worker, the level and the time"). Without this
-      # the worker ships readable text whose workflow id is buried in a Python dict repr inside the
-      # message, so `run_id:"campaign-…"` — the query the console's rail runs — matches nothing and
-      # the rail is empty for the whole campaign.
-      KONTRA_LOG_FORMAT: json
-    volumes:
-      # THE SAME PATH INSIDE AND OUT, exactly as the other roles mount it: a Source id is
-      # `at:<absolute path>`, so the two sides must agree on what that path means.
-      - ${KONTRA_WORKSPACES:-${PWD}/workspaces}:${KONTRA_WORKSPACES:-${PWD}/workspaces}:ro
-      # READ-WRITE, unlike the roles above. `kontra workflow serve` writes `runtime.env` here on
-      # start — the addresses it resolved, so a pane or a re-exec sees the same ones — and a `:ro`
-      # mount makes the worker exit before it registers anything:
-      #   error: open /var/lib/kontra/runtime.env: read-only file system
-      - kontra-home:/var/lib/kontra
-      # THE CHECKOUT'S RUNTIME OVER THE IMAGE'S, read-only. The image carries a built SDK at
-      # /opt/kontra, so a fix to `runtime/python` in this checkout is invisible to the worker until
-      # the image is rebuilt — and a log-plumbing fix that needs an image rebuild to take effect is
-      # one nobody applies mid-campaign. Mounting the source keeps the worker on the code being
-      # reviewed. Drop this line once the image is rebuilt from the same tree.
-      - ./runtime/python:/opt/kontra/runtime/python:ro
-      # AND THE SDK, which is a SEPARATE tree from the runtime and was the half I missed. The
-      # workflow-facing API — `catalog.Dataset`, `fleet` — lives here, so mounting only
-      # `runtime/python` left the worker on the image's `catalog.py` and every metric read failed
-      # with `DatasetHandle.batches() got an unexpected keyword argument 'via'`, swallowed into a
-      # warning and a zero. Both trees or neither.
-      - ./sdk/python:/opt/kontra/sdk/python:ro
-    working_dir: /root/oss/kontra
-    command: ["kontra", "workflow", "serve", "workspaces/bugbounty/workflows/campaign"]
-
+  # THE SAME IMAGE THE CLI RUNS, for its python3 and the SDK on PYTHONPATH. It had a `kontra-host`
+  # of its own, built from a Dockerfile whose only other job was being the base `kontra deploy`
+  # layered actors onto — and buildpacks layer onto a published runtime instead, so that Dockerfile
+  # went (ADR 0061/0063). Sharing this image is also the argument `Dockerfile.orchestrator` already
+  # makes for taking its python from here: a second `pip install` would be unpinned in two images.
   orchestrator-probe:
-    image: ${KONTRA_HOST_IMAGE:-ghcr.io/medmahmoudi26/kontra-host:dev}
+    image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
     container_name: kontra-probe
     labels:
       kontra.logs: 'true'
@@ -921,7 +1198,8 @@ services:
       timeout: 5s
       retries: 5
 
-  # First boot prints the console login, seeds hello/, then watches the current workspace.
+  # First boot writes the console login to /var/lib/kontra/console-password (0600, never stdout —
+  # stdout here is `docker compose logs`), seeds hello/, then watches the current workspace.
   # `docker compose exec cli …` still works while watch is PID 1.
   cli:
     image: ${KONTRA_IMAGE:-ghcr.io/medmahmoudi26/kontra:dev}
@@ -1012,6 +1290,23 @@ services:
                     raise SystemExit("cli: timed out waiting for orchestrator-api")
                 time.sleep(1)
         PY
+        # ── THE RUNTIMES, MIRRORED IN, BECAUSE AN ACTOR CANNOT BE BUILT WITHOUT ONE ──────────────
+        #
+        # `kontra deploy` layers an actor onto a published run image (ADR 0061) resolved under
+        # `$KONTRA_REGISTRY/kontra-runtimes/`, and that namespace is EMPTY on a fresh install — so
+        # the actor this install ships could not be built at all. The published set reads
+        # anonymously from ghcr and is COPIED here rather than resolved there, because the trust
+        # policy admits this registry and cannot express ghcr's per-release signing identity. ADR
+        # 0063 and cli/runtimeimport.go carry the whole reasoning.
+        #
+        # NOT FATAL, AND NOT SILENT EITHER. An airgapped install has no route to the source and a
+        # mirror of its own; refusing to start the CLI would make that install unusable rather than
+        # degraded. `kontra deploy` is what reports a missing runtime, and it lists what IS
+        # published when it does. The import is idempotent — a runtime already here costs one
+        # manifest HEAD and is left alone — so this runs on every boot and copies on the first.
+        kontra runtime import \
+          || echo "runtimes: import failed — an actor build will say which runtime is missing" >&2
+
         exec kontra workspace watch
 
 networks:
@@ -1042,7 +1337,18 @@ configs:
 volumes:
   postgres-data:
   redis-data:
+  # `registry:2`'s store. zot's layout is not the same one, so zot gets `zot-data` and this keeps the
+  # old bytes until `kontra registry migrate` has moved them and the operator removes it (spec §6.3).
+  #
+  # IT IS DECLARED, AND THAT IS A REVERSAL. Leaving it out looked safer — compose drops a volume no
+  # service mounts, and an undeclared volume survives `down -v`. But undeclared also means unmounted
+  # and unbounded: ADR 0052 left this volume without `protect: true` precisely BECAUSE retention
+  # bounded it, and `docker volume prune` does not spare a volume merely for being unreferenced. It
+  # is mounted read-only into `registry-config` now, which both keeps it in the project and is what
+  # lets that one-shot refuse to start an unmigrated install.
   registry-data:
+  zot-data:
+  registry-config:
   seaweed-data:
   victoriametrics-data:
   victorialogs-data:

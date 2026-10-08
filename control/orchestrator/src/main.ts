@@ -6,22 +6,22 @@
  * `orchestrator-api`, `orchestrator-materializer` and `orchestrator-infra` were three `command:`
  * entries over one image, and three containers is three things that can be the wrong version, fail
  * to start, or be missing on a fresh machine. They become three roles here — one process the
- * appliance runs as a single child, in place of three it would otherwise have to supervise.
+ * install runs as a single child, in place of three it would otherwise have to supervise.
  *
  * **THE MERGE IS ONLY SAFE BECAUSE PULUMI IS NOT IN IT.** `infra.ts`'s header records the measured
  * reason the infra role was a separate process: Pulumi's Node language host installs PROCESS-GLOBAL
  * `unhandledRejection` / `uncaughtException` handlers for the duration of every inline run, so an
  * unrelated rejected promise anywhere in the process fails the in-flight `up` — and the process
  * survives, reporting healthy. Co-locating an engine with a Fastify server and a DuckDB decode is a
- * correctness problem, not a tuning one. ADR 0031 §4 removes the engine from the appliance, and
+ * correctness problem, not a tuning one. ADR 0031 §4 removes the engine from the install, and
  * removing the engine is what removes the hazard. {@link runInfra} therefore registers
- * `workflows/appliance.ts` and never `workflows/infra.ts`.
+ * `workflows/noProvisioner.ts` and never `workflows/infra.ts`.
  *
  * MEASURED, not asserted: no `@pulumi/*` package is reachable from this module, and neither
  * `DIGITALOCEAN_TOKEN` nor `PULUMI_CONFIG_PASSPHRASE` is read anywhere in the graph — the API's
  * `parseFqn` used to drag the whole Automation API in, which is why `infra/paths.ts` exists. The
  * one Pulumi variable still read here is `KONTRA_PULUMI_STATE_DIR`, by the READ side: the `/infra`
- * dashboard lists checkpoint files, and on an appliance that directory does not exist and the page
+ * dashboard lists checkpoint files, and on an install that directory does not exist and the page
  * says there are no stacks.
  *
  * Two consequences follow and are worth stating rather than discovering:
@@ -80,10 +80,10 @@ export async function runInfra(): Promise<void> {
   const connection = await NativeConnection.connect(temporalConnectOptions({ address }));
 
   const worker = await Worker.create({
-    // THE APPLIANCE BUNDLE. `stackWorkflow` is in it and refuses; leaving the TYPE out would not
+    // THE INSTALL BUNDLE. `stackWorkflow` is in it and refuses; leaving the TYPE out would not
     // fail a `fleet.up()`, it would hang one — the task is taken, no such type is found, the task
-    // fails, and Temporal retries it forever. See `workflows/appliance.ts`.
-    workflowsPath: require.resolve('./workflows/appliance'),
+    // fails, and Temporal retries it forever. See `workflows/noProvisioner.ts`.
+    workflowsPath: require.resolve('./workflows/noProvisioner'),
     // NO ACTIVITIES, AND THAT IS THE WHOLE SET. This role registered the panel activities and
     // nothing else; the Monitor is gone and `activities/infra.ts` is the Pulumi half, which this
     // file deliberately does not import so nothing here can resolve a cloud credential even by

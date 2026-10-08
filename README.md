@@ -5,7 +5,7 @@
 
 **Run a job over a batch of inputs, across a fleet you don't have to babysit.**
 
-You write the job once — a small Python or Go file whose **Methods** each take a whole **Batch** and push records to the caller's **Dataset**. kontra runs it across a fleet, retries failures, isolates bad units, offloads large payloads to object storage, and resumes from the last committed **Unit** if anything crashes. Your actor *is* a [Temporal](https://temporal.io) activity worker: it polls its own task queue and keeps durable state in Redis, while a single Go handler owns the workflow and the exactly-once reload.
+You write the job once — a small Python or Go file whose **Methods** each take a whole **Batch** and push records to the caller's **Dataset**. kontra runs it across a fleet, retries failures, isolates bad units, offloads large payloads to object storage, and resumes from the last committed **Unit** if anything crashes. Your actor *is* a [Temporal](https://temporal.io) activity worker: it polls its own task queue, and a single Go handler owns the workflow. Dispatch is **at-least-once**, as Temporal activities are — a Batch can be handed to a worker more than once. What makes that safe is that a Unit's commit marker is written before anything after it can run, so a retry skips what already finished; records are keyed by position, so a re-push lands in the same place rather than twice.
 
 **You compose in code, not on a canvas.** A **Run** is one execution of *your own* Temporal workflow, which pages a **Dataset** into Batches and drives deployed **Actors** with ordinary control flow — a loop, a branch, a fan-out whose width depends on what the last Actor returned.
 
@@ -70,16 +70,40 @@ One file. Docker is the only prerequisite — no clone, no build, no `kontra` bi
 ```bash
 curl -O https://raw.githubusercontent.com/medmahmoudi26/kontra/dev/docker-compose.yml
 docker compose up -d --wait
-docker compose logs cli | grep -A4 'console login'
+docker compose exec cli cat /var/lib/kontra/console-password
 ```
 
 The console is on <http://127.0.0.1:8088> (ADR 0047). Sign in as `admin` with the password that
-last line printed.
+last line prints.
+
+The password is **never written to stdout**, because `init` runs in the `cli` container and stdout
+there is `docker compose logs` — readable by anyone in the docker group. It is generated into that
+0600 file instead, and `config.yaml` keeps only an scrypt hash.
 
 `docker-compose.yml` is the whole install: every default in it resolves to a published image, and
 the two scripts it used to need from a checkout are now an inline `configs:` entry and an image. It
 creates `./workspaces` for your code beside itself and seeds `hello/` into it on first boot, so
 there is nothing to make first.
+
+**An actor's OS is a Runtime it names, and the install's registry is where Runtimes live.** A
+**Runtime** is the OS plus the system packages an actor runs on — `python`, `python-browser`, `base` —
+published as a Cloud Native Buildpacks run image under `kontra-runtimes/` and named by major in
+`actor.json` (`"runtime": "python-browser:1"`). They come from a repository of their own,
+`kontra-runtimes`, so adding one is adding a directory there rather than editing kontra;
+`KONTRA_RUNTIMES_PREFIX` points an install at your own fork's registry instead.
+
+**That is the build path now.** `kontra deploy` is `pack` and nothing else: the generated Dockerfile
+and its base images are gone, an `actor.json` with a `runtime` field is resolved to a digest and
+layered on, and first boot mirrors the published set into this install's registry
+(`kontra runtime import`) because the trust policy admits one registry and not three signing
+identities. See [ADR 0061](docs/adr/0061-buildpacks-runtimes-and-the-image-store.md) for the decision,
+[ADR 0063](docs/adr/0063-the-appliance-is-deleted.md) for what wiring it forced, and the wiki's
+[Runtimes](../../wiki/Runtimes) page for the author surface.
+
+Upgrading an install that still has a `registry:2` store needs one command first: the registry is
+**zot** now, its on-disk layout is different, and an unmigrated install **refuses to start** rather
+than presenting an empty registry — `kontra registry migrate --from <old host:port>` copies every
+repository by digest and proves every catalog digest arrived.
 
 <details>
 <summary><b>Optional:</b> a second file, for ports, the bind address, and the query workbench</summary>
@@ -112,7 +136,6 @@ R=ghcr.io/medmahmoudi26
 
 make image                                            # needs kontra-console beside this checkout (the SPA)
 docker build -f control/images/Dockerfile.orchestrator --build-arg SPA_IMAGE=$R/kontra:dev -t $R/kontra-orchestrator:dev .
-docker build -f control/images/Dockerfile.pyworker  -t $R/kontra-host:dev .
 docker build -f control/images/Dockerfile.logship   -t $R/kontra-logship:dev .
 
 cp .env.quickstart .env
@@ -122,9 +145,8 @@ docker compose up -d --wait
 
 **Build under the qualified names, not bare ones.** Docker resolves by *name*, so
 `ghcr.io/medmahmoudi26/kontra:dev` and `kontra:latest` are two names for the same bytes — build the
-second and the install still goes to the registry for the first. `make image` and `make worker-base`
-already write the qualified names (`KONTRA_IMAGE` / `KONTRA_WORKER_BASE_IMAGE` override them), which
-is why `make image` is enough for two of the five.
+second and the install still goes to the registry for the first. `make image` already writes the
+qualified name (`KONTRA_IMAGE` overrides it), which is why it is enough on its own.
 
 `KONTRA_PULL_POLICY=never` is the rest of it: it stops compose quietly running a published image over
 the one you just built. It is the only line the `.env` needs for this.
@@ -253,6 +275,7 @@ The **[wiki](../../wiki)** is the manual — start at [Getting Started](../../wi
 | [First Run](../../wiki/First-Run) | nothing → an actor → a workflow → a fleet, one step at a time |
 | [Getting Started](../../wiki/Getting-Started) · [Dev Cycle](../../wiki/Dev-Cycle) | install, run one, iterate |
 | [Writing Actors: Python](../../wiki/Writing-Actors-Python) · [Go](../../wiki/Writing-Actors-Go) | the authoring surface |
+| [Runtimes](../../wiki/Runtimes) · [Writing a runtime](../../wiki/Writing-a-Runtime) | what an actor is built on, and how to add or fork one |
 | [Writing Workflows](../../wiki/Writing-Workflows) | the only dispatcher — input shapes, Fleet scopes, Method calls |
 | [CLI Reference](../../wiki/CLI-Reference) · [Configuration](../../wiki/Configuration) | every verb; every token, image pin and manifest field |
 | [Execution Model](../../wiki/Execution-Model) · [Durability](../../wiki/Durability-and-Failures) | what happens when things break |
@@ -282,7 +305,6 @@ control/        WHAT RUNS WHERE `kontra up` RUNS           (AGPL-3.0)
   images/         the container definitions for it
 
 cli/            THE ONE BINARY, WHICH IS BOTH
-  appliance/      the embedded services `kontra up` supervises   (control plane)
   warden/         the Machine agent and its container drivers    (a Machine)
   internal/       what both halves share, and nothing else
 
@@ -302,6 +324,8 @@ the git tag prefix that publishes them. Their directory *is* their API. It is wh
 frozen and a binary that is also the operator's.
 
 **The console is not here.** It lives in [kontra-console](https://github.com/medmahmoudi26/kontra-console) and depends on `@kontra/core` — this repository's `shared/core/` — so the two halves read a Run through one set of declarations rather than two (ADR 0041). It ships as a content-addressed artifact the release pins by digest, which is why building kontra does not need it.
+
+**The runtimes are not here either.** A **Runtime** — the OS and system packages an actor is built *on*, as a Cloud Native Buildpacks run image — lives in `kontra-runtimes`: one directory and a `runtime.json` per runtime, published to the install's registry under `kontra-runtimes/`. A separate repository for a sharper reason than the console's: a fork that had to edit *this* repository to add a runtime could not add one, so discovery is a registry query under that prefix and never a list in `cli/`. **The repository is not created yet** ([ADR 0061](docs/adr/0061-buildpacks-runtimes-and-the-image-store.md)), and `cli/runtimes.go`'s resolver — which turns a declared `name:major` into a digest against whatever is published under the prefix — is committed and tested but not yet called by `kontra deploy`.
 
 ### The conformance corpora
 

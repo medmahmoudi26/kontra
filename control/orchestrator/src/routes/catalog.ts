@@ -7,7 +7,7 @@
  *
  * WHAT IT NEEDS: the {@link Repo}, and nothing else. No Temporal, no object store, no lake — a
  * catalog is a table, and the whole point of `buildServer` touching Temporal lazily is that this
- * surface answers on an appliance with no cluster running at all.
+ * surface answers on an install with no cluster running at all.
  *
  * OPEN, ALL FOUR. `auth.ts` records that most of this API is unauthenticated; these predate that
  * record and are named in it. Registration in particular MUST stay open — a worker on a fleet host
@@ -97,11 +97,30 @@ export function registerCatalogRoutes(app: FastifyInstance, repo: Repo): void {
   // would take a whole fleet out of the catalog over a contract it never claims to describe.
   app.post('/api/actors/:key/digest', async (req, reply) => {
     const { key } = req.params as { key: string };
-    const body = req.body as Partial<{ name: string; version: string; digest: string }>;
+    const body = req.body as Partial<{
+      name: string;
+      version: string;
+      digest: string;
+      runtime: { name: string; major?: number; digest?: string };
+    }>;
     if (!body?.name || !body.version || !body.digest) {
       return reply.code(400).send({ error: 'digest registration requires name, version, digest' });
     }
-    return repo.setActorDigest({ key, name: body.name, version: body.version, digest: body.digest });
+    // `runtime` IS OPTIONAL AND IS WHAT A REBASE SENDS. A rebase rewrites a manifest onto a new run
+    // image: the version is unchanged, the digest is new, and what it was built on moved. Omitting it
+    // keeps whatever was recorded, which is what a worker self-registering its digest means — so the
+    // two callers of this route cannot clobber each other.
+    const runtime =
+      body.runtime && body.runtime.name
+        ? { name: body.runtime.name, major: body.runtime.major ?? 0, digest: body.runtime.digest ?? '' }
+        : undefined;
+    return repo.setActorDigest({
+      key,
+      name: body.name,
+      version: body.version,
+      digest: body.digest,
+      ...(runtime ? { runtime } : {}),
+    });
   });
 
   app.delete('/api/actors/:key', async (req, reply) => {

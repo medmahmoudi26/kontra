@@ -189,7 +189,7 @@ git archive --format=tar HEAD | gzip -1 | $SSH "tar xzf - -C $REMOTE_CHECKOUT"
 echo "  done"
 
 # --- 6. install.sh ----------------------------------------------------------------------------
-say "install.sh (docker, Go 1.26.4, duckdb, buf, the CLI — several minutes)"
+say "install.sh (docker, Go 1.26.8, duckdb, buf, the CLI — several minutes)"
 $SSH "cd $REMOTE_CHECKOUT && KONTRA_BOOTSTRAP=yes ./install.sh"
 
 # --- 7. config.yaml — the ONLY configuration this installation gets ------------------------------

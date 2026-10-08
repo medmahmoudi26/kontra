@@ -582,7 +582,9 @@ func TestUpdateToRetagsEveryImageAndSendsThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(refs) < 4 {
+	// Three: see hostengine/images_test.go for why the set shrank. The floor is the live count so an
+	// extraction that stops reading the program fails here rather than asserting over nothing.
+	if len(refs) < 3 {
 		t.Fatalf("only %d image keys came out of the program", len(refs))
 	}
 	for k := range refs {

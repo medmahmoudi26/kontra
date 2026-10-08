@@ -225,6 +225,18 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 			beat[k] = v
 		}
 		lk2.Unlock()
+		// THE CHECKPOINT, WHICH IS THE DURABLE HALF OF THIS BEAT.
+		//
+		// The three counters above say how many, never WHICH, so nothing can resume from them. This
+		// says which, in the encoding the Python peer and the orchestrator share
+		// (shared/conformance/checkpoint.json) — and because heartbeat details live in the
+		// activity's own history, it is the one copy of the commit map a cache cannot lose
+		// (ADR 0059).
+		//
+		// Read here rather than passed through SetHeartbeat because that signature is exported and
+		// has callers outside this repository. The runner publishes immediately before it beats, so
+		// this is the current state and not a lagging copy.
+		beat["checkpoint"] = a.Checkpoint()
 		activity.RecordHeartbeat(ctx, beat)
 	})
 

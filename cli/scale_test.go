@@ -118,8 +118,8 @@ func envValue(env []string, key string) (string, bool) {
 func TestWorkerOTelEndpointIsNeverDefaulted(t *testing.T) {
 	// AN EMPTY DATA DIRECTORY, so this test measures the compose defaults and not whatever
 	// `kontra up` happens to have published on the machine running it. `resolveWorkerPlane` reads
-	// the appliance's endpoints record when there is one, which is the point of it — and would
-	// make this suite's answer depend on whether a developer had an appliance up.
+	// the install's endpoints record when there is one, which is the point of it — and would
+	// make this suite's answer depend on whether a developer had an install up.
 	t.Setenv("KONTRA_DATA_DIR", t.TempDir())
 	scale := func(t *testing.T, o scaleOpts) []string {
 		t.Helper()

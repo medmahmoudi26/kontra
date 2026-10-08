@@ -11,7 +11,7 @@
  * what this file is for, and it caught the third move only because it was already here: the
  * candidate list in `defaultWebRoot` was edited and this suite was not re-run.
  *
- * The bundle's shape is the other half and has never moved: a hydrated appliance bundle puts the
+ * The bundle's shape is the other half and has never moved: a hydrated install bundle puts the
  * SPA at `orchestrator/web/dist` beside `orchestrator/dist/src`, an artifact contract that
  * `runtime/handler/internal/hydrate` writes. So every shape has to resolve, from any depth.
  */

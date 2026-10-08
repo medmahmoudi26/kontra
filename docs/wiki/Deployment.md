@@ -38,7 +38,7 @@ Temporal activity worker.
 
 ## 0. Which topology, and why there are two
 
-| | **the appliance** — `kontra up` | **the controller** — `docker-compose.yml` |
+| | **the install** — `kontra up` | **the controller** — `docker-compose.yml` |
 |---|---|---|
 | What it is for | local development, and any install that runs no cloud fleet | the deployment that runs **cloud runs** |
 | What it is | one process, one data directory | `orchestrator-infra` (Pulumi, the fleet key, the cloud credential) + `orchestrator-probe`, beside a `kontra up` |
@@ -50,7 +50,7 @@ Temporal activity worker.
 Nine services left `docker-compose.yml` one slice at a time and every one left a block behind
 saying where it went; that file's header is the authority on what survives and why.
 
-**Running both on one box** — the parity window, and a real case: the appliance runs all three
+**Running both on one box** — the parity window, and a real case: the install runs all three
 orchestrator roles because it ships no Pulumi engine, so tell it to leave the third one to compose,
 and give it an address the containers can reach.
 
@@ -62,17 +62,17 @@ The clusters are decoupled by design: the control plane knows nothing about whic
 
 ### 0a. Worker containers, the bind address, and the one firewall rule nobody expects
 
-An actor Worker is a **container** (ADR 0031 §2) and the appliance binds **loopback** (§3), and a
+An actor Worker is a **container** (ADR 0031 §2) and the install binds **loopback** (§3), and a
 container's loopback is its own. So the local actor path needs an address the container can reach:
 
 ```sh
 kontra up --bind 172.17.0.1        # docker0's gateway. Host-local; there is no route to it from off-box.
 ```
 
-`kontra deploy` and `kontra serve --mode docker` then resolve everything from the appliance's own
+`kontra deploy` and `kontra serve --mode docker` then resolve everything from the install's own
 `<data-dir>/endpoints.json` — Temporal, the object store, the state store, the API — so there is
 nothing to keep in step by hand. `kontra serve --mode docker` **refuses** a loopback-bound
-appliance by name rather than starting workers that poll nothing.
+install by name rather than starting workers that poll nothing.
 
 **The registry is the exception, and it is deliberate.** `kontra up` serves it on the bind address
 *and* on `127.0.0.1`, and publishes the loopback one — because the registry's client is this host's
@@ -101,7 +101,6 @@ which of the two topologies it proved.
 
 ```sh
 kontra up                     # start it; Ctrl-C stops the child first, then the services
-kontra up --temporal-ui       # also Temporal's own Web UI, hydrated from the CAS (opt-in)
 kontra up --bind 172.17.0.1   # an address worker CONTAINERS can reach (their loopback is their own)
 ```
 
@@ -172,23 +171,22 @@ actor deployed: beacon@0.2.0
 `KONTRA_REDIS_HOST` is **required**, not an upgrade: a worker started without it points at a
 localhost Redis that is not there and fails on its first commit.
 
-Images built over the Docker Engine API, layered so a re-deploy is cheap:
+ONE IMAGE, BUILT BY CLOUD NATIVE BUILDPACKS (ADR 0061). `kontra deploy` runs a pinned `pack`
+against the actor's own directory and publishes `<registry>/<name>:<version>` directly:
 
-1. `kontra-host:1` (`infra/Dockerfile.pyworker`) — the Python actor runtime: actorkit on
-   `PYTHONPATH` plus `temporalio` / `redis` / `boto3` / `pydantic`. Built once
-   (rebuilt when `sdk/python` or `runtime/python` changes: `docker rmi kontra-host:1`).
-2. `kontra-worker-base:1` — the actor-**agnostic** worker parts: the Go **handler**
-   (compiled here, ONCE) and the entrypoint. Built once (rebuilt when `handler/` changes:
-   `docker rmi kontra-worker-base:1`). This is what keeps deploys fast — the handler compile
-   (memory-heavy) does not run per deploy.
-3. the **host** image `kontra/<name>:<version>` — `FROM kontra-host:1` + the actor's code
-   (a `Dockerfile`-less actor gets a synthesized `COPY`; one with a `Dockerfile` adds its
-   deps). A Go actor is compiled instead, into a slim runtime image. `--host-only` stops here.
-4. the **worker** image `kontra/<name>-worker:<version>`, pushed as `<registry>/<name>:<version>`.
-   `FROM` the host image (so it carries the actor's deps) +
-   `COPY --from=kontra-worker-base:1` (the pre-built handler + entrypoint) —
-   no handler recompile. A single `docker run` is a complete worker, reaching OUT only to the
-   controller (Temporal / S3 / Redis / orchestrator via `KONTRA_*`).
+1. the **runtime** is resolved from `actor.json`'s `runtime` field — a name and a MAJOR
+   (`python:1`, `python-browser:1`, default `python:1` or `base:1` by engine) — and PINNED BY
+   DIGEST. That digest is recorded in the catalog, which is what lets `kontra rebase` move an actor
+   onto a newer digest of the same major without rebuilding it.
+2. the **builder** is `heroku/builder:24`, also pinned by digest, and run with
+   `--trust-builder=false` so the lifecycle's phases stay in separate containers.
+3. the **build context is the actor's own directory**, which is why a `go.mod` `replace` pointing
+   above it is refused: a published actor has to build from its own folder. It also means an edit
+   elsewhere in a checkout no longer invalidates the build.
+4. `--host-only` builds without publishing, for checking a build before claiming a version.
+
+A single `docker run` of the result is a complete worker, reaching OUT only to the controller
+(Temporal / S3 / Redis / orchestrator via `KONTRA_*`).
 
 That worker is **two** processes now (`infra/worker-entrypoint.sh`), and the entrypoint exits
 non-zero the moment either dies so the container restarts — a half-dead worker keeps its Temporal
@@ -207,6 +205,92 @@ or pass `--override` to replace it. `--registry` defaults to a local `registry:2
 This is the distributed model: `kontra deploy` once, then `docker pull` + `docker run` the
 image on any droplet (pointed at the controller) and it self-registers + shows up in
 `kontra workers list` — no per-machine runtime install, venv, or repo checkout.
+
+> **This is the path being replaced.** Cloud Native Buildpacks take over the four steps above: the
+> base images become **Runtimes** an actor chooses in `actor.json`, dependencies land in their own
+> reusable layer, and the app layer is the only thing a code change rewrites — 1.44–2.26 GiB per actor
+> image becomes 175.4 MiB, and a one-line change becomes 0.133 MiB of new blobs. The build machinery
+> and the runtime resolution are committed; `kontra deploy` does not call them yet. [[Runtimes]] and
+> [ADR 0061](../adr/0061-buildpacks-runtimes-and-the-image-store.md).
+
+## 2a. The image store
+
+**There are two registries and they are not the same software.**
+
+| | the compose controller | `kontra up` |
+|---|---|---|
+| what it is | **zot**, pinned to the exact version `v2.1.21`, service name `registry` | an in-process registry inside the install binary |
+| retention / GC | yes, configured below | **none at all** |
+| search API | yes (zot's GraphQL `search` extension) | no |
+| auth | three optional roles; anonymous by default | none, by design — loopback only |
+
+The service name stays `registry` on purpose: the orchestrator reaches it at `http://registry:5000`,
+by service name, and no env file overrides that ([[Configuration]]).
+
+Its healthcheck targets **`/v2/_zot/ext/mgmt`**, not `/v2/`. That is not cosmetic: `/v2/` answers 401
+once credentials are on, and both `orchestrator-api` and `cli` gate on
+`registry: condition: service_healthy` — a healthcheck that fails under auth means the install never
+comes up.
+
+### Retention, and why it reports before it deletes
+
+| repository | kept |
+|---|---|
+| `actors/*-cache`, `*-cache` | the most recent only |
+| `kontra-runtimes/**` | every `<major>` tag, plus the 3 most recently pushed `<major>.<minor>.<patch>` |
+| `bundles/**` | **every tag** — a Bundle is not an actor image |
+| `actors/**`, `*` | the 5 most recently pushed, **plus every `^inuse-`** |
+| anything else (`**`) | **every tag** — a repository this table does not name is never trimmed |
+| untagged manifests | deleted after 24 h |
+
+Both the current repository shape (bare names like `webcrawl`, and `bundles/`) and the shape the
+buildpack path will create (`actors/<name>`) are named, because a policy keyed only on the future
+naming matched nothing — and inert retention is the one thing this is here to prevent.
+
+`KONTRA_REGISTRY_RETENTION` defaults to **`dryrun`**: zot logs every would-delete instead of deleting,
+so the policy is reviewable before it is live.
+
+The `^inuse-` tags that row depends on **are written** — a reconciler in the orchestrator, armed in the
+API role every start and disarmed only by `KONTRA_INUSE_TAGS=off`. What it tags is **narrower than the
+row implies**: the digest the catalog currently records for each actor, and *not* a Machine's
+placements or an in-retention run's digest. So before flipping to `enforce`, read a `dryrun` pass — and
+note that an install whose `kontra-api` container predates the reconciler has not run one yet.
+[[Durability-and-Failures]] has what is and is not covered, and why.
+
+Storage dedupe is on. The same content that took **7.9 GiB** under `registry:2` takes **4.7 GiB**
+here, before retention removes anything.
+
+### Migrating off `registry:2`
+
+zot's on-disk layout is not `registry:2`'s, so pointing the new service at the old volume presents an
+**empty registry** — and nothing in this system distinguishes an empty registry from a fresh one.
+So an unmigrated install **refuses to start**, naming the repository count it found and the command:
+
+```sh
+kontra registry migrate --from <old host:port> [--to <host:port>] [--dry-run]
+```
+
+`--to` defaults to `--registry` / `KONTRA_REGISTRY`. The same address on both sides is refused by
+name: it would copy every tag onto itself, report success, and leave you believing the old store had
+been drained. **Both sides have to be served** — a volume is not an endpoint — so the copy happens
+while the old `registry:2` is still answering. (The start-up refusal prints `kontra registry migrate`
+with no flags. `--from` is required.)
+
+It copies every repository and tag **by digest**, then re-reads each one at the destination and
+compares. Then it checks that every digest *the catalog* knows about resolves — which is a separate
+pass for a measured reason: 27 of 27 tags copied with matching digests and **two catalog digests still
+did not resolve**, both present in the old store and reachable by no tag, because a later push had
+moved the tag while the catalog kept the older digest. Those digests are what Placements are pinned to.
+
+`KONTRA_REGISTRY_MIGRATION=skip` starts a deliberately empty zot on a box that still has the old
+store. The `registry-data` volume is kept, mounted read-only, until the operator removes it.
+
+> [!WARNING]
+> **The two topologies have to agree about what the registry is.** `docker-compose.yml` and the Pulumi
+> program behind `kontra control up` each declare it, and ADR 0052 says the install *is* the Pulumi
+> program — so a converge against a program that still names `registry:2` and `/var/lib/registry`
+> re-creates the old service on a box that has already migrated, pointing it at the old volume.
+> `control/pulumi/parity.py` is the only check that compares the two, and it is not in CI.
 
 ## 3. The materializer — routed by task queue, placed off the controller
 
@@ -404,7 +488,7 @@ drove load to 7.4 during a DuckDB extraction and OOM-killed the report generator
 
 ## Replacing an actor mid-run
 
-The handler's workflow owns retry = **exactly-once reload** (see [[Durability-and-Failures]]): if the actor dies mid-batch, its activity stops heartbeating, `HeartbeatTimeout` fires, and the retry lands on the same actor id (on whichever worker is polling the sessions queue) and replays its per-unit state from Redis, so the run completes. Self-asserting demo:
+The handler's workflow owns retry = **exactly-once reload** (see [[Durability-and-Failures]]): if the actor dies mid-batch, its activity stops heartbeating, `HeartbeatTimeout` fires, and the retry lands on the same actor id (on whichever worker is polling the sessions queue) and replays its per-unit state from Redis, so the run completes — which holds only while that state is still there: the hash has a 24 h TTL, so the store runs `noeviction` rather than `volatile-lru`, under which a TTL'd key is exactly what gets evicted first. Self-asserting demo:
 
 ```sh
 kontra workflow serve workflows/dnssweep.py
@@ -435,7 +519,7 @@ kontra workflow start workflows/dnssweep.py --wait \
 | `7233` | Temporal gRPC | every handler, every actor, + dispatch |
 | `8233` | Temporal UI | you |
 | `8333` | SeaweedFS S3 | the handler (codec), the actor (per-unit blobs), the browser (presigned parquet) |
-| `5000` | the OCI registry | `kontra deploy`/`scale` for Images, **and every fleet Machine**, which fetches its Bundle's layer from `/v2/bundles/<actor>/blobs/sha256:<sha>` (ADR 0036). A control plane without one cannot run a fleet run. |
+| `5000` | the OCI registry — zot under compose, an in-process one under `kontra up` (§2a) | `kontra deploy`/`scale` for Images, **and every fleet Machine**, which fetches its Bundle's layer from `/v2/bundles/<actor>/blobs/sha256:<sha>` (ADR 0036). A control plane without one cannot run a fleet run. |
 | `8088` | Orchestrator | the UI + actor self-registration (which IS the schema compat gate — ADR 0027) |
 | `6379` | Redis — the shared state store | every actor process, outbound to the controller |
 | `9110` | the actor's `/metrics` | a local agent (`kontra-vmagent`), which pushes to the controller |

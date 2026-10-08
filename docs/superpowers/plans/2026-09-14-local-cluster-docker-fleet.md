@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the single-appliance install with a Docker Compose cluster and a Pulumi `dockerFleet` sibling of `do_fleet`, so a first-time installer can bring up Postgres, Temporal, SeaweedFS, and the rest of the control plane as separate services, then serve and start a seeded hello workflow that writes `hello world` into a Dataset and tears the local Fleet down.
+**Goal:** Replace the single-install install with a Docker Compose cluster and a Pulumi `dockerFleet` sibling of `do_fleet`, so a first-time installer can bring up Postgres, Temporal, SeaweedFS, and the rest of the control plane as separate services, then serve and start a seeded hello workflow that writes `hello world` into a Dataset and tears the local Fleet down.
 
 **Architecture:** One Compose project on a private `kontra` network. Operator ports bind `127.0.0.1`. Orchestrator API, materializer, and infra stay separate PIDs. `docker_fleet()` starts `stackWorkflow` on `kontra-infra` against project `kontra-docker-fleet` with no cloud credential. Each Machine is a Warden container with the host Docker socket; actor Workers are sibling containers. An empty workspace is seeded once; discovery is recursive and does not auto-run workflows.
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Work on `dev`-based branch `feat/local-cluster-docker-fleet`. Never commit to `main`.
-- No Kubernetes. No second supported appliance install path.
+- No Kubernetes. No second supported install install path.
 - `do_fleet` public behaviour is unchanged.
 - Published ports default to `127.0.0.1`.
 - Seed only when the workspace is empty; never overwrite user files.
@@ -120,7 +120,7 @@ Kontra image: keep building from the release tarball; install `docker-ce-cli` fo
 
 - [ ] Ubuntu job copies the two documented files into a temp dir (curl stand-in), points images at CI-built tags, runs the literal `docker compose up -d --wait`, then asserts spec verification bullets.
 - [ ] `scripts/install-cluster.macos.sh` same assertions for Docker Desktop.
-- [ ] Retire appliance-specific healthcheck of a `kontra` service. Assert every published HostIp is `127.0.0.1`.
+- [ ] Retire install-specific healthcheck of a `kontra` service. Assert every published HostIp is `127.0.0.1`.
 
 ## Task 8: PR against `dev`
 

@@ -24,7 +24,7 @@ package main
 // currently names — not storage or transport."*
 //
 // So `--push` is a whole reference and it may name anything speaking the distribution spec: GitHub
-// Container Registry, GitLab, Harbor, ECR, a mirror in an airgap, or the appliance's own port on
+// Container Registry, GitLab, Harbor, ECR, a mirror in an airgap, or the install's own port on
 // loopback. There is no kontra registry, no kontra versioning scheme and no kontra deployment store
 // to be inside of. `pushDestination` (cli/bundle.go) is where the reference is resolved and judged,
 // and cli/internal/ociref/ociref.go is the grammar it consults — the same one the pull site and the podman driver
@@ -108,7 +108,7 @@ func buildFlagSet() *buildFlags {
 		actorDir:   fs.String("actor", "", "actor directory (contains actor.json)"),
 		push:       fs.String("push", "", "OCI reference to publish the Artifact to (default: <registry>/bundles/<name>:<version>)"),
 		controller: fs.String("controller", "", "Controller whose registry the Artifact is published to (default: KONTRA_CONTROLLER)"),
-		registry:   fs.String("registry", "", "registry host only, when the rest of the reference is conventional (default: the Controller's, else the running appliance's)"),
+		registry:   fs.String("registry", "", "registry host only, when the rest of the reference is conventional (default: the Controller's, else the running install's)"),
 		// RETIRED, AND DECLARED SO IT CAN BE REFUSED BY NAME. See this file's header.
 		target: fs.String("target", "", "retired (ADR 0036) — see --push"),
 		asJSON: fs.Bool("json", false, "print the published Artifact as JSON (for CI: the digest is a field, not a line to grep)"),

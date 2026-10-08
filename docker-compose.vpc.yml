@@ -1,0 +1,116 @@
+# The VPC overlay: publish the control plane on a private address so cloud Machines can reach it.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.vpc.yml up -d
+#
+# ── WHY THIS IS A SEPARATE FILE ─────────────────────────────────────────────────────────────────
+#
+# These five publishes used to sit in docker-compose.yml with `${KONTRA_VPC_BIND:-10.124.0.2}`, and
+# that default is ONE PARTICULAR MACHINE'S OWN ADDRESS. On anybody else's host it is an address they
+# do not have, so five of eleven published ports could not bind and the documented bare-`docker
+# compose up` quickstart did not come up — while the main file's own header claimed loopback was the
+# security control and `scripts/assert-loopback-publish.py` claimed to prove it.
+#
+# A default cannot fix that. An address that is correct for exactly one host has no safe default:
+# wrong and it fails to bind, empty and compose emits a publish with no host_ip, which is 0.0.0.0 —
+# the whole control plane on every interface, arrived at by leaving a variable blank.
+#
+# So the VPC publish is an OPT-IN FILE and the variable is `:?`, which refuses to start and says
+# what to set rather than guessing.
+#
+# A fleet Machine reaches: Temporal (dispatch), Redis (global/object state), the registry (its
+# Bundle), S3 (batches and results) and the orchestrator API (catalog registration, progress).
+
+services:
+  temporal:
+    ports:
+      - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address, e.g. 10.124.0.2}:${KONTRA_TEMPORAL_PORT:-7233}:7233"
+
+  # REDIS ON THE VPC NEEDS A PASSWORD, AND THAT IS THE WHOLE REASON THIS BLOCK IS LONGER THAN THE
+  # OTHERS.
+  #
+  # In the main file Redis publishes on loopback, and loopback IS the control (ADR 0056). Publishing
+  # it here hands the state store to every host on the private network — and it holds every actor's
+  # commit map and every `global_state` entry, with no credential of any kind. "Anything on this VPC
+  # can rewrite a running Run's commit map" is not a posture; it is the absence of one.
+  #
+  # `:?` and not a default: a default password is the one an attacker tries first, and a blank
+  # `requirepass` is accepted by Redis as "no password" — so the failure mode of forgetting is
+  # exactly the exposure. Generate one per controller, like the fleet key:
+  #
+  #   KONTRA_REDIS_PASSWORD=$(openssl rand -hex 32)
+  #
+  # EVERY CLIENT MUST GET THE SAME VALUE, which is why it is in this file's `environment:` blocks
+  # too — `runtime/{python/internals,go}/{redis_kv,rediskv}`, the two `statekv`s and the
+  # orchestrator's `stateStore.ts` all read `KONTRA_REDIS_PASSWORD` and send AUTH only when it is
+  # set. A worker that does not get it fails on its first state write, loudly.
+  redis:
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - always
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${KONTRA_REDIS_PASSWORD:?set KONTRA_REDIS_PASSWORD — publishing Redis on a VPC with no password hands every actor's state to the network}
+    ports:
+      - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_KV_PORT:-6379}:6379"
+
+  # THE REGISTRY GETS CREDENTIALS HERE, BESIDE THE PUBLISH THAT CREATES THE EXPOSURE — the same
+  # argument as Redis above. On loopback an anonymous registry is what `registry:2` always was. On a
+  # VPC it is a write-anything store for whatever else is on that network, and the thing it would be
+  # handing out is the image a Machine is about to run.
+  #
+  # `:?` and not `:-`: the renderer treats blank as "anonymous", so a default would make forgetting
+  # indistinguishable from choosing. All three, because it refuses a partial set.
+  registry-config:
+    environment:
+      KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:?set KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD — publishing the registry on a VPC with no credential lets the network replace the image a Machine runs}
+      KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD: ${KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD:?set KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD}
+      KONTRA_REGISTRY_PULL_PASSWORD: ${KONTRA_REGISTRY_PULL_PASSWORD:?set KONTRA_REGISTRY_PULL_PASSWORD}
+
+  registry:
+    ports:
+      - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_REGISTRY_PORT:-5000}:5000"
+
+  seaweed:
+    ports:
+      - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_S3_PORT:-8333}:8333"
+
+  # THE PASSWORD GOES TO EVERY ROLE THAT READS THE STATE STORE, AND THE LIST IS EXPLICIT. A role
+  # that does not get it cannot authenticate, and the symptom is a NOAUTH error on its first state
+  # access — which names neither this file nor the variable.
+  orchestrator-api:
+    ports:
+      - "${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}:${KONTRA_API_PORT:-8088}:8088"
+    environment:
+      KONTRA_REDIS_PASSWORD: ${KONTRA_REDIS_PASSWORD:?set KONTRA_REDIS_PASSWORD}
+
+  cli:
+    environment:
+      KONTRA_REDIS_PASSWORD: ${KONTRA_REDIS_PASSWORD:?set KONTRA_REDIS_PASSWORD}
+
+  # THE ADDRESSES A MACHINE IS TOLD TO CALL HOME ON, and the key it is reached with. Both belong to
+  # this role alone — `orchestrator-infra` is the only process that converges a stack.
+  orchestrator-infra:
+    environment:
+      KONTRA_REDIS_PASSWORD: ${KONTRA_REDIS_PASSWORD:?set KONTRA_REDIS_PASSWORD}
+      KONTRA_CONTROLLER: ${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND to this host's private address}
+      KONTRA_REGISTRY: ${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND}:${KONTRA_REGISTRY_PORT:-5000}
+      KONTRA_TRUST_REGISTRIES: ${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND}:${KONTRA_REGISTRY_PORT:-5000}
+      KONTRA_TRUST_UNSIGNED: ${KONTRA_VPC_BIND:?set KONTRA_VPC_BIND}:${KONTRA_REGISTRY_PORT:-5000}
+    volumes:
+      # THE FLEET KEY, AND IT HAS NO DEFAULT ON PURPOSE.
+      #
+      # This was `${KONTRA_SSH_KEY_HOST:-/root/.ssh/axiom_rsa}` in the main file — one developer's
+      # personal key, from 2023, mounted into every install that ran the quickstart. The repo's own
+      # policy forbids exactly that: scripts/provision-controller.sh generates a fresh keypair per
+      # controller because "handing that key to another installation means one compromised
+      # controller owns every fleet on the account".
+      #
+      # It must be the private half of a key DigitalOcean has — the Droplets are created with
+      # `sshKeyIds` and only those keys can log in.
+      - ${KONTRA_SSH_KEY_HOST:?set KONTRA_SSH_KEY_HOST to the private half of a key DigitalOcean holds}:/var/lib/kontra-ssh/fleet_key:ro

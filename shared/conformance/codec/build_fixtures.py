@@ -198,7 +198,7 @@ def build() -> None:
                                    "reads as identical addressing two different namespaces, "
                                    "with no error, is the same defect class as the "
                                    "concatenation these rows were added to catch. Measured "
-                                   "against the appliance's own object store, a 'p//cas/...' "
+                                   "against the install's own object store, a 'p//cas/...' "
                                    "key is not merely odd -- it is REFUSED, 'object key ... has "
                                    "an empty path segment'.",
         },

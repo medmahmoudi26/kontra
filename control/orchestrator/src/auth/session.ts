@@ -159,11 +159,39 @@ export class SessionBook {
 /** The process's session book. One per orchestrator, which is one per Tenant. */
 export const sessions = new SessionBook();
 
-/** `Bearer <token>` → `<token>`, or undefined. The one place the header shape is parsed. */
+/**
+ * `Bearer <token>` → `<token>`, or undefined. The one place the header shape is parsed.
+ *
+ * NO REGEX, AND THAT IS THE POINT. This was `/^Bearer\s+(.+)$/i`, which is POLYNOMIAL: `\s+` and
+ * `.+` both match a space, so the engine tries every split between them, and `.` does not cross a
+ * line terminator — so an input of `bearer`, many spaces, then a tail `(.+)$` cannot match
+ * backtracks once per space and rescans from each. The work happens in header parsing, BEFORE any
+ * credential is looked at, so it is unauthenticated work. Found by CodeQL, rated high.
+ *
+ * A prefix compare and two slices cannot backtrack. The accepted shape is unchanged, including the
+ * parts that are easy to lose: the scheme is case-insensitive, at least one space is required (so
+ * `Bearerabc` is not a bearer header), and a token may not contain a line terminator — which the
+ * old `.` gave for free and a plain slice does not.
+ */
+const BEARER = 'bearer';
+
 export function bearerOf(authorization: string | undefined): string | undefined {
   if (!authorization) return undefined;
-  const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
-  return match?.[1];
+  const s = authorization.trim();
+  if (s.length <= BEARER.length) return undefined;
+  if (s.slice(0, BEARER.length).toLowerCase() !== BEARER) return undefined;
+
+  const rest = s.slice(BEARER.length);
+  // ASCII whitespace: space, and tab through carriage return. One character, no quantifier.
+  const first = rest.charCodeAt(0);
+  if (first !== 0x20 && (first < 0x09 || first > 0x0d)) return undefined;
+
+  const token = rest.trimStart();
+  if (token.length === 0) return undefined;
+  // `.` excluded line terminators, so `Bearer a\nb` never parsed. Keep that: a header carrying one
+  // is malformed, and accepting it here would widen what reaches the session lookup.
+  if (/[\n\r\u2028\u2029]/.test(token)) return undefined;
+  return token;
 }
 
 function timingSafeEqualStr(a: string, b: string): boolean {

@@ -10,11 +10,10 @@ Container definitions for running kontra locally, and the shape the cloud mirror
 > console became a sibling package (ADR 0035) and then another repository (ADR 0038), and no
 > compose service or CI job has referenced it since `orchestrator-api` left `docker-compose.yml`
 > (ADR 0031 §1). The control plane is `kontra up`'s supervised child now, and the SPA is a
-> content-addressed artifact — `kontra bundle spa`. It is in git history if it is ever wanted.
+> content-addressed artifact of its own. It is in git history if it is ever wanted.
 
 ## Images
 
-- **`Dockerfile.pyworker`** — the canonical `kontra-host:1` base: the Python runtime only
   (`actorkit` + the Temporal SDK + the S3/seaweed extra), no actor deps. Per-actor images
   are `FROM kontra-host:1` and add only their own deps (`examples/python/<actor>/Dockerfile`).
   The base carries no entrypoint; the build step stamps `ENTRYPOINT ["python3",

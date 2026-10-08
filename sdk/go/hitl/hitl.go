@@ -63,7 +63,7 @@
 //
 // ── THE OPERATOR LABEL IS ATTRIBUTION, NEVER AUTHENTICATION ────────────────────────────────────
 //
-// The appliance is loopback with no credential (ADR 0031), so there is no authenticated identity to
+// The install is loopback with no credential (ADR 0031), so there is no authenticated identity to
 // record and this SDK does not pretend otherwise. `by` is whatever the answering client said it was.
 // It is genuinely useful — on a shared box, or reading your own history six weeks later — and
 // nothing in kontra gates anything on it. Do not build one that does.

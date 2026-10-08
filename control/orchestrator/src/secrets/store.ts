@@ -135,7 +135,7 @@ export class SecretStore {
     return verifyActorToken(token, { dir: this.keyDir });
   }
 
-  /** Which backend this appliance is configured with — shown in Settings. */
+  /** Which backend this install is configured with — shown in Settings. */
   get backendKind(): string {
     return this.backend.kind;
   }
@@ -282,7 +282,7 @@ let shared: SecretStore | null = null;
  * The process-wide store — what the last hop and the API both hold.
  *
  * Built on first use rather than at boot, for the same reason the state reader is: a fresh
- * appliance must start with no store on disk, and the store directory (and its key) come into
+ * install must start with no store on disk, and the store directory (and its key) come into
  * existence when somebody first writes a secret, not when the server starts.
  */
 export function secretStore(): SecretStore {

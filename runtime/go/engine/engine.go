@@ -54,6 +54,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/medmahmoudi26/kontra/runtime/go/checkpoint"
 	"github.com/medmahmoudi26/kontra/runtime/go/globalstore"
 	"github.com/medmahmoudi26/kontra/runtime/go/rediskv"
 	"github.com/medmahmoudi26/kontra/runtime/go/statekv"
@@ -195,6 +196,12 @@ type KontraActor struct {
 	// beat is set by the host; called once per Unit outcome. nil outside a hosted run, which is
 	// what makes the engine testable without a Temporal activity context.
 	beat func(done, total, isolated int)
+
+	// The latest checkpoint, published by the runner and read by the host inside `beat`. Guarded
+	// separately from the session lock: this is written on the commit path and read from the
+	// heartbeat callback, and making them contend would put a heartbeat in front of a commit.
+	ckMu sync.Mutex
+	ck   checkpoint.Details
 	// progress is the sink for the author's @actor.healthcheck value, on the engine's own
 	// ticker rather than per Unit. See SetProgress.
 	progress func(any)
@@ -230,6 +237,31 @@ func (a *KontraActor) ResolvedMethodName(wireName string) string {
 		return ""
 	}
 	return m.Name
+}
+
+// publishCheckpoint stores the batch's latest checkpoint for the host to ship with the next beat.
+//
+// WHY A FIELD AND NOT A WIDER CALLBACK. SetHeartbeat's signature is exported and has callers outside
+// this repository, so widening it would break them for a payload they do not send. The runner
+// publishes here immediately BEFORE it beats, so what the host reads inside the callback is this
+// batch's current state rather than a lagging copy.
+func (a *KontraActor) publishCheckpoint(d checkpoint.Details) {
+	a.ckMu.Lock()
+	a.ck = d
+	a.ckMu.Unlock()
+}
+
+// Checkpoint is the latest published checkpoint — WHICH Units committed and which were isolated,
+// which the three counters SetHeartbeat carries cannot express. The host puts it in the heartbeat
+// details, where it lives in the activity's own history rather than in a cache that can evict it
+// (ADR 0059).
+//
+// The zero value has V == 0, which every reader of the contract discards. That is correct for an
+// actor that has not begun a batch: a checkpoint nobody wrote is not evidence about anything.
+func (a *KontraActor) Checkpoint() checkpoint.Details {
+	a.ckMu.Lock()
+	defer a.ckMu.Unlock()
+	return a.ck
 }
 
 // heartbeat reports progress, best-effort: a heartbeat that fails must never fail a Unit that
@@ -508,6 +540,23 @@ type batchRun struct {
 
 func (r *batchRun) slot(i int) string { return unitSlot(r.bid, i) }
 
+// checkpoint renders this batch's progress in the cross-SDK encoding
+// (shared/conformance/checkpoint.json). THE CALLER MUST HOLD r.mu: it reads both slot maps.
+//
+// Built from the maps rather than maintained beside them, as the Python peer does. Two structures
+// tracking one fact drift, and the drift would be a checkpoint that disagrees with the commits it
+// claims to describe.
+func (r *batchRun) checkpoint() checkpoint.Details {
+	c := checkpoint.New(r.bid)
+	for i := range r.slots {
+		c.Commit(i)
+	}
+	for i := range r.failSlots {
+		c.Isolate(i)
+	}
+	return c.ToDetails()
+}
+
 // Enter binds the Unit's durable resume scratch. Called when a Unit is handed to the author.
 func (r *batchRun) Enter(u *core.Unit) {
 	u.BindState(boundUnitState{r: r, key: r.slot(u.Index) + ckptSuffix})
@@ -545,7 +594,9 @@ func (r *batchRun) Commit(u *core.Unit) error {
 	r.clearScratch(r.slot(u.Index))
 	r.slots[u.Index] = out
 	done, isolated := len(r.slots), len(r.failSlots)
+	ck := r.checkpoint()
 	r.mu.Unlock()
+	r.a.publishCheckpoint(ck)
 	r.a.heartbeat(done, r.total, isolated)
 	return nil
 }
@@ -647,8 +698,10 @@ func (r *batchRun) fail(u *core.Unit, e error, category string) error {
 	r.clearScratch(slot) // an isolated Unit never resumes -> drop its scratch
 	r.failSlots[u.Index] = failureRecord(u.Value, ei, category)
 	done, isolated := len(r.slots), len(r.failSlots)
+	ck := r.checkpoint()
 	r.mu.Unlock()
 	countIsolated(category) // the run just lost this Unit; make that observable
+	r.a.publishCheckpoint(ck)
 	r.a.heartbeat(done, r.total, isolated)
 	return nil
 }

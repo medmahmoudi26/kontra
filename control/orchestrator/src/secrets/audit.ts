@@ -30,7 +30,7 @@
  * rested somewhere the store's own permissions do not cover would be the weakest link about the
  * strongest thing. Appended rather than rewritten, so a crash mid-write costs the line being
  * written and never the history behind it, and BOUNDED at {@link CAP} entries because this runs on
- * an appliance whose disk is the operator's laptop: the trim keeps the newest, which is the half
+ * an install whose disk is the operator's laptop: the trim keeps the newest, which is the half
  * anybody reads.
  */
 

@@ -15,19 +15,60 @@ import (
 )
 ```
 
-Both are modules in this checkout, so an actor's `go.mod` requires and replaces both:
+A **caller** — a workflow that drives actors rather than serving one — needs `sdk/go` alone; `go/dnssweep` is one, and its dependency graph carries no Redis and no S3 client at all.
+
+## The actor directory, and the one rule about `go.mod`
+
+```
+main.go
+actor.json
+go.mod              # require the PUBLISHED sdk/go and runtime/go. No replace outside this directory
+go.sum
+Procfile            # optional; the built binary is the default process
+```
+
+**A Go actor is to build on its own** — `go build` inside the actor directory, with nothing else from
+any checkout. That shape needs a published SDK module, and **there is not one yet**, so the versions
+below are a placeholder rather than something to copy:
 
 ```
 require (
-    github.com/medmahmoudi26/kontra/runtime/go v0.0.0
-    github.com/medmahmoudi26/kontra/sdk/go v0.0.0
+    github.com/medmahmoudi26/kontra/runtime/go v0.N.M
+    github.com/medmahmoudi26/kontra/sdk/go v0.N.M
 )
-
-replace github.com/medmahmoudi26/kontra/sdk/go => ../../../sdk/go
-replace github.com/medmahmoudi26/kontra/runtime/go => ../../../runtime/go
 ```
 
-A **caller** — a workflow that drives actors rather than serving one — needs `sdk/go` alone; `go/dnssweep` is one, and its dependency graph carries no Redis and no S3 client at all.
+**A `replace` directive pointing outside the actor directory is refused, with the offending line
+named — a check that is written and tested and that `kontra deploy` does not reach yet** (the note
+below says why, and what every Go actor here does instead). The rule reads like pedantry and is not. A `replace ../../sdk/go` is why the old build path
+used the **repo root** as its Docker context — it had to, because the directive pointed out of the
+actor directory — and that is why an edit anywhere in the repository invalidated every Go actor's
+build cache and re-downloaded every module.
+
+It is also wrong in a second way the repository can show you. `workspaces/bugbounty/actors/subfinder`
+carries this comment above its own `replace`:
+
+> A REPLACE PATH IS A FUNCTION OF WHERE THIS FOLDER SITS. […] It said `../../../kontra/sdk/go` — the
+> path a SIBLING kontra-actors checkout uses, inherited unchanged when the actor moved here […] and
+> that resolves from nowhere: `go build` failed on a missing directory rather than on anything the
+> author wrote, so this module had not compiled since the move.
+
+A relative path is a fact about a directory's position, so moving the directory breaks it silently. A
+`require` on a published version is a fact about the module.
+
+> [!IMPORTANT]
+> **Today the SDK has no published module**, so every Go actor in this repository still uses
+> `replace ../../../../sdk/go` and is still built with the repo root as context. The refusal above
+> is written and tested; `kontra deploy` does not call it yet, and the `--dev` path for repo-internal
+> fixtures — which vendors the SDK into a temp copy before building — is designed and not built. Until
+> the SDK is published, the `replace` is the only thing that works — see
+> [ADR 0061](../adr/0061-buildpacks-runtimes-and-the-image-store.md).
+
+**Extra tools come from the runtime, not from a `runtime.Dockerfile`.** A Go actor that shells out to a
+binary declares a runtime that provides it ([[Runtimes]]); `base:1` is the default and carries only an
+OS. The `runtime.Dockerfile` escape hatch still works today and goes away with the old build path.
+
+## A whole actor
 
 ```go
 package main
@@ -75,9 +116,9 @@ gave Go the callee only and was reversed: `sdk/go/catalog` is the peer of
 `sdk/python/kontra/catalog.py`, so a Go workflow pages a Dataset and drives a Python actor exactly
 as a Python one drives a Go actor. See [[Execution-Model]].
 
-`a.Serve()` serves the actor as a **Temporal activity worker** — run it directly, exactly like a Python actor: `go run .`, or `kontra serve --actor go/<name> --engine go` for the actor plus its handler in one command (that form executes the compiled binary `<actor-dir>/<name>`, so build it first — with `GOWORK=off`, since example actors are standalone modules). It registers `RunBatch` and `Close` and polls `{name}-{version}-sessions`; there is no sidecar to launch it under, no app port and no actor type name. The batches it serves are scheduled by the actor's Go **handler** ([`/handler`](../../handler)), which owns the workflow on the shared `{name}-{version}` queue — Temporal splits workflow and activity across languages by design, which is what keeps the two halves decoupled.
+`a.Serve()` serves the actor as a **Temporal activity worker** — run it directly, exactly like a Python actor: `go run .`, or `kontra serve --actor go/<name> --engine go` for the actor plus its handler in one command (that form executes the compiled binary `<actor-dir>/<name>`, so build it first — with `GOWORK=off`, since example actors are standalone modules). It registers `RunBatch` and `Close` and polls `{name}-{version}-sessions`; there is no sidecar to launch it under, no app port and no actor type name. The batches it serves are scheduled by the actor's Go **handler** ([`runtime/handler`](../../runtime/handler)), which owns the workflow on the shared `{name}-{version}` queue — Temporal splits workflow and activity across languages by design, which is what keeps the two halves decoupled.
 
-`actor.json` sits beside `main.go`, same as Python: `{ "schemaVersion": "kontra.actor.v1", "name": "...", "version": "..." }`.
+`actor.json` sits beside `main.go`, same as Python: `{ "schemaVersion": "kontra.actor.v1", "name": "...", "version": "..." }`, plus a `"runtime"` field when the binary needs more than a bare OS — `base:1` is what a Go actor gets by default ([[Runtimes]]).
 
 ## Methods and the Batch
 
@@ -250,7 +291,7 @@ a.Method("scan", func(s *kontra.Session, b *kontra.Batch, ds *kontra.Dataset) er
 
 ## Execution (same semantics as Python)
 
-Both SDKs are Temporal activity workers, byte-compatible with each other: same queue derivation, same activity names, same payload keys, so the Go handler cannot tell which SDK is on the other end. Each serves `RunBatch` / `Close` on its own sessions queue; the actor's Go **handler** owns the workflow that schedules them and owns retry = exactly-once reload. `load` / Methods / `close` all run on the one live instance pinned to the actor id — a map plus a mutex in the worker process, which is the whole of "activation" now that Temporal serializes work per id. Durable state and per-Unit progress live in Redis.
+Both SDKs are Temporal activity workers, byte-compatible with each other: same queue derivation, same activity names, same payload keys, so the Go handler cannot tell which SDK is on the other end. Each serves `RunBatch` / `Close` on its own sessions queue; the actor's Go **handler** owns the workflow that schedules them and owns retry = exactly-once reload. `load` / Methods / `close` all run on the one live instance pinned to the actor id — a map plus a mutex in the worker process, which is the whole of "activation" now that Temporal serializes work per id. Durable state and per-Unit progress live in Redis, which is durable WITH A BOUND worth knowing: the actor hash carries a 24 h TTL, and the store must run `maxmemory-policy noeviction` — under the old `volatile-lru` the TTL made that hash the first thing evicted under memory pressure, which silently deleted the record of what had committed.
 
 A committed Unit is keyed by the **Batch's content hash plus its index**, and the Method's name is part of that hash — so two Methods handed identical Units are two Batches and cannot replay each other's outputs ([ADR 0023](../adr/0023-v2-one-kind-sessions-caller-owned-loop.md) §17). Both SDKs compute that hash the same way, which the Go suite asserts against goldens taken from the Python peer.
 

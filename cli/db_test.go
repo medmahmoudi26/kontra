@@ -81,7 +81,7 @@ func TestNoSourceGivesAnActionableError(t *testing.T) {
 	chdir(t, t.TempDir())
 	t.Setenv("KONTRA_DUCKLAKE_CATALOG", "")
 	t.Setenv("PATH", "") // no docker binary to ask
-	// AND NO APPLIANCE CATALOG EITHER, which is now the last source `lakeCatalog` tries. Without
+	// AND NO INSTALL CATALOG EITHER, which is now the last source `lakeCatalog` tries. Without
 	// this the test reads the DEVELOPER'S OWN ~/.kontra/data/datasets.ducklake and passes or fails
 	// depending on whether that machine has ever materialized a Dataset.
 	t.Setenv("KONTRA_HOME", t.TempDir())

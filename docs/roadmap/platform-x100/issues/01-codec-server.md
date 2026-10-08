@@ -1,20 +1,20 @@
 # 01 — Temporal codec server (UI payload decode)
 
 Status: **done** — `runtime/handler/codecserver` implements Temporal's remote-codec contract
-(`POST /encode` / `POST /decode`) and is served by the appliance at `cli/appliance/codec/codec.go`
+(`POST /encode` / `POST /decode`) and is served by the install at `cli/install/codec/codec.go`
 on a listener it already owns. Do not work this.
 
 > **The "Problem" section below is STALE and was believed on 2026-09-26.** It says "there is **no**
 > codec server", which was true when written and has not been for some time. The package exists,
 > has a test, and is wired — what changed is HOW: ADR 0031 §1 collapsed it from `cmd/codec-server`
 > + `Dockerfile.codec-server` + a compose service with a published port into an HTTP handler on the
-> appliance's own listener ("it is an HTTP handler in a container; it becomes an HTTP handler").
+> install's own listener ("it is an HTTP handler in a container; it becomes an HTTP handler").
 > That also collapsed the codec's port and the address the UI is told to call from two hand-synced
 > settings into one derived one.
 >
 > What is still true: the **docker-compose** stack has no Temporal Web UI (no `temporal-ui`
 > service, nothing on :8233 — it publishes only `127.0.0.1:7233`), so there is nothing there for a
-> codec server to decode *for*. The UI and the codec endpoint are an appliance (`kontra up`)
+> codec server to decode *for*. The UI and the codec endpoint are an install (`kontra up`)
 > feature. If you want them under compose, that is the open work — not building the codec server.
 **Tier:** 1 | **Effort:** S–M | **Depends on:** —
 

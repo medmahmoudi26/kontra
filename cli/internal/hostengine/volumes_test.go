@@ -37,8 +37,8 @@ func TestExactlyTheseVolumesAreUnprotected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(set.ByName) != 11 {
-		t.Fatalf("the program declares %d volumes and this test knows about 11: %v", len(set.ByName), set.Names())
+	if len(set.ByName) != 13 {
+		t.Fatalf("the program declares %d volumes and this test knows about 13: %v", len(set.ByName), set.Names())
 	}
 	want := map[string]string{
 		// The only genuinely rebuildable one: a config file that lives in the repository, written by
@@ -49,6 +49,10 @@ func TestExactlyTheseVolumesAreUnprotected(t *testing.T) {
 		// on seaweed precisely because logs age out.
 		"kontra_victoriametrics-data": "retention-bounded observability data",
 		"kontra_victorialogs-data":    "retention-bounded observability data",
+		// Written from scratch on every converge by the `registry-config` one-shot: the rendered zot
+		// config, its htpasswd and the static busybox the healthcheck runs. Protecting it would protect
+		// a derived file that the next converge overwrites anyway.
+		"kontra_registry-config": "rebuilt by the next converge",
 	}
 	got := map[string]bool{}
 	for _, n := range set.Unprotected() {
@@ -71,12 +75,12 @@ func TestExactlyTheseVolumesAreUnprotected(t *testing.T) {
 				"`pulumi state unprotect` typed against a URN", n, why)
 		}
 	}
-	if p := set.Protected(); p != 8 {
-		t.Errorf("%d volumes carry protect: true, want 8", p)
+	if p := set.Protected(); p != 9 {
+		t.Errorf("%d volumes carry protect: true, want 9", p)
 	}
 }
 
-// THE EIGHT ARE THE ONES THAT HOLD SOMETHING NOTHING ELSE HOLDS, and two of them are one unit.
+// THE NINE ARE THE ONES THAT HOLD SOMETHING NOTHING ELSE HOLDS, and two of them are one unit.
 //
 // §7: "`seaweed-data` and `postgres-data` are ONE unit… Protect one and not the other and you get a
 // catalog pointing at nothing, or gigabytes of files nothing can find." This asserts the pair together,
@@ -497,5 +501,78 @@ func TestReplacingEveryContainerIsNotARefusal(t *testing.T) {
 	sum := &Summary{Counts: map[string]int{"replace": len(changes)}, Total: 40, Changes: changes}
 	if err := CheckPlanKeepsEveryVolume(sum, declared, VolumeSet{}); err != nil {
 		t.Fatalf("replacing containers was refused, which is what an update does:\n%v", err)
+	}
+}
+
+// ── A VOLUME MAY GAIN A READER AND MAY NOT LOSE ONE ───────────────────────────────────────────────
+//
+// The hazard this gate describes is one-directional: a volume handed to a service that did not write
+// it reads as an empty disk there. A service added BESIDE the ones that already mount it cannot
+// produce that. Comparing the two lists for equality refused both, which made a read-only reader
+// impossible to add without stopping the converge.
+
+func recordedWith(name string, services ...string) VolumeSet {
+	s := newVolumeSet()
+	s.add(Volume{Logical: "volThing", Name: name, Services: services})
+	s.Converged = true
+	return s
+}
+
+func declaredWith(name string, services ...string) VolumeSet {
+	s := newVolumeSet()
+	s.add(Volume{Logical: "volThing", Name: name, Services: services})
+	return s
+}
+
+func TestAVolumeMayGainAReader(t *testing.T) {
+	// The real case: `kontra_registry-data` stays on the registry and is mounted read-only into the
+	// one-shot that refuses to start an unmigrated install. Nothing is renamed and no bytes move.
+	err := CheckVolumeIdentity(
+		declaredWith("kontra_registry-data", "kontra-registry", "kontra-registry-config"),
+		recordedWith("kontra_registry-data", "kontra-registry"),
+	)
+	if err != nil {
+		t.Fatalf("adding a reader was refused:\n%v", err)
+	}
+}
+
+func TestAVolumeMayNotLoseAReader(t *testing.T) {
+	// The hazard itself, and the direction that must stay refused: the service that wrote it starts on
+	// an empty disk while its data sits where nothing looks.
+	err := CheckVolumeIdentity(
+		declaredWith("kontra_seaweed-data", "kontra-other"),
+		recordedWith("kontra_seaweed-data", "kontra-seaweed"),
+	)
+	if err == nil {
+		t.Fatal("a volume taken away from the service that wrote it was accepted")
+	}
+	for _, want := range []string{"NO LONGER DOES", "kontra-seaweed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should name %q:\n%v", want, err)
+		}
+	}
+}
+
+func TestSwappingOneReaderForAnotherIsStillALoss(t *testing.T) {
+	// Equal lengths, different members — the case a length check would wave through.
+	err := CheckVolumeIdentity(
+		declaredWith("kontra_postgres-data", "kontra-a", "kontra-c"),
+		recordedWith("kontra_postgres-data", "kontra-a", "kontra-b"),
+	)
+	if err == nil {
+		t.Fatal("exchanging a mounter for a different one was accepted")
+	}
+	if !strings.Contains(err.Error(), "kontra-b") {
+		t.Errorf("the refusal should name the one it lost:\n%v", err)
+	}
+}
+
+func TestAnUnconvergedStackHasNothingToLose(t *testing.T) {
+	// Nothing recorded is not an install with zero volumes; it is an install that has not happened.
+	rec := newVolumeSet()
+	rec.add(Volume{Logical: "volThing", Name: "kontra_thing", Services: []string{"kontra-old"}})
+	// Converged deliberately left false.
+	if err := CheckVolumeIdentity(declaredWith("kontra_thing", "kontra-new"), rec); err != nil {
+		t.Fatalf("an unconverged stack was gated:\n%v", err)
 	}
 }

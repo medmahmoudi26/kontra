@@ -53,9 +53,10 @@ import os
 import subprocess
 import sys
 
-# The two mounts that are legitimate. The socket is host-level Docker authority and is a documented
+# The mounts that are legitimate. The socket is host-level Docker authority and is a documented
 # decision (`docker-compose.yml`'s header); the workspace is where the operator's own code lives and
-# is the one host path this install is FOR.
+# is the one host path this install is FOR; and the install directory itself, handled at the check
+# because it is only known at runtime.
 SOCKET = "/var/run/docker.sock"
 ALLOWED_FILES = {"docker-compose.yml", ".env"}
 
@@ -142,6 +143,18 @@ def main(argv: list[str]) -> None:
             src = vol.get("source", "")
             if src == SOCKET or src == workspaces or src.startswith(workspaces + os.sep):
                 continue
+            # THE INSTALL DIRECTORY ITSELF IS NOT A HOST PATH THIS CHECK IS ABOUT. It is the
+            # directory the operator curl'd into and is standing in, it always exists, and `cli`
+            # mounts it at the same path inside and out so that `kontra deploy --actor ./x` means
+            # the same thing on both sides. The hazard named below is a source that does NOT
+            # exist — Docker invents an empty directory for it — and this one cannot be that.
+            #
+            # DELIBERATELY NOT "ANYTHING UNDER THE INSTALL". `$PWD/runtime/python` is under it and
+            # is exactly the failure: absent from a curl-only install, invented empty, and mounted
+            # over the SDK the image ships. Refusing that while allowing the root is the whole
+            # distinction, so this compares for equality and does not walk the prefix.
+            if src == install:
+                continue
             binds.append(f"{name}: {src} -> {vol.get('target')}")
     if binds:
         fail(
@@ -170,7 +183,7 @@ def main(argv: list[str]) -> None:
 
     print(
         f"install is self-contained: only {sorted(ALLOWED_FILES)} on disk, "
-        f"mounts only the socket and {workspaces}, "
+        f"mounts only the socket, {install} and {workspaces}, "
         f"{sum(len(s.get('configs') or []) for s in cfg['services'].values())} config(s) with explicit modes"
     )
 

@@ -207,7 +207,7 @@ export interface DiskSchema {
  * The command that actually serves this Actor in THIS deployment.
  *
  * IT IS COMPOSED SERVER-SIDE BECAUSE ONLY THE SERVER KNOWS. A browser pane cannot tell whether the
- * control plane is a container, an appliance or a checkout on the reader's own laptop, and the
+ * control plane is a container, an install or a checkout on the reader's own laptop, and the
  * answer differs in every one. Guessing produced a command that could not work: the Compose cluster
  * shows an operator `kontra serve --actor <dir> --watch`, they run it on the host, and the actor
  * process dies on `import temporalio` — the host has no SDK, and the whole point of this install is

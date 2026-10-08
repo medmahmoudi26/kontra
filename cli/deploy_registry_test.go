@@ -10,44 +10,34 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra/cli/appliance/registry"
+	registry "github.com/medmahmoudi26/kontra/cli/internal/testregistry"
 )
 
-// TestRegistryAddressPrefersTheRunningAppliance pins the resolution order deploy and scale share.
-// The whole point of having one function is that both halves of a round trip get the same string,
-// and the third rung — the address `kontra up` actually bound — is what makes a moved port not
-// silently orphan every deploy.
-func TestRegistryAddressPrefersTheRunningAppliance(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("KONTRA_HOME", home)
+// TestRegistryAddressIsOneResolutionForBothHalves pins the order `deploy` and `scale` share.
+//
+// THE POINT OF ONE FUNCTION is that both halves of a round trip get the same string. `deploy` tags
+// an image with a registry address and pushes it; `scale` pulls by an address it resolves
+// separately; and an image the daemon does not have does NOT auto-pull on container create. Two
+// resolutions that disagree surface as `no such image` at scale time — a message about Docker,
+// three commands away from the deploy that caused it.
+func TestRegistryAddressIsOneResolutionForBothHalves(t *testing.T) {
+	t.Setenv("KONTRA_HOME", t.TempDir())
 	t.Setenv("KONTRA_REGISTRY", "")
 
-	// Nothing running, nothing configured.
+	// Nothing configured: the conventional address, so the reachability check is what reports.
 	if got := registryAddress(""); got != defaultRegistry {
-		t.Errorf("with nothing running: got %q, want %q", got, defaultRegistry)
+		t.Errorf("with nothing configured: got %q, want %q", got, defaultRegistry)
 	}
 
-	// An appliance publishes the address it bound.
-	regDir := filepath.Join(home, "data", "registry")
-	if err := os.MkdirAll(regDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(regDir, "address"), []byte("127.0.0.1:51234\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := registryAddress(""); got != "127.0.0.1:51234" {
-		t.Errorf("with an appliance running: got %q, want the bound address", got)
-	}
-
-	// The environment overrides it, and the flag overrides that.
+	// The environment is what compose sets for every service, so an install that moved
+	// KONTRA_REGISTRY_PORT is followed rather than guessed at. The flag overrides that.
 	t.Setenv("KONTRA_REGISTRY", "controller.internal:5000")
 	if got := registryAddress(""); got != "controller.internal:5000" {
-		t.Errorf("KONTRA_REGISTRY should win over the appliance: got %q", got)
+		t.Errorf("KONTRA_REGISTRY should win over the default: got %q", got)
 	}
 	if got := registryAddress("box:5001"); got != "box:5001" {
 		t.Errorf("--registry should win over everything: got %q", got)
@@ -210,16 +200,15 @@ func TestStreamPushOutputReadsTheDigest(t *testing.T) {
 }
 
 // TestAgainstTheEmbeddedRegistry ties the two halves together against the real thing: the
-// appliance publishes an address, `registryAddress` finds it with nothing configured, and the
+// install publishes an address, `registryAddress` finds it with nothing configured, and the
 // digest the registry reports for a tag is what `confirmPushed` records. Every other test here
-// uses a stand-in; this one uses the registry that will actually be serving.
-func TestAgainstTheEmbeddedRegistry(t *testing.T) {
+// uses a stand-in; this one uses a registry that really speaks the distribution API.
+func TestAgainstARealRegistry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("KONTRA_HOME", home)
-	t.Setenv("KONTRA_REGISTRY", "")
 
-	// A FREE port, not `Port: 0` — that means the default 5000, and a suite run on a controller
-	// that is already serving one would talk to the wrong registry and report it as a pass.
+	// A FREE port, not `Port: 0` — that means the default 5000, and a suite run on a machine that
+	// is already serving one would talk to the wrong registry and report it as a pass.
 	srv, err := registry.Start(registry.Options{
 		DataDir: filepath.Join(home, "data"), Port: freeTestPort(t), Logf: func(string, ...any) {},
 	})
@@ -228,12 +217,13 @@ func TestAgainstTheEmbeddedRegistry(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	// THE ADDRESS IS DISCOVERED, not assumed: Port 0 means it is not 5000, so a resolution that
-	// fell back to defaultRegistry would be caught here rather than at scale time.
-	if got := registryAddress(""); got != srv.Address() {
-		t.Fatalf("registryAddress() = %q, want the running appliance's %q", got, srv.Address())
-	}
+	// NAMED THROUGH THE ENVIRONMENT, which is the rung compose uses, so this exercises the same
+	// resolution an install does rather than reaching past it.
+	t.Setenv("KONTRA_REGISTRY", srv.Address())
 	reg := registryAddress("")
+	if reg != srv.Address() {
+		t.Fatalf("registryAddress() = %q, want %q", reg, srv.Address())
+	}
 
 	if err := registryReachable(reg); err != nil {
 		t.Fatalf("the embedded registry does not answer /v2/: %v", err)
@@ -307,13 +297,17 @@ func TestAgainstTheEmbeddedRegistry(t *testing.T) {
 		t.Error("versionDeployed did not see the tag it just pushed")
 	}
 
-	// And when the appliance stops, the published address goes with it, so the next deploy falls
-	// back to the conventional one rather than to a dead port.
+	// A STOPPED REGISTRY STILL RESOLVES, and that is the right behaviour rather than a gap: the
+	// address is configuration, not a discovery, so `deploy` reports "nothing is listening there"
+	// through `registryReachable` instead of silently retargeting a different registry.
 	if err := srv.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if got := registryAddress(""); got != defaultRegistry {
-		t.Errorf("after the appliance stopped: registryAddress() = %q, want %q", got, defaultRegistry)
+	if got := registryAddress(""); got != reg {
+		t.Errorf("the configured address must not change when the registry stops: got %q, want %q", got, reg)
+	}
+	if err := registryReachable(reg); err == nil {
+		t.Error("a stopped registry must fail the reachability check, not pass it")
 	}
 }
 
@@ -322,7 +316,7 @@ func sha256Digest(b []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// freeTestPort picks a port nothing is on. The appliance package has its own; this is the one line
+// freeTestPort picks a port nothing is on. `testregistry` has its own copy; this is the one line
 // of it that matters on the far side of the package boundary.
 func freeTestPort(t *testing.T) int {
 	t.Helper()

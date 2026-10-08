@@ -75,6 +75,32 @@ def register_actor_catalog(url, m, operations: list, *, timeout: float = 5.0) ->
     source = str(m.actor_dir) if m.actor_dir else ""
     if source:
         descriptor["source"] = source
+    # WHAT THE IMAGE WAS BUILT ON, which this process cannot discover for itself.
+    #
+    # Every other field here is something the worker knows about itself. These two are facts about a
+    # BUILD — the run image a buildpack layered onto, and the builder that layered it — and neither is
+    # visible from inside the running container. The deploying CLI records them, the Warden hands them
+    # back as environment, and this echoes them, so a worker re-registering does not erase what it
+    # cannot independently know.
+    #
+    # A runtime with no NAME is not a runtime: a partially-filled object would overwrite a complete
+    # one, and the same absent-not-empty rule as `digest` applies to both keys.
+    runtime_name = os.environ.get("KONTRA_RUNTIME_NAME", "")
+    if runtime_name:
+        try:
+            major = int(os.environ.get("KONTRA_RUNTIME_MAJOR", ""))
+        except ValueError:
+            # Reported as 0 rather than dropping the whole runtime: the digest is what rebase
+            # compares, and losing it over an unreadable major would lose the comparison.
+            major = 0
+        descriptor["runtime"] = {
+            "name": runtime_name,
+            "major": major,
+            "digest": os.environ.get("KONTRA_RUNTIME_DIGEST", ""),
+        }
+    builder_digest = os.environ.get("KONTRA_BUILDER_DIGEST", "")
+    if builder_digest:
+        descriptor["builderDigest"] = builder_digest
     body = json.dumps(descriptor).encode()
     req = urllib.request.Request(
         f"{url.rstrip('/')}/api/actors",

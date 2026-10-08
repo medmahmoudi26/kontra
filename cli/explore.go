@@ -608,7 +608,7 @@ func firstQueryableView(m *exploreManifest) string {
 // --- cross-run catalog mode ---
 
 // crossRunCatalog resolves the catalog this mode attaches: the operator's own read-only Postgres,
-// or — since ADR 0031 §1b made the catalog a file — the one the appliance owns on this machine.
+// or — since ADR 0031 §1b made the catalog a file — the one this installation owns on this machine.
 //
 // THE TWO CASES ARE DIFFERENT IN KIND, WHICH IS WHY BOTH EXIST. A Postgres catalog is a SERVER
 // somebody else's writer is also attached to, so the credential is the boundary and this mode
@@ -620,18 +620,18 @@ func crossRunCatalog() string {
 	if pg := os.Getenv("KONTRA_CATALOG_PG"); pg != "" {
 		return pg
 	}
-	return applianceCatalog()
+	return localCatalog()
 }
 
 // catalogPreflight refuses the mode when there is no catalog it may attach. For a SERVER catalog
 // that means its OWN credential, and that is not a convenience check: --catalog attaches the
 // catalog every run writes through, and the orchestrator's DSN on a workstation is one mistyped
-// statement away from mutating the lake. For the appliance's FILE catalog it means the file
+// statement away from mutating the lake. For the install's FILE catalog it means the file
 // exists — see crossRunCatalog for why the credential rule has nothing to bite on there.
 func catalogPreflight() error {
 	if crossRunCatalog() == "" {
 		return errors.New("--catalog needs a catalog to attach, and there is none here.\n" +
-			"  On this machine's own appliance it is <data-dir>/datasets.ducklake (KONTRA_DATA_DIR or\n" +
+			"  On this machine's own install it is <data-dir>/datasets.ducklake (KONTRA_DATA_DIR or\n" +
 			"  $KONTRA_HOME/data) and it does not exist yet — nothing has materialized a Dataset. Note that\n" +
 			"  a file catalog is single-writer: STOP the control plane first, or DuckDB refuses this process\n" +
 			"  with `Conflicting lock is held in … (PID n)`.\n" +

@@ -17,7 +17,12 @@ func TestImageRefsComeOutOfTheProgram(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(refs) < 4 {
+	// THREE, DOWN FROM FIVE. `hostImage` and `workerBaseImage` left with the classic build path:
+	// `orchestrator-probe` runs the `kontra` image now, and an actor is layered onto a published
+	// runtime rather than onto a base this repo builds (ADR 0061/0063). The floor is the live count
+	// so that an extraction which stops matching still fails here — raising it means a new image,
+	// lowering it again means one fewer thing `--to` is checked against.
+	if len(refs) < 3 {
 		t.Fatalf("only %d *Image config keys found in the program (%v) — the extraction is not reading it, "+
 			"and `--to` would then retag a subset", len(refs), ImageKeys(refs))
 	}
@@ -31,7 +36,7 @@ func TestImageRefsComeOutOfTheProgram(t *testing.T) {
 	}
 	// The four the program has had since it was written; a fifth or a sixth is fine, one of these
 	// disappearing is a service whose image `--to` would silently stop moving.
-	for _, k := range []string{"kontraImage", "orchestratorImage", "hostImage", "workerBaseImage"} {
+	for _, k := range []string{"kontraImage", "orchestratorImage", "logshipImage"} {
 		if _, ok := refs[k]; !ok {
 			t.Errorf("%s is gone from the program's config keys", k)
 		}

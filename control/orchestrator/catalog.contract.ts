@@ -33,7 +33,11 @@ type AssertEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : ne
  * (ts-proto is configured `snakeToCamel=false` so the generated names line up with the Python
  * dataclasses). One field, two spellings; this line is the only place that knows.
  */
-type StoreName<K extends string> = K extends 'schema_version' ? 'schemaVersion' : K;
+type StoreName<K extends string> = K extends 'schema_version'
+  ? 'schemaVersion'
+  : K extends 'builder_digest'
+    ? 'builderDigest'
+    : K;
 
 /** Every descriptor field is a field the catalog stores. A proto field with nowhere to land is
  *  a descriptor the orchestrator would accept and silently drop on the way to the table. */
@@ -46,6 +50,12 @@ const _everyDescriptorFieldIsStored: NoneLeftOver<
  * catalog's fact about itself, not something a worker declares about its actor. Anything else the
  * store grows is a field the descriptor should have carried.
  *
+ * `history` is the third, and it is exempted for exactly the reason the second one is: it is the
+ * digests this version HAS had, which the store knows by comparing a registration against the row
+ * before it. A wire field would let a worker declare its own lineage — and a worker that claimed a
+ * predecessor it never had would make `inuse-` protect an image nothing is running, while one that
+ * claimed none would let retention take the image a Lease is still pulling.
+ *
  * `incompatibilities` is the second such fact and is exempted for the same reason, not as a
  * convenience: it is what the catalog CONCLUDED by comparing this registration against the version
  * before it (`src/compat.ts`), and the comparison needs a catalog to be made from. A wire field for
@@ -55,7 +65,7 @@ const _everyDescriptorFieldIsStored: NoneLeftOver<
 const _theStoreAddsOnlyItsOwnBookkeeping: NoneLeftOver<
   Exclude<
     keyof ActorRecord & string,
-    StoreName<keyof ActorDescriptor & string> | 'savedAt' | 'incompatibilities'
+    StoreName<keyof ActorDescriptor & string> | 'savedAt' | 'incompatibilities' | 'history'
   >
 > = true;
 

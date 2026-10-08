@@ -67,6 +67,8 @@ import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
 import type { RunDescription } from './temporalClient';
 import { HistoryArchive, startHistoryArchiver } from './historyArchive';
+import { startInuseReconciler } from './images/inuseReconciler';
+import { installApiGate } from './auth/apiGate';
 import { registerInfraRoutes } from './infraRoutes';
 import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
@@ -81,6 +83,7 @@ import type { LakeConfig } from './data/parquet';
 import { MaterializationStore, materializationStore } from './data/materializationStore';
 import { SummaryStore, summaryStore } from './data/summaries';
 import { registerCatalogRoutes } from './routes/catalog';
+import { registerImageRoutes } from './routes/images';
 import { registerDatasetRoutes } from './routes/datasets';
 import { errMessage } from './routes/errors';
 import { registerExploreRoutes } from './routes/explore';
@@ -329,6 +332,12 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // editor canvas, and the default rejected the larger ones with a broken pipe.
   const app = Fastify({ bodyLimit: 33_554_432, logger: opts.logger ?? false });
 
+  // DENY BY DEFAULT ON `/api/*`. Admission is a call each route makes for itself across 30 files,
+  // so a route that forgets is OPEN and nothing says so. This refuses any `/api` route that has not
+  // declared a posture in `auth/apiGate.ts`, which closes the hole for code nobody has written yet;
+  // `auth/apiSurface.test.ts` holds that table to what the server actually does.
+  installApiGate(app);
+
   // THE ROUTE INVENTORY, DERIVED RATHER THAN MAINTAINED.
   //
   // `onRoute` fires for every route as it is registered, so this list is the routes that EXIST —
@@ -366,6 +375,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // The operator trail, beside the sign-in that is its first entry (`audit.ts`).
   registerAuditRoutes(app);
   registerCatalogRoutes(app, repo);
+  // The image store (ADR 0061). It needs the catalog to say what is IN USE and the registry to say
+  // what exists, and it is a separate module from `catalog.ts` because that one's four routes are
+  // open by an argued decision and these eight are not.
+  registerImageRoutes(app, { repo });
   registerScratchRoutes(app, repo);
   registerRunRoutes(app, { runs, runWorkflows, queueDescriber });
   registerHistoryRoutes(app, archive);
@@ -427,7 +440,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // leave this process is one file to review rather than a needle in this one; see
   // `secrets/routes.ts` for the three admission postures and why they differ.
   //
-  // Built lazily: `secretStore()` computes paths and touches nothing, so an appliance with no
+  // Built lazily: `secretStore()` computes paths and touches nothing, so an install with no
   // secrets has no store directory and no key file until somebody writes the first one.
   const secrets = opts.secrets ?? secretStore();
   registerSecretRoutes(app, secrets);
@@ -588,7 +601,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
  * A marker search rather than a fixed relative path, because this file runs at two DEPTHS —
  * `src/` under vitest and `dist/src/` compiled — and now in two SHAPES as well:
  *
- *   `web/dist`              THE BUNDLE. Inside a hydrated appliance bundle the SPA is a CHILD of
+ *   `web/dist`              THE BUNDLE. Inside a hydrated install bundle the SPA is a CHILD of
  *                           the server: `orchestrator/dist/src/main.js` beside
  *                           `orchestrator/web/dist`. That layout is an artifact contract
  *                           `runtime/handler/internal/hydrate` writes and reads, and it did not move.
@@ -666,6 +679,24 @@ export async function runApi(): Promise<FastifyInstance> {
     onNote: (note) => app.log.info(note),
   });
 
+  // `inuse-` tags, which are what make registry retention safe to ENFORCE: zot keeps the five most
+  // recently pushed tags per repository, and without these a sixth-oldest version a Fleet is still
+  // running is deleted on schedule. Armed here for the same reason the archive above is — the
+  // materializer role has no periodic loop to join, and this is the only in-process reconciler idiom
+  // the codebase has. Failures are noted, never thrown: a registry blip must not take the API down,
+  // and the worst case of this loop going quiet is retention keeping more than it must.
+  //
+  // Its own Repo handle, the way the archiver above takes its own ObjectStore: `buildServer` keeps
+  // the one it built private, and a background loop that outlives a request has no business reaching
+  // into a request-scoped graph. `Repo`'s constructor migration is PRAGMA-guarded and idempotent, so
+  // a second reader of the same file is not a second schema.
+  const inuseRepo = new Repo(process.env.KONTRA_ORCHESTRATOR_DB ?? 'orchestrator.db');
+  startInuseReconciler({
+    listActors: () => inuseRepo.listActors(),
+    onError: (err, where) => app.log.warn(`inuse tags: ${where ? `${where}: ` : ''}${errMessage(err)}`),
+    onNote: (note) => app.log.info(note),
+  });
+
   // AWAITED, where it used to be fire-and-forget. A merged process starts three roles and the
   // caller has to know this one is actually up — an API whose port never bound, beside a
   // materializer that is happily polling, is a control plane reporting healthy with no control
@@ -676,7 +707,7 @@ export async function runApi(): Promise<FastifyInstance> {
   // That was right when this was a container: the bind was inside a network namespace and the
   // control was the compose `ports:` entry, eleven of which each named an address deliberately.
   // It is not right now that the process runs on the host. `kontra up --bind` closes five
-  // embedded services onto one address; this listener ignored it, so an appliance told to bind
+  // embedded services onto one address; this listener ignored it, so an install told to bind
   // the docker bridge still answered — unauthenticated — on every interface the machine has,
   // including a public one. MEASURED on a droplet, and it is precisely the exposure ADR 0031 §3
   // says loopback removes.

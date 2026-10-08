@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,41 @@ type actorDescriptor struct {
 	// one row on the Actors page with no way back to its code — indistinguishable from an actor
 	// nobody had registered a source for.
 	Source string `json:"source,omitempty"`
+	// Runtime and BuilderDigest are facts about the BUILD, not about this process, and that is why
+	// they are echoed rather than discovered: nothing inside a running container can see the run
+	// image it was layered onto or the builder that layered it. The deploying CLI records them and
+	// the Warden hands them back as environment, so a worker re-registering preserves what it cannot
+	// independently know. Omitted when unset for the same reason Digest is — the catalog keeps a
+	// previous value only when the key is ABSENT, so an empty object would unpin the runtime.
+	Runtime       *actorRuntime `json:"runtime,omitempty"`
+	BuilderDigest string        `json:"builderDigest,omitempty"`
+}
+
+// actorRuntime is the run image this Actor image was layered onto: the name and MAJOR the author
+// declared, and the digest the build resolved them to. Both, because they answer different
+// questions — the major is what was asked for and the digest is whether it is still current, which
+// is the whole of rebase detection.
+type actorRuntime struct {
+	Name   string `json:"name"`
+	Major  uint32 `json:"major"`
+	Digest string `json:"digest"`
+}
+
+// runtimeFromEnv reads the three variables the Warden stamps, and returns nil unless there is a
+// NAME — a runtime with no name is not a runtime, and a partially-filled object would overwrite a
+// complete one in the catalog.
+func runtimeFromEnv() *actorRuntime {
+	name := os.Getenv("KONTRA_RUNTIME_NAME")
+	if name == "" {
+		return nil
+	}
+	major, err := strconv.ParseUint(os.Getenv("KONTRA_RUNTIME_MAJOR"), 10, 32)
+	if err != nil {
+		// A major that does not parse is reported as 0 rather than refused: the digest below is what
+		// rebase compares, and dropping the whole runtime over an unreadable major would lose it.
+		major = 0
+	}
+	return &actorRuntime{Name: name, Major: uint32(major), Digest: os.Getenv("KONTRA_RUNTIME_DIGEST")}
 }
 
 // actorOperation is one dispatchable operation + its JSON Schemas (Draft 2020-12).
@@ -100,6 +136,8 @@ func Describe(reg *core.Registry) actorDescriptor {
 		Operations:    ops,
 		Digest:        os.Getenv("KONTRA_ACTOR_DIGEST"),
 		Source:        actorSource(),
+		Runtime:       runtimeFromEnv(),
+		BuilderDigest: os.Getenv("KONTRA_BUILDER_DIGEST"),
 	}
 }
 

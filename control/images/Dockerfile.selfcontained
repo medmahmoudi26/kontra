@@ -1,13 +1,11 @@
 # The whole thing, built in Docker. `docker` is the only prerequisite.
 #
-# ── WHY THIS EXISTS BESIDE `Dockerfile.appliance` ───────────────────────────────────────────────
+# ── NOTHING IS BUILT ON THE HOST, AND THAT IS NOT JUST CONVENIENCE ──────────────────────────────
 #
-# That one builds the image FROM a release tarball you cut first, which is the right shape for
-# shipping: the container and the download are then the same bytes. It also means `make image` ran
-# the SPA build, the Go build and both pnpm installs ON YOUR MACHINE — so "install kontra with
-# Docker" quietly required Go, Node, pnpm and a working workspace before Docker did anything.
+# Building the SPA, the Go binary and both pnpm installs on the host would make "install kontra with
+# Docker" quietly require Go, Node, pnpm and a working workspace before Docker did anything.
 #
-# THAT IS NOT JUST A TAX, IT IS A CORRECTNESS PROBLEM ON macOS. The console has ten pairs of files
+# IT IS ALSO A CORRECTNESS PROBLEM ON macOS. The console has ten pairs of files
 # whose names differ only in case — `WorkflowThread.tsx` beside `workflowThread.ts`, and nine more.
 # On a case-sensitive filesystem those are two modules. On the case-INSENSITIVE one macOS gives you
 # by default, `tsc` resolves `./WorkflowThread` to both and stops with 102 errors about names that
@@ -39,9 +37,9 @@
 
 # ── 1 · THE BROWSER BUNDLE ──────────────────────────────────────────────────────────────────────
 #
-# Node 22 because that is what the appliance bundle pins (`cli/appliance/bundle/pins.go`). A SPA
-# built on a different major than the one that will serve it is a difference with nowhere to show
-# up until runtime.
+# Node 22 because that is `engines.node` for the orchestrator that will serve this bundle
+# (control/orchestrator/package.json). A SPA built on a different major than the one that serves it
+# is a difference with nowhere to show up until runtime.
 FROM node:22-bookworm AS spa
 
 # corepack ships with Node and takes pnpm's version from the lockfile, so there is no pnpm pinned
@@ -96,40 +94,32 @@ RUN cd kontra-console && pnpm run build && test -f dist/index.html
 
 # ── 2 · THE BINARY AND ITS BUNDLES ──────────────────────────────────────────────────────────────
 #
-# `kontra release` produces exactly what a user downloads: the binary, the orchestrator bundle for
-# this platform and the browser bundle, laid out where `findBundles` looks. Running it HERE rather
-# than on the host is the point of this file — but it is the same command producing the same
-# artifact, so the image and a published tarball remain the same thing.
+# Two Go binaries and one archive come out of this stage: the `kontra` CLI, the workflow `handler`,
+# and the browser bundle packed where `Dockerfile.orchestrator` reads it. Nothing is staged, packed
+# and unpacked on the way — a tarball in the middle of a single build is a step that can only lose
+# bytes.
 FROM golang:1.25-bookworm AS release
 
 # THE ARCHITECTURE IS THE BUILD'S, NOT A LITERAL. `TARGETARCH` is set by the builder — `arm64` on an
 # Apple Silicon Mac, `amd64` on an Intel one or a Linux box — and everything below has to agree with
-# it. This said `linux/amd64` in three places, which on an M-series Mac cross-built an amd64 release
-# and then unpacked it into an arm64 runtime image: a container that pulls fine and answers
-# `exec format error` on first run, if the release check does not refuse it first.
+# it. A literal `linux/amd64` here cross-builds an amd64 binary into an arm64 runtime image: a
+# container that pulls fine and answers `exec format error` on first run.
 ARG TARGETARCH
 
-# The repo pins Go 1.26.4 in `go.work`, which no `golang:` tag ships yet. GOTOOLCHAIN makes the
-# toolchain in this image fetch and verify the pinned one — the mechanism Go added for exactly this,
-# and the same version `install.sh` fetches on a bare machine.
-ENV GOTOOLCHAIN=go1.26.4
+# The repo pins Go 1.26.8 in `go.work`. GOTOOLCHAIN makes the toolchain in this image fetch and
+# verify that exact one rather than whatever the base ships — the mechanism Go added for this, and
+# the same version `install.sh` fetches on a bare machine. `cli/gotoolchain_test.go` asserts every
+# copy of the version agrees with `go.work`; there are seven, and a bump that lands in go.mod alone
+# breaks only the container paths.
+ENV GOTOOLCHAIN=go1.26.8
 ENV CGO_ENABLED=0
 
-# NODE, BECAUSE THE ORCHESTRATOR BUNDLE IS BUILT WITH ONE. `kontra release` compiles the
-# orchestrator with `tsc` and runs `pnpm deploy` for its production dependencies. The Node it
-# EMBEDS is fetched and checksummed by the build itself; this is the one that runs the build.
-COPY --from=node:22-bookworm /usr/local/bin/node /usr/local/bin/node
-COPY --from=node:22-bookworm /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
- && ln -sf /usr/local/lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
- && corepack enable
-
+# NO NODE AND NO PNPM IN THIS STAGE. Two Go binaries come out of it and neither is built with a
+# JavaScript toolchain; the orchestrator is compiled in `Dockerfile.orchestrator`, which is where it
+# runs. A pnpm install here cost minutes and produced nothing this stage copies out.
 WORKDIR /src/kontra
 COPY kontra ./
 RUN rm -rf node_modules ./*/node_modules ./*/*/node_modules
-RUN --mount=type=cache,id=pnpm-release,target=/pnpm-store,sharing=locked \
-    pnpm config set store-dir /pnpm-store && pnpm install --frozen-lockfile \
- && pnpm --filter @kontra/core run build
 
 # THE SPA COMES FROM STAGE 1, not from the host. A `dist/` that happened to be lying around in the
 # checkout is somebody's older build, and archiving it would put a stale console in a fresh image.
@@ -138,9 +128,8 @@ COPY --from=spa /src/kontra-console/dist /src/console-dist
 # `0.0.0-docker` says "built from a working tree", which is what an untagged `latest` actually is.
 # `make image` passes the git describe.
 ARG VERSION=0.0.0-docker
-# TARGETARCH IS A BUILDKIT VARIABLE, so it is empty under the legacy builder — and an empty one
-# would make the tar glob below `kontra_*_linux_.tar.gz` and match nothing, three steps later, with
-# nothing to say why. Refuse here instead, naming the fix.
+# TARGETARCH IS A BUILDKIT VARIABLE, so it is empty under the legacy builder. Refuse here, naming
+# the fix, rather than letting an empty arch surface as a confusing failure further down.
 RUN test -n "${TARGETARCH}" || { \
       echo "TARGETARCH is empty — this build needs BuildKit. Run it with DOCKER_BUILDKIT=1, or update Docker."; \
       exit 1; }
@@ -159,34 +148,38 @@ RUN test -n "${TARGETARCH}" || { \
 #
 # The trade is that `docker builder prune` is now where that space is reclaimed from, which is also
 # the answer when a machine does run out.
-# `--out` GOES TO A CACHE MOUNT, AND ONLY THE TARBALL IS COPIED OUT.
+# THE BINARY, BUILT DIRECTLY. `-trimpath` so the paths in a panic are the module's rather than this
+# container's, and the version is linked in so `kontra version` reports what was built rather than
+# what a working tree looked like.
 #
-# The release needs ~1.5 GB of working space — it stages the orchestrator tree, deploys production
-# dependencies into it and packs it — and writes all of that to `<out>/.artifacts/`. Pointed
-# straight at `/out`, every byte of that scratch lands in this stage's image layer, for a directory
-# the next stage does not read and the final image never sees.
-#
-# So the work happens in a cache mount and the two files that matter — the tarball and its
-# SHA256SUMS — are copied into `/out` afterwards. The layer goes from ~1.7 GB to ~170 MB, and the
-# scratch is reused by the next build instead of being committed and thrown away.
+# THE LDFLAGS TARGET IS THE WHOLE SYMBOL PATH, AND A WRONG ONE IS SILENT. `-X` on a symbol that does
+# not exist is dropped without an error, so `buildinfo.version` stays empty and the image reports a
+# dev version. `buildinfo.LinkerFlag` spells the one target out.
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
-    --mount=type=cache,target=/work,sharing=locked \
-    rm -f /work/kontra_*_linux_"${TARGETARCH}".tar.gz /work/SHA256SUMS \
- && cd cli && KONTRA_CONSOLE_DIST=/src/console-dist \
-      go run . release --repo .. --platform "linux/${TARGETARCH}" --version "${VERSION}" --out /work \
- && mkdir -p /out \
- && n=$(ls /work/kontra_*_linux_"${TARGETARCH}".tar.gz | wc -l) \
- && [ "$n" = 1 ] \
- && cp /work/kontra_*_linux_"${TARGETARCH}".tar.gz /work/SHA256SUMS /out/ \
- && ls -la /out
+    mkdir -p /out \
+ && cd cli && go build -trimpath \
+      -ldflags "-s -w -X github.com/medmahmoudi26/kontra/cli/internal/buildinfo.version=${VERSION}" \
+      -o /out/kontra . \
+ && /out/kontra version
+
+# THE CONSOLE, AS THE ONE ARCHIVE `Dockerfile.orchestrator` READS.
+#
+# That image is `FROM ${SPA_IMAGE} AS spa-src` and untars `bundles/kontra-spa.tar.gz`, expecting
+# `web/dist/` inside it (Dockerfile.orchestrator:78-84). The member prefix is therefore part of the
+# contract between the two images and not a detail of how this one happens to pack: `tar -C /stage
+# web/dist` is what puts it there.
+RUN mkdir -p /stage/web/dist /out/bundles \
+ && cp -a /src/console-dist/. /stage/web/dist/ \
+ && test -f /stage/web/dist/index.html \
+ && tar -czf /out/bundles/kontra-spa.tar.gz -C /stage web/dist
 
 # THE HANDLER, COMPILED ONCE — the workflow half of a Worker, which `kontra serve --mode local`
 # used to run as `go run .` out of `runtime/handler`. That is right in a checkout and impossible in
 # the control plane: this image has no Go toolchain and no sources, so the Actors page's Serve
 # button (which runs `kontra serve` inside orchestrator-api) could only ever fail. Same build flags
-# as `control/images/Dockerfile.workerbase`, so the handler a locally served actor runs and the one
-# a Machine runs are the same binary.
+# as a Machine's own build, so the handler a locally served actor runs and the one a Machine runs
+# are the same binary.
 #
 # NOT into /out: the runtime stage below unpacks /out and then deletes it.
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
@@ -195,16 +188,14 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
 
 # ── 3 · WHAT ACTUALLY RUNS ──────────────────────────────────────────────────────────────────────
 #
-# The same runtime half as `Dockerfile.appliance`, deliberately: the two paths must produce the same
-# container or this one is a second product. Debian rather than Alpine because the orchestrator
-# bundle carries a glibc Node from nodejs.org — on musl it does not start, and the failure is
-# `no such file or directory` about a file that is plainly there.
+# Debian rather than Alpine: this image carries glibc-linked Node and Python wheels, and on musl
+# they do not start — the failure is `no such file or directory` about a file that is plainly there.
 FROM debian:bookworm-slim
 ARG TARGETARCH
 
-# ca-certificates is load-bearing rather than habit: the appliance reaches a registry, an object
-# store and (for a Fleet) a cloud API over TLS, and a container with no root store fails every one
-# of them with a certificate error that reads like a fault at the far end. tzdata because a Run's
+# ca-certificates is load-bearing rather than habit: this container reaches a registry, an object
+# store and (for a Fleet) a cloud API over TLS, and one with no root store fails every one of them
+# with a certificate error that reads like a fault at the far end. tzdata because a Run's
 # timestamps are rendered by the console, and a UTC-only container makes every local time in a
 # transcript wrong by however far the reader is from Greenwich.
 RUN apt-get update \
@@ -250,21 +241,14 @@ RUN set -eux; \
     rm -rf /tmp/duckdb /tmp/duckdb.zip; \
     duckdb --version
 
-# UNPACKED THE WAY `install.sh` UNPACKS IT: the binary onto PATH, the rest into KONTRA_HOME. That
-# equivalence is the point — an operator debugging this container is looking at the same tree they
-# would have on a laptop, so every path in every error message means the same thing in both.
+# LAID OUT THE WAY `install.sh` LAYS IT OUT: the binary onto PATH, everything else under
+# KONTRA_HOME. That equivalence is the point — an operator debugging this container is looking at
+# the same tree they would have on a laptop, so every path in every error message means the same
+# thing in both.
 ENV KONTRA_HOME=/var/lib/kontra
-COPY --from=release /out /rel
-RUN set -eux; \
-    mkdir -p /tmp/unpack "${KONTRA_HOME}"; \
-    n=$(ls /rel/kontra_*_linux_"${TARGETARCH}".tar.gz | wc -l); \
-    [ "$n" = 1 ]; \
-    tar -xzf /rel/kontra_*_linux_"${TARGETARCH}".tar.gz -C /tmp/unpack; \
-    install -m 0755 /tmp/unpack/kontra /usr/local/bin/kontra; \
-    cp -r /tmp/unpack/bundles "${KONTRA_HOME}/bundles"; \
-    if [ -d /tmp/unpack/manifests ]; then cp -r /tmp/unpack/manifests "${KONTRA_HOME}/manifests"; fi; \
-    rm -rf /tmp/unpack /rel; \
-    kontra --version
+COPY --from=release /out/kontra /usr/local/bin/kontra
+COPY --from=release /out/bundles /var/lib/kontra/bundles
+RUN kontra --version
 
 # THE WHOLE HOME IS THE VOLUME, not `data/`. `config.yaml` — the console account and the four
 # service tokens `kontra init` generates — is a SIBLING of `data/`, and a volume one level deeper
@@ -273,7 +257,6 @@ RUN set -eux; \
 ENV KONTRA_DATA_DIR=/var/lib/kontra/data
 VOLUME ["/var/lib/kontra"]
 
-EXPOSE 8088 7233 8333 6379 18234 5000
 
 # FIRST BOOT INITIALISES, EVERY BOOT AFTER IT STARTS — and the one-time console password goes to the
 # container log, which is where `docker compose logs kontra` looks and the only place it can go in
@@ -292,6 +275,42 @@ RUN chmod +x /usr/local/bin/kontra-entrypoint \
  && rm -rf /var/lib/apt/lists/*
 ENV PYTHONPATH=/opt/kontra/sdk/python:/opt/kontra/runtime/python
 ENV KONTRA_SDK_ROOT=/opt/kontra
-RUN test -x /opt/kontra/handler && test -d /opt/kontra/sdk/python/kontra
+
+# ── THE CNB `pack` BINARY, PINNED AND CHECKSUMMED (ADR 0061) ────────────────────────────────────
+#
+# `kontra deploy` builds actor images with Cloud Native Buildpacks, which means the lifecycle, which
+# means `pack`. It is a BINARY and not a Go module on purpose: importing pack pulls its whole
+# dependency graph into a CLI that also ships as a single download, and this image is the one place
+# that needs it. `cli/packbuild.go:packBinary` looks here first.
+#
+# THE CHECKSUM IS THE POINT OF PINNING, not the version string. A tag can be re-pointed; a build
+# that silently used a different lifecycle than the one this was tested against would produce actor
+# images whose layers do not match what the catalog records.
+#
+# BOTH CHECKSUMS, EACH NAMED FOR WHAT IT COVERS. `kontra-runtimes/builder.json` records two for this
+# release — one for the tarball and one for the `pack` binary inside it — and they are both 64 hex
+# characters, so nothing about either value says which is which. Verifying /tmp/pack.tgz against the
+# BINARY's digest failed every build with `/tmp/pack.tgz: FAILED`, a message that reads like a
+# corrupted download or a re-pointed release. Checking both, under names, makes a swap fail on the
+# first line and say so.
+ARG PACK_VERSION=0.40.9
+ARG PACK_TARBALL_SHA256=dc0ee1e931cf8a106d7555a01a214864f9acb60b77adf15d69b74df4404758e9
+ARG PACK_BINARY_SHA256=2f85c3ec624f73f2d3c4a680a2c48fe6755197844730cc4ea5ed05f950fe05a3
+ADD https://github.com/buildpacks/pack/releases/download/v${PACK_VERSION}/pack-v${PACK_VERSION}-linux.tgz /tmp/pack.tgz
+RUN printf '%s  /tmp/pack.tgz\n' "${PACK_TARBALL_SHA256}" | sha256sum -c - \
+ && tar -xzf /tmp/pack.tgz -C /usr/local/bin pack \
+ && printf '%s  /usr/local/bin/pack\n' "${PACK_BINARY_SHA256}" | sha256sum -c - \
+ && rm /tmp/pack.tgz \
+ && /usr/local/bin/pack --version
+
+# EVERYTHING `kontra deploy` STAGES INTO AN ACTOR IMAGE, ASSERTED HERE. The build context is
+# assembled from this tree (cli/packstage.go): the handler is the actor's workflow half, and the two
+# Python trees have to BOTH be present because the SDK's pyproject maps
+# `internals = "../../runtime/python/internals"` — a vendored SDK with no sibling installs a `kontra`
+# that cannot import its own actor host, and that failure arrives at load() on a Machine.
+RUN test -x /opt/kontra/handler \
+ && test -d /opt/kontra/sdk/python/kontra \
+ && test -d /opt/kontra/runtime/python/internals \
+ && test -x /usr/local/bin/pack
 CMD ["kontra", "version"]
 ENTRYPOINT ["/usr/local/bin/kontra-entrypoint"]

@@ -87,7 +87,7 @@ func lakeCatalog(override string) (string, error) {
 		func() string { return os.Getenv("KONTRA_DUCKLAKE_CATALOG") },
 		catalogFromCheckout,     // cheap: two file reads
 		catalogFromRunningStack, // costs a docker exec, so it goes last
-		applianceCatalog,        // the file the appliance owns — the default since ADR 0031 §1b
+		localCatalog,            // the file this installation owns — the default since ADR 0031 §1b
 	} {
 		if dsn := source(); dsn != "" {
 			return hostReachableDSN(dsn), nil
@@ -95,7 +95,7 @@ func lakeCatalog(override string) (string, error) {
 	}
 	return "", errors.New("could not work out the DuckLake catalog.\n" +
 		"  Four places were tried: KONTRA_DUCKLAKE_CATALOG, the checkout (docker-compose.yml + .env),\n" +
-		"  the running orchestrator container, and the file the appliance owns —\n" +
+		"  the running orchestrator container, and the file this installation owns —\n" +
 		"  <data-dir>/datasets.ducklake, where the data dir is KONTRA_DATA_DIR or $KONTRA_HOME/data.\n" +
 		"  The last one is the DEFAULT since the catalog stopped being a Postgres, and it does not\n" +
 		"  exist yet: it is created by the first thing that writes the lake, so this usually means no\n" +
@@ -104,7 +104,7 @@ func lakeCatalog(override string) (string, error) {
 		"    --catalog 'postgres:dbname=kontra_ducklake host=localhost port=5432 user=kontra password=…'")
 }
 
-// applianceCatalog is the file catalog `control/orchestrator/src/data/parquet.ts:defaultCatalogPath`
+// localCatalog is the file catalog `control/orchestrator/src/data/parquet.ts:defaultCatalogPath`
 // resolves — the same directory, the same name, so the CLI and the control plane cannot disagree
 // about which lake they are talking about.
 //
@@ -119,8 +119,8 @@ func lakeCatalog(override string) (string, error) {
 // (PID n)`. Measured, both directions. Every `kontra` verb that reads the lake through the
 // ORCHESTRATOR (`dataset list`, `dataset query` without `--local`) is unaffected, because that
 // process is the holder; the ones that attach DuckDB here need the control plane stopped.
-func applianceCatalog() string {
-	dir, err := applianceDataDir("")
+func localCatalog() string {
+	dir, err := installDataDir("")
 	if err != nil {
 		return ""
 	}

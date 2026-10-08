@@ -26,6 +26,19 @@ dependencies = [
 dev = ["pytest>=8.0", "PyYAML>=6.0"]
 # Claim-check offload to an S3 store (SeaweedFS S3 gateway locally, S3 in cloud).
 seaweed = ["boto3>=1.28"]
+# WHAT AN ACTOR IMAGE NEEDS BEYOND THE AUTHORING SURFACE, and it is an extra rather than a base
+# dependency because the two imports are LAZY and the comments at them say so:
+# `internals/casstore.py` does `import boto3  # actor-image / [seaweed] extra dep, not a base SDK
+# requirement` and `internals/redis_kv.py` does `import redis.asyncio`. Something authoring an actor,
+# or deriving its schemas, needs neither.
+#
+# IT EXISTS BECAUSE THE IMAGE THAT USED TO SUPPLY THEM IS GONE. The deleted worker base ran
+# `pip3 install temporalio redis boto3 pydantic`, so every actor image had them and nothing had to
+# say so. Under buildpacks an image gets exactly what the actor's requirements name, and the first
+# thing that happened was `ModuleNotFoundError: No module named 'boto3'` from inside `actor.serve()`
+# — the handler half serving happily beside it, so the worker looked half alive and the Warden
+# reported only `hello@0.1.0 is missing`. `cli/packstage.go` requests this extra.
+actor = ["boto3>=1.28", "redis>=5.0"]
 
 # No console script: a Python actor is run by `python3 actor.py` (actor.serve()), and
 # DISPATCH is the orchestrator's job. Kontra ships no dispatch CLI — a DIY trigger is a
@@ -73,8 +86,17 @@ seaweed = ["boto3>=1.28"]
 # `internals.temporal` IS LISTED. It was not, which no editable install ever noticed (the finder
 # maps a directory, so subpackages came along); a built wheel dropped the actor host on the floor.
 [tool.setuptools]
-packages = ["kontra", "kontra", "internals", "internals.temporal"]
+# `kontra` WAS LISTED TWICE AND `actorkit` NOT AT ALL, which is the failure the comment above warns
+# about, arriving one step earlier than predicted: not a wheel that drops the alias, an EDITABLE
+# install that never had it. Both halves of one bad edit — see the `package-dir` note below for the
+# other half, which pointed the alias at the wrong directory and would have hidden this one.
+packages = ["kontra", "actorkit", "internals", "internals.temporal"]
 
 [tool.setuptools.package-dir]
-actorkit = "kontra"
+# `actorkit = "kontra"` STOOD HERE AND WAS STALE. It pointed the alias package at the author
+# package's directory, so `import actorkit` loaded `kontra/__init__.py` — no deprecation warning, no
+# `sys.modules` aliasing, none of what `actorkit/__init__.py` exists to do. It is a leftover from
+# when the shim lived at the repository root; `sdk/python/actorkit/` is a real directory now, and
+# with no mapping setuptools resolves both packages to their same-named directories, which is what
+# the comment above means by the directory being named after the package.
 internals = "../../runtime/python/internals"

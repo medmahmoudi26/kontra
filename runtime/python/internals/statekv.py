@@ -113,7 +113,10 @@ def redis_client_factory() -> Any:
     def _factory() -> Any:
         import redis.asyncio as aioredis
 
-        return aioredis.Redis(host=host or "localhost", port=int(port or 6379), db=0)
+        # Optional; set with `requirepass` by the VPC overlay. Unset means no auth, which is
+        # the loopback and install case. See redis_kv.py for why this exists.
+        return aioredis.Redis(host=host or "localhost", port=int(port or 6379), db=0,
+                              password=os.environ.get("KONTRA_REDIS_PASSWORD") or None)
 
     return _factory
 

@@ -15,7 +15,7 @@ import (
 )
 
 // StateDirName is the directory under this installation's `.kontra/` that holds the `file://`
-// backend. `get.sh:301`/`:333`/`:356` and `control/pulumi/README.md:243` both spell it
+// backend. `control/pulumi/README.md:243` spells it
 // `$KONTRA_HOME/state`, so the name is theirs and this constant only stops a third spelling.
 const StateDirName = "state"
 
@@ -30,7 +30,7 @@ type Env func(string) string
 // you are standing in when it holds a `config.yaml`, else `$HOME/.kontra` — three answers, in that
 // order, each of which broke a real case (cliutil.go:41-66).
 //
-// THAT IS A DISAGREEMENT WORTH NAMING: `get.sh:72` hardcodes `KONTRA_HOME="${KONTRA_HOME:-$HOME/.kontra}"`
+// THAT IS A DISAGREEMENT WORTH NAMING: the one-line installer hardcodes `KONTRA_HOME="${KONTRA_HOME:-$HOME/.kontra}"`
 // and `control/pulumi/README.md:243` writes `file://~/.kontra/state`, and neither goes through
 // KontraRoot. Inside a checkout that holds its own `config.yaml` those name a DIFFERENT directory
 // than this function does, and the two halves of one install would then log in to two backends. The
@@ -42,7 +42,7 @@ func Backend(root string) string {
 
 // selfManaged is the file://|s3:// pair, and it is the pair `workspace.ts:93` accepts.
 //
-// THE SAME POLICY IN BOTH ENGINES, DELIBERATELY. get.sh:319-320 states the rule for the shell half:
+// THE SAME POLICY IN BOTH ENGINES, DELIBERATELY. the one-line installer states the rule for the shell half:
 // "file:// and s3:// are the accepted pair because those are the two `workspace.ts:93` accepts, and a
 // second, different policy for the same question is how two engines start disagreeing."
 func selfManaged(url string) bool {
@@ -67,7 +67,7 @@ func hosted(url string) bool {
 // the difference between the two machines. In a container the ambient environment is ours. On a
 // developer's laptop an ambient `PULUMI_ACCESS_TOKEN` is ordinary (any other Pulumi project puts one
 // there), which turns the trap from the unlucky case into the likely one. And the trap needs no token
-// at all to spring: re-measured for `get.sh:290-300` on host CLI 3.244.0, non-interactive, empty
+// at all to spring: re-measured for the one-line installer on host CLI 3.244.0, non-interactive, empty
 // PULUMI_HOME, NO credential of any kind —
 //
 //	warning: failed to get user account details: this command requires logging in
@@ -78,9 +78,9 @@ func hosted(url string) bool {
 //
 // ── WHAT THIS CHECKS, AND IN THIS ORDER, BECAUSE THE ORDER IS MEASURED ──────────────────────────
 //
-// The ladder is `get.sh:322-358`'s, verbatim in shape, so the installer and the CLI cannot disagree
+// The ladder is the one-line installer's, verbatim in shape, so the installer and the CLI cannot disagree
 // about what a dangerous environment is. Each rung was measured on 3.244.0 with `pulumi whoami
-// --verbose` (get.sh:307-318):
+// --verbose` (the one-line installer):
 //
 //  1. `PULUMI_BACKEND_URL` WINS OVER EVERYTHING, including a later `pulumi login` and a set
 //     `PULUMI_ACCESS_TOKEN`. So an exported hosted URL is the one setting that cannot be undone by
@@ -95,7 +95,7 @@ func hosted(url string) bool {
 //     HOSTED value is refused; a DIY backend belongs to whatever else the operator does with Pulumi.
 //
 // WHAT IT DELIBERATELY DOES NOT DO IS `pulumi login`. That writes the operator's global
-// `~/.pulumi/credentials.json` — get.sh:302-306 declines for the same reason ("rewriting an
+// `~/.pulumi/credentials.json` — the one-line installer declines for the same reason ("rewriting an
 // operator's current backend on the way past would be an installer deciding something it was not
 // asked about"). Stating `PULUMI_BACKEND_URL` in the child's environment is measurably stronger
 // (rung 1) and mutates nothing.
@@ -108,7 +108,7 @@ func AssertBackend(root string, env Env) (string, error) {
 				"  An exported backend URL beats every other setting, including a later `pulumi login`, so\n"+
 				"  this would converge kontra's whole control plane there — 13 containers and their state.\n"+
 				"  A failed login does not stop `pulumi`: it creates an ephemeral Pulumi Cloud account and\n"+
-				"  deploys THERE (workspace.ts:16, measured again in get.sh:290-300).\n"+
+				"  deploys THERE (workspace.ts:16, measured again in the one-line installer).\n"+
 				"      unset PULUMI_BACKEND_URL\n"+
 				"      # or point it at this installation's own state:\n"+
 				"      export PULUMI_BACKEND_URL=%s", amb, backend)
@@ -187,7 +187,7 @@ func credentialsPath(env Env) string {
 // ONE FIELD, AND A MISSING OR UNPARSEABLE FILE IS NOT A REFUSAL. A box that has never run `pulumi`
 // has no file, which is the safest state there is; a file this cannot read is not evidence of a
 // hosted login, and treating it as one would make `kontra up` fail on a corrupt unrelated dotfile.
-// get.sh:343-347 reads the same field with `sed`; Go has a JSON parser, so it uses it.
+// the one-line installer reads the same field with `sed`; Go has a JSON parser, so it uses it.
 func currentBackend(env Env) string {
 	b, err := os.ReadFile(credentialsPath(env))
 	if err != nil {

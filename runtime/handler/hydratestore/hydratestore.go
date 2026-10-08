@@ -1,10 +1,10 @@
 // Package hydratestore is first-run hydration — a pinned, digest-verified artifact turned into
-// a working directory — exported for the appliance.
+// a working directory — exported for the install.
 //
 // The implementation is runtime/handler/internal/hydrate over runtime/handler/internal/cas, and `internal` is
 // the right home for both: the digest rules, the tar policy and the copy-on-write ladder are
 // this module's business. This file exists for the same reason `casstore` does, and the pair of
-// them is the whole story. The appliance is a DIFFERENT MODULE (cli/), ADR 0031 §2 says it must
+// them is the whole story. The install is a DIFFERENT MODULE (cli/), ADR 0031 §2 says it must
 // not open a second store, and a store the sharer cannot import is not shared.
 //
 // TWO EXPORT FILES, NOT ONE, BECAUSE THEY HAVE TWO CUSTOMERS. `casstore` is what the embedded
@@ -29,11 +29,11 @@ import (
 	"github.com/medmahmoudi26/kontra/runtime/handler/internal/hydrate"
 )
 
-// Store is the appliance's artifact store: the CAS for fetched bytes, plus the golden trees
+// Store is the install's artifact store: the CAS for fetched bytes, plus the golden trees
 // archives expand to.
 type Store = hydrate.Store
 
-// Open opens (and creates) the store under root. Root is the appliance's data directory, so the
+// Open opens (and creates) the store under root. Root is the install's data directory, so the
 // hydrated artifacts and the registry's layers land in the one `cas/` beneath it.
 var Open = hydrate.Open
 
@@ -48,7 +48,7 @@ const (
 	KindTarGz = hydrate.KindTarGz
 )
 
-// FileURL is the pin for an artifact this machine already has. The appliance's own bundle is
+// FileURL is the pin for an artifact this machine already has. The install's own bundle is
 // built locally by `kontra bundle orchestrator` and has no release URL until issue 17 gives it
 // one; the digest promise is unchanged either way.
 var FileURL = hydrate.FileURL
@@ -99,7 +99,7 @@ var ErrDiskFull = cas.ErrDiskFull
 // --- verified hydration (issue 15) ------------------------------------------------------------
 //
 // Everything above makes sure the right bytes ENTER the store. This is the half that makes sure
-// the right bytes LEAVE it, and it exists because the appliance's next act after hydrating is to
+// the right bytes LEAVE it, and it exists because the install's next act after hydrating is to
 // exec what it hydrated. A warning would have nowhere to go.
 
 // Level is how hard a verification looks: Structure is one lstat per entry of the artifact's
@@ -119,6 +119,6 @@ const (
 // THE SENTINEL AND NOT THE TYPES, for the reason casstore gives about its own surface: an
 // unused export is a promise nobody checked. `hydrate.Damage` names the one file that was
 // wrong and `hydrate.RepairFailed` carries both causes of a final failure, and both of them
-// reach the appliance already — as the `error` in Result.Damage and as the error
+// reach the install already — as the `error` in Result.Damage and as the error
 // EnsureHydrated returns, whose Error() strings are what an operator reads. A caller that
 // needs to take the two apart can be given the types when it asks for them.

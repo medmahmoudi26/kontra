@@ -1,5 +1,5 @@
 /**
- * The local encrypted-file backend — the one that ships with the appliance.
+ * The local encrypted-file backend — the one that ships with the install.
  *
  * ONE JSON FILE, AES-256-GCM PER VERSION. A single file rather than a file per secret, and that is
  * a security choice before it is a convenience: a name never becomes a path, so no name can

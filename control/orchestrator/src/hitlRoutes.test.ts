@@ -229,11 +229,11 @@ describe('POST /api/runs/:runId/asks/:askId', () => {
     ctx = serverFor(async () => described({ memo: askMemo('ask-1', { schema: undefined }) }));
     const { signalRun } = await import('./temporalClient');
 
-    process.env.KONTRA_OPERATOR = 'mo@appliance';
+    process.env.KONTRA_OPERATOR = 'mo@install';
     await answer(ctx.app, 'ask-1', { value: true });
     expect(signalRun).toHaveBeenLastCalledWith(RUN, `${ANSWER_SIGNAL_PREFIX}ask-1`, {
       value: true,
-      by: 'mo@appliance',
+      by: 'mo@install',
     });
 
     delete process.env.KONTRA_OPERATOR;
