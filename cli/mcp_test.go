@@ -308,6 +308,11 @@ func TestMCPDeployActor(t *testing.T) {
 	}
 	const runtimeDigest = "sha256:" + "11" + "22334455667788990011223344556677889900112233445566778899001122"
 	t.Setenv("KONTRA_REGISTRY", fakeRegistry(t, http.StatusOK, runtimeDigest))
+	// THE STAGING IS REAL AND ONLY THE HANDLER IS STOOD IN FOR. `deploy` builds a staged context
+	// rather than handing `pack` the actor's own directory (cli/packstage.go), and that part is
+	// cheap, has no daemon in it, and is where an image silently loses its workflow half — so it
+	// runs. The binary is the one thing a test cannot produce without a Go build.
+	t.Setenv("KONTRA_HANDLER_BIN", fakeHandler(t))
 
 	// THE BUILD IS FAKED AND ITS OUTPUT IS NOT. `pack` streams minutes of lifecycle output, and the
 	// property under test is where that output goes — so the stand-in writes to the same Progress
@@ -510,4 +515,16 @@ func TestScratchIDTakesAUrlOrAnId(t *testing.T) {
 			t.Errorf("scratchID(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// fakeHandler is an executable file standing in for the compiled Go handler. Its CONTENT is never
+// run here; what is under test is that staging finds one, refuses when it cannot, and carries it
+// into the build context with the executable bit intact.
+func fakeHandler(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "handler")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

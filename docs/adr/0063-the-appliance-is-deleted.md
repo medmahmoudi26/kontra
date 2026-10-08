@@ -175,6 +175,52 @@ indistinguishable from a private package. A host that is neither loopback nor on
 own names is HTTPS, with HTTP kept as a second base so an operator's plain-HTTP VPC registry named
 without a scheme still resolves.
 
+**THE CONTEXT HANDED TO `pack` IS A STAGED COPY, BECAUSE THE DELETED DOCKERFILE WAS DOING THREE
+JOBS.** It assembled the actor's code, the Python SDK, and the compiled handler plus the two-process
+supervisor that runs both halves. With it gone the lifecycle refused the actor this install ships:
+`No buildpack groups passed detection` — `examples/python/hello` is `actor.json` and `actor.py`,
+which heroku/python does not detect on and heroku/procfile has no `Procfile` to read. The lifecycle
+has no `COPY` from outside the context, and the actor's own directory is what an author publishes,
+so `cli/packstage.go` stages a copy and adds what is missing. Four of its decisions are not
+obvious:
+
+- **The SDK is vendored BY PATH and never by name.** `kontra-sdk` is published to no index, and
+  `kontra` on PyPI is a live unrelated project — "developer-first data quality engine", 0.15.0. The
+  old path resolved no names and so could not be bitten by this; the buildpack path resolves them
+  from PyPI, which makes a bare dependency name either an unresolvable build or a stranger's code in
+  every actor image. Asserted in `cli/packstage_test.go`.
+- **`sdk/python` and `runtime/python` travel together, with their layout intact.** The SDK's
+  `pyproject.toml` maps `internals = "../../runtime/python/internals"`, so a vendored SDK with no
+  sibling installs a `kontra` that cannot import its own actor host — and nothing fails until
+  `load()` on a Machine. Verified inside the built image: both `kontra` and `internals` import from
+  the venv.
+- **The Procfile carries the actor's identity.** `pack build --env` is build-time only and there is
+  no `ENTRYPOINT` to set, so the process definition is the only place `KONTRA_ACTOR_NAME` and its
+  four siblings can be baked — and the supervisor REFUSES without them. It also now takes
+  `KONTRA_ACTOR_ROOT` and `KONTRA_HANDLER_BIN`, because `/actor/<name>/` and `/kontra/handler` are
+  absolute paths a buildpack-built image cannot promise; both default to the old locations, so an
+  image built before this keeps working.
+- **A missing handler is a refusal, not a warning.** An image without it starts the actor half,
+  polls `<actor>-<version>-sessions`, answers no workflow task, and looks healthy.
+
+**AND `**` HAD TO GRANT `push-actors` CREATE.** Actor images do not live under `actors/`:
+`cli/deploy.go` pushes `<registry>/<name>:<version>` and `cli/scale.go` pulls the same string —
+measured in this install's catalog, which holds eleven actor images at the ROOT beside one
+`actors/probe`. A Fleet Bundle is `bundles/<name>`. With create granted on `actors/**` alone,
+turning auth on made every deploy and every bundle push fail with `denied: requested access to the
+resource is denied`. Reproduced against a zot carrying this exact policy, which is also how the
+rest of this was proved: v2.1.21 with the install's rendered `accessControl`, three htpasswd
+accounts and `compat: ["docker2s2"]`, on a loopback port. The separation that matters is untouched —
+`kontra-runtimes/**` is the more specific rule, so `push-actors` is read-only there.
+
+**Measured, end to end, on that install:** `hello:0.1.0` built, pushed, confirmed at
+`sha256:b7e77989…`, entrypoint `/cnb/process/worker`, Python 3.12.15 from the pinned
+`.python-version`, and `docker run` starts both halves — `[worker] started: host=17 handler=18`.
+**The image is 635 MB in 9 layers, not the 175 MiB ADR 0061 advertises**: that figure was an actor
+whose virtualenv is smaller than this one's, and `temporalio` alone carries a Rust core. Still
+against 1.44–2.26 GiB on the path this replaced, and the layer that a code change rebuilds is still
+the app layer.
+
 ## Consequences
 
 **A tagged release carries no binary assets until GoReleaser lands.** release-please still creates

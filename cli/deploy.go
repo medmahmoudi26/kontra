@@ -376,10 +376,25 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 		dockerConfig = tmp
 	}
 
+	// THE CONTEXT IS A STAGED COPY, NOT THE ACTOR'S DIRECTORY. The image needs three things the
+	// actor does not carry — the SDK, the compiled handler and the two-process supervisor — and the
+	// lifecycle can only take what is in the context. Writing them into the actor's own directory
+	// would edit a tree the author publishes. See cli/packstage.go.
+	root, rerr := serveRoot()
+	if rerr != nil {
+		return nil, fmt.Errorf("kontra deploy needs the SDK tree to stage into the image "+
+			"(KONTRA_SDK_ROOT, else the checkout): %w", rerr)
+	}
+	staged, err := stageActorBuild(o.actorDir, m, engine, root)
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(staged)
+
 	res := &deployResult{Name: m.Name, Version: m.Version, HostImage: remote}
 	if _, err := runPackBuild(ctx, packOpts{
 		Image:        remote,
-		ActorDir:     o.actorDir,
+		ActorDir:     staged,
 		Builder:      pinnedBuilder(),
 		RunImage:     rt.Pinned(),
 		Registry:     reg,

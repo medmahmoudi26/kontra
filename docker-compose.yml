@@ -580,7 +580,20 @@ services:
           # bcrypt is what zot's htpasswd loader accepts and busybox cannot produce one, so the
           # plaintext goes to `registry-htpasswd` and is deleted there.
           printf '%s\n%s\n%s\n' "push-actors:$$a" "push-runtimes:$$r" "pull:$$p" > /out/users
-          # NO `adminPolicy`. One granting `push-runtimes` read/create/update/delete would make it
+          # `**` GRANTS push-actors CREATE, AND THAT IS NOT A WIDENING BY ACCIDENT. Actor images do not
+        # live under `actors/`: `cli/deploy.go` pushes `<registry>/<name>:<version>` and
+        # `cli/scale.go` pulls the same string — measured in this install's catalog, which holds
+        # `cachepoison`, `canary`, `desync`, `nscheck` and seven more at the ROOT beside one
+        # `actors/probe`. A Fleet Bundle is `bundles/<name>`, pushed by `kontra build --push`, and
+        # nothing grants that either. So with create on `actors/**` alone, turning auth on made every
+        # deploy and every bundle push fail with `denied: requested access to the resource is
+        # denied` — reproduced against a zot carrying this exact policy.
+        #
+        # The separation that matters is kept and it is the one above: `kontra-runtimes/**` is more
+        # specific, so push-actors is read-only there and cannot replace the base image every other
+        # actor is layered on. `pull` stays read-only everywhere.
+        #
+        # NO `adminPolicy`. One granting `push-runtimes` read/create/update/delete would make it
           # registry-ROOT — including delete over `actors/**` — and that credential is the one spec
           # §6.1 hands to `kontra runtime build`, i.e. to whoever is iterating on a runtime. The
           # least-trusted of the three would have been the most powerful. Each role is scoped to the
@@ -600,7 +613,8 @@ services:
                   { "users": ["pull","push-actors"], "actions": ["read"] }
                 ] },
                 "**": { "defaultPolicy": [], "policies": [
-                  { "users": ["pull","push-actors","push-runtimes"], "actions": ["read"] }
+                  { "users": ["push-actors"], "actions": ["read","create","update","delete","detectManifestCollision"] },
+                  { "users": ["pull","push-runtimes"], "actions": ["read"] }
                 ] }
               }
             }

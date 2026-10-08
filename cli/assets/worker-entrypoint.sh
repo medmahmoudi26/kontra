@@ -77,6 +77,15 @@ pipe_to_both() { # <fifo> <logfile>
 pipe_to_both "$LOG_DIR/host.pipe" "$LOG_DIR/host.log"
 pipe_to_both "$LOG_DIR/handler.pipe" "$LOG_DIR/handler.log"
 
+# WHERE THE TWO HALVES LIVE, AND WHY IT IS NOT HARDCODED ANY MORE. The generated Dockerfile put
+# the actor at `/actor/<name>/` and the handler at `/kontra/handler`; the CNB lifecycle stages an
+# app wherever the platform says and runs the process with that directory as the working dir, so
+# an absolute path is the one thing a buildpack-built image cannot promise. Both default to the
+# old locations, so an image built before the buildpack path keeps working unchanged.
+ACTOR_ROOT="${KONTRA_ACTOR_ROOT:-/actor/${KONTRA_ACTOR_NAME}}"
+HANDLER_BIN="${KONTRA_HANDLER_BIN:-/kontra/handler}"
+[ -x "$HANDLER_BIN" ] || { log "no handler at $HANDLER_BIN (set KONTRA_HANDLER_BIN)"; exit 1; }
+
 # 1) the actor — a Python actor is run by Python; a Go actor is a compiled binary beside its
 #    manifest. KONTRA_ACTOR_ENGINE is baked by `kontra deploy`; it defaults to py so an older
 #    worker image keeps working.
@@ -85,14 +94,14 @@ pipe_to_both "$LOG_DIR/handler.pipe" "$LOG_DIR/handler.log"
 # switches to block buffering and a progress line written every few seconds arrives in 4 KB
 # lumps — which turns "logging as it progresses" back into silence, just with a different cause.
 if [ "${KONTRA_ACTOR_ENGINE:-py}" = "go" ]; then
-  "/actor/${KONTRA_ACTOR_NAME}/${KONTRA_ACTOR_NAME}" >"$LOG_DIR/host.pipe" 2>&1 &
+  "${ACTOR_ROOT}/${KONTRA_ACTOR_NAME}" >"$LOG_DIR/host.pipe" 2>&1 &
 else
-  python3 -u "/actor/${KONTRA_ACTOR_NAME}/${KONTRA_ACTOR_ENTRY:-actor.py}" >"$LOG_DIR/host.pipe" 2>&1 &
+  python3 -u "${ACTOR_ROOT}/${KONTRA_ACTOR_ENTRY:-actor.py}" >"$LOG_DIR/host.pipe" 2>&1 &
 fi
 HOST_PID=$!
 
 # 2) the handler — the workflow half.
-/kontra/handler >"$LOG_DIR/handler.pipe" 2>&1 &
+"$HANDLER_BIN" >"$LOG_DIR/handler.pipe" 2>&1 &
 HANDLER_PID=$!
 
 log "started: host=$HOST_PID handler=$HANDLER_PID"
