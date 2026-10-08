@@ -89,8 +89,11 @@ The two shapes are told apart by asking whether the first path element **looks l
 (it needs a dot, a port, or to be `localhost`) — the same question this repository already answers for
 every other image reference, rather than a second rule invented for runtimes.
 
-`KONTRA_RUNTIMES_PREFIX` defaults to the install's own registry under `kontra-runtimes/`. A fork
-points it at its own registry and changes nothing else; see [[Writing-a-Runtime]].
+`KONTRA_RUNTIMES_PREFIX` defaults to **`ghcr.io/medmahmoudi26/kontra-runtimes`**, which reads
+anonymously — that is what lets a fresh install build the actor it ships, because the install's own
+`kontra-runtimes/` namespace is empty until somebody copies the set into it. Point it at a mirror
+for an airgap (`kontra registry migrate` moves a store), or at a fork's registry to use your own,
+and nothing else changes; see [[Writing-a-Runtime]].
 
 **The digest is what the build is to use and what the catalog has room for**, as
 `runtime: {name, major, digest}` beside `builderDigest`. Both halves are kept because they answer

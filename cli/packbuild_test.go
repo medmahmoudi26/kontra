@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -182,5 +183,30 @@ func TestTheBuilderDigestMatchesTheConformanceCorpus(t *testing.T) {
 	}
 	if !strings.HasSuffix(pinnedBuilder(), "@"+builderDigest) {
 		t.Errorf("pinnedBuilder() = %q, which does not end in the pinned digest", pinnedBuilder())
+	}
+}
+
+// THE `pack` VERSION THIS CLI EXPECTS IS THE ONE THE IMAGE INSTALLS.
+//
+// `packBinary`'s refusal names `packVersion` as the version to install, and the `kontra` image
+// fetches `PACK_VERSION` and checksums it. If those two drift, the CLI tells an operator to install
+// a version the image it is running inside does not have — advice that is wrong in the one place it
+// is read. Both move together or this fails.
+func TestThePackVersionMatchesTheImageThatShipsIt(t *testing.T) {
+	root, err := cliutil.FindRepoRoot("")
+	if err != nil {
+		t.Skipf("not in a checkout: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "control", "images", "Dockerfile.selfcontained"))
+	if err != nil {
+		t.Fatalf("reading the image that ships pack: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^ARG PACK_VERSION=(\S+)$`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("no `ARG PACK_VERSION=` in Dockerfile.selfcontained — this comparison matched " +
+			"nothing and would pass whatever the constant said")
+	}
+	if got := string(m[1]); got != packVersion {
+		t.Errorf("the image installs pack %s and cli/packbuild.go expects %s", got, packVersion)
 	}
 }

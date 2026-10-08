@@ -564,6 +564,25 @@ jobs:
             echo "KONTRA_WORKSPACES=$RUNNER_TEMP/workspaces"
           } >> "$RUNNER_TEMP/install/.env"
 
+          # ── THE REGISTRY IS AUTHENTICATED HERE, ON PURPOSE ──────────────────────────────────────
+          #
+          # With no passwords set, `registry-htpasswd` writes no htpasswd and zot serves
+          # anonymously — which is the quickstart's default and the ONE configuration in which the
+          # bug this job exists to catch cannot happen. `kontra deploy` pushed with an empty
+          # credential for as long as the accounts existed, and an anonymous registry accepts that.
+          # So CI runs the authenticated shape.
+          #
+          # ALL THREE OR NONE: `registry-config` refuses a partial set by name, because a registry
+          # with auth enabled and users it cannot authenticate is worse than either end state.
+          #
+          # GENERATED PER RUN AND NEVER ECHOED. `>>` into the file, no `echo` to the log, and the
+          # assertion further down already fails if a password reaches `docker compose logs`.
+          {
+            echo "KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD=$(openssl rand -hex 24)"
+            echo "KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD=$(openssl rand -hex 24)"
+            echo "KONTRA_REGISTRY_PULL_PASSWORD=$(openssl rand -hex 24)"
+          } >> "$RUNNER_TEMP/install/.env"
+
           # AND THE LIST ABOVE IS CHECKED AGAINST COMPOSE, because it is hand-written and compose is
           # the thing that decides. `KONTRA_PORTER_IMAGE` was missing from it, so porter alone fell
           # back to a `:dev` tag that has never been published and the `up` below could not start —
@@ -594,6 +613,28 @@ jobs:
       - name: docker compose up -d --wait
         working-directory: ${{ runner.temp }}/install
         run: docker compose up -d --wait
+
+      # ASSERTED, NOT ASSUMED: `kontra deploy` IS `pack` NOW, so an actor cannot be built without
+      # it. The binary is installed by `Dockerfile.selfcontained` and copied into the orchestrator
+      # image, and both of those are layers that could silently stop happening — the failure would
+      # arrive as `no pack binary` from inside a build, which reads as a missing dependency on the
+      # operator's machine rather than a missing layer in ours.
+      #
+      # THE VERSION TOO. `cli/packbuild.go` names the one it was written against, and a different
+      # `pack` is the kind of difference that shows up as a build that works on one machine and not
+      # another.
+      - name: the services that build actors have `pack`
+        working-directory: ${{ runner.temp }}/install
+        run: |
+          set -euo pipefail
+          want=$(grep -oE '^const packVersion = "[^"]+"' "$GITHUB_WORKSPACE/cli/packbuild.go" \
+            | sed -E 's/.*"([^"]+)".*/\1/')
+          [ -n "$want" ] || { echo "::error::could not read packVersion out of cli/packbuild.go"; exit 1; }
+          for svc in cli orchestrator-infra; do
+            got=$(docker compose exec -T "$svc" pack --version | tr -d '\r')
+            echo "$svc: pack $got (want $want)"
+            [ "$got" = "$want" ] || { echo "::error::$svc has pack $got, cli/packbuild.go expects $want"; exit 1; }
+          done
 
       - name: the API answers
         working-directory: ${{ runner.temp }}/install

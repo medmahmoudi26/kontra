@@ -180,15 +180,16 @@ and no garbage collection. Everything in this section is the compose one.
 |---|---|---|
 | `KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD` | — | the credential a build pushes `actors/**` with |
 | `KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD` | — | CI and `kontra runtime build`, scoped to `kontra-runtimes/**` |
+| `KONTRA_REGISTRY_PUSH_ACTORS_USER` | `push-actors` | the account `kontra deploy` pushes an actor image as |
 | `KONTRA_REGISTRY_PULL_PASSWORD` | — | Machines and the Warden: read everything |
 | `KONTRA_REGISTRY_RETENTION` | `dryrun` | `enforce` deletes; `dryrun` logs what it *would* delete |
 | `KONTRA_INUSE_TAGS` | — (unset ⇒ **on**) | `off` disarms the `inuse-` tag reconciler, the thing that exempts a digest from the row above. Leave retention on `dryrun` while it is off |
 | `KONTRA_INUSE_TAGS_MS` | `600000` (10 min) | the reconciler's interval. A non-numeric or non-positive value falls back to the default rather than failing |
 | `KONTRA_REGISTRY_MIGRATION` | — | `skip` starts a deliberately empty zot on a box that still holds a `registry:2` store |
 | `KONTRA_REGISTRY_CVE` | — | `1` turns on zot's Trivy integration, which downloads a vulnerability database on first boot |
-| `KONTRA_RUNTIMES_PREFIX` | `<registry>/kontra-runtimes` | where a bare `name:major` in `actor.json` resolves ([[Runtimes]]) |
-| `KONTRA_PACK_BIN` | `/usr/local/bin/pack`, then `/opt/kontra/pack`, then `PATH` | the pinned `pack` `0.40.9`. It is checksummed into the image the **release** builds; `make image`'s Dockerfile does not carry it, so a from-clone install sets this |
-| `KONTRA_DEPLOY_SH` | — (unset ⇒ warn) | `refuse` will make an actor's `deploy.sh` an error instead of a warning. Read only on the buildpack build path, which `kontra deploy` does not take yet, so it changes nothing today ([[Writing-Actors-Python]]) |
+| `KONTRA_RUNTIMES_PREFIX` | `ghcr.io/medmahmoudi26/kontra-runtimes` | where a bare `name:major` in `actor.json` resolves — the published set, read anonymously ([[Runtimes]]) |
+| `KONTRA_PACK_BIN` | `/usr/local/bin/pack`, then `/opt/kontra/pack`, then `PATH` | the pinned `pack` `0.40.9`, checksummed into the `kontra` image and copied into the orchestrator image. Set this only to point at your own |
+| `KONTRA_DEPLOY_SH` | — (unset ⇒ warn) | `refuse` makes an actor's `deploy.sh` an error instead of a warning. A buildpack build does not run it, so an actor that depended on it builds fine and is missing whatever it installed ([[Writing-Actors-Python]]) |
 
 > **Blank is a choice here, not an oversight.** With all three passwords empty the registry accepts
 > **anonymous** pulls and pushes — which is what `registry:2` always did, and the loopback publish is

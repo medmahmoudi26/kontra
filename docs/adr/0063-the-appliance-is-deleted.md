@@ -74,6 +74,46 @@ registers, and what distinguishes it from `workflows/infra.ts` is that `stackWor
 a REFUSAL rather than absent — because an absent workflow type does not fail, it fails the task, and
 Temporal retries that for ever (0031 §4). The new name says which of the two bundles it is.
 
+## The build path that replaced it, and two things it forced
+
+ADR 0061 decided Cloud Native Buildpacks and measured them; `packBuild` was written and **never
+called**. Wiring it deleted the Dockerfile path — `ensureBase`, `buildActor`, `buildGoActor`,
+`buildWorker`, `ensureWorkerBase`, their two generated Dockerfiles, `control/images/Dockerfile.pyworker`
+and `control/images/Dockerfile.workerbase` — and with them the SDK-digest mechanism
+(`sdkLabel`/`sdkDigest`/`isCheckout`), which existed only to tell a stale Python base image from a
+current one. An actor's SDK comes from its runtime now, pinned by digest and recorded in the catalog.
+
+**`pack` BUILDS INTO THE DAEMON AND DOES NOT PUBLISH.** This is the one decision here that is not
+obvious, and it is a split this repository has paid for before — `registryAddress`'s header calls it
+"the oldest bug on this path". `pack --publish` makes the *lifecycle* push, from inside a container,
+so the image reference would have to be `registry:5000`: a name only the compose network resolves.
+The thing that *pulls* an actor image is the Docker daemon, on the host, for which the resolvable
+name is `127.0.0.1:5000`. One reference cannot be both, and a push the puller cannot reach shows up
+as `no such image` at scale time, three commands from its cause. So the build lands in the daemon
+and the daemon pushes. The cost is `--cache-image`, which pack accepts only with `--publish`: the
+dependency cache is lost and the correctness is kept.
+
+**THE PUSH CREDENTIAL WAS `base64("{}")`.** That is the Engine API's canonical "no credentials", and
+it had been there for as long as the install has generated zot accounts — `push-actors`,
+`push-runtimes` and `pull`, with a per-repository policy. An anonymous registry accepts it; an
+authenticated one answers 401, from inside a push, with nothing in the message about a credential.
+So: the account and password reach the two services that push (`cli` and `orchestrator-infra`, where
+`activities/buildActor.ts` spawns `kontra deploy`); the Engine API header carries them; `pack` gets
+them through a `DOCKER_CONFIG` directory this process makes at 0700 and removes; and a **preflight**
+asks `GET /v2/` *before* the build, so a credential problem is a sentence naming the user, the
+registry and the variable rather than a 401 after minutes of lifecycle. CI now runs the
+authenticated shape, because the anonymous default is the one configuration in which this bug cannot
+happen.
+
+**"ANONYMOUS PULL" DOES NOT MEAN "NO AUTHORIZATION HEADER".** Measured: ghcr answers an
+unauthenticated manifest read of a *public* repository with `401` and a
+`WWW-Authenticate: Bearer realm=…` challenge. `docker` and `pack` follow it; this CLI did not, so a
+runtime a human can open in a browser reported as "not in the registry". `registryManifestDigest`
+now follows a Bearer challenge to the realm the registry named, for the scope it asked for, sending
+no credential of its own. That is what makes `KONTRA_RUNTIMES_PREFIX`'s new default —
+`ghcr.io/medmahmoudi26/kontra-runtimes`, so a fresh install can build the actor it ships — work at
+all; the local `kontra-runtimes/` namespace is empty until somebody mirrors it.
+
 ## Consequences
 
 **A tagged release carries no binary assets until GoReleaser lands.** release-please still creates

@@ -81,6 +81,27 @@ x-orchestrator-env: &orchestrator-env
   # The VPC address is reachable from every container AND from a Droplet in the Controller's VPC,
   # so one value is correct for both the manifest read here and the blob URL a Machine is handed.
   KONTRA_REGISTRY: ${KONTRA_REGISTRY:-127.0.0.1:${KONTRA_REGISTRY_PORT:-5000}}
+  # ── THE PUSH CREDENTIAL, WHICH THE SERVICES THAT PUSH HAD NEVER BEEN GIVEN ─────────────────────
+  #
+  # `registry-config` above generates three zot accounts and a per-repository policy: only
+  # `push-actors` may create in the actors namespace. Nothing passed that account to the two
+  # services that push — `cli` and `orchestrator-infra`, which is where
+  # `src/activities/buildActor.ts` spawns `kontra deploy` — so an install with the three passwords
+  # set could not deploy an actor, and the way it said so was a 401 from inside a builder.
+  #
+  # THE SAME VARIABLE THE HTPASSWD WAS WRITTEN FROM. One secret, read twice, rather than a copy that
+  # can drift: a mismatch here is a registry that authenticates nobody it was configured for.
+  #
+  # EMPTY IS ANONYMOUS AND STAYS SUPPORTED. With no passwords set `registry-htpasswd` writes no
+  # htpasswd and zot serves anonymously, which is the quickstart's default; `registryAdmits`
+  # (cli/registryauth.go) only refuses when the registry actually answers 401.
+  KONTRA_REGISTRY_PUSH_ACTORS_USER: ${KONTRA_REGISTRY_PUSH_ACTORS_USER:-push-actors}
+  KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD: ${KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD:-}
+  # WHERE A BARE `name:major` IN actor.json RESOLVES. It defaults to this install's own registry
+  # under `kontra-runtimes/`, which is empty until somebody mirrors the published set — so a fresh
+  # install could not build the actor it ships. ghcr serves them and reads anonymously, so this is
+  # the default that makes a first `kontra deploy` work; point it at a mirror for an airgap.
+  KONTRA_RUNTIMES_PREFIX: ${KONTRA_RUNTIMES_PREFIX:-ghcr.io/medmahmoudi26/kontra-runtimes}
   KONTRA_ORCHESTRATOR_URL: http://orchestrator-api:8088
   KONTRA_CONTROLLER: orchestrator-api
   KONTRA_DUCKLAKE_CATALOG: postgres:dbname=kontra_ducklake host=postgres user=kontra password=kontra

@@ -275,6 +275,13 @@ cp "$REPO/.env.quickstart" "$INSTALL_DIR/.env"
   echo "KONTRA_PULL_POLICY=never"
   echo "KONTRA_REPO=$REPO"
   echo "KONTRA_WORKSPACES=$WORKSPACES"
+  # THE REGISTRY IS AUTHENTICATED, which is the shape the anonymous default cannot test: `kontra
+  # deploy` pushed with an empty credential for as long as the zot accounts existed, and an
+  # anonymous registry accepts that. ALL THREE OR NONE — `registry-config` refuses a partial set.
+  # Generated per run, written straight into the file, never echoed.
+  echo "KONTRA_REGISTRY_PUSH_ACTORS_PASSWORD=$(openssl rand -hex 24)"
+  echo "KONTRA_REGISTRY_PUSH_RUNTIMES_PASSWORD=$(openssl rand -hex 24)"
+  echo "KONTRA_REGISTRY_PULL_PASSWORD=$(openssl rand -hex 24)"
 } >> "$INSTALL_DIR/.env"
 if "$PYTHON" "$REPO/scripts/assert-install-is-self-contained.py" "$INSTALL_DIR" \
      >"$LOGS/self-contained.log" 2>&1; then

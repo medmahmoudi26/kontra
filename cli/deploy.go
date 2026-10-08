@@ -276,6 +276,7 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 	// accidental re-deploy of an existing version BEFORE spending a build.
 	reg := registryAddress(o.registry)
 	remote := fmt.Sprintf("%s/%s:%s", reg, m.Name, m.Version)
+	cred := pushCredential()
 	if !o.hostOnly {
 		// A FOURTH SITE NAMES AN ARTIFACT, and it is checked here for the same reason the other three
 		// are (cli/internal/ociref/ociref.go). `.scratch/warden/issues/15-*` counted three — build, pull, and the
@@ -293,6 +294,12 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 				"  fine and only its ARTIFACT is unnameable. Rename it in actor.json.", m.Name, m.Version, err)
 		}
 		if err := registryReachable(reg); err != nil {
+			return nil, err
+		}
+		// THE CREDENTIAL IS CHECKED BEFORE THE BUILD, not discovered by the push. See
+		// cli/registryauth.go: an install with zot accounts answers an anonymous push with 401, and
+		// spending a buildpack build first only moves the message further from its cause.
+		if err := registryAdmits(reg, cred); err != nil {
 			return nil, err
 		}
 		if !o.override && versionDeployed(reg, m.Name, m.Version) {
@@ -333,37 +340,81 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 		}
 	}
 
-	// 3) THE BUILD, WHICH IS `pack` AND NOTHING ELSE. One image, published directly by the
-	// lifecycle: there is no separate host image to layer a worker onto any more, so there is no
-	// second build, no cached worker base, and no handler recompile per deploy.
+	// 3) THE BUILD, WHICH IS `pack` AND NOTHING ELSE. One image: there is no separate host image to
+	// layer a worker onto any more, so no second build, no cached worker base, and no handler
+	// recompile per deploy.
 	//
-	// `--host-only` BECOMES "DO NOT PUBLISH". It used to mean "build the actor image and stop
-	// before the worker image"; with one image the only thing left to stop before is the push, and
-	// that is the useful half — it is what lets an author check a build without claiming a version.
+	// IT BUILDS INTO THE DAEMON AND DOES NOT PUBLISH, AND THAT IS THE FIX FOR A SPLIT THIS REPO HAS
+	// PAID FOR BEFORE (see registryAddress). `pack --publish` makes the LIFECYCLE push, from inside
+	// a container — so the reference would have to be `registry:5000`, a name only the compose
+	// network resolves. The thing that PULLS an actor image is the Docker daemon, on the host, for
+	// which the resolvable name is `127.0.0.1:5000`. One reference cannot be both. So the build
+	// lands in the daemon, the daemon pushes, and push and pull resolve the one address `kontra
+	// scale` is about to depend on.
+	//
+	// NO `--cache-image` EITHER: pack accepts one only with `--publish`. The dependency cache is
+	// lost, and a push that lands somewhere the puller cannot reach would be worse.
+	//
+	// `--host-only` BECOMES "DO NOT PUSH". It used to mean "build the actor image and stop before
+	// the worker image"; with one image the only thing left to stop before is the push, and that is
+	// the useful half — it lets an author check a build without claiming a version.
+	//
+	// THE CREDENTIAL IS WRITTEN FOR `pack` TOO, not only for the push: the lifecycle PULLS the
+	// builder and the run image, and a runtime in an authenticated registry needs it. In a
+	// directory this process makes and removes — never the operator's `~/.docker`, which would hand
+	// an actor's build every credential on the machine.
+	dockerConfig := o.dockerConfig
+	if dockerConfig == "" && !cred.anonymous() {
+		tmp, terr := os.MkdirTemp("", "kontra-push-")
+		if terr != nil {
+			return nil, fmt.Errorf("could not make a directory for the push credential: %w", terr)
+		}
+		defer os.RemoveAll(tmp)
+		if werr := writeDockerConfig(tmp, reg, cred); werr != nil {
+			return nil, fmt.Errorf("could not write the push credential: %w", werr)
+		}
+		dockerConfig = tmp
+	}
+
 	res := &deployResult{Name: m.Name, Version: m.Version, HostImage: remote}
-	built, err := runPackBuild(ctx, packOpts{
+	if _, err := runPackBuild(ctx, packOpts{
 		Image:        remote,
 		ActorDir:     o.actorDir,
 		Builder:      pinnedBuilder(),
 		RunImage:     rt.Pinned(),
-		CacheImage:   fmt.Sprintf("%s/%s:cache", reg, m.Name),
 		Registry:     reg,
-		DockerConfig: o.dockerConfig,
-		Publish:      !o.hostOnly,
+		DockerConfig: dockerConfig,
+		Publish:      false,
 		Progress:     progress,
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
 	if o.hostOnly {
 		return res, nil
 	}
+
+	// 4) THE PUSH, OVER THE ENGINE API, CARRYING A REAL CREDENTIAL. `base64("{}")` was here for as
+	// long as the install has had zot accounts: correct against a registry with no users, a 401
+	// against one with them, and silent about which.
+	d, err := newDocker()
+	if err != nil {
+		return nil, fmt.Errorf("docker engine unreachable: %w", err)
+	}
+	rc, err := d.ImagePush(ctx, remote, image.PushOptions{RegistryAuth: registryAuthHeader(reg, cred)})
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	built, err := streamPushOutput(progress, rc)
+	if err != nil {
+		return nil, fmt.Errorf("push %s: %w", remote, err)
+	}
 	res.Image = remote
 	res.Registry = reg
 
-	// THE ADDRESS CHECK, AND IT BELONGS HERE RATHER THAN AT SCALE TIME. `pack` has just reported a
-	// digest for what it published to `reg` AS IT RESOLVES IT; this asks the registry THIS PROCESS
-	// reaches at `reg` what that tag resolves to now. Agreement means push and pull are the same
+	// THE ADDRESS CHECK, AND IT BELONGS HERE RATHER THAN AT SCALE TIME. The daemon has just
+	// reported a digest for a push it made to `reg` AS IT RESOLVES IT; this asks the registry THIS
+	// PROCESS reaches at `reg` what that tag resolves to now. Agreement means push and pull are the same
 	// registry, which is the property `kontra scale` is about to depend on. A disagreement is caught
 	// one second after the push that caused it, naming the address — instead of arriving minutes
 	// later as `no such image`, which sends an operator to look at Docker rather than at which
@@ -396,20 +447,45 @@ var registryHTTP = &http.Client{Timeout: 10 * time.Second}
 func registryManifestDigest(reg, name, ref string) (string, error) {
 	var last error
 	for _, base := range registryProbeBases(reg) {
-		req, err := http.NewRequest(http.MethodHead, base+"/v2/"+name+"/manifests/"+ref, nil)
-		if err != nil {
-			return "", err
+		url := base + "/v2/" + name + "/manifests/" + ref
+		ask := func(bearer string) (code int, status, digest string, err error) {
+			req, rerr := http.NewRequest(http.MethodHead, url, nil)
+			if rerr != nil {
+				return 0, "", "", rerr
+			}
+			req.Header.Set("Accept", manifestAccept)
+			if bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+bearer)
+			}
+			resp, derr := registryHTTP.Do(req)
+			if derr != nil {
+				return 0, "", "", derr
+			}
+			defer resp.Body.Close()
+			return resp.StatusCode, resp.Status, resp.Header.Get("Docker-Content-Digest"), nil
 		}
-		req.Header.Set("Accept", manifestAccept)
-		resp, err := registryHTTP.Do(req)
+
+		code, status, digest, err := ask("")
 		if err != nil {
 			last = err
 			continue
 		}
-		digest := resp.Header.Get("Docker-Content-Digest")
-		code := resp.StatusCode
-		status := resp.Status
-		resp.Body.Close()
+		// A 401 IS A CHALLENGE, NOT A VERDICT. See cli/registryauth.go: ghcr answers an
+		// unauthenticated read of a PUBLIC repository this way, and the pull everyone calls
+		// anonymous is a client fetching a token from the realm it names and asking again. Without
+		// this the registry reads as "not in the registry" for a reference a human can open.
+		if code == http.StatusUnauthorized {
+			// `resp.Header` is gone by now, so the challenge is re-read on its own request. One
+			// extra HEAD against a registry that has already refused is cheaper than keeping the
+			// response body open across a token exchange.
+			if ch, ok := bearerChallengeFor(url); ok {
+				if tok := registryToken(ch); tok != "" {
+					if c2, s2, d2, e2 := ask(tok); e2 == nil {
+						code, status, digest = c2, s2, d2
+					}
+				}
+			}
+		}
 		switch code {
 		case http.StatusOK:
 			return digest, nil

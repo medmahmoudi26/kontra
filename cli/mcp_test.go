@@ -348,8 +348,15 @@ func TestMCPDeployActor(t *testing.T) {
 	if !strings.HasSuffix(builtWith.RunImage, "@"+runtimeDigest) {
 		t.Errorf("run image = %q, want it pinned to the digest the registry answered", builtWith.RunImage)
 	}
+	// THE LIFECYCLE NEVER PUBLISHES, host_only or not. `pack --publish` pushes from inside a
+	// container, so the reference would have to be a compose-network name — and the daemon that
+	// pulls an actor image resolves a different one. The build lands in the daemon and the daemon
+	// pushes; see runDeploy. A `--publish` creeping back in is a push the puller cannot reach.
 	if builtWith.Publish {
-		t.Error("host_only must not publish")
+		t.Error("the lifecycle must not publish; the daemon pushes")
+	}
+	if builtWith.CacheImage != "" {
+		t.Error("pack accepts --cache-image only with --publish, so asking for one here would fail the build")
 	}
 }
 

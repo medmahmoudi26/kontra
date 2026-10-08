@@ -102,6 +102,13 @@ RUN mkdir -p web/dist \
 # `/usr/local/lib/python3.11/dist-packages` mean the same thing in both. The RUN below is the check
 # that says so AT BUILD TIME rather than on the operator's first click.
 COPY --from=spa-src /usr/local/bin/kontra /usr/local/bin/kontra
+# `pack` COMES WITH IT, BECAUSE THE INFRA ROLE IS WHAT RUNS `kontra deploy`.
+# `src/activities/buildActor.ts` spawns it here — this is the only role holding the Docker socket —
+# and `kontra deploy` is `pack` now (ADR 0061). Without this the console's build path fails with
+# `no pack binary`, which reads as a missing dependency on the operator's machine rather than a
+# missing layer in this image. Taken from `spa-src` and not re-downloaded, so the two images cannot
+# disagree about which lifecycle built an actor.
+COPY --from=spa-src /usr/local/bin/pack /usr/local/bin/pack
 # THE CLI'S OTHER HALF. `serveWorkflow` spawns `kontra` in THIS container, and a workflow that
 # reaches a dataset verb shells out to `duckdb` (cli/runs.go:duckdbBin) — so shipping the CLI
 # without it is shipping a binary that fails on a subset of its own commands. Copied rather than

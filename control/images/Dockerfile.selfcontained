@@ -275,6 +275,34 @@ RUN chmod +x /usr/local/bin/kontra-entrypoint \
  && rm -rf /var/lib/apt/lists/*
 ENV PYTHONPATH=/opt/kontra/sdk/python:/opt/kontra/runtime/python
 ENV KONTRA_SDK_ROOT=/opt/kontra
-RUN test -x /opt/kontra/handler && test -d /opt/kontra/sdk/python/kontra
+
+# ── THE CNB `pack` BINARY, PINNED AND CHECKSUMMED (ADR 0061) ────────────────────────────────────
+#
+# `kontra deploy` builds actor images with Cloud Native Buildpacks, which means the lifecycle, which
+# means `pack`. It is a BINARY and not a Go module on purpose: importing pack pulls its whole
+# dependency graph into a CLI that also ships as a single download, and this image is the one place
+# that needs it. `cli/packbuild.go:packBinary` looks here first.
+#
+# THE CHECKSUM IS THE POINT OF PINNING, not the version string. A tag can be re-pointed; a build
+# that silently used a different lifecycle than the one this was tested against would produce actor
+# images whose layers do not match what the catalog records.
+#
+# BOTH CHECKSUMS, EACH NAMED FOR WHAT IT COVERS. `kontra-runtimes/builder.json` records two for this
+# release — one for the tarball and one for the `pack` binary inside it — and they are both 64 hex
+# characters, so nothing about either value says which is which. Verifying /tmp/pack.tgz against the
+# BINARY's digest failed every build with `/tmp/pack.tgz: FAILED`, a message that reads like a
+# corrupted download or a re-pointed release. Checking both, under names, makes a swap fail on the
+# first line and say so.
+ARG PACK_VERSION=0.40.9
+ARG PACK_TARBALL_SHA256=dc0ee1e931cf8a106d7555a01a214864f9acb60b77adf15d69b74df4404758e9
+ARG PACK_BINARY_SHA256=2f85c3ec624f73f2d3c4a680a2c48fe6755197844730cc4ea5ed05f950fe05a3
+ADD https://github.com/buildpacks/pack/releases/download/v${PACK_VERSION}/pack-v${PACK_VERSION}-linux.tgz /tmp/pack.tgz
+RUN printf '%s  /tmp/pack.tgz\n' "${PACK_TARBALL_SHA256}" | sha256sum -c - \
+ && tar -xzf /tmp/pack.tgz -C /usr/local/bin pack \
+ && printf '%s  /usr/local/bin/pack\n' "${PACK_BINARY_SHA256}" | sha256sum -c - \
+ && rm /tmp/pack.tgz \
+ && /usr/local/bin/pack --version
+
+RUN test -x /opt/kontra/handler && test -d /opt/kontra/sdk/python/kontra && test -x /usr/local/bin/pack
 CMD ["kontra", "version"]
 ENTRYPOINT ["/usr/local/bin/kontra-entrypoint"]
