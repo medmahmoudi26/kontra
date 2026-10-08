@@ -19,11 +19,32 @@ package main
 //	{% code "http", v %}     osteele: an undefined tag, unless registered — hence `registerTags`.
 //	{{ result.summary }      both: literal text. A missing brace is not catchable here.
 //
-// So this lint is deliberately NARROW: a syntax error and an unknown context root, both of which the
-// two agree on. It does not try to be the renderer, because a lint that refuses a template the
-// orchestrator would have rendered is worse than no lint — it blocks an author with no way round.
+// So this lint is deliberately NARROW. It refuses three things:
+//
+//	a syntax error            — both parsers agree
+//	an unknown context root   — both parsers agree
+//	`{{ }}` inside a fence or an inline code span — neither parser is consulted; see
+//	                            `fencedInterpolations`, which reads the text, because the defect is
+//	                            about what the ESCAPE does downstream and not about what parses.
+//
+// It does not try to be the renderer, because a lint that refuses a template the orchestrator would
+// have rendered is worse than no lint — it blocks an author with no way round.
 // `KONTRA_REPORT_LINT=off` is that way round if the two ever disagree anyway, and its existence is the
 // admission that they might.
+//
+// ── A SECOND REASON THIS STAYS IN GO, WHICH IS NOT CONVENIENCE ─────────────────────────────────
+//
+// Go's `regexp` is RE2: it has no backtracking, so every pattern here is linear in the input by
+// construction and a template cannot be written that makes the lint hang. That matters because a
+// template is AUTHOR-SUPPLIED INPUT, which is the worst place for a quadratic regex to live.
+//
+// It is not hypothetical. A `/^Bearer\s+(.+)$/i` in the orchestrator's `auth/session.ts` was measured
+// at 17,783 ms on one 100 KB header on 2026-10-08 — `\s+` and `.+` both match a space, and the `$`
+// anchor forces a rescan from each one. Node's event loop is single-threaded, so that is not one slow
+// request but every request stopped for eighteen seconds.
+//
+// So moving this lint into the TypeScript engine "to share the parser" would trade a guarantee for a
+// convenience. If it ever moves, every pattern needs the audit Go is giving for free here.
 //
 // LINE, NOT LINE AND COLUMN. §6.1 asks for both; `liquid.SourceError` carries `LineNumber()` and no
 // column, and inventing one would be worse than saying so.
