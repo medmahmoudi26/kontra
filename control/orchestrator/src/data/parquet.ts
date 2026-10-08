@@ -42,6 +42,7 @@ import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
 import type { ObjectStore } from '../codec/objectStore';
 // From `../workspaces`, which is a pure derivation over a NAME — no lookup table, no I/O, and no
 // import cycle: `workspaces.ts` reaches nothing in `data/`.
+import { runEvents } from '../runEvents';
 import { activeLakeWorkspace, workspaceAddress } from '../workspaces';
 import { applianceDataDir } from './dataDir';
 import { MATERIALIZATION_SCHEMA_VERSION } from './materialization';
@@ -976,6 +977,10 @@ export async function writeDatasetParquet(
       await conn.run('COMMIT');
       rows += added;
       if (createdHere) created = true;
+      // ADR 0062. AFTER THE COMMIT AND NEVER BEFORE: a live report may only show rows that are
+      // durable, and an emit inside the transaction would announce a batch a ROLLBACK then erased.
+      // Keyed by the EXECUTION (`runStartedAt`) because Run ids are reused.
+      runEvents.emitData({ runId: sel.runId, runStartedAt: sel.runStartedAt, dataset: tbl, rows });
     } catch (err) {
       await conn.run('ROLLBACK').catch(() => undefined);
       throw err;
