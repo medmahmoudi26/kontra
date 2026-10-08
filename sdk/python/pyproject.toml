@@ -73,7 +73,11 @@ seaweed = ["boto3>=1.28"]
 # `internals.temporal` IS LISTED. It was not, which no editable install ever noticed (the finder
 # maps a directory, so subpackages came along); a built wheel dropped the actor host on the floor.
 [tool.setuptools]
-packages = ["kontra", "kontra", "internals", "internals.temporal"]
+# `kontra` WAS LISTED TWICE AND `actorkit` NOT AT ALL, which is the failure the comment above warns
+# about, arriving one step earlier than predicted: not a wheel that drops the alias, an EDITABLE
+# install that never had it. `package-dir` maps `actorkit` onto the `kontra` directory, and a
+# mapping for a package setuptools was not told to build produces nothing and says nothing.
+packages = ["kontra", "actorkit", "internals", "internals.temporal"]
 
 [tool.setuptools.package-dir]
 actorkit = "kontra"

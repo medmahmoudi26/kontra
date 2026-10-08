@@ -79,6 +79,16 @@ def _walk(script: str, start: pathlib.PurePosixPath) -> list[tuple[str, pathlib.
 #: correct rather than a bug. Flags are dropped; every operand counts.
 MKDIR = re.compile(r"^\s*mkdir\s+(.*)$")
 
+#: `git clone <url> <dir>` MAKES A DIRECTORY TOO, and `wiki.yml` is why this is here: it clones the
+#: repository's own wiki into `wiki/` and the next step does `cd wiki`, which no checkout can
+#: contain. Recognition and not proof, exactly as the `actions/checkout` case above — but the
+#: alternative is a permanent failure on a job that is correct, which is how an assertion gets
+#: deleted rather than fixed. Matched anywhere in the line because the real one is inside `if ! …`.
+GIT_CLONE = re.compile(r"\bgit\s+clone\s+(.*)$")
+
+#: Where a shell word stops being an argument: a redirection, a separator, a terminator.
+CLONE_STOP = re.compile(r"(?:[;&|]|\d?>)")
+
 
 def _makes(step: dict) -> set[str]:
     """Directories this step creates, which later steps may therefore walk into.
@@ -107,12 +117,22 @@ def _makes(step: dict) -> set[str]:
     if isinstance(script, str):
         for line in script.splitlines():
             m = MKDIR.match(line)
-            if not m:
+            if m:
+                for word in m.group(1).split():
+                    if word.startswith("-") or UNRESOLVABLE.search(word):
+                        continue
+                    made.add(os.path.normpath(word.strip("'\"")))
                 continue
-            for word in m.group(1).split():
-                if word.startswith("-") or UNRESOLVABLE.search(word):
-                    continue
-                made.add(os.path.normpath(word.strip("'\"")))
+            c = GIT_CLONE.search(line)
+            if c:
+                rest = CLONE_STOP.split(c.group(1), 1)[0]
+                words = [w.strip("'\"") for w in rest.split() if not w.startswith("-")]
+                # TWO OPERANDS OR NOTHING. `git clone <url>` alone derives the directory from the
+                # URL's basename, and the URL is the operand carrying `${{ secrets… }}` — so the
+                # name would be a guess about a string this file cannot resolve. An explicit
+                # destination is the only case worth recognising.
+                if len(words) >= 2 and not UNRESOLVABLE.search(words[-1]):
+                    made.add(os.path.normpath(words[-1]))
     return made
 
 

@@ -258,11 +258,13 @@ def test_the_shipped_package_file_carries_the_lazy_accessor() -> None:
     exec(compile(PKG_INIT.read_text(), "pkg-init", "exec"), ns)
     assert ns["__getattr__"]("ask") is hitl.ask
     # EVERY REMOVED VERB MUST REFUSE, not resolve something. `note`/`partial` went with the rest of
-    # the logger wrappers; `progress`, `stream` and `KontraFlow` went with the Workflow Stream they
-    # published onto (the module they lived in, `say`, is deleted). An author following a stale
-    # example has to get the plain AttributeError Python gives for a gone name, rather than a
-    # confusing failure deeper in.
-    for gone in ("note", "partial", "progress", "stream", "KontraFlow"):
+    # the logger wrappers; `stream` and `KontraFlow` went with the Workflow Stream they published onto
+    # (the module they lived in, `say`, is deleted). An author following a stale example has to get
+    # the plain AttributeError Python gives for a gone name, rather than a confusing failure deeper in.
+    #
+    # `progress` IS NOT IN THIS LIST, because it came back — `_VERBS` in `__init__.py` is
+    # `("ask", "progress")` and says why. This list went on asserting its absence for nine days.
+    for gone in ("note", "partial", "stream", "KontraFlow"):
         with pytest.raises(AttributeError, match=gone):
             ns["__getattr__"](gone)
     assert "ask" in set(ns["__all__"])

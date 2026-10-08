@@ -47,7 +47,12 @@ def caught() -> Capture:
 
 def fields(record: logging.LogRecord) -> dict:
     """Just what `progress` put there — the ~18 stdlib attributes are not the subject."""
-    standard = set(logging.LogRecord("", 0, "", 0, "", None, None).__dict__)
+    # `message` IS STDLIB TOO, and is the one stdlib attribute a bare LogRecord does not have:
+    # `logging.Formatter.format` assigns `record.message = record.getMessage()`. So it appears only
+    # once something has formatted the record, which under pytest's logging plugin is always, and it
+    # is not something `progress` put there. Deriving the exclusion set from a bare record alone
+    # therefore misses it, and the assertion failed on an attribute the subject never wrote.
+    standard = set(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {"message"}
     return {k: v for k, v in record.__dict__.items() if k not in standard and not k.startswith("_")}
 
 
