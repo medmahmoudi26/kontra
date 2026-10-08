@@ -36,6 +36,8 @@ export interface RunContext {
   ended_at: string;
   duration_s: number;
   error: { type: string; message: string } | null;
+  /** `null` rather than absent, so `{% if run.progress %}` is falsy instead of a strictVariables error. */
+  progress: ProgressContext | null;
 }
 
 /** §2.4's `workflow`. */
@@ -52,12 +54,47 @@ export interface ReportContext {
   version: number;
 }
 
+/**
+ * `run.progress` (ADR 0062) — what a live report counts while the run is open.
+ *
+ * `units_done` INCLUDES `isolated`: ADR 0060 is explicit that a unit abandoned after repeated
+ * failure is finished, and counting it as outstanding makes a healthy run read as stuck for ever.
+ */
+export interface ProgressContext {
+  units_done: number;
+  units_total: number;
+  isolated: number;
+  phase: string;
+  updated_at: string;
+}
+
+/** The head and tail bounds a template may read. Not configurable: they bound the render, not a view. */
+export const DATASET_HEAD_MAX = 20;
+export const DATASET_TAIL_MAX = 50;
+
+/**
+ * `datasets.<name>` (ADR 0062) — the run's own Datasets, summarised while it is still writing them.
+ *
+ * BOUNDED AT THE CONTEXT, not at the template: `head`/`tail` are clamped here, so no template can
+ * ask for more and no author can be surprised by a report that got slower as a Dataset grew.
+ */
+export interface DatasetSummary {
+  rows: number;
+  batches: number;
+  last_commit_at: string;
+  head: readonly unknown[];
+  tail: readonly unknown[];
+}
+
 export interface TemplateContext {
   run: RunContext;
   workflow: WorkflowContext;
   input: unknown;
   result: unknown;
   report: ReportContext;
+  /** THE SIXTH ROOT. `cli/reportlint.go`'s `contextRoots` must list it or every template using it
+   *  fails at render under `strictVariables` — which is to say after the run. */
+  datasets: Record<string, DatasetSummary>;
   [key: string]: unknown;
 }
 
@@ -108,6 +145,24 @@ export interface BuildContextInput {
   error?: { type: string; message: string } | undefined;
   version: number;
   now?: number;
+  /** ADR 0062. Progress facts for an open run; absent renders `run.progress` as null. */
+  progress?: ProgressContext | undefined;
+  /** ADR 0062. Summaries of the run's own Datasets, clamped here rather than trusted. */
+  datasets?: Record<string, DatasetSummary> | undefined;
+  /**
+   * ADR 0062. The workflow's `report` QUERY while the run is OPEN — what `result` becomes mid-run.
+   *
+   * Only consulted for an open run, so a FAILED, cancelled, terminated or timed-out run still has
+   * `result === null`. That is the load-bearing part of §2.4 and it is unchanged; what does change is
+   * that `{% if result %}` is true mid-run for a workflow that defines the handler, which makes
+   * `run.status` the completion test rather than `result`.
+   */
+  partial?: unknown;
+}
+
+/** Clamp one Dataset summary to the context's own bounds. */
+function clampSummary(s: DatasetSummary): DatasetSummary {
+  return { ...s, head: s.head.slice(0, DATASET_HEAD_MAX), tail: s.tail.slice(0, DATASET_TAIL_MAX) };
 }
 
 /**
@@ -133,6 +188,7 @@ export function buildContext(input: BuildContextInput): TemplateContext {
       ended_at: isoOf(input.closedAt),
       duration_s: duration,
       error: input.error ?? null,
+      progress: input.progress ?? null,
     },
     workflow: {
       name: input.identity?.workflow ?? input.type ?? '',
@@ -142,12 +198,25 @@ export function buildContext(input: BuildContextInput): TemplateContext {
     // `null` rather than absent, for both: a template may legitimately ask `{% if input %}`, and
     // `strictVariables` makes an absent name an error rather than a falsy value.
     input: input.input ?? null,
-    result: status === 'completed' ? (input.output ?? null) : null,
+    // ADR 0062. THREE CASES, AND ONLY THE MIDDLE ONE IS NEW: the return value once the run completed,
+    // the workflow's `report` query while it is still OPEN, and `null` for every terminal
+    // non-completion — which is §2.4's load-bearing case and is unchanged.
+    result:
+      status === 'completed'
+        ? (input.output ?? null)
+        : input.closedAt > 0
+          ? null
+          : (input.partial ?? null),
     report: {
       rendered_at: isoOf(input.now ?? 0),
       template_hash: input.pinned?.templateHash ?? '',
       version: input.version,
     },
+    // Always an object, never absent: `{{ datasets.nope.rows }}` should be an author's empty value
+    // rather than a strictVariables error about a root they spelled correctly.
+    datasets: Object.fromEntries(
+      Object.entries(input.datasets ?? {}).map(([name, s]) => [name, clampSummary(s)])
+    ),
   };
 }
 
@@ -162,8 +231,17 @@ export function buildContext(input: BuildContextInput): TemplateContext {
  * mode a key like this usually has.
  */
 export function renderKey(templateHash: string, context: TemplateContext): string {
+  // ADR 0062 ADDED TWO VALUES AND NEITHER MAY ENTER THIS KEY. `run.progress` and `datasets` change on
+  // every batch commit, so including either mints a version per tick and the dropdown becomes the
+  // tick history. PROJECTING A FIELD OUT IS BACKWARD-COMPATIBLE — a run that never carried `progress`
+  // hashes exactly as it did before this change, so no stored version is orphaned and the convergence
+  // pass does not re-render the whole retention window on deploy.
+  //
+  // CALL THIS ONLY WITH A FINAL CONTEXT. For an open run `result` is the workflow's `report` query,
+  // which also changes per tick — live renders are never persisted, so no key is ever minted for one.
+  const { progress: _progress, ...run } = context.run;
   const stable = {
-    run: context.run,
+    run,
     workflow: context.workflow,
     input: context.input,
     result: context.result,
