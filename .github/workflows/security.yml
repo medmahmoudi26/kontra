@@ -89,33 +89,79 @@ jobs:
             --allow "$GITHUB_WORKSPACE/.github/vuln-allow.json" \
             < "$report"
 
-  # ── EVERY OTHER LOCKFILE ────────────────────────────────────────────────────────────────────────
+  # ── EVERY OTHER LOCKFILE, AS A REPORT AND DELIBERATELY NOT AS A GATE ───────────────────────────
   #
   # osv-scanner covers what govulncheck cannot: pnpm-lock.yaml, uv.lock/requirements, and the Go
-  # modules again without call-graph filtering. Four languages, one tool, no per-ecosystem config.
+  # modules again — but with NO call graph, which is simultaneously its value and the reason it must
+  # not gate. This repository resolves 566 npm and ~460 Go transitive packages. A tool with no
+  # reachability filter over that is red more or less permanently, and the only two ways to green it
+  # are a large ignore file or an unreviewed major-version sweep. Both are worse than the finding.
+  #
+  # AND A PERMANENTLY-RED GATE IS WORSE THAN NO GATE, because it trains people to scroll past the job
+  # above — which IS call-graph aware and whose findings always mean something. This file's own header
+  # makes that argument about govulncheck ("a vulnerable function nobody calls is noise, and a tool
+  # that reports it teaches people to ignore the tool"); wiring this one as an equal gate contradicted
+  # it, and it was wired that way first.
+  #
+  # `continue-on-error` HERE IS NOT `|| true`, and the difference is where the findings land. Every
+  # advisory becomes a code-scanning alert with a severity, a fixed version and a history; it appears
+  # on the pull request and in the Security tab, and it stays open until somebody closes it. What
+  # RESOLVES them is `renovate.json`, which has `osvVulnerabilityAlerts` enabled and schedules
+  # security PRs `at any time` rather than in the Monday window.
+  #
+  # THE SCANNER FAILING STILL FAILS THIS JOB. Only its FINDINGS are non-blocking; an exit code that
+  # means "could not scan" is reported, because a reporter that did not run reports nothing. That is
+  # the same distinction the govulncheck step draws for a killed process.
   osv:
     name: osv-scanner
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: google/osv-scanner-action/osv-scanner-action@v2.2.3
+
+      - name: osv-scanner
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@v2.2.3
         with:
           # `--recursive` so a nested manifest is not missed: this repo has five go.mod, several
           # package.json and the runtimes fixtures' uv.lock.
           #
-          # `--skip-git` IS NOT A FLAG ANY MORE and was never silently ignored: osv-scanner answers
-          # `Incorrect Usage: flag provided but not defined: -skip-git` and exits 127, so this job
-          # scanned nothing at all on its first run. Scanning a git root is opt-IN now
-          # (`--include-git-root`), which is the behaviour the flag used to ask for.
+          # `--skip-git` IS NOT A FLAG ANY MORE, and it was never silently ignored: osv-scanner
+          # answers `Incorrect Usage: flag provided but not defined: -skip-git` and exits 127, so
+          # this job scanned nothing at all on its first run. Scanning a git root is opt-IN now
+          # (`--include-git-root`), which is what the old flag asked to avoid.
           #
-          # NO GO CALL ANALYSIS, because osv-scanner implements it by running govulncheck — the four
-          # jobs above already do that properly, per module and with the module's own toolchain, and
-          # here it fails on `workspaces/demo/actors/desync/go.mod`, a standalone module outside
-          # `go.work`: "pattern ./...: directory prefix . does not contain modules listed in go.work".
+          # NO GO CALL ANALYSIS, because osv-scanner implements it by running govulncheck — which the
+          # jobs above already do properly, per module, with each module's own toolchain. Here it
+          # instead dies on `workspaces/demo/actors/desync/go.mod`, a standalone module outside
+          # `go.work`: "pattern ./...: directory prefix . does not contain modules listed in
+          # go.work". It is also the step that needs ~5 GiB, which is a second reason not to run it
+          # twice.
           scan-args: |-
             --recursive
             --no-call-analysis=go
+            --format=sarif
+            --output=/github/workspace/osv.sarif
             ./
+
+      # A SCAN THAT FOUND NOTHING WRITES NOTHING, and `upload-sarif` fails on a missing file — which
+      # would turn a clean result into a red job. An empty run is the honest encoding of "scanned,
+      # found nothing".
+      - name: a SARIF file exists either way
+        run: |
+          set -euo pipefail
+          if [ ! -s osv.sarif ]; then
+            printf '%s' '{"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[]}' > osv.sarif
+            echo "osv-scanner produced no SARIF; uploading an empty run"
+          fi
+          python3 -c 'import json,sys; d=json.load(open("osv.sarif")); print("SARIF runs:", len(d.get("runs", [])), "results:", sum(len(r.get("results") or []) for r in d.get("runs", [])))'
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner
 
   # ── THE WORKFLOWS THEMSELVES ────────────────────────────────────────────────────────────────────
   #

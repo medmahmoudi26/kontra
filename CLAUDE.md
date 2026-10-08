@@ -7,23 +7,29 @@
 `dev` is the default branch and the base for every pull request. `main` is what has been released —
 it moves only by merging `dev`, and only deliberately.
 
-**`kontra` and `kontra-console` are PUBLIC; `kontra-actors`, `kontra-workflows`, `kontra-cloud` and
-`kontra-runtimes` are private.** Verified 2026-10-07: an unauthenticated `git ls-remote` against
-`kontra` succeeds. Treat anything in those two as published — nothing secret has leaked (`.env` is
-gitignored, no key or token path was ever committed, and the `AKIA…`/`dop_v1_…` literals in the tree
-are documentation examples and sequential fakes), and that is a property to keep rather than assume.
+**`kontra`, `kontra-console` and `kontra-runtimes` are PUBLIC; `kontra-actors`, `kontra-workflows`
+and `kontra-cloud` are private.** Verified 2026-10-07 by an unauthenticated `git ls-remote`. Treat
+anything in those three as published — nothing secret has leaked (`.env` is gitignored, no key or
+token path was ever committed, and the `AKIA…`/`dop_v1_…` literals in the tree are documentation
+examples and sequential fakes), and that is a property to keep rather than assume.
+
+`kontra-runtimes` is public because the only documented way to add a runtime is to fork it, and
+nobody can fork what they cannot read. Its name is load-bearing in a way a rename would break:
+`publish.yml` builds `ghcr.io/${{ github.repository }}/<runtime>`, so the repository name IS the
+`kontra-runtimes/` image namespace that runtime discovery lists, that `KONTRA_RUNTIMES_PREFIX`
+defaults to, and that zot's retention policies key on.
 
 So branch protection IS available: rulesets are free on a public repository, and the sentence that
 used to stand here — that protection needs GitHub Pro for a private repo — was both wrong about these
-two and the reason nothing mechanically stops a push to `main`. Until a ruleset is configured, this
+and the reason nothing mechanically stops a push to `main`. Until a ruleset is configured, this
 paragraph is still the only enforcement. If you find yourself on `main`, switch before you commit:
 
 ```sh
 git switch dev        # or: git switch -c <topic> dev
 ```
 
-Same two branches, same rule, in all five repositories: `kontra`, `kontra-actors`,
-`kontra-workflows`, `kontra-console`, `kontra-cloud`.
+Same two branches, same rule, in all six repositories: `kontra`, `kontra-actors`,
+`kontra-workflows`, `kontra-console`, `kontra-cloud`, `kontra-runtimes`.
 
 ## Agent skills
 

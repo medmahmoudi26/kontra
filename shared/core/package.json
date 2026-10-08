@@ -37,8 +37,8 @@
     "prepublishOnly": "tsc && tsc -p tsconfig.esm.json && node scripts/bundle-conformance.mjs"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "typescript": "^5.5.0"
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
   },
   "module": "./dist/esm/index.js"
 }
