@@ -375,6 +375,9 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // The operator trail, beside the sign-in that is its first entry (`audit.ts`).
   registerAuditRoutes(app);
   registerCatalogRoutes(app, repo);
+  // The image store (ADR 0061). It needs the catalog to say what is IN USE and the registry to say
+  // what exists, and it is a separate module from `catalog.ts` because that one's four routes are
+  // open by an argued decision and these eight are not.
   registerImageRoutes(app, { repo });
   registerScratchRoutes(app, repo);
   registerRunRoutes(app, { runs, runWorkflows, queueDescriber });

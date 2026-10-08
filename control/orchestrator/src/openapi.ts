@@ -70,6 +70,11 @@ const GATES: ReadonlyArray<{
   { prefix: '/api/workflows/start', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/workflows/stop', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/datasets/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
+  // THE IMAGE STORE (ADR 0061). Eight routes, all of which refuse without a credential — so without
+  // this entry they would be published as OPEN, and `openapi.test.ts` drives every open-documented
+  // route with no credential and fails on a 401/403. The three that CHANGE something additionally
+  // require the `infra` scope, which this document cannot express per-route: it describes the
+  // scheme, and the scope is in the route's own refusal.
   { prefix: '/api/images/', scheme: 'stateToken', vars: STATE_TOKEN_VARS },
   { prefix: '/api/runs', scheme: 'runToken', vars: RUN_TOKEN_VARS },
   { prefix: '/api/probe', scheme: 'runToken', vars: RUN_TOKEN_VARS },
