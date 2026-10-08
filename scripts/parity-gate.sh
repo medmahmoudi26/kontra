@@ -187,8 +187,22 @@ info "ports         temporal=$P_TEMPORAL s3=$P_S3 kv=$P_KV registry=$P_REGISTRY 
 # NOTHING MAY ALREADY BE ON THE `kontra` NETWORK. See the header: the network name is fixed by the
 # compose file, so this is the one axis `-p` cannot scope, and joining a live stack is the
 # incident. Asked of docker rather than assumed from a pid file.
-ATTACHED=$(docker network inspect kontra --format '{{ len .Containers }}' 2>/dev/null || echo 0)
-if [ "${ATTACHED:-0}" != "0" ]; then
+# ABSENT IS NOT "UNKNOWN", AND THE DIFFERENCE IS THE WHOLE CHECK. `docker network inspect` EXITS
+# NON-ZERO on a network that does not exist — which is the normal state on a fresh runner, the one
+# machine this gate is meant to run on. `… || echo 0` did not save it: the failing command still
+# wrote a newline to stdout, so the substitution captured "\n0", which is not the string "0", and
+# the gate refused to start because ZERO containers were attached. Measured in CI:
+#     REFUSING: \n0 container(s) are already attached to the `kontra` network
+#     Error response from daemon: network kontra not found
+# Existence is therefore asked FIRST, as its own question, and the count is only read when there is
+# something to count — and then stripped to digits so no stray whitespace can make it a non-number.
+if docker network inspect kontra >/dev/null 2>&1; then
+  ATTACHED=$(docker network inspect kontra --format '{{ len .Containers }}' 2>/dev/null | tr -dc '0-9')
+  ATTACHED=${ATTACHED:-0}
+else
+  ATTACHED=0
+fi
+if [ "$ATTACHED" != "0" ]; then
   echo "REFUSING: $ATTACHED container(s) are already attached to the \`kontra\` network, so" >&2
   echo "  something is running there and this gate will not start a second control plane into" >&2
   echo "  it. docker-compose.yml fixes the network name, so a compose project cannot scope it." >&2
