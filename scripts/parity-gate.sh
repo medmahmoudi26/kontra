@@ -117,6 +117,20 @@ WORKFLOW_DIR="$WORKSPACES/parity/workflows/paritygate"
 mkdir -p "$(dirname "$ACTOR_DIR")" "$(dirname "$WORKFLOW_DIR")"
 cp -a "$REPO/tests/parity/actor/." "$ACTOR_DIR/"
 cp -a "$REPO/tests/parity/workflow/." "$WORKFLOW_DIR/"
+# AND THE FIXTURE ACTOR, FOR THE SAME REASON — which this script got wrong. Step 4 served it as
+# `kontra serve --actor testdata/fixtureactor`, a REPO-relative path, inside a container whose
+# working directory is the INSTALL and which has no repo mount: `error: open
+# testdata/fixtureactor/actor.json: no such file or directory`, and then an e2e leg with nothing to
+# dispatch to. The header above says it in as many words — copying is the only way these are
+# visible at all.
+# DOT-PREFIXED, SO THE WATCHER DOES NOT DEPLOY IT. `kontra workspace watch` is the `cli` service's
+# main process and it deploys every actor directory under a workspace; this one is served in LOCAL
+# mode on purpose (step 4's header says why), so a buildpack build of it would be three minutes of
+# work nothing asks for — and a second deploy racing step 3's. `workspace watch` and `workspace
+# list` both skip a leading dot, which is the same property the staged build context relies on.
+FIXTURE_DIR="$WORKSPACES/.fixtures/fixtureactor"
+mkdir -p "$FIXTURE_DIR"
+cp -a "$REPO/testdata/fixtureactor/." "$FIXTURE_DIR/"
 
 # THE PROJECT NAME IS THE ISOLATION, so it carries the pid and a timestamp rather than being a
 # constant somebody could run twice. Lower-case and dash-only: compose rejects anything else.
@@ -731,13 +745,26 @@ fi
 # ONE QUERY, THREE AGGREGATES. Two queries against a Dataset a run may still be writing is the
 # divide-two-counts trap: one scan cannot disagree with itself.
 #
-# EXPORTED INSIDE THE CONTAINER AND READ BACK OUT, because `--export` writes a file and the only
-# filesystem both sides share is the read-only repo mount. /tmp in the container, then `cat`.
+# READ OFF THE PRINTED TABLE, NOT `--export`, AND THAT IS A WORKAROUND WITH A BUG BEHIND IT.
+# `kontra dataset query … --export <file>` writes the four bytes `null` for EVERY query on this
+# install — measured, three different SQL shapes, including `SELECT * … LIMIT 2`. The cause is one
+# level down and belongs to the per-workspace isolation work, not here: `exportQuery` COPYs to
+# `${dataPath}exports/<token>.<fmt>`, which for a workspace lake is the `ws-<name>` BUCKET, and
+# `routes/query.ts` then reads the key back through the SHARED ObjectStore, whose bucket is the
+# default one. An ObjectStore is bucket-scoped at construction, so the read cannot find what the
+# write made, `store.get` answers null, and Fastify serialises that as the body.
+#
+# So this counts off the display path, which the install job proves works. Three integers on the
+# line after the rule — `awk` on the third line rather than a header-aware parse, because the
+# alternative is parsing a table whose column order this query itself fixes.
 kli kontra dataset query "$DATASET" \
   --sql "SELECT count(*) AS rows_out, count(DISTINCT id) AS ids, count(DISTINCT worker) AS workers FROM \"$DATASET\"" \
-  --export /tmp/rowcount.json >"$LOGS/rowcount.log" 2>&1
-kli sh -c 'cat /tmp/rowcount.json 2>/dev/null' >"$LOGS/rowcount.json" 2>/dev/null
-COUNTS=$("$PYTHON" "$REPO/scripts/lib/one-row.py" "$LOGS/rowcount.json" rows_out ids workers 2>/dev/null || echo "? ? ?")
+  >"$LOGS/rowcount.log" 2>&1
+COUNTS=$(awk 'NR==3 {print $1, $2, $3}' "$LOGS/rowcount.log" 2>/dev/null)
+case "$COUNTS" in
+  [0-9]*' '[0-9]*' '[0-9]*) ;;                 # three integers: the shape this query must produce
+  *) COUNTS="? ? ?" ;;                          # anything else is unparseable, and `?` says so
+esac
 read -r ROWS IDS WORKERS_SEEN <<<"$COUNTS"
 check "rows queryable in Dataset $DATASET" "$UNITS" "${ROWS:-?}"
 # AND THE ROWS ARE THE ROWS THAT WENT IN. A count alone would pass on a Dataset full of the wrong
@@ -745,7 +772,6 @@ check "rows queryable in Dataset $DATASET" "$UNITS" "${ROWS:-?}"
 check "distinct Unit ids in the Dataset" "$UNITS" "${IDS:-?}"
 if [ "${ROWS:-?}" != "$UNITS" ] || [ "${IDS:-?}" != "$UNITS" ]; then
   sed 's/^/     /' "$LOGS/rowcount.log"
-  head -c 500 "$LOGS/rowcount.json" 2>/dev/null | sed 's/^/     /'
 fi
 # WHICH WORKER PRODUCED THE ROWS — a fact, not a fan-out assertion.
 #
@@ -754,7 +780,7 @@ fi
 # worth checking is that the column is populated at all: an empty producer means the ref's meta
 # did not survive the round trip, which is the same missing-metadata class as a lost drop count.
 case "${WORKERS_SEEN:-?}" in
-  ""|"?"|0) bad "the Dataset records no producing worker — the ref's meta did not survive; see $LOGS/rowcount.json" ;;
+  ""|"?"|0) bad "the Dataset records no producing worker — the ref's meta did not survive; see $LOGS/rowcount.log" ;;
   *) info "produced by $WORKERS_SEEN distinct worker(s) out of $REPLICAS replica(s) — one Batch is one dispatch, so 1 is the expected answer" ;;
 esac
 
@@ -765,8 +791,8 @@ say "4 · condition 1b — THE E2E LEG AGAINST THIS STACK"
 # and not as a shortcut: the image path is already proven by step 3, and this step is about
 # whether the SDK's own contract holds against the control plane rather than how a Worker was
 # placed.
-info "kontra serve --actor testdata/fixtureactor (local mode, for the e2e leg)"
-kli sh -c 'nohup kontra serve --actor testdata/fixtureactor >/tmp/fixture.log 2>&1 &' >/dev/null 2>&1
+info "kontra serve --actor $FIXTURE_DIR (local mode, for the e2e leg)"
+kli sh -c "nohup kontra serve --actor '$FIXTURE_DIR' >/tmp/fixture.log 2>&1 &" >/dev/null 2>&1
 BEACON_QUEUE="fixtureactor-0.1.0"
 if wait_for_pollers "$BEACON_QUEUE" 120 "$LOGS/workers-fixture.log"; then
   ok "the fixture actor is polling $BEACON_QUEUE: $POLLERS_ROW"
