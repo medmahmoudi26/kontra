@@ -882,8 +882,25 @@ jobs:
           docker compose exec -T cli sh -c 'kontra dataset query hello --sql "select message from hello"' | tee ds.out
           grep -q 'hello world' ds.out \
             || { echo "::error title=Dataset missing hello world::"; cat ds.out; exit 1; }
-          leftover=$(docker ps -a --format '{{.Names}}' | grep -E '^kf-' || true)
-          [ -z "$leftover" ] || { echo "::error title=Warden/actor containers still running::$leftover"; exit 1; }
+          # THE REAP IS ASYNCHRONOUS AND THIS ASSERTED IT AT 0.75 SECONDS. Measured, from this job's
+          # own timestamps: the workflow returned `{"dataset":"hello","rows":1}` at 21:37:00.17, the
+          # dataset query answered at 21:37:00.88, and this check ran at 21:37:00.92 — while the
+          # orchestrator's Pulumi destroy of the Fleet was still in flight. It had never been seen
+          # because no run had reached this step before.
+          #
+          # The property is "the Fleet is reaped when the run ends", not "within a second of it", so
+          # this waits for it — and when it gives up it says how long it waited and what state the
+          # leftovers are in, because "still present" and "still running" are different failures.
+          for _ in $(seq 1 30); do
+            leftover=$(docker ps -a --format '{{.Names}}' | grep -E '^kf-' || true)
+            [ -z "$leftover" ] && break
+            sleep 2
+          done
+          if [ -n "$leftover" ]; then
+            echo "::error title=Fleet containers still present 60s after the run::$leftover"
+            docker ps -a --filter 'name=^kf-' --format '{{.Names}}\t{{.Status}}'
+            exit 1
+          fi
 
       - name: recreating does not rotate the credential
         working-directory: ${{ runner.temp }}/install
