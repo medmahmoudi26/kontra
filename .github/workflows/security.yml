@@ -54,11 +54,40 @@ jobs:
           # reverted by a pinned version in a workflow file.
           go-version-file: ${{ matrix.module }}/go.mod
           cache-dependency-path: ${{ matrix.module }}/go.sum
+      # THE JSON IS WHAT THE GATE READS; `scripts/vulngate.py` prints the human-readable half. One
+      # scan, not two, because this is the expensive step — measured at ~5 GiB resident over `cli`.
+      #
+      # THE EXIT CODE IS CLASSIFIED RATHER THAN TRUSTED OR IGNORED. govulncheck exits 3 when it finds
+      # something, and 3 is not a verdict here: two of this repository's advisories have no fixed
+      # version, so the decision is `.github/vuln-allow.json`'s and the gate's. But a scan that DIED
+      # must still fail, and that is not the same thing. An OOM kill exits 137 and leaves a PARTIAL
+      # report — symbol analysis never finished, so every finding comes out module-level and the
+      # report reads exactly like "nothing is reachable". Measured on this repository: a killed run
+      # over `cli` reported 10 advisories, 0 reachable, while CI reported 3 reachable. A bare
+      # `|| true` here would have shipped that as a pass.
       - name: govulncheck
         working-directory: ${{ matrix.module }}
         run: |
+          set -euo pipefail
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          "$(go env GOPATH)/bin/govulncheck" ./...
+          report="$RUNNER_TEMP/govulncheck-$(echo "${{ matrix.module }}" | tr / -).json"
+          set +e
+          "$(go env GOPATH)/bin/govulncheck" -format json ./... > "$report"
+          rc=$?
+          set -e
+          if [ "$rc" -ge 128 ]; then
+            echo "::error::govulncheck was KILLED by signal $((rc - 128)) — the report in $report is partial and every finding in it will look module-level. This is not a pass."
+            exit 1
+          fi
+          case "$rc" in
+            0|3) : ;;  # 0 = nothing found, 3 = findings; both are complete reports
+            *)   echo "::error::govulncheck exited $rc, which is an error rather than a result"; exit 1 ;;
+          esac
+          [ -s "$report" ] || { echo "::error::govulncheck exited $rc but wrote no report"; exit 1; }
+          python3 "$GITHUB_WORKSPACE/scripts/vulngate.py" \
+            --module "${{ matrix.module }}" \
+            --allow "$GITHUB_WORKSPACE/.github/vuln-allow.json" \
+            < "$report"
 
   # ── EVERY OTHER LOCKFILE ────────────────────────────────────────────────────────────────────────
   #
@@ -73,9 +102,19 @@ jobs:
         with:
           # `--recursive` so a nested manifest is not missed: this repo has five go.mod, several
           # package.json and the runtimes fixtures' uv.lock.
+          #
+          # `--skip-git` IS NOT A FLAG ANY MORE and was never silently ignored: osv-scanner answers
+          # `Incorrect Usage: flag provided but not defined: -skip-git` and exits 127, so this job
+          # scanned nothing at all on its first run. Scanning a git root is opt-IN now
+          # (`--include-git-root`), which is the behaviour the flag used to ask for.
+          #
+          # NO GO CALL ANALYSIS, because osv-scanner implements it by running govulncheck — the four
+          # jobs above already do that properly, per module and with the module's own toolchain, and
+          # here it fails on `workspaces/demo/actors/desync/go.mod`, a standalone module outside
+          # `go.work`: "pattern ./...: directory prefix . does not contain modules listed in go.work".
           scan-args: |-
             --recursive
-            --skip-git
+            --no-call-analysis=go
             ./
 
   # ── THE WORKFLOWS THEMSELVES ────────────────────────────────────────────────────────────────────
@@ -156,7 +195,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: ossf/scorecard-action@v2.4.0
+      # v2.4.4, NOT v2.4.0: this is a Docker action, and v2.4.0's image is
+      # `gcr.io/openssf/scorecard-action`, which now answers `denied: This API method requires
+      # billing to be enabled` for OpenSSF's GCR project. The pull fails, so the job fails, and the
+      # message is about somebody else's billing. v2.4.4 publishes to `ghcr.io/ossf/scorecard-action`.
+      - uses: ossf/scorecard-action@v2.4.4
         with:
           results_file: scorecard.sarif
           results_format: sarif

@@ -1,0 +1,32 @@
+{
+  "_whyThisExists": [
+    "`scripts/vulngate.py` fails the build on a reachable vulnerability. Some are not fixable by a",
+    "version bump, and a gate that cannot be made green teaches everyone to ignore the gate — the",
+    "exact failure `security.yml`'s header warns about. So the decision goes HERE, in a file a pull",
+    "request has to touch and a reviewer can read, instead of into a `|| true`.",
+    "",
+    "An entry is not a dismissal. `vulngate.py` fails when an entry matches nothing (the",
+    "vulnerability is gone and the suppression is still live) and when one is past its `review_by`.",
+    "Both are deliberate build breaks. A suppression file without them only ever grows, and the",
+    "entry that silences the next real finding was added for a finding that no longer exists."
+  ],
+
+  "allow": [
+    {
+      "id": "GO-2026-4883",
+      "modules": ["cli"],
+      "package": "github.com/docker/docker",
+      "why": "Off-by-one in moby's PLUGIN PRIVILEGE VALIDATION — daemon code. kontra uses the docker CLIENT, and `docker/docker` ships daemon and client in one `+incompatible` module, so `cli.init` reaching `client.init` makes every daemon symbol init-reachable. The reported trace is package initialisation, not a call into plugin validation, and kontra never installs a docker plugin.",
+      "fix_requires": "github.com/moby/moby/v2 >= v2.0.0-beta.8. `github.com/docker/docker` has no fixed version and will not get one — the fix lives at a NEW module path, so this is an import rewrite across cli/deploy.go, cli/scale.go and cli/warden, onto a module still in beta.",
+      "review_by": "2026-12-15"
+    },
+    {
+      "id": "GO-2026-4887",
+      "modules": ["cli"],
+      "package": "github.com/docker/docker",
+      "why": "Same module, same shape, same reason: reported through `cli.init` → `client.init` → `api.init`, which is package initialisation of the API types the client needs. Not a call into the vulnerable path.",
+      "fix_requires": "github.com/moby/moby/v2 >= v2.0.0-beta.8, as above. The two advisories move together or not at all.",
+      "review_by": "2026-12-15"
+    }
+  ]
+}
