@@ -826,9 +826,28 @@ jobs:
               case "$c" in
                 kontra-hello*)
                   echo "::group::$c — the object store from where the actor stands"
-                  docker cp scripts/probe-objectstore.py "$c":/tmp/probe.py >/dev/null 2>&1 || true
-                  timeout 90 docker exec "$c" python3 -u /tmp/probe.py \
-                    || echo "(the probe did not finish in 90s — that IS the answer)"
+                  # AN ABSOLUTE PATH, because this step's working-directory is the INSTALL dir and
+                  # not the repo — `docker cp scripts/…` resolved to nothing there, `|| true`
+                  # swallowed it, and `python3` then answered
+                  #   can't open file '/tmp/probe.py': [Errno 2] No such file or directory
+                  if ! docker cp "$GITHUB_WORKSPACE/scripts/probe-objectstore.py" "$c":/tmp/probe.py; then
+                    echo "could not copy the probe into $c; nothing below ran"
+                  else
+                    # 124 IS THE ONLY EXIT THAT MEANS "HANG", and the previous version claimed a
+                    # 90-second timeout for ANY non-zero exit — so a probe that died instantly on a
+                    # missing file reported itself as the hang it was written to detect, and I
+                    # believed it. `timeout` reserves 124 for exactly this; everything else is the
+                    # probe failing and says nothing about the object store.
+                    set +e
+                    timeout 90 docker exec "$c" python3 -u /tmp/probe.py
+                    rc=$?
+                    set -e
+                    case "$rc" in
+                      0) ;;
+                      124) echo "(the probe hit its 90s timeout — a HANG, which is the finding)" ;;
+                      *)   echo "(the probe itself exited $rc — this says NOTHING about the store)" ;;
+                    esac
+                  fi
                   echo "::endgroup::"
                   ;;
               esac
