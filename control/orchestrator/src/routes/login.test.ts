@@ -167,8 +167,36 @@ describe('parsing what the CLI exports', () => {
   it('bearerOf parses the header and nothing else', () => {
     expect(bearerOf('Bearer abc')).toBe('abc');
     expect(bearerOf('bearer abc')).toBe('abc');
+    expect(bearerOf('BEARER abc')).toBe('abc');
+    expect(bearerOf('  Bearer   abc  ')).toBe('abc');
+    expect(bearerOf('Bearer\tabc')).toBe('abc');
     expect(bearerOf('Basic abc')).toBeUndefined();
     expect(bearerOf(undefined)).toBeUndefined();
+    // AT LEAST ONE SPACE. `Bearerabc` is a different scheme with a long name, not a token.
+    expect(bearerOf('Bearerabc')).toBeUndefined();
+    expect(bearerOf('Bearer')).toBeUndefined();
+    expect(bearerOf('Bearer   ')).toBeUndefined();
+    // A LINE TERMINATOR IN THE TOKEN WAS NEVER ACCEPTED, because the old pattern's `.` could not
+    // cross one. The regex-free version has to refuse it deliberately.
+    expect(bearerOf('Bearer a\nb')).toBeUndefined();
+    expect(bearerOf('Bearer a\rb')).toBeUndefined();
+  });
+
+  /**
+   * THE REASON IT IS NOT A REGEX. `/^Bearer\s+(.+)$/i` is polynomial — `\s+` and `.+` both match a
+   * space and `.` cannot cross a line terminator, so this input backtracked once per space and
+   * rescanned from each. Header parsing runs before any credential is checked, so the cost was
+   * unauthenticated.
+   *
+   * A BOUND RATHER THAN A COMPARISON, because a ratio against the old implementation would be a
+   * test of this runner's mood. 100k spaces is ~1 ms linear and seconds quadratic; 250 ms is far
+   * enough from both to never flake and still fail loudly on a reintroduced quantifier.
+   */
+  it('bearerOf does not backtrack on a long whitespace run', () => {
+    const hostile = `bearer ${' '.repeat(100_000)}x\ny`;
+    const started = performance.now();
+    expect(bearerOf(hostile)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(250);
   });
 });
 
