@@ -65,16 +65,18 @@ jobs:
       - name: pytest (non-e2e)
         run: pytest -m 'not e2e'
 
-      # The example actors' OWN tests, one process per directory — `testpaths` cannot include
-      # them (the actor registry is a process-global singleton, so importing two example actors
-      # into one session collides on a Method name).
+      # THERE IS NO `pytest (example actors)` STEP, and the Makefile says why at the place the
+      # target used to be: `test-examples`, `test-examples-python` and `test-examples-go` MOVED TO
+      # kontra-actors (ADR 0038), because there are no actors in this repository to run them
+      # against. `testdata/fixtureactor` is a fixture, exercised by `tests/test_fixture_actor_e2e.py`
+      # and by `scripts/parity-gate.sh`, not by a suite of its own.
       #
-      # This step exists because the gap was load-bearing: the ADR 0028 migration to
-      # `async def m(self, batch, dataset)` left webcrawl's and crawl4ai's tests on the old
-      # one-arg call, and the branch stayed green for a week because nothing ran them. An
-      # example actor is the surface an author copies from.
-      - name: pytest (example actors, one process each)
-        run: make test-examples-python
+      # The move took the target and left this step calling it, so the job has been failing with
+      # `make: *** No rule to make target 'test-examples-python'` ever since — a gate that reports
+      # red for the absence of the thing it was asked to run. The reason the step existed is still
+      # sound (the ADR 0028 migration left two example suites broken for a week because nothing ran
+      # them), which is exactly why it is kontra-actors' CI that has to carry it, not a step here
+      # that cannot.
 
   ts:
     name: orchestrator
