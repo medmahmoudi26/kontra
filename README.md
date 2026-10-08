@@ -92,12 +92,13 @@ published as a Cloud Native Buildpacks run image under `kontra-runtimes/` and na
 `kontra-runtimes`, so adding one is adding a directory there rather than editing kontra;
 `KONTRA_RUNTIMES_PREFIX` points an install at your own fork's registry instead.
 
-**None of that is on the build path yet.** `kontra deploy` still generates a Dockerfile
-`FROM kontra-host:1`, so an `actor.json` with a `runtime` field builds exactly as one without it. The
-`kontra-runtimes` repository does not exist and nothing mirrors runtimes on first boot, so a fresh
-install has none until one is pushed under that prefix. See
-[ADR 0061](docs/adr/0061-buildpacks-runtimes-and-the-image-store.md) for what is landed and what is
-not, and the wiki's [Runtimes](../../wiki/Runtimes) page for the author surface.
+**That is the build path now.** `kontra deploy` is `pack` and nothing else: the generated Dockerfile
+and its base images are gone, an `actor.json` with a `runtime` field is resolved to a digest and
+layered on, and first boot mirrors the published set into this install's registry
+(`kontra runtime import`) because the trust policy admits one registry and not three signing
+identities. See [ADR 0061](docs/adr/0061-buildpacks-runtimes-and-the-image-store.md) for the decision,
+[ADR 0063](docs/adr/0063-the-appliance-is-deleted.md) for what wiring it forced, and the wiki's
+[Runtimes](../../wiki/Runtimes) page for the author surface.
 
 Upgrading an install that still has a `registry:2` store needs one command first: the registry is
 **zot** now, its on-disk layout is different, and an unmigrated install **refuses to start** rather

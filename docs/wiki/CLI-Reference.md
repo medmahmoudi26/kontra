@@ -93,6 +93,25 @@ it would copy every tag onto itself and report success. An install that still ha
 
 ---
 
+### `kontra runtime import [name:major ...] [--from <prefix>] [--to <registry>] [--dry-run] [--force]`
+Copies published **run images** into this install's registry under `kontra-runtimes/`, by digest, and
+re-reads each one at the destination before reporting it. First boot runs it, so a fresh install can
+build the actor it ships — `kontra-runtimes/` is empty otherwise, and the published set cannot be
+resolved where it is published: its signing identity is per release and `trustpolicy` takes one exact
+`--certificate-identity`.
+
+Which runtimes: the arguments, else `KONTRA_RUNTIMES_IMPORT`, else whatever `--from`'s catalog lists —
+ghcr answers `/v2/_catalog` with **403**, so there the set has to be named. Idempotent: one already
+present is left alone, and one whose **major has moved upstream** is reported rather than replaced,
+because replacing it would advance the base image under every actor already built here. `--force` is
+how you mean it.
+
+### `kontra runtime list [--registry host:port]`
+The runtimes this install can resolve, as `<name>:<major>`. A registry query under the prefix, never a
+list inside kontra — which is what lets a fork add one by pushing it.
+
+---
+
 ## Authoring an Actor
 
 ### `kontra serve --actor <dir>`
@@ -135,10 +154,11 @@ With no `--push`: `<registry>/bundles/<name>:<version>`, the address a Fleet pla
 ### `kontra deploy --actor <dir> [--engine py|go] [--registry host:port]`
 The container-**Image** spelling: builds and pushes a self-contained worker image.
 
-> Cloud Native Buildpacks replace the generated Dockerfile this still uses, and `actor.json`'s
-> `runtime` field is how an actor picks what it is built on. The resolver and the `pack` invocation are
-> committed and tested; **neither is wired into this verb**, so the `runtime` field changes nothing
-> today. `kontra runtime build|test|import` and `kontra rebase` do not exist — [[Runtimes]].
+> ONE IMAGE, BUILT BY THE CNB LIFECYCLE. `actor.json`'s `runtime` field picks what it is layered on,
+> resolved to a digest before the build and recorded in the catalog. The build context is a STAGED
+> COPY of your directory — your own is never written to — carrying the vendored SDK, the handler and
+> the supervisor the image needs ([[Writing-Actors-Python]]). There is no second image, no cached
+> worker base and no handler recompile per deploy. `--host-only` means "build, do not push".
 
 ### `kontra workers list`
 What is polling.

@@ -308,58 +308,53 @@ boundary as before — so the line is `worker: python actor.py`.
 `python-browser:1` for a headless browser. System packages are chosen there, never installed per actor.
 See [[Runtimes]].
 
-### `deploy.sh` is deprecated
+### `deploy.sh` is not run any more
 
 A buildpack build **does not run `deploy.sh`**, so an actor that depended on it would build clean and
 be missing whatever the script installed — a failure at run time, in a container, far from the change
 that caused it. So the author is told at build time: a warning, and a refusal under
-`KONTRA_DEPLOY_SH=refuse`. The check and both messages are written and tested in `cli/packbuild.go`,
-and they hang off the buildpack path — **the shipped `kontra deploy` still runs the script** and never
-reaches them.
+`KONTRA_DEPLOY_SH=refuse` (`cli/packbuild.go`).
 
 Migrating one is a split, and the two halves go to different places:
 
 | what the script did | where it goes now |
 |---|---|
 | `apt-get install` of system libraries, fonts, a browser | a **runtime** that `provides` them |
-| `pip install` of a library | `pyproject.toml` + `uv.lock` |
+| `pip install` of a library | `requirements.txt`, or a `pyproject.toml` you resolve yourself |
 | fetching a binary the actor shells out to | a runtime, for the same reason as apt |
 
 [[Runtimes]] walks through `webcrawl`'s script, which is all three at once.
 
-### What is live today, and how native deps work until it changes
+An author's own `Dockerfile` beside `actor.py` is **no longer an escape hatch** — nothing reads it.
+Native dependencies are a runtime now, and a runtime is a directory in `kontra-runtimes`, which is
+the point: one image provides them for every actor on it instead of each actor installing its own.
 
-The shipped `kontra deploy` still builds the old way — a generated Dockerfile `FROM kontra-host:1` with
-a `COPY` of your directory — and nothing in this repository uses the layout above yet. What is **in the
-tree** is the `runtime` field (read into the manifest struct), its resolver and the `pack` invocation
-with their tests, and the catalog fields that will record what an image was built on. None of it is on
-the deploy path, so writing the new layout today changes nothing about what is built;
-[ADR 0061](../adr/0061-buildpacks-runtimes-and-the-image-store.md) says which half is which.
+### What `kontra deploy` adds to your directory, and why it is a copy
 
-So until the switch: pure Python needs nothing, and native deps go in a `Dockerfile` beside `actor.py`
-with **deps only** (no `ENTRYPOINT` — the image runs `python3 /actor/<name>/actor.py`). An author's own
-`Dockerfile` **wins** over the generated one.
+Your directory is what you publish, so **nothing is written into it**. `kontra deploy` stages a copy
+(`cli/packstage.go`) and adds what the image needs and the actor does not carry:
 
-```dockerfile
-FROM kontra-host:1
-COPY . /actor/myactor/
-RUN pip install some-dependency
-```
+| added to the staged copy | why |
+|---|---|
+| `requirements.txt` | so heroku/python participates in detection. If you ship one it is **extended**, never replaced; a `pyproject.toml` is refused with the line to add, because your resolver would ignore an appended pip requirement |
+| `Procfile` | the process definition, which is the only place a runtime variable can be baked — `pack build --env` is build-time only and a CNB image has no `ENTRYPOINT` to set |
+| `.python-version` | pinned, so two builds of one commit get the same interpreter |
+| the SDK, vendored | `vendor/sdk/python` + `vendor/runtime/python`, installed **by path**. Never by name: `kontra-sdk` is on no index, and `kontra` on PyPI is an unrelated project |
+| `kontra-handler` + `worker-entrypoint.sh` | the workflow half and the supervisor that runs both halves. An image without the handler polls the sessions queue, answers no workflow task, and looks healthy — so a missing one is a refusal |
 
-Both of those are the escape hatches buildpacks replace, and both go away with the old build path:
-`pip install` becomes the lockfile and an `apt-get` becomes a runtime.
+So a pure-Python actor needs `actor.json` and `actor.py` and nothing else, which is what the shipped
+`hello` is. Add a `requirements.txt` when you have a dependency of your own.
 
-One consequence to know before the switch: with buildpacks the app lands at **`/workspace`**, not
-`/actor/<name>/`, and the identity environment stops being baked in with `ENV`. Today `cli/deploy.go`
-stamps five variables into the image — `KONTRA_ACTOR_NAME`, `_VERSION`, `_ENGINE`, `_KIND`, `_ENTRY` —
-and `control/images/worker-entrypoint.sh` reads the last three to decide which interpreter to launch
-and on what file.
+Two consequences of the lifecycle doing the build, worth knowing when you read a container:
 
-The Warden sets only part of that set, and not from the catalog: `KONTRA_ACTOR_NAME` and `_VERSION`
-come from the **assignment** it was given, `KONTRA_NAMESPACE` from the Machine's own certificate, and
-`KONTRA_ACTOR_DIGEST` from the pull. **Nothing sets `_ENGINE`, `_KIND` or `_ENTRY` at container start**,
-so those three have to lose their reader — the Procfile names the process under buildpacks — before the
-`ENV` stamping can go.
+- **The app lands at `/workspace`**, not `/actor/<name>/`. The supervisor takes `KONTRA_ACTOR_ROOT`
+  and `KONTRA_HANDLER_BIN` for exactly this reason, both defaulting to the old absolute paths so an
+  image built before the switch keeps working.
+- **The identity rides in the Procfile** — `KONTRA_ACTOR_NAME`, `_VERSION`, `_ENGINE`, `_KIND`,
+  `_ENTRY` — rather than in `ENV` layers. The Warden still sets `KONTRA_ACTOR_NAME` and `_VERSION`
+  from the **assignment** it was given, `KONTRA_NAMESPACE` from the Machine's own certificate and
+  `KONTRA_ACTOR_DIGEST` from the pull; nothing sets the other three at container start, which is why
+  they have to come from the image.
 
 ## When the work is a function
 
