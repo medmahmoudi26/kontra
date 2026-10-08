@@ -588,6 +588,18 @@ jobs:
           # control/images/Dockerfile.logship. Built here so the compose `up` below has it; without
           # it, `pull_policy: never` fails on a missing image, which is the honest failure.
           docker build -f control/images/Dockerfile.logship -t kontra-logship:ci .
+          # PORTER, WHICH IS THE ONE IMAGE HERE NOT BUILT FROM THIS COMMIT — and it is built anyway,
+          # for a reason worth stating. `Dockerfile.porter` clones `github.com/TFMV/porter` at a
+          # pinned ref, so nothing about this commit changes what comes out; pointing CI at a local
+          # build therefore proves nothing the way the other four do. It is here because the
+          # alternative is not available: compose starts porter unconditionally (no `profiles:`), its
+          # default is `ghcr.io/medmahmoudi26/kontra-porter:dev`, and THAT PACKAGE HAS NEVER BEEN
+          # PUBLISHED — publish.yml had no arm for it until 8da3305. So a stranger following the
+          # documented install gets
+          #   Error response from daemon: No such image: ghcr.io/medmahmoudi26/kontra-porter:dev
+          # and this job gets the same thing under `KONTRA_PULL_POLICY=never`. Building it is what
+          # lets the eleven assertions below run at all; publishing it is what fixes the quickstart.
+          docker build -f control/images/Dockerfile.porter -t kontra-porter:ci .
 
       # ONE FILE IN THE INSTALL DIRECTORY, AND THE COUNT IS THE ASSERTION.
       #
@@ -618,9 +630,27 @@ jobs:
             echo "KONTRA_ORCHESTRATOR_IMAGE=kontra-orchestrator:ci"
             echo "KONTRA_HOST_IMAGE=kontra-host:1"
             echo "KONTRA_LOGSHIP_IMAGE=kontra-logship:ci"
+            echo "KONTRA_PORTER_IMAGE=kontra-porter:ci"
             echo "KONTRA_PULL_POLICY=never"
             echo "KONTRA_WORKSPACES=$RUNNER_TEMP/workspaces"
           } >> "$RUNNER_TEMP/install/.env"
+
+          # AND THE LIST ABOVE IS CHECKED AGAINST COMPOSE, because it is hand-written and compose is
+          # the thing that decides. `KONTRA_PORTER_IMAGE` was missing from it, so porter alone fell
+          # back to a `:dev` tag that has never been published and the `up` below could not start —
+          # an omission with no error until the very last step. `publish.yml` already derives its
+          # image list from these same `${KONTRA_*_IMAGE:-…}` defaults rather than restating them;
+          # this job cannot derive the BUILD commands that way, so it verifies instead.
+          missing=()
+          while read -r var; do
+            grep -q "^${var}=" "$RUNNER_TEMP/install/.env" || missing+=("$var")
+          done < <(grep -oE '\$\{KONTRA_[A-Z_]*IMAGE:-' docker-compose.yml | sed 's/^\${//;s/:-$//' | sort -u)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::docker-compose.yml names image override(s) this job does not set: ${missing[*]}"
+            echo 'Each one needs a docker build above and a line here, or the service falls back'
+            echo 'to a published :dev tag, which under KONTRA_PULL_POLICY=never cannot be pulled.'
+            exit 1
+          fi
 
       # THE CHECK IS A SCRIPT AND NOT A STEP, for the same reason `control/images/logline.py` is a
       # file: a multi-line checker embedded in a YAML block scalar is something nothing can run
