@@ -199,3 +199,80 @@ func TestTheDocumentedExampleLints(t *testing.T) {
 		}
 	}
 }
+
+func TestLintRefusesAnInterpolationInsideAFence(t *testing.T) {
+	// The measured case: a real report template's recovery query rendered
+	// `'enrich\-1791234567'`, a run id that matches nothing. The block copied clean and
+	// returned zero rows.
+	text := "see the lake:\n\n```sql\nSELECT 1 FROM t WHERE campaign_run = '{{ run.id }}'\n```\n"
+	problems := lintReportTemplate("report.md", text)
+	if len(problems) != 1 {
+		t.Fatalf("want one problem, got %d: %v", len(problems), problems)
+	}
+	msg := problems[0].Error()
+	if !strings.Contains(msg, "report.md:4") {
+		t.Errorf("want the offending line named, got %q", msg)
+	}
+	for _, want := range []string{"Markdown-escaped", "{% code"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("want %q in the message, got %q", want, msg)
+		}
+	}
+}
+
+func TestLintLeavesProseAndTaggedFencesAlone(t *testing.T) {
+	cases := []struct {
+		why  string
+		text string
+	}{
+		// Prose IS escaped, and the escape is undone by the Markdown parse. That is the design.
+		{"an interpolation in prose", "the run was {{ run.id }}, which finished"},
+		{"a fence with no holes in it", "```sql\nSELECT 1\n```\n"},
+		{"a tag inside a fence emits no escaped value", "```\n{% if result %}x{% endif %}\n```\n"},
+		{"an interpolation AFTER a closed fence", "```\nliteral\n```\n\nand then {{ run.id }}\n"},
+		{"a tilde fence, which is the same construct", "~~~\nSELECT 1\n~~~\n"},
+		{"a backtick inside a fence is content, not a span", "```\nSELECT `col` FROM t\n```\n\n{{ run.id }}\n"},
+		{"an inline code span with no hole in it", "the table is `cache_observations` for {{ run.id }}"},
+		{"the sanctioned way to carry bytes", `{% code "sql", result.recovery_query %}`},
+	}
+	for _, c := range cases {
+		if problems := lintReportTemplate("report.md", c.text); len(problems) != 0 {
+			t.Errorf("%s: refused a valid template: %v", c.why, problems)
+		}
+	}
+}
+
+func TestLintRefusesAnInterpolationInAnInlineCodeSpan(t *testing.T) {
+	// Same class as the fence: inline code is literal, so the escape is never undone here either.
+	problems := lintReportTemplate("report.md", "the run was `{{ run.id }}`, which stalled")
+	if len(problems) != 1 {
+		t.Fatalf("want one problem, got %d: %v", len(problems), problems)
+	}
+	if msg := problems[0].Error(); !strings.Contains(msg, "an inline code span") {
+		t.Errorf("want the construct named, got %q", msg)
+	}
+}
+
+func TestLintCatchesAnInterpolationInAnUnterminatedFence(t *testing.T) {
+	// A fence that is never closed runs to end of file, which is how a Markdown parser reads it too.
+	text := "```sql\nWHERE run = '{{ run.id }}'\n"
+	if problems := lintReportTemplate("report.md", text); len(problems) != 1 {
+		t.Fatalf("want one problem, got %d: %v", len(problems), problems)
+	}
+}
+
+func TestLintExplainsTheDefaultTemplatesOwnRoot(t *testing.T) {
+	// The built-in template loops over `default.run`, a root sweep.ts supplies only for that render.
+	// An author who copies it as a starting point must be told that, not told it is a typo.
+	problems := lintReportTemplate("report.md", "{% for row in default.run %}{{ row.k }}{% endfor %}")
+	if len(problems) != 1 {
+		t.Fatalf("want one problem, got %d: %v", len(problems), problems)
+	}
+	msg := problems[0].Error()
+	if strings.Contains(msg, "Did you mean") {
+		t.Errorf("want no typo suggestion for a root that really exists, got %q", msg)
+	}
+	if !strings.Contains(msg, "built-in template") {
+		t.Errorf("want the real explanation, got %q", msg)
+	}
+}

@@ -63,6 +63,31 @@ describe('the filter allowlist is complete, which is what keeps it an allowlist'
     expect(out.markdown).toBe('2 AB 2 1,2 ab');
   });
 
+  it('groups a large count with | thousands, because a headline figure is read at a glance', async () => {
+    const out = await render(
+      '{{ n | thousands }} {{ small | thousands }} {{ f | thousands }} {{ neg | thousands }}',
+      { n: 1_234_567_890, small: 346, f: 1234.5, neg: -1234 }
+    );
+    // `-` is a Markdown special, so the escape takes it context-free and the console re-escapes
+    // minimally from the tree — correct at both stages, same as `| redact`'s brackets.
+    expect(out.markdown).toBe('1,234,567,890 346 1,234.5 \\-1,234');
+  });
+
+  it('passes a non-number through | thousands rather than failing the whole report over one field', async () => {
+    // The real motivation: a workflow in this tree returns a headline figure as a STRING pointing
+    // at a Dataset rather than as a number. A filter that threw would lose the other 70 lines.
+    const out = await render('{{ s | thousands }}', { s: 'see run_summary.total_seconds' });
+    expect(out.markdown).toBe('see run\\_summary.total\\_seconds');
+  });
+
+  it('reads a count of seconds as a magnitude with | duration, to two units at most', async () => {
+    const out = await render(
+      '{{ ttl | duration }} | {{ run | duration }} | {{ short | duration }} | {{ zero | duration }}',
+      { ttl: 31_536_000, run: 7461, short: 1.5, zero: 0 }
+    );
+    expect(out.markdown).toBe('1y | 2h 4m | 1.5s | 0s');
+  });
+
   it('adds | redact for a value an author knows is sensitive', async () => {
     const out = await render('{{ s | redact }}', { s: 'token Bearer abc123 here' });
     // The marker's own brackets are escaped, because `| redact` runs BEFORE outputEscape and its

@@ -165,6 +165,8 @@ func lintReportTemplate(path, text string) []error {
 		}
 	}
 
+	fenced := fencedInterpolations(path, text)
+
 	names := make([]string, 0, len(unknown))
 	for name := range unknown {
 		names = append(names, name)
@@ -179,6 +181,86 @@ func lintReportTemplate(path, text string) []error {
 			Msg: fmt.Sprintf(
 				"%q is not part of a report's context. A template can see run, workflow, input, result and report — and nothing else (ADR 0055). %s",
 				name, didYouMean(name),
+			),
+		})
+	}
+	out = append(out, fenced...)
+	return out
+}
+
+var fenceRe = regexp.MustCompile("(?m)^[ \t]*(```+|~~~+)")
+
+// A single-backtick code span on one line, which is the form authors actually write.
+var inlineCodeRe = regexp.MustCompile("`[^`\n]+`")
+
+// fencedInterpolations reports every `{{ ... }}` sitting inside a raw ``` fence.
+//
+// WHY THIS IS A REFUSAL AND NOT A STYLE NOTE. The engine's outputEscape is context-free: it escapes
+// every Markdown special in every interpolated value, which is what makes the parse safe. Prose
+// survives that, because the escapes are consumed when the Markdown is parsed and the console
+// re-escapes minimally from the tree. A FENCED BLOCK DOES NOT: its content is literal, backslashes
+// included, so the escape is never undone.
+//
+// Measured on a real report template. A recovery query ending
+//
+//	WHERE campaign_run = '{{ run.id }}'
+//
+// rendered as `'enrich\-1791234567'` — a run id that matches nothing. The block looked
+// right, copied clean, and returned zero rows, which is the worst shape a defect can take in a
+// report somebody reaches for after a run went wrong.
+//
+// There is no runtime fix: by the time the mdast exists, our backslashes and the data's are the
+// same byte. So it is caught here, where the author can still choose `{% code %}` — which carries
+// bytes rather than text and is the whole reason that tag exists.
+func fencedInterpolations(path, text string) []error {
+	marks := fenceRe.FindAllStringIndex(text, -1)
+	out := []error{}
+	// Fences pair up: open, close, open, close. An unterminated final fence runs to end of file,
+	// which is also how a Markdown parser reads it.
+	for i := 0; i < len(marks); i += 2 {
+		start := marks[i][1]
+		end := len(text)
+		if i+1 < len(marks) {
+			end = marks[i+1][0]
+		}
+		out = append(out, holesIn(path, text, start, end, "a fenced code block")...)
+	}
+
+	// THE SAME DEFECT IN THE SAME CLASS: an inline code span is literal too, so `{{ run.id }}`
+	// between backticks reads `enrich\-1791234567` exactly as the fence did. Only the gaps
+	// BETWEEN fences are searched — a backtick inside a fence is content, not a span.
+	for i, at := 0, 0; at < len(text); i += 2 {
+		end := len(text)
+		if i < len(marks) {
+			end = marks[i][0]
+		}
+		for _, span := range inlineCodeRe.FindAllStringIndex(text[at:end], -1) {
+			out = append(out, holesIn(path, text, at+span[0], at+span[1], "an inline code span")...)
+		}
+		if i+1 >= len(marks) {
+			break
+		}
+		at = marks[i+1][1]
+	}
+	return out
+}
+
+// holesIn reports every `{{ ... }}` in text[start:end], which the caller has established is literal.
+func holesIn(path, text string, start, end int, where string) []error {
+	out := []error{}
+	for _, m := range expressionRe.FindAllStringSubmatchIndex(text[start:end], -1) {
+		// `{% ... %}` is left alone: a tag emits no value through outputEscape.
+		if m[2] < 0 {
+			continue
+		}
+		out = append(out, &reportLintError{
+			Path: path,
+			Line: lineOf(text, start+m[0]),
+			Msg: fmt.Sprintf(
+				"a `{{ ... }}` inside %s is Markdown-escaped and the escape is never undone, so it "+
+					"reads `a\\-b` where the value said `a-b`. Show the value in prose, or put the whole "+
+					"snippet in the context and emit it with `{%% code \"sql\", result.recovery_query %%}`, "+
+					"which carries bytes instead of text.", where,
 			),
 		})
 	}
@@ -206,6 +288,15 @@ func stripQuoted(body string) string {
 
 // didYouMean names the root an author probably meant. `results` for `result` is the typo §6.1 cites.
 func didYouMean(name string) string {
+	// `default` IS a real root, but only for the built-in template: `sweep.ts` adds it to the context
+	// just for that render. Copying the default template into a workflow folder as a starting point
+	// is the obvious first move for an author, and it is also the one case where the generic message
+	// below is actively misleading — the name is not a typo and `result` is not the answer.
+	if name == "default" {
+		return "`default` is the built-in template's own scaffolding and is NOT given to a template " +
+			"in a workflow folder — copying that template as a starting point is what usually brings " +
+			"this here. Build the rows from `result` instead."
+	}
 	for root := range contextRoots {
 		if strings.HasPrefix(name, root) || strings.HasPrefix(root, name) {
 			return fmt.Sprintf("Did you mean %q?", root)

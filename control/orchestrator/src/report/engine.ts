@@ -66,6 +66,8 @@ export const ALLOWED_FILTERS: ReadonlySet<string> = new Set([
   'array_to_sentence_string', 'compact', 'concat', 'find', 'find_exp', 'find_index',
   'find_index_exp', 'first', 'group_by', 'group_by_exp', 'has', 'has_exp', 'join', 'last', 'map',
   'reject', 'reject_exp', 'reverse', 'sort', 'sort_natural', 'sum', 'uniq', 'where', 'where_exp',
+  // presentation, registered below — see applyFilterPolicy
+  'redact', 'thousands', 'duration',
 ]);
 
 /**
@@ -243,6 +245,75 @@ function applyFilterPolicy(liquid: Liquid, redactText: (text: string) => string)
   liquid.registerFilter('redact', (value: unknown) =>
     typeof value === 'string' ? redactText(value) : value
   );
+  liquid.registerFilter('thousands', thousands);
+  liquid.registerFilter('duration', duration);
+}
+
+/**
+ * `| thousands` groups an integer's digits.
+ *
+ * THIS EXISTS BECAUSE A REPORT'S HEADLINE IS OFTEN A LARGE COUNT and Liquid has no separator filter:
+ * a long-running campaign's leading figure can run to ten digits, which no reader parses at a
+ * glance and which the author would otherwise have to pre-format in the workflow — pushing a
+ * presentation decision into the thing that produces the evidence.
+ *
+ * NO ARGUMENT, DELIBERATELY. A locale or a separator string would be author-controlled format input
+ * reaching a formatter, and `toLocaleString` with a caller-supplied tag is a much larger surface than
+ * this needs. One separator, one grouping, same bytes on every machine — which is also what makes a
+ * re-render reproducible, the property `| sample` was denied for.
+ *
+ * A non-finite or non-numeric value passes through untouched, as `| redact` does for a non-string:
+ * a filter that threw here would fail a whole report over a field the context contract never
+ * promised to be a number.
+ */
+export function thousands(value: unknown): unknown {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return value;
+  const negative = n < 0 || Object.is(n, -0);
+  // `toFixed`-free: the fraction is kept exactly as JavaScript prints it, so no precision is invented.
+  const [whole = '', fraction] = Math.abs(n).toString().split('.');
+  if (whole.includes('e')) return value; // exponent form: grouping it would misrepresent the number
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${negative ? '-' : ''}${grouped}${fraction !== undefined ? `.${fraction}` : ''}`;
+}
+
+const DURATION_UNITS: ReadonlyArray<readonly [string, number]> = [
+  ['y', 31_536_000],
+  ['d', 86_400],
+  ['h', 3600],
+  ['m', 60],
+];
+
+/**
+ * `| duration` turns a count of SECONDS into something a reader holds in their head.
+ *
+ * Two units at most — `2h 4m`, not `2h 4m 21s` — because the third is never the point at the scale a
+ * report quotes, and a run's length read to the second invites a precision the measurement does not
+ * have. Under a minute the seconds are kept as given, fraction and all.
+ *
+ * `y` IS 365 DAYS AND NOT A CALENDAR YEAR. Nothing here knows which year, and an edge's `max-age` is
+ * a count of seconds rather than a date, so a calendar is the wrong instrument: this is a magnitude,
+ * which is what `max-age=31536000` means too. Use `| date` for anything that is actually a moment.
+ */
+export function duration(value: unknown): unknown {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return value;
+  const negative = n < 0;
+  let rest = Math.abs(n);
+  const parts: string[] = [];
+  for (const [suffix, size] of DURATION_UNITS) {
+    const whole = Math.floor(rest / size);
+    if (whole > 0) {
+      parts.push(`${whole}${suffix}`);
+      rest -= whole * size;
+    }
+    if (parts.length === 2) break;
+  }
+  if (parts.length < 2 && (rest > 0 || parts.length === 0)) {
+    // `1e-7` prints as exponent form, which is not a duration anybody reads; round the tail.
+    parts.push(`${Number(rest.toFixed(3))}s`);
+  }
+  return `${negative ? '-' : ''}${parts.join(' ')}`;
 }
 
 /**
