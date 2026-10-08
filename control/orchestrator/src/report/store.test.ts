@@ -37,6 +37,62 @@ for (const backend of backends) {
       await store.purgeRun(OTHER);
     });
 
+    describe('dropEmptyDefaultVersions', () => {
+      const empty = JSON.stringify({ v: 1, root: { type: 'root', children: [] }, blocks: {} });
+      const real = JSON.stringify({
+        v: 1,
+        root: { type: 'root', children: [{ type: 'paragraph', children: [{ type: 'text', value: 'x' }] }] },
+        blocks: {},
+      });
+
+      it('removes a default-pinned version whose snapshot is the render of an empty template', async () => {
+        // The bug: `pinTemplate` stores '' for source 'default' on purpose, and `'' ?? DEFAULT` is ''.
+        // The hash still named the default template, so the row lies about what it holds.
+        await store.pinTemplate({ runId: RUN, templateHash: 'default@abc', templateText: '', source: 'default' });
+        await store.declareVersion({
+          runId: RUN, status: 'ok', templateHash: 'default@abc', renderKey: 'k1',
+          snapshotJson: empty, renderedBy: 'sweep', at: 1,
+        });
+
+        const removed = await store.dropEmptyDefaultVersions();
+        expect(removed).toEqual([{ runId: RUN, version: 1 }]);
+        expect(await store.version(RUN)).toBeUndefined();
+      });
+
+      it('leaves a default-pinned version that actually rendered something', async () => {
+        await store.pinTemplate({ runId: RUN, templateHash: 'default@abc', templateText: '', source: 'default' });
+        await store.declareVersion({
+          runId: RUN, status: 'ok', templateHash: 'default@abc', renderKey: 'k1',
+          snapshotJson: real, renderedBy: 'sweep', at: 1,
+        });
+
+        expect(await store.dropEmptyDefaultVersions()).toEqual([]);
+        expect((await store.version(RUN))?.version).toBe(1);
+      });
+
+      it('leaves an empty WORKSPACE render alone, because that is somebody\'s template doing what they wrote', async () => {
+        await store.pinTemplate({ runId: OTHER, templateHash: 'sha256:w', templateText: '{% if false %}x{% endif %}', source: 'workspace' });
+        await store.declareVersion({
+          runId: OTHER, status: 'ok', templateHash: 'sha256:w', renderKey: 'k2',
+          snapshotJson: empty, renderedBy: 'sweep', at: 1,
+        });
+
+        expect(await store.dropEmptyDefaultVersions()).toEqual([]);
+        expect((await store.version(OTHER))?.version).toBe(1);
+      });
+
+      it('is idempotent, because it runs on every boot', async () => {
+        await store.pinTemplate({ runId: RUN, templateHash: 'default@abc', templateText: '', source: 'default' });
+        await store.declareVersion({
+          runId: RUN, status: 'ok', templateHash: 'default@abc', renderKey: 'k1',
+          snapshotJson: empty, renderedBy: 'sweep', at: 1,
+        });
+
+        expect((await store.dropEmptyDefaultVersions()).length).toBe(1);
+        expect(await store.dropEmptyDefaultVersions()).toEqual([]);
+      });
+    });
+
     afterAll(async () => {
       await store?.close().catch(() => undefined);
     });

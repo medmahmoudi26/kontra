@@ -13,7 +13,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { templateHash } from './sweep';
-import { isReportable, sweepFinishedRuns, type SweepDeps, type SweepRun } from './sweep';
+import { contextForRun, isReportable, sweepFinishedRuns, type SweepDeps, type SweepRun } from './sweep';
+import { DEFAULT_TEMPLATE } from './defaultTemplate';
 import { ReportStore } from './store';
 
 const RUN: SweepRun = {
@@ -277,5 +278,45 @@ describe('the render host seam', () => {
     expect(out.rendered).toBe(1);
     const secret = await store.secret(RUN.runId, 1, 'b1');
     expect(Buffer.from(secret!, 'base64').toString()).toContain('Bearer abc');
+  });
+});
+
+describe('a run pinned to the DEFAULT template renders the default, not an empty document', () => {
+  // `pinTemplate` stores `templateText: ''` for `source: 'default'` on purpose — the text ships with
+  // the orchestrator — and `contextForRun` read `pinned` as a boolean, so `'' ?? DEFAULT_TEMPLATE`
+  // was `''`. That is every run started without a `report.md`, which is most of them. Found by the
+  // live-report session; both assertions fail against the code before the fix.
+  const RUN = 'enrich-1791234567';
+
+  async function pinnedDefault(): Promise<Awaited<ReturnType<typeof contextForRun>>> {
+    await store.pinTemplate({
+      runId: RUN,
+      templateHash: 'default@abc',
+      templateText: '',
+      source: 'default',
+    });
+    return contextForRun(
+      { runId: RUN, status: 'completed', startedAt: 1, closedAt: 2 },
+      { input: {}, result: { n: 1 } },
+      { store, now: () => 3 }
+    );
+  }
+
+  it('hands the renderer the default template rather than the empty string', async () => {
+    const built = await pinnedDefault();
+    expect(built.template).toBe(DEFAULT_TEMPLATE);
+    expect(built.template).not.toBe('');
+  });
+
+  it('still supplies `default`, which the default template loops over', async () => {
+    // Fixing only the text would trade the empty document for an UndefinedVariableError on
+    // `default.tables` — the context arm has to key on the source too, which is why it is one change.
+    const built = await pinnedDefault();
+    expect(built.context.default).toBeDefined();
+  });
+
+  it('does not move the render key, which is what makes the fix safe for every stored version', async () => {
+    const built = await pinnedDefault();
+    expect(built.templateHash).toBe('default@abc');
   });
 });

@@ -244,10 +244,39 @@ export function startReportRenderer(deps: SweepDeps = {}): () => void {
   const interval = Number.isFinite(every) && every > 0 ? every : DEFAULT_INTERVAL_MS;
 
   let running = false;
+  /**
+   * ONCE PER PROCESS, BEFORE THE FIRST PASS, and idempotent — after it has run there are no such rows
+   * and it costs one query per boot. See {@link ReportStore.dropEmptyDefaultVersions} for why these
+   * rows cannot heal through the ordinary convergence loop: the fix moves no `renderKey`, so the key
+   * check skips them and `POST /report/render` confirms them, both correctly.
+   *
+   * It runs HERE rather than as a migration because the sweep immediately after it is what produces
+   * the replacements. A migration would leave the rows gone and the reports absent until something
+   * else happened to run; this way the repair and the re-render are one boot apart at most.
+   */
+  let repaired = false;
+  const repair = async (): Promise<void> => {
+    if (repaired) return;
+    repaired = true;
+    const store = deps.store ?? reportStore();
+    const removed = await store.dropEmptyDefaultVersions();
+    if (removed.length === 0) return;
+    // NAMED, NOT COUNTED, on SKIPPED_IDS_CAP's grounds: a line saying a number of reports were
+    // deleted is not something an operator can check, and this is a deletion.
+    const named = removed.slice(0, SKIPPED_IDS_CAP).map((r) => `${r.runId}@v${r.version}`);
+    deps.onNote?.(
+      `report renderer: removed ${removed.length} empty report version(s) that named the default ` +
+        'template but held the render of an empty one — ' +
+        `${named.join(', ')}${removed.length > named.length ? ', …' : ''}. ` +
+        'This pass re-renders them.'
+    );
+  };
+
   const pass = async (): Promise<void> => {
     if (running) return;
     running = true;
     try {
+      await repair();
       const report = await sweepFinishedRuns(deps);
       if (report.gone > 0) {
         deps.onNote?.(
@@ -322,14 +351,34 @@ export async function contextForRun(
     version: await deps.store.nextVersion(run.runId),
     now: deps.now(),
   });
-  const withDefault: TemplateContext = pinned
-    ? context
-    : {
+  /*
+   * PINNED TO THE DEFAULT IS STILL THE DEFAULT, and reading `pinned` as a BOOLEAN missed that in two
+   * places at once. `pinTemplate` stores `templateText: ''` for `source: 'default'` deliberately —
+   * the text ships with the orchestrator and a copy per Run would be megabytes of identical rows —
+   * but `'' ?? DEFAULT_TEMPLATE` is `''`, so such a Run rendered an EMPTY DOCUMENT. That is every Run
+   * started without a `report.md` beside its workflow, which is most of them.
+   *
+   * Supplying the text alone would only have traded the empty document for an `UndefinedVariableError`
+   * on `default.tables`, because `default` was withheld from the context whenever `pinned` was truthy.
+   * BOTH ARMS HAVE TO KEY ON THE SOURCE, which is why this is one change and not two.
+   *
+   * `templateHash` is deliberately untouched: `workflowControl.ts` already pins `defaultTemplateId()`
+   * for these Runs, so the hash always named the right template even while the render did not. That is
+   * what makes this fix safe — it moves no `renderKey` and orphans no stored version — and it is also
+   * why the versions already stored cannot heal on their own. See
+   * {@link ReportStore.dropEmptyDefaultVersions}, which removes them so this can replace them.
+   *
+   * Found by the live-report session against this branch.
+   */
+  const usesDefault = pinned === undefined || pinned.source === 'default' || pinned.templateText === '';
+  const withDefault: TemplateContext = usesDefault
+    ? {
         ...context,
         default: defaultContext(context.run as unknown as Record<string, unknown>, context.result),
-      };
+      }
+    : context;
   return {
-    template: pinned?.templateText ?? DEFAULT_TEMPLATE,
+    template: usesDefault ? DEFAULT_TEMPLATE : pinned!.templateText,
     templateHash: pinned?.templateHash ?? defaultTemplateId(deps.version),
     context: withDefault,
     pinned: pinned !== undefined,

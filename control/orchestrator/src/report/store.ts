@@ -659,6 +659,83 @@ export class ReportStore {
    * Returns the number of VERSION rows removed, which is what the sweep's counter means by "a report
    * was deleted"; secrets and feedback are consequences of that, not separate events.
    */
+  /**
+   * Drop version rows that are the render of the EMPTY template rather than of the template they name.
+   *
+   * ── WHY DELETING A STORED REPORT IS NOT A CONTRADICTION HERE ───────────────────────────────────
+   *
+   * A report is immutable and versioned, and that protects a record of what a Run returned. These rows
+   * are not one. `contextForRun` read `pinned` as a boolean, and `pinTemplate` stores `templateText:
+   * ''` for `source: 'default'` on purpose — the text ships with the orchestrator, so a copy per Run
+   * would be megabytes of identical rows — so `'' ?? DEFAULT_TEMPLATE` was `''` and every Run started
+   * without a `report.md` rendered an EMPTY document. The row says `default@<digest>` and holds the
+   * render of a different template, the empty one. It lies about its own provenance, and removing it
+   * is not discarding a report: it is clearing the way for the one the label already promises.
+   *
+   * ── WHY THIS CANNOT BE LEFT TO CONVERGE ON ITS OWN ─────────────────────────────────────────────
+   *
+   * `renderKey` covers the template hash and the context, and the FIX CHANGES NEITHER — the hash was
+   * always `defaultTemplateId()`, which is what makes the fix safe for every other Run. So the sweep's
+   * key check finds the bad row and skips, and `POST /report/render` answers 200 `reproduced: true`
+   * with that same row, because a pinned template over unchanged metadata is exactly what it holds a
+   * version for. Both correct, both unable to help. Nothing writes a second version under that key,
+   * so without this the rows are permanent.
+   *
+   * ── EMPTINESS IS READ FROM THE TREE, NEVER FROM THE TEXT ───────────────────────────────────────
+   *
+   * A snapshot whose root has no children is structurally empty and could not have come from a
+   * template with content in it. Matching on the markdown instead — a short document, no headings —
+   * is a heuristic, and a heuristic that deletes reports eventually deletes a real one.
+   *
+   * Filtered to `source = 'default'` as well, though the structural test alone would be nearly as
+   * tight: the bug could not reach a workspace template, so a Run that pinned its own `report.md` and
+   * legitimately rendered nothing is somebody's template doing what they wrote, not this.
+   *
+   * SECRETS GO FIRST, on {@link ReportStore.purgeRun}'s grounds exactly: a half-finished pass must not
+   * leave `report_secret` rows reachable by a reveal route whose version row has already gone.
+   * An empty render has no blocks and so no secrets, but that is a fact about today's bug rather than
+   * a property of the method, and ordering it correctly costs one statement.
+   */
+  async dropEmptyDefaultVersions(): Promise<Array<{ runId: string; version: number }>> {
+    await this.init();
+    const rows = await this.driver.all(
+      `SELECT v.run_id, v.version, v.snapshot_json
+         FROM ${this.t('report_version')} v
+         JOIN ${this.t('report_template')} t ON t.run_id = v.run_id
+        WHERE t.source = ? AND v.status = ?`,
+      ['default', 'ok']
+    );
+
+    const removed: Array<{ runId: string; version: number }> = [];
+    for (const r of rows) {
+      const raw = r.snapshot_json;
+      if (typeof raw !== 'string') continue;
+      let snapshot: { root?: { children?: unknown[] } };
+      try {
+        snapshot = JSON.parse(raw) as { root?: { children?: unknown[] } };
+      } catch {
+        // UNPARSEABLE IS NOT EMPTY. It is a different defect and this method has no opinion on it;
+        // deleting it here would destroy the only evidence of whatever wrote it.
+        continue;
+      }
+      const children = snapshot.root?.children;
+      if (!Array.isArray(children) || children.length > 0) continue;
+
+      const runId = String(r.run_id);
+      const version = num(r.version);
+      await this.driver.run(
+        `DELETE FROM ${this.t('report_secret')} WHERE run_id = ? AND version = ?`,
+        [runId, version]
+      );
+      await this.driver.run(
+        `DELETE FROM ${this.t('report_version')} WHERE run_id = ? AND version = ?`,
+        [runId, version]
+      );
+      removed.push({ runId, version });
+    }
+    return removed;
+  }
+
   async purgeRun(runId: string): Promise<number> {
     await this.init();
     await this.driver.run(`DELETE FROM ${this.t('report_secret')} WHERE run_id = ?`, [runId]);
