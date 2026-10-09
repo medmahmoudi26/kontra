@@ -362,8 +362,11 @@ Migrating one is a split, and the two halves go to different places:
 
 [[Runtimes]] walks through `webcrawl`'s script, which is all three at once.
 
-An author's own `Dockerfile` beside `actor.py` is **no longer an escape hatch** — nothing reads it.
-Native dependencies are a runtime now, and a runtime is a directory in `kontra-runtimes`, which is
+An author's own `Dockerfile` beside `actor.py` is **no longer an escape hatch** — nothing reads it,
+so `kontra deploy` **refuses** an actor that carries one (or a `runtime.Dockerfile`) rather than
+building an image without whatever the file installed. Unlike `deploy.sh` there is no warning period:
+the file was the whole build on the old path, so ignoring it changes what the image is, not one step
+of it. Native dependencies are a runtime now, and a runtime is a directory in `kontra-runtimes`, which is
 the point: one image provides them for every actor on it instead of each actor installing its own.
 
 ### What `kontra deploy` adds to your directory, and why it is a copy

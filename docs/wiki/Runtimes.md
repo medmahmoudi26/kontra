@@ -173,11 +173,15 @@ catalog had to learn `runtime` and `builderDigest` before rebase could exist at 
 `deploy.sh` is how an actor installed system packages before runtimes. A buildpack build **does not
 run it**, so an actor that depended on it would build clean and be missing what the script installed —
 at run time, in a container, far from the change. So it is reported at build time: a warning, and a
-refusal under `KONTRA_DEPLOY_SH=refuse`. That check belongs to the buildpack path, which `kontra deploy`
-does not take yet — so today the script still runs and nobody is warned.
+refusal under `KONTRA_DEPLOY_SH=refuse` (`cli/packbuild.go`).
+
+A `Dockerfile` or `runtime.Dockerfile` in the actor's folder is the same problem, and `kontra deploy`
+refuses the actor outright: nothing on the buildpack path reads either file, so whatever it installed
+would be missing at run time. There is no warning period because no actor in this repository carries
+one — `deploy.sh`'s exists for `webcrawl`, below. The fix is the same: a runtime.
 
 The migration is to read what the script installed and pick the runtime that provides it. The
-worked example is `workspaces/bugbounty/actors/webcrawl/deploy.sh`, which apt-installs Chromium's
+worked example is `workspaces/demo/actors/webcrawl/deploy.sh`, which apt-installs Chromium's
 shared libraries and fonts and then `playwright install chromium`:
 
 - the apt half is `python-browser:1` — that is what the runtime is for;
@@ -186,8 +190,8 @@ shared libraries and fonts and then `playwright install chromium`:
 - the pinned browser build Playwright refuses to run without is the runtime's job to keep in step
   with the Playwright version it ships against. A runtime that provides `chromium` states which.
 
-Nothing in this repository uses the new layout yet, and `deploy.sh` is still run by the shipped
-`kontra deploy`.
+That script is the one `deploy.sh` left in this repository, so a deploy of `webcrawl` takes the
+warning path until it moves to `python-browser:1`.
 
 ---
 
