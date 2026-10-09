@@ -483,6 +483,19 @@ func (a *KontraActor) RunBatch(ctx context.Context, req RunBatchReq) (*RunBatchR
 		todo = append(todo, core.Item{Index: i, Value: u})
 	}
 
+	// THIS BATCH'S CHECKPOINT, BEFORE THIS ATTEMPT'S FIRST BEAT. Every beat now carries
+	// `a.Checkpoint()` (the keepalive and the author's progress included), and until a Unit commits
+	// that was whatever the instance last published: a keyed dispatch's PREVIOUS batch — its done
+	// count shown on this batch's run page — or, on a fresh instance, the zero value, which a
+	// keepalive then wrote over the real checkpoint of the attempt before. Published here, from the
+	// replayed commits, so the first beat of an attempt already says what is committed. And the
+	// counts seeded to match, so the beat reports the replayed Units as done.
+	r.mu.Lock()
+	ck, done, isolated := r.checkpoint(), len(r.slots), len(r.failSlots)
+	r.mu.Unlock()
+	a.publishCheckpoint(ck)
+	a.heartbeat(done, r.total, isolated)
+
 	countBatch()
 	if method == nil {
 		// No Method declared (a load-only actor): identity passthrough.
@@ -594,9 +607,10 @@ func (r *batchRun) Commit(u *core.Unit) error {
 	r.clearScratch(r.slot(u.Index))
 	r.slots[u.Index] = out
 	done, isolated := len(r.slots), len(r.failSlots)
-	ck := r.checkpoint()
+	// PUBLISHED UNDER r.mu: two Units committing at once would otherwise publish in either order,
+	// and the older checkpoint landing last would un-commit a Unit in the heartbeat.
+	r.a.publishCheckpoint(r.checkpoint())
 	r.mu.Unlock()
-	r.a.publishCheckpoint(ck)
 	r.a.heartbeat(done, r.total, isolated)
 	return nil
 }
@@ -698,10 +712,9 @@ func (r *batchRun) fail(u *core.Unit, e error, category string) error {
 	r.clearScratch(slot) // an isolated Unit never resumes -> drop its scratch
 	r.failSlots[u.Index] = failureRecord(u.Value, ei, category)
 	done, isolated := len(r.slots), len(r.failSlots)
-	ck := r.checkpoint()
+	r.a.publishCheckpoint(r.checkpoint()) // under r.mu, for Commit's reason
 	r.mu.Unlock()
 	countIsolated(category) // the run just lost this Unit; make that observable
-	r.a.publishCheckpoint(ck)
 	r.a.heartbeat(done, r.total, isolated)
 	return nil
 }

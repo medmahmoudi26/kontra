@@ -478,11 +478,14 @@ func (b *beater) send(extra map[string]any) {
 	for k, v := range extra {
 		beat[k] = v
 	}
+	// ONE LOCK ACROSS THE SNAPSHOT, THE CHECKPOINT READ AND THE RECORD. Temporal keeps the LAST
+	// details, so two beats must reach it in the order their checkpoints were read: a keepalive that
+	// read checkpoint N and recorded it after a commit's beat for N+1 would un-commit a Unit.
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	for k, v := range b.last {
 		beat[k] = v
 	}
-	b.mu.Unlock()
 	// Read here, after the runner has published it, so this is the current state and not a lagging
 	// copy. Encoded in the contract the Python peer and the orchestrator share
 	// (shared/conformance/checkpoint.json).

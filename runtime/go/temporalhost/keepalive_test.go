@@ -16,10 +16,9 @@ technique class — 3,630 techniques x 3 oracle writes, paced at 250ms, ~45 minu
 two-minute bound. The first beat was due 43 minutes after the attempt had already been killed.
 Three runs died this way, 75 minutes and 0 rows each, with no error on the parent.
 
-What is asserted here is the DERIVATION; the payload is beater_test.go's. The goroutine itself needs a real
-activity context, which `progress_beat_test.go` already declines to fake for the same reason; what
-can go wrong without a test is the interval (a constant creeping back in) and the merge (a tick that
-blanks the counts, which `heartbeat.ts` would read as a batch that had made no progress at all).
+What is asserted here is the DERIVATION of the interval — a constant creeping back in is what can
+go wrong without a test. The goroutine itself needs a real activity context; the PAYLOAD every tick
+sends is asserted against the real builder in beater_test.go.
 */
 
 func TestTheKeepaliveIntervalIsDerivedFromTheBound(t *testing.T) {
