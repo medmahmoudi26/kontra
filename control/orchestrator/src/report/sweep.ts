@@ -42,7 +42,14 @@
 import { createHash } from 'node:crypto';
 
 import { DEFAULT_TEMPLATE, defaultContext, defaultTemplateId } from './defaultTemplate';
-import { buildContext, renderKey, statusWord, type TemplateContext } from './context';
+import {
+  buildContext,
+  renderKey,
+  statusWord,
+  type DatasetSummary,
+  type ProgressContext,
+  type TemplateContext,
+} from './context';
 import { render as renderInHost, type RenderResponse } from './renderHost';
 import type { ReportSnapshot } from './render';
 import { reportStore, type ReportStore } from './store';
@@ -358,7 +365,13 @@ export function templateHash(text: string): string {
 export async function contextForRun(
   run: SweepRun,
   io: { input?: unknown; output?: unknown },
-  deps: SweepDeps & { store: ReportStore; now: () => number }
+  deps: SweepDeps & { store: ReportStore; now: () => number },
+  /**
+   * What only an OPEN run has: `run.progress`, the in-flight `datasets` and the workflow's `report`
+   * query as `result` (ADR 0062 §2). Passed by the live renderer alone. The stored render never
+   * passes it — it is built from the final context — so nothing here can reach a `renderKey`.
+   */
+  live?: { progress?: ProgressContext; datasets?: Record<string, DatasetSummary>; partial?: unknown }
 ): Promise<{ template: string; templateHash: string; context: TemplateContext; pinned: boolean }> {
   const pinned = await deps.store.template(run.runId);
   const status = statusWord(run.status);
@@ -380,6 +393,9 @@ export async function contextForRun(
     // key deliberately excludes — see `renderKey`.
     version: await deps.store.nextVersion(run.runId),
     now: deps.now(),
+    ...(live?.progress ? { progress: live.progress } : {}),
+    ...(live?.datasets ? { datasets: live.datasets } : {}),
+    ...(live?.partial !== undefined ? { partial: live.partial } : {}),
   });
   /*
    * PINNED TO THE DEFAULT IS STILL THE DEFAULT, and reading `pinned` as a BOOLEAN missed that in two

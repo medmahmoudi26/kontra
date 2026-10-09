@@ -269,9 +269,30 @@ export class LiveSession {
     }
   }
 
+  /** What {@link LiveHub} hangs on a session for its lifetime: the tick and the producers'
+   *  subscriptions. Run once, by {@link close}, however the session ends. */
+  private readonly onClose: Array<() => void> = [];
+
+  /** Register something to undo when this session closes. Runs at once if it already has. */
+  whenClosed(fn: () => void): void {
+    if (this.closed) {
+      fn();
+      return;
+    }
+    this.onClose.push(fn);
+  }
+
   close(): void {
+    if (this.closed) return;
     this.closed = true;
     this.viewers.clear();
+    for (const fn of this.onClose.splice(0)) {
+      try {
+        fn();
+      } catch (err) {
+        this.deps.onError?.(err);
+      }
+    }
   }
 }
 
@@ -281,6 +302,22 @@ export type RefusalReason = 'per-run' | 'runs' | 'viewers';
 export interface LiveHubDeps extends Omit<LiveSessionDeps, 'degraded'> {
   degraded?: string | undefined;
   onNote?: (note: string) => void;
+  /**
+   * Re-render every `tickMs` while a session has viewers. Absent means commits are the only trigger.
+   *
+   * ADR 0062 refused a timer because the context could not change between ticks, and at the time
+   * that was true: nothing produced `run.progress`, `datasets` or the open-run `result`. With those
+   * produced, the context DOES move without a commit: progress and duration change, and pushed rows
+   * land well before their batch is published. A tick goes through {@link LiveSession.touch}, so it
+   * shares the debounce and the one-in-flight rule, and a render that changed nothing sends nothing.
+   */
+  tickMs?: number;
+  /**
+   * Called once when a session is CREATED (not when a viewer joins one), with that session. Return a
+   * cleanup and it runs when the session closes. This is where a producer subscribes to whatever
+   * feeds the session's context, and stops when nobody is watching any more.
+   */
+  onOpen?: (key: LiveRunKey, session: LiveSession) => (() => void) | void;
 }
 
 /**
@@ -335,7 +372,26 @@ export class LiveHub {
     const session = new LiveSession(key, { ...this.deps, degraded: this.deps.degraded });
     session.viewers.add(viewer);
     this.sessions.set(liveKey(key), session);
+    this.attachProducers(key, session);
     return { ok: true, session, detach: () => this.detach(key, viewer) };
+  }
+
+  /** The tick and the {@link LiveHubDeps.onOpen} producers, both undone by the session's close. */
+  private attachProducers(key: LiveRunKey, session: LiveSession): void {
+    const tickMs = this.deps.tickMs;
+    if (tickMs && tickMs > 0) {
+      const timer = setInterval(() => session.touch(), tickMs);
+      timer.unref?.();
+      session.whenClosed(() => clearInterval(timer));
+    }
+    try {
+      const cleanup = this.deps.onOpen?.(key, session);
+      if (cleanup) session.whenClosed(cleanup);
+    } catch (err) {
+      // A producer that cannot subscribe leaves the session on its other triggers; it is not a
+      // reason to refuse the viewer a document.
+      this.deps.onError?.(err);
+    }
   }
 
   /** The last viewer leaving ends the session, so an unwatched run costs nothing. */

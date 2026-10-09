@@ -1135,3 +1135,35 @@ export async function fetchRunIO(runId: string, execId?: string): Promise<RunIO 
 
   return io;
 }
+
+/** How long a live render waits for a workflow's `report` query before rendering without it. */
+const REPORT_QUERY_TIMEOUT_MS = 3_000;
+
+/**
+ * An open run's own account of itself: its workflow's `report` query (ADR 0062 §2), or `undefined`.
+ *
+ * MOST WORKFLOWS DEFINE NO SUCH QUERY, and that is an answer, not a failure: the SDK raises for an
+ * unknown query type and this returns `undefined`, so the template sees `result` as null exactly as it
+ * did before. Same for a run whose worker is gone — Temporal cannot answer a query without one, and
+ * would otherwise hold the request — so it is bounded by {@link REPORT_QUERY_TIMEOUT_MS}: a live
+ * render renders without the query rather than waits for it.
+ */
+export async function queryRunReport(
+  runId: string,
+  timeoutMs = REPORT_QUERY_TIMEOUT_MS
+): Promise<unknown | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const client = await getClient();
+    const answer = client.workflow.getHandle(runId).query<unknown>('report');
+    const timeout = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), timeoutMs);
+      timer.unref?.();
+    });
+    return await Promise.race([answer, timeout]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

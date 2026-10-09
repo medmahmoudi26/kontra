@@ -65,7 +65,16 @@ import { Repo } from './db/repo';
 import { SourceStore } from './sourceStore';
 import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
-import { describeRun as describeRunById, fetchRunClose, fetchRunIO, getClient, listRuns, type RunDescription } from './temporalClient';
+import {
+  describeRun as describeRunById,
+  describeRunHeartbeats,
+  fetchRunClose,
+  fetchRunIO,
+  getClient,
+  listRuns,
+  queryRunReport,
+  type RunDescription,
+} from './temporalClient';
 import { HistoryArchive, startHistoryArchiver } from './historyArchive';
 import { startInuseReconciler } from './images/inuseReconciler';
 import { installApiGate } from './auth/apiGate';
@@ -74,6 +83,10 @@ import { reportStore, type ReportStore } from './report/store';
 import { render as renderReportInHost } from './report/renderHost';
 import { admitReport, registerReportRoutes } from './routes/report';
 import { registerReportLiveRoute } from './routes/reportLive';
+import { LiveHub, type RenderOnce } from './report/live';
+import { IN_FLIGHT, inFlightSummary, progressFromHeartbeats, type InFlightRows } from './report/liveProducers';
+import type { RowTailHub } from './rowTail';
+
 import { registerInfraRoutes } from './infraRoutes';
 import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
@@ -115,6 +128,10 @@ import { registerStuckRoutes } from './routes/stuck';
 import { registerRunStream } from './routes/runStream';
 import { registerSummaryRoutes } from './routes/summaries';
 import { registerWorkflowRoutes } from './routes/workflows';
+
+/** How often a watched open run's live report re-renders when nothing else asked it to. Matches the
+ *  row tail's poll: a faster tick would render a context that cannot have changed. */
+const LIVE_TICK_MS = 2_000;
 
 /**
  * The console's surfaces, by first path segment — the closed set the SPA fallback serves.
@@ -440,7 +457,93 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
      and the same gate — `admitReport` is shared rather than copied, so the documented posture and the
      enforced one cannot drift. The render goes to the same worker thread the sweep uses, so a live
      tick costs the API's event loop no more than a stored render does. */
+  /* WHAT THE LIVE RENDER READS THAT A STORED ONE NEVER DOES (ADR 0062 §2, and its correction).
+     `liveRows` is the row tail's last look at each watched run's pushed records, kept between its
+     polls; `rowTailHub` is the run page's own poller, assigned where its route registers below, so a
+     live report watches the same rows through the same caps rather than a second poller. */
+  const liveRows = new Map<string, InFlightRows>();
+  let rowTailHub: RowTailHub | undefined;
+  const renderLive: RenderOnce = async (key) => {
+    const described = await describeRunById(key.runId);
+    if (!described) return { error: `run ${key.runId} is no longer readable` };
+    const io = (await fetchRunIO(key.runId)) ?? {};
+    // ONLY FOR AN OPEN RUN. A closed run's live render is the bridge to its stored version, and
+    // must say what the stored one will: no progress, no in-flight rows, `result` from its return.
+    let live: Parameters<typeof contextForRun>[3];
+    if (described.status === 'running') {
+      const [beats, partial] = await Promise.all([
+        describeRunHeartbeats(key.runId).catch(() => ({})),
+        queryRunReport(key.runId),
+      ]);
+      const progress = progressFromHeartbeats(beats);
+      const seen = liveRows.get(key.runId);
+      live = {
+        ...(progress ? { progress } : {}),
+        ...(seen && seen.rows > 0 ? { datasets: { [IN_FLIGHT]: inFlightSummary(seen) } } : {}),
+        ...(partial !== undefined ? { partial } : {}),
+      };
+    }
+    const built = await contextForRun(
+      {
+        runId: key.runId,
+        status: described.status,
+        startedAt: described.startedAt,
+        closedAt: described.closedAt,
+        type: described.type,
+      },
+      io,
+      {
+        store: reports,
+        now: Date.now,
+        close: (id) => fetchRunClose(id),
+        identity: async (id) => {
+          const found = await runWorkflowStore().get(id);
+          return found ? { workflow: found.workflow, version: found.version } : undefined;
+        },
+      },
+      live
+    );
+    const result = await renderReportInHost(
+      { template: built.template, context: built.context as unknown as Record<string, unknown> },
+      { onNote: (note) => app.log.info(note) }
+    );
+    if (!result.ok) return { error: result.error };
+    return { snapshot: result.snapshot };
+  };
+  const liveHub = new LiveHub({
+    renderOnce: renderLive,
+    onError: (err) => app.log.warn(`report live: ${errMessage(err)}`),
+    tickMs: LIVE_TICK_MS,
+    // THE ROW TAIL, PER WATCHED RUN, for as long as somebody watches. A new snapshot is new context,
+    // so it re-renders through the session's debounce; the subscription ends with the session.
+    onOpen: (key, session) => {
+      if (!rowTailHub) return undefined;
+      let cancel: () => void;
+      try {
+        cancel = rowTailHub.subscribe(key.runId, (e) => {
+          if (e.kind !== 'snapshot') return;
+          const before = liveRows.get(key.runId);
+          liveRows.set(key.runId, {
+            rows: e.snapshot.rows,
+            lastChunkAt: e.snapshot.lastChunkAt,
+            // A snapshot carries a window only when freshly minted; keep the last one otherwise.
+            recent: e.snapshot.window ? e.snapshot.window.recent.map((c) => c.row) : (before?.recent ?? []),
+          });
+          session.touch();
+        });
+      } catch (err) {
+        // At the row tail's caps. The report still updates on its other triggers.
+        app.log.warn(`report live: run ${key.runId}: no row tail: ${errMessage(err)}`);
+        return undefined;
+      }
+      return () => {
+        cancel();
+        liveRows.delete(key.runId);
+      };
+    },
+  });
   registerReportLiveRoute(app, {
+    hub: liveHub,
     admit: admitReport,
     onError: (err, runId) =>
       app.log.warn(`report live: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
@@ -453,36 +556,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         closedAt: described.closedAt,
       };
     },
-    renderOnce: async (key) => {
-      const described = await describeRunById(key.runId);
-      if (!described) return { error: `run ${key.runId} is no longer readable` };
-      const io = (await fetchRunIO(key.runId)) ?? {};
-      const built = await contextForRun(
-        {
-          runId: key.runId,
-          status: described.status,
-          startedAt: described.startedAt,
-          closedAt: described.closedAt,
-          type: described.type,
-        },
-        io,
-        {
-          store: reports,
-          now: Date.now,
-          close: (id) => fetchRunClose(id),
-          identity: async (id) => {
-            const found = await runWorkflowStore().get(id);
-            return found ? { workflow: found.workflow, version: found.version } : undefined;
-          },
-        }
-      );
-      const result = await renderReportInHost(
-        { template: built.template, context: built.context as unknown as Record<string, unknown> },
-        { onNote: (note) => app.log.info(note) }
-      );
-      if (!result.ok) return { error: result.error };
-      return { snapshot: result.snapshot };
-    },
+    renderOnce: renderLive,
     /* THE TERMINAL EVENT, NOT A TIMER (ADR 0062). `handle.result()` is a long poll on history under
        the hood, so this resolves within seconds of the run closing rather than within the
        reconciliation pass's minute. It REJECTS for a failed, cancelled, terminated or timed-out run,
@@ -538,7 +612,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   registerProbeRoutes(app, sources);
   registerDatasetRoutes(app, { store, lake, materialization, records, runWorkflows });
   registerRetentionRoutes(app, { store, lake, materialization, records, runWorkflows, summaries });
-  registerRowStreamRoute(app, store, opts.rowStreamCaps ?? {});
+  rowTailHub = registerRowStreamRoute(app, store, opts.rowStreamCaps ?? {});
   // The workbench sandbox. On unless a test explicitly asks otherwise — see ServerOptions.
   registerQueryRoutes(app, { store, lake, harden: !opts.unsafeQueryNoSandbox });
   registerExploreRoutes(app, { store, lake, runs });
