@@ -43,6 +43,7 @@ import { armRetentionSchedule } from './retention';
 import { temporalConnectOptions } from './temporalTls';
 import { identityFor } from './workerIdentity';
 import { runPerNamespace } from './namespacePool';
+import { bindNamespace } from './workspaces';
 import { LEGACY_NAMESPACE, clientFor } from './temporalClient';
 
 /**
@@ -137,7 +138,7 @@ async function runWorker(): Promise<void> {
     make: (namespace) =>
       Worker.create({
         workflowsPath: require.resolve('./workflows/infra'),
-        activities: { ...infraActivities, ...serveDevActivities, ...buildActorActivities },
+        activities: bindNamespace(namespace, { ...infraActivities, ...serveDevActivities, ...buildActorActivities }),
         taskQueue: INFRA_QUEUE,
         namespace,
         connection,

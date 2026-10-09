@@ -269,8 +269,29 @@ export function workspaceRoot(env: NodeJS.ProcessEnv = process.env): string {
 export function activeLakeWorkspace(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = (env.KONTRA_LAKE_WORKSPACE ?? '').trim();
   if (explicit) return explicit;
+  // INSIDE A NAMESPACE SCOPE, THE RUN'S WORKSPACE, NOT THE CONSOLE'S (ADR 0051). An activity that
+  // publishes a run's rows runs in a per-namespace worker that binds its namespace (see
+  // `bindNamespace`), and a background pass binds each namespace in turn. Reading `.current` there
+  // would put a run's rows in whichever workspace the console happened to have selected when the
+  // batch landed — a silent wrong-lake commit, which is exactly the failure an address exists to
+  // make impossible.
+  const scoped = namespaceScope.getStore();
+  if (scoped !== undefined) return workspaceOfNamespace(scoped, env);
   const parent = workspacesParent(env);
   return parent ? readCurrentName(parent) : '';
+}
+
+/**
+ * The workspace whose runs live in `namespace` — the inverse of {@link namespaceFor}.
+ *
+ * `ws-<name>` is `<name>`. The legacy namespace is the `default` workspace's when there is a
+ * named-workspace layout, and the legacy (unnamed) address when there is not, which is what
+ * `activeLakeWorkspace` answered for that install before this existed. Pinned against
+ * `namespaceFor` by `shared/conformance/workspace_namespace.json`.
+ */
+export function workspaceOfNamespace(namespace: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (namespace.startsWith(ADDRESS_PREFIX)) return namespace.slice(ADDRESS_PREFIX.length);
+  return workspacesParent(env) ? LEGACY_WORKSPACE : '';
 }
 
 export function readCurrentName(parent: string): string {
@@ -425,4 +446,24 @@ export function inNamespace<T>(namespace: string, fn: () => Promise<T>): Promise
 /** The namespace `getClient` would answer with right now. */
 export function activeNamespace(): string {
   return namespaceScope.getStore() ?? currentNamespace();
+}
+
+/**
+ * `activities` with every function run inside `namespace`'s scope.
+ *
+ * WHAT A PER-NAMESPACE WORKER IS FOR. `runPerNamespace` builds one worker per workspace namespace,
+ * and every activity that worker takes belongs to a run in that namespace — so the namespace is
+ * bound once, here, around each call, and everything the activity reaches (the lake, the report
+ * tables, `getClient`) addresses the run's workspace without being told. One wrapper at the worker
+ * rather than a call per activity, because a forgotten call is the silent wrong-workspace read.
+ */
+export function bindNamespace<T extends Record<string, unknown>>(namespace: string, activities: T): T {
+  const out: Record<string, unknown> = {};
+  for (const [name, fn] of Object.entries(activities)) {
+    out[name] =
+      typeof fn === 'function'
+        ? (...args: unknown[]) => inNamespace(namespace, async () => (fn as (...a: unknown[]) => unknown)(...args))
+        : fn;
+  }
+  return out as T;
 }

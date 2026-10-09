@@ -5,7 +5,16 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { allNamespaces, currentNamespace, namespaceFor } from './workspaces';
+import {
+  activeLakeWorkspace,
+  activeNamespace,
+  allNamespaces,
+  bindNamespace,
+  currentNamespace,
+  inNamespace,
+  namespaceFor,
+  workspaceOfNamespace,
+} from './workspaces';
 
 /** ADR 0051 §2: the namespace a workspace's Runs live in. The CLI drives the same corpus. */
 const corpus = JSON.parse(
@@ -47,5 +56,58 @@ describe('the current namespace follows .current, read on every call', () => {
   it('an install with no named-workspace layout has exactly the legacy namespace', () => {
     expect(currentNamespace({ KONTRA_NAMESPACE: 'acme' })).toBe('acme');
     expect(allNamespaces({ KONTRA_NAMESPACE: 'acme' })).toEqual(['acme']);
+  });
+});
+
+describe('the lake follows the RUN, not the console (ADR 0051)', () => {
+  function layout(current: string): NodeJS.ProcessEnv {
+    const parent = mkdtempSync(path.join(tmpdir(), 'kontra-ws-'));
+    for (const name of ['default', 'hello', 'scraping']) mkdirSync(path.join(parent, name));
+    writeFileSync(path.join(parent, '.current'), current);
+    return { KONTRA_WORKSPACES: parent };
+  }
+
+  it('maps every workspace namespace back to its workspace', () => {
+    const env = layout('hello');
+    for (const c of corpus.cases) {
+      const ns = namespaceFor(c.workspace, { ...env, ...envWith(c.env_namespace) });
+      const back = workspaceOfNamespace(ns, env);
+      if (ns.startsWith('ws-')) expect(back).toBe(c.workspace);
+      else expect(back).toBe('default');
+    }
+    // No named-workspace layout: the legacy namespace is the legacy (unnamed) lake address.
+    expect(workspaceOfNamespace('default', {})).toBe('');
+  });
+
+  it('reads the scope before .current, so a switch mid-run cannot move a run\'s rows', async () => {
+    const env = layout('scraping');
+    const before = process.env.KONTRA_WORKSPACES;
+    process.env.KONTRA_WORKSPACES = env.KONTRA_WORKSPACES;
+    try {
+      expect(activeLakeWorkspace()).toBe('scraping');
+      expect(await inNamespace('ws-hello', async () => activeLakeWorkspace())).toBe('hello');
+      expect(await inNamespace('default', async () => activeLakeWorkspace())).toBe('default');
+      // The explicit override still wins: a migration points at an address on purpose.
+      expect(activeLakeWorkspace({ ...env, KONTRA_LAKE_WORKSPACE: 'hello' })).toBe('hello');
+    } finally {
+      if (before === undefined) delete process.env.KONTRA_WORKSPACES;
+      else process.env.KONTRA_WORKSPACES = before;
+    }
+  });
+
+  it('binds a worker\'s namespace around every activity it runs', async () => {
+    const seen: string[] = [];
+    const bound = bindNamespace('ws-hello', {
+      publishBatch: async (n: number) => {
+        seen.push(activeNamespace());
+        return n + 1;
+      },
+      notAFunction: 3,
+    });
+    expect(await bound.publishBatch(1)).toBe(2);
+    expect(bound.notAFunction).toBe(3);
+    expect(seen).toEqual(['ws-hello']);
+    // And the binding does not leak out of the call.
+    expect(activeNamespace()).not.toBe('ws-hello');
   });
 });

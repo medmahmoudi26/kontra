@@ -54,6 +54,7 @@ import { datasetQueue } from './queues';
 import { temporalConnectOptions } from './temporalTls';
 import { identityFor } from './workerIdentity';
 import { runPerNamespace } from './namespacePool';
+import { bindNamespace } from './workspaces';
 import { clientFor } from './temporalClient';
 
 /** One decode at a time by default — concurrency here multiplies peak RSS directly. */
@@ -124,7 +125,9 @@ export async function runMaterializer(): Promise<void> {
           // stores, which this process already holds, and it heartbeats, so it belongs on the pager
           // queue beside the reads rather than behind a decode. `sweepDatasetsWorkflow` proxies it
           // here from wherever the controller hosts the workflow.
-          activities: {
+          // BOUND TO THIS WORKER'S NAMESPACE, so a run's rows land in its own workspace's lake
+          // whatever the console has selected (ADR 0051; `bindNamespace`).
+          activities: bindNamespace(namespace, {
             ...createDatasetActivities({ store: new ObjectStore() }),
             ...createRetentionActivities({ store: new ObjectStore() }),
             ...fleetActivities,
@@ -132,7 +135,7 @@ export async function runMaterializer(): Promise<void> {
             // is what a `fleet.up()` does FIRST, so a hold queued behind a sixty-minute converge would
             // block every Run at the top of its scope. `activities/lease.ts` says the rest.
             ...leaseActivities,
-          },
+          }),
           maxConcurrentActivityTaskExecutions: pagerSlots(),
           // Its own name, on its own queue — see the decoder above.
           identity: identityFor(datasetQueue()),
