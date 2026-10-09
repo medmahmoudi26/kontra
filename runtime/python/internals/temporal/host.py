@@ -377,6 +377,11 @@ async def serve_async(registry, *, address: str = "", namespace: str = "",
     from temporalio.worker import Worker
 
     from internals import casstore, metrics
+    from internals.workeryaml import load as load_worker_yaml
+
+    # worker.yaml FIRST, before anything connects: a key the Worker cannot take is a boot failure
+    # naming the file, not a Worker that started without the setting its author believed in.
+    declared = load_worker_yaml(getattr(registry, "actor_dir", None))
 
     address = address or os.environ.get("KONTRA_ADDRESS", "localhost:7233")
     namespace = namespace or os.environ.get("KONTRA_NAMESPACE", "default")
@@ -417,13 +422,12 @@ async def serve_async(registry, *, address: str = "", namespace: str = "",
     identity = workerid.worker_identity(queue)
     # EVERY `Worker` OPTION IS REACHABLE, the same as on the workflow side: `**worker_kwargs` goes
     # straight through, and the two numbers below are defaults rather than a ceiling.
-    worker = actor_worker(
-        client,
-        registry,
-        task_queue=queue,
-        max_concurrent_activities=max(4, max_parallel_sessions()),
-        **worker_kwargs,
-    )
+    # worker.yaml OVERRIDES the host's default and a programmatic `**worker_kwargs` overrides both,
+    # so a test or an embedding caller still has the last word.
+    options = {"max_concurrent_activities": max(4, max_parallel_sessions()), **declared, **worker_kwargs}
+    if declared:
+        log.info("[host] worker.yaml: %s", ", ".join(f"{k}={v}" for k, v in sorted(declared.items())))
+    worker = actor_worker(client, registry, task_queue=queue, **options)
     log.info("[host] %s@%s serving on %s (%s) as %s, %d live Sessions max",
              registry.actor_name, version, queue, address, identity, max_parallel_sessions())
     # THE IDENTITY IS IN THE BOOT LINE because it is the string an operator pastes into

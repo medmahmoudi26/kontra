@@ -44,7 +44,8 @@ import inspect
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+import typing
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 # An author function: async (self, batch, dataset) for a Method, or async (self) -> Any for
 # load/close/healthcheck.
@@ -220,6 +221,42 @@ param = _Param()
 # registry somewhere.
 
 
+def _type_arg(annotation: Any, generic: type) -> Optional[type]:
+    """`T` from `generic[T]`, or None for a bare `generic`, `generic[Any]` or anything else."""
+    if typing.get_origin(annotation) is not generic:
+        return None
+    args = typing.get_args(annotation)
+    if not args or args[0] is Any or isinstance(args[0], typing.TypeVar):
+        return None
+    return args[0]
+
+
+def signature_types(fn: ActorFn) -> Tuple[Optional[type], Optional[type], bool]:
+    """What a Method's signature says it takes and emits: `(takes, emits, pending)`.
+
+    `async def m(self, batch: Batch[In], dataset: Dataset[Out])` -> `(In, Out, False)`. Positional,
+    because that is how the engine calls a Method; the names are the author's. A parameter that is
+    unannotated, or annotated with a bare `Batch`, says nothing. `pending` is True when a hint names
+    a class not defined yet — `from __future__ import annotations` with the type further down the
+    module — and the caller resolves again later rather than registering a Method with no types.
+    """
+    from kontra.batch import Batch, Dataset
+
+    try:
+        hints = typing.get_type_hints(fn)
+    except NameError:
+        return None, None, True
+    except Exception:  # an annotation that is not a type at all: it declares nothing
+        return None, None, False
+    params = [
+        p for p in inspect.signature(fn).parameters.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    takes = _type_arg(hints.get(params[1].name), Batch) if len(params) > 1 else None
+    emits = _type_arg(hints.get(params[2].name), Dataset) if len(params) > 2 else None
+    return takes, emits, False
+
+
 @dataclass
 class MethodRegistration:
     """One registered Method. `name` is what a caller dispatches; it defaults to the
@@ -236,6 +273,21 @@ class MethodRegistration:
     fn_name: str            # local function name, e.g. "crawl"
     takes: Optional[type] = None   # the Unit type this Method consumes
     emits: Optional[type] = None   # the record type it emits (never a return annotation: §18)
+    #: The signature named a type that did not exist yet when the decorator ran — a forward
+    #: reference to a class defined further down the module. Resolved by `resolved()`.
+    hints_pending: bool = False
+
+    def resolved(self) -> "MethodRegistration":
+        """This registration with any signature types that were still forward references at
+        decoration time filled in. Idempotent; the catalog and the engine call it before reading
+        `takes`/`emits`. Explicit `takes=`/`emits=` are never replaced."""
+        if self.hints_pending:
+            takes, emits, pending = signature_types(self.fn)
+            if not pending:
+                self.hints_pending = False
+                self.takes = self.takes or takes
+                self.emits = self.emits or emits
+        return self
 
     @property
     def description(self) -> str:
@@ -652,7 +704,7 @@ class ActorRegistry:
                     f"@actor.method {f.__name__} is a generator; a Method pushes with "
                     "`await dataset.push(x)` and returns nothing (ADR 0028 §3)"
                 )
-            reserved = _reserved_emits_fields(emits)
+            reserved = _reserved_emits_fields(emits if emits is not None else signature_types(f)[1])
             if reserved:
                 # CAUGHT AT IMPORT, for the same reason the generator check above is: an actor
                 # that cannot possibly materialise should not register, let alone serve.
@@ -674,6 +726,19 @@ class ActorRegistry:
                     f"materializer would refuse the INSERT. Rename the field(s). Reserved names: "
                     f"{', '.join(RESERVED_OUTPUT_FIELDS)}."
                 )
+            # THE SIGNATURE IS THE CONTRACT (PRD D2): `batch: Batch[Product]` says what the Method
+            # takes as plainly as `takes=Product` does, so it is read as one. An explicit argument
+            # still wins, and a disagreement between the two is said out loud — two declarations
+            # of one fact that differ are a bug in one of them, and only the author knows which.
+            hint_takes, hint_emits, pending = signature_types(f)
+            for kind, said, hinted in (("takes", takes, hint_takes), ("emits", emits, hint_emits)):
+                if said is not None and hinted is not None and said is not hinted:
+                    warnings.warn(
+                        f"@actor.method {f.__name__}: {kind}={getattr(said, '__name__', said)} but "
+                        f"the signature says {getattr(hinted, '__name__', hinted)}; {kind}= wins. "
+                        "Drop the argument or fix the annotation so they agree.",
+                        stacklevel=3,
+                    )
             dispatch_name = name or f.__name__
             clash = self.methods.get(dispatch_name)
             if clash is not None:
@@ -682,7 +747,10 @@ class ActorRegistry:
                     f"({clash.fn_name}, {f.__name__}); give one of them name=\"...\""
                 )
             self.methods[dispatch_name] = MethodRegistration(
-                fn=f, name=dispatch_name, fn_name=f.__name__, takes=takes, emits=emits)
+                fn=f, name=dispatch_name, fn_name=f.__name__,
+                takes=takes if takes is not None else hint_takes,
+                emits=emits if emits is not None else hint_emits,
+                hints_pending=pending)
             return f
 
         return register(fn) if fn is not None else register

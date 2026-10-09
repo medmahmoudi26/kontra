@@ -64,7 +64,14 @@ Unit is finished.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generic, List, Optional, TypeVar
+
+#: What a Batch's Units carry and what a Dataset's records are — the Method's contract, written in
+#: its signature: `async def enrich(self, batch: Batch[Product], dataset: Dataset[Enriched])`.
+#: `@actor.method` reads these as `takes=` and `emits=` (PRD D2), so a typed signature IS the
+#: declaration. Parameters only: nothing checks a value against them at run time.
+T = TypeVar("T")
+R = TypeVar("R")
 
 # Distinguishes "not yet coerced" from a legitimately None payload.
 _UNSET = object()
@@ -173,7 +180,7 @@ class Unit:
         return self._out
 
 
-class Dataset:
+class Dataset(Generic[R]):
     """Where a Method pushes its output (ADR 0028 §2). The caller's third parameter; from inside
     a Method the destination is indistinguishable whether the caller named it or not, which is the
     asymmetry ADR 0028 exists to remove.
@@ -227,7 +234,7 @@ class Dataset:
         return iter(self._collected)
 
 
-class Batch:
+class Batch(Generic[T]):
     """The Units handed to one Method call, as the iterator the author loops over."""
 
     __slots__ = (

@@ -32,6 +32,7 @@ import contextlib
 import inspect
 import logging
 import os
+from pathlib import Path
 from typing import Any, Sequence
 
 from internals import workerid
@@ -89,6 +90,25 @@ def _configure_logging() -> None:
     logging.getLogger("temporalio").setLevel(level)
 
 
+def declared_worker_options(workflows: Sequence[type]) -> dict[str, Any]:
+    """The `worker.yaml` options beside the workflows this worker serves.
+
+    One worker has one set of options, so folders that declare DIFFERENT ones cannot share it: that
+    is refused rather than settled by whichever folder happened to be read last.
+    """
+    from internals.workeryaml import WorkerYamlError, load
+
+    _, dirs = _watch_targets(workflows)
+    found = {d: load(Path(d)) for d in dirs}
+    declared = {d: o for d, o in found.items() if o}
+    if len({repr(sorted(o.items())) for o in declared.values()}) > 1:
+        raise WorkerYamlError(
+            "one worker serves workflows whose folders declare different worker.yaml: "
+            + ", ".join(sorted(declared))
+        )
+    return next(iter(declared.values()), {})
+
+
 def _watch_targets(workflows: Sequence[type]) -> tuple[list[tuple[str, list[str]]], list[str]]:
     """What watch mode re-imports and can mark broken: one (source file, type names) pair per file,
     plus every folder to watch.
@@ -144,6 +164,8 @@ async def serve_workflows_async(
 
     if not workflows:
         raise ValueError("serve() needs at least one @workflow.defn class to run")
+    # Read BEFORE anything connects: a bad worker.yaml is a boot failure naming the file.
+    declared = declared_worker_options(workflows)
     # `kontra workflow serve` sets KONTRA_WORKFLOW_QUEUE to the queue DERIVED from the folder's
     # content (wf-<name>-<digest>, GitHub #15), so a module serves on the right queue without an
     # edit and without a typed --queue. An explicit argument still wins, for a hand-run worker.
@@ -191,7 +213,10 @@ async def serve_workflows_async(
 
     from internals.temporal.connect import workflow_worker
 
-    kwargs: dict[str, Any] = dict(worker_kwargs)
+    # worker.yaml BESIDE THE WORKFLOW, the same file and the same rules as an actor's (PRD D2):
+    # the SDK's own Worker option names, tuning only, never the task queue. Under a programmatic
+    # argument, which still has the last word.
+    kwargs: dict[str, Any] = {**declared, **worker_kwargs}
     if max_concurrent_activities is not None:
         kwargs.setdefault("max_concurrent_activities", max_concurrent_activities)
 
