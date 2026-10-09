@@ -83,6 +83,10 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/blob-report/
 
+# e2e/ screenshots: the report page of a CI run, or a failing page. Never committed — a screenshot
+# can carry a run id or figures as pixels that no text grep will find.
+e2e/test-results/
+
 # .kontra/ — this installation's own configuration and code, created by `kontra init`
 # (install.sh runs it). Ignored WHOLE, and both halves matter:
 #   config.yaml   live credentials — the DigitalOcean token, the Pulumi passphrase, four tokens

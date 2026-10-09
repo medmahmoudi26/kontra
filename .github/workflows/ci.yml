@@ -550,10 +550,39 @@ jobs:
         with:
           path: _sibling/kontra
           persist-credentials: false
+
+      # WHICH CONSOLE, BECAUSE THIS JOB NOW READS A PAGE OF IT. The canary step at the end drives the
+      # console in a browser, so the SPA baked into the image has to be the one this change was
+      # written against. A change that needs both repositories is two branches with ONE NAME: the
+      # console's branch named like this PR's head wins, then its base, then the console's default.
+      # Nothing to configure, and nothing to forget to revert when the pair merges.
+      #
+      # The names travel through `env:`, never through `${{ }}` inside the script, because a branch
+      # name is attacker-chosen text on a pull request from a fork.
+      - name: which kontra-console branch goes with this change
+        id: console
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          PUSH_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          url=https://github.com/medmahmoudi26/kontra-console
+          ref=""
+          for want in "$HEAD_REF" "$BASE_REF" "$PUSH_REF"; do
+            [ -n "$want" ] || continue
+            if git ls-remote --exit-code --heads "$url" "refs/heads/$want" >/dev/null 2>&1; then
+              ref="$want"
+              break
+            fi
+          done
+          echo "kontra-console at ${ref:-its default branch}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: medmahmoudi26/kontra-console
           path: _sibling/kontra-console
+          ref: ${{ steps.console.outputs.ref }}
           persist-credentials: false
 
       - name: build cluster images
@@ -971,6 +1000,125 @@ jobs:
       - name: every published port is bound to loopback
         working-directory: ${{ runner.temp }}/install
         run: python3 "${{ github.workspace }}/scripts/assert-loopback-publish.py"
+
+      # ══ THE CANARY ENDS IN ITS OWN REPORT, IN A BROWSER ════════════════════════════════════════
+      #
+      # Everything above proves the install comes up and runs the seeded starter from the CLI. This
+      # proves the thing a person does next: open the console, run the canary, read its report.
+      # `e2e/canary-report.spec.ts` says what it asserts and why the template hash is the assertion
+      # that matters. It runs LAST so a failure here never hides one of the install checks above.
+      #
+      # THE CANARY IS COPIED IN, the way anybody adds code to a workspace: into the current one, where
+      # the watcher registers the workflow and deploys the actor. A fresh install seeds `hello` only.
+      - name: put the canary into the fresh workspace
+        working-directory: ${{ runner.temp }}/install
+        run: |
+          set -euo pipefail
+          ws="$RUNNER_TEMP/workspaces/hello"
+          # Through `docker compose cp` and a `cp` inside, so the files belong to the user the
+          # watcher and the worker run as — the workspace is the container's, not the runner's.
+          docker compose cp "$GITHUB_WORKSPACE/workspaces/default/actors/canary" cli:/tmp/canary-actor
+          docker compose cp "$GITHUB_WORKSPACE/workspaces/default/workflows/canary" cli:/tmp/canary-workflow
+          docker compose exec -T cli sh -c "mkdir -p '$ws/actors' '$ws/workflows' \
+            && cp -r /tmp/canary-actor '$ws/actors/canary' \
+            && cp -r /tmp/canary-workflow '$ws/workflows/canary'"
+          # REGISTERED means deployed, for an actor: the watcher logs it only after `kontra deploy`
+          # has built and pushed the image (cli/workspace.go, reconcileWorkspace).
+          for i in $(seq 1 120); do
+            logs=$(docker compose logs --no-color cli)
+            if grep -qF "registered actor $ws/actors/canary" <<<"$logs" \
+               && grep -qF "registered workflow $ws/workflows/canary" <<<"$logs"; then
+              echo "the watcher registered the canary actor and workflow"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error title=the canary was never registered::the watcher did not deploy it within 10 minutes"
+          docker compose logs --no-color cli | tail -120
+          exit 1
+
+      - name: serve the canary
+        working-directory: ${{ runner.temp }}/install
+        run: |
+          set -euo pipefail
+          docker compose exec -d cli sh -c \
+            'kontra workflow serve "$KONTRA_WORKSPACES/hello/workflows/canary" > /tmp/canary-serve.log 2>&1'
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: install the browser check
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --filter @kontra/e2e
+          pnpm --filter @kontra/e2e exec playwright install --with-deps chromium
+
+      # THE PASSWORD FIRST BOOT WROTE, read the way the login step above reads it, and MASKED before
+      # anything can print it. The spec signs in with it through the console's own form.
+      - name: run the canary from the console and read its report
+        working-directory: ${{ runner.temp }}/install
+        run: |
+          set -euo pipefail
+          pw=$(docker compose exec -T cli cat /var/lib/kontra/console-password \
+                 | awk -F'\t' '$1 == "admin" { print $2; exit }' | tr -d '\r')
+          [ -n "$pw" ] || { echo "::error title=no admin line in the 0600 file::"; exit 1; }
+          echo "::add-mask::$pw"
+          cd "$GITHUB_WORKSPACE"
+          KONTRA_CONSOLE_USER=admin KONTRA_CONSOLE_PASS="$pw" pnpm --filter @kontra/e2e test
+
+      # THE FLEET THE CANARY HELD IS GONE. Pressing Run from a check provisions a Machine, and a
+      # check that does that without proving the teardown is how a test suite becomes a fleet. From
+      # the Docker host, as the starter's step above does it — no API route lists Machines. Polled,
+      # because the reap is asynchronous: the Lease lapses on its own clock.
+      - name: the canary's Fleet is gone
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 24); do
+            leftover=$(docker ps -a --format '{{.Names}}' | grep -E '^kf-' || true)
+            [ -z "$leftover" ] && { echo "no Warden containers left"; exit 0; }
+            sleep 5
+          done
+          echo "::error title=the canary's Fleet is still standing::$leftover"
+          exit 1
+
+      - name: what the canary left behind, when it failed
+        if: failure()
+        working-directory: ${{ runner.temp }}/install
+        run: |
+          echo "::group::the canary workflow worker"
+          docker compose exec -T cli cat /tmp/canary-serve.log || true
+          echo "::endgroup::"
+          echo "::group::containers"
+          docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' || true
+          echo "::endgroup::"
+          for c in $(docker ps -a --format '{{.Names}}' | grep -E '^(kf-|kontra-canary)' || true); do
+            echo "::group::docker logs $c (last 150)"
+            docker logs --tail 150 "$c" 2>&1 || true
+            echo "::endgroup::"
+          done
+          for svc in cli orchestrator-api orchestrator-infra; do
+            echo "::group::compose logs $svc (last 120)"
+            docker compose logs --no-color --tail 120 "$svc" || true
+            echo "::endgroup::"
+          done
+
+      # Screenshots only: the report page on success, the failing page on failure. No trace and no
+      # HTML report — see e2e/playwright.config.ts for why a password must not be in an artifact.
+      - name: keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: canary-report-screenshots
+          path: e2e/test-results/**/*.png
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: teardown
         if: always()
