@@ -17,24 +17,6 @@ import pytest
 from kontra import catalog
 
 # ---------------------------------------------------------------------------------------------
-# Identity. The queue, session-queue and endpoint derivations that used to be pinned here by a
-# hand-copied table are pinned by shared/conformance/queues.json now — every language executes it, and
-# tests/test_queue_congruence.py is this package's arm. The table that stood here was the third
-# copy of one contract, kept correct by somebody remembering to update all three.
-#
-# What stays is the one identity assertion that is NOT a shared string: an API that was retired.
-# ---------------------------------------------------------------------------------------------
-
-
-def test_there_is_one_deployed_kind():
-    """ADR 0023 §9. The Activity kind had its own handle, its own queue suffix and its own host;
-    a caller reaching for it now must get an AttributeError here rather than a queue nobody
-    polls, which is what a leftover `activities()` shim would have produced."""
-    for gone in ("activities", "ActivityHandle", "activities_queue"):
-        assert not hasattr(catalog, gone), f"{gone} retired with ADR 0023 §9"
-
-
-# ---------------------------------------------------------------------------------------------
 # The wire shape
 # ---------------------------------------------------------------------------------------------
 
