@@ -215,5 +215,6 @@ func NonRetryable(msg string) error { return &core.NonRetryableError{Msg: msg} }
 
 // SessionLost signals the session's shared resource is dead. Returning it ends the Session: the
 // host nulls the instance and the handler's retry re-runs Load for a fresh resource, resuming
-// from the commit map (ADR 0023 §20). The Go peer of raising actorkit's SessionLost.
+// from the last heartbeat's checkpoint (ADR 0023 §20, ADR 0060). The Go peer of raising
+// actorkit's SessionLost.
 func SessionLost(msg string) error { return &core.SessionLostError{Msg: msg} }
