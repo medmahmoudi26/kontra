@@ -51,11 +51,13 @@
     "ajv": "^8.20.0",
     "fastify": "^5.12.5",
     "ioredis": "^6.0.0",
+    "js-yaml": "4.1.0",
     "pg": "^8.23.1"
   },
   "devDependencies": {
     "@temporalio/nexus": "1.24.0",
     "@temporalio/testing": "1.24.0",
+    "@types/js-yaml": "4.0.9",
     "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
     "ts-json-schema-generator": "^2.9.0",

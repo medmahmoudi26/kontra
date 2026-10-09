@@ -1,0 +1,136 @@
+{
+  "why": "THE `fleets:` BLOCK OF kontra.yaml (PRD §7, ADR 0066): a map of named fleet profiles, each one the inputs of one provider's Pulumi program, read by TWO sides with no shared code — the orchestrator's infra role (control/orchestrator/src/infra/fleets.ts), which converges a profile, and the CLI (cli/internal/config/fleets.go), which names and lists them. A drift has the failure shape every config drift has here: one side accepts a file the other refuses, and the refusal arrives at converge time inside an activity instead of at `kontra fleet up`.",
+  "derived_by": [
+    "control/orchestrator/src/infra/fleets.ts:parseFleets",
+    "cli/internal/config/fleets.go:ParseFleets"
+  ],
+  "rules": [
+    "`local` IS THE DEFAULT AND NEEDS NOTHING: a file with no `fleets:` key, or none at all, has exactly one profile, `local`, with every default filled in.",
+    "`default:` names a profile; it is not a profile. Absent, it is `local` when `local` exists, and otherwise refused — a fleet nobody chose is not chosen silently.",
+    "A profile name is the DNS-label subset ^[a-z]([a-z0-9-]{0,30}[a-z0-9])?$ because it becomes part of a Pulumi stack name and a Kubernetes label.",
+    "STRICT: a key a provider does not know is refused, naming it. A typo in `idle_minutes` would otherwise leave a fleet running all night.",
+    "Defaults are filled in by the parser so both sides agree on what an omitted field MEANS: nodes 1, size {cpus 2, memory 4Gi}, idle_minutes 15.",
+    "SECRETS ARE NAMED, NOT SHOWN. `public` is what an API response, a log line or the CLI may print: every secret field is replaced by the list of secret fields that are set."
+  ],
+  "secret_fields": ["token", "kubeconfig"],
+  "valid": [
+    {
+      "why": "no fleets key at all: one local profile, all defaults",
+      "yaml": "apiVersion: kontra.dev/v1\n",
+      "expect": {
+        "default": "local",
+        "profiles": {
+          "local": { "provider": "local", "nodes": 1, "size": { "cpus": 2, "memory": "4Gi" }, "idle_minutes": 15 }
+        }
+      },
+      "public": {
+        "default": "local",
+        "profiles": {
+          "local": { "provider": "local", "nodes": 1, "size": { "cpus": 2, "memory": "4Gi" }, "idle_minutes": 15, "secrets": [] }
+        }
+      }
+    },
+    {
+      "why": "the PRD's own example, dummy secrets included",
+      "yaml": "fleets:\n  default: local\n  local:\n    provider: local\n    nodes: 1\n    size: { cpus: 2, memory: 4Gi }\n    idle_minutes: 15\n  do-fra:\n    provider: digital_ocean\n    region: fra1\n    token: dop_v1_EXAMPLE_not_a_real_token\n    ssh_key_fingerprint: \"aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99\"\n    vpc_cidr: 10.200.0.0/20\n    sizes: { s: s-2vcpu-4gb, m: s-4vcpu-8gb, l: s-8vcpu-16gb }\n    idle_minutes: 15\n  customer-eks:\n    provider: byo_kubeconfig\n    kubeconfig: |\n      apiVersion: v1\n      kind: Config\n",
+      "expect": {
+        "default": "local",
+        "profiles": {
+          "local": { "provider": "local", "nodes": 1, "size": { "cpus": 2, "memory": "4Gi" }, "idle_minutes": 15 },
+          "do-fra": {
+            "provider": "digital_ocean",
+            "region": "fra1",
+            "token": "dop_v1_EXAMPLE_not_a_real_token",
+            "ssh_key_fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+            "vpc_cidr": "10.200.0.0/20",
+            "sizes": { "s": "s-2vcpu-4gb", "m": "s-4vcpu-8gb", "l": "s-8vcpu-16gb" },
+            "nodes": 1,
+            "idle_minutes": 15
+          },
+          "customer-eks": { "provider": "byo_kubeconfig", "kubeconfig": "apiVersion: v1\nkind: Config\n" }
+        }
+      },
+      "public": {
+        "default": "local",
+        "profiles": {
+          "local": { "provider": "local", "nodes": 1, "size": { "cpus": 2, "memory": "4Gi" }, "idle_minutes": 15, "secrets": [] },
+          "do-fra": {
+            "provider": "digital_ocean",
+            "region": "fra1",
+            "ssh_key_fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+            "vpc_cidr": "10.200.0.0/20",
+            "sizes": { "s": "s-2vcpu-4gb", "m": "s-4vcpu-8gb", "l": "s-8vcpu-16gb" },
+            "nodes": 1,
+            "idle_minutes": 15,
+            "secrets": ["token"]
+          },
+          "customer-eks": { "provider": "byo_kubeconfig", "secrets": ["kubeconfig"] }
+        }
+      }
+    },
+    {
+      "why": "a local profile that says only `nodes: 3` (the --nodes 3 fleet tests) keeps every other default",
+      "yaml": "fleets:\n  local:\n    provider: local\n    nodes: 3\n",
+      "expect": {
+        "default": "local",
+        "profiles": {
+          "local": { "provider": "local", "nodes": 3, "size": { "cpus": 2, "memory": "4Gi" }, "idle_minutes": 15 }
+        }
+      },
+      "public": {
+        "default": "local",
+        "profiles": {
+          "local": { "provider": "local", "nodes": 3, "size": { "cpus": 2, "memory": "4Gi" }, "idle_minutes": 15, "secrets": [] }
+        }
+      }
+    },
+    {
+      "why": "a default that is not `local`, and no local profile at all: an install that only ever runs in the cloud",
+      "yaml": "fleets:\n  default: do-fra\n  do-fra:\n    provider: digital_ocean\n    region: fra1\n    token: dop_v1_x\n    ssh_key_fingerprint: \"aa:bb\"\n    sizes: { m: s-4vcpu-8gb }\n",
+      "expect": {
+        "default": "do-fra",
+        "profiles": {
+          "do-fra": {
+            "provider": "digital_ocean",
+            "region": "fra1",
+            "token": "dop_v1_x",
+            "ssh_key_fingerprint": "aa:bb",
+            "vpc_cidr": "10.200.0.0/20",
+            "sizes": { "m": "s-4vcpu-8gb" },
+            "nodes": 1,
+            "idle_minutes": 15
+          }
+        }
+      },
+      "public": {
+        "default": "do-fra",
+        "profiles": {
+          "do-fra": {
+            "provider": "digital_ocean",
+            "region": "fra1",
+            "ssh_key_fingerprint": "aa:bb",
+            "vpc_cidr": "10.200.0.0/20",
+            "sizes": { "m": "s-4vcpu-8gb" },
+            "nodes": 1,
+            "idle_minutes": 15,
+            "secrets": ["token"]
+          }
+        }
+      }
+    }
+  ],
+  "invalid": [
+    { "why": "default names a profile that does not exist", "yaml": "fleets:\n  default: nowhere\n", "error": "nowhere" },
+    { "why": "no local profile and no default: nothing was chosen", "yaml": "fleets:\n  do-fra:\n    provider: digital_ocean\n    region: fra1\n    token: t\n    ssh_key_fingerprint: f\n    sizes: { m: s-1vcpu-1gb }\n", "error": "default" },
+    { "why": "a provider nobody wrote a program for", "yaml": "fleets:\n  x:\n    provider: azure\n", "error": "azure" },
+    { "why": "a typo in a known key is refused rather than ignored", "yaml": "fleets:\n  local:\n    provider: local\n    idle_minute: 15\n", "error": "idle_minute" },
+    { "why": "zero nodes is not a fleet", "yaml": "fleets:\n  local:\n    provider: local\n    nodes: 0\n", "error": "nodes" },
+    { "why": "memory must be a Kubernetes quantity in Mi or Gi", "yaml": "fleets:\n  local:\n    provider: local\n    size: { cpus: 2, memory: 4GB }\n", "error": "memory" },
+    { "why": "a cloud profile without its token cannot converge", "yaml": "fleets:\n  default: d\n  d:\n    provider: digital_ocean\n    region: fra1\n    ssh_key_fingerprint: f\n    sizes: { m: s-1vcpu-1gb }\n", "error": "token" },
+    { "why": "a cloud profile with no sizes has nothing to make nodes from", "yaml": "fleets:\n  default: d\n  d:\n    provider: digital_ocean\n    region: fra1\n    token: t\n    ssh_key_fingerprint: f\n", "error": "sizes" },
+    { "why": "bring-your-own without a kubeconfig", "yaml": "fleets:\n  default: b\n  b:\n    provider: byo_kubeconfig\n", "error": "kubeconfig" },
+    { "why": "a profile name that cannot be a stack name or a label", "yaml": "fleets:\n  default: Do_Fra\n  Do_Fra:\n    provider: local\n", "error": "Do_Fra" },
+    { "why": "a profile that is not a map", "yaml": "fleets:\n  local: yes\n", "error": "local" },
+    { "why": "fleets that is not a map", "yaml": "fleets: [local]\n", "error": "fleets" }
+  ]
+}

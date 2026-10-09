@@ -155,3 +155,7 @@ backend.db-wal
 # `go build` in workspaces/<ws>/actors/<name>/ writes ./<name>. One reached a commit that way
 # (51 MB, see cli/notrackedbinaries_test.go); the test catches the class, this catches the path.
 workspaces/*/actors/*/[!.]*.out
+
+# THE INSTALL'S kontra.yaml: fleet profiles WITH their cloud credentials (ADR 0066). Per-install,
+# like .env; kontra.example.yaml is the committed, dummy-valued template.
+/kontra.yaml
