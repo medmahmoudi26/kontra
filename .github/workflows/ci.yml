@@ -270,9 +270,8 @@ jobs:
   build-actor:
     # THE CI TEMPLATES, EXERCISED. `.github/actions/build-actor/action.yml` and
     # `.gitlab/kontra-build-actor.yml` are shipped surface — somebody's pipeline runs those exact
-    # strings — and nothing joins them to `kontra build`'s flag set but matching literals.
-    # `cli/build_test.go` catches a flag that stopped existing; only running them catches a step
-    # that stopped working.
+    # strings — and nothing joins them to `kontra build`'s flag set but matching literals. Running
+    # them is the check: a flag that stopped existing and a step that stopped working fail it alike.
     #
     # AGAINST A LOCAL registry:2 AND NOTHING ELSE. ADR 0036 makes the destination the customer's
     # registry, and this job must never authenticate to one: it publishes to a service container on

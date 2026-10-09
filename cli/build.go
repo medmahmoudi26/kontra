@@ -87,10 +87,10 @@ type buildOutput struct {
 
 // buildFlags is `kontra build`'s flag set together with the pointers it fills.
 //
-// IT IS A FUNCTION AND NOT A LITERAL INSIDE cmdBuild so that a test can enumerate THE SAME SET the
-// command parses, rather than a list written beside it. `fleet_documented_flags_test.go` is the
-// precedent and its header says what a list beside it costs: three flags this repo told people to
-// type had been gone for months, in copy-pasteable position, with nothing red anywhere.
+// IT IS A FUNCTION AND NOT A LITERAL INSIDE cmdBuild so that a test can parse with THE SAME SET the
+// command parses, rather than a list written beside it. `fleetFlagSet` is the precedent, and what a
+// list beside it cost: three flags this repo told people to type had been gone for months, in
+// copy-pasteable position, with nothing red anywhere.
 type buildFlags struct {
 	fs         *flag.FlagSet
 	actorDir   *string
@@ -201,8 +201,8 @@ func cmdBuild(args []string) error {
 //
 // A RETIRED FLAG IS NOT A TYPO AND MUST NOT READ AS ONE. `flag provided but not defined: -target`
 // sends an operator to check their spelling; this sends them to the verb that does what they meant.
-// The same reasoning `cli/fleet_documented_flags_test.go` was written under: a flag somebody was
-// told to type has to either work or explain itself.
+// A flag somebody was told to type has to either work or explain itself — and the command the
+// explanation names is handed to the CLI by `build_test.go`, so it has to work too.
 func retiredTarget(t string) error {
 	switch t {
 	case "container":

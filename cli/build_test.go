@@ -2,65 +2,71 @@ package main
 
 // build_test.go — `kontra build --push <ref>`, and the flag that stopped meaning anything.
 //
-// Three things are pinned here and each one is a failure this repo has actually had:
+// Two things are pinned here and each one is a failure this repo has actually had:
 //
-//  1. A RETIRED FLAG EXPLAINS ITSELF. `--target` is gone (ADR 0036), and `flag provided but not
-//     defined: -target` reads as a typo — so `--target container` names `kontra deploy` and
-//     `--target machine` names `--push`. `fleet_documented_flags_test.go` was written after three
-//     dead flags were found in copy-pasteable position; this is the other half of that rule.
+//  1. A RETIRED FLAG IS REFUSED, AND WHAT THE REFUSAL TELLS YOU TO TYPE RUNS. `--target` is gone
+//     (ADR 0036), and `flag provided but not defined: -target` reads as a typo — so the refusal
+//     names the command that does what was meant. That command is checked by handing it to the
+//     CLI (`advice_test.go`), not by reading its words.
 //  2. TWO ANSWERS TO ONE QUESTION ARE REFUSED, not silently resolved. `--push` is the whole
 //     reference and `--registry` is only its first component.
-//  3. EVERY `--flag` THE CI TEMPLATES TYPE IS A FLAG THAT EXISTS. The GitHub Action and the GitLab
-//     template are shipped as product surface and are the one place a rename cannot be caught by a
-//     compiler.
+//
+// The GitHub Action and the GitLab template are product surface too, and they are checked the way
+// a pipeline meets them: ci.yml's `build-actor` job RUNS both, as written, against a local
+// registry. A flag either of them stops having fails that job.
 
 import (
 	"errors"
-	"flag"
-	"os"
-	"path/filepath"
-	"regexp"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
 
-// TestTargetIsRetiredAndSaysWhereItWent — a retired flag is not a typo and must not read as one.
-func TestTargetIsRetiredAndSaysWhereItWent(t *testing.T) {
+// TestTargetIsRefusedAndItsAdviceRuns — a retired flag is not a typo and must not read as one, and
+// the command it sends you to has to be one the CLI accepts.
+func TestTargetIsRefusedAndItsAdviceRuns(t *testing.T) {
 	dir := t.TempDir()
 
-	// Each value went somewhere different, and the refusal has to point at the right place.
-	for _, tc := range []struct {
-		target string
-		wants  []string
-	}{
-		{"container", []string{"retired", "kontra deploy --actor"}},
-		{"machine", []string{"retired", "--push", "process"}},
-		{"nonsense", []string{"retired", "--push"}},
-	} {
-		err := cmdBuild([]string{"--actor", dir, "--target", tc.target})
-		if err == nil {
-			t.Errorf("--target %s was accepted; a retired flag that still works builds the other thing "+
-				"quietly", tc.target)
+	for _, value := range []string{"container", "machine", "nonsense"} {
+		err := cmdBuild([]string{"--actor", dir, "--target", value})
+		// THE REFUSAL FIRED, and fired FIRST. `dir` holds no actor.json, so any later error — the
+		// manifest read, or the stock `flag` error had the flag been dropped — is a different value.
+		// A retired flag that still works builds the other thing quietly; one that falls through to
+		// the stock error sends an operator to check their spelling.
+		if want := retiredTarget(value); err == nil || err.Error() != want.Error() {
+			t.Errorf("--target %s = %v, want the retirement refusal", value, err)
 			continue
 		}
-		for _, want := range tc.wants {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("--target %s: the refusal does not say %q:\n%v", tc.target, want, err)
-			}
+		advice := adviceIn(err.Error())
+		if len(advice) == 0 {
+			t.Errorf("--target %s is refused with no command to run instead: %v", value, err)
 		}
-		// The one thing it must never be: the stock `flag` message, which sends an operator to check
-		// their spelling for a flag that was deliberately removed.
-		if strings.Contains(err.Error(), "not defined") {
-			t.Errorf("--target %s got the stock flag error, so the retirement is invisible:\n%v", tc.target, err)
+		for _, argv := range advice {
+			if e := adviceRuns(t, argv); e != nil {
+				t.Errorf("--target %s advises a command that does not run: %v", value, e)
+			}
+			// …and the advice must not lead back here: a `kontra build` it names, parsed by the
+			// command's own flag set, sets no --target.
+			if argv[0] == "build" {
+				f := buildFlagSet()
+				f.fs.SetOutput(io.Discard)
+				if e := f.fs.Parse(argv[1:]); e != nil || *f.target != "" {
+					t.Errorf("--target %s advises `kontra %s`, which is this refusal again (%v)",
+						value, strings.Join(argv, " "), e)
+				}
+			}
 		}
 	}
 
 	// AND IT IS ONLY REFUSED WHEN WRITTEN. An empty `--target` is the zero value of a declared flag
 	// and must not refuse a build nobody asked to target anything.
-	if err := cmdBuild([]string{"--actor", dir}); err != nil && strings.Contains(err.Error(), "retired") {
-		t.Errorf("a build with no --target was refused as though one had been passed: %v", err)
+	err := cmdBuild([]string{"--actor", dir})
+	for _, value := range []string{"", "container", "machine"} {
+		if err != nil && err.Error() == retiredTarget(value).Error() {
+			t.Errorf("a build with no --target was refused as though one had been passed: %v", err)
+		}
 	}
 }
 
@@ -111,90 +117,4 @@ func TestDefaultDestinationIsTheConventionalOne(t *testing.T) {
 	if _, err := pushDestination("", "", "10.124.0.2", "nscheck", "1:2"); !errors.Is(err, ociref.ErrImageUnrepresentable) {
 		t.Errorf("version `1:2` = %v, want ociref.ErrImageUnrepresentable", err)
 	}
-}
-
-// ═══ EVERY FLAG THE CI TEMPLATES TYPE IS A FLAG THAT EXISTS ═══
-//
-// The GitHub Action and the GitLab template are shipped surface: somebody's pipeline runs those
-// exact strings. Nothing joins them to `buildFlagSet` but matching literals — no compiler, no vet,
-// no ordinary test — and the failure is silent on this side and loud on theirs, arriving as `flag
-// provided but not defined` in a pipeline that was green yesterday.
-//
-// SCOPE, stated the way fleet_documented_flags_test.go states its own: this covers `kontra build`
-// command lines, in the files that tell somebody what to type. It is not a repo-wide sweep.
-func TestEveryDocumentedBuildFlagExists(t *testing.T) {
-	registered := map[string]bool{}
-	buildFlagSet().fs.VisitAll(func(f *flag.Flag) { registered[f.Name] = true })
-	// RETIRED FLAGS ARE STILL REGISTERED, WHICH IS THE POINT AND ALSO THE TRAP. `--target` is
-	// declared so that passing it produces a sentence instead of `flag provided but not defined` — so
-	// "does the flag exist" is TRUE for it and cannot be the question. What has to be false is that
-	// anything still TELLS somebody to type it.
-	retired := map[string]bool{"target": true}
-	if len(registered) < 4 {
-		t.Fatalf("buildFlagSet has %d flags; this test is reading the wrong flag set", len(registered))
-	}
-
-	sources := map[string]string{}
-	for _, p := range []string{
-		"../.github/actions/build-actor/action.yml",
-		"../.gitlab/kontra-build-actor.yml",
-		"../README.md",
-		"../control/images/README.md",
-		"main.go",
-		"build.go",
-	} {
-		b, err := os.ReadFile(filepath.Clean(p))
-		if err != nil {
-			t.Errorf("%s is named here as a place `kontra build` is documented and could not be read: %v", p, err)
-			continue
-		}
-		sources[p] = string(b)
-	}
-	// THE GUARD AGAINST A SWEEP THAT FINDS NOTHING: a repo reshuffle that moved these files would
-	// leave this test reading an empty set and reporting success.
-	if len(sources) < 6 {
-		t.Fatalf("only %d of the 6 documented sources were readable, so this test would pass by reading "+
-			"almost nothing", len(sources))
-	}
-
-	buildCmdLine := regexp.MustCompile(`kontra build((?:\s+--?[a-zA-Z][-\w]*(?:[= ][^\s|"]*)?)*)`)
-	flagTok := regexp.MustCompile(`--([a-zA-Z][-\w]*)`)
-
-	seen := 0
-	for path, body := range sources {
-		for _, m := range buildCmdLine.FindAllStringSubmatch(body, -1) {
-			for _, f := range flagTok.FindAllStringSubmatch(m[1], -1) {
-				seen++
-				name := f[1]
-				// The exemption is scoped to the one file allowed to write a retired flag: build.go's own
-				// refusal text, which has to quote the flag it is refusing. Anywhere else — a README, a
-				// CI template — a mention is an INSTRUCTION, and following it now produces an error.
-				if retired[name] {
-					if path != "build.go" {
-						t.Errorf("%s tells somebody to type `kontra build --%s`, which is retired "+
-							"(ADR 0036) and now refuses. A retired flag left in copy-pasteable position is "+
-							"exactly what fleet_documented_flags_test.go was written after.", path, name)
-					}
-					continue
-				}
-				if !registered[name] {
-					t.Errorf("%s tells somebody to type `kontra build --%s`, and there is no such flag.\n"+
-						"  Registered: %v", path, name, keysOfBool(registered))
-				}
-			}
-		}
-	}
-	if seen < 4 {
-		t.Fatalf("only %d `kontra build --flag` mentions were found across %d files; the regexp no "+
-			"longer matches how this repo writes a command line, and this test asserts nothing",
-			seen, len(sources))
-	}
-}
-
-func keysOfBool(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }

@@ -26,8 +26,8 @@
 #       KONTRA_PUSH: "$CI_REGISTRY_IMAGE/bundles/nscheck"     # untagged: takes actor.json's version
 #
 # The three commands below are the whole of it, which is the point: Jenkins, Buildkite or a shell
-# script do the same thing with the same flags. `cli/build_test.go` asserts every `--flag` typed in
-# this file is one `kontra build` actually has, so a rename here cannot go quietly out of date.
+# script do the same thing with the same flags. ci.yml's `build-actor` job extracts them from this
+# file and runs them as written, so a rename here cannot go quietly out of date.
 
 .kontra-build-actor:
   image: golang:1.26

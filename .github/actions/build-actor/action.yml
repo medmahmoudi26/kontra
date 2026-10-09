@@ -23,10 +23,10 @@
 #
 # It lives here so it is versioned with the CLI whose flags it types and is exercised by this repo's
 # own CI (`.github/workflows/ci.yml`, job `build-actor`). Publishing it under `kontra/build-actor@v1`
-# moves the file and changes nothing in it. `cli/build_test.go` asserts every flag typed below is a
-# flag `kontra build` actually has — the failure mode this guards is documented drift, where the
-# markdown still renders and the only thing that changes is that the operator gets `flag provided but
-# not defined`.
+# moves the file and changes nothing in it. That job RUNS this action against a local registry, so a
+# flag typed below that `kontra build` no longer has fails it — the failure mode this guards is
+# documented drift, where the markdown still renders and the only thing that changes is that the
+# operator gets `flag provided but not defined`.
 #
 # A GitLab CI equivalent is `.gitlab/kontra-build-actor.yml`. Both are the same three commands, so
 # Jenkins, Buildkite or a shell script work identically.

@@ -63,10 +63,10 @@ var flagRe = regexp.MustCompile(`--([a-z][a-z0-9-]*)`)
 
 // EVERY FLAG THIS COMMAND TELLS SOMEBODY TO TYPE EXISTS.
 //
-// `cli/fleet_documented_flags_test.go` does this for the fleet family and its SCOPE note (line 21-24)
-// is explicit that it is deliberately NOT a repo-wide sweep — so a new command's documented flags are
-// unguarded unless the equivalent is written, and this is it. Both surfaces are swept: `usageText`,
-// which nothing else checks, and `controlUsage()`, which is what a wrong subcommand prints.
+// Nothing here is a repo-wide sweep — `advice_test.go` hands the fleet family's help to the CLI, and
+// each other command needs its own — so a new command's documented flags are unguarded unless the
+// equivalent is written, and this is it. Both surfaces are swept: `usageText`, which nothing else
+// checks, and `controlUsage()`, which is what a wrong subcommand prints.
 func TestEveryDocumentedControlFlagIsRegistered(t *testing.T) {
 	registered := map[string]bool{}
 	controlFlagSet("up").fs.VisitAll(func(f *flag.Flag) { registered[f.Name] = true })
@@ -75,9 +75,9 @@ func TestEveryDocumentedControlFlagIsRegistered(t *testing.T) {
 	}
 
 	// THE `kontra up` AND `kontra down` BLOCKS OF usageText, AND ONLY THEM. Scoped rather than swept
-	// over the whole text for the reason `fleet_documented_flags_test.go:21-24` gives about its own
-	// scope: this file knows one command's flags. A continuation line is any indented line that does
-	// not itself start a new `kontra …` entry.
+	// over the whole text because this file knows one command's flags, and a guard that half-covers
+	// the help while reading as though it covers all of it is worse than one that says what it holds.
+	// A continuation line is any indented line that does not itself start a new `kontra …` entry.
 	var prose []string
 	inBlock := false
 	for _, line := range strings.Split(usageText, "\n") {
