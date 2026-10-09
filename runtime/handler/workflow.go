@@ -27,9 +27,7 @@ func (a *Activities) RunWorkflow(ctx workflow.Context, in wire.EntryInput) (*wir
 	// "cannot unmarshal object into Go value of type []interface {}" surfacing from an
 	// activity result decode, which names neither the cause nor the fix.
 	if len(units) == 0 && in.InputRef != nil {
-		fetchAO := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 5 * time.Minute,
-		})
+		fetchAO := workflow.WithActivityOptions(ctx, blobActivityOptions())
 		var fetched any
 		if err := workflow.ExecuteActivity(fetchAO, identity.FetchBlobActivity, *in.InputRef).Get(ctx, &fetched); err != nil {
 			return nil, err
@@ -63,16 +61,9 @@ func (a *Activities) RunWorkflow(ctx workflow.Context, in wire.EntryInput) (*wir
 	//    takes the Session id, which gives every Method call in it the same instance — a
 	//    per-dispatch node id would give each call its own, which is a Session in name only.
 	//    Congruent with actorkit's `session_actor_id`, written independently on that side.
-	actorID := in.IdempotencyKey
-	if actorID == "" {
-		actorID = in.SessionID
-	}
-	if actorID == "" {
-		actorID = joinNonEmpty(in.RunID, in.NodeID)
-	}
-	if actorID == "" {
-		return nil, temporal.NewNonRetryableApplicationError(
-			"run has no idempotency_key/run_id/node_id to key the actor", "BadInput", nil)
+	actorID, err := deriveActorID(in)
+	if err != nil {
+		return nil, err
 	}
 
 	// 2b. Tag this backing workflow with search attributes for the visibility-backed monitor
@@ -148,11 +139,7 @@ func (a *Activities) RunWorkflow(ctx workflow.Context, in wire.EntryInput) (*wir
 	//    it. That is the silent reset §7 refuses — so the scope's close is the caller's own
 	//    CloseSession, and this path stays exactly as it was for an unscoped dispatch.
 	if in.SessionID == "" {
-		closeAO := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			TaskQueue:           opts.TaskQueue,
-			StartToCloseTimeout: 30 * time.Second,
-			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
-		})
+		closeAO := workflow.WithActivityOptions(ctx, closeActivityOptions(opts.TaskQueue))
 		_ = workflow.ExecuteActivity(closeAO, "Close",
 			map[string]any{"actor_id": actorID}).Get(ctx, nil)
 	}
@@ -173,9 +160,7 @@ func (a *Activities) RunWorkflow(ctx workflow.Context, in wire.EntryInput) (*wir
 	// BareRef. They ride as a SECOND CAS object named on the ref's meta, so a caller can see
 	// THAT units were dropped, and how many, without dereferencing anything — and fetch the
 	// rows only when it actually wants them.
-	storeAO := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 5 * time.Minute,
-	})
+	storeAO := workflow.WithActivityOptions(ctx, blobActivityOptions())
 	emitted, _ := result["results"].([]any)
 	if emitted == nil {
 		emitted = []any{}
@@ -308,4 +293,37 @@ func isolatedUnits(env map[string]any) int {
 		return len(f)
 	}
 	return 0
+}
+
+// deriveActorID is which live instance — and which commit map — a batch belongs to: the
+// idempotency key, else the Session, else run and node joined. A retry derives the same id, which
+// is what lands it on the instance holding the batch's progress. Pinned by
+// shared/conformance/dispatch.json §actor_id, which every Phase 2 caller drives too (ADR 0067).
+func deriveActorID(in wire.EntryInput) (string, error) {
+	actorID := in.IdempotencyKey
+	if actorID == "" {
+		actorID = in.SessionID
+	}
+	if actorID == "" {
+		actorID = joinNonEmpty(in.RunID, in.NodeID)
+	}
+	if actorID == "" {
+		return "", temporal.NewNonRetryableApplicationError(
+			"run has no idempotency_key/run_id/node_id to key the actor", "BadInput", nil)
+	}
+	return actorID, nil
+}
+
+// closeActivityOptions: an unscoped call's Close, on the RunBatch's own queue (dispatch.json §close_options).
+func closeActivityOptions(queue string) workflow.ActivityOptions {
+	return workflow.ActivityOptions{
+		TaskQueue:           queue,
+		StartToCloseTimeout: 30 * time.Second,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+	}
+}
+
+// blobActivityOptions: fetch_blob and store_blob (dispatch.json §blob_options).
+func blobActivityOptions() workflow.ActivityOptions {
+	return workflow.ActivityOptions{StartToCloseTimeout: 5 * time.Minute}
 }
