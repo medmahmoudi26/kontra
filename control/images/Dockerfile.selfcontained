@@ -106,12 +106,12 @@ FROM golang:1.25-bookworm AS release
 # container that pulls fine and answers `exec format error` on first run.
 ARG TARGETARCH
 
-# The repo pins Go 1.26.8 in `go.work`. GOTOOLCHAIN makes the toolchain in this image fetch and
+# The repo pins Go 1.26.9 in `go.work`. GOTOOLCHAIN makes the toolchain in this image fetch and
 # verify that exact one rather than whatever the base ships — the mechanism Go added for this, and
 # the same version `install.sh` fetches on a bare machine. `cli/gotoolchain_test.go` asserts every
 # copy of the version agrees with `go.work`; there are seven, and a bump that lands in go.mod alone
 # breaks only the container paths.
-ENV GOTOOLCHAIN=go1.26.8
+ENV GOTOOLCHAIN=go1.26.9
 ENV CGO_ENABLED=0
 
 # NO NODE AND NO PNPM IN THIS STAGE. Two Go binaries come out of it and neither is built with a
