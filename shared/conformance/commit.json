@@ -1,0 +1,230 @@
+{
+ "why": "Where a committed Unit's outcome lives in the object store, and what a resuming attempt will accept as one.",
+ "note": [
+  "THE HEARTBEAT SAYS WHICH UNITS FINISHED; THIS SAYS WHAT THEY PRODUCED. A checkpoint",
+  "(checkpoint.json) is a range set because a heartbeat is small, and a range set cannot carry a",
+  "Unit's output refs. So each Unit's outcome is written as ONE object, synchronously, BEFORE the",
+  "beat that reports it, and the checkpoint's `manifest_ref` names the batch's prefix. A retry",
+  "folds the finished Units back from these objects instead of re-running them (ADR 0060).",
+  "",
+  "`commits/` IS ITS OWN TOP-LEVEL PREFIX, NOT A CORNER OF `units/`. Everything under",
+  "`units/run=<id>/` that ends in `.json` is counted as a ROW by the live row tail (rowTail.ts) and",
+  "read as one by a DuckDB glob over the run. A commit object is not a row, and putting it there",
+  "would inflate every run's count by its Unit count.",
+  "",
+  "`run=` LEADS for the same measured reason it leads in blobkey.json: an object store prunes a LIST",
+  "only by literal prefix, and every reader of this tree (a retention sweep, an operator) asks by run.",
+  "",
+  "A DECODE THAT REFUSES IS LOUD, NOT A RE-RUN. A body that names another batch or another Unit at",
+  "this key, or a version this reader does not know, is corruption or skew, and the engine fails the",
+  "attempt rather than guess. Reading it as 'not finished' would re-run silently; reading it as",
+  "'finished' with what it says would fold another Unit's output into this one."
+ ],
+ "version": 1,
+ "keys": [
+  {
+   "why": "ordinary key",
+   "actor": "cachebuster",
+   "run": "run-abc",
+   "node": "n7",
+   "batch_id": "0123456789abcdef",
+   "unit": 11,
+   "prefix": "commits/run=run-abc/actor=cachebuster/shard=0007/batch=0123456789abcdef/",
+   "key": "commits/run=run-abc/actor=cachebuster/shard=0007/batch=0123456789abcdef/unit=00011.json"
+  },
+  {
+   "why": "empty fields must still make a valid key — a missing segment is a path no reader can match",
+   "actor": "",
+   "run": "",
+   "node": "",
+   "batch_id": "",
+   "unit": 0,
+   "prefix": "commits/run=run/actor=unknown/shard=node/batch=batch/",
+   "key": "commits/run=run/actor=unknown/shard=node/batch=batch/unit=00000.json"
+  },
+  {
+   "why": "n10 must not prefix-collide n1 (the padding blobkey.json pins, reused)",
+   "actor": "crawl4ai-canon",
+   "run": "r1",
+   "node": "n10",
+   "batch_id": "b1",
+   "unit": 1,
+   "prefix": "commits/run=r1/actor=crawl4ai-canon/shard=0010/batch=b1/",
+   "key": "commits/run=r1/actor=crawl4ai-canon/shard=0010/batch=b1/unit=00001.json"
+  },
+  {
+   "why": "n1 (the collision victim)",
+   "actor": "crawl4ai-canon",
+   "run": "r1",
+   "node": "n1",
+   "batch_id": "b1",
+   "unit": 1,
+   "prefix": "commits/run=r1/actor=crawl4ai-canon/shard=0001/batch=b1/",
+   "key": "commits/run=r1/actor=crawl4ai-canon/shard=0001/batch=b1/unit=00001.json"
+  },
+  {
+   "why": "a per-dispatch node id (catalog.py mints `{actor}-{uuid8}`) is not numeric and is kept",
+   "actor": "enrich",
+   "run": "r",
+   "node": "enrich-3f9a01bc",
+   "batch_id": "b2",
+   "unit": 2,
+   "prefix": "commits/run=r/actor=enrich/shard=enrich-3f9a01bc/batch=b2/",
+   "key": "commits/run=r/actor=enrich/shard=enrich-3f9a01bc/batch=b2/unit=00002.json"
+  },
+  {
+   "why": "path and glob injection is neutered in EVERY segment, the batch id included",
+   "actor": "a/b=c",
+   "run": "r 2",
+   "node": "n*3",
+   "batch_id": "b?/x",
+   "unit": 3,
+   "prefix": "commits/run=r_2/actor=a_b_c/shard=n_3/batch=b__x/",
+   "key": "commits/run=r_2/actor=a_b_c/shard=n_3/batch=b__x/unit=00003.json"
+  },
+  {
+   "why": "a chunked numeric shard keeps its padding",
+   "actor": "cachebuster",
+   "run": "r",
+   "node": "n1.2",
+   "batch_id": "b3",
+   "unit": 4,
+   "prefix": "commits/run=r/actor=cachebuster/shard=0001.2/batch=b3/",
+   "key": "commits/run=r/actor=cachebuster/shard=0001.2/batch=b3/unit=00004.json"
+  },
+  {
+   "why": "an index past five digits WIDENS rather than truncates: two Units must never share a key",
+   "actor": "x",
+   "run": "r",
+   "node": "n1",
+   "batch_id": "b4",
+   "unit": 123456,
+   "prefix": "commits/run=r/actor=x/shard=0001/batch=b4/",
+   "key": "commits/run=r/actor=x/shard=0001/batch=b4/unit=123456.json"
+  }
+ ],
+ "encode": [
+  {
+   "why": "a committed Unit carries its output refs and nothing else",
+   "batch_id": "b1",
+   "unit": 2,
+   "out": [{"$ref": {"key": "units/run=r/dt=2026-10-10/actor=x/shard=0001/unit=00002/aa.json", "size": 9, "sha256": "aa"}}],
+   "expect": {"v": 1, "batch_id": "b1", "unit": 2, "out": [{"$ref": {"key": "units/run=r/dt=2026-10-10/actor=x/shard=0001/unit=00002/aa.json", "size": 9, "sha256": "aa"}}]}
+  },
+  {
+   "why": "a Unit that pushed nothing commits an EMPTY list, not null — a reader refuses null",
+   "batch_id": "b1",
+   "unit": 0,
+   "out": [],
+   "expect": {"v": 1, "batch_id": "b1", "unit": 0, "out": []}
+  },
+  {
+   "why": "an isolated Unit carries its error and category, and `out` is still a list",
+   "batch_id": "b1",
+   "unit": 4,
+   "error": {"type": "ValueError", "message": "bad unit"},
+   "category": "terminal",
+   "expect": {"v": 1, "batch_id": "b1", "unit": 4, "out": [], "error": {"type": "ValueError", "message": "bad unit"}, "category": "terminal"}
+  }
+ ],
+ "decode": [
+  {
+   "why": "a committed Unit folds back as its output",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 1, "batch_id": "b1", "unit": 3, "out": [{"$ref": {"key": "k", "size": 2, "sha256": "s"}}]},
+   "expect": {"outcome": "committed", "out": [{"$ref": {"key": "k", "size": 2, "sha256": "s"}}]}
+  },
+  {
+   "why": "a committed Unit that pushed nothing is FINISHED, and is not the same fact as a missing commit",
+   "batch_id": "b1",
+   "unit": 0,
+   "body": {"v": 1, "batch_id": "b1", "unit": 0, "out": []},
+   "expect": {"outcome": "committed", "out": []}
+  },
+  {
+   "why": "an isolated Unit folds back as the same failure, so a retry reports it rather than re-poisoning the scope",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 1, "batch_id": "b1", "unit": 3, "out": [], "error": {"type": "ValueError", "message": "bad"}, "category": "terminal"},
+   "expect": {"outcome": "isolated", "error": {"type": "ValueError", "message": "bad"}, "category": "terminal"}
+  },
+  {
+   "why": "an isolated Unit with no category reads as `exhausted`, the category the framework isolates by when nothing else is said",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 1, "batch_id": "b1", "unit": 3, "out": [], "error": {"type": "RuntimeError", "message": "x"}},
+   "expect": {"outcome": "isolated", "error": {"type": "RuntimeError", "message": "x"}, "category": "exhausted"}
+  },
+  {
+   "why": "ANOTHER BATCH'S BODY AT THIS KEY IS REFUSED. The key carries the batch id, so a mismatch is corruption — and folding it would put another batch's output in this one",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 1, "batch_id": "b0", "unit": 3, "out": []},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "ANOTHER UNIT'S BODY AT THIS KEY IS REFUSED, for the same reason one level down",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 1, "batch_id": "b1", "unit": 4, "out": []},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "a body that does not say which Unit it is is not evidence about Unit 0",
+   "batch_id": "b1",
+   "unit": 0,
+   "body": {"v": 1, "batch_id": "b1", "out": []},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "a body that does not say which batch it is is not evidence about this one",
+   "batch_id": "b1",
+   "unit": 0,
+   "body": {"v": 1, "unit": 0, "out": []},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "A FUTURE VERSION IS REFUSED, NOT PARTLY READ — the checkpoint's rule, for the same reason",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 2, "batch_id": "b1", "unit": 3, "out": []},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "an absent version is an encoder that did not say, which is the same risk",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"batch_id": "b1", "unit": 3, "out": []},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "a committed body with no `out` is refused: folding it as empty would silently drop the Unit's rows",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 1, "batch_id": "b1", "unit": 3},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "`out: null` is refused for the same reason — null is not an empty list",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 1, "batch_id": "b1", "unit": 3, "out": null},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "an error that is not an object cannot be reported as one",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": {"v": 1, "batch_id": "b1", "unit": 3, "out": [], "error": "bad"},
+   "expect": {"outcome": "refused"}
+  },
+  {
+   "why": "a body that is not an object at all is refused",
+   "batch_id": "b1",
+   "unit": 3,
+   "body": [{"v": 1, "batch_id": "b1", "unit": 3, "out": []}],
+   "expect": {"outcome": "refused"}
+  }
+ ]
+}

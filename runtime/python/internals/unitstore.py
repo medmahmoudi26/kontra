@@ -1,14 +1,19 @@
 """Per-unit blob store for the actor host — the actor side of the claim-check data plane.
 
-Each unit's output is written to the object store THE MOMENT it completes (deterministic
-key `units/{run_id}/{node_id}/u{i}.json`), and the durable commit holds only a small ref
-`{"$ref": {key, size, sha256}}` — so neither actor memory nor the Redis state store ever
-carries batch payloads. Deterministic keys (not content-addressed) on purpose: a re-run
-overwrites idempotently, and a node's whole output is an S3 PREFIX a query engine can
-scan directly (`read_json('s3://…/units/{run}/{node}/*.json')`) without the manifest.
+Each pushed record is written to the object store THE MOMENT it is pushed (`blob_key`, keyed by
+content sha), and what a Unit commits holds only small refs `{"$ref": {key, size, sha256}}` — so
+neither actor memory nor any state store ever carries batch payloads. A node's whole output is an S3
+PREFIX a query engine can scan directly (`read_json('s3://…/units/run={run}/**/*.json')`).
 
-Unconfigured (`KONTRA_S3_ENDPOINT` unset) -> None: the host commits payloads inline,
-exactly the no-S3 dev/test behavior. Configured -> `ensure()` fails fast at serve() (S3
+A Unit's COMMIT is an object here too (ADR 0060): one per finished Unit under `commit_prefix`,
+holding its refs or its isolation error, written before the heartbeat that reports it. The
+heartbeat's checkpoint says WHICH Units finished and names that prefix; this says what they
+produced. It used to be a field in the actor's Redis hash, which was one TTL or one eviction away
+from a retry re-running finished work or skipping unfinished work with nothing raised.
+
+Unconfigured (`KONTRA_S3_ENDPOINT` unset) -> None: the host collects records inline and writes
+no commit objects — the no-S3 dev/test mode, in which a retry re-runs its whole batch because
+nothing durable holds a finished Unit's output. Configured -> `ensure()` fails fast at serve() (S3
 sits in the per-unit hot path; better to die at boot than on the first unit).
 
 boto3 is sync — callers wrap writes in `asyncio.to_thread` so a PUT never stalls the
@@ -94,6 +99,126 @@ class UnitStore:
                     f"sub-unit blob {key} holds {len(rec)} records; expected exactly 1")
             return rec[0]
         return rec
+
+    # ---- per-Unit commit objects (ADR 0060) -----------------------------------------------------
+
+    def commit_prefix(self, run_id: str, node_id: str, batch_id: str) -> str:
+        """This batch's commit prefix as this store spells it — the value a checkpoint carries as
+        `manifest_ref`. Concatenated with the store prefix exactly as `put_subunit` does, for the
+        same reason: the prefix is CARRIED (in the heartbeat) and read back verbatim."""
+        return self.prefix + commit_prefix(_actor_name(), run_id, node_id, batch_id)
+
+    def put_commit(self, key: str, body: dict) -> None:
+        """Write one Unit's commit object. SYNCHRONOUS ON PURPOSE: the beat that reports the Unit
+        finished is sent only after this returns, so a checkpoint can never name a Unit whose
+        outcome is not already in the store."""
+        data = json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
+        self._s3.put_object(Bucket=self.bucket, Key=key, Body=data,
+                            ContentType="application/json")
+
+    def get_commit(self, key: str) -> Any:
+        """Read one commit object back, or `None` when there is no object at `key`.
+
+        ABSENCE IS RETURNED, NOT RAISED, so the caller decides what it means — and the engine
+        decides it is loud (`CommitLost`): a Unit the checkpoint calls finished with nothing here
+        is the store having lost something, never a Unit to quietly re-run. Every OTHER failure
+        (a refused credential, a network error) raises as itself, because those are retryable and
+        absence is not.
+        """
+        try:
+            body = self._s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        except Exception as e:  # noqa: BLE001 - narrowed to "not found" just below
+            code = str(((getattr(e, "response", None) or {}).get("Error") or {}).get("Code", ""))
+            if code in ("NoSuchKey", "404", "NotFound"):
+                return None
+            raise
+        return json.loads(body)
+
+
+#: The only commit-object version this reader understands (shared/conformance/commit.json).
+COMMIT_VERSION = 1
+
+
+class CommitInvalid(ValueError):
+    """A commit object that may not be folded into a resumed batch — see `decode_commit`."""
+
+
+def commit_prefix(actor: str, run_id: str, node_id: str, batch_id: str) -> str:
+    """Where every commit object of one batch lives — byte-identical to Go's unitstore.CommitPrefix.
+
+        commits/run={run}/actor={actor}/shard={shard}/batch={batch_id}/
+
+    ITS OWN TOP-LEVEL PREFIX, NOT A CORNER OF `units/`. Everything under `units/run=<id>/` that
+    ends in `.json` is a ROW to the live row tail (`control/orchestrator/src/rowTail.ts` counts
+    them) and to a DuckDB glob over the run, so a commit object there would inflate every run's
+    row count by its Unit count. `run=` still leads, for the measured reason `blob_key` gives:
+    an object store prunes a LIST only by literal prefix, and whatever sweeps this tree asks by run.
+
+    The batch id is the batch's CONTENT HASH, so one dispatch's attempts all land on one prefix
+    and two batches under one run/node never share one. shared/conformance/commit.json pins it.
+    """
+    return (
+        f"commits/run={_part_safe(run_id or 'run')}"
+        f"/actor={_part_safe(actor or 'unknown')}"
+        f"/shard={_shard_of(node_id)}"
+        f"/batch={_part_safe(batch_id or 'batch')}/"
+    )
+
+
+def commit_key(prefix: str, unit: int) -> str:
+    """Unit `unit`'s commit object under a batch's prefix. Five digits is a floor, not a width:
+    an index past 99999 widens rather than truncating into a neighbour's key."""
+    return f"{prefix}unit={unit:05d}.json"
+
+
+def encode_commit(batch_id: str, unit: int, out=None, error=None, category=None) -> dict:
+    """One Unit's outcome as its commit object holds it.
+
+    The body NAMES its batch and its Unit even though the key already does. That redundancy is the
+    integrity check: a body at the wrong key — a copy, a skewed prefix, a hand edit — is refused
+    on read instead of folded into a batch it does not describe.
+
+    `out` is always a list: an isolated Unit has `[]`, and a committed Unit that pushed nothing has
+    `[]` too, which a reader must tell apart from a missing `out` (refused, never "empty").
+    """
+    body = {"v": COMMIT_VERSION, "batch_id": batch_id, "unit": int(unit), "out": list(out or [])}
+    if error is not None:
+        body["error"] = error
+        body["category"] = category or "exhausted"
+    return body
+
+
+def decode_commit(body: Any, batch_id: str, unit: int) -> dict:
+    """Validate one commit object read back for (`batch_id`, `unit`), or raise `CommitInvalid`.
+
+    Returns `{"out": [...]}` for a committed Unit, `{"out": [], "error": {...}, "category": ...}`
+    for an isolated one.
+
+    REFUSED RATHER THAN PARTLY READ, the checkpoint's rule one level down: a version this code does
+    not know, a body naming another batch or another Unit, or a committed body with no `out` list.
+    The safe-looking alternatives are both wrong — treating it as "not finished" re-runs silently,
+    and folding what it says puts another Unit's output in this one.
+    """
+    if not isinstance(body, dict):
+        raise CommitInvalid(f"commit object is a {type(body).__name__}, not an object")
+    if body.get("v") != COMMIT_VERSION:
+        raise CommitInvalid(f"commit object version {body.get('v')!r}; this reader knows "
+                            f"{COMMIT_VERSION}")
+    if body.get("batch_id") != batch_id:
+        raise CommitInvalid(f"commit object names batch {body.get('batch_id')!r}, expected "
+                            f"{batch_id!r}")
+    got_unit = body.get("unit")
+    if not isinstance(got_unit, int) or isinstance(got_unit, bool) or got_unit != unit:
+        raise CommitInvalid(f"commit object names unit {got_unit!r}, expected {unit}")
+    out = body.get("out")
+    if not isinstance(out, list):
+        raise CommitInvalid(f"commit object has no `out` list (got {out!r})")
+    err = body.get("error")
+    if err is None:
+        return {"out": out}
+    if not isinstance(err, dict):
+        raise CommitInvalid(f"commit object's error is a {type(err).__name__}, not an object")
+    return {"out": [], "error": err, "category": body.get("category") or "exhausted"}
 
 
 def _part_safe(v: str) -> str:
