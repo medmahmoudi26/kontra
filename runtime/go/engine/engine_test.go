@@ -195,36 +195,39 @@ func TestTwoMethodsHandedTheSameUnitsAreTwoBatches(t *testing.T) {
 }
 
 // A crash mid-Batch resumes at the first uncommitted Unit and never re-runs a committed one. This
-// is the whole point of the commit map, so it is tested directly rather than inferred.
+// is the whole point of the checkpoint, so it is tested directly rather than inferred: the retry is
+// handed what the last beat carried (ResumeFrom), and lands on a FRESH instance over a FRESH state
+// hash — the host drops the session on error, and nothing about resume may need what it held.
 func TestACrashMidBatchResumesAtTheFirstUncommittedUnit(t *testing.T) {
 	var ran []any
 	died := false
-	a, _ := actorWith(t, methodRegistry("scan", core.MethodFunc(
-		func(s *core.Session, b *core.Batch, ds *core.Dataset) error {
-			for unit := range b.All() {
-				if unit.Index == 1 && !died { // die AFTER unit 0 committed
-					died = true
-					return &core.SessionLostError{Msg: "host gone"}
-				}
-				ran = append(ran, unit.Value)
-				ds.Push(map[string]any{"got": unit.Value})
+	a, _ := newTestActor(t, func(s *core.Session, b *core.Batch, ds *core.Dataset) error {
+		for unit := range b.All() {
+			if unit.Index == 1 && !died { // die AFTER unit 0 committed
+				died = true
+				return &core.SessionLostError{Msg: "host gone"}
 			}
-			return nil
-		})))
+			ran = append(ran, unit.Value)
+			ds.Push(map[string]any{"got": unit.Value})
+		}
+		return nil
+	})
 
-	req := RunBatchReq{Method: "scan", Units: []any{"a", "b", "c"}, RunID: "r", NodeID: "n"}
+	req := RunBatchReq{Units: []any{"a", "b", "c"}, RunID: "r", NodeID: "n"}
 	if _, err := a.RunBatch(context.Background(), req); err == nil {
 		t.Fatal("turn 1 must surface the dead resource")
 	}
-	resp, err := a.RunBatch(context.Background(), req) // the handler's retry, same actor id
+	retry := New("run1-node1", newFakeSM()) // the handler's retry, same actor id, new process
+	retry.ResumeFrom(a.Checkpoint())
+	resp, err := retry.RunBatch(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := fmt.Sprint(ran), "[a b c]"; got != want {
 		t.Errorf("bodies ran for %s, want %s — a committed Unit must never run twice", got, want)
 	}
-	if got, want := fmt.Sprint(resp.Results), "[map[got:a] map[got:b] map[got:c]]"; got != want {
-		t.Errorf("results = %s, want %s — the replayed commit rides in the envelope", got, want)
+	if got := len(resp.Results); got != 3 {
+		t.Errorf("results = %v, want 3 — the folded-back commit rides in the envelope", resp.Results)
 	}
 }
 

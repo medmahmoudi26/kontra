@@ -24,6 +24,7 @@ package temporalhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -33,6 +34,7 @@ import (
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 	"go.temporal.io/sdk/worker"
@@ -191,6 +193,34 @@ func heartbeatBoundOf(ctx context.Context) time.Duration {
 	return activity.GetInfo(ctx).HeartbeatTimeout
 }
 
+// previousCheckpoint is the checkpoint the previous ATTEMPT of this activity last beat, or the zero
+// value (a first attempt, or no activity behind ctx).
+//
+// Temporal keeps only an activity's LAST heartbeat details and hands them to the next attempt. Every
+// beat this host sends is one map whose `checkpoint` field is the cross-SDK encoding
+// (shared/conformance/checkpoint.json), so that one field is decoded and the rest ignored. It is
+// passed on UNVALIDATED: the engine's resumePlan decides whether it describes this batch, by the
+// rule checkpoint.Accepted shares with ResumeFrom and the corpus, so there is one judgement, not two.
+//
+// DETAILS PRESENT IS THE RETRY SIGNAL. A first attempt has none, so the attempt number is not
+// consulted as a second condition: it cannot say anything the details do not already say.
+//
+// A payload that will not decode is logged and treated as absent — the batch then runs every Unit,
+// which is the direction the contract calls safe — rather than failing an attempt over a beat.
+func previousCheckpoint(ctx context.Context) checkpoint.Details {
+	if !activity.IsActivity(ctx) || !activity.HasHeartbeatDetails(ctx) {
+		return checkpoint.Details{}
+	}
+	var beat struct {
+		Checkpoint checkpoint.Details `json:"checkpoint"`
+	}
+	if err := activity.GetHeartbeatDetails(ctx, &beat); err != nil {
+		log.Printf("[kontra] previous attempt's heartbeat did not decode, running every unit: %v", err)
+		return checkpoint.Details{}
+	}
+	return beat.Checkpoint
+}
+
 func keepaliveEvery(timeout time.Duration) time.Duration {
 	if timeout <= 0 {
 		return 0
@@ -208,6 +238,11 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 	defer lk.Unlock()
 
 	a := h.s.get(req.ActorID)
+	// RESUME FROM THE PREVIOUS ATTEMPT'S LAST BEAT (PRD D1, ADR 0060), handed over BEFORE the
+	// beater below exists: ResumeFrom also publishes it, so a keepalive tick that fires while Load
+	// is still running re-sends what Temporal already holds instead of overwriting it with this
+	// instance's stale or empty checkpoint.
+	a.ResumeFrom(previousCheckpoint(ctx))
 	// Beat per committed unit. The field names are a cross-language contract with
 	// control/orchestrator/src/heartbeat.ts, where every field is optional and defaults to 0 — so a
 	// wrong name reports 0/0 forever rather than erroring. Peer of _beat in engine.py.
@@ -311,6 +346,15 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 		// A dead resource nulls the instance inside the engine; drop the whole session so the
 		// retry rebuilds it from scratch rather than reusing a half-torn one.
 		h.s.drop(req.ActorID)
+		// A Unit the previous attempt finished whose commit object cannot be read: the next attempt
+		// would read the same checkpoint and the same store, so it is NOT retried, and it is named
+		// so the failure says the STORE lost something rather than that the author's code refused.
+		// The same type Python's host raises. Only this error is mapped: the wider NonRetryable
+		// mapping core.NonRetryable's doc describes is a separate change with its own blast radius.
+		var lost *engine.CommitLostError
+		if errors.As(err, &lost) {
+			return nil, temporal.NewNonRetryableApplicationError(lost.Error(), lost.KontraErrorType(), lost)
+		}
 		return nil, err
 	}
 	// PROVENANCE TRAVELS WITH THE BATCH — peer of `out["machine"]` in host.py. The handler

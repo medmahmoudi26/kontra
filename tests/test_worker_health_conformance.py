@@ -157,12 +157,6 @@ def _make_host(method, load=None):  # noqa: ANN001, ANN202
         async def delete(self, field):  # noqa: ANN001, ANN202
             return self.d.pop(field, None) is not None
 
-        async def touch(self):
-            pass
-
-        async def drop(self):
-            self.d.clear()
-
     reg = ActorRegistry()
     reg.actor_name = "t"
     reg.methods = {method.__name__: MethodRegistration(

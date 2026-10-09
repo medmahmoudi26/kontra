@@ -1,37 +1,36 @@
-"""ActorStateKV — the per-actor durable state, tiers 1 and 2 (ADR 0015, ADR 0018).
+"""ActorStateKV — the per-actor durable state, tier 2 (ADR 0015, ADR 0018).
 
-This is tier 1 and tier 2 of the three-tier model: the per-(step,unit) commit map, the per-unit
-resume scratch (`unit_state`), and the cross-session `global_state`. ADR 0018 changed the client
-these ride on but **not the tiers**: same keys, same Redis, same 24 h TTL.
+What lives here now is the per-unit resume scratch (`unit_state`, `{batch}-u{i}-ckpt`) and the
+poison counter beside it (`{batch}-u{i}-kills`). Both describe a Unit that is still IN FLIGHT.
 
-Why they stay in Redis rather than riding Temporal heartbeat details, which was the original
-plan and is struck in the ADR:
+TIER 1 — THE COMMIT MAP — USED TO LIVE HERE TOO, AND MOVED (ADR 0060). Which Units finished rides
+the activity heartbeat as a checkpoint, and what each one produced is a commit object in the unit
+store. A cache with a TTL was the wrong owner for the one record a retry acts on: losing it either
+re-ran finished work or skipped unfinished work, and nothing raised either way (ADR 0059). With it
+went the `batch-owner` field and the batch-boundary TTL renewal (`touch`), which existed only to
+keep the commit map coherent and alive; and `drop`, whose only caller was that owner guard.
+
+Why `unit_state` stays here rather than riding the heartbeat with the checkpoint:
 
   - `RecordHeartbeat` *panics* on encode failure rather than degrading, and `unit_state` is
     author-controlled opaque JSON — a crawl frontier is exactly the shape that outgrows a
-    payload limit and would kill the activity.
-  - Heartbeat details are throttled to one per `0.8 × HeartbeatTimeout` window and are not
-    flushed on SIGKILL, so a hard kill loses up to a minute of commits.
-  - Details survive *attempts*, not *executions*. The Redis map is keyed by actor id with a
-    24 h TTL, so it survives a re-dispatch on the same idempotency key and `recover_run`.
-
-And the failure mode is not degradation: a lost commit **duplicates**. Unit blob keys end in
-`sha256(data)`, and the downstream node is handed every key it has not seen — so a re-run whose
-records are not byte-identical writes a second blob and the child processes both.
+    payload limit and would kill the activity. The checkpoint is a range set precisely so that
+    it never grows that way.
+  - Its move off Redis (with `global_state`/`object_state`, which live in another store) is the
+    hardening Phase 9 decision, not this one.
 
 ## Layout
 
 One Redis HASH per actor id, one field per key:
 
-    kontra-actor:{actor_id}  ->  { "u0": …, "u0-ckpt": …, "s-index": …, "s-name": … }
+    kontra-actor:{actor_id}  ->  { "<batch>-u0-ckpt": …, "<batch>-u3-kills": … }
 
 A hash rather than a key per field because the TTL is what makes this safe to leave behind, and
 `EXPIRE` applies to the whole hash — so one `EXPIRE` per write slides the whole actor's state
-forward instead of needing a touch per field, so renewal is a single `EXPIRE` rather than a
-re-write of every live key.
+forward instead of needing a touch per field.
 
-Values are JSON. `None` is a real stored value (a unit can commit `null`), so absence is
-signalled by the field being missing, never by a sentinel.
+Values are JSON. `None` is a real stored value (an author can store `null` in `unit_state`), so
+absence is signalled by the field being missing, never by a sentinel.
 """
 
 from __future__ import annotations
@@ -40,8 +39,9 @@ import json
 import os
 from typing import Any, Optional
 
-# 24 h. Long enough to outlive any retry budget (MaxAttempts × StartToClose) and a same-day
-# `recover_run`; short enough that abandoned runs do not accumulate in Redis forever.
+# 24 h. Long enough to outlive any retry budget (MaxAttempts × StartToClose), so an in-flight
+# Unit's scratch is still there for the attempt that re-runs it; short enough that abandoned runs
+# do not accumulate in Redis forever.
 STATE_TTL_S = 24 * 60 * 60
 
 _PREFIX = "kontra-actor"
@@ -86,18 +86,6 @@ class ActorStateKV:
     async def delete(self, field: str) -> bool:
         c = self._client()
         return bool(await c.hdel(self._key, field))
-
-    async def touch(self) -> None:
-        """Slide the whole actor's TTL forward. One call, because the TTL is on the hash.
-
-        One call, because the TTL is on the hash rather than on each field.
-        """
-        await self._client().expire(self._key, self._ttl)
-
-    async def drop(self) -> None:
-        """Remove everything for this actor id. Called when a batch completes: the commit map
-        exists to make a RETRY skip finished units, and a finished batch has no retry."""
-        await self._client().delete(self._key)
 
 
 def redis_client_factory() -> Any:

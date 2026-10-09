@@ -37,7 +37,7 @@ from kontra.retry import NonRetryableError, SessionLost
 
 from internals import logs, workerid
 from internals.catalog import publish_catalog
-from internals.engine import build_session_factory
+from internals.engine import CommitLost, build_session_factory
 from internals.temporal.sessions import SessionWorkers
 
 log = logging.getLogger("kontra.host")
@@ -143,6 +143,23 @@ def session_actor_id(session_id: str, key: str = "") -> str:
     return key or session_id
 
 
+def _previous_checkpoint(info) -> Any:
+    """The checkpoint the previous ATTEMPT of this activity last beat, or None.
+
+    Temporal keeps only an activity's LAST heartbeat details and hands them to the next attempt;
+    the engine's beat is one dict whose `checkpoint` field is the cross-SDK encoding
+    (shared/conformance/checkpoint.json). What comes back here is passed through UNVALIDATED —
+    the engine's `_resume_plan` decides whether it describes this batch, by the same rule
+    `resume_from` and the corpus use, so there is one judgement and not two.
+
+    DETAILS PRESENT IS THE RETRY SIGNAL. A first attempt has none, so `info.attempt` is not
+    consulted as a second condition: it cannot say anything the details do not already say.
+    """
+    details = getattr(info, "heartbeat_details", None) or ()
+    last = details[0] if details else None
+    return last.get("checkpoint") if isinstance(last, dict) else None
+
+
 def build_activities(registry, *, sessions: SessionWorkers | None = None, session_factory=None):
     """Return the activities this actor serves, closed over its registry.
 
@@ -176,7 +193,11 @@ def build_activities(registry, *, sessions: SessionWorkers | None = None, sessio
         async with _lock(actor_id):
             session = _session(actor_id)
             try:
-                out = await session.run_batch(payload)
+                # `activity.info()` RAISES outside an activity context, and this function is also
+                # called directly — by the host's own tests, and by anything embedding it — so the
+                # question is asked first. Off the activity path there is no previous attempt.
+                prior = _previous_checkpoint(activity.info()) if activity.in_activity() else None
+                out = await session.run_batch(payload, resume=prior)
                 # PROVENANCE TRAVELS WITH THE BATCH. The handler copies this onto the result
                 # ref's meta, the caller's `Batch` reads it from there without a fetch, and
                 # `publish` writes it as the row's Machine. It has to be stamped HERE, in the
@@ -195,6 +216,12 @@ def build_activities(registry, *, sessions: SessionWorkers | None = None, sessio
                 # improves by asking the same Session again. The caller's scope is what recovers,
                 # by reopening and resuming from the cursor it holds (§7).
                 raise ApplicationError(str(e), type="SessionLost", non_retryable=True) from e
+            except CommitLost as e:
+                # A Unit the previous attempt's checkpoint calls finished has no readable commit
+                # object. Named rather than folded into the generic NonRetryableError below, so the
+                # failure a caller sees says it is the STORE that lost something, not the author's
+                # code that refused — the two have opposite remedies.
+                raise ApplicationError(str(e), type="CommitLost", non_retryable=True) from e
             except NonRetryableError as e:
                 # TERMINAL MEANS TERMINAL, INCLUDING OUT OF @actor.load. `_classify` already
                 # honours this for a raise inside a Method body — the Unit is isolated, not

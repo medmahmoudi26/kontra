@@ -157,7 +157,7 @@ class FakeSession:
     def __init__(self, actor_id: str, closed: list) -> None:
         self.actor_id, self._closed = actor_id, closed
 
-    async def run_batch(self, payload: dict) -> dict:
+    async def run_batch(self, payload: dict, resume=None) -> dict:
         return {"done": True, "results": list(payload.get("units") or []), "failures": []}
 
     async def close(self) -> dict:
@@ -268,7 +268,7 @@ class DeadResourceSession:
         self._ended = False
         built.append(actor_id)
 
-    async def run_batch(self, payload: dict) -> dict:
+    async def run_batch(self, payload: dict, resume=None) -> dict:
         if self._ended:
             raise self._lost(f"session {self.actor_id} ended when its resource died")
         self._ended = True
@@ -340,7 +340,7 @@ class TerminalLoadSession:
         self._terminal = NonRetryableError
         self._attempts = attempts
 
-    async def run_batch(self, payload: dict) -> dict:
+    async def run_batch(self, payload: dict, resume=None) -> dict:
         self._attempts.append(1)
         raise self._terminal("reddit refused the credentials (HTTP 401)")
 

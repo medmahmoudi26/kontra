@@ -102,7 +102,7 @@ func TestConcurrentPushesAreDurableAtPushTime(t *testing.T) {
 			t.Fatalf("a durable push should commit a $ref, got %v", r)
 		}
 	}
-	if len(fp.blobs) != 2 {
-		t.Errorf("store holds %d blobs, want 2 — each push must be durable AS it is made", len(fp.blobs))
+	if n := len(recordBlobs(fp)); n != 2 {
+		t.Errorf("store holds %d record blobs, want 2 — each push must be durable AS it is made", n)
 	}
 }
