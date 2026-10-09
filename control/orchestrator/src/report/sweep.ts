@@ -53,6 +53,8 @@ import {
 import { render as renderInHost, type RenderResponse } from './renderHost';
 import type { ReportSnapshot } from './render';
 import { reportStore, type ReportStore } from './store';
+import { folderTemplateFor, type FolderTemplate } from './folderTemplate';
+import { activeNamespace } from '../workspaces';
 
 /** Every 15 minutes, matching the history archiver — the same runs, the same visibility query. */
 /**
@@ -132,6 +134,16 @@ export interface SweepDeps {
    * uses to address the run's own namespace (ADR 0051). Identity when absent.
    */
   within?: <T>(runId: string, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * The template of a run nothing pinned, from its workflow type (`report/folderTemplate.ts`).
+   * Defaults to a lookup in the active namespace's workspace folder.
+   */
+  folderTemplate?: (type: string) => FolderTemplate | undefined;
+  /**
+   * Whether a template found that way is PINNED. True for the sweep and the live render; false for
+   * a preview, which §6.2 says stores nothing.
+   */
+  pinFound?: boolean;
 }
 
 /** A closed run is reportable. The same predicate as `isArchivable`, and for the same reason. */
@@ -219,17 +231,24 @@ export async function sweepFinishedRuns(deps: SweepDeps = {}): Promise<ReportSwe
           return;
         }
 
-        const snapshot: ReportSnapshot = built.pinned
-          ? result.snapshot
-          : {
+        const snapshot: ReportSnapshot = !built.pinned
+          ? {
               ...result.snapshot,
               warnings: [
-                'No report.md was pinned when this run started, so this is the default report. A run ' +
-                  'started by `kontra workflow start` pins nothing today — it dials Temporal directly — ' +
-                  'and nothing maps a run id back to its workflow folder, so the template could not be ' +
-                  'found afterwards either.',
+                'No report.md was pinned when this run started, and no single workflow folder in its ' +
+                  'workspace declares its type, so this is the default report.',
               ],
-            };
+            }
+          : built.pinnedLate
+            ? {
+                ...result.snapshot,
+                warnings: [
+                  'This run was started outside the console, which pins nothing, so this report uses ' +
+                    `the report.md in its workspace's workflow folder as it was when first rendered — the ` +
+                    'copy on disk there, which is not necessarily the committed one or the one the run started with.',
+                ],
+              }
+            : result.snapshot;
         const stored = await store.declareVersion({
           runId: run.runId,
           status: 'ok',
@@ -379,8 +398,36 @@ export async function contextForRun(
    * passes it — it is built from the final context — so nothing here can reach a `renderKey`.
    */
   live?: { progress?: ProgressContext; datasets?: Record<string, DatasetSummary>; partial?: unknown }
-): Promise<{ template: string; templateHash: string; context: TemplateContext; pinned: boolean }> {
-  const pinned = await deps.store.template(run.runId);
+): Promise<{
+  template: string;
+  templateHash: string;
+  context: TemplateContext;
+  pinned: boolean;
+  /** Pinned from the folder at a render after the start, not by the start: see {@link LATE_PIN_MS}. */
+  pinnedLate: boolean;
+}> {
+  let pinned = await deps.store.template(run.runId);
+  if (pinned === undefined && run.type) {
+    // NOTHING PINNED IT — a run started outside the console. Find its folder by type in its own
+    // workspace and pin what is there now, so the next render of this run reads the same template.
+    const found = (deps.folderTemplate ?? ((type: string) => folderTemplateFor(type, activeNamespace())))(run.type);
+    if (found) {
+      const pin = {
+        runId: run.runId,
+        templateHash: found.text === undefined ? defaultTemplateId(deps.version) : templateHash(found.text),
+        templateText: found.text ?? '',
+        source: (found.text === undefined ? 'default' : 'workspace') as 'default' | 'workspace',
+        workspace: found.workspace,
+        capturedAt: deps.now(),
+      };
+      if (deps.pinFound === false) {
+        pinned = pin;
+      } else {
+        await deps.store.pinTemplate({ ...pin, at: pin.capturedAt });
+        pinned = await deps.store.template(run.runId);
+      }
+    }
+  }
   const status = statusWord(run.status);
   const close = status === 'completed' ? undefined : await deps.close?.(run.runId);
   const identity = await deps.identity?.(run.runId);
@@ -435,5 +482,14 @@ export async function contextForRun(
     templateHash: pinned?.templateHash ?? defaultTemplateId(deps.version),
     context: withDefault,
     pinned: pinned !== undefined,
+    pinnedLate:
+      pinned !== undefined && pinned.source === 'workspace' && pinned.capturedAt - run.startedAt > LATE_PIN_MS,
   };
 }
+
+/**
+ * How long after its start a pin can be and still be the START's pin. `POST /api/runs` pins within
+ * a second of starting; a pin later than this was made by a render from the folder as it was then,
+ * and the report says so — the workspace copy is not necessarily what was committed, nor what ran.
+ */
+export const LATE_PIN_MS = 60_000;

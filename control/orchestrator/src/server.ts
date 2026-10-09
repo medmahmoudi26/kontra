@@ -455,6 +455,8 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         io,
         {
           store: reports,
+          // A preview stores nothing (§6.2), not even the pin a sweep would make.
+          pinFound: false,
           now: Date.now,
           close: (id) => fetchRunClose(id),
           identity: async (id) => {

@@ -63,7 +63,7 @@ import {
 import { tenantAttributes } from './visibility';
 import { SERVE_DEV_WORKFLOW, infraQueue, serveDevWorkflowId } from './queues';
 import { clientFor, getClient } from './temporalClient';
-import { activeWorkspace, namespaceFor, workspaceOfPath } from './workspaces';
+import { activeWorkspace, inNamespace, namespaceFor, workspaceOfPath } from './workspaces';
 import { toActorRef } from './secrets/slotRoutes';
 import { slotStore } from './secrets/slotStore';
 import type { ActorRef } from './secrets/slots';
@@ -981,7 +981,8 @@ export async function startRun(
   });
 
   const workflow = await stampRunWorkflow(handle.workflowId, manifest, recorder);
-  await pinReportTemplate(handle.workflowId, file, pinner);
+  // IN THE RUN'S NAMESPACE: the report tables are the workspace's own, and the folder decides which.
+  await inNamespace(namespace, () => pinReportTemplate(handle.workflowId, file, pinner));
   return { runId: handle.workflowId, type, queue, ...(workflow ? { workflow } : {}) };
 }
 
