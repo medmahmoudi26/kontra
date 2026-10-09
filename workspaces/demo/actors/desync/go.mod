@@ -1,6 +1,6 @@
 module github.com/medmahmoudi26/kontra-actors/go/desync
 
-go 1.26.8
+go 1.26.9
 
 require (
 	github.com/sw33tLie/http v0.0.0-20251029225617-e8254e59a930

@@ -1,6 +1,6 @@
 module github.com/medmahmoudi26/kontra/cli
 
-go 1.26.8
+go 1.26.9
 
 // go.sum + the // indirect block are produced by `go mod tidy` (coordinator step).
 require (
