@@ -663,6 +663,63 @@ async function closeReason(
   return close.message || close.type;
 }
 
+/** `WORKFLOW_EXECUTION_STATUS_RUNNING` on the wire. Numeric, like the filter below, because the
+ *  enum's export path has moved between SDK minors and the wire value has not. */
+const STATUS_RUNNING = 1;
+/** `HISTORY_EVENT_FILTER_TYPE_CLOSE_EVENT` on the wire. */
+const CLOSE_EVENT = 2;
+
+/** The two raw-service calls {@link closeEventOf} makes, so a test can hand it a fake. */
+export interface CloseEventService {
+  describeWorkflowExecution(req: {
+    namespace: string;
+    execution: { workflowId: string; runId?: string };
+  }): Promise<{ workflowExecutionInfo?: { status?: number | null } | null }>;
+  getWorkflowExecutionHistory(req: {
+    namespace: string;
+    execution: { workflowId: string; runId?: string };
+    historyEventFilterType: number;
+    waitNewEvent: boolean;
+  }): Promise<{ history?: { events?: unknown[] | null } | null }>;
+}
+
+/**
+ * An execution's close event, or `undefined` while it is still running — WITHOUT WAITING FOR ONE.
+ *
+ * THE CLOSE-EVENT FILTER LONG-POLLS AN OPEN RUN, AND `waitNewEvent: false` DOES NOT STOP IT. Asked
+ * for the close event of a running workflow, Temporal holds the request until its long-poll expiry
+ * and then answers with nothing. Measured inside a live install's API container against an open run:
+ * 20,006 ms and zero events for this call, 30 ms for a first-event read of the same history.
+ *
+ * Two callers paid that on every open run. `/api/runs/:id/io` took 20 s, so the run page's output
+ * region hung for as long. And a live report's first render read it TWICE — once through `fetchRunIO`
+ * and once through `fetchRunClose` — before writing a byte. The stream's headers only leave on the
+ * first write, so the browser sat on "No report yet" for 41 s of a 54 s canary, which is the
+ * opposite of streaming (ADR 0062).
+ *
+ * So ask whether it is running first: one describe, a few milliseconds. A describe that FAILS says
+ * nothing either way, and falls through to the read that always worked rather than guessing.
+ */
+export async function closeEventOf(
+  service: CloseEventService,
+  namespace: string,
+  execution: { workflowId: string; runId?: string }
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const described = await service.describeWorkflowExecution({ namespace, execution });
+    if (described.workflowExecutionInfo?.status === STATUS_RUNNING) return undefined;
+  } catch {
+    // Could not tell. The history read below is the old behaviour: slow on an open run, but correct.
+  }
+  const res = await service.getWorkflowExecutionHistory({
+    namespace,
+    execution,
+    historyEventFilterType: CLOSE_EVENT,
+    waitNewEvent: false,
+  });
+  return (res.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
+}
+
 /**
  * How a Run ended, as a TYPE and a MESSAGE rather than one sentence.
  *
@@ -682,15 +739,10 @@ async function runClose(
   execId: string
 ): Promise<{ type: string; message: string } | undefined> {
   try {
-    const res = await client.workflowService.getWorkflowExecutionHistory({
-      namespace: NAMESPACE,
-      execution: { workflowId, ...(execId ? { runId: execId } : {}) },
-      // 2 = CLOSE_EVENT, in the numeric form `fetchRunIO` uses and for the reason it records: the
-      // enum's export path has moved between SDK minors and this is a stable wire value.
-      historyEventFilterType: 2,
-      waitNewEvent: false,
+    const last = await closeEventOf(client.workflowService, NAMESPACE, {
+      workflowId,
+      ...(execId ? { runId: execId } : {}),
     });
-    const last = (res.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
     if (!last) return undefined;
     const kind = closedAsOf(last);
     if (!kind) return undefined;
@@ -1065,15 +1117,7 @@ export async function fetchRunIO(runId: string, execId?: string): Promise<RunIO 
   }
 
   try {
-    const close = await client.workflowService.getWorkflowExecutionHistory({
-      namespace: NAMESPACE,
-      execution,
-      // 2 = CLOSE_EVENT. The numeric form rather than the enum, because the enum's export path has
-      // moved between SDK minors and this is a stable wire value.
-      historyEventFilterType: 2,
-      waitNewEvent: false,
-    });
-    const last = (close.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
+    const last = await closeEventOf(client.workflowService, NAMESPACE, execution);
     if (last) {
       const done = last.workflowExecutionCompletedEventAttributes as
         | { result?: { payloads?: unknown[] } }
