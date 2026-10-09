@@ -65,14 +65,15 @@ import { Repo } from './db/repo';
 import { SourceStore } from './sourceStore';
 import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
-import { describeRun as describeRunById, fetchRunClose, fetchRunIO, listRuns, type RunDescription } from './temporalClient';
+import { describeRun as describeRunById, fetchRunClose, fetchRunIO, getClient, listRuns, type RunDescription } from './temporalClient';
 import { HistoryArchive, startHistoryArchiver } from './historyArchive';
 import { startInuseReconciler } from './images/inuseReconciler';
 import { installApiGate } from './auth/apiGate';
-import { contextForRun, startReportRenderer } from './report/sweep';
+import { contextForRun, startReportRenderer, sweepFinishedRuns } from './report/sweep';
 import { reportStore, type ReportStore } from './report/store';
 import { render as renderReportInHost } from './report/renderHost';
-import { registerReportRoutes } from './routes/report';
+import { admitReport, registerReportRoutes } from './routes/report';
+import { registerReportLiveRoute } from './routes/reportLive';
 import { registerInfraRoutes } from './infraRoutes';
 import { registerSecretRoutes } from './secrets/routes';
 import { registerSlotRoutes } from './secrets/slotRoutes';
@@ -430,6 +431,97 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         }
       );
       return built.context;
+    },
+  });
+  /* LIVE REPORT MODE (ADR 0062). Registered beside the report surface because it is the same renderer
+     and the same gate — `admitReport` is shared rather than copied, so the documented posture and the
+     enforced one cannot drift. The render goes to the same worker thread the sweep uses, so a live
+     tick costs the API's event loop no more than a stored render does. */
+  registerReportLiveRoute(app, {
+    admit: admitReport,
+    onError: (err, runId) =>
+      app.log.warn(`report live: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
+    resolveRun: async (runId) => {
+      const described = await describeRunById(runId);
+      if (!described) return undefined;
+      return {
+        runStartedAt: described.startedAt,
+        status: described.status,
+        closedAt: described.closedAt,
+      };
+    },
+    renderOnce: async (key) => {
+      const described = await describeRunById(key.runId);
+      if (!described) return { error: `run ${key.runId} is no longer readable` };
+      const io = (await fetchRunIO(key.runId)) ?? {};
+      const built = await contextForRun(
+        {
+          runId: key.runId,
+          status: described.status,
+          startedAt: described.startedAt,
+          closedAt: described.closedAt,
+          type: described.type,
+        },
+        io,
+        {
+          store: reports,
+          now: Date.now,
+          close: (id) => fetchRunClose(id),
+          identity: async (id) => {
+            const found = await runWorkflowStore().get(id);
+            return found ? { workflow: found.workflow, version: found.version } : undefined;
+          },
+        }
+      );
+      const result = await renderReportInHost(
+        { template: built.template, context: built.context as unknown as Record<string, unknown> },
+        { onNote: (note) => app.log.info(note) }
+      );
+      if (!result.ok) return { error: result.error };
+      return { snapshot: result.snapshot };
+    },
+    /* THE TERMINAL EVENT, NOT A TIMER (ADR 0062). `handle.result()` is a long poll on history under
+       the hood, so this resolves within seconds of the run closing rather than within the
+       reconciliation pass's minute. It REJECTS for a failed, cancelled, terminated or timed-out run,
+       and the rejection is the signal — such a run still gets a report, saying what happened.
+       PARKED PER WATCHED RUN, not per open run, which is what bounds it: at most one poll per live
+       session, and sessions are already capped. A poll per open run would risk Temporal's
+       per-namespace long-poll limiter, whose RESOURCE_EXHAUSTED the SDK's default retry interceptor
+       would then retry on the shared channel that `/api/runs` uses.
+       The STORED version is minted by the ordinary sweep path over this one run, so the render that
+       is persisted is built from the FINAL context and carries the key a later convergence pass will
+       compute — which is what stops that pass from inserting a second version beside it. */
+    watchTerminal: async (key) => {
+      const client = await getClient();
+      try {
+        await client.workflow.getHandle(key.runId).result();
+      } catch {
+        // Terminal and not a completion. Still reportable, and the report says which.
+      }
+      const described = await describeRunById(key.runId);
+      if (!described || described.closedAt <= 0) return undefined;
+      await sweepFinishedRuns({
+        store: reports,
+        list: async () => [
+          {
+            runId: key.runId,
+            status: described.status,
+            startedAt: described.startedAt,
+            closedAt: described.closedAt,
+            type: described.type,
+          },
+        ],
+        io: (id) => fetchRunIO(id),
+        close: (id) => fetchRunClose(id),
+        identity: async (id) => {
+          const found = await runWorkflowStore().get(id);
+          return found ? { workflow: found.workflow, version: found.version } : undefined;
+        },
+        onError: (err, runId) =>
+          app.log.warn(`report live finalize: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
+      });
+      const latest = await reports.version(key.runId);
+      return latest ? { version: latest.version } : undefined;
     },
   });
   registerLogsRoutes(app);

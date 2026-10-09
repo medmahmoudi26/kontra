@@ -48,7 +48,27 @@ import type { ReportSnapshot } from './render';
 import { reportStore, type ReportStore } from './store';
 
 /** Every 15 minutes, matching the history archiver — the same runs, the same visibility query. */
-const DEFAULT_INTERVAL_MS = 15 * 60 * 1000;
+/**
+ * ADR 0062 CHANGED WHAT THIS LOOP IS FOR, AND THEREFORE ITS CADENCE — 15 minutes to 60 seconds.
+ *
+ * It used to be the only way a finished Run got a report, so the interval WAS the latency: up to
+ * fifteen minutes of a completed run showing nothing. Live mode parks a long poll per watched run and
+ * finalises on the terminal event, so that latency is gone and this pass is no longer on the happy
+ * path at all.
+ *
+ * WHAT IT STILL DOES, AND WHY DELETING IT WOULD HAVE BEEN A REGRESSION DRESSED AS A CLEANUP:
+ * `renderKey` covers the TEMPLATE HASH, so fixing a typo in `report.md` changes the key and the next
+ * pass re-renders every affected finished run — the back catalogue heals itself. A terminal-event
+ * watcher is structurally blind to that: the run is closed, its history is final, and no event will
+ * ever arrive for an edit to a file. This is the convergence loop for (template × run); completion
+ * was only its most visible input.
+ *
+ * It is also the reconciliation arm for runs that ended while no watcher was parked — a restart, or a
+ * run nobody was watching. In steady state it should find NOTHING, and `startReportRenderer` says so
+ * out loud when it finds something, because a safety net doing real work every minute means the
+ * mechanism it is backing up is broken.
+ */
+const DEFAULT_INTERVAL_MS = 60 * 1000;
 
 /** How many ids a counter names before it stops naming them. A sweep report is a log line. */
 export const SKIPPED_IDS_CAP = 50;
@@ -278,6 +298,16 @@ export function startReportRenderer(deps: SweepDeps = {}): () => void {
     try {
       await repair();
       const report = await sweepFinishedRuns(deps);
+      // A SAFETY NET THAT IS DOING REAL WORK IS A BROKEN PRIMARY. Since ADR 0062 the watcher
+      // finalises a watched run on its terminal event, so a render here is either a template edit
+      // healing the back catalogue (expected, occasional) or a run the watcher missed (not expected).
+      // Silence in steady state is the signal; this line is how the difference becomes visible.
+      if (report.rendered > 0) {
+        deps.onNote?.(
+          `report renderer: the reconciliation pass rendered ${report.rendered} run(s). Expected ` +
+            'after a template edit; otherwise the terminal-event watcher missed them.'
+        );
+      }
       if (report.gone > 0) {
         deps.onNote?.(
           `report renderer: ${report.gone} run(s) lost their metadata before a report could be ` +

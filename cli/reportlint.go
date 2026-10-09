@@ -74,6 +74,11 @@ var contextRoots = map[string]bool{
 	"input":    true,
 	"result":   true,
 	"report":   true,
+	// ADR 0062. `datasets.<name>` is the run's own Datasets, summarised while it is still writing
+	// them. It is listed HERE and not only in the engine because an unknown root is an
+	// `UndefinedVariableError` under `strictVariables` — which is to say after the run, which is the
+	// one time a report cannot be fixed by editing it.
+	"datasets": true,
 }
 
 // liquidKeywords are the words inside `{% %}` that are syntax rather than data.

@@ -115,6 +115,10 @@ export const POSTURE: Readonly<Record<string, Posture>> = {
      composer work in a browser. */
   'GET /api/reports': 'gated',
   'GET /api/runs/:runId/report': 'gated',
+  // ADR 0062. The SAME posture as the stored report, because it is the same document on a shorter
+  // clock — and it must be declared here or ADR 0058's "undeclared is closed" answers it 403, which
+  // is the gate working rather than a bug to route around.
+  'GET /api/runs/:runId/report/live': 'gated',
   'GET /api/runs/:runId/report/versions': 'gated',
   'POST /api/runs/:runId/report/render': 'gated',
   'POST /api/runs/:runId/report/preview': 'gated',

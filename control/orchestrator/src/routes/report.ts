@@ -80,6 +80,26 @@ export interface ReportRouteDeps {
 const PREVIEW_MAX = 10;
 const PREVIEW_WINDOW_MS = 60_000;
 
+/**
+ * The gate every report route but reveal shares.
+ *
+ * MODULE-LEVEL AND EXPORTED so `routes/reportLive.ts` uses THIS one rather than its own copy. The
+ * live route is published under the same `/api/runs/:runId/report` prefix and therefore inherits the
+ * same `exploreToken` in the generated spec; two implementations of one gate is how a documented
+ * posture and an enforced one drift apart.
+ */
+export function admitReport(
+  req: { headers: { authorization?: string | undefined } },
+  reply: { code: (n: number) => { send: (b: unknown) => unknown } }
+): boolean {
+  const denied = checkBearer(req.headers.authorization, EXPLORE_TOKEN_VARS);
+  if (denied) {
+    reply.code(denied.code).send(denied.body);
+    return false;
+  }
+  return true;
+}
+
 export function registerReportRoutes(app: FastifyInstance, deps: ReportRouteDeps): void {
   const { reports } = deps;
   const now = deps.now ?? Date.now;
@@ -89,17 +109,7 @@ export function registerReportRoutes(app: FastifyInstance, deps: ReportRouteDeps
   );
 
   /** The gate every route but reveal shares. `true` means carry on. */
-  const admit = (
-    req: { headers: { authorization?: string | undefined } },
-    reply: { code: (n: number) => { send: (b: unknown) => unknown } }
-  ): boolean => {
-    const denied = checkBearer(req.headers.authorization, EXPLORE_TOKEN_VARS);
-    if (denied) {
-      reply.code(denied.code).send(denied.body);
-      return false;
-    }
-    return true;
-  };
+  const admit = admitReport;
 
   /** `?version=` as a positive integer, or undefined for "the latest". */
   const versionOf = (query: unknown): number | undefined => {
