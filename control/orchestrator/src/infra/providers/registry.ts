@@ -9,7 +9,10 @@
  * Called ONLY inside the infra converge activity, with the profile resolved there from kontra.yaml:
  * a profile carries its cloud token, and the token never enters history, arguments or a Batch.
  */
+import { execFile } from 'node:child_process';
+
 import type { ByoKubeconfigProfile, FleetProfile } from '../fleets';
+import { LocalProvider, type Runner } from './local';
 import type { ClusterFlavor } from '../../kube/bootstrap';
 
 export interface FleetNode {
@@ -50,9 +53,33 @@ function notYet(provider: string, slice: string): FleetProvider {
   return { converge: refuse, destroy: refuse };
 }
 
+/** A command, run with no shell: arguments are never interpolated into a command line. */
+const execRunner: Runner = (cmd, args) =>
+  new Promise((resolve) => {
+    execFile(cmd, args, { maxBuffer: 16 * 1024 * 1024, timeout: 20 * 60_000 }, (err, stdout, stderr) => {
+      const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : 1) : 0;
+      resolve({ code, stdout: String(stdout), stderr: String(stderr) || (err ? err.message : '') });
+    });
+  });
+
+/**
+ * The `local` provider, configured from the infra role's environment: where fleet state lives, and
+ * how a node reaches this install's registry (the name image references use, and the address a VM
+ * fetches it from — `host.lima.internal` is the host as Lima's VMs see it).
+ */
+function localFromEnv(env: NodeJS.ProcessEnv = process.env): FleetProvider {
+  const name = env.KONTRA_REGISTRY_NAME?.trim();
+  const endpoint = env.KONTRA_REGISTRY_ENDPOINT?.trim();
+  return new LocalProvider(
+    execRunner,
+    env.KONTRA_FLEET_STATE?.trim() || '/var/lib/kontra/fleets',
+    name && endpoint ? { name, endpoint } : undefined
+  );
+}
+
 export const PROVIDERS: Record<FleetProfile['provider'], FleetProvider> = {
   byo_kubeconfig: byoKubeconfig,
-  local: notYet('local', 'slice 4'),
+  local: localFromEnv(),
   digital_ocean: notYet('digital_ocean', 'slice 9'),
 };
 
