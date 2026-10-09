@@ -20,9 +20,10 @@ import (
 // same env var — kept honest with the first by its own arm of the cross-language conformance corpus.
 // Two implementations plus a test proving they agree is strictly more to maintain than one.
 // IT RETURNS THE INTERFACE, AND nil STAYS nil. `codec.New(nil, …)` is PASSTHROUGH — the codec
-// serves unchanged payloads when no store is configured, which is how the codec server runs with
-// object storage disabled. Returning a concrete struct here wrapped a nil `*Store` into a NON-nil
-// interface, so that check stopped firing and the first encode dereferenced it.
+// serves unchanged payloads when no store is configured, which is how the handler runs with
+// `KONTRA_S3_ENDPOINT` unset (`FromEnv` answers a nil store, and main.go passes it straight
+// here). Returning a concrete struct here wrapped a nil `*Store` into a NON-nil interface, so
+// that check stopped firing and the first encode dereferenced it.
 // `TestPassthroughWithoutAStore` caught exactly that; the nil must survive the conversion.
 func AsCodecStore(s *Store) codec.Store {
 	if s == nil {

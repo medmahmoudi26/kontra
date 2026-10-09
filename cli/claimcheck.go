@@ -34,7 +34,8 @@
 // and reaches the store unsigned over plain HTTP — the same assumption `kontra runs --query` makes
 // with DuckDB — so it brings a `claimcheck.Backing` and nothing else. The marker, the ref shape,
 // the metadata decoding, the integrity check and the key layout come from
-// runtime/handler/claimcheck, reached the way casstore and hydratestore already are.
+// runtime/handler/claimcheck, reached the way `internal/testregistry` reaches the store through
+// runtime/handler/casstore: an exported seam over the handler module's internals.
 //
 // DECODE-ONLY, ON PURPOSE. A workflow's result comes back offloaded whenever it exceeds 128 KiB,
 // and without the codec the SDK fails on `Unknown payload encoding binary/claim-check-v1` — so

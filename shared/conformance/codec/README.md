@@ -17,8 +17,8 @@ exhaustion — loud, but only once a batch was big enough, so small runs passed.
 the ref shape, the metadata decoding and the CAS key so that `kontra workflow start --wait` could
 read an offloaded result — an implementation of this contract whose header cited this corpus and
 whose tests never opened it. It is gone: the CLI reaches the handler's codec through
-`runtime/handler/claimcheck`, the way the install already reached the handler's store types through
-`casstore` and `hydratestore`, and what is left in the CLI is a transport (one unsigned HTTP GET)
+`runtime/handler/claimcheck`, the way its test registry reaches the handler's store types through
+`runtime/handler/casstore`, and what is left in the CLI is a transport (one unsigned HTTP GET)
 rather than a copy of this contract.
 
 The sentence that used to open this file said how many implementations there were, and the number

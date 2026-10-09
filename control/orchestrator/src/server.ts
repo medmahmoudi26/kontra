@@ -601,10 +601,12 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
  * A marker search rather than a fixed relative path, because this file runs at two DEPTHS —
  * `src/` under vitest and `dist/src/` compiled — and now in two SHAPES as well:
  *
- *   `web/dist`              THE BUNDLE. Inside a hydrated install bundle the SPA is a CHILD of
- *                           the server: `orchestrator/dist/src/main.js` beside
- *                           `orchestrator/web/dist`. That layout is an artifact contract
- *                           `runtime/handler/internal/hydrate` writes and reads, and it did not move.
+ *   `web/dist`              THE IMAGE. In the orchestrator image the SPA is a CHILD of the
+ *                           server: `orchestrator/dist/src/main.js` beside `orchestrator/web/dist`,
+ *                           which is where `Dockerfile.orchestrator` unpacks `kontra-spa.tar.gz`.
+ *                           That archive's `web/dist/` member prefix is the artifact contract
+ *                           (`Dockerfile.selfcontained` packs it), and it is the shape the
+ *                           appliance's hydrated install bundle had before it, so it did not move.
  *   `../kontra-console/dist` THE CHECKOUT. The console is a separate REPOSITORY since ADR 0038, so
  *                           the checkout shape is a sibling directory rather than a sibling
  *                           package. This was `../frontend/dist`; `frontend/` no longer exists.

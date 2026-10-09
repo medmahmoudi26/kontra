@@ -11,9 +11,10 @@
  * what this file is for, and it caught the third move only because it was already here: the
  * candidate list in `defaultWebRoot` was edited and this suite was not re-run.
  *
- * The bundle's shape is the other half and has never moved: a hydrated install bundle puts the
- * SPA at `orchestrator/web/dist` beside `orchestrator/dist/src`, an artifact contract that
- * `runtime/handler/internal/hydrate` writes. So every shape has to resolve, from any depth.
+ * The image's shape is the other half and has never moved: the orchestrator image puts the SPA
+ * at `orchestrator/web/dist` beside `orchestrator/dist/src`, unpacked from the `web/dist/` member
+ * prefix of `kontra-spa.tar.gz` — the same shape the appliance's hydrated install bundle had. So
+ * every shape has to resolve, from any depth.
  */
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
