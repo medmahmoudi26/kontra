@@ -2,7 +2,7 @@ package hydrate
 
 import "fmt"
 
-// THE PINS. Same shape as install.sh's Go step, which is the one of its three fetches that
+// THE PINS. Same shape as scripts/dev-setup.sh's Go step, which is the one of its three fetches that
 // is reproducible: a version, an explicit URL built from it, and a checksum per platform,
 // all bumped together (ADR 0031 finding 6). The buf step in that file — `/releases/latest/`
 // with no version and no checksum — is the shape this deliberately does not copy, and

@@ -154,6 +154,10 @@ the one you just built. It is the only line the `.env` needs for this.
 `scripts/install-cluster.macos.sh` runs this whole path and asserts the result — login, seed,
 loopback, the log shipper, and the DuckLake catalog.
 
+To work on the code rather than run it — the venv, the editable SDK, buf codegen and the `kontra`
+CLI on your `PATH` — run `scripts/dev-setup.sh` from the clone. On a bare Ubuntu it installs its own
+prerequisites first; `KONTRA_BOOTSTRAP=no` makes it report them instead.
+
 </details>
 
 That `grep` prints the password on a **first** boot. On any later boot — a recreate, an image

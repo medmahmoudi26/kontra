@@ -108,7 +108,7 @@ ARG TARGETARCH
 
 # The repo pins Go 1.26.9 in `go.work`. GOTOOLCHAIN makes the toolchain in this image fetch and
 # verify that exact one rather than whatever the base ships — the mechanism Go added for this, and
-# the same version `install.sh` fetches on a bare machine. `cli/gotoolchain_test.go` asserts every
+# the same version `scripts/dev-setup.sh` fetches on a bare machine. `cli/gotoolchain_test.go` asserts every
 # copy of the version agrees with `go.work`; there are seven, and a bump that lands in go.mod alone
 # breaks only the container paths.
 ENV GOTOOLCHAIN=go1.26.9
@@ -241,7 +241,7 @@ RUN set -eux; \
     rm -rf /tmp/duckdb /tmp/duckdb.zip; \
     duckdb --version
 
-# LAID OUT THE WAY `install.sh` LAYS IT OUT: the binary onto PATH, everything else under
+# LAID OUT THE WAY `scripts/dev-setup.sh` LAYS IT OUT: the binary onto PATH, everything else under
 # KONTRA_HOME. That equivalence is the point — an operator debugging this container is looking at
 # the same tree they would have on a laptop, so every path in every error message means the same
 # thing in both.

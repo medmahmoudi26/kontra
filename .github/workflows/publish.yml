@@ -464,7 +464,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      # THE INSTALLER VERIFIES WHAT IT DOWNLOADS, which is the property `install.sh:175-181`'s buf
+      # THE INSTALLER VERIFIES WHAT IT DOWNLOADS, which is the property `scripts/dev-setup.sh`'s buf
       # step does not have and this repository has written down as a mistake not to copy:
       # `/releases/latest/download/` with no version and no checksum. `cosign-release` is deliberately not pinned here — the action's default for a
       # given major IS pinned, and a cosign version invented in this file without being run would

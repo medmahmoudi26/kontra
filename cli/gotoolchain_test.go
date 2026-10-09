@@ -3,7 +3,7 @@ package main
 // gotoolchain_test.go — the `go` directive has eight copies, and seven of them are not Go files.
 //
 // RAISING `go.work` AND THE go.mod FILES IS NOT RAISING THE TOOLCHAIN. The container paths pin it
-// separately: three `ENV GOTOOLCHAIN=`, one `FROM golang:`, one `GO_VERSION=` in `install.sh`. A bump
+// separately: three `ENV GOTOOLCHAIN=`, one `FROM golang:`, one `GO_VERSION=` in `scripts/dev-setup.sh`. A bump
 // that lands in the module files alone compiles everywhere a developer looks and fails only inside
 // Docker, with `go.mod requires go >= X (running go Y; GOTOOLCHAIN=goY)` — a message that names the
 // module file rather than the pin that is actually wrong.

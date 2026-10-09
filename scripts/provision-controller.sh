@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provision a NEW kontra control droplet, from this machine, on DigitalOcean.
 #
-# WHAT THIS IS. `install.sh` installs kontra onto a machine you already have; `fleet.ts` creates
+# WHAT THIS IS. `scripts/dev-setup.sh` installs kontra onto a machine you already have; `fleet.ts` creates
 # Machines that call home to a controller that already exists. Neither creates a controller, and
 # both controllers built so far were made by hand. This is that missing step, written down.
 #
@@ -162,7 +162,7 @@ for i in $(seq 1 60); do
 done
 echo "  up"
 
-# cloud-init runs unattended-upgrades on first boot and HOLDS THE APT LOCK. install.sh's very
+# cloud-init runs unattended-upgrades on first boot and HOLDS THE APT LOCK. dev-setup.sh's very
 # first act is apt-get; starting before this returns fails on a lock, not on anything real.
 say "waiting for cloud-init (holds the apt lock)"
 $SSH 'cloud-init status --wait >/dev/null 2>&1 || true; cloud-init status || true'
@@ -188,13 +188,13 @@ $SSH "mkdir -p $REMOTE_CHECKOUT"
 git archive --format=tar HEAD | gzip -1 | $SSH "tar xzf - -C $REMOTE_CHECKOUT"
 echo "  done"
 
-# --- 6. install.sh ----------------------------------------------------------------------------
-say "install.sh (docker, Go 1.26.9, duckdb, buf, the CLI — several minutes)"
-$SSH "cd $REMOTE_CHECKOUT && KONTRA_BOOTSTRAP=yes ./install.sh"
+# --- 6. scripts/dev-setup.sh ----------------------------------------------------------------
+say "scripts/dev-setup.sh (docker, Go 1.26.9, duckdb, buf, the CLI — several minutes)"
+$SSH "cd $REMOTE_CHECKOUT && KONTRA_BOOTSTRAP=yes scripts/dev-setup.sh"
 
 # --- 7. config.yaml — the ONLY configuration this installation gets ------------------------------
 #
-# install.sh ended in `kontra init`, which wrote the template and MINTED `tokens.state`. Every
+# dev-setup.sh ended in `kontra init`, which wrote the template and MINTED `tokens.state`. Every
 # other value is blank, and blank means two opposite things in that file: `run: ""` is OPEN,
 # `state: ""` fails closed. Fill the rest here, on the box, with values generated on the box.
 say "config.yaml"

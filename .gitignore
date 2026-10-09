@@ -84,7 +84,7 @@ frontend/playwright-report/
 frontend/blob-report/
 
 # .kontra/ — this installation's own configuration and code, created by `kontra init`
-# (install.sh runs it). Ignored WHOLE, and both halves matter:
+# (scripts/dev-setup.sh runs it). Ignored WHOLE, and both halves matter:
 #   config.yaml   live credentials — the DigitalOcean token, the Pulumi passphrase, four tokens
 #   workflows/    an operator's own caller workflows
 #   actors/       an operator's own actors

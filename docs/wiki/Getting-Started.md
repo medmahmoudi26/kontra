@@ -6,16 +6,16 @@ The supported path is a Docker Compose cluster (ADR 0047). Clone, build the imag
 `docker compose --env-file .env.quickstart up -d --wait` — see the repository README. Docker is the
 only host prerequisite. `kontra up` (the install) is not a supported install.
 
-A **development checkout** still uses `install.sh` below: a venv, the editable SDK, the buf
-toolchain and proto codegen. It needs Go, Docker and a clone.
+A **development checkout** uses `scripts/dev-setup.sh` below: a venv, the editable SDK, the buf
+toolchain and proto codegen. It needs Go, Docker and a clone, and runs from any directory.
 
 ```bash
-./install.sh
+scripts/dev-setup.sh
 ```
 
 Creates `.venv` — the SDK, editable (`pip install -e ./sdk/python[dev,seaweed]`), plus the actor-host runtime (`temporalio`, `redis`, `boto3`, `pydantic`) — and builds the `kontra` CLI onto your `PATH`. **One** venv: there used to be a second, `.venv-actor`, because the old actor runtime pinned a protobuf the Temporal SDK could not share an interpreter with. That runtime is gone and the split went with it.
 
-**On a bare machine it installs its own prerequisites.** A stock Ubuntu 24.04 has `git`, `python3` and `curl` and none of the rest, so preflight finds everything missing at once and (on apt systems, with sudo) installs `python3-venv`, Docker with the v2 compose plugin, and Go — Go from upstream and checksummed, because the distro package is 1.22 and `go.work` says 1.26.4. `KONTRA_BOOTSTRAP=no ./install.sh` reports the bill and installs nothing.
+**On a bare machine it installs its own prerequisites.** A stock Ubuntu 24.04 has `git`, `python3` and `curl` and none of the rest, so preflight finds everything missing at once and (on apt systems, with sudo) installs `python3-venv`, Docker with the v2 compose plugin, and Go — Go from upstream and checksummed, because the distro package is 1.22 and `go.work` asks for a newer one. `KONTRA_BOOTSTRAP=no scripts/dev-setup.sh` reports the bill and installs nothing.
 
 Node is **not** needed to run kontra, and the reason changed with v2: the orchestrator used to serve
 from a container, and now it is a supervised child of the `kontra` process, hydrated from a bundle
