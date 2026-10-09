@@ -162,7 +162,12 @@ function ddl(t: (name: string) => string): string[] {
        render_key    TEXT   NOT NULL DEFAULT '',
        PRIMARY KEY (run_id, version)
      )`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS ${t('report_version_key')} ON ${t('report_version')} (run_id, render_key)`,
+    // AN INDEX NAME IS NEVER SCHEMA-QUALIFIED. Postgres puts an index in its table's schema and
+    // refuses `CREATE INDEX kontra.x ON kontra.y` with `syntax error at or near "."` — which is
+    // what every compose install got from this line, for every Run, so no Run there ever had a
+    // report. SQLite has no schema, `t()` is the identity there, and the default suite is SQLite,
+    // which is why nothing failed until `KONTRA_TEST_PG` was set.
+    `CREATE UNIQUE INDEX IF NOT EXISTS report_version_key ON ${t('report_version')} (run_id, render_key)`,
     // The unredacted bytes. A separate table and not a column on the version, so that the reveal
     // route's read touches nothing else and a purge can drop these FIRST on their own.
     `CREATE TABLE IF NOT EXISTS ${t('report_secret')} (
@@ -183,7 +188,7 @@ function ddl(t: (name: string) => string): string[] {
        edited_at   BIGINT,
        deleted_at  BIGINT
      )`,
-    `CREATE INDEX IF NOT EXISTS ${t('run_feedback_run')} ON ${t('run_feedback')} (run_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS run_feedback_run ON ${t('run_feedback')} (run_id, created_at)`,
   ];
 }
 
