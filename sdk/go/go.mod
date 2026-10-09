@@ -1,6 +1,6 @@
 module github.com/medmahmoudi26/kontra/sdk/go
 
-go 1.26.8
+go 1.26.9
 
 require (
 	github.com/invopop/jsonschema v0.14.0

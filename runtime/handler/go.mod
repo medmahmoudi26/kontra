@@ -1,6 +1,6 @@
 module github.com/medmahmoudi26/kontra/runtime/handler
 
-go 1.26.8
+go 1.26.9
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.42.1

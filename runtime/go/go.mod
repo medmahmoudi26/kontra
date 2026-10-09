@@ -1,6 +1,6 @@
 module github.com/medmahmoudi26/kontra/runtime/go
 
-go 1.26.8
+go 1.26.9
 
 require github.com/medmahmoudi26/kontra/sdk/go v0.0.0
 
