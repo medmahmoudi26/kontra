@@ -29,6 +29,16 @@ const { DatabaseSync: DatabaseSyncCtor } = createRequire(__filename)(
 export type SqlRow = Record<string, unknown>;
 
 /** The minimum SQL surface both engines provide. */
+/** The SQLSTATEs a concurrent `CREATE … IF NOT EXISTS` loser gets instead of a no-op: a unique
+ *  violation on a catalog index, or the plain duplicate_schema/table/object codes. */
+const CREATION_RACE_CODES = new Set(['23505', '42P06', '42P07', '42710']);
+
+/** Whether `err` is a lost creation race on an idempotent DDL statement. Exported for its test. */
+export function isCreationRace(sql: string, err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && CREATION_RACE_CODES.has(code) && /\bIF\s+NOT\s+EXISTS\b/i.test(sql);
+}
+
 export interface SqlDriver {
   exec(sql: string): Promise<void>;
   /** Rows changed. */
@@ -87,7 +97,23 @@ class PostgresDriver implements SqlDriver {
   constructor(private readonly pool: PgPoolLike) {}
 
   async exec(sql: string): Promise<void> {
-    await this.pool.query(sql);
+    try {
+      await this.pool.query(sql);
+    } catch (err) {
+      // TWO CREATORS, ONE WINNER, AND THE LOSER IS NOT TOLD "ALREADY EXISTS". `CREATE … IF NOT EXISTS`
+      // checks the catalog and then inserts into it, and two sessions doing that at once both pass
+      // the check: one inserts, the other hits the catalog's unique index and gets a 23505 on
+      // `pg_namespace_nspname_index` (or `pg_type_typname_nsp_index` for a table) instead of a
+      // no-op. Five stores create the `kontra` schema at boot, in two processes, so this was a race
+      // a fresh install lost at random: `[orchestrator] fatal: duplicate key value violates unique
+      // constraint "pg_namespace_nspname_index"`, the API never healthy, the install never up.
+      //
+      // ONE RETRY, NOT A SWALLOW. By the time the loser sees the error the winner has committed, so
+      // the same statement now finds the object and does nothing. If it fails again, that is a real
+      // error and it propagates. Only for IF NOT EXISTS DDL, where "it exists" is the success case.
+      if (!isCreationRace(sql, err)) throw err;
+      await this.pool.query(sql);
+    }
   }
 
   async run(sql: string, params: unknown[]): Promise<number> {

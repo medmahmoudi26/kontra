@@ -1,0 +1,14 @@
+{
+  "name": "@kontra/e2e",
+  "private": true,
+  "description": "Browser checks against a RUNNING install. Not hermetic: the `docker` job in .github/workflows/ci.yml brings up a fresh install from this commit first, then runs these.",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}

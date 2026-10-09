@@ -38,3 +38,4 @@ export * from './contract/datasets';
 export * from './queues';
 export * from './secrets';
 export * from './caller';
+export * from './redaction';

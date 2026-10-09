@@ -332,6 +332,42 @@
         "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
       }
     },
+    "/api/feedback/{id}": {
+      "patch": {
+        "operationId": "patchFeedbackById",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      },
+      "delete": {
+        "operationId": "deleteFeedbackById",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
     "/api/fleet/operations": {
       "get": {
         "operationId": "getFleetOperations",
@@ -848,6 +884,25 @@
         "description": "Open: no credential is checked. See auth.ts and THREAT_MODEL.md EP6."
       }
     },
+    "/api/reports": {
+      "get": {
+        "operationId": "getReports",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
     "/api/runs": {
       "get": {
         "operationId": "getRuns",
@@ -979,6 +1034,42 @@
         "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
       }
     },
+    "/api/runs/{runId}/feedback": {
+      "get": {
+        "operationId": "getRunsByRunIdFeedback",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      },
+      "post": {
+        "operationId": "postRunsByRunIdFeedback",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
     "/api/runs/{runId}/heartbeats": {
       "get": {
         "operationId": "getRunsByRunIdHeartbeats",
@@ -1108,6 +1199,155 @@
           }
         ],
         "description": "Gated by KONTRA_RUN_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/report": {
+      "get": {
+        "operationId": "getRunsByRunIdReport",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/report/blocks/{blockId}/raw": {
+      "get": {
+        "operationId": "getRunsByRunIdReportBlocksByBlockIdRaw",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/report/blocks/{blockId}/reveal": {
+      "post": {
+        "operationId": "postRunsByRunIdReportBlocksByBlockIdReveal",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "stateToken": []
+          }
+        ],
+        "description": "KONTRA_STATE_TOKEN, and a session additionally needs the `report:reveal` scope — which no sign-in grants, so this route is service-token-only in practice."
+      }
+    },
+    "/api/runs/{runId}/report/export": {
+      "get": {
+        "operationId": "getRunsByRunIdReportExport",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/report/live": {
+      "get": {
+        "operationId": "getRunsByRunIdReportLive",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/report/preview": {
+      "post": {
+        "operationId": "postRunsByRunIdReportPreview",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/report/render": {
+      "post": {
+        "operationId": "postRunsByRunIdReportRender",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
+      }
+    },
+    "/api/runs/{runId}/report/versions": {
+      "get": {
+        "operationId": "getRunsByRunIdReportVersions",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "security": [
+          {
+            "exploreToken": []
+          },
+          {
+            "consoleSession": []
+          }
+        ],
+        "description": "Gated by KONTRA_EXPLORE_TOKEN or KONTRA_STATE_TOKEN, or a console session (ADR 0045)."
       }
     },
     "/api/runs/{runId}/stop": {

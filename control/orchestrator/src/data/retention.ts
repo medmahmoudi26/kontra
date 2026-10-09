@@ -317,6 +317,14 @@ export interface RetentionDeps {
     purgeRun(runId: string): Promise<number>;
   };
   summaries?: { purgeRun(runId: string): Promise<number> };
+  /**
+   * The Run's **Report** — its pinned template, its versions, the unredacted bytes behind the audited
+   * reveal path, and its feedback thread (ADR 0055).
+   *
+   * OPTIONAL AND COLLECTION-ONLY, like `summaries`: a sweep on an install whose report store has never
+   * been opened must not fail for the absence of a table it would have created on first use.
+   */
+  reports?: { purgeRun(runId: string): Promise<number> };
 }
 
 export interface SweepOptions {
@@ -717,11 +725,18 @@ export async function sweepDatasets(deps: RetentionDeps, opts: SweepOptions = {}
  * reclaimed later by DuckLake's snapshot expiry + file cleanup (`data/maintenance.ts`), which is what
  * "durable output ages out by retention" has always meant here; this removes it from the catalog.
  *
- * THEN THE FOUR RETENTION ARMS: the materialization ledger, the run summaries, the Dataset record and
- * the Run's caller-workflow identity — so a collected Run leaves nothing behind that outlives its
- * data. `records.purgeRun` on an untagged Run removes nothing (it had no row), which is correct and
- * cheap; the identity row is the one arm that is always present for a Run started since it existed,
- * and leaving it would be the one table here that grows forever.
+ * THEN THE FIVE RETENTION ARMS: the Run's **Report**, the materialization ledger, the run summaries,
+ * the Dataset record and the Run's caller-workflow identity — so a collected Run leaves nothing behind
+ * that outlives its data. `records.purgeRun` on an untagged Run removes nothing (it had no row), which
+ * is correct and cheap; the identity row is the one arm that is always present for a Run started since
+ * it existed, and leaving it would be the one table here that grows forever.
+ *
+ * THE REPORT ARM GOES FIRST, which is the only ordering decision among the five. These are sequential
+ * bare awaits with no rollback, so a throw part-way through leaves a half-purged Run — and the report
+ * arm is the one holding `report_secret`, the unredacted bytes behind the audited reveal path. Taking
+ * it first means a purge that fails anywhere afterwards has already removed the credentials; the arms
+ * after it lose data that is merely data. ADR 0055 records why that table cannot be dropped in the
+ * same transaction as the rest.
  */
 async function collectRun(deps: RetentionDeps, cand: SweepCandidate): Promise<void> {
   if (lakeEnabled(deps.store, deps.lake)) {
@@ -736,6 +751,13 @@ async function collectRun(deps: RetentionDeps, cand: SweepCandidate): Promise<vo
       );
     }
   }
+  /* FIRST, AND THAT IS THE POINT — ADR 0055. These arms are sequential bare awaits with no rollback,
+     so a throw part-way through leaves a half-purged Run; `reports.purgeRun` removes the only rows in
+     this system that hold an UNREDACTED credential (`report_secret`), and it orders its own four
+     deletes to take those first. Putting it ahead of the others means a purge that dies anywhere
+     after this line has already removed the sensitive half. The arms below lose data that is merely
+     data. */
+  await deps.reports?.purgeRun(cand.runId);
   await deps.materialization.purgeRun(cand.runId);
   await deps.summaries?.purgeRun(cand.runId);
   await deps.records.purgeRun(cand.runId);

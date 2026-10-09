@@ -10,6 +10,7 @@ WHAT A READER SEES, IN ORDER, AND WHERE EACH ONE COMES FROM:
     rows you can SQL          `catalog.dataset("canary_signals")`
     the Machines going away   the scope exiting — a replayable step, not a line in a script
     the run's own narration   `workflow.logger`, replay-aware, carrying the run id
+    a report at the end       `report.md` beside this file, rendered from what `run` RETURNS
 
 THE POINT IS THAT NOTHING HERE IS A MOCK. It is a real Fleet, a real Worker and a real Dataset; the
 only pretend part is that the actor sleeps instead of talking to somebody else's estate, which is
@@ -31,7 +32,19 @@ still answers. The typed `Sweep` records on their own topic stay gone — those 
 the pane is not coming back.
 
 So: `progress` says HOW FAR, `workflow.logger` says what the RUN is doing, the actor's logger says
-what the SWEEP is doing, and the Dataset says what came of it.
+what the SWEEP is doing, the Dataset says what came of it, and the report says it once, afterwards.
+
+── THE REPORT IS THE RETURN VALUE, PRESENTED ───────────────────────────────────────────────────────
+
+A Run's report (ADR 0055) is `report.md` rendered against what the workflow returned, so anything the
+report shows is computed here and returned in `CanaryResult`: the summary sentence, a row per target,
+the query that reads this Run's rows back. The template cannot ask a question of its own. Two tests
+hold the pair together without a cluster — `tests/test_canary_report.py` (every field the template
+reads exists on the result) and `control/orchestrator/src/report/canaryTemplate.test.ts` (it renders
+in every way a canary can end) — and `e2e/canary-report.spec.ts` runs the whole thing on a fresh
+install in CI. Start it from the console to get this template: a Run started with
+`kontra workflow start` dials Temporal directly, nothing pins its template, and it gets the default
+report with a warning.
 
 ── WHY IT IS NOT FASTER THAN IT IS ─────────────────────────────────────────────────────────────────
 
@@ -51,6 +64,7 @@ Run it:
     kontra workflow start Canary --wait
 """
 
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 from pydantic import Field
@@ -67,6 +81,53 @@ ACTOR = ("canary", "1.1.1")
 #: What a run sweeps when nothing is passed. Names rather than hostnames, because nothing is
 #: resolved — a reader who sees `example.com` here will reasonably assume DNS is involved.
 DEFAULT_TARGETS = ["alpha", "beta"]
+
+
+@dataclass
+class TargetOutcome:
+    """One row of the report's target table: what happened to one Unit."""
+
+    target: str
+    #: Rows this target put in the Dataset — `steps` when it swept, 0 when it was dropped or the
+    #: whole sweep was voided, None when it is `unknown`.
+    records: int | None
+    #: `swept`, `dropped` (this Unit raised and was isolated), `voided` (the Batch as a whole never
+    #: came back, so nothing is known about this Unit) or `unknown` (something was dropped and the
+    #: names could not be fetched, so this target may be among them).
+    outcome: str
+    #: The isolated Unit's own error message, or None. None rather than "" because a Liquid
+    #: template treats "" as TRUE, and `{% if t.error %}` has to be false for a clean target.
+    error: str | None = None
+
+
+@dataclass
+class CanaryResult:
+    """What the Run returned, and therefore everything its report can say (ADR 0055).
+
+    THE REPORT ONLY PRESENTS THIS. `report.md` beside this file reads these fields and nothing
+    else: a template cannot query the Dataset or the Fleet, so anything a reader should see in the
+    report has to be computed here and returned. That is why it carries `query`, a sentence-ready
+    `summary` and a per-target table, rather than only the counts the dict used to hold.
+
+    Optional fields are None and never "", for the reason on `TargetOutcome.error`.
+    """
+
+    summary: str
+    complete: bool
+    records: int
+    expected: int
+    steps: int
+    every: float
+    provider: str
+    machines: int
+    sessions: int
+    dataset: str
+    #: The SQL that reads back exactly this Run's rows — what a reader runs next.
+    query: str
+    run: str
+    targets: list[TargetOutcome] = field(default_factory=list)
+    #: Why the sweep Batch never came back, or None. Set means NO target's outcome is known.
+    voided: str | None = None
 
 
 class CanaryInput(TypedDict, total=False):
@@ -184,7 +245,7 @@ class Canary:
     """
 
     @workflow.run
-    async def run(self, req: CanaryInput | None = None) -> dict:
+    async def run(self, req: CanaryInput | None = None) -> CanaryResult:
         """`req` DEFAULTS, because `kontra workflow start` with no `--input` passes no argument at
         all, and a required parameter makes that a workflow-task failure:
 
@@ -222,6 +283,10 @@ class Canary:
 
         rows: list = []
         voided = ""
+        #: target -> the isolated Unit's error message. Filled only when something was dropped.
+        dropped_errors: dict[str, str] = {}
+        #: How many Units the sweep dropped. Free to read; the names above cost a fetch.
+        dropped_count = 0
         # THE SCOPE IS THE FLEET'S LIFETIME. Exiting it drops the Lease and the Machines die when
         # the last one goes — and it is a REPLAYABLE step in a durable program rather than a line
         # in a script that might not run. That is the whole reason a run that provisions anything
@@ -269,11 +334,12 @@ class Canary:
 
             async with catalog.actor(*ACTOR) as c:
                 try:
-                    rows, _ = await c.sweep(
+                    rows, dropped = await c.sweep(
                         units, out,
                         params={"every": every, "fail_on": fail_on},
                         schedule_to_close_timeout=timedelta(minutes=int(req.get("minutes") or 10)),
                     )
+                    dropped_count = len(dropped)
                 except Exception as exc:  # noqa: BLE001 - the reason is the announcement
                     # A VOIDED BATCH IS NOT A BATCH THAT FOUND NOTHING, and this demo exists to
                     # make that distinction visible rather than to hide it behind a zero.
@@ -291,6 +357,26 @@ class Canary:
                     # rather than a hand-spelled `extra=` dict.
                     progress("sweep", "targets", done=len(rows), total=total, program="canary",
                              incomplete=True, detail=f"sweep voided — {voided}")
+
+                # WHICH targets were dropped, for the report's table. `len(dropped)` is free;
+                # the rows cost one fetch, so they are read only when there is something to name
+                # — a clean run (the default) pays nothing for this.
+                #
+                # OUTSIDE THE SWEEP'S `try`, ON PURPOSE. The sweep came back; a fetch that fails
+                # here loses the NAMES and nothing else. Inside that `try` it would be reported as
+                # a voided sweep, which claims the Batch never returned — false, and worse than a
+                # table that says "unknown".
+                if dropped_count and not voided:
+                    try:
+                        for f in await dropped.rows(timeout=timedelta(minutes=1)):
+                            unit = (f or {}).get("unit") or {}
+                            err = (f or {}).get("error") or {}
+                            dropped_errors[str(unit.get("target", "?"))] = str(
+                                err.get("message") or err.get("type") or "dropped")
+                    except Exception as exc:  # noqa: BLE001 - the names are a nicety
+                        workflow.logger.warning(
+                            "canary: %d target(s) dropped and could not be named: %r",
+                            dropped_count, exc)
 
             workflow.logger.info(
                 "canary: sweep finished — %d of %d row(s) into %s", len(rows), total, out.name)
@@ -356,18 +442,68 @@ class Canary:
                 "canary: could not mark %s as %s — the rows are committed either way: %s",
                 out.name, "sealed" if complete else "abandoned", err)
 
-        return {
-            "targets": targets,
-            "steps": steps,
-            "records": len(rows),
-            "expected": total,
-            "dataset": out.name,
-            "provider": provider,
-            "machines": machines,
-            "complete": complete,
-            **({"voided": voided} if voided else {}),
-            "run": workflow.info().workflow_id,
-        }
+        return _result(
+            targets=targets, steps=steps, every=every, provider=provider, machines=machines,
+            sessions=sessions, dataset=out.name, records=len(rows), complete=complete,
+            voided=voided, dropped=dropped_errors, dropped_count=dropped_count,
+            run=workflow.info().workflow_id)
+
+
+def _n(count: int, noun: str) -> str:
+    """`1 target`, `2 targets`."""
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _result(*, targets: list[str], steps: int, every: float, provider: str, machines: int,
+            sessions: int, dataset: str, records: int, complete: bool, voided: str,
+            dropped: dict[str, str], dropped_count: int, run: str) -> CanaryResult:
+    """Assemble what the report shows. A plain function of its arguments, so it is deterministic
+    on replay and testable without a Temporal worker.
+
+    PER-TARGET RECORDS ARE DERIVED, NOT COUNTED. The Batch hands back refs, not rows, whenever an
+    object store is configured, so the workflow cannot count a target's rows without reading them
+    back. It does not need to: the actor pushes exactly `steps` rows for a target it sweeps and
+    raises before pushing any for the one `fail_on` names. A voided sweep says nothing about any
+    target, and the table says so instead of guessing — as it does when targets were dropped and
+    their names could not be fetched (`dropped_count` above the names known): then no target that
+    is not named can honestly be called `swept`.
+    """
+    expected = len(targets) * steps
+    dropped_count = max(dropped_count, len(dropped))
+    unattributed = dropped_count > len(dropped)
+    outcomes: list[TargetOutcome] = []
+    for t in targets:
+        if voided:
+            outcomes.append(TargetOutcome(target=t, records=0, outcome="voided"))
+        elif t in dropped:
+            outcomes.append(TargetOutcome(target=t, records=0, outcome="dropped", error=dropped[t]))
+        elif unattributed:
+            outcomes.append(TargetOutcome(target=t, records=None, outcome="unknown"))
+        else:
+            outcomes.append(TargetOutcome(target=t, records=steps, outcome="swept"))
+
+    # Real plurals rather than "target(s)": the summary is a VALUE, so the report escapes every
+    # parenthesis in it, and a sentence a person reads first should not need that.
+    if complete:
+        summary = (f"All {_n(len(targets), 'target')} swept: {records} of {_n(expected, 'record')} "
+                   f"landed in {dataset}, on {_n(machines, f'{provider} machine')} that "
+                   f"{'is' if machines == 1 else 'are'} now destroyed.")
+    elif voided:
+        summary = (f"The sweep was voided before it reported back, so {records} of "
+                   f"{_n(expected, 'record')} are accounted for. The Fleet was still released.")
+    else:
+        summary = (f"{dropped_count} of {_n(len(targets), 'target')} dropped: {records} of "
+                   f"{_n(expected, 'record')} landed in {dataset}. The rest of the sweep carried on.")
+
+    # A Run's rows are the ones its Worker stamped with its run id; `run_id` is one of the
+    # provenance columns the framework adds to every pushed record (see the actor's `Signal`).
+    query = (f"select target, step, phase, latency_ms, worker\nfrom {dataset}\n"
+             f"where run_id = '{run}'\norder by target, step")
+
+    return CanaryResult(
+        summary=summary, complete=complete, records=records, expected=expected, steps=steps,
+        every=every, provider=provider, machines=machines, sessions=sessions, dataset=dataset,
+        query=query, run=run, targets=outcomes, voided=voided or None)
 
 
 if __name__ == "__main__":

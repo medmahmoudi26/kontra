@@ -655,27 +655,120 @@ async function closeReason(
   workflowId: string,
   execId: string
 ): Promise<string> {
+  const close = await runClose(client, workflowId, execId);
+  // The ROW wants one sentence, and prefers the specific one: a failure message if there is one, else
+  // the terminator's reason, else the bare kind. {@link fetchRunClose} keeps the two apart for callers
+  // that need them apart; this flattens them exactly as it always did.
+  if (!close) return '';
+  return close.message || close.type;
+}
+
+/** `WORKFLOW_EXECUTION_STATUS_RUNNING` on the wire. Numeric, like the filter below, because the
+ *  enum's export path has moved between SDK minors and the wire value has not. */
+const STATUS_RUNNING = 1;
+/** `HISTORY_EVENT_FILTER_TYPE_CLOSE_EVENT` on the wire. */
+const CLOSE_EVENT = 2;
+
+/** The two raw-service calls {@link closeEventOf} makes, so a test can hand it a fake. */
+export interface CloseEventService {
+  describeWorkflowExecution(req: {
+    namespace: string;
+    execution: { workflowId: string; runId?: string };
+  }): Promise<{ workflowExecutionInfo?: { status?: number | null } | null }>;
+  getWorkflowExecutionHistory(req: {
+    namespace: string;
+    execution: { workflowId: string; runId?: string };
+    historyEventFilterType: number;
+    waitNewEvent: boolean;
+  }): Promise<{ history?: { events?: unknown[] | null } | null }>;
+}
+
+/**
+ * An execution's close event, or `undefined` while it is still running — WITHOUT WAITING FOR ONE.
+ *
+ * THE CLOSE-EVENT FILTER LONG-POLLS AN OPEN RUN, AND `waitNewEvent: false` DOES NOT STOP IT. Asked
+ * for the close event of a running workflow, Temporal holds the request until its long-poll expiry
+ * and then answers with nothing. Measured inside a live install's API container against an open run:
+ * 20,006 ms and zero events for this call, 30 ms for a first-event read of the same history.
+ *
+ * Two callers paid that on every open run. `/api/runs/:id/io` took 20 s, so the run page's output
+ * region hung for as long. And a live report's first render read it TWICE — once through `fetchRunIO`
+ * and once through `fetchRunClose` — before writing a byte. The stream's headers only leave on the
+ * first write, so the browser sat on "No report yet" for 41 s of a 54 s canary, which is the
+ * opposite of streaming (ADR 0062).
+ *
+ * So ask whether it is running first: one describe, a few milliseconds. A describe that FAILS says
+ * nothing either way, and falls through to the read that always worked rather than guessing.
+ */
+export async function closeEventOf(
+  service: CloseEventService,
+  namespace: string,
+  execution: { workflowId: string; runId?: string }
+): Promise<Record<string, unknown> | undefined> {
   try {
-    const res = await client.workflowService.getWorkflowExecutionHistory({
-      namespace: NAMESPACE,
-      execution: { workflowId, ...(execId ? { runId: execId } : {}) },
-      // 2 = CLOSE_EVENT, in the numeric form `fetchRunIO` uses and for the reason it records: the
-      // enum's export path has moved between SDK minors and this is a stable wire value.
-      historyEventFilterType: 2,
-      waitNewEvent: false,
+    const described = await service.describeWorkflowExecution({ namespace, execution });
+    if (described.workflowExecutionInfo?.status === STATUS_RUNNING) return undefined;
+  } catch {
+    // Could not tell. The history read below is the old behaviour: slow on an open run, but correct.
+  }
+  const res = await service.getWorkflowExecutionHistory({
+    namespace,
+    execution,
+    historyEventFilterType: CLOSE_EVENT,
+    waitNewEvent: false,
+  });
+  return (res.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
+}
+
+/**
+ * How a Run ended, as a TYPE and a MESSAGE rather than one sentence.
+ *
+ * EXTRACTED FROM `closeReason`, WHICH NOW CALLS IT, so there is one reader of the close event and not
+ * two that agree today. A report's context (§2.4) gives a template `run.error.type` and
+ * `run.error.message` separately — a template that wants to say "TimeoutError" in a heading and the
+ * message in a paragraph cannot do it from a pre-joined string, and joining them here and splitting
+ * them there is how the two spellings would drift.
+ *
+ * `undefined` for a Run that COMPLETED, which is a different answer from a Run whose close event could
+ * not be read: the second returns a type with an empty message, so a report never claims a successful
+ * Run failed because an RPC was slow.
+ */
+async function runClose(
+  client: Awaited<ReturnType<typeof getClient>>,
+  workflowId: string,
+  execId: string
+): Promise<{ type: string; message: string } | undefined> {
+  try {
+    const last = await closeEventOf(client.workflowService, NAMESPACE, {
+      workflowId,
+      ...(execId ? { runId: execId } : {}),
     });
-    const last = (res.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
-    if (!last) return '';
+    if (!last) return undefined;
+    const kind = closedAsOf(last);
+    if (!kind) return undefined;
     const failed = last.workflowExecutionFailedEventAttributes as { failure?: unknown } | undefined;
     const message = failureMessage(failed?.failure);
-    if (message) return message;
+    if (message) return { type: kind, message };
     const killed = last.workflowExecutionTerminatedEventAttributes as { reason?: unknown } | undefined;
     const reason = typeof killed?.reason === 'string' ? killed.reason.trim() : '';
-    if (reason) return reason;
-    return closedAsOf(last) ?? '';
+    return { type: kind, message: reason };
   } catch {
-    return '';
+    return undefined;
   }
+}
+
+/**
+ * How one Run ended, for a caller that has only its id — the report renderer's single use.
+ *
+ * `undefined` means it completed, is still running, or Temporal could not answer. A caller that needs
+ * to tell those apart has the status from the describe already.
+ */
+export async function fetchRunClose(
+  runId: string,
+  execId?: string
+): Promise<{ type: string; message: string } | undefined> {
+  const client = await getClient();
+  return runClose(client, runId, execId ?? '');
 }
 
 export type { NodeHeartbeat } from './heartbeat';
@@ -1024,15 +1117,7 @@ export async function fetchRunIO(runId: string, execId?: string): Promise<RunIO 
   }
 
   try {
-    const close = await client.workflowService.getWorkflowExecutionHistory({
-      namespace: NAMESPACE,
-      execution,
-      // 2 = CLOSE_EVENT. The numeric form rather than the enum, because the enum's export path has
-      // moved between SDK minors and this is a stable wire value.
-      historyEventFilterType: 2,
-      waitNewEvent: false,
-    });
-    const last = (close.history?.events ?? []).at(-1) as Record<string, unknown> | undefined;
+    const last = await closeEventOf(client.workflowService, NAMESPACE, execution);
     if (last) {
       const done = last.workflowExecutionCompletedEventAttributes as
         | { result?: { payloads?: unknown[] } }
@@ -1049,4 +1134,36 @@ export async function fetchRunIO(runId: string, execId?: string): Promise<RunIO 
   }
 
   return io;
+}
+
+/** How long a live render waits for a workflow's `report` query before rendering without it. */
+const REPORT_QUERY_TIMEOUT_MS = 3_000;
+
+/**
+ * An open run's own account of itself: its workflow's `report` query (ADR 0062 §2), or `undefined`.
+ *
+ * MOST WORKFLOWS DEFINE NO SUCH QUERY, and that is an answer, not a failure: the SDK raises for an
+ * unknown query type and this returns `undefined`, so the template sees `result` as null exactly as it
+ * did before. Same for a run whose worker is gone — Temporal cannot answer a query without one, and
+ * would otherwise hold the request — so it is bounded by {@link REPORT_QUERY_TIMEOUT_MS}: a live
+ * render renders without the query rather than waits for it.
+ */
+export async function queryRunReport(
+  runId: string,
+  timeoutMs = REPORT_QUERY_TIMEOUT_MS
+): Promise<unknown | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const client = await getClient();
+    const answer = client.workflow.getHandle(runId).query<unknown>('report');
+    const timeout = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), timeoutMs);
+      timer.unref?.();
+    });
+    return await Promise.race([answer, timeout]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

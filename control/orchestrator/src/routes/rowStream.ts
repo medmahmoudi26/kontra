@@ -41,7 +41,7 @@ export function registerRowStreamRoute(
   app: FastifyInstance,
   store: ObjectStore,
   caps: RowStreamCaps = {}
-): void {
+): RowTailHub {
   // The live row tail (live-datasets slice 05): one server-side poller per WATCHED Run, LISTing the
   // durable `units/run=<id>/` path and fanning the count out to every subscriber, so two tabs on one
   // Run agree. Reads the SAME store the dataset browser does — the count on screen must be a reading
@@ -208,4 +208,7 @@ export function registerRowStreamRoute(
     req.raw.on('close', done);
     req.raw.on('error', done);
   });
+
+  // Returned so the live report can watch the same rows through the same poller and caps (ADR 0062).
+  return rowTail;
 }
