@@ -5,8 +5,8 @@ anybody does on a fresh install, and the one that shows what kontra actually is.
 
 In one run you see a Fleet come into existence, a Worker pick up work on it, a line arrive every
 two seconds saying what it is doing *while it is still doing it*, rows land in a Dataset you can
-query in SQL, and the Machines destroyed when the scope exits — with a line of code responsible
-for each.
+query in SQL, the Machines destroyed when the scope exits, and a report saying what came of it —
+with a line of code responsible for each.
 
 Nothing here is a mock. Real Fleet, real Worker, real Dataset. The only pretend part
 is that the actor sleeps instead of reaching somebody else's estate, which is the one thing a first
@@ -48,6 +48,18 @@ That asymmetry is why `provider` defaults to `docker`. A first run should not de
 credential, and `cloud` additionally needs `KONTRA_CONTROLLER` to be an address a Droplet can
 actually reach — a Compose service name is not one, and a Machine that cannot call home starts,
 registers nothing, and looks idle.
+
+## What to read when it is done
+
+**The report** — *Read the report* at the bottom of the run page. It is `report.md` beside
+`workflow.py`, rendered from what the run returned: one sentence on how it went, the Fleet and the
+sweep in a row, every target with its records and outcome (`swept`, `dropped` with the target's own
+error, or `voided`), and the SQL that reads back exactly this run's rows. Set `fail_on: beta` to see
+a dropped target in it.
+
+Press **Run** in the console to get this report. A run started with `kontra workflow start` dials
+Temporal directly, so nothing pins its template and it gets the default report, with a warning
+saying so.
 
 ## What to look at while it runs
 

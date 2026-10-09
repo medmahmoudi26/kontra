@@ -276,3 +276,25 @@ func TestLintExplainsTheDefaultTemplatesOwnRoot(t *testing.T) {
 		t.Errorf("want the real explanation, got %q", msg)
 	}
 }
+
+// TestTheCanaryReportLints keeps `workspaces/default/workflows/canary/report.md` servable.
+//
+// `kontra workflow serve` refuses to start a workflow whose template does not lint, and the canary
+// is the first workflow anybody serves on a fresh install — so a canary template that stopped
+// linting would make the first command of the first run fail. Its field names are held to the
+// workflow's return type by `tests/test_canary_report.py`, which this lint does not check.
+func TestTheCanaryReportLints(t *testing.T) {
+	path := filepath.Join("..", "workspaces", "default", "workflows", "canary", reportFile)
+	text, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the canary has no report template: %v", err)
+	}
+	if problems := lintReportTemplate(path, string(text)); len(problems) != 0 {
+		t.Errorf("the canary's report.md does not lint: %v", problems)
+	}
+	for _, want := range []string{"{% if result %}", "{% else %}", "{% for t in result.targets"} {
+		if !strings.Contains(string(text), want) {
+			t.Errorf("the canary's report.md no longer has %q", want)
+		}
+	}
+}
