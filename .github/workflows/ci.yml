@@ -83,6 +83,23 @@ jobs:
   ts:
     name: orchestrator
     runs-on: ubuntu-latest
+    # A REAL POSTGRES, because every compose install keeps its application tables in one and the
+    # default suite runs them on SQLite. The report store's DDL was valid SQLite and invalid
+    # Postgres (a schema-qualified index name), so every Run on every install failed to store a
+    # report while this job was green. The stores' suites already run twice when `KONTRA_TEST_PG`
+    # is set; nothing set it. Trust auth on a throwaway service: no credential to hard-code.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     defaults:
       run:
         working-directory: control/orchestrator
@@ -136,7 +153,9 @@ jobs:
 
       # vitest run over src/**/*.test.ts — includes src/codec/conformance.test.ts,
       # the TS peer of the byte-compatible claim-check codec gate.
-      - name: vitest (incl. TS conformance test)
+      - name: vitest (incl. TS conformance test, and the stores on Postgres)
+        env:
+          KONTRA_TEST_PG: postgres://postgres@localhost:5432/postgres
         run: pnpm test
 
   # THE CONSOLE'S SUITE MOVED TO kontra-console (ADR 0038).
