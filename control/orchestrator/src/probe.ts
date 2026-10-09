@@ -210,7 +210,7 @@ export function probeRequest(body: unknown, actor: string, version: string): Pro
  */
 export async function startProbe(input: ProbeInput, deps: ProbeDeps = {}): Promise<ProbeStarted> {
   const { actor, version, method, units } = input;
-  const endpoint = endpointName(actor, version);
+  const endpoint = endpointName(actor, version, LEGACY_NAMESPACE);
   const queue = probeQueue();
   const now = deps.now ?? Date.now;
 

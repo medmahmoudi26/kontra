@@ -253,6 +253,59 @@
       }
     ]
   },
+  "endpoint_in_namespace": {
+    "why": "THE ENDPOINT IS CLUSTER STATE AND A WORKSPACE IS A NAMESPACE (ADR 0051). A Nexus endpoint name is global to the Temporal cluster while the task queue it targets lives in ONE namespace, so the same Actor version served in two workspaces would need two endpoints with one name — the second registration finds the first, reports `existed`, and every dispatch from the second workspace runs in the first one's namespace. So a workspace namespace (`ws-<workspace>`) is appended after a DOUBLE dash, and the legacy namespace keeps the bare name every existing endpoint already has. The double dash is unambiguous: the sanitised stem collapses every doubled separator, and a workspace name refuses one (workspace_namespace.json). The rule reads the namespace and nothing else — no side needs to know which namespace is the install's legacy one.",
+    "derived_by": [
+      "runtime/handler/internal/identity.EndpointName",
+      "sdk/go/catalog.EndpointName",
+      "sdk/python/kontra/catalog.endpoint_name",
+      "control/orchestrator/src/nexusRegistry.ts:endpointName"
+    ],
+    "cases": [
+      {
+        "why": "the legacy namespace keeps the name every existing endpoint already has",
+        "name": "echo",
+        "version": "0.1.0",
+        "namespace": "default",
+        "expect": "kontra-echo-0-1-0"
+      },
+      {
+        "why": "no namespace at all is the legacy form too",
+        "name": "echo",
+        "version": "0.1.0",
+        "namespace": "",
+        "expect": "kontra-echo-0-1-0"
+      },
+      {
+        "why": "a renamed legacy namespace (KONTRA_NAMESPACE) is not a workspace and gets no suffix",
+        "name": "echo",
+        "version": "0.1.0",
+        "namespace": "kontra",
+        "expect": "kontra-echo-0-1-0"
+      },
+      {
+        "why": "A WORKSPACE NAMESPACE: the same Actor version, a different endpoint",
+        "name": "echo",
+        "version": "0.1.0",
+        "namespace": "ws-hello",
+        "expect": "kontra-echo-0-1-0--ws-hello"
+      },
+      {
+        "why": "a hyphenated workspace survives intact after the double dash",
+        "name": "canary",
+        "version": "1.1.0",
+        "namespace": "ws-bug-bounty",
+        "expect": "kontra-canary-1-1-0--ws-bug-bounty"
+      },
+      {
+        "why": "the stem is sanitised BEFORE the suffix is added, so the suffix's double dash is not collapsed",
+        "name": "my actor",
+        "version": "0.1.0",
+        "namespace": "ws-scraping",
+        "expect": "kontra-my-actor-0-1-0--ws-scraping"
+      }
+    ]
+  },
   "tmux_session": {
     "why": "The Worker NAME, and it was the tmux session name until the Monitor was deleted. tmux's `session_check_name()` rewrote every `.` and `:` to `_` SILENTLY at creation (measured: `tmux new-session -d -s 'nscheck-0.1.0'` stored `nscheck-0_1_0`), so the name was sanitised where it is MINTED. The sanitisation OUTLIVED tmux: it is now an inherited naming rule, and changing it renames every Worker, so it does not change.",
     "two_domains": "There are TWO derivations here, not one, and the difference in their fallbacks is INTENDED. `worker` is an ACTOR's Worker: it is given a name and a version and nothing else, and its fallback exists only so the string stays attachable. `machine` is a fleet MACHINE's session: it is given the fleet's tag as well, because a `fleet up` with no Actor placed on it still has Terminals, and its fallback is the word `fleet` because that is what such a Machine IS. Making them agree would name a placement-less Machine's session `actor`, which is a lie about what is running there. Recorded here rather than left as two literals nobody can tell from a typo.",

@@ -170,3 +170,31 @@ Temporal carries the most per unit of work.
 - **What happens to a Fleet mid-flight when a workspace is switched.** Leases follow Temporal, so a
   Fleet belongs to a workspace — but the operator switching workspaces in the console while a Fleet
   is up is a state nobody has designed yet.
+
+## The namespace slice, as built (2026-10-09)
+
+What the first of the three slices decided, recorded here because each was left open above.
+
+- **Provisioning.** The orchestrator registers a workspace's namespace (`ws-<workspace>`, 24 h
+  retention, the kontra search attributes) the first time anything addresses it, and the console's
+  create and switch routes do it eagerly so the first run does not wait. The CLI never registers one;
+  it waits up to 90 s for the orchestrator to have done so. The `default` workspace keeps the legacy
+  namespace (`KONTRA_NAMESPACE`, else `default`), so every existing run, schedule and report stays
+  where it is — readable from `default` and from nowhere else.
+- **Workers.** The materializer and infra roles serve their shared queues once per namespace, in one
+  process (`namespacePool.ts`), and pick up a new workspace within ten seconds. A workflow or actor
+  worker serves the namespace of the workspace its FOLDER is in, not the console's selection.
+- **Nexus endpoints are cluster state**, so a workspace's endpoint name carries its namespace after a
+  double dash (`kontra-canary-1-1-0--ws-hello`); the legacy namespace keeps the bare name. Four
+  derivations, one corpus: `shared/conformance/queues.json` §endpoint_in_namespace.
+- **The report ledger is many tables, not one with a column.** Run ids are NOT unique across
+  namespaces — a workflow id is unique only inside one — so the "defensible" shared table above
+  would have let two workspaces' runs of the same id share versions. Each workspace namespace gets
+  its own Postgres schema (`kontra_ws_hello`), or its own table names on SQLite, chosen per call from
+  the namespace the request or the background pass is addressed to.
+- **Proven on a fresh install** by `e2e/canary-report.spec.ts`: the canary runs in `hello`
+  (ws-hello), and a second workspace then lists none of its runs or reports and gets a 404 for its
+  report and its live stream by id.
+
+Still open: the actor probe, which runs in the legacy namespace only; a Fleet when its workspace is
+switched mid-flight.

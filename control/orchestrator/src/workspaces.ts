@@ -9,6 +9,7 @@
  * Switching rewrites `.current`; discovery and watch re-read it. Nothing remounts.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -51,7 +52,7 @@ export class WorkspaceRefused extends Error {
 }
 
 /** The prefix every derived address carries, so a workspace's stores are recognisable on sight. */
-const ADDRESS_PREFIX = 'ws-';
+export const ADDRESS_PREFIX = 'ws-';
 
 /**
  * WHERE A WORKSPACE'S THINGS LIVE — the three addresses, derived and never stored (**ADR 0051**).
@@ -402,4 +403,26 @@ function copyTree(src: string, dst: string): void {
     if (ent.isDirectory()) copyTree(from, to);
     else writeFileSync(to, readFileSync(from));
   }
+}
+
+/**
+ * A namespace pinned for everything one piece of work does, carried through its awaits.
+ *
+ * WHY A SCOPE AND NOT A PARAMETER. Every reader in this module reaches Temporal through
+ * `getClient`, and the background loops (the report renderer, the history archiver) must walk
+ * EVERY workspace, not just the one the console has selected. Threading a namespace argument through
+ * thirty functions would be thirty places to forget it. A forgotten one silently reads the console's
+ * workspace instead, and that looks like an ordinary empty result. Inside a scope, getClient answers
+ * with the scope's namespace; outside one, with the console's current workspace.
+ */
+const namespaceScope = new AsyncLocalStorage<string>();
+
+/** Run `fn` with every `getClient` inside it bound to `namespace`. */
+export function inNamespace<T>(namespace: string, fn: () => Promise<T>): Promise<T> {
+  return namespaceScope.run(namespace, fn);
+}
+
+/** The namespace `getClient` would answer with right now. */
+export function activeNamespace(): string {
+  return namespaceScope.getStore() ?? currentNamespace();
 }

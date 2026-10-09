@@ -66,6 +66,13 @@ export type Viewer = (event: LiveEvent) => void;
 export interface LiveRunKey {
   runId: string;
   runStartedAt: number;
+  /**
+   * The Temporal namespace the run was resolved in — its workspace (ADR 0051). Carried so every
+   * render and the terminal watch read the run where it lives, even when they fire after the
+   * console has switched workspace. Not part of {@link liveKey}: a progress event names a run by id
+   * and start time only.
+   */
+  namespace?: string;
 }
 
 /** `runId` alone is NOT a key: ids are reused and collapse to the newest execution. */

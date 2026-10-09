@@ -118,6 +118,17 @@ def test_the_endpoint_name_matches_the_corpus(case: dict) -> None:
     assert catalog.endpoint_name(case["name"], case["version"]) == case["expect"]
 
 
+ENDPOINT_IN_NAMESPACE = CORPUS["endpoint_in_namespace"]["cases"]
+
+
+@pytest.mark.parametrize("case", ENDPOINT_IN_NAMESPACE, ids=_ids(ENDPOINT_IN_NAMESPACE))
+def test_the_endpoint_name_in_a_namespace_matches_the_corpus(case: dict) -> None:
+    assert (
+        catalog.endpoint_name(case["name"], case["version"], case["namespace"]) == case["expect"]
+    )
+    assert re.match(CORPUS["endpoint"]["servable"], case["expect"])
+
+
 def test_every_endpoint_name_in_the_corpus_is_servable() -> None:
     """The pattern is the corpus's, not this file's: the cluster enforces it, and a name that
     fails it is refused at create time with a message about the NAME rather than about the

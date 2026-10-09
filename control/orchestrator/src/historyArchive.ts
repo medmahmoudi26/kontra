@@ -32,8 +32,8 @@ import { partSafe } from './codec/shard';
 import { dtPartition } from './data/parquet';
 import type { RunHistory } from './history';
 import { readAsks, type RunAsk } from './hitl';
-import { LIST_LIMIT, fetchRunHistory, inNamespace, listRuns, type RunRow } from './temporalClient';
-import { allNamespaces } from './workspaces';
+import { LIST_LIMIT, fetchRunHistory, listRuns, type RunRow } from './temporalClient';
+import { allNamespaces, inNamespace } from './workspaces';
 
 /** The envelope's version. Bumped only if the STORED shape changes; `RunHistory` growing a field
  *  does not, because every reader of it already treats new fields as optional. */

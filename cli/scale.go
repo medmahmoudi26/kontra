@@ -26,6 +26,7 @@ import (
 	docker "github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"github.com/medmahmoudi26/kontra/cli/internal/ociref"
 )
 
@@ -448,6 +449,9 @@ func startWorker(ctx context.Context, d containerAPI, name, img, label string, p
 		"KONTRA_ORCHESTRATOR_URL=" + plane.orchestrator,
 		"KONTRA_S3_ENDPOINT=" + plane.s3,
 		"KONTRA_REDIS_HOST=" + plane.redis,
+		// THE CURRENT WORKSPACE'S NAMESPACE (ADR 0051). Unset, the handler polls `default`, and a
+		// worker scaled from any other workspace serves a namespace none of its runs are in.
+		"KONTRA_NAMESPACE=" + config.TemporalNamespace(),
 	}
 	// The tracing collector (platform-x100 #03), and the one endpoint here with NO default.
 	// The others name control-plane components kontra runs; a collector is not one of them

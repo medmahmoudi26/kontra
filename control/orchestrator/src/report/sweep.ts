@@ -127,7 +127,11 @@ export interface SweepDeps {
   onNote?: (note: string) => void;
   onError?: (err: unknown, runId?: string) => void;
   /** A page this size may be a prefix of what exists — the archiver's own caveat. */
-  listLimit?: number;
+  listLimit?: number;  /**
+   * Run one run's whole step — its reads and its store writes — inside a scope, which the server
+   * uses to address the run's own namespace (ADR 0051). Identity when absent.
+   */
+  within?: <T>(runId: string, fn: () => Promise<T>) => Promise<T>;
 }
 
 /** A closed run is reportable. The same predicate as `isArchivable`, and for the same reason. */
@@ -163,84 +167,87 @@ export async function sweepFinishedRuns(deps: SweepDeps = {}): Promise<ReportSwe
   out.scanned = runs.length;
   if (deps.listLimit !== undefined) out.capped = runs.length >= deps.listLimit;
 
+  const within = deps.within ?? (<T>(_runId: string, fn: () => Promise<T>) => fn());
   for (const run of runs) {
     if (!isReportable(run)) continue;
     out.closed += 1;
     try {
-      const io = deps.io ? await deps.io(run.runId) : undefined;
-      if (!io) {
-        // Temporal described it a moment ago and cannot serve its metadata now. Counted and NAMED,
-        // never inferred — the archiver's rule, and the reason is the same: the loss is unrecoverable
-        // and the only moment it can be reconciled is now.
-        out.gone += 1;
-        if (out.goneIds.length < SKIPPED_IDS_CAP) out.goneIds.push(run.runId);
-        continue;
-      }
-      const built = await contextForRun(run, io, {
-        ...deps,
-        store,
-        now,
-      });
-      const { template, templateHash, context } = built;
+      await within(run.runId, async () => {
+        const io = deps.io ? await deps.io(run.runId) : undefined;
+        if (!io) {
+          // Temporal described it a moment ago and cannot serve its metadata now. Counted and NAMED,
+          // never inferred — the archiver's rule, and the reason is the same: the loss is unrecoverable
+          // and the only moment it can be reconciled is now.
+          out.gone += 1;
+          if (out.goneIds.length < SKIPPED_IDS_CAP) out.goneIds.push(run.runId);
+          return;
+        }
+        const built = await contextForRun(run, io, {
+          ...deps,
+          store,
+          now,
+        });
+        const { template, templateHash, context } = built;
 
-      /* THE KEY IS CHECKED BEFORE THE RENDER AND THE ROW IS WRITTEN AFTER IT, in ONE insert.
-         The first version of this claimed the key first and inserted the snapshot second, which found
-         its own row by that key and answered `created: false` — so every snapshot was discarded and
-         every report stored empty. One insert, carrying the snapshot, is the fix.
-         The cheap read here is what keeps a steady-state pass over a full retention window from
-         rendering anything; two orchestrators racing can both render, and the loser's insert is
-         absorbed by the unique index, which costs one wasted render rather than a lost report. */
-      const key = renderKey(templateHash, context);
-      if ((await store.versionByKey(run.runId, key)) !== undefined) {
-        out.present += 1;
-        continue;
-      }
+        /* THE KEY IS CHECKED BEFORE THE RENDER AND THE ROW IS WRITTEN AFTER IT, in ONE insert.
+           The first version of this claimed the key first and inserted the snapshot second, which found
+           its own row by that key and answered `created: false` — so every snapshot was discarded and
+           every report stored empty. One insert, carrying the snapshot, is the fix.
+           The cheap read here is what keeps a steady-state pass over a full retention window from
+           rendering anything; two orchestrators racing can both render, and the loser's insert is
+           absorbed by the unique index, which costs one wasted render rather than a lost report. */
+        const key = renderKey(templateHash, context);
+        if ((await store.versionByKey(run.runId, key)) !== undefined) {
+          out.present += 1;
+          return;
+        }
 
-      if (!built.pinned) out.noTemplate += 1;
+        if (!built.pinned) out.noTemplate += 1;
 
-      const result = await renderOne({ template, context });
-      if (!result.ok) {
-        out.errored += 1;
-        await store.declareVersion({
+        const result = await renderOne({ template, context });
+        if (!result.ok) {
+          out.errored += 1;
+          await store.declareVersion({
+            runId: run.runId,
+            status: 'error',
+            templateHash,
+            renderKey: key,
+            errorText: result.error,
+            renderedBy: 'sweep',
+            at: now(),
+          });
+          return;
+        }
+
+        const snapshot: ReportSnapshot = built.pinned
+          ? result.snapshot
+          : {
+              ...result.snapshot,
+              warnings: [
+                'No report.md was pinned when this run started, so this is the default report. A run ' +
+                  'started by `kontra workflow start` pins nothing today — it dials Temporal directly — ' +
+                  'and nothing maps a run id back to its workflow folder, so the template could not be ' +
+                  'found afterwards either.',
+              ],
+            };
+        const stored = await store.declareVersion({
           runId: run.runId,
-          status: 'error',
+          status: 'ok',
           templateHash,
           renderKey: key,
-          errorText: result.error,
+          snapshotJson: JSON.stringify(snapshot),
           renderedBy: 'sweep',
           at: now(),
         });
-        continue;
-      }
-
-      const snapshot: ReportSnapshot = built.pinned
-        ? result.snapshot
-        : {
-            ...result.snapshot,
-            warnings: [
-              'No report.md was pinned when this run started, so this is the default report. A run ' +
-                'started by `kontra workflow start` pins nothing today — it dials Temporal directly — ' +
-                'and nothing maps a run id back to its workflow folder, so the template could not be ' +
-                'found afterwards either.',
-            ],
-          };
-      const stored = await store.declareVersion({
-        runId: run.runId,
-        status: 'ok',
-        templateHash,
-        renderKey: key,
-        snapshotJson: JSON.stringify(snapshot),
-        renderedBy: 'sweep',
-        at: now(),
+        if (!stored.created) {
+          // Another orchestrator got there between the check and the insert. Its version is the one
+          // that counts, and this render is discarded rather than stored beside it.
+          out.present += 1;
+          return;
+        }
+        await store.putSecrets(run.runId, stored.version, result.secrets);
+        out.rendered += 1;
       });
-      if (!stored.created) {
-        // Another orchestrator got there between the check and the insert. Its version is the one
-        // that counts, and this render is discarded rather than stored beside it.
-        out.present += 1;
-        continue;
-      }
-      await store.putSecrets(run.runId, stored.version, result.secrets);
-      out.rendered += 1;
     } catch (err) {
       out.failed += 1;
       deps.onError?.(err, run.runId);

@@ -38,7 +38,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { EXPLORE_TOKEN_VARS, checkBearer } from '../auth';
 import { STREAM_HEADERS } from './runStream';
-import { activeNamespace } from '../temporalClient';
+import { activeNamespace } from '../workspaces';
 
 /** In-compose, unpublished. The same shape `panels/metrics.ts` states for the metrics store. */
 export const DEFAULT_LOGS_URL = 'http://victorialogs:9428';

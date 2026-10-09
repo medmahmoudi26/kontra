@@ -626,7 +626,10 @@ export function metaOf(detail: string): Record<string, string> {
  * endpoint is carried on the turn either way, so nothing is lost to this heuristic.
  */
 export function actorOf(endpoint: string): { actor: string; version: string } {
-  const stem = endpoint.startsWith('kontra-') ? endpoint.slice(7) : endpoint;
+  // A workspace's endpoint carries `--<namespace>` (queues.json §endpoint_in_namespace); the
+  // namespace is not part of the Actor's name or version.
+  const bare = endpoint.replace(/--ws-[0-9a-z-]+$/, '');
+  const stem = bare.startsWith('kontra-') ? bare.slice(7) : bare;
   const m = /^(.+)-(\d+)-(\d+)-(\d+)((?:-[0-9A-Za-z]+)*)$/.exec(stem);
   if (!m) return { actor: stem, version: '' };
   return { actor: m[1]!, version: `${m[2]}.${m[3]}.${m[4]}${m[5] ?? ''}` };

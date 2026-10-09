@@ -224,6 +224,37 @@ test('a fresh install runs the canary from the console and renders the canary\'s
   // Warden's `kf-*` containers on the Docker host — which is where `.github/workflows/ci.yml` looks,
   // in the step after this one.
 
+  // ── ANOTHER WORKSPACE SEES NONE OF IT (ADR 0051) ──────────────────────────────────────────────
+  //
+  // The defect this pins: from any workspace the Runs and Reports pages listed every workspace's
+  // runs, because there was one Temporal namespace and one set of report tables. The canary ran in
+  // `hello` (namespace ws-hello); a second workspace must not be able to list it, read its report,
+  // or open its live stream — and switching back must show it again, so the empty answers below are
+  // isolation and not a broken API.
+  const send = async (method: 'post' | 'put', path: string, data: unknown) => {
+    const res = await request[method](path, { data, headers: { authorization: `Bearer ${token}` } });
+    expect(res.status(), `${method.toUpperCase()} ${path}: ${await res.text()}`).toBe(200);
+    return (await res.json()) as { namespace?: { namespace: string; state: string } };
+  };
+  const created = await send('post', '/api/workspaces', { name: 'isolation-check', use: true, seed: false });
+  expect(created.namespace?.namespace, 'the new workspace has a namespace of its own').toBe('ws-isolation-check');
+  try {
+    const runs = await getJson<RunRow[]>(request, token, '/api/runs?limit=200');
+    expect(runs.status).toBe(200);
+    expect((runs.body ?? []).map((r) => r.runId), 'another workspace lists none of hello\'s runs').not.toContain(run.runId);
+    const reports = await getJson<Array<{ runId: string }>>(request, token, '/api/reports');
+    expect(reports.status).toBe(200);
+    expect((reports.body ?? []).map((r) => r.runId), 'another workspace lists none of hello\'s reports').not.toContain(run.runId);
+    const report = await getJson<unknown>(request, token, `/api/runs/${encodeURIComponent(run.runId)}/report`);
+    expect(report.status, 'another workspace cannot read hello\'s report by its id').toBe(404);
+    const live = await getJson<unknown>(request, token, `/api/runs/${encodeURIComponent(run.runId)}/report/live`);
+    expect(live.status, 'another workspace cannot open hello\'s live report').toBe(404);
+  } finally {
+    await send('put', '/api/workspaces/current', { name: 'hello' });
+  }
+  const back = await getJson<StoredReport>(request, token, `/api/runs/${encodeURIComponent(run.runId)}/report`);
+  expect(back.status, 'back in hello, its report is there again').toBe(200);
+
   // `ResizeObserver loop` is the browser's own throttling notice, not an error in the page.
   expect(pageErrors.filter((e) => !/ResizeObserver loop/.test(e)), 'no uncaught errors in the page').toEqual([]);
 });

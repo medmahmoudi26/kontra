@@ -893,6 +893,8 @@ test('reading the metadata back out of the line the reducer built', () => {
     expect(actorOf('kontra-nscheck-0-1-0')).toEqual({ actor: 'nscheck', version: '0.1.0' });
     expect(actorOf('kontra-dns-facts-0-1-0')).toEqual({ actor: 'dns-facts', version: '0.1.0' });
     expect(actorOf('kontra-probe-10-2-0')).toEqual({ actor: 'probe', version: '10.2.0' });
+    // A workspace's endpoint carries its namespace after a double dash; it names neither.
+    expect(actorOf('kontra-canary-1-1-0--ws-bug-bounty')).toEqual({ actor: 'canary', version: '1.1.0' });
     expect(actorOf('kontra-probe-1-0-0-rc1')).toEqual({ actor: 'probe', version: '1.0.0-rc1' });
   });
 

@@ -24,6 +24,7 @@ type queueCase struct {
 	Name      string `json:"name"`
 	Version   string `json:"version"`
 	SessionID string `json:"session_id"`
+	Namespace string `json:"namespace"`
 	Expect    string `json:"expect"`
 }
 
@@ -42,6 +43,9 @@ type queueCorpus struct {
 		Servable string      `json:"servable"`
 		Cases    []queueCase `json:"cases"`
 	} `json:"endpoint"`
+	EndpointInNamespace struct {
+		Cases []queueCase `json:"cases"`
+	} `json:"endpoint_in_namespace"`
 }
 
 // ../../../shared/conformance/queues.json — catalog -> go -> sdk -> <repo root>. One string, not a
@@ -101,8 +105,18 @@ func TestTheQueuesMatchTheCorpus(t *testing.T) {
 	}
 	for _, c := range doc.Endpoint.Cases {
 		t.Run("endpoint/"+c.Why, func(t *testing.T) {
-			if got := EndpointName(c.Name, c.Version); got != c.Expect {
+			if got := EndpointName(c.Name, c.Version, ""); got != c.Expect {
 				t.Errorf("EndpointName(%q,%q) = %q, want %q", c.Name, c.Version, got, c.Expect)
+			}
+		})
+	}
+	if len(doc.EndpointInNamespace.Cases) == 0 {
+		t.Fatal("queues.json §endpoint_in_namespace has no cases")
+	}
+	for _, c := range doc.EndpointInNamespace.Cases {
+		t.Run("endpoint_in_namespace/"+c.Why, func(t *testing.T) {
+			if got := EndpointName(c.Name, c.Version, c.Namespace); got != c.Expect {
+				t.Errorf("EndpointName(%q,%q,%q) = %q, want %q", c.Name, c.Version, c.Namespace, got, c.Expect)
 			}
 		})
 	}

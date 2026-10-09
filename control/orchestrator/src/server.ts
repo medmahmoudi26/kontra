@@ -66,10 +66,8 @@ import { SourceStore } from './sourceStore';
 import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
 import {
-  activeNamespace,
   describeRun as describeRunById,
   describeRunHeartbeats,
-  inNamespace,
   fetchRunClose,
   fetchRunIO,
   getClient,
@@ -85,8 +83,8 @@ import { reportStore, type ReportStore } from './report/store';
 import { render as renderReportInHost } from './report/renderHost';
 import { admitReport, registerReportRoutes } from './routes/report';
 import { registerReportLiveRoute } from './routes/reportLive';
-import { allNamespaces } from './workspaces';
-import { LiveHub, type RenderOnce } from './report/live';
+import { activeNamespace, allNamespaces, inNamespace } from './workspaces';
+import { LiveHub, type RenderOnce, type LiveRunKey } from './report/live';
 import { IN_FLIGHT, inFlightSummary, progressFromHeartbeats, type InFlightRows } from './report/liveProducers';
 import type { RowTailHub } from './rowTail';
 
@@ -478,7 +476,11 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
      live report watches the same rows through the same caps rather than a second poller. */
   const liveRows = new Map<string, InFlightRows>();
   let rowTailHub: RowTailHub | undefined;
-  const renderLive: RenderOnce = async (key) => {
+  // IN THE RUN'S OWN NAMESPACE, which the route resolved it in (ADR 0051): a render fires from a
+  // timer, long after the request, and must not follow the console to another workspace.
+  const renderLive: RenderOnce = (key) =>
+    inNamespace(key.namespace ?? activeNamespace(), () => renderLiveIn(key));
+  const renderLiveIn: RenderOnce = async (key) => {
     const described = await describeRunById(key.runId);
     if (!described) return { error: `run ${key.runId} is no longer readable` };
     const io = (await fetchRunIO(key.runId)) ?? {};
@@ -569,6 +571,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         runStartedAt: described.startedAt,
         status: described.status,
         closedAt: described.closedAt,
+        namespace: activeNamespace(),
       };
     },
     renderOnce: renderLive,
@@ -583,39 +586,40 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
        The STORED version is minted by the ordinary sweep path over this one run, so the render that
        is persisted is built from the FINAL context and carries the key a later convergence pass will
        compute — which is what stops that pass from inserting a second version beside it. */
-    watchTerminal: async (key) => {
-      const client = await getClient();
-      try {
-        await client.workflow.getHandle(key.runId).result();
-      } catch {
-        // Terminal and not a completion. Still reportable, and the report says which.
-      }
-      const described = await describeRunById(key.runId);
-      if (!described || described.closedAt <= 0) return undefined;
-      await sweepFinishedRuns({
-        store: reports,
-        list: async () => [
-          {
-            runId: key.runId,
-            status: described.status,
-            startedAt: described.startedAt,
-            closedAt: described.closedAt,
-            type: described.type,
-          },
-        ],
-        io: (id) => fetchRunIO(id),
-        close: (id) => fetchRunClose(id),
-        identity: async (id) => {
-          const found = await runWorkflowStore().get(id);
-          return found ? { workflow: found.workflow, version: found.version } : undefined;
-        },
-        onError: (err, runId) =>
-          app.log.warn(`report live finalize: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
-      });
-      const latest = await reports.version(key.runId);
-      return latest ? { version: latest.version } : undefined;
-    },
+    watchTerminal: (key) => inNamespace(key.namespace ?? activeNamespace(), () => watchTerminalIn(key)),
   });
+  async function watchTerminalIn(key: LiveRunKey): Promise<{ version?: number } | undefined> {
+    const client = await getClient();
+    try {
+      await client.workflow.getHandle(key.runId).result();
+    } catch {
+      // Terminal and not a completion. Still reportable, and the report says which.
+    }
+    const described = await describeRunById(key.runId);
+    if (!described || described.closedAt <= 0) return undefined;
+    await sweepFinishedRuns({
+      store: reports,
+      list: async () => [
+        {
+          runId: key.runId,
+          status: described.status,
+          startedAt: described.startedAt,
+          closedAt: described.closedAt,
+          type: described.type,
+        },
+      ],
+      io: (id) => fetchRunIO(id),
+      close: (id) => fetchRunClose(id),
+      identity: async (id) => {
+        const found = await runWorkflowStore().get(id);
+        return found ? { workflow: found.workflow, version: found.version } : undefined;
+      },
+      onError: (err, runId) =>
+        app.log.warn(`report live finalize: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
+    });
+    const latest = await reports.version(key.runId);
+    return latest ? { version: latest.version } : undefined;
+  }
   registerLogsRoutes(app);
   // Which Workers are running and NOT logging — the check every silent shipper failure needed.
   registerLogsCoverageRoutes(app, queueDescriber, repo);
@@ -957,8 +961,11 @@ export async function runApi(): Promise<FastifyInstance> {
       }
       return rows;
     },
-    io: (runId) => inRunNamespace(runId, () => fetchRunIO(runId)),
-    close: (runId) => inRunNamespace(runId, () => fetchRunClose(runId)),
+    // THE WHOLE STEP, not only its Temporal reads: the store addresses the run's workspace tables
+    // by the same scope, so a report is written where that workspace's readers will look for it.
+    within: inRunNamespace,
+    io: (runId) => fetchRunIO(runId),
+    close: (runId) => fetchRunClose(runId),
     identity: async (runId) => {
       const found = await runWorkflowStore().get(runId);
       return found ? { workflow: found.workflow, version: found.version } : undefined;

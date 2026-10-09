@@ -14,8 +14,6 @@
  * only the run endpoints touch it (and surface a clear error if it's down).
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
-
 import { Client, Connection, defaultPayloadConverter } from '@temporalio/client';
 import type { Payload, PayloadCodec } from '@temporalio/common';
 import { OpenTelemetryWorkflowClientInterceptor } from '@temporalio/interceptors-opentelemetry';
@@ -38,7 +36,7 @@ import { SERVE_DEV_WORKFLOW, serveDevWorkflowId } from './queues';
 import { temporalConnectOptions } from './temporalTls';
 import { clientIdentity } from './workerIdentity';
 import { ensureNamespace } from './namespaces';
-import { currentNamespace, namespaceFor } from './workspaces';
+import { activeNamespace, namespaceFor } from './workspaces';
 
 /**
  * THE INSTALL'S LEGACY NAMESPACE: `KONTRA_NAMESPACE`, or `default`. Since ADR 0051 it is no longer
@@ -97,7 +95,9 @@ export async function clientFor(namespace: string): Promise<Client> {
   if (!p) {
     p = (async () => {
       const conn = await connection();
-      await ensureNamespace(conn, namespace);
+      // NOT FOR THE LEGACY NAMESPACE, which the install's Temporal was set up with and which nothing
+      // here ever registered: a workspace namespace is the only kind this process creates.
+      if (namespace !== LEGACY_NAMESPACE) await ensureNamespace(conn, namespace);
       const client = new Client({
         connection: conn,
         namespace,
@@ -131,27 +131,9 @@ export async function getClient(): Promise<Client> {
   return clientFor(activeNamespace());
 }
 
-/**
- * A namespace pinned for everything one piece of work does, carried through its awaits.
- *
- * WHY A SCOPE AND NOT A PARAMETER. Every reader in this module reaches Temporal through
- * {@link getClient}, and the background loops (the report renderer, the history archiver) must walk
- * EVERY workspace, not just the one the console has selected. Threading a namespace argument through
- * thirty functions would be thirty places to forget it. A forgotten one silently reads the console's
- * workspace instead, and that looks like an ordinary empty result. Inside a scope, getClient answers
- * with the scope's namespace; outside one, with the console's current workspace.
- */
-const namespaceScope = new AsyncLocalStorage<string>();
-
-/** Run `fn` with every {@link getClient} inside it bound to `namespace`. */
-export function inNamespace<T>(namespace: string, fn: () => Promise<T>): Promise<T> {
-  return namespaceScope.run(namespace, fn);
-}
-
-/** The namespace {@link getClient} would answer with right now. */
-export function activeNamespace(): string {
-  return namespaceScope.getStore() ?? currentNamespace();
-}
+// The namespace scope lives beside the namespace rule (workspaces.ts) so that a store can address
+// itself by namespace without importing a Temporal client. Re-exported: every reader here uses it.
+export { activeNamespace, inNamespace } from './workspaces';
 
 /**
  * The CONNECTION behind the client, for the RPCs that are not workflow calls.

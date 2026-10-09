@@ -30,12 +30,17 @@ import { describeLength } from './temporalClient';
 
 /** Just enough client for the one call, plus a record of what it was asked. */
 function client(info: unknown, opts: { throws?: boolean } = {}) {
-  const calls: Array<{ execution?: { workflowId?: string; runId?: string } }> = [];
+  const calls: Array<{ namespace?: string; execution?: { workflowId?: string; runId?: string } }> = [];
   return {
     calls,
     client: {
+      // The namespace the client was built for; the raw describe is addressed to it.
+      options: { namespace: 'ws-hello' },
       workflowService: {
-        describeWorkflowExecution: async (arg: { execution?: { workflowId?: string; runId?: string } }) => {
+        describeWorkflowExecution: async (arg: {
+          namespace?: string;
+          execution?: { workflowId?: string; runId?: string };
+        }) => {
           calls.push(arg);
           if (opts.throws) throw new Error('describe is down');
           return { workflowExecutionInfo: info };
@@ -106,6 +111,8 @@ describe('it asks about the execution the events came from', () => {
     await describeLength(c, 'kontra-fleet/dns', 'exec-abc');
     expect(calls).toHaveLength(1);
     expect(calls[0]!.execution).toEqual({ workflowId: 'kontra-fleet/dns', runId: 'exec-abc' });
+    // In the CLIENT'S namespace: a describe addressed anywhere else reads another workspace's run.
+    expect(calls[0]!.namespace).toBe('ws-hello');
   });
 
   it('omits runId entirely when there is none, rather than sending an empty one', async () => {

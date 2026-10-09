@@ -72,6 +72,11 @@ function unquoteList(s: string): string[] {
 
 vi.mock('@temporalio/client', () => {
   class Client {
+    // The namespace the real client was built for, which every raw RPC is addressed to.
+    options: { namespace: string };
+    constructor(opts?: { namespace?: string }) {
+      this.options = { namespace: opts?.namespace ?? 'default' };
+    }
     workflow = {
       // eslint-disable-next-line require-yield
       async *list({ query }: { query: string }) {

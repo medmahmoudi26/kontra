@@ -35,7 +35,9 @@ export interface ReportLiveDeps {
    * one unauthenticated client opened 250 streams on 250 FICTIONAL ids and got 250 pollers, because
    * the id was never validated.
    */
-  resolveRun: (runId: string) => Promise<{ runStartedAt: number; status: string; closedAt: number } | undefined>;
+  resolveRun: (
+    runId: string
+  ) => Promise<{ runStartedAt: number; status: string; closedAt: number; namespace?: string } | undefined>;
   /**
    * Resolves when the run reaches a terminal state, with the stored version if one was minted.
    *
@@ -109,7 +111,11 @@ export function registerReportLiveRoute(app: FastifyInstance, deps: ReportLiveDe
       });
     }
 
-    const key: LiveRunKey = { runId, runStartedAt: run.runStartedAt };
+    const key: LiveRunKey = {
+      runId,
+      runStartedAt: run.runStartedAt,
+      ...(run.namespace ? { namespace: run.namespace } : {}),
+    };
     const queue: string[] = [];
     const push = (event: LiveEvent): void => {
       queue.push(frame(event));

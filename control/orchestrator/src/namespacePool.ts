@@ -18,7 +18,7 @@
 import { allNamespaces } from './workspaces';
 
 /** How often the pool looks for a workspace it is not serving yet. */
-export const RESCAN_MS = 30_000;
+export const RESCAN_MS = 10_000;
 
 /** The part of a Temporal Worker the pool drives. */
 export interface PooledWorker {
