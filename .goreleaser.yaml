@@ -1,0 +1,108 @@
+# .goreleaser.yaml — the `kontra` CLI as downloadable binaries on a tagged release (PRD D10, §7).
+#
+# ONE BINARY. The control plane ships as images (`publish.yml`'s other jobs) and an install is
+# `docker compose up`; this is the binary an operator puts on their own PATH to talk to it. There is
+# no separate `kontra-warden` to build, whatever `publish.yml`'s header used to say: the Warden is
+# `kontra warden …` in this same binary (`cli/main.go`'s dispatch), and `kontra-warden` is only the
+# name of the systemd unit it installs.
+#
+# WHO RUNS THIS. `publish.yml`'s `binaries` job, on a `v*` tag and nothing else, as
+# `goreleaser release --clean`. `ci.yml` runs `goreleaser check` and a single-target snapshot build on
+# every pull request, so a config that cannot build fails a PR instead of the first tag — `git tag`
+# in this repository still returns nothing, and a release is a bad place to find out.
+version: 2
+
+project_name: kontra
+
+builds:
+  - id: kontra
+    dir: cli
+    main: .
+    binary: kontra
+    # THE WORKSPACE BUILD, NOT `GOWORK=off`. `go.work` is at the root, so this compiles against the
+    # same module graph `ci.yml`'s `go test` in `cli/` tests, `govulncheck` in `cli/` scans, and
+    # `Dockerfile.selfcontained` compiles into the image. `scripts/dev-setup.sh` builds with
+    # `GOWORK=off` and is the odd one out — a released binary should be the thing the scanners read.
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    # The binary's mtime is the commit's, not the runner's clock, so the bytes in the archive do not
+    # depend on when the job ran.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    # THE -X TARGET IS THE WHOLE SYMBOL PATH, AND A WRONG ONE IS SILENT. `-X` on a symbol that does
+    # not exist is dropped without an error and every release reports `dev` forever
+    # (cli/internal/buildinfo/buildinfo.go says why there is no version constant to fall back on).
+    # `buildinfo.LinkerFlag` is the one spelling of it; `ci.yml`'s `goreleaser` job runs the
+    # snapshot binary and fails if it answers `dev`, which is the check that this copy still agrees.
+    #
+    # `.Version` is the tag WITHOUT its `v`, which is the bare form every other artifact name uses.
+    ldflags:
+      - -s -w -X github.com/medmahmoudi26/kontra/cli/internal/buildinfo.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    # `kontra_0.1.0_linux_amd64.tar.gz` — no `v`, the OS and arch as Go spells them. A name a script
+    # can build from `uname` and a version without a lookup table.
+    name_template: "kontra_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # THE FILES CARRY THE COMMIT'S TIME TOO, for the reason `mod_timestamp` does above: left alone, a
+    # tar entry's mtime is whenever the runner checked the file out, and two builds of one commit
+    # produce two different archives.
+    #
+    # MEASURED, AND ONLY THIS FAR: two `release --snapshot` runs of one commit, with LICENSE and
+    # README.md re-touched to another date between them, wrote byte-identical SHA256SUMS for all four
+    # archives. Same machine, same toolchain, same checkout path — so it shows these settings remove
+    # the clock from the bytes, not yet that a second host reproduces them (ADR 0063 left that claim to
+    # this file; it is not made here).
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          mtime: "{{ .CommitDate }}"
+
+# ONE FILE NAMES EVERY ARCHIVE BY DIGEST, AND THE SIGNATURE IS OVER THAT FILE. Signing four archives
+# would be four signatures to verify; signing the list makes `sha256sum -c` the rest of the check.
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+# ── KEYLESS, LIKE THE IMAGES ─────────────────────────────────────────────────────────────────────
+#
+# The same credential `publish.yml`'s `manifests` job signs the images with: `id-token: write` on the
+# job, a ten-minute Fulcio certificate bound to this workflow's identity, nothing in the repository
+# to leak or rotate.
+#
+# `--new-bundle-format` IS SPELLED OUT BECAUSE THE TWO COSIGNS DISAGREE ON IT. The pinned
+# `cosign-installer` (v3.9.1) installs cosign v2.5.2, whose default is the legacy bundle; cosign v3
+# defaults to the Sigstore bundle and deprecates the flag without removing it. Explicit, the file is a
+# `.sigstore.json` under both, so bumping the installer does not change what a release publishes.
+# Checked against both versions' flag definitions, not by running a keyless signature locally — that
+# needs a GitHub OIDC token, which only the release job has.
+signs:
+  - id: checksum-keyless
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --new-bundle-format
+      - --bundle=${signature}
+      - --yes
+      - ${artifact}
+
+# ── RELEASE-PLEASE OWNS THE RELEASE; THIS ATTACHES TO IT ────────────────────────────────────────
+#
+# release-please creates the tag AND the GitHub release, with the notes it wrote from Conventional
+# Commits (`release-please.yml`). GoReleaser finds that release by tag and appends its assets; with the
+# changelog disabled it has no notes of its own to add, so the body release-please wrote is what a
+# reader sees. A second changelog generated here from the same commits would disagree with the first
+# on wording and sometimes on content.
+release:
+  mode: append
+
+changelog:
+  disable: true
