@@ -38,6 +38,7 @@ import {
   type SweepSummary,
 } from '../data/retention';
 import { summaryStore, type SummaryStore } from '../data/summaries';
+import { reportStore, type ReportStore } from '../report/store';
 
 export type { SweepReport, SweepSummary } from '../data/retention';
 
@@ -141,6 +142,9 @@ export interface RetentionActivityDeps {
    *  Dataset, and the fourth thing a collected Run leaves behind if it is not purged with the rest. */
   workflows?: RunWorkflowStore;
   summaries?: SummaryStore;
+  /** The Runs' **Reports** (ADR 0055) — the fifth arm, and the one that is purged FIRST because it is
+   *  the only one holding unredacted credential bytes. */
+  reports?: ReportStore;
 }
 
 /** The activities this factory returns — the type `sweepDatasetsWorkflow` proxies. The activities are
@@ -155,8 +159,17 @@ export function createRetentionActivities(deps: RetentionActivityDeps = {}) {
   const records = deps.records ?? datasetRecordStore();
   const workflows = deps.workflows ?? runWorkflowStore();
   const summaries = deps.summaries ?? summaryStore();
+  const reports = deps.reports ?? reportStore();
 
-  const retentionDeps: RetentionDeps = { store, lake, materialization, records, workflows, summaries };
+  const retentionDeps: RetentionDeps = {
+    store,
+    lake,
+    materialization,
+    records,
+    workflows,
+    summaries,
+    reports,
+  };
 
   return {
     /**

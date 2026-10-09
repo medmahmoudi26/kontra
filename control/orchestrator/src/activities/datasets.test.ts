@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { MemoryStore, ObjectStore } from '../codec/objectStore';
+import { runEvents, type RunDataEvent } from '../runEvents';
 import { createDatasetActivities } from './datasets';
 import { DatasetRecordStore, InvalidDeviationError } from '../data/datasetRecords';
 // The lifecycle key lives with the READ side, which is what has to agree with the UI's badge.
@@ -190,6 +191,40 @@ describe('openTempDataset — ownership, recorded once and apart from the state'
 
     expect(await acts.datasetState({ dataset: 'tmp_a7f31b2c' })).toEqual({ state: 'open' });
     expect(((await ownerOf(s, 'tmp_a7f31b2c')) as { owner: string }).owner).toBe('NsCheck-42');
+  });
+
+  /**
+   * ADR 0062's trigger, asserted against the REAL publish path rather than against the emitter.
+   * The emit sits after `conn.run('COMMIT')` in `data/parquet.ts`, so this is the only test that can
+   * say the wiring exists — a unit test of `RunEventBus` would pass with the call site deleted.
+   */
+  it('emits a run `data` event after the commit, carrying the execution it belongs to', async () => {
+    const s = store();
+    const cfg = lakeCfg([{ host: 'a.example' }]);
+    const acts = createDatasetActivities({ store: s, lake: cfg });
+    const seen: RunDataEvent[] = [];
+    const off = runEvents.onData((e) => seen.push(e));
+    try {
+      await acts.openTempDataset({ dataset: 'tmp_a7f31b2c', owner: 'NsCheck-42' });
+      await acts.publishBatch({
+        dataset: 'tmp_a7f31b2c',
+        sha256: 'unused-when-sourceUri-is-set',
+        runId: 'NsCheck-42',
+        runStartedAt: 1_700_000_000_000,
+      });
+    } finally {
+      off();
+    }
+
+    expect(seen).toHaveLength(1);
+    // `runStartedAt` is what keys a live report's cache, because Run ids are REUSED and the id alone
+    // would serve the previous execution's rows (`temporalClient.ts:240-246`).
+    expect(seen[0]).toMatchObject({
+      runId: 'NsCheck-42',
+      runStartedAt: 1_700_000_000_000,
+      dataset: 'tmp_a7f31b2c',
+    });
+    expect(seen[0]!.rows).toBeGreaterThan(0);
   });
 });
 

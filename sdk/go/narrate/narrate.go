@@ -351,6 +351,80 @@ func Redact(sentence string) string {
 	return cutGroup(bearerRe, cutGroup(secretAssignmentRe, sentence))
 }
 
+// ── THE HTTP MESSAGE RULE ───────────────────────────────────────────────────────────────────────
+//
+// A THIRD RULE AND NOT A WIDENING OF THE SECOND, for a measured reason. `secretAssignmentRe` captures
+// `(\S+)` — one run of non-whitespace — which is right for prose and wrong for a header:
+//
+//	Cookie: a=1; b=2                      -> Cookie: [redacted] b=2
+//	Set-Cookie: sid=zzz; Path=/; HttpOnly -> Set-Cookie: [redacted] Path=/; HttpOnly
+//
+// Measured, in Go and in Python. That is the worst failure shape available: the line reads as
+// redacted while the second cookie pair is still in the clear, and a reviewer scanning a code block
+// sees `[redacted]` and moves on. Widening `(\S+)` to end-of-line would fix it and would also change
+// prose redaction everywhere — `token=abc and then more words` would lose the rest of the sentence,
+// and `Summary` is a live caller. So headers get their own rule and the sentence rule is untouched.
+//
+// NO GO CALLER TODAY, and that is recorded rather than hidden: the report renderer that needs this is
+// TypeScript, in the orchestrator. This arm exists because `shared/conformance/redaction.json` pins
+// the rule in three languages, and a rule with one implementation drifts the moment a second appears.
+// `sdk/python/kontra/redaction.py` has carried its sentence rule with no production caller on the same
+// reasoning since narration was removed.
+//
+// WHY THE WHITESPACE CLASSES ARE `[ \t]` AND NOT `\s`. Go's regexp `\s` is ASCII-only while Python's
+// and JavaScript's include U+00A0, and this rule runs over a LATIN-1 view of raw bytes where byte 0xA0
+// IS U+00A0. The sentence rule already diverges because of that — `token:\xa0abc123def456` redacts to
+// `token:[redacted]` here and `token:\xa0[redacted]` in Python, which no corpus case catches — and a
+// new rule gets to not inherit it. `[ \t]` is also what RFC 9112 permits around a field value.
+
+// httpCredentialHeaderRe matches a header line whose NAME names a credential, capturing the whole
+// value to end of line. Built from the word list with HEADER-NAME affixes, which is why `X-Api-Key`,
+// `Set-Cookie`, `Proxy-Authorization` and `X-Amz-Security-Token` all match without being named: the
+// affix class allows the hyphens a header name uses.
+//
+// The VALUE IS THE ONLY CAPTURING GROUP, so {@link cutGroup} works on it unchanged.
+var httpCredentialHeaderRe = regexp.MustCompile(
+	`(?im)^(?:[ \t]*[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]*` +
+		`(?:password|passwd|pwd|secret|secrets|token|api[_-]?key|apikey|access[_-]?key|` +
+		`private[_-]?key|credential|credentials|authorization|cookie|session[_-]?key)` +
+		`[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]*[ \t]*:[ \t]*)([^\r\n]+)`)
+
+// jsonCredentialPairRe matches a JSON member whose KEY names a secret, capturing the quoted value.
+//
+// The sentence rule misses these entirely — measured, `{"password": "hunter2"}` comes back untouched —
+// because the closing quote sits between the key word and the colon, so `\s*[:=]\s*` never matches. An
+// `http` code block carrying a login request therefore stored the password in the clear, which is the
+// one gap worth closing beyond the header rule: a report's export must not contain the credential the
+// request sent.
+var jsonCredentialPairRe = regexp.MustCompile(
+	`(?i)"[A-Za-z0-9_-]*` +
+		`(?:password|passwd|pwd|secret|secrets|token|api[_-]?key|apikey|access[_-]?key|` +
+		`private[_-]?key|credential|credentials|authorization|cookie|session[_-]?key)` +
+		`[A-Za-z0-9_-]*"[ \t]*:[ \t]*"((?:[^"\\]|\\.)*)"`)
+
+// RedactHTTP returns an HTTP request or response with every credential value replaced.
+//
+// THREE PASSES, IN THIS ORDER, and the order is what makes them compose:
+//
+//  1. Credential HEADER values, to end of line. First, because it replaces the whole value, so the
+//     passes after it find {@link Redacted} where a credential was and cannot be fooled by the
+//     half-redacted line the sentence rule alone would leave.
+//  2. {@link Redact}, unchanged — the sentence and bearer rules. They catch a credential in a request
+//     line's query string (`GET /x?token=abc`) and a bare pasted `Bearer …`, neither of which is a
+//     header.
+//  3. JSON members whose key names a secret, which pass 2 cannot see.
+//
+// IDEMPOTENT. `[redacted]` carries brackets no credential pattern here accepts, so a second
+// application changes nothing — which matters because a stored snapshot can be re-rendered.
+//
+// NOT A SECURITY BOUNDARY, exactly as {@link Redact} is not. It is a guard against a credential
+// reaching a document by accident, and an audited reveal path exists because a reader sometimes needs
+// the original bytes.
+func RedactHTTP(message string) string {
+	withHeaders := cutGroup(httpCredentialHeaderRe, message)
+	return cutGroup(jsonCredentialPairRe, Redact(withHeaders))
+}
+
 // cutGroup replaces the FIRST CAPTURING GROUP of every match with {@link Redacted}, keeping
 // everything around it. Only the value is replaced; the key stays, because "there was a token here
 // and kontra would not carry it" is a more useful line than a sentence with a hole in it.

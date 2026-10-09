@@ -63,6 +63,17 @@ JOINED_PATH = re.compile(
     r"""filepath\.Join\(\s*((?:"\.\."\s*,\s*)+(?:"[\w.-]+"\s*,\s*)*?"[\w-]*conformance"\s*,\s*"[\w]+\.json")\s*\)"""
 )
 
+#: The same shape in TypeScript, which this guard could not see until a TS arm was added to
+#: `redaction.json`. `path.join(__dirname, '..', '..', '..', 'shared', 'conformance', 'lease.json')` is an
+#: assembled path with every fragment separately correct — exactly the spelling the docstring below
+#: says breaks silently on a tree move — and Go's was the only language checked for it. There were two
+#: such paths in the tree when this was added (`lease` and `redaction`) and both resolved, so this
+#: pattern is additive rather than a bug report.
+JOINED_PATH_TS = re.compile(
+    r"""path\.join\(\s*__dirname\s*,\s*((?:['"]\.\.['"]\s*,\s*)+"""
+    r"""(?:['"][\w.-]+['"]\s*,\s*)*?['"][\w-]*conformance['"]\s*,\s*['"][\w]+\.json['"])\s*\)"""
+)
+
 
 def _joined_to_relative(args: str) -> str:
     """Turn a Join argument list into the path it builds.
@@ -73,7 +84,30 @@ def _joined_to_relative(args: str) -> str:
 
         `"..", "..", "conformance", "blobkey.json"`  ->  `../../conformance/blobkey.json`
     """
-    return "/".join(re.findall(r'"([^"]+)"', args))
+    # EITHER QUOTE, because the TypeScript spelling uses single quotes and the Go one double. A
+    # version of this that read only double quotes returned an empty path for every TS arm, which
+    # resolved to the driver's own directory and therefore "existed" — a guard that passed by
+    # looking at the wrong thing.
+    return "/".join(re.findall(r"""['"]([^'"]+)['"]""", args))
+
+
+def test_the_joined_path_guard_can_see_an_assembled_typescript_path() -> None:
+    """The TypeScript half of the guard above, non-vacuous for the same reason as the Go half.
+
+    `JOINED_PATH_TS` was added when `redaction.json` gained a TypeScript arm. Until then every TS
+    driver's assembled path was unchecked — `lease.conformance.test.ts` included — because the only
+    assembled spelling this module knew was Go's `filepath.Join`. Both TS paths in the tree resolved
+    when the pattern arrived, so it found no bug; what it does is stop the next `../` from being
+    silently wrong in a third language.
+    """
+    ts = "readFileSync(path.join(__dirname, '..', '..', '..', 'shared', 'conformance', 'lease.json'), 'utf8')"
+    m = JOINED_PATH_TS.search(ts)
+    assert m is not None, "JOINED_PATH_TS no longer matches the spelling it was written for"
+    assert _joined_to_relative(m.group(1)) == "../../../shared/conformance/lease.json"
+    # And it must not match Go's, which JOINED_PATH already covers — two patterns reporting the same
+    # path twice is harmless, but a pattern that matched everything would hide which one is wrong.
+    go = 'os.ReadFile(filepath.Join("..", "..", "..", "shared", "conformance", "lease.json"))'
+    assert JOINED_PATH_TS.search(go) is None
 
 
 def _sources() -> list[pathlib.Path]:
@@ -138,6 +172,8 @@ def test_every_relative_corpus_path_resolves() -> None:
         # with every fragment separately correct, which is exactly why a tree move leaves it wrong
         # and a grep for the old string finds nothing. See JOINED_PATH.
         found += [_joined_to_relative(m.group(1)) for m in JOINED_PATH.finditer(text)]
+        # AND THE TYPESCRIPT SPELLING of the same shape. See JOINED_PATH_TS.
+        found += [_joined_to_relative(m.group(1)) for m in JOINED_PATH_TS.finditer(text)]
         for rel in found:
             if not (src.parent / rel).resolve().exists():
                 broken.append(

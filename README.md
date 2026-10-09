@@ -259,6 +259,7 @@ The vocabulary is small and load-bearing. Full definitions live in [`CONTEXT.md`
 | **Batch** / **Unit** | the work, and one item of it. Every `push` is durable as you move through it |
 | **Dataset** | SQL-queryable output, readable while the Run is still open |
 | **Run** | one execution of *your* workflow |
+| **Report** | what a Run returned, shown through the workflow's `report.md`; versioned, redacted, with a feedback thread |
 | **Fleet** | tagged capacity: Machines that Containers are scheduled onto. Not owned by one Run |
 | **Machine** / **Container** / **Worker** | the three axes: a host, a process on it, a concurrent unit inside that. `place(machines=4, containers=3, workers=8)` |
 | **Lease** | one Run's claim on a Fleet. Machines die when the last Lease drops |

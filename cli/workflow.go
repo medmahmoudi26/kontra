@@ -388,6 +388,14 @@ func workflowServe(args []string) error {
 		return err
 	}
 
+	/* THE REPORT TEMPLATE, CHECKED BEFORE A WORKER STARTS (ADR 0055, spec §6.1). The same reasoning as
+	   the queue above and the slot refusal in `startRun`: a report renders only when a run ENDS, so a
+	   typo in `report.md` is otherwise discovered after however long the work took. A folder with no
+	   template is the common case and says nothing. */
+	if problems := lintReportInFolder(filepath.Dir(file)); len(problems) > 0 {
+		return reportLintRefusal(problems)
+	}
+
 	// The DELTA this command adds (workflowworker.go), kept separate from the inherited environment
 	// because the two paths below need it differently: the foreground child inherits and overrides,
 	// while a tmux pane inherits the tmux SERVER's environment and must be told each variable
