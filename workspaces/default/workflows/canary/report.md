@@ -1,6 +1,27 @@
 # canary · {{ run.status }}
 
-{% if result %}
+{% if run.status == "running" %}
+Running for {{ run.duration_s | duration }}. This page re-renders while the run goes, and the final
+report replaces it when the run ends.
+
+{% if run.progress %}
+**{{ run.progress.units_done }} of {{ run.progress.units_total }}** target(s) swept so far{% if run.progress.isolated > 0 %}, {{ run.progress.isolated }} dropped{% endif %}.
+{% else %}
+No target has reached a Worker yet: the Fleet is still coming up.
+{% endif %}
+{% assign flying = datasets["in flight"] %}
+{% if flying %}
+## Records so far: {{ flying.rows }}
+
+The newest ones, as the actor pushed them:
+
+| target | step | phase | latency (ms) | worker |
+|---|---|---|---|---|
+{% for r in flying.tail -%}
+| {{ r.target }} | {{ r.step }} | {{ r.phase }} | {{ r.latency_ms }} | {{ r.worker }} |
+{% endfor %}
+{% endif %}
+{% elsif result %}
 {{ result.summary }}
 
 | fleet | sweep | records | took |

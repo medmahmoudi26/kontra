@@ -37,23 +37,41 @@ const deps: EngineDeps = {
 
 const RUN_ID = 'canary-1791506965';
 
-function ctx(status: string, result: Record<string, unknown> | null, error: unknown = null) {
+function ctx(
+  status: string,
+  result: Record<string, unknown> | null,
+  error: unknown = null,
+  live: { progress?: unknown; datasets?: Record<string, unknown> } = {}
+) {
   return {
     run: {
       id: RUN_ID,
       workflow_id: RUN_ID,
       status,
       started_at: '2026-10-09T10:00:00Z',
-      ended_at: '2026-10-09T10:00:55Z',
-      duration_s: 55,
+      ended_at: status === 'running' ? '' : '2026-10-09T10:00:55Z',
+      duration_s: status === 'running' ? 31 : 55,
       error,
+      progress: live.progress ?? null,
     },
     workflow: { name: 'canary', version: '1.1.0', workspace: 'default' },
     input: {},
     result,
     report: { rendered_at: '2026-10-09T10:00:56Z', template_hash: 'x', version: 1 },
+    // Always an object, as `buildContext` makes it; `in flight` only while rows have been pushed.
+    datasets: live.datasets ?? {},
   };
 }
+
+const pushed = (n: number) =>
+  Array.from({ length: n }, (_, i) => ({
+    target: 'alpha',
+    step: i + 1,
+    phase: ['resolve', 'connect', 'handshake', 'probe', 'settle'][i % 5],
+    latency_ms: 8 + i * 2.5,
+    ok: true,
+    worker: '808b7f0da909',
+  }));
 
 function result(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -83,6 +101,43 @@ async function render(c: Record<string, unknown>) {
   const out = await renderReport(TEMPLATE, c, deps);
   return { ...out, tree: parseMarkdown(out.markdown) };
 }
+
+describe('the canary report while the run is LIVE (ADR 0062)', () => {
+  it('before any target reaches a Worker: the clock, and that the Fleet is still coming up', async () => {
+    const { markdown, blocks } = await render(ctx('running', null));
+    expect(markdown).toContain('# canary · running');
+    expect(markdown).toContain('Running for 31s');
+    expect(markdown).toContain('the Fleet is still coming up');
+    // Not the ended branch: an open run is not a run that "returned nothing".
+    expect(markdown).not.toContain('This run ended');
+    expect(blocks).toHaveLength(0);
+  });
+
+  it('mid-sweep: targets swept so far, the record count, and the newest records as a table', async () => {
+    const { markdown, tree } = await render(
+      ctx('running', null, null, {
+        progress: { units_done: 1, units_total: 2, isolated: 0, phase: 'one batch running', updated_at: '' },
+        datasets: {
+          'in flight': { rows: 7, batches: 0, last_commit_at: '', head: pushed(5), tail: pushed(5), columns: [] },
+        },
+      })
+    );
+    expect(markdown).toContain('**1 of 2** target(s) swept so far.');
+    expect(markdown).toContain('## Records so far: 7');
+    expect(markdown).toMatch(/\| alpha \| 3 \| handshake \| 13 \| 808b7f0da909 \|/);
+    expect(countNodes(tree, 'table')).toBe(1);
+    expect(countNodes(tree, 'tableRow')).toBe(1 + 5);
+  });
+
+  it('says how many were dropped while it is still going', async () => {
+    const { markdown } = await render(
+      ctx('running', null, null, {
+        progress: { units_done: 2, units_total: 2, isolated: 1, phase: 'one batch running', updated_at: '' },
+      })
+    );
+    expect(markdown).toContain('**2 of 2** target(s) swept so far, 1 dropped.');
+  });
+});
 
 describe('the canary report', () => {
   it('a complete run: the summary, one fleet row, one row per target, and the query', async () => {

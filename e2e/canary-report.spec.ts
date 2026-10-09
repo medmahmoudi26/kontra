@@ -145,6 +145,31 @@ test('a fresh install runs the canary from the console and renders the canary\'s
   const startedAfter = Date.now() - 5_000; // the runner's clock and the API's are the same host's
   await runButton.click();
 
+  // ── WHILE IT RUNS, THE REPORT STREAMS ─────────────────────────────────────────────────────────
+  //
+  // THE REGRESSION THIS PINS: live mode once rendered one frame and then the final document, because
+  // nothing produced a context that could change mid-run, and before that the first frame itself
+  // waited 41 s on two Temporal long polls. Either way the page showed nothing moving, and a check
+  // that only read the finished report was green through all of it. So: open the report while the
+  // run is going, through the run page as a person does, and require the RECORD COUNT TO CLIMB —
+  // two different counts, both before the run ends. A count that never changes is a frozen page.
+  await page.waitForURL(/\/runs\/canary-/, { timeout: 30_000 });
+  const openRunId = decodeURIComponent(page.url().split('/runs/')[1] ?? '');
+  await page.getByTestId('run-to-report').click();
+  const liveCard = page.getByTestId('report-live');
+  await expect(liveCard, 'the report page is live while the run goes').toBeVisible({ timeout: 60_000 });
+  await expect(liveCard).toContainText('canary · running');
+  const recordsSoFar = async (): Promise<number> => {
+    const text = (await liveCard.textContent().catch(() => '')) ?? '';
+    return Number(text.match(/Records so far: (\d+)/)?.[1] ?? 0);
+  };
+  await expect.poll(recordsSoFar, { message: 'pushed records appear in the live report', timeout: RUN_BUDGET_MS }).toBeGreaterThan(0);
+  const firstCount = await recordsSoFar();
+  await expect
+    .poll(recordsSoFar, { message: 'the live record count keeps climbing', timeout: 30_000 })
+    .toBeGreaterThan(firstCount);
+  console.log(`live: ${firstCount} -> ${await recordsSoFar()} records on ${openRunId} before it ended`);
+
   const run = await waitFor('the canary run closes', RUN_BUDGET_MS, async () => {
     const { body } = await getJson<RunRow[]>(request, token, '/api/runs?limit=20');
     // BY START TIME, NOT ROW ORDER: `/api/runs` puts open runs first.

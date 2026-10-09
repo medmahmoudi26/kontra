@@ -292,7 +292,12 @@ func TestTheCanaryReportLints(t *testing.T) {
 	if problems := lintReportTemplate(path, string(text)); len(problems) != 0 {
 		t.Errorf("the canary's report.md does not lint: %v", problems)
 	}
-	for _, want := range []string{"{% if result %}", "{% else %}", "{% for t in result.targets"} {
+	// Three branches, because a canary report is read in three states: LIVE while the run goes
+	// (ADR 0062 renders it every few seconds), FINISHED with a result, and ENDED without one.
+	for _, want := range []string{
+		`{% if run.status == "running" %}`, `datasets["in flight"]`,
+		"{% elsif result %}", "{% for t in result.targets", "{% else %}",
+	} {
 		if !strings.Contains(string(text), want) {
 			t.Errorf("the canary's report.md no longer has %q", want)
 		}
