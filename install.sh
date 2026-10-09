@@ -14,7 +14,7 @@ BUF=.venv/bin/buf
 #   CLI_DEST=$PWD/cli/kontra ./install.sh
 CLI_DEST="${CLI_DEST:-/usr/local/bin/kontra}"
 
-# The Go this repo is built with. `go.work` says 1.26.8 and Ubuntu 24.04 ships 1.22, so the
+# The Go this repo is built with. `go.work` says 1.26.9 and Ubuntu 24.04 ships 1.22, so the
 # distro package is not an option — this is fetched from upstream and checksummed, the same
 # shape as the buf step below. Bump both the version and its digests together.
 GO_VERSION="${GO_VERSION:-1.26.9}"

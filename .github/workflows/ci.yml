@@ -304,7 +304,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       registry:
-        image: registry:2
+        # Through mirror.gcr.io: a service container is pulled before any step can configure the
+        # daemon, and an anonymous Docker Hub pull is what failed this job with 429.
+        image: mirror.gcr.io/library/registry:2
         ports:
           - 5000:5000
     steps:
@@ -490,6 +492,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      # DOCKER HUB THROUGH mirror.gcr.io. GitHub's shared runners pull Docker Hub anonymously, and on
+      # 2026-10-09 every image-pulling job died on `429 Too Many Requests` before running a line of
+      # kontra. The daemon tries the mirror first and falls back to Docker Hub for an image the mirror
+      # does not hold, so this only takes pulls off the rate-limited path. MERGED into the runner's
+      # own daemon.json, which carries its cgroup settings.
+      - name: pull Docker Hub through a mirror
+        run: |
+          set -euo pipefail
+          conf=/etc/docker/daemon.json
+          current='{}'
+          if sudo test -s "$conf"; then current=$(sudo cat "$conf"); fi
+          echo "$current" | jq '."registry-mirrors" = ((."registry-mirrors" // []) + ["https://mirror.gcr.io"] | unique)' \
+            | sudo tee "$conf" >/dev/null
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{json .RegistryConfig.Mirrors}}'
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -556,6 +574,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      # DOCKER HUB THROUGH mirror.gcr.io. GitHub's shared runners pull Docker Hub anonymously, and on
+      # 2026-10-09 every image-pulling job died on `429 Too Many Requests` before running a line of
+      # kontra. The daemon tries the mirror first and falls back to Docker Hub for an image the mirror
+      # does not hold, so this only takes pulls off the rate-limited path. MERGED into the runner's
+      # own daemon.json, which carries its cgroup settings.
+      - name: pull Docker Hub through a mirror
+        run: |
+          set -euo pipefail
+          conf=/etc/docker/daemon.json
+          current='{}'
+          if sudo test -s "$conf"; then current=$(sudo cat "$conf"); fi
+          echo "$current" | jq '."registry-mirrors" = ((."registry-mirrors" // []) + ["https://mirror.gcr.io"] | unique)' \
+            | sudo tee "$conf" >/dev/null
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{json .RegistryConfig.Mirrors}}'
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
