@@ -151,3 +151,53 @@ def test_batch_and_dataset_are_the_actor_side_types():
     # And a collector Dataset still works with a type parameter on it.
     d = Dataset[Enriched]()
     assert d.records == []
+
+
+def test_a_forward_reference_to_a_reserved_field_fails_when_it_resolves():
+    # From the review: a hint naming a class defined below the Method skipped the reserved-field
+    # check, so a `node` column was advertised and then refused by the materializer (GitHub #22).
+    reg = _registry()
+
+    @reg.method
+    async def later(self, batch: Batch[Product], dataset: Dataset[LateClash]) -> None: ...
+
+    m = reg.methods["later"]
+    assert m.hints_pending
+    globals()["LateClash"] = dataclass(type("LateClash", (), {"__annotations__": {"node": str}}))
+    try:
+        with pytest.raises(TypeError, match="node"):
+            m.resolved()
+    finally:
+        del globals()["LateClash"]
+
+
+def test_a_disagreement_found_on_resolution_still_warns():
+    reg = _registry()
+
+    @reg.method(takes=dict)
+    async def later(self, batch: Batch[LateIn], dataset: Dataset[Enriched]) -> None: ...
+
+    globals()["LateIn"] = type("LateIn", (), {})
+    try:
+        with pytest.warns(UserWarning, match="takes=dict but the signature says LateIn"):
+            reg.methods["later"].resolved()
+        assert reg.methods["later"].takes is dict
+    finally:
+        del globals()["LateIn"]
+
+
+def test_equal_generic_aliases_are_not_a_disagreement():
+    reg = _registry()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+
+        @reg.method(takes=list[str])
+        async def m(self, batch: Batch[list[str]], dataset: Dataset[Enriched]) -> None: ...
+
+
+def test_an_explicit_reserved_emits_is_refused_even_when_the_signature_is_pending():
+    reg = _registry()
+    with pytest.raises(TypeError, match="node"):
+
+        @reg.method(emits=Clashes)
+        async def m(self, batch: Batch[NotYetDefined], dataset) -> None: ...

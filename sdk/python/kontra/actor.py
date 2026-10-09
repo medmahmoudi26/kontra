@@ -231,6 +231,42 @@ def _type_arg(annotation: Any, generic: type) -> Optional[type]:
     return args[0]
 
 
+def check_method_types(
+    fn_name: str,
+    takes: Optional[type],
+    emits: Optional[type],
+    hint_takes: Optional[type],
+    hint_emits: Optional[type],
+    stacklevel: int = 3,
+) -> None:
+    """The two checks a Method's types get, wherever they are first known — at decoration, or when
+    a forward reference resolves (`MethodRegistration.resolved`).
+
+    A RESERVED OUTPUT FIELD is a TypeError: the framework stamps it on every row and the
+    materializer would refuse the INSERT long after the Method returned (GitHub #22). A
+    DISAGREEMENT between an explicit argument and the signature is a warning naming both.
+    """
+    effective = emits if emits is not None else hint_emits
+    reserved = _reserved_emits_fields(effective)
+    if reserved:
+        fields = ", ".join(repr(r) for r in reserved)
+        raise TypeError(
+            f"@actor.method {fn_name}: emits type {getattr(effective, '__name__', effective)!r} "
+            f"declares {fields}, which the framework stamps on every output row — the "
+            f"materializer would refuse the INSERT. Rename the field(s). Reserved names: "
+            f"{', '.join(RESERVED_OUTPUT_FIELDS)}."
+        )
+    for kind, said, hinted in (("takes", takes, hint_takes), ("emits", emits, hint_emits)):
+        # `!=`, not `is not`: two spellings of one generic alias (`list[str]`) are equal, not identical.
+        if said is not None and hinted is not None and said != hinted:
+            warnings.warn(
+                f"@actor.method {fn_name}: {kind}={getattr(said, '__name__', said)} but "
+                f"the signature says {getattr(hinted, '__name__', hinted)}; {kind}= wins. "
+                "Drop the argument or fix the annotation so they agree.",
+                stacklevel=stacklevel,
+            )
+
+
 def signature_types(fn: ActorFn) -> Tuple[Optional[type], Optional[type], bool]:
     """What a Method's signature says it takes and emits: `(takes, emits, pending)`.
 
@@ -248,8 +284,12 @@ def signature_types(fn: ActorFn) -> Tuple[Optional[type], Optional[type], bool]:
         return None, None, True
     except Exception:  # an annotation that is not a type at all: it declares nothing
         return None, None, False
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):  # not introspectable (a classmethod object, a builtin): says nothing
+        return None, None, False
     params = [
-        p for p in inspect.signature(fn).parameters.values()
+        p for p in signature.parameters.values()
         if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
     ]
     takes = _type_arg(hints.get(params[1].name), Batch) if len(params) > 1 else None
@@ -284,9 +324,13 @@ class MethodRegistration:
         if self.hints_pending:
             takes, emits, pending = signature_types(self.fn)
             if not pending:
+                # THE CHECKS THE DECORATOR COULD NOT RUN, now that the types exist: a reserved
+                # output field fails the serve here rather than in the materializer, and an explicit
+                # argument that disagrees with the signature still says so.
+                check_method_types(self.fn_name, self.takes, self.emits, takes, emits)
                 self.hints_pending = False
-                self.takes = self.takes or takes
-                self.emits = self.emits or emits
+                self.takes = self.takes if self.takes is not None else takes
+                self.emits = self.emits if self.emits is not None else emits
         return self
 
     @property
@@ -704,41 +748,22 @@ class ActorRegistry:
                     f"@actor.method {f.__name__} is a generator; a Method pushes with "
                     "`await dataset.push(x)` and returns nothing (ADR 0028 §3)"
                 )
-            reserved = _reserved_emits_fields(emits if emits is not None else signature_types(f)[1])
-            if reserved:
-                # CAUGHT AT IMPORT, for the same reason the generator check above is: an actor
-                # that cannot possibly materialise should not register, let alone serve.
-                #
-                # Without this the collision surfaces as `Binder Error: Duplicate column name
-                # "node" in INSERT` — in the materializer, inside a retrying activity, LONG after
-                # the Method returned successfully. Nothing reaches the actor's log (the push
-                # succeeded) or the workflow's (it is still awaiting the dispatch), so the only way
-                # to see it was `temporal workflow describe | jq .pendingActivities`, at attempt 8,
-                # with the run still reading RUNNING (GitHub #22).
-                #
-                # `node` is the one that actually happens. It is not an exotic name for an actor on
-                # a fleet — it is the obvious one for "which machine produced this row", which is
-                # precisely what the framework is also recording.
-                fields = ", ".join(repr(r) for r in reserved)
-                raise TypeError(
-                    f"@actor.method {f.__name__}: emits type {getattr(emits, '__name__', emits)!r} "
-                    f"declares {fields}, which the framework stamps on every output row — the "
-                    f"materializer would refuse the INSERT. Rename the field(s). Reserved names: "
-                    f"{', '.join(RESERVED_OUTPUT_FIELDS)}."
-                )
             # THE SIGNATURE IS THE CONTRACT (PRD D2): `batch: Batch[Product]` says what the Method
             # takes as plainly as `takes=Product` does, so it is read as one. An explicit argument
             # still wins, and a disagreement between the two is said out loud — two declarations
             # of one fact that differ are a bug in one of them, and only the author knows which.
+            #
+            # CAUGHT AT IMPORT when the types are known now; when a hint names a class defined
+            # further down the module, the same checks run when it resolves (`resolved()`). A
+            # reserved output field (`node` is the one that happens) would otherwise surface as
+            # `Duplicate column name "node" in INSERT` in the materializer, long after the Method
+            # returned, with the run still reading RUNNING (GitHub #22).
             hint_takes, hint_emits, pending = signature_types(f)
-            for kind, said, hinted in (("takes", takes, hint_takes), ("emits", emits, hint_emits)):
-                if said is not None and hinted is not None and said is not hinted:
-                    warnings.warn(
-                        f"@actor.method {f.__name__}: {kind}={getattr(said, '__name__', said)} but "
-                        f"the signature says {getattr(hinted, '__name__', hinted)}; {kind}= wins. "
-                        "Drop the argument or fix the annotation so they agree.",
-                        stacklevel=3,
-                    )
+            if not pending:
+                check_method_types(f.__name__, takes, emits, hint_takes, hint_emits, stacklevel=4)
+            elif emits is not None:
+                # The signature is not readable yet, but an explicit `emits=` is: check it now.
+                check_method_types(f.__name__, takes, emits, None, None, stacklevel=4)
             dispatch_name = name or f.__name__
             clash = self.methods.get(dispatch_name)
             if clash is not None:

@@ -170,7 +170,7 @@ fi
 # protobuf the Temporal SDK could not share an interpreter with. That runtime is gone; the actor
 # host is a Temporal activity worker and needs the same temporalio the rest of the repo has.
 echo "==> actor host runtime (temporalio + redis + boto3, into .venv)"
-.venv/bin/pip install -q temporalio redis boto3 pydantic
+.venv/bin/pip install -q temporalio redis boto3 pydantic pyyaml
 
 echo "==> buf"
 if [ ! -x "$BUF" ]; then

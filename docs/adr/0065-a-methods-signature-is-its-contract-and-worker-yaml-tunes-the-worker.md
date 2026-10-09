@@ -32,10 +32,15 @@ who wrote the hints got a Method that advertised no schema.
    installed SDK's signature at boot, before connecting. The PRD's draft key
    `max_concurrent_activity_task_pollers` is not a Python option (`..._polls` is) and is refused
    with that suggestion. kontra adds no aliases.
-3. **Tuning only.** A key is accepted when the SDK types it as an int, float, bool or duration.
-   `task_queue`, `identity` and `build_id` are refused by name: the queue is derived from the
-   actor's name and version (`catalog.shared_queue`) and is not a knob, and the identity is the
-   Worker name the logs and console carry.
+3. **Tuning only, by name.** The accepted keys are an explicit table (`TUNING` in
+   `runtime/python/internals/workeryaml.py`) of concurrency, polling, throttling and shutdown
+   options, intersected with the installed SDK, each with a range: counts are whole numbers of at
+   least 1 (0 where the SDK means none), rates finite and positive, durations finite and not
+   negative, and a key may appear once. A type was not a good enough test: `no_remote_activities`
+   is a bool and makes the actor's worker poll no activity tasks at all. `task_queue`, `identity`
+   and `build_id` are refused by name with the reason: the queue is derived from the actor's name
+   and version (`catalog.shared_queue`) and is not a knob, and the identity is the Worker name the
+   logs and console carry.
 4. **Precedence:** a programmatic `**worker_kwargs` > `worker.yaml` > the host's default.
    `KONTRA_MAX_PARALLEL_SESSIONS` stays an environment variable: it caps live Sessions, which is not
    a Worker option.
@@ -44,8 +49,11 @@ who wrote the hints got a Method that advertised no schema.
 
 ## Consequences
 
-- PyYAML joins the `[actor]` extra, which every actor image already installs. A missing PyYAML is
-  an error only when a `worker.yaml` exists.
+- PyYAML joins the `[actor]` extra (pack-built actor images) and the control-plane images that run
+  `kontra workflow serve` and `kontra serve` (Dockerfile.selfcontained, checked at build time in
+  Dockerfile.orchestrator). A missing PyYAML is an error only when a `worker.yaml` exists.
+- A forward-referenced type gets the same checks when it resolves: a reserved output field fails
+  the serve, and a disagreement with an explicit argument warns.
 - Go actors are unchanged. Go's Worker options are `worker.Options` fields with different names,
   and signature derivation needs generic handles the Go SDK does not have yet; both are follow-ups,
   and the corpus for them is this ADR's tests.

@@ -96,6 +96,11 @@ nearest real one. Only numbers, flags and durations are accepted; `task_queue`, 
 moving it leaves a healthy worker that nothing schedules onto. A `worker.yaml` beside a workflow
 tunes the workflow's worker the same way (ADR 0065).
 
+**What it reaches in an actor:** the actor's shared worker — the one that opens and closes Sessions
+and runs an unscoped call. A Session's own worker has fixed slots and drain, so
+`max_concurrent_activities` here bounds how many Sessions open at once, not how many Units a Session
+runs; that is still `KONTRA_MAX_PARALLEL_SESSIONS` and your own loop.
+
 ### Concurrency is yours
 
 There is no `concurrent_aruns` knob any more — the framework stopped owning the window (ADR 0023

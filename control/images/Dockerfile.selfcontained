@@ -271,7 +271,7 @@ COPY --from=release /handlerbin/handler /opt/kontra/handler
 RUN chmod +x /usr/local/bin/kontra-entrypoint \
  && apt-get update \
  && apt-get install -y --no-install-recommends docker.io python3 python3-pip python3-venv \
- && pip3 install --break-system-packages --no-cache-dir temporalio redis boto3 pydantic \
+ && pip3 install --break-system-packages --no-cache-dir temporalio redis boto3 pydantic pyyaml \
  && rm -rf /var/lib/apt/lists/*
 ENV PYTHONPATH=/opt/kontra/sdk/python:/opt/kontra/runtime/python
 ENV KONTRA_SDK_ROOT=/opt/kontra

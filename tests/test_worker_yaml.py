@@ -42,8 +42,18 @@ def test_addressing_and_identity_are_not_knobs(key):
 
 @pytest.mark.parametrize("key", ["client", "activities", "workflows", "interceptors", "workflow_runner"])
 def test_wiring_is_not_tuning(key):
-    with pytest.raises(WorkerYamlError, match="not a tunable"):
+    with pytest.raises(WorkerYamlError, match="not a tuning option"):
         parse(f"{key}: x")
+
+
+@pytest.mark.parametrize(
+    "key", ["no_remote_activities", "use_worker_versioning", "debug_mode", "disable_safe_workflow_eviction"]
+)
+def test_a_scalar_that_changes_what_the_worker_does_is_not_tuning(key):
+    # `no_remote_activities: true` would make the actor's worker poll no activity tasks at all — a
+    # healthy idle worker nothing schedules onto. A type check alone let it through.
+    with pytest.raises(WorkerYamlError, match="not a tuning option"):
+        parse(f"{key}: true")
 
 
 @pytest.mark.parametrize(
@@ -53,6 +63,7 @@ def test_wiring_is_not_tuning(key):
         ("graceful_shutdown_timeout: 2m", timedelta(minutes=2)),
         ("graceful_shutdown_timeout: 1h", timedelta(hours=1)),
         ("graceful_shutdown_timeout: 45", timedelta(seconds=45)),
+        ("graceful_shutdown_timeout: 0", timedelta(0)),
     ],
 )
 def test_durations(text, expect):
@@ -64,9 +75,19 @@ def test_durations(text, expect):
     [
         ("max_concurrent_activities: lots", "a whole number"),
         ("max_concurrent_activities: true", "a whole number"),
-        ("debug_mode: 1", "true or false"),
+        ("max_concurrent_activities: 0", "between 1 and"),
+        ("max_concurrent_activities: -3", "between 1 and"),
+        ("max_cached_workflows: -1", "between 0 and"),
+        ("disable_eager_activity_execution: 1", "true or false"),
         ("graceful_shutdown_timeout: soon", "a duration"),
+        ("graceful_shutdown_timeout: -5", "not negative"),
+        ("graceful_shutdown_timeout: .inf", "finite"),
+        ("graceful_shutdown_timeout: 99999999999999", "a timedelta can hold"),
+        ("max_activities_per_second: .nan", "finite"),
+        ("max_activities_per_second: -1", "above 0"),
+        ("nonsticky_to_sticky_poll_ratio: 2", "at most 1"),
         ("- max_concurrent_activities", "must be a map"),
+        ("max_concurrent_activities: 2\nmax_concurrent_activities: 3", "appears twice"),
     ],
 )
 def test_a_wrong_type_names_the_key_and_what_it_must_be(text, message):
@@ -92,9 +113,9 @@ def test_load_reads_the_file_beside_the_actor_and_names_it_in_errors(tmp_path: P
 def test_the_tunable_set_follows_the_installed_sdk():
     opts = tunable_options()
     # A few that exist in every supported temporalio, with the kinds the coercion relies on.
-    assert opts["max_concurrent_activities"] == "int"
-    assert opts["graceful_shutdown_timeout"] == "timedelta"
-    assert opts["debug_mode"] == "bool"
+    assert opts["max_concurrent_activities"] == "count1"
+    assert opts["graceful_shutdown_timeout"] == "duration"
+    assert "debug_mode" not in opts and "no_remote_activities" not in opts
     assert "task_queue" not in opts and "client" not in opts
 
 

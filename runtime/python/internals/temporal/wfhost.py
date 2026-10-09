@@ -218,7 +218,10 @@ async def serve_workflows_async(
     # argument, which still has the last word.
     kwargs: dict[str, Any] = {**declared, **worker_kwargs}
     if max_concurrent_activities is not None:
-        kwargs.setdefault("max_concurrent_activities", max_concurrent_activities)
+        # AN EXPLICIT ARGUMENT WINS over the file (ADR 0065: arguments > worker.yaml > defaults).
+        # `setdefault` here let `max_concurrent_activities: 2` in worker.yaml silently override a
+        # caller's `serve(max_concurrent_activities=8)`.
+        kwargs["max_concurrent_activities"] = max_concurrent_activities
 
     # EVERY `Worker` OPTION IS REACHABLE FROM HERE. `serve()` used to name four of forty-three and
     # the other thirty-nine needed an edit to this file to use, so an interceptor or a cache size
