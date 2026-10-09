@@ -1039,8 +1039,12 @@ async function pinReportTemplate(
 ): Promise<void> {
   try {
     const store = pinner ?? reportStore();
-    const folder = path.dirname(file);
-    const candidate = path.join(folder, REPORT_FILE);
+    const folder = path.resolve(path.dirname(file));
+    const candidate = path.resolve(folder, REPORT_FILE);
+    // INSIDE THE FOLDER, checked where it is read. `file` arrives confined by `resolveWorkflowFile`,
+    // so this cannot fail today; it is here so the read is safe on its own terms rather than by an
+    // argument about every caller (and so CodeQL's path-injection rule can see the guard).
+    if (!candidate.startsWith(folder + path.sep)) return;
     const workspace = workspaceOf(folder);
     if (existsSync(candidate)) {
       const text = readFileSync(candidate, 'utf8');

@@ -35,9 +35,14 @@ function escapeInline(text: string): string {
   return text.replace(/([\\`*_[\]<>])/g, '\\$1');
 }
 
-/** The same, plus the pipe, for a table cell — where a pipe ends the cell. */
+/** The same, plus the pipe, for a table cell — where a pipe ends the cell.
+ *
+ *  ONE PASS, BACKSLASH INCLUDED. Escaping the pipe in a second `replace` over the first one's output
+ *  was correct (the first had already doubled every backslash) but read as a sanitizer that forgets
+ *  backslashes — CodeQL js/incomplete-sanitization — and a reader has to know the order to see it is
+ *  safe. A single class with every structural character cannot be reordered wrong. */
 function escapeCell(text: string): string {
-  return escapeInline(text).replace(/\|/g, '\\|');
+  return text.replace(/([\\`*_[\]<>|])/g, '\\$1');
 }
 
 /** A fence one backtick longer than the longest run inside, minimum three — `codeTag.ts`'s rule. */
