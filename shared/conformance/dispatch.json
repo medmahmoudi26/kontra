@@ -1,0 +1,55 @@
+{
+  "why": "HOW A WORKFLOW CALLS ONE METHOD OF ONE ACTOR (ADR 0067). Today the Go handler's backing workflow (runtime/handler/workflow.go) makes these choices; after Phase 2 the CALLER does, in each SDK (sdk/python/kontra/catalog.py, sdk/go/catalog), with no sidecar in between. Every value here is one a drift turns into a quiet failure: a different actor_id lands a retry on a fresh instance that re-runs committed Units; a different queue is a batch nobody polls; a different heartbeat bound kills a legitimately slow Unit or leaves a wedged one alive for an hour. So the values are pinned FIRST, against the handler that has them today, and every caller that replaces it drives the same rows.",
+  "derived_by": [
+    "runtime/handler/workflow.go (today's backing workflow; deleted when Phase 2 lands)",
+    "sdk/python/kontra/catalog.py (Phase 2 caller)",
+    "sdk/go/catalog (Phase 2 caller)"
+  ],
+  "activities": {
+    "why": "The activity type names. RunBatch and Close are served by the actor process today; the blob pair is served by the orchestrator's dataset worker after Phase 2 (it already has the object store, in every namespace).",
+    "run": "RunBatch",
+    "close": "Close",
+    "fetch_blob": "kontra.fetch_blob",
+    "store_blob": "kontra.store_blob"
+  },
+  "actor_id": {
+    "why": "Which live instance (and which commit map) a batch belongs to: the idempotency key, else the Session, else run and node joined with `-`, empty parts skipped. A retry derives the SAME id, which is what lands it on the instance holding the batch's progress.",
+    "cases": [
+      { "why": "a keyed actor (a virtual object): the key wins over everything", "idempotency_key": "acme.com", "session_id": "s1", "run_id": "r1", "node_id": "n1", "expect": "acme.com" },
+      { "why": "a scoped call: the Session", "idempotency_key": "", "session_id": "s1", "run_id": "r1", "node_id": "n1", "expect": "s1" },
+      { "why": "an unscoped call: run and node", "idempotency_key": "", "session_id": "", "run_id": "canary-1791", "node_id": "3f-1", "expect": "canary-1791-3f-1" },
+      { "why": "a node with no run id keeps only what is there", "idempotency_key": "", "session_id": "", "run_id": "", "node_id": "n9", "expect": "n9" }
+    ],
+    "refused": [
+      { "why": "nothing to key the instance by", "idempotency_key": "", "session_id": "", "run_id": "", "node_id": "" }
+    ]
+  },
+  "run_options": {
+    "why": "RunBatch's activity options. StartToClose is generous because the heartbeat, not the clock, is what catches a wedge: the actor beats per committed Unit and on a keepalive. A dispatch may RELAX the heartbeat for a debugger (never tighten it), capped at StartToClose. A scoped call waits at most a minute for its Session's worker; an unscoped one waits for capacity with no bound.",
+    "start_to_close_seconds": 3600,
+    "retry": { "maximum_attempts": 10, "initial_interval_seconds": 1 },
+    "scoped_schedule_to_start_seconds": 60,
+    "heartbeat": [
+      { "why": "no request: the default", "requested_seconds": 0, "expect_seconds": 120 },
+      { "why": "a request below the default cannot tighten it", "requested_seconds": 30, "expect_seconds": 120 },
+      { "why": "a debugger's ten minutes", "requested_seconds": 600, "expect_seconds": 600 },
+      { "why": "capped at StartToClose", "requested_seconds": 7200, "expect_seconds": 3600 }
+    ]
+  },
+  "close_options": {
+    "why": "Close runs only for an UNSCOPED call — a Session's close is the scope's exit — on the same queue as the RunBatch, briefly and with few retries: a close that cannot run is a leak to report, not a reason to fail a batch that succeeded.",
+    "start_to_close_seconds": 30,
+    "retry": { "maximum_attempts": 3 }
+  },
+  "blob_options": {
+    "why": "fetch_blob and store_blob: bounded and short.",
+    "start_to_close_seconds": 300
+  },
+  "queue": {
+    "why": "Where RunBatch is scheduled: an unscoped call on the actor version's sessions queue (every worker of the version polls it), a scoped call on its Session's own queue. Names are queues.json's; this pins WHICH one a call uses.",
+    "cases": [
+      { "why": "unscoped", "name": "canary", "version": "1.1.0", "session_id": "", "expect": "canary-1.1.0-sessions" },
+      { "why": "scoped", "name": "canary", "version": "1.1.0", "session_id": "s-7", "expect": "canary-1.1.0-s-s-7" }
+    ]
+  }
+}
