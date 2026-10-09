@@ -84,6 +84,16 @@ export interface DatasetSummary {
   last_commit_at: string;
   head: readonly unknown[];
   tail: readonly unknown[];
+  /**
+   * The column names across `head`, in first-seen order — what lets a template draw a TABLE of a
+   * Dataset it knows nothing about.
+   *
+   * WITHOUT THIS A LIVE TABLE IS NOT WRITABLE. `head` is a list of arbitrary row objects, and Liquid
+   * has no way to take the union of their keys, so a template could only print rows it already knew
+   * the shape of — which the default template, by definition, does not. Derived HERE, at the same
+   * chokepoint that clamps the rows, so every producer gets it and none can disagree about it.
+   */
+  columns: readonly string[];
 }
 
 export interface TemplateContext {
@@ -161,8 +171,22 @@ export interface BuildContextInput {
 }
 
 /** Clamp one Dataset summary to the context's own bounds. */
+/** Columns beyond this are dropped: a table wider than a screen is not a table a person reads, and
+ *  a Dataset with 60 columns would otherwise make every default report unreadable. */
+const DATASET_COLUMN_MAX = 8;
+
 function clampSummary(s: DatasetSummary): DatasetSummary {
-  return { ...s, head: s.head.slice(0, DATASET_HEAD_MAX), tail: s.tail.slice(0, DATASET_TAIL_MAX) };
+  const head = s.head.slice(0, DATASET_HEAD_MAX);
+  // FIRST-SEEN ORDER, NOT SORTED. A row's own key order is the author's, and alphabetising it puts
+  // `batches` before `title` for no reason a reader would recognise.
+  const columns: string[] = [];
+  for (const row of head) {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) continue;
+    for (const k of Object.keys(row as Record<string, unknown>)) {
+      if (!columns.includes(k) && columns.length < DATASET_COLUMN_MAX) columns.push(k);
+    }
+  }
+  return { ...s, head, tail: s.tail.slice(0, DATASET_TAIL_MAX), columns };
 }
 
 /**
@@ -173,8 +197,17 @@ function clampSummary(s: DatasetSummary): DatasetSummary {
  * to mean anything, and a timestamp baked in here would make every render differ.
  */
 export function buildContext(input: BuildContextInput): TemplateContext {
+  // ELAPSED WHILE OPEN, TOTAL ONCE CLOSED. `closedAt` is 0 for a running run, so the old form —
+  // `closedAt > startedAt ? … : 0` — reported 0 SECONDS FOR THE WHOLE LIFE of every run, and a live
+  // report that ticks is the one place that is most obviously wrong. Measured on the live install:
+  // `duration_s` read 0 from the first frame to the last.
+  //
+  // `input.now` is the render clock the context already takes (and the only non-deterministic input
+  // it has, which is why it is a parameter rather than a `Date.now()` in here). A frozen render
+  // still computes from `closedAt`, so the stored document is unchanged and reproducible.
+  const until = input.closedAt > input.startedAt ? input.closedAt : (input.now ?? 0);
   const duration =
-    input.closedAt > input.startedAt ? Math.round(((input.closedAt - input.startedAt) / 1000) * 10) / 10 : 0;
+    until > input.startedAt ? Math.round(((until - input.startedAt) / 1000) * 10) / 10 : 0;
   const status = statusWord(input.status);
   return {
     run: {

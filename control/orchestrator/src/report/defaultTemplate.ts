@@ -168,6 +168,34 @@ export const DEFAULT_TEMPLATE = `# {{ workflow.name }} · {{ run.status }}
 {% for row in default.run -%}
 | {{ row.k }} | {{ row.v }} |
 {% endfor -%}
+{% if run.status == "running" and run.progress %}
+## In progress
+
+{{ run.progress.phase }} — {{ run.progress.units_done }} of {{ run.progress.units_total }} units committed{% if run.progress.isolated > 0 %}, {{ run.progress.isolated }} isolated{% endif %}.
+{% endif -%}
+{%- comment -%}
+PUSHED IS NOT COMMITTED, and saying "last commit" over rows that have not been committed is the
+kind of wrong a reader cannot see. A Method's pushes become durable blobs at push time but only
+reach the lake when the batch is PUBLISHED after the Method returns, so the in-flight summary — the
+one that makes a report move before the first commit — legitimately carries rows with a batch count
+of zero. Branching on the COUNT rather than on the dataset's name, so any producer reporting
+un-published rows gets an honest sentence without this template knowing which one it is.
+
+(No backticks anywhere in this string: DEFAULT_TEMPLATE is a TypeScript template literal and one
+ends it mid-sentence — the same trap programs/machine.ts documents twice.)
+{%- endcomment -%}
+{% if datasets %}{% for d in datasets %}
+## {{ d[0] }}
+
+{% if d[1].batches == 0 %}{{ d[1].rows }} row{% if d[1].rows != 1 %}s{% endif %} pushed so far, not yet published{% if d[1].last_commit_at %}, newest at {{ d[1].last_commit_at }}{% endif %}.{% else %}{{ d[1].rows }} row{% if d[1].rows != 1 %}s{% endif %} across {{ d[1].batches }} batch{% if d[1].batches != 1 %}es{% endif %}{% if d[1].last_commit_at %}, last commit {{ d[1].last_commit_at }}{% endif %}.{% endif %}
+{% if d[1].head.size > 0 %}
+|{% for c in d[1].columns %} {{ c }} |{% endfor %}
+|{% for c in d[1].columns %}---|{% endfor %}
+{% for row in d[1].head -%}
+|{% for c in d[1].columns %} {{ row[c] }} |{% endfor %}
+{% endfor -%}
+{% endif -%}
+{% endfor %}{% endif -%}
 {% if run.error %}
 ## It ended with an error
 

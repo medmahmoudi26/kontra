@@ -136,6 +136,32 @@ describe('the stream', () => {
     return out;
   }
 
+  it('answers 200 BEFORE the first render — the browser must not wait on it', async () => {
+    // THE BUG THIS PINS, measured on the live install: 41 SECONDS to first byte on an open run.
+    // `writeHead` only sets headers; Node sends them with the first body write, and the first
+    // write here is the snapshot — which waits on a render that calls Temporal twice with
+    // `historyEventFilterType: CLOSE_EVENT`, each long-polling 20s on a RUNNING workflow. So the
+    // browser had not received the 200 at all and the page could only show "No report yet",
+    // which is indistinguishable from there being no stream. `flushHeaders()` is the fix.
+    //
+    // Asserted as TIME TO HEADERS, not as the presence of a frame: a test that waited for the
+    // snapshot would pass with the headers still stuck behind it, which is exactly the shape of
+    // the bug. The render here is a stub, so a generous bound still fails loudly on a regression.
+    build({ renderOnce: async () => { await new Promise((r) => setTimeout(r, 1_500)); return { snapshot: snap([para('hello')]) }; } });
+    const base = await listen();
+    const ac = new AbortController();
+    const began = Date.now();
+    try {
+      const res = await fetch(`${base}/api/runs/${RUN}/report/live`, { signal: ac.signal });
+      const toHeaders = Date.now() - began;
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/event-stream');
+      expect(toHeaders).toBeLessThan(1_000); // the render takes 1.5s; headers must beat it
+    } finally {
+      ac.abort();
+    }
+  });
+
   it('sends a named `snapshot` event carrying the block list', async () => {
     build();
     const base = await listen();

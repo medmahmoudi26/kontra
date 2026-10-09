@@ -182,6 +182,37 @@ true-with-an-asterisk. It holds for a finished run; live mode simply never mints
 Everything else in ADR 0055 stands, including §4's rule that a ref is resolved from object storage
 and never from an actor — which is why bulk content is a ref and `datasets.head/tail` is bounded.
 
+## CORRECTION, 2026-10-09: the consumer shipped without a producer
+
+**Everything above describes a context that nothing fills.** Found by the session driving the live
+install, after an operator said a live report "just finishes and gives the final report".
+
+`buildContext` accepts `progress`, `datasets` and `partial`. `contextForRun` passes **none of them**,
+`renderOnce` passes neither progress nor datasets, and **nothing anywhere calls the `report`
+workflow query**. So for an open run `run.progress` is null, `datasets` is `{}` and `result` is null
+— and the document is byte-identical from the first frame to the last.
+
+That is the exact defect this ADR opens by diagnosing in the original brief: *re-rendering while a
+run is open produces a byte-identical document for the run's whole life.* The diagnosis was right;
+the implementation reproduced it. The context shape, the clamping, the `datasets` root, the lint
+entry, the SSE route, the hub, the block diffing and the patch protocol were all built and tested —
+and the handful of lines that would have made them carry anything were not.
+
+**What the tests proved, and why they passed anyway.** `report/context.test.ts` builds contexts by
+hand and asserts the shape. `report/live.test.ts` drives the hub with stub renders. The console
+suite drives a stub SSE stream. The workflow suite calls its own query handler directly. Each half
+was verified against a fixture of the other half. **Nothing exercised the seam**, so every suite was
+green over a feature that could not work. A browser check caught a chrome bug; it did not catch
+this, because a live report with an unchanging context looks exactly like a slow one.
+
+Being wired now on `canary-report`: a ~2s tick for open runs with viewers, `run.progress`,
+`datasets.<name>` from the pushed-record tail, and the `report` query. `duration_s` is fixed here —
+it read 0 for every open run, since it keyed on `closedAt > startedAt`.
+
+**The tick reverses this ADR's "trigger on data arrival, not a timer", and that reversal is right.**
+The rule was written because a timer re-renders an unchanging context — true while nothing filled
+it, and not an argument once it changes between ticks.
+
 ## Consequences
 
 ### 10. Redaction is inherited, and that decided the architecture

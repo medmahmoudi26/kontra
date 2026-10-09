@@ -75,6 +75,15 @@ export function registerReportLiveRoute(app: FastifyInstance, deps: ReportLiveDe
   runEvents.onStatus((e) =>
     hub.statusChanged({ runId: e.runId, runStartedAt: e.runStartedAt }, e.status)
   );
+  // PROGRESS IS AN ARRIVAL TOO, and this subscription was missing — `runEvents.emitProgress` and
+  // `onProgress` both existed with no subscriber, so `run.progress` only ever changed when a BATCH
+  // happened to commit at the same moment. A workflow that advances its phase without committing
+  // (placing a fleet, waiting on a session) showed a frozen document for as long as that took.
+  //
+  // NOT a timer, so ADR 0062's rule holds: this fires when something happened, not on a clock. It
+  // routes through the same `onData` path, so it inherits the debounce and the one-render-in-flight
+  // coalescing — progress is cheap to emit and must not become cheap to re-render.
+  runEvents.onProgress((e) => hub.onData({ runId: e.runId, runStartedAt: e.runStartedAt }));
 
   app.get('/api/runs/:runId/report/live', async (req, reply) => {
     if (!deps.admit(req, reply)) return undefined;
@@ -127,6 +136,26 @@ export function registerReportLiveRoute(app: FastifyInstance, deps: ReportLiveDe
       // Nginx and friends buffer an event stream into uselessness otherwise.
       'x-accel-buffering': 'no',
     });
+    // FLUSHED NOW, NOT WITH THE FIRST FRAME, and that distinction is the whole bug.
+    //
+    // `writeHead` only SETS headers; Node sends them with the first body write. The first write
+    // here is the snapshot, which waits on a full render — so until that render finished the
+    // browser had not received the 200 at all, and `fetch` had not resolved. The page could only
+    // show "No report yet", which is indistinguishable from there being no stream.
+    //
+    // MEASURED by the session driving the live install: 41 seconds to first byte on an open run,
+    // because `renderOnce` -> `fetchRunIO` -> `contextForRun` each issue a
+    // `getWorkflowExecutionHistory` with `historyEventFilterType: CLOSE_EVENT`, which Temporal
+    // long-polls to its 20s expiry on a RUNNING workflow no matter what `waitNewEvent` says. That
+    // stall is being fixed in `temporalClient.ts`; this line is the OTHER half, and it is worth
+    // having on its own: a render is never instant, so a client must be able to tell "connected,
+    // nothing yet" from "no stream". With the headers out, it can.
+    reply.raw.flushHeaders();
+    // NO PRIMING COMMENT. `: open\n\n` is legal SSE and would also defeat a proxy that ignores
+    // `x-accel-buffering`, but it is a FRAME on the wire and this client's `parseFrame` does not
+    // skip comment lines — three tests caught it immediately, which is the contract working.
+    // Flushing the head is what the browser actually needed; making the client comment-tolerant
+    // is a separate change and not one to smuggle in here.
 
     let open = true;
     function flush(): void {
