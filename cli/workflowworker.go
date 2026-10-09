@@ -54,10 +54,12 @@ var codecEnv = []string{
 // a run starts, pages fine, and then a big Batch comes back undecodable. A workflow worker is
 // exactly where that bites: `delegation` fans one domain out to every nameserver it has, and the
 // Batch that returns is the one over the line.
-func serveEnvDelta(root, queue string) []string {
+func serveEnvDelta(root, namespace, queue string) []string {
 	delta := []string{
 		"KONTRA_ADDRESS=" + config.TemporalAddress(),
-		"KONTRA_NAMESPACE=" + config.TemporalNamespace(),
+		// The FOLDER'S workspace namespace (ADR 0051), resolved by the caller, not the current one:
+		// serving hello's workflow while the console looks at default must still poll ws-hello.
+		"KONTRA_NAMESPACE=" + namespace,
 		// WHERE TO REGISTER — the same line `kontra serve` passes an actor, and for the same
 		// reason. A workflow worker self-registers what each of its `@workflow.defn` classes
 		// takes, returns and is for (`internals/catalog.py:publish_workflow_catalog`), and that

@@ -62,7 +62,8 @@ import {
 } from './sources';
 import { tenantAttributes } from './visibility';
 import { SERVE_DEV_WORKFLOW, infraQueue, serveDevWorkflowId } from './queues';
-import { NAMESPACE, getClient } from './temporalClient';
+import { clientFor, getClient } from './temporalClient';
+import { activeWorkspace, namespaceFor, workspaceOfPath } from './workspaces';
 import { toActorRef } from './secrets/slotRoutes';
 import { slotStore } from './secrets/slotStore';
 import type { ActorRef } from './secrets/slots';
@@ -933,7 +934,12 @@ export async function startRun(
   // REFUSE IF NOTHING SERVES THIS DIGEST. `describeQueue` reports identities and an `error` that
   // means "could not ask Temporal", which is not the same as "nobody is serving" — but for a start,
   // both are a refusal: we will not dispatch onto a queue we cannot confirm a worker polls.
-  const state = await describeQueue(describer ?? temporalQueueDescriber(), queue);
+  // THE RUN'S NAMESPACE IS ITS WORKFLOW FOLDER'S WORKSPACE (ADR 0051 §2), falling back to the one
+  // the console is looking at for a folder outside the workspaces tree. The preflight asks THAT
+  // namespace for pollers, because a worker serving this folder in any other namespace cannot pick
+  // the run up, and "a worker exists somewhere" is the false yes this check exists to prevent.
+  const namespace = namespaceFor(workspaceOfPath(file) ?? activeWorkspace());
+  const state = await describeQueue(describer ?? temporalQueueDescriber({ namespace }), queue);
   if (state.error !== undefined) {
     throw new ControlRefused(
       `cannot verify a worker is serving ${type} on ${queue}: ${state.error} — serve it first`
@@ -947,7 +953,7 @@ export async function startRun(
     );
   }
 
-  const client = await getClient();
+  const client = await clientFor(namespace);
   const workflowId = `${type.toLowerCase()}-${Math.floor(Date.now() / 1000)}`;
   const handle = await client.workflow.start(type, {
     taskQueue: queue,
@@ -971,7 +977,7 @@ export async function startRun(
      * is `default`, which is a true and useful answer — the alternative, leaving it blank, is what
      * made every one of those readers silently wrong.
      */
-    typedSearchAttributes: tenantAttributes(NAMESPACE),
+    typedSearchAttributes: tenantAttributes(namespace),
   });
 
   const workflow = await stampRunWorkflow(handle.workflowId, manifest, recorder);

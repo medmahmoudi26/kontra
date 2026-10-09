@@ -34,6 +34,7 @@ import {
 import { datasetQueue, infraQueue } from '../queues';
 import { temporalConnectOptions } from '../temporalTls';
 import { registerSearchAttributes, tenantAttributes } from '../visibility';
+import { activityNamespace } from '../activityNamespace';
 
 export interface HoldFleetLeaseInput {
   /** The stack being held — `kontra-fleet/<actor>-<version>`. The **Lease** workflow's id derives from it. */
@@ -114,7 +115,8 @@ async function withClient<T>(
   // take the test's own connection down mid-suite.
   if (injected) return fn(injected);
   const address = process.env.KONTRA_ADDRESS ?? 'localhost:7233';
-  const namespace = process.env.KONTRA_NAMESPACE ?? 'default';
+  // The CALLER'S namespace, not the install's: see `activityNamespace.ts`.
+  const namespace = activityNamespace();
   const connection = await Connection.connect(temporalConnectOptions({ address }));
   try {
     // REGISTERED BEFORE THE FIRST STAMPED START, AND THIS IS NOT BOOKKEEPING.
@@ -185,7 +187,7 @@ export async function holdFleetLease(
       //
       // BEST-EFFORT, AND THAT IS THE WHOLE POINT — see `withoutAttributes` below.
       ...(stamp
-        ? { typedSearchAttributes: tenantAttributes(process.env.KONTRA_NAMESPACE ?? 'default') }
+        ? { typedSearchAttributes: tenantAttributes(client.options.namespace) }
         : {}),
       args: [
         {

@@ -40,16 +40,20 @@ type queueDescriber interface {
 
 // newDescriber dials Temporal ($KONTRA_ADDRESS / $KONTRA_NAMESPACE); a func var so
 // tests (and pollerCount fakes) can swap it out.
-var newDescriber = func() (queueDescriber, error) {
+var newDescriber = func() (queueDescriber, error) { return newDescriberIn(config.TemporalNamespace()) }
+
+// newDescriberIn asks one namespace for pollers (ADR 0051): a worker in any other namespace cannot
+// take this namespace's work, so "a poller exists somewhere" is not the answer a preflight wants.
+func newDescriberIn(namespace string) (queueDescriber, error) {
 	conn, err := temporaltls.ConnectionOptions(nil)
 	if err != nil {
 		return nil, err
 	}
-	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: config.TemporalNamespace(), ConnectionOptions: conn})
+	c, err := client.Dial(client.Options{HostPort: config.TemporalAddress(), Namespace: namespace, ConnectionOptions: conn})
 	if err != nil {
 		return nil, err
 	}
-	return &temporalDescriber{c: c, ns: config.TemporalNamespace()}, nil
+	return &temporalDescriber{c: c, ns: namespace}, nil
 }
 
 type temporalDescriber struct {

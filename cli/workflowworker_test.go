@@ -91,7 +91,7 @@ func TestCodecEnvCarriesTheKeyPrefixTheCLIAlsoReadsWith(t *testing.T) {
 // contract. `kontra serve` passes the same variable to an actor for the same reason.
 func TestServeEnvCarriesTheCatalogItRegistersWith(t *testing.T) {
 	t.Setenv("KONTRA_ORCHESTRATOR_URL", "http://10.0.0.7:8088")
-	delta := serveEnvDelta("/checkout", "recon")
+	delta := serveEnvDelta("/checkout", "default", "recon")
 	if !has(delta, "KONTRA_ORCHESTRATOR_URL=http://10.0.0.7:8088") {
 		t.Errorf("serveEnvDelta does not carry the orchestrator URL — nothing registers: %v", delta)
 	}
@@ -109,7 +109,7 @@ func TestWatchEnvIsOptInAndSeparateFromResume(t *testing.T) {
 		t.Errorf("--watch does not set KONTRA_WORKFLOW_WATCH — the worker never arms the loop: %v", watchEnv(true))
 	}
 	t.Setenv("KONTRA_ORCHESTRATOR_URL", "http://10.0.0.7:8088")
-	if has(serveEnvDelta("/checkout", "recon"), "KONTRA_WORKFLOW_WATCH=1") {
+	if has(serveEnvDelta("/checkout", "default", "recon"), "KONTRA_WORKFLOW_WATCH=1") {
 		t.Error("serveEnvDelta carries the watch flag — resume would re-arm a loop it did not ask for")
 	}
 }

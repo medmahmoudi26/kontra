@@ -14,6 +14,8 @@
  * only the run endpoints touch it (and surface a clear error if it's down).
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { Client, Connection, defaultPayloadConverter } from '@temporalio/client';
 import type { Payload, PayloadCodec } from '@temporalio/common';
 import { OpenTelemetryWorkflowClientInterceptor } from '@temporalio/interceptors-opentelemetry';
@@ -35,11 +37,17 @@ import {
 import { SERVE_DEV_WORKFLOW, serveDevWorkflowId } from './queues';
 import { temporalConnectOptions } from './temporalTls';
 import { clientIdentity } from './workerIdentity';
+import { ensureNamespace } from './namespaces';
+import { currentNamespace, namespaceFor } from './workspaces';
 
-/** EXPORTED so the one place that STARTS a workflow can stamp the tenant with the same value this
- *  connects to. A second `process.env.KONTRA_NAMESPACE ?? 'default'` elsewhere is how a client and
- *  the attribute it writes come to disagree about which namespace a run is in. */
-export const NAMESPACE = process.env.KONTRA_NAMESPACE ?? 'default';
+/**
+ * THE INSTALL'S LEGACY NAMESPACE: `KONTRA_NAMESPACE`, or `default`. Since ADR 0051 it is no longer
+ * where every Run lives. It belongs to the workspace called `default` and to an install with no named
+ * workspace, and it is where every Run from before isolation stays. Install-level work that belongs
+ * to no workspace, such as the probe, keeps using it. Everything a workspace owns resolves its
+ * namespace through {@link getClient} or {@link clientFor} instead.
+ */
+export const LEGACY_NAMESPACE = namespaceFor('');
 
 /** The handler backing workflow's registered type name (handler main.go registers RunWorkflow
  *  under kontrav1.RunWorkflowName). Every dispatch a run makes starts one, tagged with the
@@ -63,37 +71,86 @@ export const LIST_LIMIT = 200;
  *  column is a volume indicator, so a bounded undercount is the right failure. */
 const DISPATCH_SCAN_LIMIT = 5000;
 
-let clientPromise: Promise<Client> | null = null;
+let connectionPromise: Promise<Connection> | null = null;
+/** One Client per namespace, all on the one connection. */
+const clients = new Map<string, Promise<Client>>();
 
-/** Exported so the infra surface can start workflows on its own task queue (ADR 0019)
- * without opening a second connection to Temporal. */
-export async function getClient(): Promise<Client> {
-  if (!clientPromise) {
-    clientPromise = (async () => {
+/** The one connection every namespace's client shares, dialled on first use. */
+async function connection(): Promise<Connection> {
+  if (!connectionPromise) {
+    connectionPromise = (async () => {
       startTracing();
-      const connection = await Connection.connect(temporalConnectOptions());
+      return Connection.connect(temporalConnectOptions());
+    })();
+    connectionPromise.catch(() => (connectionPromise = null));
+  }
+  return connectionPromise;
+}
+
+/**
+ * The client for one namespace, created on first use: the namespace registered if it is new and
+ * usable before this resolves, and the custom Search Attributes registered in it (they are
+ * per-namespace, so every namespace needs its own registration before its first visibility query).
+ */
+export async function clientFor(namespace: string): Promise<Client> {
+  let p = clients.get(namespace);
+  if (!p) {
+    p = (async () => {
+      const conn = await connection();
+      await ensureNamespace(conn, namespace);
       const client = new Client({
-        connection,
-        namespace: NAMESPACE,
+        connection: conn,
+        namespace,
         dataConverter,
         // WHO STARTED THIS RUN, recorded by the server rather than inferred. Every console-driven
-        // start, signal, terminate and reset goes through THIS client, so its identity is what
-        // lands on `WorkflowExecutionStarted.identity` and on a `RequestCancel` event. Left at the
-        // default that is `<pid>@<hostname>` — indistinguishable from the Workers sharing this
+        // start, signal, terminate and reset goes through a client built here, so its identity is
+        // what lands on `WorkflowExecutionStarted.identity` and on a `RequestCancel` event. Left at
+        // the default that is `<pid>@<hostname>` — indistinguishable from the Workers sharing this
         // container, and useless for the question an audit asks of it.
         identity: clientIdentity(),
         interceptors: tracingEnabled
           ? { workflow: [new OpenTelemetryWorkflowClientInterceptor()] }
           : undefined,
       });
-      // Register the custom Search Attributes exactly once, the first time we reach Temporal.
-      // Doing it here (not at HTTP boot) preserves the "server boots with no cluster" property,
-      // yet still guarantees registration BEFORE the first visibility query. Idempotent.
-      await registerSearchAttributes(connection, NAMESPACE);
+      await registerSearchAttributes(conn, namespace);
       return client;
     })();
+    p.catch(() => clients.delete(namespace));
+    clients.set(namespace, p);
   }
-  return clientPromise;
+  return p;
+}
+
+/**
+ * The client for the workspace this install is looking at NOW (ADR 0051 §4): `.current`, read per
+ * call. Every read the console makes, of runs, histories, reports, fleets and pulse, goes through
+ * here, so they are all scoped to that workspace's namespace by address. A Run in another
+ * workspace's namespace is not filtered out; this client cannot see it.
+ */
+export async function getClient(): Promise<Client> {
+  return clientFor(activeNamespace());
+}
+
+/**
+ * A namespace pinned for everything one piece of work does, carried through its awaits.
+ *
+ * WHY A SCOPE AND NOT A PARAMETER. Every reader in this module reaches Temporal through
+ * {@link getClient}, and the background loops (the report renderer, the history archiver) must walk
+ * EVERY workspace, not just the one the console has selected. Threading a namespace argument through
+ * thirty functions would be thirty places to forget it. A forgotten one silently reads the console's
+ * workspace instead, and that looks like an ordinary empty result. Inside a scope, getClient answers
+ * with the scope's namespace; outside one, with the console's current workspace.
+ */
+const namespaceScope = new AsyncLocalStorage<string>();
+
+/** Run `fn` with every {@link getClient} inside it bound to `namespace`. */
+export function inNamespace<T>(namespace: string, fn: () => Promise<T>): Promise<T> {
+  return namespaceScope.run(namespace, fn);
+}
+
+/** The namespace {@link getClient} would answer with right now. */
+export function activeNamespace(): string {
+  return namespaceScope.getStore() ?? currentNamespace();
 }
 
 /**
@@ -166,8 +223,11 @@ export interface RunRow extends RunDescription {
  * ABSENT IS STILL ABSENT FOR ANYTHING THE NAMESPACE CANNOT ANSWER — this is not a default, it is a
  * derivation, and it is only sound because the read that produced the row was namespace-scoped.
  */
-function tenantOf(attrs: { get(key: typeof KontraTenant): string | undefined }): string {
-  return attrs.get(KontraTenant) ?? NAMESPACE;
+function tenantOf(
+  attrs: { get(key: typeof KontraTenant): string | undefined },
+  namespace: string
+): string {
+  return attrs.get(KontraTenant) ?? namespace;
 }
 
 /**
@@ -183,7 +243,7 @@ export async function describeRun(runId: string): Promise<RunDescription | undef
       runId,
       status: mapStatus(desc.status),
       type: desc.type ?? '',
-      tenant: tenantOf(desc.typedSearchAttributes),
+      tenant: tenantOf(desc.typedSearchAttributes, client.options.namespace),
       startedAt: desc.startTime?.getTime() ?? 0,
       closedAt: desc.closeTime?.getTime() ?? 0,
       // Both come off the SAME response. A parked run's asks and the evidence that a running run
@@ -249,7 +309,7 @@ export async function listRuns(
       runId: info.workflowId,
       status: mapStatus(info.status),
       type: info.type ?? '',
-      tenant: tenantOf(info.typedSearchAttributes),
+      tenant: tenantOf(info.typedSearchAttributes, client.options.namespace),
       startedAt: info.startTime?.getTime() ?? 0,
       closedAt: info.closeTime?.getTime() ?? 0,
       dispatches: 0,
@@ -739,7 +799,7 @@ async function runClose(
   execId: string
 ): Promise<{ type: string; message: string } | undefined> {
   try {
-    const last = await closeEventOf(client.workflowService, NAMESPACE, {
+    const last = await closeEventOf(client.workflowService, client.options.namespace, {
       workflowId,
       ...(execId ? { runId: execId } : {}),
     });
@@ -821,7 +881,7 @@ export async function fetchRunHistory(
   try {
     for (let page = 0; page < HISTORY_MAX_PAGES; page++) {
       const res = await client.workflowService.getWorkflowExecutionHistory({
-        namespace: NAMESPACE,
+        namespace: client.options.namespace,
         execution: { workflowId: runId, ...(execId ? { runId: execId } : {}) },
         maximumPageSize: HISTORY_PAGE,
         nextPageToken,
@@ -841,7 +901,7 @@ export async function fetchRunHistory(
   // The namespace goes in so the reducer can refuse a link that points OUT of it — see mapHistory.
   // The LENGTH goes in because `scanned` is what this reader fetched, and past the cap above that
   // is not the same number — see `describeLength`.
-  return reducer.finish(truncated, NAMESPACE, await describeLength(client, runId, execId));
+  return reducer.finish(truncated, client.options.namespace, await describeLength(client, runId, execId));
 }
 
 /**
@@ -899,7 +959,7 @@ export async function describeLength(
 ): Promise<{ historyLength?: number; historySizeBytes?: number }> {
   try {
     const desc = await client.workflowService.describeWorkflowExecution({
-      namespace: NAMESPACE,
+      namespace: client.options.namespace,
       execution: { workflowId: runId, ...(execId ? { runId: execId } : {}) },
     });
     const info = desc.workflowExecutionInfo;
@@ -943,7 +1003,7 @@ export async function describeRunHeartbeats(runId: string): Promise<Record<strin
     let desc;
     try {
       desc = await client.workflowService.describeWorkflowExecution({
-        namespace: NAMESPACE,
+        namespace: client.options.namespace,
         execution: { workflowId: info.workflowId },
       });
     } catch {
@@ -1101,7 +1161,7 @@ export async function fetchRunIO(runId: string, execId?: string): Promise<RunIO 
 
   try {
     const first = await client.workflowService.getWorkflowExecutionHistory({
-      namespace: NAMESPACE,
+      namespace: client.options.namespace,
       execution,
       maximumPageSize: 1,
       waitNewEvent: false,
@@ -1117,7 +1177,7 @@ export async function fetchRunIO(runId: string, execId?: string): Promise<RunIO 
   }
 
   try {
-    const last = await closeEventOf(client.workflowService, NAMESPACE, execution);
+    const last = await closeEventOf(client.workflowService, client.options.namespace, execution);
     if (last) {
       const done = last.workflowExecutionCompletedEventAttributes as
         | { result?: { payloads?: unknown[] } }

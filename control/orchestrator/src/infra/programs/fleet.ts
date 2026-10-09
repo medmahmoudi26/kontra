@@ -49,6 +49,13 @@ export interface FleetArgs {
   tag: string;
   /** How many machines. The real scale knob for the fleet; density is `maxSessions`. */
   machines: number;
+  /**
+   * The Temporal namespace this Fleet's Workers poll: its run's workspace (ADR 0051). Set by
+   * `stacks.ts::planFor` from the activity's own workflow, never read from the caller's payload, and
+   * only when it differs from the install's legacy namespace, so a legacy Fleet renders byte for
+   * byte as it did before isolation. Absent means the legacy namespace.
+   */
+  namespace?: string;
   region?: string;
   size?: string;
   image?: string;
@@ -392,6 +399,7 @@ export function fleetProgram(args: FleetArgs) {
           // placement its own port — by position in the sorted list, which is stable for a given
           // set of placements and therefore does not move a port under a Worker that did not change.
           metricsPort: placements.length > 1 ? METRICS_PORT_BASE + i : undefined,
+          ...(args.namespace ? { namespace: args.namespace } : {}),
         };
         const install = machineInstall(actor);
         const teardown = machineTeardown(actor.name);

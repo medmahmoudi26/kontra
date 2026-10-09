@@ -28,6 +28,7 @@ import { runLog } from './runLog';
 
 import { describeQueue, sharedQueue, temporalQueueDescriber, type QueueDescriber } from '../pollers';
 import { registryReadAuth } from '../images/registryAuth';
+import { activityNamespace } from '../activityNamespace';
 
 /**
  * The OCI registry port — `cli/install/registry.DefaultPort`, which is what `kontra up` serves
@@ -354,7 +355,8 @@ export async function queuePollers(
   describer?: QueueDescriber
 ): Promise<QueuePollersOutput> {
   const queue = sharedQueue(input.actor, input.version);
-  const d = describer ?? temporalQueueDescriber();
+  // Asked in the CALLER'S namespace: a worker serving this queue anywhere else cannot take its work.
+  const d = describer ?? temporalQueueDescriber({ namespace: activityNamespace() });
   try {
     const state = await describeQueue(d, queue);
     return state.error

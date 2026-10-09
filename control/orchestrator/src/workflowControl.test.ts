@@ -63,12 +63,21 @@ const executed = vi.hoisted(() => ({
   result: { worker: 'nscheck', queue: '', detail: '' },
 }));
 
+const { clientNamespaces } = vi.hoisted(() => ({ clientNamespaces: [] as string[] }));
 vi.mock('./temporalClient', () => ({
   // `NAMESPACE` IS EXPORTED BY THE REAL MODULE AND MUST BE HERE TOO. A factory that returns only
   // `getClient` leaves every other binding `undefined`, and the tenant stamp below would write
   // `value: undefined` — which is the shape of bug a whole-module mock invites and a partial one
   // would have hidden.
-  NAMESPACE: 'test-namespace',
+  LEGACY_NAMESPACE: 'test-namespace',
+  // ONE FAKE BEHIND BOTH. `startRun` opens the client of the RUN'S namespace through `clientFor`
+  // (ADR 0051); everything else still reaches it through `getClient`. `clientNamespaces` records
+  // which namespace each `clientFor` call asked for, so a test can hold the stamp to it.
+  clientFor: vi.fn(async (namespace: string) => {
+    clientNamespaces.push(namespace);
+    const { getClient } = await import('./temporalClient');
+    return getClient();
+  }),
   getClient: vi.fn(async () => ({
     workflow: {
       start: async (_type: string, opts: { workflowId: string }) => {
@@ -682,9 +691,12 @@ describe('startRun', () => {
    * `kontra.v1.ActorService.Run` carried any `Kontra*` attribute at all.
    */
   it('stamps the tenant on the start, where it costs no event', async () => {
+    // The run's namespace comes from its workspace (no layout here, so the legacy one, from the env).
+    vi.stubEnv('KONTRA_NAMESPACE', 'test-namespace');
     started.opts = undefined;
     servable('ping', 'Ping');
     await startRun({ file: 'ping' }, pollers(1));
+    vi.unstubAllEnvs();
 
     expect(started.opts, 'startRun never reached Temporal').toBeDefined();
     const attrs = started.opts!.typedSearchAttributes as
@@ -694,15 +706,21 @@ describe('startRun', () => {
     expect(attrs!.get(KontraTenant)).toBe('test-namespace');
   });
 
-  it('takes the namespace it CONNECTS to, not a second reading of the environment', async () => {
-    // A `process.env.KONTRA_NAMESPACE ?? 'default'` written here as well is how a client and the
-    // attribute it writes come to disagree about which namespace a run is in. The mock's namespace
-    // is deliberately not `default`, so a hard-coded fallback fails this.
-    started.opts = undefined;
-    servable('ping2', 'Ping2');
-    await startRun({ file: 'ping2' }, pollers(1));
-    const attrs = started.opts!.typedSearchAttributes as { get(key: unknown): unknown };
-    expect(attrs.get(KontraTenant)).not.toBe('default');
+  it('stamps the namespace it CONNECTS to, which is the run\'s workspace namespace (ADR 0051)', async () => {
+    // A client opened in one namespace and a tenant stamp saying another is how a run comes to be
+    // filed under the wrong workspace. Not `default`, so a hard-coded fallback fails this.
+    vi.stubEnv('KONTRA_NAMESPACE', 'test-namespace');
+    try {
+      started.opts = undefined;
+      clientNamespaces.length = 0;
+      servable('ping2', 'Ping2');
+      await startRun({ file: 'ping2' }, pollers(1));
+      const attrs = started.opts!.typedSearchAttributes as { get(key: unknown): unknown };
+      expect(clientNamespaces).toEqual(['test-namespace']);
+      expect(attrs.get(KontraTenant)).toBe('test-namespace');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
   /** A folder that can be started: a manifest naming its @workflow.defn class. */
   function servable(name: string, cls = 'NsCheck'): void {

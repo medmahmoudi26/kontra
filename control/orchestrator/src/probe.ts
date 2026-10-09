@@ -45,7 +45,7 @@ import { ControlRefused } from './workflowControl';
 import { endpointName, listEndpoints, sharedQueue } from './nexusRegistry';
 import { describeQueue, pollIsFresh, temporalQueueDescriber, type QueueDescriber } from './pollers';
 import { PROBE_WORKFLOW, probeQueue } from './queues';
-import { NAMESPACE, getClient } from './temporalClient';
+import { LEGACY_NAMESPACE, clientFor } from './temporalClient';
 import { runWorkflowStore, type RunWorkflowStore } from './data/runWorkflows';
 import { tenantAttributes } from './visibility';
 
@@ -223,7 +223,7 @@ export async function startProbe(input: ProbeInput, deps: ProbeDeps = {}): Promi
     );
   }
 
-  const describer = deps.describer ?? temporalQueueDescriber();
+  const describer = deps.describer ?? temporalQueueDescriber({ namespace: LEGACY_NAMESPACE });
   const actorQueue = sharedQueue(actor, version);
   const serving = await describeQueue(describer, actorQueue);
   if (serving.error !== undefined) {
@@ -352,13 +352,16 @@ export type ProbeStarter = (
 
 function temporalProbeStarter(): ProbeStarter {
   return async (type, options) => {
-    const client = await getClient();
+    // THE INSTALL'S NAMESPACE, NOT A WORKSPACE'S. The probe checks the install itself, and its worker
+    // (`kontra.probe`) polls the legacy namespace. Started in the console's current workspace instead,
+    // a probe would wait on a queue nobody polls whenever that workspace is not `default`.
+    const client = await clientFor(LEGACY_NAMESPACE);
     // Stamped HERE and not in `ProbeStarter`'s type, so the test double stays three lines: the
     // attribute is a property of how THIS starter reaches Temporal, not of what a probe is. See
     // `tenantAttributes` for why every start in this control plane carries it.
     const handle = await client.workflow.start(type, {
       ...options,
-      typedSearchAttributes: tenantAttributes(NAMESPACE),
+      typedSearchAttributes: tenantAttributes(LEGACY_NAMESPACE),
     });
     return handle.workflowId;
   };
@@ -534,14 +537,15 @@ function asProbeResult(value: unknown): ProbeResult | undefined {
 }
 
 function temporalProbeHandles(): ProbeHandles {
+  // The same install-level namespace the probe was started in (see `temporalProbeStarter`).
   return {
     describe: async (runId) => {
-      const client = await getClient();
+      const client = await clientFor(LEGACY_NAMESPACE);
       const desc = await client.workflow.getHandle(runId).describe();
       return { type: String(desc.type ?? ''), status: String(desc.status.name) };
     },
     result: async (runId) => {
-      const client = await getClient();
+      const client = await clientFor(LEGACY_NAMESPACE);
       return client.workflow.getHandle(runId).result();
     },
   };

@@ -149,6 +149,78 @@ export function workspaceAddress(
   };
 }
 
+/** The workspace whose Temporal namespace is the install's legacy one (ADR 0051 §6). */
+export const LEGACY_WORKSPACE = 'default';
+
+/**
+ * WHICH TEMPORAL NAMESPACE A WORKSPACE'S RUNS LIVE IN — the address Temporal enforces (ADR 0051 §2).
+ *
+ * `default`, and an install with no named workspace, keep the legacy namespace: `KONTRA_NAMESPACE`,
+ * or `default`. That is §6, and it is what keeps every Run that existed before isolation readable:
+ * they are all in that namespace and they cannot be moved, because Temporal has no way to move a
+ * history between namespaces. Every other workspace gets `ws-<name>`, its own namespace, so a
+ * client bound to it cannot read another workspace's Runs by constructing a different query.
+ *
+ * NOT `workspaceAddress(name).namespace`, which derives `ws-default` too. That function's "no
+ * grandfather clause" is right for the lake, whose old data a migration moves; here no migration
+ * can move anything, so `default` stays where its Runs are.
+ *
+ * Pinned against the CLI's copy by `shared/conformance/workspace_namespace.json`.
+ */
+export function namespaceFor(workspace: string, env: NodeJS.ProcessEnv = process.env): string {
+  const legacy = (env.KONTRA_NAMESPACE ?? '').trim() || 'default';
+  if (workspace === '' || workspace === LEGACY_WORKSPACE) return legacy;
+  assertWorkspaceName(workspace);
+  return `${ADDRESS_PREFIX}${workspace}`;
+}
+
+/**
+ * The workspace this install is looking at RIGHT NOW: `.current` under `KONTRA_WORKSPACES`, read on
+ * every call, or '' for an install with no named-workspace layout.
+ *
+ * READ PER CALL, NOT AT BOOT (ADR 0051 §4). Switching workspace writes `.current` and nothing
+ * restarts, so a value captured at module load is exactly the single process-wide namespace this
+ * replaces. The console treats the switch as a server fact (`PUT /api/workspaces/current`), and
+ * this is the server reading it.
+ */
+export function activeWorkspace(env: NodeJS.ProcessEnv = process.env): string {
+  const parent = workspacesParent(env);
+  return parent ? readCurrentName(parent) : '';
+}
+
+/**
+ * The workspace a path is in: the first segment under `KONTRA_WORKSPACES`, or `undefined` when the
+ * path is outside it or there is no named-workspace layout. Resolved against the configured parent,
+ * not guessed from a path segment called `workspaces`, which any directory could be named.
+ */
+export function workspaceOfPath(p: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const parent = workspacesParent(env);
+  if (!parent) return undefined;
+  const rel = path.relative(parent, path.resolve(p));
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+  return rel.split(path.sep)[0] || undefined;
+}
+
+/** The Temporal namespace of the workspace this install is looking at now. */
+export function currentNamespace(env: NodeJS.ProcessEnv = process.env): string {
+  return namespaceFor(activeWorkspace(env), env);
+}
+
+/** Every workspace's namespace, the legacy one included: what a per-workspace worker pool serves. */
+export function allNamespaces(env: NodeJS.ProcessEnv = process.env): string[] {
+  const parent = workspacesParent(env);
+  const names = parent ? listWorkspaceNames(parent) : [];
+  const out = new Set<string>([namespaceFor('', env)]);
+  for (const n of names) {
+    try {
+      out.add(namespaceFor(n, env));
+    } catch {
+      // A folder whose name the rule refuses is not a workspace, and gets no namespace.
+    }
+  }
+  return [...out];
+}
+
 /** Parent folder Compose bind-mounts. Empty means no named-workspace layout. */
 export function workspacesParent(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.KONTRA_WORKSPACES ?? '').trim();

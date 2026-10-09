@@ -42,6 +42,8 @@ import { kontraBin, serveEnv } from './workflowControl';
 import { armRetentionSchedule } from './retention';
 import { temporalConnectOptions } from './temporalTls';
 import { identityFor } from './workerIdentity';
+import { runPerNamespace } from './namespacePool';
+import { LEGACY_NAMESPACE, clientFor } from './temporalClient';
 
 /**
  * The queue this process serves. It is `queues.ts`'s now — a queue NAME is a routing fact and not
@@ -112,82 +114,39 @@ async function main(): Promise<void> {
 
 async function runWorker(): Promise<void> {
   const address = process.env.KONTRA_ADDRESS ?? 'localhost:7233';
-  const namespace = process.env.KONTRA_NAMESPACE ?? 'default';
 
-  // An explicit connection, not the default. `connection: undefined` silently means
-  // localhost:7233 — which is right on a laptop and always wrong in a container, where the
-  // failure reads as an unrelated tonic transport error against ::1.
   const connection = await NativeConnection.connect(temporalConnectOptions({ address }));
 
-  const worker = await Worker.create({
-    // A BUNDLE, not a single file. `stackWorkflow` needs the cloud credential, `serveDevWorkflow`
-    // needs the Docker socket, and `sweepDatasetsWorkflow` is controller-pinned — three workflows
-    // that share this queue because each needs an authority this role holds and the API does not.
-    workflowsPath: require.resolve('./workflows/infra'),
-    activities: { ...infraActivities, ...serveDevActivities, ...buildActorActivities },
-    taskQueue: INFRA_QUEUE,
-    namespace,
-    connection,
-    // One provision at a time per process. The engine forks a `pulumi` CLI child plus a child
-    // per provider (~164 MB per concurrent update measured), and this container is memory
-    // capped; queueing is preferable to an OOM mid-apply, which is how locks get wedged.
-    //
-    // The session converge shares this limit. That is deliberate: it is one `ssh` and a few
-    // hundred milliseconds, and a converge queued behind a provision is a wall that fills a
-    // moment later — whereas a converge racing an `up` on the same Machine is a Machine being
-    // rebuilt under a session that was just created on it.
-    maxConcurrentActivityTaskExecutions: 1,
-    /**
-     * HOW OFTEN A CONVERGE'S HEARTBEAT DETAILS REACH THE SERVER — 2 seconds, not 60.
-     *
-     * `stackUp` heartbeats `{op, urn}` on every one of Pulumi's `resourcePreEvent`s, and that detail
-     * is the only thing on this control plane that can say which resource the engine is on. The SDK
-     * THROTTLES heartbeats, and the throttle is derived rather than defaulted: with an
-     * `ActivityOptions.heartbeatTimeout` set — `workflows/stack.ts` sets 2 minutes — it is
-     * `heartbeatTimeout * 0.8`, capped by `maxHeartbeatThrottleInterval`, whose default is 60 s. So
-     * every detail between one flush and the next is buffered and superseded, and the "live" cursor
-     * was a once-a-minute sample.
-     *
-     * MEASURED on `kontra-docker-fleet/cursorproof`, a five-second converge creating five resources,
-     * polled at 250 ms: exactly ONE cursor was ever visible — `pulumi:pulumi:Stack`, the first
-     * resource — and the four Containers that followed never appeared at all. On a DigitalOcean
-     * Fleet, where a converge runs for minutes, the same throttle means a cursor that names the
-     * resource from up to a minute ago while claiming to be current.
-     *
-     * THE COST IS ONE RPC EVERY TWO SECONDS, PER IN-FLIGHT CONVERGE, AND THERE IS AT MOST ONE:
-     * `maxConcurrentActivityTaskExecutions: 1` above. Half an RPC a second against the cluster that
-     * is already serving this converge's workflow tasks.
-     *
-     * IT DOES NOT WEAKEN THE TIMEOUT. `heartbeatTimeout` stays 2 minutes and keeps its meaning — the
-     * throttle governs only how often buffered details are flushed, so a lower value makes a wedged
-     * converge detectable sooner, never later.
-     */
-    maxHeartbeatThrottleInterval: '2s',
-    defaultHeartbeatThrottleInterval: '2s',
-    // NAMED. This is the one Worker that holds the cloud credential, so "which Worker converged
-    // this stack" is a question with an auditor behind it — and the answer has to be a value
-    // Temporal recorded on `ActivityTaskStarted`, not one reconstructed from a deploy log.
-    identity: identityFor(INFRA_QUEUE),
-  });
-
-  // eslint-disable-next-line no-console
   console.log(
-    `[infra] queue=${INFRA_QUEUE} temporal=${address} ns=${namespace} ` +
+    `[infra] queue=${INFRA_QUEUE} temporal=${address} ` +
       `backend=${backendUrl()} as=${identityFor(INFRA_QUEUE)}`
   );
 
-  // ARM THE RETENTION SWEEP (ADR 0029 §5) — after the Worker exists, before it polls.
-  //
-  // HERE because this is the process that HOSTS `sweepDatasetsWorkflow` (`workflows/infra.ts`): the
-  // Schedule targets INFRA_QUEUE, so arming it anywhere else could register an hourly firing onto a
-  // queue with no poller — a workflow per hour that never starts, and `SKIP` skipping every firing
-  // behind the first one, which looks armed and sweeps nothing.
-  //
-  // It cannot fail this boot: see `armRetentionSchedule`. And it deletes nothing by default — a
-  // firing resolves its mode on the worker holding the lake, where unset means dry run.
-  await armRetention(address, namespace);
+  // THE RETENTION SCHEDULE STAYS IN THE LEGACY NAMESPACE, ONCE. It sweeps the Dataset lake, which
+  // still follows the install's current workspace rather than a run's namespace, so arming it in
+  // every namespace would sweep the same lake once per workspace.
+  await armRetention(address, LEGACY_NAMESPACE);
 
-  await worker.run();
+  // PER WORKSPACE NAMESPACE (ADR 0051): a run's Fleet is a CHILD workflow on this queue, and a child
+  // runs in its parent's namespace. See `namespacePool.ts`.
+  await runPerNamespace({
+    label: 'infra',
+    ensure: async (namespace) => {
+      await clientFor(namespace);
+    },
+    make: (namespace) =>
+      Worker.create({
+        workflowsPath: require.resolve('./workflows/infra'),
+        activities: { ...infraActivities, ...serveDevActivities, ...buildActorActivities },
+        taskQueue: INFRA_QUEUE,
+        namespace,
+        connection,
+        maxConcurrentActivityTaskExecutions: 1,
+        maxHeartbeatThrottleInterval: '2s',
+        defaultHeartbeatThrottleInterval: '2s',
+        identity: identityFor(INFRA_QUEUE),
+      }),
+  });
 }
 
 /**

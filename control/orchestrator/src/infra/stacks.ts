@@ -24,6 +24,7 @@ import { fleetProgram, type FleetArgs, type PlacementArgs } from './programs/fle
 import { dockerFleetProgram, type DockerFleetArgs } from './programs/dockerFleet';
 import { parseFqn } from './workspace';
 import type { SecretRef } from '../secrets/types';
+import { activityNamespace } from '../activityNamespace';
 
 /** Projects we know how to build. A stack outside these is refused. */
 export const FLEET_PROJECT = 'kontra-fleet';
@@ -61,16 +62,24 @@ export interface StackPlan {
 
 export function planFor(input: { stackFqn: string } & StackInput): StackPlan {
   const { project } = parseFqn(input.stackFqn);
+  // THE RUN'S WORKSPACE NAMESPACE (ADR 0051), from the activity's own workflow and never from
+  // `input.args`, which a caller writes: a payload naming another namespace must not be able to
+  // place a Fleet whose Workers serve another workspace. Left out when it is the legacy namespace,
+  // so a legacy Fleet's program (and a cloud Machine's script, which is a replacement trigger) is
+  // byte for byte what it was.
+  const runNamespace = activityNamespace();
+  const legacy = (process.env.KONTRA_NAMESPACE ?? '').trim() || 'default';
+  const ns = runNamespace !== legacy ? { namespace: runNamespace } : {};
   switch (project) {
     case FLEET_PROJECT:
       return {
-        program: fleetProgram(coerceFleetArgs(input.args ?? {})),
+        program: fleetProgram({ ...coerceFleetArgs(input.args ?? {}), ...ns }),
         credential: credentialFrom(input.args),
         providerEnvVar: DO_TOKEN_VAR,
       };
     case DOCKER_FLEET_PROJECT:
       return {
-        program: dockerFleetProgram(coerceDockerFleetArgs(input.args ?? {})),
+        program: dockerFleetProgram({ ...coerceDockerFleetArgs(input.args ?? {}), ...ns }),
         credential: { name: '' },
         providerEnvVar: '',
       };

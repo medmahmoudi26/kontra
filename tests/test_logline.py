@@ -121,6 +121,29 @@ def test_a_record_cannot_set_a_stream_field(base):
     assert out["tenant"] == "default"
 
 
+def test_a_line_from_a_workspaces_run_lands_in_that_workspaces_tenant(base):
+    """ADR 0051: logs are per workspace, and the shipper cannot know which workspace a line is from.
+
+    It serves ONE namespace, so before this every line on the install had `tenant=default`, and
+    `routes/logs.ts` scoping by tenant scoped nothing. A record emitted inside a workflow or an
+    activity carries the Temporal `namespace` it ran in (`internals/logs.py`), and that is the
+    workspace's address. So it becomes the tenant: one value per workspace, and no cardinality to
+    speak of.
+    """
+    raw = json.dumps({"_time": "2026-10-09T19:00:00.000Z", "_msg": "x", "namespace": "ws-hello"})
+    assert _parse(raw, base)["tenant"] == "ws-hello"
+
+
+def test_a_line_with_no_namespace_stays_on_the_shippers_tenant(base):
+    """The orchestrator, a Warden, a process outside any run: install-level, on the shipper's own."""
+    blank = json.dumps({"_time": "2026-10-09T19:00:00.000Z", "_msg": "x", "namespace": "  "})
+    absent = json.dumps({"_time": "2026-10-09T19:00:00.000Z", "_msg": "x"})
+    pino = json.dumps({"level": 30, "time": 1791580000000, "msg": "incoming request"})
+    assert _parse(blank, base)["tenant"] == "default"
+    assert _parse(absent, base)["tenant"] == "default"
+    assert _parse(pino, base)["tenant"] == "default"
+
+
 # ── PINO, THE ORCHESTRATOR'S OWN LOGGER ─────────────────────────────────────────────────────────
 
 

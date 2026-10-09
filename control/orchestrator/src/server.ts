@@ -66,8 +66,10 @@ import { SourceStore } from './sourceStore';
 import { RunLifecycle } from './runs';
 import type { PulseDeps } from './pulse';
 import {
+  activeNamespace,
   describeRun as describeRunById,
   describeRunHeartbeats,
+  inNamespace,
   fetchRunClose,
   fetchRunIO,
   getClient,
@@ -83,6 +85,7 @@ import { reportStore, type ReportStore } from './report/store';
 import { render as renderReportInHost } from './report/renderHost';
 import { admitReport, registerReportRoutes } from './routes/report';
 import { registerReportLiveRoute } from './routes/reportLive';
+import { allNamespaces } from './workspaces';
 import { LiveHub, type RenderOnce } from './report/live';
 import { IN_FLIGHT, inFlightSummary, progressFromHeartbeats, type InFlightRows } from './report/liveProducers';
 import type { RowTailHub } from './rowTail';
@@ -358,8 +361,20 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
    * every workflow on the page — and the page polls. It is passed as a GETTER so that registering
    * either module opens nothing.
    */
-  let describer: QueueDescriber | null = opts.queueDescriber ?? null;
-  const queueDescriber = (): QueueDescriber => (describer ??= temporalQueueDescriber());
+  //
+  // ONE PER NAMESPACE, picked per call (ADR 0051): the pollers a page shows are the current
+  // workspace's, because a worker serving another workspace's namespace cannot take this one's work.
+  const describers = new Map<string, QueueDescriber>();
+  const queueDescriber = (): QueueDescriber => {
+    if (opts.queueDescriber) return opts.queueDescriber;
+    const namespace = activeNamespace();
+    let d = describers.get(namespace);
+    if (!d) {
+      d = temporalQueueDescriber({ namespace });
+      describers.set(namespace, d);
+    }
+    return d;
+  };
 
   // 32 MiB body limit (Fastify defaults to 1 MiB): a saved design document carries the whole
   // editor canvas, and the default rejected the larger ones with a broken pipe.
@@ -925,10 +940,25 @@ export async function runApi(): Promise<FastifyInstance> {
      mechanism there would be a second thing to learn and a second thing to get wrong. The RENDER
      itself goes to a worker thread (`report/renderHost.ts`), so this loop costs the API's event loop
      nothing but the store reads. */
+  // EVERY WORKSPACE'S RUNS, each read in its own namespace (ADR 0051). The renderer lists runs and
+  // then reads each one's input, output and close event, and those reads have to happen in the run's
+  // own namespace. So the list remembers which namespace each run came from.
+  const reportRunNamespace = new Map<string, string>();
+  const inRunNamespace = <T>(runId: string, fn: () => Promise<T>): Promise<T> =>
+    inNamespace(reportRunNamespace.get(runId) ?? activeNamespace(), fn);
   startReportRenderer({
-    list: async () => listRuns(),
-    io: (runId) => fetchRunIO(runId),
-    close: (runId) => fetchRunClose(runId),
+    list: async () => {
+      const rows: RunDescription[] = [];
+      reportRunNamespace.clear();
+      for (const namespace of allNamespaces()) {
+        const found = await inNamespace(namespace, () => listRuns());
+        for (const r of found) reportRunNamespace.set(r.runId, namespace);
+        rows.push(...found);
+      }
+      return rows;
+    },
+    io: (runId) => inRunNamespace(runId, () => fetchRunIO(runId)),
+    close: (runId) => inRunNamespace(runId, () => fetchRunClose(runId)),
     identity: async (runId) => {
       const found = await runWorkflowStore().get(runId);
       return found ? { workflow: found.workflow, version: found.version } : undefined;
