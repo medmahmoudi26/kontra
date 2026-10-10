@@ -78,6 +78,7 @@ import {
 import { HistoryArchive, startHistoryArchiver } from './historyArchive';
 import { startInuseReconciler } from './images/inuseReconciler';
 import { installApiGate } from './auth/apiGate';
+import { installWorkspaceScope } from './auth/workspaceScope';
 import { contextForRun, startReportRenderer, sweepFinishedRuns } from './report/sweep';
 import { reportStore, type ReportStore } from './report/store';
 import { render as renderReportInHost } from './report/renderHost';
@@ -383,6 +384,9 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // declared a posture in `auth/apiGate.ts`, which closes the hole for code nobody has written yet;
   // `auth/apiSurface.test.ts` holds that table to what the server actually does.
   installApiGate(app);
+  // THE WORKSPACE IS PER REQUEST (ADR 0070). After the gate, so an undeclared route is refused
+  // before anything reads a header; see `auth/workspaceScope.ts`.
+  installWorkspaceScope(app);
 
   // THE ROUTE INVENTORY, DERIVED RATHER THAN MAINTAINED.
   //

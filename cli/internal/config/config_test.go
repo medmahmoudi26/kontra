@@ -8,6 +8,7 @@ package config
 // mounted `.kontra/` silently winning would repoint a production process at a laptop's settings.
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -431,5 +432,22 @@ func TestAnEmptyCheckoutDirIsNotAnInstallation(t *testing.T) {
 	}
 	if want := filepath.Join(home, cliutil.KontraDir); got != want {
 		t.Errorf("an empty checkout dir must not shadow a real home installation: got %q, want %q", got, want)
+	}
+}
+
+// A user's workspaces reach the orchestrator, and an admin with none is exported without the
+// field, which the orchestrator reads as every workspace (ADR 0070).
+func TestConsoleUsersCarryWorkspaces(t *testing.T) {
+	raw := encodeConsoleUsers([]AuthUser{
+		{Name: "admin", PasswordHash: "scrypt$1$1$1$AA$BB"},
+		{Name: "ana", PasswordHash: "scrypt$1$1$1$AA$BB", Workspaces: []string{"bugbounty"}},
+	})
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"name":"admin","password_hash":"scrypt$1$1$1$AA$BB"},{"name":"ana","password_hash":"scrypt$1$1$1$AA$BB","workspaces":["bugbounty"]}]`
+	if string(decoded) != want {
+		t.Fatalf("got %s\nwant %s", decoded, want)
 	}
 }
