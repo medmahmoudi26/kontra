@@ -1,8 +1,15 @@
 # 01 — Temporal codec server (UI payload decode)
 
-Status: **done** — `runtime/handler/codecserver` implements Temporal's remote-codec contract
-(`POST /encode` / `POST /decode`) and is served by the install at `cli/install/codec/codec.go`
-on a listener it already owns. Do not work this.
+Status: needs-triage — **built, then deleted with what served it.** `runtime/handler/codecserver`
+implemented Temporal's remote-codec contract (`POST /encode` / `POST /decode`) and the install
+served it on a listener it already owned. The install and its Temporal Web UI went with the
+appliance (ADR 0063), which left the package with no importer, and it has been deleted since.
+Nothing serves the remote-codec contract today, and nothing this repo deploys runs a Temporal
+Web UI for one to decode *for*. Whether that comes back is the open question; the codec
+it would serve is pinned by `shared/conformance/codec`, and `runtime/go/codec` implements it.
+
+> **The status above replaces one that read "done … Do not work this."** It was true from ADR
+> 0031 §1 until the appliance was deleted, and the quoted note below was written inside that window.
 
 > **The "Problem" section below is STALE and was believed on 2026-09-26.** It says "there is **no**
 > codec server", which was true when written and has not been for some time. The package exists,

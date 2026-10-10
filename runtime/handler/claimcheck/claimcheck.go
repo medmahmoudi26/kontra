@@ -4,8 +4,8 @@
 // The implementation is runtime/handler/internal/codec over runtime/handler/internal/objectstore, and `internal`
 // is the right home for it — the marker, the ref shape, the metadata round-trip and the
 // content-addressed key layout are this module's business. This file exists for the same reason
-// `casstore` and `hydratestore` do, and it is the third of the same kind. The CLI is a DIFFERENT
-// MODULE, and a codec the sharer cannot import is not shared: `cli/claimcheck.go` held a FIFTH
+// `casstore` does, and it is the second of the same kind. The CLI is a DIFFERENT MODULE, and a
+// codec the sharer cannot import is not shared: `cli/claimcheck.go` held a FIFTH
 // implementation of this wire format — its own marker constant, its own `{sha256,size,meta}`
 // struct, its own base64 metadata decode and its own `cas/<ab>/<sha>` string — and cited
 // shared/conformance/codec/fixtures.json in a comment while no test of it ever opened the file.
@@ -22,8 +22,10 @@
 // here, once, for all three. That is the difference between a transport and a fifth codec.
 //
 // THIS IS A CLAIM-CHECK, NOT ENCRYPTION (ADR 0007 §4, ADR 0034 §6). A payload under the threshold
-// rides inline in workflow history in the clear and an offloaded one is just as readable to
-// anyone who can reach the store. See the codecserver package header; nothing here changes it.
+// rides inline in workflow history in the clear, for the namespace's whole retention, and an
+// offloaded one is just as readable to anyone who can reach the store. There is no size at which
+// a payload becomes secret, so a bigger threshold would not make anything safer: the threshold is
+// a size decision about history, not a confidentiality boundary, and nothing here changes that.
 package claimcheck
 
 import (

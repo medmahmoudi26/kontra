@@ -1,5 +1,5 @@
-// server.go — an in-process OCI registry, served over the SAME content-addressed store everything
-// else hydrates from (ADR 0032, issues 11 and 12).
+// server.go — an in-process OCI registry, served over the SAME content-addressed store the handler
+// module exports as `runtime/handler/casstore` (ADR 0032, issues 11 and 12).
 //
 // TEST-ONLY, AND THE PACKAGE NAME IS THE INVARIANT. zot serves this install's images; nothing in a
 // shipped binary may import this package, which is why it is named `testregistry` and imported
@@ -10,9 +10,9 @@
 // WHY THE LAYERS AND THE STORE ARE THE SAME THING. An OCI blob is addressed by
 // `sha256:<hex>` over its own bytes, and `runtime/handler/internal/cas` addresses an object by sha256
 // over its own bytes. They are not two stores that happen to agree; they are one address. So a
-// layer PUT lands at `<data-dir>/cas/<ab>/<hex>` — the file the hydrator would have fetched, the
-// file `sha256sum` confirms — and a push of an image whose layers are already there transfers
-// nothing, because the daemon HEADs each digest first and this store already answers yes.
+// layer PUT lands at `<data-dir>/cas/<ab>/<hex>` — the file `sha256sum` confirms — and a push of
+// an image whose layers are already there transfers nothing, because the daemon HEADs each digest
+// first and this store already answers yes.
 //
 // THAT SHARING HAS ONE CONSEQUENCE WORTH SAYING OUT LOUD: BLOBS ARE GLOBAL. A real registry links
 // each blob into each repository that uses it, so `GET /v2/other/blobs/<digest>` 404s for content
@@ -35,11 +35,13 @@
 // push surface directly — /v2/, blobs (incl. chunked, monolithic and cross-repo mount), manifests,
 // tags, _catalog — which is the part `docker push` and `docker pull` actually speak.
 //
-// DELETION IS ABSENT ON PURPOSE. This store has other customers — the hydrated Node runtime, the
-// built SPA, an actor's artifacts — so "delete this layer" is a garbage-collection question about
-// the whole store, not a registry operation. Untagging without deleting bytes would be a lie
-// about reclaimed disk; deleting bytes without asking the other customers is a corruption. The
-// slice that adds retention answers it once, for the store.
+// DELETION IS ABSENT, AND THE REASON WAS THE STORE'S OTHER CUSTOMERS. In the appliance the same
+// store held what its bundle hydration laid down — the Node runtime, the built SPA, an actor's
+// artifacts — so "delete this layer" was a garbage-collection question about the whole store, not
+// a registry operation: untagging without deleting bytes would have been a lie about reclaimed
+// disk, and deleting bytes without asking the other customers a corruption. That hydration is
+// deleted, and every caller here is a test with a temporary DataDir, so the registry is the
+// store's only customer now. A test that needs deletion can add it without that question.
 package testregistry
 
 import (
@@ -106,10 +108,9 @@ type Options struct {
 	// DataDir/registry.
 	DataDir string
 
-	// Store is the shared CAS. nil opens one at DataDir, which is the same store `hydrate.Open`
-	// would return for that root — one directory, one address space. A caller that already holds
-	// one (the hydrator, in a later slice) passes it so the two share an open handle rather than
-	// two views of one tree.
+	// Store is the shared CAS. nil opens one at DataDir with `casstore.NewLocal`, which is what
+	// every caller does today. A caller that already holds one for that root passes it, so the
+	// two share an open handle rather than two views of one tree.
 	Store *casstore.Local
 
 	// BindIP is the address to listen on. Empty means 127.0.0.1.

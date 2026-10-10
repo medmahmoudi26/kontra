@@ -9,9 +9,11 @@ require (
 	go.temporal.io/sdk v1.47.0
 )
 
-// The handler module, for the codec (ADR 0031 §1). `kontra up` serves Temporal's remote-codec
-// endpoint from this binary over the SAME claim-check codec the actors, the orchestrator and the
-// handler already use, instead of from a container that had to be kept in step with it by hand.
+// The handler module, for its two exported seams: `claimcheck`, the codec `kontra workflow start
+// --wait` decodes an offloaded result with (cli/claimcheck.go), and `casstore`, the store
+// `internal/testregistry` keeps layers in. IT WAS FIRST REQUIRED FOR A THIRD: the remote-codec
+// endpoint this binary served Temporal's Web UI under `kontra up` (ADR 0031 §1). That went with
+// the appliance (ADR 0063), and the handler package it was served from has been deleted since.
 //
 // A LOCAL-PATH REPLACE because the two are one repo with no published version to pin. go.work
 // already arranges this inside the workspace; the replace is what makes it hold for

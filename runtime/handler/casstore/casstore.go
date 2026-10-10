@@ -8,17 +8,21 @@
 // issue 11 decided its embedded OCI registry stores layers in this store rather than
 // opening a second one. A shared store the sharer cannot import is not shared.
 //
-// TYPE ALIASES, NOT A WRAPPER, and the contrast with codecserver is the reason. That
-// package RESTATES an interface because bytes flow the other way: it accepts a store FROM
-// the install, so structural identity is all it needs. Here the install takes the
-// store itself, and a restatement would be a second implementation of the publish-by-link
-// concurrency design — the one thing in that file that must exist exactly once. `= cas.Local`
-// makes handler and cli name the same type, so there is nothing left to keep in step.
+// TYPE ALIASES, NOT A WRAPPER, because of which way the bytes flow. Restating an interface is
+// right for a package that accepts a store FROM a caller: structural identity is all it needs.
+// Here the caller takes the store itself, and a restatement would be a second implementation
+// of the publish-by-link concurrency design — the one thing in that file that must exist
+// exactly once. `= cas.Local` makes handler and cli name the same type, so there is nothing
+// left to keep in step.
 //
 // THE SURFACE IS DELIBERATELY SMALL: what a registry needs to put a layer in, ask whether
 // it already holds one, and stream one out. Materialization, copy-on-write and the mode
-// ladder are hydration's, and are not re-exported, because nothing outside this module has
-// asked for them and an unused export is a promise nobody checked.
+// ladder are not re-exported, because nothing outside this module has asked for them and an
+// unused export is a promise nobody checked. THEIR ONE CALLER IS GONE: they were for
+// hydrating the appliance's bundles, and that package went once the appliance did. Nothing
+// but `internal/cas`'s own tests calls them now, and `Weakest` and `RequireSpace` not even
+// those. They are left in place rather than pared out, because the whole of runtime/handler
+// is what the in-process worker retires next.
 package casstore
 
 import "github.com/medmahmoudi26/kontra/runtime/handler/internal/cas"
