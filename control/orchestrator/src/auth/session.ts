@@ -73,22 +73,43 @@ export const REPORT_REVEAL_SCOPE = 'report:reveal';
 /** What a sign-in mints. NO PATH GRANTS `infra`, which is what keeps it a service-token capability. */
 export const DEFAULT_SESSION_SCOPES: readonly string[] = [CONSOLE_SCOPE];
 
+/**
+ * The workspaces a session may name (ADR 0070 §3): every one (`'*'`), or exactly these.
+ *
+ * `'*'` IS THE LAPTOP TIER'S ANSWER, not a wildcard someone has to grant: its one admin is a member
+ * of every workspace on the install (ADR 0070 §4), and a user whose config entry lists no
+ * workspaces is that admin.
+ */
+export type Membership = '*' | readonly string[];
+
+export const ALL_WORKSPACES: Membership = '*';
+
 export interface Session {
   token: string;
   /** Which console user signed in. Carried so a future audit line can name somebody. */
   user: string;
   expiresAt: number;
   scopes: readonly string[];
+  workspaces: Membership;
 }
 
 /** A live session as the admission code reads it — the user, and what they may reach. */
 export interface SessionView {
   user: string;
   scopes: readonly string[];
+  workspaces: Membership;
+}
+
+/** Whether `membership` admits `workspace`. */
+export function isMember(membership: Membership, workspace: string): boolean {
+  return membership === '*' || membership.includes(workspace);
 }
 
 export class SessionBook {
-  private live = new Map<string, { user: string; expiresAt: number; scopes: readonly string[] }>();
+  private live = new Map<
+    string,
+    { user: string; expiresAt: number; scopes: readonly string[]; workspaces: Membership }
+  >();
 
   constructor(
     private readonly now: () => number = () => Date.now(),
@@ -100,7 +121,11 @@ export class SessionBook {
   }
 
   /** Mint a session for a user who has already proved who they are. */
-  mint(user: string, scopes: readonly string[] = DEFAULT_SESSION_SCOPES): Session {
+  mint(
+    user: string,
+    scopes: readonly string[] = DEFAULT_SESSION_SCOPES,
+    workspaces: Membership = ALL_WORKSPACES
+  ): Session {
     this.sweep();
     if (this.live.size >= MAX_SESSIONS) {
       // Drop the oldest rather than refuse: the caller authenticated, and a full book must not lock
@@ -111,8 +136,8 @@ export class SessionBook {
     // 32 bytes of CSPRNG, base64url so it survives a header untouched.
     const token = randomBytes(32).toString('base64url');
     const expiresAt = this.now() + this.ttlMs;
-    this.live.set(token, { user, expiresAt, scopes });
-    return { token, user, expiresAt, scopes };
+    this.live.set(token, { user, expiresAt, scopes, workspaces });
+    return { token, user, expiresAt, scopes, workspaces };
   }
 
   /**
@@ -147,7 +172,7 @@ export class SessionBook {
         return null;
       }
       entry.expiresAt = this.now() + this.ttlMs;
-      return { user: entry.user, scopes: entry.scopes };
+      return { user: entry.user, scopes: entry.scopes, workspaces: entry.workspaces };
     }
     return null;
   }

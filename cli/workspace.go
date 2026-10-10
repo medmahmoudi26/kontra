@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
+	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
 )
 
 const (
@@ -114,7 +115,9 @@ func workspaceFromAPI() (string, error) {
 	var got struct {
 		CurrentPath string `json:"currentPath"`
 	}
-	if err := newAPI(orchestratorURL()).getJSON("/api/workspaces", &got); err != nil {
+	// The listing needs a credential once the install has one (ADR 0070); any service token is one.
+	token := cliutil.EnvOr("KONTRA_RUN_TOKEN", os.Getenv("KONTRA_STATE_TOKEN"))
+	if err := newAuthAPI(orchestratorURL(), token).getJSON("/api/workspaces", &got); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(got.CurrentPath), nil

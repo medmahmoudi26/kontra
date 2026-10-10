@@ -35,7 +35,7 @@ import type { FastifyInstance } from 'fastify';
 import { audit } from '../audit';
 import { verifyPassword } from '../auth/password';
 import { loginGuard } from '../auth/loginGuard';
-import { bearerOf, sessions } from '../auth/session';
+import { DEFAULT_SESSION_SCOPES, bearerOf, sessions } from '../auth/session';
 import { consoleUsers, type ConsoleUser } from '../auth/users';
 
 /**
@@ -140,7 +140,10 @@ export function registerLoginRoutes(app: FastifyInstance): void {
     // FORGIVEN ON SUCCESS: an operator who fumbles a generated password nine times and then gets
     // it right must not spend the rest of the window locked out of their own box.
     loginGuard.forgive(req.ip);
-    const session = sessions.mint(name);
+    // THE SESSION CARRIES THE USER'S WORKSPACES (ADR 0070 §3), read from the same entry the password
+    // was checked against. A user who vanished between the check and here gets none.
+    const account = consoleUsers().find((u) => u.name === name);
+    const session = sessions.mint(name, DEFAULT_SESSION_SCOPES, account?.workspaces ?? []);
     audit(
       { action: 'login', outcome: 'allowed', who: name, via: 'session', target: 'console', ip: req.ip },
       req.log

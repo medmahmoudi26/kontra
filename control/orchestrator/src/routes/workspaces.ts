@@ -1,13 +1,18 @@
 /**
  * Named workspaces under the Compose parent mount — list, switch, create.
  *
- * ADMISSION: listing is open. Switching and creating take the same optional run token as
- * registering a source: they change which code the catalog discovers.
+ * ADMISSION (ADR 0070 §3). Listing needs a credential, or an install that configures none, and a
+ * session sees only the workspaces it is a member of. Switching and creating take the same optional
+ * run token as registering a source, because they change which code the catalog discovers, and
+ * they also need membership of every workspace: `.current` is the install's default for every
+ * caller, and creating one is an install change.
  */
 
 import type { FastifyInstance } from 'fastify';
 
 import { checkOptionalBearer } from '../auth';
+import { isMember } from '../auth/session';
+import { membershipOf } from '../auth/workspaceScope';
 import { RUN_TOKEN_VARS } from '../workflowControl';
 import { errMessage } from './errors';
 import { clientFor } from '../temporalClient';
@@ -50,17 +55,39 @@ async function provision(workspace: string): Promise<{ namespace: string; state:
   }
 }
 
+/** Refuses a session scoped to some workspaces: what follows changes the install for everyone. */
+function installWide(authorization: string | undefined): { code: number; body: { error: string } } | null {
+  const membership = membershipOf(authorization);
+  if (membership === null || membership === '*') return null;
+  return {
+    code: 403,
+    body: {
+      error:
+        'forbidden: switching or creating a workspace changes the install for every user; ' +
+        'this session is scoped to some workspaces (name one in the x-kontra-workspace header instead)',
+    },
+  };
+}
+
 export function registerWorkspaceRoutes(app: FastifyInstance): void {
-  app.get('/api/workspaces', async (_req, reply) => {
+  app.get('/api/workspaces', async (req, reply) => {
+    const membership = membershipOf(req.headers.authorization);
+    if (membership === null) return reply.code(401).send({ error: 'unauthorized' });
     try {
-      return describeWorkspaces();
+      const all = describeWorkspaces();
+      if (membership === '*') return all;
+      // A SCOPED SESSION SEES ITS OWN WORKSPACES, and `current` is the install's only when it is one
+      // of them: naming another would tell this user what somebody else is working on.
+      const names = all.names.filter((n) => isMember(membership, n));
+      const current = names.includes(all.current) ? all.current : names[0] ?? '';
+      return { ...all, names, current, currentPath: current === all.current ? all.currentPath : '' };
     } catch (err) {
       return reply.code(502).send({ error: `could not list workspaces: ${errMessage(err)}` });
     }
   });
 
   app.put('/api/workspaces/current', async (req, reply) => {
-    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
+    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS) ?? installWide(req.headers.authorization);
     if (denied) return reply.code(denied.code).send(denied.body);
     const body = (req.body ?? {}) as { name?: string };
     try {
@@ -73,7 +100,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance): void {
   });
 
   app.post('/api/workspaces', async (req, reply) => {
-    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS);
+    const denied = checkOptionalBearer(req.headers.authorization, RUN_TOKEN_VARS) ?? installWide(req.headers.authorization);
     if (denied) return reply.code(denied.code).send(denied.body);
     const body = (req.body ?? {}) as { name?: string; seed?: boolean; use?: boolean };
     try {

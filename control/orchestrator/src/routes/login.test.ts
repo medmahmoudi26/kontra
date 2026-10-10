@@ -12,13 +12,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { DEFAULTS } from '../auth/loginGuard';
 import { hashPassword } from '../auth/password';
-import { SessionBook, bearerOf } from '../auth/session';
+import { SessionBook, bearerOf, sessions } from '../auth/session';
 import { consoleUsers, CONSOLE_USERS_VAR } from '../auth/users';
 import { registerLoginRoutes } from './login';
 
 const PASSWORD = 'correct-horse-battery-staple';
 
-function encodeUsers(users: Array<{ name: string; password_hash: string }>): string {
+function encodeUsers(users: Array<{ name: string; password_hash: string; workspaces?: string[] }>): string {
   return Buffer.from(JSON.stringify(users), 'utf8').toString('base64');
 }
 
@@ -56,6 +56,14 @@ async function withCheapUser(name: string, password: string): Promise<void> {
 }
 
 describe('signing in', () => {
+  it('hands out a session that carries the user\'s workspaces', async () => {
+    const password_hash = await hashPassword(PASSWORD, { N: 2, r: 1, p: 1 });
+    process.env[CONSOLE_USERS_VAR] = encodeUsers([{ name: 'ana', password_hash, workspaces: ['bugbounty'] }] as never);
+    const res = await app.inject({ method: 'POST', url: '/api/login', payload: { user: 'ana', password: PASSWORD } });
+    expect(res.statusCode).toBe(200);
+    expect(sessions.look((res.json() as { token: string }).token)?.workspaces).toEqual(['bugbounty']);
+  });
+
   it('hands out a token for the right password', async () => {
     await withUser('admin', PASSWORD);
     const res = await app.inject({ method: 'POST', url: '/api/login', payload: { user: 'admin', password: PASSWORD } });
@@ -146,7 +154,18 @@ describe('the session a login hands out', () => {
 describe('parsing what the CLI exports', () => {
   it('reads base64 JSON', () => {
     process.env[CONSOLE_USERS_VAR] = encodeUsers([{ name: 'a', password_hash: 'scrypt$1$1$1$AA$BB' }]);
-    expect(consoleUsers()).toEqual([{ name: 'a', passwordHash: 'scrypt$1$1$1$AA$BB' }]);
+    expect(consoleUsers()).toEqual([{ name: 'a', passwordHash: 'scrypt$1$1$1$AA$BB', workspaces: '*' }]);
+  });
+
+  it('reads a membership list, and drops an account whose list does not parse rather than widening it', () => {
+    const hash = 'scrypt$1$1$1$AA$BB';
+    process.env[CONSOLE_USERS_VAR] = encodeUsers([
+      { name: 'ana', password_hash: hash, workspaces: ['bugbounty', 'bugbounty'] },
+      { name: 'empty', password_hash: hash, workspaces: [] },
+      { name: 'bad-name', password_hash: hash, workspaces: ['../x'] },
+      { name: 'not-a-list', password_hash: hash, workspaces: 'bugbounty' },
+    ] as never);
+    expect(consoleUsers()).toEqual([{ name: 'ana', passwordHash: hash, workspaces: ['bugbounty'] }]);
   });
 
   it('collapses every unreadable form to no users, never to a user with no hash', () => {

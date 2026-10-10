@@ -42,7 +42,7 @@ export const DEFAULT_WORKSPACE = 'hello';
  *
  * Costs nothing today: `bugbounty`, `default` and `scraping` all pass unchanged.
  */
-const NAME_RE = /^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$/;
+export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$/;
 
 export class WorkspaceRefused extends Error {
   constructor(message: string) {
@@ -441,6 +441,14 @@ const namespaceScope = new AsyncLocalStorage<string>();
 /** Run `fn` with every `getClient` inside it bound to `namespace`. */
 export function inNamespace<T>(namespace: string, fn: () => Promise<T>): Promise<T> {
   return namespaceScope.run(namespace, fn);
+}
+
+/**
+ * Call `fn` synchronously inside `namespace`'s scope. What a request hook needs: Fastify's `done`
+ * runs the rest of the request, and everything it starts stays in the scope.
+ */
+export function withinNamespace(namespace: string, fn: () => void): void {
+  namespaceScope.run(namespace, fn);
 }
 
 /** The namespace `getClient` would answer with right now. */

@@ -78,6 +78,9 @@ type AuthUser struct {
 	Name string `yaml:"name"`
 	// PasswordHash is `scrypt$N$r$p$salt$hash`. Never a password.
 	PasswordHash string `yaml:"password_hash"`
+	// Workspaces this user may name (ADR 0070). Empty means every workspace: the laptop tier's
+	// admin.
+	Workspaces []string `yaml:"workspaces,omitempty"`
 }
 
 type FleetConfig struct {
@@ -191,15 +194,16 @@ func encodeConsoleUsers(users []AuthUser) string {
 		return ""
 	}
 	type wire struct {
-		Name         string `json:"name"`
-		PasswordHash string `json:"password_hash"`
+		Name         string   `json:"name"`
+		PasswordHash string   `json:"password_hash"`
+		Workspaces   []string `json:"workspaces,omitempty"`
 	}
 	out := make([]wire, 0, len(users))
 	for _, u := range users {
 		if u.Name == "" || u.PasswordHash == "" {
 			continue // a half-written entry is not an account; it must not become one that admits nobody
 		}
-		out = append(out, wire{u.Name, u.PasswordHash})
+		out = append(out, wire{u.Name, u.PasswordHash, u.Workspaces})
 	}
 	if len(out) == 0 {
 		return ""

@@ -19,6 +19,9 @@
  * that spends 150 ms in a KDF by design.
  */
 
+import { NAME_RE as WORKSPACE_NAME } from '../workspaces';
+import { ALL_WORKSPACES, type Membership } from './session';
+
 /** The variable the CLI exports. Named here so a test can assert nothing else reads it. */
 export const CONSOLE_USERS_VAR = 'KONTRA_CONSOLE_USERS';
 
@@ -26,6 +29,11 @@ export interface ConsoleUser {
   name: string;
   /** `scrypt$N$r$p$salt$hash`. Never a password — see `cli/internal/creds`. */
   passwordHash: string;
+  /**
+   * The workspaces this user may name (ADR 0070 §3). `'*'` when the entry lists none, which is the
+   * laptop tier's admin (§4).
+   */
+  workspaces: Membership;
 }
 
 /**
@@ -49,12 +57,24 @@ export function consoleUsers(env: NodeJS.ProcessEnv = process.env): ConsoleUser[
   const out: ConsoleUser[] = [];
   for (const entry of parsed) {
     if (typeof entry !== 'object' || entry === null) continue;
-    const { name, password_hash: hash } = entry as { name?: unknown; password_hash?: unknown };
+    const {
+      name,
+      password_hash: hash,
+      workspaces,
+    } = entry as { name?: unknown; password_hash?: unknown; workspaces?: unknown };
     // A half-written entry is not an account. Admitting a `name` with no hash would be an account
     // that any password opens, which is the one outcome worse than no account at all.
     if (typeof name !== 'string' || !name) continue;
     if (typeof hash !== 'string' || !hash) continue;
-    out.push({ name, passwordHash: hash });
+    // A MEMBERSHIP THAT DOES NOT PARSE DROPS THE ACCOUNT rather than widening it. Reading a garbled
+    // list as "no list" would make a user scoped to one workspace a member of all of them.
+    let membership: Membership = ALL_WORKSPACES;
+    if (workspaces !== undefined) {
+      if (!Array.isArray(workspaces) || workspaces.length === 0) continue;
+      if (!workspaces.every((w) => typeof w === 'string' && WORKSPACE_NAME.test(w))) continue;
+      membership = [...new Set(workspaces as string[])];
+    }
+    out.push({ name, passwordHash: hash, workspaces: membership });
   }
   return out;
 }
