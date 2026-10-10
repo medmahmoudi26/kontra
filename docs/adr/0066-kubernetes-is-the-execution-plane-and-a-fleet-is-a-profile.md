@@ -33,7 +33,9 @@ use the same mechanics.
    history, activity arguments or a Batch — ADR 0034's rule, kept, with the file in place of the
    secret store for fleet credentials. `shared/conformance/fleets.json` pins the schema, defaults
    and refusals for the orchestrator's reader and the CLI's.
-3. **A placement is a Deployment**, one per (holding scope, actor@version), in the tenant's
+3. **A placement is a Deployment**, one per (tenant, fleet, actor@version), SHARED by every run in
+   that tenant holding that fleet and reference-counted by the Lease (plan default A24): the first
+   hold that places it applies it, the last one that drops it deletes it. It lives in the tenant's
    Kubernetes namespace — named like the tenant's Temporal namespace (ADR 0051), with a
    ResourceQuota. The pod runs the actor image **pinned by digest**, under
    **`runtimeClassName: gvisor`**, as non-root with every capability dropped, with no
@@ -51,9 +53,17 @@ use the same mechanics.
 6. **KEDA scales a placement on its Temporal task-queue backlog.** `place(replicas=N)` is the
    maximum; the minimum is 1 while the placement exists, so `ready()` is meaningful and a pinned
    Session is not scaled out from under itself.
-7. **The Lease holds a node pool.** One Lease per profile; when the last hold drops, the nodes are
-   destroyed after `idle_minutes` unless a new hold arrives (the existing Lease workflow, plus the
-   grace).
+7. **The Lease holds a node pool, and is the single writer of everything on it.** One Lease
+   workflow per (tenant, profile), id `kontra-lease/<namespace>/<profile>`. A hold that finds no
+   cluster converges it — the provider makes or adopts it, the cluster bootstrap and the tenant
+   bootstrap run — and every placement is a request TO the Lease, which applies the Deployment and
+   its ScaledObject, counts its holders, and deletes it when the last holder drops. When the last
+   hold drops, the nodes are destroyed after `idle_minutes` unless a new hold arrives first. One
+   writer is what makes the counting safe: two runs placing and dropping at once are two signals to
+   one workflow, not two read-modify-writes of a Kubernetes object.
+   The kubeconfig a converge produces is kept by the infra role (plan default A23), 0600 in its
+   state volume and never in history; the Lease's activities run on the infra container's
+   `kontra-placement` queue, which runs several at once, unlike the one-at-a-time infra queue.
 8. **The control plane and the cluster are separate.** The dev box only ever runs the control
    plane; `local`'s nodes are VMs. Workers dial out to the control plane; nothing dials in.
 9. **Deleted once the `local` provider passes the PRD §10.3/§10.4 tests in CI:** the Warden, the
@@ -80,7 +90,10 @@ use the same mechanics.
 - **Lima**, not Multipass, for `local`: no snap dependency on Linux, scriptable, QEMU/KVM.
 - The CLI verb is **`kontra fleet up [--profile p] [--nodes N]`** (§7); §10.1's `kontra fleet
   local --nodes 1` is read as that command with the default profile.
-- One Deployment per holding scope, not shared across runs.
+- One Deployment per (tenant, fleet, actor@version), shared and counted by the Lease (A24).
+- The old SDK surface (`docker_fleet`, `do_fleet`, `tag=`, `machines=`, `sessions=`, `up()`) keeps
+  working for one minor release with a DeprecationWarning (A25); "actors run unchanged" (§10.6)
+  covers actor code, and workflows migrate to `fleet.hold(profile=…)`.
 - A per-install cosign key pair (decision 5).
 - The PRD's "KEDA-scaled workflow host" in the control plane is read as future work: the control
   plane is compose, and KEDA runs in the execution cluster.
