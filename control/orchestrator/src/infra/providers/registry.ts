@@ -12,12 +12,20 @@
 import { execFile } from 'node:child_process';
 
 import type { ByoKubeconfigProfile, FleetProfile } from '../fleets';
+import { DigitalOceanProvider } from './digitalOcean';
 import { LocalProvider, type Runner } from './local';
 import type { ClusterFlavor } from '../../kube/bootstrap';
 
 export interface FleetNode {
   name: string;
   address: string;
+  /** The cloud's size slug, when the provider rents the node — what {@link priceHourly} is the price OF. */
+  size?: string;
+  /**
+   * List price per hour in USD as the cloud reported it at converge, for the Fleet page (WP-60).
+   * 0 means "unknown", never "free" — render it as unknown rather than multiply it.
+   */
+  priceHourly?: number;
 }
 
 export interface ProvisionedCluster {
@@ -28,11 +36,26 @@ export interface ProvisionedCluster {
   nodes: FleetNode[];
 }
 
+/**
+ * WHAT THE ACTIVITY RUNNING A PROVIDER LENDS IT, and nothing more: a way to say what it is doing,
+ * whether a previous attempt died, and the activity's cancellation. A provider never sees a Temporal
+ * context — it is called from tests, from the e2e job and from the pool alike — so the activity
+ * translates its context into this, and a provider that has no use for it ignores it.
+ */
+export interface ProviderRun {
+  /** What the provider is working on now, for the activity's heartbeat detail. Never a secret. */
+  progress?: (detail: Record<string, unknown>) => void;
+  /** A previous attempt of this activity died, so a lock it left on the provider's state is stale. */
+  retrying?: boolean;
+  /** The activity's cancellation: a provider that runs an engine stops it on abort. */
+  signal?: AbortSignal;
+}
+
 export interface FleetProvider {
   /** Make or adopt the cluster for `profile`. Idempotent: a second call with the same inputs changes nothing. */
-  converge(fleet: string, profile: FleetProfile): Promise<ProvisionedCluster>;
+  converge(fleet: string, profile: FleetProfile, run?: ProviderRun): Promise<ProvisionedCluster>;
   /** Release the nodes. A provider that made none releases none. */
-  destroy(fleet: string, profile: FleetProfile): Promise<void>;
+  destroy(fleet: string, profile: FleetProfile, run?: ProviderRun): Promise<void>;
 }
 
 /** `byo_kubeconfig`: the cluster exists; kontra adopts it and never destroys it. */
@@ -45,13 +68,6 @@ export const byoKubeconfig: FleetProvider = {
     // Not kontra's cluster: releasing a lease on it releases nothing.
   },
 };
-
-function notYet(provider: string, slice: string): FleetProvider {
-  const refuse = async (): Promise<never> => {
-    throw new Error(`the ${provider} provider is not built yet (ADR 0066 ${slice}); use byo_kubeconfig until then`);
-  };
-  return { converge: refuse, destroy: refuse };
-}
 
 /** A command, run with no shell: arguments are never interpolated into a command line. */
 const execRunner: Runner = (cmd, args) =>
@@ -80,7 +96,10 @@ function localFromEnv(env: NodeJS.ProcessEnv = process.env): FleetProvider {
 export const PROVIDERS: Record<FleetProfile['provider'], FleetProvider> = {
   byo_kubeconfig: byoKubeconfig,
   local: localFromEnv(),
-  digital_ocean: notYet('digital_ocean', 'slice 9'),
+  // Reads its environment (the firewall's sources, the SSH key's path) at converge, not here: the
+  // registry is built when the infra worker starts, and a missing variable must refuse a converge
+  // with its name rather than stop a worker that may never be asked for a droplet.
+  digital_ocean: new DigitalOceanProvider(),
 };
 
 /** The provider a profile names. */

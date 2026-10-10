@@ -69,14 +69,24 @@ export function apiPort(fleet: string): number {
   return 16443 + (n % 1000);
 }
 
-const GVISOR_INSTALL = (): string => `ARCH=$(uname -m)
+/**
+ * The gVisor install, verified by SHA-512, and its registration as a containerd runtime. SHARED WITH
+ * THE `digital_ocean` PROVIDER, so the two fleets cannot drift onto different pins.
+ *
+ * `apt` IS THE ONE SEAM, and it exists for a measured reason that applies to a droplet and not to a
+ * Lima VM here: a fresh DigitalOcean image is still running unattended-upgrades when SSH comes up,
+ * and `apt-get update` then dies on `/var/lib/apt/lists/lock` (programs/machine.ts, step 1). The
+ * droplet script passes a retrying wrapper; this provider passes nothing and its script is the same
+ * bytes it always was.
+ */
+export const gvisorInstall = (apt = 'apt-get'): string => `ARCH=$(uname -m)
 case "$ARCH" in
   x86_64) WANT=${GVISOR.sha512.x86_64} ;;
   aarch64) WANT=${GVISOR.sha512.aarch64} ;;
   *) echo "no pinned gVisor for $ARCH" >&2; exit 1 ;;
 esac
 if ! command -v runsc >/dev/null; then
-  apt-get update -q && apt-get install -y -q zstd
+  ${apt} update -q && ${apt} install -y -q zstd
   curl -fsSL -o /tmp/gvisor.tar.zstd https://storage.googleapis.com/gvisor/releases/release/${GVISOR.release}/$ARCH/gvisor.tar.zstd
   echo "$WANT  /tmp/gvisor.tar.zstd" | sha512sum -c -
   tar --zstd -xf /tmp/gvisor.tar.zstd -C /usr/local/bin
@@ -91,7 +101,9 @@ cat > /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl <<'TOML'
   runtime_type = "io.containerd.runsc.v1"
 TOML`;
 
-const K3S_INSTALL = (exec: string, env: string): string => `curl -fsSL -o /tmp/k3s-install.sh ${K3S.installer}
+/** The pinned k3s install: the installer verified by digest, then run at the pinned version. Shared
+ *  with the `digital_ocean` provider for the same reason as {@link gvisorInstall}. */
+export const k3sInstall = (exec: string, env: string): string => `curl -fsSL -o /tmp/k3s-install.sh ${K3S.installer}
 echo "${K3S.installerSha256}  /tmp/k3s-install.sh" | sha256sum -c -
 ${env} INSTALL_K3S_VERSION='${K3S.version}' INSTALL_K3S_EXEC='${exec}' sh /tmp/k3s-install.sh`;
 
@@ -131,7 +143,7 @@ YAML
     provision: [
       {
         mode: 'system',
-        script: `#!/bin/sh\nset -eu\n${GVISOR_INSTALL()}\n${registries}${K3S_INSTALL(exec, env)}\n`,
+        script: `#!/bin/sh\nset -eu\n${gvisorInstall()}\n${registries}${k3sInstall(exec, env)}\n`,
       },
     ],
     probes: server
