@@ -9,7 +9,15 @@
 # vulnerable while nobody touches it, so a PR-only gate goes quiet exactly when the risk is arriving.
 #
 # NONE OF THESE NEEDS A SECRET. govulncheck and osv-scanner read a public database; zizmor reads the
-# workflow files in the checkout; CodeQL and Scorecard use the token GitHub already provides.
+# workflow files in the checkout; gitleaks reads the history in it; CodeQL and Scorecard use the
+# token GitHub already provides.
+#
+# WHAT IS A GATE AND WHAT IS A REPORT. govulncheck, zizmor and gitleaks fail the job on a finding,
+# and each scanner is pinned to a version so that the verdict moves only when this repository
+# changes or a NEW advisory lands, never because a scanner shipped a release overnight: a required
+# check that turns red with no change in the tree is how required checks get un-required.
+# osv-scanner and Scorecard report into the Security tab and do not gate (osv's section says why).
+# CodeQL stays out of the required set until its open high-severity alerts have been triaged.
 
 name: security
 
@@ -37,7 +45,16 @@ jobs:
   #
   # `govulncheck` reports only vulnerabilities your code can actually REACH, which is why its output is
   # worth gating on: a vulnerable function nobody calls is noise, and a tool that reports it teaches
-  # people to ignore the tool. Four modules, each with its own go.mod.
+  # people to ignore the tool. Five modules, each with its own go.mod.
+  #
+  # THE DEMO ACTOR IS SCANNED BECAUSE IT LIVES HERE. `workspaces/demo/actors/desync` is a standalone
+  # module outside `go.work` with its own dependency set (a third-party HTTP library, the AWS SDK),
+  # and it was the one go.mod in the tree no gate read; `tests/test_vulngate.py` now fails if the
+  # tracked go.mod files and this matrix disagree in either direction. It runs with `GOWORK=off`:
+  # inside the workspace, `govulncheck ./...` there dies with "directory prefix . does not contain
+  # modules listed in go.work" — the same error osv-scanner's section below records — and a scan
+  # that cannot load the module reports nothing. Standalone it builds, because its replaces point at
+  # the sdk and runtime in this checkout.
   govulncheck:
     name: govulncheck (${{ matrix.module }})
     runs-on: ubuntu-latest
@@ -45,11 +62,14 @@ jobs:
       fail-fast: false
       matrix:
         module: [cli, runtime/go, runtime/handler, sdk/go]
+        include:
+          - module: workspaces/demo/actors/desync
+            gowork: 'off'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           # THE MODULE'S OWN DIRECTIVE, as every other workflow here does it. That is what makes a
           # toolchain bump fix the standard-library findings everywhere at once instead of being
@@ -69,9 +89,14 @@ jobs:
       # `|| true` here would have shipped that as a pass.
       - name: govulncheck
         working-directory: ${{ matrix.module }}
+        env:
+          # Empty for the workspace modules, which is Go's default (find go.work); `off` for desync.
+          GOWORK: ${{ matrix.gowork }}
         run: |
           set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # PINNED, NOT @latest, for the reason the header gives: the advisory DATABASE is what
+          # should move this gate, and it is read fresh on every run regardless of this version.
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           report="$RUNNER_TEMP/govulncheck-$(echo "${{ matrix.module }}" | tr / -).json"
           set +e
           "$(go env GOPATH)/bin/govulncheck" -format json ./... > "$report"
@@ -121,7 +146,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -162,7 +187,7 @@ jobs:
           fi
           python3 -c 'import json,sys; d=json.load(open("osv.sarif")); print("SARIF runs:", len(d.get("runs", [])), "results:", sum(len(r.get("results") or []) for r in d.get("runs", [])))'
 
-      - uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+      - uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
         with:
           sarif_file: osv.sarif
           category: osv-scanner
@@ -172,6 +197,30 @@ jobs:
   # Six workflow files existed here with nothing auditing them, and they do privileged things: publish
   # images, sign with cosign, push to a wiki. zizmor finds template-injection via `${{ }}` in `run:`,
   # over-broad permissions, and unpinned Actions.
+  #
+  # THIS JOB WAS GREEN WITH NINE FINDINGS OPEN, two of them high (an Action pinned by tag in
+  # release-please.yml and in wiki.yml). The action's default is `advanced-security: true`, which
+  # runs zizmor with `--format=sarif`, and zizmor exits 0 in SARIF mode whatever it finds: the
+  # findings went to the Security tab and the job could not fail. So there are two steps now, and
+  # they are different things.
+  #
+  # THE REPORT uploads everything the regular persona finds, low severity included, so the Security
+  # tab keeps the full picture and an alert closes when its finding is fixed.
+  #
+  # THE GATE re-runs the same pinned image without SARIF, at medium and above, and fails on a
+  # finding with an annotation on the line. Low stays a report: `self-repository`-style advice is
+  # worth reading and not worth blocking a merge on.
+  #
+  # PINNED TO A ZIZMOR VERSION, NOT `latest`. A new zizmor release adds audits, and with `latest`
+  # every open pull request would go red the morning it shipped, for code none of them touched.
+  # Since v0.4 the action pulls the image by a digest it ships for each version, so `1.30.1` names
+  # one image and not a tag somebody can move. Raising it is a change that is green in its own PR.
+  #
+  # ONLINE AUDITS STAY ON, because `known-vulnerable-actions` is the half of this that behaves like
+  # govulncheck: an advisory against an Action we pin should turn this red at night with nothing
+  # changed here. `ref-version-mismatch` is online too, which is why every pin's comment names the
+  # EXACT tag (`# v4.4.0`, not `# v4`): a moving major tag would flag every pin at once the day
+  # upstream cut a patch release.
   zizmor:
     name: zizmor
     runs-on: ubuntu-latest
@@ -179,10 +228,20 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: zizmorcore/zizmor-action@e673c3917a1aef3c65c972347ed84ccd013ecda4 # v0.2.0
+      - name: zizmor (report, every severity, to the Security tab)
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+      - name: zizmor (gate, medium and above)
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          advanced-security: false
+          annotations: true
+          min-severity: medium
 
   # ── CODEQL ──────────────────────────────────────────────────────────────────────────────────────
   #
@@ -201,42 +260,86 @@ jobs:
       matrix:
         language: [go, javascript-typescript, python, actions]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         if: matrix.language == 'go'
         with:
           go-version-file: cli/go.mod
-      - uses: github/codeql-action/init@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+      - uses: github/codeql-action/init@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
-      - uses: github/codeql-action/autobuild@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
-      - uses: github/codeql-action/analyze@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+      - uses: github/codeql-action/autobuild@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
+      - uses: github/codeql-action/analyze@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
         with:
           category: /language:${{ matrix.language }}
 
   # ── SECRETS, AS A SECOND PAIR OF EYES ───────────────────────────────────────────────────────────
   #
-  # GitHub's own secret scanning with push protection is the first and is enabled in repository
-  # settings rather than here. gitleaks is the one that reads HISTORY and catches a pattern GitHub's
-  # providers do not know — a kontra service token, for instance, is not a provider pattern.
+  # GITHUB'S SECRET SCANNING AND PUSH PROTECTION ARE THE FIRST, AND THEY ARE ON. Both are repository
+  # settings, which no workflow can turn on or even observe, so this comment is the only record of
+  # them in the tree, and it has been wrong before: an earlier version said "enabled in repository
+  # settings" while the API reported both `disabled`. The owner has since enabled them: on
+  # 2026-10-10 `gh api repos/medmahmoudi26/kontra --jq .security_and_analysis` reported
+  # `secret_scanning` and `secret_scanning_push_protection` as `enabled`, and that command is how to
+  # check it again rather than trusting this paragraph.
+  #
+  # WHAT GITLEAKS ADDS ON TOP. Push protection refuses a PROVIDER pattern (an AWS key id, a GitHub
+  # token) at push time, and secret scanning alerts on those across history after the fact. Neither
+  # knows a credential no provider registered (a kontra service token, for instance), and GitHub's
+  # generic half, `secret_scanning_non_provider_patterns` (private keys, connection strings, auth
+  # headers), is off. gitleaks runs its generic and private-key rules as well as the provider ones,
+  # and it is a CHECK on the pull request: a finding blocks the merge instead of opening an alert
+  # once the commit is already public.
   #
   # An audit on 2026-10-07 found nothing leaked (`.env` gitignored, no key path ever committed, the
   # `AKIA…`/`dop_v1_…` literals in the tree being documentation examples and sequential fakes). This
   # job is what keeps that true rather than true-as-of-a-date.
+  #
+  # THE WHOLE HISTORY, ON EVERY EVENT. Everything reachable from dev's head is 231 commits with a
+  # patch, which gitleaks read in 9 s on a dev box (the nightly run's 243, with `--all`, took 1.7 s on
+  # a runner), so a pull request gets the same verdict as the nightly run rather than a scan of its
+  # own commits only. `--log-opts=HEAD`, not gitleaks' default of `--all`: with `fetch-depth: 0` the
+  # checkout holds every branch, and `--all` is why the nightly run of 2026-10-09 reported a fixture
+  # that exists only on an unmerged branch. A check on dev must not be red for a commit dev does not
+  # contain.
+  #
+  # THE BINARY, NOT gitleaks-action. v2 is a Node 20 action that downloads gitleaks (8.24.3 unless
+  # told otherwise) with no checksum, and needs GITHUB_TOKEN in its environment to list a pull
+  # request's commits. This is the same pinned release a person runs locally, checked against a
+  # sha256 written here; raising the version means changing both lines, and a mismatch fails the
+  # step before anything runs.
+  #
+  # WHAT IT IGNORES lives in two reviewed files: `.gitleaks.toml` (fixture paths only) and
+  # `.gitleaksignore` (exact fingerprints for reviewed non-secrets). A finding prints redacted, with
+  # the fingerprint to add once someone has confirmed it is not a credential — and rotated it if it is.
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-          fetch-depth: 0 # history, which is the half GitHub's push protection cannot see in a PR
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+          fetch-depth: 0 # the whole history; gitleaks reads every commit's patch, not the tree
+      - name: gitleaks (full history)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb # linux_x64.tar.gz
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git \
+            --config .gitleaks.toml \
+            --gitleaks-ignore-path .gitleaksignore \
+            --log-opts=HEAD \
+            --redact --verbose --no-banner --no-color \
+            .
 
   # ── ONE NUMBER THAT TRACKS ALL OF THE ABOVE ─────────────────────────────────────────────────────
   scorecard:
@@ -247,7 +350,7 @@ jobs:
       security-events: write
       id-token: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       # v2.4.4, NOT v2.4.0: this is a Docker action, and v2.4.0's image is
@@ -259,6 +362,6 @@ jobs:
           results_file: scorecard.sarif
           results_format: sarif
           publish_results: false
-      - uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+      - uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
         with:
           sarif_file: scorecard.sarif

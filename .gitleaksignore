@@ -1,0 +1,36 @@
+# Reviewed gitleaks findings that are not credentials, one EXACT fingerprint each.
+#
+# WHY FINGERPRINTS AND NOT PATHS. A fingerprint is commit:file:rule:line, so an entry silences the
+# one finding a person read and nothing else: not the next line of the same file, not the same file
+# in a later commit. A path entry in `.gitleaks.toml` would silence every future secret in that
+# file, which is why that file allowlists fixture paths only and real source ends up here.
+#
+# HOW TO ADD ONE. Read the finding (the CI log prints it redacted, with its fingerprint), confirm it
+# is not a credential, then add the fingerprint with a line saying what the string actually is. If
+# it IS a credential, rotate it first: this file stops the report, not the exposure.
+#
+# DESCRIBE THE VALUE, DO NOT QUOTE IT. This file is scanned like any other, and a fake pasted into a
+# comment here is a new finding in a file no allowlist covers.
+
+# cli/internal/creds/creds.go — `passwordAlphabet`, the character SET generated passwords are drawn
+# from (a-z, A-Z, 2-9 minus the look-alikes). It is the alphabet, not a password.
+2f846737d8364500e89eed6c03373ca1cfbfc5f3:cli/internal/creds/creds.go:generic-api-key:118
+
+# cli/appliance/bundle/scan.go (deleted with the appliance) — a comment naming the PEM header label
+# and, three lines below it, the REGEX the bundle scanner used to refuse a private key. The rule's
+# multi-line match runs from one to the other; there is no key material in either.
+f3ddc32b677c0c9e9539e4275766ed1780402a5c:cli/appliance/bundle/scan.go:private-key:99
+
+# cli/appliance/objstore/s3.go (deleted with the appliance) — the S3 secret-key option being assigned
+# from a Go constant. What matched is the constant's NAME; the rule scored the identifier's entropy.
+f3ddc32b677c0c9e9539e4275766ed1780402a5c:cli/appliance/objstore/s3.go:generic-api-key:185
+
+# cli/appliance/bundle/scan_test.go (deleted with the appliance) — an AWS key id whose 16 characters
+# after the prefix are a digit and then the keyboard's letter rows typed left to right, there to
+# prove the scanner refuses that shape.
+f3ddc32b677c0c9e9539e4275766ed1780402a5c:cli/appliance/bundle/scan_test.go:aws-access-token:60
+
+# workspaces/bugbounty/actors/linkfind/main_test.go (no longer in the tree) — a Stripe-shaped live key
+# whose body is the sixteen hex digits in order, which the secrets extractor had to capture without
+# its surrounding text.
+1b098cf55c295c91b3b2c8c119c1da69c8d69399:workspaces/bugbounty/actors/linkfind/main_test.go:stripe-access-token:59
