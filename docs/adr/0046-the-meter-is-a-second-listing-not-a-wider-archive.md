@@ -4,7 +4,9 @@ Date: 2026-09-13
 
 ## Status
 
-Accepted.
+Accepted; **superseded as the billing decision by [ADR 0071](0071-the-meter-is-host-active-time-and-node-time.md)**,
+which meters workflow-host active time and node time instead of events. §1 (`historyLength` by
+`describe`) and §4 (`KontraTenant` populated) stand as diagnostics.
 
 Follows an event-log audit (`docs/event-log-audit.md`), whose findings F1, F2 and F4 this decides.
 Amends nothing in [ADR 0025](0025-the-reduced-log-is-the-durable-record.md) — it says what that

@@ -153,18 +153,18 @@ bypasses on this Fleet); allowlist/blocklist alone (each names one half of a pol
 precedence levels); "network policy" (a Kubernetes term for a pod-to-pod rule, which this is not)
 
 **Tenant**:
-One party whose work is separated from every other party's. **A Tenant IS a Temporal namespace**
-(ADR 0036) — not a name in front of one, and not a prefix on a queue: in Temporal the namespace is
-the only authorisation boundary there is, so anything else is a convention rather than a boundary.
-A **Warden**'s enrolment mints a certificate scoped to exactly one, chosen when its one-time token
-was minted and never taken from anything the **Machine** says.
-_Avoid_: customer, org, account, project (each names a billing or UI grouping somewhere and would
-invite a **Tenant** that spans two namespaces, which is a **Tenant** that is not one); **workspace**
-— which is now a DEFINED term (`CONTEXT.md`) and still not this one: a Workspace is the directory an
-operator keeps their config, actors and workflows in, bounded by file permissions and by nothing at
-runtime. Two Workspaces on one Tenant see each other's every Run. Separation is a second Tenant;
-"namespace prefix" and "queue prefix" (both describe the thing this word replaced — queue names
-are namespace-RELATIVE and `shared/conformance/queues.json` pins them unchanged)
+One party's separated work, named from the execution side: a Temporal namespace plus the
+Kubernetes namespace of the same name (`ws-<workspace>`), with its ResourceQuota, LimitRange and
+NetworkPolicy. **A Tenant IS a Temporal namespace** (ADR 0036) — not a name in front of one, and not
+a prefix on a queue: in Temporal the namespace is the only authorisation boundary there is, so
+anything else is a convention rather than a boundary. Each **Workspace** runs as exactly one Tenant
+(ADR 0070); the legacy namespace (`KONTRA_NAMESPACE`) is the Tenant of an install with no workspace,
+and its Kubernetes namespace is `kontra-<namespace>`.
+_Avoid_: customer, org, project (each names a billing or UI grouping and would invite a **Tenant**
+that spans two namespaces, which is a **Tenant** that is not one); **account** — a defined term in
+`CONTEXT.md` for the party that pays, which may hold several Tenants; "namespace prefix" and "queue
+prefix" (both describe the thing this word replaced — queue names are namespace-RELATIVE and
+`shared/conformance/queues.json` pins them unchanged)
 
 ### Getting an actor onto them
 
