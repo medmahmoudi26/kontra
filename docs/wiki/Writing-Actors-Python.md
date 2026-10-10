@@ -11,6 +11,15 @@ that target shape, and the shipped `kontra deploy` reads none of those four yet.
 { "schemaVersion": "kontra.actor.v1", "name": "echo", "version": "0.1.0" }
 ```
 
+Add **`resources`** when it needs a stated amount to run — `"resources": { "cpus": 1, "memory": "1Gi" }`.
+`needs` is the older spelling ([ADR 0040](../adr/0040-actor-json-states-needs-and-one-vocabulary.md))
+and reads the same; stating both is refused. Memory is a Kubernetes quantity (`1Gi`, `512Mi`), and
+Docker's `512m` / `1g` are read as MiB / GiB — never as Kubernetes' *milli* — so the shipped examples
+mean what they always meant. An unknown key (`cpu`, `shmSize`), a unit in neither table, or a CPU
+count that is not a positive number is refused when the manifest is read, by `kontra deploy` and by the
+worker alike. `shared/conformance/resources.json` is the whole rule. Nothing sizes a placement from it
+yet: the catalog does not carry it.
+
 Everything else lives in **`actor.py`**: typed I/O classes and a decorated lifecycle. The public package is `actorkit` (the flat files under `sdk/python/kontra/`); `internals`, under `runtime/python/`, is the private runtime — and the import arrow runs one way only, runtime to sdk.
 
 ```python
