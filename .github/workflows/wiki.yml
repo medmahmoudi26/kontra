@@ -33,7 +33,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # NO CREDENTIALS LEFT IN `.git/config`. This job clones the WIKI with its own token in the URL
+      # and never pushes to this repository, so a persisted checkout token would serve nothing but
+      # the next step that reads it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # THE LINKS ARE CHECKED BEFORE ANYTHING IS PUBLISHED, because a dead relative link is invisible
       # in the tree and visible on the wiki: GitHub resolves `../../handler` to `/<owner>/handler`,

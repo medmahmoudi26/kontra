@@ -83,7 +83,7 @@ jobs:
       kontra_images: ${{ steps.names.outputs.kontra_images }}
       compose_vars: ${{ steps.names.outputs.compose_vars }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -269,7 +269,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -278,23 +278,23 @@ jobs:
       # filesystem path, not a published package — so both checkouts must be visible to ONE build
       # and both directory names are load-bearing. Two `path:` checkouts and not a symlink: docker
       # does not follow a context symlink that leaves the context.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: _sibling/kontra
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: medmahmoudi26/kontra-console
           path: _sibling/kontra-console
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # NO PAT AND NO REPOSITORY SECRET. A workflow pushing to GHCR under the same owner as the
       # repository authenticates with the token GitHub already gave the job; `packages: write` above
       # is the entire grant. `github.actor` is the user or bot that pushed the tag, which is who the
       # push is attributed to.
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -457,8 +457,8 @@ jobs:
       # `imagetools` reads and writes the registry rather than building anything, so it needs no
       # `docker-container` builder — but it is a buildx subcommand and buildx wants A builder to
       # exist. Setting one up is four seconds against a failure mode that reads as an imagetools bug.
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -469,7 +469,7 @@ jobs:
       # `/releases/latest/download/` with no version and no checksum. `cosign-release` is deliberately not pinned here — the action's default for a
       # given major IS pinned, and a cosign version invented in this file without being run would
       # fail on the first tag, which is worse than tracking the installer's own default.
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
       - run: cosign version
 
       - name: create the lists and record their digests
@@ -575,7 +575,7 @@ jobs:
             echo "The identity carries this tag's ref, so it changes every release."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: digests-kontra
           path: digests-kontra.tsv
@@ -595,7 +595,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: digests-*
           merge-multiple: true
@@ -693,7 +693,7 @@ jobs:
           print(open("images.env").read())
           PY
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pins
           path: |
@@ -728,7 +728,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: pins
           path: .
