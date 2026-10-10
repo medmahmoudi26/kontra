@@ -707,7 +707,8 @@ def build_session_factory(registry, *, store="env"):
             # commits against the Unit the iterator is on; the caller does not yet name it (that is
             # slice 07), so it is the unnamed, chainable kind. `tail` collects pushes made with no
             # current Unit and is folded into results below.
-            batch = Batch(self, todo, getattr(self._method, "takes", None))
+            method = self._method.resolved() if hasattr(self._method, "resolved") else self._method
+            batch = Batch(self, todo, getattr(method, "takes", None))
             beat = asyncio.create_task(self._progress_beat(run_id, node_id, len(units)))
             # A PER-BATCH WORKFLOW-STREAM PUBLISHER WAS BOUND HERE, and `kontra.stream()` wrote
             # through it. Both are gone: the stream died with the workflow, so nothing could read

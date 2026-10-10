@@ -62,7 +62,44 @@ if __name__ == "__main__":
 
 `self` is an instance of *your* class with framework state mixed in: `self.params` (run-wide config from the dispatcher), `self.run_id` / `self.idempotency_key` (run lineage), and `self.rebuilds` (how many times this session's resource was rebuilt after a `SessionLost`).
 
+### The signature is the contract
+
+A Method's types can live in its signature instead of the decorator (ADR 0065):
+
+```python
+from kontra import Batch, Dataset, actor
+
+@actor.method                                       # takes/emits read off the annotations
+async def shout(self, batch: Batch[EchoInput], dataset: Dataset[EchoOutput]) -> None:
+    ...
+```
+
+`takes=`/`emits=` still work, win when given, and a disagreement with the annotations is a warning
+naming both. `kontra.Batch` is the Method's input; the CALLER's handle on a Method's output is
+`kontra.catalog.Batch`, a different thing.
+
 ## Knobs
+
+### `worker.yaml` — the Worker's tuning, beside the actor
+
+```yaml
+# worker.yaml — temporalio.worker.Worker keyword names, tuning only
+max_concurrent_activities: 2
+max_concurrent_activity_task_polls: 2
+graceful_shutdown_timeout: 30s
+```
+
+Every key is a keyword argument of the installed `temporalio.worker.Worker`, under the SDK's own
+name, checked at boot before anything connects: a key the SDK does not have is refused with the
+nearest real one. Only numbers, flags and durations are accepted; `task_queue`, `identity` and
+`build_id` are refused by name, because the queue is derived from the actor's name and version and
+moving it leaves a healthy worker that nothing schedules onto. A `worker.yaml` beside a workflow
+tunes the workflow's worker the same way (ADR 0065).
+
+**What it reaches in an actor:** the actor's shared worker — the one that opens and closes Sessions
+and runs an unscoped call. A Session's own worker has fixed slots and drain, so
+`max_concurrent_activities` here bounds how many Sessions open at once, not how many Units a Session
+runs; that is still `KONTRA_MAX_PARALLEL_SESSIONS` and your own loop.
 
 ### Concurrency is yours
 

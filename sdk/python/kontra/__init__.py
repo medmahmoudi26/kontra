@@ -138,6 +138,7 @@ from kontra.actor import (
     Actor, ActorRegistry, ParamRef, MethodRegistration, Slot, SlotDeclaration, actor,
     unit_state, param, global_state, object_state,
 )
+from kontra.batch import Batch, Dataset, Unit
 from kontra.retry import NonRetryableError, SessionLost
 from kontra.version import CONTRACT_VERSION
 
@@ -246,6 +247,12 @@ __all__ = [
     "Actor",
     "ActorRegistry",
     "MethodRegistration",
+    # THE METHOD'S OWN VOCABULARY, typed: `batch: Batch[Product], dataset: Dataset[Enriched]` is
+    # the contract `takes=`/`emits=` used to have to restate (PRD D2). NOT `kontra.catalog.Batch`,
+    # which is the CALLER's handle on a Method's output and keeps its own module.
+    "Batch",
+    "Dataset",
+    "Unit",
     "Slot",
     "SlotDeclaration",
     # THE TWO INPUT TYPES A FORM CAN COLLECT BY DRAGGING. Top level beside `Slot`, because they are

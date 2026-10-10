@@ -151,6 +151,8 @@ def operations_of(registry) -> list[dict]:
     params = schema_of(getattr(registry, "params_type", None))
     ops = []
     for method in getattr(registry, "methods", {}).values():
+        # A signature naming a class defined below the Method is resolved now, at serve time.
+        method = method.resolved() if hasattr(method, "resolved") else method
         op = {"name": method.name}
         # WHAT THE METHOD IS FOR, from the author's own docstring. The catalog carried a name and
         # two schemas, so every surface that listed a Method could say what it TAKES and never what
