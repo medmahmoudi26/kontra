@@ -1,10 +1,15 @@
-# kontra.yaml — repo-level facts ONLY.
+# kontra.example.yaml — copy to kontra.yaml beside docker-compose.yml and edit.
 #
-# This file holds NO per-actor identity. Actors are discovered by the
-# `actors.roots` glob; each actor's (name, version) is INHERITED from its own
-# actor.json and never restated here. Every value below is sourced from the real
-# repo (codec.py constants, manifest.py, the protos, docker-compose.yml, and the
-# hardcoded execution defaults in workflows.py / step.proto) — nothing invented.
+# kontra.yaml IS PER-INSTALL AND GITIGNORED, like .env (PRD §7, ADR 0066): its `fleets:` block
+# holds the cloud credentials a fleet profile needs, so it never belongs in a repository. This
+# example ships with DUMMY values only — every token below is a fake.
+#
+# Only `fleets:` is read by anything today: the orchestrator's infra role reads it at converge time,
+# inside the activity, and never passes a secret into workflow history; the CLI reads it to name and
+# list profiles. The other blocks are the install's documented facts, kept from when this file was
+# the repo-level facts file: they hold NO per-actor identity (actors are discovered by the
+# `actors.roots` glob and each (name, version) comes from its own actor.json), and every value is
+# sourced from the real code rather than invented.
 
 apiVersion: kontra.dev/v1
 
@@ -162,3 +167,31 @@ tenancy:
 build:
   immutableVersions: true                          # build refuses to overwrite an existing (name, version)
   signImages: true                                 # identity should ultimately pin to an image digest, not a mutable :latest tag
+
+# FLEETS — named fleet profiles, each the inputs of one provider's Pulumi program (ADR 0066).
+# `fleet.hold()` uses `default`; `fleet.hold(profile="do-fra")` names one. `local` needs nothing:
+# without this block an install has exactly one profile, `local`, with the defaults below.
+fleets:
+  default: local
+
+  local:                              # Lima VMs on this machine, k3s inside
+    provider: local
+    nodes: 1                          # --nodes N for fleet tests
+    size: { cpus: 2, memory: 4Gi }
+    idle_minutes: 15
+
+  do-fra:
+    provider: digital_ocean
+    region: fra1
+    token: dop_v1_EXAMPLE_not_a_real_token   # dummy
+    ssh_key_fingerprint: "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"           # dummy
+    vpc_cidr: 10.200.0.0/20
+    sizes: { s: s-2vcpu-4gb, m: s-4vcpu-8gb, l: s-8vcpu-16gb }
+    idle_minutes: 15
+
+  customer-eks:                       # bring-your-own cluster: no nodes are created
+    provider: byo_kubeconfig
+    kubeconfig: |
+      apiVersion: v1
+      kind: Config
+      # ... dummy ...
