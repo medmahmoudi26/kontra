@@ -180,17 +180,17 @@ export const POSTURE: Readonly<Record<string, Posture>> = {
   'POST /api/workspaces': 'gated',
   'PUT /api/datasets/runs/:runId/name': 'gated',
   'PUT /api/runs/:runId/workflow': 'gated',
-  // The image store (ADR 0061). All eight REFUSE without a credential; the three that would change
+  // The image store (ADR 0061). All seven REFUSE without a credential; the two that would change
   // something also require `infra`, because ADR 0054 already decided that a privileged capability is a
   // service-token one a session cannot inherit — and inventing a second vocabulary for the same idea is
-  // worse than reusing the one that was argued.
+  // worse than reusing the one that was argued. (`POST /api/images/gc` was an eighth, and it is
+  // deleted: zot has no GC trigger, so it could only ever answer 501.)
   'DELETE /api/images/actors/:name/:version': 'gated',
   'GET /api/images/actors': 'gated',
   'GET /api/images/actors/:name/:version': 'gated',
   'GET /api/images/layers': 'gated',
   'GET /api/images/runtimes': 'gated',
   'GET /api/images/storage': 'gated',
-  'POST /api/images/gc': 'gated',
   'POST /api/images/rebase': 'gated',
   'PUT /api/secrets/:name': 'gated',
   'PUT /api/slots/actor/:actor/:slot': 'gated',

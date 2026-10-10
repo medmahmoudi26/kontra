@@ -106,4 +106,20 @@ describe('the catalog stores the golden descriptor without loss', () => {
     await post({ ...fixture.expect, digest: '' });
     expect((await list())[0].digest).toBe('');
   });
+
+  it('keeps every build fact the corpus names when a re-registration omits it', async () => {
+    // The same rule, for the keys a worker cannot discover at all. `runtime` and `builderDigest` used
+    // to be erased by any registration without them, while this corpus said otherwise — so a worker
+    // started without the Procfile's stamp unpinned a deployed image's runtime and `kontra rebase`
+    // stopped seeing it.
+    const absent = fixture.unsetDigest.absent;
+    expect(absent).toEqual(expect.arrayContaining(['runtime', 'builderDigest']));
+    await post(fixture.expect);
+
+    const stripped: Record<string, unknown> = { ...fixture.expect };
+    for (const key of absent) delete stripped[key];
+    await post(stripped);
+    const { savedAt: _savedAt, ...kept } = (await list())[0];
+    expect(kept).toEqual(fixture.expect);
+  });
 });

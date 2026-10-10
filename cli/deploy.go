@@ -118,6 +118,13 @@ type actorManifest struct {
 	// actor without rebuilding it (`kontra rebase`). The digest it resolves to at build time is
 	// recorded in the catalog; the major is what is asked for next time.
 	Runtime string `json:"runtime"`
+	// Resources is what the actor says it needs to run, normalised to `{cpus, memory}` in
+	// Kubernetes' units from either spelling — `resources` (PRD §6) or its alias `needs` (ADR 0040).
+	// Nil when the manifest states neither. readManifest fills it; the two raw fields are only how
+	// it gets there. See cli/actorresources.go.
+	Resources    *actorResources `json:"-"`
+	RawResources json.RawMessage `json:"resources"`
+	RawNeeds     json.RawMessage `json:"needs"`
 }
 
 // engineFor decides which engine an actor folder runs under: the flag, then the manifest, then the
@@ -399,7 +406,7 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 		return nil, fmt.Errorf("kontra deploy needs the SDK tree to stage into the image "+
 			"(KONTRA_SDK_ROOT, else the checkout): %w", rerr)
 	}
-	staged, err := stageActorBuild(o.actorDir, m, engine, root)
+	staged, err := stageActorBuild(o.actorDir, m, engine, root, rt)
 	if err != nil {
 		return nil, err
 	}
@@ -770,6 +777,11 @@ func readManifest(dir string) (actorManifest, error) {
 	if m.Name == "" || m.Version == "" {
 		return m, fmt.Errorf("%s needs name and version", filepath.Join(dir, "actor.json"))
 	}
+	res, err := resourcesOf(m.RawResources, m.RawNeeds)
+	if err != nil {
+		return m, fmt.Errorf("%s: %w", filepath.Join(dir, "actor.json"), err)
+	}
+	m.Resources = res
 	switch m.kindOf() {
 	case kindActor:
 	case kindActivity:

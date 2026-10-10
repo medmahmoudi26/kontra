@@ -31,6 +31,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -92,7 +94,11 @@ func stageParent() string {
 
 // stageActorBuild copies the actor into a temporary directory, adds everything the image needs that
 // the actor does not carry, and returns the directory to hand `pack`. The caller removes it.
-func stageActorBuild(actorDir string, m actorManifest, engine, sdkRoot string) (string, error) {
+//
+// `rt` is the runtime the build is about to be handed as `--run-image`, already resolved to a
+// digest. It is taken here, and not only by `pack`, because the Procfile is the one place the
+// image can carry what it was built on (see stageProcfile).
+func stageActorBuild(actorDir string, m actorManifest, engine, sdkRoot string, rt resolvedRuntime) (string, error) {
 	if sdkRoot == "" {
 		return "", fmt.Errorf("no SDK tree to build this actor against: set KONTRA_SDK_ROOT, or run "+
 			"from the checkout.\n  The `cli` and `orchestrator-infra` services have it at /opt/kontra, "+
@@ -138,7 +144,7 @@ func stageActorBuild(actorDir string, m actorManifest, engine, sdkRoot string) (
 	if err := writeIfAbsent(filepath.Join(staged, ".python-version"), stagedPython+"\n", 0o644); err != nil {
 		return cleanup(err)
 	}
-	if err := stageProcfile(staged, m, engine); err != nil {
+	if err := stageProcfile(staged, m, engine, rt); err != nil {
 		return cleanup(err)
 	}
 	script, err := workerEntrypoint.ReadFile("assets/worker-entrypoint.sh")
@@ -207,12 +213,69 @@ func stagePythonSDK(staged, sdkRoot string) error {
 // stageProcfile writes the process the image runs. CNB has no ENTRYPOINT to set, so the Procfile IS
 // the contract — and the actor's identity rides in it because `pack build --env` is BUILD-time only
 // and nothing else in this path can bake a runtime variable into the image.
-func stageProcfile(staged string, m actorManifest, engine string) error {
+//
+// WHAT THE IMAGE WAS BUILT ON RIDES HERE TOO, AND FOR THE SAME REASON. Both registrars echo
+// KONTRA_RUNTIME_{NAME,MAJOR,DIGEST} and KONTRA_BUILDER_DIGEST into the catalog, and until this
+// nothing set them: the comments said the Warden would hand them back, and the Warden never did. So
+// a deployed actor's catalog row carried no runtime, `kontra rebase` skipped every one of them as
+// "built before the field existed", and the Images page could not say which actors sat on a stale
+// runtime. Nothing inside the running container can discover these — it cannot see the run image it
+// was layered onto or the builder that layered it — and this function is the last point that knows
+// both.
+//
+// AS SHELL DEFAULTS, `${VAR:-baked}`, AND NOT AS ASSIGNMENTS LIKE THE IDENTITY ABOVE THEM. The
+// identity cannot change under an image; the runtime digest can. `kontra rebase` rewrites the run
+// image beneath the app layers and leaves those layers — this Procfile among them — byte for byte
+// as they were, so after a rebase the baked digest names the runtime the image USED to sit on. A
+// placer that knows better (the catalog records the rebase) can say so with the container's
+// environment, and a default is what lets it win. The catalog also refuses to let a registration
+// move a runtime digest within one major (`control/orchestrator/src/db/repo.ts`, upsertActor), so a
+// worker of a rebased image that nobody re-stamps cannot undo the rebase by restarting either.
+//
+// NOT WRITTEN WHEN UNKNOWN. The registrars omit `runtime` when KONTRA_RUNTIME_NAME is empty and the
+// catalog keeps a previous value only when the key is absent, so a blank baked here would erase a
+// good one on every restart.
+func stageProcfile(staged string, m actorManifest, engine string, rt resolvedRuntime) error {
 	entry := m.entryFile()
+	var built strings.Builder
+	if rt.Name != "" {
+		for _, kv := range [][2]string{
+			{"KONTRA_RUNTIME_NAME", rt.Name},
+			{"KONTRA_RUNTIME_MAJOR", strconv.FormatUint(uint64(rt.Major), 10)},
+			{"KONTRA_RUNTIME_DIGEST", rt.Digest},
+		} {
+			if err := bakeDefault(&built, kv[0], kv[1]); err != nil {
+				return err
+			}
+		}
+	}
+	if err := bakeDefault(&built, "KONTRA_BUILDER_DIGEST", builderDigest); err != nil {
+		return err
+	}
 	cmd := fmt.Sprintf("worker: KONTRA_ACTOR_NAME=%s KONTRA_ACTOR_VERSION=%s KONTRA_ACTOR_ENGINE=%s "+
-		"KONTRA_ACTOR_KIND=%s KONTRA_ACTOR_ENTRY=%s KONTRA_ACTOR_ROOT=. KONTRA_HANDLER_BIN=./%s ./%s\n",
-		m.Name, m.Version, engine, m.kindOf(), entry, stagedHandler, stagedEntry)
+		"KONTRA_ACTOR_KIND=%s KONTRA_ACTOR_ENTRY=%s KONTRA_ACTOR_ROOT=. %sKONTRA_HANDLER_BIN=./%s ./%s\n",
+		m.Name, m.Version, engine, m.kindOf(), entry, built.String(), stagedHandler, stagedEntry)
 	return writeIfAbsent(filepath.Join(staged, "Procfile"), cmd, 0o644)
+}
+
+// procfileValue is what may be baked into the Procfile unquoted: a runtime name, a major, an OCI
+// digest. THE PROCFILE IS A SHELL COMMAND, which is why the existing `VAR=value` prefix works at all,
+// so a value outside this set is not a formatting problem — a `$(…)` in it would run in every
+// container of the image. Every value that reaches here has already been through the OCI grammar
+// (resolveRuntime) or is a constant; this is the check that keeps that true if a new caller is not.
+var procfileValue = regexp.MustCompile(`^[A-Za-z0-9._:@+-]+$`)
+
+// bakeDefault appends `VAR=${VAR:-value} ` — or nothing, for an empty value. See stageProcfile.
+func bakeDefault(b *strings.Builder, name, value string) error {
+	if value == "" {
+		return nil
+	}
+	if !procfileValue.MatchString(value) {
+		return fmt.Errorf("refusing to bake %s=%q into the image's Procfile: it is a shell command line "+
+			"and that value is not a name, a number or a digest", name, value)
+	}
+	fmt.Fprintf(b, "%s=${%s:-%s} ", name, name, value)
+	return nil
 }
 
 // stageSkip is what never enters a build context: a checkout, a local virtualenv, caches, and a

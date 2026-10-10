@@ -79,9 +79,9 @@ def register_actor_catalog(url, m, operations: list, *, timeout: float = 5.0) ->
     #
     # Every other field here is something the worker knows about itself. These two are facts about a
     # BUILD — the run image a buildpack layered onto, and the builder that layered it — and neither is
-    # visible from inside the running container. The deploying CLI records them, the Warden hands them
-    # back as environment, and this echoes them, so a worker re-registering does not erase what it
-    # cannot independently know.
+    # visible from inside the running container. The deploying CLI bakes them into the image's
+    # Procfile as environment (cli/packstage.go) and this echoes them, so a worker re-registering does
+    # not erase what it cannot independently know.
     #
     # A runtime with no NAME is not a runtime: a partially-filled object would overwrite a complete
     # one, and the same absent-not-empty rule as `digest` applies to both keys.

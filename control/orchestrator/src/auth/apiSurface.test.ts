@@ -190,9 +190,11 @@ describe('the size of the exposure, stated out loud', () => {
     expect({ legacy: count('legacy'), worker: count('worker') }).toEqual({ legacy: 54, worker: 4 });
   });
 
-  it('and 57 routes that do refuse, which is the half that works', () => {
+  it('and 56 routes that do refuse, which is the half that works', () => {
+    // 57 → 56: `POST /api/images/gc` is deleted. It was gated and could only answer 501 (zot has no
+    // garbage-collection trigger), so the surface shrank by a route that never did anything.
     const count = (p: Posture) => Object.values(POSTURE).filter((v) => v === p).length;
-    expect({ gated: count('gated'), public: count('public') }).toEqual({ gated: 57, public: 4 });
+    expect({ gated: count('gated'), public: count('public') }).toEqual({ gated: 56, public: 4 });
   });
 });
 

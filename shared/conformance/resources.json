@@ -1,0 +1,183 @@
+{
+ "why": "What an Actor says it needs to run — `resources` in `actor.json`, the PRD §6 spelling, with `needs` (ADR 0040's spelling, which the shipped examples use) accepted as an alias. TWO READERS AND NO SHARED CODE: `cli/actorresources.go` (every CLI path that reads `actor.json` — deploy, serve, build, bundle) and `runtime/python/internals/manifest.py` (the worker's own load). Both normalise to ONE shape, `{cpus, memory}`, which is what a Kubernetes Deployment's `resources` is built from (`control/orchestrator/src/kube/manifests.ts`, PlacementSpec.resources, on the D3 branch). A drift here is silent in the worst direction: an author's `256m` that one reader turns into `256Mi` and another hands on verbatim is a pod with a 256-MILLIBYTE memory limit, which Kubernetes accepts and the container cannot start under.",
+ "memory": "THE UNIT TABLE IS THE CONTRACT. The examples and ADR 0040 were written in Docker's spelling, where `256m` is 256 MiB; the PRD writes Kubernetes', where `1Gi` is 1 GiB and a lowercase `m` means MILLI. The two notations collide on exactly the letters an author is most likely to type, so the rule is: Docker's lowercase binary suffixes (`b k m g t`) become Kubernetes' binary ones (`'' Ki Mi Gi Ti`); Kubernetes' own suffixes (`Ki Mi Gi Ti Pi Ei` and decimal `M G T P E`) pass through untouched; a bare integer is bytes in both; anything else is refused rather than guessed at. A lowercase `k` is Docker's KiB and not Kubernetes' decimal kilo, because a lowercase family is Docker's family — `m` and `g` mean nothing else for memory. Uppercase `M`/`G` are read the Kubernetes way (decimal), which differs from Docker's by under 7%; that is an imprecision, where the lowercase collision is a 10^9 error.",
+ "normalised": "the key set a reader returns: `cpus` (a JSON number) and `memory` (a string), each ABSENT when the manifest did not state it — never 0 and never \"\", because a consumer filling a default must be able to tell \"unstated\" from a value. A manifest that states nothing at all, or an empty block, or `null`, normalises to `null`.",
+ "keys": ["cpus", "memory"],
+ "cases": [
+  {
+   "why": "the PRD §6 sample, verbatim — the canonical spelling in the canonical units",
+   "manifest": {"resources": {"memory": "1Gi", "cpus": 1}},
+   "resources": {"cpus": 1, "memory": "1Gi"}
+  },
+  {
+   "why": "what `examples/python/hello` ships: the alias, in Docker's units. `256m` must become 256 MiB and never 256 millibytes",
+   "manifest": {"needs": {"memory": "256m", "cpus": 1}},
+   "resources": {"cpus": 1, "memory": "256Mi"}
+  },
+  {
+   "why": "ADR 0040's own sample",
+   "manifest": {"needs": {"memory": "512m", "cpus": 1}},
+   "resources": {"cpus": 1, "memory": "512Mi"}
+  },
+  {
+   "why": "`g` is what kontra-actors' manifests write (`targets.container`), so it is what an author migrating them will type",
+   "manifest": {"resources": {"memory": "3g", "cpus": 2}},
+   "resources": {"cpus": 2, "memory": "3Gi"}
+  },
+  {
+   "why": "a lowercase `k` is Docker's KiB, not Kubernetes' decimal kilo — see `memory`",
+   "manifest": {"resources": {"memory": "64k"}},
+   "resources": {"memory": "64Ki"}
+  },
+  {
+   "why": "`t` exists in Docker's table too",
+   "manifest": {"resources": {"memory": "1t"}},
+   "resources": {"memory": "1Ti"}
+  },
+  {
+   "why": "a bare integer is bytes in both notations, and `b` is Docker's explicit spelling of the same",
+   "manifest": {"resources": {"memory": "1073741824b"}},
+   "resources": {"memory": "1073741824"}
+  },
+  {
+   "why": "a bare integer passes through as it is",
+   "manifest": {"resources": {"memory": "1073741824"}},
+   "resources": {"memory": "1073741824"}
+  },
+  {
+   "why": "Kubernetes' binary suffixes are already the target notation",
+   "manifest": {"resources": {"memory": "512Mi"}},
+   "resources": {"memory": "512Mi"}
+  },
+  {
+   "why": "Kubernetes' decimal `G` passes through — read as 10^9, see `memory` for why that is not converted",
+   "manifest": {"resources": {"memory": "2G"}},
+   "resources": {"memory": "2G"}
+  },
+  {
+   "why": "a fraction is legal with a unit; the Docker rewrite keeps it",
+   "manifest": {"resources": {"memory": "1.5g"}},
+   "resources": {"memory": "1.5Gi"}
+  },
+  {
+   "why": "a fraction of a CPU is how a light actor says so",
+   "manifest": {"resources": {"cpus": 0.5}},
+   "resources": {"cpus": 0.5}
+  },
+  {
+   "why": "one key stated, one absent: the absent one stays ABSENT for the consumer to default",
+   "manifest": {"resources": {"memory": "1Gi"}},
+   "resources": {"memory": "1Gi"}
+  },
+  {
+   "why": "most manifests state nothing",
+   "manifest": {},
+   "resources": null
+  },
+  {
+   "why": "an empty block states nothing either",
+   "manifest": {"resources": {}},
+   "resources": null
+  },
+  {
+   "why": "`null` is not stating it",
+   "manifest": {"needs": null},
+   "resources": null
+  },
+  {
+   "why": "`targets` is a different, older key (ADR 0040 deleted it; D3 removes what is left). It is neither read nor refused here, so the manifests that still carry it keep working",
+   "manifest": {"targets": {"container": {"memory": "1g", "cpus": 2, "shmSize": "1g"}}},
+   "resources": null
+  },
+  {
+   "why": "BOTH SPELLINGS AT ONCE is refused rather than resolved by precedence: an author who added `resources` and forgot `needs` has two answers, and picking one silently is how the other one turns out to be the one they edited",
+   "manifest": {"needs": {"cpus": 1}, "resources": {"cpus": 2}},
+   "refused": ["needs", "resources"]
+  },
+  {
+   "why": "both spellings, even agreeing, is still two places to edit",
+   "manifest": {"needs": {"cpus": 1}, "resources": {"cpus": 1}},
+   "refused": ["needs", "resources"]
+  },
+  {
+   "why": "a block that is not an object",
+   "manifest": {"resources": "large"},
+   "refused": ["resources"]
+  },
+  {
+   "why": "the alias is named in its own refusal: the author wrote `needs`, and a message about `resources` sends them looking for a key their file does not have",
+   "manifest": {"needs": {"cpus": "2"}},
+   "refused": ["needs", "cpus"]
+  },
+  {
+   "why": "an UNKNOWN KEY IS REFUSED, because the likely one is a typo — `cpu` for `cpus` — and dropping it would run the actor on the default with nothing said",
+   "manifest": {"resources": {"cpu": 2}},
+   "refused": ["unknown", "cpu"]
+  },
+  {
+   "why": "`shmSize` rode `targets.container`; nothing honours it on this path, so copying it across is told rather than ignored",
+   "manifest": {"resources": {"memory": "1Gi", "shmSize": "1g"}},
+   "refused": ["unknown", "shmSize"]
+  },
+  {
+   "why": "cpus as a string — a Kubernetes manifest would accept `\"1\"`, actor.json does not",
+   "manifest": {"resources": {"cpus": "1"}},
+   "refused": ["cpus"]
+  },
+  {
+   "why": "a boolean is a number in Python (`isinstance(True, int)`), so this is the input that tells the two readers apart",
+   "manifest": {"resources": {"cpus": true}},
+   "refused": ["cpus"]
+  },
+  {
+   "why": "zero CPUs is not a smaller actor, it is one that cannot be scheduled",
+   "manifest": {"resources": {"cpus": 0}},
+   "refused": ["cpus"]
+  },
+  {
+   "why": "negative",
+   "manifest": {"resources": {"cpus": -1}},
+   "refused": ["cpus"]
+  },
+  {
+   "why": "memory as a number: bytes or MiB? Refused rather than guessed",
+   "manifest": {"resources": {"memory": 512}},
+   "refused": ["memory"]
+  },
+  {
+   "why": "`MB` is in neither table",
+   "manifest": {"resources": {"memory": "512MB"}},
+   "refused": ["memory"]
+  },
+  {
+   "why": "uppercase `K` is Docker's and not Kubernetes' — which is exactly why it is refused rather than read one way",
+   "manifest": {"resources": {"memory": "64K"}},
+   "refused": ["memory"]
+  },
+  {
+   "why": "an exponent is legal Kubernetes and not legal here; one notation per unit is the point",
+   "manifest": {"resources": {"memory": "1e9"}},
+   "refused": ["memory"]
+  },
+  {
+   "why": "zero memory",
+   "manifest": {"resources": {"memory": "0Mi"}},
+   "refused": ["memory"]
+  },
+  {
+   "why": "empty",
+   "manifest": {"resources": {"memory": ""}},
+   "refused": ["memory"]
+  },
+  {
+   "why": "a fraction of a BYTE",
+   "manifest": {"resources": {"memory": "1.5"}},
+   "refused": ["memory"]
+  },
+  {
+   "why": "whitespace is not trimmed: a value that only parses after cleanup is a value two readers can clean differently",
+   "manifest": {"resources": {"memory": " 1Gi"}},
+   "refused": ["memory"]
+  }
+ ]
+}
