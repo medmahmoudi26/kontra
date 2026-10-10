@@ -21,7 +21,6 @@ import pytest
 
 import asyncio
 
-from internals.engine import batch_id, unit_slot
 from test_actor_engine import FakeUnitStore, make_host
 
 
@@ -106,6 +105,18 @@ class FailingUnitStore:
     def get_subunit(self, key):
         raise KeyError(key)
 
+    def commit_prefix(self, run_id, actor_id, batch_id):
+        return f"commits/{run_id}/{actor_id}/{batch_id}/"
+
+    def put_commit(self, key, body):
+        raise RuntimeError("disk full")
+
+    def get_commit(self, key):
+        return None
+
+    def list_commits(self, prefix):
+        return []   # nothing was ever written, so a fresh execution finds nothing to fold
+
 
 def test_push_returns_nothing():
     """The Kafka-producer contract (ADR 0028 §3): push is fire-and-forget, so it returns None and
@@ -133,12 +144,15 @@ def test_a_failing_store_surfaces_at_the_checkpoint_and_does_not_commit_the_unit
             await dataset.push({"u": unit.value})
 
     host = make_host(method, store=FailingUnitStore())
+    beats = []
+    host._heartbeat = beats.append
     with pytest.raises(RuntimeError, match="disk full"):
         asyncio.run(host.run_batch({"units": ["a"], "run_id": "r", "node_id": "n"}))
 
-    # The Unit did NOT commit — a retry re-runs it and re-pushes, so nothing was silently lost.
-    bid = batch_id("method", ["a"], {})
-    assert unit_slot(bid, 0) not in host._kv.d
+    # The Unit did NOT commit — no beat named it finished, so the retry re-runs it and re-pushes,
+    # and nothing was silently lost. The beat is what a retry resumes from (ADR 0060), so "no beat"
+    # is the whole of "not committed".
+    assert beats == [], beats
 
 
 def test_a_failing_store_fails_the_whole_call_rather_than_isolating_one_unit():

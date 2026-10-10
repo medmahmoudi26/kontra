@@ -3,12 +3,16 @@ package unitstore
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // s3Putter is the real Putter over aws-sdk-go-v2 s3 (path-style, custom endpoint) — the same
@@ -26,6 +30,58 @@ func (p *s3Putter) Put(ctx context.Context, key string, data []byte) error {
 		ContentType: aws.String("application/json"),
 	})
 	return err
+}
+
+// Get reads one object back — the commit path's read half (see commit.go). A missing key is
+// ErrNotFound and nothing else is: every other error (a refused credential, a dropped connection)
+// must stay retryable rather than be mistaken for data the store lost.
+//
+// "Missing" is the code set the handler's object store already uses for the same question
+// (runtime/handler/internal/objectstore.isNotFound, and Python's get_commit): NoSuchKey, NotFound,
+// 404. Matched on the API error CODE rather than only on the typed *types.NoSuchKey, because a
+// gateway that answers a bare 404 surfaces as a generic API error with code "NotFound" — and it is
+// asked through the one-method interface rather than smithy.APIError so this package does not take
+// a direct dependency it does not have today.
+func (p *s3Putter) Get(ctx context.Context, key string) ([]byte, error) {
+	out, err := p.cli.GetObject(ctx, &s3.GetObjectInput{Bucket: &p.bucket, Key: &key})
+	if err != nil {
+		var missing *types.NoSuchKey
+		var coded interface{ ErrorCode() string }
+		if errors.As(err, &missing) || (errors.As(err, &coded) && isMissingCode(coded.ErrorCode())) {
+			return nil, fmt.Errorf("%w: s3://%s/%s", ErrNotFound, p.bucket, key)
+		}
+		return nil, err
+	}
+	defer out.Body.Close()
+	return io.ReadAll(out.Body)
+}
+
+// List returns every key under prefix — a fresh execution's resume (commit.go, ListCommits).
+// Paginated, because a LIST page stops at 1,000 keys and a batch can hold more Units than that. Any
+// error returns as itself, retryable: unlike a GET, a LIST has no "absent" answer to tell apart.
+func (p *s3Putter) List(ctx context.Context, prefix string) ([]string, error) {
+	var keys []string
+	pages := s3.NewListObjectsV2Paginator(p.cli, &s3.ListObjectsV2Input{Bucket: &p.bucket, Prefix: &prefix})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range page.Contents {
+			if o.Key != nil {
+				keys = append(keys, *o.Key)
+			}
+		}
+	}
+	return keys, nil
+}
+
+func isMissingCode(code string) bool {
+	switch code {
+	case "NoSuchKey", "NotFound", "404":
+		return true
+	}
+	return false
 }
 
 // FromEnv builds a Store from the shared KONTRA_S3_* contract (identical to the Python actorkit

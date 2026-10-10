@@ -1051,7 +1051,10 @@ class Session:
     `async with`. That is the deal being struck: while a Session lives `self.*` is coherent, and
     when it cannot be, you get an exception rather than a silent re-activation with an empty
     instance. Catch it, reopen, and re-dispatch the Batch you were on — the blast radius is one
-    Batch, because the cursor is yours and the commit map is keyed by the Batch's content (§17).
+    Batch, because the cursor is yours. The re-dispatch is a new activity execution with no heartbeat
+    to resume from: on a KEYED scope it lists the Batch's commit objects and folds back what the lost
+    scope finished (ADR 0060); an unkeyed scope reopens as a new Session id, a new instance, and
+    re-runs that Batch.
 
     KEYS ARE OPTIONAL (§10). `crawler["acme.com"]` claims a shared identity: the durable
     `object_state` of that key, still there next week (ADR 0022). Bare `crawler` is a private

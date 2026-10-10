@@ -157,10 +157,11 @@ used to mean *"reload me"*, and the framework rebuilt the resource in place — 
 `@actor.load` anyway), and the gain is that a Session's promise has no third case — while it
 lives, `self.*` is coherent.
 
-What survives the reopen is what was **committed**: the caller resumes from the cursor it holds,
-the Batch's content hash is unchanged, so the commit map skips every finished Unit. A **poison**
-Unit that has killed N scopes is recorded as a failure and skipped (§21) — without that, §20 plus
-§17 is a tight loop. Execution is at-least-once; result recording is exactly-once. See
+A reopen is a **new activity execution**, so it has no heartbeat to resume from. On the same key it
+**lists** the Batch's commit objects and folds back what the lost scope finished (ADR 0060, owner
+decision A7); an unkeyed scope reopens as a new Session id — a new instance — and re-runs the Batch it
+was on. The **poison** counter survives the reopen too — a Unit that has killed N scopes is recorded
+as a failure and skipped (§21); without that, §20 plus §17 is a tight loop. Execution is at-least-once; result recording is exactly-once. See
 [[Durability-and-Failures]].
 
 ## Session admission (`max_parallel_sessions`)

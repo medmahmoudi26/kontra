@@ -15,10 +15,10 @@
 // has already been done once without touching a line of it.
 //
 // COMMIT BY IDENTITY, NOT BY POSITION. A committed Unit is keyed by the BATCH's content hash plus
-// its index (ADR 0023 §17). That is stable across a retry by construction, distinct across
-// Batches, and it survives a reopened scope — a hash does not know its scope died. Keyed on
-// position alone, a second Batch under one Session replays the first Batch's outputs by index and
-// never runs the author at all: full, plausible, wrong.
+// its index (ADR 0023 §17). That is stable across a retry by construction and distinct across
+// Batches, which is what lets the checkpoint a retry is handed be checked against the batch it
+// describes. Keyed on position alone, a second Batch under one Session replays the first Batch's
+// outputs by index and never runs the author at all: full, plausible, wrong.
 //
 // ISOLATION AT THE ITERATOR BOUNDARY. The Batch knows which Unit the author is on, so a failure
 // in the body is attributed to that Unit, recorded, and the Method RE-INVOKED with the remainder
@@ -31,7 +31,15 @@
 // probes @actor.healthcheck: if the probe reports the resource DEAD (non-nil error or a returned
 // false) — OR the Method returned a core.SessionLostError — RunBatch nulls the instance and
 // RETURNS the error, so the handler's activity retries the SAME actor id, the fresh turn re-runs
-// Load, and the commit map skips every committed Unit.
+// Load, and every committed Unit is folded back rather than re-run.
+//
+// RESUME HAS TWO HALVES (PRD D1, owner decision A7, ADR 0060). Within one activity execution it is
+// Temporal's: the previous attempt's last heartbeat carries a checkpoint saying WHICH Units finished,
+// each finished Unit's outcome is a commit object in the unit store written before that beat, and the
+// host hands the checkpoint in (ResumeFrom). Across executions — a re-dispatch of the same Batch on
+// the same instance, which has no heartbeat to read — it is the store's: the batch's commit prefix is
+// LISTED and what an earlier execution finished is folded back the same way. Nothing here reads a
+// cache to decide what already ran.
 //
 // Method bodies must be IDEMPOTENT: a Unit can re-run after a host death that struck between the
 // work and its commit (at-least-once across that window).
@@ -66,8 +74,10 @@ import (
 // each live session reads these.
 var (
 	reg *core.Registry
-	// unitStore is the per-unit blob plane for pushed records (nil => no KONTRA_S3_ENDPOINT,
-	// the no-S3 dev/test mode where pushed records are collected inline). One per host process.
+	// unitStore is the per-unit blob plane: pushed records and commit objects. One per host
+	// process. nil only where Serve never runs — Serve refuses an actor that declares a Method
+	// without one (owner decision A8) — so nil is the in-process seam for engine tests that predate
+	// the in-memory store, where pushed records ride inline and no commit object is written.
 	unitStore *unitstore.Store
 )
 
@@ -76,23 +86,40 @@ var (
 func Configure(r *core.Registry) {
 	reg = r
 	if us, err := unitstore.FromEnv(context.Background()); err != nil {
-		log.Printf("[kontra] unit store init failed (streaming falls back to inline): %v", err)
+		// Logged and left nil rather than returned, because Configure's signature has callers:
+		// UnitStoreConfigured is what Serve asks next, and it refuses a committing actor here.
+		log.Printf("[kontra] unit store init failed: %v", err)
 	} else {
 		unitStore = us
 	}
 }
 
+// UnitStoreConfigured reports whether Configure (or ConfigureWith) left this process an object
+// store. Serve asks it to refuse, at boot, an actor that commits Units with nowhere durable to commit
+// them (owner decision A8, ADR 0060).
+func UnitStoreConfigured() bool { return unitStore != nil }
+
+// ConfigureWith binds the registry and an already-open unit store — Configure with the store handed
+// in rather than read from the environment. It exists because the store is now on the RESUME path as
+// well as the push path: a host-level test of a retry has to put the same store under two attempts
+// (or two executions), and the environment can only describe a real S3. nil is the in-process test
+// seam, exactly as Configure leaves it when KONTRA_S3_ENDPOINT is unset.
+func ConfigureWith(r *core.Registry, us *unitstore.Store) {
+	reg = r
+	unitStore = us
+}
+
 // maxUnitReloads: a Unit that forces this many resource reloads is ISOLATED as a failure instead
 // of reloading forever, so one poison Unit (a Unit that kills the resource every run) can't sink
 // the batch by exhausting the handler's activity retries (ADR 0023 §21, peer of Python's
-// _MAX_UNIT_RELOADS). This is framework-internal machinery beside the commit map, NOT an author
+// _MAX_UNIT_RELOADS). This is framework-internal machinery beside the commit, NOT an author
 // state tier, and NOT a failure budget — nothing fails a Batch on the framework's judgement (§14).
 const maxUnitReloads = 2
 
-// stateTTL: committed Unit keys self-expire this long after the run so Redis doesn't grow
-// unbounded (one key set per run_id, never otherwise deleted); comfortably past the handler's
-// retry budget. Applied by runtime/go/statekv on every write (one EXPIRE on the actor's hash) —
-// peer of STATE_TTL_S in statekv.py.
+// stateTTL: a Unit's scratch and reload counter self-expire this long after their last write so
+// Redis doesn't grow unbounded; comfortably past the handler's retry budget, so an in-flight Unit's
+// scratch is still there for the attempt that re-runs it. Applied by runtime/go/statekv on every
+// write (one EXPIRE on the actor's hash) — peer of STATE_TTL_S in statekv.py.
 const stateTTL = 24 * time.Hour
 
 // ckptSuffix is the shared cross-SDK suffix for a Unit's resume scratch (ADR 0015). Both SDKs
@@ -100,26 +127,32 @@ const stateTTL = 24 * time.Hour
 // (see statekey_congruence_test.go).
 const ckptSuffix = "-ckpt"
 
-// errInfo is the {type, message} of an isolated unit (wire.PerUnitFailure.error shape).
-type errInfo struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-}
+// errInfo is the {type, message} of an isolated unit (wire.PerUnitFailure.error shape) — the same
+// type the Unit's commit object carries, so a failure folded back on a retry is the failure that
+// was recorded, field for field.
+type errInfo = unitstore.CommitError
 
-// commit is one durable Unit result in the actor's state hash. A non-nil Error records an
-// isolated Unit (with Category "terminal" or "exhausted"); Out holds what was pushed while the Unit
-// was current otherwise. The presence of the key (Contains) is the exactly-once marker across a retry.
-type commit struct {
-	Out      []any    `json:"out"`
-	Error    *errInfo `json:"error,omitempty"`
-	Category string   `json:"category,omitempty"`
-}
+// CommitLostError is a Unit the previous attempt's checkpoint calls finished with no readable commit
+// object — or a listing of the batch's commit objects naming a Unit the batch cannot hold, or one
+// that will not decode.
+//
+// LOUD, AND NOT RETRIED. The checkpoint is beaten only AFTER the commit object is written, so a
+// finished Unit with nothing at its key means the store lost it, or this worker is reading a
+// different store than the attempt that wrote it. Neither improves on the next attempt — it reads the
+// same checkpoint and the same store — and the two quiet alternatives are both wrong: folding the
+// Unit as empty drops its rows, and re-running it hides a store that is losing data. The host maps it
+// to a non-retryable ApplicationError of type "CommitLost", as Python's host does.
+type CommitLostError struct{ Msg string }
+
+func (e *CommitLostError) Error() string           { return e.Msg }
+func (e *CommitLostError) KontraNonRetryable()     {}
+func (e *CommitLostError) KontraErrorType() string { return "CommitLost" }
 
 // RunBatchReq is one batch: the input Units, the run-wide params, and which Method to run.
 type RunBatchReq struct {
 	// ActorID keys the live instance and its state hash. The workflow derives it (idempotency
-	// key, else run/node joined) so a retry lands on the SAME instance and the commit map skips
-	// already-done Units.
+	// key, else run/node joined) so a retry lands on the SAME instance when this process still
+	// holds it; which Units are already done comes from the heartbeat, not from the instance.
 	ActorID string         `json:"actor_id"`
 	Units   []any          `json:"units"`
 	Params  map[string]any `json:"params"`
@@ -162,25 +195,25 @@ type CloseResp struct {
 	Closed bool `json:"closed"`
 }
 
-// StateStore is the durable per-actor state the engine commits through. The production
-// implementation is runtime/go/statekv over Redis; tests inject an in-memory fake.
+// StateStore is the durable per-actor state the engine keeps for a Unit IN FLIGHT: its resume
+// scratch (`unit_state`) and its reload counter. The production implementation is
+// runtime/go/statekv over Redis; tests inject an in-memory fake.
 //
 // Narrow on purpose: this is everything the engine calls. It is an interface because the seam is
 // real rather than hypothetical — the production store and the test fake have both existed from
 // the start, and the store has been swapped once already.
+//
+// TOUCH AND DROP WENT WITH THE COMMIT MAP (ADR 0060). Touch slid the hash's TTL forward at each
+// batch boundary so an idle actor's commit map survived between batches; Drop cleared it when a new
+// batch owner superseded the last. A finished Unit is a commit object now and which Units finished
+// rides the heartbeat, so neither had anything left to protect — every write here still slides the
+// TTL itself.
 type StateStore interface {
 	Contains(ctx context.Context, field string) (bool, error)
 	Get(ctx context.Context, field string, out any) error
 	SetWithTTL(ctx context.Context, field string, val any, ttl time.Duration) error
 	Remove(ctx context.Context, field string) error
 	Save(ctx context.Context) error
-	// Touch slides the whole actor's TTL forward in ONE call. It is the method the hash layout
-	// bought: the store this replaced had none, so the host re-wrote every live session key at
-	// each turn boundary just to refresh a clock.
-	Touch(ctx context.Context) error
-	// Drop clears the whole actor's state. Used when a new batch owner supersedes the previous
-	// one, so one Session's per-batch state never leaks into the next.
-	Drop(ctx context.Context) error
 }
 
 // KontraActor is one live actor instance, keyed by actor id. The host holds at most one per id
@@ -188,7 +221,7 @@ type StateStore interface {
 // engine.py.
 type KontraActor struct {
 	actorID string
-	state   StateStore // the commit map and the per-Unit scratch
+	state   StateStore // the per-Unit scratch and reload counters
 	inst    *core.Session
 	opens   int
 	global  *globalstore.Store // cross-session global_state, built once per instance
@@ -202,6 +235,9 @@ type KontraActor struct {
 	// heartbeat callback, and making them contend would put a heartbeat in front of a commit.
 	ckMu sync.Mutex
 	ck   checkpoint.Details
+	// prior is the checkpoint the previous ATTEMPT of this activity last beat, handed in by the
+	// host (ResumeFrom) and consumed by the next RunBatch. Under ckMu with `ck`, which it seeds.
+	prior checkpoint.Details
 	// progress is the sink for the author's @actor.healthcheck value, on the engine's own
 	// ticker rather than per Unit. See SetProgress.
 	progress func(any)
@@ -249,6 +285,34 @@ func (a *KontraActor) publishCheckpoint(d checkpoint.Details) {
 	a.ckMu.Lock()
 	a.ck = d
 	a.ckMu.Unlock()
+}
+
+// ResumeFrom hands the engine the checkpoint the previous ATTEMPT of this activity last beat — the
+// `checkpoint` field of its heartbeat details — for the next RunBatch to resume from. The zero value
+// means a first attempt.
+//
+// IT IS ALSO PUBLISHED AT ONCE, AS IS, and that is the half that matters for a second death.
+// Temporal keeps only the LAST heartbeat, and the host's keepalive beats on a timer from the moment
+// RunBatch is entered — through Load, which can take as long as the author's resource takes to come
+// up. A beat sent before this attempt has re-derived its own checkpoint would otherwise carry
+// whatever this instance last published (zero on a fresh one, ANOTHER batch's on a reused keyed
+// instance) and overwrite the record of what the previous attempt finished. Re-beating the prior
+// unchanged costs nothing: it is exactly what Temporal already holds. RunBatch replaces it with this
+// batch's own once the resume has folded (seed), which is before Load.
+func (a *KontraActor) ResumeFrom(prior checkpoint.Details) {
+	a.ckMu.Lock()
+	a.prior, a.ck = prior, prior
+	a.ckMu.Unlock()
+}
+
+// takePrior returns the handed-in checkpoint and forgets it, so a LATER batch on this instance — a
+// different dispatch — is never resumed from a previous one's attempt.
+func (a *KontraActor) takePrior() checkpoint.Details {
+	a.ckMu.Lock()
+	defer a.ckMu.Unlock()
+	p := a.prior
+	a.prior = checkpoint.Details{}
+	return p
 }
 
 // Checkpoint is the latest published checkpoint — WHICH Units committed and which were isolated,
@@ -330,7 +394,9 @@ func BatchID(method string, units []any, params map[string]any) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// unitSlot is where Unit i of batch bid commits, and the prefix its scratch hangs off.
+// unitSlot is Unit i of batch bid as a state-hash prefix: its scratch (`-ckpt`) and its reload
+// counter (`-reloads`) hang off it. It used to be the commit's own key too; commits are objects now
+// (unitstore.CommitKey), and the identity they share is the same content hash plus index.
 func unitSlot(bid string, i int) string { return fmt.Sprintf("%s-u%d", bid, i) }
 
 // open builds a fresh session and runs Load — on the first batch AND on every reload after a
@@ -402,15 +468,20 @@ func (a *KontraActor) probe() (dead bool, progress any) {
 	return false, res
 }
 
-// RunBatch runs one Batch through the named Method. Committed Units are skipped (exactly-once
-// across a handler retry); a dead resource (healthcheck says dead, or a Method returns
-// SessionLost) nulls the instance and is returned so the handler retries the same actor id; any
-// other failure on a LIVE resource isolates the Unit the author was on.
+// RunBatch runs one Batch through the named Method. Units the previous attempt finished (see
+// ResumeFrom) are folded back from their commit objects rather than re-run; a dead resource
+// (healthcheck says dead, or a Method returns SessionLost) nulls the instance and is returned so the
+// handler retries the same actor id; any other failure on a LIVE resource isolates the Unit the
+// author was on.
 func (a *KontraActor) RunBatch(ctx context.Context, req RunBatchReq) (*RunBatchResp, error) {
 	// The DENOMINATOR of the sick-worker signature. `countReload` below is meaningless without
 	// it — two reloads in a thousand batches and two in two are the same number otherwise. It was
 	// defined and never called, which left the fleet dashboard dividing by a constant zero.
 	countBatch()
+
+	// Taken first, so a dispatch that fails to resolve its Method below cannot leave the previous
+	// attempt's checkpoint behind for some later batch on this instance to read.
+	prior := a.takePrior()
 
 	// Resolved here, not at boot: an actor declares many Methods and the dispatch names one, so
 	// one loaded Session serves them all (ADR 0023 §9).
@@ -426,19 +497,55 @@ func (a *KontraActor) RunBatch(ctx context.Context, req RunBatchReq) (*RunBatchR
 	// name and once without is one Method, and must hash to one Batch.
 	bid := BatchID(name, req.Units, req.Params)
 
+	r := &batchRun{
+		a: a, ctx: ctx, sm: a.state, bid: bid,
+		slots: map[int][]any{}, failSlots: map[int]map[string]any{},
+		total: len(req.Units),
+		run:   req.RunID, node: req.NodeID, rdate: req.RunDate,
+	}
+	// Where this batch's Units commit. Derived from the run, the INSTANCE and the batch's content
+	// hash — not the dispatch's node id, which a keyed re-dispatch mints afresh — so every attempt
+	// AND every execution of one Batch on one instance derives the same prefix. resumePlan keeps a
+	// previous attempt's if it differs. Empty without an object store, where nothing is written.
+	if unitStore != nil {
+		r.manifest = unitStore.CommitPrefix(req.RunID, a.actorID, bid)
+	}
+
+	// RESUME, BEFORE THE RESOURCE LOADS. From the previous attempt's checkpoint when it has
+	// something to say about this batch; otherwise — a fresh execution, a discarded checkpoint —
+	// from a LISTING of the batch's commit prefix (resumePlan). Either way the fold reads the commit
+	// objects and fails loud, without paying for a Load, when they cannot be read.
+	//
+	// WHAT THE KEEPALIVE CARRIES MEANWHILE: it beats from the moment this function is entered, and
+	// Temporal keeps only the last beat. Until seed() below, the published checkpoint is the one
+	// ResumeFrom handed in, as is — the very checkpoint a heartbeat plan was built from, or a zero
+	// value on a fresh execution, which every reader discards. A checkpoint rebuilt from the
+	// still-empty slots would beat `done: []` over the prior for the length of the fold.
+	//
+	// THE REDIS COMMIT MAP, THE `batch-owner` GUARD AND THE TTL RENEWAL THAT WERE HERE ARE GONE. The
+	// map was the resume record, keyed by actor id under a 24 h TTL; the guard dropped it whenever a
+	// dispatch with another run/node took the instance, which is every keyed re-dispatch that did
+	// not pin its node id. The listing is keyed by the instance and the batch's content hash
+	// instead, so the case the guard threw away — the same Batch, the same key, a new node id — now
+	// resumes. What remains in the hash is an in-flight Unit's scratch and reload counter, keyed by
+	// the batch's content hash.
+	plan, err := r.resumePlan(prior)
+	if err != nil {
+		return nil, err
+	}
+	if plan != nil {
+		if err := r.fold(plan, req.Units); err != nil {
+			return nil, err
+		}
+	}
+	r.seed()
+
 	if a.inst == nil {
 		if err := a.open(req.Params); err != nil {
 			return nil, err
 		}
 	} else {
 		a.inst.Params = req.Params
-	}
-
-	r := &batchRun{
-		a: a, ctx: ctx, sm: a.state, bid: bid,
-		slots: map[int][]any{}, failSlots: map[int]map[string]any{},
-		total: len(req.Units),
-		run:   req.RunID, node: req.NodeID, rdate: req.RunDate,
 	}
 
 	// Optional background progress beat: periodically log the healthcheck's returned progress
@@ -450,51 +557,21 @@ func (a *KontraActor) RunBatch(ctx context.Context, req RunBatchReq) (*RunBatchR
 		go a.progressBeat(beatCtx)
 	}
 
-	// Slide live keys' TTLs forward
-	// forward — the batch-boundary half of the sliding TTL. Done before the author's loop starts,
-	// so the in-place bind and the renewal are uncontended.
-	r.renewTTLs()
 	// Bind cross-session global_state (its Redis client is opened lazily on first use).
 	a.inst.BindGlobalState(boundGlobalState{ctx: ctx, s: a.globalStore()})
 
-	// The commit map below is per BATCH; the state hash it lives in is per ACTOR ID. A KEYED
-	// dispatch points many batches at ONE id, so per-batch state from a superseded owner is
-	// dropped here rather than in Close — the handler's Close is best-effort, so a batch whose
-	// close never landed would otherwise poison the next one. Tier 3/4 live in another store and
-	// are untouched, which is the whole point of keying.
-	r.claimOwner()
-
-	// Replay commits from a PRIOR ATTEMPT of this Batch; what is left is this attempt's work. The
-	// commit map is why a retry after a mid-batch death is not a re-run, and keying it by the
-	// Batch's content hash is why a SECOND Batch under this owner cannot read the first's slots.
+	// What is left is this attempt's work: every Unit neither folded back as committed nor folded
+	// back as isolated.
 	var todo []core.Item
 	for i, u := range req.Units {
-		var prev commit
-		if ok, err := r.sm.Contains(ctx, r.slot(i)); err == nil && ok {
-			if err := r.sm.Get(ctx, r.slot(i), &prev); err == nil {
-				if prev.Error != nil {
-					r.failSlots[i] = failureRecord(u, prev.Error, prev.Category)
-				} else {
-					r.slots[i] = prev.Out
-				}
-				continue
-			}
+		if _, done := r.slots[i]; done {
+			continue
+		}
+		if _, isolated := r.failSlots[i]; isolated {
+			continue
 		}
 		todo = append(todo, core.Item{Index: i, Value: u})
 	}
-
-	// THIS BATCH'S CHECKPOINT, BEFORE THIS ATTEMPT'S FIRST BEAT. Every beat now carries
-	// `a.Checkpoint()` (the keepalive and the author's progress included), and until a Unit commits
-	// that was whatever the instance last published: a keyed dispatch's PREVIOUS batch — its done
-	// count shown on this batch's run page — or, on a fresh instance, the zero value, which a
-	// keepalive then wrote over the real checkpoint of the attempt before. Published here, from the
-	// replayed commits, so the first beat of an attempt already says what is committed. And the
-	// counts seeded to match, so the beat reports the replayed Units as done.
-	r.mu.Lock()
-	ck, done, isolated := r.checkpoint(), len(r.slots), len(r.failSlots)
-	r.mu.Unlock()
-	a.publishCheckpoint(ck)
-	a.heartbeat(done, r.total, isolated)
 
 	countBatch()
 	if method == nil {
@@ -511,8 +588,8 @@ func (a *KontraActor) RunBatch(ctx context.Context, req RunBatchReq) (*RunBatchR
 		if err := r.drive(method.Fn, b, core.NewDataset(b)); err != nil {
 			if isSessionLost(err) {
 				// The resource is dead. Null the instance so the NEXT turn re-runs Load, then
-				// return the error: the handler's activity retries this same actor id and the
-				// commit map skips the finished Units. Reload = the retry.
+				// return the error: the handler's activity retries this same actor id, and the
+				// retry folds the finished Units back from the checkpoint. Reload = the retry.
 				log.Printf("[%s] resource dead -> let the handler retry: %v", a.ID(), err)
 				countReload()
 				a.inst = nil
@@ -525,8 +602,8 @@ func (a *KontraActor) RunBatch(ctx context.Context, req RunBatchReq) (*RunBatchR
 	return r.response(), nil
 }
 
-// batchRun is one Batch in flight: the commit map for this Batch, the durable sink the author's
-// Units push and commit through, and the failure policy.
+// batchRun is one Batch in flight: which of its Units have finished and with what, the durable
+// sink the author's Units push and commit through, and the failure policy.
 //
 // It implements core.Sink — Enter / Record / Commit are the three calls the Batch makes as the
 // author's loop moves.
@@ -538,6 +615,9 @@ type batchRun struct {
 	total int
 
 	run, node, rdate string
+	// manifest is the prefix this batch's commit objects live under — what the checkpoint carries
+	// as `manifest_ref`. "" without an object store, where nothing is written.
+	manifest string
 
 	// mu guards the state store and the two slot maps. The store is NOT assumed goroutine-safe
 	// and the author may run their Units in real goroutines, so every store call serializes here.
@@ -561,6 +641,7 @@ func (r *batchRun) slot(i int) string { return unitSlot(r.bid, i) }
 // claims to describe.
 func (r *batchRun) checkpoint() checkpoint.Details {
 	c := checkpoint.New(r.bid)
+	c.ManifestRef = r.manifest
 	for i := range r.slots {
 		c.Commit(i)
 	}
@@ -595,15 +676,15 @@ func (r *batchRun) Record(u *core.Unit, rec any) (any, error) {
 	return unitStore.PutSubunit(r.ctx, r.rdate, r.run, r.node, u.Index, m)
 }
 
-// Commit writes the Unit's durable done-marker, drops its scratch, and beats. This is the marker
-// a retry reads to skip the Unit, so nothing after this line may re-run it.
+// Commit writes the Unit's commit object, drops its scratch, and beats. The beat is what a retry
+// reads to skip the Unit and the object is what it folds back, so nothing after this line may
+// re-run it.
 func (r *batchRun) Commit(u *core.Unit) error {
 	out := u.Out()
-	r.mu.Lock()
-	if err := saveState(r.ctx, r.sm, r.slot(u.Index), commit{Out: out}); err != nil {
-		r.mu.Unlock()
+	if err := r.putCommit(u.Index, unitstore.Commit{Out: out}); err != nil {
 		return err
 	}
+	r.mu.Lock()
 	r.clearScratch(r.slot(u.Index))
 	r.slots[u.Index] = out
 	done, isolated := len(r.slots), len(r.failSlots)
@@ -700,15 +781,14 @@ func (r *batchRun) classify(u *core.Unit, e error) error {
 
 // fail isolates one Unit as a durable failure. The record matches the wire contract
 // (PerUnitFailure {unit, error:{type,message}, category}); the SAME structured error is stored in
-// the commit so the skip-replay path re-emits it verbatim.
+// the Unit's commit object so a retry folds it back verbatim.
 func (r *batchRun) fail(u *core.Unit, e error, category string) error {
 	ei := &errInfo{Type: core.ErrorTypeName(e), Message: e.Error()}
 	slot := r.slot(u.Index)
-	r.mu.Lock()
-	if err := saveState(r.ctx, r.sm, slot, commit{Error: ei, Category: category}); err != nil {
-		r.mu.Unlock()
+	if err := r.putCommit(u.Index, unitstore.Commit{Error: ei, Category: category}); err != nil {
 		return err
 	}
+	r.mu.Lock()
 	r.clearScratch(slot) // an isolated Unit never resumes -> drop its scratch
 	r.failSlots[u.Index] = failureRecord(u.Value, ei, category)
 	done, isolated := len(r.slots), len(r.failSlots)
@@ -744,35 +824,204 @@ func (r *batchRun) reloadOrIsolate(u *core.Unit, e error) error {
 	return &core.SessionLostError{Msg: e.Error()}
 }
 
-// claimOwner drops per-batch state left by a superseded owner (see RunBatch).
-func (r *batchRun) claimOwner() {
-	owner := r.run + "/" + r.node
-	var prev string
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	has := false
-	if ok, err := r.sm.Contains(r.ctx, "batch-owner"); err == nil && ok {
-		if err := r.sm.Get(r.ctx, "batch-owner", &prev); err == nil {
-			has = true
-		}
+// putCommit writes Unit i's commit object — its output refs, or its isolation error.
+//
+// SYNCHRONOUS, AND BEFORE THE BEAT. Commit and fail beat only after this returns, so a checkpoint can
+// never name a Unit whose outcome is not already in the store — which is what lets a reader treat a
+// missing object as loss (CommitLostError) rather than as "not finished yet". Outside r.mu: the
+// object store is goroutine-safe, and holding the lock across a PUT would serialise every Unit's
+// commit behind the slowest one.
+//
+// A no-op without an object store, which only an in-process test reaches: Serve refuses to start an
+// actor that declares a Method without one (owner decision A8), because that mode has nowhere durable
+// to put a finished Unit's output.
+func (r *batchRun) putCommit(i int, c unitstore.Commit) error {
+	if r.manifest == "" {
+		return nil
 	}
-	if has && prev == owner {
-		return
-	}
-	if has {
-		log.Printf("[%s] batch %s supersedes %s: clearing per-session state", r.a.ID(), owner, prev)
-		_ = r.sm.Drop(r.ctx)
-	}
-	_ = saveState(r.ctx, r.sm, "batch-owner", owner) // after the drop, which clears the hash
+	return unitStore.PutCommit(r.ctx, unitstore.CommitKey(r.manifest, i), r.bid, i, c)
 }
 
-// renewTTLs slides the actor's whole state TTL forward at the batch boundary. ONE call: the state
-// is a single hash and EXPIRE applies to all of it. Best-effort — a store hiccup never fails a
-// run, since the write-time TTL is the backstop.
-func (r *batchRun) renewTTLs() {
+// seed publishes THIS BATCH'S CHECKPOINT — already naming every Unit the resume folded back — and
+// beats it, before Load and before this attempt's first commit (PR #43's review).
+//
+// Every beat carries `a.Checkpoint()` (the keepalive and the author's progress included), and until a
+// Unit commits that was whatever the instance last published: a keyed dispatch's PREVIOUS batch — its
+// done count shown on this batch's run page — or, on a fresh instance, the zero value, which a
+// keepalive then wrote over the real checkpoint of the attempt before. Seeded here, from the folded
+// slots, so the first beat of an attempt already says what is committed; and beaten with the counts
+// to match, so a cross-execution resume's first beat reports the folded Units as done rather than
+// waiting for a commit that a slow first Unit may not make inside the bound. Published under r.mu,
+// for Commit's reason.
+func (r *batchRun) seed() {
+	r.mu.Lock()
+	r.a.publishCheckpoint(r.checkpoint())
+	done, isolated := len(r.slots), len(r.failSlots)
+	r.mu.Unlock()
+	r.a.heartbeat(done, r.total, isolated)
+}
+
+// foldPlan is what resumePlan found worth reading back: the prefix the Units committed under, the
+// Units, and where that list came from — named in a CommitLost so an operator knows which record
+// disagreed with the store.
+type foldPlan struct {
+	manifest string
+	finished []int
+	source   string
+}
+
+// resumePlan decides what this attempt may skip — nil to run every Unit. Peer of Python's
+// _resume_plan and _listed_plan together, outcome for outcome.
+//
+// THE HEARTBEAT FIRST, THE STORE WHEN IT HAS NOTHING TO SAY. A checkpoint that names finished Units of
+// THIS batch is the within-execution record and is folded as it says. Otherwise — no details (a fresh
+// execution, or an attempt that died before its first beat), a checkpoint for another batch, or one
+// naming nothing finished — listedPlan asks the store what an earlier execution finished.
+//
+// The checkpoint is honoured only if checkpoint.Accepted says so — v1, and THIS batch's content
+// hash — which is the corpus's rule and ResumeFrom's, so none of the `discarded` rows in
+// shared/conformance/checkpoint.json can be folded back here.
+//
+// THREE OUTCOMES WHEN IT IS HONOURED, AND ONLY ONE OF THEM IS QUIET:
+//   - no manifest_ref: the attempt that committed had no object store, so the outputs it finished
+//     were never durable anywhere. Every Unit runs again — safe, because a re-run is what the
+//     contract already permits, and logged, because it is work redone.
+//   - a manifest_ref and no store HERE: this worker cannot read what the batch already committed.
+//     CommitLostError, because re-running would silently hide a skewed fleet.
+//   - both: fold the finished Units back from their objects (fold).
+//
+// A manifest_ref that differs from the one this worker derives is KEPT, for writing as well as
+// reading. It only differs when the two attempts disagree on the layout or on KONTRA_S3_PREFIX, and
+// splitting one batch's commits across two prefixes would make the NEXT attempt's checkpoint point
+// at only half of them.
+func (r *batchRun) resumePlan(prior checkpoint.Details) (*foldPlan, error) {
+	ck := checkpoint.Accepted(&prior, r.bid)
+	if ck == nil {
+		if prior.V != 0 || prior.BatchID != "" {
+			log.Printf("[%s] previous attempt's checkpoint does not describe batch %s; discarded", r.a.ID(), r.bid)
+		}
+		return r.listedPlan()
+	}
+	if ck.ManifestRef != "" && unitStore != nil && ck.ManifestRef != r.manifest {
+		log.Printf("[%s] batch %s committed under %s, not %s: keeping the previous attempt's prefix",
+			r.a.ID(), r.bid, ck.ManifestRef, r.manifest)
+		r.manifest = ck.ManifestRef
+	}
+	var finished []int
+	for i := 0; i < r.total; i++ {
+		if ck.Done.Has(i) || ck.Failed[i] {
+			finished = append(finished, i)
+		}
+	}
+	if len(finished) == 0 {
+		return r.listedPlan()
+	}
+	if ck.ManifestRef == "" {
+		log.Printf("[%s] batch %s: %d unit(s) finished on an attempt with no object store, so their outputs were never durable — they run again",
+			r.a.ID(), r.bid, len(finished))
+		return r.listedPlan()
+	}
+	if unitStore == nil {
+		return nil, &CommitLostError{Msg: fmt.Sprintf(
+			"batch %s: a previous attempt committed %d unit(s) under %q, and this actor has no object store configured (KONTRA_S3_ENDPOINT unset) to read them back from",
+			r.bid, len(finished), ck.ManifestRef)}
+	}
+	return &foldPlan{manifest: ck.ManifestRef, finished: finished, source: "the previous attempt's checkpoint"}, nil
+}
+
+// listedPlan is the cross-execution half of resume (owner decision A7): the Units an earlier
+// EXECUTION of this batch on this instance finished, read from a LISTING of its commit prefix — nil
+// to run every Unit.
+//
+// One LIST per attempt that reaches here, and for a Batch nobody ran before it comes back empty. What
+// a listing may name is CommitUnits's rule (shared/conformance/commit.json §list): an index the batch
+// cannot hold is CommitLostError, and a LIST that fails returns as itself, retryable. No store, no
+// listing — that is the in-process test seam, not a mode Serve starts.
+func (r *batchRun) listedPlan() (*foldPlan, error) {
+	if unitStore == nil || r.manifest == "" {
+		return nil, nil
+	}
+	keys, err := unitStore.ListCommits(r.ctx, r.manifest)
+	if err != nil {
+		return nil, err
+	}
+	finished, err := unitstore.CommitUnits(r.manifest, keys, r.total)
+	if err != nil {
+		return nil, &CommitLostError{Msg: fmt.Sprintf(
+			"batch %s: the listing of %s cannot be folded back: %v", r.bid, r.manifest, err)}
+	}
+	if len(finished) == 0 {
+		return nil, nil
+	}
+	log.Printf("[%s] batch %s: an earlier execution finished %d of %d unit(s) under %s",
+		r.a.ID(), r.bid, len(finished), r.total, r.manifest)
+	return &foldPlan{manifest: r.manifest, finished: finished, source: "a listing of its commit objects"}, nil
+}
+
+// foldConcurrency bounds the commit-object reads a resume makes at once — the peer of Python's
+// _INGEST_CONCURRENCY, for the same reason: each is an S3 GET, and an unbounded fan-out over a
+// thousand-Unit batch would open a thousand at once.
+const foldConcurrency = 16
+
+// fold reads every finished Unit's commit object and folds it back into this batch's slots.
+//
+// WHAT THE OBJECT SAYS WINS OVER WHICH SET THE CHECKPOINT PUT THE UNIT IN. The checkpoint answers
+// "is it finished"; the object answers "with what". They can disagree only when a Unit re-ran after
+// its beat was lost (a beat is throttled and a hard kill drops it) and finished the other way the
+// second time — and the object is the later write.
+func (r *batchRun) fold(plan *foldPlan, units []any) error {
+	type read struct {
+		i   int
+		c   unitstore.Commit
+		err error
+	}
+	results := make([]read, len(plan.finished))
+	sem := make(chan struct{}, foldConcurrency)
+	var wg sync.WaitGroup
+	for n, i := range plan.finished {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(n, i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[n] = read{i: i}
+			key := unitstore.CommitKey(plan.manifest, i)
+			raw, err := unitStore.GetCommit(r.ctx, key)
+			switch {
+			case errors.Is(err, unitstore.ErrNotFound):
+				results[n].err = &CommitLostError{Msg: fmt.Sprintf(
+					"batch %s: unit %d is finished according to %s, but there is no commit object at %s",
+					r.bid, i, plan.source, key)}
+			case err != nil:
+				results[n].err = err // a read that failed for any other reason stays retryable
+			default:
+				c, derr := unitstore.DecodeCommit(raw, r.bid, i)
+				if derr != nil {
+					results[n].err = &CommitLostError{Msg: fmt.Sprintf(
+						"batch %s: unit %d's commit object at %s cannot be folded back: %v", r.bid, i, key, derr)}
+				}
+				results[n].c = c
+			}
+		}(n, i)
+	}
+	wg.Wait()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_ = r.sm.Touch(r.ctx)
+	for _, res := range results {
+		if res.err != nil {
+			return res.err
+		}
+	}
+	for _, res := range results {
+		if res.c.Error != nil {
+			r.failSlots[res.i] = failureRecord(units[res.i], res.c.Error, res.c.Category)
+		} else {
+			r.slots[res.i] = res.c.Out
+		}
+	}
+	log.Printf("[%s] resumed batch %s: %d of %d unit(s) folded back from %s",
+		r.a.ID(), r.bid, len(plan.finished), len(units), plan.manifest)
+	return nil
 }
 
 // clearScratch drops a committed/isolated Unit's resume scratch. Best-effort: the Unit never

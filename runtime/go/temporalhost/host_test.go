@@ -97,7 +97,7 @@ func TestRunBatchRequiresAnActorID(t *testing.T) {
 }
 
 // memState is an engine.StateStore that holds nothing and errors on nothing — enough for a test
-// about the ENVELOPE, which never reads the commit map.
+// about the ENVELOPE, and for the resume tests, which must not need the state hash at all.
 type memState struct{}
 
 func (memState) Contains(context.Context, string) (bool, error)               { return false, nil }
@@ -105,8 +105,6 @@ func (memState) Get(context.Context, string, any) error                       { 
 func (memState) SetWithTTL(context.Context, string, any, time.Duration) error { return nil }
 func (memState) Remove(context.Context, string) error                         { return nil }
 func (memState) Save(context.Context) error                                   { return nil }
-func (memState) Touch(context.Context) error                                  { return nil }
-func (memState) Drop(context.Context) error                                   { return nil }
 
 // TestRunBatchNamesTheMachineItRanOn is the callee half of "provenance travels with the Batch".
 //

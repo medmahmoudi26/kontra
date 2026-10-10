@@ -12,7 +12,8 @@ import asyncio
 import pytest
 
 from kontra import ActorRegistry, MethodRegistration
-from internals.engine import batch_id, build_session_factory, unit_slot
+from internals.engine import CommitLost, batch_id, build_session_factory, unit_slot
+from internals.unitstore import commit_key, commit_prefix, decode_commit, encode_commit
 
 
 class FakeKV:
@@ -31,12 +32,6 @@ class FakeKV:
     async def delete(self, field):
         return self.d.pop(field, None) is not None
 
-    async def touch(self):
-        pass
-
-    async def drop(self):
-        self.d.clear()
-
 
 class FakeUnitStore:
     """In-memory unitstore double: same put_subunit contract, keys -> bytes.
@@ -49,6 +44,7 @@ class FakeUnitStore:
 
     def __init__(self):
         self.blobs = {}
+        self.commits = {}
 
     def put_subunit(self, run_id, node_id, i, record, run_date=""):
         import hashlib
@@ -69,6 +65,33 @@ class FakeUnitStore:
         rec = _json.loads(self.blobs[key])
         return rec[0] if isinstance(rec, list) else rec
 
+    # Commit objects (ADR 0060). Kept in their OWN dict rather than in `blobs`, because `blobs` is
+    # what these tests count as rows — and a commit object is not a row, which is exactly why the
+    # real layout puts it under `commits/` rather than `units/`.
+    def commit_prefix(self, run_id, actor_id, batch_id):
+        from internals.unitstore import commit_prefix
+
+        return commit_prefix("t", run_id, actor_id, batch_id)
+
+    def put_commit(self, key, body):
+        import json as _json
+
+        self.commits[key] = _json.dumps(body).encode()   # bytes, round-tripped like the real one
+
+    def get_commit(self, key):
+        import json as _json
+
+        raw = self.commits.get(key)
+        return None if raw is None else _json.loads(raw)
+
+    def list_commits(self, prefix):
+        """A prefix LIST, as S3 answers one: every key that starts with it, in no promised order.
+        Counts its calls, and raises `list_error` when a test sets one."""
+        self.lists = getattr(self, "lists", 0) + 1
+        if getattr(self, "list_error", None) is not None:
+            raise self.list_error
+        return [k for k in reversed(list(self.commits)) if k.startswith(prefix)]
+
 
 def unit_blobs(store, run, unit):
     """Keys this run wrote for one unit, matched on the hive segments rather than the whole
@@ -78,6 +101,15 @@ def unit_blobs(store, run, unit):
         k for k in store.blobs
         if k.startswith(f"units/run={run}/") and f"/unit={unit:05d}/" in k
     ]
+
+
+def beating(host):
+    """Capture every heartbeat `host` sends. The LAST one is what Temporal hands the next attempt
+    of the same activity — it keeps only an activity's last heartbeat details — so
+    `beats[-1]["checkpoint"]` is exactly what a retry is given as `resume`."""
+    beats = []
+    host._heartbeat = beats.append
+    return beats
 
 
 def make_host(method, load=None, healthcheck=None, store=None):
@@ -147,23 +179,32 @@ def test_a_unit_pushes_as_many_records_as_it_likes():
                               {"seed": 1, "page": 0}]
 
 
-def test_a_committed_unit_is_keyed_by_the_batch_hash_plus_its_index():
-    """ADR 0023 §17. The key scheme is durable state, so it is asserted directly: a bare index
-    is what let a second Batch read the first's slots."""
+def test_a_committed_unit_is_an_object_keyed_by_the_batch_hash_plus_its_index():
+    """ADR 0023 §17, ADR 0060. The key scheme is durable state, so it is asserted directly: a bare
+    index is what let a second Batch read the first's slots. The commit is an OBJECT in the unit
+    store now, and the actor's state hash holds none of it."""
 
     async def method(self, batch, dataset):
         async for unit in batch:
             await dataset.push({"u": unit.value})
 
-    host = make_host(method)
-    asyncio.run(host.run_batch({"units": ["a", "b"], "method": "method"}))
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    out = asyncio.run(host.run_batch(
+        {"units": ["a", "b"], "method": "method", "run_id": "r", "node_id": "n"}))
 
     bid = batch_id("method", ["a", "b"], {})
-    assert host._kv.d[unit_slot(bid, 0)] == {"out": [{"u": "a"}]}
-    assert host._kv.d[unit_slot(bid, 1)] == {"out": [{"u": "b"}]}
+    prefix = commit_prefix("t", "r", "run1-node1", bid)
+    for i in (0, 1):
+        body = store.get_commit(commit_key(prefix, i))
+        assert decode_commit(body, bid, i) == {"out": [out["results"][i]]}
+    assert host._kv.d == {}, "the commit map is gone from the state hash"
 
 
 def test_retry_replays_committed_units_by_identity_not_position():
+    """A prior attempt of THIS batch committed units 1 and 3: its last beat says so, and their
+    commit objects hold what they produced. Same units, same Method, same params -> the same
+    content hash, which is what makes the checkpoint describe this batch at all."""
     ran = []
 
     async def method(self, batch, dataset):
@@ -171,19 +212,25 @@ def test_retry_replays_committed_units_by_identity_not_position():
             ran.append(unit.value)
             await dataset.push({"u": unit.value})
 
-    host = make_host(method)
-    # A prior attempt of THIS batch committed units 1 and 3. Same units, same Method, same
-    # params -> the same content hash, which is what makes a retry find them at all.
-    bid = batch_id("method", ["a", "b", "c", "d"], {})
-    host._kv.d[unit_slot(bid, 1)] = {"out": [{"u": "one-committed"}]}
-    host._kv.d[unit_slot(bid, 3)] = {"out": [{"u": "three-committed"}]}
-    out = asyncio.run(host.run_batch({"units": ["a", "b", "c", "d"], "method": "method"}))
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    units = ["a", "b", "c", "d"]
+    bid = batch_id("method", units, {})
+    prefix = commit_prefix("t", "r", "run1-node1", bid)
+    store.put_commit(commit_key(prefix, 1), encode_commit(bid, 1, [{"u": "one-committed"}]))
+    store.put_commit(commit_key(prefix, 3), encode_commit(bid, 3, [{"u": "three-committed"}]))
+    resume = {"v": 1, "batch_id": bid, "done": [[1, 1], [3, 3]], "failed": [], "manifest_ref": prefix}
+
+    out = asyncio.run(host.run_batch(
+        {"units": units, "method": "method", "run_id": "r", "node_id": "n"}, resume=resume))
     assert sorted(ran) == ["a", "c"]  # committed units never re-run
-    assert out["results"] == [{"u": "a"}, {"u": "one-committed"}, {"u": "c"}, {"u": "three-committed"}]
+    # Folded back IN INPUT ORDER, not appended after the units that ran.
+    assert [r if "u" in r else store.get_subunit(r["$ref"]["key"]) for r in out["results"]] == [
+        {"u": "a"}, {"u": "one-committed"}, {"u": "c"}, {"u": "three-committed"}]
 
 
 def test_a_crash_mid_batch_resumes_at_the_first_uncommitted_unit():
-    """The whole point of the commit map. A host death is not a unit failure — nothing catches
+    """The whole point of the checkpoint. A host death is not a unit failure — nothing catches
     it — so the batch stops where it stood; the retry re-runs the Unit that was in flight and
     NOT the ones already committed."""
 
@@ -199,15 +246,18 @@ def test_a_crash_mid_batch_resumes_at_the_first_uncommitted_unit():
                 raise HostStruck()
             await dataset.push({"u": unit.value})
 
-    host = make_host(method)
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    beats = beating(host)
     units = ["a", "b", "c", "d"]
     with pytest.raises(HostStruck):
         asyncio.run(host.run_batch({"units": units}))
 
-    out = asyncio.run(host.run_batch({"units": units}))     # = the Temporal activity retry
+    # = the Temporal activity retry, handed the last beat's checkpoint
+    out = asyncio.run(host.run_batch({"units": units}, resume=beats[-1]["checkpoint"]))
     assert ran == ["a", "b", "c", "c", "d"]                 # only the in-flight unit re-ran
     assert out["done"] is True
-    assert out["results"] == [{"u": u} for u in units]
+    assert [store.get_subunit(r["$ref"]["key"]) for r in out["results"]] == [{"u": u} for u in units]
 
 
 def test_an_author_who_stops_early_commits_what_they_finished():
@@ -226,14 +276,17 @@ def test_an_author_who_stops_early_commits_what_they_finished():
             await dataset.push({"u": unit.value})
 
     host = make_host(method)
+    beats = beating(host)
     units = ["a", "b", "c", "d"]
     out = asyncio.run(host.run_batch({"units": units}))
     assert out["results"] == [{"u": "a"}, {"u": "b"}]
     assert out["done"] is False                     # two Units were never attempted
+    assert ran == ["a", "b"]
 
-    out2 = asyncio.run(host.run_batch({"units": units}))   # the same Batch again
-    assert ran == ["a", "b", "c", "d"]              # only the unfinished Units re-ran
-    assert out2["done"] is True
+    # What a retry would act on names exactly the two that finished — never the two that were
+    # not reached, which committed EMPTY would be indistinguishable from "produced nothing".
+    ck = beats[-1]["checkpoint"]
+    assert ck["done"] == [[0, 1]] and ck["failed"] == [], ck
 
 
 def test_push_from_a_concurrent_task_carries_its_own_provenance():
@@ -274,35 +327,46 @@ def test_a_raise_with_no_unit_to_blame_propagates_and_commits_nothing():
         await dataset.push({"u": units[0].value}, key="first")  # no current Unit -> keyed
         raise RuntimeError("my own concurrency, my own error")
 
-    host = make_host(method)
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    beats = beating(host)
     with pytest.raises(RuntimeError, match="my own concurrency"):
         asyncio.run(host.run_batch({"units": ["a", "b"]}))
 
-    bid = batch_id("method", ["a", "b"], {})
-    assert unit_slot(bid, 0) not in host._kv.d      # in-flight work is never committed
-    assert unit_slot(bid, 1) not in host._kv.d
+    assert store.commits == {}                      # in-flight work is never committed
+    assert beats == []                              # ...nor reported finished to a retry
 
 
 def test_live_failure_isolates_unit_and_batch_completes():
     """The naive loop — no try/except anywhere — does the right thing: the raise is attributed
     to the Unit the iterator was on and the Method is re-invoked with the remainder."""
 
+    seen = []
+
     async def method(self, batch, dataset):
         async for unit in batch:
+            seen.append(unit.value)
             if unit.value == "boom":
                 raise ValueError("bad unit")
             await dataset.push({"u": unit.value})
 
-    host = make_host(method)
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    beats = beating(host)
     out = asyncio.run(host.run_batch({"units": ["a", "boom", "c"]}))
     assert out["done"] is True
-    assert out["results"] == [{"u": "a"}, {"u": "c"}]
+    assert [store.get_subunit(r["$ref"]["key"]) for r in out["results"]] == [{"u": "a"}, {"u": "c"}]
     assert len(out["failures"]) == 1
     f = out["failures"][0]
     assert f["unit"] == "boom" and f["error"]["type"] == "ValueError" and f["category"] == "exhausted"
-    # the failure commit replays verbatim on retry
-    out2 = asyncio.run(host.run_batch({"units": ["a", "boom", "c"]}))
+
+    # The failure commit replays verbatim on retry — folded back from its commit object, with no
+    # Unit handed to the author again, because every one of them is accounted for.
+    seen.clear()
+    out2 = asyncio.run(host.run_batch({"units": ["a", "boom", "c"]}, resume=beats[-1]["checkpoint"]))
+    assert seen == []
     assert out2["failures"] == out["failures"]
+    assert out2["results"] == out["results"]
 
 
 def test_the_method_is_re_invoked_with_only_the_remaining_units():
@@ -412,12 +476,15 @@ def test_a_resource_that_dies_on_the_beat_ends_the_session_too(monkeypatch):
             raise RuntimeError("resource gone")
         return True
 
-    host = make_host(method, healthcheck=hc)
+    store = FakeUnitStore()
+    host = make_host(method, healthcheck=hc, store=store)
     with pytest.raises(SessionLost):
         asyncio.run(host.run_batch({"units": ["a", "b"]}))
 
     # What committed before the death is still committed — the scope ended, it was not undone.
-    assert host._kv.d[unit_slot(batch_id("method", ["a", "b"], {}), 0)] == {"out": [{"u": "a"}]}
+    bid = batch_id("method", ["a", "b"], {})
+    got = decode_commit(store.get_commit(commit_key(commit_prefix("t", "", "run1-node1", bid), 0)), bid, 0)
+    assert [store.get_subunit(r["$ref"]["key"]) for r in got["out"]] == [{"u": "a"}]
 
 
 def reopen(method, load=None, healthcheck=None, store=None, key="acme.com"):
@@ -437,10 +504,15 @@ def reopen(method, load=None, healthcheck=None, store=None, key="acme.com"):
     return (lambda: factory(key, kv=kv)), kv
 
 
-def test_a_reopened_scope_resumes_from_the_commit_map():
-    """ADR 0023 §7 + §17. Losing the resource costs at most the Batch in flight: the caller
-    opens a new scope against the same key and the Units that committed before the death do not
-    run again, because a content hash does not know its scope died."""
+def test_a_reopened_scope_resumes_the_batch_it_lost_from_its_commit_objects():
+    """ADR 0023 §7, PRD D1 and owner decision A7. Losing the resource costs at most the Units in
+    flight: the caller opens a new scope against the same key and runs the Batch again, and what the
+    lost scope already committed is folded back rather than re-run.
+
+    A reopened scope is a NEW activity execution, and heartbeat details do not cross executions, so
+    nothing here hands the second scope a checkpoint. What it resumes from is a LISTING of the
+    batch's commit prefix, which is keyed by the instance (the key) and the batch's content hash —
+    so the same Batch on the same key finds it, whatever dispatch carried it."""
     from kontra.retry import SessionLost
 
     ran, died = [], []
@@ -462,16 +534,81 @@ def test_a_reopened_scope_resumes_from_the_commit_map():
             raise RuntimeError("dead")
         return True
 
-    scope, _ = reopen(method, load=load, healthcheck=hc)
+    store = FakeUnitStore()
+    scope, kv = reopen(method, load=load, healthcheck=hc, store=store)
     units = ["a", "die", "c"]
     with pytest.raises(SessionLost):
-        asyncio.run(scope().run_batch({"units": units}))
+        asyncio.run(scope().run_batch({"units": units, "run_id": "r", "node_id": "n1"}))
 
-    out = asyncio.run(scope().run_batch({"units": units}))   # the caller reopens
+    # The caller reopens. A new dispatch carries a new node id; the instance is the same key.
+    out = asyncio.run(scope().run_batch({"units": units, "run_id": "r", "node_id": "n2"}))
     assert out["opens"] == 1                  # a NEW resource in a NEW scope, not a rebuilt one
     assert out["done"] is True
+    assert ran == ["a", "die", "die", "c"], "the committed Unit is folded back, not re-run"
+    rows = [store.get_subunit(r["$ref"]["key"]) for r in out["results"]]
+    assert rows == [{"u": "a"}, {"u": "die"}, {"u": "c"}]   # each Unit's output ONCE, in order
+    assert len(store.blobs) == 3, "and each row is in the store once"
+    # What survives the scope in the hash is the poison counter; the commits are objects.
+    bid = batch_id("method", units, {})
+    assert set(kv.d) == {f"{unit_slot(bid, 1)}-kills"}, kv.d
+
+
+def test_without_a_store_a_reopened_scope_re_runs_the_batch():
+    """The in-process seam with no object store (which `serve()` no longer starts, A8): there is
+    nothing durable to list, so a reopened scope runs the Batch again. Re-running is what the
+    contract permits — Method bodies tolerate replay — and the output is still each Unit's once."""
+    from kontra.retry import SessionLost
+
+    ran, died = [], []
+
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            ran.append(unit.value)
+            if unit.value == "die" and not died:
+                died.append(1)
+                raise SessionLost("engine crashed")
+            await dataset.push({"u": unit.value})
+
+    scope, _ = reopen(method)
+    with pytest.raises(SessionLost):
+        asyncio.run(scope().run_batch({"units": ["a", "die", "c"]}))
+    out = asyncio.run(scope().run_batch({"units": ["a", "die", "c"]}))
+    assert ran == ["a", "die", "a", "die", "c"]
     assert out["results"] == [{"u": "a"}, {"u": "die"}, {"u": "c"}]
-    assert ran == ["a", "die", "die", "c"], "only the Unit that died re-ran"
+
+
+def test_a_failed_listing_is_retryable_and_runs_nothing():
+    """A LIST that fails is the store being unreachable, not the store having lost something: it
+    raises as itself (retryable, not CommitLost), and nothing loads or runs against a batch whose
+    earlier executions could not be read."""
+    ran, loads = [], []
+
+    async def load(self):
+        loads.append(1)
+
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            ran.append(unit.value)
+
+    store = FakeUnitStore()
+    store.list_error = ConnectionError("connection refused")
+    host = make_host(method, load=load, store=store)
+    with pytest.raises(ConnectionError):
+        asyncio.run(host.run_batch({"units": ["a"], "run_id": "r", "node_id": "n"}))
+    assert ran == [] and loads == []
+
+
+def test_a_fresh_execution_lists_once():
+    """One LIST per attempt that has no heartbeat to read — not one per Unit, and not none."""
+
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            await dataset.push({"u": unit.value})
+
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    asyncio.run(host.run_batch({"units": ["a", "b", "c"], "run_id": "r", "node_id": "n"}))
+    assert store.lists == 1
 
 
 def test_a_unit_that_kills_scope_after_scope_is_isolated_and_skipped():
@@ -542,7 +679,7 @@ def test_unit_state_resumes_mid_unit_and_clears_on_commit():
     assert out["results"] == [{"unit": "big", "pages": ["big-p0", "big-p1", "big-p2", "big-p3"]}]
     assert fetched == [("big", 0), ("big", 1), ("big", 2), ("big", 3)]  # no page fetched twice
     assert f"{slot}-ckpt" not in kv.d  # slot cleared on commit
-    assert slot in kv.d
+    assert slot not in kv.d            # and the commit itself is not a field here any more
 
 
 def test_each_unit_gets_its_own_unit_state_slot():
@@ -623,8 +760,9 @@ def test_push_writes_one_durable_blob_per_record():
     assert all(k.endswith(".json") for k in subkeys)
     assert len(out["results"]) == 3                        # results = the refs
     assert all("$ref" in r for r in out["results"])
-    slot = unit_slot(batch_id("method", units, {}), 0)
-    assert host._kv.d[slot]["out"] == out["results"]       # the commit holds the refs
+    bid = batch_id("method", units, {})
+    body = store.get_commit(commit_key(commit_prefix("t", "r", "run1-node1", bid), 0))
+    assert decode_commit(body, bid, 0) == {"out": out["results"]}   # the commit holds the refs
 
 
 def test_push_without_a_store_collects_records_inline():
@@ -663,10 +801,9 @@ def test_a_resumed_unit_repushes_by_content_sha():
                 await self.unit_state.set("cursor", state)
 
     scope, kv = reopen(method, store=store)
-    slot = unit_slot(batch_id("method", [{}], {}), 0)
     with pytest.raises(SessionLost):
         asyncio.run(scope().run_batch({"units": [{}], "run_id": "r", "node_id": "n"}))
-    assert slot not in kv.d  # died mid-unit -> unit uncommitted
+    assert store.commits == {}  # died mid-unit -> unit uncommitted
     assert len(unit_blobs(store, "r", 0)) == 2  # p0, p1 durable
 
     out = asyncio.run(scope().run_batch({"units": [{}], "run_id": "r", "node_id": "n"}))  # reopened
@@ -767,9 +904,9 @@ def test_run_date_comes_from_the_handler_not_the_worker():
 
 
 def test_unit_store_commits_refs_not_payloads():
-    """With a store configured, Redis (the state manager) holds only small refs; the
-    payload lives in the blob store; the response carries the refs; a retry replays the
-    refs without touching S3."""
+    """With a store configured, a Unit's commit object holds only small refs; the payload lives
+    in its own blob; the response carries the refs; a retry replays the refs from the commit
+    objects without re-running the Method or writing a single new record blob."""
     ran = []
 
     async def method(self, batch, dataset):
@@ -779,39 +916,59 @@ def test_unit_store_commits_refs_not_payloads():
 
     store = FakeUnitStore()
     host = make_host(method, store=store)
+    beats = beating(host)
     units = ["a", "b"]
     out = asyncio.run(host.run_batch({"units": units, "run_id": "r9", "node_id": "n1"}))
     assert out["done"] is True
 
     # response + commits are refs, blobs hold the payloads under the unit's prefix
     bid = batch_id("method", units, {})
+    prefix = commit_prefix("t", "r9", "run1-node1", bid)
+    assert beats[-1]["checkpoint"]["manifest_ref"] == prefix   # the pointer a retry follows
     for i, entry in enumerate(out["results"]):
         ref = entry["$ref"]
         assert ref["key"].startswith("units/run=r9/") and f"/unit={i:05d}/" in ref["key"]
-        committed = host._kv.d[unit_slot(bid, i)]["out"]
-        assert committed == [entry]
-        assert len(str(committed)) < 300  # the 1000-char payload is NOT in the state store
+        raw = store.commits[commit_key(prefix, i)]
+        assert decode_commit(store.get_commit(commit_key(prefix, i)), bid, i) == {"out": [entry]}
+        assert b"xxxxxxxx" not in raw and len(raw) < 1000  # the 1000-char payload is NOT in it
     import json as _json
     blob0 = _json.loads(store.blobs[out["results"][0]["$ref"]["key"]])
     assert blob0 == [{"u": "a", "big": "x" * 1000}]
 
     # retry: committed refs replay verbatim, the Method does not re-run, no new blob writes
     n_blobs = len(store.blobs)
-    out2 = asyncio.run(host.run_batch({"units": units, "run_id": "r9", "node_id": "n1"}))
+    out2 = asyncio.run(host.run_batch({"units": units, "run_id": "r9", "node_id": "n1"},
+                                      resume=beats[-1]["checkpoint"]))
     assert out2["results"] == out["results"]
     assert ran == ["a", "b"] and len(store.blobs) == n_blobs
 
 
-def test_no_store_keeps_inline_commits():
+def test_without_a_store_nothing_durable_is_committed_and_a_retry_re_runs_the_batch():
+    """The no-S3 dev/test mode, and the decision it embodies (ADR 0060). Records ride inline in the
+    result and there is nowhere durable to put a finished Unit's output — not Redis any more — so
+    the checkpoint says WHICH finished with an empty `manifest_ref`, and a retry handed it re-runs
+    every Unit rather than returning a batch with holes where those outputs were.
+
+    Refusing to run at all without a store was the alternative, and it would break every no-S3
+    dev loop for an optimisation. Re-running is the path the contract already calls safe."""
+    ran = []
+
     async def method(self, batch, dataset):
         async for unit in batch:
+            ran.append(unit.value)
             await dataset.push({"u": unit.value})
 
     host = make_host(method, store=None)
-    out = asyncio.run(host.run_batch({"units": ["a"]}))
-    assert out["results"] == [{"u": "a"}]
-    slot = unit_slot(batch_id("method", ["a"], {}), 0)
-    assert host._kv.d[slot] == {"out": [{"u": "a"}]}  # payload inline, as before
+    beats = beating(host)
+    out = asyncio.run(host.run_batch({"units": ["a", "b"]}))
+    assert out["results"] == [{"u": "a"}, {"u": "b"}]
+    assert host._kv.d == {}                                  # nothing of it in the state hash
+    ck = beats[-1]["checkpoint"]
+    assert ck["done"] == [[0, 1]] and ck["manifest_ref"] == "", ck
+
+    out2 = asyncio.run(host.run_batch({"units": ["a", "b"]}, resume=ck))
+    assert ran == ["a", "b", "a", "b"]                       # every Unit ran again
+    assert out2["results"] == out["results"]                 # and each output is there ONCE
 
 
 def test_a_batch_finishes_in_one_call():
@@ -895,11 +1052,14 @@ def test_heartbeat_speaks_the_orchestrator_s_field_names():
 
 
 def test_a_second_batch_on_a_reused_actor_id_does_not_replay_the_first():
-    """The failure this guards is silent and total. The commit map is keyed by unit INDEX and
-    lives in the actor-id-scoped hash; before keying existed every dispatch minted a fresh id,
-    so the map could only ever describe THIS batch. `handle["acme.com"]` points many batches at
-    one id — and without an owner check the second dispatch's unit 0 reads the first's `u0`,
-    returns it, and never runs the author. A full, plausible, wrong result."""
+    """The failure this guards is silent and total: `handle["acme.com"]` points many batches at
+    one id, and a second dispatch whose unit 0 is answered by the first's returns a full,
+    plausible, wrong result without ever running the author.
+
+    The guard used to be a `batch-owner` field beside a commit map in the actor-id-scoped hash.
+    Both are gone; what stops it now is `batch_id`. Even handed the FIRST batch's checkpoint as
+    though it were its own previous attempt — the worst case, a stale details payload — the second
+    batch discards it, because unit indices are positions within one batch (ADR 0060)."""
     ran = []
 
     async def method(self, batch, dataset):
@@ -907,9 +1067,15 @@ def test_a_second_batch_on_a_reused_actor_id_does_not_replay_the_first():
             ran.append(unit.value)
             await dataset.push({"unit": unit.value})
 
-    host = make_host(method)
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    beats = beating(host)
     first = asyncio.run(host.run_batch({"units": ["a"], "node_id": "n1"}))
-    second = asyncio.run(host.run_batch({"units": ["b"], "node_id": "n2"}))
+    stale = beats[-1]["checkpoint"]
+    assert stale["done"] == [[0, 0]]
+    second = asyncio.run(host.run_batch({"units": ["b"], "node_id": "n2"}, resume=stale))
+    first["results"] = [store.get_subunit(r["$ref"]["key"]) for r in first["results"]]
+    second["results"] = [store.get_subunit(r["$ref"]["key"]) for r in second["results"]]
 
     assert ran == ["a", "b"]                              # the second batch actually RAN
     assert first["results"][0] == {"unit": "a"}
@@ -917,23 +1083,31 @@ def test_a_second_batch_on_a_reused_actor_id_does_not_replay_the_first():
 
 
 def test_a_retry_of_the_SAME_batch_still_replays_its_commits():
-    """The other half of the guard: same owner (same run/node) is a RETRY, and replay-not-rerun
-    is the property that makes a mid-batch death cheap (ADR 0012). Clearing on every batch
-    would have been the easy fix and would have broken exactly this."""
+    """The other half of the guard: the same batch's own checkpoint is a RETRY, and
+    replay-not-rerun is the property that makes a mid-batch death cheap (ADR 0012). Discarding
+    every checkpoint would have been the easy fix and would have broken exactly this."""
+
+    class HostStruck(BaseException):
+        pass
+
     ran = []
 
     async def method(self, batch, dataset):
         async for unit in batch:
             ran.append(unit.value)
             if len(ran) == 2:                             # die after unit "a" committed
-                raise RuntimeError("host struck")
+                raise HostStruck()
             await dataset.push({"unit": unit.value})
 
-    host = make_host(method)
-    asyncio.run(host.run_batch({"units": ["a", "b"], "node_id": "n1"}))
-    out = asyncio.run(host.run_batch({"units": ["a", "b"], "node_id": "n1"}))  # the retry
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    beats = beating(host)
+    with pytest.raises(HostStruck):
+        asyncio.run(host.run_batch({"units": ["a", "b"], "node_id": "n1"}))
+    out = asyncio.run(host.run_batch({"units": ["a", "b"], "node_id": "n1"},
+                                     resume=beats[-1]["checkpoint"]))  # the retry
 
-    assert out["results"][0] == {"unit": "a"}
+    assert store.get_subunit(out["results"][0]["$ref"]["key"]) == {"unit": "a"}
     assert ran.count("a") == 1, "the committed unit must NOT have re-run on the retry"
 
 
@@ -1070,3 +1244,144 @@ def test_a_failed_load_still_gets_its_close_so_a_half_open_resource_is_released(
     with pytest.raises(RuntimeError):
         asyncio.run(host.run_batch({"units": ["a"]}))
     assert closed == ["open"], "a half-open resource was dropped without its @actor.close"
+
+
+# ---------------------------------------------------------------------------------------------
+# Resume from the heartbeat's checkpoint (ADR 0060): what is folded back, and what is refused
+# ---------------------------------------------------------------------------------------------
+
+
+def _counting_method(ran):
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            ran.append(unit.value)
+            await dataset.push({"u": unit.value})
+
+    return method
+
+
+def _first_attempt_dies_after(k, units, store, *, load=None):
+    """Attempt 1 of a batch commits `k` Units and the worker dies. Returns (host, beats, ran)."""
+
+    class WorkerDied(BaseException):
+        pass
+
+    ran = []
+
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            if len(ran) == k:
+                raise WorkerDied()
+            ran.append(unit.value)
+            await dataset.push({"u": unit.value})
+
+    host = make_host(method, store=store, load=load)
+    beats = beating(host)
+    with pytest.raises(WorkerDied):
+        asyncio.run(host.run_batch({"units": units, "run_id": "r", "node_id": "n"}))
+    assert ran == units[:k]
+    return host, beats, ran
+
+
+def test_a_finished_unit_with_no_commit_object_is_loud_and_loads_nothing():
+    """The checkpoint is beaten only after the commit object lands, so a finished Unit with nothing
+    at its key is the store having LOST it. Folding it as empty would drop its rows; re-running it
+    would hide a store that is losing data. Neither: `CommitLost`, before the resource loads."""
+    units = ["a", "b", "c", "d"]
+    store = FakeUnitStore()
+    _, beats, _ = _first_attempt_dies_after(2, units, store)
+    ck = beats[-1]["checkpoint"]
+    del store.commits[commit_key(ck["manifest_ref"], 1)]          # the store loses unit 1
+
+    loads, ran = [], []
+
+    async def load(self):
+        loads.append(1)
+
+    host = make_host(_counting_method(ran), store=store, load=load)
+    with pytest.raises(CommitLost, match=r"unit 1 .*no commit object"):
+        asyncio.run(host.run_batch({"units": units, "run_id": "r", "node_id": "n"}, resume=ck))
+    assert ran == [] and loads == [], "nothing may run against a batch whose commits are lost"
+
+
+def test_a_commit_object_naming_another_unit_is_loud():
+    """A body at unit 1's key that says it is unit 0 — a copy, a skewed prefix, a hand edit. Folding
+    it would put unit 0's output in unit 1's place, so the corpus's refusal becomes `CommitLost`."""
+    units = ["a", "b", "c"]
+    store = FakeUnitStore()
+    _, beats, _ = _first_attempt_dies_after(2, units, store)
+    ck = beats[-1]["checkpoint"]
+    store.commits[commit_key(ck["manifest_ref"], 1)] = store.commits[commit_key(ck["manifest_ref"], 0)]
+
+    host = make_host(_counting_method([]), store=store)
+    with pytest.raises(CommitLost, match="names unit 0, expected 1"):
+        asyncio.run(host.run_batch({"units": units, "run_id": "r", "node_id": "n"}, resume=ck))
+
+
+def test_committed_units_this_worker_cannot_read_are_loud():
+    """The previous attempt committed under a prefix and THIS worker has no object store: a skewed
+    fleet. Re-running would hide it, so it is refused by name."""
+    units = ["a", "b", "c"]
+    _, beats, _ = _first_attempt_dies_after(2, units, FakeUnitStore())
+
+    host = make_host(_counting_method([]), store=None)
+    with pytest.raises(CommitLost, match="no object store configured"):
+        asyncio.run(host.run_batch({"units": units, "run_id": "r", "node_id": "n"},
+                                   resume=beats[-1]["checkpoint"]))
+
+
+def test_the_first_beat_of_a_resumed_attempt_still_names_what_the_last_one_finished():
+    """Temporal keeps only the LAST heartbeat. If attempt 2's first beat named only attempt 2's own
+    commits, a second death would hand attempt 3 a checkpoint missing everything attempt 1 did — and
+    attempt 3 would run it all again. The checkpoint is built from the folded slots, so it cannot."""
+    units = ["a", "b", "c", "d", "e"]
+    store = FakeUnitStore()
+    _, beats, _ = _first_attempt_dies_after(2, units, store)
+
+    class DiedAgain(BaseException):
+        pass
+
+    ran = []
+
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            if len(ran) == 1:
+                raise DiedAgain()
+            ran.append(unit.value)
+            await dataset.push({"u": unit.value})
+
+    host = make_host(method, store=store)
+    beats2 = beating(host)
+    with pytest.raises(DiedAgain):
+        asyncio.run(host.run_batch({"units": units, "run_id": "r", "node_id": "n"},
+                                   resume=beats[-1]["checkpoint"]))
+    assert ran == ["c"]
+    assert beats2[0]["checkpoint"]["done"] == [[0, 2]], beats2[0]
+
+    # ...and attempt 3, handed that, runs only what is left.
+    ran3 = []
+    out = asyncio.run(make_host(_counting_method(ran3), store=store).run_batch(
+        {"units": units, "run_id": "r", "node_id": "n"}, resume=beats2[-1]["checkpoint"]))
+    assert ran3 == ["d", "e"]
+    assert [store.get_subunit(r["$ref"]["key"])["u"] for r in out["results"]] == units
+
+
+def test_a_previous_attempts_prefix_is_kept_for_reading_and_writing():
+    """Two attempts that disagree on the prefix (KONTRA_S3_PREFIX skew, a layout change between
+    deploys) must not split one batch's commits across two places: the next attempt's checkpoint
+    would then point at only half of them. The first prefix written is the batch's."""
+    units = ["a", "b", "c"]
+    store = FakeUnitStore()
+    _, beats, _ = _first_attempt_dies_after(1, units, store)
+    ck = dict(beats[-1]["checkpoint"])
+    moved = "elsewhere/" + ck["manifest_ref"]
+    for k in list(store.commits):
+        store.commits[k.replace(ck["manifest_ref"], moved)] = store.commits.pop(k)
+    ck["manifest_ref"] = moved
+
+    host = make_host(_counting_method([]), store=store)
+    beats2 = beating(host)
+    out = asyncio.run(host.run_batch({"units": units, "run_id": "r", "node_id": "n"}, resume=ck))
+    assert out["done"] is True
+    assert all(k.startswith(moved) for k in store.commits), sorted(store.commits)
+    assert beats2[-1]["checkpoint"]["manifest_ref"] == moved

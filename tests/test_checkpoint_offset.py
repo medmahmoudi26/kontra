@@ -21,8 +21,7 @@ import asyncio
 import pytest
 
 from kontra.batch import MissingPushKey
-from internals.engine import batch_id, unit_slot
-from test_actor_engine import FakeUnitStore, make_host, reopen
+from test_actor_engine import FakeUnitStore, make_host
 
 
 def _store_records(store):
@@ -283,40 +282,40 @@ def test_an_unkeyed_push_from_a_batch_units_task_raises():
 
 
 def test_a_host_killed_mid_batch_and_retried_produces_the_exact_row_count():
-    """The acceptance criterion that matters. A host dies mid-Batch with records already durable,
-    the caller reopens the scope, and the run produces EXACTLY the expected rows — no duplicate
-    (the commit map skips the committed Units), no loss (the in-flight Unit re-runs and re-pushes
-    by content sha into the same blob)."""
-    from kontra.retry import SessionLost
+    """The acceptance criterion that matters (PRD §10.3, unit half). A host dies mid-Batch with
+    records already durable, Temporal retries the activity with the last heartbeat's checkpoint, and
+    the run produces EXACTLY the expected rows — no duplicate (the committed Units are folded back
+    from their commit objects, not re-run), no loss (the in-flight Unit re-runs and re-pushes by
+    content sha into the same blob)."""
 
-    died = []
+    class HostKilled(BaseException):
+        pass
 
-    async def load(self):
-        self.alive = True
+    ran, died = [], []
 
     async def method(self, batch, dataset):
         async for unit in batch:
+            ran.append(unit.value)
             if unit.value == "c" and not died:
+                await dataset.push({"u": "c"})       # durable before the death...
                 died.append(1)
-                self.alive = False
-                raise RuntimeError("host struck")
+                raise HostKilled()                    # ...and the Unit never commits
             await dataset.push({"u": unit.value})
 
-    async def hc(self):
-        if not self.alive:
-            raise RuntimeError("dead")
-        return True
-
     store = FakeUnitStore()
-    scope, _ = reopen(method, load=load, healthcheck=hc, store=store)
+    host = make_host(method, store=store)
+    beats = []
+    host._heartbeat = beats.append
     units = ["a", "b", "c", "d"]
-    with pytest.raises(SessionLost):
-        asyncio.run(scope().run_batch({"units": units, "run_id": "r", "node_id": "n"}))
+    with pytest.raises(HostKilled):
+        asyncio.run(host.run_batch({"units": units, "run_id": "r", "node_id": "n"}))
 
-    out = asyncio.run(scope().run_batch({"units": units, "run_id": "r", "node_id": "n"}))
+    out = asyncio.run(host.run_batch({"units": units, "run_id": "r", "node_id": "n"},
+                                     resume=beats[-1]["checkpoint"]))
     assert out["done"] is True
+    assert ran == ["a", "b", "c", "c", "d"], "a committed Unit ran twice"
     # Exactly one row per input Unit, in input order — the envelope AND the durable store agree.
-    assert len(out["results"]) == 4
+    assert [r["u"] for r in _resolved_results(out, store)] == units
     got = sorted(r["u"] for r in _store_records(store))
     assert got == ["a", "b", "c", "d"], got
 

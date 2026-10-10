@@ -88,12 +88,6 @@ class _FakeKV:
     async def delete(self, f):
         return self.d.pop(f, None) is not None
 
-    async def touch(self):
-        pass
-
-    async def drop(self):
-        self.d.clear()
-
 
 def _host(method, kv):
     from kontra import ActorRegistry, MethodRegistration
@@ -145,8 +139,8 @@ def test_an_in_flight_unit_resumes_from_its_scratch_on_the_retry():
 
 
 def test_a_committed_unit_drops_its_scratch():
-    """Scratch is dead weight the moment a Unit commits — it can never be read again, because
-    the commit map skips the Unit entirely on any retry."""
+    """Scratch is dead weight the moment a Unit commits — it can never be read again, because a
+    retry folds a finished Unit back from its commit object and never re-runs it."""
     async def method(self, batch, dataset):
         async for unit in batch:
             await self.unit_state.set("cursor", 1)
@@ -156,6 +150,8 @@ def test_a_committed_unit_drops_its_scratch():
     asyncio.run(_host(method, kv).run_batch({"units": ["x"], "method": "method"}))
 
     bid = batch_id("method", ["x"], {})
-    assert unit_slot(bid, 0) in kv.d, kv.d                    # the commit marker stays
-    assert not any(k.endswith("-ckpt") for k in kv.d), kv.d   # the scratch does not
+    # NOTHING is left in the hash. The commit marker that used to stay here is an object in the
+    # unit store now (ADR 0060), and the scratch went with the commit.
+    assert unit_slot(bid, 0) not in kv.d, kv.d
+    assert not any(k.endswith("-ckpt") for k in kv.d), kv.d
     assert not any(k.startswith("s-") for k in kv.d), "session_state left no keys behind"

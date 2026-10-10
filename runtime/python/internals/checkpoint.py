@@ -136,18 +136,32 @@ class Checkpoint:
         )
 
 
-def resume_from(details, batch_id: str, units: int) -> list[int]:
-    """Which unit indices still need running, given what a previous attempt reported.
+def accepted(details, batch_id: str) -> "Checkpoint | None":
+    """The checkpoint in `details` if a resume of `batch_id` may act on it, else `None`.
 
-    `details` is whatever Temporal handed back (`None` on a first attempt). The result is every
-    index in `[0, units)` that is neither committed nor isolated.
+    ONE RULE, TWO READERS. `resume_from` below answers "which units are left" and the engine also
+    needs "which finished, and where are their outputs" (`manifest_ref`). Both come through here, so
+    the engine cannot fold back a checkpoint that `resume_from` — and the corpus — would discard.
 
     AN EMPTY `batch_id` MATCHES NOTHING, including another empty one. An unidentified checkpoint is
     not evidence about any particular batch, and treating two blanks as equal is how a checkpoint
     from an unrelated dispatch gets applied.
     """
-    todo = list(range(max(int(units), 0)))
     ck = Checkpoint.from_details(details)
     if ck is None or not batch_id or ck.batch_id != batch_id:
+        return None
+    return ck
+
+
+def resume_from(details, batch_id: str, units: int) -> list[int]:
+    """Which unit indices still need running, given what a previous attempt reported.
+
+    `details` is whatever Temporal handed back (`None` on a first attempt). The result is every
+    index in `[0, units)` that is neither committed nor isolated — or all of them, when `accepted`
+    refuses the checkpoint.
+    """
+    todo = list(range(max(int(units), 0)))
+    ck = accepted(details, batch_id)
+    if ck is None:
         return todo
     return [i for i in todo if i not in ck.done and i not in ck.failed]

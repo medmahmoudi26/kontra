@@ -1,16 +1,22 @@
-// Package statekv is the per-actor durable state the engine commits through — tiers 1 and 2 of
-// the three-tier model (ADR 0015), over plain Redis (ADR 0018).
+// Package statekv is the per-actor durable state the engine keeps for a Unit IN FLIGHT — its
+// `unit_state` scratch and its reload counter, tier 2 of the three-tier model (ADR 0015), over plain
+// Redis (ADR 0018).
+//
+// TIER 1 — THE COMMIT MAP — USED TO LIVE HERE TOO, AND MOVED (ADR 0060). Which Units finished rides
+// the activity heartbeat as a checkpoint, and what each produced is a commit object in the unit
+// store. A cache with a TTL was the wrong owner for the one record a retry acts on (ADR 0059). With
+// it went Touch (the batch-boundary TTL renewal that kept an idle actor's commit map alive) and Drop
+// (whose only caller was the `batch-owner` guard that kept one owner's map from answering another).
 //
 // The Go peer of runtime/python/internals/statekv.py, and deliberately a BYTE-COMPATIBLE one:
 // both SDKs write the same hash, with the same field names and the same TTL, so the operator
 // projection (control/orchestrator/src/state.ts) reads a Go actor's state exactly as it reads a Python
-// actor's. The key SCHEMES inside the hash still differ by SDK on purpose — Python `u{i}`, Go
-// `s{si}-u{i}` for the step pipeline — and the congruence contract is the `-ckpt` suffix and the
-// `s-` prefix, not the whole string (see the congruence tests on both sides).
+// actor's. Both key a Unit as `{batch}-u{i}` and hang its scratch off that with `-ckpt` (see the
+// congruence tests on both sides).
 //
 // # Layout
 //
-//	kontra-actor:{actorID}  ->  { "s0-u0": …, "s0-u0-ckpt": …, "s-index": …, "s-name": … }
+//	kontra-actor:{actorID}  ->  { "<batch>-u0-ckpt": …, "<batch>-u3-reloads": … }
 //
 // One hash rather than a key per field because the TTL is what makes it safe to leave state
 // behind, and EXPIRE applies to the whole hash — so one call slides an actor's entire state
@@ -36,8 +42,9 @@ import (
 )
 
 // TTL is how long an actor's state outlives its last write. Long enough to outlive any retry
-// budget (MaxAttempts × StartToClose) and a same-day recover_run; short enough that abandoned
-// runs do not accumulate forever. Peer of STATE_TTL_S in statekv.py.
+// budget (MaxAttempts × StartToClose), so an in-flight Unit's scratch is still there for the attempt
+// that re-runs it; short enough that abandoned runs do not accumulate forever. Peer of STATE_TTL_S
+// in statekv.py.
 const TTL = 24 * time.Hour
 
 const prefix = "kontra-actor"
@@ -83,7 +90,7 @@ func FromEnv(actorID string) *KV {
 }
 
 // Contains reports whether a field is present. Absence is signalled by the field being missing,
-// never by a sentinel — a unit may legitimately commit a null.
+// never by a sentinel — an author may legitimately store a null in unit_state.
 func (k *KV) Contains(ctx context.Context, field string) (bool, error) {
 	n, err := k.c.HExists(ctx, k.key, field).Result()
 	if err != nil {
@@ -126,17 +133,6 @@ func (k *KV) Remove(ctx context.Context, field string) error {
 
 // Save is a no-op. See the package doc: every write above has already landed.
 func (k *KV) Save(context.Context) error { return nil }
-
-// Touch slides the whole actor's TTL forward. ONE call, because the TTL is on the hash.
-func (k *KV) Touch(ctx context.Context) error {
-	return k.c.Expire(ctx, k.key, k.ttl).Err()
-}
-
-// Drop removes everything for this actor id. The commit map exists to make a RETRY skip finished
-// units, and a finished batch has no retry.
-func (k *KV) Drop(ctx context.Context) error {
-	return k.c.Del(ctx, k.key).Err()
-}
 
 // Close releases the client when this KV owns one.
 func (k *KV) Close() error {

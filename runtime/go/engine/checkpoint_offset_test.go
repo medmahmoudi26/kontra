@@ -27,7 +27,7 @@ import (
 // sees, independent of the response envelope.
 func storeRecords(fp *fakePutter) []map[string]any {
 	var out []map[string]any
-	for _, v := range fp.blobs {
+	for _, v := range recordBlobs(fp) {
 		var recs []map[string]any
 		if err := json.Unmarshal(v, &recs); err == nil {
 			out = append(out, recs...)
@@ -383,16 +383,21 @@ func TestAnUnkeyedOutOfLoopPushIsRefused(t *testing.T) {
 // Really kill a host mid-Batch and count rows (ADR 0028 §consequence 5)
 // ---------------------------------------------------------------------------------------------
 
-// A host dies mid-Batch with records already durable, the handler retries the same actor id, and
-// the run produces EXACTLY the expected rows — no duplicate, no loss. Peer of
-// test_a_host_killed_mid_batch_and_retried_produces_the_exact_row_count.
+// A host dies mid-Batch with records already durable, the handler retries the same actor id with
+// the last beat's checkpoint, and the run produces EXACTLY the expected rows — no duplicate (the
+// committed Units are folded back from their commit objects, not re-run), no loss (the in-flight
+// Unit re-runs and re-pushes by content sha into the same blob). Peer of
+// test_a_host_killed_mid_batch_and_retried_produces_the_exact_row_count (PRD §10.3, unit half).
 func TestAHostKilledMidBatchAndRetriedProducesTheExactRowCount(t *testing.T) {
 	died := false
+	var ran []string
 	a, fp := newTestActor(t, func(_ *core.Session, b *core.Batch, ds *core.Dataset) error {
 		for unit := range b.All() {
+			ran = append(ran, unit.Str("v"))
 			if unit.Str("v") == "c" && !died {
+				ds.Push(map[string]any{"u": "c"}) // durable before the death...
 				died = true
-				return &core.SessionLostError{Msg: "host struck"} // nulls the instance, handler retries
+				return &core.SessionLostError{Msg: "host struck"} // ...and the Unit never commits
 			}
 			ds.Push(map[string]any{"u": unit.Str("v")})
 		}
@@ -407,12 +412,24 @@ func TestAHostKilledMidBatchAndRetriedProducesTheExactRowCount(t *testing.T) {
 		t.Fatal("expected the host death to surface as an error on the first attempt")
 	}
 
-	resp, err := a.RunBatch(context.Background(), RunBatchReq{Units: units, RunID: "r", NodeID: "n"})
+	retry := New("run1-node1", newFakeSM())
+	retry.ResumeFrom(a.Checkpoint())
+	resp, err := retry.RunBatch(context.Background(), RunBatchReq{Units: units, RunID: "r", NodeID: "n"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if fmt.Sprint(ran) != "[a b c c d]" {
+		t.Errorf("bodies ran for %v, want [a b c c d] — a committed Unit ran twice", ran)
+	}
 	if !resp.Done || len(resp.Results) != 4 {
 		t.Fatalf("results = %v (done=%v), want exactly 4 rows", resp.Results, resp.Done)
+	}
+	var inOrder []string
+	for _, r := range resolvedResults(resp, fp) {
+		inOrder = append(inOrder, r["u"].(string))
+	}
+	if fmt.Sprint(inOrder) != "[a b c d]" {
+		t.Errorf("envelope rows = %v, want [a b c d] in input order", inOrder)
 	}
 	var got []string
 	for _, r := range storeRecords(fp) {

@@ -210,15 +210,29 @@ func FromDetails(d *Details) *Checkpoint {
 	return c
 }
 
-// ResumeFrom is which unit indices still need running, given what a previous attempt reported.
+// Accepted is the checkpoint in `d` if a resume of `batchID` may act on it, else nil.
 //
-// `d` is nil on a first attempt. The result is every index in [0, units) that is neither committed
-// nor isolated, and it is never nil — `[]` and `null` mean the same thing to a caller that ranges
-// over it, but not to a test that compares them.
+// ONE RULE, TWO READERS. ResumeFrom answers "which units are left", and the engine also needs
+// "which finished, and where are their outputs" (ManifestRef). Both come through here, so the
+// engine cannot fold back a checkpoint that ResumeFrom — and the corpus — would discard.
 //
 // AN EMPTY BatchID MATCHES NOTHING, including another empty one. An unidentified checkpoint is not
 // evidence about any particular batch, and treating two blanks as equal is how a checkpoint from an
 // unrelated dispatch gets applied.
+func Accepted(d *Details, batchID string) *Checkpoint {
+	c := FromDetails(d)
+	if c == nil || batchID == "" || c.BatchID != batchID {
+		return nil
+	}
+	return c
+}
+
+// ResumeFrom is which unit indices still need running, given what a previous attempt reported.
+//
+// `d` is nil on a first attempt. The result is every index in [0, units) that is neither committed
+// nor isolated — or all of them, when Accepted refuses the checkpoint — and it is never nil: `[]`
+// and `null` mean the same thing to a caller that ranges over it, but not to a test that compares
+// them.
 func ResumeFrom(d *Details, batchID string, units int) []int {
 	if units < 0 {
 		units = 0
@@ -227,8 +241,8 @@ func ResumeFrom(d *Details, batchID string, units int) []int {
 	for i := 0; i < units; i++ {
 		all = append(all, i)
 	}
-	c := FromDetails(d)
-	if c == nil || batchID == "" || c.BatchID != batchID {
+	c := Accepted(d, batchID)
+	if c == nil {
 		return all
 	}
 	todo := make([]int, 0, units)

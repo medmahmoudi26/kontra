@@ -100,15 +100,16 @@ await self.unit_state.set("frontier", frontier)
 **Who reads it** is worth being precise about, because ADR 0023 §19 got this wrong once and
 retired the tier before the amendment put it back: the reader is a Unit that was **in flight when
 the activity died** and re-runs on the handler's retry, against the same session queue and the
-same Batch hash — hence the same slot. A **committed** Unit is skipped by the commit map and an
-**isolated** Unit is never resumed, so neither of those reads it.
+same Batch hash — hence the same slot. A **committed** Unit is folded back from its commit object
+and an **isolated** Unit is never resumed, so neither of those reads it.
 
 It is resume scratch, **not a result store** — output goes through `await dataset.push(x)`, never
 here. All of a Unit's keys live in one blob (`{slot}-ckpt`) and the framework deletes the whole
 blob when the Unit commits, so a finished Unit never resumes.
 
-**Gate a resume on `self.emit_durable`.** In the no-S3 inline mode a record is not durable until
-its Unit commits, so skipping already-pushed work on a resume would silently drop it.
+**Gate a resume on `self.emit_durable`.** In the store-less mode (an in-process test; `serve()` no
+longer starts a committing actor without S3) a record is not durable until its Unit commits, so
+skipping already-pushed work on a resume would silently drop it.
 `python/crawl4ai` does exactly this, and its DEFAULT tier deliberately leaves
 `unit_state` unwired: re-crawling a whole seed is safe because every page is keyed by content
 sha, so a re-push overwrites idempotently.
@@ -136,10 +137,13 @@ Barely more expensive (a reload re-runs `@actor.load` anyway), and the gain is t
 promise has no third case: while it lives, `self.*` is coherent — it either survives or you get
 an exception. Nothing silently continues against a corpse.
 
-What survives the reopen is what was **committed**: the caller resumes from the cursor it holds,
-the Batch's content hash is unchanged, so the commit map skips every Unit that finished. A
-**poison** Unit that has killed N scopes is recorded as a failure and skipped (§21) — without
-that, §20 plus §17 is a tight loop.
+A reopen is a **new activity execution**, so it has no heartbeat to resume from. On the same
+instance — a scope keyed `actor["acme.com"]`, reopened on that key — it **lists** the Batch's commit
+objects and folds back what the lost scope finished, then runs only the rest (ADR 0060, owner decision
+A7). An unkeyed scope reopens as a new Session id, which is a new instance, so it re-runs the Batch;
+records re-push by content sha into the same blobs, and only the Batch the successful call returns is
+published. The **poison** counter survives the reopen too: a Unit that has killed N scopes is recorded
+as a failure and skipped (§21) — without that, §20 plus §17 is a tight loop.
 
 ## Exactly-once, honestly
 
@@ -149,21 +153,22 @@ effects inside a Method (a POST, a charge) are the author's idempotency problem 
 deduplicates *results*, not *actions*.
 
 A committed Unit is keyed by the **Batch's content hash plus its index** (§17), not by a sequence
-number: a hash does not know its scope died, so it survives a reopened scope, and two Batches
-under one Session cannot read each other's slots.
+number: the hash is the same on every attempt and every execution of one Batch, so a retry or a
+re-dispatch finds what was already finished, and two Batches under one Session cannot read each
+other's slots.
 
-### Where the commit map lives, and where it is going
+### Where the record of what finished lives
 
-In Redis today, in the actor's state hash. That hash has a 24 h TTL, and until ADR 0059 the store ran
+**In the activity's heartbeat, and in the object store — not in Redis** (ADR 0060). It used to be a
+commit map in the actor's Redis hash under a 24 h TTL, and until ADR 0059 the store ran
 `maxmemory-policy volatile-lru` — which evicts keys *that have a TTL*, so under memory pressure the
 first thing dropped was the record of what had committed. A retry then re-ran finished work or skipped
-unfinished work, and nothing raised. The store now runs `noeviction` and refuses the write instead.
+unfinished work, and nothing raised.
 
-**A copy also rides in the activity's heartbeat** (ADR 0060), where it is part of the run's own history
-and no cache can lose it:
+Every beat carries a **checkpoint** saying WHICH Units finished:
 
 ```json
-{"v":1,"batch_id":"b1","done":[[0,1]],"failed":[4],"manifest_ref":""}
+{"v":1,"batch_id":"b1","done":[[0,1]],"failed":[4],"manifest_ref":"commits/run=r/actor=crawl/actor_id=acme.com/batch=b1/"}
 ```
 
 `done` is a **range set** — merged inclusive `[lo, hi]` pairs — because a heartbeat payload is bounded
@@ -173,20 +178,50 @@ discards a checkpoint whose id does not match rather than applying it by index t
 A version the reader does not know is discarded whole for the same reason. The encoding is pinned
 across both SDKs and the orchestrator by `shared/conformance/checkpoint.json`.
 
-The heartbeat copy is authoritative for *progress* now — what the run page shows comes from it, which
-is why a node that isolated Units reaches its total instead of looking stuck. It is not yet what a
-retry resumes from; that still reads Redis.
+What each finished Unit PRODUCED does not fit in a heartbeat, so it is one **commit object** under the
+prefix `manifest_ref` names, written *before* the beat that reports it (`shared/conformance/commit.json`).
+The prefix is keyed by the run, the actor, the **instance** (`actor_id`: the idempotency key, else the
+Session, else run and node joined) and the Batch's content hash — not by the dispatch, so every attempt
+and every execution of one Batch on one instance writes to one place.
+
+Temporal hands the last beat to the next attempt; the engine folds the finished Units back from their
+objects and hands the Method only the rest. A **new execution** has no beat to read, so it **lists** the
+Batch's prefix instead and folds back what an earlier execution finished. A Unit the checkpoint (or the
+listing) calls finished whose object is missing or does not decode fails the attempt as **`CommitLost`**,
+non-retryable — that is the store having lost something, and neither re-running it nor folding it as
+empty would say so.
+
+**What this covers, and what it does not:**
+
+- **Within one execution, across attempts** — a worker killed under an unscoped dispatch (the retry
+  lands on another worker of the shared queue), a dead resource on Go — a retry resumes from the
+  heartbeat. A scoped call's queue is polled only by the worker that died, so its scope raises instead
+  (§7) and the caller reopens.
+- **Across executions, on the same instance and run** — a re-dispatch on the same idempotency key, a
+  reopened keyed scope, a retried workflow — the new execution resumes from the listing (owner decision
+  A7). An identical call made again on purpose is the same Batch and replays, as `batch_id` has always
+  said.
+- **Across instances or runs, nothing resumes.** Another key's commits are not this key's, and a Unit's
+  output is refs into its own run's `units/` prefix, so another run folding them would return rows its
+  Dataset does not hold.
+- **A hard kill re-runs up to one heartbeat throttle window** of Units within an execution: their
+  objects were written but the beat naming them was never sent. They overwrite their objects and
+  re-push by content sha.
+- **S3 is mandatory for an actor that commits** (owner decision A8): `serve()` refuses to start one
+  with `KONTRA_S3_ENDPOINT` unset, because nothing else holds a finished Unit's output.
 
 ## What a commit holds
 
 With `KONTRA_S3_ENDPOINT` set, each pushed record is written to the object store **at push
 time** under the hive key `units/run={run}/dt={date}/actor={actor}/shard={n}/unit={i}/{sha}.json`,
-and the durable commit holds only `{"$ref": {key, size, sha256}}`. Blob write **first**, then the
-ref commit, so a committed ref always points at written bytes. Redis never holds payloads.
+and the Unit's commit object holds only `{"$ref": {key, size, sha256}}`. Blob write **first**, then
+the commit object, then the beat — so a committed ref always points at written bytes, and a beat
+always names a Unit whose commit object exists. Redis never holds payloads, or commits.
 
 The record's sha is its identity, so re-pushing the same record on a resume is an idempotent
 overwrite — which is why records must be **content-deterministic** (no timestamps, no random ids).
-Store unset ⇒ commits are inline (dev/test). See [[Data-Plane]].
+Store unset ⇒ `serve()` refuses a committing actor; only an in-process engine test runs without one,
+with records inline in the result and nothing durable committed. See [[Data-Plane]].
 
 ## The image a Placement is pinned to
 
@@ -243,8 +278,10 @@ to the scope: the handler does not tear the resource down between two Method cal
 Session.
 
 The handler workflow is deterministic Temporal code, so a workflow-worker restart replays from
-history and continues. The actor's own durability is Redis, independent of workflow replay, and
-deliberately not Temporal heartbeat details — those are throttled, dropped on a hard kill, and
-survive *attempts* rather than *executions*
-([legacy ADR 0018](../adr/legacy/0018-temporal-native-actor-runtime.md) §4). The heartbeat carries
-progress; it is never the authority.
+history and continues. The actor's resume is the activity heartbeat plus its commit objects (ADR
+0060), which reverses [legacy ADR 0018](../adr/legacy/0018-temporal-native-actor-runtime.md) §4. Its
+three objections still describe the edges: details are **throttled and dropped on a hard kill** (so
+up to one window of Units re-runs — work redone, not lost), they survive **attempts rather than
+executions** (so a re-dispatch resumes from a listing of the commit objects instead, owner decision
+A7), and `RecordHeartbeat` cannot carry author-sized state — which is why the checkpoint is a range set
+and a pointer, and `unit_state` stays in Redis for now.

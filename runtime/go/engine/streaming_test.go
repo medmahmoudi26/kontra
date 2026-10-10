@@ -13,7 +13,7 @@ import (
 )
 
 // fakeSM is an in-memory engine.StateStore that JSON-roundtrips values (mimicking the real
-// store's serialization), so the Unit scratch blob + commit records behave as in production.
+// store's serialization), so the Unit scratch blob and reload counters behave as in production.
 type fakeSM struct{ d map[string][]byte }
 
 func newFakeSM() *fakeSM { return &fakeSM{d: map[string][]byte{}} }
@@ -41,11 +41,18 @@ func (f *fakeSM) Get(_ context.Context, k string, reply any) error {
 func (f *fakeSM) Contains(_ context.Context, k string) (bool, error) { _, ok := f.d[k]; return ok, nil }
 func (f *fakeSM) Remove(_ context.Context, k string) error           { delete(f.d, k); return nil }
 func (f *fakeSM) Save(_ context.Context) error                       { return nil }
-func (f *fakeSM) Touch(_ context.Context) error                      { return nil }
-func (f *fakeSM) Drop(_ context.Context) error                       { clear(f.d); return nil }
 
-// fakePutter records emitted-record blobs in memory (a stand-in for S3).
-type fakePutter struct{ blobs map[string][]byte }
+// fakePutter is an in-memory object store (a stand-in for S3): every object the engine writes —
+// pushed-record blobs under `units/`, commit objects under `commits/` — and the reads a resume makes.
+type fakePutter struct {
+	blobs map[string][]byte
+	// onGet, when set, runs before every read — how a test looks at what the engine has published
+	// while a resume's fold is still in flight.
+	onGet func(key string)
+	// lists counts LIST calls; listErr, when set, is what every one of them returns.
+	lists   int
+	listErr error
+}
 
 func (p *fakePutter) Put(_ context.Context, key string, data []byte) error {
 	if p.blobs == nil {
@@ -53,6 +60,57 @@ func (p *fakePutter) Put(_ context.Context, key string, data []byte) error {
 	}
 	p.blobs[key] = data
 	return nil
+}
+
+func (p *fakePutter) Get(_ context.Context, key string) ([]byte, error) {
+	if p.onGet != nil {
+		p.onGet(key)
+	}
+	b, ok := p.blobs[key]
+	if !ok {
+		return nil, unitstore.ErrNotFound
+	}
+	return b, nil
+}
+
+// List is a prefix LIST as S3 answers one: every key that starts with it, in no promised order (Go's
+// map iteration sees to that). It counts its calls, so a test can say a resume LISTED rather than
+// guessed.
+func (p *fakePutter) List(_ context.Context, prefix string) ([]string, error) {
+	p.lists++
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	var out []string
+	for k := range p.blobs {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
+
+// recordBlobs is the ROWS in the fake store — the `units/` half. A commit object is not a row, which
+// is why the real layout keeps it under `commits/`; counting the whole store would count both.
+func recordBlobs(fp *fakePutter) map[string][]byte {
+	out := map[string][]byte{}
+	for k, v := range fp.blobs {
+		if strings.HasPrefix(k, "units/") {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// commitBlobs is the other half: one commit object per finished Unit.
+func commitBlobs(fp *fakePutter) map[string][]byte {
+	out := map[string][]byte{}
+	for k, v := range fp.blobs {
+		if strings.HasPrefix(k, "commits/") {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // newTestActor wires a KontraActor with a fake state store + id over a single-Method registry,

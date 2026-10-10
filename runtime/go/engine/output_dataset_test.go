@@ -20,6 +20,10 @@ func (failingPutter) Put(context.Context, string, []byte) error {
 	return errors.New("disk full")
 }
 
+// List answers the listing a fresh execution makes before it runs anything: nothing was ever
+// written, so there is nothing to fold back.
+func (failingPutter) List(context.Context, string) ([]string, error) { return nil, nil }
+
 // push returns nothing, and a write failure surfaces at the next checkpoint — BEFORE the Unit it
 // struck commits. That ordering is load-bearing: a committed Unit is skipped on retry, so
 // committing one whose push never persisted would lose the record for good (ADR 0028
@@ -102,7 +106,7 @@ func TestConcurrentPushesAreDurableAtPushTime(t *testing.T) {
 			t.Fatalf("a durable push should commit a $ref, got %v", r)
 		}
 	}
-	if len(fp.blobs) != 2 {
-		t.Errorf("store holds %d blobs, want 2 — each push must be durable AS it is made", len(fp.blobs))
+	if n := len(recordBlobs(fp)); n != 2 {
+		t.Errorf("store holds %d record blobs, want 2 — each push must be durable AS it is made", n)
 	}
 }

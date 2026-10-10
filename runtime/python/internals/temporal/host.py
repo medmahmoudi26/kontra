@@ -37,7 +37,7 @@ from kontra.retry import NonRetryableError, SessionLost
 
 from internals import logs, workerid
 from internals.catalog import publish_catalog
-from internals.engine import build_session_factory
+from internals.engine import CommitLost, build_session_factory
 from internals.temporal.sessions import SessionWorkers
 
 log = logging.getLogger("kontra.host")
@@ -143,6 +143,23 @@ def session_actor_id(session_id: str, key: str = "") -> str:
     return key or session_id
 
 
+def _previous_checkpoint(info) -> Any:
+    """The checkpoint the previous ATTEMPT of this activity last beat, or None.
+
+    Temporal keeps only an activity's LAST heartbeat details and hands them to the next attempt;
+    the engine's beat is one dict whose `checkpoint` field is the cross-SDK encoding
+    (shared/conformance/checkpoint.json). What comes back here is passed through UNVALIDATED —
+    the engine's `_resume_plan` decides whether it describes this batch, by the same rule
+    `resume_from` and the corpus use, so there is one judgement and not two.
+
+    DETAILS PRESENT IS THE RETRY SIGNAL. A first attempt has none, so `info.attempt` is not
+    consulted as a second condition: it cannot say anything the details do not already say.
+    """
+    details = getattr(info, "heartbeat_details", None) or ()
+    last = details[0] if details else None
+    return last.get("checkpoint") if isinstance(last, dict) else None
+
+
 def build_activities(registry, *, sessions: SessionWorkers | None = None, session_factory=None):
     """Return the activities this actor serves, closed over its registry.
 
@@ -176,7 +193,11 @@ def build_activities(registry, *, sessions: SessionWorkers | None = None, sessio
         async with _lock(actor_id):
             session = _session(actor_id)
             try:
-                out = await session.run_batch(payload)
+                # `activity.info()` RAISES outside an activity context, and this function is also
+                # called directly — by the host's own tests, and by anything embedding it — so the
+                # question is asked first. Off the activity path there is no previous attempt.
+                prior = _previous_checkpoint(activity.info()) if activity.in_activity() else None
+                out = await session.run_batch(payload, resume=prior)
                 # PROVENANCE TRAVELS WITH THE BATCH. The handler copies this onto the result
                 # ref's meta, the caller's `Batch` reads it from there without a fetch, and
                 # `publish` writes it as the row's Machine. It has to be stamped HERE, in the
@@ -195,6 +216,12 @@ def build_activities(registry, *, sessions: SessionWorkers | None = None, sessio
                 # improves by asking the same Session again. The caller's scope is what recovers,
                 # by reopening and resuming from the cursor it holds (§7).
                 raise ApplicationError(str(e), type="SessionLost", non_retryable=True) from e
+            except CommitLost as e:
+                # A Unit the previous attempt's checkpoint calls finished has no readable commit
+                # object. Named rather than folded into the generic NonRetryableError below, so the
+                # failure a caller sees says it is the STORE that lost something, not the author's
+                # code that refused — the two have opposite remedies.
+                raise ApplicationError(str(e), type="CommitLost", non_retryable=True) from e
             except NonRetryableError as e:
                 # TERMINAL MEANS TERMINAL, INCLUDING OUT OF @actor.load. `_classify` already
                 # honours this for a raise inside a Method body — the Unit is isolated, not
@@ -364,6 +391,34 @@ def _install_blob_reader() -> None:
     blobs.set_blob_reader(read)
 
 
+def _require_object_store(registry) -> None:
+    """Refuse to serve an actor that commits Units when no object store is configured.
+
+    S3 IS MANDATORY FOR AN ACTOR THAT COMMITS (owner decision A8, ADR 0060). A finished Unit's
+    outcome is a commit object, and the bytes it points at are pushed records in the same store; the
+    heartbeat names which Units finished and nothing else. Without a store neither is written
+    anywhere, so a retry and a re-dispatch both re-run everything, quietly — and the actor still
+    looks healthy, polling and returning batches. That is the mode this replaces: it used to start
+    and degrade, and now it does not start.
+
+    BEFORE ANYTHING CONNECTS, so the failure is a boot error naming the variable rather than a
+    Worker that registered, took a Batch, and ran it with nowhere to commit. An actor that declares
+    no Method commits nothing (its Batch passes through), so it is not refused.
+
+    The same condition as `unitstore.from_env`: the variable is what selects a store, and asking it
+    here keeps boto3 out of a refusal that never needed a client.
+    """
+    if not getattr(registry, "methods", None):
+        return
+    if os.environ.get("KONTRA_S3_ENDPOINT"):
+        return
+    raise RuntimeError(
+        f"{getattr(registry, 'actor_name', '') or 'this actor'} declares a Method, and "
+        "KONTRA_S3_ENDPOINT is unset: an actor that commits Units needs the object store, because "
+        "a finished Unit's output is durable nowhere else (ADR 0060). Set KONTRA_S3_* — locally, "
+        "the compose stack's SeaweedFS at http://localhost:8333.")
+
+
 async def serve_async(registry, *, address: str = "", namespace: str = "",
                       **worker_kwargs) -> None:
     # LOGGING FIRST, and for the reason `wfhost._configure_logging` records at length: Python emits
@@ -382,6 +437,9 @@ async def serve_async(registry, *, address: str = "", namespace: str = "",
     # worker.yaml FIRST, before anything connects: a key the Worker cannot take is a boot failure
     # naming the file, not a Worker that started without the setting its author believed in.
     declared = load_worker_yaml(getattr(registry, "actor_dir", None))
+    # And the object store, for the same reason: a missing one is a boot failure, not a Worker that
+    # runs every Batch with nowhere durable to commit it.
+    _require_object_store(registry)
 
     address = address or os.environ.get("KONTRA_ADDRESS", "localhost:7233")
     namespace = namespace or os.environ.get("KONTRA_NAMESPACE", "default")

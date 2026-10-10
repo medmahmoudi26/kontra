@@ -47,7 +47,7 @@ func TestRoundTripAndAbsence(t *testing.T) {
 	defer c.Close()
 	ctx := context.Background()
 	kv := New(c, "test-"+t.Name(), time.Minute)
-	defer kv.Drop(ctx)
+	defer c.Del(ctx, Key("test-"+t.Name()))
 
 	// Absence is signalled by the field missing, never by a sentinel — a unit may legitimately
 	// commit a null, and a sentinel would make "committed nothing" look like "never ran".
@@ -82,15 +82,16 @@ func TestRoundTripAndAbsence(t *testing.T) {
 }
 
 // TestTTLCoversEveryFieldAtOnce is the property the hash layout exists for: one EXPIRE slides an
-// actor's whole state, instead of N round trips re-writing every live key to move a clock.
+// actor's whole state, so a write to ONE field keeps every other field alive too — which is what
+// let the batch-boundary Touch go with the commit map.
 func TestTTLCoversEveryFieldAtOnce(t *testing.T) {
 	c := redisOrSkip(t)
 	defer c.Close()
 	ctx := context.Background()
 	kv := New(c, "test-"+t.Name(), 30*time.Second)
-	defer kv.Drop(ctx)
+	defer c.Del(ctx, Key("test-"+t.Name()))
 
-	for _, f := range []string{"s0-u0", "s0-u0-ckpt", "s-index"} {
+	for _, f := range []string{"b-u0-ckpt", "b-u1-ckpt", "b-u1-reloads"} {
 		if err := kv.SetWithTTL(ctx, f, "v", 30*time.Second); err != nil {
 			t.Fatal(err)
 		}
@@ -103,45 +104,36 @@ func TestTTLCoversEveryFieldAtOnce(t *testing.T) {
 		t.Fatalf("expected a live TTL <= 30s, got %v", ttl)
 	}
 
-	// Touch slides ALL of it forward, including fields written before the last write.
+	// A later write to one field slides ALL of it forward, including fields written before it.
 	time.Sleep(1100 * time.Millisecond)
-	if err := kv.Touch(ctx); err != nil {
+	if err := kv.SetWithTTL(ctx, "b-u2-ckpt", "v", 30*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := c.TTL(ctx, Key("test-"+t.Name())).Result()
 	if after <= ttl-time.Second {
-		t.Errorf("Touch did not slide the TTL forward: %v -> %v", ttl, after)
+		t.Errorf("a write did not slide the TTL forward: %v -> %v", ttl, after)
 	}
 }
 
-func TestRemoveAndDrop(t *testing.T) {
+func TestRemove(t *testing.T) {
 	c := redisOrSkip(t)
 	defer c.Close()
 	ctx := context.Background()
 	id := "test-" + t.Name()
 	kv := New(c, id, time.Minute)
-	defer kv.Drop(ctx)
+	defer c.Del(ctx, Key(id))
 
-	_ = kv.SetWithTTL(ctx, "u0", 1, time.Minute)
-	_ = kv.SetWithTTL(ctx, "u0-ckpt", 2, time.Minute)
+	_ = kv.SetWithTTL(ctx, "b-u0-reloads", 1, time.Minute)
+	_ = kv.SetWithTTL(ctx, "b-u0-ckpt", 2, time.Minute)
 
-	if err := kv.Remove(ctx, "u0-ckpt"); err != nil {
+	if err := kv.Remove(ctx, "b-u0-ckpt"); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := kv.Contains(ctx, "u0-ckpt"); ok {
+	if ok, _ := kv.Contains(ctx, "b-u0-ckpt"); ok {
 		t.Error("Remove left the field behind")
 	}
-	if ok, _ := kv.Contains(ctx, "u0"); !ok {
+	if ok, _ := kv.Contains(ctx, "b-u0-reloads"); !ok {
 		t.Error("Remove took a sibling field with it")
-	}
-
-	// Drop is what a completed batch does: the commit map exists to make a RETRY skip finished
-	// units, and a finished batch has no retry.
-	if err := kv.Drop(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if n, _ := c.Exists(ctx, Key(id)).Result(); n != 0 {
-		t.Error("Drop left the actor hash behind")
 	}
 }
 
@@ -152,7 +144,7 @@ func TestSaveIsANoOpButWritesAlreadyLanded(t *testing.T) {
 	defer c.Close()
 	ctx := context.Background()
 	kv := New(c, "test-"+t.Name(), time.Minute)
-	defer kv.Drop(ctx)
+	defer c.Del(ctx, Key("test-"+t.Name()))
 
 	if err := kv.SetWithTTL(ctx, "u0", "v", time.Minute); err != nil {
 		t.Fatal(err)
