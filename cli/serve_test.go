@@ -3,6 +3,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,30 +107,36 @@ func TestServeIsTheVerbThatStartsAWorker(t *testing.T) {
 // `kontra run` is a REDIRECT and NOT an alias, the same shape `kontra monitor` has. An alias would
 // leave one word meaning both "make work happen" and "wait for work", which is the ambiguity the
 // rename exists to remove.
-func TestRunRedirectsAndDoesNotStartAnything(t *testing.T) {
-	err := dispatch([]string{"run", "--actor", "examples/python/beacon"})
+func TestRunRedirectsToCommandsThatRun(t *testing.T) {
+	// `-h` LAST, so a `run` wired back to cmdServe answers `flag.ErrHelp`: its parser read the flags,
+	// which is the old verb working again. The redirect reads none of them, and `-h` means nothing
+	// was started either way.
+	err := dispatch([]string{"run", "--actor", t.TempDir(), "-h"})
 	if err == nil {
 		t.Fatal("`kontra run` must fail — a working alias keeps the old word alive")
 	}
-	msg := err.Error()
-	// It has to NAME the new spelling. An operator who typed the old word learns the new one here
-	// or nowhere: `kontra help` no longer lists it.
-	if !strings.Contains(msg, "kontra serve") {
-		t.Errorf("the redirect must name `kontra serve`, got: %v", err)
-	}
-	// …and say WHY, so the rename reads as a decision rather than a removal.
-	if !strings.Contains(msg, "SERVES") {
-		t.Errorf("the redirect must explain that an actor serves, got: %v", err)
+	if errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("`kontra run` parsed its flags, so it reached a command instead of the redirect: %v", err)
 	}
 	// Not the unknown-command path: that one prints the whole usage and exits 2, which buries the
 	// one sentence that answers the question.
 	if errors.Is(err, errUsage) {
 		t.Errorf("`run` must be a named redirect, not an unknown command: %v", err)
 	}
-	// The flags were passed and MUST NOT have been parsed. If this ever reports a flag error, the
-	// case is wired to cmdServe again and the old verb works.
-	if strings.Contains(msg, "flag provided but not defined") || strings.Contains(msg, "actor.json") {
-		t.Errorf("`kontra run` reached the command instead of the redirect: %v", err)
+	// An operator who typed the old word learns the new one here or nowhere, so every command the
+	// redirect names — other than the old spelling it quotes — has to be one the CLI accepts.
+	named := 0
+	for _, argv := range adviceIn(err.Error()) {
+		if argv[0] == "run" {
+			continue
+		}
+		named++
+		if e := adviceRuns(t, argv); e != nil {
+			t.Errorf("the redirect names a command that does not run: %v", e)
+		}
+	}
+	if named == 0 {
+		t.Errorf("the redirect names no command to run instead: %v", err)
 	}
 }
 
@@ -142,21 +149,6 @@ func TestUnknownVerbIsTheUsagePath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `"nonsense"`) {
 		t.Errorf("the message must quote the word, got: %v", err)
-	}
-}
-
-// Help is the one surface nothing else checks: a verb it advertises that no longer exists sends
-// an operator to a redirect, and a verb it omits may as well not be there.
-func TestHelpListsServeAndNotRun(t *testing.T) {
-	if !strings.Contains(usageText, "kontra serve --actor") {
-		t.Error("`kontra help` does not list `serve`")
-	}
-	for _, line := range strings.Split(usageText, "\n") {
-		f := strings.Fields(line)
-		// `kontra runs` is a different, live verb — match the WORD, not the prefix.
-		if len(f) >= 2 && f[0] == "kontra" && f[1] == "run" {
-			t.Errorf("`kontra help` still lists the retired verb: %q", strings.TrimSpace(line))
-		}
 	}
 }
 

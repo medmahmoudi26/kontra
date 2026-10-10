@@ -75,8 +75,7 @@ func TestUpdateIsDocumented(t *testing.T) {
 }
 
 // EVERY FLAG THE HELP TELLS SOMEBODY TO TYPE EXISTS — `control_test.go:75`'s sweep, for this command's
-// own block. `cli/fleet_documented_flags_test.go`'s SCOPE note is explicit that it covers the fleet
-// family only, so each new command needs its own.
+// own block. `advice_test.go` covers the fleet family only, so each new command needs its own.
 func TestEveryDocumentedUpdateFlagIsRegistered(t *testing.T) {
 	registered := map[string]bool{}
 	updateFlagSetForTest().VisitAll(func(f *flag.Flag) { registered[f.Name] = true })

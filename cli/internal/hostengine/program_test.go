@@ -37,9 +37,8 @@ func TestAssetsAreReadOutOfTheRealProgram(t *testing.T) {
 	//
 	// COMMENTS ARE EXCLUDED, and getting that wrong is how this check first failed: `Pulumi.yaml`
 	// mentions `fn::readFile` three times in its own header prose (`:70`, `:77`, `:83`) and uses it
-	// once, so a bare substring count says four. `cli/retired_words_test.go:25` already draws the same
-	// line for the same reason — it scans Go string literals and exempts prose — and a check that
-	// counts a design note as a file to copy would fail on every edit to a comment.
+	// once, so a bare substring count says four, and a check that counts a design note as a file to
+	// copy would fail on every edit to a comment.
 	if want := countLoads(b); want != len(got) {
 		t.Errorf("Assets = %v (%d), but the program loads %d files — the extraction is missing some, "+
 			"and a missed asset is a converge that fails before any resource", got, len(got), want)

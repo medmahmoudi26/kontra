@@ -958,8 +958,8 @@ func installWardenUnit(dir, unit string) error {
 // wardenTrustFlags declares the five inputs to `cli/internal/trustpolicy/trustpolicy.go` on a flag set, each defaulting to
 // its environment variable.
 //
-// A FUNCTION AND NOT A LITERAL, for `buildFlagSet`'s reason: `cli/fleet_documented_flags_test.go`
-// found three flags this repo told people to type that had been gone for months, so a flag set a test
+// A FUNCTION AND NOT A LITERAL, for `buildFlagSet`'s reason: three flags this repo told people to
+// type had been gone for months before anything enumerated the fleet's flag set, so a flag set a test
 // can enumerate is worth more than a list written beside one.
 //
 // BOTH CHANNELS, BECAUSE THERE ARE TWO CALLERS AND THEY ARE NOT THE SAME PERSON. An installed Warden

@@ -48,31 +48,24 @@ def test_a_sole_method_hashes_the_same_named_or_not():
     assert batch_id("", ["a"], {}) == batch_id("", ["a"], {})
 
 
-def test_session_state_is_gone_and_unit_state_is_not():
-    """ADR 0023 §19 retired both; the amendment put `unit_state` back. Asserted together
-    because the orchestrator's state projection classified tiers by exactly the `s-` and
-    `-ckpt` conventions, and a stale classifier presents an always-empty tier as though it were
-    a real but idle one."""
+def test_an_actor_reaches_the_three_surviving_tiers_through_self():
+    """`self.unit_state`, `self.global_state` and `self.object_state` are the spelling the author
+    guides teach, so each is CALLED here. Outside a host every one is a no-op that answers None —
+    the contract `test_global_state.py` pins for the module-level name — not an error.
+
+    THIS REPLACES A `hasattr` SWEEP, and its other half: it also asserted that `session_state` and
+    `checkpoint` stay deleted (§19). An attribute that exists and raises when used passed the first
+    half, and a deleted name needs no test to stay deleted."""
     import kontra
 
-    for gone in ("session_state", "checkpoint"):
-        assert not hasattr(kontra, gone), f"kontra.{gone} retired with §19"
-    assert hasattr(kontra, "unit_state"), "unit_state survives — see the §19 amendment"
-
     inst = kontra.Actor()
-    for gone in ("session_state", "checkpoint"):
-        assert not hasattr(inst, gone), f"self.{gone} retired with §19"
-    assert hasattr(inst, "unit_state")
-    assert hasattr(inst, "global_state")   # scoped by actor NAME
-    assert hasattr(inst, "object_state")   # scoped by the dispatch's KEY
 
+    async def main():
+        for tier in (inst.unit_state, inst.global_state, inst.object_state):
+            await tier.set("k", 1)
+            assert await tier.get("k") is None, tier
 
-def test_the_engine_no_longer_carries_the_session_store():
-    import internals.engine as engine
-
-    for gone in ("_SessionStore", "_SESSION_INDEX", "_guard_session_key"):
-        assert not hasattr(engine, gone), f"engine.{gone} retired with §19"
-    assert hasattr(engine, "_UnitCkpt")
+    asyncio.run(main())
 
 
 class _FakeKV:

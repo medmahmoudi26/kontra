@@ -26,9 +26,11 @@ every assertion built on it looking at an empty list.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Iterator
 
 from kontra import fleet
 
@@ -60,6 +62,7 @@ class FleetScope:
         place_fails: str = "",
         resolve_fails: str = "",
         machines: int = 0,
+        pollers: int | None = None,
         resolve_controller: str = "10.124.0.2",
     ) -> None:
         self.leases = leases
@@ -77,6 +80,13 @@ class FleetScope:
         #: How many Machines a converge reports. Non-zero so the standing-Machine count in
         #: `PlacementFailed` is a number under test rather than a constant 0.
         self.machines = machines
+        #: What `queuePollers` answers — how many Workers `ready()` sees. DEFAULTS TO THE MACHINE
+        #: COUNT, which is a Fleet whose every Machine came up polling: the case where `ready()`
+        #: returns on its first look rather than the one where it waits.
+        self.pollers = machines if pollers is None else pollers
+        #: Workflow time. It moves only when the scope SLEEPS, so a `ready()` that is never
+        #: satisfied reaches its deadline in a bounded number of looks instead of spinning forever.
+        self.clock = datetime(2026, 1, 1, tzinfo=timezone.utc)
         #: What `resolveBundle` answers for `controller`. EMPTY IS A REAL ANSWER and the reason this
         #: is a knob: a control plane that cannot resolve its own address returns one, and the SDK's
         #: refusal for that case was unreachable while the fake always supplied a good one — a
@@ -171,12 +181,57 @@ class FleetScope:
             expect_error,
         )
 
+    def program(self, run: Callable[[], Any]) -> Any:
+        """A WHOLE WORKFLOW BODY under the same fakes, where `hold()` and `run()` open one scope.
+
+        Those two open the scope themselves and hand the body a Fleet, which is right for asking
+        what one scope schedules. A shipped workflow opens its own, with its own arguments — and
+        then those arguments are the thing under test, so here the harness opens nothing and only
+        answers. Returns what the workflow returned.
+        """
+        with self._faked():
+            out = asyncio.run(run())
+        assert self.calls, "the program made no Temporal calls at all — the harness patched nothing"
+        return out
+
     def _drive(
         self,
         make: Callable[[], Any],
         body: Callable[[Any], Any] | None,
         expect_error: type[BaseException] | None,
     ) -> "FleetScope":
+        async def drive():
+            async with make() as f:
+                self.entered = True
+                self.fleet = f
+                if body is not None:
+                    res = body(f)
+                    if asyncio.iscoroutine(res):
+                        await res
+            self.exited = True
+
+        with self._faked():
+            if expect_error is not None:
+                try:
+                    asyncio.run(drive())
+                except expect_error:
+                    pass
+                else:  # pragma: no cover - the assertion IS the point
+                    raise AssertionError(f"expected {expect_error.__name__} and the scope succeeded")
+            else:
+                asyncio.run(drive())
+
+        # THE GUARD ON THE HARNESS. A patch that missed a name, or a scope that returned without
+        # doing anything, would leave every assertion downstream looking at an empty list and
+        # passing. `expect_error` runs are exempt from `exited` and nothing else.
+        assert self.calls, "the scope made no Temporal calls at all — the harness patched nothing"
+        if expect_error is None:
+            assert self.entered and self.exited, "the scope did not open and close"
+        return self
+
+    @contextlib.contextmanager
+    def _faked(self) -> Iterator[None]:
+        """Every `temporalio.workflow` name the scope reaches, answered here and put back after."""
         from temporalio import workflow as wf
 
         async def execute_activity(name, arg=None, **kw):
@@ -209,6 +264,8 @@ class FleetScope:
                 }
             if name == fleet.DROP_LEASE_ACTIVITY:
                 return {"workflowId": "kontra-lease/" + str(arg["stackFqn"]), "delivered": True}
+            if name == fleet.QUEUE_POLLERS_ACTIVITY:
+                return {"pollers": self.pollers}
             return {}
 
         async def execute_child_workflow(name, arg=None, **kw):
@@ -267,40 +324,23 @@ class FleetScope:
         class _Info:
             workflow_id = self.run_id
 
-        saved = (wf.execute_activity, wf.execute_child_workflow, wf.logger, wf.info, wf.uuid4)
+        def now() -> datetime:
+            return self.clock
+
+        async def sleep(d: Any) -> None:
+            self.clock += d if isinstance(d, timedelta) else timedelta(seconds=float(d))
+
+        names = ("execute_activity", "execute_child_workflow", "logger", "info", "uuid4", "now", "sleep")
+        saved = {n: getattr(wf, n) for n in names}
         wf.execute_activity = execute_activity
         wf.execute_child_workflow = execute_child_workflow
         wf.logger = _Log()
         wf.info = lambda: _Info()
         wf.uuid4 = lambda: self.nonce
+        wf.now = now
+        wf.sleep = sleep
         try:
-
-            async def drive():
-                async with make() as f:
-                    self.entered = True
-                    self.fleet = f
-                    if body is not None:
-                        res = body(f)
-                        if asyncio.iscoroutine(res):
-                            await res
-                self.exited = True
-
-            if expect_error is not None:
-                try:
-                    asyncio.run(drive())
-                except expect_error:
-                    pass
-                else:  # pragma: no cover - the assertion IS the point
-                    raise AssertionError(f"expected {expect_error.__name__} and the scope succeeded")
-            else:
-                asyncio.run(drive())
+            yield
         finally:
-            (wf.execute_activity, wf.execute_child_workflow, wf.logger, wf.info, wf.uuid4) = saved
-
-        # THE GUARD ON THE HARNESS. A patch that missed a name, or a scope that returned without
-        # doing anything, would leave every assertion downstream looking at an empty list and
-        # passing. `expect_error` runs are exempt from `exited` and nothing else.
-        assert self.calls, "the scope made no Temporal calls at all — the harness patched nothing"
-        if expect_error is None:
-            assert self.entered and self.exited, "the scope did not open and close"
-        return self
+            for n, v in saved.items():
+                setattr(wf, n, v)
