@@ -83,7 +83,8 @@ import { reportStore, type ReportStore } from './report/store';
 import { render as renderReportInHost } from './report/renderHost';
 import { admitReport, registerReportRoutes } from './routes/report';
 import { registerReportLiveRoute } from './routes/reportLive';
-import { LiveHub, type RenderOnce } from './report/live';
+import { activeNamespace, allNamespaces, inNamespace } from './workspaces';
+import { LiveHub, type RenderOnce, type LiveRunKey } from './report/live';
 import { IN_FLIGHT, inFlightSummary, progressFromHeartbeats, type InFlightRows } from './report/liveProducers';
 import type { RowTailHub } from './rowTail';
 
@@ -358,8 +359,20 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
    * every workflow on the page — and the page polls. It is passed as a GETTER so that registering
    * either module opens nothing.
    */
-  let describer: QueueDescriber | null = opts.queueDescriber ?? null;
-  const queueDescriber = (): QueueDescriber => (describer ??= temporalQueueDescriber());
+  //
+  // ONE PER NAMESPACE, picked per call (ADR 0051): the pollers a page shows are the current
+  // workspace's, because a worker serving another workspace's namespace cannot take this one's work.
+  const describers = new Map<string, QueueDescriber>();
+  const queueDescriber = (): QueueDescriber => {
+    if (opts.queueDescriber) return opts.queueDescriber;
+    const namespace = activeNamespace();
+    let d = describers.get(namespace);
+    if (!d) {
+      d = temporalQueueDescriber({ namespace });
+      describers.set(namespace, d);
+    }
+    return d;
+  };
 
   // 32 MiB body limit (Fastify defaults to 1 MiB): a saved design document carries the whole
   // editor canvas, and the default rejected the larger ones with a broken pipe.
@@ -442,6 +455,8 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         io,
         {
           store: reports,
+          // A preview stores nothing (§6.2), not even the pin a sweep would make.
+          pinFound: false,
           now: Date.now,
           close: (id) => fetchRunClose(id),
           identity: async (id) => {
@@ -463,7 +478,11 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
      live report watches the same rows through the same caps rather than a second poller. */
   const liveRows = new Map<string, InFlightRows>();
   let rowTailHub: RowTailHub | undefined;
-  const renderLive: RenderOnce = async (key) => {
+  // IN THE RUN'S OWN NAMESPACE, which the route resolved it in (ADR 0051): a render fires from a
+  // timer, long after the request, and must not follow the console to another workspace.
+  const renderLive: RenderOnce = (key) =>
+    inNamespace(key.namespace ?? activeNamespace(), () => renderLiveIn(key));
+  const renderLiveIn: RenderOnce = async (key) => {
     const described = await describeRunById(key.runId);
     if (!described) return { error: `run ${key.runId} is no longer readable` };
     const io = (await fetchRunIO(key.runId)) ?? {};
@@ -554,6 +573,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         runStartedAt: described.startedAt,
         status: described.status,
         closedAt: described.closedAt,
+        namespace: activeNamespace(),
       };
     },
     renderOnce: renderLive,
@@ -568,39 +588,40 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
        The STORED version is minted by the ordinary sweep path over this one run, so the render that
        is persisted is built from the FINAL context and carries the key a later convergence pass will
        compute — which is what stops that pass from inserting a second version beside it. */
-    watchTerminal: async (key) => {
-      const client = await getClient();
-      try {
-        await client.workflow.getHandle(key.runId).result();
-      } catch {
-        // Terminal and not a completion. Still reportable, and the report says which.
-      }
-      const described = await describeRunById(key.runId);
-      if (!described || described.closedAt <= 0) return undefined;
-      await sweepFinishedRuns({
-        store: reports,
-        list: async () => [
-          {
-            runId: key.runId,
-            status: described.status,
-            startedAt: described.startedAt,
-            closedAt: described.closedAt,
-            type: described.type,
-          },
-        ],
-        io: (id) => fetchRunIO(id),
-        close: (id) => fetchRunClose(id),
-        identity: async (id) => {
-          const found = await runWorkflowStore().get(id);
-          return found ? { workflow: found.workflow, version: found.version } : undefined;
-        },
-        onError: (err, runId) =>
-          app.log.warn(`report live finalize: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
-      });
-      const latest = await reports.version(key.runId);
-      return latest ? { version: latest.version } : undefined;
-    },
+    watchTerminal: (key) => inNamespace(key.namespace ?? activeNamespace(), () => watchTerminalIn(key)),
   });
+  async function watchTerminalIn(key: LiveRunKey): Promise<{ version?: number } | undefined> {
+    const client = await getClient();
+    try {
+      await client.workflow.getHandle(key.runId).result();
+    } catch {
+      // Terminal and not a completion. Still reportable, and the report says which.
+    }
+    const described = await describeRunById(key.runId);
+    if (!described || described.closedAt <= 0) return undefined;
+    await sweepFinishedRuns({
+      store: reports,
+      list: async () => [
+        {
+          runId: key.runId,
+          status: described.status,
+          startedAt: described.startedAt,
+          closedAt: described.closedAt,
+          type: described.type,
+        },
+      ],
+      io: (id) => fetchRunIO(id),
+      close: (id) => fetchRunClose(id),
+      identity: async (id) => {
+        const found = await runWorkflowStore().get(id);
+        return found ? { workflow: found.workflow, version: found.version } : undefined;
+      },
+      onError: (err, runId) =>
+        app.log.warn(`report live finalize: ${runId ? `run ${runId}: ` : ''}${errMessage(err)}`),
+    });
+    const latest = await reports.version(key.runId);
+    return latest ? { version: latest.version } : undefined;
+  }
   registerLogsRoutes(app);
   // Which Workers are running and NOT logging — the check every silent shipper failure needed.
   registerLogsCoverageRoutes(app, queueDescriber, repo);
@@ -925,8 +946,26 @@ export async function runApi(): Promise<FastifyInstance> {
      mechanism there would be a second thing to learn and a second thing to get wrong. The RENDER
      itself goes to a worker thread (`report/renderHost.ts`), so this loop costs the API's event loop
      nothing but the store reads. */
+  // EVERY WORKSPACE'S RUNS, each read in its own namespace (ADR 0051). The renderer lists runs and
+  // then reads each one's input, output and close event, and those reads have to happen in the run's
+  // own namespace. So the list remembers which namespace each run came from.
+  const reportRunNamespace = new Map<string, string>();
+  const inRunNamespace = <T>(runId: string, fn: () => Promise<T>): Promise<T> =>
+    inNamespace(reportRunNamespace.get(runId) ?? activeNamespace(), fn);
   startReportRenderer({
-    list: async () => listRuns(),
+    list: async () => {
+      const rows: RunDescription[] = [];
+      reportRunNamespace.clear();
+      for (const namespace of allNamespaces()) {
+        const found = await inNamespace(namespace, () => listRuns());
+        for (const r of found) reportRunNamespace.set(r.runId, namespace);
+        rows.push(...found);
+      }
+      return rows;
+    },
+    // THE WHOLE STEP, not only its Temporal reads: the store addresses the run's workspace tables
+    // by the same scope, so a report is written where that workspace's readers will look for it.
+    within: inRunNamespace,
     io: (runId) => fetchRunIO(runId),
     close: (runId) => fetchRunClose(runId),
     identity: async (runId) => {

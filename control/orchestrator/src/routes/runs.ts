@@ -42,7 +42,7 @@ import { EXPLORE_TOKEN_VARS, checkBearer, checkOptionalBearer } from '../auth';
 import { InvalidRunWorkflowError, type RunWorkflowStore } from '../data/runWorkflows';
 import type { QueueDescriber } from '../pollers';
 import type { RunLifecycle } from '../runs';
-import { NAMESPACE, describeRunHeartbeats, getClient } from '../temporalClient';
+import { describeRunHeartbeats, getClient } from '../temporalClient';
 import { STREAM_HEADERS } from './runStream';
 import {
   CANCEL_REPORT_MS,
@@ -407,7 +407,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): voi
           let pollers = -1;
           try {
             const tq = await client.workflowService.describeTaskQueue({
-              namespace: NAMESPACE,
+              namespace: client.options.namespace,
               taskQueue: { name: queue },
             });
             pollers = (tq.pollers ?? []).length;

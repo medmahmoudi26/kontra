@@ -87,7 +87,7 @@ func TestWorkflowStartRefusesWhenNothingServesTheQueue(t *testing.T) {
 	defer func() { pollerCount = restore }()
 
 	var asked string
-	pollerCount = func(queue string) (int, error) {
+	pollerCount = func(_ string, queue string) (int, error) {
 		asked = queue
 		return 0, nil // nothing is serving
 	}

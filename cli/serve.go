@@ -319,7 +319,9 @@ func cmdServe(args []string) error {
 		"KONTRA_ACTOR_NAME="+m.Name,
 		"KONTRA_ACTOR_VERSION="+m.Version,
 		"KONTRA_ADDRESS="+config.TemporalAddress(),
-		"KONTRA_NAMESPACE="+config.TemporalNamespace(),
+		// THE ACTOR FOLDER'S WORKSPACE, not the console's current one (ADR 0051): an actor under
+		// workspaces/hello serves ws-hello whichever workspace happens to be selected.
+		"KONTRA_NAMESPACE="+config.NamespaceForPath(absActor),
 		"KONTRA_REDIS_HOST="+*redis,
 		// WHERE TO REGISTER. `publish_catalog` returns immediately when this is unset, so an actor
 		// run locally never told the catalog anything — and the failure is silent by design (a

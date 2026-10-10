@@ -97,7 +97,10 @@ const NexusServiceName = "kontra.actor"
 // THE ONE DERIVATION HERE THAT SANITISES. shared/conformance/queues.json §endpoint runs the same
 // inputs through this and through §shared, which passes them verbatim: a space is legal in a
 // queue name and illegal in an endpoint name, and the two rules must not be shared.
-func EndpointName(name, version string) string {
+//
+// ONE ENDPOINT PER NAMESPACE: a workspace namespace (`ws-<workspace>`) is appended after a double
+// dash, and the legacy namespace keeps the bare name (queues.json §endpoint_in_namespace).
+func EndpointName(name, version, namespace string) string {
 	// ponytail: separators collapse to '-', so punctuated name/version could alias
 	// (a.b/c vs a/b.c); fine for local single-author, revisit if endpoint names collide.
 	var b strings.Builder
@@ -112,5 +115,9 @@ func EndpointName(name, version string) string {
 	for strings.Contains(safe, "--") {
 		safe = strings.ReplaceAll(safe, "--", "-")
 	}
-	return strings.Trim(safe, "-")
+	safe = strings.Trim(safe, "-")
+	if strings.HasPrefix(namespace, "ws-") {
+		return safe + "--" + namespace
+	}
+	return safe
 }

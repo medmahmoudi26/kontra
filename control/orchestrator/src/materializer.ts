@@ -53,6 +53,9 @@ import { startTracing, tracingEnabled } from './otel';
 import { datasetQueue } from './queues';
 import { temporalConnectOptions } from './temporalTls';
 import { identityFor } from './workerIdentity';
+import { runPerNamespace } from './namespacePool';
+import { bindNamespace } from './workspaces';
+import { clientFor } from './temporalClient';
 
 /** One decode at a time by default — concurrency here multiplies peak RSS directly. */
 const DEFAULT_SLOTS = 1;
@@ -101,41 +104,50 @@ export async function runMaterializer(): Promise<void> {
      * of typed output into DuckLake — `publishBatch` -> `writeDatasetParquet` — so "materializer"
      * describes what it does. What was dead was one queue and three activities, not the job.
      */
-    const pager = await Worker.create({
-      connection,
-      namespace: process.env.KONTRA_NAMESPACE ?? 'default',
-      taskQueue: datasetQueue(),
-      // Plus the caller SDK's two fleet reads (`activities/fleet.ts` says why they are here and
-      // not on the infra queue: that worker is deliberately serialised to one Pulumi update at a
-      // time, and a readiness poll behind a sixty-minute provision reads as a fleet that never
-      // came up).
-      //
-      // And the retention SWEEP (ADR 0029 §5): it reads the lake and the record/**Lease** workflow/summary
-      // stores, which this process already holds, and it heartbeats, so it belongs on the pager
-      // queue beside the reads rather than behind a decode. `sweepDatasetsWorkflow` proxies it
-      // here from wherever the controller hosts the workflow.
-      activities: {
-        ...createDatasetActivities({ store: new ObjectStore() }),
-        ...createRetentionActivities({ store: new ObjectStore() }),
-        ...fleetActivities,
-        // And the three **Lease** calls (ADR 0037), here for the same reason and one more: a hold
-        // is what a `fleet.up()` does FIRST, so a hold queued behind a sixty-minute converge would
-        // block every Run at the top of its scope. `activities/lease.ts` says the rest.
-        ...leaseActivities,
+    // PER WORKSPACE NAMESPACE (ADR 0051): every workspace's runs publish through this queue in
+    // their own namespace, so it is served in each. See `namespacePool.ts`.
+    await runPerNamespace({
+      label: 'materializer',
+      ensure: async (namespace) => {
+        await clientFor(namespace);
       },
-      maxConcurrentActivityTaskExecutions: pagerSlots(),
-      // Its own name, on its own queue — see the decoder above.
-      identity: identityFor(datasetQueue()),
-      ...(tracingEnabled
-        ? {
-            interceptors: {
-              activity: [(ctx) => ({ inbound: new OpenTelemetryActivityInboundInterceptor(ctx) })],
-            },
-          }
-        : {}),
+      make: (namespace) =>
+        Worker.create({
+          connection,
+          namespace,
+          taskQueue: datasetQueue(),
+          // Plus the caller SDK's two fleet reads (`activities/fleet.ts` says why they are here and
+          // not on the infra queue: that worker is deliberately serialised to one Pulumi update at a
+          // time, and a readiness poll behind a sixty-minute provision reads as a fleet that never
+          // came up).
+          //
+          // And the retention SWEEP (ADR 0029 §5): it reads the lake and the record/**Lease** workflow/summary
+          // stores, which this process already holds, and it heartbeats, so it belongs on the pager
+          // queue beside the reads rather than behind a decode. `sweepDatasetsWorkflow` proxies it
+          // here from wherever the controller hosts the workflow.
+          // BOUND TO THIS WORKER'S NAMESPACE, so a run's rows land in its own workspace's lake
+          // whatever the console has selected (ADR 0051; `bindNamespace`).
+          activities: bindNamespace(namespace, {
+            ...createDatasetActivities({ store: new ObjectStore() }),
+            ...createRetentionActivities({ store: new ObjectStore() }),
+            ...fleetActivities,
+            // And the three **Lease** calls (ADR 0037), here for the same reason and one more: a hold
+            // is what a `fleet.up()` does FIRST, so a hold queued behind a sixty-minute converge would
+            // block every Run at the top of its scope. `activities/lease.ts` says the rest.
+            ...leaseActivities,
+          }),
+          maxConcurrentActivityTaskExecutions: pagerSlots(),
+          // Its own name, on its own queue — see the decoder above.
+          identity: identityFor(datasetQueue()),
+          ...(tracingEnabled
+            ? {
+                interceptors: {
+                  activity: [(ctx) => ({ inbound: new OpenTelemetryActivityInboundInterceptor(ctx) })],
+                },
+              }
+            : {}),
+        }),
     });
-
-    await pager.run();
   } finally {
     await connection.close();
   }

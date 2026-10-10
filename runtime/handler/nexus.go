@@ -89,7 +89,7 @@ func joinNonEmpty(parts ...string) string {
 // registration change exists to remove. It is idempotent, so in the normal path it is a no-op that
 // reports `AlreadyExists` and moves on.
 func ensureNexusEndpoint(ctx context.Context, c client.Client, namespace, name, version string) (string, error) {
-	endpoint := identity.EndpointName(name, version)
+	endpoint := identity.EndpointName(name, version, namespace)
 	_, err := c.OperatorService().CreateNexusEndpoint(ctx, &operatorservice.CreateNexusEndpointRequest{
 		Spec: &nexusv1.EndpointSpec{
 			Name: endpoint,

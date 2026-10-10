@@ -196,7 +196,12 @@ def session_queue(name: str, version: str = "", session_id: str = "") -> str:
     return f"{shared_queue(name, version)}-s-{session_id}"
 
 
-def endpoint_name(name: str, version: str = "") -> str:
+#: The prefix a WORKSPACE's Temporal namespace carries (ADR 0051, workspace_namespace.json). An
+#: endpoint for a queue in one of those namespaces says so; the legacy namespace's does not.
+WORKSPACE_NAMESPACE_PREFIX = "ws-"
+
+
+def endpoint_name(name: str, version: str = "", namespace: str = "") -> str:
     """The Nexus endpoint the actor's worker creates on boot: `kontra-{name}-{version}` with
     every non-alphanumeric collapsed to '-', doubles collapsed, ends stripped
     (echo 0.1.0 -> "kontra-echo-0-1-0").
@@ -204,12 +209,19 @@ def endpoint_name(name: str, version: str = "") -> str:
     THE ONE DERIVATION IN THIS MODULE THAT SANITISES, because the cluster enforces
     ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$ on an endpoint name and enforces nothing on a queue name.
     shared/conformance/queues.json runs the same inputs through both rules for exactly that reason.
+
+    ONE ENDPOINT PER NAMESPACE. The endpoint is cluster state and a workspace is a namespace, so
+    a workspace's endpoint carries `--<namespace>` after the sanitised stem and the legacy
+    namespace's does not (queues.json §endpoint_in_namespace).
     """
     raw = f"kontra-{name}-{version}"
     safe = "".join(c if (c.isascii() and (c.isalnum() or c == "-")) else "-" for c in raw)
     while "--" in safe:
         safe = safe.replace("--", "-")
-    return safe.strip("-")
+    safe = safe.strip("-")
+    if namespace.startswith(WORKSPACE_NAMESPACE_PREFIX):
+        return f"{safe}--{namespace}"
+    return safe
 
 
 def entry_input(
@@ -783,8 +795,10 @@ class ActorHandle:
     ) -> None:
         self.name = name
         self.version = version
-        #: Overridable for a cross-namespace endpoint registered under another name.
-        self.endpoint = endpoint or endpoint_name(name, version)
+        #: Overridable for a cross-namespace endpoint registered under another name. Unset, the
+        #: endpoint is derived at DISPATCH time from the calling workflow's own namespace — the
+        #: handle is built at module scope, where no namespace is known yet.
+        self._endpoint = endpoint
         #: The virtual-object key, bound by `handle[key]`. Empty = un-keyed (a fresh instance
         #: per dispatch). Rides the wire as `idempotency_key`; see __getitem__.
         self.key = key
@@ -794,6 +808,21 @@ class ActorHandle:
     def __repr__(self) -> str:  # pragma: no cover - debugging affordance
         keyed = f"[{self.key!r}]" if self.key else ""
         return f"<kontra actor {self.name}@{self.version or 'shared'}{keyed} via {self.endpoint}>"
+
+    @property
+    def endpoint(self) -> str:
+        """The endpoint a dispatch goes through: the override, or the derivation for the calling
+        workflow's namespace (the legacy name outside a workflow)."""
+        if self._endpoint:
+            return self._endpoint
+        namespace = ""
+        try:
+            from temporalio import workflow
+
+            namespace = workflow.info().namespace
+        except Exception:  # not inside a workflow: the legacy name is the only one there is
+            pass
+        return endpoint_name(self.name, self.version, namespace)
 
     def __getitem__(self, key: str) -> "ActorHandle":
         """Bind a KEY — `crawler["acme.com"]` — making this actor a virtual object.
@@ -827,7 +856,7 @@ class ActorHandle:
             # It becomes part of a Temporal workflow id, which has a server-side size limit; a
             # cap here fails at the call site instead of deep inside a Nexus start.
             raise ValueError(f"actor key is {len(k)} chars; cap is 400")
-        return ActorHandle(self.name, self.version, endpoint=self.endpoint, key=k)
+        return ActorHandle(self.name, self.version, endpoint=self._endpoint, key=k)
 
     def session(
         self,

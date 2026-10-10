@@ -139,13 +139,18 @@ func cliClaimCheckCodec() converter.PayloadCodec {
 
 // dialWithClaimCheck dials Temporal with the codec above installed.
 func dialWithClaimCheck() (client.Client, error) {
+	return dialWithClaimCheckIn(config.TemporalNamespace())
+}
+
+// dialWithClaimCheckIn is the same dial, in one workspace's namespace (ADR 0051).
+func dialWithClaimCheckIn(namespace string) (client.Client, error) {
 	conn, err := temporaltls.ConnectionOptions(nil)
 	if err != nil {
 		return nil, err
 	}
 	return client.Dial(client.Options{
 		HostPort:          config.TemporalAddress(),
-		Namespace:         config.TemporalNamespace(),
+		Namespace:         namespace,
 		DataConverter:     converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), cliClaimCheckCodec()),
 		ConnectionOptions: conn,
 	})

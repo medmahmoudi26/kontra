@@ -33,6 +33,7 @@ import { dtPartition } from './data/parquet';
 import type { RunHistory } from './history';
 import { readAsks, type RunAsk } from './hitl';
 import { LIST_LIMIT, fetchRunHistory, listRuns, type RunRow } from './temporalClient';
+import { allNamespaces, inNamespace } from './workspaces';
 
 /** The envelope's version. Bumped only if the STORED shape changes; `RunHistory` growing a field
  *  does not, because every reader of it already treats new fields as optional. */
@@ -401,6 +402,22 @@ export function startHistoryArchiver(
     if (running) return;
     running = true;
     try {
+      // EVERY WORKSPACE'S NAMESPACE, one at a time (ADR 0051). A Run ages out of ITS namespace, so
+      // a sweep of only the console's current workspace would let every other workspace's histories
+      // expire unarchived, with nothing anywhere saying so.
+      for (const namespace of allNamespaces()) {
+        await inNamespace(namespace, () => passIn(namespace));
+      }
+    } catch (err) {
+      deps.onError?.(err);
+    } finally {
+      running = false;
+    }
+  };
+  // ONE NAMESPACE'S PASS, failing on its own: Temporal refusing one namespace must not stop the
+  // others being archived.
+  const passIn = async (namespace: string): Promise<void> => {
+    try {
       const report = await sweepClosedRuns(archive, deps);
       /* NAMED, NOT COUNTED. Events lost to retention are unrecoverable, so the one moment they can
          be reconciled is now, and an integer is not something anybody can reconcile against. The
@@ -408,13 +425,13 @@ export function startHistoryArchiver(
          and said nothing is the quieter half of the same failure. */
       if (report.gone > 0) {
         deps.onNote?.(
-          `history archive: ${report.gone} run(s) aged out of Temporal before they were archived — ` +
+          `history archive [${namespace}]: ${report.gone} run(s) aged out of Temporal before they were archived — ` +
             `${report.goneIds.join(', ')}${report.gone > report.goneIds.length ? ', …' : ''}`
         );
       }
       if (report.capped) {
         deps.onNote?.(
-          `history archive: the run listing came back FULL (${report.scanned}) — there may be more ` +
+          `history archive [${namespace}]: the run listing came back FULL (${report.scanned}) — there may be more ` +
             'than this pass considered.'
         );
       }
@@ -422,8 +439,6 @@ export function startHistoryArchiver(
       // Temporal down, S3 down, credentials wrong — all ordinary, all transient, and none of them
       // may kill the API process. The next pass tries again.
       deps.onError?.(err);
-    } finally {
-      running = false;
     }
   };
 

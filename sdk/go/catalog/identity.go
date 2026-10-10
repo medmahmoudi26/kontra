@@ -105,7 +105,10 @@ func SessionQueue(name, version, sessionID string) string {
 // EndpointName is the Nexus endpoint an actor's worker creates on boot: `kontra-{name}-{version}`
 // with every non-alphanumeric collapsed to '-', doubles collapsed, ends stripped
 // (echo 0.1.0 -> "kontra-echo-0-1-0").
-func EndpointName(name, version string) string {
+//
+// ONE ENDPOINT PER NAMESPACE: a workspace namespace (`ws-<workspace>`) is appended after a double
+// dash, and the legacy namespace keeps the bare name (queues.json §endpoint_in_namespace).
+func EndpointName(name, version, namespace string) string {
 	raw := "kontra-" + name + "-" + version
 	var b strings.Builder
 	for _, r := range raw {
@@ -120,5 +123,12 @@ func EndpointName(name, version string) string {
 	for strings.Contains(safe, "--") {
 		safe = strings.ReplaceAll(safe, "--", "-")
 	}
-	return strings.Trim(safe, "-")
+	safe = strings.Trim(safe, "-")
+	if strings.HasPrefix(namespace, WorkspaceNamespacePrefix) {
+		return safe + "--" + namespace
+	}
+	return safe
 }
+
+// WorkspaceNamespacePrefix marks a workspace's Temporal namespace (ADR 0051).
+const WorkspaceNamespacePrefix = "ws-"

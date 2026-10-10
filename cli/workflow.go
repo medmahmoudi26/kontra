@@ -38,6 +38,7 @@ import (
 
 	"github.com/medmahmoudi26/kontra/cli/internal/cliio"
 	"github.com/medmahmoudi26/kontra/cli/internal/cliutil"
+	"github.com/medmahmoudi26/kontra/cli/internal/config"
 	"github.com/medmahmoudi26/kontra/cli/warden"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
@@ -49,8 +50,8 @@ import (
 // against a queue nothing serves instead of leaving the run `running` forever.
 var pollerCount = livePollerCount
 
-func livePollerCount(queue string) (int, error) {
-	d, err := newDescriber()
+func livePollerCount(namespace, queue string) (int, error) {
+	d, err := newDescriberIn(namespace)
 	if err != nil {
 		return 0, err
 	}
@@ -400,7 +401,14 @@ func workflowServe(args []string) error {
 	// because the two paths below need it differently: the foreground child inherits and overrides,
 	// while a tmux pane inherits the tmux SERVER's environment and must be told each variable
 	// explicitly.
-	delta := append(serveEnvDelta(root, serveQueue), watchEnv(watch)...)
+	// The workspace's namespace must exist before a worker polls it: a poll of a namespace Temporal
+	// does not know kills the worker on its first call. The orchestrator provisions it, in one place
+	// that registers the namespace AND its search attributes; this waits for that and says so.
+	serveNamespace := config.NamespaceForPath(file)
+	if err := waitForNamespace(serveNamespace); err != nil {
+		return err
+	}
+	delta := append(serveEnvDelta(root, serveNamespace, serveQueue), watchEnv(watch)...)
 	env := append(os.Environ(), delta...)
 
 	// serve-dev: the worker in a container holding this folder, and this command RETURNS.
@@ -575,7 +583,11 @@ func workflowStart(args []string) error {
 	// changes its digest and therefore its queue, so a stale or un-served checkout derives a queue no
 	// worker polls; a start there sits `running` forever with no error, which is the exact failure
 	// deriving-instead-of-typing exists to remove. Naming the fix is the point.
-	n, err := pollerCount(queue)
+	//
+	// ASKED IN THE FOLDER'S WORKSPACE NAMESPACE (ADR 0051), the same one `workflow serve` gives its
+	// worker, and the one the run is started in below.
+	namespace := config.NamespaceForPath(file)
+	n, err := pollerCount(namespace, queue)
 	if err != nil {
 		return fmt.Errorf("cannot verify a worker is serving %s on %q: %w\n"+
 			"  serve this code first:  kontra workflow serve %s --tmux", wfType, queue, err, target)
@@ -597,7 +609,7 @@ func workflowStart(args []string) error {
 		wfID = fmt.Sprintf("%s-%d", strings.ToLower(wfType), time.Now().Unix())
 	}
 
-	c, err := dialWithClaimCheck()
+	c, err := dialWithClaimCheckIn(namespace)
 	if err != nil {
 		return err
 	}

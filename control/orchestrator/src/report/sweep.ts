@@ -53,6 +53,8 @@ import {
 import { render as renderInHost, type RenderResponse } from './renderHost';
 import type { ReportSnapshot } from './render';
 import { reportStore, type ReportStore } from './store';
+import { folderTemplateFor, type FolderTemplate } from './folderTemplate';
+import { activeNamespace } from '../workspaces';
 
 /** Every 15 minutes, matching the history archiver — the same runs, the same visibility query. */
 /**
@@ -127,7 +129,21 @@ export interface SweepDeps {
   onNote?: (note: string) => void;
   onError?: (err: unknown, runId?: string) => void;
   /** A page this size may be a prefix of what exists — the archiver's own caveat. */
-  listLimit?: number;
+  listLimit?: number;  /**
+   * Run one run's whole step — its reads and its store writes — inside a scope, which the server
+   * uses to address the run's own namespace (ADR 0051). Identity when absent.
+   */
+  within?: <T>(runId: string, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * The template of a run nothing pinned, from its workflow type (`report/folderTemplate.ts`).
+   * Defaults to a lookup in the active namespace's workspace folder.
+   */
+  folderTemplate?: (type: string) => FolderTemplate | undefined;
+  /**
+   * Whether a template found that way is PINNED. True for the sweep and the live render; false for
+   * a preview, which §6.2 says stores nothing.
+   */
+  pinFound?: boolean;
 }
 
 /** A closed run is reportable. The same predicate as `isArchivable`, and for the same reason. */
@@ -163,84 +179,94 @@ export async function sweepFinishedRuns(deps: SweepDeps = {}): Promise<ReportSwe
   out.scanned = runs.length;
   if (deps.listLimit !== undefined) out.capped = runs.length >= deps.listLimit;
 
+  const within = deps.within ?? (<T>(_runId: string, fn: () => Promise<T>) => fn());
   for (const run of runs) {
     if (!isReportable(run)) continue;
     out.closed += 1;
     try {
-      const io = deps.io ? await deps.io(run.runId) : undefined;
-      if (!io) {
-        // Temporal described it a moment ago and cannot serve its metadata now. Counted and NAMED,
-        // never inferred — the archiver's rule, and the reason is the same: the loss is unrecoverable
-        // and the only moment it can be reconciled is now.
-        out.gone += 1;
-        if (out.goneIds.length < SKIPPED_IDS_CAP) out.goneIds.push(run.runId);
-        continue;
-      }
-      const built = await contextForRun(run, io, {
-        ...deps,
-        store,
-        now,
-      });
-      const { template, templateHash, context } = built;
+      await within(run.runId, async () => {
+        const io = deps.io ? await deps.io(run.runId) : undefined;
+        if (!io) {
+          // Temporal described it a moment ago and cannot serve its metadata now. Counted and NAMED,
+          // never inferred — the archiver's rule, and the reason is the same: the loss is unrecoverable
+          // and the only moment it can be reconciled is now.
+          out.gone += 1;
+          if (out.goneIds.length < SKIPPED_IDS_CAP) out.goneIds.push(run.runId);
+          return;
+        }
+        const built = await contextForRun(run, io, {
+          ...deps,
+          store,
+          now,
+        });
+        const { template, templateHash, context } = built;
 
-      /* THE KEY IS CHECKED BEFORE THE RENDER AND THE ROW IS WRITTEN AFTER IT, in ONE insert.
-         The first version of this claimed the key first and inserted the snapshot second, which found
-         its own row by that key and answered `created: false` — so every snapshot was discarded and
-         every report stored empty. One insert, carrying the snapshot, is the fix.
-         The cheap read here is what keeps a steady-state pass over a full retention window from
-         rendering anything; two orchestrators racing can both render, and the loser's insert is
-         absorbed by the unique index, which costs one wasted render rather than a lost report. */
-      const key = renderKey(templateHash, context);
-      if ((await store.versionByKey(run.runId, key)) !== undefined) {
-        out.present += 1;
-        continue;
-      }
+        /* THE KEY IS CHECKED BEFORE THE RENDER AND THE ROW IS WRITTEN AFTER IT, in ONE insert.
+           The first version of this claimed the key first and inserted the snapshot second, which found
+           its own row by that key and answered `created: false` — so every snapshot was discarded and
+           every report stored empty. One insert, carrying the snapshot, is the fix.
+           The cheap read here is what keeps a steady-state pass over a full retention window from
+           rendering anything; two orchestrators racing can both render, and the loser's insert is
+           absorbed by the unique index, which costs one wasted render rather than a lost report. */
+        const key = renderKey(templateHash, context);
+        if ((await store.versionByKey(run.runId, key)) !== undefined) {
+          out.present += 1;
+          return;
+        }
 
-      if (!built.pinned) out.noTemplate += 1;
+        if (!built.pinned) out.noTemplate += 1;
 
-      const result = await renderOne({ template, context });
-      if (!result.ok) {
-        out.errored += 1;
-        await store.declareVersion({
+        const result = await renderOne({ template, context });
+        if (!result.ok) {
+          out.errored += 1;
+          await store.declareVersion({
+            runId: run.runId,
+            status: 'error',
+            templateHash,
+            renderKey: key,
+            errorText: result.error,
+            renderedBy: 'sweep',
+            at: now(),
+          });
+          return;
+        }
+
+        const snapshot: ReportSnapshot = !built.pinned
+          ? {
+              ...result.snapshot,
+              warnings: [
+                'No report.md was pinned when this run started, and no single workflow folder in its ' +
+                  'workspace declares its type, so this is the default report.',
+              ],
+            }
+          : built.pinnedLate
+            ? {
+                ...result.snapshot,
+                warnings: [
+                  'This run was started outside the console, which pins nothing, so this report uses ' +
+                    `the report.md in its workspace's workflow folder as it was when first rendered — the ` +
+                    'copy on disk there, which is not necessarily the committed one or the one the run started with.',
+                ],
+              }
+            : result.snapshot;
+        const stored = await store.declareVersion({
           runId: run.runId,
-          status: 'error',
+          status: 'ok',
           templateHash,
           renderKey: key,
-          errorText: result.error,
+          snapshotJson: JSON.stringify(snapshot),
           renderedBy: 'sweep',
           at: now(),
         });
-        continue;
-      }
-
-      const snapshot: ReportSnapshot = built.pinned
-        ? result.snapshot
-        : {
-            ...result.snapshot,
-            warnings: [
-              'No report.md was pinned when this run started, so this is the default report. A run ' +
-                'started by `kontra workflow start` pins nothing today — it dials Temporal directly — ' +
-                'and nothing maps a run id back to its workflow folder, so the template could not be ' +
-                'found afterwards either.',
-            ],
-          };
-      const stored = await store.declareVersion({
-        runId: run.runId,
-        status: 'ok',
-        templateHash,
-        renderKey: key,
-        snapshotJson: JSON.stringify(snapshot),
-        renderedBy: 'sweep',
-        at: now(),
+        if (!stored.created) {
+          // Another orchestrator got there between the check and the insert. Its version is the one
+          // that counts, and this render is discarded rather than stored beside it.
+          out.present += 1;
+          return;
+        }
+        await store.putSecrets(run.runId, stored.version, result.secrets);
+        out.rendered += 1;
       });
-      if (!stored.created) {
-        // Another orchestrator got there between the check and the insert. Its version is the one
-        // that counts, and this render is discarded rather than stored beside it.
-        out.present += 1;
-        continue;
-      }
-      await store.putSecrets(run.runId, stored.version, result.secrets);
-      out.rendered += 1;
     } catch (err) {
       out.failed += 1;
       deps.onError?.(err, run.runId);
@@ -372,8 +398,36 @@ export async function contextForRun(
    * passes it — it is built from the final context — so nothing here can reach a `renderKey`.
    */
   live?: { progress?: ProgressContext; datasets?: Record<string, DatasetSummary>; partial?: unknown }
-): Promise<{ template: string; templateHash: string; context: TemplateContext; pinned: boolean }> {
-  const pinned = await deps.store.template(run.runId);
+): Promise<{
+  template: string;
+  templateHash: string;
+  context: TemplateContext;
+  pinned: boolean;
+  /** Pinned from the folder at a render after the start, not by the start: see {@link LATE_PIN_MS}. */
+  pinnedLate: boolean;
+}> {
+  let pinned = await deps.store.template(run.runId);
+  if (pinned === undefined && run.type) {
+    // NOTHING PINNED IT — a run started outside the console. Find its folder by type in its own
+    // workspace and pin what is there now, so the next render of this run reads the same template.
+    const found = (deps.folderTemplate ?? ((type: string) => folderTemplateFor(type, activeNamespace())))(run.type);
+    if (found) {
+      const pin = {
+        runId: run.runId,
+        templateHash: found.text === undefined ? defaultTemplateId(deps.version) : templateHash(found.text),
+        templateText: found.text ?? '',
+        source: (found.text === undefined ? 'default' : 'workspace') as 'default' | 'workspace',
+        workspace: found.workspace,
+        capturedAt: deps.now(),
+      };
+      if (deps.pinFound === false) {
+        pinned = pin;
+      } else {
+        await deps.store.pinTemplate({ ...pin, at: pin.capturedAt });
+        pinned = await deps.store.template(run.runId);
+      }
+    }
+  }
   const status = statusWord(run.status);
   const close = status === 'completed' ? undefined : await deps.close?.(run.runId);
   const identity = await deps.identity?.(run.runId);
@@ -428,5 +482,14 @@ export async function contextForRun(
     templateHash: pinned?.templateHash ?? defaultTemplateId(deps.version),
     context: withDefault,
     pinned: pinned !== undefined,
+    pinnedLate:
+      pinned !== undefined && pinned.source === 'workspace' && pinned.capturedAt - run.startedAt > LATE_PIN_MS,
   };
 }
+
+/**
+ * How long after its start a pin can be and still be the START's pin. `POST /api/runs` pins within
+ * a second of starting; a pin later than this was made by a render from the folder as it was then,
+ * and the report says so — the workspace copy is not necessarily what was committed, nor what ran.
+ */
+export const LATE_PIN_MS = 60_000;

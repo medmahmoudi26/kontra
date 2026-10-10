@@ -38,6 +38,7 @@
  */
 
 import { getConnection } from './temporalClient';
+import { ADDRESS_PREFIX, activeNamespace } from './workspaces';
 
 /**
  * `kontra-<name>-<version>`, non-alphanumerics collapsed to `-`.
@@ -54,10 +55,12 @@ import { getConnection } from './temporalClient';
  * them through verbatim, because Temporal accepts a space in a queue name and the endpoint
  * registry does not. The corpus runs both rules over the same rows for that reason.
  */
-export function endpointName(name: string, version: string): string {
+export function endpointName(name: string, version: string, namespace = ''): string {
   const raw = `kontra-${name}-${version}`;
-  const safe = raw.replace(/[^0-9A-Za-z-]/g, '-').replace(/-{2,}/g, '-');
-  return safe.replace(/^-+|-+$/g, '');
+  const safe = raw.replace(/[^0-9A-Za-z-]/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '');
+  // ONE ENDPOINT PER NAMESPACE (queues.json §endpoint_in_namespace): the endpoint is cluster
+  // state and a workspace is a namespace, so a workspace's endpoint says which one.
+  return namespace.startsWith(ADDRESS_PREFIX) ? `${safe}--${namespace}` : safe;
 }
 
 /**
@@ -79,9 +82,9 @@ export interface EndpointResult {
   detail?: string;
 }
 
-/** The namespace endpoints are created in. Same variable the rest of the control plane reads. */
+/** The namespace endpoints are created in: the one the current request is addressed to. */
 function namespace(): string {
-  return process.env.KONTRA_NAMESPACE || 'default';
+  return activeNamespace();
 }
 
 /**
@@ -143,7 +146,7 @@ export async function ensureEndpoint(
    */
   methods: ReadonlyArray<{ name?: string; description?: string }> = []
 ): Promise<EndpointResult> {
-  const endpoint = endpointName(name, version);
+  const endpoint = endpointName(name, version, namespace());
   try {
     // LIST FIRST. CreateNexusEndpoint is not idempotent on matching: an AlreadyExists is
     // logged as ERROR and retried by the server interceptor. Workspace watch used to hit
@@ -176,7 +179,7 @@ export async function ensureEndpoint(
  * left behind is a leak to report, not a reason to keep a row they asked to remove.
  */
 export async function removeEndpoint(name: string, version: string): Promise<EndpointResult> {
-  const endpoint = endpointName(name, version);
+  const endpoint = endpointName(name, version, namespace());
   try {
     const connection = await getConnection();
     // BY LISTING, not by name: the operator API deletes by endpoint UUID, and there is no

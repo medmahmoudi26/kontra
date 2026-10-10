@@ -213,7 +213,8 @@ func (h *ActorHandle) nextNodeSeq(ctx workflow.Context) string {
 
 // Actor returns a handle on a deployed Actor.
 func Actor(name, version string) *ActorHandle {
-	return &ActorHandle{Name: name, Version: version, endpoint: EndpointName(name, version)}
+	// No endpoint yet: it depends on the CALLING workflow's namespace, known only at dispatch.
+	return &ActorHandle{Name: name, Version: version}
 }
 
 // Key binds a virtual-object KEY — `Actor("crawler","1").Key("acme.com")`. One Batch at a time
@@ -569,7 +570,11 @@ func (h *ActorHandle) dispatch(
 		return nil, fmt.Errorf("units must be []any or *Batch, got %T", units)
 	}
 
-	c := workflow.NewNexusClient(h.endpoint, ServiceName)
+	endpoint := h.endpoint
+	if endpoint == "" {
+		endpoint = EndpointName(h.Name, h.Version, workflow.GetInfo(ctx).Namespace)
+	}
+	c := workflow.NewNexusClient(endpoint, ServiceName)
 	fut := c.ExecuteOperation(ctx, RunOperation, entry, workflow.NexusOperationOptions{
 		ScheduleToCloseTimeout: o.timeout,
 		// METADATA, NOT PAYLOAD — the Method name is in `entry` too, but `entry` is a payload and

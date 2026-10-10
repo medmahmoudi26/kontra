@@ -46,7 +46,8 @@ import { infraQueue } from './queues';
 import { armRetentionSchedule } from './retention';
 import { assertDistinctQueues, queueAssignments, resolveRoles, ROLES_VAR, type Role } from './roles';
 import { runApi } from './server';
-import { getClient } from './temporalClient';
+import { LEGACY_NAMESPACE, clientFor } from './temporalClient';
+import { runPerNamespace } from './namespacePool';
 import { temporalConnectOptions } from './temporalTls';
 import { identityFor } from './workerIdentity';
 
@@ -71,7 +72,6 @@ function log(line: string): void {
  */
 export async function runInfra(): Promise<void> {
   const address = process.env.KONTRA_ADDRESS ?? 'localhost:7233';
-  const namespace = process.env.KONTRA_NAMESPACE ?? 'default';
   const queue = infraQueue();
 
   // An explicit connection, not the default. `connection: undefined` silently means
@@ -79,7 +79,10 @@ export async function runInfra(): Promise<void> {
   // an unrelated tonic transport error against ::1.
   const connection = await NativeConnection.connect(temporalConnectOptions({ address }));
 
-  const worker = await Worker.create({
+  // ONE PER WORKSPACE NAMESPACE (ADR 0051), as the full infra worker does: a Fleet is a child
+  // workflow, and a child runs in its parent's namespace. See `namespacePool.ts`.
+  const make = (namespace: string) =>
+    Worker.create({
     // THE INSTALL BUNDLE. `stackWorkflow` is in it and refuses; leaving the TYPE out would not
     // fail a `fleet.up()`, it would hang one — the task is taken, no such type is found, the task
     // fails, and Temporal retries it forever. See `workflows/noProvisioner.ts`.
@@ -97,7 +100,7 @@ export async function runInfra(): Promise<void> {
     // the materializer's. At the SDK default all of them are one `<pid>@<hostname>` and a poller
     // listing cannot say which queue stopped being served. See `workerIdentity.ts`.
     identity: identityFor(queue),
-  });
+    });
 
   log(`infra role: queue=${queue} as ${identityFor(queue)} (no provisioner — stackWorkflow is registered and refuses)`);
 
@@ -115,7 +118,9 @@ export async function runInfra(): Promise<void> {
   // `@temporalio/client`'s; in a merged process that client already exists and is already built
   // with the repo's `dataConverter`, which is the property that mattered.
   try {
-    const client = await getClient();
+    // Once, in the legacy namespace, whose worker the pool below always starts. See `infra.ts` on
+    // why the lake's sweep is not per namespace.
+    const client = await clientFor(LEGACY_NAMESPACE);
     await armRetentionSchedule(client.schedule, {
       taskQueue: queue,
       log: (line) => log(`infra role: ${line}`),
@@ -126,7 +131,14 @@ export async function runInfra(): Promise<void> {
     log(`infra role: could not arm the retention schedule: ${message(err)}`);
   }
 
-  await worker.run();
+  await runPerNamespace({
+    label: 'infra role',
+    ensure: async (namespace) => {
+      await clientFor(namespace);
+    },
+    make,
+    log,
+  });
 }
 
 function message(err: unknown): string {

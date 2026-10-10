@@ -1,0 +1,19 @@
+{
+ "why": "Which Temporal namespace a workspace's runs live in (ADR 0051 §2: the namespace is the isolation boundary, and the only one Temporal enforces for us). TWO WRITERS that must agree byte for byte: `control/orchestrator/src/workspaces.ts::namespaceFor`, which every API read and every orchestrator worker resolves through, and the CLI's `namespaceForWorkspace` in `cli/internal/config`, which `kontra workflow serve` and `kontra workflow start` resolve through. If they disagree, a workflow is served in one namespace and started in another: the start succeeds, nothing polls it, and the Run sits at RUNNING with an empty page.",
+ "rule": "The workspace named `default`, and an install with no named workspace (``), keep the legacy namespace: `KONTRA_NAMESPACE`, or `default` when it is unset or blank. That is ADR 0051 §6 — every Run that existed before isolation stays readable there. Every other workspace is `ws-<name>`, whatever `KONTRA_NAMESPACE` says, because a custom legacy namespace names that ONE install's old address, not a prefix for new ones. A name the workspace rule refuses is refused here too, rather than turned into a namespace.",
+ "cases": [
+  { "why": "no named-workspace layout, nothing configured: today's behaviour, unchanged", "workspace": "", "env_namespace": null, "namespace": "default" },
+  { "why": "no named-workspace layout, a configured namespace: still honoured", "workspace": "", "env_namespace": "acme", "namespace": "acme" },
+  { "why": "blank counts as unset, as `??` alone would not", "workspace": "", "env_namespace": "  ", "namespace": "default" },
+  { "why": "the workspace called default keeps the legacy namespace and every Run already in it", "workspace": "default", "env_namespace": null, "namespace": "default" },
+  { "why": "…including a customised one", "workspace": "default", "env_namespace": "acme", "namespace": "acme" },
+  { "why": "the seeded starter on a fresh install is NOT legacy: it gets its own address", "workspace": "hello", "env_namespace": null, "namespace": "ws-hello" },
+  { "why": "a configured legacy namespace is not a prefix for other workspaces", "workspace": "scraping", "env_namespace": "acme", "namespace": "ws-scraping" },
+  { "why": "hyphens survive: a namespace may hold them", "workspace": "bug-bounty", "env_namespace": null, "namespace": "ws-bug-bounty" }
+ ],
+ "refused": [
+  { "why": "an underscore, which the workspace rule forbids so two names cannot share one catalog", "workspace": "bug_bounty" },
+  { "why": "uppercase", "workspace": "Default" },
+  { "why": "a path separator", "workspace": "a/b" }
+ ]
+}

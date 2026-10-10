@@ -835,7 +835,91 @@ func TemporalAddress() string {
 	return DefaultTemporal
 }
 
-func TemporalNamespace() string { return cliutil.EnvOr("KONTRA_NAMESPACE", DefaultNamespace) }
+// TemporalNamespace is the namespace the CLI acts in: the CURRENT workspace's (ADR 0051), read from
+// `.current` under `KONTRA_WORKSPACES` on every call, so `kontra workspace use` takes effect at once.
+// Without a named-workspace layout, which is every Machine, Warden and local-mode process, it is
+// `KONTRA_NAMESPACE`, exactly as before. The Fleet sets that per run, so a Warden still polls its
+// run's namespace.
+func TemporalNamespace() string {
+	if ws := currentWorkspace(); ws != "" {
+		if ns, err := NamespaceForWorkspace(ws); err == nil {
+			return ns
+		}
+	}
+	return legacyNamespace()
+}
+
+// LegacyWorkspace is the workspace whose namespace is the install's legacy one (ADR 0051 §6).
+const LegacyWorkspace = "default"
+
+// workspaceName is the workspace naming rule, the same as `cli/workspace.go` and the control plane's
+// `NAME_RE`: lowercase letters, digits and dashes, 2 to 60, alphanumeric at both ends.
+var workspaceName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$`)
+
+func legacyNamespace() string {
+	if v := strings.TrimSpace(os.Getenv("KONTRA_NAMESPACE")); v != "" {
+		return v
+	}
+	return DefaultNamespace
+}
+
+// NamespaceForWorkspace is the Temporal namespace a workspace's Runs live in. It mirrors
+// `control/orchestrator/src/workspaces.ts::namespaceFor`, and `shared/conformance/workspace_namespace.json`
+// pins the two together. If they disagreed, a workflow would be served in one namespace and started in
+// another: the start would succeed, nothing would poll it, and the Run would sit at RUNNING.
+//
+// `default` and "" keep the legacy namespace, so every Run from before isolation stays readable there.
+// Every other workspace is `ws-<name>`.
+func NamespaceForWorkspace(workspace string) (string, error) {
+	if workspace == "" || workspace == LegacyWorkspace {
+		return legacyNamespace(), nil
+	}
+	if !workspaceName.MatchString(workspace) {
+		return "", fmt.Errorf("workspace name %q: use lowercase letters, digits and dashes (2–60 chars, start and end alphanumeric)", workspace)
+	}
+	return "ws-" + workspace, nil
+}
+
+// NamespaceForPath is the namespace of the workspace a path is in: the first segment under
+// `KONTRA_WORKSPACES`. A path outside it falls back to the current workspace's namespace.
+func NamespaceForPath(p string) string {
+	if parent := workspacesParentDir(); parent != "" {
+		if abs, err := filepath.Abs(p); err == nil {
+			if rel, err := filepath.Rel(parent, abs); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+				first := strings.Split(rel, string(filepath.Separator))[0]
+				if ns, err := NamespaceForWorkspace(first); err == nil {
+					return ns
+				}
+			}
+		}
+	}
+	return TemporalNamespace()
+}
+
+func workspacesParentDir() string {
+	raw := strings.TrimSpace(os.Getenv("KONTRA_WORKSPACES"))
+	if raw == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
+// currentWorkspace reads `.current` under `KONTRA_WORKSPACES`, or "" when there is no layout.
+func currentWorkspace() string {
+	parent := workspacesParentDir()
+	if parent == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(parent, ".current"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
 
 // CmdUserAdd adds a console login: `kontra user add <name>`.
 //

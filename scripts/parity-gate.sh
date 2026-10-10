@@ -823,7 +823,18 @@ fi
 # KONTRA_ADDRESS is set, so run 1a above and this run differ in exactly one thing.
 E2E_RECEIPT="$LOGS/e2e-receipt"
 : >"$E2E_RECEIPT"
+# IN THE ACTOR'S NAMESPACE (ADR 0051). A Worker serves its workspace's Temporal namespace — and the
+# fixture folder sits outside any workspace, so `kontra serve` falls back to the CURRENT one's — and a
+# caller in any other namespace dispatches to an endpoint that does not exist there. That refusal is
+# the isolation working, so the caller is put where the actor is rather than the actor where it is not.
+E2E_WS=$(kli sh -c 'cat "$KONTRA_WORKSPACES/.current" 2>/dev/null' | tr -d '\r\n ')
+case "$E2E_WS" in
+  ""|default) E2E_NS=default ;;
+  *) E2E_NS="ws-$E2E_WS" ;;
+esac
+info "the e2e caller runs in namespace $E2E_NS, where the fixture actor serves"
 KONTRA_E2E_RECEIPT="$E2E_RECEIPT" KONTRA_E2E=1 \
+  KONTRA_NAMESPACE="$E2E_NS" \
   KONTRA_ADDRESS="127.0.0.1:$P_TEMPORAL" \
   KONTRA_S3_ENDPOINT="http://127.0.0.1:$P_S3" \
   KONTRA_REDIS_HOST="127.0.0.1:$P_KV" \

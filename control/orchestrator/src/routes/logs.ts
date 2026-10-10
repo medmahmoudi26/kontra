@@ -38,6 +38,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { EXPLORE_TOKEN_VARS, checkBearer } from '../auth';
 import { STREAM_HEADERS } from './runStream';
+import { activeNamespace } from '../workspaces';
 
 /** In-compose, unpublished. The same shape `panels/metrics.ts` states for the metrics store. */
 export const DEFAULT_LOGS_URL = 'http://victorialogs:9428';
@@ -77,9 +78,17 @@ export function scopedQuery(caller: string | undefined, tenant: string): string 
   return `(${q}) AND _stream:{tenant=${JSON.stringify(tenant)}}`;
 }
 
-/** The namespace this control plane serves, which is the tenant — see `tenantHeaders`. */
+/**
+ * The tenant whose logs a read may see: the namespace of the workspace being looked at (ADR 0051).
+ *
+ * It was the install's one namespace, read from the environment, which made every line on the
+ * install every workspace's. The shipper now stamps a run's line with the namespace it ran in
+ * (`control/images/logline.py`), so scoping by the current workspace's namespace shows that
+ * workspace's runs and no other's. Install-level lines with no namespace stay on the legacy tenant,
+ * which is the `default` workspace's.
+ */
 export function tenant(): string {
-  return process.env.KONTRA_NAMESPACE ?? 'default';
+  return activeNamespace();
 }
 
 /** Strip anything the caller sent that would decide authorisation for us. */

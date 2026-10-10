@@ -41,6 +41,7 @@ const corpus = JSON.parse(
 ) as {
   shared: { cases: QueueCase[] };
   endpoint: { servable: string; cases: QueueCase[] };
+  endpoint_in_namespace: { cases: Array<QueueCase & { namespace: string }> };
   tmux_session: { cases: TmuxCase[] };
 };
 
@@ -85,6 +86,13 @@ describe('the Nexus endpoint name', () => {
   for (const c of corpus.endpoint.cases) {
     it(c.why, () => {
       expect(endpointName(c.name, c.version)).toBe(c.expect);
+    });
+  }
+
+  for (const c of corpus.endpoint_in_namespace.cases) {
+    it(`in a namespace: ${c.why}`, () => {
+      expect(endpointName(c.name, c.version, c.namespace)).toBe(c.expect);
+      expect(new RegExp(corpus.endpoint.servable).test(c.expect)).toBe(true);
     });
   }
 

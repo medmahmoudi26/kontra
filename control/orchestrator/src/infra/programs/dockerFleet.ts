@@ -45,7 +45,7 @@ export function dockerFleetProgram(args: DockerFleetArgs) {
 
     const machines = Array.from({ length: args.machines }, (_, i) => {
       const name = `kf-${args.tag}-${String(i + 1).padStart(2, '0')}`;
-      const assigned = assignmentFor(placements, args.machines, i);
+      const assigned = assignmentFor(placements, args.machines, i, args.namespace);
       const container = new docker.Container(
         name,
         {
@@ -55,7 +55,9 @@ export function dockerFleetProgram(args: DockerFleetArgs) {
           command: ['kontra', 'warden', 'serve', '--driver', 'docker', '--local'],
           envs: [
             `KONTRA_ADDRESS=${process.env.KONTRA_ADDRESS || 'temporal:7233'}`,
-            `KONTRA_NAMESPACE=${process.env.KONTRA_NAMESPACE || 'default'}`,
+            // The run's workspace namespace (ADR 0051): the Warden writes it into this Machine's
+            // certificate on first boot, and every Worker it supervises polls there.
+            `KONTRA_NAMESPACE=${args.namespace || process.env.KONTRA_NAMESPACE || 'default'}`,
             `KONTRA_REDIS_HOST=${process.env.KONTRA_REDIS_HOST || 'redis:6379'}`,
             `KONTRA_S3_ENDPOINT=${process.env.KONTRA_S3_ENDPOINT || 'http://seaweed-s3:8333'}`,
             `KONTRA_ORCHESTRATOR_URL=${process.env.KONTRA_ORCHESTRATOR_URL || 'http://orchestrator-api:8088'}`,
@@ -111,7 +113,9 @@ export function dockerFleetProgram(args: DockerFleetArgs) {
 export function assignmentFor(
   placements: PlacementArgs[],
   machineCount: number,
-  machineIndex: number
+  machineIndex: number,
+  /** The run's workspace namespace (`FleetArgs.namespace`); absent means the legacy one. */
+  namespace?: string
 ): { generation: number; workers: Array<Record<string, unknown>> } {
   const workers = [];
   for (const p of placements) {
@@ -135,7 +139,7 @@ export function assignmentFor(
       image,
       env: {
         KONTRA_ADDRESS: process.env.KONTRA_ADDRESS || 'temporal:7233',
-        KONTRA_NAMESPACE: process.env.KONTRA_NAMESPACE || 'default',
+        KONTRA_NAMESPACE: namespace || process.env.KONTRA_NAMESPACE || 'default',
         KONTRA_REDIS_HOST: process.env.KONTRA_REDIS_HOST || 'redis:6379',
         KONTRA_S3_ENDPOINT: process.env.KONTRA_S3_ENDPOINT || 'http://seaweed-s3:8333',
         KONTRA_ORCHESTRATOR_URL:

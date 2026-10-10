@@ -77,6 +77,9 @@ export interface MachineActor {
   /** The fleet's label, stamped on every metric so a per-Machine failure is attributable.
    *  Called `role` until it was renamed for claiming behaviour it never had — see FleetArgs.tag. */
   tag: string;
+  /** The run's workspace namespace when it is not the legacy one (see `FleetArgs.namespace`).
+   *  Written into the Worker's env file only when set, so a legacy Fleet's script is unchanged. */
+  namespace?: string;
   /**
    * Live Sessions this Machine will hold at once — `KONTRA_MAX_PARALLEL_SESSIONS`.
    *
@@ -608,7 +611,7 @@ KONTRA_S3_ENDPOINT=http://$CONTROLLER:8333
 KONTRA_REDIS_HOST=$CONTROLLER:6379
 KONTRA_CONTROLLER=$CONTROLLER
 KONTRA_TAG=\${TAG}
-${sessionCap}${metricsAddr}PYTHONPATH=$ROOT/sdk/python:$ROOT/runtime/python
+${a.namespace ? `KONTRA_NAMESPACE=${a.namespace}\n` : ''}${sessionCap}${metricsAddr}PYTHONPATH=$ROOT/sdk/python:$ROOT/runtime/python
 PYTHONUNBUFFERED=1
 PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ENV_EOF

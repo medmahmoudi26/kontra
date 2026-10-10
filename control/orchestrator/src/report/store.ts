@@ -48,6 +48,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { chunkBinds, createDriver, memoizeInit, num, type DriverOptions, type SqlDriver } from '../data/sql';
+import { ADDRESS_PREFIX, activeNamespace } from '../workspaces';
 
 /** Where a pinned template came from. `default` is the built-in, and carries the kontra version. */
 export type TemplateSource = 'workspace' | 'default';
@@ -140,7 +141,7 @@ export class InvalidFeedbackError extends Error {
  * It is UNIQUE per run rather than per row, so re-rendering the same run from the same template over
  * the same inputs cannot produce a second version.
  */
-function ddl(t: (name: string) => string): string[] {
+function ddl(t: (name: string) => string, idx: (name: string) => string = (n) => n): string[] {
   return [
     `CREATE TABLE IF NOT EXISTS ${t('report_template')} (
        run_id        TEXT   PRIMARY KEY,
@@ -167,7 +168,7 @@ function ddl(t: (name: string) => string): string[] {
     // what every compose install got from this line, for every Run, so no Run there ever had a
     // report. SQLite has no schema, `t()` is the identity there, and the default suite is SQLite,
     // which is why nothing failed until `KONTRA_TEST_PG` was set.
-    `CREATE UNIQUE INDEX IF NOT EXISTS report_version_key ON ${t('report_version')} (run_id, render_key)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ${idx('report_version_key')} ON ${t('report_version')} (run_id, render_key)`,
     // The unredacted bytes. A separate table and not a column on the version, so that the reveal
     // route's read touches nothing else and a purge can drop these FIRST on their own.
     `CREATE TABLE IF NOT EXISTS ${t('report_secret')} (
@@ -188,25 +189,64 @@ function ddl(t: (name: string) => string): string[] {
        edited_at   BIGINT,
        deleted_at  BIGINT
      )`,
-    `CREATE INDEX IF NOT EXISTS run_feedback_run ON ${t('run_feedback')} (run_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS ${idx('run_feedback_run')} ON ${t('run_feedback')} (run_id, created_at)`,
   ];
+}
+
+/**
+ * Where one namespace's report tables live (ADR 0051: a workspace is addressed, never filtered).
+ *
+ * The legacy namespace keeps the tables every existing report is already in, so those stay readable
+ * from the `default` workspace and from nowhere else. A workspace namespace gets tables of its own:
+ * its own Postgres schema (`kontra_ws_hello`), or on SQLite, which has no schemas, its own table and
+ * index names (`ws_hello__report_version`). A report is therefore not visible from another
+ * workspace because no query there can name its table, not because a WHERE clause leaves it out.
+ */
+export function reportScope(
+  namespace: string,
+  base: { schema: string | null }
+): { schema: string | null; table: (name: string) => string; index: (name: string) => string } {
+  const ws = namespace.startsWith(ADDRESS_PREFIX) ? namespace.replace(/[^0-9a-z]/g, '_') : '';
+  if (base.schema !== null) {
+    const schema = ws ? `${base.schema}_${ws}` : base.schema;
+    return { schema, table: (name) => `${schema}.${name}`, index: (name) => name };
+  }
+  const prefix = ws ? `${ws}__` : '';
+  return { schema: null, table: (name) => `${prefix}${name}`, index: (name) => `${prefix}${name}` };
 }
 
 export class ReportStore {
   private readonly driver: SqlDriver;
   readonly backend: 'postgres' | 'sqlite';
-  private readonly t: (name: string) => string;
-  private readonly init: () => Promise<void>;
+  private readonly baseSchema: string | null;
+  private readonly inits = new Map<string, () => Promise<void>>();
 
   constructor(opts: DriverOptions = {}) {
     const resolved = createDriver(opts);
     this.driver = resolved.driver;
     this.backend = resolved.backend;
-    this.t = resolved.table;
-    this.init = memoizeInit(async () => {
-      if (resolved.schema) await this.driver.exec(`CREATE SCHEMA IF NOT EXISTS ${resolved.schema}`);
-      for (const stmt of ddl(this.t)) await this.driver.exec(stmt);
-    });
+    this.baseSchema = resolved.schema;
+  }
+
+  /** The tables of the namespace this call is addressed to — the request's workspace, or the run's
+   *  own inside a background pass (`inNamespace`). Read per call, never cached on the instance. */
+  private get t(): (name: string) => string {
+    return reportScope(activeNamespace(), { schema: this.baseSchema }).table;
+  }
+
+  /** Create the addressed namespace's tables once per process, and again after a failure. */
+  private get init(): () => Promise<void> {
+    const scope = reportScope(activeNamespace(), { schema: this.baseSchema });
+    const id = scope.table('');
+    let init = this.inits.get(id);
+    if (!init) {
+      init = memoizeInit(async () => {
+        if (scope.schema) await this.driver.exec(`CREATE SCHEMA IF NOT EXISTS ${scope.schema}`);
+        for (const stmt of ddl(scope.table, scope.index)) await this.driver.exec(stmt);
+      });
+      this.inits.set(id, init);
+    }
+    return init;
   }
 
   async ensureSchema(): Promise<void> {

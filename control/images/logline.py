@@ -74,9 +74,21 @@ def parse(raw: str, base: dict, clock=now) -> dict:
     """
 
     def merge(doc: dict) -> dict:
-        """The record's fields over the container's — except the stream fields, which are ours."""
+        """The record's fields over the container's — except the stream fields, which are ours.
+
+        ONE EXCEPTION, AND IT IS WHAT MAKES LOGS PER WORKSPACE (ADR 0051). `tenant` is the namespace a
+        line belongs to, and the shipper only knows its OWN namespace, which is one value for every
+        container it reads. A record emitted inside a workflow or an activity knows better: kontra's
+        formatter stamps the Temporal `namespace` it ran in (`internals/logs.py`). So when the record
+        carries one, that is the tenant. A line from a workspace's run then lands in that workspace's
+        stream, and `routes/logs.ts::scopedQuery` keeps it there. A line with no namespace, from the
+        orchestrator or a process outside any run, stays on the shipper's own, install-level tenant.
+        """
         out = {**base, **doc}
         out.update({k: v for k, v in base.items() if k in STREAM_FIELDS})
+        own = doc.get("namespace")
+        if isinstance(own, str) and own.strip():
+            out["tenant"] = own.strip()
         out["structured"] = True
         return out
 

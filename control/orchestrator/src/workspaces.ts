@@ -9,6 +9,7 @@
  * Switching rewrites `.current`; discovery and watch re-read it. Nothing remounts.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -51,7 +52,7 @@ export class WorkspaceRefused extends Error {
 }
 
 /** The prefix every derived address carries, so a workspace's stores are recognisable on sight. */
-const ADDRESS_PREFIX = 'ws-';
+export const ADDRESS_PREFIX = 'ws-';
 
 /**
  * WHERE A WORKSPACE'S THINGS LIVE — the three addresses, derived and never stored (**ADR 0051**).
@@ -149,6 +150,78 @@ export function workspaceAddress(
   };
 }
 
+/** The workspace whose Temporal namespace is the install's legacy one (ADR 0051 §6). */
+export const LEGACY_WORKSPACE = 'default';
+
+/**
+ * WHICH TEMPORAL NAMESPACE A WORKSPACE'S RUNS LIVE IN — the address Temporal enforces (ADR 0051 §2).
+ *
+ * `default`, and an install with no named workspace, keep the legacy namespace: `KONTRA_NAMESPACE`,
+ * or `default`. That is §6, and it is what keeps every Run that existed before isolation readable:
+ * they are all in that namespace and they cannot be moved, because Temporal has no way to move a
+ * history between namespaces. Every other workspace gets `ws-<name>`, its own namespace, so a
+ * client bound to it cannot read another workspace's Runs by constructing a different query.
+ *
+ * NOT `workspaceAddress(name).namespace`, which derives `ws-default` too. That function's "no
+ * grandfather clause" is right for the lake, whose old data a migration moves; here no migration
+ * can move anything, so `default` stays where its Runs are.
+ *
+ * Pinned against the CLI's copy by `shared/conformance/workspace_namespace.json`.
+ */
+export function namespaceFor(workspace: string, env: NodeJS.ProcessEnv = process.env): string {
+  const legacy = (env.KONTRA_NAMESPACE ?? '').trim() || 'default';
+  if (workspace === '' || workspace === LEGACY_WORKSPACE) return legacy;
+  assertWorkspaceName(workspace);
+  return `${ADDRESS_PREFIX}${workspace}`;
+}
+
+/**
+ * The workspace this install is looking at RIGHT NOW: `.current` under `KONTRA_WORKSPACES`, read on
+ * every call, or '' for an install with no named-workspace layout.
+ *
+ * READ PER CALL, NOT AT BOOT (ADR 0051 §4). Switching workspace writes `.current` and nothing
+ * restarts, so a value captured at module load is exactly the single process-wide namespace this
+ * replaces. The console treats the switch as a server fact (`PUT /api/workspaces/current`), and
+ * this is the server reading it.
+ */
+export function activeWorkspace(env: NodeJS.ProcessEnv = process.env): string {
+  const parent = workspacesParent(env);
+  return parent ? readCurrentName(parent) : '';
+}
+
+/**
+ * The workspace a path is in: the first segment under `KONTRA_WORKSPACES`, or `undefined` when the
+ * path is outside it or there is no named-workspace layout. Resolved against the configured parent,
+ * not guessed from a path segment called `workspaces`, which any directory could be named.
+ */
+export function workspaceOfPath(p: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const parent = workspacesParent(env);
+  if (!parent) return undefined;
+  const rel = path.relative(parent, path.resolve(p));
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+  return rel.split(path.sep)[0] || undefined;
+}
+
+/** The Temporal namespace of the workspace this install is looking at now. */
+export function currentNamespace(env: NodeJS.ProcessEnv = process.env): string {
+  return namespaceFor(activeWorkspace(env), env);
+}
+
+/** Every workspace's namespace, the legacy one included: what a per-workspace worker pool serves. */
+export function allNamespaces(env: NodeJS.ProcessEnv = process.env): string[] {
+  const parent = workspacesParent(env);
+  const names = parent ? listWorkspaceNames(parent) : [];
+  const out = new Set<string>([namespaceFor('', env)]);
+  for (const n of names) {
+    try {
+      out.add(namespaceFor(n, env));
+    } catch {
+      // A folder whose name the rule refuses is not a workspace, and gets no namespace.
+    }
+  }
+  return [...out];
+}
+
 /** Parent folder Compose bind-mounts. Empty means no named-workspace layout. */
 export function workspacesParent(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.KONTRA_WORKSPACES ?? '').trim();
@@ -196,8 +269,29 @@ export function workspaceRoot(env: NodeJS.ProcessEnv = process.env): string {
 export function activeLakeWorkspace(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = (env.KONTRA_LAKE_WORKSPACE ?? '').trim();
   if (explicit) return explicit;
+  // INSIDE A NAMESPACE SCOPE, THE RUN'S WORKSPACE, NOT THE CONSOLE'S (ADR 0051). An activity that
+  // publishes a run's rows runs in a per-namespace worker that binds its namespace (see
+  // `bindNamespace`), and a background pass binds each namespace in turn. Reading `.current` there
+  // would put a run's rows in whichever workspace the console happened to have selected when the
+  // batch landed — a silent wrong-lake commit, which is exactly the failure an address exists to
+  // make impossible.
+  const scoped = namespaceScope.getStore();
+  if (scoped !== undefined) return workspaceOfNamespace(scoped, env);
   const parent = workspacesParent(env);
   return parent ? readCurrentName(parent) : '';
+}
+
+/**
+ * The workspace whose runs live in `namespace` — the inverse of {@link namespaceFor}.
+ *
+ * `ws-<name>` is `<name>`. The legacy namespace is the `default` workspace's when there is a
+ * named-workspace layout, and the legacy (unnamed) address when there is not, which is what
+ * `activeLakeWorkspace` answered for that install before this existed. Pinned against
+ * `namespaceFor` by `shared/conformance/workspace_namespace.json`.
+ */
+export function workspaceOfNamespace(namespace: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (namespace.startsWith(ADDRESS_PREFIX)) return namespace.slice(ADDRESS_PREFIX.length);
+  return workspacesParent(env) ? LEGACY_WORKSPACE : '';
 }
 
 export function readCurrentName(parent: string): string {
@@ -330,4 +424,46 @@ function copyTree(src: string, dst: string): void {
     if (ent.isDirectory()) copyTree(from, to);
     else writeFileSync(to, readFileSync(from));
   }
+}
+
+/**
+ * A namespace pinned for everything one piece of work does, carried through its awaits.
+ *
+ * WHY A SCOPE AND NOT A PARAMETER. Every reader in this module reaches Temporal through
+ * `getClient`, and the background loops (the report renderer, the history archiver) must walk
+ * EVERY workspace, not just the one the console has selected. Threading a namespace argument through
+ * thirty functions would be thirty places to forget it. A forgotten one silently reads the console's
+ * workspace instead, and that looks like an ordinary empty result. Inside a scope, getClient answers
+ * with the scope's namespace; outside one, with the console's current workspace.
+ */
+const namespaceScope = new AsyncLocalStorage<string>();
+
+/** Run `fn` with every `getClient` inside it bound to `namespace`. */
+export function inNamespace<T>(namespace: string, fn: () => Promise<T>): Promise<T> {
+  return namespaceScope.run(namespace, fn);
+}
+
+/** The namespace `getClient` would answer with right now. */
+export function activeNamespace(): string {
+  return namespaceScope.getStore() ?? currentNamespace();
+}
+
+/**
+ * `activities` with every function run inside `namespace`'s scope.
+ *
+ * WHAT A PER-NAMESPACE WORKER IS FOR. `runPerNamespace` builds one worker per workspace namespace,
+ * and every activity that worker takes belongs to a run in that namespace — so the namespace is
+ * bound once, here, around each call, and everything the activity reaches (the lake, the report
+ * tables, `getClient`) addresses the run's workspace without being told. One wrapper at the worker
+ * rather than a call per activity, because a forgotten call is the silent wrong-workspace read.
+ */
+export function bindNamespace<T extends Record<string, unknown>>(namespace: string, activities: T): T {
+  const out: Record<string, unknown> = {};
+  for (const [name, fn] of Object.entries(activities)) {
+    out[name] =
+      typeof fn === 'function'
+        ? (...args: unknown[]) => inNamespace(namespace, async () => (fn as (...a: unknown[]) => unknown)(...args))
+        : fn;
+  }
+  return out as T;
 }
