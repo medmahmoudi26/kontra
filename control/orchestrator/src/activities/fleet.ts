@@ -291,7 +291,7 @@ export async function resolveBundle(input: ResolveBundleInput): Promise<Resolved
 }
 
 /** The runnable Worker image `kontra deploy` pushes as `<registry>/<actor>:<version>`. */
-async function resolveWorkerImage(registry: string, actor: string, version: string): Promise<string> {
+export async function resolveWorkerImage(registry: string, actor: string, version: string): Promise<string> {
   const advertised = registry.replace(/^https?:\/\//, '').replace(/\/+$/, '');
   const bases = [registryBase(registry)];
   if (/^(127\.0\.0\.1|localhost|::1)(:|$)/.test(advertised)) {

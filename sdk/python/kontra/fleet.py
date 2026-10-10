@@ -1504,12 +1504,154 @@ class Fleet:
             )
 
 
+# ── THE KUBERNETES FLEET (ADR 0066) ──────────────────────────────────────────────────────────────
+#
+# `fleet.hold(profile="do-fra")` — a fleet is a NAMED PROFILE in the install's kontra.yaml, and the
+# workflow never sees a region, a token or a droplet size. The pool workflow for the profile
+# (control/orchestrator/src/workflows/fleetPool.ts) makes the cluster on the first hold, applies
+# each placement as a Deployment shared by every run that places it, and releases the nodes after
+# the profile's idle grace once the last hold drops. These names are the activity types the infra
+# container serves on its placement queue.
+
+PLACEMENT_QUEUE = "kontra-placement"
+HOLD_POOL_ACTIVITY = "holdFleetPool"
+PLACE_POOL_ACTIVITY = "placeOnFleetPool"
+DROP_POOL_ACTIVITY = "dropFleetPool"
+
+
+class PoolFleet:
+    """A hold on a fleet profile, for the length of an `async with` (ADR 0066).
+
+        async with fleet.hold(profile="do-fra") as f:      # or fleet.hold() for kontra.yaml's default
+            await f.place("enrich", "0.3.0", replicas=8)
+            await f.ready()
+            ...                                           # dispatch with catalog.actor(...)
+
+    THE SCOPE IS THE HOLD, AS ON EVERY FLEET IN THIS MODULE: entering it waits until the cluster
+    exists (a first hold converges it — minutes for real machines, nothing on a warm fleet), and
+    leaving it drops this scope's hold. Nothing is torn down by the exit itself: the pool does that
+    when the last hold is gone and the idle grace has passed, so two runs on one profile share its
+    nodes and a run that follows another within the grace finds them warm.
+
+    `place()` IS A REQUEST TO THE POOL, NOT A CONVERGE. A Deployment is shared by every run in this
+    tenant that places the same `actor@version`, and runs the largest `replicas` any of them asked
+    for. It goes when the last run that placed it drops its hold.
+    """
+
+    def __init__(self, profile: str | None = None, *, lease_ttl: timedelta | None = None,
+                 timeout: timedelta = timedelta(minutes=45)) -> None:
+        self.profile = (profile or "").strip()
+        self.lease_ttl = lease_ttl
+        self.timeout = timeout
+        self.nodes = 0
+        self._lease = ""
+        self._namespace = ""
+        self._placed: list[tuple[str, str]] = []
+
+    @property
+    def lease(self) -> str:
+        return self._lease
+
+    def _activity(self, name: str, arg: dict[str, Any], summary: str):
+        from temporalio import workflow
+
+        return workflow.execute_activity(
+            name,
+            arg,
+            task_queue=PLACEMENT_QUEUE,
+            start_to_close_timeout=self.timeout,
+            # The pool BEATS while it waits on a converge, so a silent activity is a dead one.
+            heartbeat_timeout=timedelta(minutes=2),
+            retry_policy=_hold_retry(),
+            summary=summary,
+        )
+
+    async def __aenter__(self) -> "PoolFleet":
+        from temporalio import workflow
+
+        info = workflow.info()
+        self._namespace = info.namespace
+        self._lease = lease_id(info.workflow_id, str(workflow.uuid4()))
+        out = await self._activity(
+            HOLD_POOL_ACTIVITY,
+            {
+                "profile": self.profile,
+                "lease": self._lease,
+                "holder": info.workflow_id,
+                "holderNamespace": info.namespace,
+                **({"ttlMs": int(self.lease_ttl.total_seconds() * 1000)} if self.lease_ttl else {}),
+            },
+            f"hold fleet {self.profile or '(default)'}",
+        )
+        # The profile kontra.yaml resolved `(default)` to, so a log line and a drop name it.
+        self.profile = out["profile"]
+        self.nodes = int(out.get("nodes", 0))
+        return self
+
+    async def place(self, actor: str, version: str, *, replicas: int = 1) -> dict[str, Any]:
+        """Run `actor@version` on this fleet, at most `replicas` workers (KEDA scales below that on
+        the queue's backlog). Idempotent; a second call with a different `replicas` rescales."""
+        if not self._lease:
+            raise RuntimeError("place() outside its `async with fleet.hold(...)` scope")
+        if not isinstance(replicas, int) or replicas < 1:
+            raise ValueError(f"replicas must be a whole number of at least 1, got {replicas!r}")
+        out = await self._activity(
+            PLACE_POOL_ACTIVITY,
+            {
+                "profile": self.profile,
+                "lease": self._lease,
+                "namespace": self._namespace,
+                "actor": actor,
+                "version": version,
+                "replicas": replicas,
+            },
+            f"place {actor}@{version} x{replicas} on {self.profile}",
+        )
+        if (actor, version) not in self._placed:
+            self._placed.append((actor, version))
+        return out
+
+    async def ready(self, *, timeout: timedelta = timedelta(minutes=10)) -> None:
+        """Wait until every placement of this scope has a worker polling its queue. A Deployment that
+        exists is not one whose pods have pulled their image and dialled Temporal."""
+        if not self._placed:
+            raise RuntimeError("ready() with nothing placed: call place() first")
+        for actor, version in self._placed:
+            await serving(actor, version, at_least=1, timeout=timeout)
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        from temporalio import workflow
+
+        if not self._lease:
+            return False
+        lease, self._lease = self._lease, ""
+        try:
+            # SHIELDED: a cancelled run is exactly when a hold must still be dropped.
+            await asyncio.shield(
+                workflow.execute_activity(
+                    DROP_POOL_ACTIVITY,
+                    {"profile": self.profile, "lease": lease},
+                    task_queue=PLACEMENT_QUEUE,
+                    start_to_close_timeout=timedelta(seconds=60),
+                    summary=f"drop fleet {self.profile}",
+                )
+            )
+        except Exception as e:
+            workflow.logger.error(
+                "FLEET HOLD NOT DROPPED — %s holds %s until its clock runs out",
+                lease, self.profile, extra={"lease": lease, "error": str(e)},
+            )
+        return False
+
+
 def hold(
     provider: DigitalOcean | Docker | None = None,
     /,
     *,
-    tag: str,
+    profile: str | None = None,
+    tag: str | None = None,
     machines: int | None = None,
+    nodes: int | None = None,
     region: str = "",
     size: str = "",
     credential: str = DEFAULT_CREDENTIAL,
@@ -1559,7 +1701,30 @@ def hold(
     scope brought up.
 
     Nothing is provisioned until the scope is entered.
+
+    ── THE KUBERNETES FLEET (ADR 0066) ──────────────────────────────────────────────────────────
+
+    `fleet.hold()` and `fleet.hold(profile="do-fra")` — no provider, no `tag=`, no `machines=` —
+    hold a fleet PROFILE from the install's kontra.yaml: see {@link PoolFleet}. Everything above
+    is the Warden fleet, which ADR 0066 retires; it keeps working for one release and says so.
     """
+    if provider is None and tag is None and machines is None:
+        if nodes is not None or size:
+            raise ValueError(
+                "nodes= and size= are set on the fleet's profile in kontra.yaml for now "
+                "(fleets.<profile>.nodes / .size); a per-run override is not built yet"
+            )
+        return PoolFleet(profile, lease_ttl=lease_ttl, timeout=timeout)  # type: ignore[return-value]
+    import warnings
+
+    warnings.warn(
+        "fleet.hold(tag=…, machines=…, provider) is the Warden fleet, which ADR 0066 retires; "
+        "hold a profile from kontra.yaml instead: fleet.hold(profile=\"…\")",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if profile is not None or nodes is not None:
+        raise ValueError("profile=/nodes= hold a Kubernetes fleet and cannot be mixed with tag=/machines=/a provider")
     tag = (tag or "").strip()
     if not TAG_RE.match(tag):
         raise ValueError(

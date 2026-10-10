@@ -31,6 +31,8 @@ import { NativeConnection, Worker } from '@temporalio/worker';
 import * as infraActivities from './activities/infra';
 import * as serveDevActivities from './activities/serveDev';
 import * as buildActorActivities from './activities/buildActor';
+import * as fleetPoolActivities from './activities/fleetPool';
+import { placementQueue } from './fleetPool';
 import { dataConverter } from './codec/dataConverter';
 import { adoptLegacyCloudToken } from './infra/credential';
 import { assertBackend, backendUrl } from './infra/workspace';
@@ -187,7 +189,25 @@ async function runWorker(): Promise<void> {
   // firing resolves its mode on the worker holding the lake, where unset means dry run.
   await armRetention(address, namespace);
 
-  await worker.run();
+  /*
+   * THE PLACEMENT WORKER (ADR 0066): the fleet pools and their activities, in this process because it
+   * is the one that may read kontra.yaml and keeps the kubeconfigs. On a queue of its own, beside the
+   * infra queue rather than on it: that one runs ONE activity at a time so two Pulumi updates never
+   * share a stack, and a placement queued behind a sixty-minute converge would hold every run that
+   * places onto an already-running fleet.
+   */
+  const placement = await Worker.create({
+    workflowsPath: require.resolve('./workflows/infra'),
+    activities: fleetPoolActivities,
+    taskQueue: placementQueue(),
+    namespace,
+    connection,
+    maxConcurrentActivityTaskExecutions: 8,
+    identity: identityFor(placementQueue()),
+  });
+  console.log(`[infra] queue=${placementQueue()} (fleet pools) ns=${namespace}`);
+
+  await Promise.all([worker.run(), placement.run()]);
 }
 
 /**
