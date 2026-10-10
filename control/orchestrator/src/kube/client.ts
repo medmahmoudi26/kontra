@@ -96,8 +96,12 @@ const PLURAL: Record<string, string> = {
   Deployment: 'deployments',
   ScaledObject: 'scaledobjects',
   ClusterPolicy: 'clusterpolicies',
+  // k3s's own Helm controller (helm.cattle.io/v1): how a k3s fleet gets KEDA and Kyverno.
+  HelmChart: 'helmcharts',
+  // Read only, to see whether an add-on's API exists yet.
+  CustomResourceDefinition: 'customresourcedefinitions',
 };
-const CLUSTER_SCOPED = new Set(['Namespace', 'RuntimeClass', 'ClusterPolicy']);
+const CLUSTER_SCOPED = new Set(['Namespace', 'RuntimeClass', 'ClusterPolicy', 'CustomResourceDefinition']);
 
 /** The REST path for one object: `/api/v1/…` for the core group, `/apis/<group>/<version>/…` otherwise. */
 export function objectPath(apiVersion: string, kind: string, name: string, namespace?: string): string {
