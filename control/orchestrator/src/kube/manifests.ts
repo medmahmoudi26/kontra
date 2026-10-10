@@ -212,7 +212,11 @@ export function placementDeployment(p: PlacementSpec): Obj {
     throw new Error(`placement ${p.actor}@${p.version}: image ${JSON.stringify(p.image)} is not pinned by digest`);
   }
   for (const key of Object.keys(p.env)) {
-    if (/TOKEN|SECRET|PASSWORD|PASSPHRASE|KEY$/i.test(key)) {
+    // TWO TESTS, NOT ONE ALTERNATION: a credential word anywhere in the name, or a name that ENDS in
+    // KEY (S3_ACCESS_KEY, not KEYSPACE). One regex with `$` on its last branch read as an anchor
+    // forgotten on the others (CodeQL js/regex/missing-regexp-anchor), which is the opposite of
+    // what it meant.
+    if (/TOKEN|SECRET|PASSWORD|PASSPHRASE/i.test(key) || /KEY$/i.test(key)) {
       throw new Error(`placement ${p.actor}@${p.version}: env ${key} looks like a credential; a worker's only credential is its projected token`);
     }
   }
