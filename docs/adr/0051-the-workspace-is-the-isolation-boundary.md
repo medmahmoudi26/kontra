@@ -4,7 +4,9 @@ Date: 2026-09-23
 
 ## Status
 
-Proposed.
+Proposed. **Amended by [ADR 0070](0070-a-workspace-runs-as-one-tenant-and-an-account-holds-workspaces.md)**:
+"the install is the tenant" below is the laptop tier's one implicit Account, and each workspace runs
+as one Tenant (a Temporal namespace plus a Kubernetes namespace of the same name).
 
 Extends [ADR 0049](0049-the-workspace-is-the-registration.md), which made a workspace the thing that
 decides *which code exists*. This makes it the thing that decides *where everything that code
