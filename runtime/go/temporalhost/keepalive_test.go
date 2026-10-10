@@ -2,7 +2,6 @@ package temporalhost
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 )
@@ -17,10 +16,9 @@ technique class — 3,630 techniques x 3 oracle writes, paced at 250ms, ~45 minu
 two-minute bound. The first beat was due 43 minutes after the attempt had already been killed.
 Three runs died this way, 75 minutes and 0 rows each, with no error on the parent.
 
-What is asserted here is the DERIVATION and the PAYLOAD SHAPE. The goroutine itself needs a real
-activity context, which `progress_beat_test.go` already declines to fake for the same reason; what
-can go wrong without a test is the interval (a constant creeping back in) and the merge (a tick that
-blanks the counts, which `heartbeat.ts` would read as a batch that had made no progress at all).
+What is asserted here is the DERIVATION of the interval — a constant creeping back in is what can
+go wrong without a test. The goroutine itself needs a real activity context; the PAYLOAD every tick
+sends is asserted against the real builder in beater_test.go.
 */
 
 func TestTheKeepaliveIntervalIsDerivedFromTheBound(t *testing.T) {
@@ -50,53 +48,7 @@ func TestNoBoundMeansNoKeepalive(t *testing.T) {
 	}
 }
 
-func TestAKeepaliveTickKeepsTheUnitCountsAndAddsAlive(t *testing.T) {
-	/*
-	 * A tick must carry the SAME counts the commit beat last reported, plus `alive`.
-	 *
-	 * `heartbeat.ts` defaults every missing field to 0, so a tick carrying only `alive` would read
-	 * as `done=0, total=0` — a batch that is working reported as one that has done nothing, with
-	 * nothing raised anywhere. That tolerance is exactly what makes the merge load-bearing.
-	 *
-	 * And `alive` is what replaces the property the keepalive gives up. "Silence means stuck" is
-	 * gone; a counter that rises while `done` does not is how a reader still tells a Unit that is
-	 * working slowly from one that has stopped.
-	 */
-	var mu sync.Mutex
-	last := map[string]any{"node": "n1", "done": 4000, "total": 10890, "isolated": 0}
-	var sent []map[string]any
-
-	var alive int64
-	tick := func() {
-		alive++
-		mu.Lock()
-		beat := map[string]any{"alive": alive}
-		for k, v := range last {
-			beat[k] = v
-		}
-		mu.Unlock()
-		sent = append(sent, beat)
-	}
-
-	tick()
-	tick()
-
-	if len(sent) != 2 {
-		t.Fatalf("want 2 beats, got %d", len(sent))
-	}
-	for i, b := range sent {
-		if b["done"] != 4000 || b["total"] != 10890 {
-			t.Fatalf("beat %d blanked the counts: %v", i, b)
-		}
-		if b["node"] != "n1" {
-			t.Fatalf("beat %d lost the node: %v", i, b)
-		}
-	}
-	// RISING, which is the whole diagnostic: `done` stayed at 4000 across both.
-	if sent[0]["alive"].(int64) != 1 || sent[1]["alive"].(int64) != 2 {
-		t.Fatalf("alive must rise across ticks, got %v then %v", sent[0]["alive"], sent[1]["alive"])
-	}
-}
+// The tick's PAYLOAD is asserted against the real builder in beater_test.go.
 
 // defaultHeartbeatForTest reads the production bound the handler applies, so this suite fails if
 // that constant moves without the interval being reconsidered.

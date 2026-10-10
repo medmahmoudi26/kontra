@@ -37,6 +37,7 @@ import (
 	"github.com/medmahmoudi26/kontra/sdk/go/temporaltls"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/medmahmoudi26/kontra/runtime/go/checkpoint"
 	"github.com/medmahmoudi26/kontra/runtime/go/codec"
 	"github.com/medmahmoudi26/kontra/runtime/go/engine"
 	"github.com/medmahmoudi26/kontra/runtime/go/registrar"
@@ -214,31 +215,10 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 	// heartbeat never REPLACES the liveness numbers with a payload that lacks them.
 	// heartbeat.ts defaults every missing field to 0, so a beat without `done` would read as a
 	// batch that had made no progress at all.
-	var lk2 sync.Mutex
-	last := map[string]any{"node": req.NodeID, "done": 0, "total": len(req.Units), "isolated": 0}
-
-	a.SetHeartbeat(func(done, total, isolated int) {
-		lk2.Lock()
-		last["done"], last["total"], last["isolated"] = done, total, isolated
-		beat := map[string]any{}
-		for k, v := range last {
-			beat[k] = v
-		}
-		lk2.Unlock()
-		// THE CHECKPOINT, WHICH IS THE DURABLE HALF OF THIS BEAT.
-		//
-		// The three counters above say how many, never WHICH, so nothing can resume from them. This
-		// says which, in the encoding the Python peer and the orchestrator share
-		// (shared/conformance/checkpoint.json) — and because heartbeat details live in the
-		// activity's own history, it is the one copy of the commit map a cache cannot lose
-		// (ADR 0059).
-		//
-		// Read here rather than passed through SetHeartbeat because that signature is exported and
-		// has callers outside this repository. The runner publishes immediately before it beats, so
-		// this is the current state and not a lagging copy.
-		beat["checkpoint"] = a.Checkpoint()
+	b := newBeater(req.NodeID, len(req.Units), a.Checkpoint, func(beat map[string]any) {
 		activity.RecordHeartbeat(ctx, beat)
 	})
+	a.SetHeartbeat(b.commit)
 
 	// THE AUTHOR'S OWN PROGRESS, ONTO THE SAME WIRE.
 	//
@@ -261,15 +241,7 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 	// finished run. The heartbeat survives because it does not have that property: Temporal keeps
 	// it with the activity, and `temporal workflow describe -w <run>` shows it with no log
 	// shipper, no mounted volume and no shell into the box.
-	a.SetProgress(func(v any) {
-		lk2.Lock()
-		beat := map[string]any{"progress": v}
-		for k, val := range last {
-			beat[k] = val
-		}
-		lk2.Unlock()
-		activity.RecordHeartbeat(ctx, beat)
-	})
+	a.SetProgress(b.progress)
 
 	// THE PER-METHOD STREAM WAS WIRED HERE — `kontra.Stream(s, rec)` onto `<actor>/<method>` —
 	// and the verb, the sink and the topic naming are all gone with it. A Method narrates through
@@ -325,15 +297,9 @@ func (h *Activities) RunBatch(ctx context.Context, req engine.RunBatchReq) (*eng
 					return
 				case <-ticker.C:
 					alive++
-					lk2.Lock()
-					beat := map[string]any{"alive": alive}
-					for k, v := range last {
-						beat[k] = v
-					}
-					lk2.Unlock()
 					// Best-effort: outside an activity, or after the attempt is gone, this is a
 					// no-op. Liveness must never be the thing that fails a batch.
-					activity.RecordHeartbeat(ctx, beat)
+					b.alive(alive)
 				}
 			}
 		}()
@@ -478,3 +444,66 @@ func getenv(k, def string) string {
 	}
 	return def
 }
+
+// beater builds every heartbeat one RunBatch sends — the commit beat, the author's progress beat and
+// the keepalive tick — so all three carry the same fields.
+//
+// ONE BUILDER, BECAUSE TEMPORAL KEEPS ONLY THE LAST DETAILS. The checkpoint (ADR 0060) is the one
+// copy of WHICH Units committed that a cache cannot lose, and the next attempt resumes from whatever
+// beat came last. When only the commit beat carried it, a keepalive or a progress beat after the
+// last commit replaced the details with a payload that had none, and a resume from there would have
+// re-run the whole batch. Three hand-built maps is how that happened; one is how it cannot again.
+//
+// The unit counts ride on every beat for the reason they always did: `heartbeat.ts` defaults a
+// missing field to 0, so a beat without them reads as a batch that has done nothing.
+type beater struct {
+	mu         sync.Mutex
+	last       map[string]any
+	checkpoint func() checkpoint.Details
+	record     func(map[string]any)
+}
+
+func newBeater(node string, total int, ck func() checkpoint.Details, record func(map[string]any)) *beater {
+	return &beater{
+		last:       map[string]any{"node": node, "done": 0, "total": total, "isolated": 0},
+		checkpoint: ck,
+		record:     record,
+	}
+}
+
+// send records the counts, the checkpoint and `extra`. `extra` cannot overwrite either: an author's
+// progress is namespaced under `progress`, and the keepalive adds only `alive`.
+func (b *beater) send(extra map[string]any) {
+	beat := map[string]any{}
+	for k, v := range extra {
+		beat[k] = v
+	}
+	// ONE LOCK ACROSS THE SNAPSHOT, THE CHECKPOINT READ AND THE RECORD. Temporal keeps the LAST
+	// details, so two beats must reach it in the order their checkpoints were read: a keepalive that
+	// read checkpoint N and recorded it after a commit's beat for N+1 would un-commit a Unit.
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k, v := range b.last {
+		beat[k] = v
+	}
+	// Read here, after the runner has published it, so this is the current state and not a lagging
+	// copy. Encoded in the contract the Python peer and the orchestrator share
+	// (shared/conformance/checkpoint.json).
+	beat["checkpoint"] = b.checkpoint()
+	b.record(beat)
+}
+
+// commit is the beat per committed Unit.
+func (b *beater) commit(done, total, isolated int) {
+	b.mu.Lock()
+	b.last["done"], b.last["total"], b.last["isolated"] = done, total, isolated
+	b.mu.Unlock()
+	b.send(nil)
+}
+
+// progress is the author's own report, namespaced so it cannot overwrite a liveness field.
+func (b *beater) progress(v any) { b.send(map[string]any{"progress": v}) }
+
+// alive is the keepalive tick: a counter that rises while `done` does not tells a slow Unit from a
+// stopped one.
+func (b *beater) alive(n int64) { b.send(map[string]any{"alive": n}) }

@@ -1,11 +1,15 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/medmahmoudi26/kontra/runtime/go/checkpoint"
+	"github.com/medmahmoudi26/kontra/sdk/go/core"
 )
 
 // THE CHECKPOINT THE HOST SHIPS WITH EACH BEAT — WHICH Units finished, not merely how many.
@@ -117,4 +121,47 @@ func TestPublishThenReadBackIsWhatTheHostDoes(t *testing.T) {
 // committed — the same posture `heartbeat` and `reportProgress` have.
 func TestPublishingIsSafeOnAZeroValueActor(t *testing.T) {
 	(&KontraActor{}).publishCheckpoint(checkpoint.Details{V: 1, BatchID: "b"}) // must not panic
+}
+
+// BEFORE AN ATTEMPT'S FIRST COMMIT, THE PUBLISHED CHECKPOINT IS THIS BATCH'S — the PR #43 review's
+// finding. Every beat (the keepalive included) carries `a.Checkpoint()`, and until a Unit commits
+// that used to be whatever the instance had last published: under a KEYED dispatch, the previous
+// batch's — its done count shown against this batch — and on a retry's fresh instance, nothing,
+// which a keepalive then wrote over the attempt before. RunBatch now publishes the replayed state
+// before the Method runs.
+func TestAnAttemptPublishesItsOwnCheckpointBeforeItsFirstCommit(t *testing.T) {
+	var a *KontraActor
+	var seenAtStart []string
+	a, _ = actorWith(t, methodRegistry("scan", core.MethodFunc(
+		func(s *core.Session, b *core.Batch, ds *core.Dataset) error {
+			// What a keepalive would send right now, before this batch commits anything.
+			ck := a.Checkpoint()
+			seenAtStart = append(seenAtStart, fmt.Sprintf("%s/%d", ck.BatchID, len(ck.Done)))
+			for unit := range b.All() {
+				ds.Push(map[string]any{"got": unit.Value})
+			}
+			return nil
+		})))
+
+	first := RunBatchReq{Method: "scan", Units: []any{"a", "b"}, RunID: "r", NodeID: "n"}
+	if _, err := a.RunBatch(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := RunBatchReq{Method: "scan", Units: []any{"c", "d", "e"}, RunID: "r", NodeID: "n2"}
+	if _, err := a.RunBatch(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if len(seenAtStart) != 2 {
+		t.Fatalf("the Method ran %d times, want 2", len(seenAtStart))
+	}
+	firstBatch := strings.SplitN(seenAtStart[0], "/", 2)[0]
+	secondBatch := strings.SplitN(seenAtStart[1], "/", 2)[0]
+	if firstBatch == "" || secondBatch == "" || firstBatch == secondBatch {
+		t.Fatalf("each attempt must start on its OWN batch's checkpoint, got %v", seenAtStart)
+	}
+	for _, s := range seenAtStart {
+		if !strings.HasSuffix(s, "/0") {
+			t.Errorf("a fresh batch starts with nothing done, got %s", s)
+		}
+	}
 }
