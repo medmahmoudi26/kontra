@@ -89,8 +89,8 @@ importers:
         specifier: ^6.0.0
         version: 6.0.0
       js-yaml:
-        specifier: 4.1.0
-        version: 4.1.0
+        specifier: 4.3.2
+        version: 4.3.2
       pg:
         specifier: ^8.23.1
         version: 8.23.1
@@ -1817,10 +1817,6 @@ packages:
   jest-worker@27.5.1:
     resolution: {integrity: sha512-7vuh85V5cdDofPyxn58nrPjBktZo0u9x1g8WtjQol+jZDaE+fhN+cIvTj11GndBnMnyfrUOG1sZQxCdjKh+DKg==}
     engines: {node: '>= 10.13.0'}
-
-  js-yaml@4.1.0:
-    resolution: {integrity: sha512-wpxZs9NoxZaJESJGIZTyDEaYpl0FKSA+FB9aJiyemKhMwkxQg63h4T1KJgUGHpTqPDNRcmmYLugrRjJlBtWvRA==}
-    hasBin: true
 
   js-yaml@4.3.2:
     resolution: {integrity: sha512-SFNOvSJ+Dgf/9An904Yx+CgSlIPCkIpao4qo51lpee25TIRejdH3rhR4EZMGoNx3/TP3O+wzWuiTFl4sqbltzA==}
@@ -4527,10 +4523,6 @@ snapshots:
       '@types/node': 22.20.5
       merge-stream: 2.0.0
       supports-color: 8.1.1
-
-  js-yaml@4.1.0:
-    dependencies:
-      argparse: 2.0.1
 
   js-yaml@4.3.2:
     dependencies:
