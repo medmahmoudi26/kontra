@@ -20,6 +20,10 @@ func (failingPutter) Put(context.Context, string, []byte) error {
 	return errors.New("disk full")
 }
 
+// List answers the listing a fresh execution makes before it runs anything: nothing was ever
+// written, so there is nothing to fold back.
+func (failingPutter) List(context.Context, string) ([]string, error) { return nil, nil }
+
 // push returns nothing, and a write failure surfaces at the next checkpoint — BEFORE the Unit it
 // struck commits. That ordering is load-bearing: a committed Unit is skipped on retry, so
 // committing one whose push never persisted would lose the record for good (ADR 0028

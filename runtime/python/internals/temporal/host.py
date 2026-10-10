@@ -391,6 +391,34 @@ def _install_blob_reader() -> None:
     blobs.set_blob_reader(read)
 
 
+def _require_object_store(registry) -> None:
+    """Refuse to serve an actor that commits Units when no object store is configured.
+
+    S3 IS MANDATORY FOR AN ACTOR THAT COMMITS (owner decision A8, ADR 0060). A finished Unit's
+    outcome is a commit object, and the bytes it points at are pushed records in the same store; the
+    heartbeat names which Units finished and nothing else. Without a store neither is written
+    anywhere, so a retry and a re-dispatch both re-run everything, quietly — and the actor still
+    looks healthy, polling and returning batches. That is the mode this replaces: it used to start
+    and degrade, and now it does not start.
+
+    BEFORE ANYTHING CONNECTS, so the failure is a boot error naming the variable rather than a
+    Worker that registered, took a Batch, and ran it with nowhere to commit. An actor that declares
+    no Method commits nothing (its Batch passes through), so it is not refused.
+
+    The same condition as `unitstore.from_env`: the variable is what selects a store, and asking it
+    here keeps boto3 out of a refusal that never needed a client.
+    """
+    if not getattr(registry, "methods", None):
+        return
+    if os.environ.get("KONTRA_S3_ENDPOINT"):
+        return
+    raise RuntimeError(
+        f"{getattr(registry, 'actor_name', '') or 'this actor'} declares a Method, and "
+        "KONTRA_S3_ENDPOINT is unset: an actor that commits Units needs the object store, because "
+        "a finished Unit's output is durable nowhere else (ADR 0060). Set KONTRA_S3_* — locally, "
+        "the compose stack's SeaweedFS at http://localhost:8333.")
+
+
 async def serve_async(registry, *, address: str = "", namespace: str = "",
                       **worker_kwargs) -> None:
     # LOGGING FIRST, and for the reason `wfhost._configure_logging` records at length: Python emits
@@ -409,6 +437,9 @@ async def serve_async(registry, *, address: str = "", namespace: str = "",
     # worker.yaml FIRST, before anything connects: a key the Worker cannot take is a boot failure
     # naming the file, not a Worker that started without the setting its author believed in.
     declared = load_worker_yaml(getattr(registry, "actor_dir", None))
+    # And the object store, for the same reason: a missing one is a boot failure, not a Worker that
+    # runs every Batch with nowhere durable to commit it.
+    _require_object_store(registry)
 
     address = address or os.environ.get("KONTRA_ADDRESS", "localhost:7233")
     namespace = namespace or os.environ.get("KONTRA_NAMESPACE", "default")

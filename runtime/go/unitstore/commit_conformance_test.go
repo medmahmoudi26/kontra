@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -23,7 +24,7 @@ type commitCorpus struct {
 		Why     string `json:"why"`
 		Actor   string `json:"actor"`
 		Run     string `json:"run"`
-		Node    string `json:"node"`
+		ActorID string `json:"actor_id"`
 		BatchID string `json:"batch_id"`
 		Unit    int    `json:"unit"`
 		Prefix  string `json:"prefix"`
@@ -50,6 +51,16 @@ type commitCorpus struct {
 			Category string       `json:"category"`
 		} `json:"expect"`
 	} `json:"decode"`
+	List []struct {
+		Why    string   `json:"why"`
+		Prefix string   `json:"prefix"`
+		N      int      `json:"n"`
+		Keys   []string `json:"keys"`
+		Expect struct {
+			Outcome string `json:"outcome"`
+			Units   []int  `json:"units"`
+		} `json:"expect"`
+	} `json:"list"`
 }
 
 func loadCommitCorpus(t *testing.T) commitCorpus {
@@ -63,8 +74,19 @@ func loadCommitCorpus(t *testing.T) commitCorpus {
 		t.Fatalf("parse fixture: %v", err)
 	}
 	// NON-VACUOUS, and the interesting rows are still there.
-	if len(fx.Keys) == 0 || len(fx.Encode) == 0 || len(fx.Decode) == 0 {
+	if len(fx.Keys) == 0 || len(fx.Encode) == 0 || len(fx.Decode) == 0 || len(fx.List) == 0 {
 		t.Fatal("fixture is empty — a vacuously passing conformance test is worse than none")
+	}
+	listRefused, skipped := 0, 0
+	for _, c := range fx.List {
+		if c.Expect.Outcome == "refused" {
+			listRefused++
+		} else if len(c.Keys) > 0 && len(c.Expect.Units) == 0 {
+			skipped++
+		}
+	}
+	if listRefused == 0 || skipped == 0 {
+		t.Fatalf("fixture lost its listing refusal (%d) or its not-a-Unit row (%d)", listRefused, skipped)
 	}
 	refused, wide := 0, 0
 	for _, c := range fx.Decode {
@@ -89,7 +111,7 @@ func TestCommitKeyMatchesCrossSDKFixture(t *testing.T) {
 		t.Errorf("corpus version %d, this reader knows %d", fx.Version, CommitVersion)
 	}
 	for _, c := range fx.Keys {
-		prefix := CommitPrefix(c.Actor, c.Run, c.Node, c.BatchID)
+		prefix := CommitPrefix(c.Actor, c.Run, c.ActorID, c.BatchID)
 		if prefix != c.Prefix {
 			t.Errorf("%s:\n  got  %s\n  want %s", c.Why, prefix, c.Prefix)
 		}
@@ -100,6 +122,31 @@ func TestCommitKeyMatchesCrossSDKFixture(t *testing.T) {
 		// object there would inflate a run's count by its Unit count.
 		if strings.HasPrefix(prefix, "units/") {
 			t.Errorf("%s: commit prefix %s is under the row prefix", c.Why, prefix)
+		}
+	}
+}
+
+// What a fresh execution folds back is decided by this parse, so a drift between the SDKs is one of
+// them re-running Units the other would resume — or folding a name it should have skipped.
+func TestCommitListingMatchesCrossSDKFixture(t *testing.T) {
+	fx := loadCommitCorpus(t)
+	for _, c := range fx.List {
+		got, err := CommitUnits(c.Prefix, c.Keys, c.N)
+		if c.Expect.Outcome == "refused" {
+			if !errors.Is(err, ErrCommitInvalid) {
+				t.Errorf("%s: got %v / %v, want a refusal wrapping ErrCommitInvalid", c.Why, got, err)
+			}
+			continue
+		}
+		if err != nil || fmt.Sprint(got) != fmt.Sprint(c.Expect.Units) {
+			t.Errorf("%s:\n  got  %v / %v\n  want %v", c.Why, got, err, c.Expect.Units)
+		}
+	}
+	// The round trip the two tables imply: whatever CommitKey writes lists back as that Unit.
+	for _, c := range fx.Keys {
+		got, err := CommitUnits(c.Prefix, []string{c.Key}, c.Unit+1)
+		if err != nil || fmt.Sprint(got) != fmt.Sprint([]int{c.Unit}) {
+			t.Errorf("%s: %s lists as %v / %v, want [%d]", c.Why, c.Key, got, err, c.Unit)
 		}
 	}
 }
@@ -171,7 +218,7 @@ func normalise(v []any) []any {
 	return v
 }
 
-// fakeObjects is an in-memory Putter+Getter, the shape the S3 store has.
+// fakeObjects is an in-memory Putter+Getter+Lister, the shape the S3 store has.
 type fakeObjects struct{ m map[string][]byte }
 
 func (f *fakeObjects) Put(_ context.Context, k string, b []byte) error {
@@ -190,14 +237,24 @@ func (f *fakeObjects) Get(_ context.Context, k string) ([]byte, error) {
 	return b, nil
 }
 
+func (f *fakeObjects) List(_ context.Context, prefix string) ([]string, error) {
+	var out []string
+	for k := range f.m {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
+
 // The store spells its prefix in front of the corpus layout exactly as PutSubunit does, and a
 // commit written through it reads back through it.
 func TestAStoreRoundTripsACommitUnderItsOwnPrefix(t *testing.T) {
 	t.Setenv("KONTRA_ACTOR_NAME", "crawler")
 	objs := &fakeObjects{}
 	s := New(objs, "tenant-a/")
-	prefix := s.CommitPrefix("r1", "n7", "b1")
-	if want := "tenant-a/commits/run=r1/actor=crawler/shard=0007/batch=b1/"; prefix != want {
+	prefix := s.CommitPrefix("r1", "acme.com", "b1")
+	if want := "tenant-a/commits/run=r1/actor=crawler/actor_id=acme.com/batch=b1/"; prefix != want {
 		t.Fatalf("prefix = %s, want %s", prefix, want)
 	}
 	key := CommitKey(prefix, 3)
@@ -214,6 +271,14 @@ func TestAStoreRoundTripsACommitUnderItsOwnPrefix(t *testing.T) {
 	if _, err := s.GetCommit(context.Background(), CommitKey(prefix, 4)); !errors.Is(err, ErrNotFound) {
 		t.Errorf("an absent commit must read as ErrNotFound, got %v", err)
 	}
+	// And a listing through the store finds it under the same spelling, prefix included.
+	keys, err := s.ListCommits(context.Background(), prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if units, err := CommitUnits(prefix, keys, 4); err != nil || fmt.Sprint(units) != "[3]" {
+		t.Errorf("listed %v -> %v / %v, want [3]", keys, units, err)
+	}
 }
 
 // A write-only object client is a wiring mistake, and it must say so rather than report every key
@@ -223,6 +288,10 @@ func TestAWriteOnlyStoreRefusesToReadByName(t *testing.T) {
 	_, err := s.GetCommit(context.Background(), "k")
 	if err == nil || errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want a named refusal that is not ErrNotFound", err)
+	}
+	// The same for a listing: "nothing there" would re-run everything an earlier execution did.
+	if keys, err := s.ListCommits(context.Background(), "p/"); err == nil {
+		t.Fatalf("listed %v, want a named refusal", keys)
 	}
 }
 

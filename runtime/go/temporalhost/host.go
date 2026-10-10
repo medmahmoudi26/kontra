@@ -383,6 +383,26 @@ func (h *Activities) Close(ctx context.Context, req map[string]any) (*engine.Clo
 	return &engine.CloseResp{Closed: true}, nil
 }
 
+// requireObjectStore refuses to serve an actor that commits Units when Configure left no object
+// store — the peer of Python's _require_object_store.
+//
+// S3 IS MANDATORY FOR AN ACTOR THAT COMMITS (owner decision A8, ADR 0060). A finished Unit's outcome
+// is a commit object, and the bytes it points at are pushed records in the same store; the heartbeat
+// names which Units finished and nothing else. Without a store neither is written anywhere, so a
+// retry and a re-dispatch both re-run everything, quietly, while the actor polls and returns batches
+// as if healthy. It used to start and degrade like that; now it does not start. An actor that
+// declares no Method commits nothing (its Batch passes through), so it is not refused.
+func requireObjectStore(r *core.Registry) error {
+	if len(r.Methods) == 0 || engine.UnitStoreConfigured() {
+		return nil
+	}
+	name := r.Name
+	if name == "" {
+		name = "this actor"
+	}
+	return fmt.Errorf("%s declares a Method, and no object store is configured (KONTRA_S3_ENDPOINT unset, or the store failed to open — see the log line above): an actor that commits Units needs it, because a finished Unit's output is durable nowhere else (ADR 0060). Set KONTRA_S3_* — locally, the compose stack's SeaweedFS at http://localhost:8333", name)
+}
+
 // Serve runs the actor as a Temporal activity worker — THE way (*kontra.Actor).Run() boots a Go
 // actor. It blocks until interrupted.
 func Serve(r *core.Registry) error { return serve(r, worker.InterruptCh()) }
@@ -393,6 +413,11 @@ func Serve(r *core.Registry) error { return serve(r, worker.InterruptCh()) }
 // the only way an actor starts.
 func serve(r *core.Registry, stop <-chan interface{}) error {
 	engine.Configure(r)
+	// BEFORE ANYTHING ELSE STARTS: registering, metrics, dialing. A committing actor with no object
+	// store is a boot failure naming the variable, not a Worker that takes Batches it cannot commit.
+	if err := requireObjectStore(r); err != nil {
+		return err
+	}
 
 	registrar.SelfRegister(r) // best-effort; no-op unless KONTRA_ORCHESTRATOR_URL is set
 	engine.ServeMetrics(r.Name, r.Version)

@@ -49,6 +49,9 @@ type fakePutter struct {
 	// onGet, when set, runs before every read — how a test looks at what the engine has published
 	// while a resume's fold is still in flight.
 	onGet func(key string)
+	// lists counts LIST calls; listErr, when set, is what every one of them returns.
+	lists   int
+	listErr error
 }
 
 func (p *fakePutter) Put(_ context.Context, key string, data []byte) error {
@@ -68,6 +71,23 @@ func (p *fakePutter) Get(_ context.Context, key string) ([]byte, error) {
 		return nil, unitstore.ErrNotFound
 	}
 	return b, nil
+}
+
+// List is a prefix LIST as S3 answers one: every key that starts with it, in no promised order (Go's
+// map iteration sees to that). It counts its calls, so a test can say a resume LISTED rather than
+// guessed.
+func (p *fakePutter) List(_ context.Context, prefix string) ([]string, error) {
+	p.lists++
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	var out []string
+	for k := range p.blobs {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
 }
 
 // recordBlobs is the ROWS in the fake store — the `units/` half. A commit object is not a row, which

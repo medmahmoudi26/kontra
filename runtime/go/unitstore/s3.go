@@ -56,6 +56,26 @@ func (p *s3Putter) Get(ctx context.Context, key string) ([]byte, error) {
 	return io.ReadAll(out.Body)
 }
 
+// List returns every key under prefix — a fresh execution's resume (commit.go, ListCommits).
+// Paginated, because a LIST page stops at 1,000 keys and a batch can hold more Units than that. Any
+// error returns as itself, retryable: unlike a GET, a LIST has no "absent" answer to tell apart.
+func (p *s3Putter) List(ctx context.Context, prefix string) ([]string, error) {
+	var keys []string
+	pages := s3.NewListObjectsV2Paginator(p.cli, &s3.ListObjectsV2Input{Bucket: &p.bucket, Prefix: &prefix})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range page.Contents {
+			if o.Key != nil {
+				keys = append(keys, *o.Key)
+			}
+		}
+	}
+	return keys, nil
+}
+
 func isMissingCode(code string) bool {
 	switch code {
 	case "NoSuchKey", "NotFound", "404":

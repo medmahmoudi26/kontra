@@ -15,10 +15,28 @@
   "`run=` LEADS for the same measured reason it leads in blobkey.json: an object store prunes a LIST",
   "only by literal prefix, and every reader of this tree (a retention sweep, an operator) asks by run.",
   "",
+  "`actor_id=` IS THE INSTANCE THE DISPATCH NAMED, AND IT REPLACED `shard=`. It is the id both hosts",
+  "already key the live instance by: the idempotency key, else the Session, else run and node joined",
+  "(runtime/handler/workflow.go derives it today, and a Phase 2 caller by the same rule). A keyed",
+  "re-dispatch carries a FRESH node id (catalog.py mints one per call), so a prefix keyed by node",
+  "could never be found by the execution that re-dispatches the same Batch on the same key. Keyed by",
+  "the instance, it is: a fresh execution LISTS this prefix and folds back what is there (ADR 0060,",
+  "cross-execution resume). The node id is deliberately NOT an input here, and a numeric-looking",
+  "actor id is not padded: it is an identity, not a sortable shard.",
+  "",
+  "`run=` STILL SCOPES IT, ON PURPOSE. A Unit's `out` is refs into `units/run=<id>/`, so folding",
+  "another run's commits into this one would return rows this run's Dataset does not hold.",
+  "",
   "A DECODE THAT REFUSES IS LOUD, NOT A RE-RUN. A body that names another batch or another Unit at",
   "this key, or a version this reader does not know, is corruption or skew, and the engine fails the",
   "attempt rather than guess. Reading it as 'not finished' would re-run silently; reading it as",
-  "'finished' with what it says would fold another Unit's output into this one."
+  "'finished' with what it says would fold another Unit's output into this one.",
+  "",
+  "THE `list` TABLE IS WHAT A LISTING OF ONE BATCH'S PREFIX MEANS. Only names the writer can produce",
+  "count as Units (`unit=` + at least five digits + `.json`, directly under the prefix); anything else",
+  "is not a Unit and is skipped rather than guessed at. An index outside the batch is REFUSED: the",
+  "batch id is a content hash over the Units, so a Unit past its length under its prefix is not this",
+  "batch's, and the engine raises CommitLost rather than fold or ignore it."
  ],
  "version": 1,
  "keys": [
@@ -26,81 +44,61 @@
    "why": "ordinary key",
    "actor": "cachebuster",
    "run": "run-abc",
-   "node": "n7",
+   "actor_id": "acme.com",
    "batch_id": "0123456789abcdef",
    "unit": 11,
-   "prefix": "commits/run=run-abc/actor=cachebuster/shard=0007/batch=0123456789abcdef/",
-   "key": "commits/run=run-abc/actor=cachebuster/shard=0007/batch=0123456789abcdef/unit=00011.json"
+   "prefix": "commits/run=run-abc/actor=cachebuster/actor_id=acme.com/batch=0123456789abcdef/",
+   "key": "commits/run=run-abc/actor=cachebuster/actor_id=acme.com/batch=0123456789abcdef/unit=00011.json"
   },
   {
    "why": "empty fields must still make a valid key — a missing segment is a path no reader can match",
    "actor": "",
    "run": "",
-   "node": "",
+   "actor_id": "",
    "batch_id": "",
    "unit": 0,
-   "prefix": "commits/run=run/actor=unknown/shard=node/batch=batch/",
-   "key": "commits/run=run/actor=unknown/shard=node/batch=batch/unit=00000.json"
+   "prefix": "commits/run=run/actor=unknown/actor_id=unknown/batch=batch/",
+   "key": "commits/run=run/actor=unknown/actor_id=unknown/batch=batch/unit=00000.json"
   },
   {
-   "why": "n10 must not prefix-collide n1 (the padding blobkey.json pins, reused)",
-   "actor": "crawl4ai-canon",
-   "run": "r1",
-   "node": "n10",
-   "batch_id": "b1",
-   "unit": 1,
-   "prefix": "commits/run=r1/actor=crawl4ai-canon/shard=0010/batch=b1/",
-   "key": "commits/run=r1/actor=crawl4ai-canon/shard=0010/batch=b1/unit=00001.json"
-  },
-  {
-   "why": "n1 (the collision victim)",
-   "actor": "crawl4ai-canon",
-   "run": "r1",
-   "node": "n1",
-   "batch_id": "b1",
-   "unit": 1,
-   "prefix": "commits/run=r1/actor=crawl4ai-canon/shard=0001/batch=b1/",
-   "key": "commits/run=r1/actor=crawl4ai-canon/shard=0001/batch=b1/unit=00001.json"
-  },
-  {
-   "why": "a per-dispatch node id (catalog.py mints `{actor}-{uuid8}`) is not numeric and is kept",
+   "why": "an unkeyed dispatch's actor id is run and node joined (the handler's rule), kept verbatim",
    "actor": "enrich",
    "run": "r",
-   "node": "enrich-3f9a01bc",
+   "actor_id": "r-enrich-3f9a01bc",
    "batch_id": "b2",
    "unit": 2,
-   "prefix": "commits/run=r/actor=enrich/shard=enrich-3f9a01bc/batch=b2/",
-   "key": "commits/run=r/actor=enrich/shard=enrich-3f9a01bc/batch=b2/unit=00002.json"
+   "prefix": "commits/run=r/actor=enrich/actor_id=r-enrich-3f9a01bc/batch=b2/",
+   "key": "commits/run=r/actor=enrich/actor_id=r-enrich-3f9a01bc/batch=b2/unit=00002.json"
   },
   {
-   "why": "path and glob injection is neutered in EVERY segment, the batch id included",
+   "why": "a numeric-looking actor id is NOT padded the way a shard was: it is an identity, and padding would make `n7` and `0007` one instance",
+   "actor": "crawl4ai-canon",
+   "run": "r1",
+   "actor_id": "n7",
+   "batch_id": "b1",
+   "unit": 1,
+   "prefix": "commits/run=r1/actor=crawl4ai-canon/actor_id=n7/batch=b1/",
+   "key": "commits/run=r1/actor=crawl4ai-canon/actor_id=n7/batch=b1/unit=00001.json"
+  },
+  {
+   "why": "path and glob injection is neutered in EVERY segment — the actor id is the CALLER's string, and the batch id is included",
    "actor": "a/b=c",
    "run": "r 2",
-   "node": "n*3",
+   "actor_id": "k*3/x=y?",
    "batch_id": "b?/x",
    "unit": 3,
-   "prefix": "commits/run=r_2/actor=a_b_c/shard=n_3/batch=b__x/",
-   "key": "commits/run=r_2/actor=a_b_c/shard=n_3/batch=b__x/unit=00003.json"
-  },
-  {
-   "why": "a chunked numeric shard keeps its padding",
-   "actor": "cachebuster",
-   "run": "r",
-   "node": "n1.2",
-   "batch_id": "b3",
-   "unit": 4,
-   "prefix": "commits/run=r/actor=cachebuster/shard=0001.2/batch=b3/",
-   "key": "commits/run=r/actor=cachebuster/shard=0001.2/batch=b3/unit=00004.json"
+   "prefix": "commits/run=r_2/actor=a_b_c/actor_id=k_3_x_y_/batch=b__x/",
+   "key": "commits/run=r_2/actor=a_b_c/actor_id=k_3_x_y_/batch=b__x/unit=00003.json"
   },
   {
    "why": "an index past five digits WIDENS rather than truncates: two Units must never share a key",
    "actor": "x",
    "run": "r",
-   "node": "n1",
+   "actor_id": "k",
    "batch_id": "b4",
    "unit": 123456,
-   "prefix": "commits/run=r/actor=x/shard=0001/batch=b4/",
-   "key": "commits/run=r/actor=x/shard=0001/batch=b4/unit=123456.json"
+   "prefix": "commits/run=r/actor=x/actor_id=k/batch=b4/",
+   "key": "commits/run=r/actor=x/actor_id=k/batch=b4/unit=123456.json"
   }
  ],
  "encode": [
@@ -224,6 +222,50 @@
    "batch_id": "b1",
    "unit": 3,
    "body": [{"v": 1, "batch_id": "b1", "unit": 3, "out": []}],
+   "expect": {"outcome": "refused"}
+  }
+ ],
+ "list": [
+  {
+   "why": "every Unit committed under the prefix lists as its index, in order, whatever order the store returned them in",
+   "prefix": "commits/run=r/actor=x/actor_id=k/batch=b1/",
+   "n": 4,
+   "keys": ["commits/run=r/actor=x/actor_id=k/batch=b1/unit=00002.json", "commits/run=r/actor=x/actor_id=k/batch=b1/unit=00000.json", "commits/run=r/actor=x/actor_id=k/batch=b1/unit=00003.json"],
+   "expect": {"units": [0, 2, 3]}
+  },
+  {
+   "why": "an empty listing is an ordinary first dispatch: nothing to fold, nothing refused",
+   "prefix": "commits/run=r/actor=x/actor_id=k/batch=b1/",
+   "n": 3,
+   "keys": [],
+   "expect": {"units": []}
+  },
+  {
+   "why": "a wide index lists as itself",
+   "prefix": "commits/run=r/actor=x/actor_id=k/batch=b1/",
+   "n": 200000,
+   "keys": ["commits/run=r/actor=x/actor_id=k/batch=b1/unit=123456.json"],
+   "expect": {"units": [123456]}
+  },
+  {
+   "why": "names the writer cannot produce are not Units: skipped, never guessed at (an unpadded index, a temp suffix, a non-number, a nested path, another case)",
+   "prefix": "commits/run=r/actor=x/actor_id=k/batch=b1/",
+   "n": 10,
+   "keys": ["commits/run=r/actor=x/actor_id=k/batch=b1/unit=1.json", "commits/run=r/actor=x/actor_id=k/batch=b1/unit=00001.json.tmp", "commits/run=r/actor=x/actor_id=k/batch=b1/unit=abcde.json", "commits/run=r/actor=x/actor_id=k/batch=b1/sub/unit=00001.json", "commits/run=r/actor=x/actor_id=k/batch=b1/unit=00001.JSON", "commits/run=r/actor=x/actor_id=k/batch=b1/_marker"],
+   "expect": {"units": []}
+  },
+  {
+   "why": "a key under ANOTHER prefix is not this batch's Unit, even one the store returned (a prefix query is literal, and a sibling batch can share its leading characters)",
+   "prefix": "commits/run=r/actor=x/actor_id=k/batch=b1/",
+   "n": 10,
+   "keys": ["commits/run=r/actor=x/actor_id=k/batch=b10/unit=00001.json"],
+   "expect": {"units": []}
+  },
+  {
+   "why": "AN INDEX OUTSIDE THE BATCH IS REFUSED: the batch id hashes its Units, so a Unit past its length under its prefix is corruption, and folding or skipping it would each hide that",
+   "prefix": "commits/run=r/actor=x/actor_id=k/batch=b1/",
+   "n": 3,
+   "keys": ["commits/run=r/actor=x/actor_id=k/batch=b1/unit=00000.json", "commits/run=r/actor=x/actor_id=k/batch=b1/unit=00003.json"],
    "expect": {"outcome": "refused"}
   }
  ]

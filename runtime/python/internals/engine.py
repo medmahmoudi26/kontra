@@ -22,7 +22,9 @@ loads exactly ONCE per batch by construction.
 Execution is AT-LEAST-ONCE with exactly-once result recording: Method bodies must tolerate
 replay. What makes a retry skip what already finished is the CHECKPOINT the heartbeat carries
 (which Units finished) plus one commit object per finished Unit in the object store (what each
-produced) — ADR 0060. Both survive the worker; neither lives in a cache.
+produced) — ADR 0060. Both survive the worker; neither lives in a cache. A fresh EXECUTION of the
+same Batch on the same instance has no heartbeat to read, so it LISTS the batch's commit objects
+instead and folds back what an earlier execution finished (owner decision A7).
 """
 
 from __future__ import annotations
@@ -48,8 +50,8 @@ from internals.globalstore import GlobalStore, object_prefix
 from internals.redis_kv import redis_kv_from_env
 from internals.statekv import ActorStateKV, state_kv
 from internals.unitstore import (
-    CommitInvalid, commit_key, decode_commit, encode_commit, from_env as unitstore_from_env,
-    unit_ref,
+    CommitInvalid, commit_key, commit_units, decode_commit, encode_commit,
+    from_env as unitstore_from_env, unit_ref,
 )
 from internals import metrics
 
@@ -112,7 +114,8 @@ _INGEST_CONCURRENCY = 16
 
 
 class CommitLost(NonRetryableError):
-    """A Unit the checkpoint calls finished has no readable commit object.
+    """A Unit the checkpoint calls finished has no readable commit object — or a listing of the
+    batch's commit objects names one this batch cannot hold, or one that will not decode.
 
     LOUD, AND NOT RETRIED. The checkpoint is beaten only AFTER the commit object is written, so a
     finished Unit with nothing at its key means the store lost it, or this worker is reading a
@@ -393,10 +396,9 @@ def build_session_factory(registry, *, store="env"):
             is not already in the store — which is what lets the reader treat a missing object as
             loss (`CommitLost`) rather than as "not finished yet".
 
-            A no-op without an object store. That mode has nowhere durable to put a finished
-            Unit's output, so a retry re-runs the whole batch (`_resume_plan`); refusing to run at
-            all would break every no-S3 dev loop for an optimisation, while re-running is the path
-            the contract already calls safe — Method bodies tolerate replay.
+            A no-op without an object store, which only an in-process test reaches: `serve()`
+            refuses to start an actor that declares a Method without one (owner decision A8),
+            because that mode has nowhere durable to put a finished Unit's output.
             """
             if not self._manifest:
                 return
@@ -674,26 +676,39 @@ def build_session_factory(registry, *, store="env"):
             slots = self._slots = {}
             self._fail_slots = {}
             self._total = len(units)
-            # Where this batch's Units commit. Derived from the run, the dispatch and the batch's
-            # content hash, so every attempt of one activity derives the same prefix — and
-            # `_resume_plan` keeps the previous attempt's if it differs.
-            self._manifest = (unit_store.commit_prefix(run_id, node_id, self._bid)
+            # Where this batch's Units commit. Derived from the run, the INSTANCE and the batch's
+            # content hash — not the dispatch's node id, which a keyed re-dispatch mints afresh — so
+            # every attempt AND every execution of one Batch on one instance derives the same
+            # prefix. `_resume_plan` keeps a previous attempt's if it differs.
+            self._manifest = (unit_store.commit_prefix(run_id, self._actor_id, self._bid)
                               if unit_store is not None else "")
 
-            # RESUME IS TEMPORAL'S (PRD D1): within one activity execution, across its attempts.
-            # The previous attempt's last heartbeat says which Units finished; their commit
-            # objects say what each produced. Folded back BEFORE the resource loads, so a batch
-            # whose commits cannot be read fails without paying for a Load first.
+            # RESUME, IN TWO HALVES (PRD D1; owner decision A7; ADR 0060).
             #
-            # THE REDIS COMMIT MAP AND THE `batch-owner` GUARD THAT WERE HERE ARE GONE. The map
-            # was the resume record, keyed by actor id under a 24 h TTL, so it also resumed ACROSS
-            # executions — a re-dispatch on the same idempotency key, a reopened scope. That path
-            # no longer resumes; it re-runs (ADR 0060 says what keeps that from duplicating rows).
-            # The guard existed to stop one owner's commit map answering for another's, and with no
-            # commit map in the hash there is nothing for it to guard. What remains there is the
-            # scratch of a Unit in flight and its poison counter, both keyed by the batch's content
-            # hash, which is the identity a re-run of the same batch should resume.
+            # WITHIN ONE EXECUTION IT IS TEMPORAL'S. The previous attempt's last heartbeat says
+            # which Units finished; their commit objects say what each produced.
+            #
+            # ACROSS EXECUTIONS IT IS THE STORE'S. Heartbeat details do not cross executions, so a
+            # re-dispatch of the same Batch on the same instance (the same idempotency key, a
+            # reopened keyed scope, a retried workflow) arrives with nothing to read. When the
+            # heartbeat has nothing to say about THIS batch, the batch's commit prefix is LISTED
+            # and whatever an earlier execution finished is folded back the same way. One LIST per
+            # such attempt, and for a Batch nobody ran before it comes back empty.
+            #
+            # Both fold BEFORE the resource loads, so a batch whose commits cannot be read fails
+            # without paying for a Load first.
+            #
+            # THE REDIS COMMIT MAP AND THE `batch-owner` GUARD THAT WERE HERE ARE GONE. The map was
+            # the resume record, keyed by actor id under a 24 h TTL; the guard dropped it whenever a
+            # dispatch with another run/node took the instance, which is every keyed re-dispatch
+            # that did not pin its node id.
+            # The listing is keyed by the instance and the batch's content hash instead, so the
+            # case the guard threw away — the same Batch, the same key, a new node id — now
+            # resumes. What remains in the hash is the scratch of a Unit in flight and its poison
+            # counter, both keyed by the batch's content hash.
             plan = self._resume_plan(resume, len(units))
+            if plan is None:
+                plan = await self._listed_plan(len(units))
             if plan is not None:
                 await self._fold(plan, units)
 
@@ -753,11 +768,11 @@ def build_session_factory(registry, *, store="env"):
             except SessionLost:
                 # The resource is gone, so the SESSION is over (ADR 0023 §20). Tear it down here
                 # and remember: the caller's scope raises, and it reopens if it wants to. A reopen
-                # is a NEW activity execution, so it re-runs this batch rather than resuming it —
-                # resume is Temporal's, within one execution (PRD D1) — while the poison counter,
-                # keyed by the batch's content hash, still survives the scope it killed. What must
-                # not happen is a quiet reopen under the author's feet, so the ended Session
-                # refuses every later call rather than rebuilding `self.*`.
+                # is a NEW activity execution with no heartbeat to read, so on the same instance it
+                # resumes this batch from a LISTING of its commit objects (`_listed_plan`), and the
+                # poison counter, keyed by the batch's content hash, still survives the scope it
+                # killed. What must not happen is a quiet reopen under the author's feet, so the
+                # ended Session refuses every later call rather than rebuilding `self.*`.
                 log.warning("[%s] @actor.healthcheck: resource dead -> the Session ends",
                             self._actor_id)
                 # Counted on the same EVENT as Go's countReload(), which is "the resource was
@@ -839,17 +854,18 @@ def build_session_factory(registry, *, store="env"):
             return ck
 
         def _resume_plan(self, resume, n):
-            """`(manifest_ref, finished)` for the Units a previous attempt finished, or None to
-            run every Unit.
+            """`(manifest_ref, finished, source)` for the Units a previous ATTEMPT finished, or None
+            when the heartbeat says nothing about this batch — and then `_listed_plan` asks the
+            store.
 
             The checkpoint is honoured only if `accepted` says so — v1, and THIS batch's content
             hash — which is the corpus's rule and `resume_from`'s, so none of the `discarded` rows
             in shared/conformance/checkpoint.json can be folded back here.
 
             THREE OUTCOMES WHEN IT IS HONOURED, AND ONLY ONE OF THEM IS QUIET:
-              - no `manifest_ref`: the attempt that committed had no object store, so the outputs
-                it finished were never durable anywhere. Every Unit runs again. Safe, because a
-                re-run is what the contract already permits, and logged, because it is work redone.
+              - no `manifest_ref`: the attempt that committed had no object store (an attempt from
+                before S3 was mandatory), so the outputs it finished were never durable anywhere.
+                Nothing to fold from the checkpoint; logged, because it is work redone.
               - a `manifest_ref` and no store HERE: this worker cannot read what the batch already
                 committed. `CommitLost`, because re-running would silently hide a skewed fleet.
               - both: fold the finished Units back from their objects (`_fold`).
@@ -863,7 +879,7 @@ def build_session_factory(registry, *, store="env"):
             if ck is None:
                 if resume is not None:
                     log.info("[%s] previous attempt's checkpoint does not describe batch %s; "
-                             "running every unit", self._actor_id, self._bid)
+                             "discarded", self._actor_id, self._bid)
                 return None
             if ck.manifest_ref and unit_store is not None and ck.manifest_ref != self._manifest:
                 log.warning("[%s] batch %s committed under %s, not %s: keeping the previous "
@@ -875,7 +891,7 @@ def build_session_factory(registry, *, store="env"):
                 return None
             if not ck.manifest_ref:
                 log.warning("[%s] batch %s: %d unit(s) finished on an attempt with no object store, "
-                            "so their outputs were never durable — running every unit again",
+                            "so their outputs were never durable — they run again",
                             self._actor_id, self._bid, len(finished))
                 return None
             if unit_store is None:
@@ -883,7 +899,33 @@ def build_session_factory(registry, *, store="env"):
                     f"batch {self._bid}: a previous attempt committed {len(finished)} unit(s) under "
                     f"{ck.manifest_ref!r}, and this actor has no object store configured "
                     "(KONTRA_S3_ENDPOINT unset) to read them back from")
-            return ck.manifest_ref, finished
+            return ck.manifest_ref, finished, "the previous attempt's checkpoint"
+
+        async def _listed_plan(self, n):
+            """`(prefix, finished, source)` for the Units an earlier EXECUTION of this batch on this
+            instance finished, read from a LISTING of its commit prefix — or None to run every Unit.
+
+            The cross-execution half of resume (owner decision A7). It runs only when the heartbeat
+            had nothing to say about this batch: a first attempt, a discarded checkpoint, or one
+            that named nothing finished. What a listing may name is `commit_units`'s rule, pinned by
+            shared/conformance/commit.json §list; an index the batch cannot hold is `CommitLost`,
+            and a LIST that fails raises as itself, retryable.
+
+            No store, no listing: that is the in-process test seam, not a mode `serve()` starts.
+            """
+            if unit_store is None or not self._manifest:
+                return None
+            keys = await asyncio.to_thread(unit_store.list_commits, self._manifest)
+            try:
+                finished = commit_units(self._manifest, keys, n)
+            except CommitInvalid as e:
+                raise CommitLost(f"batch {self._bid}: the listing of {self._manifest} cannot be "
+                                 f"folded back: {e}") from e
+            if not finished:
+                return None
+            log.info("[%s] batch %s: an earlier execution finished %d of %d unit(s) under %s",
+                     self._actor_id, self._bid, len(finished), n, self._manifest)
+            return self._manifest, finished, "a listing of its commit objects"
 
         async def _fold(self, plan, units):
             """Read every finished Unit's commit object and fold it back into this batch's slots.
@@ -893,7 +935,7 @@ def build_session_factory(registry, *, store="env"):
             Unit re-ran after its beat was lost (a beat is throttled and a hard kill drops it) and
             finished the other way the second time — and the object is the later write.
             """
-            manifest, finished = plan
+            manifest, finished, source = plan
             sem = asyncio.Semaphore(_INGEST_CONCURRENCY)
 
             async def one(i):
@@ -902,8 +944,8 @@ def build_session_factory(registry, *, store="env"):
                     body = await asyncio.to_thread(unit_store.get_commit, key)
                 if body is None:
                     raise CommitLost(
-                        f"batch {self._bid}: unit {i} is finished according to the previous "
-                        f"attempt's checkpoint, but there is no commit object at {key}")
+                        f"batch {self._bid}: unit {i} is finished according to {source}, but "
+                        f"there is no commit object at {key}")
                 try:
                     return i, decode_commit(body, self._bid, i)
                 except CommitInvalid as e:

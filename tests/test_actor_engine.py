@@ -68,10 +68,10 @@ class FakeUnitStore:
     # Commit objects (ADR 0060). Kept in their OWN dict rather than in `blobs`, because `blobs` is
     # what these tests count as rows — and a commit object is not a row, which is exactly why the
     # real layout puts it under `commits/` rather than `units/`.
-    def commit_prefix(self, run_id, node_id, batch_id):
+    def commit_prefix(self, run_id, actor_id, batch_id):
         from internals.unitstore import commit_prefix
 
-        return commit_prefix("t", run_id, node_id, batch_id)
+        return commit_prefix("t", run_id, actor_id, batch_id)
 
     def put_commit(self, key, body):
         import json as _json
@@ -83,6 +83,14 @@ class FakeUnitStore:
 
         raw = self.commits.get(key)
         return None if raw is None else _json.loads(raw)
+
+    def list_commits(self, prefix):
+        """A prefix LIST, as S3 answers one: every key that starts with it, in no promised order.
+        Counts its calls, and raises `list_error` when a test sets one."""
+        self.lists = getattr(self, "lists", 0) + 1
+        if getattr(self, "list_error", None) is not None:
+            raise self.list_error
+        return [k for k in reversed(list(self.commits)) if k.startswith(prefix)]
 
 
 def unit_blobs(store, run, unit):
@@ -186,7 +194,7 @@ def test_a_committed_unit_is_an_object_keyed_by_the_batch_hash_plus_its_index():
         {"units": ["a", "b"], "method": "method", "run_id": "r", "node_id": "n"}))
 
     bid = batch_id("method", ["a", "b"], {})
-    prefix = commit_prefix("t", "r", "n", bid)
+    prefix = commit_prefix("t", "r", "run1-node1", bid)
     for i in (0, 1):
         body = store.get_commit(commit_key(prefix, i))
         assert decode_commit(body, bid, i) == {"out": [out["results"][i]]}
@@ -208,7 +216,7 @@ def test_retry_replays_committed_units_by_identity_not_position():
     host = make_host(method, store=store)
     units = ["a", "b", "c", "d"]
     bid = batch_id("method", units, {})
-    prefix = commit_prefix("t", "r", "n", bid)
+    prefix = commit_prefix("t", "r", "run1-node1", bid)
     store.put_commit(commit_key(prefix, 1), encode_commit(bid, 1, [{"u": "one-committed"}]))
     store.put_commit(commit_key(prefix, 3), encode_commit(bid, 3, [{"u": "three-committed"}]))
     resume = {"v": 1, "batch_id": bid, "done": [[1, 1], [3, 3]], "failed": [], "manifest_ref": prefix}
@@ -475,7 +483,7 @@ def test_a_resource_that_dies_on_the_beat_ends_the_session_too(monkeypatch):
 
     # What committed before the death is still committed — the scope ended, it was not undone.
     bid = batch_id("method", ["a", "b"], {})
-    got = decode_commit(store.get_commit(commit_key(commit_prefix("t", "", "", bid), 0)), bid, 0)
+    got = decode_commit(store.get_commit(commit_key(commit_prefix("t", "", "run1-node1", bid), 0)), bid, 0)
     assert [store.get_subunit(r["$ref"]["key"]) for r in got["out"]] == [{"u": "a"}]
 
 
@@ -496,16 +504,15 @@ def reopen(method, load=None, healthcheck=None, store=None, key="acme.com"):
     return (lambda: factory(key, kv=kv)), kv
 
 
-def test_a_reopened_scope_re_runs_the_batch_it_lost():
-    """ADR 0023 §7, and PRD D1. Losing the resource costs at most the Batch in flight: the caller
-    opens a new scope against the same key and runs it again.
+def test_a_reopened_scope_resumes_the_batch_it_lost_from_its_commit_objects():
+    """ADR 0023 §7, PRD D1 and owner decision A7. Losing the resource costs at most the Units in
+    flight: the caller opens a new scope against the same key and runs the Batch again, and what the
+    lost scope already committed is folded back rather than re-run.
 
-    AGAIN, NOT FROM WHERE IT STOPPED, and that reversed on purpose. A reopened scope is a NEW
-    activity execution, and resume is Temporal's — within one execution, across its attempts —
-    because heartbeat details survive attempts and not executions. The Redis commit map that used
-    to resume this path was keyed by actor id under a TTL, which is what made it a cache a retry
-    could not trust (ADR 0059, 0060). Re-running is what the contract already permits: Method
-    bodies tolerate replay, and records re-push by content sha into the same blobs."""
+    A reopened scope is a NEW activity execution, and heartbeat details do not cross executions, so
+    nothing here hands the second scope a checkpoint. What it resumes from is a LISTING of the
+    batch's commit prefix, which is keyed by the instance (the key) and the batch's content hash —
+    so the same Batch on the same key finds it, whatever dispatch carried it."""
     from kontra.retry import SessionLost
 
     ran, died = [], []
@@ -527,19 +534,81 @@ def test_a_reopened_scope_re_runs_the_batch_it_lost():
             raise RuntimeError("dead")
         return True
 
-    scope, kv = reopen(method, load=load, healthcheck=hc)
+    store = FakeUnitStore()
+    scope, kv = reopen(method, load=load, healthcheck=hc, store=store)
     units = ["a", "die", "c"]
     with pytest.raises(SessionLost):
-        asyncio.run(scope().run_batch({"units": units}))
+        asyncio.run(scope().run_batch({"units": units, "run_id": "r", "node_id": "n1"}))
 
-    out = asyncio.run(scope().run_batch({"units": units}))   # the caller reopens
+    # The caller reopens. A new dispatch carries a new node id; the instance is the same key.
+    out = asyncio.run(scope().run_batch({"units": units, "run_id": "r", "node_id": "n2"}))
     assert out["opens"] == 1                  # a NEW resource in a NEW scope, not a rebuilt one
     assert out["done"] is True
-    assert out["results"] == [{"u": "a"}, {"u": "die"}, {"u": "c"}]   # each Unit's output ONCE
-    assert ran == ["a", "die", "a", "die", "c"], "a new execution re-runs the batch"
-    # What survives the scope is the poison counter, not a commit map: there is none to survive.
+    assert ran == ["a", "die", "die", "c"], "the committed Unit is folded back, not re-run"
+    rows = [store.get_subunit(r["$ref"]["key"]) for r in out["results"]]
+    assert rows == [{"u": "a"}, {"u": "die"}, {"u": "c"}]   # each Unit's output ONCE, in order
+    assert len(store.blobs) == 3, "and each row is in the store once"
+    # What survives the scope in the hash is the poison counter; the commits are objects.
     bid = batch_id("method", units, {})
     assert set(kv.d) == {f"{unit_slot(bid, 1)}-kills"}, kv.d
+
+
+def test_without_a_store_a_reopened_scope_re_runs_the_batch():
+    """The in-process seam with no object store (which `serve()` no longer starts, A8): there is
+    nothing durable to list, so a reopened scope runs the Batch again. Re-running is what the
+    contract permits — Method bodies tolerate replay — and the output is still each Unit's once."""
+    from kontra.retry import SessionLost
+
+    ran, died = [], []
+
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            ran.append(unit.value)
+            if unit.value == "die" and not died:
+                died.append(1)
+                raise SessionLost("engine crashed")
+            await dataset.push({"u": unit.value})
+
+    scope, _ = reopen(method)
+    with pytest.raises(SessionLost):
+        asyncio.run(scope().run_batch({"units": ["a", "die", "c"]}))
+    out = asyncio.run(scope().run_batch({"units": ["a", "die", "c"]}))
+    assert ran == ["a", "die", "a", "die", "c"]
+    assert out["results"] == [{"u": "a"}, {"u": "die"}, {"u": "c"}]
+
+
+def test_a_failed_listing_is_retryable_and_runs_nothing():
+    """A LIST that fails is the store being unreachable, not the store having lost something: it
+    raises as itself (retryable, not CommitLost), and nothing loads or runs against a batch whose
+    earlier executions could not be read."""
+    ran, loads = [], []
+
+    async def load(self):
+        loads.append(1)
+
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            ran.append(unit.value)
+
+    store = FakeUnitStore()
+    store.list_error = ConnectionError("connection refused")
+    host = make_host(method, load=load, store=store)
+    with pytest.raises(ConnectionError):
+        asyncio.run(host.run_batch({"units": ["a"], "run_id": "r", "node_id": "n"}))
+    assert ran == [] and loads == []
+
+
+def test_a_fresh_execution_lists_once():
+    """One LIST per attempt that has no heartbeat to read — not one per Unit, and not none."""
+
+    async def method(self, batch, dataset):
+        async for unit in batch:
+            await dataset.push({"u": unit.value})
+
+    store = FakeUnitStore()
+    host = make_host(method, store=store)
+    asyncio.run(host.run_batch({"units": ["a", "b", "c"], "run_id": "r", "node_id": "n"}))
+    assert store.lists == 1
 
 
 def test_a_unit_that_kills_scope_after_scope_is_isolated_and_skipped():
@@ -692,7 +761,7 @@ def test_push_writes_one_durable_blob_per_record():
     assert len(out["results"]) == 3                        # results = the refs
     assert all("$ref" in r for r in out["results"])
     bid = batch_id("method", units, {})
-    body = store.get_commit(commit_key(commit_prefix("t", "r", "n", bid), 0))
+    body = store.get_commit(commit_key(commit_prefix("t", "r", "run1-node1", bid), 0))
     assert decode_commit(body, bid, 0) == {"out": out["results"]}   # the commit holds the refs
 
 
@@ -854,7 +923,7 @@ def test_unit_store_commits_refs_not_payloads():
 
     # response + commits are refs, blobs hold the payloads under the unit's prefix
     bid = batch_id("method", units, {})
-    prefix = commit_prefix("t", "r9", "n1", bid)
+    prefix = commit_prefix("t", "r9", "run1-node1", bid)
     assert beats[-1]["checkpoint"]["manifest_ref"] == prefix   # the pointer a retry follows
     for i, entry in enumerate(out["results"]):
         ref = entry["$ref"]

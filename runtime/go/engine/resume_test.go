@@ -1,9 +1,10 @@
 package engine
 
-// Resume from the heartbeat's checkpoint (PRD D1, ADR 0060) — the Go peers of the resume tests in
-// tests/test_actor_engine.py. What is folded back, what is refused and why loudly, and the one
-// property a second death depends on: no beat of a resumed attempt may forget what the previous one
-// finished.
+// Resume from the heartbeat's checkpoint (PRD D1, ADR 0060) and, across executions, from a listing
+// of the batch's commit objects (owner decision A7) — the Go peers of the resume tests in
+// tests/test_actor_engine.py and tests/test_resume_from_checkpoint.py. What is folded back, what is
+// refused and why loudly, and the one property a second death depends on: no beat of a resumed
+// attempt may forget what the previous one finished.
 
 import (
 	"context"
@@ -317,5 +318,78 @@ func TestACommittedBatchLeavesNothingInTheStateHash(t *testing.T) {
 	}
 	if len(commitBlobs(fp)) != 2 {
 		t.Errorf("commit objects = %v, want one per Unit", commitBlobs(fp))
+	}
+}
+
+// A FRESH EXECUTION — no prior checkpoint at all — lists the batch's commit prefix ONCE, folds back
+// what an earlier execution on this instance finished, and has already published it before Load: a
+// keepalive tick during a slow Load, followed by a death, must not leave the next attempt less than
+// the listing found.
+func TestAFreshExecutionListsItsCommitsAndPublishesThemBeforeLoad(t *testing.T) {
+	req := RunBatchReq{Units: strUnits("a", "b", "c", "d"), RunID: "r", NodeID: "n-1"}
+	_, fp := firstAttemptDiesAfter(t, 3, req)
+	fp.lists = 0
+
+	var ran []string
+	a := retryOn(counting(&ran), checkpoint.Details{}) // a new execution: nothing handed in
+	var duringLoad checkpoint.Details
+	reg.LoadFn = func(*core.Session) error { duringLoad = a.Checkpoint(); return nil }
+	req.NodeID = "n-2" // a re-dispatch mints a new node id; the instance and the Batch are the same
+	resp, err := a.RunBatch(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(ran) != "[d]" {
+		t.Errorf("ran %v, want only the Unit no earlier execution committed", ran)
+	}
+	if fp.lists != 1 {
+		t.Errorf("listed %d times, want exactly once", fp.lists)
+	}
+	if ck := checkpoint.Accepted(&duringLoad, a.Checkpoint().BatchID); ck == nil || ck.Done.Len() != 3 {
+		t.Errorf("published during Load = %+v, want the three folded Units already named", duringLoad)
+	}
+	if len(resolvedResults(resp, fp)) != 4 || len(storeRecords(fp)) != 4 {
+		t.Errorf("results %v / store %d rows, want each of the 4 Units once", resp.Results, len(storeRecords(fp)))
+	}
+}
+
+// A retry whose previous beat describes ANOTHER batch (a keyed instance's last one) has nothing to say
+// about this one — and this batch's own commit objects are still the record of what finished. They
+// are listed and folded back, not thrown away with the beat.
+func TestADiscardedCheckpointStillResumesFromTheListing(t *testing.T) {
+	req := RunBatchReq{Units: strUnits("a", "b", "c"), RunID: "r", NodeID: "n"}
+	_, _ = firstAttemptDiesAfter(t, 2, req)
+	stale := checkpoint.New("0000000000000000")
+	stale.Commit(0)
+
+	var ran []string
+	a := retryOn(counting(&ran), stale.ToDetails())
+	if _, err := a.RunBatch(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(ran) != "[c]" {
+		t.Errorf("ran %v, want only the Unit this batch had not committed", ran)
+	}
+}
+
+// A LIST that fails is the store being unreachable, not the store having lost something: the error
+// returns as itself (retryable, not CommitLost), and nothing runs or loads against a batch whose
+// earlier executions could not be read.
+func TestAFailedListingIsRetryableAndRunsNothing(t *testing.T) {
+	var ran []string
+	a, fp := newTestActor(t, counting(&ran))
+	fp.listErr = errors.New("connection refused")
+	loads := 0
+	reg.LoadFn = func(*core.Session) error { loads++; return nil }
+	_, err := a.RunBatch(context.Background(), RunBatchReq{Units: strUnits("a"), RunID: "r", NodeID: "n"})
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("err = %v, want the listing's own error", err)
+	}
+	var nr core.NonRetryable
+	if errors.As(err, &nr) {
+		t.Error("a failed LIST must stay retryable")
+	}
+	if len(ran) != 0 || loads != 0 {
+		t.Errorf("ran %v with %d loads, want nothing", ran, loads)
 	}
 }

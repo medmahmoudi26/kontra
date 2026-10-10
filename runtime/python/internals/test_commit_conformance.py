@@ -29,9 +29,12 @@ def _fx():
     fx = json.loads(FIXTURE.read_text())
     # NON-VACUOUS, and the interesting rows are still there: a corpus that shrank to its easy
     # cases passes every loop below.
-    assert fx["keys"] and fx["encode"] and fx["decode"], "fixture is empty"
+    assert fx["keys"] and fx["encode"] and fx["decode"] and fx["list"], "fixture is empty"
     assert any(c["expect"]["outcome"] == "refused" for c in fx["decode"]), "no refusal rows"
     assert any(c["unit"] > 99999 for c in fx["keys"]), "no wide-index row"
+    assert any(c["expect"].get("outcome") == "refused" for c in fx["list"]), "no listing refusal"
+    assert any(c["keys"] and c["expect"].get("units") == [] for c in fx["list"]), \
+        "no row of names that are not Units"
     return fx
 
 
@@ -39,7 +42,7 @@ def test_commit_prefix_and_key_match_the_corpus():
     m, fx = _mod(), _fx()
     assert fx["version"] == m.COMMIT_VERSION
     for c in fx["keys"]:
-        prefix = m.commit_prefix(c["actor"], c["run"], c["node"], c["batch_id"])
+        prefix = m.commit_prefix(c["actor"], c["run"], c["actor_id"], c["batch_id"])
         assert prefix == c["prefix"], f'{c["why"]}:\n  got  {prefix}\n  want {c["prefix"]}'
         key = m.commit_key(prefix, c["unit"])
         assert key == c["key"], f'{c["why"]}:\n  got  {key}\n  want {c["key"]}'
@@ -51,7 +54,28 @@ def test_commits_never_land_under_the_row_prefix():
     the corpus's spelling."""
     m, fx = _mod(), _fx()
     for c in fx["keys"]:
-        assert not m.commit_prefix(c["actor"], c["run"], c["node"], c["batch_id"]).startswith("units/")
+        assert not m.commit_prefix(c["actor"], c["run"], c["actor_id"], c["batch_id"]).startswith("units/")
+
+
+def test_a_listing_means_what_the_corpus_says():
+    """What a fresh execution folds back is decided by this parse, so a drift between the SDKs is
+    one of them re-running Units the other would resume — or folding a name it should have skipped."""
+    m, fx = _mod(), _fx()
+    for c in fx["list"]:
+        if c["expect"].get("outcome") == "refused":
+            with pytest.raises(m.CommitInvalid):
+                m.commit_units(c["prefix"], c["keys"], c["n"])
+            continue
+        got = m.commit_units(c["prefix"], c["keys"], c["n"])
+        assert got == c["expect"]["units"], f'{c["why"]}:\n  got  {got}'
+
+
+def test_every_key_the_writer_produces_lists_as_its_own_unit():
+    """The round trip the two tables imply, stated: whatever `commit_key` writes, `commit_units`
+    reads back as that Unit — the wide index included."""
+    m, fx = _mod(), _fx()
+    for c in fx["keys"]:
+        assert m.commit_units(c["prefix"], [c["key"]], c["unit"] + 1) == [c["unit"]], c["why"]
 
 
 def test_encoded_bodies_match_the_corpus():

@@ -1,4 +1,5 @@
-"""A retry resumes from the heartbeat, through Temporal's own activity seam (PRD D1, §10.3; ADR 0060).
+"""A retry resumes from the heartbeat, and a re-dispatch from the store, through Temporal's own
+activity seam (PRD D1, §10.3; owner decision A7; ADR 0060).
 
 The engine tests (`test_actor_engine.py`) hand `resume=` in directly. These go through the HOST's
 `RunBatch` activity inside temporalio's `ActivityEnvironment`, so the two halves that tests of the
@@ -9,6 +10,10 @@ engine alone cannot see are real: what `activity.heartbeat` actually received on
 it survives, so attempt 2 runs with the host's `_SESSIONS` cleared and a FRESH state hash — which is
 also the proof that resume no longer reads Redis. The object store is the one thing shared between
 the attempts, because it is the one thing that outlives the worker.
+
+"A NEW EXECUTION" IS MODELLED THE SAME WAY, with one difference that is the whole point: it has NO
+heartbeat details. Temporal hands details to the next attempt of one activity and never across
+executions, so a re-dispatch of the same Batch can only resume from what it LISTS in the store.
 """
 
 from __future__ import annotations
@@ -22,7 +27,8 @@ from temporalio.testing import ActivityEnvironment
 
 from kontra import ActorRegistry, MethodRegistration
 from internals.engine import build_session_factory
-from internals.unitstore import commit_key
+from internals.engine import batch_id
+from internals.unitstore import commit_key, commit_prefix, encode_commit
 from test_actor_engine import FakeKV, FakeUnitStore
 
 
@@ -141,7 +147,7 @@ def test_a_checkpoint_for_a_different_batch_is_discarded():
     run_batch, _ = _worker(method, store)
     stale = {"node": "n", "done": 3, "total": 3, "isolated": 0,
              "checkpoint": {"v": 1, "batch_id": "0000000000000000", "done": [[0, 2]], "failed": [],
-                            "manifest_ref": "commits/run=r/actor=t/shard=n/batch=0000000000000000/"}}
+                            "manifest_ref": "commits/run=r/actor=t/actor_id=a1/batch=0000000000000000/"}}
     out, _ = _attempt(run_batch, {"actor_id": "a1", "units": units, "method": "m",
                                   "run_id": "r", "node_id": "n"}, attempt=2, details=[stale])
     assert ran == units
@@ -192,3 +198,154 @@ def test_a_first_attempt_ignores_the_absence_of_details():
                                       "run_id": "r", "node_id": "n"})
     assert ran == ["a", "b"] and out["done"] is True
     assert beats[-1]["checkpoint"]["manifest_ref"].startswith("commits/run=r/")
+
+
+# ---- across executions: a re-dispatch resumes from a LISTING of the batch's commits (A7) ----------
+
+
+def _execution_dies_after(k, payload, store):
+    """Execution 1 of a batch: commits k Units, then the worker dies and the execution ENDS (its
+    retries exhausted, or the caller gave up on it). Returns the Units it ran."""
+    ran = []
+
+    async def dies(self, batch, dataset):
+        async for unit in batch:
+            if len(ran) == k:
+                raise WorkerKilled()
+            ran.append(unit.value)
+            await dataset.push({"u": unit.value})
+
+    run_batch, _ = _worker(dies, store)
+    died, _ = _attempt(run_batch, payload)
+    assert isinstance(died, WorkerKilled), died
+    return ran
+
+
+def _living(ran):
+    async def lives(self, batch, dataset):
+        async for unit in batch:
+            ran.append(unit.value)
+            await dataset.push({"u": unit.value})
+
+    return lives
+
+
+def test_a_re_dispatch_on_the_same_key_resumes_from_the_commit_objects():
+    """THE cross-execution property (owner decision A7): execution 1 commits k of n and ends; the
+    caller re-dispatches the SAME Batch on the SAME key — a new execution, a fresh process, NO
+    heartbeat details, and a NEW node id, because `catalog.py` mints one per dispatch. It runs
+    exactly the n-k Units that had not committed and returns n Units of output, none twice."""
+    n, k = 6, 4
+    units = [f"u{i}" for i in range(n)]
+    store = FakeUnitStore()
+    first = {"actor_id": "acme.com", "units": units, "method": "m", "run_id": "r", "node_id": "n-1"}
+    assert _execution_dies_after(k, first, store) == units[:k]
+
+    ran = []
+    run_batch, kv = _worker(_living(ran), store)
+    again = dict(first, node_id="n-2")
+    out, beats = _attempt(run_batch, again)                    # attempt 1, no details
+
+    assert ran == units[k:], "exactly the Units no earlier execution committed"
+    assert out["done"] is True
+    assert [r["u"] for r in _rows(out, store)] == units, "n Units of output, in input order"
+    assert sorted(r["u"] for r in _store_rows(store)) == sorted(units), "no row twice in the store"
+    assert beats[-1]["checkpoint"]["done"] == [[0, n - 1]], "the beat names the folded Units too"
+    assert kv.d == {}, "the resume read nothing from, and wrote nothing to, the state hash"
+
+
+def test_a_batch_an_earlier_execution_finished_runs_nothing():
+    """An identical call made again on the same instance IS a retry (`batch_id`'s rule), and every
+    Unit of it already has its commit object — so nothing runs and the outputs come back."""
+    units = ["a", "b", "c"]
+    payload = {"actor_id": "acme.com", "units": units, "method": "m", "run_id": "r", "node_id": "n"}
+    store = FakeUnitStore()
+    ran1, ran2 = [], []
+    run_batch, _ = _worker(_living(ran1), store)
+    out1, _ = _attempt(run_batch, payload)
+    run_batch, _ = _worker(_living(ran2), store)
+    out2, _ = _attempt(run_batch, dict(payload, node_id="n-again"))
+    assert ran1 == units and ran2 == []
+    assert out2["results"] == out1["results"], "the same refs, folded back"
+
+
+def test_another_instance_does_not_resume_this_ones_batch():
+    """The listing is keyed by the instance. Another key (or an unkeyed dispatch, whose actor id is
+    its own run and node) running the same Units must run them all: their commits are not its."""
+    units = ["a", "b", "c"]
+    store = FakeUnitStore()
+    _execution_dies_after(2, {"actor_id": "acme.com", "units": units, "method": "m",
+                              "run_id": "r", "node_id": "n"}, store)
+    ran = []
+    run_batch, _ = _worker(_living(ran), store)
+    out, _ = _attempt(run_batch, {"actor_id": "other.org", "units": units, "method": "m",
+                                  "run_id": "r", "node_id": "n"})
+    assert ran == units and out["done"] is True
+
+
+def test_another_run_does_not_resume_this_runs_batch():
+    """`run=` scopes the listing. A Unit's output is refs into its run's `units/` prefix, so folding
+    them into another run would hand that run rows its Dataset does not hold."""
+    units = ["a", "b", "c"]
+    store = FakeUnitStore()
+    _execution_dies_after(2, {"actor_id": "acme.com", "units": units, "method": "m",
+                              "run_id": "r1", "node_id": "n"}, store)
+    ran = []
+    run_batch, _ = _worker(_living(ran), store)
+    _attempt(run_batch, {"actor_id": "acme.com", "units": units, "method": "m",
+                         "run_id": "r2", "node_id": "n"})
+    assert ran == units
+
+
+def test_a_discarded_checkpoint_still_resumes_from_the_listing():
+    """A retry whose previous beat describes ANOTHER batch (a keyed instance's last one) has nothing
+    to read from the heartbeat about this one — and this batch's own commit objects are still the
+    record of what finished. They are listed and folded back, not ignored with the beat."""
+    n, k = 4, 2
+    units = [f"u{i}" for i in range(n)]
+    payload = {"actor_id": "acme.com", "units": units, "method": "m", "run_id": "r", "node_id": "n"}
+    store = FakeUnitStore()
+    _execution_dies_after(k, payload, store)
+    stale = {"node": "n", "done": 1, "total": 1, "isolated": 0,
+             "checkpoint": {"v": 1, "batch_id": "0000000000000000", "done": [[0, 0]], "failed": [],
+                            "manifest_ref": ""}}
+    ran = []
+    run_batch, _ = _worker(_living(ran), store)
+    out, _ = _attempt(run_batch, payload, attempt=2, details=[stale])
+    assert ran == units[k:]
+    assert [r["u"] for r in _rows(out, store)] == units
+
+
+def test_a_listed_unit_the_batch_cannot_hold_fails_loudly_and_without_retry():
+    """The batch id hashes its Units, so an object under its prefix naming a Unit past its length is
+    not this batch's. Folding it is impossible and skipping it would hide whatever put it there:
+    CommitLost, non-retryable, naming the key — and nothing runs."""
+    units = ["a", "b", "c"]
+    store = FakeUnitStore()
+    bid = batch_id("m", units, {})
+    prefix = commit_prefix("t", "r", "acme.com", bid)
+    store.put_commit(commit_key(prefix, 7), encode_commit(bid, 7, []))
+    ran = []
+    run_batch, _ = _worker(_living(ran), store)
+    failed, _ = _attempt(run_batch, {"actor_id": "acme.com", "units": units, "method": "m",
+                                     "run_id": "r", "node_id": "n"})
+    assert isinstance(failed, ApplicationError), failed
+    assert failed.type == "CommitLost" and failed.non_retryable is True
+    assert commit_key(prefix, 7) in str(failed)
+    assert ran == []
+
+
+def test_a_listed_object_that_names_another_unit_fails_loudly():
+    """The listing says WHICH keys exist; the body's own batch and Unit are still the integrity
+    check. A copy of unit 0's body at unit 1's key is refused, exactly as it is on a heartbeat
+    resume."""
+    units = ["a", "b", "c"]
+    store = FakeUnitStore()
+    bid = batch_id("m", units, {})
+    prefix = commit_prefix("t", "r", "acme.com", bid)
+    store.put_commit(commit_key(prefix, 1), encode_commit(bid, 0, []))
+    run_batch, _ = _worker(_living([]), store)
+    failed, _ = _attempt(run_batch, {"actor_id": "acme.com", "units": units, "method": "m",
+                                     "run_id": "r", "node_id": "n"})
+    assert isinstance(failed, ApplicationError) and failed.type == "CommitLost", failed
+    assert "names unit 0, expected 1" in str(failed)

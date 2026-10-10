@@ -9,12 +9,15 @@ A Unit's COMMIT is an object here too (ADR 0060): one per finished Unit under `c
 holding its refs or its isolation error, written before the heartbeat that reports it. The
 heartbeat's checkpoint says WHICH Units finished and names that prefix; this says what they
 produced. It used to be a field in the actor's Redis hash, which was one TTL or one eviction away
-from a retry re-running finished work or skipping unfinished work with nothing raised.
+from a retry re-running finished work or skipping unfinished work with nothing raised. The prefix
+is keyed by the INSTANCE (`actor_id`), not the dispatch, so a fresh execution of the same Batch on
+the same instance can LIST it and fold back what an earlier execution finished (`list_commits`).
 
-Unconfigured (`KONTRA_S3_ENDPOINT` unset) -> None: the host collects records inline and writes
-no commit objects — the no-S3 dev/test mode, in which a retry re-runs its whole batch because
-nothing durable holds a finished Unit's output. Configured -> `ensure()` fails fast at serve() (S3
-sits in the per-unit hot path; better to die at boot than on the first unit).
+Unconfigured (`KONTRA_S3_ENDPOINT` unset) -> None. S3 IS MANDATORY FOR AN ACTOR THAT COMMITS
+(ADR 0060, owner decision A8): `serve()` refuses to start an actor that declares a Method without
+it, because without it a finished Unit's output is durable nowhere. `None` survives only as the
+engine's in-process seam for tests that predate the in-memory store, where records are collected
+inline and no commit object is written.
 
 boto3 is sync — callers wrap writes in `asyncio.to_thread` so a PUT never stalls the
 window's event loop.
@@ -26,6 +29,7 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import re
 from typing import Any, Optional
 
 
@@ -102,11 +106,11 @@ class UnitStore:
 
     # ---- per-Unit commit objects (ADR 0060) -----------------------------------------------------
 
-    def commit_prefix(self, run_id: str, node_id: str, batch_id: str) -> str:
+    def commit_prefix(self, run_id: str, actor_id: str, batch_id: str) -> str:
         """This batch's commit prefix as this store spells it — the value a checkpoint carries as
         `manifest_ref`. Concatenated with the store prefix exactly as `put_subunit` does, for the
         same reason: the prefix is CARRIED (in the heartbeat) and read back verbatim."""
-        return self.prefix + commit_prefix(_actor_name(), run_id, node_id, batch_id)
+        return self.prefix + commit_prefix(_actor_name(), run_id, actor_id, batch_id)
 
     def put_commit(self, key: str, body: dict) -> None:
         """Write one Unit's commit object. SYNCHRONOUS ON PURPOSE: the beat that reports the Unit
@@ -134,6 +138,20 @@ class UnitStore:
             raise
         return json.loads(body)
 
+    def list_commits(self, prefix: str) -> list[str]:
+        """Every key under one batch's commit prefix, as the store returns them — what a FRESH
+        execution of the batch resumes from (`commit_units` says which of them are Units).
+
+        One LIST per first attempt, and it is usually empty: a batch nobody ran before has nothing
+        here. Paginated, because a LIST page stops at 1,000 keys and a batch can hold more Units
+        than that. A failure raises as itself — retryable, like every read that is not absence.
+        """
+        keys: list[str] = []
+        pages = self._s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix)
+        for page in pages:
+            keys.extend(o["Key"] for o in page.get("Contents", ()) or ())
+        return keys
+
 
 #: The only commit-object version this reader understands (shared/conformance/commit.json).
 COMMIT_VERSION = 1
@@ -143,10 +161,10 @@ class CommitInvalid(ValueError):
     """A commit object that may not be folded into a resumed batch — see `decode_commit`."""
 
 
-def commit_prefix(actor: str, run_id: str, node_id: str, batch_id: str) -> str:
+def commit_prefix(actor: str, run_id: str, actor_id: str, batch_id: str) -> str:
     """Where every commit object of one batch lives — byte-identical to Go's unitstore.CommitPrefix.
 
-        commits/run={run}/actor={actor}/shard={shard}/batch={batch_id}/
+        commits/run={run}/actor={actor}/actor_id={actor_id}/batch={batch_id}/
 
     ITS OWN TOP-LEVEL PREFIX, NOT A CORNER OF `units/`. Everything under `units/run=<id>/` that
     ends in `.json` is a ROW to the live row tail (`control/orchestrator/src/rowTail.ts` counts
@@ -154,13 +172,21 @@ def commit_prefix(actor: str, run_id: str, node_id: str, batch_id: str) -> str:
     row count by its Unit count. `run=` still leads, for the measured reason `blob_key` gives:
     an object store prunes a LIST only by literal prefix, and whatever sweeps this tree asks by run.
 
-    The batch id is the batch's CONTENT HASH, so one dispatch's attempts all land on one prefix
-    and two batches under one run/node never share one. shared/conformance/commit.json pins it.
+    KEYED BY THE INSTANCE, NOT THE DISPATCH. `actor_id` is the id the host keys the live instance by
+    — the idempotency key, else the Session, else run and node joined — and it replaced the node's
+    `shard=` here. A keyed re-dispatch carries a fresh node id, so a node-keyed prefix could never be
+    found by the execution that re-runs the same Batch on the same key; this one is, which is what
+    makes cross-execution resume a LIST (owner decision A7). `run=` still scopes it: a Unit's `out`
+    is refs into this run's `units/` prefix, and another run's would not be this run's rows.
+
+    The batch id is the batch's CONTENT HASH, so every attempt and every execution of one Batch on
+    one instance lands on one prefix, and two batches never share one.
+    shared/conformance/commit.json pins it.
     """
     return (
         f"commits/run={_part_safe(run_id or 'run')}"
         f"/actor={_part_safe(actor or 'unknown')}"
-        f"/shard={_shard_of(node_id)}"
+        f"/actor_id={_part_safe(actor_id or 'unknown')}"
         f"/batch={_part_safe(batch_id or 'batch')}/"
     )
 
@@ -169,6 +195,36 @@ def commit_key(prefix: str, unit: int) -> str:
     """Unit `unit`'s commit object under a batch's prefix. Five digits is a floor, not a width:
     an index past 99999 widens rather than truncating into a neighbour's key."""
     return f"{prefix}unit={unit:05d}.json"
+
+
+#: The one name `commit_key` writes under a prefix: `unit=` + at least five digits + `.json`.
+_COMMIT_NAME = re.compile(r"unit=([0-9]{5,})\.json")
+
+
+def commit_units(prefix: str, keys, n: int) -> list[int]:
+    """Which Units a LISTING of one batch's commit prefix says finished — sorted, each once.
+
+    Only a name the writer can produce counts: `unit=` + at least five digits + `.json`, directly
+    under `prefix`. Anything else (an operator's marker, a temp file, a nested path, a sibling batch
+    whose id merely starts the same) is not a Unit, and is skipped rather than guessed at — the
+    decode of each object is the integrity check that follows.
+
+    AN INDEX OUTSIDE THE BATCH RAISES `CommitInvalid`. The batch id hashes the Units, so a Unit
+    past the batch's length under its prefix is not this batch's: folding it is impossible, and
+    skipping it would hide whatever put it there. shared/conformance/commit.json §list pins this.
+    """
+    found = set()
+    for key in keys:
+        if not key.startswith(prefix):
+            continue
+        m = _COMMIT_NAME.fullmatch(key[len(prefix):])
+        if m is None:
+            continue
+        i = int(m.group(1))
+        if not 0 <= i < n:
+            raise CommitInvalid(f"{key} names unit {i}, and this batch has {n} unit(s)")
+        found.add(i)
+    return sorted(found)
 
 
 def encode_commit(batch_id: str, unit: int, out=None, error=None, category=None) -> dict:

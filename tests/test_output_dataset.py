@@ -105,14 +105,17 @@ class FailingUnitStore:
     def get_subunit(self, key):
         raise KeyError(key)
 
-    def commit_prefix(self, run_id, node_id, batch_id):
-        return f"commits/{run_id}/{node_id}/{batch_id}/"
+    def commit_prefix(self, run_id, actor_id, batch_id):
+        return f"commits/{run_id}/{actor_id}/{batch_id}/"
 
     def put_commit(self, key, body):
         raise RuntimeError("disk full")
 
     def get_commit(self, key):
         return None
+
+    def list_commits(self, prefix):
+        return []   # nothing was ever written, so a fresh execution finds nothing to fold
 
 
 def test_push_returns_nothing():
