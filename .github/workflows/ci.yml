@@ -346,6 +346,95 @@ jobs:
           test -s kontra-artifact.json
           python3 -c "import json;d=json.load(open('kontra-artifact.json'));assert d['digest'].startswith('sha256:'),d"
 
+  fleet-local:
+    # THE `local` FLEET PROVIDER ON A REAL VM (ADR 0066 slice 4). One Lima VM with KVM on a standard
+    # runner: k3s, gVisor, KEDA and Kyverno installed by kontra's own provider and bootstrap, then
+    # the PRD §10.4 properties checked against the live cluster — a pod really runs under gVisor,
+    # admission refuses a tenant image from another registry, the egress policy excludes the
+    # metadata address. `kubectl` only looks; everything is created by the code under test.
+    name: fleet-local (a k3s VM, gVisor, admission)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: control/orchestrator
+    env:
+      LIMA_VERSION: "2.2.1"
+      LIMA_SHA256: b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb
+      KUBECTL_VERSION: v1.37.1
+      KUBECTL_SHA256: 65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # KVM IS THERE, behind a permission. GitHub's Linux runners expose /dev/kvm but only to root;
+      # QEMU without it would emulate every instruction and k3s would not come up inside the hour.
+      - name: open /dev/kvm to the runner user
+        working-directory: .
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: install QEMU, Lima and kubectl (pinned, verified)
+        working-directory: .
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-system-x86 qemu-utils ovmf
+          curl -fsSL -o /tmp/lima.tar.gz "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
+          echo "${LIMA_SHA256}  /tmp/lima.tar.gz" | sha256sum -c -
+          sudo tar -C /usr/local -xzf /tmp/lima.tar.gz
+          curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          limactl --version
+          kubectl version --client
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: build the shared core
+        working-directory: shared/core
+        run: pnpm run build
+
+      # A THROWAWAY KEY, for the signature policy's shape only: nothing in this job signs an image,
+      # and the admission check below is the registry rule, which needs no signature to refuse.
+      - name: an ephemeral cosign-style public key
+        run: |
+          openssl ecparam -genkey -name prime256v1 -noout -out "$RUNNER_TEMP/k.pem"
+          openssl ec -in "$RUNNER_TEMP/k.pem" -pubout -out "$RUNNER_TEMP/pub.pem"
+          {
+            echo 'KONTRA_E2E_COSIGN_PUB<<PEM'
+            cat "$RUNNER_TEMP/pub.pem"
+            echo 'PEM'
+          } >> "$GITHUB_ENV"
+
+      - name: converge a local fleet and check it
+        env:
+          KONTRA_FLEET_E2E: "1"
+          KONTRA_FLEET_STATE: ${{ runner.temp }}/fleets
+        run: npx vitest run src/kube/fleetLocal.e2e.test.ts --testTimeout=1800000 --hookTimeout=1800000
+
+      - name: what the fleet left behind, when it failed
+        if: failure()
+        working-directory: .
+        run: |
+          limactl list || true
+          for f in ~/.lima/kontra-ci-0/*.log; do echo "::group::$f"; tail -200 "$f" || true; echo "::endgroup::"; done
+
   proto:
     name: proto-envelope
     runs-on: ubuntu-latest

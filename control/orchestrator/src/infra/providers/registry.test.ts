@@ -17,7 +17,7 @@ describe('fleet providers', () => {
   });
 
   it('refuses the providers that are not built yet, naming the slice', async () => {
-    const local = parseFleets('').profiles.local!;
-    await expect(providerFor(local).converge('local', local)).rejects.toThrow(/slice 4/);
+    const d = parseFleets('fleets:\n  default: d\n  d:\n    provider: digital_ocean\n    region: fra1\n    token: t\n    ssh_key_fingerprint: f\n    sizes: { m: s-1vcpu-1gb }\n').profiles.d!;
+    await expect(providerFor(d).converge('d', d)).rejects.toThrow(/slice 9/);
   });
 });

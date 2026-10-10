@@ -119,6 +119,7 @@ describe('bootstrapTenant', () => {
       'Namespace/ws-hello',
       'ServiceAccount/kontra-worker',
       'ResourceQuota/kontra-tenant',
+      'LimitRange/kontra-tenant',
       'NetworkPolicy/kontra-deny-ingress',
       'NetworkPolicy/kontra-egress',
     ]);

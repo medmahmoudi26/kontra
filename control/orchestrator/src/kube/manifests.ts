@@ -113,6 +113,29 @@ export function resourceQuota(namespace: string, quota: Quota): Obj {
   };
 }
 
+/**
+ * Defaults for a tenant pod that names no resources. A ResourceQuota on limits REFUSES such a pod
+ * outright ("must specify limits.cpu") — measured on the first real fleet, where it refused before
+ * the signature policy was ever reached — so the namespace supplies them. kontra's own Deployments
+ * always say theirs; this is for anything else that lands in the namespace.
+ */
+export function tenantLimitRange(namespace: string): Obj {
+  return {
+    apiVersion: 'v1',
+    kind: 'LimitRange',
+    metadata: { name: 'kontra-tenant', namespace, labels: { ...MANAGED_BY } },
+    spec: {
+      limits: [
+        {
+          type: 'Container',
+          defaultRequest: { cpu: '250m', memory: '256Mi' },
+          default: { cpu: '1', memory: '1Gi' },
+        },
+      ],
+    },
+  };
+}
+
 /** The cluster-wide RuntimeClass every placement names. The node bootstrap registers the handler. */
 export function gvisorRuntimeClass(): Obj {
   return {

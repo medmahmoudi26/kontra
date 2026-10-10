@@ -90,6 +90,7 @@ const PLURAL: Record<string, string> = {
   Namespace: 'namespaces',
   ServiceAccount: 'serviceaccounts',
   ResourceQuota: 'resourcequotas',
+  LimitRange: 'limitranges',
   Secret: 'secrets',
   RuntimeClass: 'runtimeclasses',
   NetworkPolicy: 'networkpolicies',
