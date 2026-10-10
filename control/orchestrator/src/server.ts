@@ -85,6 +85,7 @@ import { admitReport, registerReportRoutes } from './routes/report';
 import { registerReportLiveRoute } from './routes/reportLive';
 import { activeNamespace, allNamespaces, inNamespace } from './workspaces';
 import { LiveHub, type RenderOnce, type LiveRunKey } from './report/live';
+import { CompletionAwaiters } from './report/awaiters';
 import { IN_FLIGHT, inFlightSummary, progressFromHeartbeats, type InFlightRows } from './report/liveProducers';
 import type { RowTailHub } from './rowTail';
 
@@ -426,7 +427,15 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // open by an argued decision and these eight are not.
   registerImageRoutes(app, { repo });
   registerScratchRoutes(app, repo);
-  registerRunRoutes(app, { runs, runWorkflows, queueDescriber });
+  // COMPLETION AWAITERS (PRD D6): a run started here gets its stored report within seconds of
+  // closing, watched or not. Bound late: `watchTerminalIn` is the live route's own finaliser.
+  let awaiters: CompletionAwaiters | undefined;
+  registerRunRoutes(app, {
+    runs,
+    runWorkflows,
+    queueDescriber,
+    onStarted: (runId, namespace) => awaiters?.track(runId, namespace),
+  });
   registerHistoryRoutes(app, archive);
   registerHitlRoutes(app, { runs, archive });
 
@@ -590,6 +599,14 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
        compute — which is what stops that pass from inserting a second version beside it. */
     watchTerminal: (key) => inNamespace(key.namespace ?? activeNamespace(), () => watchTerminalIn(key)),
   });
+  awaiters = new CompletionAwaiters(
+    (runId, namespace) =>
+      inNamespace(namespace, async () => {
+        await watchTerminalIn({ runId, runStartedAt: 0, namespace });
+      }),
+    undefined,
+    (err, runId) => app.log.warn(`report awaiter: run ${runId}: ${errMessage(err)}`)
+  );
   async function watchTerminalIn(key: LiveRunKey): Promise<{ version?: number } | undefined> {
     const client = await getClient();
     try {

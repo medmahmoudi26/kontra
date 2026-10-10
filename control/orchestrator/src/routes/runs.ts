@@ -62,6 +62,8 @@ export interface RunRouteDeps {
   runWorkflows: RunWorkflowStore;
   /** Who is polling a queue — called only when a start needs it, so no connection opens at boot. */
   queueDescriber: () => QueueDescriber;
+  /** Told about every run this route starts — the server finalises its report on completion (D6). */
+  onStarted?: (runId: string, namespace: string) => void;
 }
 
 export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): void {
@@ -142,6 +144,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): voi
         },
         req.log
       );
+      if (started.runId && started.namespace) deps.onStarted?.(started.runId, started.namespace);
       return reply.code(201).send(started);
     } catch (err) {
       if (err instanceof ControlRefused) return reply.code(400).send({ error: err.message });
