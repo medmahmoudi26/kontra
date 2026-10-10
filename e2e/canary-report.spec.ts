@@ -242,9 +242,9 @@ test('a fresh install runs the canary from the console and renders the canary\'s
     const runs = await getJson<RunRow[]>(request, token, '/api/runs?limit=200');
     expect(runs.status).toBe(200);
     expect((runs.body ?? []).map((r) => r.runId), 'another workspace lists none of hello\'s runs').not.toContain(run.runId);
-    const reports = await getJson<Array<{ runId: string }>>(request, token, '/api/reports');
+    const reports = await getJson<{ reports: Array<{ runId: string }> }>(request, token, '/api/reports');
     expect(reports.status).toBe(200);
-    expect((reports.body ?? []).map((r) => r.runId), 'another workspace lists none of hello\'s reports').not.toContain(run.runId);
+    expect((reports.body?.reports ?? []).map((r) => r.runId), 'another workspace lists none of hello\'s reports').not.toContain(run.runId);
     const report = await getJson<unknown>(request, token, `/api/runs/${encodeURIComponent(run.runId)}/report`);
     expect(report.status, 'another workspace cannot read hello\'s report by its id').toBe(404);
     const live = await getJson<unknown>(request, token, `/api/runs/${encodeURIComponent(run.runId)}/report/live`);
