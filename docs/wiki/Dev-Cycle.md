@@ -28,8 +28,8 @@ Each actor runs as **two processes**: the Go **handler** (the workflow half — 
 
 - **Docker** (Temporal + SeaweedFS + Redis + orchestrator run as containers).
 - **Redis** — the `redis` service in the control plane, holding all three durable state tiers. It is **required**, and it is shared: `KONTRA_REDIS_HOST` (`host:port`) points every actor at the one store. Compose does not publish `6379` on localhost by default (in-cluster workers reach it as `redis:6379`); to reach it from a process on the host, publish it on the controller's **private** VPC IP with an override — never `0.0.0.0`, since it is auth-less.
-- **Go 1.22+** to run the handler (`go run .` from `handler/`) and to build the `kontra` CLI once: `cd cli && go build -o kontra .` (or `./install.sh`, which puts it on `PATH`).
-- **Python 3.10+** with the venv: `./install.sh` (or `just install`) — editable `actorkit` + dev/seaweed extras.
+- **Go 1.22+** to run the handler (`go run .` from `handler/`) and to build the `kontra` CLI once: `cd cli && go build -o kontra .` (or `scripts/dev-setup.sh`, which puts it on `PATH`).
+- **Python 3.10+** with the venv: `scripts/dev-setup.sh` (or `just install`) — editable `actorkit` + dev/seaweed extras.
 - **Node 22** for the orchestrator worker (`corepack enable` for pnpm). Host Node 23 breaks the TS worker — run it in Docker if your host is newer. Node is not needed to *use* kontra: the orchestrator serves from its container.
 
 In a repo checkout, `import kontra` resolves from the editable install, or from `PYTHONPATH=sdk/python:runtime/python` — one entry per package: `actorkit` (the author surface), `internals` (the runtime) and the generated `kontra.v1` stubs. There is no repo-root shim any more; the package directory is named after the package, so nothing has to point at it.

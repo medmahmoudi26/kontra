@@ -150,7 +150,7 @@ func (a Artifact) Validate() error {
 	default:
 		return fmt.Errorf("artifact %q: URL scheme %q is not https", a.Name, u.Scheme)
 	}
-	// A PIN, NOT A POINTER. ADR 0031 finding 6: install.sh fetches buf from
+	// A PIN, NOT A POINTER. ADR 0031 finding 6: scripts/dev-setup.sh fetches buf from
 	// `/releases/latest/download/` with no version and no checksum, and that is the one of
 	// its three fetches that is not reproducible at all. A digest against a moving URL is
 	// not reproducibility either — it is an install that works until upstream cuts a

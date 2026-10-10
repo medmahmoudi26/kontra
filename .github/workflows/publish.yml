@@ -7,12 +7,14 @@ name: publish
 # image` plus three hand-typed `docker build`s first, which is the difference between seconds and
 # minutes and the whole reason this file exists.
 #
-# ── IMAGES ONLY. THE HOST BINARIES ARE SOMEBODY ELSE'S JOB, AND TODAY NOBODY'S ──────────────────
+# ── IMAGES, AND ONE JOB THAT IS NOT ─────────────────────────────────────────────────────────────
 #
-# This workflow publishes no host binary and attaches nothing to the GitHub release. release-please
-# creates the tag and the release; GoReleaser is what will publish `kontra` and `kontra-warden` onto
-# it. Until that exists a tagged release carries images and no downloadable binary — stated here
-# because an empty assets list reads like a failed upload rather than a gap. See ADR 0063.
+# Every job but `binaries` publishes container images and attaches nothing to the GitHub release.
+# release-please creates the tag and the release; `binaries` runs GoReleaser (`.goreleaser.yaml`),
+# which appends the `kontra` CLI archives, `SHA256SUMS` and the keyless signature over it to that
+# release. That closes the gap ADR 0063 named — a tagged release with no downloadable binary. There
+# is no `kontra-warden` to publish beside it, as this paragraph once said: the Warden is a subcommand
+# of the same binary.
 #
 # ── EVERY REFERENCE THIS WORKFLOW PUBLISHES IS A DIGEST ─────────────────────────────────────────
 #
@@ -464,7 +466,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      # THE INSTALLER VERIFIES WHAT IT DOWNLOADS, which is the property `install.sh:175-181`'s buf
+      # THE INSTALLER VERIFIES WHAT IT DOWNLOADS, which is the property `scripts/dev-setup.sh`'s buf
       # step does not have and this repository has written down as a mistake not to copy:
       # `/releases/latest/download/` with no version and no checksum. `cosign-release` is deliberately not pinned here — the action's default for a
       # given major IS pinned, and a cosign version invented in this file without being run would
@@ -803,3 +805,117 @@ jobs:
           [ "$checked" -ge 5 ] || { echo "::error::checked only $checked references — images.json is too small to be a whole release"; exit 1; }
           echo "$checked references pull anonymously and match their recorded digests"
 
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  # binaries — the `kontra` CLI for linux and darwin, amd64 and arm64, appended to the release.
+  #
+  # ON A `v*` TAG REF AND NOWHERE ELSE. That is the tag push, and it is also a dispatch run AGAINST the
+  # tag — the recovery `release-please.yml` documents for a tag pushed with the default token, which
+  # starts no workflow. A dispatch on a branch, the `0.0.0-testN` case, has no tag for GoReleaser to
+  # release and skips this job: the registry half is what those runs are for, and `ci.yml`'s
+  # `goreleaser` job is what exercises this half before a tag exists.
+  #
+  # NO `needs:`, IN EITHER DIRECTION. It reads nothing the image jobs write and they read nothing it
+  # writes, so a `needs:` would only let an arm64 container build decide whether a CLI ships — the
+  # coupling `images` already had to have removed once, when a macOS leg decided whether images were
+  # built at all.
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  binaries:
+    name: kontra CLI binaries
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      # The release's assets, and nothing else: GoReleaser finds the release release-please created by
+      # its tag and uploads to it (`release.mode: append` in .goreleaser.yaml keeps its notes).
+      contents: write
+      # Keyless cosign over SHA256SUMS — the same credential `manifests` signs the images with.
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # GoReleaser reads the tag, the previous tag and the commit time from git; its documented
+          # requirement is full history, and a shallow clone makes it warn that tags may be wrong.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: cli/go.mod
+          # NO RESTORED BUILD CACHE IN A JOB THAT SIGNS WHAT IT BUILDS. A tag run restores cache entries
+          # written by runs on the default branch, so anything able to write one there chooses objects
+          # this job links into a signed binary. zizmor's `cache-poisoning` audit flags exactly this
+          # shape. The price is a cold module download and compile, once per release.
+          cache: false
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - run: cosign version
+
+      # GORELEASER PINNED TO A RELEASE, NOT `~> v2`. The action's default floats to the newest v2,
+      # which means the tool that builds and signs a release could change between two tags with no
+      # commit here. v2.18.3 is the version `.goreleaser.yaml` was checked and snapshot-built with.
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # ── AND VERIFIED, IN THIS RUN, AGAINST THE IDENTITY IT WAS SIGNED WITH ───────────────────────
+      #
+      # `manifests` does this for the images for the reason it gives there: a signature nobody has
+      # verified is a file. The archives are then checked against the list, and the linux/amd64 binary
+      # — this runner's own platform — is asked its version, because `-X` naming a symbol that moved is
+      # silent and the only proof the version reached the binary is the binary.
+      #
+      # AFTER THE UPLOAD, NOT BEFORE IT, AND THAT IS A LIMIT OF THE TOOL. GoReleaser signs and publishes
+      # in one pipeline with no stop between them (splitting it is a GoReleaser Pro feature). A failure
+      # here therefore means the release already carries assets that do not check out: the job goes
+      # red, and they have to be deleted from the release page by hand. Late and loud, not quiet.
+      - name: the signature, the archives and the version, verified
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_WORKFLOW_REF}"
+          issuer="https://token.actions.githubusercontent.com"
+
+          cosign verify-blob \
+            --new-bundle-format \
+            --bundle dist/SHA256SUMS.sigstore.json \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer "$issuer" \
+            dist/SHA256SUMS
+          ( cd dist && sha256sum --strict -c SHA256SUMS )
+
+          # FOUR, EXACTLY: linux and darwin, amd64 and arm64. A floor would pass with a platform
+          # missing, which is the one way this list goes wrong without anything else failing.
+          count=$(grep -c . dist/SHA256SUMS)
+          if [ "$count" -ne 4 ]; then
+            echo "::error::SHA256SUMS names $count files, expected 4 (linux/darwin x amd64/arm64):"
+            cat dist/SHA256SUMS
+            exit 1
+          fi
+
+          want="${GITHUB_REF_NAME#v}"
+          unpacked="$(mktemp -d)"
+          tar -xzf "dist/kontra_${want}_linux_amd64.tar.gz" -C "$unpacked" kontra
+          got="$("$unpacked/kontra" version)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::the released linux/amd64 binary reports '$got' and the tag says '$want' — the -X symbol in .goreleaser.yaml no longer matches cli/internal/buildinfo"
+            exit 1
+          fi
+          echo "kontra $got: signature, $count archives and the linux/amd64 version verified"
+
+          {
+            echo "### kontra CLI"
+            echo
+            echo "Verify a download (the identity carries this tag's ref, so it changes every release):"
+            echo
+            echo '```'
+            echo "cosign verify-blob --bundle SHA256SUMS.sigstore.json \\"
+            echo "  --certificate-identity '$identity' \\"
+            echo "  --certificate-oidc-issuer '$issuer' \\"
+            echo "  SHA256SUMS"
+            echo "sha256sum --ignore-missing -c SHA256SUMS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

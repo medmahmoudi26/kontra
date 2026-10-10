@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -136,6 +139,116 @@ func TestDeployShellDeprecationHasThreeStates(t *testing.T) {
 		if !strings.Contains(deployShellMessage, want) {
 			t.Errorf("the message should mention %q: %s", want, deployShellMessage)
 		}
+	}
+}
+
+// A DOCKERFILE IN AN ACTOR'S FOLDER IS REFUSED, UNDER BOTH NAMES THE OLD PATH READ. Nothing on the
+// buildpack path reads either, so an actor that kept one used to deploy clean and fail at run time
+// missing what the file installed. The message has to name where those things live now — the
+// `runtime` field and kontra-runtimes — or the author's next move is looking for a flag to turn it off.
+func TestAnActorDockerfileIsRefusedNotIgnored(t *testing.T) {
+	if got := actorDockerfiles(t.TempDir()); len(got) != 0 {
+		t.Fatalf("an empty actor folder reported %v", got)
+	}
+
+	for _, name := range []string{"Dockerfile", "runtime.Dockerfile"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := writeFileForTest(filepath.Join(dir, name), "FROM scratch\n"); err != nil {
+				t.Fatal(err)
+			}
+			got := actorDockerfiles(dir)
+			if len(got) != 1 || got[0] != name {
+				t.Fatalf("a folder holding %s reported %v", name, got)
+			}
+			msg := actorDockerfileError(dir, got).Error()
+			for _, want := range []string{name, `actor.json`, `"runtime"`, "kontra-runtimes", dir} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the refusal should mention %q:\n%s", want, msg)
+				}
+			}
+		})
+	}
+
+	// BOTH AT ONCE ARE BOTH NAMED. Reporting the first would send the author back for a second refusal.
+	dir := t.TempDir()
+	for _, name := range []string{"runtime.Dockerfile", "Dockerfile"} {
+		if err := writeFileForTest(filepath.Join(dir, name), "FROM scratch\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := actorDockerfiles(dir); strings.Join(got, ",") != "Dockerfile,runtime.Dockerfile" {
+		t.Errorf("both files present, reported %v", got)
+	}
+
+	// A DIRECTORY CALLED Dockerfile IS NOT ONE; nothing would ever have built from it.
+	dir = t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "Dockerfile"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := actorDockerfiles(dir); len(got) != 0 {
+		t.Errorf("a directory named Dockerfile was refused as a file: %v", got)
+	}
+}
+
+// THE REFUSAL IS WIRED INTO `kontra deploy`, AND IT LANDS BEFORE THE BUILD. Asserting on
+// `actorDockerfiles` alone would stay green with the call deleted from runDeploy — a refusal that is
+// written and tested and never called. So runDeploy runs, against a stand-in registry, with a `pack`
+// that only records whether it was reached.
+//
+// THE CONTROL CASE IS WHAT MAKES THE REFUSAL CASE MEAN SOMETHING. The same folder WITHOUT the
+// Dockerfile must reach `pack`; otherwise "pack was never called" could be any earlier failure — an
+// unresolvable runtime, a missing handler — passing for this one.
+func TestDeployRefusesAnActorDockerfileBeforeBuilding(t *testing.T) {
+	const runtimeDigest = "sha256:" + "ab" + "cdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	t.Setenv("KONTRA_REGISTRY", fakeRegistry(t, http.StatusOK, runtimeDigest))
+	t.Setenv("KONTRA_HANDLER_BIN", fakeHandler(t))
+
+	built := false
+	old := runPackBuild
+	runPackBuild = func(_ context.Context, _ packOpts) (string, error) {
+		built = true
+		return runtimeDigest, nil
+	}
+	t.Cleanup(func() { runPackBuild = old })
+
+	deployFolder := func(t *testing.T, extra string) error {
+		t.Helper()
+		dir := t.TempDir()
+		if err := writeFileForTest(filepath.Join(dir, "actor.json"), `{"name":"echo","version":"0.1.0"}`); err != nil {
+			t.Fatal(err)
+		}
+		if extra != "" {
+			if err := writeFileForTest(filepath.Join(dir, extra), "FROM scratch\nRUN apt-get install -y chromium\n"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		built = false
+		_, err := runDeploy(context.Background(), io.Discard, deployOpts{actorDir: dir, hostOnly: true})
+		return err
+	}
+
+	if err := deployFolder(t, ""); err != nil {
+		t.Fatalf("the control deploy (no Dockerfile) failed, so nothing below can tell a refusal from "+
+			"an unrelated failure: %v", err)
+	}
+	if !built {
+		t.Fatal("the control deploy (no Dockerfile) never reached pack; the refusal cases below would pass vacuously")
+	}
+
+	for _, name := range []string{"Dockerfile", "runtime.Dockerfile"} {
+		t.Run(name, func(t *testing.T) {
+			err := deployFolder(t, name)
+			if err == nil {
+				t.Fatalf("an actor carrying %s deployed; it should have been refused", name)
+			}
+			if built {
+				t.Fatalf("pack ran for an actor carrying %s — the refusal has to come before the build", name)
+			}
+			if msg := err.Error(); !strings.Contains(msg, name) || !strings.Contains(msg, "kontra-runtimes") {
+				t.Fatalf("refused, but not by the Dockerfile check:\n%s", msg)
+			}
+		})
 	}
 }
 

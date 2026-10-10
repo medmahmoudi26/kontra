@@ -2,7 +2,7 @@ package config
 
 // `.kontra/` — the guards on a directory that holds live credentials.
 //
-// Two failures here would be quiet and expensive. Re-running install.sh must never overwrite a
+// Two failures here would be quiet and expensive. Re-running scripts/dev-setup.sh must never overwrite a
 // config.yaml somebody typed a DigitalOcean token into; and a value in the ENVIRONMENT must never
 // be replaced by one in the file, because every container is configured by its environment and a
 // mounted `.kontra/` silently winning would repoint a production process at a laptop's settings.
@@ -64,7 +64,7 @@ func TestInitCreatesTheLayout(t *testing.T) {
 }
 
 func TestInitNeverOverwritesCredentials(t *testing.T) {
-	// install.sh runs this on EVERY run. Rewriting the template over an operator's filled-in
+	// scripts/dev-setup.sh runs this on EVERY run. Rewriting the template over an operator's filled-in
 	// config would destroy a Pulumi passphrase, and a lost passphrase makes a stack's secrets
 	// unreadable — unrecoverable, not merely annoying.
 	dir := home(t)

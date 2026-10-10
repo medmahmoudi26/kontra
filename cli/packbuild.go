@@ -181,7 +181,7 @@ func packBuild(ctx context.Context, o packOpts) (string, error) {
 	return digest, nil
 }
 
-// --- the two refusals the new layout needs ---
+// --- the refusals the new layout needs ---
 
 // deployShellDisposition says what to do about a `deploy.sh`.
 //
@@ -211,6 +211,50 @@ const deployShellMessage = "deploy.sh is no longer run: an actor's system packag
 	"runtime now. Pick a runtime that provides what the script installed, or add one to a fork of " +
 	"kontra-runtimes — `actor.json`'s `runtime` field selects it, and an unknown name is refused with " +
 	"the list of what is published."
+
+// actorDockerfileNames are the two files the deleted build path read from an actor's folder: an
+// author's own `Dockerfile`, which replaced the generated one outright, and a Go actor's
+// `runtime.Dockerfile`, the layer its extra binaries came from (ADR 0032 finding 6).
+var actorDockerfileNames = []string{"Dockerfile", "runtime.Dockerfile"}
+
+// actorDockerfiles reports which of those an actor's folder carries, in that order.
+//
+// REFUSED, NOT WARNED, AND THAT IS THE DIFFERENCE FROM deploy.sh. Nothing on the buildpack path reads
+// either file — `pack` never looks at a Dockerfile in its context — so an actor that kept one
+// deployed without a word and was missing, at run time and in a container, whatever the file
+// installed: the same failure `deployShellDisposition` exists for, minus the warning. deploy.sh gets a
+// warning period because `workspaces/demo/actors/webcrawl` still ships one; no actor in this
+// repository carries a Dockerfile, so a refusal breaks nothing here that still deploys, and an author
+// arriving with one learns at build time instead of from a stack trace.
+//
+// A DIRECTORY CALLED `Dockerfile` IS NOT ONE. Only a file is what the old path would have built from.
+func actorDockerfiles(dir string) []string {
+	var found []string
+	for _, name := range actorDockerfileNames {
+		if st, err := os.Stat(filepath.Join(dir, name)); err == nil && !st.IsDir() {
+			found = append(found, name)
+		}
+	}
+	return found
+}
+
+// actorDockerfileError names the files, says why they cannot be honoured, and where their contents go
+// now — the runtime `actor.json` selects, published in kontra-runtimes — because a refusal that only
+// says "no" sends the author looking for a flag to turn it off.
+func actorDockerfileError(dir string, found []string) error {
+	names, is, installs, it := strings.Join(found, " and "), "is", "it installs", "it"
+	if len(found) > 1 {
+		is, installs, it = "are", "they install", "them"
+	}
+	return fmt.Errorf("%s: %s %s not used by `kontra deploy`. It builds with Cloud Native Buildpacks, "+
+		"which never read an actor's Dockerfile, so the image would be missing whatever %s "+
+		"and the actor would fail at run time.\n"+
+		"  System packages and tools come from the actor's runtime: set `actor.json`'s \"runtime\" field "+
+		"to one published from kontra-runtimes (python:1, python-browser:1, base:1, …), or add one to a "+
+		"fork of kontra-runtimes. Language dependencies belong in the actor's lockfile.\n"+
+		"  Then delete %s — or rename %s, if something outside kontra still builds from %s.",
+		dir, names, is, installs, names, it, it)
+}
 
 // outsideReplace reports the first `replace` directive in an actor's go.mod that points outside the
 // actor's own directory, with its line number, or ("", 0) when there is none.

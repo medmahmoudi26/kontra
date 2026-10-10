@@ -336,7 +336,13 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 	}
 	fmt.Fprintf(progress, "runtime %s:%d → %s\n", rt.Name, rt.Major, rt.Pinned())
 
-	// 2) THE TWO REFUSALS THE BUILDPACK LAYOUT NEEDS, both before anything is built.
+	// 2) THE REFUSALS THE BUILDPACK LAYOUT NEEDS, all before anything is built. A Dockerfile first:
+	// it is refused outright, where deploy.sh below is still only warned about (cli/packbuild.go says
+	// why the two differ), and an actor carrying both should hear the hard stop rather than a warning
+	// followed by one.
+	if found := actorDockerfiles(o.actorDir); len(found) > 0 {
+		return nil, actorDockerfileError(o.actorDir, found)
+	}
 	switch deployShellCheck(o.actorDir, os.Getenv("KONTRA_DEPLOY_SH")) {
 	case deployShellRefuse:
 		return nil, errors.New(deployShellMessage)

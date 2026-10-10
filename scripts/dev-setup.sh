@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
-# Auto-install + codegen for kontra-local.
+# Auto-install + codegen for a kontra development checkout (PRD §7: contributors run this; an
+# install is `docker compose up`, and a released `kontra` CLI is a GoReleaser archive).
 #   - creates .venv and installs the package (editable, default finder mode)
 #   - fetches the buf binary into .venv/bin
 #   - generates proto stubs (sdk/python/kontra/v1/ + control/orchestrator/_gen/)
 set -euo pipefail
-cd "$(dirname "$0")"
+
+# THE REPOSITORY ROOT, ONE LEVEL UP FROM THIS FILE. Everything below is a path relative to the root
+# (`.venv`, `./sdk/python`, `cli`, `control/orchestrator`), and this script lived AT the root as
+# `install.sh` until it moved here — so the `cd` has to climb out of `scripts/`, from wherever it was
+# invoked. `$0` and not `$BASH_SOURCE` because it is run, never sourced.
+cd "$(dirname "$0")/.."
 
 PY=.venv/bin/python
 PIP=.venv/bin/pip
 BUF=.venv/bin/buf
 
 # Where the CLI lands. Overridable for a checkout you do not want on PATH:
-#   CLI_DEST=$PWD/cli/kontra ./install.sh
+#   CLI_DEST=$PWD/cli/kontra scripts/dev-setup.sh
 CLI_DEST="${CLI_DEST:-/usr/local/bin/kontra}"
 
-# The Go this repo is built with. `go.work` says 1.26.9 and Ubuntu 24.04 ships 1.22, so the
+# The Go this repo is built with. `go.work` says the same version and Ubuntu 24.04 ships 1.22, so the
 # distro package is not an option — this is fetched from upstream and checksummed, the same
 # shape as the buf step below. Bump both the version and its digests together.
 GO_VERSION="${GO_VERSION:-1.26.9}"
@@ -116,7 +122,7 @@ if [ ${#missing[@]} -gt 0 ]; then
   if [ "${KONTRA_BOOTSTRAP:-yes}" = no ] || ! need_cmd apt-get; then
     # Everything, in one message. The point of preflight is that you learn the whole bill now.
     echo
-    echo "    install these, then re-run ./install.sh:"
+    echo "    install these, then re-run scripts/dev-setup.sh:"
     for m in "${missing[@]}"; do
       case "$m" in
         python3-venv) echo "      python3-venv   apt install python3-venv   (Debian/Ubuntu)" ;;
@@ -127,7 +133,7 @@ if [ ${#missing[@]} -gt 0 ]; then
       esac
     done
     echo
-    echo "    or let this script do it:  KONTRA_BOOTSTRAP=yes ./install.sh   (needs apt + sudo)"
+    echo "    or let this script do it:  KONTRA_BOOTSTRAP=yes scripts/dev-setup.sh   (needs apt + sudo)"
     exit 1
   fi
   $SUDO apt-get update -q >/dev/null
@@ -197,7 +203,7 @@ fi
 # between a fresh control plane and having anything for a run to work on — failed at USE
 # time on a machine that had just been told installation was done. The error names the tool and
 # its URL, which is better than most, but a prerequisite discovered after install is a
-# prerequisite install.sh should have handled.
+# prerequisite this script should have handled.
 #
 # The `.gz` asset, deliberately: the `.zip` would add `unzip`, which a minimal Ubuntu also lacks.
 # Pinned rather than `latest` because the CLI and the embedded engine read the same DuckLake
@@ -255,7 +261,7 @@ install -m 0755 cli/kontra "$CLI_DEST"
 # that drifts from the one that reads it.
 #
 # Idempotent and non-destructive — an existing config.yaml holds credentials somebody typed in and
-# is never rewritten, so this is safe on every re-run of install.sh.
+# is never rewritten, so this is safe on every re-run of this script.
 echo "==> .kontra/ (config + your workflows and actors)"
 "$CLI_DEST" init
 
@@ -283,7 +289,7 @@ if node_new_enough; then
       && ORCHESTRATOR_BUILT=yes \
       || echo "    build FAILED — kontra up will refuse until \`pnpm --dir control/orchestrator run build\` succeeds"
   else
-    echo "==> orchestrator: SKIPPED — no pnpm (run \`corepack enable\`, then re-run ./install.sh)"
+    echo "==> orchestrator: SKIPPED — no pnpm (run \`corepack enable\`, then re-run scripts/dev-setup.sh)"
   fi
 else
   echo "==> orchestrator: SKIPPED — node >= $NODE_MAJOR_MIN is not installed"

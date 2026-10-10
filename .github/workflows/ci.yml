@@ -19,6 +19,8 @@ permissions:
 #   ts      — orchestrator pnpm install + vitest (incl. the TS conformance test)
 #   go      — the four modules under the root go.work, then the standalone example modules
 #   proto   — `make proto-check` (buf lint + buf breaking against the fork point) + stub drift
+#   goreleaser — `.goreleaser.yaml` checked and snapshot-built, so a broken config fails here and
+#             not on the tag that `publish.yml`'s `binaries` job runs it for
 #   docker  — the README's clone+build install: local images, `up -d`, and the assertions
 #             a stranger cannot make for us (it comes up healthy, it prints a login, a recreate
 #             does not rotate it, every port is on loopback)
@@ -266,6 +268,67 @@ jobs:
       # (`GOWORK=off`, `GOTOOLCHAIN=auto`, one `cd` per module — all three load-bearing, see the
       # note in this repo's Makefile). What remains here is `testdata/fixtureactor`, which the
       # parity gate and the build-actor job below both use, and which is not a Go module.
+
+  # THE RELEASE CONFIG, BUILT BEFORE A RELEASE NEEDS IT.
+  #
+  # `publish.yml`'s `binaries` job runs `.goreleaser.yaml` on a `v*` tag and nowhere else, and this
+  # repository has never had a tag — so without this job the first run of that file would be the
+  # release. `goreleaser check` validates the schema; the snapshot build compiles the CLI through the
+  # config exactly as the release will, for this runner's platform only (`--single-target`: the four
+  # cross-builds are the release's cost, not every pull request's).
+  #
+  # AND THE BINARY IS ASKED ITS VERSION. A snapshot is linked with a version, so `dev` here means the
+  # `-X` symbol in `.goreleaser.yaml` no longer names `buildinfo.version` — the failure that is
+  # otherwise silent until somebody files a bug against a release that reports `dev`.
+  goreleaser:
+    name: goreleaser (check + snapshot build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: cli/go.mod
+          # NO CACHE, THOUGH NOTHING HERE IS PUBLISHED. zizmor's `cache-poisoning` audit sees
+          # goreleaser-action beside a cache and cannot tell a snapshot from a release, so a cache here
+          # is a high-severity finding on every run. Measured locally rather than argued: `zizmor
+          # --offline` reports it for this job with the cache on and not with it off. A cold build of
+          # one target costs minutes, and this job runs beside `go` and `docker`, which take longer.
+          cache: false
+
+      # THE SAME GORELEASER AS THE RELEASE, pinned in both places. A check run with a newer GoReleaser
+      # than the one that releases can pass on a key the release's version does not know.
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          install-only: true
+
+      - name: goreleaser check
+        run: goreleaser check
+
+      - name: goreleaser build --snapshot --single-target
+        run: goreleaser build --snapshot --clean --single-target
+
+      - name: the snapshot binary reports the version it was linked with
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One target, so one binary; its directory name carries GoReleaser's arch suffix (`_v1`),
+          # which is why it is found rather than spelled.
+          bins=$(find dist -type f -name kontra)
+          [ "$(printf '%s\n' "$bins" | grep -c .)" -eq 1 ] || { echo "::error::expected one kontra binary under dist/, found: $bins"; exit 1; }
+          got=$("$bins" version)
+          echo "snapshot binary reports: $got"
+          case "$got" in
+            ""|dev|dev\ *)
+              echo "::error::the snapshot binary reports '$got' — the -X symbol in .goreleaser.yaml no longer matches cli/internal/buildinfo, so a release would ship a binary that calls itself dev"
+              exit 1
+              ;;
+          esac
 
   build-actor:
     # THE CI TEMPLATES, EXERCISED. `.github/actions/build-actor/action.yml` and

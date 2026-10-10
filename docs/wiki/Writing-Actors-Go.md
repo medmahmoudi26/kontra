@@ -66,7 +66,9 @@ A relative path is a fact about a directory's position, so moving the directory 
 
 **Extra tools come from the runtime, not from a `runtime.Dockerfile`.** A Go actor that shells out to a
 binary declares a runtime that provides it ([[Runtimes]]); `base:1` is the default and carries only an
-OS. The `runtime.Dockerfile` escape hatch still works today and goes away with the old build path.
+OS. The `runtime.Dockerfile` escape hatch went with the old build path, and `kontra deploy` refuses an
+actor that still carries one (or a `Dockerfile`) rather than building it without what the file
+installed — the message names `actor.json`'s `runtime` field and `kontra-runtimes`.
 
 ## A whole actor
 

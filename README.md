@@ -154,6 +154,31 @@ the one you just built. It is the only line the `.env` needs for this.
 `scripts/install-cluster.macos.sh` runs this whole path and asserts the result — login, seed,
 loopback, the log shipper, and the DuckLake catalog.
 
+To work on the code rather than run it — the venv, the editable SDK, buf codegen and the `kontra`
+CLI on your `PATH` — run `scripts/dev-setup.sh` from the clone. On a bare Ubuntu it installs its own
+prerequisites first; `KONTRA_BOOTSTRAP=no` makes it report them instead.
+
+</details>
+
+<details>
+<summary><b>The <code>kontra</code> CLI on your own machine</b></summary>
+
+Every tagged release carries it as `kontra_<version>_<os>_<arch>.tar.gz` for linux and darwin on
+amd64 and arm64, built by GoReleaser (`.goreleaser.yaml`), with a `SHA256SUMS` over the archives and
+a keyless cosign signature over that file, `SHA256SUMS.sigstore.json`. There is no tag yet (see the
+caution above), so there is nothing to download until the first one; from a clone,
+`scripts/dev-setup.sh` builds one from source, which reports a `dev` version.
+
+Verifying a download (cosign v3; cosign v2 also needs `--new-bundle-format`):
+
+```bash
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/medmahmoudi26/kontra/\.github/workflows/publish\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
 </details>
 
 That `grep` prints the password on a **first** boot. On any later boot — a recreate, an image
