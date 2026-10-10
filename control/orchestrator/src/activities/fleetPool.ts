@@ -20,7 +20,7 @@ import { Client, Connection } from '@temporalio/client';
 
 import { kubeNamespaceFor } from '../fleetPool';
 import { loadFleets, resolveProfile } from '../infra/fleets';
-import { providerFor } from '../infra/providers/registry';
+import { providerFor, type ProviderRun } from '../infra/providers/registry';
 import { bootstrapCluster, bootstrapTenant } from '../kube/bootstrap';
 import { KubeClient } from '../kube/client';
 import { placementDeployment, placementName, placementScaledObject, type Endpoint } from '../kube/manifests';
@@ -88,29 +88,80 @@ async function endpointOf(name: string, address: string): Promise<Endpoint[]> {
   return ips.map((ip) => ({ name, cidr: `${ip.address}/32`, ports: [port] }));
 }
 
+/** How often a provider's activity says it is alive. Well inside the pool's 5-minute heartbeatTimeout. */
+export const PROVIDER_KEEPALIVE_MS = 30_000;
+
+/**
+ * RUN A PROVIDER UNDER THIS ACTIVITY: its progress becomes the heartbeat detail, a retry is said to
+ * be one, and the activity's cancellation reaches it.
+ *
+ * THE HEARTBEAT IS A TIMER AS WELL AS AN EVENT, for the reason `activities/infra.ts` measured: an
+ * engine reports a resource when it STARTS and then nothing until it ends, and a droplet's install
+ * command legitimately runs for minutes (cloud-init, apt, k3s). Against the pool's 5-minute
+ * heartbeatTimeout that silence would kill a converge that was making progress and retry it into
+ * the same wall — and a retry is what clears the stack's lock, so the timer is also what keeps
+ * "the previous attempt timed out" meaning "the previous attempt is dead". The local provider has
+ * no events to report, and gets the same keepalive.
+ *
+ * Outside an activity (a test, the e2e job) there is no context: the provider runs with no heartbeat.
+ */
+export async function withProviderRun<T>(fn: (run: ProviderRun) => Promise<T>): Promise<T> {
+  const { Context } = await import('@temporalio/activity');
+  let ctx: InstanceType<typeof Context> | undefined;
+  try {
+    ctx = Context.current();
+  } catch {
+    ctx = undefined;
+  }
+  let last: Record<string, unknown> = { phase: 'provider' };
+  const run: ProviderRun = {
+    retrying: (ctx?.info.attempt ?? 1) > 1,
+    signal: ctx?.cancellationSignal,
+    progress: (detail) => {
+      last = detail;
+      ctx?.heartbeat(detail);
+    },
+  };
+  const timer = ctx ? setInterval(() => ctx!.heartbeat(last), PROVIDER_KEEPALIVE_MS) : undefined;
+  try {
+    return await fn(run);
+  } finally {
+    // A converge that threw must not leave a timer heartbeating for an activity that has failed.
+    if (timer) clearInterval(timer);
+  }
+}
+
 export interface ConvergePoolOutput {
   nodes: number;
   idleMinutes: number;
 }
 
-/** Make or adopt the profile's cluster and bootstrap it. Idempotent. */
+/**
+ * Make or adopt the profile's cluster and bootstrap it. Idempotent.
+ *
+ * THE KEEPALIVE COVERS THE BOOTSTRAP TOO: on a k3s fleet it waits up to five minutes for the add-on
+ * charts to be served, which is the pool's whole heartbeatTimeout on its own.
+ */
 export async function convergePool(input: { profile: string }): Promise<ConvergePoolOutput> {
   const { name, profile } = resolveProfile(loadFleets(), input.profile);
-  const cluster = await providerFor(profile).converge(name, profile);
-  const file = kubeconfigPath(name);
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  writeFileSync(file, cluster.kubeconfig, { mode: 0o600 });
-  chmodSync(file, 0o600);
-  const cp = controlPlaneFromEnv();
-  await bootstrapCluster(KubeClient.fromKubeconfig(cluster.kubeconfig), {
-    flavor: cluster.flavor,
-    registry: cp.registry,
-    cosignPublicKey: cp.cosignPublicKey,
+  return withProviderRun(async (run) => {
+    const cluster = await providerFor(profile).converge(name, profile, run);
+    const file = kubeconfigPath(name);
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, cluster.kubeconfig, { mode: 0o600 });
+    chmodSync(file, 0o600);
+    const cp = controlPlaneFromEnv();
+    run.progress?.({ phase: 'bootstrap' });
+    await bootstrapCluster(KubeClient.fromKubeconfig(cluster.kubeconfig), {
+      flavor: cluster.flavor,
+      registry: cp.registry,
+      cosignPublicKey: cp.cosignPublicKey,
+    });
+    return {
+      nodes: cluster.nodes.length,
+      idleMinutes: 'idle_minutes' in profile ? profile.idle_minutes : 15,
+    };
   });
-  return {
-    nodes: cluster.nodes.length,
-    idleMinutes: 'idle_minutes' in profile ? profile.idle_minutes : 15,
-  };
 }
 
 /** The tenant's namespace, quota and egress allow-list on the profile's cluster. Idempotent. */
@@ -193,7 +244,7 @@ export async function deletePlacement(input: Omit<ApplyPlacementInput, 'replicas
 /** Release the profile's nodes and forget its kubeconfig. */
 export async function destroyPool(input: { profile: string }): Promise<void> {
   const { name, profile } = resolveProfile(loadFleets(), input.profile);
-  await providerFor(profile).destroy(name, profile);
+  await withProviderRun((run) => providerFor(profile).destroy(name, profile, run));
   rmSync(path.dirname(kubeconfigPath(name)), { recursive: true, force: true });
 }
 
