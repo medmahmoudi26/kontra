@@ -4,7 +4,7 @@ Date: 2026-09-23
 
 ## Status
 
-Proposed. **Amended by [ADR 0070](0070-a-workspace-runs-as-one-tenant-and-an-account-holds-workspaces.md)**:
+Accepted (2026-10-10; built by PR #42). **Amended by [ADR 0070](0070-a-workspace-runs-as-one-tenant-and-an-account-holds-workspaces.md)**:
 "the install is the tenant" below is the laptop tier's one implicit Account, and each workspace runs
 as one Tenant (a Temporal namespace plus a Kubernetes namespace of the same name).
 
