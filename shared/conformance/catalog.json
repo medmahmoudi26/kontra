@@ -9,7 +9,7 @@
     "params": "run-wide config is ACTOR-level, so it rides EVERY operation including the one with no schemas of its own",
     "digest": "the OCI image digest the worker self-registers (ADR 0011), from KONTRA_ACTOR_DIGEST in both SDKs",
     "source": "the directory the WORKER loaded this actor from — on a fleet Machine `/opt/kontra/actor/<name>`, which is not a path on the reader's disk and is still the honest answer to where the code is",
-    "runtime": "what the image was BUILT ON — name, MAJOR and resolved digest. NOT self-discovered: nothing inside a running container can see the run image it was layered onto, so the deploying CLI records it, the Warden hands it back as KONTRA_RUNTIME_{NAME,MAJOR,DIGEST}, and the registrar echoes it. A worker that re-registers without it would otherwise erase it",
+    "runtime": "what the image was BUILT ON — name, MAJOR and resolved digest. NOT self-discovered: nothing inside a running container can see the run image it was layered onto, so the deploying CLI bakes it into the image's Procfile as KONTRA_RUNTIME_{NAME,MAJOR,DIGEST} (cli/packstage.go) and the registrar echoes it. A rebase moves the runtime under an image without touching that Procfile, which is why the catalog never lets a registration move the digest within one major. A worker that re-registers without it would otherwise erase it",
     "builderDigest": "the CNB builder that did the layering, from KONTRA_BUILDER_DIGEST. Spelled `builderDigest` and not `builder_digest` because this fixture is compared to proto3 json_names, the same reason the fourth field reads `schemaVersion`"
   },
   "expect": {

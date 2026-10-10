@@ -221,15 +221,20 @@ and no garbage collection. Everything in this section is the compose one.
 | Variable | Set by | Read by |
 |---|---|---|
 | `KONTRA_ACTOR_DIGEST` | the Warden, when it pulls by digest | both registrars |
-| `KONTRA_RUNTIME_NAME` · `_MAJOR` · `_DIGEST` | **nothing yet** | both registrars, which *echo* them into the catalog |
-| `KONTRA_BUILDER_DIGEST` | **nothing yet** | the same |
+| `KONTRA_RUNTIME_NAME` · `_MAJOR` · `_DIGEST` | the image's Procfile, written by `kontra deploy` | both registrars, which *echo* them into the catalog |
+| `KONTRA_BUILDER_DIGEST` | the same | the same |
 
 These are not facts a worker can discover: nothing inside a running container can see the run image it
-was layered onto or the builder that layered it. So the **deploying CLI** is what has to record them and
-the worker only ever echoes them back — which is what stops a restart from erasing what it cannot
-independently know. The echo is live in both registrars; the CLI side is not, so a catalog entry today
-carries neither. Both are **omitted when unset**, never sent empty, because the catalog keeps a
-previous value only when the key is absent.
+was layered onto or the builder that layered it. So the **deploying CLI** bakes them into the Procfile it
+stages (`cli/packstage.go`) and the worker only ever echoes them back — which is what stops a restart
+from erasing what it cannot independently know. Both are **omitted when unset**, never sent empty,
+because the catalog keeps a previous value only when the key is absent.
+
+They are baked as shell **defaults** (`${KONTRA_RUNTIME_DIGEST:-sha256:…}`), so a container started with
+its own value wins. That matters after `kontra rebase`, which moves an image onto a newer runtime digest
+without touching its app layers — the Procfile still names the runtime the image was *built* on. The
+catalog records the rebase, and a registration never moves a runtime digest within one major, so a
+worker of a rebased image cannot undo the rebase by restarting.
 
 ---
 

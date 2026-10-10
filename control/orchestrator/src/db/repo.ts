@@ -96,8 +96,10 @@ export interface ActorRecord {
    * field existed, or one whose worker was started without the environment that carries it.
    *
    * Not a fact the worker discovers. Nothing inside a container can see the run image it was layered
-   * onto, so the deploying CLI records it and the Warden hands it back; the registrar echoes it so a
-   * re-registration preserves it. Stored as JSON text, like `operations`, because it is a structure.
+   * onto, so the deploying CLI bakes it into the image's Procfile and the registrar echoes it — which
+   * is also why a registration may not MOVE it within a major (`registeredRuntime`): a rebase changes
+   * the runtime under an image and leaves the Procfile saying what it was built on. Stored as JSON
+   * text, like `operations`, because it is a structure.
    *
    * `major` beside `digest` because they answer different questions: the major is what the author
    * asked for and the digest is whether it is still current — which is the whole of rebase detection.
@@ -367,6 +369,16 @@ export class Repo {
         digest: a.digest ?? prev?.digest,
         savedAt: Date.now(),
       };
+      // THE BUILD FACTS FOLLOW THE SAME ABSENT-KEEPS RULE, which `shared/conformance/catalog.json`
+      // §unsetDigest has always said they do and this method did not: a registration without them
+      // wrote NULL over a recorded runtime. See `registeredRuntime` for the one case where a
+      // registration that DOES carry a runtime is still not believed.
+      const runtime = registeredRuntime(prev?.runtime, a.runtime);
+      if (runtime) rec.runtime = runtime;
+      else delete rec.runtime;
+      const builderDigest = a.builderDigest ?? prev?.builderDigest;
+      if (builderDigest !== undefined) rec.builderDigest = builderDigest;
+      else delete rec.builderDigest;
       const lineage = rememberDigest(prev, rec.digest, a.history);
       if (lineage) rec.history = lineage;
       else delete rec.history;
@@ -851,6 +863,38 @@ function rememberDigest(
   // two of the kept slots on it.
   const lineage = [was, ...kept.filter((d) => d !== was && d !== next)];
   return lineage;
+}
+
+/**
+ * The runtime a REGISTRATION may record, given the one the catalog already holds.
+ *
+ * A worker's runtime is not something it knows. It is an ECHO of what `kontra deploy` baked into the
+ * image's Procfile at build time (`cli/packstage.go`, stageProcfile) — and `kontra rebase` rewrites
+ * the run image underneath an image WITHOUT touching its app layers, that Procfile among them. So
+ * after a rebase every worker of the image still echoes the digest it was BUILT on, while the
+ * catalog holds the one the rebase moved it to (`setActorDigest`, which the rebase posts to). If a
+ * restart were believed, the rebase would be undone by the next worker to boot: the row would read
+ * as behind again, and `kontra rebase` would try to move an image that is already there and fail
+ * with "nothing was rewritten".
+ *
+ * So WITHIN ONE RUNTIME NAME AND MAJOR, a registration never moves the digest — it fills one only
+ * where the catalog has none. Moving a digest within a major is what a rebase does and only the
+ * digest route records it. A DIFFERENT name or major can only come from a rebuild (rebase never
+ * changes either), so that echo is believed.
+ *
+ * THE CASE THIS GETS WRONG, stated so nobody has to rediscover it: `kontra deploy --override` of a
+ * version whose runtime major has been patched since the first build. The rebuild sits on the new
+ * digest and the catalog keeps the old one, so the row reads as behind until a rebase — which then
+ * reports that nothing was rewritten. That is loud and confined to the override path; believing every
+ * echo instead would silently undo every rebase, on the path rebase exists for.
+ */
+function registeredRuntime(
+  held: ActorRuntimeRecord | undefined,
+  echoed: ActorRuntimeRecord | undefined
+): ActorRuntimeRecord | undefined {
+  if (!echoed) return held;
+  if (held && held.digest && held.name === echoed.name && held.major === echoed.major) return held;
+  return echoed;
 }
 
 /** `rememberDigest` as a spreadable patch, for the paths that build a record by spreading `prev`. */

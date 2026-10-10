@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ func pyActor(t *testing.T, extra map[string]string) string {
 func stage(t *testing.T, actorDir, sdkRoot, engine string) string {
 	t.Helper()
 	m := actorManifest{Name: "hello", Version: "0.1.0"}
-	staged, err := stageActorBuild(actorDir, m, engine, sdkRoot)
+	staged, err := stageActorBuild(actorDir, m, engine, sdkRoot, resolvedRuntime{})
 	if err != nil {
 		t.Fatalf("staging: %v", err)
 	}
@@ -144,7 +145,7 @@ func TestAnImageWithNoHandlerIsRefusedRatherThanBuilt(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "handler")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := stageActorBuild(pyActor(t, nil), actorManifest{Name: "hello", Version: "0.1.0"}, "py", root)
+	_, err := stageActorBuild(pyActor(t, nil), actorManifest{Name: "hello", Version: "0.1.0"}, "py", root, resolvedRuntime{})
 	if err == nil {
 		t.Fatal("an actor image with no workflow half must be refused: it would poll the sessions " +
 			"queue, answer no workflow task, and look healthy")
@@ -174,6 +175,113 @@ func TestTheProcfileCarriesTheActorsIdentityBecauseNothingElseCan(t *testing.T) 
 	}
 }
 
+// builtOn is a runtime as resolveRuntime hands it back: the corpus's own values, so the Procfile is
+// asserted against the same strings `shared/conformance/catalog.json` expects a registrar to echo.
+var builtOn = resolvedRuntime{
+	Name:   "python-browser",
+	Major:  1,
+	Ref:    "127.0.0.1:5000/kontra-runtimes/python-browser:1",
+	Digest: "sha256:5669d5a8cccfbb5a2f553d4ea9defce603f13ec010f5940fb9438c7a7f24f8a1b",
+}
+
+// procfileEnv runs the staged Procfile's command the way the launcher does — through a shell — with
+// the supervisor swapped for one that prints its environment, and returns what the worker would see.
+//
+// RUN, NOT GREPPED, because the property is a SHELL's: `${VAR:-baked}` means "the container's value
+// if it has one", and a substring check would pass just as happily on `VAR=baked`, which means the
+// opposite. `sh` and not `bash` because the default form is POSIX and the entrypoint is `#!/bin/sh`.
+func procfileEnv(t *testing.T, staged string, env ...string) map[string]string {
+	t.Helper()
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh on PATH; the Procfile is a shell command and cannot be exercised without one")
+	}
+	line := strings.TrimSpace(read(t, filepath.Join(staged, "Procfile")))
+	cmdline, ok := strings.CutPrefix(line, "worker: ")
+	if !ok {
+		t.Fatalf("the Procfile does not define the worker process:\n%s", line)
+	}
+	if err := os.WriteFile(filepath.Join(staged, stagedEntry), []byte("#!/bin/sh\nenv\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(sh, "-c", cmdline)
+	cmd.Dir = staged
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the Procfile's command: %v\n%s", err, out)
+	}
+	got := map[string]string{}
+	for _, l := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			got[k] = v
+		}
+	}
+	return got
+}
+
+func TestTheProcfileCarriesWhatTheImageWasBuiltOn(t *testing.T) {
+	t.Setenv("KONTRA_HANDLER_BIN", "")
+	staged, err := stageActorBuild(pyActor(t, nil), actorManifest{Name: "hello", Version: "0.1.0"},
+		"py", sdkTree(t), builtOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(staged) })
+
+	// Both registrars read exactly these four and echo them into the catalog, and before this
+	// nothing set them: every deployed actor's row had no runtime, so `kontra rebase` skipped it.
+	got := procfileEnv(t, staged)
+	for k, want := range map[string]string{
+		"KONTRA_RUNTIME_NAME":   builtOn.Name,
+		"KONTRA_RUNTIME_MAJOR":  "1",
+		"KONTRA_RUNTIME_DIGEST": builtOn.Digest,
+		"KONTRA_BUILDER_DIGEST": builderDigest,
+		"KONTRA_ACTOR_NAME":     "hello",
+	} {
+		if got[k] != want {
+			t.Errorf("the worker sees %s=%q, want %q", k, got[k], want)
+		}
+	}
+
+	// A REBASED IMAGE STILL CARRIES THIS PROCFILE, so the baked digest is only a default: a placer
+	// that knows the runtime moved underneath must be able to say so with the container's own
+	// environment. An assignment would silently win over it.
+	moved := "sha256:" + strings.Repeat("e", 64)
+	if got := procfileEnv(t, staged, "KONTRA_RUNTIME_DIGEST="+moved); got["KONTRA_RUNTIME_DIGEST"] != moved {
+		t.Errorf("the container's KONTRA_RUNTIME_DIGEST must win over the baked one after a rebase; "+
+			"the worker saw %q", got["KONTRA_RUNTIME_DIGEST"])
+	}
+}
+
+func TestAnUnknownRuntimeIsLeftOutRatherThanBakedBlank(t *testing.T) {
+	t.Setenv("KONTRA_HANDLER_BIN", "")
+	staged := stage(t, pyActor(t, nil), sdkTree(t), "py")
+	proc := read(t, filepath.Join(staged, "Procfile"))
+	// The registrars omit `runtime` when the NAME is empty, and the catalog keeps a previous value
+	// only when the key is absent — so an empty name baked here would erase a good row on restart.
+	if strings.Contains(proc, "KONTRA_RUNTIME_") {
+		t.Errorf("no runtime was resolved, so none may be baked:\n%s", proc)
+	}
+	// The builder is a constant of this binary, known whether or not a runtime was resolved.
+	if !strings.Contains(proc, "KONTRA_BUILDER_DIGEST=${KONTRA_BUILDER_DIGEST:-"+builderDigest+"}") {
+		t.Errorf("the builder digest must ride the Procfile:\n%s", proc)
+	}
+}
+
+func TestAValueThatIsNotANameOrADigestIsNeverBakedIntoTheShellLine(t *testing.T) {
+	t.Setenv("KONTRA_HANDLER_BIN", "")
+	hostile := builtOn
+	hostile.Digest = "sha256:$(touch /tmp/pwned)"
+	_, err := stageActorBuild(pyActor(t, nil), actorManifest{Name: "hello", Version: "0.1.0"},
+		"py", sdkTree(t), hostile)
+	// The Procfile is run by a shell in every container of the image. resolveRuntime already holds
+	// a digest to the OCI grammar; this is the refusal that keeps that true for a caller that does not.
+	if err == nil || !strings.Contains(err.Error(), "KONTRA_RUNTIME_DIGEST") {
+		t.Fatalf("a shell-active value must be refused by name, got %v", err)
+	}
+}
+
 func TestAnActorThatDeclaresItsOwnDependenciesIsExtendedOrTold(t *testing.T) {
 	t.Setenv("KONTRA_HANDLER_BIN", "")
 	// requirements.txt: the SDK is appended and the actor's own pins are kept.
@@ -187,7 +295,7 @@ func TestAnActorThatDeclaresItsOwnDependenciesIsExtendedOrTold(t *testing.T) {
 	// without the SDK is the quiet outcome this refuses.
 	_, err := stageActorBuild(
 		pyActor(t, map[string]string{"pyproject.toml": "[project]\nname = \"hello\"\n"}),
-		actorManifest{Name: "hello", Version: "0.1.0"}, "py", sdkTree(t))
+		actorManifest{Name: "hello", Version: "0.1.0"}, "py", sdkTree(t), resolvedRuntime{})
 	if err == nil || !strings.Contains(err.Error(), stagedSDK) {
 		t.Errorf("an actor on pyproject must be told what to add, got %v", err)
 	}

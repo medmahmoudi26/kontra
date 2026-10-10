@@ -399,7 +399,7 @@ func runDeploy(ctx context.Context, progress io.Writer, o deployOpts) (*deployRe
 		return nil, fmt.Errorf("kontra deploy needs the SDK tree to stage into the image "+
 			"(KONTRA_SDK_ROOT, else the checkout): %w", rerr)
 	}
-	staged, err := stageActorBuild(o.actorDir, m, engine, root)
+	staged, err := stageActorBuild(o.actorDir, m, engine, root, rt)
 	if err != nil {
 		return nil, err
 	}

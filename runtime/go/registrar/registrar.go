@@ -56,9 +56,9 @@ type actorDescriptor struct {
 	Source string `json:"source,omitempty"`
 	// Runtime and BuilderDigest are facts about the BUILD, not about this process, and that is why
 	// they are echoed rather than discovered: nothing inside a running container can see the run
-	// image it was layered onto or the builder that layered it. The deploying CLI records them and
-	// the Warden hands them back as environment, so a worker re-registering preserves what it cannot
-	// independently know. Omitted when unset for the same reason Digest is — the catalog keeps a
+	// image it was layered onto or the builder that layered it. The deploying CLI bakes them into the
+	// image's Procfile as environment (cli/packstage.go), so a worker re-registering preserves what it
+	// cannot independently know. Omitted when unset for the same reason Digest is — the catalog keeps a
 	// previous value only when the key is ABSENT, so an empty object would unpin the runtime.
 	Runtime       *actorRuntime `json:"runtime,omitempty"`
 	BuilderDigest string        `json:"builderDigest,omitempty"`
@@ -74,9 +74,9 @@ type actorRuntime struct {
 	Digest string `json:"digest"`
 }
 
-// runtimeFromEnv reads the three variables the Warden stamps, and returns nil unless there is a
-// NAME — a runtime with no name is not a runtime, and a partially-filled object would overwrite a
-// complete one in the catalog.
+// runtimeFromEnv reads the three variables the image's Procfile stamps, and returns nil unless
+// there is a NAME — a runtime with no name is not a runtime, and a partially-filled object would
+// overwrite a complete one in the catalog.
 func runtimeFromEnv() *actorRuntime {
 	name := os.Getenv("KONTRA_RUNTIME_NAME")
 	if name == "" {
