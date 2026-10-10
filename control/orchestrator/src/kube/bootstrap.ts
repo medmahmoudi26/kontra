@@ -78,8 +78,17 @@ export interface ClusterBootstrap {
   sleep?: (ms: number) => Promise<void>;
 }
 
-async function crdExists(client: KubeClient, crd: string): Promise<boolean> {
-  return (await client.get('apiextensions.k8s.io/v1', 'CustomResourceDefinition', crd)) !== undefined;
+/**
+ * Whether an add-on's API is SERVED, not merely defined: the CRD exists AND its `Established`
+ * condition is true. Measured on the first real fleet (CI, k3s 1.36): the Kyverno CRD existed and
+ * the apply of the policy that needs it still answered 404, because the API server had not yet begun
+ * serving the new kind.
+ */
+async function crdServed(client: KubeClient, crd: string): Promise<boolean> {
+  const obj = (await client.get('apiextensions.k8s.io/v1', 'CustomResourceDefinition', crd)) as
+    | { status?: { conditions?: Array<{ type?: string; status?: string }> } }
+    | undefined;
+  return (obj?.status?.conditions ?? []).some((c) => c.type === 'Established' && c.status === 'True');
 }
 
 /**
@@ -107,7 +116,7 @@ export async function bootstrapCluster(client: KubeClient, b: ClusterBootstrap):
   for (const name of Object.keys(ADDONS) as Array<keyof typeof ADDONS>) {
     const crd = ADDONS[name].crd;
     let waited = 0;
-    while (!(await crdExists(client, crd))) {
+    while (!(await crdServed(client, crd))) {
       if (waited >= deadline) {
         missing.push(`${name} (${crd})`);
         break;

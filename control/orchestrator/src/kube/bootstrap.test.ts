@@ -6,13 +6,17 @@ import { ADDONS, bootstrapCluster, bootstrapTenant, helmChart } from './bootstra
 const PEM = '-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----';
 
 /** A fake API server: records every request, and answers CRD reads from a set that can grow. */
-function cluster(crds: Set<string>) {
+function cluster(crds: Set<string>, established: Set<string> = crds) {
   const seen: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
   const transport: Transport = async (req) => {
     seen.push({ method: req.method, path: req.path, body: req.body ? JSON.parse(req.body) : undefined });
     if (req.method === 'GET' && req.path.includes('/customresourcedefinitions/')) {
       const name = decodeURIComponent(req.path.split('/').pop()!);
-      return crds.has(name) ? { status: 200, body: '{}' } : { status: 404, body: '{}' };
+      // A CRD that exists is not yet one that is SERVED: only `established` names answer Established.
+      if (established.has(name)) {
+        return { status: 200, body: JSON.stringify({ status: { conditions: [{ type: 'Established', status: 'True' }] } }) };
+      }
+      return crds.has(name) ? { status: 200, body: '{"status":{"conditions":[]}}' } : { status: 404, body: '{}' };
     }
     return { status: 200, body: '{}' };
   };
@@ -72,6 +76,26 @@ describe('bootstrapCluster', () => {
     const { seen, client } = cluster(new Set([ADDONS.keda.crd, ADDONS.kyverno.crd]));
     await bootstrapCluster(client, { flavor: 'byo', registry: 'r', cosignPublicKey: PEM });
     expect(applied(seen)).toEqual(['RuntimeClass/gvisor', 'ClusterPolicy/kontra-verify-images']);
+  });
+
+  it('waits for an add-on\'s API to be SERVED, not merely defined', async () => {
+    // What the first real fleet showed: the CRD existed, and the policy apply still got a 404.
+    const crds = new Set<string>([ADDONS.keda.crd, ADDONS.kyverno.crd]);
+    const established = new Set<string>();
+    const { seen, client } = cluster(crds, established);
+    let polls = 0;
+    await bootstrapCluster(client, {
+      flavor: 'k3s', registry: 'r', cosignPublicKey: PEM, waitMs: 60_000,
+      sleep: async () => {
+        polls += 1;
+        if (polls === 3) {
+          established.add(ADDONS.keda.crd);
+          established.add(ADDONS.kyverno.crd);
+        }
+      },
+    });
+    expect(polls).toBeGreaterThanOrEqual(3);
+    expect(applied(seen).at(-1)).toBe('ClusterPolicy/kontra-verify-images');
   });
 
   it('gives up on k3s add-ons that never appear, naming them', async () => {
