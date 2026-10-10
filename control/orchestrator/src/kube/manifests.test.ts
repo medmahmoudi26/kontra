@@ -15,6 +15,7 @@ import {
   placementName,
   placementScaledObject,
   resourceQuota,
+  tenantLimitRange,
   tenantNamespace,
   tenantNetworkPolicies,
   workerServiceAccount,
@@ -67,6 +68,11 @@ describe('the tenant namespace', () => {
 
   it('gives workers a service account with no automounted token', () => {
     expect((workerServiceAccount('ws-hello') as Any).automountServiceAccountToken).toBe(false);
+  });
+
+  it('gives a pod that names no resources the namespace defaults, which a quota on limits requires', () => {
+    const lr: Any = tenantLimitRange('ws-hello');
+    expect(lr.spec.limits[0]).toMatchObject({ type: 'Container', default: { cpu: '1', memory: '1Gi' } });
   });
 
   it('bounds the tenant with a quota', () => {

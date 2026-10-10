@@ -19,6 +19,7 @@ import {
   gvisorRuntimeClass,
   imageSignaturePolicy,
   resourceQuota,
+  tenantLimitRange,
   tenantNamespace,
   tenantNetworkPolicies,
   workerServiceAccount,
@@ -150,5 +151,6 @@ export async function bootstrapTenant(client: KubeClient, t: TenantBootstrap): P
   await client.apply(tenantNamespace(t.namespace));
   await client.apply(workerServiceAccount(t.namespace));
   await client.apply(resourceQuota(t.namespace, t.quota));
+  await client.apply(tenantLimitRange(t.namespace));
   for (const policy of tenantNetworkPolicies(t.namespace, t.endpoints)) await client.apply(policy);
 }

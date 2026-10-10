@@ -61,7 +61,7 @@ describe.skipIf(!RUN)('the local fleet provider on a real VM', () => {
     let refused = '';
     try {
       kube('run', 'foreign', '-n', 'ws-ci', '--restart=Never', '--image=busybox:1.37',
-        `--overrides={"spec":{"runtimeClassName":"${GVISOR.name}","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"foreign","image":"busybox:1.37","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}`);
+        `--overrides={"spec":{"runtimeClassName":"${GVISOR.name}","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"foreign","image":"busybox:1.37","resources":{"requests":{"cpu":"100m","memory":"64Mi"},"limits":{"cpu":"100m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}`);
     } catch (err) {
       refused = String((err as { stderr?: Buffer }).stderr ?? err);
     }
