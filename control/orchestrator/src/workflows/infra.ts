@@ -32,4 +32,6 @@ export type { SweepDatasetsWorkflowInput } from './retention';
 // and this is the workflow that decides when a **Fleet** is destroyed. Its query is `getLeases`,
 // named apart from `getProgress` and `getSessionState` because a bundle may not export a name twice.
 export { fleetLeaseWorkflow, holdLease, dropLease, getLeases } from './lease';
+// THE FLEET POOL (ADR 0066): one per profile, the single writer of a Kubernetes fleet.
+export { kontraFleetPoolWorkflow } from './fleetPool';
 export type { FleetLeaseInput, HoldSignal, DropSignal } from './lease';
