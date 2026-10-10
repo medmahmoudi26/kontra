@@ -789,6 +789,8 @@ export interface StartResult {
   runId: string;
   type: string;
   queue: string;
+  /** The Temporal namespace the run was started in: its workspace's (ADR 0051). */
+  namespace?: string;
   /**
    * The caller workflow's manifest identity as it was SNAPSHOTTED for this Run (ADR 0029 §2), or
    * absent when the folder has no manifest to snapshot (a flat `.py`) or the write did not land.
@@ -983,7 +985,7 @@ export async function startRun(
   const workflow = await stampRunWorkflow(handle.workflowId, manifest, recorder);
   // IN THE RUN'S NAMESPACE: the report tables are the workspace's own, and the folder decides which.
   await inNamespace(namespace, () => pinReportTemplate(handle.workflowId, file, pinner));
-  return { runId: handle.workflowId, type, queue, ...(workflow ? { workflow } : {}) };
+  return { runId: handle.workflowId, type, queue, namespace, ...(workflow ? { workflow } : {}) };
 }
 
 /**
