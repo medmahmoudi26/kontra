@@ -84,7 +84,7 @@ class _UnitState:
     WHO READS IT, precisely — because ADR 0023 §19 got this wrong once and retired it: a Unit
     that was IN FLIGHT when the activity died, re-running on the handler's retry
     (`MaximumAttempts: 3`) against the same session queue, the same worker and the same batch
-    hash — hence the same slot. Committed Units are skipped by the retry's checkpoint and ISOLATED
+    hash — hence the same slot. Committed Units are folded back from their commit objects and ISOLATED
     Units are never resumed, so neither of those reads it; the in-flight one does, and for a Unit whose
     body runs for minutes that is the difference between resuming and starting over.
 
