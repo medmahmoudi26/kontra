@@ -109,4 +109,13 @@ require gopkg.in/yaml.v2 v2.4.0
 
 require github.com/medmahmoudi26/kontra/runtime/go v0.0.0 // indirect
 
+// A FLOOR, NOT A DEPENDENCY: cli imports no x/mod package. GO-2026-6179 and GO-2026-6180
+// (CVE-2026-56865, CVE-2026-56864: sumdb and tlog verification) are fixed in v0.40.0, and until
+// x/net v0.60.0 this module's build list selected v0.38.0, the version its own x/text v0.41.0
+// asks for. The fixed one arrives today only through the x/text v0.42.0 that runtime/go,
+// runtime/handler and sdk/go require in the same go.work; this line keeps it from depending on
+// what a sibling module happens to require. A tidy would drop it as unneeded, and that is the
+// moment to check that `go list -m golang.org/x/mod` still answers v0.40.0 or later.
+require golang.org/x/mod v0.41.0 // indirect
+
 replace github.com/medmahmoudi26/kontra/sdk/go => ../sdk/go

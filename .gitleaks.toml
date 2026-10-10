@@ -1,0 +1,62 @@
+# gitleaks: the default rules, minus the files whose whole job is to look like a secret.
+#
+# WHY THIS FILE EXISTS. The first full-history scan (the nightly `security.yml` run of 2026-10-09)
+# reported 26 leaks, and none of them was a credential. 17 were the conformance corpora, which hold
+# secret-SHAPED strings on purpose because the redaction suite has to prove it redacts them; the rest
+# were test literals like `0123456789abcdefghij`, a password ALPHABET, a regex that detects private
+# keys, and an identifier named `DefaultS3SecretKey`. A gate that is red for that reason gets
+# switched off, and then it is not there for the one finding that matters.
+#
+# THE DEFAULT RULES STAY ON, ALL OF THEM. `useDefault` inherits every provider rule gitleaks ships
+# (and every one it adds when the pinned version in `security.yml` is raised), so this file only
+# ever SUBTRACTS, and only by path. Nothing here adds a rule, disables a rule, or raises an entropy
+# threshold for the whole tree.
+#
+# WHAT IS DELIBERATELY NOT HERE: any path outside a fixture. A false positive in real source is
+# reviewed once and recorded by its exact fingerprint in `.gitleaksignore` (commit, file, rule and
+# line), which cannot hide the next finding in the same file the way a path entry would. A new
+# fake in a test that trips a PROVIDER rule gets a `gitleaks:allow` comment on its line, or is built
+# at run time the way `scan_test.go` builds its npm and GitHub token shapes, so a reviewer sees it.
+#
+# TO REPRODUCE THE CI RESULT LOCALLY, run the same pinned binary over the same history:
+#   gitleaks git --redact --verbose --log-opts=HEAD .
+
+title = "kontra"
+
+[extend]
+useDefault = true
+
+# ── THE CONFORMANCE CORPORA, FOR EVERY RULE ──────────────────────────────────────────────────────
+#
+# `shared/conformance/redaction.json` is the redaction corpus: one input per credential shape the
+# Go, Python and TypeScript redactors must agree on, which means it MUST contain a string every
+# provider rule matches, or it is not testing the redactor. `codec/fixtures.json` carries `key` and
+# `cas_key` fields that are content addresses, not keys. `conformance/` is where the same corpus
+# lived before it moved under `shared/`; it no longer exists in the tree, but a history scan still
+# walks the commits that added it.
+[[allowlists]]
+description = "conformance corpora: secret-shaped by design"
+paths = [
+  '''^shared/conformance/''',
+  '''^conformance/''',
+]
+
+# ── TEST FILES, FOR THE GENERIC RULE ONLY ────────────────────────────────────────────────────────
+#
+# `generic-api-key` matches any `token = "<something with entropy>"`, and a test that exercises a
+# redactor, a secret store or a token check is made of exactly that. That rule is the whole of the
+# noise in test files: every test-file finding in history except two was it.
+#
+# PROVIDER RULES STILL APPLY TO TESTS, AND THAT IS THE POINT OF `targetRules`. A real `AKIA…` or
+# `ghp_…` pasted into a test to debug something is still a live credential in a public repository,
+# and a test-file path allowlist across every rule would be this config's one blind spot. The two
+# provider-shaped fakes already in history (a keyboard-row AWS key id and a sequential Stripe key)
+# are in `.gitleaksignore` by fingerprint instead.
+[[allowlists]]
+description = "test files: generic-api-key only"
+targetRules = ["generic-api-key"]
+paths = [
+  '''_test\.go$''',
+  '''\.test\.[cm]?[jt]sx?$''',
+  '''(^|/)test_[^/]*\.py$''',
+]

@@ -8,9 +8,11 @@ tested here, because a suppression file whose staleness checks do not fire is ju
 import datetime
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -193,14 +195,45 @@ def test_the_shipped_allowlist_is_well_formed():
         assert entry["modules"], f"{entry['id']} lists no modules"
 
 
-@pytest.mark.parametrize("module", ["cli", "runtime/go", "runtime/handler", "sdk/go"])
-def test_every_allowlisted_module_is_one_security_yml_actually_scans(module):
+def _scanned_modules() -> set[str]:
+    """The `--module` values security.yml's govulncheck matrix actually runs the gate with.
+
+    READ FROM THE WORKFLOW, NOT RESTATED HERE. This test used to carry its own copy of the four
+    module names, so adding a fifth to the matrix and forgetting the test (or the reverse) could not
+    fail anything. The matrix is `module:` plus any `include:` entries, which is how the one module
+    that needs `GOWORK=off` is listed.
+    """
+    spec = yaml.safe_load((_ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8"))
+    matrix = spec["jobs"]["govulncheck"]["strategy"]["matrix"]
+    return set(matrix.get("module") or []) | {e["module"] for e in matrix.get("include") or []}
+
+
+def test_every_allowlisted_module_is_one_security_yml_actually_scans():
     """An entry for a module no job scans is dead text: `vulngate.py` is run per matrix entry, so it
     would never be read and never be reported stale."""
-    scanned = {"cli", "runtime/go", "runtime/handler", "sdk/go"}
-    workflow = (_ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
-    assert module in workflow, f"{module} is not in security.yml's matrix any more"
+    scanned = _scanned_modules()
     allow = json.loads((_ROOT / ".github" / "vuln-allow.json").read_text(encoding="utf-8"))
     for entry in allow["allow"]:
         unknown = set(entry["modules"]) - scanned
         assert not unknown, f"{entry['id']} allowlists unscanned module(s) {sorted(unknown)}"
+
+
+def test_every_go_module_in_the_tree_is_scanned_and_every_scanned_one_exists():
+    """THE GATE COVERS WHAT SHIPS, IN BOTH DIRECTIONS.
+
+    A go.mod no matrix entry names is a dependency set nothing checks for reachable advisories:
+    `workspaces/demo/actors/desync` was exactly that, a standalone module outside `go.work` with its
+    own HTTP and AWS dependencies, until it was added. And a matrix entry whose go.mod is gone fails
+    in `setup-go` with a message about a missing file rather than about the module that was deleted.
+    The tracked files are the source of truth, so an untracked scratch module never counts.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "go.mod", "*/go.mod"],
+        cwd=_ROOT, check=True, capture_output=True, text=True,
+    ).stdout.split()
+    if not tracked:
+        pytest.skip("not a git checkout, so there is no list of tracked go.mod files to compare")
+    modules = {str(Path(p).parent) for p in tracked}
+    scanned = _scanned_modules()
+    assert modules - scanned == set(), f"go modules no govulncheck job scans: {sorted(modules - scanned)}"
+    assert scanned - modules == set(), f"govulncheck matrix names modules with no go.mod: {sorted(scanned - modules)}"
