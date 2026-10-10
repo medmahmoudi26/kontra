@@ -202,6 +202,9 @@ Fleet recorded against the old one can never be re-run as recorded.
 What makes it safe is an **`inuse-` tag**: retention keeps every tag matching `^inuse-` regardless of
 age, so a tag is how the control plane says *not this one* to a garbage collector that runs inside zot
 with no callback and no way to ask a question. The tag namespace is the only vocabulary the two share.
+Nothing triggers it either: GC and retention run on zot's own `gcInterval` (6 h in both
+`docker-compose.yml` and the Pulumi install), and zot exposes no endpoint to run them sooner. The
+console API had a `POST /api/images/gc` that could only ever say so with a 501; it is deleted.
 
 **A reconciler writes them.** It lives in the orchestrator, is armed in the **API** role on every
 start (the materializer has no periodic loop to join), runs one pass immediately and then every

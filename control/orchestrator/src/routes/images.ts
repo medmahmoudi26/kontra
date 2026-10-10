@@ -18,16 +18,19 @@
  * "reading which Machines exist is not the capability that was leaking — spending money is." Reading
  * which images exist is not the capability either; deleting one is.
  *
- * ── TWO ROUTES THE SPEC ASKS FOR THAT CANNOT DO WHAT IT SAYS ─────────────────────────────────────
+ * ── ONE ROUTE THE SPEC ASKS FOR THAT CANNOT DO WHAT IT SAYS ──────────────────────────────────────
  *
- * Both are implemented and both refuse, because a route that is absent is a capability nobody can
- * discover and a route that pretends is worse than either. Measured, not assumed:
- *
- *   POST /api/images/gc      zot exposes no garbage-collection trigger. Its extension discovery lists
- *                            `cosign`, `search` and `mgmt`; a POST to `/v2/_zot/ext/gc` is a 404. GC
- *                            runs on `gcInterval` and there is nothing to ask.
  *   POST /api/images/rebase  a rebase shells out to `pack`, which is in the `cli` image and not in the
  *                            one serving this route. `kontra rebase` does it, and the refusal says so.
+ *
+ * It is implemented and refuses, because the refusal carries something: the one command that does
+ * the work. There used to be a second, `POST /api/images/gc`, and it is DELETED rather than kept on
+ * the same argument, because it carried nothing. zot exposes no garbage-collection trigger — its
+ * extension discovery lists `cosign`, `search` and `mgmt`, and a POST to `/v2/_zot/ext/gc` is a 404
+ * — so the route answered 501 to every caller, for ever, and the only thing an operator could do with
+ * the answer was stop asking. GC and retention run on zot's own `gcInterval`; a route that can only
+ * say so is an entry in the API surface, a posture row and an OpenAPI path for a sentence that
+ * belongs in [[Durability-and-Failures]].
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -205,17 +208,6 @@ export function registerImageRoutes(app: FastifyInstance, deps: ImageRouteDeps):
         'nothing in the orchestrator writes to the registry, and the credential this process holds is ' +
         'read-only by construction. Retention removes an untagged, un-`inuse-` manifest on its own ' +
         'schedule, which is the path that exists today.',
-    });
-  });
-
-  app.post('/api/images/gc', async (req, reply) => {
-    const denied = checkBearer(req.headers.authorization, IMAGE_ADMIN_TOKEN_VARS, INFRA_SCOPE);
-    if (denied) return reply.code(denied.code).send(denied.body);
-    return reply.code(501).send({
-      error: 'zot has no garbage-collection trigger',
-      because:
-        'its extension discovery lists cosign, search and mgmt; POST /v2/_zot/ext/gc is a 404. GC and ' +
-        'retention run on `gcInterval` (6h) and there is nothing to ask.',
     });
   });
 
