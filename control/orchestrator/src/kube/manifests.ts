@@ -14,6 +14,8 @@
  */
 import { createHash } from 'node:crypto';
 
+import { dnsLabel } from '../fleetPool';
+
 /** Labels every object kontra makes carries, so a sweep can find exactly kontra's own. */
 export const MANAGED_BY = { 'app.kubernetes.io/managed-by': 'kontra' } as const;
 
@@ -41,11 +43,8 @@ function sha(s: string): string {
   return createHash('sha256').update(s).digest('hex');
 }
 
-/** A DNS-1123 label from free text: lowercase, `-` for anything else, trimmed, at most `max`. */
-export function dnsLabel(raw: string, max = 63): string {
-  const s = raw.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '');
-  return s.slice(0, max).replace(/-+$/g, '') || 'x';
-}
+// The label rule lives with the pool's names (no imports there, so the pool WORKFLOW can use it).
+export { dnsLabel } from '../fleetPool';
 
 /**
  * The Deployment name for one placement: readable (`enrich-0-3-0-…`) and UNIQUE per (scope, actor,
