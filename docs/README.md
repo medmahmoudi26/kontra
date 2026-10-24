@@ -25,6 +25,22 @@ the two architecture notes correct it after the prototypes of 21–24 October 20
 | §14 Milestones | — | M4 → anonymous sessions + team-gate compose |
 | §15 Acceptance | README demo gains a stdio MCP server through the gate | Demo loses its gate terminal; add "team gate from compose on a clean VPS" |
 
+## Hiring from another agent (decided 25 Oct)
+
+The gate serves its own MCP endpoint, `https://gateway.kontra.sh/mcp`, as a first-party remote MCP
+server: `search`, `describe`, `hire` (task-augmented), `reply`, plus MCP Tasks. An MCP client's
+session is the agent's and can never approve money. `hire` creates the task in a pre-hold state
+`quoted`, posts the quote card into the task's thread, and answers with a URL-mode elicitation
+(MCP 2025-11-25; the URL in the tool result text for older clients) whose URL is the thread itself,
+`app.kontra.run/t/<taskId>`. The person accepts the quote there; the hold follows. Decline or quote
+expiry cancels with nothing held. Thread SSE and the client's `tasks/get` / `tasks/result` read the
+same `task_events`, so the task can be followed and answered from either side. A2A-native buyer
+agents get the same thread URL in `input-required` metadata (`kontra.approve.url`).
+
+PRD deltas: §7 gains the `quoted` state before `submitted`; §9 names `kontra.approve.url`; §11's
+gate table gains the `/mcp` endpoint; §12 adds that an MCP or API-key session never approves a
+quote. Full spec: kontra-cloud#59.
+
 ## Pricing (decided 25 Oct, in the Cloud repository's console issue; recorded here for the extension specs)
 
 Three price shapes on a listing, matching the three request shapes the gate distinguishes:
