@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kontra Tunnel Architecture</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column (~70ch) for prose; figures and tables break out to the page width and scroll horizontally when narrow. */
+:root{
+  --bg:#F6F5F1; --bg-2:#ECEAE3; --fg:#1C1B18; --fg-2:#5B5850; --line:#D6D3C9;
+  --accent:#B86E00; --accent-ink:#8A5200; --accent-soft:#F4E3C4;
+  --data:#2456A8; --data-soft:#DCE6F7;
+  --ok:#1E7A45; --warn:#9A5B00; --bad:#A83232;
+  --code-bg:#EDEBE4;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F1012; --bg-2:#17181C; --fg:#E7E6E1; --fg-2:#9A9890; --line:#2A2C31;
+    --accent:#E7A33A; --accent-ink:#F2B544; --accent-soft:#2A2110;
+    --data:#8FB8FF; --data-soft:#14213A;
+    --ok:#4DC98A; --warn:#E7A33A; --bad:#F26D6D;
+    --code-bg:#16181C; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F1012; --bg-2:#17181C; --fg:#E7E6E1; --fg-2:#9A9890; --line:#2A2C31;
+  --accent:#E7A33A; --accent-ink:#F2B544; --accent-soft:#2A2110;
+  --data:#8FB8FF; --data-soft:#14213A;
+  --ok:#4DC98A; --warn:#E7A33A; --bad:#F26D6D;
+  --code-bg:#16181C; color-scheme:dark;
+}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:16px;line-height:1.55;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0 64px}
+.wrap{max-width:1120px;margin:0 auto}
+.col{max-width:72ch}
+h1,h2,h3{text-wrap:balance;line-height:1.2;margin:0}
+h1{font-size:clamp(28px,4vw,40px);font-weight:600;letter-spacing:-.01em}
+h2{font-size:24px;font-weight:600;margin-top:64px;padding-top:24px;border-top:1px solid var(--line)}
+h3{font-size:17px;font-weight:600;margin-top:28px}
+p{margin:12px 0}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-2)}
+.lede{font-size:19px;color:var(--fg-2);max-width:60ch}
+header.top{padding-block:40px 8px;display:flex;flex-direction:column;gap:14px;border-bottom:1px solid var(--line)}
+.meta{display:flex;flex-wrap:wrap;gap:8px 20px;font-family:var(--mono);font-size:12px;color:var(--fg-2)}
+.meta b{color:var(--fg);font-weight:500}
+code,pre{font-family:var(--mono);font-size:13.5px}
+code{background:var(--code-bg);padding:1px 5px;border-radius:4px}
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:14px 16px;overflow-x:auto;line-height:1.5;margin:14px 0}
+pre code{background:none;padding:0}
+.c{color:var(--fg-2)} .a{color:var(--accent-ink)} .d{color:var(--data)}
+figure{margin:24px 0;display:flex;flex-direction:column;gap:10px}
+.fig{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg-2);padding:12px}
+figure svg{display:block;max-width:100%;height:auto;min-width:640px;font-family:var(--mono);font-size:12px}
+figcaption{font-size:13.5px;color:var(--fg-2);max-width:80ch}
+table{border-collapse:collapse;width:100%;font-size:14.5px}
+.tbl{overflow-x:auto;margin:14px 0}
+th{text-align:left;font-weight:500;color:var(--fg-2);font-size:12.5px;letter-spacing:.03em;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top;min-width:0}
+td code{white-space:nowrap}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin:16px 0}
+.card{border:1px solid var(--line);border-radius:8px;padding:14px 16px;background:var(--bg-2)}
+.card h4{margin:0 0 6px;font-size:14px;font-weight:600}
+.card p{margin:6px 0;font-size:14.5px}
+ul,ol{padding-left:22px;margin:10px 0}
+li{margin:5px 0}
+.note{border-left:3px solid var(--accent);padding:8px 14px;background:var(--accent-soft);border-radius:0 6px 6px 0;margin:16px 0;font-size:15px}
+.tag{display:inline-block;font-family:var(--mono);font-size:11.5px;padding:1px 7px;border:1px solid var(--line);border-radius:999px;color:var(--fg-2);vertical-align:middle}
+.ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+a{color:var(--data)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion: no-preference){ a{transition:color .15s} }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">Kontra · v4 architecture note · working draft</div>
+  <h1>One tunnel for A2A agents and MCP servers</h1>
+  <p class="lede">A node runs <code>kontra connect</code>. It serves what is on its localhost to a gate it chose, and calls what others serve through the same gate. The gate adds durable tasks, identity, policy and sealing. Nothing on the node listens on a public port.</p>
+  <div class="meta">
+    <span><b>supersedes</b> v4 PRD §3–4 (roles, topology), §6 (tunnel target), §11 (two sidecars)</span>
+    <span><b>unchanged</b> §5, §7–10, §12–13</span>
+    <span><b>date</b> 2026-10-24</span>
+  </div>
+</header>
+
+<section class="col">
+<h2>1. The gateway story</h2>
+<p>Three ideas, in the order they were settled.</p>
+<p><b>The gate is the product.</b> It is an A2A server (and, now, an MCP server) toward anyone who calls, and an A2A/MCP client toward the servers enrolled behind it. It owns the task record and the policy. It never executes code, never holds a key that opens a sealed part, never opens a connection to a node.</p>
+<p><b>One node type.</b> There is no buyer sidecar and no seller sidecar. Every node runs one <code>kontra connect</code>, which dials out to a gate and does two things over that single connection: forwards the gate's inbound requests to servers on its localhost (hosting), and exposes the gate's catalog on its localhost so local clients can call out (hiring). A node that only hires has no <code>--serve</code>; a node that only hosts has local clients that never use port 7777. Same binary, same console, direction is a column.</p>
+<p><b>Membership is which gate you dial.</b> <code>gateway.kontra.sh</code> is the marketplace: the public, multi-tenant gate with a catalog and, in Cloud, escrow. A team's own gate is the same open-source binary with one tenant, no catalog and no money code. A node can hold several gate connections at once with one identity key enrolled at each.</p>
+</section>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 1040 400" fill="currentColor" role="img" aria-label="Topology: two nodes each running kontra connect dial out to a gate; each node hosts A2A agents and MCP servers on localhost and exposes the gate's catalog on localhost:7777 for its own clients; the gate holds Postgres and Temporal; the public gate is the marketplace and a team gate is the same binary." style="color:var(--fg)">
+<defs>
+<marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+<marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--accent)"/></marker>
+</defs>
+<!-- node A -->
+<rect x="20" y="40" width="300" height="320" rx="8" fill="none" stroke="currentColor" stroke-dasharray="4 4"/>
+<text x="32" y="62" font-weight="500">node A · a laptop</text>
+<rect x="40" y="80" width="260" height="56" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="52" y="102" font-weight="500">kontra connect</text>
+<text x="52" y="122" fill="var(--fg-2)">identity key · console · intercept</text>
+<rect x="40" y="160" width="120" height="48" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="52" y="180">A2A agent</text><text x="52" y="198" fill="var(--fg-2)">:9999</text>
+<rect x="180" y="160" width="120" height="48" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="192" y="180">MCP server</text><text x="192" y="198" fill="var(--fg-2)">stdio / :8000</text>
+<rect x="40" y="240" width="260" height="48" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="52" y="260">local clients</text><text x="52" y="278" fill="var(--fg-2)">a2a CLI · IDE · agent framework</text>
+<line x1="100" y1="160" x2="100" y2="136" stroke="currentColor" marker-end="url(#ar)"/>
+<text x="106" y="152" fill="var(--fg-2)" font-size="11">forwards</text>
+<line x1="240" y1="160" x2="240" y2="136" stroke="currentColor" marker-end="url(#ar)"/>
+<line x1="170" y1="240" x2="170" y2="136" stroke="var(--data)" marker-end="url(#ar)"/>
+<text x="176" y="230" fill="var(--data)" font-size="11">localhost:7777</text>
+<text x="52" y="340" fill="var(--fg-2)" font-size="11">no inbound port on the node</text>
+<!-- gate -->
+<rect x="400" y="40" width="240" height="320" rx="8" fill="var(--bg)" stroke="var(--accent)" stroke-width="2"/>
+<text x="412" y="62" font-weight="500" fill="var(--accent-ink)">gate · kontra</text>
+<text x="412" y="80" fill="var(--fg-2)">one Go binary</text>
+<rect x="412" y="96" width="216" height="40" rx="6" fill="var(--bg-2)" stroke="currentColor"/>
+<text x="422" y="120">/agents/* · /mcp/* · /v1/tunnel</text>
+<rect x="412" y="148" width="216" height="40" rx="6" fill="var(--bg-2)" stroke="currentColor"/>
+<text x="422" y="172">API keys · allow lists · limits</text>
+<rect x="412" y="200" width="104" height="48" rx="6" fill="var(--bg-2)" stroke="currentColor"/>
+<text x="422" y="220">Postgres</text><text x="422" y="238" fill="var(--fg-2)" font-size="11">tasks · events</text>
+<rect x="524" y="200" width="104" height="48" rx="6" fill="var(--bg-2)" stroke="currentColor"/>
+<text x="534" y="220">Temporal</text><text x="534" y="238" fill="var(--fg-2)" font-size="11">lifecycle</text>
+<rect x="412" y="260" width="216" height="40" rx="6" fill="var(--bg-2)" stroke="currentColor" stroke-dasharray="3 3"/>
+<text x="422" y="284" fill="var(--fg-2)">Cloud only: catalog · escrow</text>
+<text x="412" y="330" fill="var(--fg-2)" font-size="11">holds metadata, state, ciphertext</text>
+<text x="412" y="346" fill="var(--fg-2)" font-size="11">never a decrypting key</text>
+<!-- node B -->
+<rect x="720" y="40" width="300" height="320" rx="8" fill="none" stroke="currentColor" stroke-dasharray="4 4"/>
+<text x="732" y="62" font-weight="500">node B · a VPS</text>
+<rect x="740" y="80" width="260" height="56" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="752" y="102" font-weight="500">kontra connect</text>
+<text x="752" y="122" fill="var(--fg-2)">same binary, same console</text>
+<rect x="740" y="160" width="260" height="48" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="752" y="180">MCP server</text><text x="752" y="198" fill="var(--fg-2)">:8000 streamable http</text>
+<rect x="740" y="240" width="260" height="48" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="752" y="260">agent framework</text><text x="752" y="278" fill="var(--fg-2)">calls node A's agent via :7777</text>
+<line x1="870" y1="160" x2="870" y2="136" stroke="currentColor" marker-end="url(#ar)"/>
+<line x1="930" y1="240" x2="930" y2="136" stroke="var(--data)" marker-end="url(#ar)"/>
+<!-- tunnels -->
+<line x1="300" y1="108" x2="400" y2="108" stroke="var(--accent)" stroke-width="2" marker-end="url(#arA)"/>
+<text x="350" y="100" text-anchor="middle" fill="var(--accent-ink)" font-size="11">dials out</text>
+<text x="350" y="128" text-anchor="middle" fill="var(--fg-2)" font-size="11">WS + yamux</text>
+<line x1="740" y1="108" x2="640" y2="108" stroke="var(--accent)" stroke-width="2" marker-end="url(#arA)"/>
+<text x="690" y="100" text-anchor="middle" fill="var(--accent-ink)" font-size="11">dials out</text>
+<text x="690" y="128" text-anchor="middle" fill="var(--fg-2)" font-size="11">one connection each</text>
+<!-- gate kinds -->
+<text x="520" y="384" text-anchor="middle" fill="var(--fg-2)" font-size="11">gateway.kontra.sh = marketplace · gate.team.internal = same binary, one tenant, no money</text>
+</svg>
+</div>
+<figcaption>Every arrow into the gate is opened by the node. The gate is the HTTP client for inbound work (requests flow gate → node → localhost server) and the HTTP server for outbound work (local client → node :7777 → gate). Two nodes never talk to each other directly.</figcaption>
+</figure>
+
+<section class="col">
+<h3>What the gate holds, and what it refuses</h3>
+<div class="grid2" style="max-width:none">
+<div class="card"><h4>Holds</h4><p>Who may call what (API keys, tunnel keys, allow lists). Task records and the ordered event log. Tunnel sessions and which replica owns each socket. Bytes it does not interpret (sealed parts, blobs over 256 KiB in a bucket). In Cloud: listings, holds, receipts.</p></div>
+<div class="card"><h4>Refuses</h4><p>To execute code. To store a private key that opens a part. To initiate a connection to a node (cancel travels inside the tunnel the node opened). To merge concurrent writes (a stale version is a 409). To route a request to a session whose key is not enrolled for that service.</p></div>
+</div>
+</section>
+
+<section class="col">
+<h2>2. How the tunnel works</h2>
+<p>The tunnel is a reverse HTTP proxy over one outbound connection. It carries ordinary HTTP/1.1 exchanges, so it does not care whether the bytes are A2A JSON-RPC, A2A HTTP+JSON or MCP Streamable HTTP. Each request from the gate is one multiplexed stream; a streaming response (SSE either protocol) stays on that stream.</p>
+</section>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 1040 520" fill="currentColor" role="img" aria-label="Tunnel handshake and one request: node opens a WebSocket to /v1/tunnel, gate sends a nonce, node signs it with its identity key and presents its enrollment, gate accepts and writes a tunnels row, yamux session opens, pings every 20 seconds; then a client request to the gate becomes one yamux stream carrying an HTTP exchange that the node forwards to its fixed localhost target and streams back." style="color:var(--fg)">
+<defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<!-- lifelines -->
+<g font-weight="500">
+<text x="120" y="30" text-anchor="middle">localhost server</text>
+<text x="360" y="30" text-anchor="middle">kontra connect</text>
+<text x="680" y="30" text-anchor="middle">gate</text>
+<text x="920" y="30" text-anchor="middle">client</text>
+</g>
+<g stroke="currentColor" stroke-dasharray="3 5" opacity=".6">
+<line x1="120" y1="44" x2="120" y2="500"/><line x1="360" y1="44" x2="360" y2="500"/><line x1="680" y1="44" x2="680" y2="500"/><line x1="920" y1="44" x2="920" y2="500"/>
+</g>
+<!-- handshake band -->
+<rect x="20" y="52" width="1000" height="22" fill="var(--accent-soft)" stroke="none"/>
+<text x="30" y="68" fill="var(--accent-ink)" font-size="11" font-weight="500">HANDSHAKE · once per connection</text>
+<g stroke="currentColor" marker-end="url(#ar2)">
+<line x1="360" y1="96" x2="676" y2="96"/>
+<line x1="680" y1="128" x2="364" y2="128"/>
+<line x1="360" y1="160" x2="676" y2="160"/>
+<line x1="680" y1="192" x2="364" y2="192"/>
+</g>
+<text x="520" y="90" text-anchor="middle">GET /v1/tunnel · Upgrade: websocket</text>
+<text x="520" y="122" text-anchor="middle">nonce</text>
+<text x="520" y="154" text-anchor="middle">sig(nonce, identity key) · key_id · enroll token (first time only)</text>
+<text x="520" y="186" text-anchor="middle">accept · tunnels(service, key_id, session_id, replica_id)</text>
+<rect x="364" y="206" width="312" height="26" rx="4" fill="var(--bg)" stroke="currentColor"/>
+<text x="520" y="224" text-anchor="middle">yamux session over the WebSocket</text>
+<text x="520" y="256" text-anchor="middle" fill="var(--fg-2)" font-size="11">ping every 20 s ↔ pong · 3 misses either side closes it · node reconnects 1–60 s jittered</text>
+<!-- request band -->
+<rect x="20" y="272" width="1000" height="22" fill="var(--data-soft)" stroke="none"/>
+<text x="30" y="288" fill="var(--data)" font-size="11" font-weight="500">ONE REQUEST · repeated per call · same shape for A2A and MCP</text>
+<g stroke="currentColor" marker-end="url(#ar2)">
+<line x1="920" y1="318" x2="684" y2="318"/>
+<line x1="680" y1="350" x2="364" y2="350"/>
+<line x1="360" y1="382" x2="124" y2="382"/>
+<line x1="120" y1="414" x2="356" y2="414"/>
+<line x1="360" y1="446" x2="676" y2="446"/>
+<line x1="680" y1="478" x2="916" y2="478"/>
+</g>
+<text x="800" y="312" text-anchor="middle">POST /agents/hello · Bearer kk_…</text>
+<text x="520" y="344" text-anchor="middle">open stream N · HTTP/1.1 request · ids already rewritten</text>
+<text x="240" y="376" text-anchor="middle">reverse proxy to the one configured target · Host rewritten</text>
+<text x="240" y="408" text-anchor="middle">response · SSE frames as they come</text>
+<text x="520" y="440" text-anchor="middle">same stream N · frames forwarded</text>
+<text x="800" y="472" text-anchor="middle">append to task_events · NOTIFY · SSE to client</text>
+<text x="360" y="508" text-anchor="middle" fill="var(--fg-2)" font-size="11">fixed-target proxy: no CONNECT, no arbitrary Host — the node is not a SOCKS proxy</text>
+</svg>
+</div>
+<figcaption>Pull and push are both true: the node opens the TCP connection, the gate is the HTTP client. A node's service name comes from its enrolled key, never from the request, so a session can only ever receive requests for what its key is bound to.</figcaption>
+</figure>
+
+<section class="col">
+<h3>Identity</h3>
+<p>On first run <code>kontra connect</code> generates one X25519 key at <code>~/.kontra/identity.key</code> (0600). The same key proves possession in the handshake and is published as a sealing recipient for every service the node hosts. Enrollment binds a <code>key_id</code> to a service name at one gate, once, using a one-time token (<code>kontra enroll &lt;service&gt;</code> on a self-hosted gate) or the account's API key (Cloud). The binding lives in that gate's <code>tunnel_keys</code> table, so one key can be enrolled at several gates and revoked at each independently. When a node hires, it additionally mints a per-job X25519 key at send time; that key is what replies are sealed to, and it is deleted when the task is terminal plus any review window.</p>
+<h3>Several replicas, several nodes</h3>
+<p>Several nodes may enroll for one service (replicas). A new task picks a connected session round-robin and stays sticky to it for its life. Under several gate replicas, the replica holding the socket is the only one that can use it; Temporal routes the dispatch to that replica through a per-replica task queue (next section). If that socket dies mid-task, the task fails with <code>tunnel_lost</code> or retries per policy; the node never learns which tasks it was serving, because it holds no task state.</p>
+</section>
+
+<section class="col">
+<h2>3. The Temporal primitive</h2>
+<p>Postgres is the task record and the replay log. Temporal is the clock and the durable dispatcher. Events never enter Temporal history: a streaming agent emits hundreds per task, and history is the wrong place for them. There is exactly one workflow type and four activities in the open-source gate.</p>
+</section>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 1040 460" fill="currentColor" role="img" aria-label="TaskLifecycle workflow on queue kontra-lifecycle schedules a dispatch activity on the per-replica queue of the replica holding the tunnel socket; dispatch streams upstream events into Postgres task_events and heartbeats every 10 seconds; NOTIFY wakes SSE subscribers who re-read from their last seq; the workflow also schedules push_webhook per event and forward_cancel on request; if the replica dies the heartbeat times out within 30 seconds and the workflow retries as attempt 2 on another session or fails the task." style="color:var(--fg)">
+<defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+<marker id="ar3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--accent)"/></marker></defs>
+<!-- workflow -->
+<rect x="20" y="30" width="300" height="130" rx="8" fill="var(--bg)" stroke="var(--accent)" stroke-width="2"/>
+<text x="32" y="52" font-weight="500" fill="var(--accent-ink)">TaskLifecycle(task_id)</text>
+<text x="32" y="70" fill="var(--fg-2)" font-size="11">workflow · queue kontra-lifecycle</text>
+<text x="32" y="94">pick session → schedule dispatch</text>
+<text x="32" y="112">wait terminal | task.timeout | cancel</text>
+<text x="32" y="130">retry (new attempt) · hooks: OnTerminal</text>
+<text x="32" y="148" fill="var(--fg-2)" font-size="11">Cloud continues: review window → settle</text>
+<!-- dispatch -->
+<rect x="400" y="30" width="300" height="130" rx="8" fill="var(--bg)" stroke="currentColor"/>
+<text x="412" y="52" font-weight="500">dispatch(task_id, attempt)</text>
+<text x="412" y="70" fill="var(--fg-2)" font-size="11">activity · queue kontra-tunnel-&lt;replica&gt;</text>
+<text x="412" y="94">upstream SendStreamingMessage</text>
+<text x="412" y="112">each event → one task_events row</text>
+<text x="412" y="130">heartbeat every 10 s · timeout 30 s</text>
+<text x="412" y="148" fill="var(--fg-2)" font-size="11">runs only on the replica holding the socket</text>
+<line x1="320" y1="95" x2="396" y2="95" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar3a)"/>
+<text x="358" y="88" text-anchor="middle" fill="var(--accent-ink)" font-size="11">schedule</text>
+<!-- other activities -->
+<rect x="780" y="30" width="240" height="56" rx="8" fill="var(--bg)" stroke="currentColor"/>
+<text x="792" y="52" font-weight="500">push_webhook(task_id, seq)</text>
+<text x="792" y="70" fill="var(--fg-2)" font-size="11">per event · 10 s timeout · retry 24 h</text>
+<rect x="780" y="104" width="240" height="56" rx="8" fill="var(--bg)" stroke="currentColor"/>
+<text x="792" y="126" font-weight="500">forward_cancel(task_id)</text>
+<text x="792" y="144" fill="var(--fg-2)" font-size="11">CancelTask upstream, inside the tunnel</text>
+<path d="M320 60 C 360 60, 360 58, 776 58" fill="none" stroke="currentColor" marker-end="url(#ar3)"/>
+<path d="M320 132 C 360 132, 360 132, 776 132" fill="none" stroke="currentColor" marker-end="url(#ar3)"/>
+<!-- postgres -->
+<rect x="400" y="220" width="300" height="100" rx="8" fill="var(--data-soft)" stroke="var(--data)"/>
+<text x="412" y="242" font-weight="500" fill="var(--data)">Postgres</text>
+<text x="412" y="262">tasks(id, state, version, snapshot)</text>
+<text x="412" y="280">task_events(task_id, seq, kind, payload)</text>
+<text x="412" y="298">attempts · tunnels · tunnel_keys</text>
+<text x="412" y="314" fill="var(--fg-2)" font-size="11">projection + event row + NOTIFY in one transaction</text>
+<line x1="550" y1="160" x2="550" y2="216" stroke="var(--data)" marker-end="url(#ar3)"/>
+<text x="556" y="192" fill="var(--data)" font-size="11">append seq = version</text>
+<!-- subscribers -->
+<rect x="780" y="220" width="240" height="100" rx="8" fill="var(--bg)" stroke="currentColor"/>
+<text x="792" y="242" font-weight="500">subscribers</text>
+<text x="792" y="262">SSE: Last-Event-ID → replay from seq+1</text>
+<text x="792" y="280">tasks/get · tasks/result (MCP)</text>
+<text x="792" y="298">push: snapshot at seq</text>
+<text x="792" y="314" fill="var(--fg-2)" font-size="11">fed from the log, never from upstream</text>
+<line x1="700" y1="270" x2="776" y2="270" stroke="var(--data)" marker-end="url(#ar3)"/>
+<text x="738" y="262" text-anchor="middle" fill="var(--data)" font-size="11">NOTIFY</text>
+<!-- failure -->
+<rect x="20" y="220" width="300" height="100" rx="8" fill="none" stroke="var(--bad)" stroke-dasharray="4 4"/>
+<text x="32" y="242" font-weight="500" fill="var(--bad)">replica or tunnel dies mid-task</text>
+<text x="32" y="262">heartbeat times out ≤ 30 s</text>
+<text x="32" y="280">no upstream taskId yet → attempt n+1</text>
+<text x="32" y="298">upstream taskId exists → failed: tunnel_lost</text>
+<text x="32" y="314" fill="var(--fg-2)" font-size="11">the agent's state is the agent's</text>
+<line x1="170" y1="220" x2="170" y2="164" stroke="var(--bad)" marker-end="url(#ar3)"/>
+<!-- a2a-go -->
+<rect x="20" y="360" width="1000" height="80" rx="8" fill="var(--bg)" stroke="currentColor" stroke-dasharray="3 3"/>
+<text x="32" y="382" font-weight="500">a2a-go v2 cluster mode · three interfaces Kontra implements, nothing hand-rolled</text>
+<text x="32" y="404"><tspan fill="var(--data)">taskstore.Store</tspan> — Postgres, versioned Update (409 on conflict)   <tspan fill="var(--data)">eventqueue.Puller</tspan> — cursor replay from task_events   <tspan fill="var(--data)">workqueue.Queue</tspan> — Temporal-backed: Write starts/signals TaskLifecycle, Execute runs dispatch</text>
+<text x="32" y="426" fill="var(--fg-2)" font-size="11">plus NewSignedCardProducer, JWKS verification, SSRF-aware push, a2acompat for 0.2/0.3 cards</text>
+</svg>
+</div>
+<figcaption>Per-replica task queues are what let several gate replicas and several tunnels coexist: the socket lives on one replica, and Temporal routes the work to it. Retries apply only before the first upstream event with a task id; after that the agent's state is unrecoverable from outside and the task fails rather than duplicating work.</figcaption>
+</figure>
+
+<section class="col">
+<p>The same primitive serves MCP without change. A task-augmented <code>tools/call</code> is a <code>TaskLifecycle</code>; <code>tasks/get</code> reads the projection; <code>tasks/result</code> blocks on <code>LISTEN</code> until terminal; <code>notifications/tasks/status</code> is one more subscriber. The only MCP-specific piece is in the dispatch activity: it polls the upstream server's own <code>tasks/get</code> at its <code>pollInterval</code> instead of consuming an A2A stream.</p>
+</section>
+
+<section class="col">
+<h2>4. Tunneling A2A servers</h2>
+<p>Unchanged from the PRD; summarized so the MCP section can be read against it.</p>
+<div class="tbl"><table>
+<tr><th>Concern</th><th>How the gate handles it</th></tr>
+<tr><td>Route</td><td><code>{public_url}/agents/{name}</code>, JSON-RPC and HTTP+JSON; gRPC later.</td></tr>
+<tr><td>Card</td><td>Fetched through the tunnel, seller signature verified and kept, exactly five fields rewritten (interfaces, security, push, extensions, signatures), re-signed with the gate's ES256 key.</td></tr>
+<tr><td>Ids</td><td>Gate mints <code>task_id</code>/<code>context_id</code>; every relayed event is rewritten; upstream ids live only in <code>attempts</code>.</td></tr>
+<tr><td>Streaming</td><td>Upstream SSE → one <code>task_events</code> row per event → client SSE resumable from <code>Last-Event-ID</code>.</td></tr>
+<tr><td>Follow-ups</td><td><code>input-required</code> replies go to the same upstream task over the same session (sticky).</td></tr>
+<tr><td>Sealing</td><td>With <code>sealed: true</code>, every Part is an <code>age</code> envelope bound to task and context ids; the node unseals inbound and reseals outbound; the gate stores what it cannot open.</td></tr>
+<tr><td>Extensions</td><td><code>escrow/v1</code> (Cloud), <code>sealed/v1</code>, <code>input-schema/v1</code>, and A2UI passed through as DataParts.</td></tr>
+</table></div>
+</section>
+
+<section class="col">
+<h2>5. Tunneling MCP servers</h2>
+<p>MCP servers are the second kind of thing a node can host. The case for putting them behind the gate is the same as for agents, with one extra push: MCP over Streamable HTTP is now deployed widely, often on hosts that were never meant to accept inbound connections and with auth bolted on per server. Behind the tunnel the server listens on nothing public; the gate does bearer auth, allow lists, limits and audit once, for every server.</p>
+<p>What differs from A2A is the session model. A2A is task-shaped; MCP is session-shaped (<code>Mcp-Session-Id</code>) with request/response tool calls, plus an experimental task shape since the 2025-11-25 spec. The gate maps each onto the primitive it already has.</p>
+</section>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 1040 420" fill="currentColor" role="img" aria-label="Side by side: an A2A call and an MCP call through the same gate and the same tunnel. A2A: message/stream creates a gate task, TaskLifecycle, events in Postgres, SSE resume. MCP plain tools/call: Mcp-Session-Id pinned to one tunnel session, request forwarded, response returned, no Temporal. MCP task-augmented tools/call: gate mints a task, TaskLifecycle, dispatch polls upstream tasks/get, client polls gate tasks/get or blocks on tasks/result." style="color:var(--fg)">
+<defs><marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<!-- columns headers -->
+<g font-weight="500">
+<text x="180" y="28" text-anchor="middle">A2A · message/stream</text>
+<text x="520" y="28" text-anchor="middle">MCP · tools/call (plain)</text>
+<text x="860" y="28" text-anchor="middle">MCP · tools/call + task</text>
+</g>
+<g fill="var(--fg-2)" font-size="11">
+<text x="180" y="46" text-anchor="middle">/agents/{name}</text>
+<text x="520" y="46" text-anchor="middle">/mcp/{name}</text>
+<text x="860" y="46" text-anchor="middle">/mcp/{name} · params.task</text>
+</g>
+<!-- shared rows labels -->
+<g fill="var(--fg-2)" font-size="11">
+<text x="20" y="84">auth · policy</text>
+<text x="20" y="150">identity</text>
+<text x="20" y="216">durability</text>
+<text x="20" y="282">transport</text>
+<text x="20" y="348">sealing</text>
+</g>
+<!-- row 1: identical -->
+<rect x="80" y="64" width="940" height="36" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="550" y="87" text-anchor="middle">Bearer API key → allow list on the service → in-flight and body caps → audit row. Identical for all three.</text>
+<!-- row 2: identity -->
+<rect x="80" y="130" width="200" height="36" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="180" y="153" text-anchor="middle">gate task_id · context_id</text>
+<rect x="420" y="130" width="200" height="36" rx="6" fill="var(--bg)" stroke="var(--accent)"/>
+<text x="520" y="153" text-anchor="middle">Mcp-Session-Id ↔ tunnel session</text>
+<rect x="760" y="130" width="200" height="36" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="860" y="153" text-anchor="middle">gate taskId · upstream taskId</text>
+<!-- row 3: durability -->
+<rect x="80" y="196" width="200" height="36" rx="6" fill="var(--data-soft)" stroke="var(--data)"/>
+<text x="180" y="219" text-anchor="middle" fill="var(--data)">TaskLifecycle · event log</text>
+<rect x="420" y="196" width="200" height="36" rx="6" fill="var(--bg)" stroke="currentColor" stroke-dasharray="3 3"/>
+<text x="520" y="219" text-anchor="middle" fill="var(--fg-2)">none · pass-through, sticky</text>
+<rect x="760" y="196" width="200" height="36" rx="6" fill="var(--data-soft)" stroke="var(--data)"/>
+<text x="860" y="219" text-anchor="middle" fill="var(--data)">TaskLifecycle · same workflow</text>
+<!-- row 4: transport -->
+<rect x="80" y="262" width="200" height="36" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="180" y="285" text-anchor="middle">SSE · Last-Event-ID resume</text>
+<rect x="420" y="262" width="200" height="36" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="520" y="285" text-anchor="middle">POST + SSE · GET stream</text>
+<rect x="760" y="262" width="200" height="36" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="860" y="285" text-anchor="middle">tasks/get · tasks/result blocks</text>
+<!-- row 5: sealing -->
+<rect x="80" y="328" width="200" height="36" rx="6" fill="var(--bg)" stroke="currentColor"/>
+<text x="180" y="351" text-anchor="middle">every Part · stock clients fine</text>
+<rect x="420" y="328" width="540" height="36" rx="6" fill="var(--bg)" stroke="currentColor" stroke-dasharray="3 3"/>
+<text x="690" y="351" text-anchor="middle" fill="var(--fg-2)">arguments and content · only when both ends run kontra connect (stock MCP clients see no envelope)</text>
+<!-- bottom -->
+<rect x="80" y="380" width="940" height="30" rx="6" fill="var(--accent-soft)" stroke="none"/>
+<text x="550" y="400" text-anchor="middle" fill="var(--accent-ink)" font-size="11">one tunnel · one yamux stream per HTTP exchange · the node forwards to a fixed localhost target in every column</text>
+</svg>
+</div>
+<figcaption>The difference the reader is choosing between: plain MCP calls get the tunnel, auth, policy and session affinity but no Temporal, because there is no task to make durable; task-augmented calls get the whole primitive, unchanged. A2A always gets it.</figcaption>
+</figure>
+
+<section class="col">
+<h3>Route and session affinity</h3>
+<p>The gate serves <code>{public_url}/mcp/{name}</code> as a Streamable HTTP MCP endpoint. <code>initialize</code> is forwarded; the gate records the upstream's <code>Mcp-Session-Id</code>, issues its own to the client, and pins the pair to the tunnel session it chose. Every later request with that id goes to the same node. If the session's tunnel dies, the gate returns 404 for that <code>Mcp-Session-Id</code> as the transport spec requires, and the client re-initializes; it lands on another replica if one is connected. For plain <code>tools/call</code> that is the whole story: the gate is a reverse proxy with auth and policy, and the node is a fixed-target forwarder.</p>
+<h3>Durable tool calls</h3>
+<p>When the upstream server declares <code>capabilities.tasks.requests.tools.call</code> and the client sends <code>params.task</code>, the gate owns the task. It answers with its own <code>CreateTaskResult</code> immediately, starts <code>TaskLifecycle</code>, and the dispatch activity forwards the task-augmented call upstream, then polls the upstream's <code>tasks/get</code> at its <code>pollInterval</code>, writing each status change as a <code>task_events</code> row. Client <code>tasks/get</code> reads the projection; <code>tasks/result</code> blocks on <code>LISTEN</code> until terminal and then forwards the upstream <code>tasks/result</code>; <code>tasks/cancel</code> is <code>forward_cancel</code>. The <code>io.modelcontextprotocol/related-task</code> metadata is rewritten to the gate's id the same way A2A ids are. Gate replica death, tunnel reconnect and client reconnect all behave as in section 3.</p>
+<div class="note">MCP Tasks are marked experimental in the 2025-11-25 spec and a SEP proposes moving them to an extension. Pin the spec version the gate speaks, as with the A2A TCK commit, and treat the task path as a capability the gate advertises only when the upstream does.</div>
+<h3>stdio servers</h3>
+<p>Most MCP servers people run locally are stdio processes. The node can own one: <code>--serve mcp:fs=stdio:npx -y @modelcontextprotocol/server-filesystem ~/docs</code> spawns it and bridges to the Streamable HTTP the tunnel carries. The gate never knows; it sees an HTTP target like any other.</p>
+<h3>Policy per tool</h3>
+<p><code>allow:</code> stays the question "who may call this service". A second, optional list narrows which tools a principal may call: <code>tools: { allow: ["read_*"], deny: ["delete_*"] }</code>, matched on <code>tools/call.params.name</code> before dispatch, and applied to <code>tools/list</code> so denied tools are not advertised. A2A has no equivalent because skills are not callable units; the card is relayed whole.</p>
+<h3>What the marketplace sells</h3>
+<p>A listing gets a <code>kind: a2a | mcp</code>. The quote semantics differ: an agent is quoted per task; an MCP server is quoted per task-augmented call, or per session when it only offers plain calls. Escrow attaches only where there is a task to hold against, so a plain-call MCP listing is either free or metered later (the <code>rails</code> slot), not escrowed. That is a Cloud concern and does not touch the gate.</p>
+</section>
+
+<section class="col">
+<h2>6. Syntax: no Kontra protocol, standard bindings</h2>
+<p>The decision under the prototypes was whether Kontra needs a wire protocol of its own. It does not, and every attempt at one (the v3 engine Protocol, the pull/lease sketch) was dropped for the same reason: a bespoke protocol means an SDK, and an SDK means sellers write Kontra code. With A2A and MCP as the only two protocols the gate speaks, an unmodified server and a stock client work on day one, and everything Kontra adds rides in the extension slots those protocols already have: A2A <code>capabilities.extensions</code> and <code>metadata</code>, MCP <code>capabilities</code> and <code>_meta</code>.</p>
+</section>
+
+<div class="tbl" style="max-width:1120px"><table>
+<tr><th>Layer</th><th>A2A</th><th>MCP</th><th>Through the tunnel</th><th>Status</th></tr>
+<tr><td>Message syntax</td><td>JSON-RPC 2.0</td><td>JSON-RPC 2.0</td><td>bytes, uninterpreted</td><td>v4</td></tr>
+<tr><td>HTTP binding</td><td>JSON-RPC over POST; HTTP+JSON REST</td><td>Streamable HTTP: POST, optional SSE, GET stream; legacy HTTP+SSE for 2024-11 clients</td><td>one yamux stream per exchange, SSE on the same stream</td><td>v4</td></tr>
+<tr><td>Streaming</td><td>SSE with <code>Last-Event-ID</code></td><td>SSE; <code>tasks/result</code> long-poll</td><td>frames forwarded as produced</td><td>v4</td></tr>
+<tr><td>gRPC</td><td>A2A gRPC binding</td><td>none in spec</td><td>needs HTTP/2 inside a yamux stream (h2c), or gRPC-Web at the gate</td><td>later</td></tr>
+<tr><td>stdio</td><td>none</td><td>common for local servers</td><td>node bridges stdio ↔ Streamable HTTP; gate unaware</td><td>v4</td></tr>
+<tr><td>Tunnel transport</td><td colspan="2">—</td><td>WebSocket upgrade on <code>/v1/tunnel</code>, hashicorp/yamux inside, HTTP/1.1 per stream</td><td>v4</td></tr>
+<tr><td>Kontra's additions</td><td><code>escrow/v1</code>, <code>sealed/v1</code>, <code>input-schema/v1</code> as extensions; A2UI passed through</td><td>sealing on <code>arguments</code>/<code>content</code> when both ends are nodes; <code>_meta["kontra.*"]</code> for escrow state</td><td>—</td><td>v4 / Cloud</td></tr>
+</table></div>
+
+<section class="col">
+<p>gRPC is the one binding the tunnel does not carry for free. yamux streams carry HTTP/1.1; gRPC needs HTTP/2. Two routes when it is wanted: terminate gRPC at the gate and speak JSON-RPC upstream (the gate is already a protocol translator for cards), or run h2c inside a yamux stream, which hashicorp/yamux permits but a2a-go's client would need to be told to use. Neither changes a node's setup, so it stays deferred.</p>
+
+<h3>What a node runs</h3>
+<pre><code><span class="c"># host one A2A agent and one stdio MCP server, hire through localhost:7777</span>
+kontra connect --gate https://gateway.kontra.sh \
+  --serve a2a:hello=http://localhost:9999 \
+  --serve mcp:fs=stdio:npx -y @modelcontextprotocol/server-filesystem ~/docs \
+  --console          <span class="c"># http://localhost:7778</span>
+
+<span class="c"># a second gate, same identity key, enrolled separately</span>
+kontra connect --gate https://gate.team.internal --serve mcp:fs=http://localhost:8000
+
+<span class="c"># only hiring: no --serve; the catalog appears on localhost:7777</span>
+kontra connect --gate https://gateway.kontra.sh</code></pre>
+
+<h3>What a gate operator writes</h3>
+<pre><code>listen: :8080
+public_url: https://gate.team.internal
+signing_key: file:./kontra.key
+tls: { acme: { email: ops@team.internal } }
+limits: { body: 4MiB, inflight_per_key: 32, rps_per_ip: 50 }
+temporal: { address: localhost:7233, namespace: kontra }
+postgres: postgres://kontra@db/kontra
+
+services:
+  hello:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: [ "key:team-*" ]
+    sealed: true
+    task: { timeout: 2h, retries: 2 }
+  fs:
+    kind: mcp
+    backend: { tunnel: {} }
+    allow: [ "key:team-*" ]
+    tools: { allow: ["read_*", "list_*"], deny: ["delete_*"] }
+    tasks: passthrough        <span class="c"># durable | passthrough | off</span>
+  triage:
+    kind: a2a
+    backend: { a2a: { url: https://triage.internal:9000, allow_private: true } }
+    allow: [ "org:team" ]</code></pre>
+<p><code>services:</code> replaces <code>agents:</code>; the only new keys are <code>kind</code>, <code>tools</code> and <code>tasks</code>. In Cloud the block is empty and services come from the database.</p>
+
+<h3>What a client does</h3>
+<pre><code><span class="c"># stock A2A client, via the node</span>
+a2a send http://localhost:7777/agents/acme/hello "hi"
+
+<span class="c"># stock MCP client config, via the node (sealing and per-job keys handled there)</span>
+{ "mcpServers": { "fs": { "url": "http://localhost:7777/mcp/acme/fs" } } }
+
+<span class="c"># or straight at the gate with a bearer, no node (no sealing)</span>
+{ "mcpServers": { "fs": { "url": "https://gateway.kontra.sh/mcp/acme/fs",
+                          "headers": { "Authorization": "Bearer kk_…" } } } }</code></pre>
+</section>
+
+<section class="col">
+<h2>7. What this changes in the v4 PRD</h2>
+<div class="tbl"><table>
+<tr><th>Section</th><th>Change</th></tr>
+<tr><td>§3 Roles</td><td>Buyer and Seller become hats a <b>node</b> wears per request, not identities. Add <b>Service</b> (an A2A agent or MCP server behind a node) and retire Agent as the only hosted thing.</td></tr>
+<tr><td>§4 Architecture</td><td>Topology diagram above replaces the one-gate-two-sidecars figure.</td></tr>
+<tr><td>§6 Tunnel</td><td>Mechanics unchanged. <code>--to</code> becomes repeatable <code>--serve kind:name=target</code>; add the stdio bridge. Identity key file renamed from <code>tunnel.key</code> to <code>identity.key</code>.</td></tr>
+<tr><td>§8 Sealing</td><td>Key table collapses to: one identity key per node (handshake + hosting recipient), one per-job key per hire. Add the MCP sealing scope (<code>arguments</code>, <code>content</code>) and its both-ends-nodes condition.</td></tr>
+<tr><td>§9 Extensions</td><td>Add the MCP mirrors: escrow state under <code>_meta["kontra.escrow"]</code>; sealed as a declared server capability.</td></tr>
+<tr><td>§10 Data model</td><td><code>agents</code> → <code>services(kind, …)</code>; add <code>mcp_sessions(client_sid, upstream_sid, tunnel_session, service)</code>; <code>tasks.protocol</code> column.</td></tr>
+<tr><td>§11 CLI</td><td><code>kontra tunnel</code> and <code>kontra proxy</code> merge into <code>kontra connect</code>; <code>--console</code> on it; <code>kontra dev</code> unchanged.</td></tr>
+<tr><td>§12 Security</td><td>Add tests: <code>mcp_session_cross_node</code> (session id from node A presented to node B's service → 404), <code>mcp_tool_denied</code> (denied tool absent from <code>tools/list</code>, call rejected before dispatch), <code>mcp_task_resume</code> (gate replica killed during a task-augmented call; <code>tasks/result</code> still returns).</td></tr>
+<tr><td>§13 OSS vs Cloud</td><td>MCP hosting is in both. Listings gain <code>kind</code>; escrow applies only to task-augmented MCP calls.</td></tr>
+<tr><td>§15 Acceptance</td><td>README demo adds one line: a stdio filesystem server hosted and called through the gate from a stock MCP client.</td></tr>
+</table></div>
+
+<h2>8. Open questions</h2>
+<ul>
+<li>Name of the merged subcommand: <code>kontra connect</code> (used here) or <code>kontra node</code>.</li>
+<li>Should the gate advertise MCP Tasks to clients when the upstream does not, running the task-augmented shape itself over a plain upstream call? It would make every tool call durable, at the cost of the gate holding results. Default here: no, mirror the upstream.</li>
+<li>Session affinity on tunnel loss: re-initialize (spec-correct, loses in-flight state) or hold the client session for a grace period while the node reconnects with the same key. Default here: 404, let the client re-initialize.</li>
+<li>Whether the per-tool <code>tools:</code> list belongs in <code>allow:</code> syntax (<code>key:team-*:tools/read_*</code>) or stays a sibling key as drawn.</li>
+<li>gRPC: terminate at gate or h2c-in-yamux. Deferred until someone needs it.</li>
+</ul>
+
+<p class="c" style="margin-top:40px;font-size:13.5px">Sources: <a href="https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks">MCP Tasks (2025-11-25)</a> · <a href="https://modelcontextprotocol.io/seps/2663-tasks-extension">SEP-2663 tasks extension</a> · <a href="https://a2a-protocol.org/dev/specification/">A2A specification</a> · <a href="https://github.com/a2aproject/a2a-go">a2a-go</a> · <a href="https://a2ui.org/specification/v1.0-a2ui-extension-specification/">A2UI A2A extension</a> · Kontra v4 PRD (Claude Doc, 21 Oct 2026).</p>
+</section>
+</div>
+
+</body>
+</html>

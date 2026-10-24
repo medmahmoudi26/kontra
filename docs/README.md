@@ -1,0 +1,42 @@
+# Kontra design documents
+
+Three documents, written in order. The later one wins where they disagree. The PRD is the base;
+the two architecture notes correct it after the prototypes of 21–24 October 2026.
+
+| Document | Date | What it settles |
+|---|---|---|
+| [`prd-v4.md`](prd-v4.md) | 21 Oct | Kontra as a durable A2A gateway on a2a-go v2 and Temporal. Relay semantics (ids, attempts, stickiness, retries, cancel), sealing envelope, the three extensions, data model, security model, OSS vs Cloud, milestones M0–M5, acceptance tests, kill list for v3. |
+| [`architecture/01-tunnel-and-protocols.html`](architecture/01-tunnel-and-protocols.html) | 24 Oct | **One node type**: no buyer sidecar and no seller sidecar, one `kontra connect` that hosts and hires. **Membership is which gate you dial.** One identity key per node, enrolled per gate, plus per-job keys. **MCP servers tunnel next to A2A agents**: `/mcp/{name}`, session affinity for plain calls, the same `TaskLifecycle` for task-augmented calls (MCP Tasks, 2025-11-25). Per-tool allow lists. No Kontra wire protocol; standard bindings only. `services:` replaces `agents:`. |
+| [`architecture/02-deployment-topology.html`](architecture/02-deployment-topology.html) | 24 Oct | **Only the CLI runs on a user's machine.** Gates are clusters: `gateway.kontra.sh` (Cloud) or a team's own (Helm or a three-container compose). `kontra dev` is deleted; anonymous ephemeral sessions on the public gate are how people try it. One Go module, two binaries: `kontra` and `kontra-gate`. |
+
+## Section map: what the notes change in the PRD
+
+| PRD section | Note 1 (tunnel and protocols) | Note 2 (deployment) |
+|---|---|---|
+| §3 Roles | Buyer/Seller are hats a node wears per request; add **Service** (A2A agent or MCP server behind a node) | — |
+| §4 Architecture | Topology figure replaced | "One binary" → one module, two binaries |
+| §6 Tunnel | `--to` → repeatable `--serve kind:name=target`; stdio bridge; `tunnel.key` → `identity.key` | — |
+| §8 Sealing | Key table collapses to identity key + per-job key; MCP scope (`arguments`, `content`), both-ends-nodes condition | — |
+| §9 Extensions | MCP mirrors: `_meta["kontra.escrow"]`, sealed as a server capability | — |
+| §10 Data model | `agents` → `services(kind, …)`; `mcp_sessions`; `tasks.protocol` | Embedded-Temporal paragraph and localhost-only rule removed; anonymous tenants with expiry |
+| §11 CLI | `kontra tunnel` + `kontra proxy` → `kontra connect`; `--console` on it | Two tables: `kontra` (connect, console, login, seal, publish) and `kontra-gate` (serve, enroll, migrate); `kontra dev` deleted |
+| §12 Security | Tests `mcp_session_cross_node`, `mcp_tool_denied`, `mcp_task_resume` | Anonymous-session abuse controls, test `anon_limits` |
+| §13 OSS vs Cloud | MCP hosting in both; listings gain `kind`; escrow only on task-shaped MCP calls | Cloud gains anonymous and free tiers; OSS gains Helm/compose team gate |
+| §14 Milestones | — | M4 → anonymous sessions + team-gate compose |
+| §15 Acceptance | README demo gains a stdio MCP server through the gate | Demo loses its gate terminal; add "team gate from compose on a clean VPS" |
+
+## Pricing (decided 25 Oct, in the Cloud repository's console issue; recorded here for the extension specs)
+
+Three price shapes on a listing, matching the three request shapes the gate distinguishes:
+
+- `per_task` — A2A tasks and task-augmented MCP calls. Quote held at admission, released after the
+  review window, refunded on dispute or failure. The escrow extension, unchanged.
+- `per_call` — plain MCP `tools/call`, gate-metered on non-error results (tool name, bytes,
+  duration and `isError` are outside the sealed content). Prices per tool, attached to
+  `tools/list` as `_meta["kontra.price"]`. Invoiced monthly through Stripe Billing; Kontra holds no
+  balance.
+- `per_session` — per `Mcp-Session-Id`, metered and invoiced the same way.
+
+Open: whether the gate should fabricate task-augmented calls over a plain upstream so every tool
+call is durable (default: no, mirror the upstream); session affinity on tunnel loss (default: 404,
+client re-initializes); gRPC through the tunnel (deferred).
