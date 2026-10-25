@@ -5,12 +5,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/a2ahttp"
-	"github.com/medmahmoudi26/kontra/internal/config"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/tenant"
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/a2ahttp"
+	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/unimpl"
 )
 
 // TeamTenant is the slug of a team gate's one tenant.

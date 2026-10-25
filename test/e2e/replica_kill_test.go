@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/test/e2e/slowagent"
+	"kontra.sh/kontra/test/e2e/slowagent"
 )
 
 // TestReplicaKillDirect is replica_kill, direct-backend variant (spec/relay.md §6.4, §14.2, §16; D42), the

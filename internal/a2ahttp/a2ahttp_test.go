@@ -17,14 +17,14 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/auth"
-	"github.com/medmahmoudi26/kontra/internal/card"
-	"github.com/medmahmoudi26/kontra/internal/edge"
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/relay"
-	"github.com/medmahmoudi26/kontra/internal/sse"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/card"
+	"kontra.sh/kontra/internal/edge"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/relay"
+	"kontra.sh/kontra/internal/sse"
+	"kontra.sh/kontra/internal/store"
 )
 
 var tenantID = uuid.MustParse("0192f0b4-0000-7000-8000-0000000000ee")

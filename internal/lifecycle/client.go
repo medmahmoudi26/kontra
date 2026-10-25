@@ -15,7 +15,7 @@ import (
 	tlog "go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
 
-	"github.com/medmahmoudi26/kontra/internal/ids"
+	"kontra.sh/kontra/internal/ids"
 )
 
 // AcceptWait is how long the gate waits for a kontra-lifecycle worker to accept an Update; a timeout is

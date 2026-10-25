@@ -25,7 +25,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
+	"kontra.sh/kontra/internal/config"
 )
 
 // testCA is a throwaway certificate authority.

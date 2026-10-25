@@ -18,7 +18,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/store"
 )
 
 var (

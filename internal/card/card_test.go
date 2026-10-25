@@ -19,7 +19,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
-	"github.com/medmahmoudi26/kontra/internal/upstream"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden served cards in testdata")

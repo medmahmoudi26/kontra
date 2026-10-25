@@ -1,5 +1,5 @@
-// Module path provisional until the owner decides D48 (docs/decisions.md): nothing is published under it.
-module github.com/medmahmoudi26/kontra
+// Module path kontra.sh/kontra (D48, decided by the owner 25 Oct): https://kontra.sh/kontra?go-get=1 points at this repository.
+module kontra.sh/kontra
 
 go 1.26.0
 

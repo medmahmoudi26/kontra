@@ -16,8 +16,8 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/store"
 )
 
 const (

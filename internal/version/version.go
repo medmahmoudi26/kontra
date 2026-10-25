@@ -7,7 +7,7 @@ import (
 	"runtime/debug"
 )
 
-// Version is set at link time: -ldflags "-X github.com/medmahmoudi26/kontra/internal/version.Version=<v>".
+// Version is set at link time: -ldflags "-X kontra.sh/kontra/internal/version.Version=<v>".
 // It is written to gate_replicas.version and the tunnel hello (spec/tunnel.md).
 var Version = "dev"
 

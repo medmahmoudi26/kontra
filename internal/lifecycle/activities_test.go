@@ -16,10 +16,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/temporal"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/temporaltest"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/temporaltest"
 )
 
 func TestMain(m *testing.M) {

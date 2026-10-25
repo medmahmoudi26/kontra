@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Sweep intervals: orphans once a minute (spec §14.5, tasks older than 2 minutes in submitted or quoted

@@ -33,7 +33,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 
-	"github.com/medmahmoudi26/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/ssrf"
 )
 
 // Upstream limits (spec §6.6). Exceeding one fails the exchange upstream_error (service_unavailable for a

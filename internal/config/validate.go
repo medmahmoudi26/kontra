@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/internal/pg"
+	"kontra.sh/kontra/internal/pg"
 )
 
 func sortedKeys[V any](m map[string]V) []string {

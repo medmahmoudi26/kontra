@@ -12,7 +12,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/ids"
+	"kontra.sh/kontra/internal/ids"
 )
 
 // TaskWaker wakes a reader when the log of a task may have grown. pg.Listener implements it: the

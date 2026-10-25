@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/test/e2e/slowagent"
+	"kontra.sh/kontra/test/e2e/slowagent"
 )
 
 // TestRelayResume is relay_resume (spec/relay.md §9, §16; PRD §15): the buyer's SSE is cut at a random

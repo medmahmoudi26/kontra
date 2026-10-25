@@ -17,10 +17,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/push"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/upstream"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/push"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 // Backends resolves a service's backend and upstream card info for dispatch and forward_cancel. The

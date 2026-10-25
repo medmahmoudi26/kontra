@@ -15,7 +15,7 @@ import (
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
+	"kontra.sh/kontra/internal/config"
 )
 
 // CertCache is the ACME certificate cache, the shape of autocert.Cache: Get returns ErrCacheMiss for a

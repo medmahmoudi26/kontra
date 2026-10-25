@@ -25,17 +25,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/auth"
-	"github.com/medmahmoudi26/kontra/internal/card"
-	"github.com/medmahmoudi26/kontra/internal/edge"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/pg"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
-	"github.com/medmahmoudi26/kontra/internal/relay"
-	"github.com/medmahmoudi26/kontra/internal/sse"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/temporaltest"
-	"github.com/medmahmoudi26/kontra/internal/upstream"
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/card"
+	"kontra.sh/kontra/internal/edge"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/pg"
+	"kontra.sh/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/relay"
+	"kontra.sh/kontra/internal/sse"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/temporaltest"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 // TestMain stops the Temporal development server the real-stack test started.

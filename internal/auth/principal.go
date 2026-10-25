@@ -20,7 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
+	"kontra.sh/kontra/internal/config"
 )
 
 // Via is how the principal arrived (spec §2.3); the hooks receive it.

@@ -10,8 +10,8 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Worker defaults (spec §14.2, §14.3, §17).

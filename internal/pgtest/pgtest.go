@@ -21,8 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/migrate"
-	"github.com/medmahmoudi26/kontra/internal/pg"
+	"kontra.sh/kontra/internal/migrate"
+	"kontra.sh/kontra/internal/pg"
 )
 
 // Env is the variable naming the test server, a postgres:// URL with rights to create databases.

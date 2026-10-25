@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
+	"kontra.sh/kontra/internal/config"
 )
 
 // capListener enforces the connection caps of spec §2.2 and D73 and reads PROXY protocol headers (D69).

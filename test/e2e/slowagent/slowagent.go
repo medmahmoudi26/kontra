@@ -14,7 +14,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Config shapes the agent.

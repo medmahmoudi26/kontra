@@ -13,8 +13,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"go.temporal.io/sdk/client"
 
-	"github.com/medmahmoudi26/kontra/internal/edge"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/edge"
+	"kontra.sh/kontra/internal/lifecycle"
 )
 
 // temporalDown is the error the lifecycle client returns for a follow-up's Update when Temporal is

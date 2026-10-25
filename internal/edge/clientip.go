@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
+	"kontra.sh/kontra/internal/config"
 )
 
 // ClientIP is edge.client_ip (spec §2.2, D69): where rps_per_ip and conns_per_ip take a client's address.

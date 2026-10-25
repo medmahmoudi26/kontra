@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sys/unix"
 
-	"github.com/medmahmoudi26/kontra/internal/pg"
+	"kontra.sh/kontra/internal/pg"
 )
 
 // checkClientSocket reads the options pg's dialer set on a pooled connection's TCP socket.

@@ -22,10 +22,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
-	"github.com/medmahmoudi26/kontra/internal/ssrf"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/store"
 )
 
 var (

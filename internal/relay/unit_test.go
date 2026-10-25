@@ -12,9 +12,9 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/store"
 )
 
 const (

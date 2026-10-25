@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/pgtest"
 )
 
 // env is one fresh migrated database with a tenant and a service.

@@ -15,7 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	a2apush "github.com/a2aproject/a2a-go/v2/a2asrv/push"
 
-	"github.com/medmahmoudi26/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/ssrf"
 )
 
 // countingListener accepts on 127.0.0.1 and counts connections, to show that a refused URL is never

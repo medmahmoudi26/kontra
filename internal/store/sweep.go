@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/unimpl"
 )
 
 // DeleteExpired deletes up to limit terminal tasks past retention_until, with their task_events,

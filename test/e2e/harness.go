@@ -15,8 +15,8 @@ import (
 	"encoding/json"
 	"os/exec"
 
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
-	"github.com/medmahmoudi26/kontra/test/e2e/slowagent"
+	"kontra.sh/kontra/internal/unimpl"
+	"kontra.sh/kontra/test/e2e/slowagent"
 )
 
 // Options configure a harness.

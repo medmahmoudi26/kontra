@@ -39,11 +39,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/net/http/httpguts"
 
-	"github.com/medmahmoudi26/kontra/internal/auth"
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/ssrf"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/store"
 )
 
 // Limits on configs (spec §10.1); beyond them, InvalidParams.

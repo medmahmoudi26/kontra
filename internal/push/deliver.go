@@ -20,11 +20,11 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/ssrf"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/version"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/version"
 )
 
 // Delivery rules (spec §10.2, D16, D72).

@@ -5,7 +5,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
+	"kontra.sh/kontra/internal/config"
 )
 
 // AllowList is a parsed services.<name>.allow (spec §2.3, D20): deny by default; entries key:<prefix glob>,

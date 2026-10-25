@@ -3,7 +3,7 @@ package lifecycle
 import (
 	"time"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/hooks"
 )
 
 // Input is the workflow's start input (spec §14.1): everything it branches on comes from here or from

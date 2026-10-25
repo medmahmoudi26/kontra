@@ -19,7 +19,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/lifecycle"
 )
 
 // dbBlip is what a2a-go reports when its read of the task fails after Write: its own wrapping of a

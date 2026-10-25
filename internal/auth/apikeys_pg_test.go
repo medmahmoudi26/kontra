@@ -17,10 +17,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/audit"
-	"github.com/medmahmoudi26/kontra/internal/pg"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
-	"github.com/medmahmoudi26/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/audit"
+	"kontra.sh/kontra/internal/pg"
+	"kontra.sh/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/tenant"
 )
 
 type pgEnv struct {

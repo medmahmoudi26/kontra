@@ -25,14 +25,14 @@ import (
 
 	"github.com/pressly/goose/v3"
 
-	"github.com/medmahmoudi26/kontra/internal/auth"
-	"github.com/medmahmoudi26/kontra/internal/config"
-	"github.com/medmahmoudi26/kontra/internal/gate"
-	"github.com/medmahmoudi26/kontra/internal/migrate"
-	"github.com/medmahmoudi26/kontra/internal/obs"
-	"github.com/medmahmoudi26/kontra/internal/pg"
-	"github.com/medmahmoudi26/kontra/internal/tenant"
-	"github.com/medmahmoudi26/kontra/internal/version"
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/gate"
+	"kontra.sh/kontra/internal/migrate"
+	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/pg"
+	"kontra.sh/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/version"
 )
 
 const usage = `usage:

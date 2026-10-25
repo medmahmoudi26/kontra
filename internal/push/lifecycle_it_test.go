@@ -19,9 +19,9 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/temporaltest"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/temporaltest"
 )
 
 // TestMain stops the Temporal development server the lifecycle tests started.

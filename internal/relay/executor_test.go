@@ -20,10 +20,10 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/card"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/upstream"
+	"kontra.sh/kontra/internal/card"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 // spoofer streams a task whose metadata at every level claims gate and operator keys.

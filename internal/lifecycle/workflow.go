@@ -11,9 +11,9 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/store"
 )
 
 // Activity timings (spec §6.2, §8, §10.2, §13.3, §14.2).

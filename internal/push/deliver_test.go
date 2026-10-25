@@ -18,9 +18,9 @@ import (
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/testsuite"
 
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/ssrf"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/store"
 )
 
 var activityOpts = activity.RegisterOptions{Name: lifecycle.ActPushWebhook}

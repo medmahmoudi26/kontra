@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/medmahmoudi26/kontra/internal/version"
+	"kontra.sh/kontra/internal/version"
 )
 
 func main() {

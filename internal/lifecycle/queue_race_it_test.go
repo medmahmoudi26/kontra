@@ -13,8 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/temporaltest"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/temporaltest"
 )
 
 // fakeSaver is internal/push's inline save for these tests: one push_configs row per (task, URL).

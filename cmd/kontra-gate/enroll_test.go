@@ -13,9 +13,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/audit"
-	"github.com/medmahmoudi26/kontra/internal/auth"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/audit"
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/pgtest"
 )
 
 func runSplit(t *testing.T, args ...string) (stdout, stderr string, err error) {

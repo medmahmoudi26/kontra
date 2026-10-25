@@ -12,7 +12,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/errordetails"
 
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/lifecycle"
 )
 
 // RPCError is a JSON-RPC error object.

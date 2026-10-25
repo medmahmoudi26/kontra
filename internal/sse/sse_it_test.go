@@ -20,9 +20,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/pg"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/pg"
+	"kontra.sh/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/store"
 )
 
 // pgEnv is one migrated database with a service, a task store for ownerA, and two writers, each woken by

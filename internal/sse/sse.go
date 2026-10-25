@@ -30,10 +30,10 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/edge"
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/edge"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/store"
 )
 
 // Binding is the transport a stream is framed for.

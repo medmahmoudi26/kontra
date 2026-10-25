@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
+	"kontra.sh/kontra/internal/config"
 )
 
 // testRoutes registers a JSON-RPC route, an HTTP+JSON route and /healthz, counting handler runs.

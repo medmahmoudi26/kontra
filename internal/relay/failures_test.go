@@ -16,9 +16,9 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/upstream"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 // upWorking is the scripted upstream's task up-1, working.

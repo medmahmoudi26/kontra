@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra/internal/temporaltest"
+	"kontra.sh/kontra/internal/temporaltest"
 )
 
 // TestMain stops the Temporal development server the integration tests over the lifecycle started.

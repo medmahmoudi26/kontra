@@ -13,11 +13,11 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/obs"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/upstream"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 // Dispatcher implements lifecycle.DispatchActivities on this replica.

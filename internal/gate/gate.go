@@ -6,8 +6,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/unimpl"
 )
 
 // ErrDrain is wrapped by the cause of the context `kontra-gate serve` passes to Run when SIGTERM or

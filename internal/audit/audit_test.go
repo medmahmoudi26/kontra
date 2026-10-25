@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/pgtest"
 )
 
 // Canonical is RFC 8785 for the value types a row allows: members sorted by UTF-16 code units, strings

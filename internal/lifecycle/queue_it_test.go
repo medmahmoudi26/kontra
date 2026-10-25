@@ -23,10 +23,10 @@ import (
 	"go.temporal.io/sdk/client"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/temporaltest"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/temporaltest"
 )
 
 // RecordEnv, when set to 1, makes TestQueueWriteOverTemporal write the histories of its workflows to

@@ -21,14 +21,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/auth"
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/lifecycle"
-	"github.com/medmahmoudi26/kontra/internal/pg"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
-	"github.com/medmahmoudi26/kontra/internal/ssrf"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/upstream"
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/pg"
+	"kontra.sh/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 var (

@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/pgtest"
 )
 
 // EnsureTeam creates the team tenant once, returns the same id to every caller (concurrent ones too),

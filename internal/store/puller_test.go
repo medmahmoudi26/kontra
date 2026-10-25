@@ -18,8 +18,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/medmahmoudi26/kontra/internal/pg"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/pg"
+	"kontra.sh/kontra/internal/pgtest"
 )
 
 // runListener starts the replica's LISTEN connection on dsn for the test.

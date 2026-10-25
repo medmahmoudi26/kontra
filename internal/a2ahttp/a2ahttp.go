@@ -40,15 +40,15 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
-	"github.com/medmahmoudi26/kontra/internal/auth"
-	"github.com/medmahmoudi26/kontra/internal/card"
-	"github.com/medmahmoudi26/kontra/internal/config"
-	"github.com/medmahmoudi26/kontra/internal/edge"
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/relay"
-	"github.com/medmahmoudi26/kontra/internal/sse"
-	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/card"
+	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/edge"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/relay"
+	"kontra.sh/kontra/internal/sse"
+	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/tenant"
 )
 
 // Service is what a route needs to know about one service.

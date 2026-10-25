@@ -8,7 +8,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aevent"
 
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/store"
 )
 
 // ErrMalformed is an upstream event the gate cannot log: an unknown state, an event without its task.

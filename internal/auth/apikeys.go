@@ -22,9 +22,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/medmahmoudi26/kontra/internal/audit"
-	"github.com/medmahmoudi26/kontra/internal/config"
-	"github.com/medmahmoudi26/kontra/internal/pg"
+	"kontra.sh/kontra/internal/audit"
+	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/pg"
 )
 
 // ErrUnauthenticated is a missing, unknown, revoked or expired credential: HTTP 401 on every route. Any

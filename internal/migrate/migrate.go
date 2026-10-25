@@ -22,8 +22,8 @@ import (
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
 
-	"github.com/medmahmoudi26/kontra/internal/pg"
-	"github.com/medmahmoudi26/kontra/migrations"
+	"kontra.sh/kontra/internal/pg"
+	"kontra.sh/kontra/migrations"
 )
 
 // Schema is the gate's Postgres schema (D37); VersionTable is goose's table inside it.

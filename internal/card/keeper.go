@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/medmahmoudi26/kontra/internal/upstream"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 // UnavailableAfter is how long a service keeps serving its last good card while every fetch fails: past

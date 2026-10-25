@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/pressly/goose/v3"
 
-	"github.com/medmahmoudi26/kontra/internal/migrate"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/migrate"
+	"kontra.sh/kontra/internal/pgtest"
 )
 
 func open(t *testing.T, dsn string) *migrate.Migrator {

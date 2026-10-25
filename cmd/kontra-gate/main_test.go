@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/medmahmoudi26/kontra/internal/migrate"
-	"github.com/medmahmoudi26/kontra/internal/pgtest"
+	"kontra.sh/kontra/internal/migrate"
+	"kontra.sh/kontra/internal/pgtest"
 )
 
 func runCmd(t *testing.T, args ...string) (string, error) {

@@ -14,9 +14,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.temporal.io/sdk/activity"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/ids"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/store"
 )
 
 // ResendWindow is how young a first task must be for a resend to be answered with it (spec §15).

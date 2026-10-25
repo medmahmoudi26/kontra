@@ -43,7 +43,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/medmahmoudi26/kontra/internal/config"
+	"kontra.sh/kontra/internal/config"
 )
 
 // Limits are the per-replica edge limits (spec §2.2, D73). Zero values are replaced by the defaults.

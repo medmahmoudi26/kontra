@@ -7,7 +7,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/hooks"
 )
 
 // ErrForeignTask is an upstream event naming another upstream task than the attempt's: the attempt fails

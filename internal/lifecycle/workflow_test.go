@@ -19,8 +19,8 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/medmahmoudi26/kontra/internal/hooks"
-	"github.com/medmahmoudi26/kontra/internal/store"
+	"kontra.sh/kontra/internal/hooks"
+	"kontra.sh/kontra/internal/store"
 )
 
 const testTask = "01920000-0000-7000-8000-000000000001"
