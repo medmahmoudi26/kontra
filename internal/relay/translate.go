@@ -21,8 +21,9 @@ func Translate(up a2a.Event, projection *a2a.Task, firstOfAttempt bool) ([]a2a.E
 }
 
 // Failed builds the terminal failed status the relay logs: an agent-role message with one text part
-// saying what happened, and metadata["kontra.failure"] = reason (spec §6.4). The shape lives in one place,
-// store.FailedStatus, which write_terminal uses too.
+// saying what happened, and metadata["kontra.failure"] = reason (spec §6.4). The shape and the closed set
+// of reasons live in one place, store.FailedStatus, which write_terminal uses too: a reason outside the
+// set is written as upstream_error.
 func Failed(info a2a.TaskInfoProvider, reason, text string) *a2a.TaskStatusUpdateEvent {
 	return store.FailedStatus(info, store.FailureReason(reason), text)
 }

@@ -95,6 +95,28 @@ func TestFailedStatusShape(t *testing.T) {
 	if FailureReason("oops").Valid() {
 		t.Error("an unknown reason is valid")
 	}
+	// A reason outside spec §6.4's closed set (relay.Failed takes a string) is never written as
+	// kontra.failure, and the one text part is never empty.
+	for _, text := range []string{"", "boom"} {
+		ev := FailedStatus(info, FailureReason("oops"), text)
+		m := ev.Status.Message
+		want := text
+		if want == "" {
+			want = ReasonText(ReasonUpstreamError)
+		}
+		if ev.Metadata[MetaFailure] != string(ReasonUpstreamError) || m.Metadata[MetaFailure] != string(ReasonUpstreamError) ||
+			len(m.Parts) != 1 || m.Parts[0].Text() != want {
+			t.Errorf("unknown reason, text %q: metadata %v, parts %+v", text, ev.Metadata, m.Parts)
+		}
+	}
+	if c := CanceledStatus(info, "made_up", ""); c.Metadata[MetaCanceled] != nil || c.Status.Message.Parts[0].Text() != "the task was canceled" {
+		t.Errorf("an unknown kontra.canceled value: %+v", c)
+	}
+	for _, st := range []a2a.TaskState{a2a.TaskStateCompleted, a2a.TaskStateRejected, a2a.TaskStateFailed, a2a.TaskStateCanceled} {
+		if got := TerminalStatus(info, st, nil, "").Status.Message.Parts[0].Text(); got == "" {
+			t.Errorf("TerminalStatus %s without a text has an empty text part", st)
+		}
+	}
 }
 
 func TestRequestHash(t *testing.T) {

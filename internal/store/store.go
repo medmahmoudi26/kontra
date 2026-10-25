@@ -36,6 +36,9 @@ type Store struct {
 	owner OwnerFunc
 	guard FailureGuard
 	log   *Log
+	// listBytes and listBatch bound ListTasks (ListPageBytes, listBatchStored); tests lower them.
+	listBytes int
+	listBatch int64
 }
 
 var _ taskstore.Store = (*Store)(nil)
@@ -47,7 +50,7 @@ func New(db *pgxpool.Pool, svc ServiceRef, owner OwnerFunc, guard FailureGuard, 
 	if log == nil {
 		log = NewLog(db)
 	}
-	return &Store{db: db, svc: svc, owner: owner, guard: guard, log: log}
+	return &Store{db: db, svc: svc, owner: owner, guard: guard, log: log, listBytes: ListPageBytes, listBatch: listBatchStored}
 }
 
 func (s *Store) caller(ctx context.Context) (Owner, error) {

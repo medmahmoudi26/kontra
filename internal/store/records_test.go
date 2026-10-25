@@ -127,7 +127,8 @@ func TestWorkItems(t *testing.T) {
 }
 
 // kontra.review_message's append (D66): the item is consumed in the same transaction as the message row,
-// once; a missing, consumed or other task's item writes nothing.
+// once; a retry of an append that committed answers its seq again (a lost activity outcome); a missing,
+// other task's item, or one consumed by something else, writes nothing.
 func TestAppendReviewMessage(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -159,13 +160,49 @@ func TestAppendReviewMessage(t *testing.T) {
 	if wi, _ := e.log.LoadWorkItem(ctx, w, id); wi.ConsumedAt == nil {
 		t.Error("the item was not consumed")
 	}
-	if _, err := e.log.AppendReviewMessage(ctx, id, w); !errors.Is(err, ErrWorkItemConsumed) {
-		t.Errorf("a second append: %v", err)
+	// The first call committed but its outcome was lost: the retry answers the same seq, writes nothing.
+	if again, err := e.log.AppendReviewMessage(ctx, id, w); err != nil || again != seq {
+		t.Errorf("a retried append: %d %v, want %d", again, err, seq)
+	}
+	if row, _ := e.log.Load(ctx, id); row.Version != 3 || len(row.Snapshot.History) != 2 {
+		t.Errorf("a retried append wrote: version %d, history %d", row.Version, len(row.Snapshot.History))
 	}
 	if _, err := e.log.AppendReviewMessage(ctx, id, uuid.Must(uuid.NewV7())); !errors.Is(err, ErrWorkItemNotFound) {
 		t.Errorf("a missing item: %v", err)
 	}
-	if seqs, kinds := e.seqs(task.ID); len(seqs) != 3 || kinds[2] != KindMessage {
+
+	// A second review message reusing the first one's messageId (a caller resend): its own row, and each
+	// item's retry answers its own seq.
+	resent := workPayload(task, "a dispute", buyerA)
+	first, _ := e.log.LoadWorkItem(ctx, w, id)
+	resent.Request.Message.ID = first.Payload.Request.Message.ID
+	w2 := uuid.Must(uuid.NewV7())
+	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w2, TaskID: id, Kind: WorkExecute, Payload: resent}); err != nil {
+		t.Fatal(err)
+	}
+	seq2, err := e.log.AppendReviewMessage(ctx, id, w2)
+	if err != nil || seq2 != 4 {
+		t.Fatalf("a second review message: %d %v", seq2, err)
+	}
+	if again, err := e.log.AppendReviewMessage(ctx, id, w2); err != nil || again != seq2 {
+		t.Errorf("the second item's retry: %d %v, want %d", again, err, seq2)
+	}
+	if again, err := e.log.AppendReviewMessage(ctx, id, w); err != nil || again != seq {
+		t.Errorf("the first item's retry after the second message: %d %v, want %d", again, err, seq)
+	}
+
+	// An item consumed by a dispatch (ConsumeWorkItem) logged no message in its transaction: consumed.
+	w3 := uuid.Must(uuid.NewV7())
+	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w3, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "turn", buyerA)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.ConsumeWorkItem(ctx, w3, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.log.AppendReviewMessage(ctx, id, w3); !errors.Is(err, ErrWorkItemConsumed) {
+		t.Errorf("an item a dispatch consumed: %v", err)
+	}
+	if seqs, kinds := e.seqs(task.ID); len(seqs) != 4 || kinds[2] != KindMessage || kinds[3] != KindMessage {
 		t.Errorf("rows %v %v", seqs, kinds)
 	}
 }
@@ -361,6 +398,12 @@ func TestFindResend(t *testing.T) {
 	} {
 		if r, err := f(); r != nil || err != nil {
 			t.Errorf("%s: %+v %v", name, r, err)
+		}
+	}
+	// A messageId no text column can hold is the caller's error, before any query (spec §4).
+	for name, mid := range map[string]string{"a NUL": "m\x00", "invalid UTF-8": "m\xff"} {
+		if r, err := e.log.FindResend(ctx, e.svc, buyerA, mid, h, since); r != nil || !errors.Is(err, a2a.ErrInvalidParams) {
+			t.Errorf("messageId with %s: %+v %v, want InvalidParams", name, r, err)
 		}
 	}
 }

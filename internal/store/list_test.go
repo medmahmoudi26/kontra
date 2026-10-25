@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -154,6 +156,13 @@ func TestList(t *testing.T) {
 			t.Errorf("contextId filter returned %s in %s", task.ID, task.ContextID)
 		}
 	}
+	// A contextId no task can have (a NUL or invalid UTF-8, which no text column holds) matches nothing.
+	for _, c := range []string{"ctx-1\x00", "ctx\xff"} {
+		resp, err := s.List(ctx, &a2a.ListTasksRequest{ContextID: c})
+		if err != nil || resp.TotalSize != 0 || len(resp.Tasks) != 0 || resp.NextPageToken != "" || resp.PageSize != DefaultPageSize {
+			t.Errorf("contextId %q: %+v %v, want an empty page", c, resp, err)
+		}
+	}
 	completed, err := s.List(ctx, &a2a.ListTasksRequest{Status: a2a.TaskStateCompleted, IncludeArtifacts: true, HistoryLength: ptr(1)})
 	if err != nil {
 		t.Fatal(err)
@@ -200,3 +209,84 @@ func TestList(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// ListTasks reads at most about ListPageBytes of snapshots per page, plus the task that crosses it (spec
+// §6.6: one tenant must not exhaust a shared replica): a page of large tasks stops early with a next
+// token, whether the snapshots compress on disk or not, and a page always holds at least one task.
+func TestListByteBudget(t *testing.T) {
+	e := newEnv(t)
+	s := e.store(nil)
+	ctx := asOwner(context.Background(), buyerA)
+	base := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
+	const partBytes = 3 << 20
+	var want []a2a.TaskID // newest first
+	for i := range 4 {
+		at := base.Add(time.Duration(i) * time.Minute)
+		task, _ := e.newTaskAt(e.svc, buyerA, "", "q", &at)
+		text := strings.Repeat("a", partBytes) // compresses to almost nothing on disk
+		if i%2 == 1 {
+			b := make([]byte, partBytes/2)
+			_, _ = rand.Read(b)
+			text = hex.EncodeToString(b) // does not
+		}
+		mustApply(t, ctx, s, task.ID, artifact(task, "big", false, text))
+		want = append([]a2a.TaskID{task.ID}, want...)
+	}
+	oldest := base.Add(-time.Minute)
+	small, _ := e.newTaskAt(e.svc, buyerA, "", "q", &oldest) // the oldest, and small
+	want = append(want, small.ID)
+
+	walk := func(name string, req a2a.ListTasksRequest) [][]a2a.TaskID {
+		t.Helper()
+		var pages [][]a2a.TaskID
+		for {
+			resp, err := s.List(ctx, &req)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if resp.TotalSize != 5 {
+				t.Errorf("%s: totalSize %d", name, resp.TotalSize)
+			}
+			var page []a2a.TaskID
+			for _, task := range resp.Tasks {
+				page = append(page, task.ID)
+				if (task.ID != small.ID && req.IncludeArtifacts != (len(task.Artifacts) == 1)) || (!req.IncludeArtifacts && task.Artifacts != nil) {
+					t.Errorf("%s: task %s has %d artifacts", name, task.ID, len(task.Artifacts))
+				}
+			}
+			pages = append(pages, page)
+			if resp.NextPageToken == "" || len(pages) > 10 {
+				return pages
+			}
+			req.PageToken = resp.NextPageToken
+		}
+	}
+	check := func(name string, pages [][]a2a.TaskID, sizes ...int) {
+		t.Helper()
+		var all []a2a.TaskID
+		var got []int
+		for _, p := range pages {
+			all = append(all, p...)
+			got = append(got, len(p))
+		}
+		if !slices.Equal(got, sizes) || !slices.Equal(all, want) {
+			t.Errorf("%s: pages of %v, want %v; order %v, want %v", name, got, sizes, all, want)
+		}
+	}
+	// 8 MiB: the third 3 MiB task crosses the budget and ends the first page.
+	check("default budget", walk("default budget", a2a.ListTasksRequest{}), 3, 2)
+	check("with artifacts", walk("with artifacts", a2a.ListTasksRequest{IncludeArtifacts: true}), 3, 2)
+	check("page size 2", walk("page size 2", a2a.ListTasksRequest{PageSize: 2}), 2, 2, 1)
+	// A budget smaller than any task still makes progress, one task a page; the last two tasks come in one
+	// fetch (both small on disk), and the page that ends inside it leaves the second for the next page.
+	var stored int64
+	if err := e.pool.QueryRow(ctx, `select sum(pg_column_size(snapshot)) from kontra.tasks where id = any($1::uuid[])`,
+		[]string{string(want[3]), string(small.ID)}).Scan(&stored); err != nil || stored > listBatchStored {
+		t.Fatalf("the last two tasks take %d bytes on disk (%v), want at most %d", stored, err, listBatchStored)
+	}
+	s.listBytes = 1
+	check("a tiny budget", walk("a tiny budget", a2a.ListTasksRequest{}), 1, 1, 1, 1, 1)
+	// One snapshot per fetch gives the same pages.
+	s.listBytes, s.listBatch = ListPageBytes, 1
+	check("one row per fetch", walk("one row per fetch", a2a.ListTasksRequest{}), 3, 2)
+}

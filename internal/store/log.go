@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
@@ -431,15 +433,27 @@ func (t *NewTask) validate() error {
 	case t.Service.TenantID == uuid.Nil || t.Service.Name == "":
 		return errors.New("store: a new task needs its service")
 	}
-	// The columns' CHECKs would refuse these with a 500; a caller-supplied value is InvalidParams (spec §4).
-	if n := len(t.ContextID); n < 1 || n > 256 {
+	// Postgres would refuse these, a 500 to the caller; a caller-supplied value is InvalidParams (spec §4:
+	// preserve or reject). The columns' CHECKs count characters, as Postgres length() does, not bytes.
+	if !storableText(t.ContextID) {
+		return fmt.Errorf("store: contextId must be UTF-8 text without U+0000: %w", a2a.ErrInvalidParams)
+	}
+	if n := utf8.RuneCountInString(t.ContextID); n < 1 || n > 256 {
 		return fmt.Errorf("store: contextId must be 1 to 256 characters, got %d: %w", n, a2a.ErrInvalidParams)
 	}
-	if len(t.FirstMessageID) > 256 {
-		return fmt.Errorf("store: messageId must be at most 256 characters, got %d: %w", len(t.FirstMessageID), a2a.ErrInvalidParams)
+	if !storableText(t.FirstMessageID) {
+		return fmt.Errorf("store: messageId must be UTF-8 text without U+0000: %w", a2a.ErrInvalidParams)
+	}
+	if n := utf8.RuneCountInString(t.FirstMessageID); n > 256 {
+		return fmt.Errorf("store: messageId must be at most 256 characters, got %d: %w", n, a2a.ErrInvalidParams)
 	}
 	return nil
 }
+
+// storableText reports whether s can be a Postgres text value: valid UTF-8 without U+0000. The server
+// refuses anything else (SQLSTATE 22021), in a column and in a query parameter alike; only json columns
+// keep a NUL, as the escape \u0000 (D49).
+func storableText(s string) bool { return utf8.ValidString(s) && strings.IndexByte(s, 0) < 0 }
 
 // createSQL inserts the task at version 1 and its `task` row at seq 1, and notifies, in one statement.
 // Every state but quoted counts as submitted at creation: submitted_at and the deadline are fixed then.
@@ -467,7 +481,8 @@ select e.seq, t.deadline, pg_notify('kontra_task_events', e.task_id::text || ':'
 
 // CreateTask inserts tasks at version 1 and task_events seq 1 (kind task) in tx (or on its own when tx is
 // nil) and notifies. A duplicate id is taskstore.ErrTaskAlreadyExists; a contextId outside 1..256
-// characters is a2a.ErrInvalidParams; a service that does not exist is an error.
+// characters, a messageId over 256, or either one not UTF-8 text without U+0000, is a2a.ErrInvalidParams;
+// a service that does not exist is an error.
 func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, error) {
 	if err := t.validate(); err != nil {
 		return Appended{}, err
@@ -587,10 +602,15 @@ func (l *Log) LoadScoped(ctx context.Context, svc ServiceRef, o Owner, taskID uu
 }
 
 // FindResend returns the task a resend is answered with: same tenant, service, buyer and principal,
-// the same first messageId and request hash, created after since (24 h, spec §15). Nil when none.
+// the same first messageId and request hash, created after since (24 h, spec §15). Nil when none. A
+// messageId that is not UTF-8 text without U+0000 is a2a.ErrInvalidParams, before any query: CreateTask
+// refuses it too, and Postgres would refuse the query (a 500 to the caller).
 func (l *Log) FindResend(ctx context.Context, svc ServiceRef, o Owner, messageID string, requestHash [32]byte, since time.Time) (*TaskRow, error) {
 	if messageID == "" {
 		return nil, nil
+	}
+	if !storableText(messageID) {
+		return nil, fmt.Errorf("store: messageId must be UTF-8 text without U+0000: %w", a2a.ErrInvalidParams)
 	}
 	r, err := scanTask(l.db.QueryRow(ctx, `select `+taskCols+` from kontra.tasks t
 		where t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.principal = $4

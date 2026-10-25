@@ -522,6 +522,40 @@ func TestCreate(t *testing.T) {
 	if _, err := s.Create(ctx, bad); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("a 257-character contextId: %v, want InvalidParams", err)
 	}
+	// Lengths are characters, as the columns' CHECKs count them (Postgres length()), not bytes: 200
+	// two-byte characters are kept verbatim (spec §4).
+	wide := strings.Repeat("é", 200)
+	wideID := uuid.Must(uuid.NewV7())
+	wideTask := &a2a.Task{ID: a2a.TaskID(wideID.String()), ContextID: wide, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}}
+	if _, err := e.log.CreateTask(context.Background(), nil, NewTask{ID: wideID, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA,
+		ContextID: wide, State: StateSubmitted, Snapshot: wideTask, FirstMessageID: wide, FirstRequest: [32]byte{1}}); err != nil {
+		t.Fatalf("a 200-character non-ASCII contextId and messageId: %v", err)
+	}
+	if row, _ := e.log.Load(context.Background(), wideID); row.ContextID != wide || row.FirstMessageID != wide {
+		t.Errorf("stored %q %q", row.ContextID, row.FirstMessageID)
+	}
+	wider := strings.Repeat("é", 257)
+	if _, err := s.Create(ctx, &a2a.Task{ID: a2a.TaskID(uuid.Must(uuid.NewV7()).String()), ContextID: wider,
+		Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}}); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Errorf("a 257-character non-ASCII contextId: %v, want InvalidParams", err)
+	}
+	// A string no text column can hold (U+0000, invalid UTF-8) is the caller's error, not a 500.
+	for name, nt := range map[string]func(*NewTask){
+		"contextId with a NUL":      func(n *NewTask) { n.ContextID, n.Snapshot.ContextID = "a\x00b", "a\x00b" },
+		"contextId not UTF-8":       func(n *NewTask) { n.ContextID, n.Snapshot.ContextID = "a\xffb", "a\xffb" },
+		"messageId with a NUL":      func(n *NewTask) { n.FirstMessageID = "m\x00" },
+		"messageId not UTF-8":       func(n *NewTask) { n.FirstMessageID = "m\xff" },
+		"a 257-character messageId": func(n *NewTask) { n.FirstMessageID = wider },
+	} {
+		nid := uuid.Must(uuid.NewV7())
+		n := NewTask{ID: nid, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA, ContextID: "c", State: StateSubmitted,
+			Snapshot:       &a2a.Task{ID: a2a.TaskID(nid.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}},
+			FirstMessageID: "m", FirstRequest: [32]byte{1}}
+		nt(&n)
+		if _, err := e.log.CreateTask(context.Background(), nil, n); !errors.Is(err, a2a.ErrInvalidParams) {
+			t.Errorf("%s: %v, want InvalidParams", name, err)
+		}
+	}
 	if _, err := s.Create(ctx, &a2a.Task{ID: "not-a-uuid", ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}}); err == nil {
 		t.Error("a non-gate task id was created")
 	}
