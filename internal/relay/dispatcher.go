@@ -120,6 +120,13 @@ func (d *Dispatcher) dispatch(ctx, pctx context.Context, log *slog.Logger, taskU
 		return lifecycle.DispatchResult{}, err
 	}
 	if row.State.Terminal() {
+		// The task ended before this dispatch (an earlier dispatch logged the terminal event and died before
+		// it ended its attempt): the attempt ends with the task's outcome (spec §4, D77).
+		var reason string
+		if row.Snapshot != nil {
+			reason, _ = row.Snapshot.Metadata[store.MetaFailure].(string)
+		}
+		d.endAttempt(ctx, log, taskUUID, in.N, attemptOutcome(row.State, store.FailureReason(reason)))
 		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchTerminal}, nil
 	}
 	svc, err := d.Log.LoadService(pctx, row.TenantID, row.Service)
@@ -348,18 +355,7 @@ func (d *Dispatcher) endAttempt(ctx context.Context, log *slog.Logger, taskID uu
 
 // attemptOutcome is attempts.outcome for a task that ended in state with a failure reason.
 func attemptOutcome(state store.State, reason store.FailureReason) store.Outcome {
-	switch state {
-	case store.StateCompleted:
-		return store.OutcomeCompleted
-	case store.StateCanceled:
-		return store.OutcomeCanceled
-	case store.StateRejected:
-		return store.OutcomeRejected
-	}
-	if o := store.Outcome(reason); reason != "" && o.Valid() {
-		return o
-	}
-	return store.OutcomeFailed
+	return store.TerminalOutcome(state, reason)
 }
 
 // Abort implements lifecycle.DispatchActivities: it cancels the running dispatch of (task, n) through the

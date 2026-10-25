@@ -40,6 +40,23 @@ const (
 	OutcomeAborted             Outcome = "aborted"
 )
 
+// TerminalOutcome is attempts.outcome for an attempt that ended with its task's terminal event: the task's
+// state, or for failed the failure reason when it is an attempt outcome (failed otherwise).
+func TerminalOutcome(state State, reason FailureReason) Outcome {
+	switch state {
+	case StateCompleted:
+		return OutcomeCompleted
+	case StateCanceled:
+		return OutcomeCanceled
+	case StateRejected:
+		return OutcomeRejected
+	}
+	if o := Outcome(reason); reason != "" && o.Valid() {
+		return o
+	}
+	return OutcomeFailed
+}
+
 // Valid reports whether o is one of the outcomes attempts.outcome accepts.
 func (o Outcome) Valid() bool {
 	switch o {

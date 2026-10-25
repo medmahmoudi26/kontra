@@ -588,3 +588,57 @@ func TestRetryAndFirstUpstreamIDRace(t *testing.T) {
 	}
 	t.Logf("%d retries refused, %d dispatches fenced", refused, fenced)
 }
+
+// A dispatch that logged the task's terminal event and died before it ended its attempt (SIGKILL between
+// the append's commit and EndAttempt) leaves the attempt open; the workflow then learns of the end through
+// attempt_state, which ends the attempt with the outcome the dispatch would have written (spec §4, D77).
+func TestAttemptStateEndsTheAttemptOfAnEndedTask(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		state  a2a.TaskState
+		reason string
+		want   store.Outcome
+	}{
+		{a2a.TaskStateCompleted, "", store.OutcomeCompleted},
+		{a2a.TaskStateFailed, "upstream_unreachable", store.OutcomeUpstreamUnreachable},
+		{a2a.TaskStateFailed, "lifecycle_unavailable", store.OutcomeFailed},
+		{a2a.TaskStateRejected, "", store.OutcomeRejected},
+	} {
+		id := e.task(store.StateSubmitted, nil)
+		if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.log.BeginDispatch(ctx, id, 1, "r1"); err != nil {
+			t.Fatal(err)
+		}
+		if tc.reason != "" {
+			if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: id, State: store.StateFailed, Reason: store.FailureReason(tc.reason)}); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			e.status(id, tc.state)
+		}
+		if a, _ := e.log.GetAttempt(ctx, id, 1); a.EndedAt != nil {
+			t.Fatalf("attempt %+v ended before attempt_state", a)
+		}
+		st, err := e.acts.AttemptState(ctx, AttemptRef{TaskID: id.String(), N: 1})
+		if err != nil || !st.Ended || !store.State(st.TaskState).Terminal() {
+			t.Fatalf("%s: attempt_state %+v %v", tc.state, st, err)
+		}
+		if a, _ := e.log.GetAttempt(ctx, id, 1); a.EndedAt == nil || a.Outcome != tc.want {
+			t.Errorf("%s %s: attempt %+v, want ended %s", tc.state, tc.reason, a, tc.want)
+		}
+		// Again: the first outcome stays.
+		if _, err := e.acts.AttemptState(ctx, AttemptRef{TaskID: id.String(), N: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A task still running keeps its attempt open.
+	id := e.task(store.StateSubmitted, nil)
+	_, _ = e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 1})
+	e.status(id, a2a.TaskStateWorking)
+	if st, _ := e.acts.AttemptState(ctx, AttemptRef{TaskID: id.String(), N: 1}); st.Ended {
+		t.Errorf("a running task's attempt ended: %+v", st)
+	}
+}

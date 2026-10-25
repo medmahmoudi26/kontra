@@ -205,6 +205,13 @@ func (a *LifecycleActivities) Prepare(ctx context.Context, in PrepareInput) (Pre
 // AttemptState reads the task's state and, for N > 0, attempt N's first_upstream_id_at, replica_id and
 // whether it ended: the retry and cancel decisions are taken on what Postgres recorded, never on heartbeat
 // details, which a crash loses (spec §14.2).
+//
+// A task that is terminal while attempt N is still open had its terminal event logged by a dispatch that
+// died before it ended its attempt (the Dispatcher ends it after a2a-go's handler returns): the workflow
+// learns of the end here and never from that dispatch, so AttemptState ends the attempt itself, with the
+// outcome the dispatch would have written (store.TerminalOutcome; spec §4, D77: ended_at and outcome are
+// written when the attempt ends). The workflow never runs it beside write_terminal, which ends the latest
+// attempt itself when it writes the terminal event.
 func (a *LifecycleActivities) AttemptState(ctx context.Context, in AttemptRef) (AttemptState, error) {
 	id, err := parseTask(in.TaskID)
 	if err != nil {
@@ -224,6 +231,20 @@ func (a *LifecycleActivities) AttemptState(ctx context.Context, in AttemptRef) (
 	}
 	if err != nil {
 		return AttemptState{}, err
+	}
+	if row.State.Terminal() && att.EndedAt == nil {
+		var reason string
+		if row.Snapshot != nil {
+			reason, _ = row.Snapshot.Metadata[store.MetaFailure].(string)
+		}
+		o := store.TerminalOutcome(row.State, store.FailureReason(reason))
+		if err := a.Log.EndAttempt(ctx, id, in.N, o); err != nil {
+			return AttemptState{}, err
+		}
+		a.logger().Info("ended an attempt its dispatch left open at the task's end", "task_id", id.String(), "attempt", in.N, "outcome", o)
+		if att, err = a.Log.GetAttempt(ctx, id, in.N); err != nil {
+			return AttemptState{}, err
+		}
 	}
 	st.Backend, st.ReplicaID, st.Ended = string(att.Backend), att.ReplicaID, att.EndedAt != nil
 	if att.FirstUpstreamIDAt != nil {

@@ -710,3 +710,27 @@ func TestStoreReadFailureIsALostContext(t *testing.T) {
 		t.Errorf("the retry: %+v", res)
 	}
 }
+
+// A dispatch of a task that already ended (an earlier dispatch logged the terminal event and died before
+// ending its attempt) ends the attempt with the task's outcome and calls nothing upstream (spec §4, D77).
+func TestDispatchOfAnEndedTaskEndsItsAttempt(t *testing.T) {
+	e := newEnv(t, envOptions{})
+	b, calls := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+		rpcResult(w, rid, `"result":{"task":`+upWorking+`}`)
+	})
+	e.backends.set(b, rpcInfo, nil)
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	e.firstID(id, 1, "up-1", "up-ctx")
+	if _, err := e.log.WriteTerminal(context.Background(), store.TerminalWrite{TaskID: uid(t, id), State: store.StateFailed, Reason: store.ReasonUpstreamError}); err != nil {
+		t.Fatal(err)
+	}
+	if res := e.dispatch(context.Background(), id, 1, wid, true); res.Outcome != lifecycle.DispatchTerminal {
+		t.Errorf("outcome %+v", res)
+	}
+	if a := e.attempt(id, 1); a.EndedAt == nil || a.Outcome != store.OutcomeUpstreamError {
+		t.Errorf("attempt %+v, want ended upstream_error", a)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("%d upstream calls", n)
+	}
+}
