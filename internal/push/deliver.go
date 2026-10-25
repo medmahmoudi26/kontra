@@ -41,6 +41,10 @@ const (
 	RatePerHost = 10
 	// ReplicaRefresh is how often N is read again.
 	ReplicaRefresh = 10 * time.Second
+	// UnknownReplicas is the N a replica assumes while it has never counted the live replicas (its first
+	// count failed): a conservative guess, so that the gate-wide cap holds for up to that many replicas,
+	// rather than 1, which would let every replica send the whole 10 a second to one host.
+	UnknownReplicas = 10
 	// ReplicaSilence is how long a replica may be silent and still count as live (spec/tunnel.md §11).
 	ReplicaSilence = 30 * time.Second
 	// ContentType is the body's media type (A2A §4.3.3).
@@ -117,6 +121,8 @@ type Deliverer struct {
 	replicas    int
 	replicasAt  time.Time
 	replicasErr bool
+	counted     bool          // a count has succeeded: replicas is the last known N
+	counting    chan struct{} // non-nil while a count runs; closed when it ends
 
 	onBeat func() // tests: called at every heartbeat point
 }
@@ -661,33 +667,63 @@ func (d *Deliverer) liveReplicas(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// liveReplicaCount is N for the rate cap, read again every ReplicaRefresh, at least 1 (D72). A failed read
-// keeps the last N (1 before the first) and is retried at the next refresh.
+// liveReplicaCount is N for the rate cap, read again every ReplicaRefresh, at least 1 (D72). One reader
+// counts at a time; while it does, the others keep the last known N, or, before any count has succeeded,
+// wait for it (a replica starts with many push_webhook retries at once, exactly when N is not known yet).
+// A failed count keeps the last known N, or UnknownReplicas before the first success, and is retried at
+// the next refresh.
 func (d *Deliverer) liveReplicaCount(ctx context.Context) int {
 	now := d.opts.Now()
 	d.mu.Lock()
-	if !d.replicasAt.IsZero() && now.Sub(d.replicasAt) < ReplicaRefresh {
-		n := d.replicas
+	for {
+		if !d.replicasAt.IsZero() && now.Sub(d.replicasAt) < ReplicaRefresh && d.counting == nil {
+			n := d.knownN()
+			d.mu.Unlock()
+			return n
+		}
+		if d.counting == nil {
+			break // this reader counts
+		}
+		if d.counted {
+			n := d.knownN() // another reader is counting: the last known N meanwhile
+			d.mu.Unlock()
+			return n
+		}
+		wait := d.counting // N was never known: wait for the count in flight
 		d.mu.Unlock()
-		return max(n, 1)
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return UnknownReplicas
+		}
+		d.mu.Lock()
 	}
-	d.replicasAt = now // one reader refreshes; the others keep the last N meanwhile
-	last := d.replicas
+	done := make(chan struct{})
+	d.counting, d.replicasAt = done, now
 	d.mu.Unlock()
 
 	n, err := d.opts.Replicas(ctx)
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.counting = nil
+	close(done)
 	if err != nil {
 		if !d.replicasErr {
 			d.logger.Warn("push: cannot count the live gate replicas; the rate cap keeps the last count", "error", err)
 		}
 		d.replicasErr = true
-		return max(last, 1)
+		return d.knownN()
 	}
-	d.replicasErr = false
-	d.replicas = n
+	d.replicasErr, d.counted, d.replicas = false, true, n
 	return max(n, 1)
+}
+
+// knownN is the last counted N (at least 1), or UnknownReplicas when no count has succeeded. d.mu is held.
+func (d *Deliverer) knownN() int {
+	if !d.counted {
+		return UnknownReplicas
+	}
+	return max(d.replicas, 1)
 }
 
 // hostLimiter spaces deliveries to one host: each reservation takes the next free slot, interval after the

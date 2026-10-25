@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -965,5 +966,71 @@ func TestPushWebhookFindsItsConfigByRef(t *testing.T) {
 	before := len(r.requests())
 	if res, err := d.PushWebhook(context.Background(), in); err != nil || res.Stopped != StoppedDeleted || len(r.requests()) != before {
 		t.Fatalf("by the raw id: %+v %v", res, err)
+	}
+}
+
+// D72's N before it is known (a replica's start, when Temporal hands it many push_webhook retries at
+// once): a reader during the first count waits for it instead of taking N = 1, and a first count that
+// fails gives a conservative N (UnknownReplicas), not 1, until a count succeeds. Once N is known, a failed
+// count keeps it.
+func TestReplicaCountBeforeItIsKnown(t *testing.T) {
+	ctx := context.Background()
+	release := make(chan struct{})
+	o := fast()
+	o.Replicas = func(context.Context) (int, error) { <-release; return 4, nil }
+	d := NewDeliverer(nil, private, o)
+	first, second := make(chan int, 1), make(chan int, 1)
+	go func() { first <- d.liveReplicaCount(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		d.mu.Lock()
+		counting := d.counting != nil
+		d.mu.Unlock()
+		if counting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first count never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	go func() { second <- d.liveReplicaCount(ctx) }()
+	select {
+	case n := <-second:
+		t.Fatalf("a reader during the first count got N = %d before it ended (the gate has 4 replicas)", n)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if a, b := <-first, <-second; a != 4 || b != 4 {
+		t.Errorf("N = %d and %d, want 4", a, b)
+	}
+
+	var fail atomic.Bool
+	fail.Store(true)
+	now := time.Now()
+	o2 := fast()
+	o2.Now = func() time.Time { return now }
+	o2.Replicas = func(context.Context) (int, error) {
+		if fail.Load() {
+			return 0, errors.New("db blip")
+		}
+		return 3, nil
+	}
+	d2 := NewDeliverer(nil, private, o2)
+	if n := d2.liveReplicaCount(ctx); n != UnknownReplicas {
+		t.Errorf("a failed first count: N = %d, want %d", n, UnknownReplicas)
+	}
+	if n := d2.liveReplicaCount(ctx); n != UnknownReplicas {
+		t.Errorf("before the next refresh: N = %d, want %d", n, UnknownReplicas)
+	}
+	fail.Store(false)
+	now = now.Add(ReplicaRefresh)
+	if n := d2.liveReplicaCount(ctx); n != 3 {
+		t.Errorf("after a count: N = %d, want 3", n)
+	}
+	fail.Store(true)
+	now = now.Add(ReplicaRefresh)
+	if n := d2.liveReplicaCount(ctx); n != 3 {
+		t.Errorf("a failed count once N is known: N = %d, want the last, 3", n)
 	}
 }
