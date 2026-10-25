@@ -30,13 +30,19 @@ const (
 // the same turn (a retry, attempt n + 1, a resume) may reload the consumed item it owns (LoadWorkItem);
 // kontra.review_message consumes it in its append transaction (AppendReviewMessage). A refused follow-up
 // deletes its item (DeleteWorkItem); an unconsumed item otherwise stays until its task is deleted.
+//
+// DeliveredAt is a follow-up's delivery (spec §6.4, D81): set by the turn's dispatch when the upstream
+// first answered the follow-up, in the transaction of the first append from that answer (Write.Deliver,
+// Fence.ArmDelivery), or on its own when the answer logged nothing (MarkDelivered). A resume of the turn
+// sends the follow-up again only while it is nil.
 type WorkItem struct {
-	ID         uuid.UUID
-	TaskID     uuid.UUID
-	Kind       WorkItemKind
-	Payload    WorkPayload
-	CreatedAt  time.Time
-	ConsumedAt *time.Time
+	ID          uuid.UUID
+	TaskID      uuid.UUID
+	Kind        WorkItemKind
+	Payload     WorkPayload
+	CreatedAt   time.Time
+	ConsumedAt  *time.Time
+	DeliveredAt *time.Time
 }
 
 // WorkPayload is the sanitized copy of a2a-go's workqueue.Payload: the request, and the call context with
@@ -100,13 +106,13 @@ func (l *Log) InsertWorkItem(ctx context.Context, tx pgx.Tx, wi WorkItem) error 
 	return nil
 }
 
-// LoadWorkItem returns the work item if it belongs to taskID, consumed or not; otherwise
-// ErrWorkItemNotFound.
+// LoadWorkItem returns the work item if it belongs to taskID, consumed or not, with its delivery;
+// otherwise ErrWorkItemNotFound.
 func (l *Log) LoadWorkItem(ctx context.Context, id, taskID uuid.UUID) (*WorkItem, error) {
 	wi := WorkItem{ID: id, TaskID: taskID}
 	var payload []byte
-	err := l.db.QueryRow(ctx, `select kind, payload, created_at, consumed_at from kontra.work_items
-		where id = $1 and task_id = $2`, id, taskID).Scan(&wi.Kind, &payload, &wi.CreatedAt, &wi.ConsumedAt)
+	err := l.db.QueryRow(ctx, `select kind, payload, created_at, consumed_at, delivered_at from kontra.work_items
+		where id = $1 and task_id = $2`, id, taskID).Scan(&wi.Kind, &payload, &wi.CreatedAt, &wi.ConsumedAt, &wi.DeliveredAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("store: work item %s: %w", id, ErrWorkItemNotFound)
 	}

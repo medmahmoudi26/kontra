@@ -225,6 +225,10 @@ type Write struct {
 	Scope *Scope
 	// Fence, when set, makes the write commit only while the dispatch still holds its attempt (D77).
 	Fence *Fence
+	// Deliver, when set, is a follow-up work item of the task whose work_items.delivered_at the write sets,
+	// in the same statement, if the write commits and the item has none yet (spec §6.4, D81). Unset, Append
+	// takes the delivery the Fence has armed (Fence.ArmDelivery), if any.
+	Deliver uuid.UUID
 }
 
 func (w *Write) validate() error {
@@ -257,14 +261,16 @@ func (w *Write) validate() error {
 type Appended struct {
 	Seq      int64
 	Deadline *time.Time
+	// Delivered is true when this write set the delivered_at of its Deliver work item (D81): false when it
+	// carried none, or the item already had one.
+	Delivered bool
 }
 
-// appendSQL is the one write of spec §5.2 as a single statement: the versioned UPDATE with the terminal
-// rule, the caller scope and the dispatch fence; the task_events INSERT at seq = the new version; and
-// pg_notify. Zero rows is a refusal, classified by classifySQL. The fence's attempts row is read FOR SHARE,
-// so a BeginDispatch that writes a newer dispatch_id waits for an append already past the check, and an
-// append that starts after it sees the new value.
-const appendSQL = `
+// appendCTEs is the one write of spec §5.2 up to its result: the versioned UPDATE with the terminal rule,
+// the caller scope and the dispatch fence, and the task_events INSERT at seq = the new version. The fence's
+// attempts row is read FOR SHARE, so a BeginDispatch that writes a newer dispatch_id waits for an append
+// already past the check, and an append that starts after it sees the new value.
+const appendCTEs = `
 with u as (
 	update kontra.tasks t set
 		snapshot = $6::json,
@@ -296,9 +302,24 @@ with u as (
 ), e as (
 	insert into kontra.task_events (task_id, seq, kind, payload, payload_ref)
 	select u.id, u.version, $3::text, $7::json, $8::text from u
-	returning task_id, seq
+	returning task_id, seq`
+
+// appendSQL is the one write of spec §5.2 as a single statement: appendCTEs and pg_notify. Zero rows is a
+// refusal, classified by classifySQL.
+const appendSQL = appendCTEs + `)
+select e.seq, u.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text), false
+  from e join u on u.id = e.task_id`
+
+// appendDeliverSQL is appendSQL for a write that also records a follow-up's delivery (D81), in the same
+// statement: delivered_at of work item $17 is set from the tasks row the UPDATE wrote, so a refused (fenced,
+// stale, terminal) write sets nothing. Only a write carrying a delivery pays for the extra UPDATE.
+const appendDeliverSQL = appendCTEs + `), d as (
+	update kontra.work_items w set delivered_at = now()
+	  from u
+	 where w.id = $17::uuid and w.task_id = u.id and w.delivered_at is null
+	returning w.id
 )
-select e.seq, u.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text)
+select e.seq, u.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text), exists (select 1 from d)
   from e join u on u.id = e.task_id`
 
 // classifySQL tells why appendSQL wrote nothing: no such task (or outside the scope), a fence that no
@@ -331,6 +352,11 @@ func fenceArgs(f *Fence) (n, dispatch any) {
 // w.Scope is a2a.ErrTaskNotFound; a fence that no longer holds is ErrFenced (and the fence records it);
 // otherwise the version moved or the terminal rule refused the write, taskstore.ErrConcurrentModification.
 // A stale version is never merged. Payload is stored verbatim (json, D49).
+//
+// A write that carries a follow-up's delivery (w.Deliver, or the delivery w.Fence has armed) sets the work
+// item's delivered_at in the same statement, so it commits exactly when the event does (D81). Once a write
+// carrying the fence's armed delivery succeeds on its own (tx nil), the delivery is disarmed; in a caller's
+// transaction it stays armed, since only the caller knows whether that transaction commits.
 func (l *Log) Append(ctx context.Context, tx pgx.Tx, w Write) (Appended, error) {
 	if err := w.validate(); err != nil {
 		return Appended{}, err
@@ -354,16 +380,28 @@ func (l *Log) Append(ctx context.Context, tx pgx.Tx, w Write) (Appended, error) 
 	}
 	st, ss, sb := scopeArgs(w.Scope)
 	fn, fd := fenceArgs(w.Fence)
+	args := []any{
+		w.TaskID, w.PrevVersion, string(w.Kind), state, nullTime(w.StatusAt), snap, payload,
+		nullString(w.PayloadRef), w.AfterTerminalOK, micros(w.Timeout), micros(w.Retention),
+		st, ss, sb, fn, fd,
+	}
+	stmt := l.appendStmt
+	var armed *uuid.UUID
+	if w.Deliver == uuid.Nil {
+		armed, w.Deliver = w.Fence.armedDelivery()
+	}
+	if w.Deliver != uuid.Nil {
+		stmt, args = appendDeliverSQL, append(args, w.Deliver)
+	}
 
 	ctx, cancel := l.writeCtx(ctx)
 	defer cancel()
 	var out Appended
-	err = l.writeRow(ctx, tx, l.appendStmt, []any{
-		w.TaskID, w.PrevVersion, string(w.Kind), state, nullTime(w.StatusAt), snap, payload,
-		nullString(w.PayloadRef), w.AfterTerminalOK, micros(w.Timeout), micros(w.Retention),
-		st, ss, sb, fn, fd,
-	}, &out.Seq, &out.Deadline, nil)
+	err = l.writeRow(ctx, tx, stmt, args, &out.Seq, &out.Deadline, nil, &out.Delivered)
 	if err == nil {
+		if tx == nil {
+			w.Fence.deliveryWritten(armed)
+		}
 		return out, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {

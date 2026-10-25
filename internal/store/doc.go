@@ -10,7 +10,8 @@
 //
 // Every change to a task is one statement (spec §5.2): the projection UPDATE with the version check, the
 // terminal rule, the caller scope and the dispatch fence (D77); the task_events INSERT at seq = the new
-// version; and pg_notify('kontra_task_events', '<task_id>:<seq>'). A stale version is
+// version; for the first event logged from an upstream's answer to a follow-up, that work item's
+// delivered_at (D81); and pg_notify('kontra_task_events', '<task_id>:<seq>'). A stale version is
 // taskstore.ErrConcurrentModification, never a merge; PrevVersion 0 is refused the same way. Writes run on
 // context.WithoutCancel with a deadline of their own (D8). Snapshots and payloads are `json`, so NUL
 // characters survive and bytes passed to Log.Append are stored verbatim (D49).

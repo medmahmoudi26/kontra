@@ -253,3 +253,41 @@ func TestFolderPastTerminal(t *testing.T) {
 		t.Error("a log not starting with the task row folded")
 	}
 }
+
+// A fence's armed delivery (D81): armed once the upstream answers, carried by the next append, disarmed
+// by the append that wrote it unless it was armed again meanwhile, or withdrawn by the dispatch.
+func TestFenceDelivery(t *testing.T) {
+	var nilFence *Fence
+	nilFence.ArmDelivery(uuid.New())
+	if nilFence.DeliveryArmed() || nilFence.DisarmDelivery() != uuid.Nil {
+		t.Fatal("a nil fence holds a delivery")
+	}
+	f := &Fence{TaskID: uuid.New(), N: 1, DispatchID: uuid.New()}
+	if p, id := f.armedDelivery(); p != nil || id != uuid.Nil || f.DeliveryArmed() {
+		t.Fatal("a delivery armed from nothing")
+	}
+	f.ArmDelivery(uuid.Nil)
+	if f.DeliveryArmed() {
+		t.Fatal("the nil work item was armed")
+	}
+	w1, w2 := uuid.New(), uuid.New()
+	f.ArmDelivery(w1)
+	p, id := f.armedDelivery()
+	if id != w1 || !f.DeliveryArmed() {
+		t.Fatalf("armed %v", id)
+	}
+	f.ArmDelivery(w2) // armed again before the append that carried w1 committed
+	f.deliveryWritten(p)
+	if _, id := f.armedDelivery(); id != w2 {
+		t.Fatalf("the append of w1 disarmed %v", id)
+	}
+	p, _ = f.armedDelivery()
+	f.deliveryWritten(p)
+	if f.DeliveryArmed() {
+		t.Fatal("the append that wrote the delivery left it armed")
+	}
+	f.ArmDelivery(w1)
+	if got := f.DisarmDelivery(); got != w1 || f.DeliveryArmed() || f.DisarmDelivery() != uuid.Nil {
+		t.Fatalf("DisarmDelivery %v", got)
+	}
+}
