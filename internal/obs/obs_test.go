@@ -3,7 +3,10 @@ package obs
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -46,6 +49,49 @@ func TestJSONLoggerAndRedaction(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "secret") || strings.Contains(buf.String(), ":pw@") {
 		t.Errorf("a credential reached the log: %s", buf.String())
+	}
+}
+
+// The backstop also covers a sensitive group (values at any depth below it), keys that only contain a
+// credential word, a URL's password under any key, and maps logged with slog.Any.
+func TestRedactionBackstop(t *testing.T) {
+	for _, f := range []Format{FormatJSON, FormatText} {
+		var buf bytes.Buffer
+		l, err := NewLogger(&buf, f, slog.LevelInfo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hdr := http.Header{}
+		hdr.Set("Authorization", "Bearer secret8")
+		hdr.Set("X-Api-Key", "secret9")
+		hdr.Set("Accept", "text/event-stream")
+		l.Info("x",
+			slog.Group("headers", slog.String("X-Api-Key", "kk_secret1"), slog.String("Authorization", "Bearer secret2"),
+				slog.Group("inner", slog.String("note", "secret10"))),
+			slog.String("access_token", "secret3"),
+			slog.String("url", "postgres://u:secret4@h/db"),
+			slog.String("x-api-key", "secret5"),
+			slog.String("client_secret", "secret6"),
+			slog.Any("cfg", map[string]any{"postgres": "postgres://u:secret7@h/db", "nested": map[string]string{"password": "secret11"}, "ok": "visible1"}),
+			slog.Any("req", hdr),
+			slog.String("dsn_kv", "host=db user=k password=secret12 dbname=k"),
+			slog.Any("error", errors.New("dial https://bob:secret13@seller.example/a2a: refused")),
+			slog.String(KeyTaskID, "visible2"),
+			slog.String("path", "/agents/x"),
+		)
+		l.WithGroup("cookie").Info("y", slog.String("session", "secret14"))
+		l.With(slog.String("refresh_token", "secret15")).Info("z")
+		out := buf.String()
+		for i := 1; i <= 15; i++ {
+			if strings.Contains(out, fmt.Sprintf("secret%d", i)) {
+				t.Errorf("%s: secret%d reached the log:\n%s", f, i, out)
+			}
+		}
+		for _, want := range []string{"visible1", "visible2", "/agents/x", "text/event-stream", "seller.example/a2a", "postgres://u:"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s: %q was redacted too:\n%s", f, want, out)
+			}
+		}
 	}
 }
 

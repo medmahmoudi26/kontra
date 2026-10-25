@@ -56,14 +56,39 @@ const (
 
 // ParseConfig parses a postgres:// URL into a connection config with the connection bounds applied:
 // the client-side dialer (TCP_USER_TIMEOUT, keepalives, a connect timeout) and the server-side startup
-// parameters tcp_user_timeout and tcp_keepalives_* (values in the URL win).
+// parameters tcp_user_timeout and tcp_keepalives_* (values in the URL win). The pool_* parameters
+// NewPool reads are checked and left out of the startup parameters, so the same URL serves the pool,
+// the LISTEN connection and migrate.
 func ParseConfig(dsn string) (*pgx.ConnConfig, error) {
-	cfg, err := pgx.ParseConfig(dsn)
+	pc, _, err := parsePoolConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
-	applyBounds(cfg)
-	return cfg, nil
+	return pc.ConnConfig, nil
+}
+
+// parsePoolConfig parses dsn with pgxpool, which removes the pool_* parameters from RuntimeParams
+// (pgx.ParseConfig keeps every unknown parameter and sends it at startup, which the server refuses:
+// FATAL: unrecognized configuration parameter "pool_max_conns"), applies the connection bounds, and
+// reports whether the URL set pool_max_conns.
+func parsePoolConfig(dsn string) (*pgxpool.Config, bool, error) {
+	raw, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, false, err
+	}
+	_, maxSet := raw.RuntimeParams["pool_max_conns"]
+	pc, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, false, err
+	}
+	for k := range pc.ConnConfig.RuntimeParams {
+		if strings.HasPrefix(k, "pool_") {
+			// A pool_* key this pgx version does not know is a misspelling, not a server setting.
+			return nil, false, fmt.Errorf("unknown pool parameter %q", k)
+		}
+	}
+	applyBounds(pc.ConnConfig)
+	return pc, maxSet, nil
 }
 
 func applyBounds(cfg *pgx.ConnConfig) {
@@ -101,12 +126,11 @@ func applyBounds(cfg *pgx.ConnConfig) {
 // and at most DefaultMaxConns connections unless the URL sets pool_max_conns. It does not wait for a
 // connection: the first query does (call Ping to check).
 func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
-	pc, err := pgxpool.ParseConfig(dsn)
+	pc, maxSet, err := parsePoolConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
-	applyBounds(pc.ConnConfig)
-	if !strings.Contains(dsn, "pool_max_conns") {
+	if !maxSet {
 		pc.MaxConns = DefaultMaxConns
 	}
 	return pgxpool.NewWithConfig(ctx, pc)

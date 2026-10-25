@@ -677,8 +677,11 @@ func (e *ValidationError) Error() string {
 // Validate checks what the schema cannot: exactly one backend per service and of the service's kind,
 // names matching ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$, TLS required when public_url is not a localhost
 // origin (or terminated by a declared front proxy, D69), https backend URLs unless allow_private (D67),
-// kind-only keys, parseable allow: entries (D68). It also fills Warnings. Defaults must have been applied
-// (Parse and Load do).
+// URL ports from 1 to 65535, kind-only keys, allow: entries that can match (D68), durations and seconds
+// that fit the integer columns of services, listen and metrics.listen on different ports, and no key
+// this build would ignore by failing open (sealed on a direct backend, seller_keys on a direct a2a
+// backend, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
+// Defaults must have been applied (Parse and Load do).
 func (c *Config) Validate() error {
 	v := &validator{}
 	c.Warnings = nil

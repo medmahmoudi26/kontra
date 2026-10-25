@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -115,27 +116,44 @@ func serve(args []string, stderr io.Writer) error {
 	for _, w := range cfg.Warnings {
 		log.Warn(w)
 	}
-	// SIGTERM drains (spec §14.3); SIGINT stops the same way. The context is canceled with a cause
-	// wrapping gate.ErrDrain, and Run does its drain writes on a context of their own. SIGHUP reload is
-	// the replica's own.
+	// SIGTERM drains (spec §14.3); SIGINT stops the same way, and a second either one during the drain
+	// ends the process at once. The context is canceled with a cause wrapping gate.ErrDrain, and Run
+	// does its drain writes on a context of their own. SIGHUP reload is the replica's own.
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, os.Interrupt)
-	defer signal.Stop(sigs)
-	go func() {
-		select {
-		case s := <-sigs:
-			log.Info("draining", "signal", s.String())
-			cancel(fmt.Errorf("%w: received %s", gate.ErrDrain, s))
-		case <-ctx.Done():
-		}
-	}()
+	defer drainOnSignal(log, cancel)()
 	r, err := gate.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	return r.Run(ctx)
+}
+
+// drainOnSignal cancels with a cause wrapping gate.ErrDrain at the first SIGTERM or SIGINT, and then stops
+// catching them, so a second one during the drain (which lasts up to drain_timeout, D76) ends the
+// process at once with the signal's default action instead of being swallowed. The returned func stops
+// catching them earlier, when serve returns first.
+func drainOnSignal(log *slog.Logger, cancel context.CancelCauseFunc) (stop func()) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, os.Interrupt)
+	done := make(chan struct{})
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			signal.Stop(sigs)
+			close(done)
+		})
+	}
+	go func() {
+		select {
+		case s := <-sigs:
+			stop()
+			log.Info("draining; a second SIGTERM or interrupt stops the gate at once", "signal", s.String())
+			cancel(fmt.Errorf("%w: received %s", gate.ErrDrain, s))
+		case <-done:
+		}
+	}()
+	return stop
 }
 
 // migrateCmd applies, rolls back or lists the embedded migrations (D28). The database comes from

@@ -239,7 +239,7 @@
           ],
           "description": "An inline JWKS or {url}; seller card signatures are verified against it (spec §3). M3."
         },
-        "session_idle_s": { "type": "integer", "minimum": 1, "default": 3600 },
+        "session_idle_s": { "type": "integer", "minimum": 1, "maximum": 2147483647, "default": 3600 },
         "task": {
           "type": "object",
           "additionalProperties": false,

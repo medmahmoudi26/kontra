@@ -22,7 +22,6 @@
       "kind": "a2a",
       "backend": { "a2a": { "url": "https://triage.internal:9000/agents/triage", "allow_private": true } },
       "allow": ["org:acme"],
-      "sealed": { "required": false },
       "task": { "timeout": "30m", "retries": 0, "retention": "14d" },
       "listed": false,
       "annotations": { "search": { "price": "1.00 EUR" } }
@@ -33,6 +32,7 @@
       "allow": ["key:kk_team_*"],
       "tools": { "allow": ["read_*", "list_*"], "deny": ["delete_*"] },
       "tasks": "passthrough",
+      "sealed": { "required": false },
       "session_idle_s": 1800
     }
   }

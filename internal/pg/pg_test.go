@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/medmahmoudi26/kontra/internal/migrate"
 	"github.com/medmahmoudi26/kontra/internal/pg"
 	"github.com/medmahmoudi26/kontra/internal/pgtest"
 )
@@ -61,6 +62,69 @@ func TestPoolBounds(t *testing.T) {
 	}
 	if got != "30000" || p2.Config().MaxConns != 3 {
 		t.Errorf("URL overrides: tcp_user_timeout %q, MaxConns %d", got, p2.Config().MaxConns)
+	}
+}
+
+// pool_* parameters configure the pool, never the server: every connection built from the URL (the
+// pool, the LISTEN connection, migrate) leaves them out of the startup message, which the server would
+// refuse with FATAL: unrecognized configuration parameter.
+func TestPoolParamsNotSentToServer(t *testing.T) {
+	dsn := pgtest.Database(t)
+	q := "?"
+	if strings.Contains(dsn, "?") {
+		q = "&"
+	}
+	dsn += q + "pool_max_conns=7&pool_min_conns=0&pool_max_conn_lifetime=1h&pool_health_check_period=1m"
+	cfg, err := pg.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range cfg.RuntimeParams {
+		if strings.HasPrefix(k, "pool_") {
+			t.Errorf("ParseConfig keeps %s=%s as a startup parameter", k, cfg.RuntimeParams[k])
+		}
+	}
+	if p := pool(t, dsn); p.Config().MaxConns != 7 {
+		t.Errorf("NewPool MaxConns = %d, want 7", p.Config().MaxConns)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if m, err := migrate.Open(ctx, dsn); err != nil {
+		t.Errorf("migrate.Open with pool_max_conns in the URL: %v", err)
+	} else {
+		if _, err := m.Up(ctx); err != nil {
+			t.Errorf("migrate up with pool_max_conns in the URL: %v", err)
+		}
+		m.Close()
+	}
+
+	l := pg.NewListener(cfg, pg.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	lctx, lcancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- l.Run(lctx) }()
+	defer func() {
+		lcancel()
+		<-done
+	}()
+	waitFor(t, 10*time.Second, "the listener to come up with pool_max_conns in the URL", l.Healthy)
+}
+
+// pool_max_conns counts only as a parameter: the same text elsewhere in the URL (here the password)
+// leaves the default pool size.
+func TestPoolMaxConnsDetectedAsParameter(t *testing.T) {
+	p, err := pg.NewPool(context.Background(), "postgres://u:pool_max_conns@127.0.0.1:1/db?connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if got := p.Config().MaxConns; got != pg.DefaultMaxConns {
+		t.Errorf("MaxConns = %d, want %d", got, pg.DefaultMaxConns)
+	}
+	for _, bad := range []string{"pool_max_conns=many", "pool_max_conn=3"} {
+		if _, err := pg.ParseConfig("postgres://u@127.0.0.1:1/db?" + bad); err == nil {
+			t.Errorf("ParseConfig accepts %s", bad)
+		}
 	}
 }
 

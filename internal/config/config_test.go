@@ -23,6 +23,17 @@ services:
     backend: { a2a: { url: "https://hello.example.com" } }
 `
 
+// tunnelled is minimal with a tunnel backend: sealing and seller keys belong to tunnel services, which
+// this build does not serve, so ignoring them fails closed.
+const tunnelled = `
+public_url: http://localhost:8080
+postgres: postgres://kontra@localhost:5432/kontra
+services:
+  hello:
+    kind: a2a
+    backend: { tunnel: {} }
+`
+
 func parse(t *testing.T, y string, opts ...Option) *Config {
 	t.Helper()
 	c, err := Parse([]byte(y), "", opts...)
@@ -172,16 +183,34 @@ func TestSealedShapes(t *testing.T) {
 		{"{required: true}", SealedRequired},
 		{"{}", SealedRequired},
 	} {
-		c := parse(t, minimal+"    sealed: "+tc.yaml+"\n")
+		c := parse(t, tunnelled+"    sealed: "+tc.yaml+"\n")
 		if got := c.Services["hello"].Sealed.Mode; got != tc.want {
 			t.Errorf("sealed: %s loads as %q, want %q", tc.yaml, got, tc.want)
 		}
 	}
 	for _, bad := range []string{`"yes"`, "1", "{require: true}", "{required: maybe}", "[true]"} {
-		err := parseErr(t, minimal+"    sealed: "+bad+"\n")
+		err := parseErr(t, tunnelled+"    sealed: "+bad+"\n")
 		if !strings.Contains(err.Error(), "sealed") {
 			t.Errorf("sealed: %s: error %q does not name sealed", bad, err)
 		}
+	}
+}
+
+// Sealing and seller-key verification are not built (M3). A key this build would ignore on a service it
+// serves fails open, so it is refused: sealed on a direct backend (which can never be sealed: no node
+// unseals for it) and seller_keys on a direct a2a backend (its card would be served unverified).
+func TestFailOpenKeysRefused(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"sealed on a direct a2a backend", minimal + "    sealed: true\n", "services.hello.sealed: sealing needs backend tunnel"},
+		{"optional sealing on a direct a2a backend", minimal + "    sealed: { required: false }\n", "sealing needs backend tunnel"},
+		{"sealed on a direct mcp backend", minimal + "  fs:\n    kind: mcp\n    backend: { mcp: { url: \"https://mcp.example.com\" } }\n    sealed: true\n", "services.fs.sealed: sealing needs backend tunnel"},
+		{"seller_keys on a direct a2a backend", minimal + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.seller_keys: seller card signatures are not verified in this release"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := parseErr(t, tc.yaml); !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q\nwant it to contain %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -255,6 +284,13 @@ func TestLoadErrors(t *testing.T) {
 		{"backend with query", svc("    kind: a2a\n    backend: { a2a: { url: \"https://x.example.com/?a=1\" } }\n"), "no query or fragment"},
 		{"backend ftp", svc("    kind: a2a\n    backend: { a2a: { url: ftp://x.example.com } }\n"), "want https://"},
 		{"backend no url", svc("    kind: a2a\n    backend: { a2a: { allow_private: true } }\n"), "url: required"},
+		{"backend port out of range", svc("    kind: a2a\n    backend: { a2a: { url: \"https://x.example.com:99999\" } }\n"), "port \"99999\" is not a number from 1 to 65535"},
+		{"backend port 0", svc("    kind: a2a\n    backend: { a2a: { url: \"https://x.example.com:0/a2a\" } }\n"), "is not a number from 1 to 65535"},
+		{"issuer port out of range", head + "auth: { oidc: { issuer: \"https://login.example.com:70000\", audience: kontra } }\n", "auth.oidc.issuer"},
+		{"public_url port out of range", "postgres: postgres://k@db/k\npublic_url: http://localhost:65536\n", "public_url"},
+		{"timeout over int4 seconds", svc("    kind: a2a\n    backend: { tunnel: {} }\n    task: { timeout: 30000d }\n"), "services.s.task.timeout 720000h0m0s: at most 2147483647 seconds"},
+		{"retention over int4 seconds", svc("    kind: a2a\n    backend: { tunnel: {} }\n    task: { retention: 24856d }\n"), "services.s.task.retention"},
+		{"session idle over int4 seconds", svc("    kind: a2a\n    backend: { tunnel: {} }\n    session_idle_s: 3000000000\n"), "services.s.session_idle_s 3000000000: at most 2147483647"},
 		{"retries over 10", svc("    kind: a2a\n    backend: { tunnel: {} }\n    task: { retries: 11 }\n"), "want 0 to 10"},
 		{"negative retries", svc("    kind: a2a\n    backend: { tunnel: {} }\n    task: { retries: -1 }\n"), "want 0 to 10"},
 		{"sub-second timeout", svc("    kind: a2a\n    backend: { tunnel: {} }\n    task: { timeout: 1500ms }\n"), "whole number of seconds"},
@@ -288,9 +324,15 @@ func TestLoadErrors(t *testing.T) {
 		{"no postgres", "public_url: http://localhost:8080\n", "postgres: required"},
 		{"postgres not a URL", "public_url: http://localhost:8080\npostgres: host=db dbname=k\n", "want a postgres:// URL"},
 		{"postgres bad port", "public_url: http://localhost:8080\npostgres: postgres://k@db:99999/k\n", "postgres:"},
+		{"postgres bad pool size", "public_url: http://localhost:8080\npostgres: \"postgres://k@db/k?pool_max_conns=many\"\n", "pool_max_conns"},
+		{"postgres misspelt pool parameter", "public_url: http://localhost:8080\npostgres: \"postgres://k@db/k?pool_max_conn=3\"\n", "unknown pool parameter \"pool_max_conn\""},
 		{"blobs not s3", head + "blobs: https://bucket.example.com\n", "want s3://"},
 		{"listen without port", head + "listen: localhost\n", "listen \"localhost\""},
 		{"metrics on the public listener", head + "listen: :8080\nmetrics: { listen: \":8080\" }\n", "must differ from listen"},
+		{"metrics on the public port, wildcard spelt out", head + "listen: :8080\nmetrics: { listen: \"0.0.0.0:8080\" }\n", "must differ from listen"},
+		{"metrics on the wildcard's port", head + "listen: \"[::]:8080\"\nmetrics: { listen: \"127.0.0.1:8080\" }\n", "must differ from listen"},
+		{"metrics on localhost's port", head + "listen: \"localhost:9000\"\nmetrics: { listen: \"127.0.0.1:9000\" }\n", "must differ from listen"},
+		{"metrics on the same IP, spelt differently", head + "listen: \"[::ffff:127.0.0.1]:9000\"\nmetrics: { listen: \"127.0.0.1:9000\" }\n", "must differ from listen"},
 		{"zero inflight", head + "limits: { inflight_per_key: 0 }\n", "limits.inflight_per_key: must be positive"},
 		{"zero conns_per_ip (D73)", head + "limits: { conns_per_ip: 0 }\n", "limits.conns_per_ip: must be positive"},
 		{"negative max_conns (D73)", head + "limits: { max_conns: -5 }\n", "limits.max_conns: must be positive"},
@@ -317,6 +359,41 @@ func TestLoadErrors(t *testing.T) {
 			err := parseErr(t, tc.yaml)
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q\nwant it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A load error never prints a password written into a URL: the gate refuses credentials in its URLs, and
+// the refusal goes to stderr and the journal.
+func TestLoadErrorsHideURLCredentials(t *testing.T) {
+	const pw = "s3cretpw"
+	const head = "postgres: postgres://kontra@localhost/kontra\npublic_url: http://localhost:8080\n"
+	svc := func(body string) string { return head + "services:\n  s:\n" + body }
+	for name, y := range map[string]string{
+		"backend url":              svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@seller.example/a2a\" } }\n"),
+		"backend url, bad port":    svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@seller.example:99999/a2a\" } }\n"),
+		"backend url, unparseable": svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@seller.example:x/a2a\" } }\n"),
+		"backend url, no scheme":   svc("    kind: a2a\n    backend: { a2a: { url: \"bob:" + pw + "@seller.example/a2a\" } }\n"),
+		"backend url, http":        svc("    kind: a2a\n    backend: { a2a: { url: \"http://bob:" + pw + "@seller.example/a2a\" } }\n"),
+		"mcp backend url":          svc("    kind: mcp\n    backend: { mcp: { url: \"https://bob:" + pw + "@mcp.example/mcp\" } }\n"),
+		"seller_keys url":          svc("    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: { url: \"https://u:" + pw + "@x.example/jwks\" }\n"),
+		"oidc issuer":              head + "auth: { oidc: { issuer: \"https://u:" + pw + "@login.example\", audience: kontra } }\n",
+		"oidc issuer, unparseable": head + "auth: { oidc: { issuer: \"https://u:" + pw + "@login.example:p\", audience: kontra } }\n",
+		"mcp_oauth issuer":         head + "auth: { mcp_oauth: { issuer: \"https://u:" + pw + "@login.example\" } }\n",
+		"admission hook url":       head + "hooks: { admission: { url: \"https://u:" + pw + "@cp.example/admit\", secret_env: ADMIT } }\n",
+		"public_url":               "postgres: postgres://k@db/k\npublic_url: \"http://u:" + pw + "@localhost:8080\"\n",
+		"public_url, unparseable":  "postgres: postgres://k@db/k\npublic_url: \"http://u:" + pw + "@localhost:port\"\n",
+		"blobs":                    head + "blobs: \"s3://AKIAEXAMPLE:" + pw + "@bucket/prefix\"\n",
+		"blobs, unparseable":       head + "blobs: \"s3://AKIAEXAMPLE:" + pw + "@bucket:x/prefix\"\n",
+		"mcp allowed origin":       head + "mcp: { allowed_origins: [\"https://u:" + pw + "@a.example.com\"] }\n",
+		"postgres, bad port":       "public_url: http://localhost:8080\npostgres: \"postgres://k:" + pw + "@db:99999/k\"\n",
+		"postgres, bad pool size":  "public_url: http://localhost:8080\npostgres: \"postgres://k:" + pw + "@db/k?pool_max_conns=x\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := parseErr(t, y)
+			if strings.Contains(err.Error(), pw) {
+				t.Errorf("the error prints the password: %v", err)
 			}
 		})
 	}
@@ -390,6 +467,22 @@ postgres: postgres://k@db/k
 				t.Errorf("url = %q", got)
 			}
 		}},
+		{"listeners on distinct addresses or ephemeral ports", `
+public_url: http://localhost:8080
+postgres: postgres://k@db/k
+listen: "127.0.0.1:8080"
+metrics: { listen: "127.0.0.2:8080" }
+`, nil},
+		{"both listeners on ephemeral ports", `
+public_url: http://localhost:8080
+postgres: postgres://k@db/k
+listen: ":0"
+metrics: { listen: ":0" }
+`, nil},
+		{"pool parameters in the postgres URL", `
+public_url: http://localhost:8080
+postgres: "postgres://k@db/k?pool_max_conns=7&pool_max_conn_lifetime=1h"
+`, nil},
 		{"http backend with allow_private (D67)", minimal + `
   local:
     kind: a2a
@@ -431,7 +524,7 @@ func TestRemoteAdmissionRefusedAsUnbuilt(t *testing.T) {
 
 // The seller_keys mapping decodes (the skeleton's json.RawMessage could not), as JSON.
 func TestSellerKeysDecodeAsJSON(t *testing.T) {
-	c := parse(t, minimal+`
+	c := parse(t, tunnelled+`
     seller_keys:
       keys:
         - { kty: EC, crv: P-256, x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0", kid: "k1", use: sig }
@@ -448,7 +541,7 @@ func TestSellerKeysDecodeAsJSON(t *testing.T) {
 	if len(v.Keys) != 1 || v.Keys[0]["kid"] != "k1" || v.Keys[0]["crv"] != "P-256" || v.Extra != 3 {
 		t.Errorf("seller_keys = %s", got)
 	}
-	c = parse(t, minimal+"    seller_keys: { url: \"https://seller.example.com/.well-known/jwks.json\" }\n")
+	c = parse(t, tunnelled+"    seller_keys: { url: \"https://seller.example.com/.well-known/jwks.json\" }\n")
 	if string(c.Services["hello"].SellerKeys) != `{"url":"https://seller.example.com/.well-known/jwks.json"}` {
 		t.Errorf("seller_keys {url} = %s", c.Services["hello"].SellerKeys)
 	}
@@ -478,7 +571,15 @@ func TestParseAllowEntry(t *testing.T) {
 			t.Errorf("ParseAllowEntry(%q) = %+v, %v; want %+v", in, got, err, want)
 		}
 	}
+	// A key: glob matches prefixes of at least its non-* length and, without a *, of exactly its length; one
+	// that cannot meet [A-Za-z0-9_]{4,32} is refused (D68).
+	for _, in := range []string{"key:kk_?", "key:????", "key:" + strings.Repeat("?", 32), "key:*?", "key:" + strings.Repeat("a", 31) + "?*", "key:k*"} {
+		if _, err := ParseAllowEntry(in); err != nil {
+			t.Errorf("ParseAllowEntry(%q) = %v, want it accepted", in, err)
+		}
+	}
 	for _, in := range []string{"", " anonymous", "Anonymous", "key:", "key:acme-*", "key:kk.acme.*", "key:" + strings.Repeat("a", 33) + "*",
+		"key:ab?", "key:???", "key:" + strings.Repeat("?", 33), "key:" + strings.Repeat("a", 30) + "???*", "key:" + strings.Repeat("a", 33),
 		"org:", "org:a_b", "oidc:sub:", "oidc:", "node:", "user:x", "anonymous:x"} {
 		if got, err := ParseAllowEntry(in); err == nil {
 			t.Errorf("ParseAllowEntry(%q) = %+v, want an error", in, got)
@@ -489,16 +590,16 @@ func TestParseAllowEntry(t *testing.T) {
 // Fail-closed keys this build ignores are reported as warnings, so an operator is not surprised.
 func TestUnbuiltWarnings(t *testing.T) {
 	c := parse(t, minimal+`
-    sealed: true
-    seller_keys: { url: "https://seller.example.com/jwks.json" }
   remote:
     kind: a2a
     backend: { tunnel: {} }
+    sealed: true
+    seller_keys: { url: "https://seller.example.com/jwks.json" }
 blobs: s3://kontra-parts
 signing_key: file:./kontra.key
 auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra } }
 `)
-	want := []string{"auth.oidc", "blobs", "signing_key", "services.hello.sealed", "services.hello.seller_keys", "services.remote: tunnel backends"}
+	want := []string{"auth.oidc", "blobs", "signing_key", "services.remote.sealed", "services.remote.seller_keys", "services.remote: tunnel backends"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)
@@ -584,8 +685,8 @@ func TestTeamFixtureLoads(t *testing.T) {
 	if !slices.Equal(c.TLS.ACME.Domains, []string{"agents.acme.io"}) {
 		t.Errorf("acme domains = %v", c.TLS.ACME.Domains)
 	}
-	if c.Services["recon"].Sealed.Mode != SealedRequired || c.Services["triage"].Sealed.Mode != SealedOptional {
-		t.Errorf("sealed = %q, %q", c.Services["recon"].Sealed.Mode, c.Services["triage"].Sealed.Mode)
+	if c.Services["recon"].Sealed.Mode != SealedRequired || c.Services["fs"].Sealed.Mode != SealedOptional || c.Services["triage"].Sealed.Mode != SealedOff {
+		t.Errorf("sealed = %q, %q, %q", c.Services["recon"].Sealed.Mode, c.Services["fs"].Sealed.Mode, c.Services["triage"].Sealed.Mode)
 	}
 	if tr := c.Services["triage"]; tr.Task.RetryCount() != 0 || tr.Task.Retention.D() != 14*24*time.Hour {
 		t.Errorf("triage task = %+v", tr.Task)

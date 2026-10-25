@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
@@ -13,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/medmahmoudi26/kontra/internal/pg"
 )
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -38,6 +39,95 @@ func checkHostPort(addr string) error {
 	return nil
 }
 
+// checkURLPort checks the port of a URL the gate dials or publishes: absent, or 1 to 65535 (url.Parse
+// checks only that it is digits).
+func checkURLPort(u *url.URL) error {
+	p := u.Port()
+	if p == "" {
+		return nil
+	}
+	if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("port %q is not a number from 1 to 65535", p)
+	}
+	return nil
+}
+
+// parseURL is url.Parse with an error that does not repeat the URL (url.Error quotes it whole,
+// credentials included).
+func parseURL(s string) (*url.URL, error) {
+	u, err := url.Parse(s)
+	if ue, ok := err.(*url.Error); ok {
+		return nil, ue.Err
+	}
+	return u, err
+}
+
+// redactURL is s as a validation error may quote it: with any userinfo replaced by "xxxxx". Load errors
+// reach stderr and the journal, and a URL the gate refuses for carrying credentials must not print
+// them. A string that does not parse as a URL with an authority (no scheme, a bad port) loses everything
+// between "://" (or the start) and the authority's last "@".
+func redactURL(s string) string {
+	if u, err := url.Parse(s); err == nil && !strings.Contains(u.Opaque, "@") {
+		if u.User == nil {
+			return s
+		}
+		u.User = url.User("xxxxx")
+		return u.String()
+	}
+	scheme, rest, ok := strings.Cut(s, "://")
+	if !ok {
+		scheme, rest = "", s
+	} else {
+		scheme += "://"
+	}
+	authority := rest
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		authority = rest[:i]
+	}
+	if i := strings.LastIndex(authority, "@"); i >= 0 {
+		return scheme + "xxxxx@" + rest[i+1:]
+	}
+	return s
+}
+
+// listenersCollide reports whether two listen addresses (both valid host:port) bind the same port: the
+// same port other than 0 (each :0 gets its own), and either host is a wildcard ("", 0.0.0.0 or ::, which
+// Go binds dual-stack) or both name one address (localhost is 127.0.0.1 and ::1).
+func listenersCollide(a, b string) bool {
+	ha, pa, err1 := net.SplitHostPort(a)
+	hb, pb, err2 := net.SplitHostPort(b)
+	na, err3 := strconv.Atoi(pa)
+	nb, err4 := strconv.Atoi(pb)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || na != nb || na == 0 {
+		return false
+	}
+	addrs := func(h string) (set []string, wildcard bool) {
+		h = strings.ToLower(strings.TrimSuffix(h, "."))
+		if h == "" {
+			return nil, true
+		}
+		if h == "localhost" {
+			return []string{"127.0.0.1", "::1"}, false
+		}
+		if ip, err := netip.ParseAddr(h); err == nil {
+			ip = ip.Unmap().WithZone("")
+			return []string{ip.String()}, ip.IsUnspecified()
+		}
+		return []string{h}, false
+	}
+	sa, wa := addrs(ha)
+	sb, wb := addrs(hb)
+	if wa || wb {
+		return true
+	}
+	for _, x := range sa {
+		if slices.Contains(sb, x) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsLocalhost reports whether host (a URL's Hostname()) is localhost or a loopback address.
 func IsLocalhost(host string) bool {
 	h := strings.ToLower(strings.TrimSuffix(host, "."))
@@ -56,8 +146,9 @@ func (c *Config) validateListeners(v *validator) {
 	}
 	if err := checkHostPort(c.Metrics.Listen); err != nil {
 		v.add("metrics.listen %q: %v", c.Metrics.Listen, err)
-	} else if c.Metrics.Listen == c.Listen {
-		v.add("metrics.listen %q: must differ from listen (metrics never share the public listener, spec §2.1)", c.Metrics.Listen)
+	} else if checkHostPort(c.Listen) == nil && listenersCollide(c.Metrics.Listen, c.Listen) {
+		v.add("metrics.listen %q: must differ from listen %q, which binds the same port (metrics never share the public listener, spec §2.1)",
+			c.Metrics.Listen, c.Listen)
 	}
 	if err := checkHostPort(c.Temporal.Address); err != nil {
 		v.add("temporal.address %q: %v", c.Temporal.Address, err)
@@ -81,19 +172,24 @@ func (c *Config) validatePublicURL(v *validator) *url.URL {
 		v.add("public_url: required (the URL callers use; the served card carries it)")
 		return nil
 	}
-	u, err := url.Parse(c.PublicURL)
+	shown := redactURL(c.PublicURL)
+	u, err := parseURL(c.PublicURL)
 	switch {
 	case err != nil:
-		v.add("public_url %q: %v", c.PublicURL, err)
+		v.add("public_url %q: %v", shown, err)
 		return nil
 	case u.Scheme != "https" && u.Scheme != "http":
-		v.add("public_url %q: want an http:// or https:// URL", c.PublicURL)
+		v.add("public_url %q: want an http:// or https:// URL", shown)
 		return nil
 	case u.Host == "" || u.Hostname() == "":
-		v.add("public_url %q: no host", c.PublicURL)
+		v.add("public_url %q: no host", shown)
 		return nil
 	case u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
-		v.add("public_url %q: no credentials, query or fragment", c.PublicURL)
+		v.add("public_url %q: no credentials, query or fragment", shown)
+		return nil
+	}
+	if err := checkURLPort(u); err != nil {
+		v.add("public_url %q: %v", shown, err)
 		return nil
 	}
 	return u
@@ -211,13 +307,16 @@ func (c *Config) validateBackends(v *validator) {
 		v.add("postgres: required (a postgres:// URL)")
 	} else if !strings.HasPrefix(c.Postgres, "postgres://") && !strings.HasPrefix(c.Postgres, "postgresql://") {
 		v.add("postgres: want a postgres:// URL")
-	} else if _, err := pgx.ParseConfig(c.Postgres); err != nil {
-		// pgx's message quotes the URL with its password masked.
+	} else if _, err := pg.ParseConfig(c.Postgres); err != nil {
+		// The parse the gate connects with, pool_* parameters included; pgx's message quotes the URL
+		// with its password masked.
 		v.add("postgres: %v", err)
 	}
 	if c.Blobs != "" {
 		if u, err := url.Parse(c.Blobs); err != nil || u.Scheme != "s3" || u.Host == "" {
-			v.add("blobs %q: want s3://<bucket>[/<prefix>]", c.Blobs)
+			v.add("blobs %q: want s3://<bucket>[/<prefix>]", redactURL(c.Blobs))
+		} else if u.User != nil {
+			v.add("blobs %q: credentials do not belong in the URL (the bucket's come from the environment)", redactURL(c.Blobs))
 		}
 	}
 }
@@ -239,23 +338,28 @@ func (c *Config) validateAuth(v *validator) {
 }
 
 // checkHTTPSURL checks an operator-configured URL: absolute, https (or http to a loopback host when
-// loopbackHTTP), with no credentials or fragment.
+// loopbackHTTP), a port from 1 to 65535 if any, no credentials or fragment. Errors quote the URL without
+// its userinfo.
 func checkHTTPSURL(s string, loopbackHTTP bool) error {
-	u, err := url.Parse(s)
+	shown := redactURL(s)
+	u, err := parseURL(s)
 	if err != nil {
-		return err
+		return fmt.Errorf("%q: %w", shown, err)
 	}
 	if u.Host == "" || u.Hostname() == "" {
-		return fmt.Errorf("%q: want an absolute URL", s)
+		return fmt.Errorf("%q: want an absolute URL", shown)
 	}
 	if u.User != nil || u.Fragment != "" {
-		return fmt.Errorf("%q: no credentials or fragment", s)
+		return fmt.Errorf("%q: no credentials or fragment", shown)
+	}
+	if err := checkURLPort(u); err != nil {
+		return fmt.Errorf("%q: %w", shown, err)
 	}
 	switch {
 	case u.Scheme == "https":
 	case u.Scheme == "http" && loopbackHTTP && IsLocalhost(u.Hostname()):
 	default:
-		return fmt.Errorf("%q: want https://", s)
+		return fmt.Errorf("%q: want https://", shown)
 	}
 	return nil
 }
@@ -275,7 +379,7 @@ func (c *Config) validateMetadata(v *validator) {
 		u, err := url.Parse(o)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.Path != "" ||
 			u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			v.add("mcp.allowed_origins: %q is not an origin (scheme://host[:port])", o)
+			v.add("mcp.allowed_origins: %q is not an origin (scheme://host[:port])", redactURL(o))
 		}
 	}
 }
@@ -386,20 +490,42 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 	default:
 		v.add("%s.sealed: want true, false or {required: bool}", at)
 	}
+	direct := s.Backend.Direct() != nil && n == 1
+	if s.Sealed.Mode != SealedOff && direct {
+		// SPEC-CONFLICT: relay §17 and ext-sealed.md §1 do not tie sealed: to a backend. But the recipients
+		// are the service's enrolled node keys and the hosting node unseals (ext-sealed §1, PRD §8); a
+		// direct backend has neither, so a sealed direct service could never be served as declared (and
+		// this build, which does not seal, would relay plaintext for it). Refused rather than ignored.
+		v.add("%s.sealed: sealing needs backend tunnel: the recipients are the service's enrolled node keys and "+
+			"the hosting node unseals (ext-sealed.md §1); a direct backend has neither", at)
+	}
 	if !s.SellerKeys.IsZero() {
 		if err := checkSellerKeys(s.SellerKeys); err != nil {
 			v.add("%s.seller_keys: %v", at, err)
+		} else if direct && s.Kind == KindA2A {
+			// SPEC-CONFLICT: spec §3 makes a service whose card no configured key verifies unavailable
+			// (503 card routes, service_unavailable at the first attempt). Verification is M3; ignoring
+			// the keys would serve the card unverified (fail open), and this build has no unavailable
+			// state for a direct service, so it refuses to start instead, as for the remote hooks.
+			v.add("%s.seller_keys: seller card signatures are not verified in this release (M3); remove seller_keys "+
+				"rather than serve the card unverified (spec §3)", at)
 		}
 	}
 	if !s.Annotations.IsZero() && (len(s.Annotations) == 0 || s.Annotations[0] != '{') {
 		v.add("%s.annotations: want a mapping", at)
 	}
+	// services stores these as integer seconds (timeout_s, retention_s, session_idle_s in 0001).
 	if s.SessionIdle <= 0 {
 		v.add("%s.session_idle_s: must be positive", at)
+	} else if int64(s.SessionIdle) > math.MaxInt32 {
+		v.add("%s.session_idle_s %d: at most %d (stored as integer seconds)", at, s.SessionIdle, math.MaxInt32)
 	}
 	checkSeconds := func(key string, d Duration) {
-		if d < Duration(time.Second) || d.D()%time.Second != 0 {
+		switch {
+		case d < Duration(time.Second) || d.D()%time.Second != 0:
 			v.add("%s.task.%s %s: want a whole number of seconds, at least 1s", at, key, d)
+		case d.D()/time.Second > math.MaxInt32:
+			v.add("%s.task.%s %s: at most %d seconds (stored as integer seconds)", at, key, d, math.MaxInt32)
 		}
 	}
 	checkSeconds("timeout", s.Task.Timeout)
@@ -410,33 +536,38 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 }
 
 // CheckBackendURL checks a direct backend's configured url: an absolute https:// URL, or http:// when
-// allowPrivate (D67), with no credentials, query or fragment. It is the base URL (D71): its path is where
-// the card is fetched from, and its scheme://host:port is the only address the gate dials.
+// allowPrivate (D67), with a port from 1 to 65535 if any, and no credentials, query or fragment. It is the
+// base URL (D71): its path is where the card is fetched from, and its scheme://host:port is the only
+// address the gate dials. Errors quote the URL without its userinfo.
 func CheckBackendURL(s string, allowPrivate bool) error {
 	if s == "" {
 		return fmt.Errorf("required")
 	}
-	u, err := url.Parse(s)
+	shown := redactURL(s)
+	u, err := parseURL(s)
 	if err != nil {
-		return err
+		return fmt.Errorf("%q: %w", shown, err)
 	}
 	if u.Host == "" || u.Hostname() == "" || u.Opaque != "" {
-		return fmt.Errorf("%q: want an absolute URL", s)
+		return fmt.Errorf("%q: want an absolute URL", shown)
 	}
 	if u.User != nil {
-		return fmt.Errorf("%q: credentials do not belong in the URL (the gate holds no seller secret)", s)
+		return fmt.Errorf("%q: credentials do not belong in the URL (the gate holds no seller secret)", shown)
 	}
 	if u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
-		return fmt.Errorf("%q: no query or fragment (the URL is the base the card is fetched from, D71)", s)
+		return fmt.Errorf("%q: no query or fragment (the URL is the base the card is fetched from, D71)", shown)
+	}
+	if err := checkURLPort(u); err != nil {
+		return fmt.Errorf("%q: %w", shown, err)
 	}
 	switch u.Scheme {
 	case "https":
 	case "http":
 		if !allowPrivate {
-			return fmt.Errorf("%q: http:// is refused unless allow_private: true (D67)", s)
+			return fmt.Errorf("%q: http:// is refused unless allow_private: true (D67)", shown)
 		}
 	default:
-		return fmt.Errorf("%q: want https:// (or http:// with allow_private)", s)
+		return fmt.Errorf("%q: want https:// (or http:// with allow_private)", shown)
 	}
 	return nil
 }
@@ -523,14 +654,18 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 	}
 	switch AllowKind(kind) {
 	case AllowKey:
-		literal := strings.NewReplacer("*", "", "?", "").Replace(val)
+		// * matches any run of characters and ? exactly one: a glob without * matches prefixes of exactly
+		// its length, one with * prefixes of at least its non-* length. It can match a stored prefix only
+		// if that range meets 4..32.
+		star := strings.Contains(val, "*")
+		minLen := len(val) - strings.Count(val, "*")
 		switch {
 		case !keyGlobRE.MatchString(val):
 			return AllowEntry{}, fmt.Errorf("%q: a key: glob can never match: API key prefixes are [A-Za-z0-9_] "+
 				"(keys are kk_<operator prefix>_<random>; write e.g. key:kk_acme_*, D68)", s)
-		case literal == val && !KeyPrefixRE.MatchString(val):
-			return AllowEntry{}, fmt.Errorf("%q: a key prefix is 4 to 32 characters", s)
-		case len(literal) > 32:
+		case !star && (len(val) < 4 || len(val) > 32):
+			return AllowEntry{}, fmt.Errorf("%q: a key prefix is 4 to 32 characters, and this matches only %d-character prefixes", s, len(val))
+		case minLen > 32:
 			return AllowEntry{}, fmt.Errorf("%q: a key: glob longer than any prefix can never match", s)
 		}
 		return AllowEntry{Kind: AllowKey, Value: val}, nil
@@ -549,8 +684,11 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 }
 
 // unbuilt lists the keys this build accepts but does not act on yet. Each one fails closed when ignored
-// (nobody is admitted by it, nothing is served for it); keys that would fail open are refused instead
-// (hooks). Remove an entry when the work that builds it lands.
+// (nobody is admitted by it, nothing is served for it); keys that would fail open are refused by
+// Validate instead (the remote hooks, sealed on a direct backend, seller_keys on a direct a2a backend).
+// sealed and seller_keys load only on services this build does not serve (tunnel, mcp), so they fail
+// closed only while those are unbuilt: the work that serves tunnel services (M2) must refuse both, or
+// build them, before it removes the tunnel entry. Remove an entry when the work that builds it lands.
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
