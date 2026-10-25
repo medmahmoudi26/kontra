@@ -3,6 +3,7 @@ package relay
 import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
+	"github.com/medmahmoudi26/kontra/internal/store"
 	"github.com/medmahmoudi26/kontra/internal/unimpl"
 )
 
@@ -19,8 +20,9 @@ func Translate(up a2a.Event, projection *a2a.Task, firstOfAttempt bool) ([]a2a.E
 	return nil, unimpl.Error("relay.Translate", "WP-04")
 }
 
-// Failed builds the terminal failed status the relay or write_terminal logs: an agent-role message with
-// one text part saying what happened, and metadata["kontra.failure"] = reason (spec §6.4).
+// Failed builds the terminal failed status the relay logs: an agent-role message with one text part
+// saying what happened, and metadata["kontra.failure"] = reason (spec §6.4). The shape lives in one place,
+// store.FailedStatus, which write_terminal uses too.
 func Failed(info a2a.TaskInfoProvider, reason, text string) *a2a.TaskStatusUpdateEvent {
-	panic(unimpl.Error("relay.Failed", "WP-04"))
+	return store.FailedStatus(info, store.FailureReason(reason), text)
 }

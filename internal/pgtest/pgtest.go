@@ -89,6 +89,13 @@ func Database(t testing.TB) string {
 // database is dropped.
 func New(t testing.TB) *pgxpool.Pool {
 	t.Helper()
+	return Pool(t, Migrated(t))
+}
+
+// Migrated creates a fresh database with the schema applied and returns its postgres:// URL, for tests
+// that need more than one pool or a LISTEN connection on it. It is dropped when the test ends.
+func Migrated(t testing.TB) string {
+	t.Helper()
 	dsn := Database(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -103,10 +110,17 @@ func New(t testing.TB) *pgxpool.Pool {
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}
-	pool, err := pg.NewPool(ctx, dsn)
+	return dsn
+}
+
+// Pool returns a gate pool (pg.NewPool) on dsn, closed when the test ends and before a database pgtest
+// created is dropped (cleanups run last-registered first).
+func Pool(t testing.TB, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pg.NewPool(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close) // runs before Database's drop: cleanups run last-registered first
+	t.Cleanup(pool.Close)
 	return pool
 }
