@@ -13,6 +13,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	a2apush "github.com/a2aproject/a2a-go/v2/a2asrv/push"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
 	"github.com/google/uuid"
 
@@ -653,5 +654,59 @@ func TestDispatchPreambleIsBounded(t *testing.T) {
 	}
 	if n := calls.Load(); n != 0 {
 		t.Errorf("%d upstream calls", n)
+	}
+}
+
+// flakyGet is a task store whose next Get fails as a broken pooled connection does, once armed.
+type flakyGet struct {
+	*store.Store
+	fail atomic.Bool
+}
+
+func (f *flakyGet) Get(ctx context.Context, id a2a.TaskID) (*taskstore.StoredTask, error) {
+	if f.fail.CompareAndSwap(true, false) {
+		return nil, errors.New("simulated: conn closed (a Postgres switchover)")
+	}
+	return f.Store.Get(ctx, id)
+}
+
+// a2a-go's handler reads the task (loadExecutionContext's Get) on every dispatch in cluster mode, before
+// the executor runs. A read the gate's store fails (a broken connection, a statement timeout) is the gate's
+// failure, not the upstream's, which was never contacted: the dispatch returns context_lost (the workflow
+// retries before the first upstream task id), and the task is not failed upstream_error (spec §6.4, D42).
+func TestStoreReadFailureIsALostContext(t *testing.T) {
+	var flaky *flakyGet
+	e := newEnv(t, envOptions{wrapTaskStore: func(s *store.Store) taskstore.Store {
+		flaky = &flakyGet{Store: s}
+		return flaky
+	}})
+	b, calls := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+		rpcResult(w, rid, `"result":{"task":{"id":"up-1","contextId":"c","status":{"state":"TASK_STATE_COMPLETED"}}}`)
+	})
+	e.backends.set(b, rpcInfo, nil)
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	if _, err := e.handlers.For(context.Background(), e.svc); err != nil {
+		t.Fatal(err)
+	}
+	flaky.fail.Store(true)
+	res := e.dispatch(context.Background(), id, 1, wid, false)
+	if flaky.fail.Load() {
+		t.Fatal("the dispatch never read the task through the store")
+	}
+	if res.Outcome != lifecycle.DispatchContextLost {
+		t.Errorf("outcome %+v, want context_lost", res)
+	}
+	if p := projection(t, e, id); p.Status.State == a2a.TaskStateFailed {
+		t.Errorf("the task failed %v on a failed read of the gate's store", p.Metadata[store.MetaFailure])
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("%d upstream calls", n)
+	}
+	// The retry (attempt 2, the same work item) then runs the turn.
+	if err := e.log.BeginRetry(context.Background(), store.Attempt{TaskID: uid(t, id), N: 2, Backend: store.BackendDirect}, store.OutcomeUpstreamUnreachable); err != nil {
+		t.Fatal(err)
+	}
+	if res := e.dispatch(context.Background(), id, 2, wid, false); res.Outcome != lifecycle.DispatchTerminal {
+		t.Errorf("the retry: %+v", res)
 	}
 }

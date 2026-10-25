@@ -16,6 +16,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	a2apush "github.com/a2aproject/a2a-go/v2/a2asrv/push"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -114,6 +115,8 @@ type envOptions struct {
 	policy   ssrf.Policy
 	// writeTimeout replaces the log's write timeout (store.WriteTimeout) when set.
 	writeTimeout time.Duration
+	// wrapTaskStore wraps each service's task store beneath the dispatch's store-failure notes.
+	wrapTaskStore func(*store.Store) taskstore.Store
 }
 
 func newEnv(t *testing.T, o envOptions) *env {
@@ -141,6 +144,7 @@ func newEnv(t *testing.T, o envOptions) *env {
 		Queue:        func(store.ServiceRef) workqueue.Queue { q, _ := workqueue.NewPushQueue(e.queue); return q },
 		Interceptors: func(store.ServiceRef) []a2asrv.CallInterceptor { return e.intc.Chain() },
 		Registry:     e.reg, Backends: e.backends, Signals: e.signals, Executor: o.opts,
+		wrapTaskStore: o.wrapTaskStore,
 	})
 	e.disp = &Dispatcher{ReplicaID: replica, Log: e.log, Registry: e.reg, Handlers: e.handlers, Backends: e.backends,
 		Rebuild: rebuild, Heartbeater: testHeartbeater{}}

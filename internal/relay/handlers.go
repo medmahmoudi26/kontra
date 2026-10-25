@@ -51,6 +51,9 @@ type HandlerDeps struct {
 	Signals      Signaler        // kontra.dispatched
 	Logger       *slog.Logger
 	Executor     ExecutorOptions
+
+	// wrapTaskStore, in tests, wraps each service's task store beneath the dispatch's store-failure notes.
+	wrapTaskStore func(*store.Store) taskstore.Store
 }
 
 // PollInterval is the pull queue's poll interval (spec §15). The puller long-polls on LISTEN, so this only
@@ -115,8 +118,12 @@ func (h *Handlers) For(ctx context.Context, svc store.ServiceRef) (*ServiceHandl
 	q := &capturingQueue{Queue: d.Queue(svc)}
 	qm := eventqueue.NewPullQueueManager(newTaskFromStart(d.Puller), eventqueue.PullConfig{PollInterval: PollInterval, InactivityTimeout: 0})
 	exec := NewExecutor(d.Log, d.Registry, d.Backends).ForService(svc, d.Signals, d.Logger, d.Executor)
+	var ts taskstore.Store = st
+	if d.wrapTaskStore != nil {
+		ts = d.wrapTaskStore(st)
+	}
 	opts := []a2asrv.RequestHandlerOption{
-		a2asrv.WithClusterMode(a2asrv.ClusterConfig{TaskStore: dispatchStore{st}, QueueManager: qm, WorkQueue: q}),
+		a2asrv.WithClusterMode(a2asrv.ClusterConfig{TaskStore: dispatchStore{ts}, QueueManager: qm, WorkQueue: q}),
 	}
 	if d.Logger != nil {
 		opts = append(opts, a2asrv.WithLogger(d.Logger))
@@ -136,15 +143,18 @@ func (h *Handlers) For(ctx context.Context, svc store.ServiceRef) (*ServiceHandl
 	return sh, nil
 }
 
-// dispatchStore is the task store a2a-go's handler writes through. A write a dispatch makes (its context
-// carries the dispatch) that fails for a reason of the database's own — it ran out of its time on a lock or
-// a slow server, the connection broke, the server shut down — is recorded in the dispatch's registry entry,
-// so that the dispatch returns context_lost instead of failing a healthy upstream task upstream_error
-// (spec §6.4). a2a-go's processor turns any write error into its own SetTaskFailed, which the store refuses
-// (D8), and the handler's error alone cannot say whose failure it was. The store's refusals (a version
-// conflict, the terminal rule, a fenced dispatch, a2a-go's synthesized failure) are a2a-go's to handle and
-// the Dispatcher's to map, and an error that would only repeat on a re-attach is not a lost context.
-type dispatchStore struct{ *store.Store }
+// dispatchStore is the task store a2a-go's handler reads and writes through. A read or write a dispatch
+// makes (its context carries the dispatch) that fails for a reason of the database's own — it ran out of
+// its time on a lock or a slow server, the connection broke, the server shut down — is recorded in the
+// dispatch's registry entry, so that the dispatch returns context_lost instead of failing a healthy
+// upstream task upstream_error (spec §6.4, D42): before the first upstream task id the workflow retries,
+// after it a later dispatch re-attaches. a2a-go's processor turns any write error into its own
+// SetTaskFailed, which the store refuses (D8), and a2a-go's executor setup turns a failed read of the task
+// (loadExecutionContext's Get, on every dispatch in cluster mode) into "executor setup failed", so the
+// handler's error alone cannot say whose failure it was. The store's refusals (a version conflict, the
+// terminal rule, a fenced dispatch, a2a-go's synthesized failure, a task not found) are a2a-go's to handle
+// and the Dispatcher's to map, and an error that would only repeat on a re-attach is not a lost context.
+type dispatchStore struct{ taskstore.Store }
 
 func (s dispatchStore) Update(ctx context.Context, req *taskstore.UpdateRequest) (taskstore.TaskVersion, error) {
 	v, err := s.Store.Update(ctx, req)
@@ -152,6 +162,14 @@ func (s dispatchStore) Update(ctx context.Context, req *taskstore.UpdateRequest)
 		noteStoreFailure(ctx, err)
 	}
 	return v, err
+}
+
+func (s dispatchStore) Get(ctx context.Context, taskID a2a.TaskID) (*taskstore.StoredTask, error) {
+	t, err := s.Store.Get(ctx, taskID)
+	if err != nil && storeFailure(err) {
+		noteStoreFailure(ctx, err)
+	}
+	return t, err
 }
 
 // dispatchPushStore records, the same way, a failed read of the task's push configs, which a2a-go's
