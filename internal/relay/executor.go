@@ -991,8 +991,8 @@ func (r *run) recordFirst(ctx context.Context, upTask a2a.TaskID, upCtx string) 
 		err := r.e.log.SetFirstUpstreamID(ctx, r.d.fence, string(upTask), upCtx)
 		switch {
 		case err == nil:
-		case errors.Is(err, store.ErrFenced):
-			r.logger.Info("the first upstream task id was refused: a newer dispatch or attempt holds the task")
+		case errors.Is(err, store.ErrFenced), errors.Is(err, store.ErrAttemptNotFound):
+			r.logger.Info("the first upstream task id was refused: a newer dispatch or attempt holds the task", "error", err)
 			r.finish(nil, err)
 			return false
 		case errors.Is(err, store.ErrUpstreamIDMismatch):
