@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -204,6 +205,10 @@ func IsV1(upstream []byte) bool {
 	return err == nil && o.has("supportedInterfaces")
 }
 
+// v0Members are the 0.x card members that 1.0 replaced: the interface members and their protocolVersion,
+// supportsAuthenticatedExtendedCard (capabilities.extendedAgentCard) and security (securityRequirements).
+var v0Members = []string{"url", "preferredTransport", "additionalInterfaces", "protocolVersion", "supportsAuthenticatedExtendedCard", "security"}
+
 // Normalize converts a pre-1.0 card to the 1.0 shape as raw JSON; a 1.0 card is returned as is (spec §3,
 // D12). The 0.x members a2a-go's a2av0 parser maps are renamed the same way, and every other member is
 // kept byte for byte, in its place:
@@ -214,13 +219,49 @@ func IsV1(upstream []byte) bool {
 //   - supportsAuthenticatedExtendedCard becomes capabilities.extendedAgentCard;
 //   - security becomes securityRequirements, on the card and on each skill, in the 1.0 shape;
 //   - securitySchemes' OpenAPI-style entries become the 1.0 one-of wrappers.
+//
+// A card with both shapes (supportedInterfaces and 0.x members, as a2a-go v2's a2av0 card producers write
+// for a seller that also serves 0.3 clients) keeps its supportedInterfaces and loses its 0.x members: the
+// 0.x interface members go, supportsAuthenticatedExtendedCard and security are converted as above where the
+// card has no 1.0 member of their own and dropped otherwise, and so is each skill's security.
+//
+// SPEC-CONFLICT: spec §3 says "a 1.0 card is used as is" and keeps every seller-authored member but the
+// gate's; read literally, a combined card's url, additionalInterfaces, preferredTransport and
+// protocolVersion "0.3" would be served beside the gate's supportedInterfaces, so a 0.3 client reading the
+// served card would dial the seller's own (often internal) address, past the gate's allow: list and
+// authentication, against §3's "supportedInterfaces ... Never an upstream URL" and §2.4's 1.0-only
+// downstream; and its security and supportsAuthenticatedExtendedCard would contradict the gate's own
+// securityRequirements and extendedAgentCard: false (D52). The closest faithful behaviour: those 0.x
+// members are the 0.x spelling of the very fields §3 gives the gate, so a combined card is normalized like
+// a 0.x card for them, and a pure 1.0 card is still returned as is.
 func Normalize(upstream []byte) ([]byte, error) {
 	o, err := parseObject(upstream)
 	if err != nil {
 		return nil, err
 	}
 	if o.has("supportedInterfaces") {
-		return upstream, nil
+		combined := slices.ContainsFunc(v0Members, o.has)
+		if !combined {
+			combined, err = skillsHaveV0Security(o)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !combined {
+			return upstream, nil
+		}
+		o = o.del("url", "preferredTransport", "additionalInterfaces", "protocolVersion")
+		if o.has("securityRequirements") {
+			o = o.del("security")
+		}
+		caps, err := capsObject(o)
+		if err != nil {
+			return nil, err
+		}
+		if caps.has("extendedAgentCard") {
+			o = o.del("supportsAuthenticatedExtendedCard")
+		}
+		return normalizeV0Rest(o)
 	}
 	version := "0.3"
 	if raw, ok := o.get("protocolVersion"); ok {
@@ -240,7 +281,12 @@ func Normalize(upstream []byte) ([]byte, error) {
 		o = o.set("supportedInterfaces", mustJSON(ifaces))
 	}
 	o = o.del("preferredTransport", "additionalInterfaces", "protocolVersion")
+	return normalizeV0Rest(o)
+}
 
+// normalizeV0Rest converts supportsAuthenticatedExtendedCard, security, securitySchemes and each skill's
+// security, once the interface members are in the 1.0 shape.
+func normalizeV0Rest(o object) ([]byte, error) {
 	if raw, ok := o.get("supportsAuthenticatedExtendedCard"); ok {
 		var ext bool
 		if err := json.Unmarshal(raw, &ext); err != nil {
@@ -401,7 +447,26 @@ func v0Schemes(raw json.RawMessage) (json.RawMessage, error) {
 	return schemes.marshal(), nil
 }
 
-// v0Skills renames each skill's security to securityRequirements, in the 1.0 shape.
+// skillsHaveV0Security reports whether a skill of the card carries a 0.x security member.
+func skillsHaveV0Security(o object) (bool, error) {
+	raw, ok := o.get("skills")
+	if !ok {
+		return false, nil
+	}
+	var skills []json.RawMessage
+	if err := json.Unmarshal(raw, &skills); err != nil {
+		return false, nil // not an array: kept as the seller wrote it
+	}
+	for _, s := range skills {
+		if so, err := parseObject(s); err == nil && so.has("security") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// v0Skills renames each skill's security to securityRequirements, in the 1.0 shape; a skill that already
+// has securityRequirements (a card in both shapes) only loses its security.
 func v0Skills(raw json.RawMessage) (json.RawMessage, error) {
 	var skills []json.RawMessage
 	if err := json.Unmarshal(raw, &skills); err != nil {
@@ -415,6 +480,11 @@ func v0Skills(raw json.RawMessage) (json.RawMessage, error) {
 		}
 		sec, ok := o.get("security")
 		if !ok {
+			continue
+		}
+		if o.has("securityRequirements") {
+			skills[i] = o.del("security").marshal()
+			changed = true
 			continue
 		}
 		req, err := v0Security(sec)
@@ -466,7 +536,7 @@ func Rewrite(in Input) ([]byte, error) {
 			}})})
 			reqs = append(reqs, map[string]map[string]map[string][]string{"schemes": {"oidc": {"list": {}}}})
 		}
-		o = o.set("securitySchemes", schemes.marshal()).set("securityRequirements", mustJSON(reqs))
+		o = o.set("securitySchemes", schemes.marshal()).set("securityRequirements", mustJSON(reqs)).del("security")
 	}
 	caps, err := capsObject(o)
 	if err != nil {

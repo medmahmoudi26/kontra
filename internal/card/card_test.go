@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 
 	"kontra.sh/kontra/internal/upstream"
 )
@@ -575,5 +576,91 @@ func TestKeeperPersistsUntilRecorded(t *testing.T) {
 	mu.Unlock()
 	if strings.Contains(last, "securitySchemes") || last == before {
 		t.Fatalf("the seeded keeper recorded %s", last)
+	}
+}
+
+// combinedCard is the card a seller built on a2a-go v2 publishes when it also serves 0.3 clients
+// (a2av0.NewStaticAgentCardProducer): supportedInterfaces plus the 0.3 url, preferredTransport,
+// additionalInterfaces, protocolVersion, security and supportsAuthenticatedExtendedCard, all naming the
+// seller's own internal address and security.
+func combinedCard(t *testing.T) []byte {
+	t.Helper()
+	card := &a2a.AgentCard{
+		Name: "Seller", Description: "d", Version: "1",
+		SupportedInterfaces: []*a2a.AgentInterface{
+			{URL: "http://10.1.2.3:9999/rpc", ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: "1.0"},
+			{URL: "http://10.1.2.3:9999/rest", ProtocolBinding: a2a.TransportProtocolHTTPJSON, ProtocolVersion: "1.0"},
+			{URL: "http://10.1.2.3:9999/v03", ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: "0.3"},
+			{URL: "http://10.1.2.3:9999/v03rest", ProtocolBinding: a2a.TransportProtocolHTTPJSON, ProtocolVersion: "0.3"},
+		},
+		Capabilities:         a2a.AgentCapabilities{Streaming: true, ExtendedAgentCard: true},
+		SecuritySchemes:      a2a.NamedSecuritySchemes{"seller": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}},
+		SecurityRequirements: a2a.SecurityRequirementsOptions{{"seller": {}}},
+		DefaultInputModes:    []string{"text"}, DefaultOutputModes: []string{"text"},
+		Skills: []a2a.AgentSkill{{ID: "s", Name: "s", Description: "s", Tags: []string{"t"},
+			SecurityRequirements: a2a.SecurityRequirementsOptions{{"seller": {"fx"}}}}},
+	}
+	p, ok := a2av0.NewStaticAgentCardProducer(card).(interface {
+		CardJSON(context.Context) ([]byte, error)
+	})
+	if !ok {
+		t.Fatal("a2av0's card producer has no CardJSON")
+	}
+	raw, err := p.CardJSON(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// A card in both shapes is served as 1.0 only: none of its 0.x members, which name the seller's internal
+// address and security, survives, so a 0.3 client reading the served card never dials the seller past
+// the gate (spec §3: supportedInterfaces is "never an upstream URL"; §2.4: 1.0 only downstream; D52).
+func TestCombinedCardServesNoUpstreamURL(t *testing.T) {
+	up := combinedCard(t)
+	upO := members(t, up)
+	for _, k := range []string{"url", "additionalInterfaces", "preferredTransport", "protocolVersion", "security"} {
+		if !upO.has(k) {
+			t.Fatalf("the producer's card has no %q (a2a-go changed?): %s", k, up)
+		}
+	}
+	for _, anon := range []bool{false, true} {
+		in := input(up)
+		in.OnlyAnonymous = anon
+		served, err := Rewrite(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(served), "10.1.2.3") {
+			t.Errorf("anonymous %v: the served card names the seller's address: %s", anon, served)
+		}
+		o := members(t, served)
+		for _, gone := range v0Members {
+			if v, ok := o.get(gone); ok {
+				t.Errorf("anonymous %v: 0.x member %q served: %s", anon, gone, v)
+			}
+		}
+		var card a2a.AgentCard
+		if err := json.Unmarshal(served, &card); err != nil {
+			t.Fatalf("not a 1.0 card: %v", err)
+		}
+		if len(card.SupportedInterfaces) != 2 || card.SupportedInterfaces[0].URL != "https://gate.example/agents/booking" || card.Capabilities.ExtendedAgentCard {
+			t.Errorf("anonymous %v: %+v %+v", anon, card.SupportedInterfaces, card.Capabilities)
+		}
+		var skills []map[string]json.RawMessage
+		_ = json.Unmarshal(mustGet(t, o, "skills"), &skills)
+		if len(skills) != 1 || skills[0]["security"] != nil || skills[0]["securityRequirements"] == nil {
+			t.Errorf("anonymous %v: skills %s", anon, mustGet(t, o, "skills"))
+		}
+	}
+	// Every other seller member keeps its bytes.
+	norm, err := Normalize(up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"name", "description", "version", "defaultInputModes", "supportedInterfaces"} {
+		if got, want := mustGet(t, members(t, norm), k), mustGet(t, upO, k); !bytes.Equal(got, want) {
+			t.Errorf("%s: %s, want %s", k, got, want)
+		}
 	}
 }
