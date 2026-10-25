@@ -20,6 +20,9 @@ const (
 	DefaultPushSlots         = 2000
 	DefaultHeartbeatThrottle = 10 * time.Second
 	DefaultDrainTimeout      = 10 * time.Minute
+	// StopTimeout is the WorkerStopTimeout of every worker but kontra-direct: they stop only after the
+	// dispatches have ended, and then within a few seconds (spec §14.3, D76).
+	StopTimeout = 5 * time.Second
 )
 
 // WorkerConfig sizes one replica's workers (spec §14.2).
@@ -85,7 +88,7 @@ func NewWorkers(c client.Client, cfg WorkerConfig, acts Activities) (*Workers, e
 	cfg = cfg.withDefaults()
 	w := &Workers{}
 
-	w.lifecycle = worker.New(c, QueueLifecycle, worker.Options{})
+	w.lifecycle = worker.New(c, QueueLifecycle, worker.Options{WorkerStopTimeout: StopTimeout})
 	w.lifecycle.RegisterWorkflowWithOptions(TaskLifecycle, workflow.RegisterOptions{Name: WorkflowType})
 	la := acts.Lifecycle
 	for name, fn := range map[string]any{
@@ -110,17 +113,17 @@ func NewWorkers(c client.Client, cfg WorkerConfig, acts Activities) (*Workers, e
 	})
 	w.direct.RegisterActivityWithOptions(acts.Dispatch.Dispatch, activity.RegisterOptions{Name: ActDispatch})
 
-	w.directCtl = worker.New(c, QueueDirectCtl, worker.Options{DisableWorkflowWorker: true})
+	w.directCtl = worker.New(c, QueueDirectCtl, worker.Options{DisableWorkflowWorker: true, WorkerStopTimeout: StopTimeout})
 	w.directCtl.RegisterActivityWithOptions(acts.Dispatch.ForwardCancel, activity.RegisterOptions{Name: ActForwardCancel})
 
 	// The control queue has its own slots, so abort and forward_cancel are never queued behind dispatches.
-	w.ctl = worker.New(c, QueueCtl(cfg.ReplicaID), worker.Options{DisableWorkflowWorker: true})
+	w.ctl = worker.New(c, QueueCtl(cfg.ReplicaID), worker.Options{DisableWorkflowWorker: true, WorkerStopTimeout: StopTimeout})
 	w.ctl.RegisterActivityWithOptions(acts.Dispatch.Abort, activity.RegisterOptions{Name: ActAbort})
 	w.ctl.RegisterActivityWithOptions(acts.Dispatch.ForwardCancel, activity.RegisterOptions{Name: ActForwardCancel})
 
 	if acts.Push != nil {
 		w.push = worker.New(c, QueuePush, worker.Options{
-			DisableWorkflowWorker: true, MaxConcurrentActivityExecutionSize: cfg.PushSlots,
+			DisableWorkflowWorker: true, MaxConcurrentActivityExecutionSize: cfg.PushSlots, WorkerStopTimeout: StopTimeout,
 		})
 		w.push.RegisterActivityWithOptions(acts.Push.PushWebhook, activity.RegisterOptions{Name: ActPushWebhook})
 	}
@@ -175,11 +178,13 @@ func (w *Workers) Drain() error {
 	return unimpl.Error("lifecycle.Workers.Drain", "WP-08")
 }
 
-// Stop stops every worker, the control worker last, so abort and forward_cancel for this replica's
-// dispatches are served while the others stop. kontra-direct waits up to its WorkerStopTimeout (the drain
-// timeout) for in-flight dispatches. The drain order of spec §14.3 is Drain's (WP-08).
+// Stop stops every worker in the drain order (spec §14.3, D76): kontra-direct first, which stops polling at
+// once and waits up to its WorkerStopTimeout (the drain timeout) for the dispatches in flight, while
+// kontra-lifecycle, kontra-push, kontra-direct-ctl and kontra-ctl-<replica> keep polling, so that on a gate
+// of one replica Updates such as a cancel are still accepted, finished dispatches' results recorded, and
+// abort and forward_cancel served; then those, with a short WorkerStopTimeout, the control queue last.
 func (w *Workers) Stop() {
-	for _, x := range []worker.Worker{w.lifecycle, w.push, w.direct, w.directCtl, w.ctl} {
+	for _, x := range []worker.Worker{w.direct, w.lifecycle, w.push, w.directCtl, w.ctl} {
 		if x != nil {
 			x.Stop()
 		}

@@ -197,7 +197,10 @@ func (a *LifecycleActivities) ListPushConfigs(ctx context.Context, taskID string
 // WriteTerminal writes the terminal event through the store when no handler can (spec §14.2). It is
 // idempotent: a task that has already ended is left as it is, and its terminal state returned. With
 // EndAttempt it then ends the task's latest attempt if no dispatch ended it, with interrupted when the task
-// was waiting at input-required (D77).
+// was waiting at input-required (D77), but only when the task's terminal event is the one this write
+// describes (this call's, or a retried call's that committed): a dispatch that logged its own terminal
+// event and has not ended its attempt yet (the Dispatcher does after the handler returns) keeps the attempt
+// for its own outcome, which EndAttempt would otherwise lose (it keeps an attempt's first outcome).
 func (a *LifecycleActivities) WriteTerminal(ctx context.Context, in WriteTerminalInput) (TerminalResult, error) {
 	id, err := parseTask(in.TaskID)
 	if err != nil {
@@ -221,12 +224,33 @@ func (a *LifecycleActivities) WriteTerminal(ctx context.Context, in WriteTermina
 	if err != nil {
 		return TerminalResult{}, taskGone(err)
 	}
-	if in.EndAttempt != "" {
+	if in.EndAttempt != "" && endedBy(after, w) {
 		if err := a.endLatest(ctx, id, before.State, store.Outcome(in.EndAttempt)); err != nil {
 			return TerminalResult{}, err
 		}
 	}
 	return TerminalResult{Seq: seq, State: string(after.State)}, nil
+}
+
+// endedBy reports whether the task's terminal event is the one w describes: the same state and, for failed
+// and canceled, the same kontra.failure or kontra.canceled (keys only the gate writes, spec §2.5).
+func endedBy(row *store.TaskRow, w store.TerminalWrite) bool {
+	if row.State != w.State {
+		return false
+	}
+	var md map[string]any
+	if row.Snapshot != nil {
+		md = row.Snapshot.Metadata
+	}
+	switch w.State {
+	case store.StateFailed:
+		r, _ := md[store.MetaFailure].(string)
+		return r == string(w.Reason)
+	case store.StateCanceled:
+		c, _ := md[store.MetaCanceled].(string)
+		return c == w.Canceled
+	}
+	return true
 }
 
 func (a *LifecycleActivities) endLatest(ctx context.Context, id uuid.UUID, before store.State, o store.Outcome) error {

@@ -92,6 +92,10 @@ const (
 	// ErrTypeRefused is a validator's refusal of kontra.message, kontra.review_message, kontra.approval or
 	// kontra.annotate: the caller gets UnsupportedOperationError (spec §7).
 	ErrTypeRefused = "Refused"
+	// ErrTypeBehind is kontra.message refused because a turn is running whose end the workflow has not
+	// processed yet, while the caller has read a later turn end in the log than the last follow-up the
+	// workflow accepted answered (MessageUpdate.After): the work queue may send it again (spec §7).
+	ErrTypeBehind = "Behind"
 	// ErrTypeNotCancelable is kontra.cancel on a task that has ended: TaskNotCancelableError (spec §8).
 	ErrTypeNotCancelable = "NotCancelable"
 	// ErrTypeTaskGone is an activity that found no task row: the workflow ends without writing anything.

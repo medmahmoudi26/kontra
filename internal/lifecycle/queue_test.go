@@ -235,3 +235,32 @@ func TestClassifyUpdateErrors(t *testing.T) {
 		t.Errorf("a cancel not accepted in time: %v", c)
 	}
 }
+
+// Admission is called before any task exists and fails closed (spec §13.1): a new task whose request
+// carries no admission decision, or one that is neither allow nor quote, is refused before anything is
+// written, never created with an id of Write's own.
+func TestQueueWriteNewTaskNeedsAnAdmission(t *testing.T) {
+	q := NewQueue(store.ServiceRef{}, nil, nil, QueueOptions{Owner: func(context.Context) (store.Owner, error) { return buyer, nil }})
+	p := &workqueue.Payload{Type: workqueue.PayloadTypeExecute, ExecuteRequest: requestOf("m-1", "hello")}
+	for name, ctx := range map[string]context.Context{
+		"no admission": context.Background(),
+		"denied":       hooks.WithAdmitted(context.Background(), hooks.Admitted{TaskID: "01920000-0000-7000-8000-00000000000f", Decision: hooks.Decision{Outcome: hooks.Deny}}),
+		"no decision":  hooks.WithAdmitted(context.Background(), hooks.Admitted{TaskID: "01920000-0000-7000-8000-00000000000f"}),
+		"no task id":   hooks.WithAdmitted(context.Background(), hooks.Admitted{Decision: hooks.Decision{Outcome: hooks.Allow}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("Write went on to write the task: %v", r)
+					}
+				}()
+				_, err = q.Write(ctx, p)
+			}()
+			if !errors.Is(err, a2a.ErrInternalError) || !strings.Contains(err.Error(), "admission unavailable") {
+				t.Fatalf("a new task %s: %v, want -32603 admission unavailable", name, err)
+			}
+		})
+	}
+}

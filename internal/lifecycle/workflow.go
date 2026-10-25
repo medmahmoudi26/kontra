@@ -38,6 +38,17 @@ const (
 	listBudget                = 5 * time.Minute
 )
 
+// Behaviour changes behind workflow.GetVersion (spec §14.4, D46). A history recorded before a change
+// replays with workflow.DefaultVersion and keeps the earlier behaviour.
+const (
+	// changeListPushAtStart: list_push_configs runs at the workflow's start, not only after the first
+	// prepare (spec §10.2). Before it, a task that ended before its first prepare pushed nothing.
+	changeListPushAtStart = "list-push-at-start"
+	// changeDispatchNotStarted: a dispatch that was never started (schedule-to-start timeout) after the
+	// attempt's first upstream task id is dispatched again as it was, never turned into a resume.
+	changeDispatchNotStarted = "dispatch-not-started"
+)
+
 // phase is the task's state as the workflow knows it, from its own Updates and activity results.
 type phase int
 
@@ -52,6 +63,7 @@ const (
 // call is one dispatch activity.
 type call struct {
 	cancel workflow.CancelFunc
+	resume bool // dispatched with resume (D42)
 	done   bool
 	res    DispatchResult
 	err    error
@@ -87,13 +99,15 @@ const (
 	stepDispatch stepKind = iota // dispatch the current attempt
 	stepRetry                    // prepare a new attempt, then dispatch it
 	stepResume                   // re-attach to the attempt's upstream task (D42)
+	stepAgain                    // dispatch again what was never started, resume or not
 	stepDone                     // the turn ended: input-required, or the task is terminal
 )
 
 type step struct {
-	kind stepKind
-	wait time.Duration
-	prev string // the outcome prepare records on the attempt a lost dispatch left open
+	kind   stepKind
+	wait   time.Duration
+	prev   string // the outcome prepare records on the attempt a lost dispatch left open
+	resume bool   // stepAgain: the dispatch that was not started was a resume
 }
 
 // lc is one run of TaskLifecycle. Every field is workflow state: it changes only in workflow code, so a
@@ -112,12 +126,15 @@ type lc struct {
 	n       int    // the current attempt, 0 before the first prepare
 	queue   string // its dispatch queue
 	backend string
-	resumes int // successive resume dispatches of the current attempt in this turn
+	resumes int // successive resume (or not started) dispatches of the current attempt in this turn
 
 	turns    int             // kontra.message Updates accepted (the turn numbers)
 	started  int             // turns started
 	accepted map[string]bool // work items accepted in this run (D66)
 	pending  []string        // accepted turns not started yet (at most one)
+	answered int64           // MessageUpdate.After of the last follow-up accepted: the turn end it answered
+
+	listedAtStart bool // list_push_configs ran at the start (changeListPushAtStart)
 
 	disp     *call
 	ctl      int // abort and forward_cancel in flight
@@ -172,6 +189,12 @@ func TaskLifecycle(ctx workflow.Context, in Input) error {
 	}
 	workflow.Go(ctx, l.signals)
 	workflow.Go(ctx, l.patcher)
+	// A new task's inline push config is saved without kontra.push (Queue.Write): this listing is what
+	// starts its push_webhook, whatever happens to the task before its first dispatch (spec §10.2).
+	if workflow.GetVersion(ctx, changeListPushAtStart, workflow.DefaultVersion, 1) >= 1 {
+		l.listedAtStart = true
+		l.listPush(ctx)
+	}
 	if l.phase == phaseQuoted {
 		l.quoted(ctx)
 	}
@@ -234,6 +257,12 @@ func (l *lc) busy() bool { return (l.disp != nil && !l.disp.done) || l.ctl > 0 }
 // validateMessage is §7's table on workflow state (D66): refused unless the task is new (or quoted, its
 // first message) or waits at input-required, no turn is running or queued, no cancel is in flight, and
 // the work item has not been accepted in this run.
+//
+// A refusal because a turn is running is final (ErrTypeRefused) when the caller read no turn end later
+// than the one the last accepted follow-up answered: another follow-up of the same turn end was accepted
+// first (spec §7: two racing follow-ups cannot both be accepted). It is ErrTypeBehind when the caller
+// read a later turn end (MessageUpdate.After): the running turn has logged its end and the workflow has
+// not processed the dispatch's return yet, and the work queue may send the Update again (Queue.message).
 func (l *lc) validateMessage(ctx workflow.Context, u MessageUpdate) error {
 	switch {
 	case u.WorkItemID == "":
@@ -243,6 +272,9 @@ func (l *lc) validateMessage(ctx workflow.Context, u MessageUpdate) error {
 	case l.phase == phaseTerminal:
 		return refusal("the task has ended")
 	case len(l.pending) > 0, l.phase == phaseRunning:
+		if u.After > l.answered {
+			return temporal.NewApplicationError("a turn is running; the task's lifecycle has not seen it end", ErrTypeBehind)
+		}
 		return refusal("a turn is running; the task takes no input until it asks for some")
 	case l.cancelPending():
 		return refusal("the task is being canceled")
@@ -260,6 +292,7 @@ func (l *lc) validateMessage(ctx workflow.Context, u MessageUpdate) error {
 // (D66). It never blocks, so the client's wait for completion is a wait for acceptance.
 func (l *lc) onMessage(ctx workflow.Context, u MessageUpdate) (MessageResult, error) {
 	l.accepted[u.WorkItemID] = true
+	l.answered = max(l.answered, u.After)
 	l.turns++
 	l.pending = append(l.pending, u.WorkItemID)
 	return MessageResult{Turn: l.turns}, nil
@@ -352,9 +385,11 @@ func (l *lc) onReviewMessage(ctx workflow.Context, u ReviewMessageUpdate) (Revie
 	if md == nil {
 		md = map[string]any{}
 	}
+	// Bounded from its scheduling, not only from its start: on a remote hook queue nobody polls, the
+	// activity never starts, and its timeout is the answer accept: false (spec §14.1).
 	hctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue: l.in.Hooks.hooksQueue(), StartToCloseTimeout: reviewMessageStartToClose,
-		RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
+		ScheduleToCloseTimeout: reviewMessageStartToClose, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
 	})
 	var hr hooks.ReviewMessageResult
 	err := workflow.ExecuteActivity(hctx, HookOnReviewMessage, ref,
@@ -665,7 +700,8 @@ func (l *lc) active(ctx workflow.Context) {
 		l.pending = l.pending[1:]
 		l.started++
 		if l.started > MaxTurns {
-			l.fail(ctx, store.ReasonUpstreamError, fmt.Sprintf("the task reached its limit of %d turns", MaxTurns), "")
+			// The attempt waits at input-required: write_terminal ends it, interrupted (D77).
+			l.fail(ctx, store.ReasonUpstreamError, fmt.Sprintf("the task reached its limit of %d turns", MaxTurns), string(store.OutcomeUpstreamError))
 			continue
 		}
 		l.phase = phaseRunning
@@ -673,7 +709,9 @@ func (l *lc) active(ctx workflow.Context) {
 			if !l.prepare(ctx, 1, "") {
 				continue
 			}
-			l.listPush(ctx)
+			if !l.listedAtStart {
+				l.listPush(ctx)
+			}
 		}
 		l.runTurn(ctx, wid)
 	}
@@ -750,7 +788,7 @@ func (l *lc) runTurn(ctx workflow.Context, wid string) {
 				return
 			}
 		}
-		l.dispatch(ctx, wid, next.kind == stepResume)
+		l.dispatch(ctx, wid, next.kind == stepResume || (next.kind == stepAgain && next.resume))
 		if l.phase == phaseTerminal || ctx.Err() != nil {
 			return
 		}
@@ -773,7 +811,7 @@ func (l *lc) dispatch(ctx workflow.Context, wid string, resume bool) {
 		HeartbeatTimeout: dispatchHeartbeat, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
 		WaitForCancellation: true,
 	})
-	c := &call{cancel: cancel}
+	c := &call{cancel: cancel, resume: resume}
 	l.disp = c
 	f := workflow.ExecuteActivity(dctx, ActDispatch, DispatchInput{TaskID: l.in.TaskID, N: l.n, WorkItemID: wid, Resume: resume})
 	workflow.Go(ctx, func(gc workflow.Context) {
@@ -825,9 +863,12 @@ func (l *lc) decide(ctx workflow.Context) step {
 			return l.lost(ctx, store.ReasonTunnelLost)
 		}
 	} else {
+		notStarted := isTimeout(c.err, enums.TIMEOUT_TYPE_SCHEDULE_TO_START)
 		l.logger.Info("dispatch lost", "attempt", l.n,
-			"heartbeat_timeout", isTimeout(c.err, enums.TIMEOUT_TYPE_HEARTBEAT),
-			"schedule_to_start_timeout", isTimeout(c.err, enums.TIMEOUT_TYPE_SCHEDULE_TO_START))
+			"heartbeat_timeout", isTimeout(c.err, enums.TIMEOUT_TYPE_HEARTBEAT), "schedule_to_start_timeout", notStarted)
+		if notStarted && workflow.GetVersion(ctx, changeDispatchNotStarted, workflow.DefaultVersion, 1) >= 1 {
+			return l.notStarted(ctx, c)
+		}
 	}
 	// A heartbeat or schedule-to-start timeout, a lost context, an error of the dispatch itself: the
 	// replica or its context was lost. Postgres says whether an upstream task exists.
@@ -846,6 +887,11 @@ func (l *lc) lost(ctx workflow.Context, hint store.FailureReason) step {
 	if !ok {
 		return step{kind: stepDone}
 	}
+	return l.lostWith(ctx, st, hint)
+}
+
+// lostWith is lost on an attempt_state already read.
+func (l *lc) lostWith(ctx workflow.Context, st AttemptState, hint store.FailureReason) step {
 	tunnel := st.Backend == string(store.BackendTunnel) || l.backend == string(store.BackendTunnel)
 	if st.FirstUpstreamIDAt != nil {
 		if tunnel {
@@ -872,6 +918,47 @@ func (l *lc) lost(ctx workflow.Context, hint store.FailureReason) step {
 		reason = hint
 	}
 	return l.retry(ctx, st, reason, 0, string(reason))
+}
+
+// notStarted is the retry table for a dispatch that was never started (schedule-to-start timeout, 15 s):
+// no gate replica polled the attempt's queue, so the activity never ran. It consumed no work item, sent
+// nothing upstream and wrote nothing.
+//
+// SPEC-CONFLICT: spec §6.4's table does not name this case; its "dispatch heartbeat timeout or lost
+// context, direct backend" row re-attaches after the first upstream task id, and the plan applied it to a
+// schedule-to-start timeout too. For a follow-up turn that is wrong: a resume skips the work item's
+// consume and re-attaches without sending, finds the upstream still at input-required and ends the turn,
+// so the follow-up is in the log (a2a-go appends it to history) but the seller never received it. A new
+// attempt is no fix either: after the first upstream id §6.4 allows none. The closest faithful behaviour:
+// before the first upstream id, a new attempt as before; after it, a direct backend dispatches the same
+// turn again on the same attempt as it was (a follow-up's dispatch stays the turn's first, which consumes
+// the still unconsumed item and sends it; a resume stays a resume), backing off and capped like resumes
+// (D42), and a tunnel backend fails tunnel_lost. When the cap is reached by a dispatch that was not
+// started, the task fails upstream_unreachable ("no gate replica took the turn's dispatch"), the reason
+// lost() already writes when lost dispatches of a direct backend exhaust the retries.
+func (l *lc) notStarted(ctx workflow.Context, c *call) step {
+	st, ok := l.attemptState(ctx)
+	if !ok {
+		return step{kind: stepDone}
+	}
+	tunnel := st.Backend == string(store.BackendTunnel) || l.backend == string(store.BackendTunnel)
+	if st.FirstUpstreamIDAt == nil {
+		return l.lostWith(ctx, st, "")
+	}
+	switch {
+	case tunnel:
+		l.fail(ctx, store.ReasonTunnelLost, "", string(store.OutcomeTunnelLost))
+		return step{kind: stepDone}
+	case st.Ended:
+		l.fail(ctx, store.ReasonUpstreamError, "the relay could not follow the task", "")
+		return step{kind: stepDone}
+	}
+	l.resumes++
+	if l.resumes > MaxResumes {
+		l.fail(ctx, store.ReasonUpstreamUnreachable, "no gate replica took the turn's dispatch", string(store.OutcomeUpstreamUnreachable))
+		return step{kind: stepDone}
+	}
+	return step{kind: stepAgain, resume: c.resume, wait: min(time.Second<<(l.resumes-1), maxResumeBackoff)}
 }
 
 // retry starts a new attempt after 1 s, 2 s, 4 s … (at least the upstream's Retry-After), capped at the

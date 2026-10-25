@@ -408,6 +408,65 @@ func TestFindResend(t *testing.T) {
 	}
 }
 
+// FindResendLocked serializes two identical requests: the second's lookup, in its own creating transaction,
+// waits for the first's transaction and then finds its task (spec §15).
+func TestFindResendLockedSerializesIdenticalRequests(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("q"))
+	m.ID = "msg-dup"
+	h, err := RequestHash(&a2a.SendMessageRequest{Message: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().Add(-24 * time.Hour)
+	tx1, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx1.Rollback(ctx) }()
+	if r, err := e.log.FindResendLocked(ctx, tx1, e.svc, buyerA, "msg-dup", h, since); r != nil || err != nil {
+		t.Fatalf("the first request: %+v %v", r, err)
+	}
+	id := uuid.Must(uuid.NewV7())
+	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{m}}
+	if _, err := e.log.CreateTask(ctx, tx1, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA, ContextID: "c",
+		State: StateSubmitted, Snapshot: snap, FirstMessageID: "msg-dup", FirstRequest: h}); err != nil {
+		t.Fatal(err)
+	}
+	type found struct {
+		r   *TaskRow
+		err error
+	}
+	second := make(chan found, 1)
+	go func() {
+		tx2, err := e.pool.Begin(ctx)
+		if err != nil {
+			second <- found{err: err}
+			return
+		}
+		defer func() { _ = tx2.Rollback(ctx) }()
+		r, err := e.log.FindResendLocked(ctx, tx2, e.svc, buyerA, "msg-dup", h, since)
+		second <- found{r, err}
+	}()
+	select {
+	case f := <-second:
+		t.Fatalf("the second lookup did not wait for the first transaction: %+v %v", f.r, f.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx1.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case f := <-second:
+		if f.err != nil || f.r == nil || f.r.ID != id {
+			t.Fatalf("the second lookup: %+v %v, want the first request's task", f.r, f.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second lookup is still waiting after the first committed")
+	}
+}
+
 // LoadService turns a task row's tenant and service into the ServiceRef a dispatch needs.
 func TestLoadService(t *testing.T) {
 	e := newEnv(t)

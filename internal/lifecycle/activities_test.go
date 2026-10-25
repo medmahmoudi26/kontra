@@ -345,3 +345,58 @@ func TestAppendReviewMessageActivity(t *testing.T) {
 		t.Errorf("a missing work item: %v", err)
 	}
 }
+
+// write_terminal ends the latest attempt only for the terminal event it wrote itself: a dispatch that
+// logged its own terminal event and has not ended its attempt yet (the Dispatcher ends it after the
+// handler returns) keeps the attempt for its own outcome.
+func TestWriteTerminalEndsOnlyTheAttemptItEnded(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+
+	// The race: attempt 1 open, the dispatch logged completed, then the workflow's timeout.
+	id := e.task(store.StateSubmitted, nil)
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	e.status(id, a2a.TaskStateWorking)
+	e.status(id, a2a.TaskStateCompleted)
+	r, err := e.acts.WriteTerminal(ctx, WriteTerminalInput{TaskID: id.String(), State: "failed", Reason: "timeout", EndAttempt: string(store.OutcomeTimeout)})
+	if err != nil || r.State != "completed" {
+		t.Fatalf("write_terminal %+v %v, want the task's own completed", r, err)
+	}
+	a, _ := e.log.GetAttempt(ctx, id, 1)
+	if a.EndedAt != nil {
+		t.Fatalf("attempt 1 ended %q by a terminal write that wrote nothing; the dispatch's completed is lost", a.Outcome)
+	}
+
+	// A retry after its own write committed (the first try failed after it): the attempt is still ended.
+	id2 := e.task(store.StateSubmitted, nil)
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id2.String(), N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	e.status(id2, a2a.TaskStateWorking)
+	if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: id2, State: store.StateFailed, Reason: store.ReasonTimeout}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.acts.WriteTerminal(ctx, WriteTerminalInput{TaskID: id2.String(), State: "failed", Reason: "timeout", EndAttempt: string(store.OutcomeTimeout)}); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := e.log.GetAttempt(ctx, id2, 1); a.EndedAt == nil || a.Outcome != store.OutcomeTimeout {
+		t.Errorf("attempt %+v: a retried write_terminal ends the attempt its first try wrote the end of", a)
+	}
+
+	// Another writer's failure with another reason: not this call's write either.
+	id3 := e.task(store.StateSubmitted, nil)
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id3.String(), N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: id3, State: store.StateFailed, Reason: store.ReasonUpstreamError, Text: "the upstream refused"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.acts.WriteTerminal(ctx, WriteTerminalInput{TaskID: id3.String(), State: "failed", Reason: "timeout", EndAttempt: string(store.OutcomeTimeout)}); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := e.log.GetAttempt(ctx, id3, 1); a.EndedAt != nil {
+		t.Errorf("attempt ended %q by a timeout that lost the race to an upstream_error", a.Outcome)
+	}
+}

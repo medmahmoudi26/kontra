@@ -16,7 +16,9 @@ import (
 // TestReplayRecordedHistories replays every history in testdata/histories against TaskLifecycle (spec
 // §14.4, D46): a change to the workflow that would break a running task fails here. The histories are
 // recorded by TestQueueWriteOverTemporal with KONTRA_RECORD_HISTORIES=1 against the development server;
-// WP-09 adds the ones its e2e runs record.
+// WP-09 adds the ones its e2e runs record. A recording is never re-recorded over once a change is gated:
+// the v0_ files were recorded before list-push-at-start and replay through workflow.DefaultVersion, which
+// is what keeps that gate honest.
 func TestReplayRecordedHistories(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "histories", "*.json"))
 	if err != nil {

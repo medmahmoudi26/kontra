@@ -59,12 +59,14 @@ func payloadOf(req *a2a.SendMessageRequest) *workqueue.Payload {
 }
 
 // turn is what the fake dispatch does with one dispatch of a task: the state it logs, the outcome it
-// returns, and, when hold is set, a channel it waits on first.
+// returns, and, when hold is set, a channel it waits on first (before it writes anything); when holdAfter
+// is set, a channel it waits on after logging the state, before it returns.
 type turn struct {
-	state   a2a.TaskState
-	outcome DispatchOutcome
-	reason  string
-	hold    chan struct{}
+	state     a2a.TaskState
+	outcome   DispatchOutcome
+	reason    string
+	hold      chan struct{}
+	holdAfter chan struct{}
 }
 
 // fakeDispatch stands in for the relay's Dispatcher on kontra-direct and the control queues: it consumes
@@ -127,6 +129,13 @@ func (d *fakeDispatch) Dispatch(ctx context.Context, in DispatchInput) (Dispatch
 		}
 		if err := writeStatus(ctx, d.log, id, tr.state); err != nil {
 			return DispatchResult{}, err
+		}
+	}
+	if tr.holdAfter != nil {
+		select {
+		case <-tr.holdAfter:
+		case <-ctx.Done():
+			return DispatchResult{Outcome: DispatchContextLost}, nil
 		}
 	}
 	if tr.outcome == DispatchTerminal || tr.outcome == DispatchRetryable {

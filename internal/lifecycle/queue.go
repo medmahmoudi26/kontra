@@ -28,10 +28,14 @@ const MetaApproveURL = "kontra.approve.url"
 // InlinePushSaver saves a request's inline push config (configuration.taskPushNotificationConfig) for the
 // task inside the work queue's transaction, before the work item is written (spec §10.1), with Save's
 // rules (idempotent per task, URL and token; the per-task and per-buyer limits). It reports whether a row
-// was inserted: Write then sends kontra.push for a follow-up; a new task's workflow lists its configs at
-// start. internal/push implements it.
+// was inserted: Write then sends kontra.push for a follow-up once kontra.message is accepted; a new task's
+// workflow lists its configs at start. DeleteInline removes a row SaveInline inserted for a follow-up the
+// lifecycle then refused: a refused request leaves nothing on the task (spec §7, §10.1). No kontra.push was
+// sent for it; a push_webhook a listing started for it meanwhile ends when its config is deleted (§10.2).
+// internal/push implements it.
 type InlinePushSaver interface {
 	SaveInline(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, owner store.Owner, cfg *a2a.PushConfig) (configID string, inserted bool, err error)
+	DeleteInline(ctx context.Context, taskID uuid.UUID, configID string) error
 }
 
 // QueueOptions are what a service's work queue needs besides the log and the client.
@@ -76,17 +80,21 @@ func (q *Queue) now() time.Time {
 // Write never puts a2a-go's payload into Temporal: the payload carries the whole request and every
 // inbound header, Authorization and cookies included (D6). Only the work item's id crosses into Temporal.
 //
-// A new task: a resend (same principal, service, messageId and request hash, the first task younger than
-// ResendWindow) is answered with the existing task, re-issuing StartWithMessage with its first work item
-// id (idempotent; a workflow that has ended refuses it, which is swallowed, spec §14.5). Otherwise, in one
-// transaction, the gate task is pre-created (the id Admission was shown, gate ids, submitted, or quoted
-// on a quote decision, the caller's message in history), the inline push config is saved, and the
-// sanitized payload is stored as a work item; after the commit, StartWithMessage. payload.TaskID is set
-// to the task's id, which Write returns.
+// A new task needs the admission interceptor's decision on ctx (hooks.AdmittedFrom: allow or quote, and the
+// pre-minted id); without one Write creates nothing and answers -32603 "admission unavailable" (spec
+// §13.1: admission fails closed). A resend (same principal, service, messageId and request hash, the first
+// task younger than ResendWindow) is answered with the existing task, re-issuing StartWithMessage with its
+// first work item id (idempotent; a workflow that has ended refuses it, which is swallowed, spec §14.5).
+// Otherwise, in one transaction, which first looks for a resend again under the resend key's lock (two
+// identical requests arriving together make one task), the gate task is pre-created (the id Admission was
+// shown, gate ids, submitted, or quoted on a quote decision, the caller's message in history), the inline
+// push config is saved, and the sanitized payload is stored as a work item; after the commit,
+// StartWithMessage. payload.TaskID is set to the task's id, which Write returns.
 //
-// A follow-up: the work item is stored (and the task's version V read in the same transaction) and
-// kontra.message sent. A refusal deletes the work item and is a2a.ErrUnsupportedOperation; an Update not
-// accepted within 10 s keeps it and wraps ErrUnavailable (-32603, HTTP 503; spec §7, D66).
+// A follow-up: the work item is stored (and the task's version V, and the turn end it answers, read in the
+// same transaction) and kontra.message sent, then kontra.push for an inline config it inserted. A refusal
+// deletes the work item and that config and is a2a.ErrUnsupportedOperation; an Update not accepted within
+// 10 s keeps both and wraps ErrUnavailable (-32603, HTTP 503; spec §7, D66).
 //
 // A cancel payload is never written: CancelTask is decided by the cancel interceptor before a2a-go's
 // executor sees it (D4).
@@ -125,11 +133,18 @@ func (q *Queue) input(taskID uuid.UUID, quoteExpires *time.Time) Input {
 
 func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.Owner) (a2a.TaskID, error) {
 	req := p.ExecuteRequest
+	// Admission runs before any task exists and fails closed (spec §13.1): a request that reached Write
+	// without the admission interceptor's decision creates nothing.
+	adm, ok := hooks.AdmittedFrom(ctx)
+	if !ok || adm.TaskID == "" || (adm.Decision.Outcome != hooks.Allow && adm.Decision.Outcome != hooks.Quote) {
+		return "", a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+	}
 	hash, err := store.RequestHash(req)
 	if err != nil {
 		return "", err
 	}
-	prev, err := q.log.FindResend(ctx, q.svc, owner, req.Message.ID, hash, q.now().Add(-ResendWindow))
+	since := q.now().Add(-ResendWindow)
+	prev, err := q.log.FindResend(ctx, q.svc, owner, req.Message.ID, hash, since)
 	if err != nil {
 		return "", err
 	}
@@ -137,10 +152,9 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		return q.resend(ctx, p, prev)
 	}
 
-	adm, _ := hooks.AdmittedFrom(ctx)
-	taskID, err := q.newTaskID(adm)
+	taskID, err := ids.ParseTaskID(adm.TaskID)
 	if err != nil {
-		return "", err
+		return "", a2a.NewError(a2a.ErrInternalError, "admission unavailable")
 	}
 	contextID := req.Message.ContextID
 	if contextID == "" {
@@ -165,6 +179,16 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		return "", err
 	}
 	err = pgx.BeginFunc(ctx, q.log.DB(), func(tx pgx.Tx) error {
+		// The lookup above takes no lock: an identical request arriving at the same moment missed it too.
+		// Under the resend key's lock the later one finds the earlier one's task once it committed.
+		found, err := q.log.FindResendLocked(ctx, tx, q.svc, owner, req.Message.ID, hash, since)
+		if err != nil {
+			return err
+		}
+		if found != nil {
+			prev = found
+			return errResent
+		}
 		if _, err := q.log.CreateTask(ctx, tx, store.NewTask{
 			ID: taskID, Service: q.svc, Protocol: store.ProtocolA2A, Owner: owner, ContextID: contextID, State: state,
 			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash, QuoteExpiresAt: quoteExpires,
@@ -182,6 +206,9 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		}
 		return q.log.InsertWorkItem(ctx, tx, store.WorkItem{ID: wid, TaskID: taskID, Kind: store.WorkExecute, Payload: wp})
 	})
+	if errors.Is(err, errResent) {
+		return q.resend(ctx, p, prev)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -197,17 +224,9 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	return p.TaskID, nil
 }
 
-// newTaskID is the id Admission pre-minted and showed the hook (spec §13.1, D45), else a fresh UUIDv7.
-func (q *Queue) newTaskID(adm hooks.Admitted) (uuid.UUID, error) {
-	if adm.TaskID != "" {
-		return ids.ParseTaskID(adm.TaskID)
-	}
-	id, err := ids.NewTaskID()
-	if err != nil {
-		return uuid.Nil, err
-	}
-	return ids.ParseTaskID(string(id))
-}
+// errResent rolls back a new task's transaction that found, under the resend key's lock, the task an
+// identical request created meanwhile.
+var errResent = errors.New("lifecycle: an identical request created the task meanwhile")
 
 // admitted is what Admission's decision makes of a new task: submitted with the decision's metadata, or
 // quoted with it and the approve URL (spec §13.2). The decision's mcpMeta is rendered for MCP tasks (M3);
@@ -274,7 +293,7 @@ func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner s
 		return "", err
 	}
 	var (
-		version  int64
+		pos      position
 		configID string
 	)
 	err = pgx.BeginFunc(ctx, q.log.DB(), func(tx pgx.Tx) error {
@@ -290,57 +309,100 @@ func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner s
 		if err := q.log.InsertWorkItem(ctx, tx, store.WorkItem{ID: wid, TaskID: taskID, Kind: store.WorkExecute, Payload: wp}); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `select version from kontra.tasks where id = $1`, taskID).Scan(&version)
+		pos, err = positionOf(ctx, tx, taskID)
+		return err
 	})
 	if err != nil {
 		return "", err
 	}
-	if configID != "" {
-		// kontra.push is best effort: the workflow lists push configs after each dispatch (spec §10.2).
-		_ = q.client.SignalPush(ctx, a2a.TaskID(taskID.String()), PushSignal{ConfigID: configID})
-	}
-	fillStreamStart(ctx, StreamStart{TaskID: a2a.TaskID(taskID.String()), Version: version, New: false})
+	tid := a2a.TaskID(taskID.String())
+	fillStreamStart(ctx, StreamStart{TaskID: tid, Version: pos.version, New: false})
 	// The work item exists: the Update is sent even if the caller went away meanwhile, within AcceptWait.
-	if err := q.message(context.WithoutCancel(ctx), taskID, wid, version); err != nil {
+	bg := context.WithoutCancel(ctx)
+	if err := q.message(bg, taskID, wid, pos); err != nil {
 		if errors.Is(err, ErrRefused) || errors.Is(err, errBehind) {
-			// A refused follow-up's content is not kept (spec §7, §14.1): no Update of it is pending, so
-			// nothing can consume it. Deleting is best effort: the caller's answer is the refusal either
-			// way, and retention deletes a leftover with the task.
-			_ = q.log.DeleteWorkItem(context.WithoutCancel(ctx), wid, taskID)
+			// A refused follow-up's content is not kept (spec §7, §14.1), nor its inline push config (§10.1):
+			// no Update of it is pending, so nothing can consume them. Deleting is best effort: the caller's
+			// answer is the refusal either way, and retention deletes a leftover with the task.
+			_ = q.log.DeleteWorkItem(bg, wid, taskID)
+			if configID != "" {
+				_ = q.opts.Push.DeleteInline(bg, taskID, configID)
+			}
 		}
 		return "", err
+	}
+	if configID != "" {
+		// kontra.push is best effort: the workflow lists push configs after each dispatch (spec §10.2).
+		_ = q.client.SignalPush(bg, tid, PushSignal{ConfigID: configID})
 	}
 	return req.Message.TaskID, nil
 }
 
-// errBehind marks a follow-up the workflow kept refusing while the log said the task waits for it.
+// position is where a follow-up's work item was stored in the task's log: the task's version V (where its
+// SSE stream starts, spec §9), and the task's last event other than a metadata row, the turn end the
+// follow-up answers when the task was waiting for input there.
+type position struct {
+	version int64
+	turnEnd int64 // the seq of the last non-metadata event
+	waiting bool  // the task is input-required and that event is the status (or task) row that said so
+}
+
+// positionOf reads a task's position in q (the follow-up's transaction, or the pool).
+func positionOf(ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, taskID uuid.UUID) (position, error) {
+	var (
+		p     position
+		state string
+		kind  string
+	)
+	err := q.QueryRow(ctx, `select t.version, t.state, coalesce(e.seq, 0), coalesce(e.kind, '')
+		from kontra.tasks t
+		left join lateral (select seq, kind from kontra.task_events
+			where task_id = t.id and kind <> 'metadata' order by seq desc limit 1) e on true
+		where t.id = $1`, taskID).Scan(&p.version, &state, &p.turnEnd, &kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return position{}, a2a.ErrTaskNotFound
+	}
+	if err != nil {
+		return position{}, fmt.Errorf("lifecycle: read the task's position: %w", err)
+	}
+	p.waiting = store.State(state) == store.StateInputRequired && (kind == string(store.KindStatus) || kind == string(store.KindTask))
+	return p, nil
+}
+
+// errBehind marks a follow-up the workflow refused because it had not processed the turn end the caller
+// answers, until AcceptWait ran out.
 var errBehind = errors.New("lifecycle: the task's lifecycle has not caught up with its log")
 
-// message sends kontra.message for a follow-up whose work item was stored at the task's version, within
-// AcceptWait in all.
+// message sends kontra.message for a follow-up whose work item was stored at pos, within AcceptWait in all.
 //
 // SPEC-CONFLICT: spec §7 and §14.1 refuse a follow-up "while the previous turn of the same task is still
 // being dispatched", by a validator that reads workflow state only (D66). But the caller learns that a
 // turn ended from the log: the dispatch logs input-required, a2a-go answers the caller at once, and the
 // dispatch activity returns to the workflow a moment later. A caller that answers at once meets a workflow
 // that still counts the turn as running, and read literally it would be refused although the turn has
-// ended. The closest faithful behaviour: while the validator refuses and the log still shows the task at
-// input-required at the very version the work item was stored at (nothing happened since the caller saw
-// the question, so no other follow-up was accepted), the Update is sent again, backing off, until the
-// workflow catches up; if it has not within AcceptWait, the follow-up is not accepted in time (-32603 /
-// HTTP 503, ErrUnavailable) and, since no Update of it is pending, its work item is deleted.
-func (q *Queue) message(ctx context.Context, taskID uuid.UUID, wid uuid.UUID, version int64) error {
+// ended. The closest faithful behaviour: the Update carries the turn end the caller answers
+// (MessageUpdate.After), and the validator tells a final refusal (another follow-up of that turn end was
+// accepted first, or the caller read no later turn end than the workflow processed: ErrTypeRefused, at once)
+// from one by a workflow that has not processed that turn end yet (ErrTypeBehind). Only the latter is sent
+// again, backing off, and only while the task was waiting for input when the work item was stored and its
+// log still ends at that turn end (metadata rows aside: an operator patch the workflow applies once the
+// dispatch returns, spec §13.3, changes no turn). If the workflow has not caught up within AcceptWait, the
+// follow-up is not accepted in time (-32603 / HTTP 503, ErrUnavailable) and, since no Update of it is
+// pending, its work item is deleted.
+func (q *Queue) message(ctx context.Context, taskID uuid.UUID, wid uuid.UUID, pos position) error {
 	ctx, cancel := context.WithTimeout(ctx, AcceptWait)
 	defer cancel()
 	wait := 25 * time.Millisecond
 	for {
-		_, err := q.client.Message(ctx, a2a.TaskID(taskID.String()), wid.String())
-		if err == nil || !errors.Is(err, ErrRefused) || errors.Is(err, ErrClosed) {
+		_, err := q.client.Message(ctx, a2a.TaskID(taskID.String()), MessageUpdate{WorkItemID: wid.String(), After: pos.turnEnd})
+		if err == nil || !errors.Is(err, errBehind) || !pos.waiting {
 			return err
 		}
-		row, lerr := q.log.Load(ctx, taskID)
-		if lerr != nil || row.State != store.StateInputRequired || row.Version != version {
-			return err // a genuine refusal: the task moved on, or another follow-up was accepted
+		now, lerr := positionOf(ctx, q.log.DB(), taskID)
+		if lerr != nil || !now.waiting || now.turnEnd != pos.turnEnd {
+			return err // the task moved on: another turn wrote, or it ended
 		}
 		select {
 		case <-ctx.Done():

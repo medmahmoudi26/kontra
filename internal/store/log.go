@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -612,7 +613,42 @@ func (l *Log) FindResend(ctx context.Context, svc ServiceRef, o Owner, messageID
 	if !storableText(messageID) {
 		return nil, fmt.Errorf("store: messageId must be UTF-8 text without U+0000: %w", a2a.ErrInvalidParams)
 	}
-	r, err := scanTask(l.db.QueryRow(ctx, `select `+taskCols+` from kontra.tasks t
+	return l.findResend(ctx, l.db, svc, o, messageID, requestHash, since)
+}
+
+// FindResendLocked is FindResend inside tx, the transaction that creates the task, after taking the
+// transaction-scoped advisory lock of the resend key (tenant, service, buyer, principal, messageId). Of two
+// identical requests arriving together, which both miss FindResend, the second waits here until the first's
+// transaction ends and then finds its task, so the request is not made into two tasks and dispatched twice
+// (spec §15). The lock is held until tx ends.
+func (l *Log) FindResendLocked(ctx context.Context, tx pgx.Tx, svc ServiceRef, o Owner, messageID string, requestHash [32]byte, since time.Time) (*TaskRow, error) {
+	if messageID == "" {
+		return nil, nil
+	}
+	if !storableText(messageID) {
+		return nil, fmt.Errorf("store: messageId must be UTF-8 text without U+0000: %w", a2a.ErrInvalidParams)
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, resendLockKey(svc, o, messageID)); err != nil {
+		return nil, fmt.Errorf("store: lock the resend key: %w", err)
+	}
+	return l.findResend(ctx, tx, svc, o, messageID, requestHash, since)
+}
+
+// resendLockKey is the advisory lock key of a resend key: the first 8 bytes of a SHA-256 over its parts,
+// under a prefix of its own. Two keys that collide only wait for each other.
+func resendLockKey(svc ServiceRef, o Owner, messageID string) int64 {
+	h := sha256.New()
+	for _, part := range []string{"kontra.resend", svc.TenantID.String(), svc.Name, o.BuyerID.String(), o.Principal, messageID} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
+	return int64(binary.BigEndian.Uint64(sum[:8]))
+}
+
+func (l *Log) findResend(ctx context.Context, q querier, svc ServiceRef, o Owner, messageID string, requestHash [32]byte, since time.Time) (*TaskRow, error) {
+	r, err := scanTask(q.QueryRow(ctx, `select `+taskCols+` from kontra.tasks t
 		where t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.principal = $4
 		  and t.first_message_id = $5 and t.first_request = $6 and t.created_at > $7
 		order by t.created_at desc, t.id desc limit 1`,

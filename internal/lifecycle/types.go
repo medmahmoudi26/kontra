@@ -36,9 +36,14 @@ func (h HooksSnapshot) hooksQueue() string {
 
 // Update and signal payloads (spec §14.1).
 type (
-	// MessageUpdate is kontra.message; its UpdateID is the work item id.
+	// MessageUpdate is kontra.message; its UpdateID is the work item id. After is, for a follow-up, the seq
+	// of the task's last event other than a metadata row when the work item was stored: the turn end the
+	// caller answers when the task was waiting for input (spec §7). It tells the validator whether a
+	// refusal is final or the workflow has not yet processed the turn end the caller read. Zero for the
+	// first message.
 	MessageUpdate struct {
 		WorkItemID string `json:"workItemId"`
+		After      int64  `json:"after,omitempty"`
 	}
 	// MessageResult is kontra.message's result.
 	MessageResult struct {

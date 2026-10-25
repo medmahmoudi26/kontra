@@ -125,12 +125,14 @@ func (c *Client) StartWithMessage(ctx context.Context, in Input, workItemID stri
 	return res, nil
 }
 
-// Message sends kontra.message for a follow-up, waiting up to AcceptWait for its completion. A validator
-// refusal, or a workflow that has ended, is an error wrapping a2a.ErrUnsupportedOperation (and ErrRefused);
-// no answer in time wraps ErrUnavailable.
-func (c *Client) Message(ctx context.Context, taskID a2a.TaskID, workItemID string) (MessageResult, error) {
+// Message sends kontra.message for a follow-up (UpdateID = u.WorkItemID), waiting up to AcceptWait for its
+// completion. A validator refusal, or a workflow that has ended, is an error wrapping
+// a2a.ErrUnsupportedOperation (and ErrRefused); a refusal by a workflow that has not processed the turn end
+// u.After names also wraps errBehind (Queue.message may send it again); no answer in time wraps
+// ErrUnavailable.
+func (c *Client) Message(ctx context.Context, taskID a2a.TaskID, u MessageUpdate) (MessageResult, error) {
 	var res MessageResult
-	err := c.update(ctx, AcceptWait, taskID, UpdateMessage, workItemID, MessageUpdate{WorkItemID: workItemID}, &res)
+	err := c.update(ctx, AcceptWait, taskID, UpdateMessage, u.WorkItemID, u, &res)
 	if err != nil {
 		return MessageResult{}, classify(err, "the task takes no message now")
 	}
@@ -173,6 +175,8 @@ func classify(err error, msg string) error {
 		started *serviceerror.WorkflowExecutionAlreadyStarted
 	)
 	switch {
+	case errors.As(err, &app) && app.Type() == ErrTypeBehind:
+		return fmt.Errorf("%w: %w", refused(msg, err), errBehind)
 	case errors.As(err, &app):
 		return refused(msg, err)
 	case errors.As(err, &started), errors.As(err, &nf):

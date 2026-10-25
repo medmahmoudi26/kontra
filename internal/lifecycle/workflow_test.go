@@ -980,6 +980,11 @@ func TestTurnLimit(t *testing.T) {
 	if len(s.terminals) != 1 || s.terminals[0].Reason != "upstream_error" || !strings.Contains(s.terminals[0].Text, "1000 turns") {
 		t.Fatalf("terminal writes %+v", s.terminals)
 	}
+	// The task ends while its attempt waits at input-required: write_terminal ends the attempt, which it
+	// records interrupted (D77).
+	if s.terminals[0].EndAttempt != string(store.OutcomeUpstreamError) {
+		t.Errorf("the 1,001st turn's terminal write ends no attempt: %+v", s.terminals[0])
+	}
 }
 
 // --- hooks, pushes, patches (spec §10.2, §13.3) ---
@@ -1321,5 +1326,263 @@ func TestMessageRefusedWhileQuoted(t *testing.T) {
 	done(t, env)
 	if !u.has("wi-1:completed") || !u.has("wi-2:rejected") {
 		t.Fatalf("updates %v: the quoted task's first message is accepted with the start; another is refused", u.logs)
+	}
+}
+
+// --- push listing at start (spec §10.2) ---
+
+// A new task's inline push config gets no kontra.push (Queue.Write saves it in the creating transaction):
+// the workflow lists the task's push configs at start, so a task that ends before its first prepare
+// succeeds still delivers its terminal snapshot, and a quoted task's webhook gets the quoted snapshot
+// before the quote is decided.
+func TestPushConfigsListedAtStart(t *testing.T) {
+	t.Run("prepare service_unavailable", func(t *testing.T) {
+		w := newWorld(t)
+		w.pushCfgs = [][]string{{"c-inline"}}
+		env := w.env()
+		env.RegisterActivityWithOptions(func(ctx context.Context, in PrepareInput) (PrepareResult, error) {
+			return PrepareResult{}, temporal.NewNonRetryableApplicationError("gone", ErrTypeServiceUnavailable, nil)
+		}, activity.RegisterOptions{Name: ActPrepare})
+		w.dispatchFn = outcome(DispatchTerminal, "")
+		start(env, newUpdates(), input(2))
+		done(t, env)
+		s := w.snapshot()
+		if len(s.terminals) != 1 || s.terminals[0].Reason != string(store.ReasonServiceUnavailable) {
+			t.Fatalf("terminal writes %+v", s.terminals)
+		}
+		if s.lists < 1 || !slices.Equal(s.pushes, []string{"c-inline"}) {
+			t.Fatalf("lists %d, pushes %v: the inline config's push_webhook never started", s.lists, s.pushes)
+		}
+	})
+	t.Run("quote declined", func(t *testing.T) {
+		w := newWorld(t)
+		w.state = string(store.StateQuoted)
+		w.pushCfgs = [][]string{{"c-inline"}}
+		w.dispatchFn = outcome(DispatchTerminal, "")
+		env := w.env()
+		u := newUpdates()
+		env.RegisterDelayedCallback(func() {
+			env.UpdateWorkflow(UpdateApproval, "no", u.cb("no"), ApprovalUpdate{Accepted: false})
+		}, time.Minute)
+		start(env, u, quotedInput())
+		done(t, env)
+		s := w.snapshot()
+		if len(s.terminals) != 1 || s.terminals[0].Canceled != store.CanceledDeclined {
+			t.Fatalf("terminal writes %+v", s.terminals)
+		}
+		if !slices.Equal(s.pushes, []string{"c-inline"}) {
+			t.Fatalf("pushes %v: the quoted task's webhook got nothing", s.pushes)
+		}
+		// The webhook was following the task while it was quoted, before the decline.
+		if i, j := eventIndex(t, s.events, "push:c-inline"), eventIndex(t, s.events, "terminal:canceled"); i > j {
+			t.Errorf("push_webhook started only after the decline: %v", s.events)
+		}
+	})
+	t.Run("quote expired", func(t *testing.T) {
+		w := newWorld(t)
+		w.state = string(store.StateQuoted)
+		w.pushCfgs = [][]string{{"c-inline"}}
+		w.dispatchFn = outcome(DispatchTerminal, "")
+		env := w.env()
+		start(env, newUpdates(), quotedInput())
+		done(t, env)
+		s := w.snapshot()
+		if len(s.terminals) != 1 || s.terminals[0].Canceled != store.CanceledQuoteExpired || !slices.Equal(s.pushes, []string{"c-inline"}) {
+			t.Fatalf("terminal writes %+v, pushes %v", s.terminals, s.pushes)
+		}
+	})
+}
+
+// --- a follow-up turn's dispatch that never started (spec §6.4, §7) ---
+
+func scheduleToStartTimeout() error {
+	return temporal.NewTimeoutError(enums.TIMEOUT_TYPE_SCHEDULE_TO_START, nil)
+}
+
+// A schedule-to-start timeout proves the dispatch never ran: nothing consumed the follow-up's work item and
+// nothing was sent upstream. The turn is dispatched again as the turn's first dispatch, on the same
+// attempt, never re-attached (a re-attach would end the turn at the upstream's unchanged input-required
+// without sending the follow-up).
+func TestFollowUpDispatchNotStartedIsSentAgain(t *testing.T) {
+	w := newWorld(t)
+	w.firstID[1] = true
+	w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+		switch k {
+		case 0:
+			w.setState(string(store.StateInputRequired))
+			return DispatchResult{Outcome: DispatchInterrupted}, nil
+		case 1:
+			return DispatchResult{}, scheduleToStartTimeout()
+		}
+		w.setState(string(store.StateCompleted))
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	}
+	env := w.env()
+	u := newUpdates()
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateMessage, "wi-2", u.cb("wi-2"), MessageUpdate{WorkItemID: "wi-2", After: 3})
+	}, time.Minute)
+	start(env, u, input(2))
+	done(t, env)
+	s := w.snapshot()
+	if len(s.dispatches) != 3 || len(s.prepares) != 1 {
+		t.Fatalf("dispatches %d prepares %d", len(s.dispatches), len(s.prepares))
+	}
+	for i := 1; i <= 2; i++ {
+		if d := s.dispatches[i]; d.in.N != 1 || d.in.WorkItemID != "wi-2" || d.in.Resume || d.queue != QueueDirect {
+			t.Errorf("dispatch %d: %+v on %s, want the follow-up's first dispatch on attempt 1 again (resume false)", i, d.in, d.queue)
+		}
+	}
+	if gap := s.dispatches[2].at.Sub(s.dispatches[1].at); gap < time.Second {
+		t.Errorf("dispatched again after %v, want a 1 s backoff", gap)
+	}
+	if len(s.terminals) != 0 {
+		t.Errorf("terminal writes %+v", s.terminals)
+	}
+}
+
+// A resume dispatch that was not started is a resume again: its turn's item was consumed already.
+func TestResumeNotStartedStaysAResume(t *testing.T) {
+	w := newWorld(t)
+	w.firstID[1] = true
+	w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+		switch k {
+		case 0:
+			return DispatchResult{Outcome: DispatchContextLost}, nil
+		case 1:
+			return DispatchResult{}, scheduleToStartTimeout()
+		}
+		w.setState(string(store.StateCompleted))
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	}
+	env := w.env()
+	start(env, newUpdates(), input(2))
+	done(t, env)
+	s := w.snapshot()
+	if len(s.dispatches) != 3 || len(s.prepares) != 1 {
+		t.Fatalf("dispatches %d prepares %d", len(s.dispatches), len(s.prepares))
+	}
+	for i := 1; i <= 2; i++ {
+		if d := s.dispatches[i]; d.in.N != 1 || !d.in.Resume {
+			t.Errorf("dispatch %d: %+v, want a resume of attempt 1", i, d.in)
+		}
+	}
+}
+
+// With no kontra-direct poller at all, the follow-up's dispatch is tried again with the resumes' backoff
+// and cap, and the task then fails (upstream_unreachable: no gate replica took the dispatch).
+func TestFollowUpDispatchNeverStartedFails(t *testing.T) {
+	w := newWorld(t)
+	w.firstID[1] = true
+	w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+		if k == 0 {
+			w.setState(string(store.StateInputRequired))
+			return DispatchResult{Outcome: DispatchInterrupted}, nil
+		}
+		return DispatchResult{}, scheduleToStartTimeout()
+	}
+	env := w.env()
+	u := newUpdates()
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateMessage, "wi-2", u.cb("wi-2"), MessageUpdate{WorkItemID: "wi-2", After: 3})
+	}, time.Minute)
+	start(env, u, input(2))
+	done(t, env)
+	s := w.snapshot()
+	if len(s.dispatches) != 2+MaxResumes {
+		t.Fatalf("%d dispatches, want turn 1, the follow-up and %d more", len(s.dispatches), MaxResumes)
+	}
+	for _, d := range s.dispatches[1:] {
+		if d.in.Resume || d.in.WorkItemID != "wi-2" || d.in.N != 1 {
+			t.Errorf("dispatch %+v", d.in)
+		}
+	}
+	if len(s.terminals) != 1 || s.terminals[0].Reason != string(store.ReasonUpstreamUnreachable) ||
+		s.terminals[0].EndAttempt != string(store.OutcomeUpstreamUnreachable) {
+		t.Fatalf("terminal writes %+v", s.terminals)
+	}
+}
+
+// --- which refusal a busy task's kontra.message gets (spec §7) ---
+
+// A follow-up answering the turn end the workflow already processed, while another follow-up's turn runs,
+// is refused for good (a concurrent second follow-up). One whose caller read a later turn end than the
+// workflow has processed is refused as behind: the work queue sends it again while the log still shows
+// that turn end.
+func TestMessageRefusalSaysWhetherTheWorkflowIsBehind(t *testing.T) {
+	w := newWorld(t)
+	w.firstID[1] = true
+	release := make(chan struct{})
+	w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+		switch k {
+		case 0:
+			select {
+			case <-release:
+			case <-w.release:
+			}
+			w.setState(string(store.StateInputRequired))
+			return DispatchResult{Outcome: DispatchInterrupted}, nil
+		case 1:
+			select {
+			case <-ctx.Done():
+			case <-w.release:
+			case <-time.After(time.Second):
+			}
+		}
+		w.setState(string(store.StateCompleted))
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	}
+	env := w.env()
+	u := newUpdates()
+	// Turn 1 runs; the caller read input-required at seq 5 before the workflow learned it.
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateMessage, "early", u.cb("early"), MessageUpdate{WorkItemID: "early", After: 5})
+		env.UpdateWorkflow(UpdateMessage, "blind", u.cb("blind"), MessageUpdate{WorkItemID: "blind"})
+		close(release)
+	}, 100*time.Millisecond)
+	// At input-required: wi-2 is accepted; wi-3, answering the same turn end, is refused for good; wi-4,
+	// whose caller read a later turn end (wi-2's), is behind.
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateMessage, "wi-2", u.cb("wi-2"), MessageUpdate{WorkItemID: "wi-2", After: 5})
+		env.UpdateWorkflow(UpdateMessage, "wi-3", u.cb("wi-3"), MessageUpdate{WorkItemID: "wi-3", After: 5})
+		env.UpdateWorkflow(UpdateMessage, "wi-4", u.cb("wi-4"), MessageUpdate{WorkItemID: "wi-4", After: 9})
+	}, time.Minute)
+	start(env, u, input(2))
+	done(t, env)
+	if !u.has("wi-2:completed") {
+		t.Fatalf("wi-2: %v", u.logs)
+	}
+	for id, want := range map[string]string{"early": ErrTypeBehind, "blind": ErrTypeRefused, "wi-3": ErrTypeRefused, "wi-4": ErrTypeBehind} {
+		if !u.has(id+":rejected") || !isType(u.rej[id], want) {
+			t.Errorf("%s: %v, want a %s refusal (%v)", id, u.rej[id], want, u.logs)
+		}
+	}
+}
+
+// --- OnReviewMessage is bounded from its scheduling (spec §14.1) ---
+
+// A remote hook queue with no poller never starts OnReviewMessage: only a schedule-to-close bound turns
+// that into accept: false; without one the Update, and the workflow's end, wait forever.
+func TestReviewMessageHookHasAScheduleToCloseBound(t *testing.T) {
+	w := newWorld(t)
+	w.reviewWin = hooks.ReviewWindow{Open: true, Seconds: 60}
+	w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
+		w.setState(string(store.StateCompleted))
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	}
+	env := w.env()
+	var got time.Duration
+	env.RegisterActivityWithOptions(func(ctx context.Context, t hooks.TaskRef, a hooks.ReviewMessageArgs) (hooks.ReviewMessageResult, error) {
+		got = activity.GetInfo(ctx).ScheduleToCloseTimeout
+		return hooks.ReviewMessageResult{Accept: true}, nil
+	}, activity.RegisterOptions{Name: HookOnReviewMessage})
+	u := newUpdates()
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateReviewMessage, "rv-1", u.cb("rv-1"), ReviewMessageUpdate{WorkItemID: "rv-1", MessageID: "m"})
+	}, 10*time.Second)
+	start(env, u, input(2))
+	done(t, env)
+	if got != reviewMessageStartToClose {
+		t.Fatalf("OnReviewMessage schedule-to-close %v, want %v", got, reviewMessageStartToClose)
 	}
 }
