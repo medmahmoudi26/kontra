@@ -743,7 +743,7 @@ func TestRowDataOneLine(t *testing.T) {
 	}
 }
 
-// stalledClient sends a request to srv and never reads the answer (a zero TCP window once the buffers
+// stalledClient sends a request to addr and never reads the answer (a zero TCP window once the buffers
 // fill).
 func stalledClient(t *testing.T, addr string) {
 	t.Helper()
@@ -758,25 +758,39 @@ func stalledClient(t *testing.T, addr string) {
 	}
 }
 
+// smallBuffers is a listener whose connections send through a small kernel buffer, so a peer that stops
+// reading blocks the server's writes after a few kilobytes rather than megabytes.
+type smallBuffers struct{ net.Listener }
+
+func (l smallBuffers) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetWriteBuffer(4096)
+	}
+	return c, err
+}
+
 // A caller that keeps its connection open but stops reading ends its stream after the write timeout: the
 // handler returns, releasing its connection and in-flight slots and the rows it holds, although the task
 // is still running (security: a stalled reader held them until the drain's server Close).
 func TestStalledReaderEndsStream(t *testing.T) {
 	l := newMemLog(t)
-	for i := range 24 {
-		l.artifact(t, strings.Repeat(string(rune('a'+i)), 1<<20))
+	for i := range 4 {
+		l.artifact(t, strings.Repeat(string(rune('a'+i)), 512<<10))
 	}
 	w := testWriter(l, Options{WriteTimeout: 300 * time.Millisecond})
 	done := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		defer close(done)
 		w.Subscribe(rw, r, Stream{Binding: HTTPJSON, Service: svc, Owner: ownerA, TaskID: a2a.TaskID(l.taskID.String())})
 	}))
+	srv.Listener = smallBuffers{srv.Listener}
+	srv.Start()
 	t.Cleanup(srv.Close)
 	stalledClient(t, srv.Listener.Addr().String())
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("the stream of a caller that stopped reading never ended")
 	}
 }
