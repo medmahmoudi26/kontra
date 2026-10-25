@@ -4,8 +4,8 @@ The README demo seller: a2a-cli v0.3.1's exec mode, `a2a server --exec 'echo Hel
 gate as a **direct backend** (M1) and, from M2, through `kontra connect` (the tunnel). The seller is unmodified
 and imports nothing from Kontra.
 
-Status: the script and the configuration are final for M1; the gate commands below work once the M1 work
-packages that build `kontra-gate migrate`, `enroll --api-key` and `serve` have landed (see the M1 plan).
+Status: works end to end with the M1 gate (`kontra-gate migrate`, `enroll --api-key` and `serve`): the polling
+fallback, streaming with `SELLER_CHUNK`, and a cancel forwarded to the seller.
 
 ## What the seller is
 
@@ -13,7 +13,8 @@ packages that build `kontra-gate migrate`, `enroll --api-key` and `serve` have l
 anything else: `failed` with standard error). Its card is a 1.0 card, HTTP+JSON only, with
 `capabilities.streaming: true`, yet without `--chunk` it refuses streaming with `UnsupportedOperationError`.
 The gate handles that by falling back, in the same attempt, to `SendMessage` with `returnImmediately: true` and
-polling `GetTask` (D15). With `--chunk=$'\n'` each output line streams as an artifact chunk instead.
+polling `GetTask` (D15; the gate logs `the upstream refused streaming; polling (D15)`). With `--chunk=$'\n'` each
+output line streams as an artifact chunk instead.
 
 Exec mode cannot ask for input (`input-required`); `input_required_sticky` uses `sellers/booking` (M2).
 
@@ -25,21 +26,30 @@ brew tap a2aproject/a2a-cli https://github.com/a2aproject/a2a-cli && brew instal
 a2a version
 ```
 
+`run.sh` takes the binary from `A2A` when it is not `a2a` on your `PATH` (`A2A=/opt/a2a-cli/a2a ./run.sh`). Stop
+one seller before starting another on the same port.
+
 The syntax is a2a-cli's own (D15): the subcommand is `server` (not `serve`), `send` takes the agent with
 `-a <card URL>` or `-e <endpoint>`, and credentials go in `--auth` (there is no `-H`).
 
 ## Run it behind a gate (M1, direct backend)
 
-```sh
-./run.sh                                   # a2a server --exec 'echo Hello World' --host 127.0.0.1 --port 9999
+`kontra.yaml` in this directory is a team gate on one machine: the gate on `127.0.0.1:8080`, Postgres on
+`localhost:5432` and Temporal on `localhost:7233`, which is what the repository's contributor compose starts.
+The commands below run from the repository root.
 
-# a gate with the service below (kontra.yaml in this directory), Postgres and Temporal running:
-kontra-gate migrate -f kontra.yaml
-export KONTRA_API_KEY="$(kontra-gate enroll -f kontra.yaml --api-key demo)"
-kontra-gate serve -f kontra.yaml
+```sh
+examples/sellers/hello-exec/run.sh &       # a2a server --exec 'echo Hello World' --host 127.0.0.1 --port 9999
+
+docker compose -f compose.dev.yaml up -d --wait     # Postgres and Temporal for a gate run from source
+go build -o kontra-gate ./cmd/kontra-gate
+
+./kontra-gate migrate -f examples/sellers/hello-exec/kontra.yaml
+export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/sellers/hello-exec/kontra.yaml --api-key demo)"
+./kontra-gate serve -f examples/sellers/hello-exec/kontra.yaml &
 
 a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "hi"
-#  -> Hello World
+#  -> completed, with the artifact "Hello World"
 ```
 
 `-a http://localhost:8080/agents/hello` works because the gate also serves the card at `GET {svc}` (D10).
@@ -47,27 +57,46 @@ The gate's card is the seller's with the gate's interfaces (JSON-RPC and HTTP+JS
 `pushNotifications` set to `true`, and bearer security; M1 does not sign it yet (M3).
 
 `kontra.yaml` points the service at `http://127.0.0.1:9999` with `allow_private: true`: the gate's dialer
-refuses loopback and private addresses otherwise (spec/relay.md §10.3).
+refuses loopback and private addresses otherwise, and permits plain `http://` only with it (spec/relay.md §10.3,
+D67). The URL is a base: the gate fetches the card from `/.well-known/agent-card.json` under it and dials only
+`127.0.0.1:9999`, whatever the card's interface URL says (D71).
 
-## A cancel (cancel_forwarded)
-
-```sh
-SELLER_CMD='sleep 30; echo done' SELLER_PORT=9998 ./run.sh &
-# point services.hello at :9998, then:
-a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" --async "go"   # prints the task id
-a2a task cancel -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" <task-id>
-#  -> TASK_STATE_CANCELED: the gate forwarded CancelTask upstream, and no completed event follows
-```
-
-The gate's polling path sends `returnImmediately: true` upstream, so the upstream task id exists at once and a
-cancel has something to cancel (spec/relay.md §6.2, §8).
+The gate's own endpoints: `GET http://localhost:8080/healthz` (200 while Postgres and Temporal answer and the
+gate is not draining) and the metrics listener, `:9090/metrics` by default (`metrics.listen`).
 
 ## Streaming
 
 ```sh
-SELLER_CHUNK=$'\n' SELLER_CMD='for i in 1 2 3; do echo line $i; sleep 1; done' ./run.sh
+SELLER_CHUNK=$'\n' SELLER_CMD='for i in 1 2 3; do echo line $i; sleep 1; done' examples/sellers/hello-exec/run.sh &
 a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" --stream "go"
+#  -> submitted, working, then "line 1", "line 2", "line 3" a second apart as artifact chunks, then completed
 ```
+
+## A cancel (cancel_forwarded)
+
+```sh
+SELLER_CMD='sleep 30; echo done' examples/sellers/hello-exec/run.sh &
+a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" --async -o json "go"   # the task, with its id
+a2a task cancel -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" --timeout 60s <task-id>
+#  -> canceled: the gate forwarded CancelTask upstream, and no completed event follows
+```
+
+The gate's polling path sends `returnImmediately: true` upstream, so the upstream task id exists at once and a
+cancel has something to cancel (spec/relay.md §6.2, §8). Exec mode answers `CancelTask` only once its command has
+ended: with `sleep 30` the seller, and so the gate, answers about 25 s after the cancel (the gate waits up to
+60 s for the upstream's answer, §8), hence `--timeout 60s` (a2a-cli's default is 30 s). The task shows
+`canceled` in the gate's log as soon as the seller reports it. a2a-cli v0.3.1's exec mode can also end a
+canceled task `failed` (its cancel races the command's exit), which is why the automated `cancel_forwarded` test
+uses an a2a-go seller that handles cancel (D80). During M1, 20 cancels through the gate and 50 straight to the
+seller all ended `canceled`.
+
+## Reload and drain
+
+`kill -HUP <gate pid>` applies a changed `services:` block (an `allow:` list, a timeout, a removed service,
+which then answers 404) without a restart; other keys take effect at the next start. `kill -TERM <gate pid>`
+drains: `/healthz` answers 503, no new dispatch starts on this replica, a task already running is relayed to its
+end (or until `drain_timeout`, 10 minutes by default), and then the gate exits (spec/relay.md §14.3). A second
+`SIGTERM` stops it at once.
 
 ## Through the tunnel (M2)
 

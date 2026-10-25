@@ -6,11 +6,13 @@
 #   SELLER_HOST   bind address                       (default: 127.0.0.1; 0.0.0.0 in a container)
 #   SELLER_PORT   listen port                        (default: 9999)
 #   SELLER_CHUNK  stream stdout split on this delimiter (default: unset, no streaming)
+#   A2A           the a2a-cli binary                 (default: a2a on PATH)
 set -euo pipefail
 
 want="v0.3"
-command -v a2a >/dev/null || { echo "a2a not found: install a2a-cli v0.3.1 (see README.md)" >&2; exit 1; }
-have="$(a2a version 2>/dev/null | head -1)"
+a2a="${A2A:-a2a}"
+command -v "$a2a" >/dev/null || { echo "$a2a not found: install a2a-cli v0.3.1 (see README.md), or set A2A to its path" >&2; exit 1; }
+have="$("$a2a" version 2>/dev/null | head -1)"
 case "$have" in
   *"$want"*) ;;
   *) echo "warning: a2a-cli ${want}.x expected, found: $have" >&2 ;;
@@ -20,4 +22,4 @@ args=(server --exec "${SELLER_CMD:-echo Hello World}" --host "${SELLER_HOST:-127
 if [[ -n "${SELLER_CHUNK:-}" ]]; then
   args+=(--chunk "$SELLER_CHUNK")
 fi
-exec a2a "${args[@]}"
+exec "$a2a" "${args[@]}"
