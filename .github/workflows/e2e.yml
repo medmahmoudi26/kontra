@@ -1,11 +1,28 @@
 # The end-to-end tests (`make test-e2e`, test/e2e; spec/relay.md §16, D80): two gate replicas as processes,
-# a Temporal development server from the pinned CLI and Postgres 17. They take about a quarter of an hour, so
-# they run nightly and on demand rather than on every pull request.
+# a Temporal development server from the pinned CLI and Postgres 17. They take about a quarter of an hour.
+# They run nightly, on demand, and on every pull request that changes the gate's code, its migrations or
+# these tests: a pull_request workflow runs from the pull request's own branch, so the M1 gate (relay_resume,
+# replica_kill) runs before a merge, while schedule and workflow_dispatch need the file on the default
+# branch. A newer push to the same pull request cancels the run in progress.
 name: e2e
 on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "migrations/**"
+      - "test/e2e/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - "scripts/test_e2e.sh"
+      - ".github/workflows/e2e.yml"
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -25,8 +42,8 @@ jobs:
       TEMPORAL_CLI_ARCHIVE_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
       TEMPORAL_CLI_BINARY_SHA256: 712217694cac9f786a72d4b6c876cd15f3dcf1bf31434d9fed6af25242a327a0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.10"
       - name: Install the pinned Temporal CLI

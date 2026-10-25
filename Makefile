@@ -1,5 +1,5 @@
 # `make check` is what CI runs and what runs before every PR.
-.PHONY: check check-specs check-migrations check-go test-integration test-e2e
+.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e
 
 # The system Go may be older than the module's toolchain (go 1.26, a2a-go v2.7.0 needs it); pin the one
 # the module names so every go command, and gofmt, come from the same toolchain.
@@ -32,6 +32,10 @@ check-go:
 # for 16). The e2e tests have their own target.
 test-integration:
 	GO="$(GO)" scripts/test_integration.sh
+
+# The integration tests under the race detector (cgo; CI's race job, on Postgres 17).
+test-race:
+	CGO_ENABLED=1 GO="$(GO)" scripts/test_integration.sh -race
 
 # End-to-end tests (test/e2e, spec/relay.md §16, D80): per test, two kontra-gate replicas built from
 # ./cmd/kontra-gate as processes, a Temporal development server from $KONTRA_TEMPORAL_CLI (required: the
