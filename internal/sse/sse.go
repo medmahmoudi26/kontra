@@ -208,8 +208,14 @@ type plan struct {
 	task       uuid.UUID
 	lead       *a2a.Task
 	leadCloses bool
-	after      int64
-	closes     func(a2a.TaskState) bool
+	// leadAt, when lead is nil, is the seq whose snapshot leads the stream, read once the stream has begun
+	// (SendStreamingMessage continuing a task): the turn was accepted, so that read is retried like every
+	// read of the log instead of becoming the request's answer. followUp is Start.FollowUp: a follow-up's
+	// leading snapshot never closes the stream.
+	leadAt   int64
+	followUp bool
+	after    int64
+	closes   func(a2a.TaskState) bool
 }
 
 // endsTurn is SendStreamingMessage's rule: terminal, input-required, or quoted (which A2A shows as
@@ -242,15 +248,13 @@ func (w *Writer) SendStreaming(rw http.ResponseWriter, r *http.Request, s Stream
 		w.opts.Logger.Warn("sse: a2a-go failed after the turn was accepted; serving the turn's stream from the log",
 			"task", id, "after", st.After, "error", st.Late)
 	}
-	p := plan{task: id, after: st.After, closes: endsTurn}
+	// The turn was accepted, so from here on the answer is its stream: the leading snapshot at V is read once
+	// the stream has begun and retried within ReadGrace like every read of the log. Answering a read that
+	// failed would make a running turn look refused (the same database blip that made a2a-go fail, Late,
+	// often fails this read too), and the caller's retry would be refused because the turn is running.
+	p := plan{task: id, after: st.After, closes: endsTurn, followUp: st.FollowUp}
 	if !st.New {
-		lead, err := w.log.SnapshotAt(ctx, id, st.After)
-		if err != nil {
-			w.writeError(rw, s, w.internal(id, err))
-			return
-		}
-		p.lead = lead
-		p.leadCloses = !st.FollowUp && endsTurn(lead.Status.State)
+		p.leadAt = st.After
 	}
 	w.serve(rw, r, s, p)
 }
@@ -369,13 +373,20 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 		defer stop()
 	}
 	sw := w.begin(rw, r, s)
+	keep := time.NewTicker(w.opts.KeepAlive)
+	defer keep.Stop()
+	if p.lead == nil && p.leadAt > 0 {
+		lead, ok := w.readLead(ctx, sw, keep.C, p)
+		if !ok {
+			return
+		}
+		p.lead, p.leadCloses = lead, !p.followUp && endsTurn(lead.Status.State)
+	}
 	if p.lead != nil {
 		if sw.event(0, mustStreamResponse(p.lead)) != nil || p.leadCloses {
 			return
 		}
 	}
-	keep := time.NewTicker(w.opts.KeepAlive)
-	defer keep.Stop()
 	cursor := p.after
 	var failingSince time.Time
 	backoff := 100 * time.Millisecond
@@ -425,6 +436,32 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 		if !w.wait(ctx, sw, keep.C, wake, w.opts.Reread) {
 			return
 		}
+	}
+}
+
+// readLead reads the snapshot at p.leadAt for a stream that has begun, retrying a read that fails (backing
+// off from 100 ms to 5 s, with keep-alives) for up to ReadGrace; then the stream ends with an error event.
+// false when the stream is over (the caller went away, or the error event was sent).
+func (w *Writer) readLead(ctx context.Context, sw *streamWriter, keep <-chan time.Time, p plan) (*a2a.Task, bool) {
+	began := time.Now()
+	backoff := 100 * time.Millisecond
+	for {
+		lead, err := w.log.SnapshotAt(ctx, p.task, p.leadAt)
+		if err == nil {
+			return lead, true
+		}
+		if ctx.Err() != nil {
+			return nil, false
+		}
+		if time.Since(began) >= w.opts.ReadGrace {
+			w.opts.Logger.Warn("sse: the task's log could not be read; ending the stream", "task", p.task, "seq", p.leadAt, "error", err)
+			_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the task's log could not be read; subscribe to the task again"))
+			return nil, false
+		}
+		if !w.wait(ctx, sw, keep, nil, backoff) {
+			return nil, false
+		}
+		backoff = min(2*backoff, 5*time.Second)
 	}
 }
 

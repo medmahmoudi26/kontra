@@ -29,7 +29,7 @@ import (
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	removeBuild()
+	removeRoot()
 	os.Exit(code)
 }
 
@@ -251,6 +251,49 @@ func historyText(t *testing.T, js []byte) string {
 
 var identity = regexp.MustCompile(`"identity":\s*"[^"]*"`)
 
+// scrubbed is the host name's stand-in in a recorded history: the workers' identity, and the replica ids
+// (<host>-<hex>) inside payloads and in the task queues named after them (kontra-ctl-<replica id>).
+const scrubbed = "kontra-test"
+
+// scrubHost removes host from a history export (temporal workflow show -o json): from its text (task
+// queue names, failure messages) and from inside every payload, whose data is base64 the text does not
+// show (attempt_state's result carries replicaId). A payload whose decoded bytes hold host is re-encoded
+// with it replaced; every other byte of the export is kept as it is. A host name shorter than three
+// characters is left alone: replacing it would mangle unrelated text.
+func scrubHost(js []byte, host string) ([]byte, error) {
+	if len(host) < 3 {
+		return js, nil
+	}
+	var doc any
+	if err := json.Unmarshal(js, &doc); err != nil {
+		return nil, fmt.Errorf("history is not JSON: %w", err)
+	}
+	swap := map[string]string{} // base64 text -> base64 text, the host replaced inside
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, e := range x {
+				if str, ok := e.(string); ok && (k == "data" || k == "details") {
+					if dec, err := base64.StdEncoding.DecodeString(str); err == nil && bytes.Contains(dec, []byte(host)) {
+						swap[str] = base64.StdEncoding.EncodeToString(bytes.ReplaceAll(dec, []byte(host), []byte(scrubbed)))
+					}
+				}
+				walk(e)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	walk(doc)
+	for from, to := range swap {
+		js = bytes.ReplaceAll(js, []byte(`"`+from+`"`), []byte(`"`+to+`"`))
+	}
+	return bytes.ReplaceAll(js, []byte(host), []byte(scrubbed)), nil
+}
+
 // checkHistory exports the task's TaskLifecycle history (temporal workflow show -o json), checks that it
 // holds none of the forbidden strings (events and credentials never enter history), replays it against
 // the current TaskLifecycle (spec §14.4: the replayer of WP-05), and with KONTRA_RECORD_HISTORIES=1 writes it
@@ -275,10 +318,16 @@ func checkHistory(t *testing.T, h *Harness, taskID a2a.TaskID, name string, forb
 			t.Errorf("the TaskLifecycle history of %s holds %q", taskID, f)
 		}
 	}
-	// The workers' identity (pid@host) and sticky queues name the host: replay reads neither.
-	js = identity.ReplaceAll(js, []byte(`"identity": "kontra-test"`))
+	// The workers' identity (pid@host), the sticky and control queues and the replica ids in payloads name
+	// the host: replay reads none of them, and a recording must not carry the developer's machine.
+	js = identity.ReplaceAll(js, []byte(`"identity": "`+scrubbed+`"`))
 	if host, err := os.Hostname(); err == nil && host != "" {
-		js = bytes.ReplaceAll(js, []byte(host), []byte("kontra-test"))
+		if js, err = scrubHost(js, host); err != nil {
+			t.Fatal(err)
+		}
+		if len(host) >= 3 && strings.Contains(historyText(t, js), host) {
+			t.Fatalf("the history of %s still names the host %q after the scrub", taskID, host)
+		}
 	}
 	path := filepath.Join(t.TempDir(), name+".json")
 	if err := os.WriteFile(path, js, 0o644); err != nil {

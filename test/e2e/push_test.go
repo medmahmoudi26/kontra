@@ -136,7 +136,8 @@ func deliveredSeq(t *testing.T, ctx context.Context, h *Harness, taskID a2a.Task
 // checkDeliveries checks one config's deliveries (spec §10.2): each is the task snapshot at a seq of the
 // log, in seq order (a repeat is allowed: delivery is at least once), from the config's first seq to the
 // terminal snapshot, which comes last; every row from `from` to the terminal one is delivered, except an
-// artifact row coalesced into a later artifact row of the same run.
+// artifact row coalesced into a later artifact row of the same run. That includes `from` itself: a config
+// created while a run of artifact rows grows may first be delivered at a later row of that run.
 func checkDeliveries(t *testing.T, ctx context.Context, h *Harness, name string, taskID a2a.TaskID, got []delivery, from int64) {
 	t.Helper()
 	id := uuid.MustParse(string(taskID))
@@ -178,8 +179,8 @@ func checkDeliveries(t *testing.T, ctx context.Context, h *Harness, name string,
 	if len(seqs) == 0 || seqs[len(seqs)-1] != term {
 		t.Fatalf("%s: delivered seqs %v: the terminal snapshot (seq %d) must be delivered, last", name, seqs, term)
 	}
-	if seqs[0] != from {
-		t.Fatalf("%s: the first delivery is seq %d, want %d", name, seqs[0], from)
+	if seqs[0] < from {
+		t.Fatalf("%s: the first delivery is seq %d, before the config's first seq %d", name, seqs[0], from)
 	}
 	delivered := map[int64]bool{}
 	for _, s := range seqs {
@@ -339,13 +340,90 @@ func TestPushDelivery(t *testing.T) {
 	checkUpstreamHeaders(t, h, h.Upstream)
 }
 
-// privateName finds a host name this machine resolves only to non-global addresses (loopback, private,
-// link-local), from /etc/hosts, other than localhost: "a name resolving to a private address" of ssrf_webhook.
-func privateName(t *testing.T, ctx context.Context) (string, netip.Addr) {
+// TestPushFailedRestart is the push-restart gate's other branch (WP-07 handoff; spec §10.2, §14.1): a
+// config whose push_webhook ended because the config failed, set again with the same id over JSON-RPC,
+// gets a new push_webhook in the same workflow run and delivers from where it stopped, through the
+// terminal snapshot. The failure is written as the deliverer writes it when a delivery's budget runs out
+// (failed_at), which in real time takes far longer than a test. The history, recorded as
+// e2e_push_failed_restart.json, holds the push-restart marker taken on a push_webhook that stopped
+// "failed", so TestReplayRecordedHistories covers that branch (e2e_push_delivery.json covers "deleted").
+func TestPushFailedRestart(t *testing.T) {
+	h := start(t, Options{Upstream: slowagent.Config{Chunks: 24, Interval: 500 * time.Millisecond, Streaming: true}, PushAllowPrivate: true})
+	ctx := ctxFor(t, 5*time.Minute)
+	hook := newWebhook(t, "127.0.0.1")
+	hook.start(t)
+	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[0], newMessage("push_failed_restart"), Call{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readUntil(t, ctx, s, func(ev Event) bool { return ev.State == a2a.TaskStateWorking })
+	taskID := s.TaskID()
+	rpc := h.BuyerA().Client(t, h.Gates[1], "")
+	secret := randomHex(6)
+	cfg := &a2a.PushConfig{TaskID: taskID, ID: "e2e-failing-" + secret, URL: hook.url("/failing"), Token: "tok-failing-" + secret}
+	if _, err := rpc.CreateTaskPushConfig(ctx, cfg); err != nil {
+		t.Fatalf("CreateTaskPushNotificationConfig: %v", err)
+	}
+	from, _ := deliveredSeq(t, ctx, h, taskID, cfg.ID)
+	eventually(t, 30*time.Second, "the config delivering", func() bool { return len(hook.deliveries("/failing")) > 0 })
+
+	// The config fails: its push_webhook ends.
+	if _, err := h.Pool.Exec(ctx, `update kontra.push_configs set failed_at = now() where task_id = $1 and id = $2`, string(taskID), cfg.ID); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 30*time.Second, "the failed config's push_webhook ends", func() bool { return pendingActivities(ctx, h, taskID, lifecycle.ActPushWebhook) == 0 })
+	stopped, _ := deliveredSeq(t, ctx, h, taskID, cfg.ID)
+	got := len(hook.deliveries("/failing"))
+	// A failed config set again on a task that has ended stays failed (nothing is left to deliver): the
+	// task must still be running here.
+	if st, err := h.TaskState(ctx, taskID); err != nil || st != "working" {
+		t.Fatalf("the task is %q (%v) before its failed config is set again, want working", st, err)
+	}
+
+	// Set again with the same id: delivering again from where it stopped, in the same run.
+	if _, err := rpc.CreateTaskPushConfig(ctx, cfg); err != nil {
+		t.Fatalf("CreateTaskPushNotificationConfig again for the failed config: %v", err)
+	}
+	if seq, failed := deliveredSeq(t, ctx, h, taskID, cfg.ID); failed || seq != stopped {
+		t.Fatalf("the config set again: delivered_seq %d failed %v, want %d and not failed", seq, failed, stopped)
+	}
+	eventually(t, 30*time.Second, "a new push_webhook for the config set again", func() bool { return pendingActivities(ctx, h, taskID, lifecycle.ActPushWebhook) == 1 })
+	evs, err := s.ReadAll(ctx)
+	if err != nil || len(evs) == 0 || evs[len(evs)-1].State != a2a.TaskStateCompleted {
+		t.Fatalf("the caller's stream must end at completed: %v", err)
+	}
+	if err := h.WaitWorkflowClosed(ctx, taskID, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(hook.deliveries("/failing")); n <= got {
+		t.Fatalf("the config set again received nothing more (%d deliveries before, %d after)", got, n)
+	}
+	checkDeliveries(t, ctx, h, "the config failed and set again", taskID, hook.deliveries("/failing"), from+1)
+	term, _ := h.Log().TerminalSeq(ctx, uuid.MustParse(string(taskID)))
+	if seq, failed := deliveredSeq(t, ctx, h, taskID, cfg.ID); seq != term || failed {
+		t.Fatalf("the config set again: delivered_seq %d failed %v, want %d", seq, failed, term)
+	}
+
+	js := checkHistory(t, h, taskID, "e2e_push_failed_restart", slowagent.ChunkMarker, h.APIKey, cfg.ID, cfg.Token, hook.addr)
+	text := historyText(t, js)
+	if ref := lifecycle.ConfigRef(uuid.MustParse(string(taskID)), cfg.ID); !strings.Contains(text, ref) {
+		t.Fatalf("the history does not carry the config as its ConfigRef %s", ref)
+	}
+	if !strings.Contains(text, "push-restart") || !strings.Contains(text, `"stopped":"`+lifecycle.PushStoppedFailed+`"`) {
+		t.Fatal("the history has no push-restart marker taken on a push_webhook that stopped failed")
+	}
+}
+
+// privateName finds a host name this machine resolves only to private addresses (RFC 1918, or ULA
+// fc00::/7) from /etc/hosts: "a name resolving to a private address" of ssrf_webhook. Loopback names do not
+// count: they repeat the localhost row. ok is false when /etc/hosts has no such name (stock CI runners map
+// only loopback names); the package tests of internal/ssrf cover a name resolving to 10.0.0.0/8 with a
+// resolver of their own.
+func privateName(t *testing.T, ctx context.Context) (name string, addr netip.Addr, ok bool) {
 	t.Helper()
 	f, err := os.Open("/etc/hosts")
 	if err != nil {
-		t.Fatalf("ssrf_webhook needs a name resolving to a private address: %v", err)
+		return "", netip.Addr{}, false
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -362,32 +440,26 @@ func privateName(t *testing.T, ctx context.Context) (string, netip.Addr) {
 			if err != nil || len(addrs) == 0 {
 				continue
 			}
-			ok := true
+			private := true
 			for _, a := range addrs {
-				a = a.Unmap()
-				if !(a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast()) {
-					ok = false
+				if !a.Unmap().IsPrivate() {
+					private = false
 				}
 			}
-			if !ok {
-				continue
-			}
-			a := addrs[0].Unmap()
-			if l, err := net.Listen("tcp", net.JoinHostPort(a.String(), "0")); err == nil {
-				l.Close()
-				return name, a
+			if private {
+				return name, addrs[0].Unmap(), true
 			}
 		}
 	}
-	t.Fatal("ssrf_webhook: no name in /etc/hosts resolves only to a private address on this machine")
-	return "", netip.Addr{}
+	return "", netip.Addr{}, false
 }
 
 // TestSSRFWebhook is ssrf_webhook (spec/relay.md §10.3, §16; D60, D67). Without push.allow_private, push URLs
 // naming 169.254.169.254, 10.0.0.1, localhost, [::ffff:10.0.0.1], 64:ff9b::a00:1 or a name resolving to a
-// private address (all https, so the address rule refuses them), and an http:// URL (refused without
-// allow_private), are refused when set (InvalidParams) on JSON-RPC, on HTTP+JSON and inline, before any
-// connection and before any row. With push.allow_private (loopback webhooks), a redirecting URL is accepted
+// private address (when /etc/hosts has one: privateName) (all https, so the address rule refuses them), and
+// an http:// URL (refused without allow_private), are refused when set (InvalidParams): by
+// CreateTaskPushNotificationConfig on JSON-RPC and on HTTP+JSON, and inline with SendMessage on both, before
+// any connection and before any row. With push.allow_private (loopback webhooks), a redirecting URL is accepted
 // when set; its 3xx is a failed delivery, retried, and the redirect target receives no connection.
 func TestSSRFWebhook(t *testing.T) {
 	t.Run("refused when set", func(t *testing.T) {
@@ -400,21 +472,31 @@ func TestSSRFWebhook(t *testing.T) {
 		task := res.(*a2a.Task)
 		lo := newWebhook(t, "127.0.0.1")
 		lo.start(t)
-		name, addr := privateName(t, ctx)
-		priv := newWebhook(t, addr.String())
-		priv.start(t)
 		_, loPort, _ := net.SplitHostPort(lo.addr)
-		_, privPort, _ := net.SplitHostPort(priv.addr)
 		urls := []string{
 			"https://169.254.169.254/hook",
 			"https://10.0.0.1/hook",
 			"https://localhost:" + loPort + "/hook",
 			"https://[::ffff:10.0.0.1]/hook",
 			"https://[64:ff9b::a00:1]/hook",
-			"https://" + net.JoinHostPort(name, privPort) + "/hook",
 			"http://93.184.215.14/hook", // a public address, but http:// without allow_private
 		}
-		t.Logf("the private name is %s (%s)", name, addr)
+		// A name resolving to a private address, with a webhook on it when this machine holds the address,
+		// to see that nothing connects.
+		var priv *webhook
+		if name, addr, ok := privateName(t, ctx); ok {
+			port := "443"
+			if l, err := net.Listen("tcp", net.JoinHostPort(addr.String(), "0")); err == nil {
+				l.Close()
+				priv = newWebhook(t, addr.String())
+				priv.start(t)
+				_, port, _ = net.SplitHostPort(priv.addr)
+			}
+			urls = append(urls, "https://"+net.JoinHostPort(name, port)+"/hook")
+			t.Logf("the private name is %s (%s)", name, addr)
+		} else {
+			t.Logf("no name in /etc/hosts resolves only to an RFC 1918 or ULA address here: the private-name row is skipped (internal/ssrf covers it with its own resolver)")
+		}
 		var tasksBefore int
 		if err := h.Pool.QueryRow(ctx, `select count(*) from kontra.tasks`).Scan(&tasksBefore); err != nil {
 			t.Fatal(err)
@@ -429,10 +511,17 @@ func TestSSRFWebhook(t *testing.T) {
 			if _, err := rest.CreateTaskPushConfig(ctx, cfg); !errors.Is(err, a2a.ErrInvalidParams) {
 				t.Fatalf("HTTP+JSON CreateTaskPushNotificationConfig %s: %v, want InvalidParams", u, err)
 			}
-			req := newMessage("ssrf inline")
-			req.Config = &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: u}}
-			if _, err := rpc.SendMessage(ctx, req); !errors.Is(err, a2a.ErrInvalidParams) {
-				t.Fatalf("SendMessage with the inline config %s: %v, want InvalidParams", u, err)
+			for _, c := range []struct {
+				binding string
+				client  interface {
+					SendMessage(context.Context, *a2a.SendMessageRequest) (a2a.SendMessageResult, error)
+				}
+			}{{"JSON-RPC", rpc}, {"HTTP+JSON", rest}} {
+				req := newMessage("ssrf inline")
+				req.Config = &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: u}}
+				if _, err := c.client.SendMessage(ctx, req); !errors.Is(err, a2a.ErrInvalidParams) {
+					t.Fatalf("SendMessage over %s with the inline config %s: %v, want InvalidParams", c.binding, u, err)
+				}
 			}
 		}
 		if d := time.Since(begin); d > 30*time.Second {
@@ -445,8 +534,11 @@ func TestSSRFWebhook(t *testing.T) {
 		if tasksAfter != tasksBefore || configs != 0 {
 			t.Fatalf("refused URLs left %d new tasks and %d push configs", tasksAfter-tasksBefore, configs)
 		}
-		if lo.connections() != 0 || priv.connections() != 0 {
-			t.Fatalf("a refused URL was connected to: localhost %d, %s %d", lo.connections(), name, priv.connections())
+		if lo.connections() != 0 {
+			t.Fatalf("a refused URL was connected to: localhost %d", lo.connections())
+		}
+		if priv != nil && priv.connections() != 0 {
+			t.Fatalf("a refused URL was connected to: the private name's address %d", priv.connections())
 		}
 		if n := h.Upstream.Sends(); n != 1 {
 			t.Fatalf("the upstream received %d sends, want only the first task's", n)

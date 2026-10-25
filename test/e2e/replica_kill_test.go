@@ -276,23 +276,32 @@ func TestReplicaKillDirect(t *testing.T) {
 	checkHistory(t, h, taskID, "e2e_replica_kill_direct", slowagent.ChunkMarker, h.APIKey, h.APIKeyB, "e2e-cookie")
 }
 
+// stall is how long TestReplicaStallDirect keeps X stopped: two heartbeat rounds (2 x 30 s, spec §14.2)
+// and a margin. A stopped process keeps its open kontra-direct long polls, which the server still counts
+// as pollers, so the first resume dispatch (30-40 s after SIGSTOP) can be handed to X itself; it then times
+// out in turn, and the second resume (60-70 s after SIGSTOP, measured) is the first one sure to reach the
+// survivor, X's polls having expired by then (the server ends a long poll after a minute).
+const stall = 100 * time.Second
+
+// takeover bounds how long after SIGSTOP the survivor may take a stalled replica's dispatch over: two
+// heartbeat rounds and their timer delays. A dead replica's is one round (TestReplicaKillDirect, 60 s).
+const takeover = 90 * time.Second
+
 // TestReplicaStallDirect is replica_kill's stalled variant (audit: a dispatch whose heartbeat timed out
-// while its process lives, D77): the replica X holding the dispatch is SIGSTOPped for 40 s and then
-// resumed. Its heartbeat times out and the task is re-attached with a fresh dispatch_id. The re-attach
-// lands on whichever replica polls kontra-direct first: the survivor, or X itself once it runs again,
-// because a stopped process keeps its long polls open and the server may hand one of them the resume
-// dispatch (D77 names this case: the fence is per dispatch, not per replica). When X runs again its old
-// dispatch learns at its next heartbeat that it is gone, and an append it makes before that is fenced
-// (which of the two stops it is a race the test cannot steer; the fence itself is tested in
-// internal/store): the task completes once, on one attempt, with no part logged twice, the buyer's
-// resumed stream has no gap and no duplicate, and X serves again.
+// while its process lives, D77): the replica X holding the dispatch is SIGSTOPped long enough for the
+// survivor Y to take the attempt over while X is still stopped (stall), and then resumed. While X is
+// stopped, Y writes a fresh dispatch_id on attempt 1 (within takeover of the SIGSTOP: a stalled replica is
+// detected only after two heartbeat rounds, against one for a dead one). Once X runs again, its old
+// dispatch, still alive and reading the upstream, is superseded: it logs "dispatch superseded by a newer
+// dispatch" and appends nothing (D77). The task completes once, on one attempt, with no part logged
+// twice, the buyer's resumed stream has no gap and no duplicate, and X serves again.
 func TestReplicaStallDirect(t *testing.T) {
 	h := start(t, Options{Upstream: killUpstream})
-	ctx := ctxFor(t, 8*time.Minute)
+	ctx := ctxFor(t, 10*time.Minute)
 
 	s1, evs1, taskID, x, before := dispatching(t, ctx, h, "replica_stall")
 	y := h.Other(x)
-	t.Logf("task %s: the dispatch runs on %s (%s); %s is stopped for 40 s", taskID, x.Name, x.ReplicaID, x.Name)
+	t.Logf("task %s: the dispatch runs on %s (%s); %s is stopped for %v", taskID, x.Name, x.ReplicaID, x.Name, stall)
 
 	stopped := time.Now()
 	if err := x.Stop(); err != nil {
@@ -308,27 +317,29 @@ func TestReplicaStallDirect(t *testing.T) {
 	if err := s1.Close(); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Until(stopped.Add(40 * time.Second)))
+
+	// While X is stopped, the survivor takes the attempt over with a fresh dispatch_id.
+	var after Attempt
+	for {
+		as, err := h.Attempts(ctx, taskID)
+		if err == nil && len(as) == 1 && as[0].DispatchID != nil && *as[0].DispatchID != *before.DispatchID && as[0].ReplicaID == y.ReplicaID {
+			after = as[0]
+			break
+		}
+		if time.Since(stopped) > takeover {
+			t.Fatalf("%s did not take the attempt over within %v of SIGSTOP while %s was stopped: %+v %v", y.Name, takeover, x.Name, as, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Logf("re-attached on %s %.1f s after SIGSTOP, %s still stopped", y.Name, time.Since(stopped).Seconds(), x.Name)
+	if !x.Stopped() {
+		t.Fatalf("%s is not stopped", x.Name)
+	}
+	time.Sleep(time.Until(stopped.Add(stall)))
 	if err := x.Continue(); err != nil {
 		t.Fatal(err)
 	}
 	continued = true
-
-	// The re-attach writes a fresh dispatch_id on attempt 1.
-	var after Attempt
-	eventually(t, 3*time.Minute, "a re-attach with a fresh dispatch_id", func() bool {
-		as, err := h.Attempts(ctx, taskID)
-		if err != nil || len(as) != 1 || as[0].DispatchID == nil || *as[0].DispatchID == *before.DispatchID {
-			return false
-		}
-		after = as[0]
-		return true
-	})
-	holder := h.GateByReplica(after.ReplicaID)
-	if holder == nil {
-		t.Fatalf("the re-attach runs on %q, neither replica", after.ReplicaID)
-	}
-	t.Logf("re-attached on %s %.1f s after SIGSTOP", holder.Name, time.Since(stopped).Seconds())
 
 	s2, _ := resumeOn(t, ctx, h, y, taskID, lastID(t, evs1))
 	evs2, err := s2.ReadAll(ctx)
@@ -339,9 +350,16 @@ func TestReplicaStallDirect(t *testing.T) {
 		t.Fatalf("the resumed stream must end right after the completed row")
 	}
 	checkCarried(t, h, taskID, append(ids(evs1), ids(evs2)...))
-	checkCompletedOnce(t, ctx, h, taskID, holder, before)
+	checkCompletedOnce(t, ctx, h, taskID, y, before)
+	if as, err := h.Attempts(ctx, taskID); err != nil || len(as) != 1 || *as[0].DispatchID != *after.DispatchID {
+		t.Fatalf("attempts %+v %v: the dispatch that completed the task is not the one %s took over with (%s)", as, err, y.Name, after.DispatchID)
+	}
 
-	for _, line := range grepLog(x.LogPath, "fenc") {
+	// X's old dispatch, alive again, was superseded (its fence, or the registry, D77) and logged so.
+	eventually(t, 30*time.Second, x.Name+" logs its old dispatch superseded", func() bool {
+		return len(grepLog(x.LogPath, "dispatch superseded by a newer dispatch")) > 0
+	})
+	for _, line := range grepLog(x.LogPath, "superseded") {
 		t.Logf("%s: %s", x.Name, line)
 	}
 

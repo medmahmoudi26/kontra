@@ -10,7 +10,9 @@
 //
 // A first message whose text starts with "ask" stops at input-required; the follow-up that answers it
 // streams the chunks and completes (spec §7). CancelTask ends a task canceled at once, whatever it is
-// doing (spec §8).
+// doing (spec §8). With TalksAfterCancel the agent is a seller that ignores its own cancel: the stream that
+// carried the canceled status goes on with one more chunk and a completed status, which a2a-go itself
+// never sends (its processor ends an execution at the canceled event and drops what it yields after).
 //
 // With Legacy025 the agent is the a2a-samples helloworld seller at protocol 0.2.5 (card_compat): it serves
 // that seller's card at /.well-known/agent.json, speaks the 0.x JSON-RPC binding at its root, and answers
@@ -46,6 +48,10 @@ type Config struct {
 	// Legacy025 makes the agent the a2a-samples helloworld seller at protocol 0.2.5 (card_compat); Chunks,
 	// Interval and Binding are then ignored.
 	Legacy025 bool
+	// TalksAfterCancel (JSON-RPC binding): a SendStreamingMessage stream that ends with the canceled status
+	// goes on with an artifact chunk and a completed status for the same task, written right after it on
+	// the same response (cancel_forwarded: the gate must log neither, spec §8).
+	TalksAfterCancel bool
 }
 
 // ChunkMarker starts the text of every chunk the agent streams, so a test can look for chunk text where it
@@ -86,6 +92,7 @@ type Agent struct {
 	handler a2asrv.RequestHandler
 	sends   atomic.Int64
 	cancels atomic.Int64
+	late    atomic.Int64
 
 	mu       sync.Mutex
 	requests []Request
@@ -189,6 +196,11 @@ func (a *Agent) Cancels() int64 {
 	return a.cancels.Load()
 }
 
+// LateEvents is the number of events written after a canceled status (TalksAfterCancel).
+func (a *Agent) LateEvents() int64 {
+	return a.late.Load()
+}
+
 // Requests returns a copy of every request received so far, in arrival order.
 func (a *Agent) Requests() []Request {
 	a.mu.Lock()
@@ -262,8 +274,68 @@ func (a *Agent) record(next http.Handler) http.Handler {
 		a.mu.Lock()
 		a.requests = append(a.requests, req)
 		a.mu.Unlock()
+		if a.cfg.TalksAfterCancel && req.Method == "SendStreamingMessage" {
+			tw := &teeWriter{ResponseWriter: w}
+			next.ServeHTTP(tw, r)
+			a.talkAfterCancel(tw)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// teeWriter keeps what a2a-go wrote on a streaming response.
+type teeWriter struct {
+	http.ResponseWriter
+	buf bytes.Buffer
+}
+
+func (t *teeWriter) Write(b []byte) (int, error) {
+	t.buf.Write(b)
+	return t.ResponseWriter.Write(b)
+}
+
+func (t *teeWriter) Flush() {
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// talkAfterCancel writes, after a2a-go's stream ended with the canceled status, an artifact chunk and a
+// completed status for the same task on the same response, framed as a2a-go frames its events.
+func (a *Agent) talkAfterCancel(tw *teeWriter) {
+	var last []byte
+	for _, line := range bytes.Split(tw.buf.Bytes(), []byte("\n")) {
+		if rest, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
+			last = rest
+		}
+	}
+	var env struct {
+		ID     json.RawMessage    `json:"id"`
+		Result a2a.StreamResponse `json:"result"`
+	}
+	if last == nil || json.Unmarshal(last, &env) != nil {
+		return
+	}
+	su, ok := env.Result.Event.(*a2a.TaskStatusUpdateEvent)
+	if !ok || su.Status.State != a2a.TaskStateCanceled {
+		return
+	}
+	info := a2a.TaskInfo{TaskID: su.TaskID, ContextID: su.ContextID}
+	for i, ev := range []a2a.Event{
+		a2a.NewArtifactEvent(info, a2a.NewTextPart(ChunkMarker+" after the cancel")),
+		a2a.NewStatusUpdateEvent(info, a2a.TaskStateCompleted, nil),
+	} {
+		data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": env.ID, "result": a2a.StreamResponse{Event: ev}})
+		if err != nil {
+			return
+		}
+		if _, err := fmt.Fprintf(tw.ResponseWriter, "id: late-%d\ndata: %s\n\n", i, data); err != nil {
+			return
+		}
+		tw.Flush()
+		a.late.Add(1)
+	}
 }
 
 type msgIDs struct {

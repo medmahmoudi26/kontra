@@ -4,9 +4,11 @@
 # kontra-gate replicas as processes, and a database on $KONTRA_TEST_PG (a server where the user may create
 # databases) or a postgres:17-alpine container when it is unset; it removes all of them when the test
 # ends, pass or fail. Every process it starts carries KONTRA_E2E_RUN and this script's KONTRA_E2E_SESSION in
-# its environment, every container the label kontra-e2e-session, and every database this session's id in
-# its name: after the run this script looks for all three (a test binary that died cannot clean up),
-# removes any it finds, and fails the run if there were any. Extra arguments go to `go test` (e.g. -run
+# its environment, every container the label kontra-e2e-session, every database this session's id in its
+# name, and every file it writes (the built gate; per test the kontra.yaml that holds the Postgres URL and
+# its password, and the logs) lives under $TMPDIR/kontra-e2e-<session> (test/e2e TempRoot): after the run
+# this script looks for all four (a test binary that died, a go test -timeout panic or a crash, cannot clean
+# up), removes any it finds, and fails the run if there were any. Extra arguments go to `go test` (e.g. -run
 # TestRelayResume -v).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -53,8 +55,15 @@ if [[ -n "${KONTRA_TEST_PG:-}" ]] && command -v psql >/dev/null 2>&1; then
     leaked=1
   done < <(psql "$KONTRA_TEST_PG" -Atqc "select datname from pg_database where starts_with(datname, '$prefix')" 2>/dev/null || true)
 fi
+# The test binary removes its directory when it ends; one that died could not.
+dir="${TMPDIR:-/tmp}/kontra-e2e-$KONTRA_E2E_SESSION"
+if [[ -e "$dir" ]]; then
+  echo "test-e2e: directory $dir outlived the run" >&2
+  rm -rf -- "$dir"
+  leaked=1
+fi
 if [[ $leaked -ne 0 ]]; then
-  echo "test-e2e: the run left processes, containers or databases behind (removed now)" >&2
+  echo "test-e2e: the run left processes, containers, databases or files behind (removed now)" >&2
   [[ $status -eq 0 ]] && status=1
 fi
 exit $status

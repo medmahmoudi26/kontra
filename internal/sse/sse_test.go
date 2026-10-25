@@ -34,6 +34,8 @@ type memLog struct {
 	owner   store.Owner
 	rows    []store.Event
 	fail    error // EventsWithin fails with it while set
+	snapErr error // SnapshotAt fails with it while set
+	snaps   int   // SnapshotAt calls
 	reads   int
 	maxRead int // the most payload bytes one EventsWithin returned
 	wakeups chan struct{}
@@ -153,6 +155,10 @@ func (l *memLog) EventsWithin(_ context.Context, id uuid.UUID, after int64, limi
 func (l *memLog) SnapshotAt(_ context.Context, id uuid.UUID, seq int64) (*a2a.Task, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.snaps++
+	if l.snapErr != nil {
+		return nil, l.snapErr
+	}
 	if seq < 1 || seq > int64(len(l.rows)) {
 		return nil, fmt.Errorf("not a seq: %w", a2a.ErrInvalidParams)
 	}

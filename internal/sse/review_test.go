@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -146,6 +147,76 @@ func TestHandlerStarterServesAnAcceptedTurn(t *testing.T) {
 				t.Errorf("%v: %s", c.err, body)
 			}
 		}
+	}
+}
+
+// An accepted follow-up whose own read failed (Start.Late) because the database was gone for a moment is
+// still served when the gate's read of its leading snapshot fails too: that read is retried like every read
+// of the log (ReadGrace), with the stream begun, since the turn is running and a retry of the request would
+// be refused (spec §9). The e2e TestFollowUpLateRead found this: a one-second Postgres cut made a2a-go's
+// read and then the writer's SnapshotAt fail, and the caller got -32603 for a turn that ran. A log still
+// unreadable after ReadGrace ends the stream with an error event, without the cause.
+func TestAcceptedTurnRetriesItsLeadingSnapshot(t *testing.T) {
+	l := newMemLog(t)
+	l.status(t, a2a.TaskStateWorking)            // 2
+	v := l.status(t, a2a.TaskStateInputRequired) // 3 = V
+	logs := &logBuffer{}
+	w := testWriter(l, Options{ReadGrace: 2 * time.Second, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+	req := &a2a.SendMessageRequest{Message: a2a.NewMessageForTask(a2a.MessageRoleUser, l.info(), a2a.NewTextPart("blue"))}
+	h := writeThenFail{fill: &lifecycle.StreamStart{TaskID: a2a.TaskID(l.taskID.String()), Version: v}, err: dbBlip, slots: make(chan *lifecycle.StreamStart, 1)}
+
+	l.mu.Lock()
+	l.snapErr = errors.New("store: tail of task: unexpected EOF")
+	l.mu.Unlock()
+	go func() {
+		time.Sleep(400 * time.Millisecond) // the database is back
+		l.mu.Lock()
+		l.snapErr = nil
+		l.mu.Unlock()
+	}()
+	s := serve(t, func(rw http.ResponseWriter, r *http.Request) {
+		w.SendStreaming(rw, r, Stream{Binding: JSONRPC, RequestID: json.RawMessage(`7`), Service: svc, Owner: ownerA}, starter(h, req))
+	}, nil)
+	if s.status != 200 || s.header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("an accepted follow-up whose snapshot read failed for a moment: %d %s", s.status, s.header.Get("Content-Type"))
+	}
+	lead, _ := s.nextData(t)
+	if task, ok := decode(t, JSONRPC, lead.data, "7").(*a2a.Task); lead.id != 0 || !ok || task.Status.State != a2a.TaskStateInputRequired {
+		t.Fatalf("lead %+v", lead)
+	}
+	l.status(t, a2a.TaskStateWorking)   // 4
+	l.status(t, a2a.TaskStateCompleted) // 5
+	if got := s.rest(t); !eqIDs(eventIDs(got), 4, 5) {
+		t.Fatalf("ids %v", eventIDs(got))
+	}
+	l.mu.Lock()
+	snaps := l.snaps
+	l.mu.Unlock()
+	if snaps < 2 {
+		t.Fatalf("SnapshotAt ran %d times: the failed read was not retried", snaps)
+	}
+
+	// Unreadable for longer than ReadGrace: an error event ends the stream; the cause stays in the log.
+	l.mu.Lock()
+	l.snapErr = errors.New("store: dial tcp 10.0.0.5:5432: connection refused")
+	l.mu.Unlock()
+	w = testWriter(l, Options{ReadGrace: 300 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+	h.slots = make(chan *lifecycle.StreamStart, 1)
+	s = serve(t, func(rw http.ResponseWriter, r *http.Request) {
+		w.SendStreaming(rw, r, Stream{Binding: HTTPJSON, Service: svc, Owner: ownerA}, starter(h, req))
+	}, nil)
+	if s.status != 200 || s.header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("an accepted turn whose log stays unreadable: %d %s", s.status, s.header.Get("Content-Type"))
+	}
+	ev, _ := s.nextData(t)
+	if ev.id != 0 || !strings.Contains(ev.data, `"code":500`) || strings.Contains(ev.data, "10.0.0.5") {
+		t.Fatalf("after ReadGrace: %+v", ev)
+	}
+	if _, ok := s.nextData(t); ok {
+		t.Error("the stream stayed open after its error event")
+	}
+	if !strings.Contains(logs.String(), "10.0.0.5:5432") {
+		t.Errorf("the read's error was not logged: %s", logs)
 	}
 }
 
