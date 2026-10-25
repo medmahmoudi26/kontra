@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# End-to-end tests: `go test -p 1` over test/e2e only (spec/relay.md §16, D80). The harness starts, per
+# test, a Temporal development server from $KONTRA_TEMPORAL_CLI (the pinned CLI 1.9.1, Server 1.32.0), two
+# kontra-gate replicas as processes, and a database on $KONTRA_TEST_PG (a server where the user may create
+# databases) or a postgres:17-alpine container when it is unset; it removes all of them when the test
+# ends, pass or fail. Every process it starts carries KONTRA_E2E_RUN and this script's KONTRA_E2E_SESSION in
+# its environment, every container the label kontra-e2e-session, and every database this session's id in
+# its name: after the run this script looks for all three (a test binary that died cannot clean up),
+# removes any it finds, and fails the run if there were any. Extra arguments go to `go test` (e.g. -run
+# TestRelayResume -v).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+GO="${GO:-go}"
+
+if [[ -z "${KONTRA_TEMPORAL_CLI:-}" ]]; then
+  echo "test-e2e: set KONTRA_TEMPORAL_CLI to the pinned temporal CLI (1.9.1, Server 1.32.0)" >&2
+  exit 2
+fi
+
+# This run's processes and containers carry this session id (the harness passes it on), so a check never
+# touches another run's.
+export KONTRA_E2E_SESSION="e2e-$$-$RANDOM"
+status=0
+"$GO" test -p 1 -count=1 -timeout "${KONTRA_E2E_TIMEOUT:-60m}" "$@" ./test/e2e/... || status=$?
+
+leaked=0
+for environ in /proc/[0-9]*/environ; do
+  pid="${environ#/proc/}"
+  pid="${pid%/environ}"
+  env="$(tr '\0' '\n' <"$environ" 2>/dev/null || true)"
+  if grep -q '^KONTRA_E2E_RUN=' <<<"$env" && grep -qx "KONTRA_E2E_SESSION=$KONTRA_E2E_SESSION" <<<"$env"; then
+    echo "test-e2e: process $pid outlived the run: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-160)" >&2
+    kill -9 "$pid" 2>/dev/null || true
+    leaked=1
+  fi
+done
+if command -v docker >/dev/null 2>&1; then
+  while read -r name; do
+    [[ -z "$name" ]] && continue
+    echo "test-e2e: container $name outlived the run" >&2
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    leaked=1
+  done < <(docker ps -a --filter "label=kontra-e2e-session=$KONTRA_E2E_SESSION" --format '{{.Names}}' 2>/dev/null || true)
+fi
+# A test binary that died (a timeout, a crash) could not drop its databases on $KONTRA_TEST_PG; their
+# names start with kontra_e2e_ and this session's id (test/e2e DatabasePrefix).
+if [[ -n "${KONTRA_TEST_PG:-}" ]] && command -v psql >/dev/null 2>&1; then
+  prefix="kontra_e2e_$(tr 'A-Z' 'a-z' <<<"$KONTRA_E2E_SESSION" | tr -c 'a-z0-9\n' '_')_"
+  while read -r db; do
+    [[ -z "$db" ]] && continue
+    echo "test-e2e: database $db outlived the run" >&2
+    psql "$KONTRA_TEST_PG" -Atqc "drop database if exists \"$db\" with (force)" >/dev/null || true
+    leaked=1
+  done < <(psql "$KONTRA_TEST_PG" -Atqc "select datname from pg_database where starts_with(datname, '$prefix')" 2>/dev/null || true)
+fi
+if [[ $leaked -ne 0 ]]; then
+  echo "test-e2e: the run left processes, containers or databases behind (removed now)" >&2
+  [[ $status -eq 0 ]] && status=1
+fi
+exit $status
