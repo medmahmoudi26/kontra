@@ -327,10 +327,30 @@ func (d *Dispatcher) Abort(ctx context.Context, in lifecycle.AttemptRef) error {
 	return nil
 }
 
+// cancelAnswer is forward_cancel's outcome for an upstream that answered CancelTask with its task (spec
+// §8): canceled only when the task's state is canceled, which the gate then logs; not_cancelable when it is
+// terminal otherwise (it completed, failed or was rejected first); and for any other state (or no task),
+// continues: the upstream's answer is a task it keeps running (A2A 1.0.1 §3.1.5), so the gate writes
+// nothing and the task continues.
+func cancelAnswer(t *a2a.Task) lifecycle.ForwardCancelResult {
+	if t == nil {
+		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}
+	}
+	res := lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues, UpstreamState: string(t.Status.State)}
+	switch {
+	case t.Status.State == a2a.TaskStateCanceled:
+		res.Outcome = lifecycle.CancelCanceled
+	case t.Status.State.Terminal():
+		res.Outcome = lifecycle.CancelNotCancelable
+	}
+	return res
+}
+
 // ForwardCancel implements lifecycle.DispatchActivities: CancelTask upstream on the attempt's upstream
 // task, returning the upstream's answer (a canceled status is logged by the running dispatch, or by the
-// workflow through write_terminal for an input-required task). The upstream's error text crosses Temporal
-// history only as a capped message (upstream.MaxMessage).
+// workflow through write_terminal for an input-required task; any other state the upstream answers is not
+// a cancel, cancelAnswer). The upstream's error text crosses Temporal history only as a capped message
+// (upstream.MaxMessage).
 func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef) (lifecycle.ForwardCancelResult, error) {
 	taskUUID, err := ids.ParseTaskID(in.TaskID)
 	if err != nil {
@@ -363,11 +383,7 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 	cctx, ex := upstream.WithExchange(ctx)
 	t, err := client.CancelTask(cctx, &a2a.CancelTaskRequest{ID: a2a.TaskID(attempt.UpstreamTaskID)})
 	if err == nil {
-		res := lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelCanceled}
-		if t != nil {
-			res.UpstreamState = string(t.Status.State)
-		}
-		return res, nil
+		return cancelAnswer(t), nil
 	}
 	f := upstream.Classify(cctx, err, ex)
 	var a2aErr *a2a.Error

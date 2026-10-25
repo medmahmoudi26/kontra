@@ -107,6 +107,18 @@ const (
 	CancelCanceled      CancelOutcome = "canceled"
 	CancelNotCancelable CancelOutcome = "not_cancelable"
 	CancelUnsupported   CancelOutcome = "unsupported"
+	// CancelContinues is an upstream that answered CancelTask with its task in a state that is not
+	// terminal (A2A 1.0.1 §3.1.5: "success is not guaranteed"; the call "returns its updated state"): the
+	// task continues, nothing is written, and the caller gets the task as the gate stores it, with gate ids.
+	//
+	// SPEC-CONFLICT: spec §14.1 names kontra.cancel's outcomes canceled | not_cancelable | unsupported, and §8
+	// gives the caller "whatever the upstream answers, with gate ids": a canceled task or the upstream's
+	// error. An upstream may answer with a task that is not canceled and no error, which none of the three
+	// describes: canceled would log canceled for a task the seller keeps running (§8: the gate writes
+	// canceled only for "the upstream's canceled status"), and not_cancelable or unsupported would answer an
+	// error the upstream never sent. The closest faithful behaviour is this fourth outcome, whose caller
+	// answer is the stored task; an upstream task already terminal otherwise is not_cancelable.
+	CancelContinues CancelOutcome = "continues"
 )
 
 // UpstreamError is an upstream's JSON-RPC error, relayed to the caller of a cancel (spec §8).

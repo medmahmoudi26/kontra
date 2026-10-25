@@ -911,6 +911,37 @@ func TestForwardCancel(t *testing.T) {
 			t.Errorf("the task changed: %s", row.State)
 		}
 	}
+	// The upstream answers with its task, no error: canceled only for its canceled status (spec §8); a task
+	// it keeps running is no cancel (continues), and one that ended otherwise is not cancelable. A2A 1.0.1
+	// §3.1.5: "success is not guaranteed", the call "returns its updated state".
+	for _, tc := range []struct {
+		state   string
+		outcome lifecycle.CancelOutcome
+	}{
+		{"TASK_STATE_CANCELED", lifecycle.CancelCanceled},
+		{"TASK_STATE_WORKING", lifecycle.CancelContinues},
+		{"TASK_STATE_INPUT_REQUIRED", lifecycle.CancelContinues},
+		{"TASK_STATE_COMPLETED", lifecycle.CancelNotCancelable},
+		{"TASK_STATE_FAILED", lifecycle.CancelNotCancelable},
+	} {
+		b2, _ := scripted(t, func(method string, id json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+			if method != "CancelTask" {
+				w.WriteHeader(400)
+				return
+			}
+			rpcResult(w, id, `"result":{"id":"up-x","contextId":"c","status":{"state":"`+tc.state+`"}}`)
+		})
+		e.backends.set(b2, rpcInfo, nil)
+		id2, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+		e.firstID(id2, 1, "up-x", "c")
+		res, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id2), N: 1})
+		if err != nil || res.Outcome != tc.outcome || res.UpstreamState != tc.state || res.UpstreamError != nil {
+			t.Errorf("upstream answers %s: %+v %v, want %s", tc.state, res, err, tc.outcome)
+		}
+		if row := e.row(id2); row.State != store.StateSubmitted {
+			t.Errorf("the task changed: %s", row.State)
+		}
+	}
 	// No upstream task: nothing to forward.
 	id3, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
 	if _, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id3), N: 1}); err == nil {

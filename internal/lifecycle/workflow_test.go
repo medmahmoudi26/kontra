@@ -1760,3 +1760,70 @@ func TestDispatchedSignalOfAnOlderAttemptIsIgnored(t *testing.T) {
 		t.Errorf("OnDispatched ran %d times, want once (attempt 2's): %v", n, w.snapshot().hookCalls)
 	}
 }
+
+// forward_cancel answered with the upstream's task in a state that is not canceled (A2A 1.0.1 §3.1.5: the
+// call "returns its updated state" and success is not guaranteed): the gate writes no canceled, the
+// cancel's outcome says the task continues, and the task does. Both the activity's own answer (continues)
+// and an older replica's (canceled, with the upstream's state) are taken that way (spec §8).
+func TestCancelAnsweredWithARunningTaskContinues(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input bool // the task waits at input-required (no dispatch runs)
+		res   ForwardCancelResult
+		want  CancelOutcome
+	}{
+		{"input-required, older replica", true, ForwardCancelResult{Outcome: CancelCanceled, UpstreamState: "TASK_STATE_INPUT_REQUIRED"}, CancelContinues},
+		{"input-required", true, ForwardCancelResult{Outcome: CancelContinues, UpstreamState: "TASK_STATE_INPUT_REQUIRED"}, CancelContinues},
+		{"working, older replica", false, ForwardCancelResult{Outcome: CancelCanceled, UpstreamState: "TASK_STATE_WORKING"}, CancelContinues},
+		{"working", false, ForwardCancelResult{Outcome: CancelContinues, UpstreamState: "TASK_STATE_WORKING"}, CancelContinues},
+		{"completed, older replica", false, ForwardCancelResult{Outcome: CancelCanceled, UpstreamState: "TASK_STATE_COMPLETED"}, CancelNotCancelable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.firstID[1] = true
+			forwarded := make(chan struct{})
+			w.forwardFn = func(context.Context, int, string) (ForwardCancelResult, error) {
+				close(forwarded)
+				return tc.res, nil
+			}
+			if tc.input {
+				w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
+					w.setState(string(store.StateInputRequired))
+					return DispatchResult{Outcome: DispatchInterrupted}, nil
+				}
+			} else {
+				w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+					select {
+					case <-forwarded:
+					case <-w.release:
+					}
+					time.Sleep(100 * time.Millisecond) // the seller keeps working, then completes
+					w.setState(string(store.StateCompleted))
+					return DispatchResult{Outcome: DispatchTerminal}, nil
+				}
+			}
+			env := w.env()
+			u := newUpdates()
+			at := 200 * time.Millisecond // while the dispatch runs
+			if tc.input {
+				at = time.Minute
+			}
+			env.RegisterDelayedCallback(func() { env.UpdateWorkflow(UpdateCancel, "c1", u.cb("c1"), CancelUpdate{}) }, at)
+			start(env, u, input(2))
+			done(t, env)
+			s := w.snapshot()
+			r, err := u.result("c1")
+			if err != nil || r.(CancelResult).Outcome != tc.want {
+				t.Fatalf("cancel result %+v %v, want %s", r, err, tc.want)
+			}
+			for _, tw := range s.terminals {
+				if tw.State == string(store.StateCanceled) {
+					t.Errorf("canceled written for an upstream that answered %s: %+v", tc.res.UpstreamState, s.terminals)
+				}
+			}
+			if slices.Contains(s.hookCalls, HookOnTerminal+":canceled") {
+				t.Errorf("hooks %v", s.hookCalls)
+			}
+		})
+	}
+}

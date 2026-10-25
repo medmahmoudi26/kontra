@@ -403,6 +403,11 @@ func TestCancelInterceptor(t *testing.T) {
 	if e.row(id).State != store.StateWorking {
 		t.Error("a refused cancel changed the task")
 	}
+	// The upstream answered with its task still running: that answer, with gate ids, is the stored task.
+	fc.res = lifecycle.CancelResult{Outcome: lifecycle.CancelContinues}
+	if task, err := cancel(id, buyerA); err != nil || task.Status.State != a2a.TaskStateWorking || task.ID != id {
+		t.Errorf("continues: %+v %v", task, err)
+	}
 	// Past 60 s: the stored task as it is.
 	fc.res, fc.ok = lifecycle.CancelResult{}, false
 	if task, err := cancel(id, buyerA); err != nil || task.Status.State != a2a.TaskStateWorking {

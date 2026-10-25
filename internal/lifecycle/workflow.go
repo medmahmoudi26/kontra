@@ -56,6 +56,11 @@ const (
 	// attempt as a lost dispatch's (re-attach, or tunnel_lost) instead of treating the refusal as the
 	// deadline. And a kontra.dispatched for an attempt older than the current one runs no OnDispatched.
 	changeFencedRetry = "fenced-retry"
+	// changeCancelAnswer: a forward_cancel answered canceled whose upstream state is not canceled (a
+	// replica that did not yet tell them apart) is taken for what the upstream said: not_cancelable for
+	// another terminal state, continues otherwise; the workflow writes canceled only for the upstream's
+	// canceled status (spec §8).
+	changeCancelAnswer = "cancel-answer"
 )
 
 // phase is the task's state as the workflow knows it, from its own Updates and activity results.
@@ -1168,6 +1173,27 @@ func (l *lc) finishEnded(op *cancelOp, state string) {
 	l.finish(op, CancelResult{}, notCancelableErr(state))
 }
 
+// cancelAnswer is forward_cancel's result as the workflow acts on it: canceled only when the upstream's
+// answer is its canceled status (spec §8). The activity already says so (relay.cancelAnswer); an older
+// replica's answered canceled for any task the upstream returned, and its UpstreamState tells.
+func (l *lc) cancelAnswer(ctx workflow.Context, r ForwardCancelResult) ForwardCancelResult {
+	if r.Outcome != CancelCanceled || r.UpstreamState == "" || r.UpstreamState == upstreamCanceled ||
+		workflow.GetVersion(ctx, changeCancelAnswer, workflow.DefaultVersion, 1) < 1 {
+		return r
+	}
+	if upstreamTerminal[r.UpstreamState] {
+		r.Outcome = CancelNotCancelable
+	} else {
+		r.Outcome = CancelContinues
+	}
+	return r
+}
+
+// The A2A 1.0 task states forward_cancel's UpstreamState carries (a2a.TaskState values).
+const upstreamCanceled = "TASK_STATE_CANCELED"
+
+var upstreamTerminal = map[string]bool{"TASK_STATE_COMPLETED": true, "TASK_STATE_FAILED": true, "TASK_STATE_REJECTED": true, upstreamCanceled: true}
+
 // unreachable is the answer when forward_cancel could not reach the service: the task continues.
 func unreachable() CancelResult {
 	return CancelResult{Outcome: CancelNotCancelable, UpstreamError: &UpstreamError{Code: -32603, Message: "the service could not be reached to cancel the task"}}
@@ -1201,6 +1227,9 @@ func (l *lc) cancelDispatching(ctx workflow.Context, c *call) {
 		return
 	}
 	r, err := l.forwardCancel(ctx, st, true)
+	if err == nil {
+		r = l.cancelAnswer(ctx, r)
+	}
 	switch {
 	case err != nil:
 		l.logger.Info("forward_cancel failed; the task continues", "error", err)
@@ -1222,7 +1251,8 @@ func (l *lc) cancelDispatching(ctx workflow.Context, c *call) {
 		}
 		l.finishEnded(op, tr.State)
 	default:
-		// The upstream refused (TaskNotCancelableError, UnsupportedOperationError): the task continues.
+		// The upstream refused (TaskNotCancelableError, UnsupportedOperationError), or answered with its task
+		// in another state (continues): the task continues.
 		l.finish(op, CancelResult{Outcome: r.Outcome, UpstreamError: r.UpstreamError}, nil)
 	}
 }
@@ -1246,6 +1276,9 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 		return
 	}
 	r, err := l.forwardCancel(ctx, st, false)
+	if err == nil {
+		r = l.cancelAnswer(ctx, r)
+	}
 	switch {
 	case err != nil:
 		l.logger.Info("forward_cancel failed; the task continues", "error", err)

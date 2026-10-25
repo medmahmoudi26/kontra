@@ -496,7 +496,9 @@ func (c *CancelInterceptor) Before(ctx context.Context, cc *a2asrv.CallContext, 
 			return ctx, nil, a2a.NewError(a2a.ErrUnsupportedOperation, upstreamText(res.UpstreamError, "the service does not support cancel"))
 		}
 	}
-	// Canceled (the terminal event is in the log, D79), or past 60 s: the stored task as it is.
+	// Canceled (the terminal event is in the log, D79), continues (the upstream answered with its task still
+	// running: the task as the gate stores it is that answer with gate ids), or past 60 s: the stored task as
+	// it is.
 	after, err := c.Log.LoadScoped(ctx, c.Svc, o, id)
 	if err != nil {
 		return ctx, nil, err
