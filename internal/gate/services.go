@@ -9,14 +9,16 @@ import (
 	"github.com/medmahmoudi26/kontra/internal/config"
 	"github.com/medmahmoudi26/kontra/internal/lifecycle"
 	"github.com/medmahmoudi26/kontra/internal/store"
+	"github.com/medmahmoudi26/kontra/internal/tenant"
 	"github.com/medmahmoudi26/kontra/internal/unimpl"
 )
 
 // TeamTenant is the slug of a team gate's one tenant.
-const TeamTenant = "default"
+const TeamTenant = tenant.TeamSlug
 
-// Services is the replica's service registry. A team gate upserts its tenant and the services: block
-// into tenants and services (source = config) at start and on SIGHUP, marks removed ones disabled_at
+// Services is the replica's service registry. A team gate upserts its tenant (tenant.EnsureTeam, the code
+// `kontra-gate enroll --api-key` runs too) and the services: block into tenants and services (source =
+// config) at start and on SIGHUP, marks removed ones disabled_at
 // (rows are not deleted), and fetches each direct backend's card; db-sourced services (Cloud) are read
 // from Postgres and re-read on NOTIFY kontra_services.
 type Services struct{}
