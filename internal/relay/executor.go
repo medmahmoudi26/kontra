@@ -515,7 +515,7 @@ func (r *run) stream(ctx context.Context, req *a2a.SendMessageRequest) (fallback
 		r.fail(store.ReasonUpstreamError, "the service closed its stream without a task")
 		return false
 	}
-	// SPEC-CONFLICT: §6.2–§6.4 say nothing of a stream the upstream closes cleanly before a terminal or
+	// SPEC-CONFLICT (D96): §6.2–§6.4 say nothing of a stream the upstream closes cleanly before a terminal or
 	// input-required event. The closest rule is the re-attach's ("a subscription that ends without a
 	// terminal event falls back to polling", §6.4): the dispatch follows the upstream task by GetTask.
 	r.follow(ctx)
@@ -636,7 +636,7 @@ func (g *getTasks) next(interval, grace time.Duration) time.Duration {
 // It returns the task, or nil when the call failed: then either the turn ended (r.finished: the dispatch's
 // context ended, or the failure failed the task) or the call is to be made again.
 //
-// SPEC-CONFLICT: §6.4 states the 30 s GetTask rule for the re-attach only, and its table fails a task whose
+// SPEC-CONFLICT (D97): §6.4 states the 30 s GetTask rule for the re-attach only, and its table fails a task whose
 // upstream id exists at the first refused or reset connection or 502/503/504 (upstream_unreachable) and at
 // the first 408/429 (upstream_error). Read literally, one failed poll of an hour-long task on the polling
 // path would fail it. Every GetTask loop (the polling path's and the re-attach's) applies the re-attach's
@@ -757,7 +757,7 @@ func (r *run) awaitTask(ctx context.Context) *a2a.Task {
 // upstream that shows neither within GetTaskGrace (polling every PollInterval) never took the follow-up,
 // and the refusal fails the task upstream_error, as §6.4's table says.
 //
-// SPEC-CONFLICT: §6.4's table fails a task at an upstream protocol error after its first upstream id, while
+// SPEC-CONFLICT (D98): §6.4's table fails a task at an upstream protocol error after its first upstream id, while
 // D81 resends an undelivered follow-up and "then continues as a re-attach". An upstream that already took
 // the follow-up refuses the duplicate: a2a-go while the first copy runs, and any upstream once the task it
 // finished is terminal. Failing then would lose the result of a turn the seller is working on or finished,
@@ -1029,7 +1029,7 @@ func (r *run) recordFirst(ctx context.Context, upTask a2a.TaskID, upCtx string) 
 // overLimit checks what an event would store against §6.6 and §10.4: one part over MaxPart, or the task's
 // stored bytes over TaskBytes, fails the task upstream_error.
 //
-// SPEC-CONFLICT: §6.6's table names limits.task_bytes as "Parts stored per task", while its rule is that
+// SPEC-CONFLICT (D103): §6.6's table names limits.task_bytes as "Parts stored per task", while its rule is that
 // "nothing an upstream sends is unbounded", and task_bytes is the only bound on what one task accumulates.
 // Counting parts only left the rest of every event unbounded: the metadata of a task, status, artifact,
 // message or part, a part's filename and mediaType, an artifact's name and description, and status events

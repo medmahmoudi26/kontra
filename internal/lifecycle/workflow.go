@@ -366,7 +366,7 @@ func (l *lc) onApproval(ctx workflow.Context, u ApprovalUpdate) (ApprovalResult,
 // validateReviewMessage refuses once the review window is decided closed (or a dispute closed it), and a
 // work item already accepted in this run; the caller_metadata keys are at most 16 KiB (D59).
 //
-// SPEC-CONFLICT: spec §14.1's validator refuses "unless the window is open". The caller sends a review
+// SPEC-CONFLICT (D106): spec §14.1's validator refuses "unless the window is open". The caller sends a review
 // message once it read completed from the log, which can be before the workflow learned that the turn
 // ended (the dispatch returns a moment after logging it) and before OnTerminal and ReviewWindow ran (a
 // remote hook can take seconds): read literally, a message sent into a window about to open would be
@@ -558,7 +558,7 @@ func (l *lc) hook(ctx workflow.Context, name string, ref hooks.TaskRef, args, ou
 // taskRef builds the hooks' TaskRef from Postgres (spec §13.3), right before each hook, so a hook sees
 // the task as the log has it.
 //
-// SPEC-CONFLICT: spec §13.3 says the TaskRef is "built by the activity from Postgres (not carried in
+// SPEC-CONFLICT (D114): spec §13.3 says the TaskRef is "built by the activity from Postgres (not carried in
 // workflow history)", but a hook is an activity the workflow schedules with (TaskRef, args) as its input,
 // on the operator's queue for a remote hook, so its input is in history whatever builds it. The closest
 // faithful behaviour: the workflow never keeps a TaskRef in its own state or input; a task_ref activity
@@ -939,7 +939,7 @@ func (l *lc) decide(ctx workflow.Context) step {
 // lost is the retry table for a dispatch whose replica or context was lost: before the first upstream task
 // id a new attempt; after it, a direct backend is re-attached (D42) and a tunnel fails tunnel_lost.
 //
-// SPEC-CONFLICT: spec §6.4's table names no failure reason for retries exhausted by lost dispatches of a
+// SPEC-CONFLICT (D99): spec §6.4's table names no failure reason for retries exhausted by lost dispatches of a
 // direct backend (a dying gate replica, or no replica polling kontra-direct within 15 s). The closest of
 // the closed set, upstream_unreachable ("the service could not be reached"), is written, and recorded as
 // the dead attempt's outcome; a tunnel backend's is tunnel_lost.
@@ -985,7 +985,7 @@ func (l *lc) lostWith(ctx workflow.Context, st AttemptState, hint store.FailureR
 // no gate replica polled the attempt's queue, so the activity never ran. It consumed no work item, sent
 // nothing upstream and wrote nothing.
 //
-// SPEC-CONFLICT: spec §6.4's table does not name this case; its "dispatch heartbeat timeout or lost
+// SPEC-CONFLICT (D100): spec §6.4's table does not name this case; its "dispatch heartbeat timeout or lost
 // context, direct backend" row re-attaches after the first upstream task id, and the plan applied it to a
 // schedule-to-start timeout too. For a follow-up turn that is wrong: a resume skips the work item's
 // consume and re-attaches without sending, finds the upstream still at input-required and ends the turn,

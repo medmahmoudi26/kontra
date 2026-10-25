@@ -675,9 +675,10 @@ func TestCardColumnFollowsTheServedBody(t *testing.T) {
 }
 
 // A db-sourced row (Cloud, spec §13.5) gets the refusals the configuration has for the same service
-// (config/validate.go's SPEC-CONFLICT resolutions): sealed on a direct backend, which this build would relay
-// in plaintext, and seller_keys on a direct a2a service, whose card this build would serve unverified. Such
-// a row is left out (the unknown-service answer, service_unavailable for its tasks) instead of served.
+// (config/validate.go's SPEC-CONFLICT resolutions, D90 and D91): sealed on a direct backend, which this
+// build would relay in plaintext, and seller_keys on a direct a2a service, whose card this build would serve
+// unverified. Such a row is left out (the unknown-service answer, service_unavailable for its tasks)
+// instead of served.
 func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)

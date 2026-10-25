@@ -21,7 +21,7 @@
         "acme": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Built-in ACME (HTTP-01 and TLS-ALPN-01) with a directory cache: one replica only (D70).",
+          "description": "Built-in ACME (TLS-ALPN-01 on the TLS listener, D82) with a directory cache: one replica only (D70).",
           "properties": {
             "email": { "type": "string" },
             "domains": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "Default: the host of public_url, which the list must include." },
@@ -116,7 +116,7 @@
     },
     "tenancy": { "enum": ["single", "multi"], "default": "single" },
     "caller_metadata": { "type": "array", "items": { "type": "string", "pattern": "^kontra\\..+" }, "default": [] },
-    "operator_metadata_prefixes": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
+    "operator_metadata_prefixes": { "type": "array", "items": { "type": "string", "pattern": "^kontra\\..+" }, "default": [], "description": "Each prefix lies under kontra. and is longer than it (D113)." },
     "push": {
       "type": "object",
       "additionalProperties": false,

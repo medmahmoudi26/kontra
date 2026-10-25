@@ -322,7 +322,7 @@ func (l *Log) LatestAttempt(ctx context.Context, taskID uuid.UUID) (*Attempt, er
 // placed on the service's current direct backend (spec §4: an upstream context id or task id is reused only
 // on "the same direct backend").
 //
-// SPEC-CONFLICT: spec §4 reuses a recorded upstream context id only on the same tunnel session or the same
+// SPEC-CONFLICT (D92): spec §4 reuses a recorded upstream context id only on the same tunnel session or the same
 // direct backend, and maps referenceTaskIds only within the same backend, but its attempts row (§4,
 // migrations/0001_init.sql) records no direct backend's identity, only backend = 'direct'. After a SIGHUP
 // or NOTIFY moves a service to another URL, seller A's context and task ids would be sent to seller B. The

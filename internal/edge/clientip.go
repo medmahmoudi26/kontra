@@ -100,7 +100,7 @@ const ipv6CountBits = 64
 // countKey is what rps_per_ip and conns_per_ip count a client address under: an IPv4 address itself, an
 // IPv6 address's /64.
 //
-// SPEC-CONFLICT: spec §2.2 counts both limits "by the client address". One end site (a home, a cloud
+// SPEC-CONFLICT (D83): spec §2.2 counts both limits "by the client address". One end site (a home, a cloud
 // instance, a phone) commonly holds a whole IPv6 /64, so counting each address would give such a client
 // a fresh token bucket and a fresh connection quota per address it picks, and rps_per_ip would no longer
 // bound credential spraying. The edge counts an IPv6 client by its /64 instead (the network, as

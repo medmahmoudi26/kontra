@@ -636,7 +636,7 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 // refusable applies to every row the refusals config.Validate makes for a services: entry, so a row the
 // operator's control plane writes (source db, spec §13.5) cannot bypass them and fail open.
 //
-// SPEC-CONFLICT (the configuration's resolutions, config/validate.go): sealing needs backend tunnel (the
+// SPEC-CONFLICT (the configuration's resolutions, config/validate.go; D90, D91): sealing needs backend tunnel (the
 // recipients are the service's enrolled node keys and the hosting node unseals, ext-sealed.md §1), and this
 // build, which does not seal, would relay a sealed direct service in plaintext; seller card signatures are
 // not verified until M3, so a direct a2a service with seller_keys would serve its card unverified, where

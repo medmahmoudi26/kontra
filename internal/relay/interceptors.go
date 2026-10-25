@@ -369,7 +369,7 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 	msg.TaskID, msg.ContextID = a2a.TaskID(row.ID.String()), row.ContextID
 	stored.Message = &msg
 	if r.Config != nil && r.Config.PushConfig != nil {
-		// SPEC-CONFLICT: spec §10.1 saves an inline push config before the work item is written, but a
+		// SPEC-CONFLICT (D110): spec §10.1 saves an inline push config before the work item is written, but a
 		// review-window message is to a task that has ended: a config set on it would deliver nothing (an
 		// ended task has no change left to push, internal/push insertSQL), and its webhook credentials must
 		// not be stored in work_items, which hold no credentials (0001). The closest faithful behaviour: the

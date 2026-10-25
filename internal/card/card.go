@@ -225,7 +225,7 @@ var v0Members = []string{"url", "preferredTransport", "additionalInterfaces", "p
 // 0.x interface members go, supportsAuthenticatedExtendedCard and security are converted as above where the
 // card has no 1.0 member of their own and dropped otherwise, and so is each skill's security.
 //
-// SPEC-CONFLICT: spec §3 says "a 1.0 card is used as is" and keeps every seller-authored member but the
+// SPEC-CONFLICT (D88): spec §3 says "a 1.0 card is used as is" and keeps every seller-authored member but the
 // gate's; read literally, a combined card's url, additionalInterfaces, preferredTransport and
 // protocolVersion "0.3" would be served beside the gate's supportedInterfaces, so a 0.3 client reading the
 // served card would dial the seller's own (often internal) address, past the gate's allow: list and

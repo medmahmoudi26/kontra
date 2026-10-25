@@ -279,7 +279,7 @@ func JSONRPCErrorBody(id json.RawMessage, e RPCError) []byte {
 // HTTPError's status, or status when it is not zero. The message is Public's: an internal error's cause
 // is never written (the caller logs it).
 //
-// SPEC-CONFLICT: spec §2.4 ("VersionNotSupportedError (-32009, HTTP 400)"), §7 and §14.1 ("-32603 (HTTP
+// SPEC-CONFLICT (D86): spec §2.4 ("VersionNotSupportedError (-32009, HTTP 400)"), §7 and §14.1 ("-32603 (HTTP
 // 503)") give a JSON-RPC code and an HTTP status without saying which binding the status belongs to. Sent
 // on the JSON-RPC route, a 400 or 503 hides the error from A2A clients: a2a-go's JSON-RPC client reads a
 // JSON-RPC error only from an HTTP 200 response and reports any other status as "unexpected HTTP status"

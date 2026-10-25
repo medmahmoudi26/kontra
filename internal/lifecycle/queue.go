@@ -382,7 +382,7 @@ var errBehind = errors.New("lifecycle: the task's lifecycle has not caught up wi
 
 // message sends kontra.message for a follow-up whose work item was stored at pos, within AcceptWait in all.
 //
-// SPEC-CONFLICT: spec §7 and §14.1 refuse a follow-up "while the previous turn of the same task is still
+// SPEC-CONFLICT (D105): spec §7 and §14.1 refuse a follow-up "while the previous turn of the same task is still
 // being dispatched", by a validator that reads workflow state only (D66). But the caller learns that a
 // turn ended from the log: the dispatch logs input-required, a2a-go answers the caller at once, and the
 // dispatch activity returns to the workflow a moment later. A caller that answers at once meets a workflow

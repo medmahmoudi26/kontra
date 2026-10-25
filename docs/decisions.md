@@ -872,3 +872,449 @@ message: the upstream then sees the follow-up twice with the same `messageId`, w
 task's first turn is not covered: a resume before its first upstream id is a retry (§6.4), and after it the
 first message is never sent again. Tunnel backends are not covered either: after the first upstream id a lost
 tunnel fails the task (D32) ([`relay.md`](../spec/relay.md) §6.4, §7).
+
+## From building M1 (25 Oct)
+
+Building M1 (work packages WP-01 to WP-09 and the review after them) met places where the approved specs (revision
+3) say nothing, contradict themselves, or say what the code cannot or should not do. Each was resolved in the code
+with the closest faithful behaviour; where that departs from the text, a `SPEC-CONFLICT` comment in the code says
+so and names its entry here. The specs now say what the code does and cite the entry, except where an entry says
+the spec is unchanged. **Needs the owner** marks the entries that change documented behaviour; the others settle a
+silence or a contradiction.
+
+### D82. Built-in ACME validates with TLS-ALPN-01 only — **needs the owner** (narrows D70)
+
+relay.md §2.2 and D70: built-in ACME is "autocert, HTTP-01 and TLS-ALPN-01". HTTP-01 is validated on port 80, and
+no key (§17) opens a second, plaintext listener there: the gate's one public listener is its TLS listener, so an
+HTTP-01 challenge cannot be answered as the spec is written. Decision: the gate validates with TLS-ALPN-01 only, on
+its TLS listener; the CA connects to port 443, so `listen` is `:443` or forwarded from it. `ACME.HTTPHandler` is
+the seam for HTTP-01 once a key for a port-80 listener exists ([`relay.md`](../spec/relay.md) §2.2;
+`internal/edge/tls.go` `ACME`, `TestACMEIssuesIntoDirectoryCache`).
+
+### D83. An IPv6 client is counted by its /64 — **needs the owner** (amends D73)
+
+relay.md §2.2 and D73 count `rps_per_ip` and `conns_per_ip` "by the client address". One end site (a home, a cloud
+instance, a phone) commonly holds a whole IPv6 /64, so counting each address gives such a client a fresh token
+bucket and a fresh connection quota for every address it picks, and `rps_per_ip` no longer bounds credential
+spraying. Decision: an IPv6 client is counted by its /64 (a constant, not a key), an IPv4 client by its address;
+the client address itself stays whole wherever it is recorded. Precedent: [`tunnel.md`](../spec/tunnel.md) §6.2
+counts IPv6 by /48 for anonymous tenants. A key for another prefix length is the owner's call
+([`relay.md`](../spec/relay.md) §2.2; `internal/edge/clientip.go` `countKey`, `TestIPv6CountedPerSlash64`).
+
+### D84. Edge refusals before the body is read
+
+relay.md §2.2: on JSON-RPC a refusal is also a JSON-RPC error object "when the request could be parsed". A
+rate-limit refusal and a `413` happen before the body is read, so no request `id` is known, and the text does not
+say whether the error body is then owed. Decision: every refusal on a JSON-RPC route carries a JSON-RPC error body
+(`-32600`, `request too large` or `rate limited`), with the request's `id` when the body was read (the in-flight
+cap) and `id: null` otherwise ([`relay.md`](../spec/relay.md) §2.2; `internal/edge/edge.go`, `TestJSONRPCErrorID`).
+
+### D85. A slow request body is cut after 30 s
+
+PRD §12 lists slow-loris protection among the edge controls. relay.md §2.2 has a header timeout but no bound on how
+long a body may take to arrive, and the HTTP server's `ReadTimeout` cannot be that bound: `WriteTimeout` must stay
+0 for SSE, and the edge bounds bodies itself. Decision: a body that has not arrived within 30 s (4 MiB at about 140
+KiB/s) is refused `408` before the handler runs. It is a constant, not a configuration key
+([`relay.md`](../spec/relay.md) §2.2; `internal/edge/edge.go` `DefaultBodyTimeout`, `TestSlowBodyIsCut`).
+
+### D86. An HTTP status beside a JSON-RPC code is the HTTP+JSON binding's — **needs the owner**
+
+relay.md §2.4 ("`VersionNotSupportedError` (`-32009`, HTTP `400`)"), §7 and §14.1 ("`-32603` (HTTP `503`)") and §8
+(`TaskNotCancelableError`, HTTP `400`) pair a JSON-RPC code with an HTTP status without saying which binding the
+status belongs to. Sent on the JSON-RPC route, a `400` or `503` hides the error from A2A clients: a2a-go's JSON-RPC
+client reads an error only from an HTTP `200` response and reports any other status as "unexpected HTTP status"
+(`a2aclient/jsonrpc.go`), and a2a-go's own JSON-RPC server answers every error with `200`. Decision: on JSON-RPC
+the error is the body of an HTTP `200`; the status applies on HTTP+JSON, as A2A §3.3.2's table maps codes to
+statuses (`-32009` is `400`; an Update not accepted in time is `503`, `UNAVAILABLE`). The JSON-RPC statuses the
+spec states explicitly stay: the unknown-service `404` (§2.1) and a refused credential's `401`. So the M1 plan's
+"A2A-Version absent is `-32009` (HTTP `400`)" holds on HTTP+JSON only ([`relay.md`](../spec/relay.md) §2.4;
+`internal/sse/errors.go` `WriteError`, `TestWriteError`, `TestVersions`, `TestUnavailableIs503`).
+
+### D87. The credential is checked before the service
+
+relay.md §2.1 gives an unknown or forbidden service one answer, `404` (D50), and §2.3 makes a revoked or expired
+API key `401`; neither says which check comes first. Looking the service up first would make a bad key `404` on an
+unknown service and `401` on an existing one, which tells a caller which services exist. Decision: the credential
+is checked first, so a bad one is `401` on every A2A route, cards included, whether or not the service exists. A
+request without a credential is the `anonymous` principal and gets the `404` unless the service admits `anonymous`;
+a key without the `hire` scope is not admitted, so it gets the `404` too ([`relay.md`](../spec/relay.md) §2.1;
+`internal/a2ahttp/a2ahttp.go`, `TestBadCredential`, `TestUnknownServiceIsOneAnswer`).
+
+### D88. A card in both shapes is normalized like a 0.x card for its 0.x members — **needs the owner**
+
+relay.md §3: "A 1.0 card is used as is", and every seller-authored member but the gate's is kept. A seller built on
+a2a-go v2 that also serves 0.3 clients (`a2av0`'s card producers) publishes one card with `supportedInterfaces` and
+the 0.3 `url`, `preferredTransport`, `additionalInterfaces`, `protocolVersion`, `security` and
+`supportsAuthenticatedExtendedCard`. Used as is, the served card names the seller's own, often internal, address
+beside the gate's interfaces, so a 0.3 client dials the seller past the gate's `allow:` list and authentication,
+against §3's "Never an upstream URL" and §2.4's 1.0-only downstream; and its `security` and
+`supportsAuthenticatedExtendedCard` contradict the gate's `securityRequirements` and `extendedAgentCard: false`
+(D52). Decision: those members are the 0.x spelling of fields §3 gives the gate, so a card that has them beside 1.0
+members is normalized like a 0.x card for them: the interface members are dropped, and `security`,
+`supportsAuthenticatedExtendedCard` and each skill's `security` are converted where the card has no 1.0 member of
+its own and dropped otherwise. A pure 1.0 card is still used as is ([`relay.md`](../spec/relay.md) §3;
+`internal/card/card.go` `Normalize`, `TestCombinedCardServesNoUpstreamURL`).
+
+### D89. `card_fetched_at` counts from the gate's last good fetch
+
+relay.md §3: a failed fetch keeps the last verified card, and the service becomes unavailable only when no fetch
+has succeeded for 30 minutes. The card keeper persists only a changed card, so `services.card_fetched_at` was the
+time the card last changed: a replica restarting while the seller was down seeded from that old time and served
+`503` cards, although another replica had fetched the card a minute before. Decision: every successful fetch whose
+bytes equal the stored `upstream_card` also moves `card_fetched_at` (guarded by backend and bytes), so the 30
+minutes count from the gate's last good fetch on any replica ([`relay.md`](../spec/relay.md) §3;
+`internal/gate/services.go` `touchCard`, `TestCardKeepersPersistAndSeed`).
+
+### D90. `seller_keys` on a direct A2A service is refused until verification is built — **needs the owner** (M1 only)
+
+relay.md §3 and §17: with `seller_keys` configured, a card no key verifies makes the service unavailable (`503`
+card routes, `service_unavailable` at the first attempt). M1 does not verify seller signatures (M3), and has no
+unavailable state for a direct service, so ignoring the keys would serve the card unverified: failing open.
+Decision: until verification is built, a configuration with `seller_keys` on a direct `a2a` service refuses to
+start, as one with the remote hooks does, and a row the operator writes (§13.5) with the same is left out of the
+registry: its routes answer as an unknown service and its tasks fail `service_unavailable`. On a tunnel or MCP
+service, which M1 does not serve, the key is accepted with a warning. The spec is unchanged: this is M1's scope,
+and the work that verifies signatures removes the refusal (`internal/config/validate.go`,
+`internal/gate/services.go` `refusable`, `TestFailOpenKeysRefused`,
+`TestRegistryRefusesWhatTheConfigurationRefuses`).
+
+### D91. `sealed:` needs a tunnel backend
+
+relay.md §17 and [`ext-sealed.md`](../spec/ext-sealed.md) §1 do not tie `sealed:` to a backend. But the recipients
+are the identity keys enrolled for the service, and the hosting node unseals (ext-sealed §1, §4); a direct backend
+has neither, so a sealed direct service could never be served as declared, and a build that does not seal would
+relay it in plaintext. Decision: `sealed:` on a direct backend is refused at start, and a row the operator writes
+with it is left out of the registry, as in D90 ([`relay.md`](../spec/relay.md) §17; `internal/config/validate.go`,
+`internal/gate/services.go` `refusable`, `TestFailOpenKeysRefused`,
+`TestRegistryRefusesWhatTheConfigurationRefuses`).
+
+### D92. "The same direct backend", without a column for it — **needs the owner**
+
+relay.md §4 reuses a recorded upstream context id only on "the same tunnel session or the same direct backend", and
+maps `referenceTaskIds` only within the same backend. But 0001's `attempts` records no direct backend's identity,
+only `backend = 'direct'`: after a SIGHUP or NOTIFY moves a service to another URL, seller A's context and task ids
+would be sent to seller B. Decision: without a schema change, an attempt counts as on the service's current direct
+backend only if it started after the service row last changed (`services.updated_at`, which every change of its
+backend moves); otherwise the task carries none, as §4 says. This also drops context continuity after any other
+change of the row, a changed card included. The proposal: a migration 0002 adding an `attempts` column with the
+direct backend's identity (a hash of `services.backend`), matched exactly, and the column added to §4's list
+([`relay.md`](../spec/relay.md) §4; `internal/store/attempts.go` `SameDirectBackend`,
+`TestUpstreamIDsStayWithTheirBackend`).
+
+### D93. a2a-go's synthesized failure is also told by its shape
+
+relay.md §15 and D8: the store refuses a `failed` write the relay did not emit. Read literally, that refuses every
+`failed` write the registry does not hold; if a2a-go ever stopped passing the yielded event pointer through
+unchanged, it would refuse the relay's own failure, and the task would hang while the registry reports it logged.
+Decision: while a dispatch is registered, the store refuses a `failed` status only when it has no status message
+and the registry does not hold it. At the pinned a2a-go v2.7.0 this refuses exactly a2a-go's own `SetTaskFailed`,
+which never carries a message; the relay's failures always do (§6.3) ([`relay.md`](../spec/relay.md) §15;
+`internal/store/store.go` `synthesizedFailure`, `TestFailureGuard`, `TestClusterRefusesSynthesizedFailure`).
+
+### D94. A work item records the task version it was stored at
+
+D81's resend needs a follow-up's turn boundary: the version the task stood at when the follow-up's work item was
+stored. 0001's `work_items` has no column for it, and adding one needs a migration the owner has not approved.
+Decision: the version is stored inside `work_items.payload` under a key of Kontra's own (`kontraTaskVersion`) and
+decoded in Go only, so D49's "no SQL reads inside" holds and 0001 is unchanged. A column in a later migration is
+the owner's call ([`relay.md`](../spec/relay.md) §8.1; `internal/store/workitems.go`,
+`TestFollowUpResumeTurnBoundary`).
+
+### D95. Closed sessions of the gate's own `/mcp`
+
+relay.md §5.4 deletes `mcp_sessions` closed for longer than "the retention", which is a service's
+(`services.<name>.task.retention`); a session of the gate's own `/mcp` names no service. Decision: such sessions
+keep the default task retention, 7 days; a service's sessions use its `retention_s` ([`relay.md`](../spec/relay.md)
+§5.4; `internal/store/sweep.go` `DeleteClosedSessions`, `TestRetentionSweep`).
+
+### D96. An upstream stream that ends before its turn does
+
+relay.md §6.2–§6.4 do not say what a dispatch does when the upstream closes a `SendStreamingMessage` stream
+cleanly, without an error, before a terminal or `input-required` event. Decision: the closest rule is the
+re-attach's ("a subscription that ends without a terminal event falls back to polling", §6.4): once an upstream
+task id exists, the dispatch follows the task by `GetTask` polling; before one, the attempt fails `upstream_error`
+([`relay.md`](../spec/relay.md) §6.2; `internal/relay/executor.go` `stream`).
+
+### D97. The 30 s `GetTask` rule applies to every `GetTask` loop — **needs the owner**
+
+relay.md §6.4 states "only `GetTask` failing for 30 s fails the task" for the re-attach, while its table fails a
+task whose upstream id exists at the first refused or reset connection or `502/503/504` (`upstream_unreachable`)
+and at the first `408/429` (`upstream_error`). Read literally, one failed poll of an hour-long task on the polling
+path would fail it. Decision: every `GetTask` loop, the polling path's and the re-attach's, counts the calls that
+do not reach the service (refused, reset, `502/503/504`, or no answer within 10 s) and throttled calls (`408/429`,
+honouring `Retry-After` within the grace) toward 30 s, and when the 30 s run out the task fails with the table's
+reason (`upstream_unreachable`; `upstream_error` for `408/429`). An answer that is an error is never retried: a
+protocol error or an over-limit body fails the task `upstream_error` at once. The call that carries the message
+(`SendMessage`, `SendStreamingMessage`) keeps the table's rule ([`relay.md`](../spec/relay.md) §6.4;
+`internal/relay/executor.go` `getTask`, `TestGetTaskFailures`, `TestGetTaskNeverAnswered`).
+
+### D98. A resent follow-up the upstream refuses — **needs the owner** (refines D81)
+
+relay.md §6.4's table fails a task at an upstream protocol error once its upstream id exists, while D81 resends an
+undelivered follow-up and "then continues as a re-attach". An upstream that already took the follow-up refuses the
+copy: a2a-go does while the first copy runs, and any seller does once the task it finished is terminal. Failing
+then loses the result of a turn the seller is working on or has finished, which D81 exists to prevent; following an
+upstream that never took the follow-up would instead wait at its `input-required` until the deadline. Decision: a
+refused resend continues as a re-attach, and the task fails `upstream_error` (with the upstream's message) only if,
+for 30 s, the upstream task neither leaves the projection's `input-required` nor shows the follow-up's `messageId`
+in `GetTask` with `historyLength: 1`. A2A lets an agent keep no history, so an upstream that keeps none and takes
+longer than 30 s to move is still failed ([`relay.md`](../spec/relay.md) §6.4; `internal/relay/executor.go`
+`refusedResend`, `TestResentFollowUpRefused`, `TestResentFollowUpRefusedWhileUpstreamWorks`).
+
+### D99. Retries used up by lost dispatches fail `upstream_unreachable`
+
+relay.md §6.4 retries a lost dispatch of a direct backend (a heartbeat timeout, a lost context, or no replica
+polling `kontra-direct` within the 15 s schedule-to-start) before the first upstream id, but names no failure
+reason for when those retries run out. Decision: the task fails `upstream_unreachable` ("the service could not be
+reached"), the closest reason in the closed set, and the dead attempt's outcome is the same; a tunnel backend's is
+`tunnel_lost` ([`relay.md`](../spec/relay.md) §6.4; `internal/lifecycle/workflow.go` `lost`,
+`TestScheduleToStartTimeoutStartsANewAttempt`).
+
+### D100. A dispatch that never started after the first upstream id
+
+relay.md §6.4's table does not name a dispatch that never started (its schedule-to-start passed) once the upstream
+task id exists. Applying the re-attach row to it loses a follow-up: a resume skips the work item's consume,
+re-attaches without sending, finds the upstream still at `input-required` and ends the turn, so the follow-up is in
+the gate's history but the seller never received it. A new attempt is no fix: after the first upstream id there is
+none. Decision: before the first upstream id, a new attempt, as for any lost dispatch (D99). After it, a direct
+backend dispatches the same turn again on the same attempt, as it was (a follow-up's dispatch stays the turn's
+first, which consumes the unconsumed item and sends it; a resume stays a resume), backing off 1 s doubling to 30 s
+and counted with resumes against D42's cap of 10; at the cap the task fails `upstream_unreachable` ("no gate
+replica took the turn's dispatch"), as in D99. A tunnel backend fails `tunnel_lost` ([`relay.md`](../spec/relay.md)
+§6.4; `internal/lifecycle/workflow.go` `notStarted`, `TestFollowUpDispatchNotStartedIsSentAgain`,
+`TestResumeNotStartedStaysAResume`, `TestFollowUpDispatchNeverStartedFails`).
+
+### D101. Which dispatch may reload a consumed work item
+
+D66 lets "a later dispatch of the same turn (a retry, attempt `n + 1`, or a resume)" reload a consumed work item it
+owns, but a dispatch cannot otherwise tell a retry from a duplicate: a stale dispatch still alive after a resume
+replaced it is fenced for its appends (D77), not for its send. Decision: a consumed item is reloaded only by a
+resume, or by a retry of the task's first turn on a new attempt (`n > 1`; a follow-up is never retried on a new
+attempt). A resume that finds its item unconsumed consumes it, and is then the dispatch that may send it (D81). Any
+other dispatch that finds its item consumed refuses it rather than send the message upstream twice
+([`relay.md`](../spec/relay.md) §14.1; `internal/relay/dispatcher.go` `workItem`,
+`TestConsumedFollowUpNotSentAgain`).
+
+### D102. What a dispatch returns
+
+relay.md §14.2: `dispatch` "returns `{outcome}` only", and §6.4 honours `Retry-After` on a `408/429` retry, which
+is the workflow's. With the outcome alone the workflow could neither wait out the upstream's `Retry-After` nor know
+which reason to write when the retries of a retryable outcome run out. Decision: the result is `{outcome, reason,
+retryAfterSeconds}`. `reason` is the failure the relay logged, for a terminal outcome, or the reason
+`write_terminal` records when the retries run out, for a retryable one (`upstream_unreachable`, or `upstream_error`
+for `408/429`); `retryAfterSeconds` is the upstream's `Retry-After` on a retryable `408/429`. A failure's text
+never crosses history: the relay, or the dispatcher for a missing work item, writes the `failed` event itself under
+the dispatch's fence, and ends the attempt whenever the dispatch ends it ([`relay.md`](../spec/relay.md) §14.2;
+`internal/lifecycle/types.go` `DispatchResult`, `TestRetryHonoursRetryAfter`).
+
+### D103. `limits.task_bytes` counts each event's whole encoding — **needs the owner**
+
+relay.md §6.6's table names `limits.task_bytes` "Parts stored per task", while its rule is that "nothing an
+upstream sends is unbounded", and `task_bytes` is the only bound on what one task accumulates. Counting parts only
+left the rest of every event unbounded: the metadata of a task, status, artifact, message or part, a part's
+`filename` and `mediaType`, an artifact's name and description, and status events with no message at all, each
+event up to 4 MiB (SSE) or 8 MiB (polled), every one logged and rewritten into the projection until the deadline.
+Decision: each event counts its whole JSON encoding, the bytes the log stores for it, and a dispatch starts from
+what the projection already holds; the 256 KiB part rule is unchanged. Two gaps stay for the owner: the budget
+restarts from the projection at every dispatch, so the status rows of many follow-up turns are not all counted; and
+every append rewrites the whole snapshot, which may want a cap on rows or on write volume
+([`relay.md`](../spec/relay.md) §6.6; `internal/relay/executor.go` `overLimit`, `TestTaskBytesCountsWholeEvents`).
+
+### D104. No bucket in M1: parts over 256 KiB are refused even with `blobs:` — **needs the owner** (M1 only)
+
+relay.md §10.4 stores a part over 256 KiB in the bucket `blobs:` names, and refuses it only on a gate without one.
+M1 has no bucket code (the claim-check bucket is M3's). Decision: `blobs:` is validated and accepted with a warning
+at start, and an M1 gate behaves as one without a bucket: a caller part over 256 KiB is `InvalidParams` (`part too
+large: configure blobs`), and an upstream part over it fails the task `upstream_error`. The spec is unchanged: the
+work that builds the bucket removes the warning ([`relay.md`](../spec/relay.md) §10.4;
+`internal/config/validate.go` `unbuilt`, `internal/relay/interceptors.go`, `TestCallerLimits`,
+`TestUpstreamPartLimit`, `TestUnbuiltWarnings`).
+
+### D105. A follow-up to a turn end the workflow has not processed yet is not refused — **needs the owner**
+
+relay.md §7 and §14.1 refuse a follow-up "while the previous turn of the same task is still being dispatched", by a
+validator that reads workflow state only (D66). But a caller learns that a turn ended from the log: the dispatch
+logs `input-required`, a2a-go answers the caller at once, and the dispatch activity returns to the workflow a
+moment later. A caller that answers at once meets a workflow that still counts the turn as running, and read
+literally it is refused although the turn has ended (the relay test over the real stack hit this). Comparing
+`tasks.version` cannot tell the two apart either, because operator metadata rows move it. Decision: the
+`kontra.message` Update carries the turn end the follow-up answers (the seq of the last event that is not a
+`metadata` row), and the validator tells a final refusal (another follow-up of that turn end was accepted first, or
+the caller read no later turn end than the workflow processed: `UnsupportedOperationError` at once) from one by a
+workflow that has not processed that turn end yet. Only the latter is sent again, backing off 25 ms doubling to 1
+s, and only while the task was waiting for input when the work item was stored and its log still ends at that turn
+end. One not accepted within the 10 s is `-32603` (HTTP+JSON `503`), and since no Update of it is pending, its work
+item is deleted, not kept ([`relay.md`](../spec/relay.md) §7, §14.1; `internal/lifecycle/queue.go` `message`,
+`TestMessageRefusalSaysWhetherTheWorkflowIsBehind`, `TestQueueRacesOverTemporal`).
+
+### D106. A review-window message sent before the window is decided waits for it — **needs the owner**
+
+relay.md §14.1's `kontra.review_message` validator refuses "unless the window is open". A caller sends the message
+once it reads `completed` from the log, which can be before the workflow learns that the turn ended and before
+`OnTerminal` and `ReviewWindow` run (a remote hook can take seconds): read literally, a message sent into a window
+about to open is refused. Decision: before `ReviewWindow` has answered, the validator accepts the message and its
+handler waits for the window; a window that does not open answers `accepted: false`, which the caller sees exactly
+as a refusal (the interceptor deletes the work item and answers `UnsupportedOperationError`). Once the window is
+decided closed, the validator refuses as written ([`relay.md`](../spec/relay.md) §7, §14.1;
+`internal/lifecycle/workflow.go` `validateReviewMessage`, `TestReviewMessageBeforeTheWorkflowLearnsTheEnd`).
+
+### D107. `kontra.cancel` has a fourth outcome, `continues`
+
+relay.md §14.1 names `kontra.cancel`'s outcomes `canceled | not_cancelable | unsupported`, and §8 gives the caller
+"whatever the upstream answers, with gate ids": a `canceled` task, or the upstream's error while the task
+continues. An upstream may answer `CancelTask` with a task that is not canceled and no error (A2A 1.0.1 §3.1.5:
+"success is not guaranteed"), which none of the three describes: `canceled` would log `canceled` for a task the
+seller keeps running (§8 writes it only for "the upstream's `canceled` status"), and `not_cancelable` or
+`unsupported` would answer an error the upstream never sent. Decision: an answered task in `canceled` is
+`canceled`; one in another terminal state is `not_cancelable`; one still running, or no task, is `continues`:
+nothing is written, the task continues, and the caller gets the task as the gate stores it, with gate ids
+([`relay.md`](../spec/relay.md) §8, §14.1; `internal/lifecycle/types.go` `CancelContinues`,
+`TestCancelAnsweredWithARunningTaskContinues`).
+
+### D108. The stream of a resend
+
+relay.md §9 defines the `SendStreamingMessage` stream of a new task and of a follow-up, but not that of a resend: a
+request without a `taskId` that the work queue answers with the task it repeats (§15). Read as a follow-up's, the
+stream of a resend whose task is already terminal or at `input-required` would never close. Decision: a resend's
+stream leads with the snapshot at the task's current version, without an `id:` line; if that snapshot already ends
+a turn (terminal, `input-required` or `quoted`) the stream closes after it, and otherwise the later rows follow and
+it closes at the first that ends a turn ([`relay.md`](../spec/relay.md) §9; `internal/sse/sse.go`,
+`TestSendStreamingResend`).
+
+### D109. The stream of a review-window message
+
+relay.md §9 does not cover a `SendStreamingMessage` to a `completed` task with an open review window, which the
+relay's interceptor answers itself (§7, §15): the work queue never runs, and there is no turn to stream. Decision:
+the stream is the interceptor's answer as one task event without an `id:` line, and then it closes
+([`relay.md`](../spec/relay.md) §9; `internal/sse/sse.go`, `TestSendStreamingAnswer`).
+
+### D110. A review-window message's inline push config is dropped
+
+relay.md §10.1 has the gate save an inline push config before the work item is written. A review-window message is
+to a task that has ended: a config set on it would deliver nothing (D111), and keeping it in the stored request
+would put the webhook URL, token and credentials into `work_items`, which 0001 documents as holding no credentials.
+Decision: the inline config is removed from the stored request and not saved, and the message is not refused for
+carrying one (a2a-go's client sends its default push config with every message) ([`relay.md`](../spec/relay.md)
+§10.1; `internal/relay/interceptors.go`, `TestReviewMessageStoresNoPushCredentials`).
+
+### D111. A push config set on an ended task delivers nothing
+
+relay.md §10.1–§10.2 do not say what a config set on a task that has already ended receives. Delivering it the
+terminal snapshot works only while the workflow is still open; once the workflow has closed nothing delivers the
+config, which still counts toward the buyer's 256 delivering configs until retention. Decision: a config set on an
+ended task starts at the terminal row: it is stored, listed and deletable, receives nothing, and does not count as
+delivering. This matches a2a-go (a config receives the events that follow it) and A2A §3.1.7 (a config persists
+until the task completes) ([`relay.md`](../spec/relay.md) §10.1; `internal/push/push.go`,
+`TestConfigsOnEndedTasksAreDone`).
+
+### D112. History names a push config by a digest of its id
+
+relay.md §14 lets no caller-authored value but `caller_metadata` keys cross history, while §10.2, §14.1 and §14.2
+put a push config's `configId` in `kontra.push` and in `push_webhook`'s input, and A2A lets the caller choose that
+id (up to 128 characters). Decision: wherever history carries a config, it carries the config's ref, `pc_` and a
+hex SHA-256 of the task id and the config id, in the `configId` field; `push_webhook` finds the config among the
+task's (at most 10) by it. The ref is stable: a config deleted and set again with the same id has the same ref
+([`relay.md`](../spec/relay.md) §10.2, §14.1, §14.2; `internal/lifecycle/pushref.go` `ConfigRef`, `TestConfigRef`,
+`TestPushWebhookFindsItsConfigByRef`).
+
+### D113. Operator metadata prefixes lie under `kontra.` — **needs the owner**
+
+relay.md §13.2 and [`schema/config.json`](../spec/schema/config.json) accept any non-empty
+`operator_metadata_prefixes` entry. But §2.5 strips only `kontra.` keys from callers and services, and a2a-go
+copies a service event's metadata into the task's: under another prefix (`acme.`), a seller could write keys that
+`TaskRef.metadata` hands the Lifecycle hooks as operator-written, which §13.3 says it never holds. Decision: every
+prefix lies under `kontra.` (as `caller_metadata` keys must, and as Cloud's `kontra.escrow.` does), so §2.5's
+stripping vouches for every key under it; `kontra.` alone, which would cover the gate's own keys, is refused too.
+The schema gets `caller_metadata`'s pattern ([`relay.md`](../spec/relay.md) §13.2; `internal/config/validate.go`,
+`TestLoadErrors`).
+
+### D114. A hook's `TaskRef` is in history as the hook's input
+
+relay.md §13.3: the `TaskRef` is "built by the activity from Postgres (not carried in workflow history)". But a
+hook is an activity the workflow schedules with `(TaskRef, args)` as its input, on the operator's queue for a
+remote hook, so the `TaskRef` is in history whatever builds it. Decision: the workflow never keeps a `TaskRef` in
+its state or input; a `task_ref` activity builds it from Postgres right before each hook call, and it holds only
+ids, the state and the operator-written metadata (at most 16 KiB), which D59 lets cross history, and never caller
+or service content, except the caller's `contextId` (D115) ([`relay.md`](../spec/relay.md) §13.3;
+`internal/lifecycle/workflow.go` `taskRef`, `TestTaskRefCarriesOperatorKeysOnly`).
+
+### D115. Two caller-chosen identifiers cross history — **needs the owner** (amends D59)
+
+relay.md §14 and D59: "the one caller-authored value that crosses history is a review-window message's
+`caller_metadata` keys". Yet §13.3 and [`schema/hooks.json`](../spec/schema/hooks.json) put `contextId` in every
+`TaskRef` (the gate context id, which is the caller's own, up to 256 characters, when it chose one), and §13.3 and
+§14.1 put the caller's `messageId` in `OnReviewMessage`'s args and in `kontra.review_message`; a hook's input and
+an Update's payload are in history. Replacing them (with a hash) would change the contract the operator's hooks are
+written against. Decision: both are kept as the hook contract names them, and §14 lists them as the other
+caller-authored values in history. The seller's own cancel error text, which also crossed history, no longer does:
+`forward_cancel` returns the outcome and the upstream's JSON-RPC code only, and the caller gets the gate's text for
+that code. The alternative for the owner: the hook contract carries a hash of the two
+([`relay.md`](../spec/relay.md) §13.3, §14; `internal/hooks/hooks.go` `TaskRef`, `internal/lifecycle/types.go`
+`UpstreamError`).
+
+### D116. Who writes the `services` rows
+
+relay.md §13.5: Cloud's control plane writes the `services` rows, and team gates load `services:` from
+`kontra.yaml`. It does not say what a multi-tenant gate does with a `services:` block, nor what a file entry does
+to a row the operator wrote. Decision: a multi-tenant gate with a `services:` block refuses to start, and a
+`services:` entry naming a row the operator wrote (`source = 'db'`) is refused; nothing is written either way
+([`relay.md`](../spec/relay.md) §13.5; `internal/gate/services.go` `Sync`, `TestSyncRefusesADBSourcedService`).
+
+### D117. A service removed while its tasks run
+
+relay.md does not say what removing a service from the file, or disabling it, does to its tasks in flight.
+Decision: its card keeper stops and its routes answer as an unknown service at once; `prepare` gets an error, and a
+later dispatch or `forward_cancel` of a task in flight fails the task `service_unavailable`
+([`relay.md`](../spec/relay.md) §13.5; `internal/gate/services.go` `Backend`,
+`TestSyncWritesTheBlockAndAuditsChanges`, `TestDeadPrepareBackendIsServiceUnavailable`).
+
+### D118. The drain settles before it stops the other workers
+
+relay.md §14.3 and D76 keep `kontra-lifecycle` and the control queues polling "until its last dispatch has ended",
+then stop them. On a gate of one replica, stopping them the moment the last dispatch returns leaves no worker for
+the workflow task that records its result, so a `kontra.cancel` waiting on it (D79) never completes. Decision: once
+`kontra-direct` has stopped and the last dispatch has ended, the other workers keep polling for a 2 s settle, then
+stop in D76's order. This fulfils the section's stated purpose, that dispatch results are recorded
+([`relay.md`](../spec/relay.md) §14.3; `internal/lifecycle/workers.go` `Drain`,
+`TestDrainSettlesThenStopsInTheDrainOrder`, `TestDrainServesCancelOnOneReplica`).
+
+### D119. A draining replica keeps its public listener
+
+relay.md §14.3 says a draining replica fails its readiness check, but not whether its public listener stops taking
+requests; closing it at `SIGTERM` would stop callers from cancelling on a gate of one replica. Decision: the
+listener keeps serving while the workers drain (`/healthz` answers `503`, which steers load balancers away) and
+shuts down after them, giving open requests and SSE streams 5 s; callers resume elsewhere with `Last-Event-ID`
+([`relay.md`](../spec/relay.md) §14.3; `internal/gate/gate.go` `drain`, `TestReplicaServesReloadsAndDrains`).
+
+### D120. A stalled replica is taken over within two heartbeat rounds
+
+relay.md §14.2 bounds the detection of a dead replica (within a minute, `replica_kill`) and says nothing of a
+stalled one (`SIGSTOP`, a GC pause, a partition). A stopped process keeps its open `kontra-direct` long polls,
+which the Temporal server still counts as pollers, so the first resume dispatch can be handed to the stalled
+replica itself; it times out in turn, and only the second resume, once the server has ended those polls, is sure to
+reach a live replica. Each stolen dispatch costs a heartbeat timeout and counts toward D42's cap of 10. Decision:
+no further mechanism; D77's fence keeps the outcome right wherever the resume lands, and §14.2 states the bound: a
+stalled replica's dispatch is taken over within two heartbeat rounds rather than one (measured 38–70 s;
+`TestReplicaStallDirect` allows 90 s) ([`relay.md`](../spec/relay.md) §14.2; `test/e2e/replica_kill_test.go`).
+
+### D121. a2a-go's finished-turn race
+
+Not a conflict in the spec's text, but an a2a-go v2.7.0 behaviour the design does not cover (probe P15). If a turn
+ends at `input-required` before a blocking `SendMessage`'s subscription reads the store, a2a-go answers the caller
+"queue is closed" instead of the task; and when the work queue's `Write` switches a new task to Admission's
+pre-minted id, a2a-go recreates the reader at the log's tail after `Write`, and the call waits forever. Decision:
+when a2a-go answers "queue is closed", an interceptor answers the stored task (the one the request named, or for a
+new task the pre-minted id); and the reader for a task the request itself created starts at the log's first row,
+which is safe because every row of that task belongs to that turn. So §9's rule holds: a blocking `SendMessage`
+returns on the first terminal, `input-required` or `auth-required` state ([`relay.md`](../spec/relay.md) §9, §15;
+`internal/relay/interceptors.go` `finishedTurn`, `internal/relay/handlers.go` `newTaskFromStart`,
+`TestP15FinishedTurnRace`, `TestFinishedTurnAnswersTheTask`).
+
+### D122. `card_compat` runs against a stand-in for the 0.2.5 helloworld seller
+
+relay.md §16: `card_compat` serves "a 0.2.5 helloworld upstream" as 1.0. The seller it names,
+`examples/sellers/helloworld` (the Python a2a-samples seller), is still a skeleton, assigned to a later work
+package. Decision: until it is built, `card_compat` runs against `slowagent`'s `Legacy025` stand-in: that seller's
+0.2.5 card byte for byte at `/.well-known/agent.json`, a2a-go's 0.x JSON-RPC server, and a "Hello World" message
+answer, as the Python seller gives. The expected result is unchanged ([`relay.md`](../spec/relay.md) §16;
+`test/e2e/card_compat_test.go` `TestCardCompat`).

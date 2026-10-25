@@ -54,7 +54,7 @@ type ACMEConfig struct {
 // directory cache (D70). TLS-ALPN-01 is answered on the TLS listener itself; HTTP-01 only when
 // HTTPHandler is mounted on a port-80 listener.
 //
-// SPEC-CONFLICT: spec/relay.md §2.2 and D70 name HTTP-01 and TLS-ALPN-01, but HTTP-01 is validated on
+// SPEC-CONFLICT (D82): spec/relay.md §2.2 and D70 name HTTP-01 and TLS-ALPN-01, but HTTP-01 is validated on
 // port 80 and no configuration key (§17) opens a second, plaintext listener there; the gate's one public
 // listener is its TLS one. M1 therefore validates with TLS-ALPN-01 only (the CA connects to port 443, so
 // listen: must be :443 or forwarded from it), and HTTPHandler is the seam for a port-80 listener once a key

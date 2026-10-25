@@ -399,7 +399,7 @@ func twiceAsking() a2asrv.AgentExecutor {
 	})
 }
 
-// A resent follow-up the upstream refuses is checked against the upstream task (D81, SPEC-CONFLICT in
+// A resent follow-up the upstream refuses is checked against the upstream task (D81; SPEC-CONFLICT D98 in
 // refusedResend): when the earlier send was processed and only its answer lost, the upstream's task has
 // moved on (here, completed, so it refuses any further message), and the resume logs the seller's result
 // instead of failing a finished task; an upstream that keeps no history and moves within GetTaskGrace is

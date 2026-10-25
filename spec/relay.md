@@ -1,7 +1,8 @@
 # Relay
 
 Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning; revision 2 was the adversarial
-review). Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+review). Revision 4 brings the text in line with the M1 code (D82–D122); the entries marked **needs the owner**
+await sign-off. Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,
@@ -68,7 +69,8 @@ that fits the route (a JSON-RPC error `{"code": -32601, "message": "unknown serv
 MCP POSTs, `google.rpc.Status` `NOT_FOUND` on HTTP+JSON, empty on card GETs). This holds for every route
 of the service, cards and the upstream card included, unless the service's `allow:` contains `anonymous`
 or the service is `listed` (§12.2), whose cards are public. `allow:` lists therefore never reveal which
-services exist (D50).
+services exist (D50). The credential is checked before the service is looked up, so a bad one is `401` on every
+route whether or not the service exists (D87).
 
 Metrics live on a separate listener (`:9090/metrics` by default), never on the public one.
 
@@ -77,9 +79,10 @@ Metrics live on a separate listener (`:9090/metrics` by default), never on the p
 Applied before authentication, per replica. Defaults are the PRD's (§11 `limits:`): body 4 MiB,
 `inflight_per_key` 32, `rps_per_ip` 50, header timeout 10 s, idle 60 s. A request over a limit is refused
 before any task row exists: `413` for the body, `429` with `Retry-After` for rates and in-flight caps.
-On JSON-RPC the error is also a JSON-RPC error object (`-32600`, `message: "request too large"` or
-`"rate limited"`) when the request could be parsed. SSE and long-poll responses do not count against
-the idle timeout; they send a comment line (`: keep-alive`) every 15 s.
+On JSON-RPC routes the error is also a JSON-RPC error object (`-32600`, `message: "request too large"` or
+`"rate limited"`), with the request's `id` when its body was read and `null` otherwise (D84). A body that has
+not arrived within 30 s is refused `408` before the handler runs (D85). SSE and long-poll responses do not count
+against the idle timeout; they send a comment line (`: keep-alive`) every 15 s.
 
 **Connection caps** (PRD §12) are enforced by the listener: `limits.conns_per_ip` (default 256) per client
 address and `limits.max_conns` (default 10,000) in all (D73). Connections from a trusted proxy address
@@ -88,8 +91,9 @@ connection carries the proxy's address; `max_conns` still applies to them. With 
 connection's client address is known (its PROXY header), and `conns_per_ip` applies to that address.
 
 **TLS.** The gate terminates TLS itself, with ACME or a provided certificate, and refuses plaintext unless
-`public_url` is a localhost origin (PRD §11). Built-in ACME (autocert, HTTP-01 and TLS-ALPN-01) is for a single
-replica with a directory cache: replicas that do not share a cache each order a certificate, and a challenge can
+`public_url` is a localhost origin (PRD §11). Built-in ACME (autocert, validated with TLS-ALPN-01 on the TLS
+listener, so `listen` is `:443` or forwarded from it; HTTP-01 waits for a key that opens a port-80 listener, D82)
+is for a single replica with a directory cache: replicas that do not share a cache each order a certificate, and a challenge can
 land on a replica that does not hold its token. Several replicas use provided certificates, or a front proxy,
 until a later migration adds a shared certificate cache, `kontra.acme_cache`, with issuance serialized by an
 advisory lock (D70).
@@ -99,8 +103,8 @@ an `https` `public_url`. It then leaves HSTS to the proxy, its tunnel channel bi
 ([`tunnel.md`](tunnel.md) §4), and it logs a warning at start. Without the key, the gate still refuses plaintext
 off localhost (D69).
 
-**Client address.** `rps_per_ip` and `conns_per_ip` count by the client address, which
-`edge.client_ip: {from, trusted}` names (D69):
+**Client address.** `rps_per_ip` and `conns_per_ip` count by the client address (an IPv6 address by its /64,
+D83), which `edge.client_ip: {from, trusted}` names (D69):
 
 - `remote` (the default): the connection's remote address.
 - `x_forwarded_for`: honoured only on a connection from a `trusted` CIDR, where the client address is the
@@ -166,6 +170,11 @@ Applied by HTTP middleware in front of a2a-go's transports, and by the gate's ow
   `ExtensionSupportRequiredError` (`-32008`) before any task row exists. The response carries the
   activated URIs in one comma-separated `A2A-Extensions` header.
 
+Where this spec gives an HTTP status beside a JSON-RPC error code (here, §7, §8, §14.1), the status is the
+HTTP+JSON binding's, as A2A §3.3.2 maps them. On JSON-RPC the error is the body of an HTTP `200`, the only
+response a2a-go's JSON-RPC client reads an error from; the exceptions are the unknown-service `404` (§2.1) and a
+refused credential's `401` (D86).
+
 ### 2.5 Kontra's own keys are the gate's
 
 Kontra's metadata keys (A2A `kontra.*`) and `_meta` keys (MCP `sh.kontra/*`) state facts only the gate or
@@ -197,7 +206,10 @@ is produced from it as raw JSON and kept as `json` (`services.card`), never `jso
 reorders keys (D49). The gate never round-trips a card through a typed struct, because that drops fields it
 does not know (D11).
 
-**Normalization.** A 1.0 card is used as is. A pre-1.0 card is converted to the 1.0 shape as raw JSON:
+**Normalization.** A 1.0 card is used as is, unless it also carries 0.x members (`url`, `preferredTransport`,
+`additionalInterfaces`, `protocolVersion`, `security`, `supportsAuthenticatedExtendedCard`, a skill's
+`security`): for those it is normalized like a pre-1.0 card, the interface members dropped and the rest
+converted where the card has no 1.0 member of its own, dropped otherwise (D88). A pre-1.0 card is converted to the 1.0 shape as raw JSON:
 top-level `url`, `preferredTransport` (default `JSONRPC`, which is what a 0.2.x card without it means) and
 `additionalInterfaces` become `supportedInterfaces` (replaced below anyway), the 0.x field names are
 renamed per the spec's migration table, and every field the gate does not know is kept (D11, D12).
@@ -235,7 +247,7 @@ card (spec §8.4.3), so it is not copied into `signatures`; the upstream card is
   makes the service **unavailable** (PRD §5): its card routes answer `503` with an empty body, and a new task is
   still created and fails `service_unavailable` at its first attempt (§6.4), so the caller gets a task carrying
   the reason. A failed fetch keeps the last verified card; the service becomes unavailable only when no fetch has
-  succeeded for 30 minutes. Without keys, the gate does not verify and says so: `verified: false`. MCP services
+  succeeded for 30 minutes, on any replica (D89). Without keys, the gate does not verify and says so: `verified: false`. MCP services
   have no card and are never unavailable this way.
 - A verifier (`kontra connect` does this) checks the gate's signature with a `jku` equal to the origin it
   dialed, fetches the upstream card, checks the hash, and checks the seller's signatures against keys it
@@ -263,7 +275,9 @@ enforces its own modes (D14).
   dispatched to the same tunnel session or the same direct backend; otherwise it carries none. So two
   buyers' identical strings never meet at a stateful seller either (D3, D53).
 - **Referenced tasks.** A caller's `referenceTaskIds` are replaced by the upstream ids of the caller's own
-  tasks in the same gate context and backend, and dropped otherwise.
+  tasks in the same gate context and backend, and dropped otherwise. In both bullets, an attempt is on the same
+  direct backend only if it started after the service row last changed (`services.updated_at`): 0001 records no
+  direct backend's identity (D92).
 - **Message ids** are passed upstream unchanged (the TCK keys seller behaviour on them).
 - **Attempts.** Each attempt is a row `attempts(task_id, n, backend, tunnel_session, key_id, replica_id,
   dispatch_id, upstream_task_id, upstream_context_id, upstream_session, started_at, first_upstream_id_at,
@@ -371,7 +385,8 @@ credentials or request headers. The work queue's payload is not in Temporal: it 
 Every terminal task, with its `task_events`, `attempts`, `work_items`, `push_configs` and bucket objects, is
 deleted at `retention_until` (`services.<name>.task.retention`, default 7 days after the terminal event; an
 operator's review window and dispute period must fit inside it). A sweep on any replica does it every 10
-minutes. `mcp_sessions` closed for longer than the retention go the same way; `calls` rows are the
+minutes. `mcp_sessions` closed for longer than the retention go the same way (a session of the gate's own
+`/mcp`, which names no service, after the default 7 days, D95); `calls` rows are the
 operator's to delete (§13.5). Parts sealed to a key are only as safe as that key ([`tunnel.md`](tunnel.md)
 §15): retention is what bounds the exposure of a stolen key.
 
@@ -424,7 +439,9 @@ over an `http.Client` whose dialer opens a tunnel stream (or the SSRF-safe diale
 - **Streaming first.** If the upstream card says `capabilities.streaming: true`, the activity calls
   `SendStreamingMessage`. If that is refused with `UnsupportedOperationError` (or the 0.3 equivalent) before
   any event, it falls back in the same attempt to the polling path (`a2a server --exec` advertises streaming
-  and refuses it without `--chunk`, D15).
+  and refuses it without `--chunk`, D15). A stream the upstream ends cleanly before a terminal or
+  `input-required` event is followed by polling once an upstream task id exists, and fails `upstream_error`
+  before one (D96).
 - **Polling path.** `SendMessage` with `configuration.returnImmediately: true`, so an upstream task id exists
   early and a cancel has something to cancel; then `GetTask` with `historyLength: 0` every 1 s, backing off
   to 5 s after a minute without change. An upstream that ignores `returnImmediately` and blocks is waited on;
@@ -465,7 +482,8 @@ Temporal retries an activity on its original queue, which for a dead replica is 
 | Tunnel stream could not be opened, session closed or revoked, or replica lost (`tunnel_lost`) | retry on another session if one exists, else the same rules as `no_session` | `failed: tunnel_lost`, no retry |
 | A response the node wrote itself (`Kontra-Node` other than `sealed_rejected`, [`tunnel.md`](tunnel.md) §8.2) | retry on another session, as `tunnel_lost` | `full`: the dispatch retries the poll with backoff; any other: `failed: tunnel_lost` |
 | Dispatch heartbeat timeout, **tunnel** backend (the replica holding the socket died; ≤ 30 s) | retry | `failed: tunnel_lost`, no retry |
-| Dispatch heartbeat timeout or lost context, **direct** backend (a gate replica died; the upstream is untouched) | retry | **re-attach** (below; D42) |
+| Dispatch heartbeat timeout or lost context, **direct** backend (a gate replica died; the upstream is untouched) | retry; `failed: upstream_unreachable` when exhausted (D99) | **re-attach** (below; D42) |
+| Dispatch not started within its schedule-to-start (no replica polled its queue) | as a lost dispatch, above | direct: the same turn's dispatch again on the same attempt, as it was (a follow-up stays the turn's first dispatch, a resume a resume), backing off and capped with re-attaches, `failed: upstream_unreachable` at the cap; tunnel: `failed: tunnel_lost` (D100) |
 | Connection refused / reset / TLS error to a direct URL, HTTP 502/503/504 from upstream | retry | `failed: upstream_unreachable`, no retry |
 | Upstream protocol error (JSON-RPC error, HTTP 4xx other than 408/429, malformed body) | `failed: upstream_error` with the upstream message, no retry | `failed: upstream_error` with the upstream message |
 | HTTP 408 / 429 | retry, honouring `Retry-After` | `failed: upstream_error`, no retry |
@@ -479,14 +497,20 @@ Temporal retries an activity on its original queue, which for a dead replica is 
 upstream task is terminal, the attempt ends there. Otherwise it follows it with `SubscribeToTask` when the
 upstream card streams, else by polling. `UnsupportedOperationError` from `SubscribeToTask` (a task that just
 became terminal) and a subscription that ends without a terminal event both fall back to polling; only
-`GetTask` failing for 30 s fails the task, `upstream_unreachable`.
+`GetTask` failing for 30 s fails the task, `upstream_unreachable`. The 30 s rule applies to every `GetTask` loop,
+the polling path's too: a call refused, reset, answered `502/503/504` or `408/429`, or not answered within 10 s
+counts toward it, and when it runs out the task fails with the table's reason (`upstream_error` for `408/429`); an
+answer that is an error fails the task at once. The call that carries the message keeps the table's rule (D97).
 
 **Follow-up delivery (D81).** A follow-up turn's dispatch writes `work_items.delivered_at` when the upstream
 first answers its `SendMessage` or `SendStreamingMessage` (a `Task`, a `Message` or the first stream event),
 before it logs anything from that answer. A resume of a follow-up turn whose work item has no `delivered_at`
 sends the follow-up again, with the same `messageId` and the upstream ids substituted, then continues as a
 re-attach; with `delivered_at` set it re-attaches without sending. An answer lost in transit after the upstream
-processed the message is the one case where the upstream sees the follow-up twice. A task's first turn is never
+processed the message is the one case where the upstream sees the follow-up twice. An upstream that refuses the
+resent copy is followed as a re-attach all the same; the task fails `upstream_error` only if, for 30 s, the
+upstream task neither leaves the projection's `input-required` nor shows the follow-up's `messageId` in its
+history (D98). A task's first turn is never
 re-sent this way (before its first upstream id a resume is a retry, above).
 
 Re-attach is bounded (D42). An error from a2a-go's handler or the relay executor that is not a lost upstream
@@ -530,7 +554,7 @@ is read through a byte limit:
 | One SSE event | 4 MiB |
 | A card | 256 KiB |
 | `tools/list` | 100 pages or 4 MiB in all |
-| Parts stored per task | `limits.task_bytes`, default 256 MiB (an anonymous tenant: 64 MiB in all, [`tunnel.md`](tunnel.md) §6.2) |
+| Bytes stored per task (each logged event's whole encoding, D103) | `limits.task_bytes`, default 256 MiB (an anonymous tenant: 64 MiB in all, [`tunnel.md`](tunnel.md) §6.2) |
 
 Runs of artifact-append chunks may be coalesced into one event before they are logged; the bytes are the
 same. For a sealed service, events are never coalesced, and the polling path logs a changed artifact whole
@@ -551,7 +575,10 @@ same. For a sealed service, events are never coalesced, and the polling path log
 | A message whose `taskId` and `contextId` disagree | — | `InvalidParams` (`-32602`). |
 
 A follow-up while the previous turn of the same task is still being dispatched is refused with
-`UnsupportedOperationError`; turns are strictly sequential. These refusals are synchronous: every follow-up is
+`UnsupportedOperationError`; turns are strictly sequential. A follow-up that answers a turn end the workflow has
+not processed yet (the dispatch logs `input-required` a moment before it returns) is not refused: the work queue
+sends it again, backing off, within the 10 s, and if it is still not accepted then, its work item is deleted, as
+no Update of it is pending (D105). These refusals are synchronous: every follow-up is
 a Temporal **Update** of the task's workflow whose validator applies this table, so two racing follow-ups
 cannot both be accepted (§14.1, D41). The validator reads workflow state only; the turn's first dispatch loads and
 consumes the work item (§14.1, D66). A refused follow-up's work item is deleted. A follow-up not accepted within
@@ -571,7 +598,7 @@ that wins completes the Update only once the terminal `canceled` event is in the
 | terminal | — | nothing | `TaskNotCancelableError` (`-32002`, HTTP `400`) |
 | `quoted` | — | `canceled`, `kontra.canceled = "client"`; nothing was held | the `canceled` task |
 | active | none yet | aborts the running dispatch **in process**: `abort(task, attempt)` on the attempt's replica's control queue cancels the dispatch's context through the replica's registry (Temporal's own activity cancellation is requested too, as a backstop, D44). The workflow writes `canceled` only once the dispatch has stopped; if the dispatch had recorded a first upstream task id meanwhile, it sends `forward_cancel` first. The attempt is recorded `aborted` | the `canceled` task |
-| active or `input-required` | exists, session up | `forward_cancel(task, attempt)` sends `CancelTask` upstream **inside the tunnel the node opened** | whatever the upstream answers, with gate ids: a `canceled` task (the upstream's `canceled` status is logged as the terminal event; for an `input-required` task, where no dispatch runs, the workflow writes it with `write_terminal`), or the upstream's error (`TaskNotCancelableError`, `UnsupportedOperationError`) while **the task continues** |
+| active or `input-required` | exists, session up | `forward_cancel(task, attempt)` sends `CancelTask` upstream **inside the tunnel the node opened** | whatever the upstream answers, with gate ids: a `canceled` task (the upstream's `canceled` status is logged as the terminal event; for an `input-required` task, where no dispatch runs, the workflow writes it with `write_terminal`), or the upstream's error (`TaskNotCancelableError`, `UnsupportedOperationError`) while **the task continues**; an upstream task still running (no error, not `canceled`) is answered with the task as the gate stores it, and the task continues (D107) |
 | active or `input-required` | exists, session gone | nothing to forward; the dispatch is already failing `tunnel_lost` | the task as it is after that (`failed: tunnel_lost`) |
 
 **The dispatching replica is gone.** `abort`, and a direct task's `forward_cancel` while a dispatch runs, go
@@ -596,7 +623,8 @@ semantics differ (§11.6).
 a2a-go's `workqueue.Payload` carries the full request **and every inbound HTTP header, `Authorization` and
 cookies included**. Kontra's Temporal-backed queue therefore never puts the payload in Temporal: its `Write`
 stores a sanitized copy in Postgres (`work_items`: the message, the call context minus every header except
-`A2A-Version` and `A2A-Extensions`, the authenticated principal) and starts or updates the workflow with the
+`A2A-Version` and `A2A-Extensions`, the authenticated principal, and the task version it was stored at, D94) and
+starts or updates the workflow with the
 row id only (D6). Detail in §15.
 
 ## 9. Streaming to the caller and resume
@@ -623,6 +651,11 @@ reads `Last-Event-ID`, which is why the gate cannot use it here.
   at the version V current when the `kontra.message` Update was accepted, sent without an `id:` line; then
   rows with seq > V. The leading snapshot never closes the stream; it closes after the first row with
   seq > V whose state is terminal, `input-required` or `quoted`.
+- **`SendStreamingMessage`, resend** (no `taskId`, answered with the task it repeats, §15). The snapshot at the
+  task's current version without an `id:` line; the stream closes after it if it already ends a turn, and
+  otherwise after the first later row that does (D108).
+- **`SendStreamingMessage` to a `completed` task with an open review window.** The interceptor's answer (§7) as
+  one task event without an `id:` line; then the stream closes (D109).
 - **`SubscribeToTask` without `Last-Event-ID`.** Terminal task: `UnsupportedOperationError` (spec §3.1.6; TCK
   `STREAM-SUB-003`). Otherwise the current snapshot as a `Task` event **without** an `id:` line, then every
   carried row with seq greater than the snapshot's version. The stream stays open through `input-required`
@@ -656,7 +689,10 @@ URL is checked when it is set (§10.3); a redirecting URL is accepted, and its r
 (§10.2). Save is idempotent: a config without an id is keyed by (task, URL, token hash), so a2a-go's re-save
 on each turn neither duplicates rows nor starts a second delivery. At most 10 configs per task and 256
 delivering configs per buyer; beyond that, `InvalidParams`. The `anonymous` principal cannot set push
-configs (§2.3). The upstream's own push configs are never used: the gate is the agent's only client.
+configs (§2.3). The upstream's own push configs are never used: the gate is the agent's only client. A
+review-window message's inline config is dropped, neither saved nor stored with its work item, and does not
+refuse the message (D110). A config set on a task that has already ended starts at its terminal row: it is
+stored, listed and deletable, receives nothing, and does not count as delivering (D111).
 
 ### 10.2 Delivery
 
@@ -664,7 +700,9 @@ Push is delivered by the lifecycle, never by the replica that relays events (D16
 inserted a row, or a `Delete`, commits, the store sends the signal `kontra.push {configId, deleted}` to the
 task's workflow; the workflow runs one `push_webhook(task_id, config_id)` activity per live config, on its own
 queue `kontra-push` (its own worker slots, so pushes never starve the lifecycle's activities, D55), and lists
-`push_configs` at start and after each dispatch to recover a lost signal. The activity tails the event log
+`push_configs` at start and after each dispatch to recover a lost signal. In history, `configId` (here and in
+§14.1–§14.2) is the config's ref, `pc_` and a SHA-256 of the task id and the config id, never the id itself,
+which a caller may choose (D112). The activity tails the event log
 from the last seq it delivered and, for each event, delivers the **task snapshot at that seq** as
 `{"task": …}`, in seq order. Runs of consecutive `artifact` events may be coalesced into the snapshot at the
 last seq of the run; every event that changes the status, and the terminal event, is delivered.
@@ -1067,7 +1105,8 @@ for one of:
 
 `kontra.approval` is an Update, so the control plane learns synchronously whether its approval beat the
 expiry; the validator refuses it once the task has left `quoted`, and refuses metadata keys outside the
-operator's prefixes (`operator_metadata_prefixes`, default empty; Cloud sets `["kontra.escrow."]`) and
+operator's prefixes (`operator_metadata_prefixes`, default empty; Cloud sets `["kontra.escrow."]`; each lies
+under `kontra.` and is longer than it, so §2.5's stripping vouches for its keys, D113) and
 `kontra.keyRetainUntil`, or a map over 16 KiB. The same key and size rules apply to Admission decisions,
 `kontra.annotate` and Lifecycle patches. A control
 plane that places a hold before approving refunds it when its approval is refused. A caller's message to a
@@ -1087,7 +1126,8 @@ Five activities of `TaskLifecycle`, each `(TaskRef, args) → result`, all JSON:
 | `kontra.lifecycle.OnReviewClosed` | `{disputed}` | `Patch` | when the window ends, or at once after a message the hook marked `dispute` |
 
 `TaskRef = {taskId, tenantId, service, kind, protocol, buyerId, principal, via, contextId, state, metadata}`,
-built by the activity from Postgres (not carried in workflow history), whose `metadata` holds only the
+built from Postgres by a `task_ref` activity right before each hook call (never kept in workflow state; as the
+hook's input it is in history, D114, and so is its `contextId`, D115), whose `metadata` holds only the
 operator-written keys (§13.2 prefixes, at most 16 KiB), never caller or service metadata. `Patch = {metadata,
 mcpMeta, holdOpenSeconds}`, each map at most 16 KiB; a patch over the limit or with a key outside the rules of
 §13.2 fails its hook activity non-retryably and is dropped (a metric and an `audit` row). A patch is applied as
@@ -1145,15 +1185,19 @@ tables, not a gate route.
 In Cloud the services, enrollments and keys are written by the control plane into the gate's `services`,
 `enrollment_tokens` and `api_keys` tables (as sha256, with prefix, `buyer_id` and scopes). A change to
 `services` is followed by `NOTIFY kontra_services, '<tenant>/<name>'`, which every replica applies without
-restart. Team gates load `services:` from `kontra.yaml` at start and on SIGHUP.
+restart. Team gates load `services:` from `kontra.yaml` at start and on SIGHUP. A multi-tenant gate with a
+`services:` block refuses to start, and a `services:` entry naming a row the operator wrote is refused (D116). A
+service removed or disabled answers as an unknown service at once, and its tasks in flight fail
+`service_unavailable` at their next dispatch or `forward_cancel` (D117).
 
 ## 14. `TaskLifecycle`
 
 Postgres is the record and the log; Temporal is the clock and the durable dispatcher. **Events never enter
 Temporal history**: the workflow's inputs, updates, signals and activity results carry ids, states, small
 outcomes and operator patches of at most 16 KiB; relayed events and caller or service content never do. The
-one caller-authored value that crosses history is a review-window message's `caller_metadata` keys, at most 16
-KiB (D59).
+caller-authored values that cross history are a review-window message's `caller_metadata` keys, at most 16
+KiB (D59), and the two identifiers the hook contract names: the caller's `contextId` in every `TaskRef` (§13.3)
+and a review-window message's `messageId` (D115).
 
 ### 14.1 Workflow, updates and signals
 
@@ -1169,10 +1213,10 @@ are signals:
 
 | Name | Kind | Payload → result | Sent by | Validator / effect |
 |---|---|---|---|---|
-| `kontra.message` | Update; the first one starts the workflow (`UpdateWithStart`, conflict policy use-existing, reuse policy reject-duplicate) | `{workItemId}` → `{turn}`; `UpdateID = workItemId` | the work queue's `Write` (§15) | §7's table, on workflow state only: refused unless the task is `input-required` (or new), no turn is running, and the `workItemId` has not been accepted in this run (below, D66) |
-| `kontra.cancel` | Update, awaited up to 60 s | `{}` → `{outcome: canceled \| not_cancelable \| unsupported, upstreamError?}` | the cancel interceptor (§8) and MCP `tasks/cancel` (§11.6) | refused only for a terminal task; concurrent cancels share one result |
+| `kontra.message` | Update; the first one starts the workflow (`UpdateWithStart`, conflict policy use-existing, reuse policy reject-duplicate) | `{workItemId}` → `{turn}`; `UpdateID = workItemId` | the work queue's `Write` (§15) | §7's table, on workflow state only: refused unless the task is `input-required` (or new), no turn is running, and the `workItemId` has not been accepted in this run (below, D66); a follow-up to a turn end the workflow has not processed yet is told apart from a final refusal, and sent again (§7, D105) |
+| `kontra.cancel` | Update, awaited up to 60 s | `{}` → `{outcome: canceled \| not_cancelable \| unsupported \| continues, upstreamError?}` (D107) | the cancel interceptor (§8) and MCP `tasks/cancel` (§11.6) | refused only for a terminal task; concurrent cancels share one result |
 | `kontra.approval` | Update | `{accepted, metadata, mcpMeta}` → `{state}` | the operator's control plane (§13.2) | refused unless `quoted`; metadata keys and size per §13.2 |
-| `kontra.review_message` | Update, `UpdateID = workItemId` | `{workItemId, messageId, metadata}` → `{accepted, seq?}` | the review-window interceptor (§7) | validator: refused unless the window is open and the `workItemId` has not been accepted in this run. Handler: runs `OnReviewMessage` (start-to-close 8 s, no retry; a failure or timeout is `accept: false`); on accept it appends the message from the work item (`message` event, after-terminal write), applies the patch and returns the `seq`. The append loads the work item by `(id, taskId)` and consumes it in the same transaction; an item that is missing or already consumed completes the Update with `accepted: false` (D66) |
+| `kontra.review_message` | Update, `UpdateID = workItemId` | `{workItemId, messageId, metadata}` → `{accepted, seq?}` | the review-window interceptor (§7) | validator: refused unless the window is open and the `workItemId` has not been accepted in this run; before `ReviewWindow` has answered, accepted, and the handler waits for the window, answering `accepted: false` if it does not open (D106). Handler: runs `OnReviewMessage` (start-to-close 8 s, no retry; a failure or timeout is `accept: false`); on accept it appends the message from the work item (`message` event, after-terminal write), applies the patch and returns the `seq`. The append loads the work item by `(id, taskId)` and consumes it in the same transaction; an item that is missing or already consumed completes the Update with `accepted: false` (D66) |
 | `kontra.dispatched` | signal | `{n}` | the dispatch activity, on an attempt's first upstream task id | runs `OnDispatched` |
 | `kontra.push` | signal | `{configId, deleted}` | the push config store (§10.2) | starts or ends a `push_webhook` |
 | `kontra.annotate` | Update | `{metadata, mcpMeta}` → `{}` | the operator's control plane (§13.3) | the §13.2 key and size rules |
@@ -1183,7 +1227,8 @@ are signals:
 it checks workflow state only (§7's state table, no turn running, and a `workItemId` not already accepted in this
 run, which the workflow keeps in its state). Work-item ownership is checked where the item is used. The first
 dispatch of a turn loads the work item by `(id, taskId)` and consumes it (`consumed_at`) in Postgres; a later
-dispatch of the same turn (a retry, attempt `n + 1`, or a resume) may reload a consumed item it owns.
+dispatch of the same turn (a retry, attempt `n + 1`, or a resume) may reload a consumed item it owns, and any
+other dispatch that finds its item consumed refuses it rather than send it twice (D101).
 `kontra.review_message` has no dispatch: its handler's append loads and consumes the item (above). A refused
 `kontra.message` or `kontra.review_message` deletes its work item. A caller-side timeout (the Update not accepted
 within 10 s, below) does not: the workflow may still accept the Update, and the turn then runs. An unconsumed
@@ -1204,7 +1249,7 @@ reason. v4 needs no continue-as-new.
 | Activity | Queue | Options | Does |
 |---|---|---|---|
 | `prepare(taskId, n)` | `kontra-lifecycle` | start-to-close 10 s; retried, max interval 30 s | Picks the backend and session (§6.1), skipping replicas at their dispatch capacity; writes the attempt row; returns `{queue, sessionId}` |
-| `dispatch(taskId, n, workItemId, resume)` | `kontra-tunnel-<replica_id>` or `kontra-direct` | schedule-to-start 15 s; heartbeat timeout 30 s, beats every 5 s; start-to-close = time to deadline + 30 s; `MaximumAttempts: 1`; `WaitForCancellation` | Writes `attempts.replica_id` and a fresh `attempts.dispatch_id` first, as every dispatch does (a new attempt, a follow-up turn, a resume), which fences every earlier dispatch of the task; every append it makes is fenced (§6.4, D77). Loads the work item by `(id, taskId)`, consuming it on the turn's first dispatch (§14.1, D66), and runs a2a-go's handler for it (§15) with the relay executor; `resume` re-attaches (§6.4). Discards the handler's result and returns `{outcome}` only |
+| `dispatch(taskId, n, workItemId, resume)` | `kontra-tunnel-<replica_id>` or `kontra-direct` | schedule-to-start 15 s; heartbeat timeout 30 s, beats every 5 s; start-to-close = time to deadline + 30 s; `MaximumAttempts: 1`; `WaitForCancellation` | Writes `attempts.replica_id` and a fresh `attempts.dispatch_id` first, as every dispatch does (a new attempt, a follow-up turn, a resume), which fences every earlier dispatch of the task; every append it makes is fenced (§6.4, D77). Loads the work item by `(id, taskId)`, consuming it on the turn's first dispatch (§14.1, D66), and runs a2a-go's handler for it (§15) with the relay executor; `resume` re-attaches (§6.4). Discards the handler's result and returns `{outcome, reason, retryAfterSeconds}` only: the failure reason, never its text, and an upstream's `Retry-After` (D102) |
 | `abort(taskId, n)` | `kontra-ctl-<attempts.replica_id>` | schedule-to-start 10 s, start-to-close 10 s | Cancels the running dispatch through the replica's local registry (§8). If no replica is recorded yet, the workflow instead cancels the scheduled dispatch through Temporal, which completes at once for an activity that has not started. Not started within 10 s (the replica is gone): for A2A `CancelTask` the workflow waits for the dispatch's heartbeat timeout, then applies §8's table; an MCP `tasks/cancel` keeps §11.6's 10 s (§8, D79) |
 | `forward_cancel(taskId, n)` | tunnel: `kontra-ctl-<the session's replica>`; direct: `kontra-ctl-<attempts.replica_id>` while a dispatch runs, falling back to `kontra-direct-ctl` when it is not started within 10 s (§8, D79); else the shared `kontra-direct-ctl` every replica's control worker polls | schedule-to-start 10 s, start-to-close 30 s, `MaximumAttempts: 1` | Sends `CancelTask` (or MCP `tasks/cancel`) upstream inside the tunnel or to the direct URL; returns the upstream's answer |
 | `attempt_state(taskId, n)` | `kontra-lifecycle` | 10 s, retried | Reads `first_upstream_id_at` and `replica_id` from Postgres: the retry decision is taken on what Postgres recorded, never on heartbeat details, which a crash loses; the workflow reads it before scheduling `abort` or `forward_cancel` |
@@ -1219,7 +1264,9 @@ on one replica, and only that replica polls `kontra-tunnel-<replica_id>` and `ko
 `replica_id` is unique per process start). When a replica dies its queues have no poller: a new `dispatch` fails
 its schedule-to-start (15 s, never retried by Temporal), a running one its heartbeat timeout (30 s after the last
 heartbeat that reached the server; measured 18–25 s after a SIGKILL), so a dead replica surfaces within a minute
-(`replica_kill`) and the workflow consults `attempt_state` and the retry table (§6.4). Activities on a
+(`replica_kill`) and the workflow consults `attempt_state` and the retry table (§6.4). A stalled replica (`SIGSTOP`,
+a GC pause) keeps its open long polls, so a resume dispatch can be handed to it and time out in turn: its dispatch
+is taken over within two heartbeat rounds rather than one (D120). Activities on a
 per-replica queue never rely on Temporal's own retries, which go back to the same queue.
 
 Worker settings: dispatch workers (`kontra-tunnel-<id>`, `kontra-direct`) are activity-only, with an explicit
@@ -1240,8 +1287,10 @@ once, with `WorkerStopTimeout` = `drain_timeout`, so the dispatches already runn
 heartbeating. It **keeps polling** `kontra-lifecycle`, `kontra-push`, `kontra-direct-ctl` and its per-replica
 queues (`kontra-tunnel-<id>`, `kontra-ctl-<id>`) until its last dispatch has ended or `drain_timeout` (default 10
 min) passes, so that, on a gate of one replica too, Updates such as a cancel are still accepted, dispatch results
-are recorded, and `abort` and `forward_cancel` for its tasks run. Only then does it stop them
-(`WorkerStopTimeout` a few seconds) and exit (D76). Kubernetes must give it `terminationGracePeriodSeconds` ≥
+are recorded, and `abort` and `forward_cancel` for its tasks run. Only then, after a 2 s settle in which the last
+dispatch's result is recorded (D118), does it stop them (`WorkerStopTimeout` a few seconds) and exit (D76). Its
+public listener keeps serving during the drain (`/healthz` answers `503`) and closes after the workers stop,
+giving open streams 5 s; their callers resume elsewhere with `Last-Event-ID` (D119). Kubernetes must give it `terminationGracePeriodSeconds` ≥
 `drain_timeout` + 30 s. A task still dispatching on the drained replica when `drain_timeout` ends is a lost
 session like any other (§6.4): rolling deploys do not cut tasks that finish within `drain_timeout`.
 
@@ -1273,11 +1322,11 @@ This section records the implementation plan the M0 probes support. It is not no
 
 | a2a-go piece | Kontra's |
 |---|---|
-| `taskstore.Store` | Postgres store (§5.2). Owner scoping from `CallContext.User` (the principal's `buyer_id`); `List` scoped to `(tenant, service, buyer)`, ordered by `status_at`, with a2a-go's page-token shape; versions start at 1; `PrevVersion == 0` refused; writes on `context.WithoutCancel`. A per-process registry of running dispatches records every terminal event the relay executor yields for `(task, n)`; while a dispatch is registered, a `failed` write the registry does not hold as relay-emitted (a2a-go's own `SetTaskFailed`, on any of its error paths) is refused, and the dispatch returns its outcome from the registry (`retryable`, `tunnel_lost`, `interrupted`, or `context_lost`, which for a direct backend triggers the re-attach of §6.4; a handler or executor error that is not a lost upstream context is `upstream_error`, §6.4); the workflow writes any terminal event through `write_terminal` (D8). |
+| `taskstore.Store` | Postgres store (§5.2). Owner scoping from `CallContext.User` (the principal's `buyer_id`); `List` scoped to `(tenant, service, buyer)`, ordered by `status_at`, with a2a-go's page-token shape; versions start at 1; `PrevVersion == 0` refused; writes on `context.WithoutCancel`. A per-process registry of running dispatches records every terminal event the relay executor yields for `(task, n)`; while a dispatch is registered, a `failed` write without a status message that the registry does not hold as relay-emitted (a2a-go's own `SetTaskFailed`, on any of its error paths, which never carries one; the relay's failures always do, D93) is refused, and the dispatch returns its outcome from the registry (`retryable`, `tunnel_lost`, `interrupted`, or `context_lost`, which for a direct backend triggers the re-attach of §6.4; a handler or executor error that is not a lost upstream context is `upstream_error`, §6.4); the workflow writes any terminal event through `write_terminal` (D8). |
 | `eventqueue.Puller` | Postgres puller: created at the log's tail (`max(seq)` when the reader is created, because a2a-go always passes a nil first cursor), long-polls on `LISTEN`, skips `message` rows with `role = ROLE_USER` and `metadata` rows (a2a-go's reader stops at the first final event and would otherwise return the caller's own message), returns `eventqueue.Message{Event, TaskVersion: seq}`. Behind `eventqueue.NewPullQueueManager` with `PollInterval` 100 ms and `InactivityTimeout` 0 (the puller already polls), so a blocking `SendMessage` on a quiet task keeps waiting. |
 | `workqueue.Queue` | `workqueue.NewPushQueue(kontraWrite)`. `kontraWrite` for a new task pre-creates the gate task (gate ids, `submitted` or `quoted`), stores the sanitized payload in `work_items`, calls `UpdateWithStart` (`kontra.message`) on `TaskLifecycle`, and sets `payload.TaskID`; a resend (same principal, service and `messageId`, the same request hash (below), the first task younger than 24 h) is answered with the existing task and re-issues the start (§14.5); a reused `messageId` with a different request is a new task (the TCK reuses message ids). For a follow-up it stores the work item and sends the `kontra.message` Update; a refusal becomes `UnsupportedOperationError` and deletes the work item, and an Update not accepted within 10 s becomes `-32603` (HTTP `503`) and keeps it (§14.1, D66). The returned `HandlerFn` is what the `dispatch` activity calls, with a heartbeater attached (`workqueue.AttachHeartbeater`, 5 s); the activity's context reaches the executor, so `abort` stops it. The handler's concurrency limiter is off; the Temporal worker's activity slots bound concurrency. |
 | `AgentExecutor` | The relay executor (§6.2–§6.4): never yields a `Task` (the gate task exists), never yields a bare `Message`, rewrites ids deeply, strips Kontra's keys, emits explicit terminal events. |
-| `a2asrv.NewHandler(…, WithClusterMode(…))` | One handler per service, built on first use and cached, with `WithPushNotifications(pgPushConfigStore, noopSender)` (push is the lifecycle's, §10) and call interceptors for authentication, admission, the follow-up state checks of §7, the quoted guard, cancel (§8), inline push configs (§10.1), and review-window messages, which the interceptor stores as a work item, sends as the `kontra.review_message` Update and answers entirely itself as an early response (a2a-go refuses messages to terminal tasks, and must never see them). |
+| `a2asrv.NewHandler(…, WithClusterMode(…))` | One handler per service, built on first use and cached, with `WithPushNotifications(pgPushConfigStore, noopSender)` (push is the lifecycle's, §10) and call interceptors for authentication, admission, the follow-up state checks of §7, the quoted guard, cancel (§8), inline push configs (§10.1), and review-window messages, which the interceptor stores as a work item, sends as the `kontra.review_message` Update and answers entirely itself as an early response (a2a-go refuses messages to terminal tasks, and must never see them). A blocking `SendMessage` that a2a-go answers "queue is closed" (a turn that ended before its subscription read the store) gets the stored task (D121). |
 | transports | `NewJSONRPCHandler` and `NewRESTHandler` behind the middleware of §2.2–§2.5, except `SendStreamingMessage` and `SubscribeToTask`, which the gate's own SSE writer serves (§9). |
 | cards | Raw-JSON card producer (`AgentCardJSONProducer`); the gate's own JWS signer (§3), since a2a-go's `a2acrypto.Signer` has a fixed protected header. |
 | client | `a2aclient` with `WithJSONRPCTransport`/`WithRESTTransport` over an `http.Client` that dials tunnel streams, no client timeout (deadlines from the context), bodies read through byte limits (§6.6), HTTP/1.1 only; `a2av0` transports for 0.3 upstreams. |
@@ -1307,7 +1356,7 @@ with their milestones (D80).
 | `push_delivery` | §10.2: webhook down for 2 min, then back: every status change and the terminal snapshot delivered, in seq order; a config created after the task started is delivered too |
 | `ssrf_webhook` | §10.3: `169.254.169.254`, `10.0.0.1`, `localhost`, `[::ffff:10.0.0.1]`, `64:ff9b::a00:1` and a name resolving to a private address are refused when set, with no connection; a redirecting URL is accepted, its `3xx` is a failed delivery and the redirect target receives no connection (D60) |
 | `card_passthrough` | §3: one signature (the gate's), verifiable by a2a-go's verifier; its protected header binds the upstream card by hash and says whether the seller's signature was verified against the configured keys; the upstream card is served verbatim with the seller's signature; seller fields byte-identical under JCS (D13) |
-| `card_compat` | §3: a 0.2.5 helloworld upstream served as 1.0 |
+| `card_compat` | §3: a 0.2.5 helloworld upstream served as 1.0 (M1: a stand-in serving that seller's card, D122) |
 | `cross_buyer` | §2.3, §4: buyer B's `GetTask` of buyer A's task is `TaskNotFound`; two buyers sending the same `contextId` reach two distinct upstream contexts |
 | `key_scope` | §6.1: a session enrolled for `hello` never receives a stream for another service, and a revoked binding receives none from the next request on |
 | `version_conflict` | §5.2: two `Store.Update`s with the same `PrevVersion` from two replicas: exactly one commits, the other gets `ErrConcurrentModification`; seqs 1..N have no gap. (The PRD's "409" is that store error; no route writes by version, D60.) |
@@ -1329,7 +1378,7 @@ with their milestones (D80).
 | `services.<name>.kind` | — (required) | §1 |
 | `services.<name>.tools.allow`, `.deny` | allow all | §11.3 |
 | `services.<name>.tasks` | `durable` | §11.5 |
-| `services.<name>.sealed` | `false`; `true` or `{required: bool}` (`required` defaults to `true`) | [`ext-sealed.md`](ext-sealed.md) §1 |
+| `services.<name>.sealed` | `false`; `true` or `{required: bool}` (`required` defaults to `true`); tunnel backends only (D91) | [`ext-sealed.md`](ext-sealed.md) §1 |
 | `services.<name>.seller_keys` | none (seller signatures not verified) | §3 |
 | `services.<name>.session_idle_s` | `3600` | §11.2 |
 | `services.<name>.task.timeout`, `.retries`, `.retention` | `1h`, `2`, `7d` | §5.4, §6.4, §6.5 |

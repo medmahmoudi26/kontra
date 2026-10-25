@@ -370,7 +370,7 @@ func (c *Config) validateMetadata(v *validator) {
 			v.add("caller_metadata: %q is not a kontra. key (only kontra. keys are stripped from callers, spec §2.5)", k)
 		}
 	}
-	// SPEC-CONFLICT: spec §13.2 and spec/schema/config.json accept any non-empty prefix, but §2.5 strips only
+	// SPEC-CONFLICT (D113): spec §13.2 and spec/schema/config.json accept any non-empty prefix, but §2.5 strips only
 	// kontra. keys from callers and services, and a2a-go copies a service event's metadata into the task's.
 	// Under another prefix (acme.) a seller could write keys that TaskRef.metadata hands the Lifecycle hooks
 	// as operator-written, which §13.3 says it never holds ("never caller or service metadata"). The closest
@@ -502,7 +502,7 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 	}
 	direct := s.Backend.Direct() != nil && n == 1
 	if s.Sealed.Mode != SealedOff && direct {
-		// SPEC-CONFLICT: relay §17 and ext-sealed.md §1 do not tie sealed: to a backend. But the recipients
+		// SPEC-CONFLICT (D91): relay §17 and ext-sealed.md §1 do not tie sealed: to a backend. But the recipients
 		// are the service's enrolled node keys and the hosting node unseals (ext-sealed §1, PRD §8); a
 		// direct backend has neither, so a sealed direct service could never be served as declared (and
 		// this build, which does not seal, would relay plaintext for it). Refused rather than ignored.
@@ -513,7 +513,7 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 		if err := checkSellerKeys(s.SellerKeys); err != nil {
 			v.add("%s.seller_keys: %v", at, err)
 		} else if direct && s.Kind == KindA2A {
-			// SPEC-CONFLICT: spec §3 makes a service whose card no configured key verifies unavailable
+			// SPEC-CONFLICT (D90): spec §3 makes a service whose card no configured key verifies unavailable
 			// (503 card routes, service_unavailable at the first attempt). Verification is M3; ignoring
 			// the keys would serve the card unverified (fail open), and this build has no unavailable
 			// state for a direct service, so it refuses to start instead, as for the remote hooks.
