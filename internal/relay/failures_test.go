@@ -564,3 +564,94 @@ func TestFirstIDTheStoreRefusesFails(t *testing.T) {
 		t.Errorf("outcome %+v, task %s %v", res, p.Status.State, p.Metadata)
 	}
 }
+
+// beatRecorder is a Heartbeater that counts beats and, at beat number cancelAt, cancels the activity's
+// context as the Temporal SDK does when the server answers a heartbeat NotFound (the activity timed out).
+type beatRecorder struct {
+	beats    atomic.Int64
+	cancelAt int64
+	cancel   context.CancelFunc
+}
+
+func (b *beatRecorder) HeartbeatInterval() time.Duration { return 5 * time.Second }
+
+func (b *beatRecorder) Heartbeat(ctx context.Context) error {
+	if n := b.beats.Add(1); n == b.cancelAt && b.cancel != nil {
+		b.cancel()
+	}
+	return ctx.Err()
+}
+
+// A dispatch heartbeats when it starts and again right before a2a-go's handler, so the upstream call
+// never comes before a heartbeat (a2a-go's own heartbeater first beats 5 s after the handler starts) and
+// a dispatch Temporal already gave up on (its heartbeat timeout passed while it waited on Postgres) stops
+// without calling the upstream (spec §14.2: load never looks like a dead replica; §6.4).
+func TestDispatchHeartbeatsBeforeTheUpstreamCall(t *testing.T) {
+	e := newEnv(t, envOptions{})
+	var atSend atomic.Int64
+	hb := &beatRecorder{}
+	b, calls := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+		if method == "SendMessage" {
+			atSend.Store(hb.beats.Load())
+		}
+		rpcResult(w, rid, `"result":{"task":{"id":"up-1","contextId":"c","status":{"state":"TASK_STATE_COMPLETED"}}}`)
+	})
+	e.backends.set(b, rpcInfo, nil)
+	e.disp.Heartbeater = hb
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
+		t.Fatalf("outcome %+v", res)
+	}
+	if calls.Load() == 0 || atSend.Load() < 2 {
+		t.Errorf("%d heartbeats before the upstream call, want the dispatch's two", atSend.Load())
+	}
+
+	for _, at := range []int64{1, 2} {
+		ctx, cancel := context.WithCancel(context.Background())
+		hb := &beatRecorder{cancelAt: at, cancel: cancel}
+		e.disp.Heartbeater = hb
+		before := calls.Load()
+		id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+		res, err := e.disp.Dispatch(ctx, lifecycle.DispatchInput{TaskID: string(id), N: 1, WorkItemID: wid.String()})
+		cancel()
+		if err != nil || res.Outcome != lifecycle.DispatchContextLost {
+			t.Errorf("Temporal gave up at beat %d: %+v %v, want context_lost", at, res, err)
+		}
+		if n := calls.Load() - before; n != 0 {
+			t.Errorf("Temporal gave up at beat %d: %d upstream calls", at, n)
+		}
+		if a := e.attempt(id, 1); a.UpstreamTaskID != "" {
+			t.Errorf("attempt %+v", a)
+		}
+	}
+}
+
+// The reads a dispatch makes before a2a-go's handler are bounded (PreambleTimeout, well under the 30 s
+// heartbeat timeout): a Postgres that does not answer them fails the dispatch before Temporal takes it for
+// dead, and nothing is sent upstream.
+func TestDispatchPreambleIsBounded(t *testing.T) {
+	e := newEnv(t, envOptions{})
+	b, calls := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+		rpcResult(w, rid, `"result":{"task":{"id":"up-1","contextId":"c","status":{"state":"TASK_STATE_COMPLETED"}}}`)
+	})
+	e.backends.set(b, rpcInfo, nil)
+	e.disp.PreambleTimeout = 300 * time.Millisecond
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	ctx := context.Background()
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `lock table kontra.work_items in access exclusive mode`); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = e.disp.Dispatch(ctx, lifecycle.DispatchInput{TaskID: string(id), N: 1, WorkItemID: wid.String()})
+	if d := time.Since(start); err == nil || d > 5*time.Second {
+		t.Errorf("dispatch behind a stalled Postgres: %v after %v, want an error within the preamble's bound", err, d)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("%d upstream calls", n)
+	}
+}

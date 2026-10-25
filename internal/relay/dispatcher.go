@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aevent"
@@ -33,9 +34,24 @@ type Dispatcher struct {
 	}
 	// Rebuild turns a work item back into a2a-go's payload; lifecycle.Rebuild when nil.
 	Rebuild func(taskID a2a.TaskID, wi *store.WorkItem) (*workqueue.Payload, error)
-	// Heartbeater is attached to the dispatch context (every 5 s); lifecycle.Heartbeater when nil.
+	// Heartbeater is attached to the dispatch context (every 5 s); lifecycle.Heartbeater when nil. The
+	// Dispatcher also beats with it itself, when the dispatch starts and right before a2a-go's handler.
 	Heartbeater workqueue.Heartbeater
-	Logger      *slog.Logger
+	// PreambleTimeout bounds the reads the dispatch makes before a2a-go's handler runs; 10 s when zero.
+	PreambleTimeout time.Duration
+	Logger          *slog.Logger
+}
+
+// DefaultPreambleTimeout is Dispatcher.PreambleTimeout's default: well under the dispatch's 30 s
+// heartbeat timeout (spec §14.2), so a slow or saturated Postgres makes the dispatch fail before Temporal
+// takes it for dead, not after.
+const DefaultPreambleTimeout = 10 * time.Second
+
+func (d *Dispatcher) heartbeater() workqueue.Heartbeater {
+	if d.Heartbeater == nil {
+		return lifecycle.Heartbeater{}
+	}
+	return d.Heartbeater
 }
 
 var _ lifecycle.DispatchActivities = (*Dispatcher)(nil)
@@ -64,31 +80,60 @@ func (d *Dispatcher) logger() *slog.Logger {
 // It ends the attempt (attempts.ended_at and outcome) when the dispatch ends it: a terminal event, a
 // retryable failure, an abort. A turn that stops at input-required, and a lost context (re-attached by a
 // later dispatch of the same attempt), leave it open (D77).
+//
+// No upstream call happens before the dispatch has heartbeat twice (spec §14.2: "so load never looks like
+// a dead replica"): when it starts, which tells a dispatch that sat behind a slow worker or Postgres past
+// its heartbeat timeout that Temporal has already given up on it (the SDK then cancels its context), and
+// right before a2a-go's handler, whose own heartbeater first beats 5 s later while the relay sends at once.
+// The reads in between are bounded by PreambleTimeout. A dispatch whose context ended at either beat
+// returns context_lost without calling the upstream: the workflow, which no longer waits for it, reads
+// attempt_state and retries or re-attaches.
 func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (lifecycle.DispatchResult, error) {
 	taskUUID, err := ids.ParseTaskID(in.TaskID)
 	if err != nil {
 		return lifecycle.DispatchResult{}, fmt.Errorf("relay: dispatch of task %q: %w", in.TaskID, err)
 	}
 	log := d.logger().With(obs.Task(in.TaskID, in.N)...)
-	row, err := d.Log.Load(ctx, taskUUID)
+	hb := d.heartbeater()
+	if err := hb.Heartbeat(ctx); err != nil {
+		log.Info("the dispatch's activity ended before it started", "error", err)
+		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchContextLost}, nil
+	}
+	budget := d.PreambleTimeout
+	if budget <= 0 {
+		budget = DefaultPreambleTimeout
+	}
+	pctx, pcancel := context.WithTimeout(ctx, budget)
+	defer pcancel()
+	res, err := d.dispatch(ctx, pctx, log, taskUUID, in, hb)
+	if err != nil && pctx.Err() != nil && ctx.Err() == nil {
+		err = fmt.Errorf("relay: the dispatch's reads took over %v: %w", budget, err)
+	}
+	return res, err
+}
+
+// dispatch is Dispatch after its first heartbeat: the preamble's reads on pctx, the handler on ctx.
+func (d *Dispatcher) dispatch(ctx, pctx context.Context, log *slog.Logger, taskUUID uuid.UUID, in lifecycle.DispatchInput,
+	hb workqueue.Heartbeater) (lifecycle.DispatchResult, error) {
+	row, err := d.Log.Load(pctx, taskUUID)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
 	}
 	if row.State.Terminal() {
 		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchTerminal}, nil
 	}
-	svc, err := d.Log.LoadService(ctx, row.TenantID, row.Service)
+	svc, err := d.Log.LoadService(pctx, row.TenantID, row.Service)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
 	}
 	key := Key{TaskID: a2a.TaskID(taskUUID.String()), N: in.N}
 	release := d.Registry.Expect(key)
 	defer release()
-	fence, err := d.Log.BeginDispatch(ctx, taskUUID, in.N, d.ReplicaID)
+	fence, err := d.Log.BeginDispatch(pctx, taskUUID, in.N, d.ReplicaID)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
 	}
-	wi, followUp, err := d.workItem(ctx, taskUUID, in)
+	wi, followUp, err := d.workItem(pctx, taskUUID, in)
 	if errors.Is(err, store.ErrWorkItemNotFound) {
 		log.Error("the turn's work item is missing or another task's", "work_item", in.WorkItemID)
 		return d.failTask(ctx, fence, taskUUID, store.ReasonLifecycleUnavailable, "the task's request could not be found")
@@ -104,9 +149,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	if err != nil {
 		return lifecycle.DispatchResult{}, fmt.Errorf("relay: rebuild work item %s: %w", wi.ID, err)
 	}
-	sh, err := d.Handlers.For(ctx, svc)
+	sh, err := d.Handlers.For(pctx, svc)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
+	}
+	if err := hb.Heartbeat(ctx); err != nil {
+		// Temporal gave up on the dispatch while it prepared (its heartbeat timeout passed): nothing was sent.
+		log.Info("the dispatch's activity ended before it called the upstream", "error", err)
+		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchContextLost}, nil
 	}
 	dctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -125,10 +175,6 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	info := &dispatchInfo{n: in.N, resume: in.Resume, fence: fence, running: running, task: row, svc: svc, request: wi.Payload.Request,
 		followUp: followUp, workItem: wi.ID, delivered: wi.DeliveredAt != nil, since: wi.TaskVersion}
 	dctx = withDispatch(store.WithFence(dctx, fence), info)
-	hb := d.Heartbeater
-	if hb == nil {
-		hb = lifecycle.Heartbeater{}
-	}
 	dctx = workqueue.AttachHeartbeater(dctx, hb)
 	_, herr := sh.HandlerFn(dctx, payload)
 	cause := context.Cause(dctx)
