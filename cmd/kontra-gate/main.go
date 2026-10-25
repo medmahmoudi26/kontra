@@ -123,13 +123,18 @@ func serve(args []string, stderr io.Writer) error {
 	}
 	// SIGTERM drains (spec §14.3); SIGINT stops the same way, and a second either one during the drain
 	// ends the process at once. The context is canceled with a cause wrapping gate.ErrDrain, and Run
-	// does its drain writes on a context of their own. SIGHUP reload is the replica's own.
+	// does its drain writes on a context of their own.
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	defer drainOnSignal(log, cancel)()
-	// SIGHUP reloads services: from the same file with the same per-replica overrides (spec §13.5).
+	// SIGHUP reloads services: from the same file with the same per-replica overrides (spec §13.5). It is
+	// caught from here on, before gate.New (up to 30 s of Temporal dial), where its default action would
+	// end the process; the replica applies one that arrives during the start once it runs.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	reload := func() (*config.Config, error) { return serveConfig(args) }
-	r, err := gate.New(ctx, cfg, gate.WithLogger(log), gate.WithReload(reload))
+	r, err := gate.New(ctx, cfg, gate.WithLogger(log), gate.WithReload(reload), gate.WithSIGHUP(hup))
 	if err != nil {
 		return err
 	}

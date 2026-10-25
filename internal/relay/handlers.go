@@ -88,7 +88,11 @@ func (q *capturingQueue) RegisterHandler(cfg workqueue.HandlerConfig, fn workque
 	q.Queue.RegisterHandler(cfg, fn)
 }
 
-// For returns svc's handler, building it on first use.
+// For returns svc's handler, building it on first use. The handler is always the one built from svc
+// itself: a cached handler of another ServiceRef (another task.timeout, task.retries, retention) is built
+// again and replaces it. A caller can hold a ServiceRef read before a reload and call For after the
+// registry's Invalidate (an A2A request between its Lookup and For, a dispatch between LoadService and
+// For); the handler it builds must not stay cached for the callers that read the service afterwards.
 func (h *Handlers) For(ctx context.Context, svc store.ServiceRef) (*ServiceHandler, error) {
 	if svc.TenantID == uuid.Nil || svc.Name == "" {
 		return nil, errors.New("relay: a handler needs its service")
@@ -96,7 +100,7 @@ func (h *Handlers) For(ctx context.Context, svc store.ServiceRef) (*ServiceHandl
 	key := cacheKey(svc)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if sh, ok := h.cache[key]; ok {
+	if sh, ok := h.cache[key]; ok && sh.Service == svc {
 		return sh, nil
 	}
 	d := h.deps

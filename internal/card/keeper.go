@@ -42,9 +42,14 @@ var ErrUnavailable = errors.New("card: the service's card is unavailable")
 //
 // Every replica runs its own keeper per service; there is no leader. Replicas that fetched the same
 // upstream bytes produce the same served bytes and ETag (the rewrite is deterministic), so they converge
-// within one Refresh. The Persist hook is how the replica that fetched a changed card records it in
+// within one Refresh. The persist hook (WithPersist) is how a replica records the card it serves in
 // services (upstream_card, card, card_fetched_at); Seed installs the stored card at start, so a restarted
 // replica serves the last good card at once.
+//
+// The hook is called after a good fetch whenever the card the keeper serves has not been recorded yet: the
+// first good fetch after the keeper was built or seeded (the stored served card may be another body: the
+// rewrite input changed), a fetch that changed the upstream bytes or the served body, and every good fetch
+// after a call that failed, until one succeeds. A fetch of a card already recorded calls nothing.
 type Keeper struct {
 	backend      upstream.Backend
 	in           Input
@@ -53,17 +58,19 @@ type Keeper struct {
 	fetchTimeout time.Duration
 	persist      func(ctx context.Context, s *Served, fetchedAt time.Time) error
 
-	mu      sync.RWMutex
-	served  *Served
-	info    upstream.Info
-	lastOK  time.Time
-	lastErr error
+	mu       sync.RWMutex
+	served   *Served
+	recorded *Served // the card the persist hook last recorded, nil before its first success
+	info     upstream.Info
+	lastOK   time.Time
+	lastErr  error
 }
 
 // KeeperOption configures a Keeper.
 type KeeperOption func(*Keeper)
 
-// WithPersist sets the hook called after a fetch that changed the upstream card.
+// WithPersist sets the hook that records the served card after a good fetch, while it is unrecorded (see
+// Keeper).
 func WithPersist(fn func(ctx context.Context, s *Served, fetchedAt time.Time) error) KeeperOption {
 	return func(k *Keeper) { k.persist = fn }
 }
@@ -90,13 +97,13 @@ func NewKeeper(b upstream.Backend, in Input, opts ...KeeperOption) *Keeper {
 
 // Seed installs a stored upstream card (services.upstream_card) fetched at fetchedAt as the last good one.
 func (k *Keeper) Seed(raw []byte, fetchedAt time.Time) error {
-	_, err := k.install(raw, fetchedAt)
-	return err
+	return k.install(raw, fetchedAt)
 }
 
-// Refresh fetches the card once, within FetchTimeout. On success it replaces the last good card (and calls
-// the persist hook when the upstream bytes changed); on failure, a fetch that ran out of time included, the
-// last good card stays and the error is returned.
+// Refresh fetches the card once, within FetchTimeout. On success it replaces the last good card and calls
+// the persist hook while that card is unrecorded (a failed call is returned, and made again at the next
+// good fetch); on failure, a fetch that ran out of time included, the last good card stays and the error
+// is returned.
 func (k *Keeper) Refresh(ctx context.Context) error {
 	fctx, cancel := context.WithTimeout(ctx, k.fetchTimeout)
 	f, err := k.fetch(fctx, k.backend) // the body is read whole before fetch returns
@@ -105,17 +112,8 @@ func (k *Keeper) Refresh(ctx context.Context) error {
 		err = fmt.Errorf("card: the fetch did not finish within %v: %w", k.fetchTimeout, err)
 	}
 	if err == nil {
-		var changed bool
-		if changed, err = k.install(f.Raw, k.now()); err == nil {
-			if changed && k.persist != nil {
-				k.mu.RLock()
-				s := k.served
-				k.mu.RUnlock()
-				if perr := k.persist(ctx, s, s.LastModified); perr != nil {
-					return fmt.Errorf("card: persist: %w", perr)
-				}
-			}
-			return nil
+		if err = k.install(f.Raw, k.now()); err == nil {
+			return k.record(ctx)
 		}
 	}
 	k.mu.Lock()
@@ -124,21 +122,45 @@ func (k *Keeper) Refresh(ctx context.Context) error {
 	return err
 }
 
-// install rewrites raw and makes it the current card. changed reports new upstream bytes.
-func (k *Keeper) install(raw []byte, at time.Time) (bool, error) {
+// record calls the persist hook when the current card is not the one it last recorded.
+func (k *Keeper) record(ctx context.Context) error {
+	if k.persist == nil {
+		return nil
+	}
+	k.mu.RLock()
+	s, done := k.served, sameCard(k.served, k.recorded)
+	k.mu.RUnlock()
+	if done {
+		return nil
+	}
+	if err := k.persist(ctx, s, s.LastModified); err != nil {
+		return fmt.Errorf("card: persist: %w", err)
+	}
+	k.mu.Lock()
+	k.recorded = s
+	k.mu.Unlock()
+	return nil
+}
+
+// sameCard reports whether a and b are the same upstream bytes served as the same body.
+func sameCard(a, b *Served) bool {
+	return a != nil && b != nil && bytes.Equal(a.Upstream, b.Upstream) && bytes.Equal(a.Body, b.Body)
+}
+
+// install rewrites raw and makes it the current card.
+func (k *Keeper) install(raw []byte, at time.Time) error {
 	info, err := upstream.ReadInfo(raw)
 	if err != nil {
-		return false, err
+		return err
 	}
 	in := k.in
 	in.Upstream = raw
 	body, err := Rewrite(in)
 	if err != nil {
-		return false, err
+		return err
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	changed := k.served == nil || !bytes.Equal(k.served.Upstream, raw)
 	lastMod := at
 	if k.served != nil && bytes.Equal(k.served.Body, body) {
 		lastMod = k.served.LastModified // the same body keeps its Last-Modified, so caches stay valid
@@ -149,7 +171,7 @@ func (k *Keeper) install(raw []byte, at time.Time) (bool, error) {
 		k.lastOK = at
 	}
 	k.lastErr = nil
-	return changed, nil
+	return nil
 }
 
 // Run keeps the card until ctx ends: the first fetch and every failed one are retried with backoff, a

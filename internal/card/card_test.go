@@ -521,3 +521,59 @@ func TestKeeperFetchTimeout(t *testing.T) {
 	}
 	t.Fatalf("the keeper never fetched the card after the seller recovered (%d requests)", gets.Load())
 }
+
+// The persist hook records the card the keeper serves until a call succeeds: a failed call is made again
+// at the next good fetch even when the upstream bytes did not change, and a keeper seeded from the stored
+// card records it at its first good fetch, because the served body may differ from the stored one (its
+// input changed: an allow: list of exactly [anonymous], card_extensions). An unchanged card that was
+// recorded is not recorded again.
+func TestKeeperPersistsUntilRecorded(t *testing.T) {
+	raw := string(read(t, "a2a-cli-exec.json"))
+	cs := newCardServer(t, raw)
+	var (
+		mu    sync.Mutex
+		calls []string // the served body of each call
+		fail  = 1
+	)
+	persist := WithPersist(func(_ context.Context, s *Served, _ time.Time) error {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, string(s.Body))
+		if fail > 0 {
+			fail--
+			return errors.New("the database is away")
+		}
+		return nil
+	})
+	n := func() int { mu.Lock(); defer mu.Unlock(); return len(calls) }
+	k := NewKeeper(backend(t, cs), Input{PublicURL: "http://localhost:8080", ServicePath: "/agents/hello"}, persist)
+	if err := k.Refresh(context.Background()); err == nil || n() != 1 {
+		t.Fatalf("a failed persist: %v after %d calls", err, n())
+	}
+	// The same bytes again: the card is still unrecorded, so the hook is called again.
+	if err := k.Refresh(context.Background()); err != nil || n() != 2 {
+		t.Fatalf("the persist after a failed one: %v after %d calls (want 2)", err, n())
+	}
+	if err := k.Refresh(context.Background()); err != nil || n() != 2 {
+		t.Fatalf("a recorded, unchanged card: %v after %d calls (want 2)", err, n())
+	}
+
+	// A keeper of another input (allow: [anonymous]) seeded from the stored upstream card records its own
+	// body at its first good fetch of the same bytes.
+	k2 := NewKeeper(backend(t, cs), Input{PublicURL: "http://localhost:8080", ServicePath: "/agents/hello", OnlyAnonymous: true}, persist)
+	if err := k2.Seed([]byte(raw), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if n() != 2 {
+		t.Fatalf("Seed called the persist hook (%d calls): nothing was fetched", n())
+	}
+	if err := k2.Refresh(context.Background()); err != nil || n() != 3 {
+		t.Fatalf("the first fetch after Seed: %v after %d calls (want 3)", err, n())
+	}
+	mu.Lock()
+	last, before := calls[2], calls[1]
+	mu.Unlock()
+	if strings.Contains(last, "securitySchemes") || last == before {
+		t.Fatalf("the seeded keeper recorded %s", last)
+	}
+}

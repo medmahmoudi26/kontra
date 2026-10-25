@@ -212,6 +212,11 @@ func TestSyncWritesTheBlockAndAuditsChanges(t *testing.T) {
 		t.Fatalf("Lookup hello: %+v", hello)
 	}
 	tid := hello.Ref.TenantID
+	// The dispatcher reads the service with LoadService and the A2A routes with Lookup: relay.Handlers
+	// builds a handler again for a ServiceRef other than its cached one's, so both must read the same ref.
+	if ref, err := store.NewLog(pool).LoadService(ctx, tid, "hello"); err != nil || ref != hello.Ref {
+		t.Fatalf("LoadService = %+v, %v; Lookup = %+v", ref, err, hello.Ref)
+	}
 	member := auth.Principal{Kind: auth.KindKey, ID: "key:kk_a_00000001", BuyerID: uuid.New(), Via: auth.ViaAPIKey,
 		Scopes: []auth.Scope{auth.ScopeHire}, TenantID: &tid, TenantSlug: TeamTenant}
 	if !hello.Allow.Admits(member) || hello.Allow.Admits(auth.Anonymous(uuid.New())) {
@@ -512,5 +517,222 @@ func TestCardKeepersPersistAndSeed(t *testing.T) {
 	}
 	if _, _, err := other.Backend(ctx, o.Ref); err != nil {
 		t.Fatalf("dispatch on the seeded card: %v", err)
+	}
+}
+
+// keeperOf is the card keeper the registry runs for a service ("<tenant>/<name>").
+func keeperOf(t *testing.T, s *Services, key string) *card.Keeper {
+	t.Helper()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e := s.byName[key]
+	if e == nil || e.keeper == nil {
+		t.Fatalf("no card keeper for %s", key)
+	}
+	return e.keeper
+}
+
+func helloConfig(t *testing.T, sellerURL, allow, extra string) *config.Config {
+	t.Helper()
+	return parseConfig(t, `services:
+  hello:
+    kind: a2a
+    backend: { a2a: { url: "`+sellerURL+`/base", allow_private: true } }
+    allow: [`+allow+`]
+`+extra)
+}
+
+// A card Postgres refuses as json (here a description that is not UTF-8, which the gate serves byte for
+// byte) is still recorded: upstream_card verbatim and card_fetched_at, with services.card NULL, the
+// best-effort copy (the audit's proposal for services.card). A replica that starts while the seller is down
+// serves it from upstream_card.
+func TestCardPersistsWhenPostgresRefusesTheServedCard(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	pool := pgtest.Pool(t, dsn)
+	ctx := context.Background()
+	raw := strings.Replace(fakeCard, `"says hello"`, "\"caf\xe9\"", 1)
+	seller := newFakeSeller(t, raw)
+	cfg := helloConfig(t, seller.srv.URL, `"org:default"`, "")
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
+	if err := s.Sync(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := keeperOf(t, s, "default/hello").Refresh(ctx); err != nil {
+		t.Fatalf("a fetch of a card Postgres refuses as json: %v", err)
+	}
+	hello, _ := s.Lookup(ctx, TeamTenant, "hello")
+	served, err := hello.Cards()
+	if err != nil || !bytes.Contains(served.Body, []byte("caf\xe9")) {
+		t.Fatalf("served %v %s", err, served.Body)
+	}
+	var (
+		up        []byte
+		cardNull  bool
+		fetchedAt *time.Time
+	)
+	if err := pool.QueryRow(ctx, `select upstream_card, card is null, card_fetched_at from kontra.services where name = 'hello'`).Scan(&up, &cardNull, &fetchedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(up, []byte(raw)) || !cardNull || fetchedAt == nil {
+		t.Fatalf("stored upstream_card %q, card null %v, card_fetched_at %v", up, cardNull, fetchedAt)
+	}
+
+	seller.mu.Lock()
+	seller.down = true
+	seller.mu.Unlock()
+	other := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
+	if err := other.Sync(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	o, _ := other.Lookup(ctx, TeamTenant, "hello")
+	if seeded, err := o.Cards(); err != nil || seeded.ETag != served.ETag {
+		t.Fatalf("a replica started while the seller is down: %v %+v", err, seeded)
+	}
+}
+
+// A persist that fails (here once, refused by a trigger) is made again at the next good fetch of the same
+// bytes, so upstream_card does not stay unrecorded until the seller changes its card.
+func TestCardPersistRetriedAfterAFailure(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	pool := pgtest.Pool(t, dsn)
+	ctx := context.Background()
+	seller := newFakeSeller(t, fakeCard)
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
+	if err := s.Sync(ctx, helloConfig(t, seller.srv.URL, `"org:default"`, "")); err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		`create sequence public.fail_once`,
+		`create function public.fail_once() returns trigger language plpgsql as $$
+		 begin
+		   if nextval('public.fail_once') = 1 then raise exception 'injected: the first card write fails'; end if;
+		   return new;
+		 end $$`,
+		`create trigger fail_once before update of upstream_card on kontra.services
+		   for each row when (new.upstream_card is distinct from old.upstream_card) execute function public.fail_once()`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	k := keeperOf(t, s, "default/hello")
+	if err := k.Refresh(ctx); err == nil || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("the first persist: %v", err)
+	}
+	if err := k.Refresh(ctx); err != nil {
+		t.Fatalf("the second fetch of the same bytes: %v", err)
+	}
+	hello, _ := s.Lookup(ctx, TeamTenant, "hello")
+	served, _ := hello.Cards()
+	var (
+		up     []byte
+		stored *string
+	)
+	if err := pool.QueryRow(ctx, `select upstream_card, card::text from kontra.services where name = 'hello'`).Scan(&up, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(up, []byte(fakeCard)) || stored == nil || *stored != string(served.Body) {
+		t.Fatalf("after a failed persist and a good fetch of the same bytes: upstream_card %q, card %v", up, stored)
+	}
+}
+
+// services.card follows the served body when only the rewrite input changes: an allow: list of exactly
+// [anonymous] drops the security schemes, and the new keeper, seeded from the same upstream bytes,
+// records its body at its first good fetch.
+func TestCardColumnFollowsTheServedBody(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	pool := pgtest.Pool(t, dsn)
+	ctx := context.Background()
+	seller := newFakeSeller(t, fakeCard)
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
+	stored := func() string {
+		t.Helper()
+		return scalar[string](t, pool, `select coalesce(card::text, '') from kontra.services where name = 'hello'`)
+	}
+	if err := s.Sync(ctx, helloConfig(t, seller.srv.URL, `"org:default"`, "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := keeperOf(t, s, "default/hello").Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored(); !strings.Contains(got, `"securitySchemes"`) {
+		t.Fatalf("services.card with allow [org:default]: %s", got)
+	}
+	if err := s.Sync(ctx, helloConfig(t, seller.srv.URL, "anonymous", "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := keeperOf(t, s, "default/hello").Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hello, _ := s.Lookup(ctx, TeamTenant, "hello")
+	served, err := hello.Cards()
+	if err != nil || bytes.Contains(served.Body, []byte(`"securitySchemes"`)) {
+		t.Fatalf("served with allow [anonymous]: %v %s", err, served.Body)
+	}
+	if got := stored(); got != string(served.Body) {
+		t.Fatalf("services.card after allow: [anonymous]:\n%s\nserved:\n%s", got, served.Body)
+	}
+}
+
+// A db-sourced row (Cloud, spec §13.5) gets the refusals the configuration has for the same service
+// (config/validate.go's SPEC-CONFLICT resolutions): sealed on a direct backend, which this build would relay
+// in plaintext, and seller_keys on a direct a2a service, whose card this build would serve unverified. Such
+// a row is left out (the unknown-service answer, service_unavailable for its tasks) instead of served.
+func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	pool := pgtest.Pool(t, dsn)
+	ctx := context.Background()
+	acme := uuid.Must(uuid.NewV7())
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	exec(`insert into kontra.tenants (id, slug, kind) values ($1, 'acme', 'account')`, acme)
+	const direct = `{"a2a": {"url": "http://127.0.0.1:9/base", "allow_private": true}}`
+	const mcpDirect = `{"mcp": {"url": "http://127.0.0.1:9/mcp", "allow_private": true}}`
+	for _, row := range []struct {
+		name, kind, backend, sealed string
+		sellerKeys                  any
+	}{
+		{"plain", "a2a", direct, "off", nil},
+		{"sealed-direct", "a2a", direct, "required", nil},
+		{"optional-direct", "a2a", direct, "optional", nil},
+		{"sealed-mcp", "mcp", mcpDirect, "required", nil},
+		{"sealed-tunnel", "a2a", `{"tunnel": {}}`, "required", nil},
+		{"keys-direct", "a2a", direct, "off", `{"keys": []}`},
+		{"keys-null", "a2a", direct, "off", `null`},
+		{"keys-tunnel", "a2a", `{"tunnel": {}}`, "off", `{"keys": []}`},
+	} {
+		exec(`insert into kontra.services (tenant_id, name, kind, backend, allow, sealed, seller_keys, source)
+			values ($1, $2, $3, $4::jsonb, '{org:acme}', $5, $6::jsonb, 'db')`, acme, row.name, row.kind, row.backend, row.sealed, row.sellerKeys)
+	}
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Multi: true})
+	if err := s.Sync(ctx, parseConfig(t, "tenancy: multi\n")); err != nil {
+		t.Fatal(err)
+	}
+	for name, served := range map[string]bool{
+		"plain": true, "sealed-direct": false, "optional-direct": false, "sealed-mcp": false, "sealed-tunnel": true,
+		"keys-direct": false, "keys-null": true, "keys-tunnel": true,
+	} {
+		got, _ := s.Lookup(ctx, "acme", name)
+		if (got != nil) != served {
+			t.Errorf("acme/%s: served %v, want %v", name, got != nil, served)
+		}
+		if _, err := s.BackendFor(ctx, acme, name); (err == nil) != served {
+			t.Errorf("acme/%s: BackendFor error %v, want served %v", name, err, served)
+		}
+	}
+	// A row that becomes refusable is dropped on its NOTIFY, and served again once fixed.
+	exec(`update kontra.services set sealed = 'required' where name = 'plain'`)
+	s.Notify("acme/plain")
+	if got, _ := s.Lookup(ctx, "acme", "plain"); got != nil {
+		t.Fatal("a direct row set sealed is still served")
+	}
+	exec(`update kontra.services set sealed = 'off' where name = 'plain'`)
+	s.Notify("acme/plain")
+	if got, _ := s.Lookup(ctx, "acme", "plain"); got == nil {
+		t.Fatal("the fixed row is not served")
 	}
 }

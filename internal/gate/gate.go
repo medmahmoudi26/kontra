@@ -77,6 +77,7 @@ type options struct {
 	orphanEvery, orphanAge, retentionEvery                               time.Duration
 	executor                                                             relay.ExecutorOptions
 	hup                                                                  bool
+	hupCh                                                                <-chan os.Signal
 }
 
 // WithLogger sets the replica's logger (default slog.Default()).
@@ -117,6 +118,15 @@ func WithTiming(t Timing) Option {
 // WithoutSIGHUP leaves SIGHUP alone (tests that run several replicas in one process call Reload instead).
 func WithoutSIGHUP() Option { return func(o *options) { o.hup = false } }
 
+// WithSIGHUP makes Run reload on the signals ch delivers, which the caller registered for SIGHUP
+// (signal.Notify) before New. Without it Run registers SIGHUP only once it starts, and until then SIGHUP
+// keeps its default action, which ends the process: a reload sent during New (the migration check, up to
+// TemporalDialTimeout of Temporal dial, the services sync) would stop the gate. A SIGHUP that arrives
+// before Run is applied once Run starts.
+func WithSIGHUP(ch <-chan os.Signal) Option {
+	return func(o *options) { o.hup, o.hupCh = true, ch }
+}
+
 // Replica is one gate process. Its replica id is unique per process start; it is inserted into
 // gate_replicas before any worker polls, upserted every 10 s, and every 10 s each replica deletes the rows
 // of replicas silent for more than 30 s (spec/tunnel.md §11).
@@ -147,6 +157,11 @@ type Replica struct {
 	orphanFrom store.OrphanCandidate // the orphan sweep's cursor (RunSweeps' goroutine only)
 
 	cfgMu sync.Mutex // cfg's services: block, replaced by Reload
+
+	// regMu orders the heartbeat (beat) and deregister: a beat in flight ends before the row is deleted,
+	// and once deregistered no beat inserts it again (the heartbeat loop runs until Run returns).
+	regMu        sync.Mutex
+	deregistered bool
 }
 
 // New connects everything a replica needs and checks that the schema is at the embedded version (the
@@ -375,8 +390,9 @@ func (r *Replica) InFlight() int64 { return r.dispatch.n.Load() }
 // marked draining (gate_replicas.draining_at, /healthz 503) and the workers drain, kontra-direct at once and
 // the others only after its last dispatch has ended or drain_timeout passed, while the public listener
 // still serves (on a gate of one replica a caller can still cancel); then the public listener stops,
-// waiting ServeGrace for its streams, the background loops stop, and the replica's row is deleted. Run
-// returns nil after a drain, or the error of a listener that failed (after draining all the same).
+// waiting ServeGrace for its streams, the replica's row is deleted, which ends its heartbeat (deregister),
+// and the background loops stop. Run returns nil after a drain, or the error of a listener that failed
+// (after draining all the same).
 func (r *Replica) Run(ctx context.Context) error {
 	if !r.ran.CompareAndSwap(false, true) {
 		return errors.New("gate: Run called twice")
@@ -530,9 +546,13 @@ func restartKeys(a, b *config.Config) []string {
 }
 
 func (r *Replica) hupLoop(ctx context.Context) error {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGHUP)
-	defer signal.Stop(sig)
+	sig := r.opts.hupCh
+	if sig == nil {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGHUP)
+		defer signal.Stop(ch)
+		sig = ch
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -556,8 +576,14 @@ func (r *Replica) register(ctx context.Context) error {
 }
 
 // beat upserts last_seen_at. A row other replicas reaped (this one was silent: a pause, a partition) comes
-// back, draining_at included.
+// back, draining_at included. After deregister it does nothing: the drain deletes the row while the
+// heartbeat loop still runs, and a beat must not bring a stopped replica's row back.
 func (r *Replica) beat(ctx context.Context) error {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	if r.deregistered {
+		return nil
+	}
 	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version, draining_at)
 		values ($1, $2, case when $3 then now() end)
 		on conflict (replica_id) do update set last_seen_at = now(),
@@ -601,7 +627,13 @@ func (r *Replica) markDraining(ctx context.Context) error {
 	return r.beat(ctx) // a row reaped meanwhile comes back, draining
 }
 
+// deregister deletes the replica's row, last in the drain, and ends its heartbeat: it waits for a beat in
+// flight, and no later beat inserts the row again. A delete that fails leaves the row to other replicas,
+// which reap it after ReplicaSilence.
 func (r *Replica) deregister(ctx context.Context) error {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	r.deregistered = true
 	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := r.pool.Exec(dctx, `delete from kontra.gate_replicas where replica_id = $1`, r.id)

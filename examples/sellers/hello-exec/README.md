@@ -75,7 +75,7 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" -
 ## A cancel (cancel_forwarded)
 
 ```sh
-SELLER_CMD='sleep 30; echo done' examples/sellers/hello-exec/run.sh &
+SELLER_CMD='sleep 20; echo done' examples/sellers/hello-exec/run.sh &
 a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" --async -o json "go"   # the task, with its id
 a2a task cancel -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" --timeout 60s <task-id>
 #  -> canceled: the gate forwarded CancelTask upstream, and no completed event follows
@@ -83,12 +83,16 @@ a2a task cancel -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API
 
 The gate's polling path sends `returnImmediately: true` upstream, so the upstream task id exists at once and a
 cancel has something to cancel (spec/relay.md §6.2, §8). Exec mode answers `CancelTask` only once its command has
-ended: with `sleep 30` the seller, and so the gate, answers about 25 s after the cancel (the gate waits up to
-60 s for the upstream's answer, §8), hence `--timeout 60s` (a2a-cli's default is 30 s). The task shows
-`canceled` in the gate's log as soon as the seller reports it. a2a-cli v0.3.1's exec mode can also end a
-canceled task `failed` (its cancel races the command's exit), which is why the automated `cancel_forwarded` test
-uses an a2a-go seller that handles cancel (D80). During M1, 20 cancels through the gate and 50 straight to the
-seller all ended `canceled`.
+ended, and the gate waits at most 30 s for that answer: `forward_cancel`, the call that sends `CancelTask`
+upstream, has a 30 s start-to-close (spec/relay.md §14.2; the 60 s of §8 is the whole cancel's budget). With
+`sleep 20` the seller, and so the gate, answers when the 20 s are up, well inside it; `--timeout 60s` leaves
+a2a-cli (whose default is 30 s) room for the rest of the cancel. A command that still has more than 30 s to run
+when the cancel arrives (a longer `SELLER_CMD`) answers too late: the forward is cut, the cancel answers
+`TaskNotCancelableError` ("the service could not be reached to cancel the task") and the task continues to its
+end. The task shows `canceled` in the gate's log as soon as the seller reports it. a2a-cli v0.3.1's exec mode
+can also end a canceled task `failed` (its cancel races the command's exit), which is why the automated
+`cancel_forwarded` test uses an a2a-go seller that handles cancel (D80). During M1 (then with `sleep 30`), 20
+cancels through the gate and 50 straight to the seller all ended `canceled`.
 
 ## Reload and drain
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/a2ahttp"
@@ -63,8 +64,10 @@ const RefreshEvery = time.Minute
 // once. A keeper fetches when the service is configured, retries a failed fetch with backoff, refetches
 // every 10 minutes, keeps the last good card when a fetch fails, and marks the service unavailable after
 // 30 minutes without a successful fetch: card routes answer 503 and dispatch fails service_unavailable.
-// The replica whose keeper sees new upstream bytes writes them to services.upstream_card, the served card
-// to services.card (json, D49) and card_fetched_at; every successful fetch of the stored bytes moves
+// A keeper records the card it serves after a good fetch while that card is unrecorded (its first good
+// fetch, new upstream bytes or a new served body, and after a failed write; persistCard): the upstream
+// bytes to services.upstream_card with card_fetched_at, then the served card to services.card (json, D49),
+// a best-effort copy left NULL when Postgres refuses it. Every successful fetch of the stored bytes moves
 // card_fetched_at, so the seed of a restarted replica counts the 30 minutes from the gate's last good
 // fetch. Replicas that fetched the same bytes serve the same body and ETag. card_hash (sha256 over the JCS
 // of the upstream card) stays null until the gate has a JCS library (M3 signing).
@@ -428,12 +431,15 @@ type row struct {
 	retries     int
 	retentionS  int64
 	annotations []byte
+	sealed      string // off, optional or required
+	sellerKeys  bool   // seller_keys set (not SQL NULL, not JSON null)
 	upstream    []byte
 	fetchedAt   *time.Time
 }
 
 const selectServices = `select s.tenant_id, t.slug, s.name, s.kind, s.backend::text, s.allow, s.listed,
-	s.disabled_at is not null, s.timeout_s, s.retries, s.retention_s, s.annotations::text, s.upstream_card, s.card_fetched_at
+	s.disabled_at is not null, s.timeout_s, s.retries, s.retention_s, s.annotations::text, s.sealed,
+	coalesce(s.seller_keys <> 'null'::jsonb, false), s.upstream_card, s.card_fetched_at
   from kontra.services s join kontra.tenants t on t.id = s.tenant_id
  where t.deleted_at is null and (t.expires_at is null or t.expires_at > now())`
 
@@ -441,7 +447,7 @@ func scanRow(r pgx.CollectableRow) (row, error) {
 	var x row
 	var backend, annots string
 	err := r.Scan(&x.tenantID, &x.tenant, &x.name, &x.kind, &backend, &x.allow, &x.listed, &x.disabled,
-		&x.timeoutS, &x.retries, &x.retentionS, &annots, &x.upstream, &x.fetchedAt)
+		&x.timeoutS, &x.retries, &x.retentionS, &annots, &x.sealed, &x.sellerKeys, &x.upstream, &x.fetchedAt)
 	x.backend, x.annotations = []byte(backend), []byte(annots)
 	return x, err
 }
@@ -577,6 +583,11 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !x.disabled {
+		if err := refusable(x, b); err != nil {
+			return nil, err
+		}
+	}
 	e := &entry{
 		ref: store.ServiceRef{TenantID: x.tenantID, Tenant: x.tenant, Name: x.name, Kind: x.kind,
 			Timeout: time.Duration(x.timeoutS) * time.Second, Retries: x.retries, Retention: time.Duration(x.retentionS) * time.Second},
@@ -620,6 +631,24 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 	}
 	e.served = &a2ahttp.Service{Ref: e.ref, Allow: allow, Listed: x.listed, Disabled: x.disabled, Cards: cards}
 	return e, nil
+}
+
+// refusable applies to every row the refusals config.Validate makes for a services: entry, so a row the
+// operator's control plane writes (source db, spec §13.5) cannot bypass them and fail open.
+//
+// SPEC-CONFLICT (the configuration's resolutions, config/validate.go): sealing needs backend tunnel (the
+// recipients are the service's enrolled node keys and the hosting node unseals, ext-sealed.md §1), and this
+// build, which does not seal, would relay a sealed direct service in plaintext; seller card signatures are
+// not verified until M3, so a direct a2a service with seller_keys would serve its card unverified, where
+// spec §3 makes it unavailable. Such a row is left out rather than served.
+func refusable(x row, b backendSpec) error {
+	if b.direct() && x.sealed != string(config.SealedOff) {
+		return fmt.Errorf("sealed %q on a direct backend: sealing needs backend tunnel (ext-sealed.md §1), and this build would relay the service in plaintext", x.sealed)
+	}
+	if x.sellerKeys && b.direct() && x.kind == config.KindA2A {
+		return errors.New("seller_keys on a direct a2a service: seller card signatures are not verified in this release (M3), and the card would be served unverified (spec §3)")
+	}
+	return nil
 }
 
 func keeperKey(backendJS string, in card.Input) string {
@@ -674,13 +703,39 @@ func (s *Services) newKeeper(e *entry, b backendSpec, in card.Input, x row) (*ca
 	return k, nil
 }
 
-// persistCard records a changed card: the upstream bytes, the served card (json, D49) and the fetch time.
-// The backend guard keeps a keeper of a URL the configuration has just replaced from writing its seller's
-// card under the new backend.
+// persistCard records the card a keeper serves (its persist hook, called after a good fetch until it
+// succeeds): first the upstream bytes, verbatim, and the fetch time, which are what a restarted replica
+// seeds from; then the served card, a best-effort copy (json, D49): a body Postgres refuses as json (a
+// data exception: text that is not UTF-8, a NUL character) leaves services.card NULL, as the audit
+// proposed, and is not an error. Any other failure is returned, and the keeper calls again at its next good
+// fetch. The backend guard keeps a keeper of a URL the configuration has just replaced from writing its
+// seller's card under the new backend; the upstream_card guard keeps a served card next to the bytes it was
+// produced from when another replica records newer ones meanwhile.
 func (s *Services) persistCard(ctx context.Context, ref store.ServiceRef, backendJS string, sv *card.Served) error {
-	_, err := s.db.Exec(ctx, `update kontra.services set upstream_card = $3, card = $4::json, card_fetched_at = now(), updated_at = now()
-		 where tenant_id = $1 and name = $2 and backend = $5::jsonb`, ref.TenantID, ref.Name, sv.Upstream, string(sv.Body), backendJS)
-	return err
+	tag, err := s.db.Exec(ctx, `update kontra.services set upstream_card = $3, card_fetched_at = now(),
+			updated_at = case when upstream_card is distinct from $3 then now() else updated_at end
+		 where tenant_id = $1 and name = $2 and backend = $4::jsonb`, ref.TenantID, ref.Name, sv.Upstream, backendJS)
+	if err != nil {
+		return fmt.Errorf("upstream_card: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // the backend changed (this keeper is being replaced) or the row is gone
+	}
+	_, err = s.db.Exec(ctx, `update kontra.services set card = $3::text::json, updated_at = now()
+		 where tenant_id = $1 and name = $2 and backend = $4::jsonb and upstream_card = $5
+		   and card::text is distinct from $3::text`, ref.TenantID, ref.Name, string(sv.Body), backendJS, sv.Upstream)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "22") {
+		s.logger.Warn("services: Postgres refuses the served card as json; services.card is left NULL (upstream_card is stored)",
+			"service", ref.Tenant+"/"+ref.Name, "error", err)
+		_, err = s.db.Exec(ctx, `update kontra.services set card = null, updated_at = now()
+			 where tenant_id = $1 and name = $2 and backend = $3::jsonb and upstream_card = $4 and card is not null`,
+			ref.TenantID, ref.Name, backendJS, sv.Upstream)
+	}
+	if err != nil {
+		return fmt.Errorf("card: %w", err)
+	}
+	return nil
 }
 
 // touchCard moves card_fetched_at after a successful fetch of the bytes already stored, so a replica that
