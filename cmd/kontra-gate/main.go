@@ -127,7 +127,9 @@ func serve(args []string, stderr io.Writer) error {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	defer drainOnSignal(log, cancel)()
-	r, err := gate.New(ctx, cfg)
+	// SIGHUP reloads services: from the same file with the same per-replica overrides (spec §13.5).
+	reload := func() (*config.Config, error) { return serveConfig(args) }
+	r, err := gate.New(ctx, cfg, gate.WithLogger(log), gate.WithReload(reload))
 	if err != nil {
 		return err
 	}
