@@ -1,5 +1,5 @@
 # `make check` is what CI runs and what runs before every PR.
-.PHONY: check check-specs check-migrations check-go
+.PHONY: check check-specs check-migrations check-go test-integration
 
 # The system Go may be older than the module's toolchain (go 1.26, a2a-go v2.7.0 needs it); pin the one
 # the module names so every go command, and gofmt, come from the same toolchain.
@@ -26,3 +26,9 @@ check-go:
 	$(GO) vet ./...
 	$(GO) build ./...
 	$(GO) test -short ./...
+
+# Integration tests (no -short): every package but test/e2e, one at a time (-p 1), against $KONTRA_TEST_PG
+# or, when it is unset, one throwaway postgres:17-alpine container (KONTRA_TEST_PG_IMAGE=postgres:16-alpine
+# for 16). The e2e tests have their own target.
+test-integration:
+	GO="$(GO)" scripts/test_integration.sh

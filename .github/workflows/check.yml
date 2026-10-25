@@ -34,3 +34,39 @@ jobs:
         with:
           go-version: "1.26.10"
       - run: make check-go
+  # Integration tests (no -short) on Postgres 16 and 17: every package but test/e2e (`make test-integration`).
+  # The pinned Temporal CLI (spec/relay.md §0: CLI 1.9.1, Server 1.32.0) is installed for the tests that
+  # start a dev server; they read its path from KONTRA_TEMPORAL_CLI.
+  integration:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        postgres: ["16-alpine", "17-alpine"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env: { POSTGRES_USER: kontra, POSTGRES_PASSWORD: kontra, POSTGRES_DB: kontra }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kontra" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      KONTRA_TEST_PG: postgres://kontra:kontra@localhost:5432/kontra?sslmode=disable
+      TEMPORAL_CLI_VERSION: "1.9.1"
+      TEMPORAL_CLI_ARCHIVE_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+      TEMPORAL_CLI_BINARY_SHA256: 712217694cac9f786a72d4b6c876cd15f3dcf1bf31434d9fed6af25242a327a0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.10"
+      - name: Install the pinned Temporal CLI
+        run: |
+          archive="temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/$archive"
+          echo "${TEMPORAL_CLI_ARCHIVE_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/temporal"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/temporal" temporal
+          echo "${TEMPORAL_CLI_BINARY_SHA256}  $RUNNER_TEMP/temporal/temporal" | sha256sum -c -
+          "$RUNNER_TEMP/temporal/temporal" --version | grep -q 'Server 1\.32\.'
+          echo "KONTRA_TEMPORAL_CLI=$RUNNER_TEMP/temporal/temporal" >> "$GITHUB_ENV"
+      - run: make test-integration

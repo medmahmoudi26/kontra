@@ -4,10 +4,16 @@ package gate
 
 import (
 	"context"
+	"errors"
 
 	"github.com/medmahmoudi26/kontra/internal/config"
 	"github.com/medmahmoudi26/kontra/internal/unimpl"
 )
+
+// ErrDrain is wrapped by the cause of the context `kontra-gate serve` passes to Run when SIGTERM or
+// SIGINT arrives (context.Cause(ctx)). The context is canceled at that moment, so Run does its drain
+// writes (draining_at, the gate_replicas heartbeat, stopping workers) on context.WithoutCancel(ctx).
+var ErrDrain = errors.New("drain")
 
 // Replica is one gate process. Its replica id is unique per process start; it is inserted into
 // gate_replicas before any worker polls, upserted every 10 s, and every 10 s each replica deletes the rows
