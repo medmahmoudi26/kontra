@@ -118,7 +118,13 @@ type (
 	// DispatchResult is dispatch's result: the outcome only; a2a-go's SendMessageResult is discarded.
 	DispatchResult struct {
 		Outcome DispatchOutcome `json:"outcome"`
-		Reason  string          `json:"reason,omitempty"` // store.FailureReason when Outcome is failed
+		// Reason is the store.FailureReason of the outcome: for terminal, the failure the relay logged (empty
+		// for a non-failed terminal state); for retryable, the reason write_terminal records when the retries
+		// are exhausted (upstream_unreachable, or upstream_error for HTTP 408/429).
+		Reason string `json:"reason,omitempty"`
+		// RetryAfterSeconds is the upstream's Retry-After on a retryable HTTP 408/429 (spec §6.4): the next
+		// attempt waits at least this long. Zero otherwise.
+		RetryAfterSeconds int64 `json:"retryAfterSeconds,omitempty"`
 	}
 	// ForwardCancelResult is forward_cancel's result.
 	ForwardCancelResult struct {
