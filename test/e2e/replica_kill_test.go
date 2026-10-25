@@ -145,10 +145,13 @@ func checkCompletedOnce(t *testing.T, ctx context.Context, h *Harness, taskID a2
 	if task.Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("the task ended %s, want completed", task.Status.State)
 	}
-	as, err := h.Attempts(ctx, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The dispatch ends the attempt (ended_at, outcome) after it logged the terminal row the buyer saw.
+	var as []Attempt
+	eventually(t, 30*time.Second, "the attempt ended", func() bool {
+		var err error
+		as, err = h.Attempts(ctx, taskID)
+		return err == nil && (len(as) != 1 || as[0].EndedAt != nil)
+	})
 	if len(as) != 1 || as[0].N != 1 {
 		t.Fatalf("attempts = %+v, want exactly one row with n = 1 (a re-attach is not a new attempt)", as)
 	}

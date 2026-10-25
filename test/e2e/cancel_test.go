@@ -66,6 +66,19 @@ func checkCanceledForGood(t *testing.T, ctx context.Context, h *Harness, taskID 
 	}
 }
 
+// endedAttempt waits until the task's one attempt has ended and returns it: the attempt is ended after the
+// terminal row is logged.
+func endedAttempt(t *testing.T, ctx context.Context, h *Harness, taskID a2a.TaskID) Attempt {
+	t.Helper()
+	var as []Attempt
+	eventually(t, 30*time.Second, "the attempt of "+string(taskID)+" ended", func() bool {
+		var err error
+		as, err = h.Attempts(ctx, taskID)
+		return err == nil && len(as) == 1 && as[0].EndedAt != nil
+	})
+	return as[0]
+}
+
 // TestCancelForwarded is cancel_forwarded, direct backend (spec/relay.md §8, §16; D79, D80), against an
 // a2a-go seller that handles cancel: a working task whose upstream task exists, canceled through the
 // other replica over JSON-RPC, and an input-required task (no dispatch running), canceled over HTTP+JSON.
@@ -109,8 +122,8 @@ func TestCancelForwarded(t *testing.T) {
 		t.Fatalf("the caller's stream must end at the canceled row: %d events, %v", len(rest), err)
 	}
 	checkCanceledForGood(t, ctx, h, working, 3*time.Second)
-	if as, _ := h.Attempts(ctx, working); as[0].EndedAt == nil || as[0].Outcome != "canceled" {
-		t.Fatalf("the attempt of the canceled working task: %+v, want ended canceled", as[0])
+	if a := endedAttempt(t, ctx, h, working); a.Outcome != "canceled" {
+		t.Fatalf("the attempt of the canceled working task: %+v, want ended canceled", a)
 	}
 	// Canceling it again is TaskNotCancelableError.
 	if _, err := buyer.Client(t, h.Gates[0], "").CancelTask(ctx, &a2a.CancelTaskRequest{ID: working}); err == nil {
@@ -140,8 +153,8 @@ func TestCancelForwarded(t *testing.T) {
 	}
 	checkCanceledForGood(t, ctx, h, waiting.ID, 2*time.Second)
 	// The attempt waited at input-required: the task's end ends it interrupted (D77).
-	if as, _ := h.Attempts(ctx, waiting.ID); as[0].EndedAt == nil || as[0].Outcome != "interrupted" {
-		t.Fatalf("the attempt of the canceled input-required task: %+v, want ended interrupted (D77)", as[0])
+	if a := endedAttempt(t, ctx, h, waiting.ID); a.Outcome != "interrupted" {
+		t.Fatalf("the attempt of the canceled input-required task: %+v, want ended interrupted (D77)", a)
 	}
 	checkHistory(t, h, waiting.ID, "e2e_cancel_forwarded_input_required", h.APIKey)
 	checkUpstreamHeaders(t, h, h.Upstream)
