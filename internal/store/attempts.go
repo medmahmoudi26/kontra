@@ -91,29 +91,74 @@ func scanAttempt(row pgx.Row) (*Attempt, error) {
 
 // BeginAttempt inserts attempt n (prepare, spec §14.2). n must be the task's next attempt (1, or one
 // more than its latest). prepare is retried, so inserting an attempt that already exists with the same
-// backend is not an error.
+// backend is not an error. An attempt n > 1 is a retry: BeginAttempt applies BeginRetry's guard to it.
 func (l *Log) BeginAttempt(ctx context.Context, a Attempt) error {
+	return l.BeginRetry(ctx, a, "")
+}
+
+// BeginRetry inserts attempt n as BeginAttempt does. For n > 1, a retry (spec §6.4: "a retry is only ever
+// made before the first upstream task id of the current attempt exists"), it first locks attempt n-1 in the
+// same transaction: when n-1 records a first upstream task id, nothing is written and the answer is
+// ErrAttemptHasUpstream; otherwise n-1, when still open, is ended with previous (failed when previous is
+// empty), and attempt n inserted. A dispatch of n-1 that Temporal timed out but whose process is alive
+// (D77) can record its first upstream id until this transaction commits, and never after it
+// (SetFirstUpstreamID is fenced): either the retry sees the id and refuses, or the dispatch is fenced.
+func (l *Log) BeginRetry(ctx context.Context, a Attempt, previous Outcome) error {
 	if a.N < 1 {
 		return fmt.Errorf("store: attempt %d", a.N)
 	}
 	if a.Backend != BackendDirect && a.Backend != BackendTunnel {
 		return fmt.Errorf("store: backend %q", a.Backend)
 	}
+	if previous != "" && !previous.Valid() {
+		return fmt.Errorf("store: attempt outcome %q", previous)
+	}
+	if previous == "" {
+		previous = OutcomeFailed
+	}
 	ctx, cancel := l.writeCtx(ctx)
 	defer cancel()
-	tag, err := l.writeExec(ctx, `insert into kontra.attempts (task_id, n, backend, tunnel_session, key_id, replica_id)
-			select $1::uuid, $2::integer, $3::text, $4::uuid, $5::text, $6::text
-			 where $2::integer = coalesce((select max(n) from kontra.attempts where task_id = $1::uuid), 0) + 1
-			on conflict (task_id, n) do nothing`,
-		a.TaskID, a.N, string(a.Backend), a.TunnelSession, nullString(a.KeyID), nullString(a.ReplicaID))
+	var inserted bool
+	err := l.inTx(ctx, func(tx pgx.Tx) error {
+		inserted = false
+		if a.N > 1 {
+			var hasUpstream, ended bool
+			err := tx.QueryRow(ctx, `select first_upstream_id_at is not null, ended_at is not null from kontra.attempts
+					where task_id = $1 and n = $2 for update`, a.TaskID, a.N-1).Scan(&hasUpstream, &ended)
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				// No attempt n-1: the insert below refuses an attempt out of sequence (or a missing task).
+			case err != nil:
+				return err
+			case hasUpstream:
+				return fmt.Errorf("store: attempt %d of task %s: %w", a.N-1, a.TaskID, ErrAttemptHasUpstream)
+			case !ended:
+				if _, err := tx.Exec(ctx, `update kontra.attempts set ended_at = now(), outcome = $3
+						where task_id = $1 and n = $2 and ended_at is null`, a.TaskID, a.N-1, string(previous)); err != nil {
+					return err
+				}
+			}
+		}
+		tag, err := tx.Exec(ctx, `insert into kontra.attempts (task_id, n, backend, tunnel_session, key_id, replica_id)
+				select $1::uuid, $2::integer, $3::text, $4::uuid, $5::text, $6::text
+				 where $2::integer = coalesce((select max(n) from kontra.attempts where task_id = $1::uuid), 0) + 1
+				on conflict (task_id, n) do nothing`,
+			a.TaskID, a.N, string(a.Backend), a.TunnelSession, nullString(a.KeyID), nullString(a.ReplicaID))
+		if err != nil {
+			return err
+		}
+		inserted = tag.RowsAffected() == 1
+		return nil
+	})
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+	switch {
+	case errors.Is(err, ErrAttemptHasUpstream):
+		return err
+	case errors.As(err, &pgErr) && pgErr.Code == "23503":
 		return notFound()
-	}
-	if err != nil {
+	case err != nil:
 		return fmt.Errorf("store: begin attempt %d of task %s: %w", a.N, a.TaskID, err)
-	}
-	if tag.RowsAffected() == 1 {
+	case inserted:
 		return nil
 	}
 	got, err := l.GetAttempt(ctx, a.TaskID, a.N)
@@ -162,30 +207,48 @@ func (l *Log) BeginDispatch(ctx context.Context, taskID uuid.UUID, n int, replic
 }
 
 // SetFirstUpstreamID records the attempt's first upstream task id and context id, and
-// first_upstream_id_at, before the event that carried them is logged (spec §4). It is a no-op when the
-// same id is already recorded and ErrUpstreamIDMismatch when a different one is.
-func (l *Log) SetFirstUpstreamID(ctx context.Context, taskID uuid.UUID, n int, upstreamTaskID, upstreamContextID string) error {
+// first_upstream_id_at, before the event that carried them is logged (spec §4), under the dispatch's fence
+// f: the write commits only while attempt f.N is the task's latest, has ended_at null and holds
+// f.DispatchID, the condition every append of the dispatch carries (§6.4, D77). A dispatch the workflow has
+// given up on (a heartbeat timeout while its process lives on) is therefore refused, ErrFenced, and f
+// records it: the dispatch stops before it logs or signals anything, and a retry of the attempt (BeginRetry)
+// never follows an attempt whose upstream task exists. It is a no-op when the same id is already recorded
+// and ErrUpstreamIDMismatch when a different one is.
+func (l *Log) SetFirstUpstreamID(ctx context.Context, f *Fence, upstreamTaskID, upstreamContextID string) error {
+	if f == nil {
+		return errors.New("store: a first upstream task id is recorded under a dispatch's fence")
+	}
 	if upstreamTaskID == "" {
 		return errors.New("store: an empty upstream task id")
 	}
 	ctx, cancel := l.writeCtx(ctx)
 	defer cancel()
-	tag, err := l.writeExec(ctx, `update kontra.attempts
+	tag, err := l.writeExec(ctx, `update kontra.attempts a
 			set upstream_task_id = $3, upstream_context_id = $4, first_upstream_id_at = now()
-			where task_id = $1 and n = $2 and upstream_task_id is null`,
-		taskID, n, upstreamTaskID, nullString(upstreamContextID))
+			where a.task_id = $1 and a.n = $2 and a.upstream_task_id is null
+			  and a.ended_at is null and a.dispatch_id = $5
+			  and not exists (select 1 from kontra.attempts b where b.task_id = a.task_id and b.n > a.n)`,
+		f.TaskID, f.N, upstreamTaskID, nullString(upstreamContextID), f.DispatchID)
 	if err != nil {
-		return fmt.Errorf("store: first upstream id of attempt %d of task %s: %w", n, taskID, err)
+		return fmt.Errorf("store: first upstream id of attempt %d of task %s: %w", f.N, f.TaskID, err)
 	}
 	if tag.RowsAffected() == 1 {
 		return nil
 	}
-	a, err := l.GetAttempt(ctx, taskID, n)
+	a, err := l.GetAttempt(ctx, f.TaskID, f.N)
 	if err != nil {
 		return err
 	}
+	latest, err := l.LatestAttempt(ctx, f.TaskID)
+	if err != nil {
+		return err
+	}
+	if a.EndedAt != nil || a.DispatchID != f.DispatchID || latest.N != f.N {
+		f.markFenced()
+		return fmt.Errorf("store: first upstream id of attempt %d of task %s: %w", f.N, f.TaskID, ErrFenced)
+	}
 	if a.UpstreamTaskID != upstreamTaskID {
-		return fmt.Errorf("store: attempt %d of task %s: %w", n, taskID, ErrUpstreamIDMismatch)
+		return fmt.Errorf("store: attempt %d of task %s: %w", f.N, f.TaskID, ErrUpstreamIDMismatch)
 	}
 	return nil
 }

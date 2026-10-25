@@ -51,6 +51,11 @@ const (
 	// the config's place back, and the task's configs are listed again. Before it, a config created again
 	// with the same id, or a failed config set again, never got another push_webhook in the run.
 	changePushRestart = "push-restart"
+	// changeFencedRetry: prepare refuses a retry whose previous attempt recorded a first upstream task id
+	// after the workflow decided to retry (a lost dispatch still alive, D77); the workflow then follows the
+	// attempt as a lost dispatch's (re-attach, or tunnel_lost) instead of treating the refusal as the
+	// deadline. And a kontra.dispatched for an attempt older than the current one runs no OnDispatched.
+	changeFencedRetry = "fenced-retry"
 )
 
 // phase is the task's state as the workflow knows it, from its own Updates and activity results.
@@ -449,6 +454,12 @@ func (l *lc) signals(ctx workflow.Context) {
 		var s DispatchedSignal
 		c.Receive(ctx, &s)
 		n := s.N
+		if n < l.n && workflow.GetVersion(ctx, changeFencedRetry, workflow.DefaultVersion, 1) >= 1 {
+			// A dispatch of an attempt the workflow has left for a newer one (D77): that attempt has no
+			// upstream task the workflow follows, so OnDispatched must not report it.
+			l.logger.Info("kontra.dispatched for another attempt ignored", "attempt", n, "current", l.n)
+			return
+		}
 		l.hooksPending++
 		workflow.Go(ctx, func(gc workflow.Context) {
 			defer func() { l.hooksPending-- }()
@@ -721,7 +732,7 @@ func (l *lc) active(ctx workflow.Context) {
 		}
 		l.phase = phaseRunning
 		if l.n == 0 {
-			if !l.prepare(ctx, 1, "") {
+			if l.prepare(ctx, 1, "") != prepared {
 				continue
 			}
 			if !l.listedAtStart {
@@ -732,9 +743,17 @@ func (l *lc) active(ctx workflow.Context) {
 	}
 }
 
+// prepareResult is how prepare ended.
+type prepareResult int
+
+const (
+	prepared           prepareResult = iota // attempt n is written; dispatch it
+	prepareEnded                            // the task ended instead
+	prepareHasUpstream                      // a retry refused: attempt n-1 records a first upstream task id
+)
+
 // prepare writes attempt n and learns its queue (and, the first time, the deadline that arms the timer).
-// false when the task ended instead.
-func (l *lc) prepare(ctx workflow.Context, n int, prev string) bool {
+func (l *lc) prepare(ctx workflow.Context, n int, prev string) prepareResult {
 	budget := time.Duration(l.in.TimeoutSeconds) * time.Second
 	if !l.deadline.IsZero() {
 		budget = l.deadline.Sub(workflow.Now(ctx))
@@ -750,16 +769,20 @@ func (l *lc) prepare(ctx workflow.Context, n int, prev string) bool {
 	case err == nil:
 	case isType(err, ErrTypeTaskGone):
 		l.gone, l.phase = true, phaseTerminal
-		return false
+		return prepareEnded
 	case isType(err, ErrTypeServiceUnavailable):
 		l.fail(ctx, store.ReasonServiceUnavailable, "", string(store.OutcomeServiceUnavailable))
-		return false
+		return prepareEnded
+	case n > 1 && isType(err, ErrTypeAttemptHasUpstream) &&
+		workflow.GetVersion(ctx, changeFencedRetry, workflow.DefaultVersion, 1) >= 1:
+		l.logger.Info("retry refused: the previous attempt has a first upstream task id", "attempt", n-1)
+		return prepareHasUpstream
 	default:
 		// No attempt could be placed before the task's deadline.
 		l.logger.Warn("prepare failed", "attempt", n, "error", err)
 		l.timedOut = true
 		l.timeout(ctx)
-		return false
+		return prepareEnded
 	}
 	l.n, l.queue, l.backend, l.resumes = n, r.Queue, r.Backend, 0
 	if l.deadline.IsZero() {
@@ -769,7 +792,7 @@ func (l *lc) prepare(ctx workflow.Context, n int, prev string) bool {
 		}
 		l.armTimer(ctx)
 	}
-	return true
+	return prepared
 }
 
 // runTurn runs one turn: dispatch, then the retry table (spec §6.4), until the turn ends at
@@ -799,7 +822,16 @@ func (l *lc) runTurn(ctx workflow.Context, wid string) {
 			continue
 		}
 		if next.kind == stepRetry {
-			if !l.prepare(ctx, l.n+1, next.prev) {
+			switch l.prepare(ctx, l.n+1, next.prev) {
+			case prepared:
+			case prepareHasUpstream:
+				// The lost dispatch recorded the attempt's first upstream task id after attempt_state was
+				// read (D77): the attempt is followed as §6.4 says for a lost dispatch after that id.
+				if next = l.lost(ctx, ""); next.kind == stepDone {
+					return
+				}
+				continue
+			default:
 				return
 			}
 		}

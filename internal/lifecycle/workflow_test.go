@@ -42,6 +42,7 @@ type world struct {
 	onTerminal hooks.Patch
 	onClosed   hooks.Patch
 
+	prepareFn  func(in PrepareInput) error // nil: every prepare succeeds
 	dispatchFn func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error)
 	forwardFn  func(ctx context.Context, k int, queue string) (ForwardCancelResult, error)
 	abortErr   error
@@ -123,8 +124,14 @@ func (w *world) block(ctx context.Context) error {
 func (w *world) prepare(ctx context.Context, in PrepareInput) (PrepareResult, error) {
 	w.mu.Lock()
 	w.prepares = append(w.prepares, in)
+	fn := w.prepareFn
 	w.mu.Unlock()
 	w.event(fmt.Sprintf("prepare:%d", in.N))
+	if fn != nil {
+		if err := fn(in); err != nil {
+			return PrepareResult{}, err
+		}
+	}
 	return PrepareResult{Queue: QueueDirect, Backend: "direct", Deadline: w.deadline}, nil
 }
 
@@ -1680,4 +1687,76 @@ func TestPushRestartsAfterItsConfigEnded(t *testing.T) {
 			t.Fatalf("push_webhook ran for %v (lists %d): the config created again while the old activity ran got none", s.pushes, s.lists)
 		}
 	})
+}
+
+// A lost dispatch (heartbeat timeout) whose process lives on records attempt 1's first upstream task id
+// after the workflow read attempt_state and decided to retry (D77). prepare(2) refuses the retry, and the
+// workflow re-reads attempt_state and re-attaches to attempt 1: no dispatch of attempt 2 ever sends the
+// caller's message again (spec §6.4).
+func TestRetryRefusedAfterALateFirstUpstreamIDReattaches(t *testing.T) {
+	w := newWorld(t)
+	w.prepareFn = func(in PrepareInput) error {
+		if in.N == 1 {
+			return nil
+		}
+		// The old dispatch's SetFirstUpstreamID committed during the backoff.
+		w.mu.Lock()
+		w.firstID[1] = true
+		w.mu.Unlock()
+		return temporal.NewNonRetryableApplicationError("attempt 1 has a first upstream task id", ErrTypeAttemptHasUpstream, nil)
+	}
+	w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+		if k == 0 {
+			return DispatchResult{}, heartbeatTimeout()
+		}
+		w.setState(string(store.StateCompleted))
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	}
+	env := w.env()
+	start(env, newUpdates(), input(2))
+	done(t, env)
+	s := w.snapshot()
+	if len(s.prepares) != 2 || s.prepares[1].N != 2 {
+		t.Fatalf("prepares %+v, want 1 and the refused 2", s.prepares)
+	}
+	if len(s.dispatches) != 2 {
+		t.Fatalf("dispatches %+v", s.dispatches)
+	}
+	if r := s.dispatches[1].in; r.N != 1 || !r.Resume {
+		t.Errorf("after the refused retry: dispatch %+v, want a re-attach of attempt 1", r)
+	}
+	if len(s.terminals) != 0 {
+		t.Errorf("terminal writes %+v: the refusal is not the deadline", s.terminals)
+	}
+	if !slices.Contains(s.hookCalls, HookOnTerminal+":completed") {
+		t.Errorf("hooks %v", s.hookCalls)
+	}
+}
+
+// A kontra.dispatched for an attempt the workflow has left (a stale dispatch of attempt 1 while attempt 2
+// runs) runs no OnDispatched (D77); the current attempt's does.
+func TestDispatchedSignalOfAnOlderAttemptIsIgnored(t *testing.T) {
+	w := newWorld(t)
+	var env *testsuite.TestWorkflowEnvironment
+	w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+		if k == 0 {
+			return DispatchResult{Outcome: DispatchRetryable, Reason: string(store.ReasonUpstreamUnreachable)}, nil
+		}
+		env.SignalWorkflow(SignalDispatched, DispatchedSignal{N: 1})
+		env.SignalWorkflow(SignalDispatched, DispatchedSignal{N: 2})
+		w.setState(string(store.StateCompleted))
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	}
+	env = w.env()
+	start(env, newUpdates(), input(2))
+	done(t, env)
+	var n int
+	for _, h := range w.snapshot().hookCalls {
+		if h == HookOnDispatched {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("OnDispatched ran %d times, want once (attempt 2's): %v", n, w.snapshot().hookCalls)
+	}
 }

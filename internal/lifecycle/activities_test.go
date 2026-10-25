@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -145,10 +146,11 @@ func TestPrepareAndAttemptState(t *testing.T) {
 	if err != nil || st.Backend != "direct" || st.ReplicaID != "" || st.FirstUpstreamIDAt != nil || st.TaskState != "submitted" {
 		t.Fatalf("attempt_state %+v %v", st, err)
 	}
-	if _, err := e.log.BeginDispatch(ctx, id, 1, "r1"); err != nil {
+	fence, err := e.log.BeginDispatch(ctx, id, 1, "r1")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.log.SetFirstUpstreamID(ctx, id, 1, "up-1", "upctx"); err != nil {
+	if err := e.log.SetFirstUpstreamID(ctx, fence, "up-1", "upctx"); err != nil {
 		t.Fatal(err)
 	}
 	st, _ = e.acts.AttemptState(ctx, AttemptRef{TaskID: id.String(), N: 1})
@@ -156,16 +158,31 @@ func TestPrepareAndAttemptState(t *testing.T) {
 		t.Fatalf("attempt_state %+v", st)
 	}
 
+	// An attempt with a first upstream task id is never retried (spec §6.4).
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 2, PreviousOutcome: "upstream_unreachable"}); appType(err) != ErrTypeAttemptHasUpstream {
+		t.Fatalf("prepare(2) after a first upstream id: %v", err)
+	}
+
 	// A lost dispatch's attempt is ended by the next prepare.
-	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 2, PreviousOutcome: "upstream_unreachable"}); err != nil {
+	lost := e.task(store.StateSubmitted, nil)
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: lost.String(), N: 1}); err != nil {
 		t.Fatal(err)
 	}
-	a1, _ := e.log.GetAttempt(ctx, id, 1)
+	if _, err := e.log.BeginDispatch(ctx, lost, 1, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: lost.String(), N: 2, PreviousOutcome: "upstream_unreachable"}); err != nil {
+		t.Fatal(err)
+	}
+	a1, _ := e.log.GetAttempt(ctx, lost, 1)
 	if a1.EndedAt == nil || a1.Outcome != store.OutcomeUpstreamUnreachable {
 		t.Fatalf("attempt 1 %+v, want ended upstream_unreachable", a1)
 	}
-	if _, err := e.log.GetAttempt(ctx, id, 2); err != nil {
+	if _, err := e.log.GetAttempt(ctx, lost, 2); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: lost.String(), N: 2, PreviousOutcome: "upstream_unreachable"}); err != nil {
+		t.Fatalf("a retried prepare(2): %v", err)
 	}
 
 	// No backend: service_unavailable, not retried. No task: gone.
@@ -425,4 +442,140 @@ func TestWriteTerminalEndsOnlyTheAttemptItEnded(t *testing.T) {
 	if a, _ := e.log.GetAttempt(ctx, id3, 1); a.EndedAt != nil {
 		t.Errorf("attempt ended %q by a timeout that lost the race to an upstream_error", a.Outcome)
 	}
+}
+
+// A dispatch Temporal timed out but whose process is still alive (D77) and whose upstream answers during
+// the retry's backoff: attempt_state said no first upstream id, the old dispatch then records it, and
+// prepare(2) refuses the retry (ErrTypeAttemptHasUpstream) instead of ending attempt 1 and sending the
+// caller's message again (spec §6.4). In the other order prepare(2) wins, and the old dispatch's
+// SetFirstUpstreamID is fenced: it stops without logging. A resume of attempt 1 then fences the old
+// dispatch's appends.
+func TestRetryNeverFollowsAFirstUpstreamID(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+
+	// The old dispatch records its id after the workflow's attempt_state and before prepare(2).
+	id := e.task(store.StateSubmitted, nil)
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	zombie, err := e.log.BeginDispatch(ctx, id, 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := e.acts.AttemptState(ctx, AttemptRef{TaskID: id.String(), N: 1}); err != nil || st.FirstUpstreamIDAt != nil {
+		t.Fatalf("attempt_state at the retry decision %+v %v", st, err)
+	}
+	if err := e.log.SetFirstUpstreamID(ctx, zombie, "up-X", "ctx-X"); err != nil {
+		t.Fatalf("the dispatch still holds attempt 1: %v", err)
+	}
+	_, err = e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 2, PreviousOutcome: "upstream_unreachable"})
+	if appType(err) != ErrTypeAttemptHasUpstream {
+		t.Fatalf("prepare(2) after attempt 1's first upstream id: %v, want %s", err, ErrTypeAttemptHasUpstream)
+	}
+	if a1, _ := e.log.GetAttempt(ctx, id, 1); a1.EndedAt != nil || a1.UpstreamTaskID != "up-X" {
+		t.Errorf("attempt 1 %+v: the refused retry ended it", a1)
+	}
+	if _, err := e.log.GetAttempt(ctx, id, 2); !errors.Is(err, store.ErrAttemptNotFound) {
+		t.Errorf("the refused retry wrote attempt 2: %v", err)
+	}
+	// The workflow reads attempt_state again and re-attaches: the resume's fence ends the old dispatch.
+	if st, _ := e.acts.AttemptState(ctx, AttemptRef{TaskID: id.String(), N: 1}); st.FirstUpstreamIDAt == nil || st.Ended {
+		t.Fatalf("attempt_state after the refusal %+v", st)
+	}
+	if _, err := e.log.BeginDispatch(ctx, id, 1, "r2"); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := e.log.Load(ctx, id)
+	ev := a2a.NewStatusUpdateEvent(row.Snapshot, a2a.TaskStateWorking, nil)
+	next, _ := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
+	payload, _ := json.Marshal(a2a.StreamResponse{Event: ev})
+	if _, err := e.log.Append(ctx, nil, store.Write{TaskID: id, PrevVersion: row.Version, Kind: store.KindStatus, State: store.StateWorking,
+		StatusAt: store.StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload, Fence: zombie}); !errors.Is(err, store.ErrFenced) {
+		t.Errorf("the old dispatch's append after the resume: %v, want ErrFenced", err)
+	}
+
+	// prepare(2) first: the old dispatch's first upstream id is refused on the ended attempt.
+	id2 := e.task(store.StateSubmitted, nil)
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id2.String(), N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	zombie2, err := e.log.BeginDispatch(ctx, id2, 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id2.String(), N: 2, PreviousOutcome: "upstream_unreachable"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamID(ctx, zombie2, "up-Z", ""); !errors.Is(err, store.ErrFenced) || !zombie2.Fenced() {
+		t.Errorf("SetFirstUpstreamID on an ended, superseded attempt: %v (fenced %v), want ErrFenced", err, zombie2.Fenced())
+	}
+	if a1, _ := e.log.GetAttempt(ctx, id2, 1); a1.UpstreamTaskID != "" || a1.Outcome != store.OutcomeUpstreamUnreachable {
+		t.Errorf("attempt 1 %+v", a1)
+	}
+	// A dispatch superseded by a newer dispatch of the same attempt is refused too.
+	id3 := e.task(store.StateSubmitted, nil)
+	if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id3.String(), N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := e.log.BeginDispatch(ctx, id3, 1, "r1")
+	if _, err := e.log.BeginDispatch(ctx, id3, 1, "r2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamID(ctx, old, "up-O", ""); !errors.Is(err, store.ErrFenced) {
+		t.Errorf("SetFirstUpstreamID by a superseded dispatch: %v, want ErrFenced", err)
+	}
+}
+
+// The old dispatch's SetFirstUpstreamID and the retry's prepare race for real: whichever commits first,
+// never both an attempt 1 with an upstream task id and an attempt 2 (spec §6.4, D77).
+func TestRetryAndFirstUpstreamIDRace(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	var refused, fenced int
+	for i := range 30 {
+		id := e.task(store.StateSubmitted, nil)
+		if _, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 1}); err != nil {
+			t.Fatal(err)
+		}
+		zombie, err := e.log.BeginDispatch(ctx, id, 1, "r1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		go func() {
+			<-start
+			errs <- e.log.SetFirstUpstreamID(ctx, zombie, fmt.Sprintf("up-%d", i), "")
+		}()
+		go func() {
+			<-start
+			_, err := e.acts.Prepare(ctx, PrepareInput{TaskID: id.String(), N: 2, PreviousOutcome: "upstream_unreachable"})
+			errs <- err
+		}()
+		close(start)
+		for range 2 {
+			switch err := <-errs; {
+			case err == nil:
+			case errors.Is(err, store.ErrFenced):
+				fenced++
+			case appType(err) == ErrTypeAttemptHasUpstream:
+				refused++
+			default:
+				t.Fatalf("run %d: %v", i, err)
+			}
+		}
+		a1, err := e.log.GetAttempt(ctx, id, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err2 := e.log.GetAttempt(ctx, id, 2)
+		if a1.UpstreamTaskID != "" && err2 == nil {
+			t.Fatalf("run %d: attempt 1 has upstream task %q and attempt 2 exists: the message is sent twice", i, a1.UpstreamTaskID)
+		}
+	}
+	if refused+fenced != 30 {
+		t.Errorf("%d refused retries + %d fenced dispatches, want one of them in each of 30 runs", refused, fenced)
+	}
+	t.Logf("%d retries refused, %d dispatches fenced", refused, fenced)
 }

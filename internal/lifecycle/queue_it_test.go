@@ -121,10 +121,11 @@ func (d *fakeDispatch) Dispatch(ctx context.Context, in DispatchInput) (Dispatch
 		}
 	}
 	if tr.state != "" {
-		if _, err := d.log.BeginDispatch(ctx, id, in.N, "it-replica"); err != nil {
+		fence, err := d.log.BeginDispatch(ctx, id, in.N, "it-replica")
+		if err != nil {
 			return DispatchResult{}, err
 		}
-		if err := d.log.SetFirstUpstreamID(ctx, id, in.N, "upstream-"+in.TaskID, "upctx"); err != nil {
+		if err := d.log.SetFirstUpstreamID(ctx, fence, "upstream-"+in.TaskID, "upctx"); err != nil {
 			return DispatchResult{}, err
 		}
 		if err := writeStatus(ctx, d.log, id, tr.state); err != nil {

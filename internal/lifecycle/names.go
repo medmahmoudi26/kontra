@@ -103,6 +103,10 @@ const (
 	// ErrTypeServiceUnavailable is prepare finding no backend for the task's service: failed:
 	// service_unavailable (spec §6.4).
 	ErrTypeServiceUnavailable = "ServiceUnavailable"
+	// ErrTypeAttemptHasUpstream is prepare refusing a retry (attempt n) because attempt n-1 records a first
+	// upstream task id: its lost dispatch recorded it after the workflow decided to retry (D77). The
+	// workflow reads attempt_state again and follows the attempt (spec §6.4), never sending the message again.
+	ErrTypeAttemptHasUpstream = "AttemptHasUpstream"
 	// ErrTypePatchRefused is apply_metadata refusing a patch over 16 KiB or with a key outside the §13.2
 	// rules: the patch is dropped (spec §13.3).
 	ErrTypePatchRefused = "PatchRefused"

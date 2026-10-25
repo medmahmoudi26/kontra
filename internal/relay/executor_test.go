@@ -638,9 +638,7 @@ func TestReattachGivesUp(t *testing.T) {
 	b, calls := scripted(t, func(_ string, _ json.RawMessage, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(502) })
 	e.backends.set(b, rpcInfo, nil)
 	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
-	if err := e.log.SetFirstUpstreamID(context.Background(), uid(t, id), 1, "up-gone", "up-ctx"); err != nil {
-		t.Fatal(err)
-	}
+	e.firstID(id, 1, "up-gone", "up-ctx")
 	if err := e.log.ConsumeWorkItem(context.Background(), wid, uid(t, id)); err != nil {
 		t.Fatal(err)
 	}
@@ -903,9 +901,7 @@ func TestForwardCancel(t *testing.T) {
 		})
 		e.backends.set(b2, rpcInfo, nil)
 		id2, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
-		if err := e.log.SetFirstUpstreamID(context.Background(), uid(t, id2), 1, "up-x", "c"); err != nil {
-			t.Fatal(err)
-		}
+		e.firstID(id2, 1, "up-x", "c")
 		res, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id2), N: 1})
 		if err != nil || res.Outcome != tc.outcome || res.UpstreamError == nil || res.UpstreamError.Code != tc.code ||
 			len(res.UpstreamError.Message) > upstream.MaxMessage+len("…") {

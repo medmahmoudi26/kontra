@@ -46,6 +46,9 @@ type ExecutorOptions struct {
 	// MaxPart is the largest part stored inline: without a bucket, an upstream part over it fails the
 	// task upstream_error (§10.4).
 	MaxPart int64
+	// RecordBackoff is the first wait before the attempt's first upstream task id is recorded again after
+	// the gate's store failed to record it, doubling to 5 s (recordFirst). 250 ms.
+	RecordBackoff time.Duration
 }
 
 func (o ExecutorOptions) withDefaults() ExecutorOptions {
@@ -69,6 +72,9 @@ func (o ExecutorOptions) withDefaults() ExecutorOptions {
 	}
 	if o.MaxPart <= 0 {
 		o.MaxPart = upstream.MaxPart
+	}
+	if o.RecordBackoff <= 0 {
+		o.RecordBackoff = 250 * time.Millisecond
 	}
 	return o
 }
@@ -958,20 +964,54 @@ func (r *run) endLogged() {
 	r.finish(nil, errTurnLogged)
 }
 
+// maxRecordBackoff caps recordFirst's wait between two attempts to record the first upstream task id.
+const maxRecordBackoff = 5 * time.Second
+
 // recordFirst records the attempt's first upstream task id and context id before the event that carried
-// them is logged (spec §4), and signals kontra.dispatched. It reports whether the turn may continue.
+// them is logged (spec §4), and signals kontra.dispatched. It reports whether the turn may continue. The
+// write is fenced (D77): a dispatch the workflow has given up on and retried or re-attached is refused, and
+// stops here without logging or signalling anything.
+//
+// The upstream has answered with its task id, so the upstream task exists. If the gate's store fails to
+// record it (a broken connection, the write's statement timeout, a failover), the dispatch still holds the
+// id in memory: handing the turn back to the workflow would make it read no first upstream id and retry,
+// sending the caller's message upstream a second time (§6.4 allows a retry only before the first upstream
+// task id). So while the dispatch lives (a2a-go's heartbeater keeps beating) it records the id again,
+// backing off from RecordBackoff to 5 s, until it is recorded or the dispatch ends: an abort, the task's
+// deadline, Temporal giving up on the activity. Only then is the turn handed back, which is the case of a
+// dispatch that died, where Postgres is the only record. An id the store refuses as data (a NUL character)
+// fails the task upstream_error: recording it again would only fail again.
 func (r *run) recordFirst(ctx context.Context, upTask a2a.TaskID, upCtx string) bool {
-	err := r.e.log.SetFirstUpstreamID(ctx, r.taskUUID, r.d.n, string(upTask), upCtx)
-	switch {
-	case errors.Is(err, store.ErrUpstreamIDMismatch):
-		r.fail(store.ReasonUpstreamError, "the service sent an event for another task")
-		return false
-	case err != nil:
-		// Not recorded, so not logged either: the workflow sees no first upstream id. The upstream task may
-		// exist; a retry would send the message again, which §6.4 forbids only once the id is recorded.
-		r.d.running.SetOutcome(lifecycle.DispatchContextLost, "")
-		r.finish(nil, fmt.Errorf("relay: record the first upstream task id: %w", err))
-		return false
+	wait := r.e.opts.RecordBackoff
+	for {
+		err := r.e.log.SetFirstUpstreamID(ctx, r.d.fence, string(upTask), upCtx)
+		switch {
+		case err == nil:
+		case errors.Is(err, store.ErrFenced):
+			r.logger.Info("the first upstream task id was refused: a newer dispatch or attempt holds the task")
+			r.finish(nil, err)
+			return false
+		case errors.Is(err, store.ErrUpstreamIDMismatch):
+			r.fail(store.ReasonUpstreamError, "the service sent an event for another task")
+			return false
+		case !storeFailure(err):
+			r.logger.Warn("the first upstream task id cannot be recorded", "error", err)
+			r.fail(store.ReasonUpstreamError, "the service sent a task id the gate cannot record")
+			return false
+		default:
+			r.logger.Warn("the first upstream task id could not be recorded; recording it again", "wait", wait, "error", err)
+			select {
+			case <-ctx.Done():
+				// The dispatch ends with the id unrecorded: an abort (§8), or a dispatch Temporal no longer
+				// waits for, which the workflow treats as lost.
+				r.finish(nil, fmt.Errorf("relay: record the first upstream task id: %w (%w)", context.Cause(ctx), err))
+				return false
+			case <-time.After(wait):
+			}
+			wait = min(2*wait, maxRecordBackoff)
+			continue
+		}
+		break
 	}
 	r.ids.UpstreamTaskID, r.ids.UpstreamContextID = upTask, upCtx
 	if r.e.signals != nil {

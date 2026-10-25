@@ -29,6 +29,12 @@ var (
 	// or it has ended (spec §4, §6.4).
 	ErrAttemptNotOpen = errors.New("store: attempt is not the task's open latest attempt")
 
+	// ErrAttemptHasUpstream is a retry (a new attempt n) refused because attempt n-1 records a first upstream
+	// task id: after it the agent's state is the agent's, and the attempt is re-attached to or fails, never
+	// sent the message again (spec §6.4). A lost dispatch that recorded the id after the workflow read
+	// attempt_state and decided to retry is the case (D77).
+	ErrAttemptHasUpstream = errors.New("store: the attempt has a first upstream task id; it is never retried")
+
 	// ErrUpstreamIDMismatch is a first upstream task id that differs from the one already recorded for the
 	// attempt (spec §4): the upstream named another task.
 	ErrUpstreamIDMismatch = errors.New("store: the attempt already records a different first upstream task id")

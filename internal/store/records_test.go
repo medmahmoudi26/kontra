@@ -240,7 +240,14 @@ func TestAttempts(t *testing.T) {
 	if _, err := e.log.GetAttempt(ctx, id, 2); !errors.Is(err, ErrAttemptNotFound) {
 		t.Errorf("a missing attempt: %v", err)
 	}
-	if err := e.log.SetFirstUpstreamID(ctx, id, 1, "up-1", "up-ctx-1"); err != nil {
+	fence, err := e.log.BeginDispatch(ctx, id, 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamID(ctx, nil, "up-1", "up-ctx-1"); err == nil {
+		t.Error("a first upstream id without a fence was accepted")
+	}
+	if err := e.log.SetFirstUpstreamID(ctx, fence, "up-1", "up-ctx-1"); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := e.log.GetAttempt(ctx, id, 1)
@@ -249,16 +256,16 @@ func TestAttempts(t *testing.T) {
 	}
 	firstAt := *a.FirstUpstreamIDAt
 	time.Sleep(10 * time.Millisecond)
-	if err := e.log.SetFirstUpstreamID(ctx, id, 1, "up-1", "up-ctx-other"); err != nil {
+	if err := e.log.SetFirstUpstreamID(ctx, fence, "up-1", "up-ctx-other"); err != nil {
 		t.Errorf("the same id again: %v", err)
 	}
-	if err := e.log.SetFirstUpstreamID(ctx, id, 1, "up-2", "up-ctx-1"); !errors.Is(err, ErrUpstreamIDMismatch) {
+	if err := e.log.SetFirstUpstreamID(ctx, fence, "up-2", "up-ctx-1"); !errors.Is(err, ErrUpstreamIDMismatch) {
 		t.Errorf("a different id: %v", err)
 	}
 	if a, _ := e.log.GetAttempt(ctx, id, 1); a.UpstreamTaskID != "up-1" || a.UpstreamContextID != "up-ctx-1" || !a.FirstUpstreamIDAt.Equal(firstAt) {
 		t.Errorf("the no-op changed the attempt: %+v", a)
 	}
-	if err := e.log.SetFirstUpstreamID(ctx, id, 9, "up-1", ""); !errors.Is(err, ErrAttemptNotFound) {
+	if err := e.log.SetFirstUpstreamID(ctx, &Fence{TaskID: id, N: 9, DispatchID: fence.DispatchID}, "up-1", ""); !errors.Is(err, ErrAttemptNotFound) {
 		t.Errorf("an unknown attempt: %v", err)
 	}
 	if err := e.log.EndAttempt(ctx, id, 1, OutcomeCompleted); err != nil {
@@ -274,11 +281,32 @@ func TestAttempts(t *testing.T) {
 	if err := e.log.EndAttempt(ctx, id, 1, "bogus"); err == nil {
 		t.Error("an unknown outcome")
 	}
-	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 2, Backend: BackendDirect}); err != nil {
+	// An attempt with a first upstream task id is never retried (spec §6.4).
+	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 2, Backend: BackendDirect}); !errors.Is(err, ErrAttemptHasUpstream) {
+		t.Errorf("attempt 2 after attempt 1's first upstream id: %v", err)
+	}
+	if l, _ := e.log.LatestAttempt(ctx, id); l.N != 1 {
+		t.Errorf("latest attempt %d", l.N)
+	}
+	// A retry before it ends the previous attempt (with the given outcome, once) and is idempotent.
+	retried := e.newTask(e.svc, buyerA, "c9", "q9")
+	rid := uid(t, retried.ID)
+	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: rid, N: 1, Backend: BackendDirect}); err != nil {
 		t.Fatal(err)
 	}
-	if l, _ := e.log.LatestAttempt(ctx, id); l.N != 2 {
+	for range 2 {
+		if err := e.log.BeginRetry(ctx, Attempt{TaskID: rid, N: 2, Backend: BackendDirect}, OutcomeUpstreamUnreachable); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if a, _ := e.log.GetAttempt(ctx, rid, 1); a.EndedAt == nil || a.Outcome != OutcomeUpstreamUnreachable {
+		t.Errorf("attempt 1 after the retry %+v", a)
+	}
+	if l, _ := e.log.LatestAttempt(ctx, rid); l.N != 2 {
 		t.Errorf("latest attempt %d", l.N)
+	}
+	if err := e.log.BeginRetry(ctx, Attempt{TaskID: rid, N: 3, Backend: BackendDirect}, "bogus"); err == nil {
+		t.Error("an unknown outcome for the previous attempt")
 	}
 
 	// The upstream context of a gate context is reused only within the caller's own scope (spec §4, D53).
@@ -287,7 +315,9 @@ func TestAttempts(t *testing.T) {
 	}
 	later := e.newTask(e.svc, buyerA, "c1", "q2")
 	_ = e.log.BeginAttempt(ctx, Attempt{TaskID: uid(t, later.ID), N: 1, Backend: BackendDirect})
-	_ = e.log.SetFirstUpstreamID(ctx, uid(t, later.ID), 1, "up-3", "up-ctx-3")
+	if lf, err := e.log.BeginDispatch(ctx, uid(t, later.ID), 1, "r1"); err == nil {
+		_ = e.log.SetFirstUpstreamID(ctx, lf, "up-3", "up-ctx-3")
+	}
 	if p, _ := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendDirect); p.UpstreamContextID != "up-ctx-3" {
 		t.Errorf("A's latest upstream context %q", p.UpstreamContextID)
 	}

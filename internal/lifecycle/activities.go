@@ -99,8 +99,14 @@ func parseTask(taskID string) (uuid.UUID, error) {
 
 // Prepare picks the backend (spec §6.1; direct in M1), ends the previous attempt when its dispatch was
 // lost (PreviousOutcome), writes attempt N and returns the queue to dispatch on and the stored deadline.
-// It is retried, so every write is idempotent: BeginAttempt accepts an attempt that already exists with
-// the same backend, and EndAttempt keeps an attempt's first outcome.
+// It is retried, so every write is idempotent: BeginRetry accepts an attempt that already exists with the
+// same backend, and ends an open previous attempt only once.
+//
+// A retry (N > 1) is refused, ErrTypeAttemptHasUpstream, when attempt N-1 records a first upstream task id:
+// a dispatch Temporal timed out but whose process is still alive (D77) can record it after the workflow
+// read attempt_state and decided to retry. Ending N-1 and writing N happen in one transaction with that
+// check, so the old dispatch either recorded its id first (and the retry is refused) or is fenced from
+// recording it (spec §6.4: a retry is only ever made before the first upstream task id).
 func (a *LifecycleActivities) Prepare(ctx context.Context, in PrepareInput) (PrepareResult, error) {
 	id, err := parseTask(in.TaskID)
 	if err != nil {
@@ -126,16 +132,16 @@ func (a *LifecycleActivities) Prepare(ctx context.Context, in PrepareInput) (Pre
 		// Tunnel sessions (spec §6.1's candidate query, no_session) are M2.
 		return PrepareResult{}, nonRetryable(ErrTypeServiceUnavailable, fmt.Errorf("service %s: backend %q is not served by this gate yet", row.Service, backend))
 	}
-	if in.N > 1 && in.PreviousOutcome != "" {
-		o := store.Outcome(in.PreviousOutcome)
-		if !o.Valid() {
-			o = store.OutcomeFailed
-		}
-		if err := a.Log.EndAttempt(ctx, id, in.N-1, o); err != nil && !errors.Is(err, store.ErrAttemptNotFound) {
-			return PrepareResult{}, err
-		}
+	o := store.Outcome(in.PreviousOutcome)
+	if o != "" && !o.Valid() {
+		o = store.OutcomeFailed
 	}
-	if err := a.Log.BeginAttempt(ctx, store.Attempt{TaskID: id, N: in.N, Backend: backend}); err != nil {
+	err = a.Log.BeginRetry(ctx, store.Attempt{TaskID: id, N: in.N, Backend: backend}, o)
+	if errors.Is(err, store.ErrAttemptHasUpstream) {
+		return PrepareResult{}, nonRetryable(ErrTypeAttemptHasUpstream,
+			fmt.Errorf("attempt %d of task %s has a first upstream task id: it is not retried", in.N-1, id))
+	}
+	if err != nil {
 		return PrepareResult{}, taskGone(err)
 	}
 	res := PrepareResult{Queue: QueueDirect, Backend: string(backend)}

@@ -28,10 +28,22 @@ const upWorking = `{"id":"up-1","contextId":"up-ctx","status":{"state":"TASK_STA
 // lost its context: the upstream id is recorded and the turn's work item consumed.
 func (e *env) reattachable(id a2a.TaskID, wid uuid.UUID) {
 	e.t.Helper()
-	if err := e.log.SetFirstUpstreamID(context.Background(), uid(e.t, id), 1, "up-1", "up-ctx"); err != nil {
+	e.firstID(id, 1, "up-1", "up-ctx")
+	if err := e.log.ConsumeWorkItem(context.Background(), wid, uid(e.t, id)); err != nil {
 		e.t.Fatal(err)
 	}
-	if err := e.log.ConsumeWorkItem(context.Background(), wid, uid(e.t, id)); err != nil {
+}
+
+// firstID records upstream as attempt n's first upstream task id, as a dispatch of the attempt does: under
+// the fence of a dispatch begun for it (SetFirstUpstreamID is fenced, D77).
+func (e *env) firstID(id a2a.TaskID, n int, upstream, upstreamCtx string) {
+	e.t.Helper()
+	ctx := context.Background()
+	fence, err := e.log.BeginDispatch(ctx, uid(e.t, id), n, "test-replica")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamID(ctx, fence, upstream, upstreamCtx); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -407,5 +419,148 @@ func TestStoreFailureIsALostContext(t *testing.T) {
 				t.Errorf("after the re-attach: %s %v, %d sends", p.Status.State, parts, agent.sends.Load())
 			}
 		})
+	}
+}
+
+// A dispatch that Temporal timed out but whose process is still alive (D77): the workflow read
+// attempt_state (no first upstream id), decided to retry and prepared attempt 2 while the old dispatch's
+// SendMessage was in flight. When the upstream then answers, the old dispatch's first upstream id is
+// refused (SetFirstUpstreamID is fenced): it logs nothing and signals nothing, and attempt 1 keeps no
+// upstream id, so the retry is the only send the gate follows (spec §6.4: a retry is only ever made before
+// the first upstream task id).
+func TestStaleDispatchFirstIDIsFenced(t *testing.T) {
+	e := newEnv(t, envOptions{})
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	sent, answer := make(chan struct{}), make(chan struct{})
+	b, _ := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+		if method != "SendMessage" {
+			rpcResult(w, rid, `"result":`+upWorking)
+			return
+		}
+		close(sent)
+		<-answer
+		rpcResult(w, rid, `"result":{"task":`+upWorking+`}`)
+	})
+	e.backends.set(b, rpcInfo, nil)
+	done := make(chan lifecycle.DispatchResult, 1)
+	go func() { done <- e.dispatch(context.Background(), id, 1, wid, false) }()
+	<-sent
+	// prepare(2): the retry ends attempt 1 and writes attempt 2 in one transaction.
+	if err := e.log.BeginRetry(context.Background(), store.Attempt{TaskID: uid(t, id), N: 2, Backend: store.BackendDirect},
+		store.OutcomeUpstreamUnreachable); err != nil {
+		t.Fatal(err)
+	}
+	close(answer)
+	var res lifecycle.DispatchResult
+	select {
+	case res = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the stale dispatch did not stop")
+	}
+	if res.Outcome != lifecycle.DispatchContextLost {
+		t.Errorf("outcome %s, want context_lost (superseded)", res.Outcome)
+	}
+	if a := e.attempt(id, 1); a.UpstreamTaskID != "" || a.FirstUpstreamIDAt != nil || a.Outcome != store.OutcomeUpstreamUnreachable {
+		t.Errorf("attempt 1 %+v: the stale dispatch recorded its upstream id on an ended attempt", a)
+	}
+	if got := e.states(id); len(got) != 1 {
+		t.Errorf("log %v: the stale dispatch logged the upstream's answer", got)
+	}
+	if n := e.signals.count(); n != 0 {
+		t.Errorf("%d kontra.dispatched signals from a fenced dispatch", n)
+	}
+}
+
+// failFirstIDWrites makes the next n writes of an attempt's first upstream task id fail on the server as a
+// statement timeout does (SQLSTATE 57014): a sequence, not a table, counts them, because a failed write's
+// transaction rolls back everything it wrote.
+func (e *env) failFirstIDWrites(n int) {
+	e.t.Helper()
+	e.exec(`create sequence kontra.zz_fail_first_id`)
+	e.exec(fmt.Sprintf(`create function kontra.zz_fail_first_id() returns trigger language plpgsql as $$
+		begin
+			if nextval('kontra.zz_fail_first_id') <= %d then
+				raise exception 'simulated statement timeout' using errcode = '57014';
+			end if;
+			return new;
+		end $$`, n))
+	e.exec(`create trigger zz_fail_first_id before update on kontra.attempts for each row
+		when (old.upstream_task_id is null and new.upstream_task_id is not null) execute function kontra.zz_fail_first_id()`)
+}
+
+// The upstream answered with its task id and the gate's store failed to record it (a statement timeout).
+// The dispatch knows the id, so it records it again, backing off, instead of handing the turn back as a lost
+// context, which the workflow would retry by sending the caller's message upstream a second time (spec
+// §6.4: retries only before the first upstream task id).
+func TestFirstIDRecordedAgainAfterAStoreFailure(t *testing.T) {
+	e := newEnv(t, envOptions{opts: ExecutorOptions{RecordBackoff: 20 * time.Millisecond}})
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	const done = `{"id":"up-1","contextId":"up-ctx","status":{"state":"TASK_STATE_COMPLETED","message":{"messageId":"m1","role":"ROLE_AGENT","parts":[{"text":"ok"}]}}}`
+	var sends atomic.Int64
+	b, _ := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+		if method == "SendMessage" {
+			sends.Add(1)
+			rpcResult(w, rid, `"result":{"task":`+done+`}`)
+			return
+		}
+		rpcResult(w, rid, `"result":`+done)
+	})
+	e.backends.set(b, rpcInfo, nil)
+	e.failFirstIDWrites(2)
+	res := e.dispatch(context.Background(), id, 1, wid, false)
+	if res.Outcome != lifecycle.DispatchTerminal {
+		t.Errorf("outcome %+v, want terminal: the turn was handed back with its upstream task unrecorded", res)
+	}
+	if a := e.attempt(id, 1); a.UpstreamTaskID != "up-1" || a.FirstUpstreamIDAt == nil {
+		t.Errorf("attempt 1 %+v, want up-1 recorded", a)
+	}
+	if row := e.row(id); row.State != store.StateCompleted {
+		t.Errorf("state %s", row.State)
+	}
+	if n := sends.Load(); n != 1 {
+		t.Errorf("%d sends", n)
+	}
+	if n := e.signals.count(); n != 1 {
+		t.Errorf("%d kontra.dispatched signals", n)
+	}
+}
+
+// An abort while the first upstream task id cannot be recorded ends the dispatch: it does not wait for the
+// store forever.
+func TestFirstIDRecordingStopsAtAbort(t *testing.T) {
+	e := newEnv(t, envOptions{opts: ExecutorOptions{RecordBackoff: 20 * time.Millisecond}})
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	b, _ := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+		rpcResult(w, rid, `"result":{"task":`+upWorking+`}`)
+	})
+	e.backends.set(b, rpcInfo, nil)
+	e.failFirstIDWrites(1 << 30)
+	done := make(chan lifecycle.DispatchResult, 1)
+	go func() { done <- e.dispatch(context.Background(), id, 1, wid, false) }()
+	time.Sleep(300 * time.Millisecond)
+	if err := e.disp.Abort(context.Background(), lifecycle.AttemptRef{TaskID: string(id), N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-done:
+		if res.Outcome != lifecycle.DispatchAborted {
+			t.Errorf("outcome %+v, want aborted", res)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the dispatch did not stop at the abort")
+	}
+}
+
+// An upstream task id the store refuses as data (U+0000) fails the task upstream_error at once.
+func TestFirstIDTheStoreRefusesFails(t *testing.T) {
+	e := newEnv(t, envOptions{opts: ExecutorOptions{RecordBackoff: 20 * time.Millisecond}})
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	b, _ := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
+		rpcResult(w, rid, `"result":{"task":{"id":"up\u0000x","contextId":"c","status":{"state":"TASK_STATE_WORKING"}}}`)
+	})
+	e.backends.set(b, rpcInfo, nil)
+	res := e.dispatch(context.Background(), id, 1, wid, false)
+	if p := projection(t, e, id); res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "upstream_error" {
+		t.Errorf("outcome %+v, task %s %v", res, p.Status.State, p.Metadata)
 	}
 }
