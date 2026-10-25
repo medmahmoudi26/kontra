@@ -11,8 +11,6 @@ package hooks
 import (
 	"context"
 	"errors"
-
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
 )
 
 // Operation is what an Admission is asked about.
@@ -192,30 +190,32 @@ type (
 
 // BuiltinLifecycle is open source's Lifecycle: no-op activities registered on kontra-lifecycle under
 // the same type names a remote operator serves, so switching changes only the queue (spec §13.3).
-// OnTerminal is therefore the last hook that fires in open source.
+// OnTerminal is therefore the last hook that fires in open source. The workflow schedules every hook with
+// two arguments, (TaskRef, args), as a remote worker receives them; a built-in whose args are empty takes
+// only the TaskRef (the Go SDK ignores a trailing argument a function does not declare).
 type BuiltinLifecycle struct{}
 
-// OnDispatched is a no-op.
+// OnDispatched is a no-op; its result is null.
 func (BuiltinLifecycle) OnDispatched(ctx context.Context, t TaskRef, args DispatchedArgs) error {
-	return unimpl.Error("hooks.BuiltinLifecycle.OnDispatched", "WP-05")
+	return nil
 }
 
 // OnTerminal returns an empty patch.
 func (BuiltinLifecycle) OnTerminal(ctx context.Context, t TaskRef) (Patch, error) {
-	return Patch{}, unimpl.Error("hooks.BuiltinLifecycle.OnTerminal", "WP-05")
+	return Patch{}, nil
 }
 
-// ReviewWindow answers {open: false}.
+// ReviewWindow answers {open: false}: no review window opens in open source.
 func (BuiltinLifecycle) ReviewWindow(ctx context.Context, t TaskRef) (ReviewWindow, error) {
-	return ReviewWindow{}, unimpl.Error("hooks.BuiltinLifecycle.ReviewWindow", "WP-05")
+	return ReviewWindow{Open: false}, nil
 }
 
-// OnReviewMessage refuses (no window opens in open source).
+// OnReviewMessage refuses: no window opens in open source, so a message offered anyway is not accepted.
 func (BuiltinLifecycle) OnReviewMessage(ctx context.Context, t TaskRef, args ReviewMessageArgs) (ReviewMessageResult, error) {
-	return ReviewMessageResult{}, unimpl.Error("hooks.BuiltinLifecycle.OnReviewMessage", "WP-05")
+	return ReviewMessageResult{Accept: false}, nil
 }
 
 // OnReviewClosed returns an empty patch.
 func (BuiltinLifecycle) OnReviewClosed(ctx context.Context, t TaskRef, args ReviewClosedArgs) (Patch, error) {
-	return Patch{}, unimpl.Error("hooks.BuiltinLifecycle.OnReviewClosed", "WP-05")
+	return Patch{}, nil
 }

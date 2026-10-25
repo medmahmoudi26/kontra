@@ -13,11 +13,25 @@ type Input struct {
 	TimeoutSeconds int64         `json:"timeoutSeconds"`
 	Retries        int           `json:"retries"`
 	Hooks          HooksSnapshot `json:"hooks"`
+	// QuoteExpiresAt is set for a task created quoted (spec §13.2): the workflow waits for kontra.approval
+	// until then. Nil for a task created submitted.
+	QuoteExpiresAt *time.Time `json:"quoteExpiresAt,omitempty"`
 }
 
 // HooksSnapshot is the hook configuration in force when the task started (spec §13.3, D46).
 type HooksSnapshot struct {
 	LifecycleQueue string `json:"lifecycleQueue"` // QueueLifecycle when built in
+	// OperatorPrefixes are operator_metadata_prefixes (spec §13.2): the kontra.approval and kontra.annotate
+	// validators refuse metadata keys outside them (and kontra.keyRetainUntil) without reading config.
+	OperatorPrefixes []string `json:"operatorPrefixes,omitempty"`
+}
+
+// hooksQueue is the queue the Lifecycle hooks are scheduled on.
+func (h HooksSnapshot) hooksQueue() string {
+	if h.LifecycleQueue == "" {
+		return QueueLifecycle
+	}
+	return h.LifecycleQueue
 }
 
 // Update and signal payloads (spec §14.1).
@@ -101,6 +115,15 @@ type (
 		TaskID string `json:"taskId"`
 		N      int    `json:"n"`
 	}
+	// PrepareInput is prepare's input: attempt N to create, and, when the dispatch of attempt N-1 was lost
+	// (a heartbeat or schedule-to-start timeout, a lost context) so that no dispatch could end it, the
+	// outcome prepare records on attempt N-1 if it is still open (spec §4: a failure that is retried ends
+	// its attempt).
+	PrepareInput struct {
+		TaskID          string `json:"taskId"`
+		N               int    `json:"n"`
+		PreviousOutcome string `json:"previousOutcome,omitempty"`
+	}
 	// PrepareResult is prepare's result.
 	PrepareResult struct {
 		Queue     string    `json:"queue"`               // QueueDirect, or QueueTunnel(replica) in M2
@@ -132,24 +155,55 @@ type (
 		UpstreamError *UpstreamError `json:"upstreamError,omitempty"`
 		UpstreamState string         `json:"upstreamState,omitempty"`
 	}
-	// AttemptState is attempt_state's result, read from Postgres.
+	// AttemptState is attempt_state's result, read from Postgres: the attempt (when N > 0) and the task's
+	// state, so the cancel table and the retry table decide on what Postgres recorded.
 	AttemptState struct {
-		Backend           string     `json:"backend"`
+		Backend           string     `json:"backend,omitempty"`
 		ReplicaID         string     `json:"replicaId,omitempty"`
 		FirstUpstreamIDAt *time.Time `json:"firstUpstreamIdAt,omitempty"`
+		Ended             bool       `json:"ended,omitempty"`
+		TaskState         string     `json:"taskState"`
 	}
-	// WriteTerminalInput is write_terminal's input.
+	// WriteTerminalInput is write_terminal's input. Text is the gate's own text (a reason's default when
+	// empty), never service content.
 	WriteTerminalInput struct {
 		TaskID   string `json:"taskId"`
 		State    string `json:"state"`
 		Reason   string `json:"reason,omitempty"`
 		Canceled string `json:"canceled,omitempty"`
 		Text     string `json:"text"`
+		// EndAttempt, when set, ends the task's latest attempt if it is still open, with this outcome; when
+		// the task was waiting at input-required, the outcome is interrupted instead (D77).
+		EndAttempt string `json:"endAttempt,omitempty"`
 	}
-	// ApplyMetadataInput is apply_metadata's input: the patch itself, ≤ 16 KiB (D59).
+	// TerminalResult is write_terminal's result: the terminal row's seq and the task's terminal state,
+	// which is another one when the task had already ended (the write is then left undone).
+	TerminalResult struct {
+		Seq   int64  `json:"seq"`
+		State string `json:"state"`
+	}
+	// ApplyMetadataInput is apply_metadata's input: the patch itself, ≤ 16 KiB (D59). Source names who
+	// wrote it (a hook, kontra.annotate, kontra.approval) for the audit row of a refused patch.
 	ApplyMetadataInput struct {
 		TaskID string      `json:"taskId"`
 		Patch  hooks.Patch `json:"patch"`
+		Source string      `json:"source,omitempty"`
+	}
+	// SubmitInput is submit's input: the approval handler's submitted write (spec §13.2, §14.1). The
+	// approval's metadata crosses history as an operator patch (D59).
+	SubmitInput struct {
+		TaskID         string         `json:"taskId"`
+		Metadata       map[string]any `json:"metadata,omitempty"`
+		TimeoutSeconds int64          `json:"timeoutSeconds"`
+	}
+	// SubmitResult is submit's result: tasks.deadline, fixed by the store at the transition (spec §5.2).
+	SubmitResult struct {
+		Deadline time.Time `json:"deadline"`
+	}
+	// ReviewAppendInput is append_review_message's input (spec §14.1, D66).
+	ReviewAppendInput struct {
+		TaskID     string `json:"taskId"`
+		WorkItemID string `json:"workItemId"`
 	}
 	// PushInput is push_webhook's input.
 	PushInput struct {

@@ -64,6 +64,14 @@ const (
 	ActApplyMetadata   = "apply_metadata"
 	ActPushWebhook     = "push_webhook"
 
+	// Lifecycle-queue activities the §14.2 table does not list, each the I/O of a step the spec names:
+	// task_ref builds the hooks' TaskRef from Postgres (§13.3), submit is the approval handler's submitted
+	// write that returns the deadline (§13.2, §14.1), and append_review_message is kontra.review_message's
+	// append that consumes the work item in the same transaction (§14.1, D66).
+	ActTaskRef             = "task_ref"
+	ActSubmit              = "submit"
+	ActAppendReviewMessage = "append_review_message"
+
 	HookOnDispatched    = "kontra.lifecycle.OnDispatched"
 	HookOnTerminal      = "kontra.lifecycle.OnTerminal"
 	HookReviewWindow    = "kontra.lifecycle.ReviewWindow"
@@ -74,3 +82,27 @@ const (
 // MaxTurns caps the turns of one task (each is about 11 history events; Temporal allows 2,000 Updates per
 // run): the 1,001st fails upstream_error (spec §14.1). v4 needs no continue-as-new.
 const MaxTurns = 1000
+
+// MaxResumes caps the successive resume dispatches of one attempt (D42): when an 11th would be needed, the
+// task fails upstream_error, "re-attach limit reached" (spec §6.4).
+const MaxResumes = 10
+
+// Application error types the workflow, its Update handlers and its activities use; Client maps them back.
+const (
+	// ErrTypeRefused is a validator's refusal of kontra.message, kontra.review_message, kontra.approval or
+	// kontra.annotate: the caller gets UnsupportedOperationError (spec §7).
+	ErrTypeRefused = "Refused"
+	// ErrTypeNotCancelable is kontra.cancel on a task that has ended: TaskNotCancelableError (spec §8).
+	ErrTypeNotCancelable = "NotCancelable"
+	// ErrTypeTaskGone is an activity that found no task row: the workflow ends without writing anything.
+	ErrTypeTaskGone = "TaskGone"
+	// ErrTypeServiceUnavailable is prepare finding no backend for the task's service: failed:
+	// service_unavailable (spec §6.4).
+	ErrTypeServiceUnavailable = "ServiceUnavailable"
+	// ErrTypePatchRefused is apply_metadata refusing a patch over 16 KiB or with a key outside the §13.2
+	// rules: the patch is dropped (spec §13.3).
+	ErrTypePatchRefused = "PatchRefused"
+	// ErrTypeWorkItemGone is append_review_message finding the work item missing, another task's, or
+	// consumed by a dispatch: accepted: false (D66).
+	ErrTypeWorkItemGone = "WorkItemGone"
+)
