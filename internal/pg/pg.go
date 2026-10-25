@@ -4,16 +4,20 @@
 // Every connection sets TCP_USER_TIMEOUT and keepalives client-side and asks the server for the same
 // (pg-store brief §5.3), so a silent failover ends in about 20 s. The LISTEN connection is never a pooled
 // connection (a LISTEN on a pooled connection outlives its release) and never runs a transaction.
+//
+// Connections must be session-mode (no PgBouncer transaction pooling): LISTEN and the migration lock are
+// session state.
 package pg
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"strings"
+	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
 )
 
 // Channel is a NOTIFY channel the gate listens on.
@@ -30,47 +34,80 @@ const (
 	ChannelRevoke Channel = "kontra_revoke"
 )
 
-// NewPool returns the gate's connection pool for a postgres:// URL, with the connection bounds above.
+// Channels is every channel the LISTEN connection listens on.
+var Channels = []Channel{ChannelTaskEvents, ChannelServices, ChannelRevoke}
+
+// Connection bounds (pg-store brief §5.3; the kontra-cloud operations doc): a peer that stops answering
+// is given up after TCPUserTimeout of unacknowledged data, or after keepalives fail for
+// KeepAliveIdle + KeepAliveCount × KeepAliveInterval of silence; both are about 20 s.
+const (
+	TCPUserTimeout    = 20 * time.Second
+	KeepAliveIdle     = 5 * time.Second
+	KeepAliveInterval = 5 * time.Second
+	KeepAliveCount    = 3
+	// ConnectTimeout bounds dialing and the startup handshake when the URL sets no connect_timeout.
+	ConnectTimeout = 10 * time.Second
+	// DefaultMaxConns is the pool size when the URL sets no pool_max_conns (pgx's own default is
+	// max(4, NumCPU), too small for a replica with thousands of dispatch slots).
+	DefaultMaxConns = 20
+	// ApplicationName is reported in pg_stat_activity when the URL sets none.
+	ApplicationName = "kontra-gate"
+)
+
+// ParseConfig parses a postgres:// URL into a connection config with the connection bounds applied:
+// the client-side dialer (TCP_USER_TIMEOUT, keepalives, a connect timeout) and the server-side startup
+// parameters tcp_user_timeout and tcp_keepalives_* (values in the URL win).
+func ParseConfig(dsn string) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	applyBounds(cfg)
+	return cfg, nil
+}
+
+func applyBounds(cfg *pgx.ConnConfig) {
+	if cfg.ConnectTimeout == 0 {
+		cfg.ConnectTimeout = ConnectTimeout
+	}
+	d := &net.Dialer{
+		Timeout: cfg.ConnectTimeout,
+		KeepAliveConfig: net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     KeepAliveIdle,
+			Interval: KeepAliveInterval,
+			Count:    KeepAliveCount,
+		},
+		Control: setTCPUserTimeout,
+	}
+	cfg.DialFunc = d.DialContext
+	if cfg.RuntimeParams == nil {
+		cfg.RuntimeParams = map[string]string{}
+	}
+	for k, v := range map[string]string{
+		"tcp_user_timeout":        fmt.Sprint(TCPUserTimeout.Milliseconds()),
+		"tcp_keepalives_idle":     fmt.Sprint(int(KeepAliveIdle.Seconds())),
+		"tcp_keepalives_interval": fmt.Sprint(int(KeepAliveInterval.Seconds())),
+		"tcp_keepalives_count":    fmt.Sprint(KeepAliveCount),
+		"application_name":        ApplicationName,
+	} {
+		if _, set := cfg.RuntimeParams[k]; !set {
+			cfg.RuntimeParams[k] = v
+		}
+	}
+}
+
+// NewPool returns the gate's connection pool for a postgres:// URL, with the connection bounds above
+// and at most DefaultMaxConns connections unless the URL sets pool_max_conns. It does not wait for a
+// connection: the first query does (call Ping to check).
 func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
-	return nil, unimpl.Error("pg.NewPool", "WP-01")
-}
-
-// Listener holds the replica's LISTEN connection and fans notifications out without blocking.
-type Listener struct {
-	cfg *pgx.ConnConfig
-}
-
-// NewListener returns a listener for the database cfg names. Run must be called for it to deliver.
-func NewListener(cfg *pgx.ConnConfig) *Listener {
-	return &Listener{cfg: cfg}
-}
-
-// Run connects, LISTENs on every Channel and delivers until ctx ends. It reconnects with a jittered
-// 100 ms to 5 s backoff, and after every (re)connect wakes every waiter and runs every OnReconnect
-// callback, because notifications sent during the gap are lost. A wait without notifications times out
-// after about 25 s, runs `select 1`, and wakes every waiter for a safety re-read.
-func (l *Listener) Run(ctx context.Context) error {
-	return unimpl.Error("pg.Listener.Run", "WP-01")
-}
-
-// WaitTask returns a channel that receives when a kontra_task_events notification for taskID arrives or
-// the listener reconnects, and a func that releases the registration. Waiters re-read task_events: the
-// notification only says "look again".
-func (l *Listener) WaitTask(ctx context.Context, taskID uuid.UUID) (<-chan struct{}, func()) {
-	panic(unimpl.Error("pg.Listener.WaitTask", "WP-01"))
-}
-
-// OnChannel registers fn for every notification on ch (services and revocations).
-func (l *Listener) OnChannel(ch Channel, fn func(payload string)) {
-	panic(unimpl.Error("pg.Listener.OnChannel", "WP-01"))
-}
-
-// OnReconnect registers fn to run after every (re)connect, e.g. the revocation cache's catch-up read.
-func (l *Listener) OnReconnect(fn func()) {
-	panic(unimpl.Error("pg.Listener.OnReconnect", "WP-01"))
-}
-
-// Healthy reports whether the LISTEN connection is up (part of /healthz, spec §2.1).
-func (l *Listener) Healthy() bool {
-	return false
+	pc, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	applyBounds(pc.ConnConfig)
+	if !strings.Contains(dsn, "pool_max_conns") {
+		pc.MaxConns = DefaultMaxConns
+	}
+	return pgxpool.NewWithConfig(ctx, pc)
 }
