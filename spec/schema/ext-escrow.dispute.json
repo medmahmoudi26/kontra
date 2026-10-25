@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kontra.sh/schema/ext/escrow/v1/dispute.json",
+  "title": "Escrow dispute: a buyer's message metadata inside the review window (caller_metadata, ext-escrow.md §5)",
+  "type": "object",
+  "required": [
+    "kontra.escrow.dispute"
+  ],
+  "properties": {
+    "kontra.escrow.dispute": {
+      "type": "object",
+      "required": [
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{"operation": "task", "taskId": "0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11",
+ "service": {"tenantId": "0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d00", "tenant": "acme", "name": "summarize", "kind": "a2a"},
+ "principal": {"kind": "key", "id": "key:kk_ab12", "buyerId": "0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d22", "via": "api_key"},
+ "protocol": "a2a", "extensions": ["https://kontra.sh/ext/escrow/v1"], "contextId": "ctx-1",
+ "message": {"messageId": "m-1", "parts": [{"mediaType": "text/plain", "size": 12, "sealed": false}]}}

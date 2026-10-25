@@ -1,0 +1,499 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kontra.sh/schema/hooks/v1.json",
+  "title": "Remote hook payloads (spec/relay.md §13): Admission over HTTPS, Lifecycle as Temporal activities. JSON, camelCase keys, durations in integer seconds.",
+  "$defs": {
+    "service": {
+      "type": "object",
+      "required": [
+        "tenantId",
+        "tenant",
+        "name",
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tenantId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "a2a",
+            "mcp"
+          ]
+        }
+      }
+    },
+    "principal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "buyerId",
+        "via"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "key",
+            "oidc",
+            "node",
+            "anonymous"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "buyerId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "tenantId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "via": {
+          "enum": [
+            "api_key",
+            "oidc",
+            "mcp",
+            "node",
+            "anonymous"
+          ]
+        }
+      }
+    },
+    "admitRequest": {
+      "type": "object",
+      "required": [
+        "operation",
+        "service",
+        "principal",
+        "protocol"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "enum": [
+            "task",
+            "session",
+            "call"
+          ]
+        },
+        "taskId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "service": {
+          "$ref": "#/$defs/service"
+        },
+        "principal": {
+          "$ref": "#/$defs/principal"
+        },
+        "protocol": {
+          "enum": [
+            "a2a",
+            "mcp"
+          ]
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "contextId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "object",
+          "required": [
+            "messageId",
+            "parts"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "messageId": {
+              "type": "string"
+            },
+            "metadata": {
+              "type": "object"
+            },
+            "parts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "size",
+                  "sealed"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "mediaType": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sealed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "const": "task"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "taskId"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "const": "call"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tool"
+            ]
+          }
+        }
+      ]
+    },
+    "decision": {
+      "type": "object",
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "enum": [
+            "allow",
+            "deny",
+            "quote"
+          ]
+        },
+        "refusal": {
+          "type": "object",
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "integer"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "quote": {
+          "type": "object",
+          "required": [
+            "approveUrl",
+            "expiresAt"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "approveUrl": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://"
+            },
+            "expiresAt": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "mcpMeta": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^sh\\.kontra/"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "deny"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "refusal"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "quote"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "quote"
+            ]
+          }
+        }
+      ]
+    },
+    "taskRef": {
+      "type": "object",
+      "required": [
+        "taskId",
+        "tenantId",
+        "service",
+        "kind",
+        "protocol",
+        "buyerId",
+        "principal",
+        "via",
+        "contextId",
+        "state"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "tenantId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "service": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "a2a",
+            "mcp"
+          ]
+        },
+        "protocol": {
+          "enum": [
+            "a2a",
+            "mcp"
+          ]
+        },
+        "buyerId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "via": {
+          "enum": [
+            "api_key",
+            "oidc",
+            "mcp",
+            "node",
+            "anonymous"
+          ]
+        },
+        "contextId": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "quoted",
+            "submitted",
+            "working",
+            "input-required",
+            "auth-required",
+            "completed",
+            "failed",
+            "canceled",
+            "rejected"
+          ]
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Only the operator-written keys (operator_metadata_prefixes), at most 16 KiB; never caller or service metadata"
+        }
+      }
+    },
+    "patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "metadata": {
+          "type": "object"
+        },
+        "mcpMeta": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^sh\\.kontra/"
+          }
+        },
+        "holdOpenSeconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "reviewWindow": {
+      "type": "object",
+      "required": [
+        "open"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "open": {
+          "type": "boolean"
+        },
+        "seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "required": [
+        "accepted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "mcpMeta": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^sh\\.kontra/"
+          }
+        }
+      }
+    },
+    "annotate": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Payload of the kontra.annotate Update and signal (relay.md §13.2)",
+      "properties": {
+        "metadata": {
+          "type": "object"
+        },
+        "mcpMeta": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^sh\\.kontra/"
+          }
+        }
+      }
+    },
+    "dispatchedArgs": {
+      "type": "object",
+      "required": [
+        "attempt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "reviewMessageArgs": {
+      "type": "object",
+      "required": [
+        "workItemId",
+        "messageId",
+        "metadata"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workItemId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "messageId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Only the message's caller_metadata keys (relay.md §2.5), at most 16 KiB"
+        }
+      }
+    },
+    "reviewMessageResult": {
+      "type": "object",
+      "required": [
+        "accept",
+        "dispute"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "accept": {
+          "type": "boolean"
+        },
+        "dispute": {
+          "type": "boolean"
+        },
+        "patch": {
+          "$ref": "#/$defs/patch"
+        }
+      }
+    },
+    "reviewClosedArgs": {
+      "type": "object",
+      "required": [
+        "disputed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "disputed": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

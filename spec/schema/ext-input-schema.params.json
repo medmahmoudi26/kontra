@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kontra.sh/schema/ext/input-schema/v1/params.json",
+  "title": "Input schema extension params (https://kontra.sh/ext/input-schema/v1)",
+  "type": "object",
+  "required": ["schema"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "object" },
+    "mediaType": { "type": "string", "default": "application/json" }
+  }
+}

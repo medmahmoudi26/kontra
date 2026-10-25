@@ -17,7 +17,8 @@ that deploys and configures this one; nothing here imports from it.
 
 ## Status
 
-Specification stage. `docs/` is the current design; code lands against it. Read in this order:
+Specification stage (M0). `docs/` is the design; `spec/` is the protocol specification written from it;
+code lands against both. Read in this order:
 
 1. [`docs/prd-v4.md`](docs/prd-v4.md) — the v4 PRD (21 Oct 2026). The relay, data model,
    security model, milestones and acceptance tests.
@@ -27,19 +28,33 @@ Specification stage. `docs/` is the current design; code lands against it. Read 
 3. [`docs/architecture/02-deployment-topology.html`](docs/architecture/02-deployment-topology.html)
    — one CLI on the user's machine, gates as clusters, `kontra dev` removed. Supersedes PRD §10
    (embedded Temporal), §11 (`kontra dev`), §14 M4, §15 demo.
+4. [`spec/`](spec/) — [`tunnel.md`](spec/tunnel.md), [`relay.md`](spec/relay.md) and the three
+   extensions ([`ext-escrow.md`](spec/ext-escrow.md), [`ext-sealed.md`](spec/ext-sealed.md),
+   [`ext-input-schema.md`](spec/ext-input-schema.md)), with [`migrations/0001_init.sql`](migrations/0001_init.sql).
+   Every place they depart from the documents above is numbered in [`docs/decisions.md`](docs/decisions.md).
 
 Where a note and the PRD disagree, the later document wins; `docs/README.md` has the section map.
 
-## Five minutes
+## Five minutes (the M4 target)
 
 ```sh
 brew install kontra
-a2a serve --exec 'echo Hello World' --port 9999         # or your own agent, in docker or not
-kontra connect --serve a2a:hello=http://localhost:9999   # --gate defaults to gateway.kontra.sh
-a2a send http://localhost:7777/agents/anon-7f3a/hello "hi"
+brew tap a2aproject/a2a-cli https://github.com/a2aproject/a2a-cli && brew install a2a   # a2a-cli v0.3.1
+a2a server --exec 'echo Hello World' --port 9999        # or your own agent, in docker or not
+kontra connect --serve a2a:hello=http://localhost:9999 \
+               --serve 'mcp:fs=stdio:npx -y @modelcontextprotocol/server-filesystem@1.0.0 ~/docs'
+#  → anonymous session · https://gateway.kontra.sh/agents/anon-7f3a/hello · expires in 2 h
+#  → console http://localhost:7778
+a2a send -a http://localhost:7777/agents/anon-7f3a/hello "hi"
+#  → Hello World · visible in History on :7778, hosted and hired from the same laptop
 ```
 
-An MCP server is `--serve mcp:name=http://localhost:8000` or `--serve mcp:name=stdio:<command>`.
+`--gate` defaults to `gateway.kontra.sh`. Any stock MCP client reaches the filesystem server through the
+same gate: `{ "mcpServers": { "fs": { "url": "http://localhost:7777/mcp/anon-7f3a/fs" } } }`.
+An MCP server over HTTP is `--serve mcp:name=http://localhost:8000`.
+
+A team gate is the same image on your own VPS: `docker compose up` with `compose.yaml`
+(lands in M4), then `kontra connect --gate https://gate.team.internal …`.
 
 ## Layout (planned)
 
@@ -47,11 +62,13 @@ An MCP server is `--serve mcp:name=http://localhost:8000` or `--serve mcp:name=s
 cmd/kontra/        the CLI: connect, console, login, seal, publish
 cmd/kontra-gate/   the gate: serve, enroll, migrate
 internal/          relay, tunnel, store (Postgres), lifecycle (Temporal), sealing
-spec/              ext-escrow.md, ext-sealed.md, ext-input-schema.md, tunnel.md, relay.md
+spec/              tunnel.md, relay.md, ext-escrow.md, ext-sealed.md, ext-input-schema.md, schema/
+migrations/        0001_init.sql (the gate's Postgres schema)
 charts/kontra/     Helm chart for a team gate
 compose.yaml       three containers for a team gate on one VPS
 compose.dev.yaml   Temporal + Postgres for working on the gate itself
-examples/          sellers/ (a2a serve --exec, synapse, ADK, claude CLI), front/ (caddy, ingress)
+examples/          sellers/ (a2a server --exec, helloworld, booking, tck, temporal-harness, ADK, claude CLI),
+                   mcp/ (filesystem over stdio, everything), front/ (caddy, agentgateway, ingress)
 ```
 
 Apache-2.0.

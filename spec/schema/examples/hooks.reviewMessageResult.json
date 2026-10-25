@@ -1,0 +1,1 @@
+{"accept": true, "dispute": true, "patch": {"metadata": {"kontra.escrow.status": "disputed"}, "mcpMeta": {"sh.kontra/escrow": {"status": "disputed"}}}}

@@ -1,0 +1,2 @@
+{"kontra.escrow.status": "released", "kontra.escrow.quote": {"amount": "15.00", "currency": "EUR"}, "kontra.escrow.holdId": "hold_01", "kontra.escrow.reviewEndsAt": "2026-10-26T10:00:00Z",
+ "kontra.escrow.receipts": [{"event": "held", "rail": "stripe", "ref": "pi_123", "at": "2026-10-25T09:00:00Z"}, {"event": "released", "rail": "stripe", "ref": "tr_456", "at": "2026-10-26T10:00:01Z"}]}

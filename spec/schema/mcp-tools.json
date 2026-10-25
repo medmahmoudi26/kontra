@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kontra.sh/schema/mcp/tools/v1.json",
+  "title": "Input schemas of the gate's own MCP tools (spec/relay.md §12.2)",
+  "$defs": {
+    "part": {
+      "type": "object",
+      "description": "An A2A 1.0 Part: exactly one of text, raw (base64), url, data; plus optional filename, mediaType, metadata.",
+      "oneOf": [ { "required": ["text"] }, { "required": ["raw"] }, { "required": ["url"] }, { "required": ["data"] } ],
+      "properties": {
+        "text": { "type": "string" }, "raw": { "type": "string", "contentEncoding": "base64" },
+        "url": { "type": "string", "format": "uri" }, "data": {},
+        "filename": { "type": "string" }, "mediaType": { "type": "string" }, "metadata": { "type": "object" }
+      }
+    },
+    "message": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "object", "required": ["parts"], "additionalProperties": false,
+          "properties": { "parts": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/part" } } } }
+      ]
+    },
+    "search": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "query": { "type": "string", "maxLength": 256 }, "kind": { "enum": ["a2a", "mcp"] },
+                      "price": { "type": "string", "maxLength": 32 }, "cursor": { "type": "string" } }
+    },
+    "describe": {
+      "type": "object", "required": ["service"], "additionalProperties": false,
+      "properties": { "service": { "type": "string", "pattern": "^([a-z0-9-]+/)?[a-z0-9-]+$" } }
+    },
+    "hire": {
+      "type": "object", "required": ["service", "message"], "additionalProperties": false,
+      "properties": { "service": { "type": "string", "pattern": "^([a-z0-9-]+/)?[a-z0-9-]+$" },
+                      "message": { "$ref": "#/$defs/message" }, "contextId": { "type": "string", "maxLength": 256 } }
+    },
+    "reply": {
+      "type": "object", "required": ["taskId", "message"], "additionalProperties": false,
+      "properties": { "taskId": { "type": "string", "format": "uuid" }, "message": { "$ref": "#/$defs/message" } }
+    }
+  }
+}

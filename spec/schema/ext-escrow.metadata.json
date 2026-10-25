@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kontra.sh/schema/ext/escrow/v1/metadata.json",
+  "title": "Escrow task metadata, written by the operator's hooks only",
+  "type": "object",
+  "properties": {
+    "kontra.escrow.status": {
+      "enum": [
+        "held",
+        "released",
+        "refunded",
+        "disputed",
+        "resolved"
+      ]
+    },
+    "kontra.escrow.quote": {
+      "$ref": "https://kontra.sh/schema/ext/escrow/v1/params.json#/$defs/money"
+    },
+    "kontra.escrow.holdId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "kontra.escrow.reviewEndsAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "kontra.escrow.receipts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "event",
+          "rail",
+          "ref",
+          "at"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "enum": [
+              "held",
+              "released",
+              "refunded",
+              "disputed",
+              "resolved",
+              "chargeback"
+            ]
+          },
+          "rail": {
+            "type": "string",
+            "enum": [
+              "stripe"
+            ]
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "kontra.approve.url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "kontra.keyRetainUntil": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

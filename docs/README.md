@@ -9,6 +9,16 @@ the two architecture notes correct it after the prototypes of 21–24 October 20
 | [`architecture/01-tunnel-and-protocols.html`](architecture/01-tunnel-and-protocols.html) | 24 Oct | **One node type**: no buyer sidecar and no seller sidecar, one `kontra connect` that hosts and hires. **Membership is which gate you dial.** One identity key per node, enrolled per gate, plus per-job keys. **MCP servers tunnel next to A2A agents**: `/mcp/{name}`, session affinity for plain calls, the same `TaskLifecycle` for task-augmented calls (MCP Tasks, 2025-11-25). Per-tool allow lists. No Kontra wire protocol; standard bindings only. `services:` replaces `agents:`. |
 | [`architecture/02-deployment-topology.html`](architecture/02-deployment-topology.html) | 24 Oct | **Only the CLI runs on a user's machine.** Gates are clusters: `gateway.kontra.sh` (Cloud) or a team's own (Helm or a three-container compose). `kontra dev` is deleted; anonymous ephemeral sessions on the public gate are how people try it. One Go module, two binaries: `kontra` and `kontra-gate`. |
 
+## Specifications (M0, 25 Oct)
+
+The specifications in [`../spec/`](../spec/) are written from the three documents above and are later
+than all of them: [`tunnel.md`](../spec/tunnel.md), [`relay.md`](../spec/relay.md),
+[`ext-escrow.md`](../spec/ext-escrow.md), [`ext-sealed.md`](../spec/ext-sealed.md),
+[`ext-input-schema.md`](../spec/ext-input-schema.md), and the schema
+[`../migrations/0001_init.sql`](../migrations/0001_init.sql). Where a spec differs from a document, the
+spec wins once the owner has signed it, and the difference is a numbered entry in
+[`decisions.md`](decisions.md) with its reason and evidence.
+
 ## Section map: what the notes change in the PRD
 
 | PRD section | Note 1 (tunnel and protocols) | Note 2 (deployment) |
