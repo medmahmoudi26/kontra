@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"text/tabwriter"
@@ -24,11 +25,13 @@ import (
 
 	"github.com/pressly/goose/v3"
 
+	"github.com/medmahmoudi26/kontra/internal/auth"
 	"github.com/medmahmoudi26/kontra/internal/config"
 	"github.com/medmahmoudi26/kontra/internal/gate"
 	"github.com/medmahmoudi26/kontra/internal/migrate"
 	"github.com/medmahmoudi26/kontra/internal/obs"
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
+	"github.com/medmahmoudi26/kontra/internal/pg"
+	"github.com/medmahmoudi26/kontra/internal/tenant"
 	"github.com/medmahmoudi26/kontra/internal/version"
 )
 
@@ -68,7 +71,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		defer stop()
 		return migrateCmd(ctx, args[1:], stdout)
 	case "enroll":
-		return enroll(args[1:], stdout)
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+		defer stop()
+		return enroll(ctx, args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, version.String("kontra-gate"))
 		return nil
@@ -257,27 +262,106 @@ func printResult(w io.Writer, r *goose.MigrationResult) {
 	fmt.Fprintf(w, "%s %s %s (%s)\n", state, r.Direction, filepath.Base(r.Source.Path), r.Duration.Round(time.Millisecond))
 }
 
-func enroll(args []string, stdout io.Writer) error {
+// enroll mints an API key (`--api-key <name>`, M1) and prints it alone on stdout, so
+// KONTRA_API_KEY="$(kontra-gate enroll -f kontra.yaml --api-key demo)" works; what was minted is said on
+// stderr. The key goes to the team tenant, created when it does not exist yet (the README order is
+// migrate, enroll, serve), in the transaction that also appends its audit row. Service enrollment tokens
+// and node-key revocation are the tunnel's (M2).
+func enroll(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	file := fs.String("f", "kontra.yaml", "configuration file")
 	apiKey := fs.String("api-key", "", "mint an API key with this name and print it once")
-	prefix := fs.String("prefix", "", "operator-chosen part of the key prefix, for key: globs")
+	prefix := fs.String("prefix", "", "operator prefix of the key, 1-16 [a-z0-9], so key: globs can name a group (key:kk_<prefix>_*)")
 	revoke := fs.String("revoke", "", "revoke a node key (M2)")
 	var scopes multiFlag
-	fs.Var(&scopes, "scope", "API key scope (repeatable; default hire)")
+	fs.Var(&scopes, "scope", "API key scope: hire (default), enroll:<service> or enroll:* (repeatable)")
 	if err := fs.Parse(args); err != nil {
-		return usageError{err.Error()}
+		return usageError{"enroll: " + err.Error()}
 	}
-	_, _ = file, prefix
 	switch {
+	case *apiKey != "" && (*revoke != "" || fs.NArg() > 0):
+		return usageError{"enroll: --api-key mints a key; it takes no service and no --revoke"}
 	case *apiKey != "":
-		return unimpl.Error("kontra-gate enroll --api-key", "WP-03")
+		return enrollAPIKey(ctx, *file, *apiKey, *prefix, scopes, stdout, stderr)
+	case *prefix != "" || len(scopes) > 0:
+		return usageError{"enroll: --prefix and --scope go with --api-key <name>"}
 	case *revoke != "" || fs.NArg() > 0:
 		// Service enrollment tokens and node-key revocation belong to the tunnel (spec/tunnel.md §5, §12).
 		fmt.Fprintln(stdout, "kontra-gate enroll <service> and --revoke: not until M2 (the tunnel, spec/tunnel.md §5)")
 		return nil
 	}
 	return usageError{"enroll: want --api-key <name>, <service> or --revoke <key_id>"}
+}
+
+func enrollAPIKey(ctx context.Context, file, name, prefix string, scopeArgs []string, stdout, stderr io.Writer) error {
+	if err := auth.CheckKeyName(name); err != nil {
+		return usageError{"enroll: --api-key: " + err.Error()}
+	}
+	if prefix != "" {
+		if err := auth.CheckOperatorPrefix(prefix); err != nil {
+			return usageError{"enroll: --prefix: " + err.Error()}
+		}
+	}
+	var scopes []auth.Scope
+	for _, s := range scopeArgs {
+		sc, err := auth.ParseScope(s)
+		if err != nil {
+			return usageError{"enroll: --scope: " + err.Error()}
+		}
+		scopes = append(scopes, sc)
+	}
+	cfg, err := config.Load(file)
+	if err != nil {
+		return err
+	}
+	if cfg.Tenancy != config.TenancySingle {
+		return errors.New("enroll --api-key mints keys for a team gate's one tenant; a multi-tenant gate's operator writes its own keys (D37)")
+	}
+	if !cfg.Auth.APIKeys {
+		fmt.Fprintln(stderr, "warning: auth.api_keys is not true in "+file+": this gate refuses API keys until it is")
+	}
+	m, err := migrate.Open(ctx, cfg.Postgres)
+	if err != nil {
+		return err
+	}
+	err = m.Check(ctx)
+	m.Close()
+	if errors.Is(err, migrate.ErrSchemaNotCurrent) {
+		return fmt.Errorf("%w: run kontra-gate migrate -f %s first", err, file)
+	}
+	if err != nil {
+		return err
+	}
+	pool, err := pg.NewPool(ctx, cfg.Postgres)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	tenantID, err := tenant.EnsureTeam(ctx, pool)
+	if err != nil {
+		return err
+	}
+	minted, err := auth.NewAPIKeys(pool, nil).Mint(ctx, auth.MintRequest{
+		TenantID: tenantID,
+		Name:     name,
+		Scopes:   scopes,
+		Prefix:   prefix,
+		Actor:    "kontra-gate enroll --api-key",
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, minted.Secret); err != nil {
+		return err
+	}
+	shown := make([]string, len(minted.Scopes))
+	for i, s := range minted.Scopes {
+		shown[i] = string(s)
+	}
+	fmt.Fprintf(stderr, "minted API key %q: principal %s, tenant %s, buyer %s, scopes %s; the key is shown once\n",
+		name, minted.Principal(), tenant.TeamSlug, minted.BuyerID, strings.Join(shown, ","))
+	return nil
 }
 
 type multiFlag []string
