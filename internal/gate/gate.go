@@ -259,7 +259,7 @@ func (r *Replica) assemble() error {
 	authn := auth.NewAuthenticator(r.keys) // nil keys: every bearer credential is refused (auth.api_keys false)
 	r.lifecycle = lifecycle.NewClient(r.temporal)
 
-	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate}
+	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate, Resolver: pushResolver(log)}
 	pushStore := push.NewConfigStore(r.pool, r.lifecycle, policy, log)
 	rules := hooks.KeyRules{OperatorPrefixes: cfg.OperatorMetadataPrefixes, CallerMetadata: cfg.CallerMetadata}
 	hookQueue := lifecycle.QueueLifecycle

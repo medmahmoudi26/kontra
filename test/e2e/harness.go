@@ -203,7 +203,9 @@ func gateBinary() (string, error) {
 			return
 		}
 		gateBin = filepath.Join(dir, "kontra-gate")
-		cmd := exec.Command("go", "build", "-o", gateBin, "kontra.sh/kontra/cmd/kontra-gate")
+		// The kontra_e2e tag lets the gate resolve PrivateHost from KONTRA_E2E_HOSTS (internal/gate's
+		// e2e_hosts.go); a release is built without it.
+		cmd := exec.Command("go", "build", "-tags", "kontra_e2e", "-o", gateBin, "kontra.sh/kontra/cmd/kontra-gate")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			buildErr = fmt.Errorf("e2e: build kontra-gate: %v\n%s", err, out)
 		}
@@ -382,8 +384,16 @@ func procAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 }
 
+// PrivateHost is a name every gate of the harness resolves to PrivateAddr when it checks a push URL
+// (KONTRA_E2E_HOSTS, honoured by the kontra_e2e build only): ssrf_webhook's "a name resolving to a private
+// address" (spec §16, D80), on any machine. .invalid never resolves anywhere else.
+const (
+	PrivateHost = "webhook.private.e2e.invalid"
+	PrivateAddr = "10.0.0.1"
+)
+
 func (h *Harness) env() []string {
-	return append(os.Environ(), RunEnv+"="+h.run)
+	return append(os.Environ(), RunEnv+"="+h.run, "KONTRA_E2E_HOSTS="+PrivateHost+"="+PrivateAddr)
 }
 
 // gateCommand runs a short kontra-gate command and returns its combined output.

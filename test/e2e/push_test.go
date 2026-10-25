@@ -1,14 +1,12 @@
 package e2e
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -414,49 +412,10 @@ func TestPushFailedRestart(t *testing.T) {
 	}
 }
 
-// privateName finds a host name this machine resolves only to private addresses (RFC 1918, or ULA
-// fc00::/7) from /etc/hosts: "a name resolving to a private address" of ssrf_webhook. Loopback names do not
-// count: they repeat the localhost row. ok is false when /etc/hosts has no such name (stock CI runners map
-// only loopback names); the package tests of internal/ssrf cover a name resolving to 10.0.0.0/8 with a
-// resolver of their own.
-func privateName(t *testing.T, ctx context.Context) (name string, addr netip.Addr, ok bool) {
-	t.Helper()
-	f, err := os.Open("/etc/hosts")
-	if err != nil {
-		return "", netip.Addr{}, false
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		fields := strings.Fields(strings.SplitN(sc.Text(), "#", 2)[0])
-		if len(fields) < 2 {
-			continue
-		}
-		for _, name := range fields[1:] {
-			if name == "localhost" || strings.HasSuffix(name, ".localhost") {
-				continue
-			}
-			addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", name)
-			if err != nil || len(addrs) == 0 {
-				continue
-			}
-			private := true
-			for _, a := range addrs {
-				if !a.Unmap().IsPrivate() {
-					private = false
-				}
-			}
-			if private {
-				return name, addrs[0].Unmap(), true
-			}
-		}
-	}
-	return "", netip.Addr{}, false
-}
-
 // TestSSRFWebhook is ssrf_webhook (spec/relay.md §10.3, §16; D60, D67). Without push.allow_private, push URLs
 // naming 169.254.169.254, 10.0.0.1, localhost, [::ffff:10.0.0.1], 64:ff9b::a00:1 or a name resolving to a
-// private address (when /etc/hosts has one: privateName) (all https, so the address rule refuses them), and
+// private address (PrivateHost, which every gate of the harness resolves to 10.0.0.1) (all https, so the
+// address rule refuses them), and
 // an http:// URL (refused without allow_private), are refused when set (InvalidParams): by
 // CreateTaskPushNotificationConfig on JSON-RPC and on HTTP+JSON, and inline with SendMessage on both, before
 // any connection and before any row. With push.allow_private (loopback webhooks), a redirecting URL is accepted
@@ -481,22 +440,15 @@ func TestSSRFWebhook(t *testing.T) {
 			"https://[64:ff9b::a00:1]/hook",
 			"http://93.184.215.14/hook", // a public address, but http:// without allow_private
 		}
-		// A name resolving to a private address, with a webhook on it when this machine holds the address,
-		// to see that nothing connects.
-		var priv *webhook
-		if name, addr, ok := privateName(t, ctx); ok {
-			port := "443"
-			if l, err := net.Listen("tcp", net.JoinHostPort(addr.String(), "0")); err == nil {
-				l.Close()
-				priv = newWebhook(t, addr.String())
-				priv.start(t)
-				_, port, _ = net.SplitHostPort(priv.addr)
+		// A name resolving to a private address: the gates resolve PrivateHost to 10.0.0.1 (KONTRA_E2E_HOSTS,
+		// the kontra_e2e build), so the row runs on every machine. A gate that did not install the name would
+		// refuse it as a name that does not resolve, with the same answer: its log must say it resolves it.
+		for _, g := range h.Gates {
+			if b, err := os.ReadFile(g.LogPath); err != nil || !strings.Contains(string(b), "e2e hosts: push URLs resolve these names to fixed addresses") {
+				t.Fatalf("gate %s does not resolve %s from KONTRA_E2E_HOSTS (%v): the private-name row cannot run", g.Name, PrivateHost, err)
 			}
-			urls = append(urls, "https://"+net.JoinHostPort(name, port)+"/hook")
-			t.Logf("the private name is %s (%s)", name, addr)
-		} else {
-			t.Logf("no name in /etc/hosts resolves only to an RFC 1918 or ULA address here: the private-name row is skipped (internal/ssrf covers it with its own resolver)")
 		}
+		urls = append(urls, "https://"+PrivateHost+"/hook")
 		var tasksBefore int
 		if err := h.Pool.QueryRow(ctx, `select count(*) from kontra.tasks`).Scan(&tasksBefore); err != nil {
 			t.Fatal(err)
@@ -536,9 +488,6 @@ func TestSSRFWebhook(t *testing.T) {
 		}
 		if lo.connections() != 0 {
 			t.Fatalf("a refused URL was connected to: localhost %d", lo.connections())
-		}
-		if priv != nil && priv.connections() != 0 {
-			t.Fatalf("a refused URL was connected to: the private name's address %d", priv.connections())
 		}
 		if n := h.Upstream.Sends(); n != 1 {
 			t.Fatalf("the upstream received %d sends, want only the first task's", n)
