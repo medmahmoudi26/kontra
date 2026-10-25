@@ -121,7 +121,9 @@ const (
 	CancelContinues CancelOutcome = "continues"
 )
 
-// UpstreamError is an upstream's JSON-RPC error, relayed to the caller of a cancel (spec §8).
+// UpstreamError is an upstream's JSON-RPC error, relayed to the caller of a cancel (spec §8). It crosses
+// Temporal history, so Message is the gate's own words, or empty (the caller then gets the gate's text for
+// the code): the service's text never crosses history (spec §14, D59).
 type UpstreamError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`

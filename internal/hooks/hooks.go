@@ -141,6 +141,14 @@ func AdmittedFrom(ctx context.Context) (Admitted, bool) {
 }
 
 // TaskRef is hooks.json#/$defs/taskRef, built by the activity from Postgres, never carried in history.
+//
+// SPEC-CONFLICT: spec §14 and D59 say that caller content never crosses Temporal history ("the one
+// caller-authored value that crosses history is a review-window message's caller_metadata keys"), while
+// §13.3 and spec/schema/hooks.json put contextId in every TaskRef (the gate context id, the caller's verbatim
+// when it chose one, up to 256 characters), and a hook's input is in history; so does a review message's
+// messageId (§13.3's OnReviewMessage args, §14.1's kontra.review_message). Both are kept as the hook
+// contract names them: replacing them (a hash) would change the contract the operator's hooks are written
+// against. The proposal: D59 lists these two caller-chosen identifiers explicitly.
 type TaskRef struct {
 	TaskID    string         `json:"taskId"`
 	TenantID  string         `json:"tenantId"`

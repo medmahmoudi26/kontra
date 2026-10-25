@@ -391,8 +391,9 @@ func cancelAnswer(t *a2a.Task) lifecycle.ForwardCancelResult {
 // ForwardCancel implements lifecycle.DispatchActivities: CancelTask upstream on the attempt's upstream
 // task, returning the upstream's answer (a canceled status is logged by the running dispatch, or by the
 // workflow through write_terminal for an input-required task; any other state the upstream answers is not
-// a cancel, cancelAnswer). The upstream's error text crosses Temporal history only as a capped message
-// (upstream.MaxMessage).
+// a cancel, cancelAnswer). Its result and its error cross Temporal history, so they carry the outcome, the
+// upstream's JSON-RPC code and the gate's own words, never the service's text (spec §14, D59: service
+// content never crosses history); the service's message is logged here, on the replica.
 func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef) (lifecycle.ForwardCancelResult, error) {
 	taskUUID, err := ids.ParseTaskID(in.TaskID)
 	if err != nil {
@@ -428,13 +429,20 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 		return cancelAnswer(t), nil
 	}
 	f := upstream.Classify(cctx, err, ex)
+	log := d.logger().With(obs.Task(in.TaskID, in.N)...)
 	var a2aErr *a2a.Error
 	if f.Class != upstream.Protocol || !errors.As(err, &a2aErr) {
-		// Not an answer from the service (unreachable, throttled, over a limit): the cancel was not
-		// delivered, and the workflow decides (§8).
-		return lifecycle.ForwardCancelResult{}, fmt.Errorf("relay: forward_cancel of task %s: %s", in.TaskID, f.Message)
+		// Not an answer from the service (unreachable, throttled, over a limit, malformed): the cancel was
+		// not delivered, and the workflow decides (§8).
+		log.Info("forward_cancel got no answer from the service", "class", int(f.Class), "error", f.Message)
+		msg := f.Message // the gate's words: unreachable, HTTP status, over a limit
+		if f.Class == upstream.Protocol {
+			msg = "the service sent a malformed answer"
+		}
+		return lifecycle.ForwardCancelResult{}, fmt.Errorf("relay: forward_cancel of task %s: %s", in.TaskID, msg)
 	}
-	ue := &lifecycle.UpstreamError{Code: codeForError(err), Message: upstream.Cap(a2aErr.Error())}
+	log.Info("the service refused the cancel", "code", codeForError(err), "error", upstream.Cap(a2aErr.Error()))
+	ue := &lifecycle.UpstreamError{Code: codeForError(err)}
 	if errors.Is(err, a2a.ErrTaskNotCancelable) {
 		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelNotCancelable, UpstreamError: ue}, nil
 	}

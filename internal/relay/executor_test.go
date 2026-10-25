@@ -1012,9 +1012,12 @@ func TestForwardCancel(t *testing.T) {
 		id2, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
 		e.firstID(id2, 1, "up-x", "c")
 		res, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id2), N: 1})
-		if err != nil || res.Outcome != tc.outcome || res.UpstreamError == nil || res.UpstreamError.Code != tc.code ||
-			len(res.UpstreamError.Message) > upstream.MaxMessage+len("…") {
+		if err != nil || res.Outcome != tc.outcome || res.UpstreamError == nil || res.UpstreamError.Code != tc.code {
 			t.Errorf("%+v %v", res, err)
+		}
+		// The result crosses Temporal history: the code, never the service's text (spec §14, D59).
+		if js, _ := json.Marshal(res); strings.Contains(string(js), "too late") || strings.Contains(string(js), "not supported") || res.UpstreamError.Message != "" {
+			t.Errorf("forward_cancel's result carries the service's text: %s", js)
 		}
 		if row := e.row(id2); row.State != store.StateSubmitted {
 			t.Errorf("the task changed: %s", row.State)
