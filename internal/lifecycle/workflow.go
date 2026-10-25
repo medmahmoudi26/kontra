@@ -38,6 +38,11 @@ const (
 	listBudget                = 5 * time.Minute
 )
 
+// cancelWriteMargin is what a cancel keeps of its 60 s (CancelWait) for the gate's own write after it stops
+// waiting for the dispatch to log the upstream's canceled status: attempt_state and write_terminal, each
+// 10 s at most when they fail, and the margin between the caller's wait and the workflow's clock.
+const cancelWriteMargin = 15 * time.Second
+
 // Behaviour changes behind workflow.GetVersion (spec §14.4, D46). A history recorded before a change
 // replays with workflow.DefaultVersion and keeps the earlier behaviour.
 const (
@@ -56,6 +61,10 @@ const (
 	// attempt as a lost dispatch's (re-attach, or tunnel_lost) instead of treating the refusal as the
 	// deadline. And a kontra.dispatched for an attempt older than the current one runs no OnDispatched.
 	changeFencedRetry = "fenced-retry"
+	// changeCancelMargin: a cancel whose forward_cancel answered canceled waits for the running dispatch to
+	// log it for CancelWait minus cancelWriteMargin, not the whole CancelWait, so the gate's own canceled
+	// write lands inside the caller's 60 s (D79).
+	changeCancelMargin = "cancel-margin"
 	// changeCancelAnswer: a forward_cancel answered canceled whose upstream state is not canceled (a
 	// replica that did not yet tell them apart) is taken for what the upstream said: not_cancelable for
 	// another terminal state, continues otherwise; the workflow writes canceled only for the upstream's
@@ -1236,8 +1245,14 @@ func (l *lc) cancelDispatching(ctx workflow.Context, c *call) {
 		l.finish(op, unreachable(), nil)
 	case r.Outcome == CancelCanceled:
 		// The running dispatch logs the upstream's canceled status as the terminal event; the cancel
-		// completes once it is in the log, within its 60 s (D79).
-		if remaining := CancelWait - workflow.Now(ctx).Sub(op.started); remaining > 0 {
+		// completes once it is in the log, within its 60 s (D79). When the dispatch does not, the gate writes
+		// it, and that write must land inside the caller's own 60 s wait (Client.Cancel), which started with
+		// the Update's acceptance: the wait for the dispatch ends cancelWriteMargin early.
+		wait := CancelWait
+		if workflow.GetVersion(ctx, changeCancelMargin, workflow.DefaultVersion, 1) >= 1 {
+			wait -= cancelWriteMargin
+		}
+		if remaining := wait - workflow.Now(ctx).Sub(op.started); remaining > 0 {
 			_, _ = workflow.AwaitWithTimeout(ctx, remaining, func() bool { return c.done })
 		}
 		if st3, ok := l.attemptState(ctx); !ok {

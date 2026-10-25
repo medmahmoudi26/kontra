@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/activity"
 	tlog "go.temporal.io/sdk/log"
@@ -1825,5 +1826,54 @@ func TestCancelAnsweredWithARunningTaskContinues(t *testing.T) {
 				t.Errorf("hooks %v", s.hookCalls)
 			}
 		})
+	}
+}
+
+// D79: a cancel completes once the terminal canceled event is in the log, within its 60 s. When
+// forward_cancel answers canceled and the running dispatch never logs the upstream's canceled status, the
+// workflow writes it itself; that write and the Update's completion land inside the caller's own 60 s wait
+// (Client.Cancel, counted from the acceptance), which the wait for the dispatch would otherwise use up.
+func TestCancelCanceledWriteLandsInsideTheCallersWait(t *testing.T) {
+	w := newWorld(t)
+	w.firstID[1] = true
+	w.forwardFn = func(context.Context, int, string) (ForwardCancelResult, error) {
+		return ForwardCancelResult{Outcome: CancelCanceled, UpstreamState: "TASK_STATE_CANCELED"}, nil
+	}
+	env := w.env()
+	// The dispatch runs on and never logs the canceled status (its stream stalled).
+	env.OnActivity(ActDispatch, mock.Anything, mock.Anything).Return(DispatchResult{Outcome: DispatchTerminal}, nil).After(time.Hour)
+	u := newUpdates()
+	var mu sync.Mutex
+	var sent, completed time.Time
+	var res any
+	env.RegisterDelayedCallback(func() {
+		mu.Lock()
+		sent = env.Now()
+		mu.Unlock()
+		env.UpdateWorkflow(UpdateCancel, "c1", &testsuite.TestUpdateCallback{
+			OnAccept: func() {},
+			OnReject: func(err error) { t.Errorf("cancel rejected: %v", err) },
+			OnComplete: func(r any, err error) {
+				mu.Lock()
+				completed, res = env.Now(), r
+				mu.Unlock()
+			},
+		}, CancelUpdate{})
+	}, time.Second)
+	start(env, u, input(2))
+	done(t, env)
+	mu.Lock()
+	defer mu.Unlock()
+	if completed.IsZero() {
+		t.Fatal("the cancel never completed")
+	}
+	if took := completed.Sub(sent); took > CancelWait-5*time.Second {
+		t.Errorf("the cancel completed %v after it was sent: past the caller's %v wait (less a margin)", took, CancelWait)
+	}
+	if r, ok := res.(CancelResult); !ok || r.Outcome != CancelCanceled {
+		t.Errorf("cancel result %+v", res)
+	}
+	if s := w.snapshot(); len(s.terminals) != 1 || s.terminals[0].State != string(store.StateCanceled) {
+		t.Errorf("terminal writes %+v, want the gate's canceled", s.terminals)
 	}
 }
