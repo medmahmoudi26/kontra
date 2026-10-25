@@ -25,7 +25,8 @@ import (
 // from a trusted proxy are exempt from conns_per_ip (every one carries the proxy's address). With
 // proxy_protocol, a connection from a trusted peer is counted under the source address of its PROXY
 // header, read on the connection's first use, never in Accept (a slow peer would stall every other).
-// A connection over a cap is closed at once, before any byte is read.
+// A connection over a cap is closed at once, before any byte is read. An IPv6 client address is counted by
+// its /64 (countKey).
 type capListener struct {
 	net.Listener
 	maxConns      int
@@ -36,7 +37,7 @@ type capListener struct {
 
 	mu     sync.Mutex
 	total  int
-	byAddr map[netip.Addr]int
+	byAddr map[netip.Addr]int // by countKey
 }
 
 func newCapListener(ln net.Listener, l Limits, ci ClientIP, log *slog.Logger) *capListener {
@@ -82,46 +83,50 @@ func (l *capListener) Accept() (net.Conn, error) {
 
 // admit takes a slot in max_conns and, when count is set, one of addr's conns_per_ip slots.
 func (l *capListener) admit(addr netip.Addr, count bool) bool {
+	k := countKey(addr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.total >= l.maxConns {
 		return false
 	}
-	if count && l.byAddr[addr] >= l.perIP {
+	if count && l.byAddr[k] >= l.perIP {
 		return false
 	}
 	l.total++
 	if count {
-		l.byAddr[addr]++
+		l.byAddr[k]++
 	}
 	return true
 }
 
 // countAddr takes one of addr's conns_per_ip slots for a connection already holding a max_conns slot.
 func (l *capListener) countAddr(addr netip.Addr) bool {
+	k := countKey(addr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.byAddr[addr] >= l.perIP {
+	if l.byAddr[k] >= l.perIP {
 		return false
 	}
-	l.byAddr[addr]++
+	l.byAddr[k]++
 	return true
 }
 
+// release gives back a connection's max_conns slot and, when it was counted, its address's slot.
 func (l *capListener) release(addr netip.Addr, counted bool) {
+	k := countKey(addr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.total--
 	if counted {
-		if l.byAddr[addr] <= 1 {
-			delete(l.byAddr, addr)
+		if l.byAddr[k] <= 1 {
+			delete(l.byAddr, k)
 		} else {
-			l.byAddr[addr]--
+			l.byAddr[k]--
 		}
 	}
 }
 
-// open is the number of open connections (tests).
+// open is the number of open connections, in all and by countKey (tests).
 func (l *capListener) open() (total int, byAddr map[netip.Addr]int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -54,8 +54,9 @@ const (
 	// MaxBearer is the longest bearer value looked up; anything longer is 401 without a query.
 	MaxBearer = 4096
 	// CacheTTL is how long a verified key is answered from memory before Postgres is read again. A
-	// revocation still applies within RefreshInterval: the revocation cache is checked on every request,
-	// and the key cache is bypassed whenever that cache is not current.
+	// revocation, an expiry or a deletion (of the key or its tenant) still applies within RefreshInterval:
+	// the revocation cache is checked on every request, each of its re-reads re-reads the rows of the keys
+	// held in memory, and the key cache is bypassed whenever that cache is not current.
 	CacheTTL = 5 * time.Minute
 	// CacheMax bounds the verified keys kept in memory.
 	CacheMax = 10000
@@ -157,10 +158,11 @@ type cachedKey struct {
 	loaded    time.Time
 }
 
-// NewAPIKeys returns the API key authenticator. Revocation is checked on every request through revoked;
-// with revoked nil (enroll, tests) no key is answered from memory and every request reads Postgres.
+// NewAPIKeys returns the API key authenticator. Revocation is checked on every request through revoked,
+// whose re-reads also re-read the rows of the keys this authenticator holds in memory; with revoked nil
+// (enroll, tests) no key is answered from memory and every request reads Postgres.
 func NewAPIKeys(db *pgxpool.Pool, revoked *RevocationCache) *APIKeys {
-	return &APIKeys{
+	k := &APIKeys{
 		db:            db,
 		revoked:       revoked,
 		log:           slog.Default(),
@@ -170,6 +172,10 @@ func NewAPIKeys(db *pgxpool.Pool, revoked *RevocationCache) *APIKeys {
 		cache:         map[[32]byte]*cachedKey{},
 		lastUsed:      map[uuid.UUID]time.Time{},
 	}
+	if revoked != nil {
+		revoked.track(k)
+	}
+	return k
 }
 
 // Authenticate maps a bearer key to its principal key:<prefix>, with the key's tenant, buyer and scopes.
@@ -201,7 +207,11 @@ func (k *APIKeys) Authenticate(ctx context.Context, bearer string) (Principal, e
 		scopes                []string
 		expiresAt, tenantEnds *time.Time
 		revokedAt             *time.Time
+		reads                 uint64
 	)
+	if k.revoked != nil {
+		reads = k.revoked.started() // before the row is read: see remember
+	}
 	err := k.db.QueryRow(ctx, `
 		select k.id, k.tenant_id, t.slug, k.buyer_id, k.prefix, k.scopes, k.expires_at, t.expires_at, k.revoked_at
 		from kontra.api_keys k join kontra.tenants t on t.id = k.tenant_id
@@ -234,7 +244,7 @@ func (k *APIKeys) Authenticate(ctx context.Context, bearer string) (Principal, e
 		p.Scopes = append(p.Scopes, Scope(s))
 	}
 	if k.revoked != nil {
-		k.remember(h, &cachedKey{p: clonePrincipal(p), expiresAt: expiresAt, loaded: now})
+		k.remember(h, &cachedKey{p: clonePrincipal(p), expiresAt: expiresAt, loaded: now}, reads)
 	}
 	k.touch(id, now)
 	return p, nil
@@ -255,9 +265,16 @@ func clonePrincipal(p Principal) Principal {
 	return p
 }
 
-func (k *APIKeys) remember(h [32]byte, ck *cachedKey) {
+// remember keeps a verified key in memory, unless a re-read of the revocation cache began after its row
+// was read (reads is the count of re-reads started before that): such a re-read may have listed the keys
+// in memory before this one joined them, and so not checked it, and this row may predate a change it saw.
+// The count is compared under k.mu, which a re-read takes to list the keys after counting itself.
+func (k *APIKeys) remember(h [32]byte, ck *cachedKey, reads uint64) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.revoked.started() != reads {
+		return
+	}
 	if len(k.cache) >= CacheMax {
 		for kh, c := range k.cache {
 			if ck.loaded.Sub(c.loaded) >= k.ttl {
@@ -281,11 +298,34 @@ func (k *APIKeys) forget(h [32]byte) {
 }
 
 // forgetKey drops every cached entry of one key id (a revocation on this replica).
-func (k *APIKeys) forgetKey(id uuid.UUID) {
+func (k *APIKeys) forgetKey(id uuid.UUID) { k.dropKeys([]uuid.UUID{id}) }
+
+// cachedKeyIDs lists the keys that may be answered from memory (those within the TTL), for the revocation
+// cache's re-read.
+func (k *APIKeys) cachedKeyIDs() []uuid.UUID {
+	now := k.now()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	ids := make([]uuid.UUID, 0, len(k.cache))
+	for _, c := range k.cache {
+		if c.p.KeyID != nil && now.Sub(c.loaded) < k.ttl {
+			ids = append(ids, *c.p.KeyID)
+		}
+	}
+	return ids
+}
+
+// dropKeys drops every cached entry of these key ids (a revocation on this replica, or keys a re-read
+// found ended).
+func (k *APIKeys) dropKeys(ids []uuid.UUID) {
+	drop := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		drop[id] = true
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for h, c := range k.cache {
-		if c.p.KeyID != nil && *c.p.KeyID == id {
+		if c.p.KeyID != nil && drop[*c.p.KeyID] {
 			delete(k.cache, h)
 		}
 	}

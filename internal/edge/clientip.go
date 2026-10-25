@@ -94,9 +94,33 @@ func remoteAddr(r *http.Request) netip.Addr {
 	return netip.Addr{}
 }
 
+// ipv6CountBits is the prefix an IPv6 client address is counted by.
+const ipv6CountBits = 64
+
+// countKey is what rps_per_ip and conns_per_ip count a client address under: an IPv4 address itself, an
+// IPv6 address's /64.
+//
+// SPEC-CONFLICT: spec §2.2 counts both limits "by the client address". One end site (a home, a cloud
+// instance, a phone) commonly holds a whole IPv6 /64, so counting each address would give such a client
+// a fresh token bucket and a fresh connection quota per address it picks, and rps_per_ip would no longer
+// bound credential spraying. The edge counts an IPv6 client by its /64 instead (the network, as
+// spec/tunnel.md's anonymous-tenant cap counts IPv6 by /48); ClientAddr keeps the full address.
+func countKey(a netip.Addr) netip.Addr {
+	a = a.Unmap()
+	if !a.Is6() {
+		return a
+	}
+	p, err := a.Prefix(ipv6CountBits)
+	if err != nil {
+		return a
+	}
+	return p.Addr()
+}
+
 type clientAddrKey struct{}
 
-// ClientAddr is the client address the edge counted the request under (ClientIP.Addr).
+// ClientAddr is the request's client address (ClientIP.Addr), in full: the edge counts an IPv6 client by
+// its /64 (countKey), but this is the address itself.
 func ClientAddr(ctx context.Context) (netip.Addr, bool) {
 	a, ok := ctx.Value(clientAddrKey{}).(netip.Addr)
 	return a, ok

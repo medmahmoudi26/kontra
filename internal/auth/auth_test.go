@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -295,5 +296,56 @@ func TestPrincipalScopes(t *testing.T) {
 	}
 	if (Principal{}).MayHire() {
 		t.Error("the zero principal may hire")
+	}
+}
+
+// The key cache is trusted while the last good re-read began less than RefreshInterval (5 s) ago.
+func TestFreshBound(t *testing.T) {
+	rc := NewRevocationCache(nil)
+	t0 := time.Unix(1_700_000_000, 0)
+	now := t0
+	rc.now = func() time.Time { return now }
+	if rc.Fresh() {
+		t.Error("fresh before any read")
+	}
+	rc.lastOK = t0
+	for d, want := range map[time.Duration]bool{
+		0:                                    true,
+		RefreshInterval - time.Millisecond:   true,
+		RefreshInterval:                      false,
+		RefreshInterval + time.Millisecond:   false,
+		2*RefreshInterval - time.Millisecond: false,
+	} {
+		now = t0.Add(d)
+		if got := rc.Fresh(); got != want {
+			t.Errorf("%v after the last good read began: Fresh %v, want %v", d, got, want)
+		}
+	}
+}
+
+// A key whose row was read before a re-read began is not kept in memory: that re-read may have listed the
+// keys before it joined them, so it was not checked, and its row may predate what the re-read saw.
+func TestRememberAfterAReReadBegan(t *testing.T) {
+	rc := NewRevocationCache(nil)
+	k := NewAPIKeys(nil, rc)
+	id := keyID1
+	ck := func() *cachedKey {
+		return &cachedKey{p: keyPrincipal("kk_a_12345678", "default", acmeTenant), loaded: k.now()}
+	}
+	before := rc.started()
+	rc.mu.Lock()
+	rc.seq++ // a re-read begins while the row is being read
+	rc.mu.Unlock()
+	k.remember(KeyHash("kk_a_1"), ck(), before)
+	if ids := k.cachedKeyIDs(); len(ids) != 0 {
+		t.Errorf("kept a row read before a re-read began: %v", ids)
+	}
+	k.remember(KeyHash("kk_a_1"), ck(), rc.started())
+	if ids := k.cachedKeyIDs(); len(ids) != 1 || ids[0] != id {
+		t.Errorf("a row read after the re-read began: %v", ids)
+	}
+	k.dropKeys([]uuid.UUID{id})
+	if ids := k.cachedKeyIDs(); len(ids) != 0 {
+		t.Errorf("dropKeys left %v", ids)
 	}
 }

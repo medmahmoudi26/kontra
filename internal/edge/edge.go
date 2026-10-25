@@ -305,7 +305,9 @@ func NewRouter() *Router {
 	return &Router{mux: http.NewServeMux()}
 }
 
-// Handle registers h for a Go 1.22 ServeMux pattern ("GET /healthz", "/agents/{name}/{rest...}").
+// Handle registers h for a Go 1.22 ServeMux pattern ("GET /healthz", "/agents/{name}/{rest...}"). The
+// handler reads the pattern's wildcards with r.PathValue and the pattern with r.Pattern, behind the edge
+// (Middleware, New) as on the bare router. Routes are registered before the router serves.
 func (r *Router) Handle(pattern string, h http.Handler) {
 	r.mux.Handle(pattern, &route{h: h})
 }
@@ -317,7 +319,9 @@ func (r *Router) HandleJSONRPC(pattern string, h http.Handler) {
 }
 
 // match returns the route r would be served by; ok is false for anything ServeMux would answer itself
-// (not found, method not allowed, a redirect to a cleaned or slash-terminated path).
+// (not found, method not allowed, a redirect to a cleaned or slash-terminated path). It only looks:
+// ServeMux.Handler leaves r.Pattern and the wildcards unset, so a matched request is served through
+// dispatch.
 func (r *Router) match(req *http.Request) (*route, bool) {
 	h, _ := r.mux.Handler(req)
 	rt, ok := h.(*route)
@@ -330,6 +334,13 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		emptyNotFound(w)
 		return
 	}
+	r.dispatch(w, req)
+}
+
+// dispatch serves a request match accepted. ServeMux.ServeHTTP is the only place r.Pattern and the
+// wildcards (r.PathValue) are set, so the request goes through it; its method, host and path are those
+// match saw, so it reaches the same route.
+func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 	r.mux.ServeHTTP(w, req)
 }
 
@@ -453,7 +464,7 @@ func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		defer c.inflight.release(key)
 	}
-	rt.ServeHTTP(w, r)
+	c.routes.dispatch(w, r)
 }
 
 var errTooLarge = errors.New("edge: body over the limit")
@@ -473,11 +484,7 @@ func (c *chain) readBody(w http.ResponseWriter, r *http.Request) ([]byte, error)
 	rc := http.NewResponseController(w)
 	// A ResponseWriter without deadlines (a recorder in tests) reads without one; the body limit still holds.
 	deadlineSet := rc.SetReadDeadline(time.Now().Add(c.cfg.Limits.BodyTimeout)) == nil
-	var buf bytes.Buffer
-	if r.ContentLength > 0 {
-		buf.Grow(int(r.ContentLength))
-	}
-	n, err := io.Copy(&buf, io.LimitReader(r.Body, c.cfg.Limits.Body+1))
+	b, err := readUpTo(r.Body, r.ContentLength, c.cfg.Limits.Body)
 	if deadlineSet {
 		_ = rc.SetReadDeadline(time.Time{})
 	}
@@ -488,10 +495,56 @@ func (c *chain) readBody(w http.ResponseWriter, r *http.Request) ([]byte, error)
 		}
 		return nil, err
 	}
-	if n > c.cfg.Limits.Body {
+	if int64(len(b)) > c.cfg.Limits.Body {
 		return nil, errTooLarge
 	}
-	return buf.Bytes(), nil
+	return b, nil
+}
+
+// bodyPrealloc is the most readUpTo reserves before a body's bytes arrive, about what the server already
+// spends on a request's headers. A declared Content-Length costs a client nothing to send (a header alone
+// can declare limits.body, before authentication, on as many HTTP/2 streams as rps_per_ip lets through
+// within BodyTimeout), so the buffer follows the bytes that do arrive.
+const bodyPrealloc = 4 << 10
+
+// readUpTo reads r to EOF, or until it holds limit+1 bytes (a body over the limit). The buffer starts at
+// bodyPrealloc at most and doubles as bytes arrive, so it is never more than about twice what was received;
+// declared (the Content-Length, -1 when unknown) only caps its growth, so a body of the declared length
+// ends in a buffer of that length and one spare byte (which sees EOF), and a longer one is still read up to
+// limit+1.
+func readUpTo(r io.Reader, declared, limit int64) ([]byte, error) {
+	limit = min(limit, math.MaxInt64/4) // limits.body may be configured absurdly large: keep the sums in range
+	hint := limit + 1
+	if declared >= 0 && declared < limit {
+		hint = declared + 1
+	}
+	b := make([]byte, 0, min(hint, bodyPrealloc))
+	for {
+		if len(b) == cap(b) {
+			if int64(len(b)) > limit {
+				return b, nil
+			}
+			ceil := limit + 1
+			if int64(len(b)) < hint {
+				ceil = hint
+			}
+			// Double, or go straight to the ceiling when doubling again would pass it (so a body of the
+			// declared length is not copied once more for its last byte); next > cap(b) because ceil is.
+			next := 2 * int64(cap(b))
+			if 2*next > ceil {
+				next = ceil
+			}
+			b = append(make([]byte, 0, next), b...)
+		}
+		n, err := r.Read(b[len(b):cap(b)])
+		b = b[:len(b)+n]
+		if err == io.EOF {
+			return b, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 }
 
 // credentialKey identifies a presented credential for the in-flight cap without keeping it. A single
@@ -587,8 +640,9 @@ func validID(id json.RawMessage) bool {
 	}
 }
 
-// rateTable holds one token bucket per client address: rps_per_ip a second, the same burst. A bucket
-// idle long enough to be full again is dropped, so the table only holds recent clients.
+// rateTable holds one token bucket per client address (an IPv6 client's /64, countKey): rps_per_ip a
+// second, the same burst. A bucket idle long enough to be full again is dropped, so the table only holds
+// recent clients.
 type rateTable struct {
 	mu        sync.Mutex
 	limit     rate.Limit
@@ -616,8 +670,9 @@ func newRateTable(rps float64, now func() time.Time) *rateTable {
 	return &rateTable{limit: rate.Limit(rps), burst: burst, idle: idle, now: now, m: map[netip.Addr]*rateEntry{}}
 }
 
-// allow takes a token for a, or reports how long until one is available.
+// allow takes a token for a's bucket, or reports how long until one is available.
 func (t *rateTable) allow(a netip.Addr) (bool, time.Duration) {
+	a = countKey(a)
 	now := t.now()
 	t.mu.Lock()
 	defer t.mu.Unlock()

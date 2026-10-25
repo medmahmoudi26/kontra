@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -973,3 +975,234 @@ func TestMetricsListener(t *testing.T) {
 		t.Errorf("Serve after Shutdown: %v", err)
 	}
 }
+
+// A route's wildcards and pattern reach its handler behind the edge exactly as through a bare ServeMux:
+// r.PathValue and r.Pattern are set only by ServeMux.ServeHTTP, so the edge dispatches through it.
+func TestPathValuesBehindTheEdge(t *testing.T) {
+	router := NewRouter()
+	show := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "name=%q rest=%q pattern=%q", r.PathValue("name"), r.PathValue("rest"), r.Pattern)
+	})
+	router.Handle("GET /agents/{name}/{rest...}", show)
+	router.HandleJSONRPC("POST /agents/{name}", show)
+	const (
+		wantGET  = `name="hello" rest=".well-known/agent-card.json" pattern="GET /agents/{name}/{rest...}"`
+		wantPOST = `name="hello" rest="" pattern="POST /agents/{name}"`
+	)
+	get := func() *http.Request {
+		return httptest.NewRequest("GET", "/agents/hello/.well-known/agent-card.json", nil)
+	}
+	post := func() *http.Request {
+		return httptest.NewRequest("POST", "/agents/hello", strings.NewReader(`{"jsonrpc":"2.0","id":1}`))
+	}
+	for name, h := range map[string]http.Handler{
+		"Router":     router,
+		"Middleware": Middleware(MiddlewareConfig{}, router),
+	} {
+		if got := do(h, get()).Body.String(); got != wantGET {
+			t.Errorf("%s GET: %s, want %s", name, got, wantGET)
+		}
+		if got := do(h, post()).Body.String(); got != wantPOST {
+			t.Errorf("%s POST: %s, want %s", name, got, wantPOST)
+		}
+	}
+	// And through the server New builds (the production path).
+	_, addr := listen(t, Config{}, router)
+	resp, err := http.Get("http://" + addr + "/agents/hello/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != wantGET {
+		t.Errorf("New GET: %s, want %s", b, wantGET)
+	}
+	resp, err = http.Post("http://"+addr+"/agents/hello", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != wantPOST {
+		t.Errorf("New POST: %s, want %s", b, wantPOST)
+	}
+}
+
+// stallBody is a request body that sends nothing until released.
+type stallBody struct {
+	once    sync.Once
+	reading chan<- struct{}
+	release <-chan struct{}
+}
+
+func (b *stallBody) Read([]byte) (int, error) {
+	b.once.Do(func() { b.reading <- struct{}{} })
+	<-b.release
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (b *stallBody) Close() error { return nil }
+
+// A declared Content-Length is not memory: requests that declare the 4 MiB limit and send no body hold
+// what they sent, not 4 MiB each, while the edge waits for their bodies (before authentication).
+func TestDeclaredLengthIsNotPreallocated(t *testing.T) {
+	tr, h := newChain(t, Limits{RPSPerIP: 1e6}, ClientIP{}, nil)
+	const n = 40
+	reading := make(chan struct{}, n)
+	release := make(chan struct{})
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		r := httptest.NewRequest("POST", "/agents/hello", nil)
+		r.Body = &stallBody{reading: reading, release: release}
+		r.ContentLength = 4 << 20
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if w := do(h, r); w.Code != http.StatusBadRequest {
+				t.Errorf("a body cut short = %d, want 400", w.Code)
+			}
+		}()
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-reading:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d requests started reading their bodies", i)
+		}
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	close(release)
+	wg.Wait()
+	grew := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	t.Logf("%d header-only requests declaring 4 MiB each: heap grew %d KiB", n, grew>>10)
+	if grew > 8<<20 {
+		t.Errorf("%d requests declaring 4 MiB and sending nothing hold %d MiB of heap, want what they sent", n, grew>>20)
+	}
+	if tr.runs.Load() != 0 {
+		t.Error("the handler ran for a body that never arrived")
+	}
+}
+
+// rps_per_ip and conns_per_ip count an IPv6 client by its /64 (one end site), an IPv4 client by its
+// address; the handler still sees the full address.
+func TestIPv6CountedPerSlash64(t *testing.T) {
+	clock := &frozenClock{t: time.Unix(1_700_000_000, 0)}
+	_, h := newChain(t, Limits{RPSPerIP: 2}, ClientIP{}, clock)
+	call := func(remote string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/agents/hello/x", nil)
+		r.RemoteAddr = remote
+		return do(h, r)
+	}
+	served := 0
+	for i := 1; i <= 100; i++ {
+		w := call(fmt.Sprintf("[2001:db8::%x]:443", i))
+		if w.Code == 200 {
+			served++
+			if want := fmt.Sprintf("2001:db8::%x", i); w.Header().Get("X-Client") != want {
+				t.Errorf("handler saw client %q, want the full address %s", w.Header().Get("X-Client"), want)
+			}
+		}
+	}
+	if served != 2 {
+		t.Errorf("100 addresses of one /64 at rps_per_ip 2: %d served, want 2", served)
+	}
+	if w := call("[2001:db8:0:1::1]:443"); w.Code != 200 {
+		t.Errorf("another /64 = %d, want its own bucket", w.Code)
+	}
+	if w := call("192.0.2.1:1"); w.Code != 200 {
+		t.Errorf("an IPv4 client = %d", w.Code)
+	}
+	if w := call("192.0.2.2:1"); w.Code != 200 {
+		t.Errorf("a second IPv4 address = %d, want its own bucket", w.Code)
+	}
+
+	l := newCapListener(nil, Limits{ConnsPerIP: 1, MaxConns: 100}, ClientIP{}, nil)
+	a1, a2 := netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2")
+	if !l.admit(a1, true) {
+		t.Fatal("first connection of the /64 refused")
+	}
+	if l.admit(a2, true) {
+		t.Error("a second address of the same /64 got its own conns_per_ip slot")
+	}
+	if l.countAddr(netip.MustParseAddr("2001:db8::3")) {
+		t.Error("a PROXY connection from the same /64 got its own conns_per_ip slot")
+	}
+	if !l.admit(netip.MustParseAddr("2001:db8:0:1::1"), true) {
+		t.Error("another /64 refused")
+	}
+	if !l.admit(netip.MustParseAddr("192.0.2.1"), true) || !l.admit(netip.MustParseAddr("192.0.2.2"), true) {
+		t.Error("two IPv4 addresses share a slot")
+	}
+	l.release(a2, true) // the /64's slot, released by any of its addresses
+	if !l.admit(a2, true) {
+		t.Error("the /64's slot did not free")
+	}
+}
+
+// trickle returns at most n bytes a Read, as a network body does.
+type trickle struct {
+	r io.Reader
+	n int
+}
+
+func (t *trickle) Read(p []byte) (int, error) {
+	if len(p) > t.n {
+		p = p[:t.n]
+	}
+	return t.r.Read(p)
+}
+
+// readUpTo reads a body whole, or limit+1 bytes of one over the limit, and its buffer follows the bytes
+// received: a declared body ends in a buffer of its length and one spare byte, an undeclared one in at most
+// about twice its length, and a declared length is never trusted for what is read.
+func TestReadUpTo(t *testing.T) {
+	const limit = 4 << 20
+	for _, tc := range []struct {
+		name           string
+		size, declared int64
+		wantLen        int64
+		maxCap         int64
+	}{
+		{"empty, declared", 0, 0, 0, 1},
+		{"empty, chunked", 0, -1, 0, bodyPrealloc},
+		{"small, declared", 100, 100, 100, 101},
+		{"small, chunked", 100, -1, 100, bodyPrealloc},
+		{"prealloc + 1, declared", bodyPrealloc + 1, bodyPrealloc + 1, bodyPrealloc + 1, bodyPrealloc + 2},
+		{"1 MiB + 3, chunked", 1<<20 + 3, -1, 1<<20 + 3, 2*(1<<20+3) + bodyPrealloc},
+		{"the limit, declared", limit, limit, limit, limit + 1},
+		{"the limit, chunked", limit, -1, limit, limit + 1},
+		{"over, chunked", limit + 10, -1, limit + 1, limit + 1},
+		{"longer than declared", 300, 100, 300, 2 * (300 + 101)},
+		{"over, declared short", limit + 10, 100, limit + 1, limit + 1},
+	} {
+		body := bytes.Repeat([]byte("x"), int(tc.size))
+		b, err := readUpTo(&trickle{r: bytes.NewReader(body), n: 1500}, tc.declared, limit)
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if int64(len(b)) != tc.wantLen || !bytes.Equal(b, body[:tc.wantLen]) {
+			t.Errorf("%s: read %d bytes, want %d", tc.name, len(b), tc.wantLen)
+		}
+		if int64(cap(b)) > tc.maxCap {
+			t.Errorf("%s: buffer of %d for %d bytes, want at most %d", tc.name, cap(b), len(b), tc.maxCap)
+		}
+	}
+	// An absurd limit does not overflow.
+	if b, err := readUpTo(strings.NewReader("abc"), -1, math.MaxInt64); err != nil || string(b) != "abc" {
+		t.Errorf("limit MaxInt64: %q %v", b, err)
+	}
+	// A read error is returned, not a partial body.
+	r := io.MultiReader(strings.NewReader("abc"), iotestErr{})
+	if b, err := readUpTo(r, 10, limit); err == nil || b != nil {
+		t.Errorf("a failing body: %q %v", b, err)
+	}
+}
+
+type iotestErr struct{}
+
+func (iotestErr) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }

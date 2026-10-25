@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/medmahmoudi26/kontra/internal/audit"
@@ -306,7 +308,9 @@ func TestLastUsedAtOncePerMinute(t *testing.T) {
 	}
 }
 
-// A key of a deleted or expired tenant is 401, also when its verified answer is held in memory.
+// A key of a deleted or expired tenant is 401, also when its verified answer is held in memory: the
+// tenant's expiry ends the cached answer when it passes, and a deletion ends it at the next re-read. Every
+// assertion runs within CacheTTL, so the answers come from memory unless the row is read.
 func TestKeyOfDeletedTenant(t *testing.T) {
 	e := newPGEnv(t)
 	ctx := context.Background()
@@ -314,7 +318,7 @@ func TestKeyOfDeletedTenant(t *testing.T) {
 	rc.Catchup()
 	keys := NewAPIKeys(e.pool, rc)
 	m := e.mint(t, keys, MintRequest{Name: "demo"})
-	if _, err := e.pool.Exec(ctx, `update kontra.tenants set expires_at = now() + interval '1 hour' where id = $1`, e.tenant); err != nil {
+	if _, err := e.pool.Exec(ctx, `update kontra.tenants set expires_at = now() + interval '2 minutes' where id = $1`, e.tenant); err != nil {
 		t.Fatal(err)
 	}
 	clock := time.Now()
@@ -322,18 +326,155 @@ func TestKeyOfDeletedTenant(t *testing.T) {
 	if _, err := keys.Authenticate(ctx, m.Secret); err != nil {
 		t.Fatal(err)
 	}
-	clock = clock.Add(61 * time.Minute)
+	clock = clock.Add(3 * time.Minute) // past the tenant's expiry, within CacheTTL
 	if _, err := keys.Authenticate(ctx, m.Secret); !errors.Is(err, ErrUnauthenticated) {
 		t.Errorf("cached key past its tenant's expiry: %v", err)
 	}
+
 	keys.now = time.Now
-	if _, err := e.pool.Exec(ctx, `update kontra.tenants set expires_at = null, deleted_at = now() where id = $1`, e.tenant); err != nil {
+	if _, err := e.pool.Exec(ctx, `update kontra.tenants set expires_at = null where id = $1`, e.tenant); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := keys.Authenticate(ctx, m.Secret); err != nil {
+		t.Fatalf("after the expiry is lifted: %v", err)
+	}
+	if _, err := e.pool.Exec(ctx, `update kontra.tenants set deleted_at = now() where id = $1`, e.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.Authenticate(ctx, m.Secret); err != nil {
+		t.Errorf("before any re-read the cached answer stands: %v", err)
+	}
+	rc.Catchup()
 	if _, err := keys.Authenticate(ctx, m.Secret); !errors.Is(err, ErrUnauthenticated) {
-		t.Errorf("key of a deleted tenant: %v", err)
+		t.Errorf("cached key of a deleted tenant after a re-read: %v", err)
 	}
 	keys.Wait()
+}
+
+// A verified key held in memory stops authenticating at the next re-read whenever its row or its tenant
+// says it should, not only when its revoked_at is recent: a deleted tenant, a tenant or key expiry moved
+// into the past, a revoked_at stamped before the re-read's overlap, a deleted row (spec §2.3: a revoked or
+// expired key is 401 on its next request; the re-read runs at least every RefreshInterval).
+func TestCachedKeyRevalidated(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	rc := NewRevocationCache(e.pool)
+	rc.Catchup()
+	keys := NewAPIKeys(e.pool, rc)
+	for i, tc := range []struct {
+		name, sql string
+		byTenant  bool
+	}{
+		{"tenant deleted", `update kontra.tenants set deleted_at = now() where id = $1`, true},
+		{"tenant expired", `update kontra.tenants set expires_at = now() - interval '1 second' where id = $1`, true},
+		{"key expired", `update kontra.api_keys set expires_at = now() - interval '1 second' where id = $1`, false},
+		{"revoked as of 2 minutes ago", `update kontra.api_keys set revoked_at = now() - interval '2 minutes' where id = $1`, false},
+		{"revoked as of a day ago", `update kontra.api_keys set revoked_at = now() - interval '1 day' where id = $1`, false},
+		{"row deleted", `delete from kontra.api_keys where id = $1`, false},
+	} {
+		tenantID := uuid.Must(uuid.NewV7())
+		if _, err := e.pool.Exec(ctx, `insert into kontra.tenants (id, slug, kind) values ($1, $2, 'account')`,
+			tenantID, fmt.Sprintf("acct%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		m := e.mint(t, keys, MintRequest{TenantID: tenantID, Name: "demo"})
+		if _, err := keys.Authenticate(ctx, m.Secret); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		arg := m.ID
+		if tc.byTenant {
+			arg = tenantID
+		}
+		if _, err := e.pool.Exec(ctx, tc.sql, arg); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if _, err := keys.Authenticate(ctx, m.Secret); err != nil {
+			t.Errorf("%s: before any re-read the cached answer stands (the cache is in use): %v", tc.name, err)
+		}
+		rc.Catchup()
+		for n := 0; n < 2; n++ {
+			if _, err := keys.Authenticate(ctx, m.Secret); !errors.Is(err, ErrUnauthenticated) {
+				t.Errorf("%s: request %d after a re-read: %v, want ErrUnauthenticated", tc.name, n+1, err)
+			}
+		}
+	}
+	keys.Wait()
+}
+
+// The key cache is trusted for RefreshInterval after the last good re-read, not longer: when re-reads
+// fail, a key revoked behind the replica's back (no NOTIFY) is read from Postgres once 5 s have passed.
+func TestStaleAfterRefreshInterval(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	rc := NewRevocationCache(e.pool)
+	rc.Catchup()
+	keys := NewAPIKeys(e.pool, rc)
+	m := e.mint(t, keys, MintRequest{Name: "demo"})
+	if _, err := keys.Authenticate(ctx, m.Secret); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `update kontra.api_keys set revoked_at = now() where id = $1`, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.Authenticate(ctx, m.Secret); err != nil {
+		t.Fatalf("within the interval the cached answer stands: %v", err)
+	}
+	rc.mu.Lock()
+	rc.lastOK = rc.lastOK.Add(-RefreshInterval - 100*time.Millisecond) // the re-reads since have failed
+	rc.mu.Unlock()
+	if rc.Fresh() {
+		t.Errorf("Fresh %v after the last good read", RefreshInterval+100*time.Millisecond)
+	}
+	if _, err := keys.Authenticate(ctx, m.Secret); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("revoked key %v after the last good read: %v, want a read of the row", RefreshInterval, err)
+	}
+	keys.Wait()
+}
+
+// slowReads moves a test clock forward when the revocation cache's statements start, as if each took that
+// long.
+type slowReads struct {
+	advance func()
+}
+
+func (s slowReads) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, "kontra.api_keys") {
+		s.advance()
+	}
+	return ctx
+}
+
+func (slowReads) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// Fresh counts from the start of the last good re-read, whose snapshot is what the cache knows: after a
+// re-read that took 4 s, memory is trusted for 1 s more, not for 5.
+func TestFreshCountsFromTheReadStart(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	start := time.Now()
+	clock := start
+	cfg.ConnConfig.Tracer = slowReads{advance: func() { mu.Lock(); clock = clock.Add(4 * time.Second); mu.Unlock() }}
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	rc := NewRevocationCache(pool)
+	rc.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	set := func(d time.Duration) { mu.Lock(); clock = start.Add(d); mu.Unlock() }
+	rc.Catchup()
+	set(4500 * time.Millisecond)
+	if !rc.Fresh() {
+		t.Error("not fresh 4.5 s after the read began")
+	}
+	set(5500 * time.Millisecond)
+	if rc.Fresh() {
+		t.Error("fresh 5.5 s after the read began (1.5 s after it ended): the bound counts from its end")
+	}
 }
 
 // replica is one gate replica's authentication: its own pool, revocation cache and (optionally) LISTEN
@@ -466,7 +607,8 @@ func TestRevocationCatchupAndStaleness(t *testing.T) {
 		t.Error("the re-read did not record the revocation")
 	}
 
-	// A revocation cache that has not read for two intervals is not trusted: every request reads the row.
+	// A revocation cache whose last good read began more than RefreshInterval ago is not trusted: every
+	// request reads the row.
 	m2 := e.mint(t, keys, MintRequest{Name: "demo2"})
 	if _, err := keys.Authenticate(ctx, m2.Secret); err != nil {
 		t.Fatal(err)
