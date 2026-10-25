@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -55,6 +56,54 @@ type PushConfigLister interface {
 // over the limit or with a key outside the §13.2 rules is dropped, with a metric and an audit row).
 const EventPatchRefused = "lifecycle.patch_refused"
 
+// PatchRefusals counts the operator patches apply_metadata and submit refused and dropped, by the patch's
+// source (a hook's type name, kontra.annotate, kontra.approval) and the refusal's class: the metric of
+// spec §13.3, kontra_gate_operator_patches_refused_total, so a hook or control plane that keeps sending
+// refused patches raises an alert. Safe for concurrent use; the zero value is ready.
+type PatchRefusals struct {
+	mu sync.Mutex
+	n  map[[2]string]int64
+}
+
+// PatchRefusal is one series of PatchRefusals.
+type PatchRefusal struct {
+	Source, Refusal string
+	N               int64
+}
+
+// Add counts one refused patch.
+func (p *PatchRefusals) Add(source, refusal string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.n == nil {
+		p.n = map[[2]string]int64{}
+	}
+	p.n[[2]string{source, refusal}]++
+}
+
+// Counts returns every series, sorted by source then refusal.
+func (p *PatchRefusals) Counts() []PatchRefusal {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]PatchRefusal, 0, len(p.n))
+	for k, n := range p.n {
+		out = append(out, PatchRefusal{Source: k[0], Refusal: k[1], N: n})
+	}
+	slices.SortFunc(out, func(a, b PatchRefusal) int {
+		if c := strings.Compare(a.Source, b.Source); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Refusal, b.Refusal)
+	})
+	return out
+}
+
 // LifecycleActivities are the activities on kontra-lifecycle, runnable on any replica. Every error they
 // return crosses Temporal history as a failure message, so none carries caller or service content: they
 // name ids, states and the gate's own refusals.
@@ -64,8 +113,10 @@ type LifecycleActivities struct {
 	Push     PushConfigLister // nil: no push configs are listed
 	// Rules are the §13.2 key and size rules apply_metadata and submit enforce on every operator patch,
 	// and that pick the operator-written keys of a TaskRef.
-	Rules  hooks.KeyRules
-	Logger *slog.Logger
+	Rules hooks.KeyRules
+	// Refusals counts the refused patches (spec §13.3's metric); nil counts nothing.
+	Refusals *PatchRefusals
+	Logger   *slog.Logger
 }
 
 func (a *LifecycleActivities) logger() *slog.Logger {
@@ -316,6 +367,7 @@ func (a *LifecycleActivities) refusePatch(ctx context.Context, taskID uuid.UUID,
 		class = "too_large"
 	}
 	a.logger().Warn("operator patch refused and dropped", "task_id", taskID.String(), "source", source, "refusal", class)
+	a.Refusals.Add(source, class)
 	err := pgx.BeginFunc(ctx, a.Log.DB(), func(tx pgx.Tx) error {
 		_, err := audit.Append(ctx, tx, EventPatchRefused, audit.Fields{"task_id": taskID, "source": source, "refusal": class})
 		return err

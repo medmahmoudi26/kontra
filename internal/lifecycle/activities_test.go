@@ -281,6 +281,7 @@ func TestWriteTerminalEndsTheAttempt(t *testing.T) {
 
 func TestApplyMetadataRefusesAndAudits(t *testing.T) {
 	e := newPGEnv(t)
+	e.acts.Refusals = &PatchRefusals{}
 	ctx := context.Background()
 	id := e.task(store.StateCompleted, nil)
 
@@ -298,8 +299,16 @@ func TestApplyMetadataRefusesAndAudits(t *testing.T) {
 		t.Errorf("audit rows %d %s: one row naming the refusal, never the patch", rows, row)
 	}
 	big := map[string]any{"kontra.escrow.x": strings.Repeat("x", 17<<10)}
-	if _, err := e.acts.ApplyMetadata(ctx, ApplyMetadataInput{TaskID: id.String(), Patch: hooks.Patch{Metadata: big}}); appType(err) != ErrTypePatchRefused {
+	if _, err := e.acts.ApplyMetadata(ctx, ApplyMetadataInput{TaskID: id.String(), Source: UpdateAnnotate, Patch: hooks.Patch{Metadata: big}}); appType(err) != ErrTypePatchRefused {
 		t.Errorf("a patch over 16 KiB: %v", err)
+	}
+	// The metric of spec §13.3, beside the audit row: one count per refusal, by source and class.
+	_, _ = e.acts.ApplyMetadata(ctx, ApplyMetadataInput{TaskID: id.String(), Source: HookOnTerminal,
+		Patch: hooks.Patch{Metadata: map[string]any{"kontra.failure": "none"}}})
+	want := []PatchRefusal{{Source: UpdateAnnotate, Refusal: "too_large", N: 1}, {Source: HookOnTerminal, Refusal: "forbidden_key", N: 2}}
+	slices.SortFunc(want, func(a, b PatchRefusal) int { return strings.Compare(a.Source, b.Source) })
+	if got := e.acts.Refusals.Counts(); !slices.Equal(got, want) {
+		t.Errorf("refused patches counted %+v, want %+v", got, want)
 	}
 
 	seq, err := e.acts.ApplyMetadata(ctx, ApplyMetadataInput{TaskID: id.String(), Source: UpdateAnnotate,

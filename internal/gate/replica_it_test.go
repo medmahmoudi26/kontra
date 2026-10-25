@@ -454,7 +454,8 @@ func TestReplicaServesReloadsAndDrains(t *testing.T) {
 	}
 	metrics, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !bytes.Contains(metrics, []byte(`kontra_gate_ready{replica="`+r.ID()+`"} 1`)) || !bytes.Contains(metrics, []byte("kontra_gate_services")) {
+	if !bytes.Contains(metrics, []byte(`kontra_gate_ready{replica="`+r.ID()+`"} 1`)) || !bytes.Contains(metrics, []byte("kontra_gate_services")) ||
+		!bytes.Contains(metrics, []byte("# TYPE kontra_gate_operator_patches_refused_total counter")) {
 		t.Fatalf("/metrics:\n%s", metrics)
 	}
 	if code := healthz(t, "http://"+r.MetricsAddr().String()); code != http.StatusNotFound {

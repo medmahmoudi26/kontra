@@ -150,6 +150,7 @@ type Replica struct {
 	server    *edge.Server
 	metrics   *edge.Metrics
 
+	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
 	pgUp       atomic.Bool
 	temporalUp atomic.Bool
@@ -314,6 +315,8 @@ func (r *Replica) assemble() error {
 		Signals: r.lifecycle, Logger: log,
 	}}
 	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log})
+	acts := &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Push: pushStore, Rules: rules,
+		Refusals: &r.refusals, Logger: log}
 	var err error
 	r.workers, err = lifecycle.NewWorkers(r.temporal, lifecycle.WorkerConfig{
 		ReplicaID:     r.id,
@@ -322,7 +325,7 @@ func (r *Replica) assemble() error {
 		DrainTimeout:  cfg.DrainTimeout.D(),
 		RemoteHooks:   cfg.Hooks.Lifecycle != nil,
 	}, lifecycle.Activities{
-		Lifecycle: &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Push: pushStore, Rules: rules, Logger: log},
+		Lifecycle: acts,
 		Dispatch:  r.dispatch,
 		Push:      deliverer,
 		Hooks:     hooks.BuiltinLifecycle{},
@@ -720,6 +723,18 @@ func (r *Replica) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 	gauge("kontra_gate_draining", "1 once the replica has begun its drain.", b(r.draining.Load()))
 	gauge("kontra_gate_dispatches_in_flight", "Dispatches running on this replica.", r.InFlight())
 	gauge("kontra_gate_services", "Enabled services in the registry.", r.services.Count())
+	writePatchRefusals(w, r.id, &r.refusals)
+}
+
+// writePatchRefusals writes kontra_gate_operator_patches_refused_total, the operator patches this replica's
+// apply_metadata and submit refused and dropped, by source and refusal class (spec §13.3: "a metric and an
+// audit row"), so a hook or control plane that keeps sending refused patches can raise an alert.
+func writePatchRefusals(w io.Writer, replica string, p *lifecycle.PatchRefusals) {
+	const name = "kontra_gate_operator_patches_refused_total"
+	_, _ = fmt.Fprintf(w, "# HELP %s Operator patches refused and dropped (spec §13.3), by source and refusal.\n# TYPE %s counter\n", name, name)
+	for _, c := range p.Counts() {
+		_, _ = fmt.Fprintf(w, "%s{replica=%q,source=%q,refusal=%q} %d\n", name, replica, c.Source, c.Refusal, c.N)
+	}
 }
 
 // countingDispatch counts the dispatches running on this replica (metrics, the drain's log).
