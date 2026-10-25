@@ -653,6 +653,56 @@ func TestReattachGivesUp(t *testing.T) {
 	}
 }
 
+// Upstream ids stay with the backend that issued them (spec §4: a recorded upstream context id is reused,
+// and referenceTaskIds mapped, only on the same direct backend): after the service's backend moves to
+// another seller (a SIGHUP or NOTIFY changes its URL), a later task of the same gate context reaches the
+// new seller with no contextId and no referenceTaskIds of the old one.
+func TestUpstreamIDsStayWithTheirBackend(t *testing.T) {
+	e := newEnv(t, envOptions{})
+	echo := a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+		return func(yield func(a2a.Event, error) bool) {
+			if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
+				return
+			}
+			yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
+		}
+	})
+	sellerA, bA, infoA := newAgent(t, echo, agentConfig{})
+	sellerB, bB, infoB := newAgent(t, echo, agentConfig{})
+	e.backends.set(bA, infoA, nil)
+	t1, w1 := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "one"})
+	e.dispatch(context.Background(), t1, 1, w1, false)
+	// The same backend: the second task carries the upstream context and its reference (the control).
+	t2, w2 := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "two", refs: []a2a.TaskID{t1}})
+	e.dispatch(context.Background(), t2, 1, w2, false)
+	up1 := e.attempt(t1, 1)
+	if sent := sellerA.sentMessages(t); len(sent) != 2 || sent[1].ContextID != up1.UpstreamContextID || len(sent[1].ReferenceTasks) != 1 {
+		t.Fatalf("on the same backend: %+v", sent)
+	}
+
+	// The configuration moves the service to seller B (gate/services.go's Sync writes the row so).
+	e.exec(`update kontra.services set backend = '{"a2a": {"url": "http://seller-b.internal"}}', updated_at = now()
+		where tenant_id = $1 and name = $2`, e.svc.TenantID, e.svc.Name)
+	e.backends.set(bB, infoB, nil)
+	t3, w3 := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "three", refs: []a2a.TaskID{t1, t2}})
+	e.dispatch(context.Background(), t3, 1, w3, false)
+	sent := sellerB.sentMessages(t)
+	if len(sent) != 1 {
+		t.Fatalf("%d sends to seller B", len(sent))
+	}
+	if sent[0].ContextID != "" || len(sent[0].ReferenceTasks) != 0 {
+		t.Errorf("seller B got seller A's ids: contextId %q, referenceTaskIds %v", sent[0].ContextID, sent[0].ReferenceTasks)
+	}
+	// Seller B's own context is then reused on seller B.
+	up3 := e.attempt(t3, 1)
+	t4, w4 := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "four", refs: []a2a.TaskID{t3}})
+	e.dispatch(context.Background(), t4, 1, w4, false)
+	if sent := sellerB.sentMessages(t); len(sent) != 2 || sent[1].ContextID != up3.UpstreamContextID ||
+		fmt.Sprint(sent[1].ReferenceTasks) != fmt.Sprint([]a2a.TaskID{a2a.TaskID(up3.UpstreamTaskID)}) {
+		t.Errorf("on seller B after the move: %+v", sent)
+	}
+}
+
 // The upstream never receives the caller's Authorization, cookies or other headers, nor its inline push
 // config, on the first turn or on a re-attach (spec §6.2, §10.1).
 func TestUpstreamSeesNoCallerSecrets(t *testing.T) {

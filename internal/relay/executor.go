@@ -454,7 +454,8 @@ func (r *run) upstreamMessage(ctx context.Context) (*a2a.Message, error) {
 }
 
 // references maps the caller's referenceTaskIds to the upstream task ids of the caller's own tasks in the
-// same gate context on a direct backend of this service (spec §4); the rest are dropped.
+// same gate context on the service's current direct backend (spec §4, store.SameDirectBackend); the rest
+// are dropped.
 func (r *run) references(ctx context.Context) (map[a2a.TaskID]a2a.TaskID, error) {
 	var want []uuid.UUID
 	for _, ref := range r.ec.Message.ReferenceTasks {
@@ -466,9 +467,11 @@ func (r *run) references(ctx context.Context) (map[a2a.TaskID]a2a.TaskID, error)
 		return nil, nil
 	}
 	rows, err := r.e.log.DB().Query(ctx, `select t.id, a.upstream_task_id from kontra.tasks t
-		join lateral (select upstream_task_id from kontra.attempts
-		               where task_id = t.id and backend = 'direct' and upstream_task_id is not null
-		               order by n desc limit 1) a on true
+		join kontra.services s on s.tenant_id = t.tenant_id and s.name = t.service
+		join lateral (select a.upstream_task_id from kontra.attempts a
+		               where a.task_id = t.id and a.backend = 'direct' and a.upstream_task_id is not null
+		                 and `+store.SameDirectBackend+`
+		               order by a.n desc limit 1) a on true
 		where t.id = any($1::uuid[]) and t.tenant_id = $2 and t.service = $3 and t.buyer_id = $4 and t.context_id = $5`,
 		want, r.d.svc.TenantID, r.d.svc.Name, r.d.task.Owner.BuyerID, r.d.task.ContextID)
 	if err != nil {
