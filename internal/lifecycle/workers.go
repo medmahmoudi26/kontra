@@ -11,7 +11,6 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"kontra.sh/kontra/internal/hooks"
-	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Worker defaults (spec §14.2, §14.3, §17).
@@ -23,6 +22,10 @@ const (
 	// StopTimeout is the WorkerStopTimeout of every worker but kontra-direct: they stop only after the
 	// dispatches have ended, and then within a few seconds (spec §14.3, D76).
 	StopTimeout = 5 * time.Second
+	// DefaultSettle is how long a drain keeps the other workers polling after kontra-direct has stopped
+	// (Drain): the completion of the last dispatches schedules workflow tasks, which record their results
+	// and answer the Updates waiting on them (a cancel, D79).
+	DefaultSettle = 2 * time.Second
 )
 
 // WorkerConfig sizes one replica's workers (spec §14.2).
@@ -35,6 +38,9 @@ type WorkerConfig struct {
 	// RemoteHooks is hooks.lifecycle set (spec §13.3): the operator's workers serve the five Lifecycle
 	// activities on its own queue, and the built-in no-ops are not registered on kontra-lifecycle.
 	RemoteHooks bool
+	// Settle is how long Drain keeps kontra-lifecycle, kontra-push and the control queues polling once
+	// kontra-direct has stopped; default DefaultSettle.
+	Settle time.Duration
 }
 
 func (c WorkerConfig) withDefaults() WorkerConfig {
@@ -49,6 +55,9 @@ func (c WorkerConfig) withDefaults() WorkerConfig {
 	}
 	if c.DrainTimeout <= 0 {
 		c.DrainTimeout = DefaultDrainTimeout
+	}
+	if c.Settle <= 0 {
+		c.Settle = DefaultSettle
 	}
 	return c
 }
@@ -72,6 +81,9 @@ type Activities struct {
 //   - kontra-tunnel-<replica>: M2.
 type Workers struct {
 	lifecycle, direct, directCtl, ctl, push worker.Worker
+	drainTimeout, settle                    time.Duration
+	now                                     func() time.Time    // tests
+	sleep                                   func(time.Duration) // tests
 }
 
 // NewWorkers builds the workers; Start begins polling.
@@ -86,7 +98,7 @@ func NewWorkers(c client.Client, cfg WorkerConfig, acts Activities) (*Workers, e
 		return nil, errors.New("lifecycle: workers need the lifecycle and dispatch activities")
 	}
 	cfg = cfg.withDefaults()
-	w := &Workers{}
+	w := &Workers{drainTimeout: cfg.DrainTimeout, settle: cfg.Settle}
 
 	w.lifecycle = worker.New(c, QueueLifecycle, worker.Options{WorkerStopTimeout: StopTimeout})
 	w.lifecycle.RegisterWorkflowWithOptions(TaskLifecycle, workflow.RegisterOptions{Name: WorkflowType})
@@ -169,13 +181,44 @@ func (w *Workers) Start() error {
 	return nil
 }
 
-// Drain begins a drain (spec §14.3, D76): stop the kontra-direct pollers at once (WorkerStopTimeout =
-// drain_timeout: in-flight dispatches keep running and heartbeating), and keep kontra-lifecycle,
-// kontra-push, kontra-direct-ctl and kontra-ctl-<replica> polling until the last dispatch has ended or
-// drain_timeout passes, so that on a gate of one replica Updates are still accepted, dispatch results
-// recorded, and abort and forward_cancel served; then Stop.
+// ErrDrainTimeout is Drain's error when dispatches were still running at drain_timeout: the worker stop
+// canceled their contexts, and each is a lost dispatch the workflow re-attaches on another replica (a
+// direct backend, D42) after its heartbeat timeout (spec §14.3).
+var ErrDrainTimeout = errors.New("lifecycle: drain_timeout passed with dispatches still running")
+
+// Drain drains the workers and returns once all of them have stopped (spec §14.3, D76). kontra-direct
+// stops polling at once (its WorkerStopTimeout is drain_timeout): no new dispatch starts here, and the
+// dispatches already running keep running and heartbeating, because the SDK keeps sending heartbeats while
+// a worker stops. Meanwhile kontra-lifecycle, kontra-push, kontra-direct-ctl and kontra-ctl-<replica> keep
+// polling, so that on a gate of one replica Updates such as a cancel are still accepted and abort and
+// forward_cancel reach this replica's dispatches. The SDK's stop of kontra-direct returns when its last
+// dispatch has ended (its result reported), or at drain_timeout, when it cancels the ones still running.
+// The other workers then keep polling for Settle more: a dispatch's completion schedules a workflow task,
+// and on a gate of one replica only this replica can run it, record the result and answer the Update that
+// waits on it (a cancel completes once canceled is logged, D79). Then they stop, each within StopTimeout,
+// the control queue last. Drain returns ErrDrainTimeout when drain_timeout cut dispatches. It is Stop with
+// the settle and that report; calling either again is a no-op.
 func (w *Workers) Drain() error {
-	return unimpl.Error("lifecycle.Workers.Drain", "WP-08")
+	now, sleep := w.now, w.sleep
+	if now == nil {
+		now = time.Now
+	}
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	start := now()
+	if w.direct != nil {
+		w.direct.Stop()
+	}
+	timedOut := w.drainTimeout > 0 && now().Sub(start) >= w.drainTimeout
+	if w.settle > 0 {
+		sleep(w.settle)
+	}
+	w.stopAfterDirect()
+	if timedOut {
+		return fmt.Errorf("%w (%v)", ErrDrainTimeout, w.drainTimeout)
+	}
+	return nil
 }
 
 // Stop stops every worker in the drain order (spec §14.3, D76): kontra-direct first, which stops polling at
@@ -184,7 +227,15 @@ func (w *Workers) Drain() error {
 // of one replica Updates such as a cancel are still accepted, finished dispatches' results recorded, and
 // abort and forward_cancel served; then those, with a short WorkerStopTimeout, the control queue last.
 func (w *Workers) Stop() {
-	for _, x := range []worker.Worker{w.direct, w.lifecycle, w.push, w.directCtl, w.ctl} {
+	if w.direct != nil {
+		w.direct.Stop()
+	}
+	w.stopAfterDirect()
+}
+
+// stopAfterDirect stops every worker but kontra-direct, in the drain order: the control queue last.
+func (w *Workers) stopAfterDirect() {
+	for _, x := range []worker.Worker{w.lifecycle, w.push, w.directCtl, w.ctl} {
 		if x != nil {
 			x.Stop()
 		}
