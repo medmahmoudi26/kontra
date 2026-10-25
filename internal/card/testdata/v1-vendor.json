@@ -1,0 +1,29 @@
+{
+  "name": "Booking Agent",
+  "description": "Books <rooms> & tables",
+  "x-vendor": {"tier": "gold", "weights": [1.50, 2e3, -0.0], "note": "kept \u00e9 and \u0000 byte for byte"},
+  "supportedInterfaces": [
+    {"url": "http://10.1.2.3:8080/a2a", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"},
+    {"url": "grpc://10.1.2.3:9090", "protocolBinding": "GRPC", "protocolVersion": "1.0"}
+  ],
+  "provider": {"organization": "Example Co", "url": "https://example.com"},
+  "version": "2.1.0",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "extendedAgentCard": true,
+    "extensions": [
+      {"uri": "https://kontra.sh/ext/input-schema/v1", "params": {"schema": {"type": "object"}}},
+      {"uri": "https://kontra.sh/ext/escrow/v1", "description": "seller's own claim", "required": false},
+      {"uri": "https://example.com/ext/seller", "required": true}
+    ],
+    "x-cap": "seller"
+  },
+  "securitySchemes": {"internal": {"apiKeySecurityScheme": {"location": "header", "name": "X-Internal"}}},
+  "securityRequirements": [{"schemes": {"internal": {"list": []}}}],
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain", "application/json"],
+  "skills": [{"id": "book", "name": "Book", "description": "Books things", "tags": ["booking"]}],
+  "signatures": [{"protected": "eyJhbGciOiJFUzI1NiJ9", "signature": "c2lnbmF0dXJl"}],
+  "iconUrl": "https://example.com/icon.png"
+}

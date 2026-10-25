@@ -10,6 +10,7 @@ package hooks
 
 import (
 	"context"
+	"errors"
 
 	"github.com/medmahmoudi26/kontra/internal/unimpl"
 )
@@ -110,9 +111,35 @@ type BuiltinAdmission struct{}
 
 var _ Admission = BuiltinAdmission{}
 
-// Admit implements Admission.
+// Admit implements Admission: allow. The allow: list, per-tool policy, Kontra's reserved keys and the edge
+// limits were enforced by the gate before it was asked (spec §13).
 func (BuiltinAdmission) Admit(ctx context.Context, req AdmitRequest) (Decision, error) {
-	return Decision{}, unimpl.Error("hooks.BuiltinAdmission.Admit", "WP-04")
+	if req.Operation == "" {
+		return Decision{}, errors.New("hooks: an admission request needs its operation")
+	}
+	return Decision{Outcome: Allow}, nil
+}
+
+// Admitted is what Admission decided for a new task, carried on the request context from the admission
+// interceptor to the work queue's Write (spec §13.1, §15): the pre-minted task id the hook was shown, which
+// Write must use as the task's id so an operator that recorded anything under it finds the task (D45),
+// and the decision (its metadata and mcpMeta apply to the task, a quote creates it quoted).
+type Admitted struct {
+	TaskID   string
+	Decision Decision
+}
+
+type admittedKey struct{}
+
+// WithAdmitted returns ctx carrying a.
+func WithAdmitted(ctx context.Context, a Admitted) context.Context {
+	return context.WithValue(ctx, admittedKey{}, a)
+}
+
+// AdmittedFrom returns the admission of the request ctx belongs to, if Admission ran for it.
+func AdmittedFrom(ctx context.Context) (Admitted, bool) {
+	a, ok := ctx.Value(admittedKey{}).(Admitted)
+	return a, ok
 }
 
 // TaskRef is hooks.json#/$defs/taskRef, built by the activity from Postgres, never carried in history.
