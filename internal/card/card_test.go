@@ -468,3 +468,56 @@ func TestKeeperLegacyCard(t *testing.T) {
 		t.Errorf("seeded %+v %v", s2, err)
 	}
 }
+
+// A seller that accepts the card request and never answers does not hold the keeper: each fetch has a
+// deadline of its own, a fetch that runs out of it is a failed fetch, and Run's backoff fetches again, so
+// the card arrives once the seller answers (spec §3).
+func TestKeeperFetchTimeout(t *testing.T) {
+	card := read(t, "a2a-cli-exec.json")
+	var hang atomic.Bool
+	hang.Store(true)
+	var gets atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets.Add(1)
+		if hang.Load() {
+			<-r.Context().Done() // accepted, never answered
+			return
+		}
+		w.Write(card)
+	}))
+	t.Cleanup(srv.Close)
+	b, err := upstream.NewDirect(srv.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := NewKeeper(b, Input{PublicURL: "http://localhost:8080", ServicePath: "/agents/hello"}, WithFetchTimeout(200*time.Millisecond))
+	start := time.Now()
+	if err := k.Refresh(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a fetch the seller never answers: %v", err)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("the fetch returned after %v", took)
+	}
+	if _, err := k.Current(); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("no card yet: %v", err)
+	}
+
+	// Run: the first fetch hangs and times out; the seller recovers; the backoff fetches the card.
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); k.Run(ctx) }()
+	defer func() { cancel(); <-stopped }()
+	before := gets.Load()
+	deadline := time.Now().Add(5 * time.Second)
+	for gets.Load() == before && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	hang.Store(false)
+	for time.Now().Before(deadline) {
+		if _, err := k.Current(); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the keeper never fetched the card after the seller recovered (%d requests)", gets.Load())
+}

@@ -12,8 +12,10 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/eventqueue"
 	a2apush "github.com/a2aproject/a2a-go/v2/a2asrv/push"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/medmahmoudi26/kontra/internal/hooks"
 	"github.com/medmahmoudi26/kontra/internal/push"
@@ -58,7 +60,8 @@ const PollInterval = 100 * time.Millisecond
 // Handlers builds each service's handler on first use and caches it (spec §15): a2asrv.NewHandler with
 // WithClusterMode{TaskStore, QueueManager: eventqueue.NewPullQueueManager(Puller, {PollInterval: 100 ms,
 // InactivityTimeout: 0}), WorkQueue}, WithPushNotifications(PushStore, push.NoopSender) (push is the
-// lifecycle's, §10), the interceptors, and no input-mode enforcer (D14). A config or NOTIFY
+// lifecycle's, §10), the interceptors, and no input-mode enforcer (D14). The task store and the push
+// config store reach a2a-go through dispatchStore and dispatchPushStore. A config or NOTIFY
 // kontra_services change drops the cached handler.
 type Handlers struct {
 	deps  HandlerDeps
@@ -109,13 +112,13 @@ func (h *Handlers) For(ctx context.Context, svc store.ServiceRef) (*ServiceHandl
 	qm := eventqueue.NewPullQueueManager(newTaskFromStart(d.Puller), eventqueue.PullConfig{PollInterval: PollInterval, InactivityTimeout: 0})
 	exec := NewExecutor(d.Log, d.Registry, d.Backends).ForService(svc, d.Signals, d.Logger, d.Executor)
 	opts := []a2asrv.RequestHandlerOption{
-		a2asrv.WithClusterMode(a2asrv.ClusterConfig{TaskStore: st, QueueManager: qm, WorkQueue: q}),
+		a2asrv.WithClusterMode(a2asrv.ClusterConfig{TaskStore: dispatchStore{st}, QueueManager: qm, WorkQueue: q}),
 	}
 	if d.Logger != nil {
 		opts = append(opts, a2asrv.WithLogger(d.Logger))
 	}
 	if d.PushStore != nil {
-		opts = append(opts, a2asrv.WithPushNotifications(d.PushStore, push.NoopSender{}))
+		opts = append(opts, a2asrv.WithPushNotifications(dispatchPushStore{d.PushStore}, push.NoopSender{}))
 	}
 	if d.Interceptors != nil {
 		opts = append(opts, a2asrv.WithCallInterceptors(d.Interceptors(svc)...))
@@ -127,6 +130,62 @@ func (h *Handlers) For(ctx context.Context, svc store.ServiceRef) (*ServiceHandl
 	sh := &ServiceHandler{Service: svc, Handler: handler, HandlerFn: q.fn, Store: st}
 	h.cache[key] = sh
 	return sh, nil
+}
+
+// dispatchStore is the task store a2a-go's handler writes through. A write a dispatch makes (its context
+// carries the dispatch) that fails for a reason of the database's own — it ran out of its time on a lock or
+// a slow server, the connection broke, the server shut down — is recorded in the dispatch's registry entry,
+// so that the dispatch returns context_lost instead of failing a healthy upstream task upstream_error
+// (spec §6.4). a2a-go's processor turns any write error into its own SetTaskFailed, which the store refuses
+// (D8), and the handler's error alone cannot say whose failure it was. The store's refusals (a version
+// conflict, the terminal rule, a fenced dispatch, a2a-go's synthesized failure) are a2a-go's to handle and
+// the Dispatcher's to map, and an error that would only repeat on a re-attach is not a lost context.
+type dispatchStore struct{ *store.Store }
+
+func (s dispatchStore) Update(ctx context.Context, req *taskstore.UpdateRequest) (taskstore.TaskVersion, error) {
+	v, err := s.Store.Update(ctx, req)
+	if err != nil && storeFailure(err) {
+		noteStoreFailure(ctx, err)
+	}
+	return v, err
+}
+
+// dispatchPushStore records, the same way, a failed read of the task's push configs, which a2a-go's
+// processor makes after every event a dispatch logged: the event is in the log, and only the gate's own
+// store failed.
+type dispatchPushStore struct{ a2apush.ConfigStore }
+
+func (s dispatchPushStore) List(ctx context.Context, taskID a2a.TaskID) ([]*a2a.PushConfig, error) {
+	cfgs, err := s.ConfigStore.List(ctx, taskID)
+	if err != nil {
+		noteStoreFailure(ctx, err)
+	}
+	return cfgs, err
+}
+
+func noteStoreFailure(ctx context.Context, err error) {
+	if d, ok := dispatchFrom(ctx); ok {
+		d.running.NoteStoreFailure(err)
+	}
+}
+
+// storeFailure reports whether err, returned by the store, is a failure of the database rather than one of
+// the store's refusals or an error a re-attach would only meet again.
+func storeFailure(err error) bool {
+	switch {
+	case errors.Is(err, taskstore.ErrConcurrentModification), // a version conflict, the terminal rule, ErrFenced
+		errors.Is(err, store.ErrSynthesizedFailure),
+		errors.Is(err, a2a.ErrTaskNotFound), errors.Is(err, a2a.ErrInvalidParams), errors.Is(err, a2a.ErrUnauthenticated):
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && len(pgErr.Code) >= 2 {
+		switch pgErr.Code[:2] {
+		case "22", "23", "42": // a data exception, an integrity violation, a syntax or access error
+			return false
+		}
+	}
+	return true
 }
 
 // Invalidate drops svc's cached handler; the next For builds it again with the service's current policy.

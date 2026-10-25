@@ -22,6 +22,12 @@ const (
 	retryMax = time.Minute
 )
 
+// FetchTimeout bounds one fetch (both well-known paths). A seller that accepts the request and never
+// answers (a deadlock, a half-dead proxy) fails that fetch, which Run retries on its backoff schedule;
+// without it, Run would wait on the one fetch forever and never refetch, and the service would go
+// unavailable 30 minutes later and stay so after the seller recovered.
+const FetchTimeout = 30 * time.Second
+
 // ErrUnavailable is a service with no usable card: none fetched yet, or none fetched for UnavailableAfter.
 var ErrUnavailable = errors.New("card: the service's card is unavailable")
 
@@ -40,11 +46,12 @@ var ErrUnavailable = errors.New("card: the service's card is unavailable")
 // services (upstream_card, card, card_fetched_at); Seed installs the stored card at start, so a restarted
 // replica serves the last good card at once.
 type Keeper struct {
-	backend upstream.Backend
-	in      Input
-	now     func() time.Time
-	fetch   func(context.Context, upstream.Backend) (*upstream.Fetched, error)
-	persist func(ctx context.Context, s *Served, fetchedAt time.Time) error
+	backend      upstream.Backend
+	in           Input
+	now          func() time.Time
+	fetch        func(context.Context, upstream.Backend) (*upstream.Fetched, error)
+	fetchTimeout time.Duration
+	persist      func(ctx context.Context, s *Served, fetchedAt time.Time) error
 
 	mu      sync.RWMutex
 	served  *Served
@@ -69,9 +76,12 @@ func WithFetch(fn func(context.Context, upstream.Backend) (*upstream.Fetched, er
 	return func(k *Keeper) { k.fetch = fn }
 }
 
+// WithFetchTimeout replaces FetchTimeout (tests).
+func WithFetchTimeout(d time.Duration) KeeperOption { return func(k *Keeper) { k.fetchTimeout = d } }
+
 // NewKeeper returns a keeper for backend b; in is the rewrite input (its Upstream is ignored).
 func NewKeeper(b upstream.Backend, in Input, opts ...KeeperOption) *Keeper {
-	k := &Keeper{backend: b, in: in, now: time.Now, fetch: upstream.FetchCard}
+	k := &Keeper{backend: b, in: in, now: time.Now, fetch: upstream.FetchCard, fetchTimeout: FetchTimeout}
 	for _, o := range opts {
 		o(k)
 	}
@@ -84,10 +94,16 @@ func (k *Keeper) Seed(raw []byte, fetchedAt time.Time) error {
 	return err
 }
 
-// Refresh fetches the card once. On success it replaces the last good card (and calls the persist hook
-// when the upstream bytes changed); on failure the last good card stays and the error is returned.
+// Refresh fetches the card once, within FetchTimeout. On success it replaces the last good card (and calls
+// the persist hook when the upstream bytes changed); on failure, a fetch that ran out of time included, the
+// last good card stays and the error is returned.
 func (k *Keeper) Refresh(ctx context.Context) error {
-	f, err := k.fetch(ctx, k.backend)
+	fctx, cancel := context.WithTimeout(ctx, k.fetchTimeout)
+	f, err := k.fetch(fctx, k.backend) // the body is read whole before fetch returns
+	cancel()
+	if err != nil && ctx.Err() == nil && errors.Is(fctx.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("card: the fetch did not finish within %v: %w", k.fetchTimeout, err)
+	}
 	if err == nil {
 		var changed bool
 		if changed, err = k.install(f.Raw, k.now()); err == nil {

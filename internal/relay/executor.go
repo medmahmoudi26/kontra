@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,8 +36,11 @@ type ExecutorOptions struct {
 	PollInterval  time.Duration // GetTask polling, 1 s (spec §6.2)
 	PollMax       time.Duration // the polling interval after PollSlowAfter without change, 5 s
 	PollSlowAfter time.Duration // 1 min
-	// GetTaskGrace is how long GetTask may fail before the task fails upstream_unreachable, 30 s (§6.4).
+	// GetTaskGrace is how long GetTask may fail to reach the service before the task fails, 30 s (§6.4).
 	GetTaskGrace time.Duration
+	// GetTaskTimeout bounds one GetTask call: an upstream that accepts it and never answers fails the call,
+	// which counts toward GetTaskGrace. 10 s, and at most GetTaskGrace.
+	GetTaskTimeout time.Duration
 	// TaskBytes caps the part bytes stored per task (limits.task_bytes, 256 MiB, §6.6).
 	TaskBytes int64
 	// MaxPart is the largest part stored inline: without a bucket, an upstream part over it fails the
@@ -56,6 +60,9 @@ func (o ExecutorOptions) withDefaults() ExecutorOptions {
 	}
 	if o.GetTaskGrace <= 0 {
 		o.GetTaskGrace = 30 * time.Second
+	}
+	if o.GetTaskTimeout <= 0 {
+		o.GetTaskTimeout = min(10*time.Second, o.GetTaskGrace)
 	}
 	if o.TaskBytes <= 0 {
 		o.TaskBytes = 256 << 20
@@ -476,41 +483,23 @@ func (r *run) poll(ctx context.Context, req *a2a.SendMessageRequest) {
 }
 
 // follow polls GetTask (historyLength 0) every PollInterval, backing off to PollMax after PollSlowAfter
-// without change, until a final state. GetTask failing for GetTaskGrace fails the task
-// upstream_unreachable.
-//
-// SPEC-CONFLICT: §6.4 states the 30 s GetTask rule for the re-attach only, and its table fails a task whose
-// upstream id exists on a refused or reset connection. Read literally, one failed poll of an hour-long
-// task on the polling path would fail it. Every polling loop applies the re-attach's rule instead: only
-// GetTask failing for GetTaskGrace (30 s) fails the task, upstream_unreachable. The call that carries
-// the message (SendMessage, SendStreamingMessage) keeps the table's rule.
+// without change, until a final state. A failed GetTask is handled by getTask: the 30 s rule for a call
+// that does not reach the service, upstream_error at once for an answer that is an error.
 func (r *run) follow(ctx context.Context) {
 	interval := r.e.opts.PollInterval
 	lastChange := time.Now()
-	var failingSince time.Time
+	var g getTasks
 	for !r.finished {
 		select {
 		case <-ctx.Done():
 			r.finish(nil, context.Cause(ctx))
 			return
-		case <-time.After(interval):
+		case <-time.After(g.next(interval, r.e.opts.GetTaskGrace)):
 		}
-		t, err := r.getTask(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				r.finish(nil, context.Cause(ctx))
-				return
-			}
-			if failingSince.IsZero() {
-				failingSince = time.Now()
-			}
-			if time.Since(failingSince) >= r.e.opts.GetTaskGrace {
-				r.fail(store.ReasonUpstreamUnreachable, "the service did not answer GetTask for "+r.e.opts.GetTaskGrace.String())
-				return
-			}
-			continue
+		t := r.getTask(ctx, &g)
+		if t == nil {
+			continue // r.finished, or a failure the 30 s rule still allows
 		}
-		failingSince = time.Time{}
 		before := r.proj
 		if r.handle(ctx, t) {
 			return
@@ -523,46 +512,116 @@ func (r *run) follow(ctx context.Context) {
 	}
 }
 
-func (r *run) getTask(ctx context.Context) (*a2a.Task, error) {
+// getTasks is the 30 s rule's clock over the successive GetTask calls of one loop (spec §6.4).
+type getTasks struct {
+	failingSince time.Time     // the start of the first call of the current run of failures
+	retryAfter   time.Duration // the last throttled answer's Retry-After
+}
+
+// next is the wait before the next call: the interval, or a throttled answer's Retry-After up to the grace.
+func (g *getTasks) next(interval, grace time.Duration) time.Duration {
+	return max(interval, min(g.retryAfter, grace))
+}
+
+// getTask issues one GetTask (historyLength 0), bounded by GetTaskTimeout, and applies §6.4 to a failure.
+// It returns the task, or nil when the call failed: then either the turn ended (r.finished: the dispatch's
+// context ended, or the failure failed the task) or the call is to be made again.
+//
+// SPEC-CONFLICT: §6.4 states the 30 s GetTask rule for the re-attach only, and its table fails a task whose
+// upstream id exists at the first refused or reset connection or 502/503/504 (upstream_unreachable) and at
+// the first 408/429 (upstream_error). Read literally, one failed poll of an hour-long task on the polling
+// path would fail it. Every GetTask loop (the polling path's and the re-attach's) applies the re-attach's
+// rule to the failures that are about reaching the service: a call that is refused, reset, answered
+// 502/503/504, throttled (408/429), or not answered within GetTaskTimeout counts toward GetTaskGrace (30 s),
+// and when the grace runs out the task fails with the table's reason (upstream_unreachable;
+// upstream_error for 408/429). A throttled call's Retry-After is honoured up to the grace. An answer that
+// is an error is never retried, as the table says: a protocol error (a JSON-RPC error, another HTTP status,
+// a malformed body) fails the task upstream_error with the upstream's message, and a body over its limit
+// (§6.6) fails it upstream_error, at the first such answer. The call that carries the message
+// (SendMessage, SendStreamingMessage) keeps the table's rule (upstreamFailed).
+func (r *run) getTask(ctx context.Context, g *getTasks) *a2a.Task {
 	zero := 0
+	start := time.Now()
+	cctx, cancel := context.WithTimeout(ctx, r.e.opts.GetTaskTimeout)
+	defer cancel()
 	r.ex.Reset()
-	return r.client.GetTask(ctx, &a2a.GetTaskRequest{ID: r.ids.UpstreamTaskID, HistoryLength: &zero})
+	t, err := r.client.GetTask(cctx, &a2a.GetTaskRequest{ID: r.ids.UpstreamTaskID, HistoryLength: &zero})
+	g.retryAfter = 0
+	if err == nil && t == nil {
+		r.fail(store.ReasonUpstreamError, "the service answered GetTask without a task")
+		return nil
+	}
+	if err == nil {
+		g.failingSince = time.Time{}
+		return t
+	}
+	if ctx.Err() != nil {
+		r.finish(nil, context.Cause(ctx))
+		return nil
+	}
+	var f upstream.Failure
+	if cctx.Err() != nil {
+		f = upstream.Failure{Class: upstream.Unreachable, Err: err,
+			Message: "the service did not answer GetTask within " + r.e.opts.GetTaskTimeout.String()}
+	} else {
+		f = upstream.Classify(ctx, err, r.ex)
+	}
+	switch f.Class {
+	case upstream.Unreachable, upstream.Throttled:
+	case upstream.Limit:
+		r.fail(store.ReasonUpstreamError, f.Message)
+		return nil
+	case upstream.Canceled:
+		r.finish(nil, err)
+		return nil
+	default:
+		r.fail(store.ReasonUpstreamError, "the service returned an error: "+f.Message)
+		return nil
+	}
+	if g.failingSince.IsZero() {
+		g.failingSince = start
+	}
+	failing := time.Since(g.failingSince)
+	r.logger.Info("GetTask failed", "class", int(f.Class), "failing_for", failing, "error", f.Message)
+	if failing < r.e.opts.GetTaskGrace {
+		g.retryAfter = f.RetryAfter
+		return nil
+	}
+	if f.Class == upstream.Throttled {
+		r.fail(store.ReasonUpstreamError, "the service throttled GetTask for "+r.e.opts.GetTaskGrace.String()+": "+f.Message)
+	} else {
+		r.fail(store.ReasonUpstreamUnreachable, "the service did not answer GetTask for "+r.e.opts.GetTaskGrace.String())
+	}
+	return nil
 }
 
 // reattach follows the recorded upstream task of the attempt without sending anything (D42): GetTask,
 // log the difference from the projection, then SubscribeToTask (or polling) until a final state. Only
-// GetTask failing for GetTaskGrace fails the task, upstream_unreachable (§6.4).
+// GetTask failing to reach the service for GetTaskGrace fails the task upstream_unreachable (§6.4; see
+// getTask).
 func (r *run) reattach(ctx context.Context) {
 	if r.ids.UpstreamTaskID == "" {
 		// Nothing upstream to follow: nothing was sent, so the attempt may be retried (§6.4).
 		r.retry(store.ReasonUpstreamUnreachable, 0, errors.New("relay: re-attach without an upstream task id"))
 		return
 	}
-	var failingSince time.Time
+	var g getTasks
 	for {
-		t, err := r.getTask(ctx)
-		if err == nil {
+		t := r.getTask(ctx, &g)
+		if r.finished {
+			return
+		}
+		if t != nil {
 			if r.handle(ctx, t) {
 				return
 			}
 			break
 		}
-		if ctx.Err() != nil {
-			r.finish(nil, context.Cause(ctx))
-			return
-		}
-		if failingSince.IsZero() {
-			failingSince = time.Now()
-		}
-		if time.Since(failingSince) >= r.e.opts.GetTaskGrace {
-			r.fail(store.ReasonUpstreamUnreachable, "the service did not answer GetTask for "+r.e.opts.GetTaskGrace.String())
-			return
-		}
 		select {
 		case <-ctx.Done():
 			r.finish(nil, context.Cause(ctx))
 			return
-		case <-time.After(r.e.opts.PollInterval):
+		case <-time.After(g.next(r.e.opts.PollInterval, r.e.opts.GetTaskGrace)):
 		}
 	}
 	if r.info.Streaming {
@@ -626,6 +685,7 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 		r.fail(store.ReasonUpstreamError, "the service sent an event for another task")
 		return true
 	}
+	gate = wirePrecision(gate)
 	// Only a Task that is the attempt's very first upstream event is logged whole; any later one (after
 	// events, from polling, after a re-attach) logs its difference from the projection.
 	first := isTask && r.firstTask
@@ -634,6 +694,20 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 	if err != nil {
 		r.fail(store.ReasonUpstreamError, "the service sent a malformed event: "+err.Error())
 		return true
+	}
+	// A later Task at the turn boundary the projection already shows (the same final state, status message
+	// and timestamp). On a re-attach that is the boundary this turn reached before its context was lost:
+	// nothing new to log, and the turn ends (endLogged, below). On a turn's own dispatch it can only be the
+	// boundary the previous turn ended at, input-required: the upstream answered a follow-up's
+	// SendMessage{returnImmediately} (or opened its stream) with its task as it still is, which A2A 1.0.1
+	// allows ("an in-progress state (e.g., TASK_STATE_WORKING, TASK_STATE_INPUT_REQUIRED)"). That is not this
+	// turn's end: the dispatch logs any artifact difference, keeps following the upstream, and does not
+	// repeat the status (a status event at input-required would end the turn in a2a-go's processor).
+	t, _ := gate.(*a2a.Task)
+	unchanged := t != nil && !first && a2aevent.IsFinal(t) && !statusChanged(r.proj, t)
+	stale := unchanged && !r.d.resume && t.Status.State == a2a.TaskStateInputRequired
+	if stale {
+		evs = slices.DeleteFunc(evs, func(e a2a.Event) bool { _, st := e.(*a2a.TaskStatusUpdateEvent); return st })
 	}
 	for _, out := range evs {
 		if msg, ok := r.overLimit(out); ok {
@@ -644,13 +718,51 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 			return true
 		}
 	}
-	if t, ok := ev.(*a2a.Task); ok && a2aevent.IsFinal(t) {
-		// The upstream is at a turn boundary the projection already shows (a re-attach after the event was
-		// logged): nothing new to log, and the turn ends.
+	if unchanged && !stale {
 		r.endLogged()
 		return true
 	}
 	return false
+}
+
+// statusChanged is a2aevent's own test of a changed status, which Recover applies but does not export: the
+// state, the presence and id of the status message, or the timestamp differ.
+func statusChanged(prev, curr *a2a.Task) bool {
+	s1, s2 := prev.Status, curr.Status
+	if s1.State != s2.State || (s1.Message == nil) != (s2.Message == nil) || s1.Message != nil && s1.Message.ID != s2.Message.ID {
+		return true
+	}
+	if s1.Timestamp == nil || s2.Timestamp == nil {
+		return s1.Timestamp != s2.Timestamp
+	}
+	return !s1.Timestamp.Equal(*s2.Timestamp)
+}
+
+// wirePrecision truncates the status timestamp of an upstream Task or status event to the milliseconds the
+// A2A wire, and so the log, keeps (a2a.TaskStatus writes .000Z). An upstream writing finer timestamps (the
+// Python SDK's isoformat() writes microseconds) would otherwise never equal the projection read back from
+// the log: a re-attach would log an unchanged status again (§6.3: nothing already in the log is logged
+// twice), and a follow-up's unchanged task would look changed. ev is not modified.
+func wirePrecision(ev a2a.Event) a2a.Event {
+	trunc := func(ts *time.Time) *time.Time {
+		t := ts.UTC().Truncate(time.Millisecond)
+		return &t
+	}
+	switch e := ev.(type) {
+	case *a2a.Task:
+		if e.Status.Timestamp != nil {
+			cp := *e
+			cp.Status.Timestamp = trunc(e.Status.Timestamp)
+			return &cp
+		}
+	case *a2a.TaskStatusUpdateEvent:
+		if e.Status.Timestamp != nil {
+			cp := *e
+			cp.Status.Timestamp = trunc(e.Status.Timestamp)
+			return &cp
+		}
+	}
+	return ev
 }
 
 // errTurnLogged ends an execution whose final state is already in the log: a2a-go's consumer needs a final

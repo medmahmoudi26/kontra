@@ -53,8 +53,12 @@ func (d *Dispatcher) logger() *slog.Logger {
 // dispatch, attaches the Heartbeater and calls the service's HandlerFn with the activity context. It
 // discards the handler's result and returns the registry's outcome. With Resume, the executor re-attaches
 // to the recorded upstream task: GetTask, log the difference, then SubscribeToTask (or polling) until
-// terminal or input-required; only GetTask failing for 30 s fails the task upstream_unreachable (spec
-// §6.4, D42).
+// terminal or input-required; only GetTask failing to reach the service for 30 s fails the task
+// upstream_unreachable (spec §6.4, D42).
+//
+// The dispatch announces itself in the registry before it writes attempts.replica_id, which routes abort
+// here (§14.2): an abort that arrives before it registers is kept, and the dispatch then stops before it
+// calls the upstream, returns aborted and ends the attempt aborted (§8).
 //
 // It ends the attempt (attempts.ended_at and outcome) when the dispatch ends it: a terminal event, a
 // retryable failure, an abort. A turn that stops at input-required, and a lost context (re-attached by a
@@ -76,6 +80,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
 	}
+	key := Key{TaskID: a2a.TaskID(taskUUID.String()), N: in.N}
+	release := d.Registry.Expect(key)
+	defer release()
 	fence, err := d.Log.BeginDispatch(ctx, taskUUID, in.N, d.ReplicaID)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
@@ -100,12 +107,19 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
 	}
-	key := Key{TaskID: a2a.TaskID(taskUUID.String()), N: in.N}
 	dctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	running, err := d.Registry.Register(key, cancel)
+	release()
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
+	}
+	if running.Aborted() {
+		// An abort reached this replica while the dispatch prepared: nothing was sent upstream.
+		running.Done()
+		log.Info("dispatch aborted before it called the upstream")
+		d.endAttempt(ctx, log, taskUUID, in.N, store.OutcomeAborted)
+		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchAborted}, nil
 	}
 	info := &dispatchInfo{n: in.N, resume: in.Resume, fence: fence, running: running, task: row, svc: svc, request: wi.Payload.Request}
 	dctx = withDispatch(store.WithFence(dctx, fence), info)
@@ -155,6 +169,7 @@ func (d *Dispatcher) settle(ctx context.Context, log *slog.Logger, in lifecycle.
 		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchContextLost}, nil
 	}
 	recorded, _ := running.Outcome()
+	aborted := running.Aborted() || errors.Is(cause, ErrAborted)
 	switch {
 	case recorded == lifecycle.DispatchTerminal || recorded == lifecycle.DispatchInterrupted:
 		row, err := d.Log.Load(ctx, taskUUID)
@@ -175,11 +190,21 @@ func (d *Dispatcher) settle(ctx context.Context, log *slog.Logger, in lifecycle.
 	case recorded == lifecycle.DispatchRetryable:
 		d.endAttempt(ctx, log, taskUUID, in.N, store.Outcome(res.Reason))
 		return res, nil
-	case recorded != "":
-		return res, nil
-	case running.Aborted() || errors.Is(cause, ErrAborted):
+	case aborted:
+		// abort() stopped the dispatch (§8). A lost context the executor recorded on its way out (a read of
+		// the log on the context the abort canceled) is the abort's doing.
 		d.endAttempt(ctx, log, taskUUID, in.N, store.OutcomeAborted)
 		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchAborted}, nil
+	case recorded != "":
+		return res, nil
+	}
+	if serr := running.StoreFailure(); serr != nil {
+		// The gate's store failed while the dispatch logged an event (a write that ran out of its time or
+		// lost its connection; a2a-go's processor then stopped the execution). That is not an upstream
+		// error (§6.4): the upstream task is untouched, and a write that did not commit is a lost context,
+		// which a later dispatch of the same attempt re-attaches, logging the difference (D42).
+		log.Warn("the task's log could not be written; the attempt is followed again", "error", serr)
+		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchContextLost}, nil
 	}
 	if herr == nil || ctx.Err() != nil {
 		// The activity's context ended (Temporal canceled it, the worker stops): a lost context, which a
@@ -188,7 +213,8 @@ func (d *Dispatcher) settle(ctx context.Context, log *slog.Logger, in lifecycle.
 	}
 	// An error of a2a-go's handler or the executor that is not a lost context — a2a-go refusing a
 	// parallel active execution, a validation failure, a task already terminal — is upstream_error,
-	// never context_lost (§6.4, D42): re-attaching would only meet it again.
+	// never context_lost (§6.4, D42): re-attaching would only meet it again. (A failure of the gate's
+	// store is a lost context, above.)
 	row, err := d.Log.Load(ctx, taskUUID)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
@@ -272,7 +298,9 @@ func attemptOutcome(state store.State, reason store.FailureReason) store.Outcome
 }
 
 // Abort implements lifecycle.DispatchActivities: it cancels the running dispatch of (task, n) through the
-// replica's registry (spec §8, D44). Nothing running here is not an error: the dispatch already ended.
+// replica's registry, or marks one that recorded this replica but has not registered yet so that it stops
+// before calling the upstream (spec §8, D44). Nothing running or starting here is not an error: the
+// dispatch already ended.
 func (d *Dispatcher) Abort(ctx context.Context, in lifecycle.AttemptRef) error {
 	if !d.Registry.Abort(Key{TaskID: a2a.TaskID(in.TaskID), N: in.N}) {
 		d.logger().Info("abort: no dispatch of the attempt runs on this replica", obs.Task(in.TaskID, in.N)...)

@@ -986,7 +986,11 @@ func TestHandlerErrorIsUpstreamError(t *testing.T) {
 func TestExecutorDefaults(t *testing.T) {
 	o := ExecutorOptions{}.withDefaults()
 	if o.PollInterval != time.Second || o.PollMax != 5*time.Second || o.PollSlowAfter != time.Minute ||
-		o.GetTaskGrace != 30*time.Second || o.TaskBytes != 256<<20 || o.MaxPart != 256<<10 {
+		o.GetTaskGrace != 30*time.Second || o.GetTaskTimeout != 10*time.Second || o.TaskBytes != 256<<20 || o.MaxPart != 256<<10 {
+		t.Errorf("%+v", o)
+	}
+	// One GetTask never outlasts the grace.
+	if o := (ExecutorOptions{GetTaskGrace: 3 * time.Second}).withDefaults(); o.GetTaskTimeout != 3*time.Second {
 		t.Errorf("%+v", o)
 	}
 }

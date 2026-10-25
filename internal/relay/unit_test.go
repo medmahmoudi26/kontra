@@ -299,6 +299,48 @@ func TestRegistry(t *testing.T) {
 	}
 }
 
+// An abort between Expect and Register is kept: the dispatch registers aborted, its context canceled with
+// ErrAborted. Once the announcement is released, an abort of nothing is not kept (spec §8, §14.2).
+func TestRegistryAbortBeforeRegister(t *testing.T) {
+	r := NewRegistry()
+	k := Key{TaskID: "t1", N: 1}
+	release := r.Expect(k)
+	if !r.Abort(k) {
+		t.Fatal("an abort of an expected dispatch was not taken")
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	d, err := r.Register(k, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	release() // idempotent
+	if !d.Aborted() || !errors.Is(context.Cause(ctx), ErrAborted) {
+		t.Error("the dispatch registered without the abort")
+	}
+	if res := d.Done(); res.Outcome != lifecycle.DispatchAborted {
+		t.Errorf("%+v", res)
+	}
+
+	// Another attempt's announcement, and one released before the abort, keep nothing.
+	release = r.Expect(Key{TaskID: "t1", N: 2})
+	other := r.Expect(k)
+	other()
+	if r.Abort(k) {
+		t.Error("an abort with nothing expected or running was taken")
+	}
+	ctx2, cancel2 := context.WithCancelCause(context.Background())
+	d2, _ := r.Register(k, cancel2)
+	if d2.Aborted() || ctx2.Err() != nil {
+		t.Error("a dispatch registered after the announcement ended was aborted")
+	}
+	d2.Done()
+	release()
+	if len(r.pending) != 0 {
+		t.Errorf("announcements left: %v", r.pending)
+	}
+}
+
 func TestCallerOwner(t *testing.T) {
 	ctx, cc := a2asrv.NewCallContext(context.Background(), nil)
 	if _, err := CallerOwner(ctx); !errors.Is(err, a2a.ErrUnauthenticated) {

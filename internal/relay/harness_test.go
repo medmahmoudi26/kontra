@@ -112,13 +112,19 @@ type envOptions struct {
 	admit    hooks.Admission
 	rules    hooks.KeyRules
 	policy   ssrf.Policy
+	// writeTimeout replaces the log's write timeout (store.WriteTimeout) when set.
+	writeTimeout time.Duration
 }
 
 func newEnv(t *testing.T, o envOptions) *env {
 	t.Helper()
 	dsn := pgtest.Migrated(t)
 	e := &env{t: t, dsn: dsn, pool: pgtest.Pool(t, dsn), reg: NewRegistry(), backends: &staticBackends{}, signals: &signalRecorder{}}
-	e.log = store.NewLog(e.pool)
+	var logOpts []store.LogOption
+	if o.writeTimeout > 0 {
+		logOpts = append(logOpts, store.WithWriteTimeout(o.writeTimeout))
+	}
+	e.log = store.NewLog(e.pool, logOpts...)
 	tenant := uuid.Must(uuid.NewV7())
 	e.exec(`insert into kontra.tenants (id, slug, kind) values ($1, 'default', 'team')`, tenant)
 	e.exec(`insert into kontra.services (tenant_id, name, kind, backend, source, retries) values ($1, 'hello', 'a2a', '{"a2a": {"url": "http://127.0.0.1:1"}}', 'config', 2)`, tenant)

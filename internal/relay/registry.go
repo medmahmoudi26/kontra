@@ -31,18 +31,28 @@ type Key struct {
 // Registry is the replica's registry of running dispatches (spec §8, §15; D8, D44). It holds each
 // dispatch's cancel function (abort cancels the context in process), the terminal events the relay
 // executor yielded (the store lets only those `failed` writes through while the dispatch is
-// registered), and the outcome the dispatch returns to the workflow.
+// registered), and the outcome the dispatch returns to the workflow; and the dispatches that recorded
+// this replica but have not registered yet (Expect), so that an abort reaching one of them is kept.
 type Registry struct {
 	mu      sync.Mutex
 	running map[Key]*Running
 	byTask  map[a2a.TaskID]*Running
+	// pending holds the dispatches that announced themselves (Expect) and have not registered or given up
+	// yet, per key, and whether an abort reached them meanwhile.
+	pending map[Key]*expected
+}
+
+// expected is the announcement of one or more dispatches of a key.
+type expected struct {
+	n       int
+	aborted bool
 }
 
 var _ store.FailureGuard = (*Registry)(nil)
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{running: map[Key]*Running{}, byTask: map[a2a.TaskID]*Running{}}
+	return &Registry{running: map[Key]*Running{}, byTask: map[a2a.TaskID]*Running{}, pending: map[Key]*expected{}}
 }
 
 // Running is one registered dispatch.
@@ -58,18 +68,50 @@ type Running struct {
 	retryAfter time.Duration
 	aborted    bool
 	superseded bool
+	storeErr   error
+}
+
+// Expect announces a dispatch of k that is about to record this replica in attempts.replica_id
+// (BeginDispatch), which is what routes abort(k) here (spec §14.2), and has not registered yet: it consumes
+// the turn's work item and builds a2a-go's payload and handler first. An abort of k from then until the
+// dispatch registers is kept, and Register returns the dispatch already aborted, its context canceled with
+// ErrAborted, so it stops before calling the upstream (spec §8). release ends the announcement; it is
+// idempotent, and after Register it leaves the registered dispatch alone.
+func (r *Registry) Expect(k Key) (release func()) {
+	r.mu.Lock()
+	p := r.pending[k]
+	if p == nil {
+		p = &expected{}
+		r.pending[k] = p
+	}
+	p.n++
+	r.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			if p.n--; p.n <= 0 && r.pending[k] == p {
+				delete(r.pending, k)
+			}
+			r.mu.Unlock()
+		})
+	}
 }
 
 // Register records a dispatch about to call a2a-go's handler. A dispatch of the same task already
 // registered here (the same attempt or another) is canceled with ErrSuperseded and replaced: the newer
 // dispatch takes over, and the older one, whose fence the newer one's BeginDispatch already broke, stops
-// instead of looping against it.
+// instead of looping against it. A dispatch an abort reached while it was announced (Expect) registers
+// aborted, its context canceled with ErrAborted.
 func (r *Registry) Register(k Key, cancel context.CancelCauseFunc) (*Running, error) {
 	if cancel == nil {
 		return nil, errors.New("relay: a dispatch registers with its cancel function")
 	}
 	d := &Running{reg: r, key: k, cancel: cancel, terminals: map[a2a.Event]struct{}{}}
 	r.mu.Lock()
+	if p := r.pending[k]; p != nil && p.aborted {
+		d.aborted = true
+	}
 	old := r.byTask[k.TaskID]
 	if old != nil {
 		delete(r.running, old.key)
@@ -83,16 +125,24 @@ func (r *Registry) Register(k Key, cancel context.CancelCauseFunc) (*Running, er
 		old.mu.Unlock()
 		old.cancel(ErrSuperseded)
 	}
+	if d.aborted {
+		cancel(ErrAborted)
+	}
 	return d, nil
 }
 
-// Abort cancels the dispatch's context; false when nothing runs under k here.
+// Abort cancels the dispatch's context, and marks a dispatch of k announced but not registered yet
+// (Expect) so that it registers aborted; false when nothing runs or is announced under k here.
 func (r *Registry) Abort(k Key) bool {
 	r.mu.Lock()
 	d := r.running[k]
+	p := r.pending[k]
+	if p != nil {
+		p.aborted = true
+	}
 	r.mu.Unlock()
 	if d == nil {
-		return false
+		return p != nil
 	}
 	d.mu.Lock()
 	d.aborted = true
@@ -150,6 +200,24 @@ func (d *Running) Outcome() (lifecycle.DispatchOutcome, store.FailureReason) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.outcome, d.reason
+}
+
+// NoteStoreFailure records a failure of the gate's own store while the dispatch logged an event: a write
+// that did not commit, or the push config read a2a-go's processor makes after each event. The dispatch's
+// result is then a lost context, never an upstream failure (spec §6.4); the first one is kept.
+func (d *Running) NoteStoreFailure(err error) {
+	d.mu.Lock()
+	if d.storeErr == nil {
+		d.storeErr = err
+	}
+	d.mu.Unlock()
+}
+
+// StoreFailure is the first store failure NoteStoreFailure recorded, nil when none.
+func (d *Running) StoreFailure() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.storeErr
 }
 
 // Aborted reports whether abort() stopped the dispatch.
