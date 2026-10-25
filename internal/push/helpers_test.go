@@ -48,6 +48,29 @@ type env struct {
 	pool *pgxpool.Pool
 	log  *store.Log
 	svc  store.ServiceRef
+
+	clock      sync.Mutex
+	now        func() time.Time // time.Now when nil
+	lastStatus time.Time        // the timestamp of the last status env.status wrote
+}
+
+// statusTime is the timestamp of the next status env.status writes: now, at the millisecond the A2A wire
+// (and so a snapshot) keeps (a2a writes .000Z), and at least 1 ms after the previous one. Two statuses
+// written within one millisecond would otherwise give byte-identical snapshots, which no delivery can tell
+// apart (seqOf).
+func (e *env) statusTime() time.Time {
+	e.clock.Lock()
+	defer e.clock.Unlock()
+	now := time.Now
+	if e.now != nil {
+		now = e.now
+	}
+	ts := now().UTC().Truncate(time.Millisecond)
+	if !ts.After(e.lastStatus) {
+		ts = e.lastStatus.Add(time.Millisecond)
+	}
+	e.lastStatus = ts
+	return ts
 }
 
 func newEnv(t testing.TB) *env {
@@ -128,7 +151,7 @@ func info(id uuid.UUID) a2a.TaskInfo {
 func (e *env) status(id uuid.UUID, s store.State) int64 {
 	e.t.Helper()
 	ev := a2a.NewStatusUpdateEvent(info(id), s.A2A(), nil)
-	now := time.Now().UTC()
+	now := e.statusTime()
 	ev.Status.Timestamp = &now
 	seq, err := write(context.Background(), e.log, id, store.KindStatus, s, ev)
 	if err != nil {

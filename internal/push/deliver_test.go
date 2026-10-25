@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -637,7 +638,10 @@ func TestRateCapPerHost(t *testing.T) {
 		t.Errorf("N after the refresh: %d", n)
 	}
 
-	// Two configs to one host, N = 2: every delivery to that host is at least 200 ms after the previous.
+	// Two configs to one host, N = 2: the limiter gives each delivery to that host a slot 200 ms after the
+	// previous one's, the first at the earliest when the push_webhooks start. A delivery is sent at its slot or
+	// later (after a read of its row), so the i-th to arrive arrives at least i·200 ms after the start. Gaps
+	// between two arrivals are not bounded: one delivery's lag after its slot can shrink the next gap.
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
 	id := e.newTask(buyerA)
@@ -651,6 +655,7 @@ func TestRateCapPerHost(t *testing.T) {
 	o := fast()
 	o.Replicas = func(context.Context) (int, error) { return 2, nil }
 	d2 := NewDeliverer(e.log, private, o)
+	begin := time.Now()
 	out1, out2 := runPush(ctx, d2, id, c1), runPush(ctx, d2, id, c2)
 	waitOut(t, out1, 20*time.Second)
 	waitOut(t, out2, 20*time.Second)
@@ -658,9 +663,10 @@ func TestRateCapPerHost(t *testing.T) {
 	if len(got) != 10 {
 		t.Fatalf("%d deliveries, want 10", len(got))
 	}
-	for i := 1; i < len(got); i++ {
-		if gap := got[i].at.Sub(got[i-1].at); gap < 190*time.Millisecond {
-			t.Fatalf("deliveries %d and %d to one host %s apart, want ≥ 200 ms with N = 2", i-1, i, gap)
+	slices.SortFunc(got, func(a, b delivery) int { return a.at.Compare(b.at) })
+	for i, g := range got {
+		if at, want := g.at.Sub(begin), time.Duration(i)*200*time.Millisecond; at < want {
+			t.Fatalf("delivery %d to one host %s after the start, want ≥ %s with N = 2 (5 a second)", i, at, want)
 		}
 	}
 	// Another host is not held back by this one's slots.

@@ -171,12 +171,23 @@ func (le *lifecycleEnv) history(id uuid.UUID) string {
 	return b.String()
 }
 
-// seqOf maps each delivered body to the seq whose snapshot it is.
+// seqOf maps each delivered body to the seq whose snapshot it is. Two seqs with byte-identical snapshots
+// cannot be told apart by their deliveries, so they fail the test at once: the test must write distinct
+// rows (env.status keeps status timestamps at least 1 ms apart).
 func (le *lifecycleEnv) seqOf(id uuid.UUID, tail int64) map[string]int64 {
 	le.t.Helper()
+	return seqOf(le.env, id, tail)
+}
+
+func seqOf(e *env, id uuid.UUID, tail int64) map[string]int64 {
+	e.t.Helper()
 	m := map[string]int64{}
 	for s := int64(1); s <= tail; s++ {
-		m[le.expectedBody(id, s)] = s
+		b := e.expectedBody(id, s)
+		if prev, ok := m[b]; ok {
+			e.t.Fatalf("seqs %d and %d have the same snapshot: their deliveries cannot be told apart", prev, s)
+		}
+		m[b] = s
 	}
 	return m
 }
@@ -440,5 +451,23 @@ func TestPushWorkerRestart(t *testing.T) {
 	}
 	if seq, _ := le.deliveredSeq(id, cid); seq != 17 {
 		t.Errorf("delivered_seq %d, want 17", seq)
+	}
+}
+
+// Statuses written back to back within one millisecond (a runner whose Postgres commits in under 1 ms)
+// still give distinct snapshots, so checkDeliveries can tell every seq's delivery apart: here with a clock
+// that never moves. Before, two such snapshots were byte-identical, and TestPushWorkerRestart reported one
+// seq as never delivered and the next as delivered twice (CI run 40230326148).
+func TestStatusesWithinOneMillisecondAreDistinctSnapshots(t *testing.T) {
+	e := newEnv(t)
+	frozen := time.Now()
+	e.now = func() time.Time { return frozen }
+	id := e.newTask(buyerA)
+	for range 15 {
+		e.status(id, store.StateWorking)
+	}
+	e.status(id, store.StateCompleted)
+	if m := seqOf(e, id, 17); len(m) != 17 {
+		t.Fatalf("%d distinct snapshots of 17 seqs", len(m))
 	}
 }

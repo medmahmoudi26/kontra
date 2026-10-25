@@ -276,6 +276,10 @@ type fakeTemporal struct {
 	handler workqueue.HandlerFn
 	mu      sync.Mutex
 	done    []chan error
+	lastID  a2a.TaskID
+	// ahead delays Write's return after the handler started, so the handler runs ahead of the caller's
+	// subscription (a2a-go v2.7.0's P15 order, which a real dispatch can take too).
+	ahead time.Duration
 }
 
 func (f *fakeTemporal) write(ctx context.Context, p *workqueue.Payload) (a2a.TaskID, error) {
@@ -318,12 +322,34 @@ func (f *fakeTemporal) write(ctx context.Context, p *workqueue.Payload) (a2a.Tas
 	done := make(chan error, 1)
 	f.mu.Lock()
 	f.done = append(f.done, done)
+	f.lastID = cp.TaskID
+	ahead := f.ahead
 	f.mu.Unlock()
 	go func() {
 		_, err := f.handler(context.Background(), &cp)
 		done <- err
 	}()
+	time.Sleep(ahead)
 	return cp.TaskID, nil
+}
+
+// sendTurn sends a blocking SendMessage and returns the task it answers. a2a-go v2.7.0 answers
+// eventqueue.ErrQueueClosed when the turn already ended at input-required before the call's subscription
+// read the store (P15, relay's TestP15FinishedTurnRace); the gate's finishedTurn interceptor then answers
+// the stored task, and so does this helper, so the test asserts on the task either way.
+func (f *fakeTemporal) sendTurn(ctx context.Context, h a2asrv.RequestHandler, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	res, err := h.SendMessage(ctx, req)
+	if !errors.Is(err, eventqueue.ErrQueueClosed) {
+		return res, err
+	}
+	id := req.Message.TaskID
+	if id == "" {
+		f.mu.Lock()
+		id = f.lastID
+		f.mu.Unlock()
+	}
+	f.t.Logf("the turn ended before the call's subscription read the store (P15): reading task %s", id)
+	return h.GetTask(ctx, &a2a.GetTaskRequest{ID: id})
 }
 
 func (f *fakeTemporal) last() chan error {
@@ -348,7 +374,15 @@ func newCluster(t *testing.T, e *env, exec a2asrv.AgentExecutor, guard FailureGu
 
 // The a2a-go probes P7/P7b/P7c on Postgres (a2a-go brief C11): behind a real cluster-mode handler, a
 // two-turn input-required task completes, and turn 2 returns the task, not the buyer's own message.
-func TestClusterTwoTurnTask(t *testing.T) {
+func TestClusterTwoTurnTask(t *testing.T) { clusterTwoTurnTask(t, 0) }
+
+// The same, with every turn's handler running ahead of the caller's subscription (the P15 order, which
+// a fast turn on a loaded runner takes by chance): each turn's answer is still the task.
+func TestClusterTwoTurnTaskEndsBeforeItsSubscription(t *testing.T) {
+	clusterTwoTurnTask(t, 300*time.Millisecond)
+}
+
+func clusterTwoTurnTask(t *testing.T, ahead time.Duration) {
 	e := newEnv(t)
 	turns := 0
 	var sawHistory int
@@ -374,10 +408,11 @@ func TestClusterTwoTurnTask(t *testing.T) {
 		}
 	})
 	h, ft := newCluster(t, e, exec, nil)
+	ft.ahead = ahead
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	res, err := h.SendMessage(ctx, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("turn 1"))})
+	res, err := ft.sendTurn(ctx, h, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("turn 1"))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +429,7 @@ func TestClusterTwoTurnTask(t *testing.T) {
 	}
 	follow := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("the blue one"))
 	follow.TaskID = task.ID
-	res, err = h.SendMessage(ctx, &a2a.SendMessageRequest{Message: follow})
+	res, err = ft.sendTurn(ctx, h, &a2a.SendMessageRequest{Message: follow})
 	if err != nil {
 		t.Fatal(err)
 	}
