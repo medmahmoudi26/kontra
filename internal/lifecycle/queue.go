@@ -27,12 +27,13 @@ const MetaApproveURL = "kontra.approve.url"
 
 // InlinePushSaver saves a request's inline push config (configuration.taskPushNotificationConfig) for the
 // task inside the work queue's transaction, before the work item is written (spec §10.1), with Save's
-// rules (idempotent per task, URL and token; the per-task and per-buyer limits). It reports whether a row
-// was inserted: Write then sends kontra.push for a follow-up once kontra.message is accepted; a new task's
-// workflow lists its configs at start. DeleteInline removes a row SaveInline inserted for a follow-up the
-// lifecycle then refused: a refused request leaves nothing on the task (spec §7, §10.1). No kontra.push was
-// sent for it; a push_webhook a listing started for it meanwhile ends when its config is deleted (§10.2).
-// internal/push implements it.
+// rules (idempotent per task, URL and token; the per-task and per-buyer limits). configID is the config to
+// announce, empty when the save needs no push_webhook started (an update of a config that is delivering):
+// Write sends kontra.push for it once a follow-up's kontra.message is accepted (a new row, or a failed
+// config set again); a new task's workflow lists its configs at start. inserted reports a new row:
+// DeleteInline removes it when the lifecycle then refuses the follow-up, so a refused request leaves no new
+// config on the task (spec §7, §10.1). No kontra.push was sent for it; a push_webhook a listing started for
+// it meanwhile ends when its config is deleted (§10.2). internal/push implements it.
 type InlinePushSaver interface {
 	SaveInline(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, owner store.Owner, cfg *a2a.PushConfig) (configID string, inserted bool, err error)
 	DeleteInline(ctx context.Context, taskID uuid.UUID, configID string) error
@@ -198,7 +199,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 			return err
 		}
 		// A new task's workflow lists its push configs at start: no kontra.push is needed.
-		stored, _, err := q.savePush(ctx, tx, taskID, owner, req)
+		stored, _, _, err := q.savePush(ctx, tx, taskID, owner, req)
 		if err != nil {
 			return err
 		}
@@ -296,14 +297,15 @@ func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner s
 	}
 	var (
 		pos      position
-		configID string
+		configID string // the inline config to announce
+		inserted bool   // its row is new: deleted if the follow-up is refused
 	)
 	err = pgx.BeginFunc(ctx, q.log.DB(), func(tx pgx.Tx) error {
-		stored, inserted, err := q.savePush(ctx, tx, taskID, owner, req)
+		stored, announce, ins, err := q.savePush(ctx, tx, taskID, owner, req)
 		if err != nil {
 			return err
 		}
-		configID = inserted
+		configID, inserted = announce, ins
 		wp, err := Sanitize(&workqueue.Payload{Type: p.Type, TaskID: p.TaskID, ExecuteRequest: stored, CallContext: p.CallContext}, owner)
 		if err != nil {
 			return err
@@ -326,7 +328,7 @@ func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner s
 			// no Update of it is pending, so nothing can consume them. Deleting is best effort: the caller's
 			// answer is the refusal either way, and retention deletes a leftover with the task.
 			_ = q.log.DeleteWorkItem(bg, wid, taskID)
-			if configID != "" {
+			if inserted && configID != "" {
 				_ = q.opts.Push.DeleteInline(bg, taskID, configID)
 			}
 		}
@@ -418,24 +420,21 @@ func (q *Queue) message(ctx context.Context, taskID uuid.UUID, wid uuid.UUID, po
 
 // savePush saves the request's inline push config in tx when a saver is configured, and returns the
 // request to store in the work item, without the config once it is saved, so the caller's webhook
-// credentials live only in push_configs.config; and the config's id when a row was inserted. Without a
-// saver the request is returned as it is.
-func (q *Queue) savePush(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, owner store.Owner, req *a2a.SendMessageRequest) (*a2a.SendMessageRequest, string, error) {
+// credentials live only in push_configs.config; the config's id when it is to be announced (InlinePushSaver);
+// and whether its row was inserted. Without a saver the request is returned as it is.
+func (q *Queue) savePush(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, owner store.Owner, req *a2a.SendMessageRequest) (*a2a.SendMessageRequest, string, bool, error) {
 	if q.opts.Push == nil || req.Config == nil || req.Config.PushConfig == nil {
-		return req, "", nil
+		return req, "", false, nil
 	}
 	id, inserted, err := q.opts.Push.SaveInline(ctx, tx, taskID, owner, req.Config.PushConfig)
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	cp := *req
 	cfg := *req.Config
 	cfg.PushConfig = nil
 	cp.Config = &cfg
-	if !inserted {
-		id = ""
-	}
-	return &cp, id, nil
+	return &cp, id, inserted, nil
 }
 
 // RegisterHandler implements workqueue.Queue; a2a-go calls it once per handler. The function is kept as

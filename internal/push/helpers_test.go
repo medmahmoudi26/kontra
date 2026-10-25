@@ -367,6 +367,12 @@ func containsAny(s string, needles ...string) string {
 	return ""
 }
 
+// pushInput is push_webhook's input for the config with id configID, named by its ConfigRef as the
+// workflow names it (a task id that is not one is passed through, for the bad-input tests).
 func pushInput(taskID, configID string) lifecycle.PushInput {
-	return lifecycle.PushInput{TaskID: taskID, ConfigID: configID, Deadline: time.Now().Add(time.Hour)}
+	ref := configID
+	if id, err := uuid.Parse(taskID); err == nil && configID != "" {
+		ref = lifecycle.ConfigRef(id, configID)
+	}
+	return lifecycle.PushInput{TaskID: taskID, ConfigID: ref, Deadline: time.Now().Add(time.Hour)}
 }

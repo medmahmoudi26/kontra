@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -178,9 +179,34 @@ func TestPrepareAndAttemptState(t *testing.T) {
 	if _, err := e.acts.AttemptState(ctx, AttemptRef{TaskID: "not-a-uuid", N: 1}); appType(err) != ErrTypeTaskGone {
 		t.Errorf("attempt_state of a malformed id: %v", err)
 	}
-	ids, err := e.acts.ListPushConfigs(ctx, id.String())
-	if err != nil || strings.Join(ids, ",") != "a,b" {
-		t.Errorf("list_push_configs %v %v, want sorted and unique", ids, err)
+	// The result crosses history: each config is named by its ConfigRef, never its id (which may be the
+	// caller's), sorted and unique.
+	refs, err := e.acts.ListPushConfigs(ctx, id.String())
+	want := []string{ConfigRef(id, "a"), ConfigRef(id, "b")}
+	slices.Sort(want)
+	if err != nil || !slices.Equal(refs, want) {
+		t.Errorf("list_push_configs %v %v, want the refs of a and b, sorted and unique", refs, err)
+	}
+	for _, r := range refs {
+		if r == "a" || r == "b" || !strings.HasPrefix(r, "pc_") {
+			t.Errorf("list_push_configs named a config %q", r)
+		}
+	}
+}
+
+// TestConfigRef: a config's ref is stable for (task, id), differs across tasks and ids, and carries
+// nothing of the id.
+func TestConfigRef(t *testing.T) {
+	a, b := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	const id = "acme-billing-webhook"
+	if ConfigRef(a, id) != ConfigRef(a, id) {
+		t.Fatal("not stable")
+	}
+	if ConfigRef(a, id) == ConfigRef(b, id) || ConfigRef(a, id) == ConfigRef(a, id+"x") {
+		t.Fatal("refs collide across tasks or ids")
+	}
+	if r := ConfigRef(a, id); strings.Contains(r, "acme") || strings.Contains(r, a.String()) || len(r) != len("pc_")+64 {
+		t.Fatalf("ref %q", r)
 	}
 }
 

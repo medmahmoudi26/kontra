@@ -1586,3 +1586,98 @@ func TestReviewMessageHookHasAScheduleToCloseBound(t *testing.T) {
 		t.Fatalf("OnReviewMessage schedule-to-close %v, want %v", got, reviewMessageStartToClose)
 	}
 }
+
+// --- a push_webhook whose config ended (spec §10.2, §14.1: kontra.push starts or ends a push_webhook) ---
+
+// A push_webhook that ended because its config was deleted, or marked failed, no longer holds the config's
+// place in the run: the config created again with the same id (or a failed one set again) gets a new
+// push_webhook from its kontra.push, and when that signal raced the end of the old activity (it arrived
+// while the old one was still running, so it was dropped), the listing that follows the end starts it.
+func TestPushRestartsAfterItsConfigEnded(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first string // how the first push_webhook ends
+	}{
+		{"deleted then created again", "deleted"},
+		{"failed then set again", "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.pushCfgs = [][]string{{}}
+			var n int
+			w.pushFn = func(ctx context.Context, in PushInput) (PushResult, error) {
+				w.mu.Lock()
+				n++
+				k := n
+				w.mu.Unlock()
+				if k == 1 {
+					return PushResult{Stopped: tc.first}, nil
+				}
+				return PushResult{Stopped: "terminal"}, nil
+			}
+			w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+				w.setState(string(store.StateInputRequired))
+				return DispatchResult{Outcome: DispatchInterrupted}, nil
+			}
+			env := w.env()
+			env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalPush, PushSignal{ConfigID: "cfg-1"}) }, time.Minute)
+			if tc.first == "deleted" {
+				env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalPush, PushSignal{ConfigID: "cfg-1", Deleted: true}) }, 5*time.Minute)
+			}
+			env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalPush, PushSignal{ConfigID: "cfg-1"}) }, 6*time.Minute)
+			start(env, newUpdates(), input(0))
+			done(t, env)
+			if s := w.snapshot(); !slices.Equal(s.pushes, []string{"cfg-1", "cfg-1"}) {
+				t.Fatalf("push_webhook ran for %v: the config set again after its push_webhook ended %s got none", s.pushes, tc.first)
+			}
+		})
+	}
+	t.Run("the signal raced the end", func(t *testing.T) {
+		w := newWorld(t)
+		// list_push_configs: nothing at the start; the config (created again) once the first activity ended.
+		w.pushCfgs = [][]string{{}, {"cfg-1"}}
+		signaled := make(chan struct{})
+		second := make(chan struct{})
+		var n int
+		w.pushFn = func(ctx context.Context, in PushInput) (PushResult, error) {
+			w.mu.Lock()
+			n++
+			k := n
+			w.mu.Unlock()
+			if k == 1 {
+				// The config is deleted and created again while this activity runs; it ends "deleted" only
+				// after the new config's kontra.push reached the workflow.
+				select {
+				case <-signaled:
+				case <-w.release:
+				}
+				return PushResult{Stopped: "deleted"}, nil
+			}
+			if k == 2 {
+				close(second)
+			}
+			return PushResult{Stopped: "terminal"}, nil
+		}
+		w.dispatchFn = func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error) {
+			select { // the turn ends once the config got its new push_webhook (or the test gives up)
+			case <-second:
+			case <-time.After(5 * time.Second):
+			}
+			w.setState(string(store.StateCompleted))
+			return DispatchResult{Outcome: DispatchTerminal}, nil
+		}
+		env := w.env()
+		env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalPush, PushSignal{ConfigID: "cfg-1"}) }, 0)
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(SignalPush, PushSignal{ConfigID: "cfg-1", Deleted: true})
+			env.SignalWorkflow(SignalPush, PushSignal{ConfigID: "cfg-1"})
+			close(signaled)
+		}, time.Second)
+		start(env, newUpdates(), input(0))
+		done(t, env)
+		s := w.snapshot()
+		if !slices.Equal(s.pushes, []string{"cfg-1", "cfg-1"}) {
+			t.Fatalf("push_webhook ran for %v (lists %d): the config created again while the old activity ran got none", s.pushes, s.lists)
+		}
+	})
+}

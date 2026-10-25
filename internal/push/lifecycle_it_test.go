@@ -292,7 +292,8 @@ func TestPushDeliveryThroughTheLifecycle(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	late, err := le.cs.Save(context.Background(), tid(id), &a2a.PushConfig{URL: r.url("/late"), Token: secretToken})
+	// The caller names this config: its id must never cross Temporal history (spec §14).
+	late, err := le.cs.Save(context.Background(), tid(id), &a2a.PushConfig{ID: callerConfigID, URL: r.url("/late"), Token: secretToken})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,10 +362,18 @@ func TestPushDeliveryThroughTheLifecycle(t *testing.T) {
 	}
 	if h := le.history(id); containsAny(h, secretToken, secretCreds, secretPath) != "" {
 		t.Errorf("Temporal history carries a credential (%q)", containsAny(h, secretToken, secretCreds, secretPath))
-	} else if !strings.Contains(h, inlineID) || !strings.Contains(h, late.ID) {
+	} else if !strings.Contains(h, lifecycle.ConfigRef(id, inlineID)) || !strings.Contains(h, lifecycle.ConfigRef(id, late.ID)) {
 		t.Errorf("the history names no push_webhook for the configs %s and %s", inlineID, late.ID)
 	}
+	// Config ids cross history only as their ConfigRef: not in kontra.push, list_push_configs' result or
+	// push_webhook's input, nor in any activity error.
+	if h := le.history(id); strings.Contains(h, callerConfigID) || strings.Contains(h, inlineID) {
+		t.Errorf("Temporal history carries a config id (%q or %q)", callerConfigID, inlineID)
+	}
 }
+
+// callerConfigID is a config id chosen by the caller.
+const callerConfigID = "acme-billing-webhook-for-order-4711"
 
 // TestPushWorkerRestart: the kontra-push worker running a push_webhook stops mid-delivery (a drain, a
 // crash of its replica) and another one takes the activity over; it resumes from delivered_seq and its

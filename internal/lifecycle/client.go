@@ -14,6 +14,8 @@ import (
 	"go.temporal.io/sdk/client"
 	tlog "go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
+
+	"github.com/medmahmoudi26/kontra/internal/ids"
 )
 
 // AcceptWait is how long the gate waits for a kontra-lifecycle worker to accept an Update; a timeout is
@@ -231,10 +233,16 @@ func classifyCancel(err error) error {
 	return unavailable(err)
 }
 
-// SignalPush sends kontra.push. A workflow that does not exist (yet, or any more) is not an error: the
-// workflow lists push configs at start and after each dispatch (spec §10.2).
+// SignalPush sends kontra.push for the config whose id is s.ConfigID; the signal carries its ConfigRef,
+// never the id (spec §14). A workflow that does not exist (yet, or any more) is not an error: the workflow
+// lists push configs at start and after each dispatch (spec §10.2).
 func (c *Client) SignalPush(ctx context.Context, taskID a2a.TaskID, s PushSignal) error {
-	err := c.c.SignalWorkflow(ctx, WorkflowID(taskID), "", SignalPush, s)
+	id, err := ids.ParseTaskID(string(taskID))
+	if err != nil {
+		return err
+	}
+	s.ConfigID = ConfigRef(id, s.ConfigID)
+	err = c.c.SignalWorkflow(ctx, WorkflowID(taskID), "", SignalPush, s)
 	var nf *serviceerror.NotFound
 	if errors.As(err, &nf) {
 		return nil

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/medmahmoudi26/kontra/internal/auth"
 	"github.com/medmahmoudi26/kontra/internal/hooks"
 	"github.com/medmahmoudi26/kontra/internal/lifecycle"
+	"github.com/medmahmoudi26/kontra/internal/ssrf"
 	"github.com/medmahmoudi26/kontra/internal/store"
 )
 
@@ -535,4 +538,120 @@ func TestFinishedTurnAnswersTheTask(t *testing.T) {
 		t.Fatalf("follow-up: %+v %v", res, err)
 	}
 	e.queue.wait(t)
+}
+
+// pushResolver answers the push URL checks' lookups from a table; a name in servfail fails as a resolver
+// that answers SERVFAIL does.
+type pushResolver struct {
+	mu       sync.Mutex
+	addrs    map[string][]string
+	servfail map[string]bool
+}
+
+func (r *pushResolver) set(host string, addrs ...string) {
+	r.mu.Lock()
+	r.addrs[host] = addrs
+	r.mu.Unlock()
+}
+
+func (r *pushResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.servfail[host] {
+		return nil, &net.DNSError{Err: "server misbehaving", Name: host, Server: "10.0.0.53:53", IsTemporary: true}
+	}
+	var out []netip.Addr
+	for _, a := range r.addrs[host] {
+		out = append(out, netip.MustParseAddr(a))
+	}
+	if len(out) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	return out, nil
+}
+
+// A follow-up that sends its inline push config again, unchanged, is not refused for a DNS change: the URL
+// was checked when it was set (and every delivery checks every address when it dials). A URL new for the
+// task, and a new task's inline config, are checked; a lookup that fails for a reason of the gate's own
+// (SERVFAIL) is an internal error, never the caller's InvalidParams (spec §10.1, §10.3).
+func TestFollowUpInlinePushConfigNotResolvedAgain(t *testing.T) {
+	res := &pushResolver{addrs: map[string][]string{"hooks.example": {"93.184.215.14"}}, servfail: map[string]bool{"flaky.example": true}}
+	e := newEnv(t, envOptions{policy: ssrf.Policy{Resolver: res}})
+	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	e.setState(id, a2a.TaskStateInputRequired)
+	// The config set with the task, as the work queue's inline save stored it.
+	e.exec(`insert into kontra.push_configs (task_id, id, config) values ($1, 'c1', $2)`, uid(t, id),
+		`{"url": "https://hooks.example/cb", "token": "tok"}`)
+	res.set("hooks.example", "10.0.0.7") // the name resolves privately now
+	check := func(taskID a2a.TaskID, cfg *a2a.PushConfig) error {
+		m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("more"))
+		m.TaskID = taskID
+		req := &a2asrv.Request{Payload: &a2a.SendMessageRequest{Message: m, Config: &a2a.SendMessageConfig{PushConfig: cfg}}}
+		_, _, err := e.intc.pushURLs(asCaller(buyerA), nil, req)
+		return err
+	}
+	if err := check(id, &a2a.PushConfig{URL: "https://hooks.example/cb", Token: "tok"}); err != nil {
+		t.Errorf("a follow-up's unchanged inline config: %v", err)
+	}
+	if err := check(id, &a2a.PushConfig{URL: "https://hooks.example/other"}); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Errorf("a URL new for the task: %v, want InvalidParams", err)
+	}
+	if err := check("", &a2a.PushConfig{URL: "https://hooks.example/cb", Token: "tok"}); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Errorf("a new task's inline config: %v, want InvalidParams", err)
+	}
+	for _, taskID := range []a2a.TaskID{id, ""} {
+		err := check(taskID, &a2a.PushConfig{URL: "https://flaky.example/cb"})
+		if !errors.Is(err, a2a.ErrInternalError) || errors.Is(err, a2a.ErrInvalidParams) {
+			t.Errorf("a lookup that failed for the gate's own reason (task %q): %v, want an internal error", taskID, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "10.0.0.53") {
+			t.Errorf("the error names the resolver: %v", err)
+		}
+	}
+	// CreateTaskPushNotificationConfig is a config being set: checked.
+	if _, _, err := e.intc.pushURLs(asCaller(buyerA), nil, &a2asrv.Request{Payload: &a2a.PushConfig{TaskID: id, URL: "https://hooks.example/cb"}}); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Errorf("CreateTaskPushNotificationConfig to a private name: %v", err)
+	}
+}
+
+// A message to a completed task (the review window) keeps no inline push config: its webhook credentials
+// never reach work_items, which hold no credentials (0001), and the message is not refused for it.
+func TestReviewMessageStoresNoPushCredentials(t *testing.T) {
+	fr := &fakeReviews{mode: "accept"}
+	e := newEnv(t, envOptions{reviews: fr})
+	fr.e = e
+	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	e.setState(id, a2a.TaskStateCompleted)
+	m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("this is not what I ordered"))
+	m.TaskID = id
+	const secret = "whsec-review-5ecret"
+	historyLength := 5
+	req := &a2a.SendMessageRequest{Message: m, Config: &a2a.SendMessageConfig{HistoryLength: &historyLength, PushConfig: &a2a.PushConfig{
+		URL: "https://hooks.example/" + secret, Token: secret, Auth: &a2a.PushAuthInfo{Scheme: "Bearer", Credentials: secret}}}}
+	if _, err := e.handler().SendMessage(asCaller(buyerA), req); err != nil {
+		t.Fatal(err)
+	}
+	var payloads []string
+	rows, err := e.pool.Query(context.Background(), `select payload::text from kontra.work_items where task_id = $1`, uid(t, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, p)
+	}
+	if rows.Err() != nil || len(payloads) < 2 {
+		t.Fatalf("work items %d %v", len(payloads), rows.Err())
+	}
+	for _, p := range payloads {
+		if strings.Contains(p, secret) {
+			t.Fatalf("a work item stores the review message's push credentials: %s", p)
+		}
+	}
+	if !strings.Contains(payloads[len(payloads)-1], `"historyLength":5`) {
+		t.Errorf("the rest of the request's configuration is kept: %s", payloads[len(payloads)-1])
+	}
 }

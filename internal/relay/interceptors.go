@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"unicode/utf8"
 
@@ -18,6 +17,7 @@ import (
 	"github.com/medmahmoudi26/kontra/internal/hooks"
 	"github.com/medmahmoudi26/kontra/internal/ids"
 	"github.com/medmahmoudi26/kontra/internal/lifecycle"
+	"github.com/medmahmoudi26/kontra/internal/push"
 	"github.com/medmahmoudi26/kontra/internal/ssrf"
 	"github.com/medmahmoudi26/kontra/internal/store"
 	"github.com/medmahmoudi26/kontra/internal/upstream"
@@ -55,8 +55,10 @@ type ReviewMessenger interface {
 //     UnsupportedOperationError (a2a-go itself answers InvalidParams there); a review-window message is
 //     stored as a work item and sent as kontra.review_message, answered here as an early response.
 //  6. Push URLs (spec §10.1): an inline config's URL, and a CreateTaskPushNotificationConfig's, is
-//     checked now, so a refused URL is a synchronous InvalidParams and nothing is stored; the work queue
-//     saves an inline config with the task.
+//     checked now (push.CheckURL), so a refused URL is a synchronous InvalidParams and nothing is stored;
+//     the work queue saves an inline config with the task. A follow-up's inline config is checked only
+//     when its URL is new for the task (push.CheckSet): a follow-up that sends its unchanged config again
+//     is never refused for a DNS change.
 //  7. CancelInterceptor.
 //  8. GetExtendedAgentCard is UnsupportedOperationError (spec §3: capabilities.extendedAgentCard false).
 //
@@ -366,6 +368,17 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 	msg := *r.Message
 	msg.TaskID, msg.ContextID = a2a.TaskID(row.ID.String()), row.ContextID
 	stored.Message = &msg
+	if r.Config != nil && r.Config.PushConfig != nil {
+		// SPEC-CONFLICT: spec §10.1 saves an inline push config before the work item is written, but a
+		// review-window message is to a task that has ended: a config set on it would deliver nothing (an
+		// ended task has no change left to push, internal/push insertSQL), and its webhook credentials must
+		// not be stored in work_items, which hold no credentials (0001). The closest faithful behaviour: the
+		// inline config is dropped from the stored request and not saved, and the message is not refused
+		// for it (a2a-go's client sends its default config with every message).
+		cfg := *r.Config
+		cfg.PushConfig = nil
+		stored.Config = &cfg
+	}
 	if err := i.Log.InsertWorkItem(ctx, nil, store.WorkItem{
 		ID: wid, TaskID: row.ID, Kind: store.WorkExecute, Payload: store.WorkPayload{Request: &stored, Owner: o},
 	}); err != nil {
@@ -400,32 +413,26 @@ func (i *Interceptors) pushURLs(ctx context.Context, cc *a2asrv.CallContext, req
 	var pc *a2a.PushConfig
 	switch p := req.Payload.(type) {
 	case *a2a.SendMessageRequest:
-		if p != nil && p.Config != nil {
-			pc = p.Config.PushConfig
+		if p == nil || p.Config == nil || p.Config.PushConfig == nil {
+			return ctx, nil, nil
 		}
+		if p.Message != nil && p.Message.TaskID != "" {
+			// A follow-up (the followUp interceptor already found the task the caller's): its config was
+			// checked when it was set, unless its URL is new for the task.
+			id, err := ids.ParseTaskID(string(p.Message.TaskID))
+			if err != nil {
+				return ctx, nil, err
+			}
+			return ctx, nil, push.CheckSet(ctx, i.Log.DB(), id, p.Config.PushConfig, i.PushPolicy)
+		}
+		pc = p.Config.PushConfig
 	case *a2a.PushConfig:
 		pc = p
 	}
 	if pc == nil {
 		return ctx, nil, nil
 	}
-	if err := CheckPushURL(ctx, pc.URL, i.PushPolicy); err != nil {
-		return ctx, nil, err
-	}
-	return ctx, nil, nil
-}
-
-// CheckPushURL is the set-time check of a push config URL (spec §10.1, §10.3): InvalidParams when the URL
-// does not parse or the SSRF rules refuse it. It never connects.
-func CheckPushURL(ctx context.Context, raw string, p ssrf.Policy) error {
-	u, err := url.Parse(raw)
-	if err != nil || raw == "" {
-		return invalid("push notification URL is not a URL")
-	}
-	if err := ssrf.CheckURL(ctx, u, p); err != nil {
-		return invalid("push notification URL refused: " + err.Error())
-	}
-	return nil
+	return ctx, nil, push.CheckURL(ctx, pc.URL, i.PushPolicy)
 }
 
 func extendedCard(ctx context.Context, cc *a2asrv.CallContext, _ *a2asrv.Request) (context.Context, any, error) {

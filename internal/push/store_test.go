@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,8 +136,9 @@ func TestSaveInlineThenResave(t *testing.T) {
 	if len(sig.list()) != 0 || e.count(`select count(*) from kontra.push_configs where task_id = $1`, id) != 1 {
 		t.Fatal("the re-save inserted a row or started a delivery")
 	}
-	// A second SaveInline of the same config (a resend that reached Write) inserts nothing.
-	if c2, ins := e.saveInline(cs, id, buyerA, pushConfig("http://127.0.0.1:9/hook")); c2 != cid || ins {
+	// A second SaveInline of the same config (a resend that reached Write) inserts nothing, and has
+	// nothing to announce.
+	if c2, ins := e.saveInline(cs, id, buyerA, pushConfig("http://127.0.0.1:9/hook")); c2 != "" || ins {
 		t.Fatalf("SaveInline again: %q %v", c2, ins)
 	}
 	// A rolled-back transaction leaves nothing (a refused request stores nothing, spec §10.1).
@@ -437,4 +439,217 @@ func TestResaveSkipsTheDNSCheck(t *testing.T) {
 	if got, _ := cs.Get(ctx, tid(id), "n"); got.URL != "https://93.184.215.14/a" {
 		t.Errorf("the refused update changed the URL to %s", got.URL)
 	}
+}
+
+// TestConfigsOnEndedTasksAreDone: a config set on a task that has ended is done when it is set (an ended
+// task has nothing left to deliver, and once its workflow has closed nothing would deliver it): it is
+// stored, listed and deletable, but it is not delivering, so configs set on ended tasks never fill the
+// buyer's 256 and refuse a config on a live task.
+func TestConfigsOnEndedTasksAreDone(t *testing.T) {
+	e := newEnv(t)
+	sig := &signals{}
+	cs := NewConfigStore(e.pool, sig, private, nil)
+	ctx := context.Background()
+	made := 0
+	for made < MaxPerBuyer+MaxPerTask {
+		id := e.newTask(buyerA)
+		e.status(id, store.StateWorking)
+		term := e.status(id, store.StateCompleted)
+		e.metadata(id, map[string]any{"x": "y"}) // rows after the terminal one are not delivered
+		for i := 0; i < MaxPerTask; i++ {
+			s, err := cs.Save(ctx, tid(id), &a2a.PushConfig{URL: fmt.Sprintf("http://127.0.0.1:9/x%d", i)})
+			if err != nil {
+				t.Fatalf("config %d, on an ended task: %v", made+1, err)
+			}
+			if seq, failed := e.deliveredSeq(id, s.ID); seq != term || failed {
+				t.Fatalf("a config set on an ended task: delivered_seq %d failed %v, want done at the terminal row %d", seq, failed, term)
+			}
+			made++
+		}
+		if l, err := cs.List(ctx, tid(id)); err != nil || len(l) != MaxPerTask {
+			t.Fatalf("List: %d configs, %v", len(l), err)
+		}
+	}
+	if n := len(sig.list()); n != 0 {
+		t.Errorf("%d kontra.push signals for configs that have nothing to deliver", n)
+	}
+	live := e.newTask(buyerA)
+	e.status(live, store.StateWorking)
+	if _, err := cs.Save(ctx, tid(live), &a2a.PushConfig{URL: "http://127.0.0.1:9/live"}); err != nil {
+		t.Fatalf("a config on a live task after %d configs on ended tasks: %v", made, err)
+	}
+	if got := sig.list(); len(got) != 1 {
+		t.Errorf("kontra.push %+v: once for the live task's config", got)
+	}
+	// A push_webhook for one of them ends at once without a delivery.
+	d := NewDeliverer(e.log, private, fast())
+	rcv := newReceiver(t, nil)
+	id := e.newTask(buyerA)
+	e.status(id, store.StateCompleted)
+	s, err := cs.Save(ctx, tid(id), pushConfig(rcv.url("/hook")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := waitOut(t, runPush(ctx, d, id, s.ID), 5*time.Second)
+	if o.err != nil || o.res.Stopped != StoppedTerminal || len(rcv.requests()) != 0 {
+		t.Fatalf("push_webhook of a config set after the end: %+v %v, %d requests", o.res, o.err, len(rcv.requests()))
+	}
+	// The same through the work queue's inline save (a follow-up racing the task's end).
+	ended := e.newTask(buyerA)
+	term := e.status(ended, store.StateCompleted)
+	cid, inserted := e.saveInline(cs, ended, buyerA, &a2a.PushConfig{URL: "http://127.0.0.1:9/inline"})
+	if seq, _ := e.deliveredSeq(ended, cid); !inserted || seq != term {
+		t.Fatalf("SaveInline on an ended task: %q inserted %v, delivered_seq %d, want %d", cid, inserted, seq, term)
+	}
+}
+
+// TestSetAgainRevivesAFailedConfig: a failed config set again on a task that has not ended delivers again,
+// from where it stopped: its failure is cleared, it is live, kontra.push announces it, and it counts
+// against the buyer's limit again. On an ended task it stays as it is (there is nothing left to deliver).
+func TestSetAgainRevivesAFailedConfig(t *testing.T) {
+	e := newEnv(t)
+	sig := &signals{}
+	cs := NewConfigStore(e.pool, sig, private, nil)
+	ctx := context.Background()
+	id := e.newTask(buyerA)
+	e.status(id, store.StateWorking)
+	if _, err := cs.Save(ctx, tid(id), &a2a.PushConfig{ID: "c", URL: "http://127.0.0.1:9/broken"}); err != nil {
+		t.Fatal(err)
+	}
+	e.status(id, store.StateWorking)
+	e.exec(`update kontra.push_configs set failed_at = now(), delivered_seq = 2 where task_id = $1`, id)
+	before := len(sig.list())
+	s, err := cs.Save(ctx, tid(id), &a2a.PushConfig{ID: "c", URL: "http://127.0.0.1:9/fixed"})
+	if err != nil || s.URL != "http://127.0.0.1:9/fixed" {
+		t.Fatalf("set again: %+v %v", s, err)
+	}
+	seq, failed := e.deliveredSeq(id, "c")
+	if failed || seq != 2 {
+		t.Fatalf("after setting a failed config again: failed %v, delivered_seq %d (want live, from 2)", failed, seq)
+	}
+	if live, _ := cs.LiveConfigIDs(ctx, id); len(live) != 1 || live[0] != "c" {
+		t.Errorf("live configs %v", live)
+	}
+	if got := sig.list()[before:]; len(got) != 1 || got[0] != (lifecycle.PushSignal{ConfigID: "c"}) {
+		t.Errorf("kontra.push %+v: the revived config must be announced", got)
+	}
+	// The same through the work queue's inline save: announced (its id), not inserted.
+	e.exec(`update kontra.push_configs set failed_at = now() where task_id = $1`, id)
+	if cid, ins := e.saveInline(cs, id, buyerA, &a2a.PushConfig{ID: "c", URL: "http://127.0.0.1:9/fixed-again"}); cid != "c" || ins {
+		t.Fatalf("SaveInline of a failed config: %q inserted %v, want announced and not inserted", cid, ins)
+	}
+	if _, failed := e.deliveredSeq(id, "c"); failed {
+		t.Error("SaveInline left the config failed")
+	}
+	// A revived config counts again: at the buyer's limit it is refused, and stays failed.
+	e.exec(`update kontra.push_configs set failed_at = now() where task_id = $1`, id)
+	for n := 0; n < MaxPerBuyer; {
+		other := e.newTask(buyerA)
+		for i := 0; i < MaxPerTask && n < MaxPerBuyer; i++ {
+			if _, err := cs.Save(ctx, tid(other), &a2a.PushConfig{URL: fmt.Sprintf("http://127.0.0.1:9/f%d", i)}); err != nil {
+				t.Fatal(err)
+			}
+			n++
+		}
+	}
+	if _, err := cs.Save(ctx, tid(id), &a2a.PushConfig{ID: "c", URL: "http://127.0.0.1:9/fixed"}); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Fatalf("reviving a config over the buyer's limit: %v", err)
+	}
+	if _, failed := e.deliveredSeq(id, "c"); !failed {
+		t.Error("a refused revival cleared the failure")
+	}
+	// On an ended task a failed config set again stays failed, and nothing is announced.
+	ended := e.newTask(buyerB)
+	if _, err := cs.Save(ctx, tid(ended), &a2a.PushConfig{ID: "d", URL: "http://127.0.0.1:9/broken"}); err != nil {
+		t.Fatal(err)
+	}
+	e.exec(`update kontra.push_configs set failed_at = now() where task_id = $1`, ended)
+	e.status(ended, store.StateCompleted)
+	before = len(sig.list())
+	if _, err := cs.Save(ctx, tid(ended), &a2a.PushConfig{ID: "d", URL: "http://127.0.0.1:9/fixed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, failed := e.deliveredSeq(ended, "d"); !failed || len(sig.list()) != before {
+		t.Errorf("a failed config of an ended task set again: failed %v, %d signals", failed, len(sig.list())-before)
+	}
+}
+
+// TestCheckSet: a config set again on an existing task with the URL it already has is not resolved again
+// (a follow-up that re-sends its inline config is never refused for a DNS change); a new URL is checked.
+func TestCheckSet(t *testing.T) {
+	e := newEnv(t)
+	res := fakeResolver{"hooks.example": {"93.184.215.14"}}
+	pol := ssrf.Policy{Resolver: res}
+	cs := NewConfigStore(e.pool, nil, pol, nil)
+	ctx := context.Background()
+	id := e.newTask(buyerA)
+	if _, err := cs.Save(ctx, tid(id), pushConfig("https://hooks.example/hook")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.Save(ctx, tid(id), &a2a.PushConfig{ID: "n", URL: "https://hooks.example/named"}); err != nil {
+		t.Fatal(err)
+	}
+	res["hooks.example"] = []string{"10.0.0.7"} // the name now resolves privately
+	for _, c := range []*a2a.PushConfig{pushConfig("https://hooks.example/hook"), {ID: "n", URL: "https://hooks.example/named"}} {
+		if err := CheckSet(ctx, e.pool, id, c, pol); err != nil {
+			t.Errorf("CheckSet of an unchanged config %+v: %v", c.URL, err)
+		}
+	}
+	for _, c := range []*a2a.PushConfig{
+		pushConfig("https://hooks.example/new"),           // a new (URL, token)
+		{ID: "n", URL: "https://hooks.example/changed"},   // a changed URL
+		{ID: "other", URL: "https://hooks.example/named"}, // another config with that URL
+	} {
+		if err := CheckSet(ctx, e.pool, id, c, pol); !errors.Is(err, a2a.ErrInvalidParams) {
+			t.Errorf("CheckSet of %+v: %v, want InvalidParams", c.URL, err)
+		}
+	}
+	// On another task the URL is new.
+	if err := CheckSet(ctx, e.pool, e.newTask(buyerA), pushConfig("https://hooks.example/hook"), pol); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Errorf("CheckSet on another task: %v", err)
+	}
+}
+
+// TestDeliveringCountReachesTheBuyersTasksByIndex: the per-buyer count every new config runs under the
+// buyer's lock reaches the buyer's tasks by an index on (tenant_id, service, buyer_id) and their configs by
+// primary key, never by scanning every buyer's tasks or configs.
+func TestDeliveringCountReachesTheBuyersTasksByIndex(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	// 50,000 tasks of 1,000 buyers, a push config on every tenth.
+	e.exec(`insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version, snapshot, status_at)
+		select ('0192f0b4-0000-7000-8000-' || lpad(to_hex(g), 12, '0'))::uuid, $1, 'hello', 'a2a',
+			('0192f0b4-0000-7000-9000-' || lpad(to_hex(g % 1000), 12, '0'))::uuid, 'key:x', 'api_key', 'c', 'working', 1, '{}'::json, now()
+		from generate_series(1, 50000) g`, e.svc.TenantID)
+	e.exec(`insert into kontra.task_events (task_id, seq, kind, payload) select id, 1, 'task', '{}'::json from kontra.tasks`)
+	e.exec(`insert into kontra.push_configs (task_id, id, config)
+		select id, 'c', '{"url":"https://x/"}'::jsonb from kontra.tasks where substr(id::text, 36, 1) = '0'`)
+	e.exec(`analyze`)
+	buyer := uuid.MustParse("0192f0b4-0000-7000-9000-000000000008") // 50 tasks, about half with a config
+	var n int
+	if err := e.pool.QueryRow(ctx, deliveringSQL, buyer).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	var want int
+	if err := e.pool.QueryRow(ctx, `select count(*) from kontra.push_configs p join kontra.tasks t on t.id = p.task_id
+		where t.buyer_id = $1`, buyer).Scan(&want); err != nil {
+		t.Fatal(err)
+	}
+	if n != want || n == 0 {
+		t.Fatalf("delivering count %d, want %d", n, want)
+	}
+	rows, err := e.pool.Query(ctx, `explain (analyze, costs off) `+deliveringSQL, buyer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(plan, "\n")
+	if strings.Contains(text, "Seq Scan on tasks") || strings.Contains(text, "Seq Scan on push_configs") ||
+		!strings.Contains(text, "buyer_id = ") {
+		t.Fatalf("the per-buyer count scans every buyer's tasks or configs:\n%s", text)
+	}
+	t.Logf("plan:\n%s", text)
 }

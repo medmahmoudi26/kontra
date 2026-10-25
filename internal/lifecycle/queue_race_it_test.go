@@ -26,7 +26,10 @@ func (f fakeSaver) SaveInline(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, 
 	if err != nil {
 		return "", false, err
 	}
-	return id, tag.RowsAffected() == 1, nil
+	if tag.RowsAffected() != 1 {
+		return "", false, nil // an update: nothing to announce
+	}
+	return id, true, nil
 }
 
 func (f fakeSaver) DeleteInline(ctx context.Context, taskID uuid.UUID, configID string) error {

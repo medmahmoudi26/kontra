@@ -86,7 +86,9 @@ type (
 	DispatchedSignal struct {
 		N int `json:"n"`
 	}
-	// PushSignal is kontra.push, sent after a push config Save that inserted a row, or a Delete.
+	// PushSignal is kontra.push, sent after a push config Save that inserted a row (or set a failed
+	// config again), or a Delete. A sender passes the config's id to Client.SignalPush; the signal in
+	// history carries its ConfigRef.
 	PushSignal struct {
 		ConfigID string `json:"configId"`
 		Deleted  bool   `json:"deleted"`
@@ -210,7 +212,7 @@ type (
 		TaskID     string `json:"taskId"`
 		WorkItemID string `json:"workItemId"`
 	}
-	// PushInput is push_webhook's input.
+	// PushInput is push_webhook's input. ConfigID is the config's ConfigRef, never its id.
 	PushInput struct {
 		TaskID   string    `json:"taskId"`
 		ConfigID string    `json:"configId"`
@@ -219,7 +221,7 @@ type (
 	// PushResult is push_webhook's result.
 	PushResult struct {
 		DeliveredSeq int64  `json:"deliveredSeq"`
-		Stopped      string `json:"stopped"` // terminal | deleted | failed
+		Stopped      string `json:"stopped"` // PushStoppedTerminal | PushStoppedDeleted | PushStoppedFailed
 	}
 )
 

@@ -47,6 +47,10 @@ const (
 	// changeDispatchNotStarted: a dispatch that was never started (schedule-to-start timeout) after the
 	// attempt's first upstream task id is dispatched again as it was, never turned into a resume.
 	changeDispatchNotStarted = "dispatch-not-started"
+	// changePushRestart: a push_webhook that ended because its config was deleted or marked failed gives
+	// the config's place back, and the task's configs are listed again. Before it, a config created again
+	// with the same id, or a failed config set again, never got another push_webhook in the run.
+	changePushRestart = "push-restart"
 )
 
 // phase is the task's state as the workflow knows it, from its own Updates and activity results.
@@ -557,8 +561,13 @@ func (l *lc) pushBound(ctx workflow.Context) time.Time {
 	return bound.Add(time.Duration(l.in.TimeoutSeconds) * time.Second)
 }
 
-// startPush starts one push_webhook for the config on kontra-push unless this run started one already
-// (spec §10.2: one activity per config; it ends after the terminal snapshot or when the config is deleted).
+// startPush starts one push_webhook for the config on kontra-push unless one this run started is still
+// running, or delivered the terminal snapshot (spec §10.2: one activity per live config; it ends after the
+// terminal snapshot or when the config is deleted). configID is the config's ConfigRef. A push_webhook that
+// ended because its config was deleted or failed frees the config's place (changePushRestart): kontra.push
+// "starts or ends a push_webhook" (spec §14.1), so the config created again with the same id, or set again
+// after it failed, gets a new one; and since a kontra.push that arrived while the old activity still ran
+// was dropped, the configs are listed once more when it ends.
 func (l *lc) startPush(ctx workflow.Context, configID string) {
 	if configID == "" || l.pushes[configID] || l.gone {
 		return
@@ -580,6 +589,12 @@ func (l *lc) startPush(ctx workflow.Context, configID string) {
 		var r PushResult
 		if err := f.Get(gc, &r); err != nil {
 			l.logger.Warn("push_webhook ended with an error", "config", configID, "error", err)
+			return
+		}
+		if (r.Stopped == PushStoppedDeleted || r.Stopped == PushStoppedFailed) &&
+			workflow.GetVersion(gc, changePushRestart, workflow.DefaultVersion, 1) >= 1 {
+			delete(l.pushes, configID)
+			l.listPush(gc) // counted in l.listing before pushPending drops: the run cannot end in between
 		}
 	})
 }

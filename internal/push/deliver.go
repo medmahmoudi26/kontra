@@ -67,9 +67,9 @@ const (
 
 // Stopped values of lifecycle.PushResult.
 const (
-	StoppedTerminal = "terminal"
-	StoppedDeleted  = "deleted"
-	StoppedFailed   = "failed"
+	StoppedTerminal = lifecycle.PushStoppedTerminal
+	StoppedDeleted  = lifecycle.PushStoppedDeleted
+	StoppedFailed   = lifecycle.PushStoppedFailed
 )
 
 // ErrTypeBadInput is the non-retryable push_webhook error of an input that names no gate task or config.
@@ -100,6 +100,8 @@ type DelivererOptions struct {
 	Now      func() time.Time
 	Sleep    func(ctx context.Context, d time.Duration) error
 	Replicas func(ctx context.Context) (int, error)
+	// ReadBytes bounds the stored bytes of one read of the log (default 4 MiB).
+	ReadBytes int
 }
 
 // Deliverer implements lifecycle.PushActivities: push_webhook on kontra-push (spec §10.2, §14.2).
@@ -115,6 +117,8 @@ type Deliverer struct {
 	replicas    int
 	replicasAt  time.Time
 	replicasErr bool
+
+	onBeat func() // tests: called at every heartbeat point
 }
 
 var _ lifecycle.PushActivities = (*Deliverer)(nil)
@@ -157,6 +161,9 @@ func NewDeliverer(log *store.Log, policy ssrf.Policy, opts DelivererOptions) *De
 	if d.opts.Replicas == nil {
 		d.opts.Replicas = d.liveReplicas
 	}
+	if d.opts.ReadBytes <= 0 {
+		d.opts.ReadBytes = readBytes
+	}
 	return d
 }
 
@@ -191,7 +198,7 @@ func (p progress) failing() bool { return p.FailingSeq > p.Seq && !p.FirstFailur
 type run struct {
 	d        *Deliverer
 	taskID   uuid.UUID
-	configID string
+	configID string // the config's id in push_configs; history names it by its ConfigRef only
 	prog     progress
 	stop     <-chan struct{} // the worker's stop channel; nil outside an activity
 }
@@ -210,8 +217,10 @@ func badInput(msg string) error {
 // last seq of the run; every other row, so every status change and the terminal event, is delivered.
 // Deliveries to one destination host are capped at 10 a second across the gate (10/N per replica, D72).
 // delivered_seq is written after every delivery and only moves forward. The activity ends after the
-// terminal snapshot or when its config is deleted. Its errors and logs name ids, seqs and status codes,
-// never the config's URL, token or credentials.
+// terminal snapshot or when its config is deleted, also while it waits out a backoff. Its errors and logs
+// name ids, seqs and status codes, never the config's URL, token or credentials; its errors (which cross
+// Temporal history) never name the config's id either, which may be the caller's: in.ConfigID is the
+// config's lifecycle.ConfigRef, resolved here among the task's configs.
 func (d *Deliverer) PushWebhook(ctx context.Context, in lifecycle.PushInput) (lifecycle.PushResult, error) {
 	taskID, err := ids.ParseTaskID(in.TaskID)
 	if err != nil {
@@ -220,11 +229,37 @@ func (d *Deliverer) PushWebhook(ctx context.Context, in lifecycle.PushInput) (li
 	if in.ConfigID == "" {
 		return lifecycle.PushResult{}, badInput("push_webhook: no config id")
 	}
-	r := &run{d: d, taskID: taskID, configID: in.ConfigID}
+	configID, err := d.configByRef(ctx, taskID, in.ConfigID)
+	if err != nil {
+		return lifecycle.PushResult{}, err
+	}
+	if configID == "" {
+		return lifecycle.PushResult{Stopped: StoppedDeleted}, nil
+	}
+	r := &run{d: d, taskID: taskID, configID: configID}
 	if activity.IsActivity(ctx) {
 		r.stop = activity.GetWorkerStopChannel(ctx)
 	}
 	return r.run(ctx)
+}
+
+// configByRef finds the config whose lifecycle.ConfigRef is ref among the task's (at most MaxPerTask); ""
+// when there is none: it was deleted, or its task with it.
+func (d *Deliverer) configByRef(ctx context.Context, taskID uuid.UUID, ref string) (string, error) {
+	rows, err := d.log.DB().Query(ctx, `select id from kontra.push_configs where task_id = $1`, taskID)
+	if err != nil {
+		return "", fmt.Errorf("push_webhook: read the configs of task %s: %w", taskID, err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return "", fmt.Errorf("push_webhook: read the configs of task %s: %w", taskID, err)
+	}
+	for _, id := range ids {
+		if lifecycle.ConfigRef(taskID, id) == ref {
+			return id, nil
+		}
+	}
+	return "", nil
 }
 
 func (r *run) result(stopped string) lifecycle.PushResult {
@@ -232,6 +267,9 @@ func (r *run) result(stopped string) lifecycle.PushResult {
 }
 
 func (r *run) beat(ctx context.Context) {
+	if r.d.onBeat != nil {
+		r.d.onBeat()
+	}
 	if activity.IsActivity(ctx) {
 		activity.RecordHeartbeat(ctx, r.prog)
 	}
@@ -284,7 +322,7 @@ func (r *run) run(ctx context.Context) (lifecycle.PushResult, error) {
 	}
 	r.beat(ctx)
 	for {
-		evs, _, err := r.d.log.EventsWithin(ctx, r.taskID, f.Seq(), readBatch, readBytes)
+		evs, _, err := r.d.log.EventsWithin(ctx, r.taskID, f.Seq(), readBatch, r.d.opts.ReadBytes)
 		if err != nil {
 			return lifecycle.PushResult{}, r.ctxErr(ctx, fmt.Errorf("push_webhook: read the log of task %s: %w", r.taskID, err))
 		}
@@ -316,11 +354,13 @@ func (r *run) run(ctx context.Context) (lifecycle.PushResult, error) {
 			if ev.Kind == store.KindArtifact && i+1 < len(evs) && evs[i+1].Kind == store.KindArtifact {
 				continue // coalesced into the snapshot at the last seq of the run
 			}
-			snap, err := f.Snapshot()
+			// The body is the folded task itself, encoded once: the Folder is this run's own, so no copy
+			// of a task of up to limits.task_bytes is made per seq.
+			body, err := json.Marshal(a2a.StreamResponse{Event: f.Task()})
 			if err != nil {
-				return lifecycle.PushResult{}, fmt.Errorf("push_webhook: snapshot of task %s at %d: %w", r.taskID, ev.Seq, err)
+				return lifecycle.PushResult{}, fmt.Errorf("push_webhook: encode the snapshot of task %s at %d: %w", r.taskID, ev.Seq, err)
 			}
-			stopped, err := r.deliver(ctx, ev.Seq, snap)
+			stopped, err := r.deliver(ctx, ev.Seq, body)
 			if err != nil {
 				return lifecycle.PushResult{}, err
 			}
@@ -346,10 +386,12 @@ func (r *run) run(ctx context.Context) (lifecycle.PushResult, error) {
 var errFold = errors.New("push_webhook: the log cannot be folded")
 
 // foldTo folds the task's rows 1..seq into f (fewer when the log is shorter: a heartbeat of another
-// generation of the config cannot move the position past the log).
+// generation of the config cannot move the position past the log). It reads the log as the delivery loop
+// does, at most ReadBytes of stored rows at a time, so a task of up to limits.task_bytes is never read at
+// once, and it heartbeats between reads, so folding a long log never outlasts the heartbeat timeout.
 func (r *run) foldTo(ctx context.Context, f *store.Folder, seq int64) error {
 	for f.Seq() < seq {
-		evs, err := r.d.log.Events(ctx, r.taskID, f.Seq(), int(min(seq-f.Seq(), 1000)))
+		evs, _, err := r.d.log.EventsWithin(ctx, r.taskID, f.Seq(), int(min(seq-f.Seq(), readBatch)), r.d.opts.ReadBytes)
 		if err != nil {
 			return r.ctxErr(ctx, fmt.Errorf("push_webhook: read the log of task %s: %w", r.taskID, err))
 		}
@@ -361,6 +403,7 @@ func (r *run) foldTo(ctx context.Context, f *store.Folder, seq int64) error {
 				return fmt.Errorf("%w: task %s: %w", errFold, r.taskID, err)
 			}
 		}
+		r.beat(ctx)
 	}
 	return nil
 }
@@ -391,31 +434,36 @@ func (r *run) idle(ctx context.Context, wake <-chan struct{}) error {
 }
 
 // wait sleeps d through the deliverer's sleep, in steps short enough to keep heartbeating, and returns
-// early when the worker stops.
-func (r *run) wait(ctx context.Context, d time.Duration) error {
+// early when the worker stops, or with StoppedDeleted or StoppedFailed when the config was deleted or
+// marked failed meanwhile: the activity ends when its config is deleted (spec §10.2), not after a backoff
+// of up to RetryMax, which would hold the workflow open that long (D78).
+func (r *run) wait(ctx context.Context, d time.Duration) (string, error) {
 	for d > 0 {
 		step := min(d, beatEvery)
 		if err := r.d.opts.Sleep(ctx, step); err != nil {
-			return err
+			return "", err
 		}
 		d -= step
 		r.beat(ctx)
 		select {
 		case <-r.stop:
-			return errStopping
+			return "", errStopping
 		default:
 		}
+		stopped, err := r.d.rowState(ctx, r.taskID, r.configID)
+		if err != nil {
+			return "", r.ctxErr(ctx, err)
+		}
+		if stopped != "" {
+			return stopped, nil
+		}
 	}
-	return nil
+	return "", nil
 }
 
-// deliver POSTs the snapshot at seq until it is delivered, the config is deleted, or the seq's budget runs
-// out. It returns "" when delivered (delivered_seq written), else StoppedDeleted or StoppedFailed.
-func (r *run) deliver(ctx context.Context, seq int64, snap *a2a.Task) (string, error) {
-	body, err := json.Marshal(a2a.StreamResponse{Event: snap})
-	if err != nil {
-		return "", fmt.Errorf("push_webhook: encode the snapshot of task %s at %d: %w", r.taskID, seq, err)
-	}
+// deliver POSTs body, the snapshot at seq, until it is delivered, the config is deleted, or the seq's budget
+// runs out. It returns "" when delivered (delivered_seq written), else StoppedDeleted or StoppedFailed.
+func (r *run) deliver(ctx context.Context, seq int64, body []byte) (string, error) {
 	wait := r.d.opts.RetryMin
 	if r.prog.failing() && r.prog.FailingSeq <= seq && r.prog.Wait > 0 {
 		wait = r.prog.Wait
@@ -434,8 +482,8 @@ func (r *run) deliver(ctx context.Context, seq int64, snap *a2a.Task) (string, e
 			return StoppedFailed, nil
 		}
 		host := destination(cfg.cfg.URL)
-		if err := r.rate(ctx, host); err != nil {
-			return "", err
+		if stopped, err := r.rate(ctx, host); err != nil || stopped != "" {
+			return stopped, err
 		}
 		status, perr := r.d.post(ctx, cfg.cfg, body)
 		if ctx.Err() != nil {
@@ -470,8 +518,8 @@ func (r *run) deliver(ctx context.Context, seq int64, snap *a2a.Task) (string, e
 		next := min(2*wait, r.d.opts.RetryMax)
 		r.prog.Wait = next
 		r.beat(ctx)
-		if err := r.wait(ctx, min(wait, r.d.opts.Budget-elapsed)); err != nil {
-			return "", err
+		if stopped, err := r.wait(ctx, min(wait, r.d.opts.Budget-elapsed)); err != nil || stopped != "" {
+			return stopped, err
 		}
 		wait = next
 	}
@@ -485,8 +533,9 @@ func (r *run) giveUp(ctx context.Context) (lifecycle.PushResult, error) {
 	return r.result(StoppedFailed), nil
 }
 
-// rate waits for the next delivery slot to host: 10/N a second on this replica (D72).
-func (r *run) rate(ctx context.Context, host string) error {
+// rate waits for the next delivery slot to host: 10/N a second on this replica (D72); like wait, it ends
+// early when the config is deleted or marked failed.
+func (r *run) rate(ctx context.Context, host string) (string, error) {
 	n := r.d.liveReplicaCount(ctx)
 	interval := time.Second * time.Duration(n) / RatePerHost
 	now := r.d.opts.Now()
@@ -556,7 +605,7 @@ func (d *Deliverer) loadRow(ctx context.Context, taskID uuid.UUID, configID stri
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("push_webhook: read config %s of task %s: %w", configID, taskID, err)
+		return nil, fmt.Errorf("push_webhook: read a config of task %s: %w", taskID, err)
 	}
 	if r.cfg, err = decodeConfig(raw); err != nil || r.cfg.URL == "" {
 		// The error names the JSON's position, never its content.
@@ -569,11 +618,28 @@ func (d *Deliverer) loadRow(ctx context.Context, taskID uuid.UUID, configID stri
 	return &r, nil
 }
 
+// rowState reports whether the config ended meanwhile: StoppedDeleted when it no longer exists,
+// StoppedFailed when it is marked failed, "" while it is live.
+func (d *Deliverer) rowState(ctx context.Context, taskID uuid.UUID, configID string) (string, error) {
+	var failed bool
+	err := d.log.DB().QueryRow(ctx, `select failed_at is not null from kontra.push_configs
+		where task_id = $1 and id = $2`, taskID, configID).Scan(&failed)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return StoppedDeleted, nil
+	case err != nil:
+		return "", fmt.Errorf("push_webhook: read a config of task %s: %w", taskID, err)
+	case failed:
+		return StoppedFailed, nil
+	}
+	return "", nil
+}
+
 // markDelivered writes delivered_seq after a delivery; it only ever moves forward (spec §10.2).
 func (d *Deliverer) markDelivered(ctx context.Context, taskID uuid.UUID, configID string, seq int64) error {
 	if _, err := d.log.DB().Exec(ctx, `update kontra.push_configs set delivered_seq = greatest(delivered_seq, $3)
 		where task_id = $1 and id = $2`, taskID, configID, seq); err != nil {
-		return fmt.Errorf("push_webhook: record delivery %d of config %s of task %s: %w", seq, configID, taskID, err)
+		return fmt.Errorf("push_webhook: record delivery %d of a config of task %s: %w", seq, taskID, err)
 	}
 	return nil
 }
@@ -582,7 +648,7 @@ func (d *Deliverer) markDelivered(ctx context.Context, taskID uuid.UUID, configI
 func (d *Deliverer) markFailed(ctx context.Context, taskID uuid.UUID, configID string) error {
 	if _, err := d.log.DB().Exec(ctx, `update kontra.push_configs set failed_at = now()
 		where task_id = $1 and id = $2 and failed_at is null`, taskID, configID); err != nil {
-		return fmt.Errorf("push_webhook: mark config %s of task %s failed: %w", configID, taskID, err)
+		return fmt.Errorf("push_webhook: mark a config of task %s failed: %w", taskID, err)
 	}
 	return nil
 }

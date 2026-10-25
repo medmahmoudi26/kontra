@@ -317,3 +317,41 @@ func TestProxyIgnored(t *testing.T) {
 		t.Errorf("the proxy accepted %d connections", n)
 	}
 }
+
+// errResolver fails every lookup with err.
+type errResolver struct{ err error }
+
+func (r errResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return nil, r.err
+}
+
+// TestLookupFailuresAreClassified: a name that does not exist (or has no address) is ErrNoHost, the URL's
+// fault; any other lookup failure (a timeout, SERVFAIL) is ErrLookup, the gate's; the resolver's own
+// error stays in the chain, so a dial error still reads as a DNS failure.
+func TestLookupFailuresAreClassified(t *testing.T) {
+	ctx := context.Background()
+	u := mustURL(t, "https://hooks.example/cb")
+	for _, tc := range []struct {
+		name string
+		res  Resolver
+		want error
+	}{
+		{"nxdomain", fakeResolver{}, ErrNoHost},
+		{"no address", fakeResolver{"hooks.example": nil}, ErrNoHost},
+		{"servfail", errResolver{&net.DNSError{Err: "server misbehaving", Name: "hooks.example", Server: "10.0.0.53:53", IsTemporary: true}}, ErrLookup},
+		{"timeout", errResolver{&net.DNSError{Err: "i/o timeout", Name: "hooks.example", IsTimeout: true}}, ErrLookup},
+		{"other", errResolver{errors.New("resolver down")}, ErrLookup},
+	} {
+		err := CheckURL(ctx, u, Policy{Resolver: tc.res})
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, err, tc.want)
+		}
+		if errors.Is(err, ErrAddress) {
+			t.Errorf("%s: %v is an address refusal", tc.name, err)
+		}
+		var dnsErr *net.DNSError
+		if _, ok := tc.res.(errResolver); ok && tc.name != "other" && !errors.As(err, &dnsErr) {
+			t.Errorf("%s: the resolver's error left the chain: %v", tc.name, err)
+		}
+	}
+}

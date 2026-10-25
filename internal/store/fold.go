@@ -36,6 +36,11 @@ func (f *Folder) Seq() int64 { return f.seq }
 // Terminal reports whether the folded task is terminal.
 func (f *Folder) Terminal() bool { return f.task != nil && f.task.Status.State.Terminal() }
 
+// Task returns the folded task itself, nil before the first row: no copy, for a reader that only encodes
+// it (a push delivery marshals the snapshot at each seq, and a copy of a task of up to limits.task_bytes per
+// seq would double its memory). The caller must not modify it, and must use it before the next Apply.
+func (f *Folder) Task() *a2a.Task { return f.task }
+
 // Snapshot returns a deep copy of the folded task, nil before the first row.
 func (f *Folder) Snapshot() (*a2a.Task, error) {
 	if f.task == nil {

@@ -176,8 +176,9 @@ func (a *LifecycleActivities) AttemptState(ctx context.Context, in AttemptRef) (
 	return st, nil
 }
 
-// ListPushConfigs returns the task's live push config ids, at start and after each dispatch, to recover
-// a lost kontra.push signal (spec §10.2). They are sorted, so the workflow starts them in a stable order.
+// ListPushConfigs returns the task's live push configs, at start and after each dispatch, to recover a
+// lost kontra.push signal (spec §10.2), each named by its ConfigRef: the result crosses history, a config
+// id may be the caller's. They are sorted, so the workflow starts them in a stable order.
 func (a *LifecycleActivities) ListPushConfigs(ctx context.Context, taskID string) ([]string, error) {
 	id, err := parseTask(taskID)
 	if err != nil {
@@ -186,9 +187,13 @@ func (a *LifecycleActivities) ListPushConfigs(ctx context.Context, taskID string
 	if a.Push == nil {
 		return nil, nil
 	}
-	out, err := a.Push.LiveConfigIDs(ctx, id)
+	cfgs, err := a.Push.LiveConfigIDs(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	out := make([]string, 0, len(cfgs))
+	for _, c := range cfgs {
+		out = append(out, ConfigRef(id, c))
 	}
 	slices.Sort(out)
 	return slices.Compact(out), nil

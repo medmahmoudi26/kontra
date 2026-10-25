@@ -2,6 +2,8 @@ package push
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -412,8 +414,8 @@ func TestHungReceiverTimesOut(t *testing.T) {
 	r := newReceiver(t, nil)
 	r.hold = 3 * time.Second
 	id := e.newTask(buyerA)
-	e.status(id, store.StateRejected)
 	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	e.status(id, store.StateRejected)
 	o := fast()
 	o.Timeout = 200 * time.Millisecond
 	d := NewDeliverer(e.log, private, o)
@@ -711,7 +713,6 @@ func TestCredentialsNeverLogged(t *testing.T) {
 	hung.hold = 2 * time.Second
 	redir := newReceiver(t, func(int) int { return http.StatusMovedPermanently })
 	e.status(id, store.StateWorking)
-	e.status(id, store.StateCompleted)
 	var cids []string
 	s, err := cs.Save(ctx, tid(id), pushConfig(secretURL("https://hooks.example"))) // public, not listening: refused at dial on a real network or unreachable
 	if err != nil {
@@ -728,6 +729,7 @@ func TestCredentialsNeverLogged(t *testing.T) {
 	// The private name: refused at dial time (DNS rebinding), with the strict policy's dialer.
 	e.exec(`update kontra.push_configs set config = jsonb_set(config, '{url}', to_jsonb($2::text)) where task_id = $1 and id = $3`,
 		id, secretURL("https://private.example"), cids[0])
+	e.status(id, store.StateCompleted) // set while the task ran: each config has its terminal snapshot to deliver
 	o := fast()
 	o.Budget, o.Timeout, o.Logger = 400*time.Millisecond, 100*time.Millisecond, log
 	dStrict := NewDeliverer(e.log, strict, o)
@@ -836,5 +838,126 @@ func TestUndeliverableConfigGivesUp(t *testing.T) {
 	o = waitOut(t, runPush(ctx, d, id2, c3), 5*time.Second)
 	if o.err != nil || o.res.Stopped != StoppedFailed {
 		t.Fatalf("an unfoldable row in the initial fold: %+v %v", o.res, o.err)
+	}
+}
+
+// TestDeletedConfigEndsDuringBackoff: a config deleted while its delivery is failing ends its push_webhook
+// within one heartbeat step of the deletion, not after the backoff (up to 5 min) it was waiting out, which
+// would hold the task's workflow open that long (spec §10.2, D78). The clock is fake; the requests are real.
+func TestDeletedConfigEndsDuringBackoff(t *testing.T) {
+	e := newEnv(t)
+	cs := NewConfigStore(e.pool, nil, private, nil)
+	clk := &fakeClock{now: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
+	id := e.newTask(buyerA)
+	var (
+		cid       string
+		deletedAt time.Time
+	)
+	r := newReceiver(t, func(n int) int {
+		if n == 10 { // the next wait is the 5 min cap: the caller deletes the config now
+			if _, err := e.pool.Exec(context.Background(), `delete from kontra.push_configs where task_id = $1 and id = $2`, id, cid); err != nil {
+				t.Error(err)
+			}
+			deletedAt = clk.Now()
+		}
+		return http.StatusServiceUnavailable
+	})
+	cid, _ = e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	o := fast()
+	o.RetryMin, o.RetryMax, o.Budget = 0, 0, 0 // the spec's timing
+	o.Now, o.Sleep = clk.Now, clk.Sleep
+	out := waitOut(t, runPush(context.Background(), NewDeliverer(e.log, private, o), id, cid), 30*time.Second)
+	if out.err != nil || out.res.Stopped != StoppedDeleted {
+		t.Fatalf("push_webhook: %+v %v", out.res, out.err)
+	}
+	r.mu.Lock()
+	at := deletedAt
+	r.mu.Unlock()
+	if at.IsZero() {
+		t.Fatalf("the config was never deleted (%d requests)", len(r.requests()))
+	}
+	if after := clk.Now().Sub(at); after > beatEvery {
+		t.Fatalf("the activity ended %s after its config was deleted: it slept out its backoff", after)
+	}
+	if n := len(r.requests()); n != 10 {
+		t.Errorf("%d attempts, want none after the deletion", n)
+	}
+}
+
+// TestFoldReadsAreBoundedAndBeat: a restarted push_webhook folds the log up to its position in reads of at
+// most ReadBytes of stored rows, never the whole log at once, and heartbeats between reads, so folding a
+// large task neither holds it all twice in memory nor outlasts the heartbeat timeout.
+func TestFoldReadsAreBoundedAndBeat(t *testing.T) {
+	e := newEnv(t)
+	cs := NewConfigStore(e.pool, nil, private, nil)
+	r := newReceiver(t, nil)
+	id := e.newTask(buyerA)
+	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	e.status(id, store.StateWorking)
+	const rows = 12
+	for i := range rows {
+		part := make([]byte, 4<<10) // 8 KiB of hex: stored as it is (it does not compress)
+		if _, err := rand.Read(part); err != nil {
+			t.Fatal(err)
+		}
+		e.artifact(id, a2a.ArtifactID(fmt.Sprintf("a%d", i)), hex.EncodeToString(part), false)
+	}
+	term := e.status(id, store.StateCompleted)
+	e.exec(`update kontra.push_configs set delivered_seq = $3 where task_id = $1 and id = $2`, id, cid, term-1)
+	o := fast()
+	o.ReadBytes = 4 << 10 // smaller than one row: one row a read
+	d := NewDeliverer(e.log, private, o)
+	var (
+		mu    sync.Mutex
+		beats int
+		first = -1 // beats before the first delivery
+	)
+	d.onBeat = func() {
+		mu.Lock()
+		beats++
+		if first < 0 && len(r.requests()) > 0 {
+			first = beats - 1
+		}
+		mu.Unlock()
+	}
+	out := waitOut(t, runPush(context.Background(), d, id, cid), 10*time.Second)
+	if out.err != nil || out.res.Stopped != StoppedTerminal {
+		t.Fatalf("push_webhook: %+v %v", out.res, out.err)
+	}
+	if got := r.delivered(); len(got) != 1 || got[0].body != e.expectedBody(id, term) {
+		t.Fatalf("%d deliveries, want the terminal snapshot only", len(got))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// The fold reads each artifact row on its own (the small rows before them share a read) and
+	// heartbeats after each read.
+	if first < rows {
+		t.Fatalf("%d heartbeats before the first delivery, want at least one per read of the fold (%d large rows)", first, rows)
+	}
+}
+
+// TestPushWebhookFindsItsConfigByRef: push_webhook's input names the config by its ConfigRef (history never
+// carries a config id, which may be the caller's); it finds the config among the task's, and a ref that
+// names none (the config was deleted) ends it at once.
+func TestPushWebhookFindsItsConfigByRef(t *testing.T) {
+	e := newEnv(t)
+	cs := NewConfigStore(e.pool, nil, private, nil)
+	r := newReceiver(t, nil)
+	id := e.newTask(buyerA)
+	if _, err := cs.Save(context.Background(), tid(id), &a2a.PushConfig{ID: callerConfigID, URL: r.url("/hook")}); err != nil {
+		t.Fatal(err)
+	}
+	e.status(id, store.StateCompleted)
+	d := NewDeliverer(e.log, private, fast())
+	in := lifecycle.PushInput{TaskID: id.String(), ConfigID: lifecycle.ConfigRef(id, callerConfigID), Deadline: time.Now().Add(time.Hour)}
+	res, err := d.PushWebhook(context.Background(), in)
+	if err != nil || res.Stopped != StoppedTerminal || len(r.delivered()) == 0 {
+		t.Fatalf("by ref: %+v %v, %d deliveries", res, err, len(r.delivered()))
+	}
+	// The raw id names no config: it is not a ref.
+	in.ConfigID = callerConfigID
+	before := len(r.requests())
+	if res, err := d.PushWebhook(context.Background(), in); err != nil || res.Stopped != StoppedDeleted || len(r.requests()) != before {
+		t.Fatalf("by the raw id: %+v %v", res, err)
 	}
 }

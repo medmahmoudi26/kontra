@@ -33,6 +33,12 @@ var (
 	ErrRedirect = errors.New("ssrf: redirects are not followed")
 	// ErrURL is a URL the gate never dials: no host, userinfo, or a port that is not a port.
 	ErrURL = errors.New("ssrf: URL not allowed")
+	// ErrNoHost is a host name that does not resolve: the name does not exist (NXDOMAIN), or it has no
+	// address.
+	ErrNoHost = errors.New("ssrf: host does not resolve")
+	// ErrLookup is a lookup that failed for any other reason (a timeout, SERVFAIL, an unreachable
+	// resolver): the gate's own fault, not the URL's. The resolver's error stays in the chain.
+	ErrLookup = errors.New("ssrf: host lookup failed")
 )
 
 // Resolver resolves a host name to its addresses; net.DefaultResolver implements it.
@@ -242,7 +248,8 @@ func embedded(v4 netip.Addr, kind string) string {
 }
 
 // resolve returns every address host names (an IP literal is itself), refusing the whole name when any
-// one of them is refused: a name that resolves to a public and a private address is not dialed at all.
+// one of them is refused: a name that resolves to a public and a private address is not dialed at all. A
+// name that does not exist or has no address is ErrNoHost; any other lookup failure is ErrLookup.
 func resolve(ctx context.Context, r Resolver, host string) ([]netip.Addr, error) {
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	if a, err := netip.ParseAddr(host); err == nil {
@@ -253,10 +260,14 @@ func resolve(ctx context.Context, r Resolver, host string) ([]netip.Addr, error)
 	}
 	addrs, err := r.LookupNetIP(ctx, "ip", host)
 	if err != nil {
-		return nil, fmt.Errorf("ssrf: resolve %s: %w", host, err)
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return nil, fmt.Errorf("%w: %s: %w", ErrNoHost, host, err)
+		}
+		return nil, fmt.Errorf("%w: %s: %w", ErrLookup, host, err)
 	}
 	if len(addrs) == 0 {
-		return nil, fmt.Errorf("ssrf: resolve %s: no address", host)
+		return nil, fmt.Errorf("%w: %s: no address", ErrNoHost, host)
 	}
 	out := make([]netip.Addr, 0, len(addrs))
 	for _, a := range addrs {

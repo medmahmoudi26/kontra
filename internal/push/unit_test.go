@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -127,7 +128,7 @@ func TestCheckURLOffline(t *testing.T) {
 		{"https://example.com/hook", true, ssrf.Policy{}, "a name: checked by the interceptor and at dial time"},
 		{"http://127.0.0.1:9/hook", true, ssrf.Policy{AllowPrivate: true}, "allow_private"},
 	} {
-		err := checkURLOffline(tc.url, tc.pol)
+		err := checkURLOffline(tc.url, tc.pol, quiet)
 		if (err == nil) != tc.ok {
 			t.Errorf("%s: checkURLOffline(%q) = %v", tc.name, tc.url, err)
 		}
@@ -357,4 +358,76 @@ func TestBadInputIsNotRetried(t *testing.T) {
 			t.Errorf("PushWebhook(%q, %q) = %v, want a non-retryable error", in.task, in.cfg, err)
 		}
 	}
+}
+
+// TestRefusalNamesNoResolution: a refused push URL is answered with the rule only, never what its host
+// resolves to or what the resolver said, so a hire-scoped key cannot map the gate's internal DNS: a name
+// that resolves to a private address and one that does not resolve get the same answer (spec §10.3). The
+// operator's Debug log has the detail, naming the host and never the URL.
+func TestRefusalNamesNoResolution(t *testing.T) {
+	res := fakeResolver{"db.corp.internal": {"10.20.30.40"}}
+	p := ssrf.Policy{Resolver: res}
+	ctx := context.Background()
+	toPrivate := CheckURL(ctx, "https://db.corp.internal/"+secretPath, p)
+	toNothing := CheckURL(ctx, "https://nothing.corp.internal/"+secretPath, p)
+	literal := CheckURL(ctx, "https://10.20.30.40/"+secretPath, p)
+	for _, err := range []error{toPrivate, toNothing, literal} {
+		if !errors.Is(err, a2a.ErrInvalidParams) {
+			t.Fatalf("%v, want InvalidParams", err)
+		}
+		// a2a-go sends err.Error() as the JSON-RPC error message.
+		if s := containsAny(err.Error(), "10.20.30.40", "corp.internal", "RFC 1918", "no such host", secretPath); s != "" {
+			t.Errorf("the refusal %q tells the caller %q", err.Error(), s)
+		}
+	}
+	if toPrivate.Error() != toNothing.Error() {
+		t.Errorf("a private name and a missing one are told apart: %q / %q", toPrivate, toNothing)
+	}
+	// The other rules name the rule.
+	for u, want := range map[string]string{
+		"ftp://hooks.example/x":              "scheme not allowed",
+		"http://hooks.example/x":             "scheme not allowed",
+		"https://u:p@hooks.example/x":        "URL not allowed",
+		"https://hooks.example:99999/x":      "URL not allowed",
+		"https://db.corp.internal:8443/hook": "not globally reachable or does not resolve",
+	} {
+		if err := CheckURL(ctx, u, p); !errors.Is(err, a2a.ErrInvalidParams) || !strings.Contains(err.Error(), want) {
+			t.Errorf("CheckURL(%s) = %v, want InvalidParams naming %q", u, err, want)
+		}
+	}
+	// The store's refusal is the same, and its Debug log names the host and the reason, not the URL.
+	lb := &logBuffer{}
+	e := newEnv(t)
+	cs := NewConfigStore(e.pool, nil, p, newLogger(lb))
+	_, err := cs.Save(ctx, tid(e.newTask(buyerA)), pushConfig("https://db.corp.internal/"+secretPath))
+	if err == nil || err.Error() != toPrivate.Error() {
+		t.Errorf("Save's refusal %v, want %v", err, toPrivate)
+	}
+	if l := lb.String(); !strings.Contains(l, "db.corp.internal") || !strings.Contains(l, "10.20.30.40") || strings.Contains(l, secretPath) {
+		t.Errorf("the Debug log must name the host and the reason, never the URL:\n%s", l)
+	}
+}
+
+// TestLookupFailureIsTheGates: a lookup that fails for a reason that is not the name's (SERVFAIL, a
+// timeout) is the gate's own failure, an internal error, never the caller's InvalidParams; and it names
+// neither the resolver nor the host.
+func TestLookupFailureIsTheGates(t *testing.T) {
+	for _, res := range []ssrf.Resolver{
+		errResolver{&net.DNSError{Err: "server misbehaving", Name: "hooks.example", Server: "10.0.0.53:53", IsTemporary: true}},
+		errResolver{&net.DNSError{Err: "i/o timeout", Name: "hooks.example", Server: "10.0.0.53:53", IsTimeout: true}},
+	} {
+		err := CheckURL(context.Background(), "https://hooks.example/hook", ssrf.Policy{Resolver: res})
+		if !errors.Is(err, a2a.ErrInternalError) || errors.Is(err, a2a.ErrInvalidParams) {
+			t.Errorf("%v: want an internal error, not InvalidParams", err)
+		}
+		if err != nil && containsAny(err.Error(), "10.0.0.53", "hooks.example", "misbehaving") != "" {
+			t.Errorf("the error %q names the resolver or the host", err)
+		}
+	}
+}
+
+type errResolver struct{ err error }
+
+func (r errResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return nil, r.err
 }

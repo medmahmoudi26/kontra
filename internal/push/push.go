@@ -1,14 +1,20 @@
 // Package push stores push notification configs and delivers them (spec/relay.md §10.1–§10.2, D16, D55).
 //
 // Configs live in push_configs per gate task; the gate, not a2a-go's executor, validates a config's URL
-// when it is set. Delivery is the lifecycle's, never the relaying replica's: one push_webhook activity per
-// live config on kontra-push tails the log from its last delivered seq and POSTs the task snapshot at each
-// seq, in order, at least once. a2a-go's inline push is disabled with NoopSender.
+// when it is set: a new task's inline config and CreateTaskPushNotificationConfig with DNS (CheckURL), a
+// follow-up's inline config with DNS only when its URL is new for the task (CheckSet). A config set again
+// with the URL it already has is not resolved again, so neither a follow-up that re-sends its config nor
+// a2a-go's per-turn re-save is refused for a DNS change. Delivery is the lifecycle's, never the relaying
+// replica's: one push_webhook activity per live config on kontra-push tails the log from its last
+// delivered seq and POSTs the task snapshot at each seq, in order, at least once. a2a-go's inline push is
+// disabled with NoopSender.
 //
 // push_configs.config holds the caller's webhook credentials (the URL, the token, the authentication). It
 // is never logged, never in an operator read (spec §5.3, §13.5), and never crosses Temporal history: the
-// workflow and its activities carry config ids only, and every error this package returns or logs names
-// ids, seqs, states, HTTP status codes and the destination host, never a URL, a token or credentials.
+// workflow and its activities name a config by its lifecycle.ConfigRef only (a config id may be the
+// caller's), and every error this package returns or logs names ids, seqs, states, HTTP status codes and
+// the destination host, never a URL, a token or credentials; a refusal of a URL names the rule only, never
+// what its host resolves to.
 package push
 
 import (
@@ -114,17 +120,62 @@ func anonymousRefused() error {
 // CheckURL is the set-time check of a push config URL (spec §10.1, §10.3): the URL parses and
 // ssrf.CheckURL accepts it under policy: https only, or http:// too under push.allow_private (D67), no
 // userinfo, and every address the host resolves to globally reachable unless allow_private. It never
-// connects. A refusal is InvalidParams naming the rule, never the URL. A redirecting URL is accepted: its
-// redirect is never followed (D60). The interceptor's relay.CheckPushURL applies the same ssrf.CheckURL.
+// connects. A refusal is InvalidParams with a fixed text per rule (refusal); a lookup that failed for a
+// reason of the gate's own (a timeout, SERVFAIL) is an internal error, not the caller's. A redirecting URL
+// is accepted: its redirect is never followed (D60). The interceptors call it for a new task's inline
+// config and for CreateTaskPushNotificationConfig, and CheckSet for a follow-up's inline config.
 func CheckURL(ctx context.Context, rawURL string, policy ssrf.Policy) error {
+	return checkURL(ctx, rawURL, policy, slog.Default())
+}
+
+func checkURL(ctx context.Context, rawURL string, policy ssrf.Policy, logger *slog.Logger) error {
 	u, err := parseURL(rawURL)
 	if err != nil {
 		return err
 	}
 	if err := ssrf.CheckURL(ctx, u, policy); err != nil {
-		return invalid("push notification URL refused: " + err.Error())
+		return refusal(ctx, logger, u, err)
 	}
 	return nil
+}
+
+// refusal is what the caller is told of a URL ssrf refused: one fixed text per rule, never the URL, the
+// addresses its host resolves to, or the resolver's answer, so a refusal maps nothing of the gate's network
+// (a hire-scoped key could otherwise learn what internal names resolve to). A name that does not resolve
+// and one that resolves to a refused address get the same text. The detail is logged at Debug, naming the
+// host, never the URL (its path or query may carry a secret).
+func refusal(ctx context.Context, logger *slog.Logger, u *url.URL, err error) error {
+	logger.DebugContext(ctx, "push: a notification URL was refused", "host", u.Hostname(), "error", err.Error())
+	switch {
+	case errors.Is(err, ssrf.ErrLookup):
+		return a2a.NewError(a2a.ErrInternalError, "push notification URL cannot be checked now: its host could not be looked up; try again")
+	case errors.Is(err, ssrf.ErrScheme):
+		return invalid("push notification URL refused: scheme not allowed")
+	case errors.Is(err, ssrf.ErrURL):
+		return invalid("push notification URL refused: URL not allowed")
+	}
+	return invalid("push notification URL refused: its host is not globally reachable or does not resolve")
+}
+
+// CheckSet is the set-time check of a config set on a task that already exists (spec §10.1): an inline
+// config on a follow-up message. When the config Save would update (found by its id, or by its URL and
+// token) already has this URL, nothing is checked again: it was checked when it was set, and every
+// delivery checks every address when it dials. So a follow-up that sends its unchanged config again is
+// never refused for a DNS change; any other URL gets CheckURL.
+func CheckSet(ctx context.Context, db *pgxpool.Pool, taskID uuid.UUID, cfg *a2a.PushConfig, policy ssrf.Policy) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.URL != "" {
+		prior, err := find(ctx, db, taskID, cfg)
+		if err != nil {
+			return err
+		}
+		if prior != nil && prior.cfg.URL == cfg.URL {
+			return nil
+		}
+	}
+	return CheckURL(ctx, cfg.URL, policy)
 }
 
 func parseURL(rawURL string) (*url.URL, error) {
@@ -151,15 +202,16 @@ func (noLookup) LookupNetIP(context.Context, string, string) ([]netip.Addr, erro
 // checkURLOffline is CheckURL without DNS: the scheme, userinfo, host and port rules, and the address rule
 // for an IP literal. It is what SaveInline applies inside the work queue's transaction, where a lookup would
 // hold the transaction open; the inline config's URL was checked with DNS by the interceptor a moment
-// before (relay.CheckPushURL), and every delivery checks every address again when it dials.
-func checkURLOffline(rawURL string, policy ssrf.Policy) error {
+// before (CheckURL, or CheckSet for a follow-up), and every delivery checks every address again when it
+// dials.
+func checkURLOffline(rawURL string, policy ssrf.Policy, logger *slog.Logger) error {
 	u, err := parseURL(rawURL)
 	if err != nil {
 		return err
 	}
 	p := ssrf.Policy{AllowPrivate: policy.AllowPrivate, Resolver: noLookup{}}
 	if err := ssrf.CheckURL(context.Background(), u, p); err != nil && !errors.Is(err, errNoLookup) {
-		return invalid("push notification URL refused: " + err.Error())
+		return refusal(context.Background(), logger, u, err)
 	}
 	return nil
 }
@@ -302,98 +354,164 @@ func loadOwner(ctx context.Context, q querier, taskID uuid.UUID) (taskOwner, err
 	return o, nil
 }
 
-// insertSQL inserts a new config. delivered_seq starts just before the task's last task, status or
-// artifact row, so the first delivery is the snapshot of the task as it is when the config is set and every
-// change after it follows (a config saved with a new task starts at 0: its first delivery is the task row).
-// The spec's "tails the event log from the last seq it delivered" says nothing of a config that has
-// delivered nothing yet; replaying snapshots from before a config existed would only send a receiver states
-// it never asked for.
+// insertSQL inserts a new config. On a task that has not ended, delivered_seq starts just before the
+// task's last task, status or artifact row, so the first delivery is the snapshot of the task as it is when
+// the config is set and every change after it follows (a config saved with a new task starts at 0: its
+// first delivery is the task row). The spec's "tails the event log from the last seq it delivered" says
+// nothing of a config that has delivered nothing yet; replaying snapshots from before a config existed
+// would only send a receiver states it never asked for.
+//
+// On a task that has ended, delivered_seq starts at the terminal row (the last task, status or artifact
+// row, store.Log.TerminalSeq): the config is done when it is set. An ended task has no change left to
+// deliver (push_webhook stops at the terminal snapshot), as with a2a-go's own push, which sends a config
+// the events that follow it; and once the task's workflow has closed nothing could deliver it anyway, so a
+// config that waited for a delivery would hold one of the buyer's 256 delivering configs until retention.
+// The config is stored, listed and deletable like any other (A2A §3.1.7: it persists until the task
+// completes).
 const insertSQL = `insert into kontra.push_configs (task_id, id, config, delivered_seq)
-	values ($1, $2, $3, greatest((select coalesce(max(seq), 1) from kontra.task_events
-		where task_id = $1 and kind in ('task', 'status', 'artifact')) - 1, 0))
+	values ($1, $2, $3, coalesce((select case when t.terminal_at is null then greatest(coalesce(max(e.seq), 1) - 1, 0)
+			else coalesce(max(e.seq), 0) end
+		from kontra.tasks t left join kontra.task_events e on e.task_id = t.id and e.kind in ('task', 'status', 'artifact')
+		where t.id = $1 group by t.id), 0))
 	on conflict (task_id, id) do nothing`
 
 // deliveringSQL counts a buyer's delivering configs: not failed, and not done, i.e. its task is not
 // terminal or the terminal snapshot (the task's last task, status or artifact row once it is terminal,
 // store.Log.TerminalSeq) is not delivered yet.
-const deliveringSQL = `select count(*) from kontra.push_configs p join kontra.tasks t on t.id = p.task_id
-	where t.buyer_id = $1 and p.failed_at is null
-	  and (t.terminal_at is null or p.delivered_seq < (select coalesce(max(e.seq), 0) from kontra.task_events e
-		where e.task_id = t.id and e.kind in ('task', 'status', 'artifact')))`
+//
+// It reaches the buyer's tasks through the services and an index that leads with (tenant_id, service,
+// buyer_id) (tasks_by_caller, tasks_by_context), one index range per service, and each task's configs
+// through push_configs' primary key (the aggregate keeps the planner from turning that into a scan of
+// every config). So its cost follows the buyer's own tasks in retention, never every buyer's tasks or
+// configs: no index of 0001 leads with buyer_id, and push_configs has no buyer column.
+const deliveringSQL = `select coalesce(sum(d.n), 0)::bigint from kontra.services s
+	join kontra.tasks t on t.tenant_id = s.tenant_id and t.service = s.name and t.buyer_id = $1
+	cross join lateral (select count(*) as n from kontra.push_configs p
+		where p.task_id = t.id and p.failed_at is null
+		  and (t.terminal_at is null or p.delivered_seq < (select coalesce(max(e.seq), 0) from kontra.task_events e
+			where e.task_id = t.id and e.kind in ('task', 'status', 'artifact')))) d`
+
+// savedConfig is what save did: the stored config; inserted, a new row; announce, the workflow should
+// start (or keep) a push_webhook for it: a row inserted on a task that has not ended, or a failed config set
+// again on such a task (revived).
+type savedConfig struct {
+	cfg      *a2a.PushConfig
+	inserted bool
+	announce bool
+}
+
+// checkBuyerLimit refuses one more delivering config for buyer beyond MaxPerBuyer.
+func checkBuyerLimit(ctx context.Context, tx pgx.Tx, buyer uuid.UUID) error {
+	var perBuyer int
+	if err := tx.QueryRow(ctx, deliveringSQL, buyer).Scan(&perBuyer); err != nil {
+		return fmt.Errorf("push: count the buyer's delivering configs: %w", err)
+	}
+	if perBuyer >= MaxPerBuyer {
+		return invalid(fmt.Sprintf("a buyer has at most %d delivering push notification configs", MaxPerBuyer))
+	}
+	return nil
+}
+
+// taskEnded reports whether the task has ended (its terminal event is logged).
+func taskEnded(ctx context.Context, tx pgx.Tx, taskID uuid.UUID) (bool, error) {
+	var ended bool
+	err := tx.QueryRow(ctx, `select terminal_at is not null from kontra.tasks where id = $1`, taskID).Scan(&ended)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, taskNotFound()
+	}
+	if err != nil {
+		return false, fmt.Errorf("push: read task %s: %w", taskID, err)
+	}
+	return ended, nil
+}
 
 // save is Save's write in tx, under the buyer's lock: update the config found by its id or key, or insert
-// it within the limits. It returns the stored config and whether a row was inserted. urlChecked checks a
-// URL being set (a new config's, or a changed one): Save's has the DNS lookup done before the transaction,
-// SaveInline's is checkURLOffline.
-func (s *ConfigStore) save(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, buyer uuid.UUID, cfg *a2a.PushConfig, urlChecked func(string) error) (*a2a.PushConfig, bool, error) {
+// it within the limits. urlChecked checks a URL being set (a new config's, or a changed one): Save's has the
+// DNS lookup done before the transaction, SaveInline's is checkURLOffline.
+func (s *ConfigStore) save(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, buyer uuid.UUID, cfg *a2a.PushConfig, urlChecked func(string) error) (savedConfig, error) {
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, lockKey(buyer)); err != nil {
-		return nil, false, fmt.Errorf("push: lock the buyer's configs: %w", err)
+		return savedConfig{}, fmt.Errorf("push: lock the buyer's configs: %w", err)
+	}
+	ended, err := taskEnded(ctx, tx, taskID)
+	if err != nil {
+		return savedConfig{}, err
 	}
 	q := querier(tx)
 	existing, err := find(ctx, q, taskID, cfg)
 	if err != nil {
-		return nil, false, err
+		return savedConfig{}, err
 	}
 	if existing != nil {
-		// Save creates or updates (a2a-go's ConfigStore): the row keeps its id, its delivery position and its
-		// failure, and no second delivery starts. A changed URL is checked as any URL being set.
+		// Save creates or updates (a2a-go's ConfigStore): the row keeps its id and its delivery position, and
+		// no second delivery starts. A changed URL is checked as any URL being set. A config that failed and
+		// is set again on a task that has not ended is delivering again, from where it stopped, within the
+		// buyer's limit: its failure is cleared and kontra.push announces it (a caller that fixed its webhook
+		// would otherwise be told its config is set while nothing ever delivers it). On an ended task there
+		// is nothing left to deliver (insertSQL), so a failed config stays as it is.
 		if existing.cfg.URL != cfg.URL {
 			if err := urlChecked(cfg.URL); err != nil {
-				return nil, false, err
+				return savedConfig{}, err
 			}
 		}
 		next := stored(taskID, existing.id, cfg)
-		if !sameConfig(existing.cfg, next) {
-			b, err := json.Marshal(next)
-			if err != nil {
-				return nil, false, err
-			}
-			if _, err := tx.Exec(ctx, `update kontra.push_configs set config = $3 where task_id = $1 and id = $2`,
-				taskID, existing.id, b); err != nil {
-				return nil, false, fmt.Errorf("push: update a config of task %s: %w", taskID, err)
+		revive := existing.failed && !ended
+		if revive {
+			if err := checkBuyerLimit(ctx, tx, buyer); err != nil {
+				return savedConfig{}, err
 			}
 		}
-		return next, false, nil
+		if revive || !sameConfig(existing.cfg, next) {
+			b, err := json.Marshal(next)
+			if err != nil {
+				return savedConfig{}, err
+			}
+			if _, err := tx.Exec(ctx, `update kontra.push_configs set config = $3,
+				failed_at = case when $4 then null else failed_at end where task_id = $1 and id = $2`,
+				taskID, existing.id, b, revive); err != nil {
+				return savedConfig{}, fmt.Errorf("push: update a config of task %s: %w", taskID, err)
+			}
+		}
+		return savedConfig{cfg: next, announce: revive}, nil
 	}
 	if err := urlChecked(cfg.URL); err != nil {
-		return nil, false, err
+		return savedConfig{}, err
 	}
 	var perTask int
 	if err := tx.QueryRow(ctx, `select count(*) from kontra.push_configs where task_id = $1`, taskID).Scan(&perTask); err != nil {
-		return nil, false, fmt.Errorf("push: count the configs of task %s: %w", taskID, err)
+		return savedConfig{}, fmt.Errorf("push: count the configs of task %s: %w", taskID, err)
 	}
 	if perTask >= MaxPerTask {
-		return nil, false, invalid(fmt.Sprintf("a task has at most %d push notification configs", MaxPerTask))
+		return savedConfig{}, invalid(fmt.Sprintf("a task has at most %d push notification configs", MaxPerTask))
 	}
-	var perBuyer int
-	if err := tx.QueryRow(ctx, deliveringSQL, buyer).Scan(&perBuyer); err != nil {
-		return nil, false, fmt.Errorf("push: count the buyer's delivering configs: %w", err)
-	}
-	if perBuyer >= MaxPerBuyer {
-		return nil, false, invalid(fmt.Sprintf("a buyer has at most %d delivering push notification configs", MaxPerBuyer))
+	if !ended {
+		// A config set on an ended task is done when it is set (insertSQL): it never delivers, so it is not
+		// counted against the buyer's delivering configs.
+		if err := checkBuyerLimit(ctx, tx, buyer); err != nil {
+			return savedConfig{}, err
+		}
 	}
 	id := cfg.ID
 	if id == "" {
 		u, err := uuid.NewV7()
 		if err != nil {
-			return nil, false, err
+			return savedConfig{}, err
 		}
 		id = u.String()
 	}
 	next := stored(taskID, id, cfg)
 	b, err := json.Marshal(next)
 	if err != nil {
-		return nil, false, err
+		return savedConfig{}, err
 	}
 	tag, err := tx.Exec(ctx, insertSQL, taskID, id, b)
 	if err != nil {
-		return nil, false, fmt.Errorf("push: insert a config of task %s: %w", taskID, err)
+		return savedConfig{}, fmt.Errorf("push: insert a config of task %s: %w", taskID, err)
 	}
 	if tag.RowsAffected() != 1 {
 		// Every writer of this buyer's configs holds the lock, and the lookup above found no row with this id.
-		return nil, false, fmt.Errorf("push: config %q of task %s appeared under the lock", id, taskID)
+		return savedConfig{}, fmt.Errorf("push: config %q of task %s appeared under the lock", id, taskID)
 	}
-	return next, true, nil
+	return savedConfig{cfg: next, inserted: true, announce: !ended}, nil
 }
 
 func sameConfig(a, b *a2a.PushConfig) bool {
@@ -405,10 +523,12 @@ func sameConfig(a, b *a2a.PushConfig) bool {
 // Save implements push.ConfigStore (spec §10.1): a2a-go calls it for CreateTaskPushNotificationConfig, and
 // for an inline config at dispatch when the work queue did not save it. The URL is checked when it is set
 // (CheckURL, DNS included), before the transaction; re-saving a config with the URL it already has checks
-// nothing again, so a2a-go's per-turn re-save never fails a turn on a DNS change. A config without an id
-// that has the URL and token of an existing config updates it; one with an id updates the config with that
-// id. A new config beyond 10 for the task, or 256 delivering for the buyer, is InvalidParams; the
-// anonymous principal is refused (spec §2.3). After a commit that inserted a row, kontra.push is sent.
+// nothing again, so a2a-go's per-turn re-save (which runs only when no InlinePushSaver is wired) never fails
+// a turn on a DNS change. A config without an id that has the URL and token of an existing config updates
+// it; one with an id updates the config with that id. A new config beyond 10 for the task, or 256
+// delivering for the buyer, is InvalidParams; the anonymous principal is refused (spec §2.3). After a
+// commit that inserted a row on a task that has not ended, or set a failed config again (save), kontra.push
+// is sent.
 func (s *ConfigStore) Save(ctx context.Context, taskID a2a.TaskID, config *a2a.PushConfig) (*a2a.PushConfig, error) {
 	tid, err := ids.ParseTaskID(string(taskID))
 	if err != nil {
@@ -427,7 +547,7 @@ func (s *ConfigStore) Save(ctx context.Context, taskID a2a.TaskID, config *a2a.P
 	}
 	checked := ""
 	if prior == nil || prior.cfg.URL != config.URL {
-		if err := CheckURL(ctx, config.URL, s.policy); err != nil {
+		if err := checkURL(ctx, config.URL, s.policy, s.logger); err != nil {
 			return nil, err
 		}
 		checked = config.URL
@@ -439,12 +559,9 @@ func (s *ConfigStore) Save(ctx context.Context, taskID a2a.TaskID, config *a2a.P
 			return nil
 		}
 		// The row changed between the lookup and the lock: check now (rare).
-		return CheckURL(ctx, u, s.policy)
+		return checkURL(ctx, u, s.policy, s.logger)
 	}
-	var (
-		saved    *a2a.PushConfig
-		inserted bool
-	)
+	var res savedConfig
 	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		owner, err := loadOwner(ctx, tx, tid)
 		if err != nil {
@@ -453,16 +570,16 @@ func (s *ConfigStore) Save(ctx context.Context, taskID a2a.TaskID, config *a2a.P
 		if owner.anonymous {
 			return anonymousRefused()
 		}
-		saved, inserted, err = s.save(ctx, tx, tid, owner.buyer, config, urlChecked)
+		res, err = s.save(ctx, tx, tid, owner.buyer, config, urlChecked)
 		return err
 	})
 	if err != nil {
 		return nil, foreignTask(err)
 	}
-	if inserted {
-		s.signalPush(ctx, tid, lifecycle.PushSignal{ConfigID: saved.ID})
+	if res.announce {
+		s.signalPush(ctx, tid, lifecycle.PushSignal{ConfigID: res.cfg.ID})
 	}
-	return saved, nil
+	return res.cfg, nil
 }
 
 // foreignTask maps the foreign key violation of a task deleted meanwhile to TaskNotFound.
@@ -477,8 +594,12 @@ func foreignTask(err error) error {
 // SaveInline implements lifecycle.InlinePushSaver: the inline configuration.taskPushNotificationConfig, saved
 // in the work queue's transaction before the work item (spec §10.1), with Save's rules and limits. The URL
 // gets checkURLOffline here (the interceptor checked it with DNS); the owner is the caller, the task's
-// buyer. No kontra.push is sent: the work queue sends it for a follow-up once kontra.message is accepted,
-// and a new task's workflow lists its configs at start.
+// buyer. No kontra.push is sent here: the work queue sends it for a follow-up once kontra.message is
+// accepted, and a new task's workflow lists its configs at start. The id returned is the config to
+// announce: a row inserted, or a failed config set again (revived); empty when the save only updated a
+// config that needs no new push_webhook. inserted reports a new row (the work queue deletes it when the
+// follow-up is refused). A row inserted on a task that ended meanwhile is announced too: its push_webhook,
+// if the workflow still runs one, finds it done and ends at once.
 func (s *ConfigStore) SaveInline(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, owner store.Owner, cfg *a2a.PushConfig) (string, bool, error) {
 	if owner.Via == store.ViaAnonymous {
 		return "", false, anonymousRefused()
@@ -486,13 +607,16 @@ func (s *ConfigStore) SaveInline(ctx context.Context, tx pgx.Tx, taskID uuid.UUI
 	if err := validate(cfg); err != nil {
 		return "", false, err
 	}
-	saved, inserted, err := s.save(ctx, tx, taskID, owner.BuyerID, cfg, func(u string) error {
-		return checkURLOffline(u, s.policy)
+	res, err := s.save(ctx, tx, taskID, owner.BuyerID, cfg, func(u string) error {
+		return checkURLOffline(u, s.policy, s.logger)
 	})
 	if err != nil {
 		return "", false, foreignTask(err)
 	}
-	return saved.ID, inserted, nil
+	if !res.announce && !res.inserted {
+		return "", false, nil
+	}
+	return res.cfg.ID, res.inserted, nil
 }
 
 // DeleteInline implements lifecycle.InlinePushSaver: it removes the row SaveInline inserted for a follow-up
