@@ -8,6 +8,7 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -777,7 +778,7 @@ func TestRegister(t *testing.T) {
 // The middleware on its own: Versions writes HTTP+JSON errors outside the server's routing.
 func TestMiddlewareStandalone(t *testing.T) {
 	var seen http.Header
-	h := Versions(Extensions(func(*http.Request) ([]string, []string) { return []string{extOptional}, nil },
+	h := Versions(Extensions(func(*http.Request) *ExtensionSet { return NewExtensionSet([]string{extOptional}, nil) },
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = r.Header.Clone() })))
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/?A2A-Version=1.0.7", nil)
@@ -793,5 +794,98 @@ func TestMiddlewareStandalone(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	if w.Code != 400 {
 		t.Errorf("no version: %d", w.Code)
+	}
+}
+
+// A2A-Extensions costs the gate time linear in the header: a 1 MiB header of distinct URIs (the most
+// net/http accepts) against a card declaring thousands of extensions is answered at once, never with a
+// scan of the request's URIs or the card's per URI (security: one request burned minutes of CPU). Only the
+// first MaxRequestedExtensions distinct URIs count; a declared URI past them is ignored like an undeclared
+// one, and a required URI the request misses is still refused (-32008), naming a bounded few.
+func TestExtensionsHeaderIsLinear(t *testing.T) {
+	var all, required []string
+	for i := range 20000 {
+		u := fmt.Sprintf("urn:x:%d", i)
+		all = append(all, u)
+		if i%2 == 1 {
+			required = append(required, u)
+		}
+	}
+	set := NewExtensionSet(all, required)
+	header := distinctURIs((http.DefaultMaxHeaderBytes - 4096) / 4)
+	var seen http.Header
+	for name, tc := range map[string]struct {
+		set    *ExtensionSet
+		header string
+		want   int
+	}{
+		"1 MiB of undeclared URIs, nothing required": {NewExtensionSet(all, nil), header, 200},
+		"1 MiB of undeclared URIs, 10000 required":   {set, header, 400},
+		"the first required URI after 1 MiB":         {set, header + "urn:x:1", 400},
+	} {
+		h := Extensions(func(*http.Request) *ExtensionSet { return tc.set },
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = r.Header.Clone() }))
+		r := httptest.NewRequest("POST", "/", nil)
+		r.Header.Set("A2A-Extensions", tc.header)
+		r.Header.Set("X-A2A-Extensions", tc.header)
+		w := httptest.NewRecorder()
+		start := time.Now()
+		h.ServeHTTP(w, r)
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("%s: %v for one request", name, d)
+		}
+		if w.Code != tc.want {
+			t.Errorf("%s: %d, want %d", name, w.Code, tc.want)
+		}
+		if w.Code == 400 && (!strings.Contains(w.Body.String(), "requires the extensions urn:x:1, ") || w.Body.Len() > 4096) {
+			t.Errorf("%s: %d bytes: %.300s", name, w.Body.Len(), w.Body.String())
+		}
+	}
+	// A short list still activates what the card declares, in the request's order, deduplicated.
+	r := httptest.NewRequest("POST", "/", nil)
+	r.Header.Add("A2A-Extensions", "urn:x:3, urn:x:2,urn:x:3")
+	r.Header.Add("X-A2A-Extensions", "urn:nope, urn:x:2")
+	w := httptest.NewRecorder()
+	Extensions(func(*http.Request) *ExtensionSet { return NewExtensionSet(all, []string{"urn:x:2"}) },
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = r.Header.Clone() })).ServeHTTP(w, r)
+	if w.Code != 200 || !slices.Equal(seen.Values("A2A-Extensions"), []string{"urn:x:3", "urn:x:2"}) || w.Header().Get("A2A-Extensions") != "urn:x:3, urn:x:2" {
+		t.Errorf("%d %v %q", w.Code, seen.Values("A2A-Extensions"), w.Header().Get("A2A-Extensions"))
+	}
+	if got := splitExtensions([]string{header}); len(got) != MaxRequestedExtensions {
+		t.Errorf("%d URIs considered, want %d", len(got), MaxRequestedExtensions)
+	}
+}
+
+// distinctURIs is a header value of n distinct 3-byte URIs, comma-separated (4 bytes each).
+func distinctURIs(n int) string {
+	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
+	var b strings.Builder
+	for i := range n {
+		b.WriteByte(alphabet[i%64])
+		b.WriteByte(alphabet[i/64%64])
+		b.WriteByte(alphabet[i/4096%64])
+		b.WriteByte(',')
+	}
+	return b.String()
+}
+
+// Through net/http, as the reviewer measured it: one request with a 256 KiB header of distinct 3-byte
+// URIs took 14 s of CPU before the fix.
+func TestExtensionsHeaderOverHTTP(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(distinctURIs(65536))
+	srv := httptest.NewServer(Extensions(func(*http.Request) *ExtensionSet { return NewExtensionSet([]string{"urn:a"}, nil) },
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })))
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL, nil)
+	req.Header.Set("A2A-Extensions", b.String())
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if d := time.Since(start); d > 2*time.Second || resp.StatusCode != 204 {
+		t.Errorf("%d after %v", resp.StatusCode, d)
 	}
 }

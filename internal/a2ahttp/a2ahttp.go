@@ -32,7 +32,6 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 
@@ -104,7 +103,7 @@ type Server struct {
 
 	mu         sync.Mutex
 	transports map[string]*transports
-	exts       map[string]extensionSet
+	exts       map[string]cachedExtensions
 }
 
 // transports are a2a-go's two transports over one service handler.
@@ -114,18 +113,62 @@ type transports struct {
 	rest    http.Handler
 }
 
-// extensionSet is what a served card declares in capabilities.extensions, by the card's ETag.
-type extensionSet struct {
-	etag          string
-	all, required []string
+// cachedExtensions is what a served card declares in capabilities.extensions, by the card's ETag.
+type cachedExtensions struct {
+	etag string
+	set  *ExtensionSet
 }
+
+// ExtensionSet is what a served card declares in capabilities.extensions (spec §2.4): every URI, as a set,
+// and those marked required: true, in the card's order. The card is the seller's (up to 256 KiB, §6.6), so
+// a lookup never walks the list.
+type ExtensionSet struct {
+	declared map[string]struct{}
+	required []string
+}
+
+// NewExtensionSet is the set of all, with required the URIs marked required (each also in all).
+func NewExtensionSet(all, required []string) *ExtensionSet {
+	s := &ExtensionSet{declared: make(map[string]struct{}, len(all)), required: required}
+	for _, u := range all {
+		s.declared[u] = struct{}{}
+	}
+	return s
+}
+
+// Declares reports whether the card declares uri.
+func (s *ExtensionSet) Declares(uri string) bool {
+	if s == nil {
+		return false
+	}
+	_, ok := s.declared[uri]
+	return ok
+}
+
+// Required are the URIs the card marks required: true.
+func (s *ExtensionSet) Required() []string {
+	if s == nil {
+		return nil
+	}
+	return s.required
+}
+
+// Bounds on what a request's A2A-Extensions may make the gate do (security: a header of up to 1 MiB of
+// distinct URIs must cost the gate linear time, never a scan per URI). A real client activates a few
+// extensions; URIs past MaxRequestedExtensions distinct ones, and any longer than MaxExtensionURI bytes,
+// are ignored like URIs the card does not declare (§2.4).
+const (
+	MaxRequestedExtensions = 64
+	MaxExtensionURI        = 2048
+	maxMissingNamed        = 16 // the required URIs an ExtensionSupportRequiredError names
+)
 
 // New returns the A2A routes.
 func New(deps Deps) *Server {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
-	return &Server{deps: deps, transports: map[string]*transports{}, exts: map[string]extensionSet{}}
+	return &Server{deps: deps, transports: map[string]*transports{}, exts: map[string]cachedExtensions{}}
 }
 
 // Register mounts every A2A route of spec §2.1 on the edge's closed router: the JSON-RPC routes with
@@ -587,28 +630,27 @@ func (s *Server) transportsFor(ctx context.Context, svc *Service) (*transports, 
 // declared returns the extensions the service's served card declares (capabilities.extensions: every
 // URI, and those marked required: true), parsed once per card ETag. A service without a servable card
 // declares none.
-func (s *Server) declared(svc *Service) func(*http.Request) (all, required []string) {
-	return func(*http.Request) ([]string, []string) {
+func (s *Server) declared(svc *Service) func(*http.Request) *ExtensionSet {
+	return func(*http.Request) *ExtensionSet {
 		if svc.Cards == nil {
-			return nil, nil
+			return nil
 		}
 		c, _ := svc.Cards() // a card past its 30 minutes is still what the service declared
 		if c == nil || len(c.Body) == 0 {
-			return nil, nil
+			return nil
 		}
 		key := svc.Ref.TenantID.String() + "/" + svc.Ref.Name
 		s.mu.Lock()
 		e, ok := s.exts[key]
 		s.mu.Unlock()
 		if ok && e.etag == c.ETag && c.ETag != "" {
-			return e.all, e.required
+			return e.set
 		}
-		e = extensionSet{etag: c.ETag}
-		e.all, e.required = cardExtensions(c.Body)
+		e = cachedExtensions{etag: c.ETag, set: NewExtensionSet(cardExtensions(c.Body))}
 		s.mu.Lock()
 		s.exts[key] = e
 		s.mu.Unlock()
-		return e.all, e.required
+		return e.set
 	}
 }
 
@@ -628,14 +670,16 @@ func cardExtensions(body []byte) (all, required []string) {
 			return nil, nil
 		}
 	}
+	seen := map[string]bool{}
 	for _, raw := range c.Capabilities.Extensions {
 		var e struct {
 			URI      string          `json:"uri"`
 			Required json.RawMessage `json:"required"`
 		}
-		if json.Unmarshal(raw, &e) != nil || e.URI == "" || slices.Contains(all, e.URI) {
+		if json.Unmarshal(raw, &e) != nil || e.URI == "" || seen[e.URI] {
 			continue
 		}
+		seen[e.URI] = true
 		all = append(all, e.URI)
 		if string(bytes.TrimSpace(e.Required)) == "true" {
 			required = append(required, e.URI)
@@ -742,30 +786,42 @@ func isV10(v string) bool {
 //
 // The request goes on with one A2A-Extensions header line per activated URI, so a2a-go's call context
 // lists each URI as one requested extension, and without X-A2A-Extensions. The activated URIs are the
-// requested ones the card declares, in the order the request named them.
-func Extensions(declared func(r *http.Request) (all, required []string), next http.Handler) http.Handler {
+// requested ones the card declares, in the order the request named them. The work is linear in the header
+// and the card's required list: at most MaxRequestedExtensions distinct URIs of at most MaxExtensionURI
+// bytes are considered, each looked up in the card's set.
+func Extensions(declared func(r *http.Request) *ExtensionSet, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requested := splitExtensions(r.Header.Values(a2a.SvcParamExtensions), r.Header.Values("X-"+a2a.SvcParamExtensions))
-		var all, required []string
+		var set *ExtensionSet
 		if declared != nil {
-			all, required = declared(r)
+			set = declared(r)
 		}
 		var activated []string
+		active := map[string]bool{}
 		for _, u := range requested {
-			if slices.Contains(all, u) {
+			if set.Declares(u) {
 				activated = append(activated, u)
+				active[u] = true
 			}
 		}
 		var missing []string
-		for _, u := range required {
-			if !slices.Contains(activated, u) {
-				missing = append(missing, u)
+		n := 0
+		for _, u := range set.Required() {
+			if !active[u] {
+				n++
+				if len(missing) < maxMissingNamed {
+					missing = append(missing, u)
+				}
 			}
 		}
-		if len(missing) > 0 {
+		if n > 0 {
+			named := strings.Join(missing, ", ")
+			if n > len(missing) {
+				named += fmt.Sprintf(" and %d more", n-len(missing))
+			}
 			ri := routeOf(r)
 			sse.WriteError(w, ri.binding, ri.id, 0, a2a.NewError(a2a.ErrExtensionSupportRequired,
-				"the service requires the extension"+plural(missing)+" "+strings.Join(missing, ", ")+": send it in A2A-Extensions"))
+				"the service requires the extension"+plural(n)+" "+named+": send it in A2A-Extensions"))
 			return
 		}
 		r2 := withHeader(r)
@@ -781,21 +837,28 @@ func Extensions(declared func(r *http.Request) (all, required []string), next ht
 	})
 }
 
-func plural(s []string) string {
-	if len(s) == 1 {
+func plural(n int) string {
+	if n == 1 {
 		return ""
 	}
 	return "s"
 }
 
-// splitExtensions returns the URIs of every header line given, comma-split, trimmed, without empty ones
-// and duplicates, in order of first appearance.
+// splitExtensions returns the URIs of every header line given, comma-split, trimmed, without empty ones,
+// duplicates and URIs over MaxExtensionURI bytes, in order of first appearance, at most
+// MaxRequestedExtensions of them: the rest are ignored (spec §2.4 ignores URIs the card does not declare;
+// no card declares this many).
 func splitExtensions(lists ...[]string) []string {
 	var out []string
+	seen := map[string]bool{}
 	for _, vals := range lists {
 		for _, v := range vals {
 			for u := range strings.SplitSeq(v, ",") {
-				if u = strings.TrimSpace(u); u != "" && !slices.Contains(out, u) {
+				if len(out) == MaxRequestedExtensions {
+					return out
+				}
+				if u = strings.TrimSpace(u); u != "" && len(u) <= MaxExtensionURI && !seen[u] {
+					seen[u] = true
 					out = append(out, u)
 				}
 			}
