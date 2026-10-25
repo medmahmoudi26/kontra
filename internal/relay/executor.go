@@ -41,7 +41,8 @@ type ExecutorOptions struct {
 	// GetTaskTimeout bounds one GetTask call: an upstream that accepts it and never answers fails the call,
 	// which counts toward GetTaskGrace. 10 s, and at most GetTaskGrace.
 	GetTaskTimeout time.Duration
-	// TaskBytes caps the part bytes stored per task (limits.task_bytes, 256 MiB, §6.6).
+	// TaskBytes caps the bytes stored per task (limits.task_bytes, 256 MiB, §6.6): every logged event's
+	// whole encoding, not only its parts (overLimit).
 	TaskBytes int64
 	// MaxPart is the largest part stored inline: without a bucket, an upstream part over it fails the
 	// task upstream_error (§10.4).
@@ -199,7 +200,7 @@ type run struct {
 	client    *a2aclient.Client
 	ex        *upstream.Exchange
 	firstTask bool  // no upstream event of the attempt has been handled yet (no upstream task id at the start)
-	bytes     int64 // part bytes the task stores
+	bytes     int64 // the bytes the task stores (overLimit)
 	finished  bool  // a final event was yielded, or an error
 	logger    *slog.Logger
 
@@ -1022,8 +1023,17 @@ func (r *run) recordFirst(ctx context.Context, upTask a2a.TaskID, upCtx string) 
 	return true
 }
 
-// overLimit checks the parts an event would store against §6.6 and §10.4: one part over MaxPart, or the
-// task's parts over TaskBytes, fails the task upstream_error.
+// overLimit checks what an event would store against §6.6 and §10.4: one part over MaxPart, or the task's
+// stored bytes over TaskBytes, fails the task upstream_error.
+//
+// SPEC-CONFLICT: §6.6's table names limits.task_bytes as "Parts stored per task", while its rule is that
+// "nothing an upstream sends is unbounded", and task_bytes is the only bound on what one task accumulates.
+// Counting parts only left the rest of every event unbounded: the metadata of a task, status, artifact,
+// message or part, a part's filename and mediaType, an artifact's name and description, and status events
+// with no message at all, each event up to 4 MiB (an SSE event) or 8 MiB (a polled body), every one logged
+// and rewritten into the projection until the deadline. The closest faithful behaviour: task_bytes bounds
+// what the task stores, so each event counts its whole encoding (the bytes the log stores for it), and a
+// dispatch starts from what the projection already holds (taskBytes).
 func (r *run) overLimit(ev a2a.Event) (string, bool) {
 	var ps a2a.ContentParts
 	switch e := ev.(type) {
@@ -1036,19 +1046,26 @@ func (r *run) overLimit(ev a2a.Event) (string, bool) {
 			ps = e.Status.Message.Parts
 		}
 	}
-	var n int64
 	for _, p := range ps {
-		s := partSize(p)
-		if s > r.e.opts.MaxPart {
+		if s := partSize(p); s > r.e.opts.MaxPart {
 			return fmt.Sprintf("the service sent a part of %d bytes; parts over %d bytes need a bucket (blobs)", s, r.e.opts.MaxPart), true
 		}
-		n += s
 	}
+	n := encodedSize(ev)
 	if r.bytes+n > r.e.opts.TaskBytes {
-		return fmt.Sprintf("the task's parts exceed limits.task_bytes (%d bytes)", r.e.opts.TaskBytes), true
+		return fmt.Sprintf("the task's stored bytes exceed limits.task_bytes (%d bytes)", r.e.opts.TaskBytes), true
 	}
 	r.bytes += n
 	return "", false
+}
+
+// encodedSize is the length of v's JSON encoding: what the log and the projection store for it.
+func encodedSize(v any) int64 {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return int64(len(b))
 }
 
 // partSize is a part's decoded size: text and URL bytes, raw bytes before base64, data as JSON.
@@ -1070,25 +1087,21 @@ func partSize(p *a2a.Part) int64 {
 	return 0
 }
 
+// taskBytes is what the projection already stores: its status, metadata, artifacts and history, each
+// encoded on its own (never the whole task at once, which may be limits.task_bytes large).
 func taskBytes(t *a2a.Task) int64 {
-	var n int64
+	n := encodedSize(t.Status)
+	if len(t.Metadata) > 0 {
+		n += encodedSize(t.Metadata)
+	}
 	for _, a := range t.Artifacts {
 		if a != nil {
-			for _, p := range a.Parts {
-				n += partSize(p)
-			}
+			n += encodedSize(a)
 		}
 	}
 	for _, m := range t.History {
 		if m != nil {
-			for _, p := range m.Parts {
-				n += partSize(p)
-			}
-		}
-	}
-	if m := t.Status.Message; m != nil {
-		for _, p := range m.Parts {
-			n += partSize(p)
+			n += encodedSize(m)
 		}
 	}
 	return n

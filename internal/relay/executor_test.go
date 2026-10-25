@@ -759,6 +759,65 @@ func TestUpstreamPartLimit(t *testing.T) {
 	}
 }
 
+// limits.task_bytes bounds everything an upstream makes the task store, not only part content (spec §6.6:
+// "nothing an upstream sends is unbounded"): events made of metadata, filenames, artifact names and status
+// updates without a message count their whole encoding, and the task fails upstream_error once they pass
+// the budget, with the log holding at most the budget and the event that would pass it.
+func TestTaskBytesCountsWholeEvents(t *testing.T) {
+	const budget = 1 << 20
+	big := func(c string) string { return strings.Repeat(c, 100<<10) }
+	for name, ev := range map[string]func(ec *a2asrv.ExecutorContext, i int) a2a.Event{
+		"artifacts of metadata and names": func(ec *a2asrv.ExecutorContext, i int) a2a.Event {
+			p := a2a.NewTextPart("x")
+			p.Metadata, p.Filename = map[string]any{"pad": big("p")}, big("f")
+			ev := a2a.NewArtifactEvent(ec, p)
+			ev.Metadata = map[string]any{"pad": big("e")}
+			ev.Artifact.Metadata, ev.Artifact.Name, ev.Artifact.Description = map[string]any{"pad": big("a")}, big("n"), big("d")
+			return ev
+		},
+		"status updates without a message": func(ec *a2asrv.ExecutorContext, i int) a2a.Event {
+			ev := a2a.NewStatusUpdateEvent(ec, a2a.TaskStateWorking, nil)
+			ev.Metadata = map[string]any{"pad": big("s"), "i": i}
+			return ev
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, envOptions{opts: ExecutorOptions{TaskBytes: budget}})
+			var sent atomic.Int64
+			exec := a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+				return func(yield func(a2a.Event, error) bool) {
+					if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
+						return
+					}
+					for i := range 40 {
+						if !yield(ev(ec, i), nil) {
+							return
+						}
+						sent.Add(1)
+					}
+					yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
+				}
+			})
+			_, b, info := newAgent(t, exec, agentConfig{streaming: true})
+			info.Streaming = true
+			e.backends.set(b, info, nil)
+			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+			res := e.dispatch(context.Background(), id, 1, wid, false)
+			p := projection(t, e, id)
+			if res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "upstream_error" {
+				t.Fatalf("%+v: %s %v after %d events of about 500 KiB against a 1 MiB budget", res, p.Status.State, p.Metadata, sent.Load())
+			}
+			var stored int
+			for _, ev := range e.events(id) {
+				stored += len(ev.Payload)
+			}
+			if stored > budget+(600<<10) {
+				t.Errorf("the log stores %d bytes against a budget of %d", stored, budget)
+			}
+		})
+	}
+}
+
 // A card that is unavailable fails the task service_unavailable at its first attempt (spec §6.4).
 func TestServiceUnavailable(t *testing.T) {
 	e := newEnv(t, envOptions{})
