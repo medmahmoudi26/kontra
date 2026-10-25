@@ -7,8 +7,8 @@
 //	POST {svc} and {svc}/                              JSON-RPC 2.0 (the TCK posts the trailing slash)
 //	     {svc}/message:send, {svc}/tasks…, …           HTTP+JSON, every route of spec §5.3
 //
-// JSON-RPC requests are read (within the body limit) to route SendStreamingMessage and SubscribeToTask
-// to the gate's SSE writer and everything else to a2a-go's JSON-RPC handler; on HTTP+JSON,
+// JSON-RPC requests are read (the edge has bounded the body) to route SendStreamingMessage and
+// SubscribeToTask to the gate's SSE writer and everything else to a2a-go's JSON-RPC handler; on HTTP+JSON,
 // message:stream and tasks/{id}:subscribe (GET and POST) go to the SSE writer and the rest to a2a-go's
 // REST handler under http.StripPrefix. A JSON-RPC request with a non-empty tenant is an unknown service.
 //
@@ -92,10 +92,10 @@ type Deps struct {
 	SSE      Streams       // *sse.Writer
 	Auth     Authenticator // *auth.Authenticator
 	Multi    bool          // multi-tenant paths
-	// MaxBody bounds a request body read here (the edge has already read it within limits.body); 0 is
-	// config.DefaultBody.
-	MaxBody int64
-	Logger  *slog.Logger
+	Logger   *slog.Logger
+	// There is no body limit here: the server is mounted on the edge's router (Register), and the edge
+	// has read every body in full within limits.body before the route runs (spec §2.2), so every route
+	// answers an oversized body the same way, the edge's 413.
 }
 
 // Server is the A2A route set, mounted on the edge's closed router under /agents/ (Register).
@@ -122,9 +122,6 @@ type extensionSet struct {
 
 // New returns the A2A routes.
 func New(deps Deps) *Server {
-	if deps.MaxBody <= 0 {
-		deps.MaxBody = config.DefaultBody
-	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
@@ -276,11 +273,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	var id json.RawMessage
+	var (
+		id   json.RawMessage
+		body []byte
+	)
 	if rt.kind == routeJSONRPC {
-		body, err := s.readBody(w, r)
-		if err != nil {
-			sse.WriteError(w, sse.JSONRPC, nil, http.StatusRequestEntityTooLarge, a2a.NewError(a2a.ErrInvalidRequest, "request too large"))
+		var err error
+		if body, err = readBody(r); err != nil {
+			// The edge buffered the body; only a server used without it can get here.
+			sse.WriteError(w, sse.JSONRPC, nil, http.StatusBadRequest, a2a.NewError(a2a.ErrInvalidRequest, "the request body could not be read"))
 			return
 		}
 		id = rpcID(body)
@@ -340,7 +341,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(auth.WithPrincipal(ctx, p))
 	if rt.kind == routeJSONRPC {
-		s.serveJSONRPC(w, r, rt, svc, p)
+		s.serveJSONRPC(w, r, rt, svc, p, body)
 		return
 	}
 	s.serveREST(w, r, rt, svc, p)
@@ -357,12 +358,13 @@ func (s *Server) lookup(ctx context.Context, rt route) (*Service, error) {
 	return s.deps.Services.Lookup(ctx, tn, rt.name)
 }
 
-// readBody reads the request body (the edge has already bounded it) and puts it back for the handler.
-func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+// readBody reads the request body in full and puts it back for the handler. The edge has already read it
+// within limits.body (Deps): a second bound here would answer the same body differently by route.
+func readBody(r *http.Request) ([]byte, error) {
 	if r.Body == nil || r.Body == http.NoBody {
 		return nil, nil
 	}
-	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.deps.MaxBody))
+	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -417,8 +419,7 @@ func tenantOf(params json.RawMessage) string {
 	return p.Tenant
 }
 
-func (s *Server) serveJSONRPC(w http.ResponseWriter, r *http.Request, rt route, svc *Service, p auth.Principal) {
-	body, _ := s.readBody(w, r) // already read and bounded in ServeHTTP
+func (s *Server) serveJSONRPC(w http.ResponseWriter, r *http.Request, rt route, svc *Service, p auth.Principal, body []byte) {
 	var req rpcRequest
 	parsed := json.Unmarshal(body, &req) == nil
 	id := rpcID(body)
@@ -519,7 +520,7 @@ func (s *Server) serveREST(w http.ResponseWriter, r *http.Request, rt route, svc
 	case routeRESTStream:
 		next = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var msg a2a.SendMessageRequest
-			body, err := s.readBody(w, r)
+			body, err := readBody(r)
 			if err == nil {
 				err = decodeStrict(body, &msg)
 			}
@@ -573,10 +574,11 @@ func (s *Server) transportsFor(ctx context.Context, svc *Service) (*transports, 
 	if t := s.transports[key]; t != nil && t.sh == sh {
 		return t, nil
 	}
+	h := publicHandler{RequestHandler: sh.Handler, log: s.deps.Logger}
 	t := &transports{
 		sh:      sh,
-		jsonrpc: a2asrv.NewJSONRPCHandler(sh.Handler),
-		rest:    a2asrv.NewRESTHandler(noteHandler{sh.Handler}),
+		jsonrpc: a2asrv.NewJSONRPCHandler(h),
+		rest:    a2asrv.NewRESTHandler(h),
 	}
 	s.transports[key] = t
 	return t, nil
@@ -883,64 +885,93 @@ func noteError(ctx context.Context, err error) {
 	}
 }
 
-// noteHandler is the service's handler as a2a-go's REST transport calls it: every error is noted before
-// the transport writes it.
-type noteHandler struct{ a2asrv.RequestHandler }
+// publicHandler is the service's handler as a2a-go's JSON-RPC and REST transports call it. a2a-go writes
+// an error's whole text as its message, so every error is answered as sse.Public makes it: an internal
+// error keeps only the gate's own words, and its cause (a database error, the Temporal dial target) is
+// logged here instead. On HTTP+JSON an Update not accepted in time is noted first, for restWriter's 503.
+type publicHandler struct {
+	a2asrv.RequestHandler
+	log *slog.Logger
+}
 
-func (h noteHandler) GetTask(ctx context.Context, req *a2a.GetTaskRequest) (*a2a.Task, error) {
+func (h publicHandler) public(ctx context.Context, method string, err error) error {
+	if err == nil {
+		return nil
+	}
+	noteError(ctx, err)
+	pub, redacted := sse.Public(err)
+	if redacted {
+		h.log.Warn("a2ahttp: "+method+" failed", "error", err)
+	}
+	return pub
+}
+
+func (h publicHandler) GetTask(ctx context.Context, req *a2a.GetTaskRequest) (*a2a.Task, error) {
 	v, err := h.RequestHandler.GetTask(ctx, req)
-	noteError(ctx, err)
-	return v, err
+	return v, h.public(ctx, "GetTask", err)
 }
 
-func (h noteHandler) ListTasks(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
+func (h publicHandler) ListTasks(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
 	v, err := h.RequestHandler.ListTasks(ctx, req)
-	noteError(ctx, err)
-	return v, err
+	return v, h.public(ctx, "ListTasks", err)
 }
 
-func (h noteHandler) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+func (h publicHandler) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
 	v, err := h.RequestHandler.CancelTask(ctx, req)
-	noteError(ctx, err)
-	return v, err
+	return v, h.public(ctx, "CancelTask", err)
 }
 
-func (h noteHandler) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+func (h publicHandler) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
 	v, err := h.RequestHandler.SendMessage(ctx, req)
-	noteError(ctx, err)
-	return v, err
+	return v, h.public(ctx, "SendMessage", err)
 }
 
-func (h noteHandler) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
-	return h.RequestHandler.SendStreamingMessage(ctx, req) // the gate's SSE writer serves it (never routed here)
+// SendStreamingMessage and SubscribeToTask are served by the gate's SSE writer and never routed to
+// a2a-go's transports; their errors are made public all the same.
+func (h publicHandler) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+	return h.events(ctx, "SendStreamingMessage", h.RequestHandler.SendStreamingMessage(ctx, req))
 }
 
-func (h noteHandler) GetTaskPushConfig(ctx context.Context, req *a2a.GetTaskPushConfigRequest) (*a2a.PushConfig, error) {
+func (h publicHandler) SubscribeToTask(ctx context.Context, req *a2a.SubscribeToTaskRequest) iter.Seq2[a2a.Event, error] {
+	return h.events(ctx, "SubscribeToTask", h.RequestHandler.SubscribeToTask(ctx, req))
+}
+
+func (h publicHandler) events(ctx context.Context, method string, seq iter.Seq2[a2a.Event, error]) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		for ev, err := range seq {
+			if !yield(ev, h.public(ctx, method, err)) {
+				return
+			}
+		}
+	}
+}
+
+func (h publicHandler) GetTaskPushConfig(ctx context.Context, req *a2a.GetTaskPushConfigRequest) (*a2a.PushConfig, error) {
 	v, err := h.RequestHandler.GetTaskPushConfig(ctx, req)
-	noteError(ctx, err)
-	return v, err
+	return v, h.public(ctx, "GetTaskPushConfig", err)
 }
 
-func (h noteHandler) ListTaskPushConfigs(ctx context.Context, req *a2a.ListTaskPushConfigRequest) (*a2a.ListTaskPushConfigResponse, error) {
+func (h publicHandler) ListTaskPushConfigs(ctx context.Context, req *a2a.ListTaskPushConfigRequest) (*a2a.ListTaskPushConfigResponse, error) {
 	v, err := h.RequestHandler.ListTaskPushConfigs(ctx, req)
-	noteError(ctx, err)
-	return v, err
+	return v, h.public(ctx, "ListTaskPushConfigs", err)
 }
 
-func (h noteHandler) CreateTaskPushConfig(ctx context.Context, req *a2a.PushConfig) (*a2a.PushConfig, error) {
+func (h publicHandler) CreateTaskPushConfig(ctx context.Context, req *a2a.PushConfig) (*a2a.PushConfig, error) {
 	v, err := h.RequestHandler.CreateTaskPushConfig(ctx, req)
-	noteError(ctx, err)
-	return v, err
+	return v, h.public(ctx, "CreateTaskPushConfig", err)
 }
 
-func (h noteHandler) DeleteTaskPushConfig(ctx context.Context, req *a2a.DeleteTaskPushConfigRequest) error {
-	err := h.RequestHandler.DeleteTaskPushConfig(ctx, req)
-	noteError(ctx, err)
-	return err
+func (h publicHandler) DeleteTaskPushConfig(ctx context.Context, req *a2a.DeleteTaskPushConfigRequest) error {
+	return h.public(ctx, "DeleteTaskPushConfig", h.RequestHandler.DeleteTaskPushConfig(ctx, req))
 }
 
-// restWriter turns a2a-go's 500 for a noted error into the gate's 503 answer (sse.HTTPError) and drops
-// what a2a-go writes after it.
+func (h publicHandler) GetExtendedAgentCard(ctx context.Context, req *a2a.GetExtendedAgentCardRequest) (*a2a.AgentCard, error) {
+	v, err := h.RequestHandler.GetExtendedAgentCard(ctx, req)
+	return v, h.public(ctx, "GetExtendedAgentCard", err)
+}
+
+// restWriter turns a2a-go's 500 for a noted error into the gate's 503 answer (sse.HTTPError, whose
+// message is sse.Public's) and drops what a2a-go writes after it.
 type restWriter struct {
 	http.ResponseWriter
 	note    *note

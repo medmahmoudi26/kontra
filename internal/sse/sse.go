@@ -54,14 +54,19 @@ const (
 	// ReadGrace is how long a stream keeps retrying a log read that fails before it ends with an error
 	// event; the caller resumes with Last-Event-ID.
 	ReadGrace = 30 * time.Second
-	// batch is the most rows one read returns.
-	batch = 256
+	// batch is the most rows one read returns (the puller's store.PullBatch).
+	batch = 64
+	// readBytes bounds the payload bytes one read holds: it ends with the row that reaches it, so a stream
+	// holds at most this plus one row (an upstream event is at most 4 MiB, spec §6.6), however far behind
+	// the log it starts. A resume from an early seq, or 32 streams of one key (inflight_per_key), no longer
+	// hold a task's whole log (limits.task_bytes, 256 MiB) at once.
+	readBytes = 4 << 20
 )
 
 // logReader is what the writer reads; *store.Log implements it.
 type logReader interface {
 	LoadScoped(ctx context.Context, svc store.ServiceRef, o store.Owner, taskID uuid.UUID) (*store.TaskRow, error)
-	Events(ctx context.Context, taskID uuid.UUID, after int64, limit int) ([]store.Event, error)
+	EventsWithin(ctx context.Context, taskID uuid.UUID, after int64, limit int, maxBytes int) ([]store.Event, bool, error)
 	SnapshotAt(ctx context.Context, taskID uuid.UUID, seq int64) (*a2a.Task, error)
 	Tail(ctx context.Context, taskID uuid.UUID) (int64, error)
 	TerminalSeq(ctx context.Context, taskID uuid.UUID) (int64, error)
@@ -139,6 +144,11 @@ type Start struct {
 	// Answer is a task an interceptor answered the request with itself, before the work queue (an accepted
 	// review-window message, spec §7): the stream is that one event.
 	Answer *a2a.Task
+	// Late is an error a2a-go reported after Write accepted the turn (one of its reads of the task's log or
+	// snapshot failed). The turn is running and the stream position is known, so the stream is served and
+	// Late is only logged: answering it would make an accepted follow-up look failed, and the caller's
+	// retry would be refused because the turn is running.
+	Late error
 }
 
 // Starter creates or continues a task through a2a-go's handler for SendStreamingMessage and reports where
@@ -150,10 +160,22 @@ type Starter func(ctx context.Context) (Start, error)
 // context built from params (the request's headers, A2A-Version normalized by the version middleware) and
 // a lifecycle.StreamStart for Write to fill, takes the first event (the subscription's snapshot) and stops
 // iterating, which closes a2a-go's reader. The stream position is StreamStart's, never the snapshot's.
+//
+// Write fills StreamStart only when it accepted the turn, and the writer needs nothing from a2a-go after
+// that. So a filled StreamStart is served even when a2a-go then fails (its reads after Write: the reader
+// it creates again after the task id override, the subscription's snapshot): that error becomes
+// Start.Late. Only an error with StreamStart empty (no turn accepted) is the request's answer.
 func HandlerStarter(h a2asrv.RequestHandler, req *a2a.SendMessageRequest, params *a2asrv.ServiceParams) Starter {
+	return handlerStarter(h, req, params, lifecycle.WithStreamStart)
+}
+
+// handlerStarter is HandlerStarter with the way StreamStart is attached to the context given, so a test's
+// handler can fill it as Write does.
+func handlerStarter(h a2asrv.RequestHandler, req *a2a.SendMessageRequest, params *a2asrv.ServiceParams,
+	attach func(context.Context, *lifecycle.StreamStart) context.Context) Starter {
 	return func(ctx context.Context) (Start, error) {
 		var ss lifecycle.StreamStart
-		ctx = lifecycle.WithStreamStart(ctx, &ss)
+		ctx = attach(ctx, &ss)
 		ctx, cc := a2asrv.NewCallContext(ctx, params)
 		cc.ProtocolVersion = a2a.Version
 		var (
@@ -166,11 +188,11 @@ func HandlerStarter(h a2asrv.RequestHandler, req *a2a.SendMessageRequest, params
 			break
 		}
 		switch {
-		case ferr != nil:
-			return Start{}, ferr
 		case ss.TaskID != "":
 			followUp := req != nil && req.Message != nil && req.Message.TaskID != ""
-			return Start{TaskID: ss.TaskID, After: ss.Version, New: ss.New, FollowUp: followUp}, nil
+			return Start{TaskID: ss.TaskID, After: ss.Version, New: ss.New, FollowUp: followUp, Late: ferr}, nil
+		case ferr != nil:
+			return Start{}, ferr
 		case got:
 			if t, ok := first.(*a2a.Task); ok && t != nil {
 				return Start{Answer: t}, nil
@@ -203,7 +225,7 @@ func (w *Writer) SendStreaming(rw http.ResponseWriter, r *http.Request, s Stream
 	ctx := r.Context()
 	st, err := start(ctx)
 	if err != nil {
-		WriteError(rw, s.Binding, s.RequestID, 0, err)
+		w.writeError(rw, s, err)
 		return
 	}
 	if st.Answer != nil {
@@ -216,11 +238,15 @@ func (w *Writer) SendStreaming(rw http.ResponseWriter, r *http.Request, s Stream
 		WriteError(rw, s.Binding, s.RequestID, 0, a2a.NewError(a2a.ErrInternalError, "the work queue named no task"))
 		return
 	}
+	if st.Late != nil {
+		w.opts.Logger.Warn("sse: a2a-go failed after the turn was accepted; serving the turn's stream from the log",
+			"task", id, "after", st.After, "error", st.Late)
+	}
 	p := plan{task: id, after: st.After, closes: endsTurn}
 	if !st.New {
 		lead, err := w.log.SnapshotAt(ctx, id, st.After)
 		if err != nil {
-			WriteError(rw, s.Binding, s.RequestID, 0, internal(err))
+			w.writeError(rw, s, w.internal(id, err))
 			return
 		}
 		p.lead = lead
@@ -236,10 +262,19 @@ func (w *Writer) SendStreaming(rw http.ResponseWriter, r *http.Request, s Stream
 func (w *Writer) Subscribe(rw http.ResponseWriter, r *http.Request, s Stream) {
 	p, err := w.subscription(r.Context(), s)
 	if err != nil {
-		WriteError(rw, s.Binding, s.RequestID, 0, err)
+		w.writeError(rw, s, err)
 		return
 	}
 	w.serve(rw, r, s, p)
+}
+
+// writeError answers err before any SSE header (WriteError), logging the cause of an internal error whose
+// text the caller does not get (Public).
+func (w *Writer) writeError(rw http.ResponseWriter, s Stream, err error) {
+	if _, redacted := Public(err); redacted {
+		w.opts.Logger.Warn("sse: the stream could not start", "error", err)
+	}
+	WriteError(rw, s.Binding, s.RequestID, 0, err)
 }
 
 func (w *Writer) subscription(ctx context.Context, s Stream) (plan, error) {
@@ -249,7 +284,7 @@ func (w *Writer) subscription(ctx context.Context, s Stream) (plan, error) {
 	}
 	row, err := w.log.LoadScoped(ctx, s.Service, s.Owner, id)
 	if err != nil {
-		return plan{}, internal(err)
+		return plan{}, w.internal(id, err)
 	}
 	if s.LastEventID == nil {
 		if row.State.Terminal() {
@@ -260,32 +295,33 @@ func (w *Writer) subscription(ctx context.Context, s Stream) (plan, error) {
 	k := *s.LastEventID
 	tail, err := w.log.Tail(ctx, id)
 	if err != nil {
-		return plan{}, internal(err)
+		return plan{}, w.internal(id, err)
 	}
 	if k < 1 || k > tail {
 		return plan{}, a2a.NewError(a2a.ErrInvalidParams, fmt.Sprintf("Last-Event-ID %d is not an event id of this task", k))
 	}
 	ts, err := w.log.TerminalSeq(ctx, id)
 	if err != nil {
-		return plan{}, internal(err)
+		return plan{}, w.internal(id, err)
 	}
 	if ts > 0 && k >= ts {
 		return plan{}, a2a.NewError(a2a.ErrUnsupportedOperation, fmt.Sprintf("the task is %s and event %d is at or past its last event: nothing is missing", row.State, k))
 	}
 	lead, err := w.log.SnapshotAt(ctx, id, k)
 	if err != nil {
-		return plan{}, internal(err)
+		return plan{}, w.internal(id, err)
 	}
 	return plan{task: id, lead: lead, after: k, closes: terminal}, nil
 }
 
 // internal keeps the store's A2A errors (task not found, invalid params) and makes anything else an
-// internal error, so a database error's text is not sent to the caller.
-func internal(err error) error {
+// internal error, so a database error's text is not sent to the caller; it logs that error.
+func (w *Writer) internal(task uuid.UUID, err error) error {
 	var ae *a2a.Error
 	if errors.As(err, &ae) || errors.Is(err, a2a.ErrTaskNotFound) || errors.Is(err, a2a.ErrInvalidParams) {
 		return err
 	}
+	w.opts.Logger.Warn("sse: the task's log could not be read", "task", task, "error", err)
 	return a2a.NewError(a2a.ErrInternalError, "the task's log could not be read")
 }
 
@@ -344,7 +380,7 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 	var failingSince time.Time
 	backoff := 100 * time.Millisecond
 	for {
-		evs, err := w.log.Events(ctx, p.task, cursor, batch)
+		evs, more, err := w.log.EventsWithin(ctx, p.task, cursor, batch, readBytes)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -364,7 +400,8 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 			continue
 		}
 		failingSince, backoff = time.Time{}, 100*time.Millisecond
-		for _, ev := range evs {
+		for i, ev := range evs {
+			evs[i] = store.Event{} // the read's rows are let go one by one as they are sent
 			cursor = ev.Seq
 			if !ev.Kind.Carried() {
 				continue // message and metadata rows show in the next snapshot (spec §9)
@@ -382,7 +419,7 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 				return
 			}
 		}
-		if len(evs) == batch {
+		if more {
 			continue
 		}
 		if !w.wait(ctx, sw, keep.C, wake, w.opts.Reread) {
@@ -412,7 +449,10 @@ func (w *Writer) wait(ctx context.Context, sw *streamWriter, keep <-chan time.Ti
 }
 
 // rowData returns a carried row's state (empty for an artifact row) and its StreamResponse bytes on one
-// line. The payload is the stored bytes (json, D49), compacted: a NUL or any other character survives.
+// line. The payload is the stored bytes (json, D49), sent as they are: a NUL or any other character
+// survives. Only a payload stored across lines (whitespace between tokens: JSON escapes a newline in a
+// string) is compacted, into a copy. The probe decodes the state and skips everything else, so a large
+// artifact is not copied to be checked.
 func rowData(ev store.Event) (a2a.TaskState, []byte, error) {
 	if len(ev.Payload) == 0 {
 		return "", nil, errors.New("no inline payload")
@@ -428,7 +468,7 @@ func rowData(ev store.Event) (a2a.TaskState, []byte, error) {
 				State a2a.TaskState `json:"state"`
 			} `json:"status"`
 		} `json:"statusUpdate"`
-		ArtifactUpdate json.RawMessage `json:"artifactUpdate"`
+		ArtifactUpdate *struct{} `json:"artifactUpdate"`
 	}
 	if err := json.Unmarshal(ev.Payload, &probe); err != nil {
 		return "", nil, err
@@ -442,6 +482,9 @@ func rowData(ev store.Event) (a2a.TaskState, []byte, error) {
 	case ev.Kind == store.KindArtifact && probe.ArtifactUpdate != nil:
 	default:
 		return "", nil, fmt.Errorf("a %s row without its event", ev.Kind)
+	}
+	if !bytes.ContainsAny(ev.Payload, "\r\n") {
+		return state, ev.Payload, nil
 	}
 	var b bytes.Buffer
 	if err := json.Compact(&b, ev.Payload); err != nil {
@@ -486,7 +529,8 @@ func (w *Writer) begin(rw http.ResponseWriter, r *http.Request, s Stream) *strea
 	return sw
 }
 
-// event writes one event: `id: <seq>` (none when seq is 0) and one data line.
+// event writes one event: `id: <seq>` (none when seq is 0) and one data line. The StreamResponse is
+// written as it is, between its prefix and suffix, never copied into a buffer of its own.
 func (sw *streamWriter) event(seq int64, streamResponse []byte) error {
 	var b bytes.Buffer
 	if seq > 0 {
@@ -495,24 +539,26 @@ func (sw *streamWriter) event(seq int64, streamResponse []byte) error {
 		b.WriteByte('\n')
 	}
 	b.WriteString("data: ")
+	suffix := "\n\n"
 	if sw.binding == JSONRPC {
 		b.WriteString(`{"jsonrpc":"2.0","id":`)
 		b.Write(sw.id)
 		b.WriteString(`,"result":`)
-		b.Write(streamResponse)
-		b.WriteByte('}')
-	} else {
-		b.Write(streamResponse)
+		suffix = "}\n\n"
 	}
-	b.WriteString("\n\n")
-	return sw.write(b.Bytes())
+	for _, part := range [][]byte{b.Bytes(), streamResponse, []byte(suffix)} {
+		if _, err := sw.rw.Write(part); err != nil {
+			return err
+		}
+	}
+	return sw.rc.Flush()
 }
 
 // error writes an error event after the headers: the JSON-RPC error envelope, or the google.rpc.Status.
 func (sw *streamWriter) error(err error) error {
 	var data []byte
 	if sw.binding == JSONRPC {
-		data = bytes.TrimRight(JSONRPCErrorBody(sw.id, ToJSONRPC(err)), "\n")
+		data = bytes.TrimRight(JSONRPCErrorBody(sw.id, ToJSONRPC(public(err))), "\n")
 	} else {
 		_, body := HTTPError(err)
 		data = bytes.TrimRight(body, "\n")

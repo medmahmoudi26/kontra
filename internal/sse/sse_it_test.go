@@ -2,10 +2,13 @@ package sse
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -359,5 +362,85 @@ func TestFollowUpStreamOverPostgres(t *testing.T) {
 	}
 	if st := decode(t, JSONRPC, got[0].data, "7").(*a2a.Task).Status.State; st != a2a.TaskStateInputRequired {
 		t.Errorf("lead state %s", st)
+	}
+}
+
+// heapProbe is a ResponseWriter that discards the stream and, at each large write (an event's payload),
+// records the live heap after a full collection: what the stream holds while it sends a row.
+type heapProbe struct {
+	h      http.Header
+	peak   uint64
+	events int
+}
+
+func (p *heapProbe) Header() http.Header {
+	if p.h == nil {
+		p.h = http.Header{}
+	}
+	return p.h
+}
+func (p *heapProbe) WriteHeader(int) {}
+func (p *heapProbe) Flush()          {}
+func (p *heapProbe) Write(b []byte) (int, error) {
+	if len(b) >= 1<<20 {
+		p.events++
+		p.peak = max(p.peak, liveHeap())
+	}
+	return len(b), nil
+}
+
+func liveHeap() uint64 {
+	runtime.GC()
+	runtime.GC() // the second collection empties sync.Pool's victim cache (pgx's read buffers)
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc
+}
+
+// A stream that starts far behind a log of large rows (a resume from an early K) holds one read of them
+// at a time, not the rows it is behind (here 12 artifact rows of 2 MiB): about readBytes and a row.
+func TestResumeHoldsOneReadOfLargeRows(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	task := e.newTask("a large report")
+	id := uuid.MustParse(string(task.ID))
+	const rows, rowBytes = 12, 2 << 20
+	func() {
+		b := make([]byte, rowBytes*3/4)
+		for i := range rows {
+			if _, err := rand.Read(b); err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(a2a.StreamResponse{Event: &a2a.TaskArtifactUpdateEvent{TaskID: task.ID, ContextID: task.ContextID,
+				Artifact: &a2a.Artifact{ID: a2a.ArtifactID(fmt.Sprint("part-", i)), Parts: a2a.ContentParts{a2a.NewTextPart(base64.StdEncoding.EncodeToString(b))}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cur, err := e.log.Load(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.log.Append(ctx, nil, store.Write{TaskID: id, PrevVersion: cur.Version, Kind: store.KindArtifact, Snapshot: cur.Snapshot, Payload: payload}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}()
+	end := e.status(task, a2a.TaskStateCompleted, "done")
+
+	probe := &heapProbe{}
+	k := int64(1)
+	req := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+	base := liveHeap()
+	e.w1.Subscribe(probe, req, Stream{Binding: HTTPJSON, Service: e.svc, Owner: ownerA, TaskID: task.ID, LastEventID: &k})
+	if probe.events != rows {
+		t.Fatalf("%d large events written, want %d (the stream ends at seq %d)", probe.events, rows, end)
+	}
+	held := int64(probe.peak) - int64(base)
+	t.Logf("live heap while sending: %d MiB above the baseline", held>>20)
+	// One read (readBytes, ending with the row that reaches it), plus the driver's buffers for a row: well
+	// under the 24 MiB the stream is behind, which a read of 256 rows held at once.
+	if held > readBytes+4*rowBytes {
+		t.Errorf("the stream held %d MiB while sending rows of %d MiB: more than one read (%d MiB) and its rows' buffers",
+			held>>20, rowBytes>>20, readBytes>>20)
 	}
 }

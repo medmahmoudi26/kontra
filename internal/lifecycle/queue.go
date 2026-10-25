@@ -99,8 +99,10 @@ func (q *Queue) now() time.Time {
 // A cancel payload is never written: CancelTask is decided by the cancel interceptor before a2a-go's
 // executor sees it (D4).
 //
-// When ctx carries a StreamStart (WithStreamStart), Write fills it for the gate's SSE writer: a new task
-// streams from seq 0 (the creation row is the first event); a follow-up or a resend from V.
+// When ctx carries a StreamStart (WithStreamStart), Write fills it for the gate's SSE writer when it
+// returns the task, and only then: a new task streams from seq 0 (the creation row is the first event); a
+// follow-up or a resend from V. A refused Update, or one not accepted in time, leaves it empty, so a
+// filled StreamStart means the turn was accepted whatever a2a-go reports after Write (spec §9).
 func (q *Queue) Write(ctx context.Context, p *workqueue.Payload) (a2a.TaskID, error) {
 	if p == nil {
 		return "", fmt.Errorf("lifecycle: no payload: %w", a2a.ErrInvalidParams)
@@ -212,7 +214,6 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	if err != nil {
 		return "", err
 	}
-	fillStreamStart(ctx, StreamStart{TaskID: a2a.TaskID(taskID.String()), Version: 0, New: true})
 	// The task row exists: its workflow is started even if the caller went away meanwhile (D8), within
 	// AcceptWait.
 	if _, err := q.client.StartWithMessage(context.WithoutCancel(ctx), q.input(taskID, quoteExpires), wid.String()); err != nil {
@@ -220,6 +221,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		// lifecycle_unavailable after 2 minutes (spec §14.5, D63).
 		return "", err
 	}
+	fillStreamStart(ctx, StreamStart{TaskID: a2a.TaskID(taskID.String()), Version: 0, New: true})
 	p.TaskID = a2a.TaskID(taskID.String())
 	return p.TaskID, nil
 }
@@ -316,7 +318,6 @@ func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner s
 		return "", err
 	}
 	tid := a2a.TaskID(taskID.String())
-	fillStreamStart(ctx, StreamStart{TaskID: tid, Version: pos.version, New: false})
 	// The work item exists: the Update is sent even if the caller went away meanwhile, within AcceptWait.
 	bg := context.WithoutCancel(ctx)
 	if err := q.message(bg, taskID, wid, pos); err != nil {
@@ -331,6 +332,8 @@ func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner s
 		}
 		return "", err
 	}
+	// V was read in the work item's transaction; the stream starts there once the Update is accepted.
+	fillStreamStart(ctx, StreamStart{TaskID: tid, Version: pos.version, New: false})
 	if configID != "" {
 		// kontra.push is best effort: the workflow lists push configs after each dispatch (spec §10.2).
 		_ = q.client.SignalPush(bg, tid, PushSignal{ConfigID: configID})
@@ -539,7 +542,9 @@ func Rebuild(taskID a2a.TaskID, wi *store.WorkItem) (*workqueue.Payload, error) 
 // before asking a2a-go to create or continue the task: the SSE stream starts after Version (spec §9). For
 // a new task Version is 0 (the creation row, seq 1, is the first event) and New is true; for a follow-up it
 // is the task's version read in the transaction that stored the work item, before the kontra.message
-// Update, so the snapshot at V leads without an id; for a resend it is the existing task's version.
+// Update, so the snapshot at V leads without an id; for a resend it is the existing task's version. Write
+// fills it only when it returns the task (the Update accepted): an empty StreamStart after a2a-go's call
+// means no turn was accepted.
 type StreamStart struct {
 	TaskID  a2a.TaskID
 	Version int64

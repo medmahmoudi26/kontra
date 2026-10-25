@@ -6,6 +6,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -180,14 +181,70 @@ func restBody(code int, status, msg string, det []*errordetails.Typed) []byte {
 	return append(b, '\n')
 }
 
+// internalCodes are the sentinels whose JSON-RPC code is a server's own failure (-32603, -32000, -32006;
+// HTTP 500 on HTTP+JSON). An error that wraps none of the sentinels is one too.
+var internalCodes = []error{a2a.ErrInternalError, a2a.ErrServerError, a2a.ErrInvalidAgentResponse}
+
+// internalError reports whether err maps to a server failure: the first sentinel it wraps, in the order
+// ToJSONRPC reads them, is one of internalCodes, or it wraps none (an error a2a-go answers -32603).
+func internalError(err error) bool {
+	for _, m := range jsonrpcCodes {
+		if errors.Is(err, m.err) {
+			return slices.Contains(internalCodes, m.err)
+		}
+	}
+	return true
+}
+
+// Public is the error a caller is answered with for err. A caller's own mistake (task not found, invalid
+// params, a refused Update, …) keeps its text. An internal error (Internal, Server or InvalidAgentResponse,
+// or none of the sentinels; HTTP 5xx, including an Update not accepted in time) keeps only the gate's own
+// words: the message of the outermost *a2a.Error in its chain (such as "the task's lifecycle is
+// unavailable"), else the text of its sentinel ("internal error"). The rest of its text is a cause the
+// caller never reads: a database error, the Temporal dial target, a2a-go's wrapping of them. The error
+// returned wraps err, so the code, the reason, the details and the 503 of an Update not accepted in time
+// are unchanged; redacted reports whether the text changed, so the caller can log err.
+func Public(err error) (pub error, redacted bool) {
+	if err == nil || !internalError(err) {
+		return err, false
+	}
+	msg := a2a.ErrInternalError.Error()
+	for _, s := range []error{a2a.ErrServerError, a2a.ErrInvalidAgentResponse, context.DeadlineExceeded, context.Canceled} {
+		if errors.Is(err, s) {
+			msg = s.Error()
+			break
+		}
+	}
+	var ae *a2a.Error
+	if errors.As(err, &ae) && ae.Message != "" {
+		msg = ae.Message
+	}
+	if msg == err.Error() {
+		return err, false
+	}
+	out := &a2a.Error{Err: err, Message: msg}
+	if ae != nil {
+		// a2a-go reads details from the outermost *a2a.Error; keep the gate's (ErrorInfo() appends to its
+		// own copy).
+		out.Details, out.TypedDetails = ae.Details, slices.Clone(ae.TypedDetails)
+	}
+	return out, true
+}
+
+func public(err error) error {
+	pub, _ := Public(err)
+	return pub
+}
+
 // Unavailable reports whether err is an Update the task's lifecycle did not accept, or did not complete,
 // in time (lifecycle.ErrUnavailable): -32603 on JSON-RPC, HTTP 503 on HTTP+JSON (spec §7, §14.1).
 func Unavailable(err error) bool { return errors.Is(err, lifecycle.ErrUnavailable) }
 
-// HTTPError is the HTTP+JSON answer to err: ToHTTP, except that an Update not accepted in time is HTTP
-// 503 (google.rpc UNAVAILABLE, reason INTERNAL_ERROR, so an A2A client still reads -32603), where a2a-go
-// would write 500 (spec §7, §14.1: "-32603 (HTTP 503)"; A2A §3.3.2 allows 500 or 503 for it).
+// HTTPError is the HTTP+JSON answer to err: ToHTTP of Public(err), except that an Update not accepted in
+// time is HTTP 503 (google.rpc UNAVAILABLE, reason INTERNAL_ERROR, so an A2A client still reads -32603),
+// where a2a-go would write 500 (spec §7, §14.1: "-32603 (HTTP 503)"; A2A §3.3.2 allows 500 or 503 for it).
 func HTTPError(err error) (status int, body []byte) {
+	err = public(err)
 	if !Unavailable(err) {
 		return ToHTTP(err)
 	}
@@ -219,7 +276,8 @@ func JSONRPCErrorBody(id json.RawMessage, e RPCError) []byte {
 // WriteError writes err as an ordinary response of binding b, before any SSE header (spec §9): on
 // JSON-RPC a JSON-RPC error response carrying the request's id, with HTTP status 200 as a2a-go answers
 // every JSON-RPC error, or status when it is not zero (401, 404); on HTTP+JSON a google.rpc.Status with
-// HTTPError's status, or status when it is not zero.
+// HTTPError's status, or status when it is not zero. The message is Public's: an internal error's cause
+// is never written (the caller logs it).
 //
 // SPEC-CONFLICT: spec §2.4 ("VersionNotSupportedError (-32009, HTTP 400)"), §7 and §14.1 ("-32603 (HTTP
 // 503)") give a JSON-RPC code and an HTTP status without saying which binding the status belongs to. Sent
@@ -232,7 +290,7 @@ func JSONRPCErrorBody(id json.RawMessage, e RPCError) []byte {
 func WriteError(w http.ResponseWriter, b Binding, id json.RawMessage, status int, err error) {
 	var body []byte
 	if b == JSONRPC {
-		body = JSONRPCErrorBody(id, ToJSONRPC(err))
+		body = JSONRPCErrorBody(id, ToJSONRPC(public(err)))
 		if status == 0 {
 			status = http.StatusOK
 		}

@@ -707,6 +707,54 @@ func (l *Log) events(ctx context.Context, q querier, taskID uuid.UUID, after int
 	return evs, nil
 }
 
+// EventsWithin is Events bounded by bytes as well as rows, for a reader that holds a read while a slow
+// caller takes it (the gate's SSE writer): rows with seq > after in seq order, at most limit (1..1000) of
+// them, ending with the row that brings their payload bytes to maxBytes or more, and always at least one
+// row when there is one. Postgres is asked only for the rows whose stored payloads (pg_column_size, which
+// reads no TOAST) before them stay under maxBytes, so a read of large incompressible rows transfers about
+// the budget; the bytes are counted again as they arrive, so a compressible payload, whose stored size is
+// a fraction of its bytes, cannot make a read hold many times the budget. more is true when rows after
+// the last one returned may exist: the read stopped at limit, at the budget, or where the stored sizes
+// reached it.
+func (l *Log) EventsWithin(ctx context.Context, taskID uuid.UUID, after int64, limit int, maxBytes int) (evs []Event, more bool, err error) {
+	if limit < 1 || limit > 1000 {
+		limit = 1000
+	}
+	maxBytes = max(maxBytes, 1)
+	rows, err := l.db.Query(ctx, `select seq, kind, payload, coalesce(payload_ref, ''), created_at, stored from (
+			select seq, kind, payload, payload_ref, created_at, coalesce(pg_column_size(payload), 0)::bigint as stored,
+				sum(coalesce(pg_column_size(payload), 0)) over (order by seq) - coalesce(pg_column_size(payload), 0) as before
+			from kontra.task_events where task_id = $1 and seq > $2 order by seq limit $3) e
+		where before < $4 order by seq`, taskID, after, limit, int64(maxBytes))
+	if err != nil {
+		return nil, false, fmt.Errorf("store: events of task %s: %w", taskID, err)
+	}
+	defer rows.Close()
+	var read, stored int64
+	for read < int64(maxBytes) && rows.Next() {
+		ev := Event{TaskID: taskID}
+		var (
+			payload []byte
+			size    int64
+		)
+		if err := rows.Scan(&ev.Seq, &ev.Kind, &payload, &ev.PayloadRef, &ev.CreatedAt, &size); err != nil {
+			return nil, false, fmt.Errorf("store: events of task %s: %w", taskID, err)
+		}
+		if payload != nil {
+			ev.Payload = payload
+		}
+		read += int64(len(payload))
+		stored += size
+		evs = append(evs, ev)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("store: events of task %s: %w", taskID, err)
+	}
+	more = len(evs) == limit || read >= int64(maxBytes) || stored >= int64(maxBytes)
+	return evs, more, nil
+}
+
 // Tail returns max(seq) for the task, 0 when it has no rows yet.
 func (l *Log) Tail(ctx context.Context, taskID uuid.UUID) (int64, error) {
 	var tail int64

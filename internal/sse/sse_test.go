@@ -33,8 +33,9 @@ type memLog struct {
 	taskID  uuid.UUID
 	owner   store.Owner
 	rows    []store.Event
-	fail    error // Events fails with it while set
+	fail    error // EventsWithin fails with it while set
 	reads   int
+	maxRead int // the most payload bytes one EventsWithin returned
 	wakeups chan struct{}
 }
 
@@ -120,20 +121,33 @@ func (l *memLog) LoadScoped(_ context.Context, s store.ServiceRef, o store.Owner
 	return &store.TaskRow{ID: id, State: st, Version: int64(len(l.rows)), Snapshot: snap, Owner: l.owner}, nil
 }
 
-func (l *memLog) Events(_ context.Context, id uuid.UUID, after int64, limit int) ([]store.Event, error) {
+// EventsWithin is store.Log.EventsWithin over the rows: at most limit rows, ending with the one that
+// brings their payload bytes to maxBytes, at least one.
+func (l *memLog) EventsWithin(_ context.Context, id uuid.UUID, after int64, limit int, maxBytes int) ([]store.Event, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.reads++
 	if l.fail != nil {
-		return nil, l.fail
+		return nil, false, l.fail
 	}
-	var out []store.Event
+	var (
+		out  []store.Event
+		read int
+		more bool
+	)
 	for _, r := range l.rows {
-		if r.Seq > after && len(out) < limit {
-			out = append(out, r)
+		if r.Seq <= after {
+			continue
 		}
+		if len(out) == limit || read >= maxBytes {
+			more = true
+			break
+		}
+		out = append(out, r)
+		read += len(r.Payload)
 	}
-	return out, nil
+	l.maxRead = max(l.maxRead, read)
+	return out, more, nil
 }
 
 func (l *memLog) SnapshotAt(_ context.Context, id uuid.UUID, seq int64) (*a2a.Task, error) {
