@@ -23,10 +23,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
-
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
 )
 
 // Refresh is how often a serving replica re-fetches a card (spec §3).
@@ -566,8 +565,84 @@ func ETag(body []byte) string {
 	return `"` + hex.EncodeToString(sum[:16]) + `"`
 }
 
+// CacheControl is the card responses' Cache-Control (spec §3).
+const CacheControl = "max-age=60"
+
 // Handler serves a card with Cache-Control: max-age=60, ETag and Last-Modified (the TCK hard-fails
 // without them). upstream selects the verbatim upstream card.
+//
+//   - GET and HEAD only; any other method is an empty 404, as the edge's closed router answers it.
+//   - A service with no servable card (none fetched yet, or none for 30 minutes, or configured seller keys
+//     and no signature that verifies: Served.Unavailable) answers 503 with an empty body (spec §3).
+//   - The served card's ETag is Served.ETag, the upstream card's the same hash over its own bytes; both
+//     carry the served card's Last-Modified (the time its body last changed).
+//   - Conditional requests (A2A §8.6.2: clients SHOULD revalidate): If-None-Match matching the ETag, or *,
+//     is 304; without If-None-Match, If-Modified-Since at or after Last-Modified is 304 on the served card.
+//     The upstream card answers If-Modified-Since in full: its bytes can change while the served body (and
+//     so Last-Modified) does not.
+//
+// get is called once per request; the route has already decided that the caller may see the cards (an
+// unknown or forbidden service is the route's 404, spec §2.1, D50). Card GETs are not version-checked.
 func Handler(get func(r *http.Request) (*Served, error), upstream bool) http.Handler {
-	panic(unimpl.Error("card.Handler", "WP-06"))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		s, err := get(r)
+		if err != nil || s == nil || s.Unavailable {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		body, etag := s.Body, s.ETag
+		if upstream {
+			body, etag = s.Upstream, ETag(s.Upstream)
+		}
+		if etag == "" {
+			etag = ETag(body)
+		}
+		lastMod := s.LastModified.UTC().Truncate(time.Second)
+		if lastMod.IsZero() || lastMod.Unix() <= 0 {
+			lastMod = time.Unix(0, 0).UTC() // never absent (the TCK fails without it); a card without a time is old
+		}
+		h := w.Header()
+		h.Set("Cache-Control", CacheControl)
+		h.Set("ETag", etag)
+		h.Set("Last-Modified", lastMod.Format(http.TimeFormat))
+		if notModified(r, etag, lastMod, !upstream) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		h.Set("Content-Type", "application/json")
+		h.Set("Content-Length", strconv.Itoa(len(body)))
+		h.Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(body)
+		}
+	})
+}
+
+// notModified evaluates If-None-Match (weak comparison, RFC 9110 §13.1.2), and If-Modified-Since only
+// when there is no If-None-Match and byDate is set.
+func notModified(r *http.Request, etag string, lastMod time.Time, byDate bool) bool {
+	if inm := r.Header.Values("If-None-Match"); len(inm) > 0 {
+		for _, v := range inm {
+			for tag := range strings.SplitSeq(v, ",") {
+				tag = strings.TrimSpace(tag)
+				if tag == "*" || strings.TrimPrefix(tag, "W/") == strings.TrimPrefix(etag, "W/") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if !byDate {
+		return false
+	}
+	since, err := http.ParseTime(r.Header.Get("If-Modified-Since"))
+	return err == nil && !lastMod.After(since)
 }
