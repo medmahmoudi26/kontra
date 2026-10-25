@@ -15,14 +15,25 @@
 package sse
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/google/uuid"
 
+	"github.com/medmahmoudi26/kontra/internal/edge"
+	"github.com/medmahmoudi26/kontra/internal/ids"
+	"github.com/medmahmoudi26/kontra/internal/lifecycle"
 	"github.com/medmahmoudi26/kontra/internal/store"
-	"github.com/medmahmoudi26/kontra/internal/unimpl"
 )
 
 // Binding is the transport a stream is framed for.
@@ -34,15 +45,71 @@ const (
 	HTTPJSON                // data: <StreamResponse>
 )
 
+// Stream timing defaults.
+const (
+	// DefaultReread is how often a stream re-reads the log when no wake arrived: the LISTEN connection's
+	// notification is a hint, the table is the truth (spec §5.2), and a wake can be lost while the
+	// listener reconnects.
+	DefaultReread = 5 * time.Second
+	// ReadGrace is how long a stream keeps retrying a log read that fails before it ends with an error
+	// event; the caller resumes with Last-Event-ID.
+	ReadGrace = 30 * time.Second
+	// batch is the most rows one read returns.
+	batch = 256
+)
+
+// logReader is what the writer reads; *store.Log implements it.
+type logReader interface {
+	LoadScoped(ctx context.Context, svc store.ServiceRef, o store.Owner, taskID uuid.UUID) (*store.TaskRow, error)
+	Events(ctx context.Context, taskID uuid.UUID, after int64, limit int) ([]store.Event, error)
+	SnapshotAt(ctx context.Context, taskID uuid.UUID, seq int64) (*a2a.Task, error)
+	Tail(ctx context.Context, taskID uuid.UUID) (int64, error)
+	TerminalSeq(ctx context.Context, taskID uuid.UUID) (int64, error)
+}
+
+// Options tune a Writer; zero values take the defaults.
+type Options struct {
+	KeepAlive time.Duration // the `: keep-alive` interval: edge.KeepAlive (15 s, spec §2.2)
+	Reread    time.Duration // DefaultReread
+	ReadGrace time.Duration // ReadGrace
+	Logger    *slog.Logger
+}
+
+func (o Options) withDefaults() Options {
+	if o.KeepAlive <= 0 {
+		o.KeepAlive = edge.KeepAlive
+	}
+	if o.Reread <= 0 {
+		o.Reread = DefaultReread
+	}
+	if o.ReadGrace <= 0 {
+		o.ReadGrace = ReadGrace
+	}
+	if o.Logger == nil {
+		o.Logger = slog.Default()
+	}
+	return o
+}
+
 // Writer serves streams from the log.
 type Writer struct {
-	log   *store.Log
+	log   logReader
 	waker store.TaskWaker
+	opts  Options
 }
 
 // NewWriter returns a writer over the log, woken by the replica's LISTEN connection.
 func NewWriter(log *store.Log, waker store.TaskWaker) *Writer {
-	return &Writer{log: log, waker: waker}
+	return NewWriterWithOptions(log, waker, Options{})
+}
+
+// NewWriterWithOptions is NewWriter with its timing and logger set.
+func NewWriterWithOptions(log *store.Log, waker store.TaskWaker, o Options) *Writer {
+	return newWriter(log, waker, o)
+}
+
+func newWriter(log logReader, waker store.TaskWaker, o Options) *Writer {
+	return &Writer{log: log, waker: waker, opts: o.withDefaults()}
 }
 
 // Stream is one stream request, after authentication and routing.
@@ -51,19 +118,115 @@ type Stream struct {
 	RequestID   json.RawMessage // the JSON-RPC id, echoed in every envelope
 	Service     store.ServiceRef
 	Owner       store.Owner
-	TaskID      a2a.TaskID
-	LastEventID *int64 // set when the request carried Last-Event-ID
+	TaskID      a2a.TaskID // SubscribeToTask: the task the request names
+	LastEventID *int64     // set when the request carried Last-Event-ID
 }
 
-// Starter creates or continues a task through a2a-go's handler for SendStreamingMessage and reports the
-// task id and the version V the stream starts after (lifecycle.StreamStart): 0 for a new task (the
-// creation row, seq 1, is the first event), V for a follow-up (the snapshot at V leads, without an id).
-type Starter func(ctx context.Context) (taskID a2a.TaskID, after int64, isNew bool, err error)
+// Start is where a SendStreamingMessage stream starts: what lifecycle.StreamStart reported, filled by the
+// work queue's Write in the transaction that created the task or stored the follow-up's work item, never
+// read afterwards (a fast dispatch could otherwise put the turn's end inside the leading snapshot, and the
+// stream would never close).
+type Start struct {
+	TaskID a2a.TaskID
+	// After is the version the stream starts after: 0 for a new task (the creation row, seq 1, is the
+	// first event), V for a follow-up or a resend (the snapshot at V leads, without an id).
+	After int64
+	New   bool
+	// FollowUp is a request that named its task (spec §9 "follow-up"): its leading snapshot never closes
+	// the stream. Without it (a resend answered with the task it repeats) a leading snapshot whose state
+	// ends a turn closes it, since nothing more of that turn will come.
+	FollowUp bool
+	// Answer is a task an interceptor answered the request with itself, before the work queue (an accepted
+	// review-window message, spec §7): the stream is that one event.
+	Answer *a2a.Task
+}
+
+// Starter creates or continues a task through a2a-go's handler for SendStreamingMessage and reports where
+// the stream starts. An error is the request's answer, written before any SSE header.
+type Starter func(ctx context.Context) (Start, error)
+
+// HandlerStarter is the Starter of a service's a2a-go handler (the relay's interceptors and work queue
+// run, and the call context names SendStreamingMessage): it calls SendStreamingMessage with a call
+// context built from params (the request's headers, A2A-Version normalized by the version middleware) and
+// a lifecycle.StreamStart for Write to fill, takes the first event (the subscription's snapshot) and stops
+// iterating, which closes a2a-go's reader. The stream position is StreamStart's, never the snapshot's.
+func HandlerStarter(h a2asrv.RequestHandler, req *a2a.SendMessageRequest, params *a2asrv.ServiceParams) Starter {
+	return func(ctx context.Context) (Start, error) {
+		var ss lifecycle.StreamStart
+		ctx = lifecycle.WithStreamStart(ctx, &ss)
+		ctx, cc := a2asrv.NewCallContext(ctx, params)
+		cc.ProtocolVersion = a2a.Version
+		var (
+			first a2a.Event
+			ferr  error
+			got   bool
+		)
+		for ev, err := range h.SendStreamingMessage(ctx, req) {
+			first, ferr, got = ev, err, true
+			break
+		}
+		switch {
+		case ferr != nil:
+			return Start{}, ferr
+		case ss.TaskID != "":
+			followUp := req != nil && req.Message != nil && req.Message.TaskID != ""
+			return Start{TaskID: ss.TaskID, After: ss.Version, New: ss.New, FollowUp: followUp}, nil
+		case got:
+			if t, ok := first.(*a2a.Task); ok && t != nil {
+				return Start{Answer: t}, nil
+			}
+		}
+		return Start{}, a2a.NewError(a2a.ErrInternalError, "the request produced no task")
+	}
+}
+
+// plan is what a stream sends: an optional leading snapshot without an id, then every carried row after
+// `after`, until a row whose state `closes` says ends the stream.
+type plan struct {
+	task       uuid.UUID
+	lead       *a2a.Task
+	leadCloses bool
+	after      int64
+	closes     func(a2a.TaskState) bool
+}
+
+// endsTurn is SendStreamingMessage's rule: terminal, input-required, or quoted (which A2A shows as
+// input-required, spec §5.1).
+func endsTurn(s a2a.TaskState) bool { return s.Terminal() || s == a2a.TaskStateInputRequired }
+
+// terminal is SubscribeToTask's rule: open through input-required and auth-required (TCK STREAM-SUB-002).
+func terminal(s a2a.TaskState) bool { return s.Terminal() }
 
 // SendStreaming serves SendStreamingMessage. It closes after the first row whose state is terminal,
 // input-required or quoted (for a follow-up: the first such row with seq > V).
 func (w *Writer) SendStreaming(rw http.ResponseWriter, r *http.Request, s Stream, start Starter) {
-	panic(unimpl.Error("sse.Writer.SendStreaming", "WP-06"))
+	ctx := r.Context()
+	st, err := start(ctx)
+	if err != nil {
+		WriteError(rw, s.Binding, s.RequestID, 0, err)
+		return
+	}
+	if st.Answer != nil {
+		sw := w.begin(rw, r, s)
+		_ = sw.event(0, mustStreamResponse(st.Answer))
+		return
+	}
+	id, err := ids.ParseTaskID(string(st.TaskID))
+	if err != nil {
+		WriteError(rw, s.Binding, s.RequestID, 0, a2a.NewError(a2a.ErrInternalError, "the work queue named no task"))
+		return
+	}
+	p := plan{task: id, after: st.After, closes: endsTurn}
+	if !st.New {
+		lead, err := w.log.SnapshotAt(ctx, id, st.After)
+		if err != nil {
+			WriteError(rw, s.Binding, s.RequestID, 0, internal(err))
+			return
+		}
+		p.lead = lead
+		p.leadCloses = !st.FollowUp && endsTurn(lead.Status.State)
+	}
+	w.serve(rw, r, s, p)
 }
 
 // Subscribe serves SubscribeToTask, with or without Last-Event-ID. Without it a terminal task is
@@ -71,11 +234,297 @@ func (w *Writer) SendStreaming(rw http.ResponseWriter, r *http.Request, s Stream
 // carried rows after its version, open through input-required and auth-required until the terminal row
 // (TCK STREAM-SUB-002).
 func (w *Writer) Subscribe(rw http.ResponseWriter, r *http.Request, s Stream) {
-	panic(unimpl.Error("sse.Writer.Subscribe", "WP-06"))
+	p, err := w.subscription(r.Context(), s)
+	if err != nil {
+		WriteError(rw, s.Binding, s.RequestID, 0, err)
+		return
+	}
+	w.serve(rw, r, s, p)
+}
+
+func (w *Writer) subscription(ctx context.Context, s Stream) (plan, error) {
+	id, err := ids.ParseTaskID(string(s.TaskID))
+	if err != nil {
+		return plan{}, err // TaskNotFound, before any query (spec §4)
+	}
+	row, err := w.log.LoadScoped(ctx, s.Service, s.Owner, id)
+	if err != nil {
+		return plan{}, internal(err)
+	}
+	if s.LastEventID == nil {
+		if row.State.Terminal() {
+			return plan{}, a2a.NewError(a2a.ErrUnsupportedOperation, fmt.Sprintf("the task is %s: a terminal task has no stream to subscribe to", row.State))
+		}
+		return plan{task: id, lead: row.Snapshot, after: row.Version, closes: terminal}, nil
+	}
+	k := *s.LastEventID
+	tail, err := w.log.Tail(ctx, id)
+	if err != nil {
+		return plan{}, internal(err)
+	}
+	if k < 1 || k > tail {
+		return plan{}, a2a.NewError(a2a.ErrInvalidParams, fmt.Sprintf("Last-Event-ID %d is not an event id of this task", k))
+	}
+	ts, err := w.log.TerminalSeq(ctx, id)
+	if err != nil {
+		return plan{}, internal(err)
+	}
+	if ts > 0 && k >= ts {
+		return plan{}, a2a.NewError(a2a.ErrUnsupportedOperation, fmt.Sprintf("the task is %s and event %d is at or past its last event: nothing is missing", row.State, k))
+	}
+	lead, err := w.log.SnapshotAt(ctx, id, k)
+	if err != nil {
+		return plan{}, internal(err)
+	}
+	return plan{task: id, lead: lead, after: k, closes: terminal}, nil
+}
+
+// internal keeps the store's A2A errors (task not found, invalid params) and makes anything else an
+// internal error, so a database error's text is not sent to the caller.
+func internal(err error) error {
+	var ae *a2a.Error
+	if errors.As(err, &ae) || errors.Is(err, a2a.ErrTaskNotFound) || errors.Is(err, a2a.ErrInvalidParams) {
+		return err
+	}
+	return a2a.NewError(a2a.ErrInternalError, "the task's log could not be read")
 }
 
 // ParseLastEventID reads the Last-Event-ID header: absent is (0, false, nil); anything that is not a
-// positive integer is an error wrapping a2a.ErrInvalidParams.
+// positive integer is an error wrapping a2a.ErrInvalidParams. Repeated headers must agree.
 func ParseLastEventID(h http.Header) (int64, bool, error) {
-	return 0, false, unimpl.Error("sse.ParseLastEventID", "WP-06")
+	vals := h.Values("Last-Event-ID")
+	if len(vals) == 0 {
+		return 0, false, nil
+	}
+	var k int64
+	for i, v := range vals {
+		n, ok := positive(strings.TrimSpace(v))
+		if !ok || (i > 0 && n != k) {
+			return 0, false, a2a.NewError(a2a.ErrInvalidParams, "Last-Event-ID must be one positive integer: an event id this gate sent")
+		}
+		k = n
+	}
+	return k, true, nil
+}
+
+func positive(s string) (int64, bool) {
+	if s == "" || len(s) > 19 {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	return n, err == nil && n > 0
+}
+
+// serve writes the SSE headers, the plan's leading snapshot and the rows after it, live, until the plan's
+// closing row, the caller's disconnect, or a log that cannot be read for ReadGrace.
+func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan) {
+	ctx := r.Context()
+	var wake <-chan struct{}
+	if w.waker != nil {
+		// Registered before the first read: a row committed after it wakes the stream, one committed before
+		// it is found by the read.
+		var stop func()
+		wake, stop = w.waker.WaitTask(ctx, p.task)
+		defer stop()
+	}
+	sw := w.begin(rw, r, s)
+	if p.lead != nil {
+		if sw.event(0, mustStreamResponse(p.lead)) != nil || p.leadCloses {
+			return
+		}
+	}
+	keep := time.NewTicker(w.opts.KeepAlive)
+	defer keep.Stop()
+	cursor := p.after
+	var failingSince time.Time
+	backoff := 100 * time.Millisecond
+	for {
+		evs, err := w.log.Events(ctx, p.task, cursor, batch)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if failingSince.IsZero() {
+				failingSince = time.Now()
+			}
+			if time.Since(failingSince) >= w.opts.ReadGrace {
+				w.opts.Logger.Warn("sse: the task's log could not be read; ending the stream", "task", p.task, "error", err)
+				_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the task's log could not be read; resume with Last-Event-ID"))
+				return
+			}
+			if !w.wait(ctx, sw, keep.C, nil, backoff) {
+				return
+			}
+			backoff = min(2*backoff, 5*time.Second)
+			continue
+		}
+		failingSince, backoff = time.Time{}, 100*time.Millisecond
+		for _, ev := range evs {
+			cursor = ev.Seq
+			if !ev.Kind.Carried() {
+				continue // message and metadata rows show in the next snapshot (spec §9)
+			}
+			state, data, err := rowData(ev)
+			if err != nil {
+				w.opts.Logger.Error("sse: a row of the task's log is not a stream response", "task", p.task, "seq", ev.Seq, "error", err)
+				_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the task's log holds an unreadable event"))
+				return
+			}
+			if sw.event(ev.Seq, data) != nil {
+				return
+			}
+			if state != "" && p.closes(state) {
+				return
+			}
+		}
+		if len(evs) == batch {
+			continue
+		}
+		if !w.wait(ctx, sw, keep.C, wake, w.opts.Reread) {
+			return
+		}
+	}
+}
+
+// wait blocks until a wake, d, or the caller's disconnect (false), writing keep-alives meanwhile.
+func (w *Writer) wait(ctx context.Context, sw *streamWriter, keep <-chan time.Time, wake <-chan struct{}, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-wake: // a nil channel (no waker) never receives
+			return true
+		case <-t.C:
+			return true
+		case <-keep:
+			if sw.keepAlive() != nil {
+				return false
+			}
+		}
+	}
+}
+
+// rowData returns a carried row's state (empty for an artifact row) and its StreamResponse bytes on one
+// line. The payload is the stored bytes (json, D49), compacted: a NUL or any other character survives.
+func rowData(ev store.Event) (a2a.TaskState, []byte, error) {
+	if len(ev.Payload) == 0 {
+		return "", nil, errors.New("no inline payload")
+	}
+	var probe struct {
+		Task *struct {
+			Status struct {
+				State a2a.TaskState `json:"state"`
+			} `json:"status"`
+		} `json:"task"`
+		StatusUpdate *struct {
+			Status struct {
+				State a2a.TaskState `json:"state"`
+			} `json:"status"`
+		} `json:"statusUpdate"`
+		ArtifactUpdate json.RawMessage `json:"artifactUpdate"`
+	}
+	if err := json.Unmarshal(ev.Payload, &probe); err != nil {
+		return "", nil, err
+	}
+	var state a2a.TaskState
+	switch {
+	case ev.Kind == store.KindTask && probe.Task != nil:
+		state = probe.Task.Status.State
+	case ev.Kind == store.KindStatus && probe.StatusUpdate != nil:
+		state = probe.StatusUpdate.Status.State
+	case ev.Kind == store.KindArtifact && probe.ArtifactUpdate != nil:
+	default:
+		return "", nil, fmt.Errorf("a %s row without its event", ev.Kind)
+	}
+	var b bytes.Buffer
+	if err := json.Compact(&b, ev.Payload); err != nil {
+		return "", nil, err
+	}
+	return state, b.Bytes(), nil
+}
+
+func mustStreamResponse(t *a2a.Task) []byte {
+	b, err := json.Marshal(a2a.StreamResponse{Event: t})
+	if err != nil {
+		// A task decoded from the log always encodes again; this is a bug, not a caller's error.
+		panic(fmt.Sprintf("sse: encode a task snapshot: %v", err))
+	}
+	return b
+}
+
+// streamWriter frames events for one response.
+type streamWriter struct {
+	rw      http.ResponseWriter
+	rc      *http.ResponseController
+	binding Binding
+	id      json.RawMessage
+}
+
+// begin writes the SSE headers: from here on errors are events.
+func (w *Writer) begin(rw http.ResponseWriter, r *http.Request, s Stream) *streamWriter {
+	h := rw.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("X-Accel-Buffering", "no")
+	h.Del("Content-Length")
+	if r.ProtoMajor < 2 {
+		h.Set("Connection", "keep-alive")
+	}
+	rw.WriteHeader(http.StatusOK)
+	sw := &streamWriter{rw: rw, rc: http.NewResponseController(rw), binding: s.Binding, id: s.RequestID}
+	if len(sw.id) == 0 {
+		sw.id = json.RawMessage("null")
+	}
+	_ = sw.rc.Flush()
+	return sw
+}
+
+// event writes one event: `id: <seq>` (none when seq is 0) and one data line.
+func (sw *streamWriter) event(seq int64, streamResponse []byte) error {
+	var b bytes.Buffer
+	if seq > 0 {
+		b.WriteString("id: ")
+		b.WriteString(strconv.FormatInt(seq, 10))
+		b.WriteByte('\n')
+	}
+	b.WriteString("data: ")
+	if sw.binding == JSONRPC {
+		b.WriteString(`{"jsonrpc":"2.0","id":`)
+		b.Write(sw.id)
+		b.WriteString(`,"result":`)
+		b.Write(streamResponse)
+		b.WriteByte('}')
+	} else {
+		b.Write(streamResponse)
+	}
+	b.WriteString("\n\n")
+	return sw.write(b.Bytes())
+}
+
+// error writes an error event after the headers: the JSON-RPC error envelope, or the google.rpc.Status.
+func (sw *streamWriter) error(err error) error {
+	var data []byte
+	if sw.binding == JSONRPC {
+		data = bytes.TrimRight(JSONRPCErrorBody(sw.id, ToJSONRPC(err)), "\n")
+	} else {
+		_, body := HTTPError(err)
+		data = bytes.TrimRight(body, "\n")
+	}
+	return sw.write(append(append([]byte("data: "), data...), '\n', '\n'))
+}
+
+func (sw *streamWriter) keepAlive() error { return sw.write([]byte(": keep-alive\n\n")) }
+
+func (sw *streamWriter) write(b []byte) error {
+	if _, err := sw.rw.Write(b); err != nil {
+		return err
+	}
+	return sw.rc.Flush()
 }
