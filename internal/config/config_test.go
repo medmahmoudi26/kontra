@@ -342,6 +342,10 @@ func TestLoadErrors(t *testing.T) {
 		{"bare duration", head + "drain_timeout: 600\n", "missing unit"},
 		{"bad tenancy", head + "tenancy: shared\n", "want single or multi"},
 		{"caller_metadata outside kontra.", head + "caller_metadata: [acme.x]\n", "is not a kontra. key"},
+		// A service could write keys under a prefix outside kontra. (§2.5 strips only kontra. keys), which
+		// TaskRef.metadata would hand the hooks as the operator's (§13.3).
+		{"operator prefix outside kontra.", head + "operator_metadata_prefixes: [acme.]\n", "is not under kontra."},
+		{"operator prefix kontra. alone", head + "operator_metadata_prefixes: [kontra.]\n", "is not under kontra."},
 		{"bad origin", head + "mcp: { allowed_origins: [\"https://a.example.com/path\"] }\n", "is not an origin"},
 		{"xff without trusted (D69)", head + "edge: { client_ip: { from: x_forwarded_for } }\n", "needs edge.client_ip.trusted"},
 		{"proxy_protocol without trusted (D69)", head + "edge: { client_ip: { from: proxy_protocol } }\n", "needs edge.client_ip.trusted"},

@@ -321,7 +321,7 @@ func TestCallerLimits(t *testing.T) {
 // Admission decides before any task row: a deny carries the operator's refusal, a failure fails closed.
 func TestAdmissionRefusals(t *testing.T) {
 	adm := &recordingAdmission{decision: hooks.Decision{Outcome: hooks.Deny, Refusal: &hooks.Refusal{Code: -32602, Message: "over budget"}}}
-	e := newEnv(t, envOptions{admit: adm, rules: hooks.KeyRules{OperatorPrefixes: []string{"acme."}}})
+	e := newEnv(t, envOptions{admit: adm, rules: hooks.KeyRules{OperatorPrefixes: []string{"kontra.acme."}}})
 	h := e.handler()
 	send := func() error {
 		_, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("q"))})

@@ -370,9 +370,19 @@ func (c *Config) validateMetadata(v *validator) {
 			v.add("caller_metadata: %q is not a kontra. key (only kontra. keys are stripped from callers, spec §2.5)", k)
 		}
 	}
+	// SPEC-CONFLICT: spec §13.2 and spec/schema/config.json accept any non-empty prefix, but §2.5 strips only
+	// kontra. keys from callers and services, and a2a-go copies a service event's metadata into the task's.
+	// Under another prefix (acme.) a seller could write keys that TaskRef.metadata hands the Lifecycle hooks
+	// as operator-written, which §13.3 says it never holds ("never caller or service metadata"). The closest
+	// faithful behaviour: an operator prefix must lie under kontra. (as caller_metadata keys must, and as
+	// Cloud's kontra.escrow. does), so §2.5's stripping vouches for every key under it; kontra. alone, which
+	// would cover the gate's own keys, is refused too.
 	for _, p := range c.OperatorMetadataPrefixes {
-		if p == "" || strings.TrimSpace(p) != p {
+		switch {
+		case p == "" || strings.TrimSpace(p) != p:
 			v.add("operator_metadata_prefixes: %q is not a key prefix", p)
+		case !strings.HasPrefix(p, "kontra.") || len(p) == len("kontra."):
+			v.add("operator_metadata_prefixes: %q is not under kontra. (only kontra. keys are stripped from callers and services, spec §2.5, so a key under another prefix could be theirs, §13.3)", p)
 		}
 	}
 	for _, o := range c.MCP.AllowedOrigins {
