@@ -59,6 +59,10 @@ func TestWorkItems(t *testing.T) {
 	if first, err := e.log.FirstWorkItemID(ctx, newID); err != nil || first != wid {
 		t.Errorf("FirstWorkItemID %v %v", first, err)
 	}
+	// Each item records the task's version when it was stored, read in its own transaction (D81).
+	if got.TaskVersion != 1 {
+		t.Errorf("the first item's TaskVersion %d; want 1", got.TaskVersion)
+	}
 	// A failed transaction leaves neither the task nor the item.
 	lost := uuid.Must(uuid.NewV7())
 	_ = pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
@@ -70,8 +74,14 @@ func TestWorkItems(t *testing.T) {
 	}
 
 	w1 := uuid.Must(uuid.NewV7())
-	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w1, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "turn", buyerA)}); err != nil {
+	if _, err := e.log.ApplyMetadata(ctx, id, map[string]any{"k": "v"}); err != nil { // version 2
 		t.Fatal(err)
+	}
+	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w1, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "turn", buyerA), TaskVersion: 9}); err != nil {
+		t.Fatal(err)
+	}
+	if wi, err := e.log.LoadWorkItem(ctx, w1, id); err != nil || wi.TaskVersion != 2 {
+		t.Errorf("an item stored at version 2: %+v %v", wi, err)
 	}
 	if _, err := e.log.LoadWorkItem(ctx, w1, uid(t, other.ID)); !errors.Is(err, ErrWorkItemNotFound) {
 		t.Errorf("load as another task: %v", err)

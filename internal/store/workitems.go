@@ -35,6 +35,12 @@ const (
 // first answered the follow-up, in the transaction of the first append from that answer (Write.Deliver,
 // Fence.ArmDelivery), or on its own when the answer logged nothing (MarkDelivered). A resume of the turn
 // sends the follow-up again only while it is nil.
+//
+// TaskVersion is the task's version when the item was stored (InsertWorkItem sets it; the version a
+// follow-up's stream starts at, spec §9): every event of the item's turn is logged after it, which tells a
+// follow-up turn's own rows from the previous turn's without reading the log's payloads (TurnStatusLogged,
+// D81). It is kept in work_items.payload under a Kontra key and read in Go only (D49); 0 for an item stored
+// without it.
 type WorkItem struct {
 	ID          uuid.UUID
 	TaskID      uuid.UUID
@@ -43,6 +49,7 @@ type WorkItem struct {
 	CreatedAt   time.Time
 	ConsumedAt  *time.Time
 	DeliveredAt *time.Time
+	TaskVersion int64
 }
 
 // WorkPayload is the sanitized copy of a2a-go's workqueue.Payload: the request, and the call context with
@@ -55,14 +62,21 @@ type WorkPayload struct {
 
 // MarshalPayload encodes the payload for work_items.payload (json, not jsonb, D49).
 func MarshalPayload(p WorkPayload) (json.RawMessage, error) {
-	if p.Request == nil || p.Request.Message == nil {
-		return nil, errors.New("store: a work item needs the request and its message")
+	if err := p.check(); err != nil {
+		return nil, err
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
 		return nil, fmt.Errorf("store: encode work item payload: %w", err)
 	}
 	return b, nil
+}
+
+func (p WorkPayload) check() error {
+	if p.Request == nil || p.Request.Message == nil {
+		return errors.New("store: a work item needs the request and its message")
+	}
+	return nil
 }
 
 // UnmarshalPayload decodes work_items.payload.
@@ -74,8 +88,17 @@ func UnmarshalPayload(b []byte) (WorkPayload, error) {
 	return p, nil
 }
 
-// InsertWorkItem stores wi in tx (the same transaction that pre-creates a new task), or on its own when tx
-// is nil. CreatedAt and ConsumedAt are the table's; a task that does not exist is a2a.ErrTaskNotFound.
+// storedPayload is work_items.payload as stored: the payload, and the item's WorkItem.TaskVersion under a
+// key of Kontra's own (decoded in Go, never read in SQL, D49).
+type storedPayload struct {
+	WorkPayload
+	TaskVersion int64 `json:"kontraTaskVersion,omitempty"`
+}
+
+// InsertWorkItem stores wi in tx (the same transaction that pre-creates a new task, or that reads a
+// follow-up's position), or on its own when tx is nil. CreatedAt, ConsumedAt and DeliveredAt are the
+// table's; TaskVersion is the task's version read before the insert in the same transaction (wi's is
+// ignored). A task that does not exist is a2a.ErrTaskNotFound.
 func (l *Log) InsertWorkItem(ctx context.Context, tx pgx.Tx, wi WorkItem) error {
 	if wi.ID == uuid.Nil || wi.TaskID == uuid.Nil {
 		return errors.New("store: a work item needs its id and task")
@@ -83,24 +106,42 @@ func (l *Log) InsertWorkItem(ctx context.Context, tx pgx.Tx, wi WorkItem) error 
 	if wi.Kind != WorkExecute && wi.Kind != WorkCancel {
 		return fmt.Errorf("store: work item kind %q", wi.Kind)
 	}
-	payload, err := MarshalPayload(wi.Payload)
-	if err != nil {
+	if err := wi.Payload.check(); err != nil {
 		return err
 	}
 	ctx, cancel := l.writeCtx(ctx)
 	defer cancel()
-	const insert = `insert into kontra.work_items (id, task_id, kind, payload) values ($1, $2, $3, $4::json)`
-	args := []any{wi.ID, wi.TaskID, string(wi.Kind), []byte(payload)}
+	insert := func(q pgx.Tx) error {
+		var version int64
+		err := q.QueryRow(ctx, `select version from kontra.tasks where id = $1`, wi.TaskID).Scan(&version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return notFound()
+		}
+		if err != nil {
+			return err
+		}
+		payload, err := json.Marshal(storedPayload{WorkPayload: wi.Payload, TaskVersion: version})
+		if err != nil {
+			return fmt.Errorf("store: encode work item payload: %w", err)
+		}
+		_, err = q.Exec(ctx, `insert into kontra.work_items (id, task_id, kind, payload) values ($1, $2, $3, $4::json)`,
+			wi.ID, wi.TaskID, string(wi.Kind), payload)
+		return err
+	}
+	var err error
 	if tx != nil {
-		_, err = tx.Exec(ctx, insert, args...)
+		err = insert(tx)
 	} else {
-		_, err = l.writeExec(ctx, insert, args...)
+		err = l.inTx(ctx, insert)
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
 		return notFound()
 	}
 	if err != nil {
+		if errors.Is(err, a2a.ErrTaskNotFound) {
+			return err
+		}
 		return fmt.Errorf("store: insert work item %s: %w", wi.ID, err)
 	}
 	return nil
@@ -119,9 +160,11 @@ func (l *Log) LoadWorkItem(ctx context.Context, id, taskID uuid.UUID) (*WorkItem
 	if err != nil {
 		return nil, fmt.Errorf("store: load work item %s: %w", id, err)
 	}
-	if wi.Payload, err = UnmarshalPayload(payload); err != nil {
-		return nil, err
+	var sp storedPayload
+	if err := json.Unmarshal(payload, &sp); err != nil {
+		return nil, fmt.Errorf("store: decode work item payload: %w", err)
 	}
+	wi.Payload, wi.TaskVersion = sp.WorkPayload, sp.TaskVersion
 	return &wi, nil
 }
 

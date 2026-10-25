@@ -63,28 +63,24 @@ func (l *Log) MarkDelivered(ctx context.Context, f *Fence, workItemID uuid.UUID)
 	return nil // delivered already
 }
 
-// TurnStatusLogged reports whether the task's log holds a status (or task) row after the latest `message`
-// row that appended messageID to the task's history: whether the follow-up turn that message opened has
-// logged a status of its own. A resume of a follow-up whose delivery is recorded reads it to tell the
-// turn's own end at input-required (logged after the message) from the previous turn's end that the
-// upstream still shows while it has not processed the follow-up (logged before it), which is no end of
-// this turn (spec §6.4, §7, D81). False when no message row carries messageID.
-func (l *Log) TurnStatusLogged(ctx context.Context, taskID uuid.UUID, messageID string) (bool, error) {
-	if messageID == "" || !storableText(messageID) {
-		return false, nil
+// TurnStatusLogged reports whether the task's log holds a status (or task) row after version since: given a
+// follow-up's WorkItem.TaskVersion, whether the turn that follow-up opened has logged a status of its own.
+// Every row of the turn is logged after the version its work item was stored at (spec §9), and between the
+// two only metadata rows can be (§13.3: no turn runs then), so this needs neither the turn's `message` row
+// (a2a-go appends none for a messageId already in history) nor any read inside the payloads (D49). A
+// resume of a follow-up whose delivery is recorded reads it to tell the turn's own end at input-required
+// (after since) from the previous turn's end that the upstream still shows while it has not processed the
+// follow-up (at or before since), which is no end of this turn (spec §6.4, §7, D81). An item stored without
+// its version (since 0) counts as logged: the projection's state then ends the turn, as before D81.
+func (l *Log) TurnStatusLogged(ctx context.Context, taskID uuid.UUID, since int64) (bool, error) {
+	if since <= 0 {
+		return true, nil
 	}
 	var logged bool
-	err := l.db.QueryRow(ctx, `select exists (
-			select 1 from kontra.task_events s
-			 where s.task_id = m.task_id and s.seq > m.seq and s.kind in ('status', 'task'))
-		  from kontra.task_events m
-		 where m.task_id = $1 and m.kind = 'message' and m.payload -> 'message' ->> 'messageId' = $2
-		 order by m.seq desc limit 1`, taskID, messageID).Scan(&logged)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
+	err := l.db.QueryRow(ctx, `select exists (select 1 from kontra.task_events
+		where task_id = $1 and seq > $2 and kind in ('status', 'task'))`, taskID, since).Scan(&logged)
 	if err != nil {
-		return false, fmt.Errorf("store: turn of message %q in task %s: %w", messageID, taskID, err)
+		return false, fmt.Errorf("store: turn after version %d of task %s: %w", since, taskID, err)
 	}
 	return logged, nil
 }

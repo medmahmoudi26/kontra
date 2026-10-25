@@ -239,35 +239,57 @@ func TestMarkDelivered(t *testing.T) {
 }
 
 // TurnStatusLogged tells a follow-up turn that has logged a status of its own from one whose only status is
-// the previous turn's (D81): by the order of the status rows and the latest message row of its messageId.
+// the previous turn's end, by the version its work item was stored at (D81): no read inside the payloads,
+// so rows carrying U+0000 (json, D49) are no error; metadata rows, the history append and artifacts are no
+// status; and a follow-up whose messageId repeats an earlier one's (a2a-go appends no message row for it)
+// is told by its own boundary, not by the earlier turn's message row.
 func TestTurnStatusLogged(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
 	ctx := asOwner(context.Background(), buyerA)
-	task := e.newTask(e.svc, buyerA, "", "book")
+	task := e.newTask(e.svc, buyerA, "", "book\x00a room")
 	id := uid(t, task.ID)
-	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateInputRequired, "which one?"))
-	msg := userMessage(task, "the blue one")
-	check := func(messageID string, want bool) {
+	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateInputRequired, "which\x00one?"))
+	since := func(wid uuid.UUID) int64 {
 		t.Helper()
-		got, err := e.log.TurnStatusLogged(ctx, id, messageID)
+		wi, err := e.log.LoadWorkItem(ctx, wid, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wi.TaskVersion
+	}
+	check := func(what string, since int64, want bool) {
+		t.Helper()
+		got, err := e.log.TurnStatusLogged(ctx, id, since)
 		if err != nil || got != want {
-			t.Errorf("TurnStatusLogged(%q) = %v, %v; want %v", messageID, got, err, want)
+			t.Errorf("%s: TurnStatusLogged(%d) = %v, %v; want %v", what, since, got, err, want)
 		}
 	}
-	check(msg.ID, false) // no message row yet
+	f1 := e.followUpItem(task, "the blue\x00one")
+	v1 := since(f1)
+	if v1 != 2 {
+		t.Fatalf("the follow-up was stored at version %d; want 2", v1)
+	}
+	check("stored", v1, false)
+	if _, err := e.log.ApplyMetadata(ctx, id, map[string]any{"note": "between\x00turns"}); err != nil {
+		t.Fatal(err)
+	}
+	check("a metadata row", v1, false)
+	msg := userMessage(task, "the blue\x00one")
 	mustApply(t, ctx, s, task.ID, msg)
-	check(msg.ID, false) // only the previous turn's status
-	mustApply(t, ctx, s, task.ID, artifact(task, "a", false, "x"))
-	check(msg.ID, false) // an artifact is no status
-	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateInputRequired, "which colour?"))
-	check(msg.ID, true)
-	check("unknown", false)
-	check("", false)
-	check("nul\x00", false)
-	// A later turn's message: its own turn has logged nothing yet.
-	next := userMessage(task, "red")
-	mustApply(t, ctx, s, task.ID, next)
-	check(next.ID, false)
-	check(msg.ID, true)
+	check("the history append", v1, false)
+	mustApply(t, ctx, s, task.ID, artifact(task, "a", false, "x\x00y"))
+	check("an artifact", v1, false)
+	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateInputRequired, "which\x00colour?"))
+	check("the turn's own input-required", v1, true)
+	check("an item stored without its version", 0, true)
+
+	// A later follow-up that repeats msg's messageId: a2a-go appends no message row for it, and its turn
+	// has logged nothing yet although msg's turn has.
+	f2 := e.followUpItem(task, "the blue\x00one")
+	v2 := since(f2)
+	check("a repeated messageId, stored", v2, false)
+	check("the earlier turn", v1, true)
+	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateWorking, ""))
+	check("a repeated messageId, working", v2, true)
 }
