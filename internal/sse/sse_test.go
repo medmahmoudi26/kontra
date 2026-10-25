@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -739,5 +740,58 @@ func TestRowDataOneLine(t *testing.T) {
 	}
 	if _, _, err := rowData(store.Event{Kind: store.KindStatus, Payload: []byte(`{"artifactUpdate":{}}`)}); err == nil {
 		t.Error("a status row without its event was accepted")
+	}
+}
+
+// stalledClient sends a request to srv and never reads the answer (a zero TCP window once the buffers
+// fill).
+func stalledClient(t *testing.T, addr string) {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	_ = c.(*net.TCPConn).SetReadBuffer(4096)
+	if _, err := io.WriteString(c, "POST / HTTP/1.1\r\nHost: gate\r\nContent-Length: 0\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A caller that keeps its connection open but stops reading ends its stream after the write timeout: the
+// handler returns, releasing its connection and in-flight slots and the rows it holds, although the task
+// is still running (security: a stalled reader held them until the drain's server Close).
+func TestStalledReaderEndsStream(t *testing.T) {
+	l := newMemLog(t)
+	for i := range 24 {
+		l.artifact(t, strings.Repeat(string(rune('a'+i)), 1<<20))
+	}
+	w := testWriter(l, Options{WriteTimeout: 300 * time.Millisecond})
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		w.Subscribe(rw, r, Stream{Binding: HTTPJSON, Service: svc, Owner: ownerA, TaskID: a2a.TaskID(l.taskID.String())})
+	}))
+	t.Cleanup(srv.Close)
+	stalledClient(t, srv.Listener.Addr().String())
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream of a caller that stopped reading never ended")
+	}
+}
+
+// A stream that is read is not cut by the write timeout, however long it waits between events.
+func TestWriteTimeoutDoesNotCutAnIdleStream(t *testing.T) {
+	l := newMemLog(t)
+	w := testWriter(l, Options{WriteTimeout: 100 * time.Millisecond, KeepAlive: time.Hour})
+	s := serve(t, func(rw http.ResponseWriter, r *http.Request) {
+		w.Subscribe(rw, r, Stream{Binding: HTTPJSON, Service: svc, Owner: ownerA, TaskID: a2a.TaskID(l.taskID.String())})
+	}, nil)
+	s.nextData(t)
+	time.Sleep(500 * time.Millisecond) // five write timeouts without a write
+	l.status(t, a2a.TaskStateCompleted)
+	if got := s.rest(t); len(got) != 1 {
+		t.Fatalf("after an idle wait: %d events", len(got))
 	}
 }

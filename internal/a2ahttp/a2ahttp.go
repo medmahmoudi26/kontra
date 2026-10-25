@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -481,7 +482,7 @@ func (s *Server) serveJSONRPC(w http.ResponseWriter, r *http.Request, rt route, 
 			s.internal(w, rt, id, "build the service handler", err)
 			return
 		}
-		t.jsonrpc.ServeHTTP(w, r)
+		boundWrites(t.jsonrpc, ResponseWriteTimeout).ServeHTTP(w, r)
 	})
 	s.a2a(svc, next).ServeHTTP(w, r)
 }
@@ -582,7 +583,7 @@ func (s *Server) serveREST(w http.ResponseWriter, r *http.Request, rt route, svc
 			}
 			n := &note{}
 			r = r.WithContext(context.WithValue(r.Context(), noteKey{}, n))
-			http.StripPrefix(rt.prefix, t.rest).ServeHTTP(&restWriter{ResponseWriter: w, note: n}, r)
+			boundWrites(http.StripPrefix(rt.prefix, t.rest), ResponseWriteTimeout).ServeHTTP(&restWriter{ResponseWriter: w, note: n}, r)
 		})
 	}
 	s.a2a(svc, next).ServeHTTP(w, r)
@@ -1032,6 +1033,53 @@ func (h publicHandler) GetExtendedAgentCard(ctx context.Context, req *a2a.GetExt
 	v, err := h.RequestHandler.GetExtendedAgentCard(ctx, req)
 	return v, h.public(ctx, "GetExtendedAgentCard", err)
 }
+
+// ResponseWriteTimeout bounds how long a2a-go's answer to a request that is not a stream (GetTask,
+// ListTasks, a blocking SendMessage) may take to write once it starts: a caller that stops reading (a zero
+// TCP window) would otherwise hold the handler, its connection's slot, its key's in-flight slot and the
+// whole answer (a snapshot, a ListTasks page of up to 8 MiB) for as long as it likes. The public listener
+// has no WriteTimeout (edge.go: streams), and the gate's own streams bound each write (sse.WriteTimeout).
+const ResponseWriteTimeout = 60 * time.Second
+
+// boundWrites runs h with a write deadline armed when the answer starts (its first WriteHeader or Write),
+// never before: a blocking SendMessage may wait for its task long before it writes, and an HTTP/2 stream is
+// reset when its deadline passes, written to or not. The deadline is lifted when h returns, so a later
+// request on the same connection starts without it.
+func boundWrites(h http.Handler, d time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bw := &boundedWriter{ResponseWriter: w, rc: http.NewResponseController(w), timeout: d}
+		defer func() { _ = bw.rc.SetWriteDeadline(time.Time{}) }()
+		h.ServeHTTP(bw, r)
+	})
+}
+
+// boundedWriter arms its write deadline at the answer's first byte.
+type boundedWriter struct {
+	http.ResponseWriter
+	rc      *http.ResponseController
+	timeout time.Duration
+	armed   bool
+}
+
+func (b *boundedWriter) arm() {
+	if !b.armed {
+		b.armed = true
+		_ = b.rc.SetWriteDeadline(time.Now().Add(b.timeout))
+	}
+}
+
+func (b *boundedWriter) WriteHeader(code int) {
+	b.arm()
+	b.ResponseWriter.WriteHeader(code)
+}
+
+func (b *boundedWriter) Write(p []byte) (int, error) {
+	b.arm()
+	return b.ResponseWriter.Write(p)
+}
+
+// Unwrap lets http.ResponseController reach the connection beneath.
+func (b *boundedWriter) Unwrap() http.ResponseWriter { return b.ResponseWriter }
 
 // restWriter turns a2a-go's 500 for a noted error into the gate's 503 answer (sse.HTTPError, whose
 // message is sse.Public's) and drops what a2a-go writes after it.

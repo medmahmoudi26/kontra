@@ -77,8 +77,17 @@ type Options struct {
 	KeepAlive time.Duration // the `: keep-alive` interval: edge.KeepAlive (15 s, spec §2.2)
 	Reread    time.Duration // DefaultReread
 	ReadGrace time.Duration // ReadGrace
-	Logger    *slog.Logger
+	// WriteTimeout bounds each write of the stream (an event, a keep-alive): WriteTimeout when zero.
+	WriteTimeout time.Duration
+	Logger       *slog.Logger
 }
+
+// WriteTimeout is how long one write of a stream may block: a caller that keeps its connection open but
+// stops reading (a zero TCP window) ends its stream after it, releasing the handler, its connection's
+// conns_per_ip and max_conns slot, its key's in-flight slot and the rows being sent. The public listener
+// has no WriteTimeout of its own (edge.go: a stream lives as long as its task), so the deadline is set per
+// write and cleared after it; a long-lived stream that is read is never cut.
+const WriteTimeout = 30 * time.Second
 
 func (o Options) withDefaults() Options {
 	if o.KeepAlive <= 0 {
@@ -89,6 +98,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.ReadGrace <= 0 {
 		o.ReadGrace = ReadGrace
+	}
+	if o.WriteTimeout <= 0 {
+		o.WriteTimeout = WriteTimeout
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
@@ -545,7 +557,14 @@ type streamWriter struct {
 	rc      *http.ResponseController
 	binding Binding
 	id      json.RawMessage
+	timeout time.Duration // each write's deadline (Options.WriteTimeout)
 }
+
+// arm bounds the writes that follow by the stream's write timeout; disarm lifts the bound again, so a
+// stream that waits for its next event is never cut (an HTTP/2 stream is reset when its deadline passes,
+// written to or not). A ResponseWriter without deadlines (a test recorder) is written without one.
+func (sw *streamWriter) arm()    { _ = sw.rc.SetWriteDeadline(time.Now().Add(sw.timeout)) }
+func (sw *streamWriter) disarm() { _ = sw.rc.SetWriteDeadline(time.Time{}) }
 
 // begin writes the SSE headers: from here on errors are events.
 func (w *Writer) begin(rw http.ResponseWriter, r *http.Request, s Stream) *streamWriter {
@@ -558,11 +577,13 @@ func (w *Writer) begin(rw http.ResponseWriter, r *http.Request, s Stream) *strea
 		h.Set("Connection", "keep-alive")
 	}
 	rw.WriteHeader(http.StatusOK)
-	sw := &streamWriter{rw: rw, rc: http.NewResponseController(rw), binding: s.Binding, id: s.RequestID}
+	sw := &streamWriter{rw: rw, rc: http.NewResponseController(rw), binding: s.Binding, id: s.RequestID, timeout: w.opts.WriteTimeout}
 	if len(sw.id) == 0 {
 		sw.id = json.RawMessage("null")
 	}
+	sw.arm()
 	_ = sw.rc.Flush()
+	sw.disarm()
 	return sw
 }
 
@@ -583,6 +604,8 @@ func (sw *streamWriter) event(seq int64, streamResponse []byte) error {
 		b.WriteString(`,"result":`)
 		suffix = "}\n\n"
 	}
+	sw.arm()
+	defer sw.disarm()
 	for _, part := range [][]byte{b.Bytes(), streamResponse, []byte(suffix)} {
 		if _, err := sw.rw.Write(part); err != nil {
 			return err
@@ -606,6 +629,8 @@ func (sw *streamWriter) error(err error) error {
 func (sw *streamWriter) keepAlive() error { return sw.write([]byte(": keep-alive\n\n")) }
 
 func (sw *streamWriter) write(b []byte) error {
+	sw.arm()
+	defer sw.disarm()
 	if _, err := sw.rw.Write(b); err != nil {
 		return err
 	}

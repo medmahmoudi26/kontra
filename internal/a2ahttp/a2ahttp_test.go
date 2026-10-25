@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"iter"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -887,5 +889,59 @@ func TestExtensionsHeaderOverHTTP(t *testing.T) {
 	resp.Body.Close()
 	if d := time.Since(start); d > 2*time.Second || resp.StatusCode != 204 {
 		t.Errorf("%d after %v", resp.StatusCode, d)
+	}
+}
+
+// a2a-go's answers that are not streams (GetTask, ListTasks, a blocking SendMessage) get a write deadline
+// from their first byte: a caller that stops reading frees the handler and the answer it holds after it.
+// A handler that waits long before it answers (a blocking SendMessage) is not cut by it.
+func TestBoundWritesEndsAStalledAnswer(t *testing.T) {
+	done := make(chan struct{})
+	big := bytes.Repeat([]byte("x"), 64<<20)
+	srv := httptest.NewServer(boundWrites(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(big)
+	}), 300*time.Millisecond))
+	defer srv.Close()
+	c, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.(*net.TCPConn).SetReadBuffer(4096)
+	if _, err := io.WriteString(c, "GET / HTTP/1.1\r\nHost: gate\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("an answer to a caller that stopped reading never ended")
+	}
+
+	slow := httptest.NewServer(boundWrites(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(time.Second) // the task works; the deadline is not armed yet
+		_, _ = io.WriteString(w, "answer")
+	}), 300*time.Millisecond))
+	defer slow.Close()
+	resp, err := http.Get(slow.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "answer" {
+		t.Errorf("a late answer: %q", body)
+	}
+	// The next request on the same connection starts without the first one's deadline.
+	time.Sleep(400 * time.Millisecond)
+	resp, err = http.Get(slow.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "answer" {
+		t.Errorf("the second answer on a kept-alive connection: %q", body)
 	}
 }
