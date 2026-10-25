@@ -407,8 +407,14 @@ func TestCancelInterceptor(t *testing.T) {
 	}
 	// Not accepted: -32603; refused by the validator as terminal: TaskNotCancelable.
 	fc.ok, fc.err = true, errors.New("update not accepted within 10s")
-	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrInternalError) {
+	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrInternalError) || errors.Is(err, lifecycle.ErrUnavailable) {
 		t.Errorf("not accepted: %v", err)
+	}
+	// The lifecycle's own "not accepted in time" keeps its sentinel, so HTTP+JSON answers 503 (spec §14.1).
+	fc.err = fmt.Errorf("update: %w", lifecycle.ErrUnavailable)
+	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrInternalError) || !errors.Is(err, lifecycle.ErrUnavailable) ||
+		err.Error() != "the cancel was not accepted in time" {
+		t.Errorf("not accepted, unavailable: %v", err)
 	}
 	fc.err = fmt.Errorf("refused: %w", a2a.ErrTaskNotCancelable)
 	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrTaskNotCancelable) {
@@ -438,6 +444,8 @@ func (f *fakeReviews) ReviewMessage(ctx context.Context, id a2a.TaskID, u lifecy
 		return lifecycle.ReviewMessageResult{Accepted: false}, nil
 	case "timeout":
 		return lifecycle.ReviewMessageResult{}, context.DeadlineExceeded
+	case "unavailable":
+		return lifecycle.ReviewMessageResult{}, fmt.Errorf("update: %w", lifecycle.ErrUnavailable)
 	}
 	seq, err := f.e.log.AppendReviewMessage(ctx, uid(f.e.t, id), uuid.MustParse(u.WorkItemID))
 	if err != nil {
@@ -492,6 +500,10 @@ func TestReviewWindowMessages(t *testing.T) {
 	fr.mode = "timeout"
 	if _, err := send("again"); !errors.Is(err, a2a.ErrInternalError) || items() != base+2 {
 		t.Errorf("not accepted in time: %v, items %d", err, items())
+	}
+	fr.mode = "unavailable"
+	if _, err := send("again"); !errors.Is(err, a2a.ErrInternalError) || !errors.Is(err, lifecycle.ErrUnavailable) || items() != base+3 {
+		t.Errorf("not accepted in time (lifecycle unavailable): %v, items %d", err, items())
 	}
 	if len(e.queue.written()) != 0 {
 		t.Error("a review-window message reached the work queue")

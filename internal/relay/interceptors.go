@@ -380,7 +380,7 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 		return nil, unsupported("the task is completed and no review window is open")
 	case err != nil:
 		// Not accepted (or not completed) within 10 s: the item is kept, the workflow may still take it (D66).
-		return nil, a2a.NewError(a2a.ErrInternalError, "the review message was not accepted in time")
+		return nil, notInTime("the review message was not accepted in time", err)
 	case !res.Accepted:
 		i.deleteItem(ctx, wid, row.ID)
 		return nil, unsupported("the review message was not accepted")
@@ -479,7 +479,7 @@ func (c *CancelInterceptor) Before(ctx context.Context, cc *a2asrv.CallContext, 
 	case errors.Is(err, a2a.ErrTaskNotCancelable):
 		return ctx, nil, a2a.NewError(a2a.ErrTaskNotCancelable, "the task is no longer cancelable")
 	case err != nil:
-		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "the cancel was not accepted in time")
+		return ctx, nil, notInTime("the cancel was not accepted in time", err)
 	}
 	if done {
 		switch res.Outcome {
@@ -496,6 +496,23 @@ func (c *CancelInterceptor) Before(ctx context.Context, cc *a2asrv.CallContext, 
 	}
 	return ctx, after.Snapshot, nil
 }
+
+// notInTime is the -32603 answer to an Update not accepted (or not completed) within its wait. When the
+// cause is lifecycle.ErrUnavailable it stays in the chain, so the HTTP+JSON binding can answer 503 (spec
+// §14.1: "-32603 / HTTP 503"); the caller's message is msg either way, never the cause's text.
+func notInTime(msg string, cause error) error {
+	e := a2a.NewError(a2a.ErrInternalError, msg)
+	if errors.Is(cause, lifecycle.ErrUnavailable) {
+		return unavailableError{e}
+	}
+	return e
+}
+
+// unavailableError is an *a2a.Error that also wraps lifecycle.ErrUnavailable.
+type unavailableError struct{ err *a2a.Error }
+
+func (e unavailableError) Error() string   { return e.err.Error() }
+func (e unavailableError) Unwrap() []error { return []error{e.err, lifecycle.ErrUnavailable} }
 
 func upstreamText(e *lifecycle.UpstreamError, fallback string) string {
 	if e == nil || e.Message == "" {
