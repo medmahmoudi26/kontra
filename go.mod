@@ -12,7 +12,10 @@ require (
 	github.com/pressly/goose/v3 v3.29.0
 	go.temporal.io/sdk v1.50.0
 	go.yaml.in/yaml/v3 v3.0.5
+	golang.org/x/crypto v0.58.0
+	golang.org/x/net v0.61.0
 	golang.org/x/sys v0.49.0
+	golang.org/x/time v0.3.0
 )
 
 require (
@@ -34,10 +37,8 @@ require (
 	go.temporal.io/api v1.63.5 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	golang.org/x/time v0.3.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20261005182115-fad411399dd8 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261005182115-fad411399dd8 // indirect
 	google.golang.org/grpc v1.84.0 // indirect

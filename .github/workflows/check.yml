@@ -36,7 +36,7 @@ jobs:
       - run: make check-go
   # Integration tests (no -short) on Postgres 16 and 17: every package but test/e2e (`make test-integration`).
   # The pinned Temporal CLI (spec/relay.md §0: CLI 1.9.1, Server 1.32.0) is installed for the tests that
-  # start a dev server; they read its path from KONTRA_TEMPORAL_CLI.
+  # start a dev server; they read its path from KONTRA_TEMPORAL_CLI. Pebble likewise, KONTRA_TEST_PEBBLE.
   integration:
     runs-on: ubuntu-24.04
     strategy:
@@ -69,4 +69,10 @@ jobs:
           echo "${TEMPORAL_CLI_BINARY_SHA256}  $RUNNER_TEMP/temporal/temporal" | sha256sum -c -
           "$RUNNER_TEMP/temporal/temporal" --version | grep -q 'Server 1\.32\.'
           echo "KONTRA_TEMPORAL_CLI=$RUNNER_TEMP/temporal/temporal" >> "$GITHUB_ENV"
+      # The ACME test (internal/edge) issues a certificate from a local Pebble; built from the module
+      # proxy at a pinned version (checked against sum.golang.org), its path in KONTRA_TEST_PEBBLE.
+      - name: Install the pinned Pebble ACME test server
+        run: |
+          GOBIN="$RUNNER_TEMP/pebble" go install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1
+          echo "KONTRA_TEST_PEBBLE=$RUNNER_TEMP/pebble/pebble" >> "$GITHUB_ENV"
       - run: make test-integration
