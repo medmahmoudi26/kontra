@@ -54,7 +54,8 @@ func (d *Dispatcher) logger() *slog.Logger {
 // discards the handler's result and returns the registry's outcome. With Resume, the executor re-attaches
 // to the recorded upstream task: GetTask, log the difference, then SubscribeToTask (or polling) until
 // terminal or input-required; only GetTask failing to reach the service for 30 s fails the task
-// upstream_unreachable (spec §6.4, D42).
+// upstream_unreachable (spec §6.4, D42). A resume of a follow-up turn whose work item has no delivered_at
+// sends the follow-up again first (D81); a task's first turn is never sent again.
 //
 // The dispatch announces itself in the registry before it writes attempts.replica_id, which routes abort
 // here (§14.2): an abort that arrives before it registers is kept, and the dispatch then stops before it
@@ -95,6 +96,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
 	}
+	followUp, err := d.followUp(ctx, taskUUID, wi)
+	if err != nil {
+		return lifecycle.DispatchResult{}, err
+	}
 	rebuild := d.Rebuild
 	if rebuild == nil {
 		rebuild = lifecycle.Rebuild
@@ -121,7 +126,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 		d.endAttempt(ctx, log, taskUUID, in.N, store.OutcomeAborted)
 		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchAborted}, nil
 	}
-	info := &dispatchInfo{n: in.N, resume: in.Resume, fence: fence, running: running, task: row, svc: svc, request: wi.Payload.Request}
+	info := &dispatchInfo{n: in.N, resume: in.Resume, fence: fence, running: running, task: row, svc: svc, request: wi.Payload.Request,
+		followUp: followUp, workItem: wi.ID, delivered: wi.DeliveredAt != nil}
 	dctx = withDispatch(store.WithFence(dctx, fence), info)
 	hb := d.Heartbeater
 	if hb == nil {
@@ -135,13 +141,19 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 }
 
 // workItem loads the turn's work item: the turn's first dispatch consumes it; a later dispatch of the same
-// turn (a retry on attempt n > 1, a resume) reloads the consumed item it owns (D66).
+// turn (a retry on attempt n > 1, a resume) reloads the consumed item it owns (D66). A resume that finds the
+// item unconsumed (the turn's first dispatch died before it took it) consumes it: the resume is then the
+// dispatch that may send it (D81).
 func (d *Dispatcher) workItem(ctx context.Context, taskID uuid.UUID, in lifecycle.DispatchInput) (*store.WorkItem, error) {
 	wid, err := uuid.Parse(in.WorkItemID)
 	if err != nil {
 		return nil, fmt.Errorf("work item id %q: %w", in.WorkItemID, store.ErrWorkItemNotFound)
 	}
-	if !in.Resume {
+	if in.Resume {
+		if err := d.Log.ConsumeWorkItem(ctx, wid, taskID); err != nil && !errors.Is(err, store.ErrWorkItemConsumed) {
+			return nil, err
+		}
+	} else {
 		err := d.Log.ConsumeWorkItem(ctx, wid, taskID)
 		switch {
 		case err == nil:
@@ -156,6 +168,17 @@ func (d *Dispatcher) workItem(ctx context.Context, taskID uuid.UUID, in lifecycl
 		}
 	}
 	return d.Log.LoadWorkItem(ctx, wid, taskID)
+}
+
+// followUp reports whether wi is a follow-up turn's work item: any execute item of the task but its first,
+// the one every attempt's first turn sends (spec §6.4, §7). Only a follow-up records its delivery and is
+// sent again by a resume (D81).
+func (d *Dispatcher) followUp(ctx context.Context, taskID uuid.UUID, wi *store.WorkItem) (bool, error) {
+	first, err := d.Log.FirstWorkItemID(ctx, taskID)
+	if err != nil {
+		return false, err
+	}
+	return wi.ID != first, nil
 }
 
 // settle turns how the handler returned into the dispatch's result, and ends the attempt when the dispatch

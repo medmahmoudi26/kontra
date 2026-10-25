@@ -85,7 +85,12 @@ type Signaler interface {
 //     Message (an upstream Message becomes a terminal completed status carrying it, D5);
 //   - is told a first turn, a follow-up turn (the sticky attempt's upstream ids substituted) and a
 //     re-attach (Resume, D42) apart by the dispatch that runs it: the attempt row says whether an upstream
-//     task exists, and the Dispatcher's input says whether this dispatch resumes;
+//     task exists, the Dispatcher's input says whether this dispatch resumes, and the work item says
+//     whether the turn is a follow-up and whether its delivery is recorded;
+//   - records a follow-up's delivery (work_items.delivered_at) when the upstream first answers it, with
+//     the first event logged from that answer, or on its own when the answer logs nothing; a resume of a
+//     follow-up turn without it sends the follow-up again, with the same messageId, and one with it
+//     re-attaches without sending; a first turn is never sent again (spec §6.4, D81);
 //   - calls SendStreamingMessage when the upstream card streams, falling back in the same attempt to
 //     SendMessage{returnImmediately: true} plus GetTask polling (1 s, backing off to 5 s after a minute
 //     without change) on UnsupportedOperationError before any event (D15);
@@ -134,6 +139,11 @@ type dispatchInfo struct {
 	task    *store.TaskRow
 	svc     store.ServiceRef
 	request *a2a.SendMessageRequest // the work item's request: its configuration's acceptedOutputModes
+	// followUp is a follow-up turn (the work item is not the task's first); workItem is the turn's work
+	// item, and delivered whether its delivered_at was set when the dispatch loaded it (D81).
+	followUp  bool
+	workItem  uuid.UUID
+	delivered bool
 }
 
 type dispatchKey struct{}
@@ -184,6 +194,15 @@ type run struct {
 	bytes     int64 // part bytes the task stores
 	finished  bool  // a final event was yielded, or an error
 	logger    *slog.Logger
+
+	sent     bool // this dispatch sent the turn's message upstream
+	resent   bool // ...as a resume of a follow-up turn whose delivery was not recorded (D81)
+	answered bool // the upstream answered this dispatch's send (a Task, a Message, a stream event)
+	emits    int  // events yielded
+	// turnOpen is a resume of a follow-up turn whose delivery is recorded but which has logged no status
+	// since its message: an input-required the projection already shows is the previous turn's end, which
+	// the upstream shows until it processes the follow-up, not this turn's (D81).
+	turnOpen bool
 }
 
 func (r *run) execute(ctx context.Context) {
@@ -233,10 +252,39 @@ func (r *run) execute(ctx context.Context) {
 	defer client.Destroy()
 	ctx, r.ex = upstream.WithExchange(ctx)
 	if d.resume {
-		r.reattach(ctx)
+		r.resume(ctx)
 		return
 	}
 	r.send(ctx)
+}
+
+// resume runs a resume dispatch of the attempt (spec §6.4, D42, D81). A follow-up turn whose delivery is
+// not recorded is sent again, the message as the caller sent it (its messageId kept) with the upstream ids
+// substituted; the dispatch then continues as the turn's own, logging only the difference from the
+// projection. Any other resume re-attaches without sending: a task's first turn is never sent again (before
+// its first upstream id a resume is a retry), and neither is a follow-up the upstream answered.
+func (r *run) resume(ctx context.Context) {
+	d := r.d
+	if d.followUp && r.ids.UpstreamTaskID != "" {
+		if !d.delivered {
+			r.logger.Info("resending a follow-up whose delivery is not recorded (D81)", "work_item", d.workItem)
+			r.resent = true
+			r.send(ctx)
+			return
+		}
+		var msgID string
+		if r.ec.Message != nil {
+			msgID = r.ec.Message.ID
+		}
+		logged, err := r.e.log.TurnStatusLogged(ctx, r.taskUUID, msgID)
+		if err != nil {
+			d.running.SetOutcome(lifecycle.DispatchContextLost, "")
+			r.finish(nil, err)
+			return
+		}
+		r.turnOpen = !logged
+	}
+	r.reattach(ctx)
 }
 
 // activated is the A2A-Extensions the caller activated (the edge already dropped URIs the served card does
@@ -273,6 +321,7 @@ func (r *run) emit(ev a2a.Event) bool {
 	if r.finished {
 		return true
 	}
+	r.emits++
 	final := a2aevent.IsFinal(ev)
 	if final {
 		if st, ok := ev.(*a2a.TaskStatusUpdateEvent); ok {
@@ -337,6 +386,10 @@ func (r *run) upstreamFailed(ctx context.Context, err error) {
 	case upstream.Limit:
 		r.fail(store.ReasonUpstreamError, f.Message)
 	default:
+		if r.resent && !r.answered {
+			r.refusedResend(ctx, f)
+			return
+		}
 		r.fail(store.ReasonUpstreamError, "the service returned an error: "+f.Message)
 	}
 }
@@ -353,6 +406,7 @@ func (r *run) send(ctx context.Context) {
 	if q := r.d.request; q != nil && q.Config != nil && len(q.Config.AcceptedOutputModes) > 0 {
 		req.Config = &a2a.SendMessageConfig{AcceptedOutputModes: q.Config.AcceptedOutputModes}
 	}
+	r.sent = true
 	if r.info.Streaming {
 		if fallback := r.stream(ctx, req); !fallback {
 			return
@@ -435,7 +489,7 @@ func (r *run) stream(ctx context.Context, req *a2a.SendMessageRequest) (fallback
 			return false
 		}
 		got = true
-		if r.handle(ctx, ev) {
+		if r.answer(ctx, ev) {
 			return false
 		}
 	}
@@ -451,6 +505,45 @@ func (r *run) stream(ctx context.Context, req *a2a.SendMessageRequest) (fallback
 	// terminal event falls back to polling", §6.4): the dispatch follows the upstream task by GetTask.
 	r.follow(ctx)
 	return false
+}
+
+// answer relays an event the upstream sent in answer to this dispatch's send. The first answer to a
+// follow-up records the follow-up's delivery (spec §6.4, D81) before anything from it is logged: the
+// dispatch arms its fence, so the first append from the answer sets work_items.delivered_at in the same
+// statement; an answer that logs nothing (the task exactly as the projection shows it) has the delivery
+// written on its own. It reports whether the turn ended.
+func (r *run) answer(ctx context.Context, ev a2a.Event) bool {
+	if r.answered || !r.d.followUp {
+		r.answered = true
+		return r.handle(ctx, ev)
+	}
+	r.answered = true
+	r.d.fence.ArmDelivery(r.d.workItem)
+	emits := r.emits
+	ended := r.handle(ctx, ev)
+	if r.emits == emits {
+		r.markDelivered(ctx)
+	}
+	return ended || r.finished
+}
+
+// markDelivered writes the armed delivery on its own: the answer that armed it logged nothing.
+func (r *run) markDelivered(ctx context.Context) {
+	id := r.d.fence.DisarmDelivery()
+	if id == uuid.Nil {
+		return // an append wrote it
+	}
+	err := r.e.log.MarkDelivered(ctx, r.d.fence, id)
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrFenced):
+		// A newer dispatch holds the attempt: this one stops, and the Dispatcher reports it superseded.
+		r.finish(nil, err)
+	default:
+		// Not written: the next append of the turn carries it.
+		r.d.fence.ArmDelivery(id)
+		r.logger.Warn("the follow-up's delivery could not be recorded; the next event records it", "error", err)
+	}
 }
 
 // poll is the polling path: SendMessage with returnImmediately, then GetTask until a final state.
@@ -469,11 +562,11 @@ func (r *run) poll(ctx context.Context, req *a2a.SendMessageRequest) {
 	}
 	switch v := res.(type) {
 	case *a2a.Task:
-		if r.handle(ctx, v) {
+		if r.answer(ctx, v) {
 			return
 		}
 	case *a2a.Message:
-		r.handle(ctx, v)
+		r.answer(ctx, v)
 		return
 	default:
 		r.fail(store.ReasonUpstreamError, "the service answered SendMessage with neither a task nor a message")
@@ -605,25 +698,67 @@ func (r *run) reattach(ctx context.Context) {
 		r.retry(store.ReasonUpstreamUnreachable, 0, errors.New("relay: re-attach without an upstream task id"))
 		return
 	}
+	t := r.awaitTask(ctx)
+	if t == nil || r.handle(ctx, t) {
+		return
+	}
+	r.track(ctx)
+}
+
+// awaitTask calls GetTask until the upstream answers with its task, under the 30 s rule (getTask). It
+// returns nil when the turn ended meanwhile (r.finished).
+func (r *run) awaitTask(ctx context.Context) *a2a.Task {
 	var g getTasks
 	for {
 		t := r.getTask(ctx, &g)
 		if r.finished {
-			return
+			return nil
 		}
 		if t != nil {
-			if r.handle(ctx, t) {
-				return
-			}
-			break
+			return t
 		}
 		select {
 		case <-ctx.Done():
 			r.finish(nil, context.Cause(ctx))
-			return
+			return nil
 		case <-time.After(g.next(r.e.opts.PollInterval, r.e.opts.GetTaskGrace)):
 		}
 	}
+}
+
+// refusedResend handles an error the upstream answered a resume's resent follow-up with (D81): the
+// follow-up's earlier send may have reached the upstream, which processed it, and only its answer was lost
+// (a task the upstream then completed refuses any further message). GetTask tells: an upstream task still
+// at the input-required the projection shows never took the follow-up, and the error fails the task
+// upstream_error as §6.4's table says; one that moved on did take it, and the dispatch continues as a
+// re-attach, logging the difference and following the task.
+//
+// SPEC-CONFLICT: §6.4's table fails a task at an upstream protocol error after its first upstream id, and
+// D81 resends an undelivered follow-up "then continues as a re-attach". When the earlier send's answer was
+// lost after the upstream processed the follow-up (the case D81 accepts, "the upstream sees the follow-up
+// twice"), an upstream that refuses the duplicate (a2a-go refuses a message to a terminal task) would turn
+// a task the seller finished into failed: upstream_error, and the seller's result would never be logged.
+// The closest faithful behaviour: the refusal fails the task only when the upstream task has not moved
+// from the projection's input-required; otherwise the dispatch re-attaches as D81 says it continues.
+func (r *run) refusedResend(ctx context.Context, f upstream.Failure) {
+	t := r.awaitTask(ctx)
+	if t == nil {
+		return
+	}
+	if cur, ok := wirePrecision(t).(*a2a.Task); ok && cur.Status.State == a2a.TaskStateInputRequired && !statusChanged(r.proj, cur) {
+		r.fail(store.ReasonUpstreamError, "the service returned an error: "+f.Message)
+		return
+	}
+	r.logger.Info("the upstream refused the resent follow-up and had moved on; re-attaching (D81)", "error", f.Message)
+	if r.handle(ctx, t) {
+		return
+	}
+	r.track(ctx)
+}
+
+// track follows the upstream task after a re-attach's GetTask: SubscribeToTask when the upstream card
+// streams, else polling; a subscription that ends without a final event falls back to polling (§6.4).
+func (r *run) track(ctx context.Context) {
 	if r.info.Streaming {
 		r.ex.Reset()
 		for ev, err := range r.client.SubscribeToTask(ctx, &a2a.SubscribeToTaskRequest{ID: r.ids.UpstreamTaskID}) {
@@ -705,7 +840,10 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 	// repeat the status (a status event at input-required would end the turn in a2a-go's processor).
 	t, _ := gate.(*a2a.Task)
 	unchanged := t != nil && !first && a2aevent.IsFinal(t) && !statusChanged(r.proj, t)
-	stale := unchanged && !r.d.resume && t.Status.State == a2a.TaskStateInputRequired
+	// The same holds on a resume of a follow-up turn that has logged no status since its message (turnOpen):
+	// the projection's input-required is the previous turn's end, and the upstream shows it until it
+	// processes the follow-up (D81).
+	stale := unchanged && (r.sent || r.turnOpen) && t.Status.State == a2a.TaskStateInputRequired
 	if stale {
 		evs = slices.DeleteFunc(evs, func(e a2a.Event) bool { _, st := e.(*a2a.TaskStatusUpdateEvent); return st })
 	}
