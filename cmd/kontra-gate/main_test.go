@@ -88,7 +88,8 @@ func TestMigrateCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`(?m)^OK up 0001_init\.sql \(`).MatchString(out) || !strings.Contains(out, "database at version 1; this gate needs 1") {
+	if !regexp.MustCompile(`(?m)^OK up 0001_init\.sql \(`).MatchString(out) || !regexp.MustCompile(`(?m)^OK up 0002_m3\.sql \(`).MatchString(out) ||
+		!strings.Contains(out, "database at version 2; this gate needs 2") {
 		t.Errorf("migrate up printed:\n%s", out)
 	}
 	m, err := migrate.Open(context.Background(), dsn)
@@ -105,11 +106,12 @@ func TestMigrateCommand(t *testing.T) {
 		t.Errorf("second migrate up = %q, %v", out, err)
 	}
 	out, err = runCmd(t, "migrate", "status", "--postgres", dsn)
-	if err != nil || !regexp.MustCompile(`(?m)^1\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0001_init\.sql$`).MatchString(out) {
+	if err != nil || !regexp.MustCompile(`(?m)^1\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0001_init\.sql$`).MatchString(out) ||
+		!regexp.MustCompile(`(?m)^2\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0002_m3\.sql$`).MatchString(out) {
 		t.Errorf("migrate status = %v:\n%s", err, out)
 	}
 
-	// The URL from the configuration file; down, then status shows it pending.
+	// The URL from the configuration file; down (0002, then 0001), then status shows both pending.
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "kontra.yaml")
 	y := "public_url: http://localhost:8080\npostgres: \"" + dsn + "\"\n"
@@ -117,14 +119,19 @@ func TestMigrateCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err = runCmd(t, "migrate", "-f", cfg, "down")
-	if err != nil || !strings.Contains(out, "OK down 0001_init.sql") || !strings.Contains(out, "database at version 0") {
+	if err != nil || !strings.Contains(out, "OK down 0002_m3.sql") || !strings.Contains(out, "database at version 1") {
 		t.Errorf("migrate down = %v:\n%s", err, out)
+	}
+	out, err = runCmd(t, "migrate", "-f", cfg, "down")
+	if err != nil || !strings.Contains(out, "OK down 0001_init.sql") || !strings.Contains(out, "database at version 0") {
+		t.Errorf("second migrate down = %v:\n%s", err, out)
 	}
 	if err := m.Check(context.Background()); !errors.Is(err, migrate.ErrSchemaNotCurrent) {
 		t.Errorf("Check after down = %v", err)
 	}
 	out, err = runCmd(t, "migrate", "-f", cfg, "status")
-	if err != nil || !regexp.MustCompile(`(?m)^1\s+pending\s+-\s+0001_init\.sql$`).MatchString(out) {
+	if err != nil || !regexp.MustCompile(`(?m)^1\s+pending\s+-\s+0001_init\.sql$`).MatchString(out) ||
+		!regexp.MustCompile(`(?m)^2\s+pending\s+-\s+0002_m3\.sql$`).MatchString(out) {
 		t.Errorf("status after down = %v:\n%s", err, out)
 	}
 	out, err = runCmd(t, "migrate", "-f", cfg, "down")
@@ -132,7 +139,7 @@ func TestMigrateCommand(t *testing.T) {
 		t.Errorf("down with nothing applied = %q, %v", out, err)
 	}
 	out, err = runCmd(t, "migrate", "-f", cfg) // up is the default action
-	if err != nil || !strings.Contains(out, "OK up 0001_init.sql") {
+	if err != nil || !strings.Contains(out, "OK up 0001_init.sql") || !strings.Contains(out, "OK up 0002_m3.sql") {
 		t.Errorf("migrate (default up) = %q, %v", out, err)
 	}
 	if err := m.Check(context.Background()); err != nil {

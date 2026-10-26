@@ -108,4 +108,56 @@ do $$ begin
     raise exception 'FAIL: services.sealed accepted true';
 exception when check_violation then null; end $$;
 
+-- 0002: a blob ref is 26 base32 characters, an object is never empty, and a row names an existing task.
+insert into blobs (ref, tenant_id, task_id, size)
+    values ('aaaaaaaaaaaaaaaaaaaaaaaaaa', '01900000-0000-7000-8000-000000000001', '01900000-0000-7000-8000-0000000000aa', 300000);
+do $$ begin
+    insert into blobs (ref, tenant_id, task_id, size)
+        values ('Not-A-Ref', '01900000-0000-7000-8000-000000000001', '01900000-0000-7000-8000-0000000000aa', 1);
+    raise exception 'FAIL: blobs accepted a malformed ref';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into blobs (ref, tenant_id, task_id, size)
+        values ('bbbbbbbbbbbbbbbbbbbbbbbbbb', '01900000-0000-7000-8000-000000000001', '01900000-0000-7000-8000-0000000000aa', 0);
+    raise exception 'FAIL: blobs accepted an empty object';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into blobs (ref, tenant_id, task_id, size)
+        values ('cccccccccccccccccccccccccc', '01900000-0000-7000-8000-000000000001', '01900000-0000-7000-8000-0000000000ff', 1);
+    raise exception 'FAIL: a blob of a task that does not exist';
+exception when foreign_key_violation then null; end $$;
+
+-- 0002: a replica's peer address is optional.
+insert into gate_replicas (replica_id, version, peer_addr) values ('r-peer', 'test', '10.0.0.7:8444');
+insert into gate_replicas (replica_id, version) values ('r-nopeer', 'test');
+
+-- 0002 (D177): two open 2026-07-28 sessions of one principal on one service conflict, the gate's own /mcp
+-- (service null) included; a closed one, or an older revision's, does not.
+insert into mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version)
+    values (sha256('v1'), '01900000-0000-7000-8000-000000000001', 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2026-07-28');
+do $$ begin
+    insert into mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version)
+        values (sha256('v2'), '01900000-0000-7000-8000-000000000001', 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2026-07-28');
+    raise exception 'FAIL: two open virtual sessions for one principal and service';
+exception when unique_violation then null; end $$;
+insert into mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version, closed_at, close_reason)
+    values (sha256('v3'), '01900000-0000-7000-8000-000000000001', 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2026-07-28', now(), 'idle');
+insert into mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version)
+    values (sha256('v4'), '01900000-0000-7000-8000-000000000001', 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2025-11-25');
+insert into mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version)
+    values (sha256('v5'), '01900000-0000-7000-8000-0000000000bb', 'key:kk_own', 'api_key', '2026-07-28');
+do $$ begin
+    insert into mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version)
+        values (sha256('v6'), '01900000-0000-7000-8000-0000000000bb', 'key:kk_own', 'api_key', '2026-07-28');
+    raise exception 'FAIL: two open virtual sessions of the gate''s own /mcp for one principal';
+exception when unique_violation then null; end $$;
+
+-- 0002: a task's blobs go with it.
+delete from tasks where id = '01900000-0000-7000-8000-0000000000aa';
+do $$ begin
+    if exists (select 1 from blobs) then
+        raise exception 'FAIL: a deleted task left its blobs rows';
+    end if;
+end $$;
+
 select 'migration behaviour: ok';
