@@ -2,9 +2,11 @@
 // (spec/relay.md §2.3, PRD §12).
 //
 // M1 accepts API keys (Authorization: Bearer <key>, stored as sha256) and the anonymous principal on
-// services whose allow: list contains `anonymous`. OIDC JWTs, MCP OAuth and node principals are later
-// milestones; their kinds are declared here so allow: lists parse the same way from M1 on, and a bearer
-// token that is not an API key of this gate is 401.
+// services whose allow: list contains `anonymous`. M3 adds the requests a node opens on its tunnel session
+// (spec/tunnel.md §9): they carry no credential of their own and take the session's principal, the handshake's
+// API key re-validated on every request or node:<key_id> (HireSource). OIDC JWTs and MCP OAuth are later
+// milestones; their kinds are declared here so allow: lists parse the same way from M1 on, and a bearer token
+// that is not an API key of this gate is 401.
 //
 // Revocation is checked on every request against a per-replica RevocationCache, refreshed by NOTIFY
 // kontra_revoke and re-read from Postgres at least every 5 s; APIKeys keeps verified keys in memory for a
@@ -109,6 +111,31 @@ func (p Principal) MayHire() bool {
 }
 
 type principalKey struct{}
+
+// HireSource gives the principal of a request a node opened on its tunnel session (spec/tunnel.md §9,
+// spec/relay.md §2.3): the session's, the API key from the handshake's auth when present (re-validated on every
+// request against the revocation cache), else node:<key_id> with the key's tenant. A local client never sends
+// the node a credential, and a credential the request carries is never read: the session decides who it is.
+// internal/tunnelgate attaches one to every hiring request (WithHireSource).
+type HireSource interface {
+	// HirePrincipal is the session's principal for this request. ErrUnauthenticated is the 401 of a session
+	// whose hiring API key was revoked or has expired, or whose node key may no longer hire (spec/tunnel.md
+	// §12); any other error is the gate's own.
+	HirePrincipal(ctx context.Context) (Principal, error)
+}
+
+type hireKey struct{}
+
+// WithHireSource marks ctx as a request a node opened on its tunnel session, whose principal src gives.
+func WithHireSource(ctx context.Context, src HireSource) context.Context {
+	return context.WithValue(ctx, hireKey{}, src)
+}
+
+// HireSourceFrom returns the hire source of a request a node opened, ok false for a request from the network.
+func HireSourceFrom(ctx context.Context) (HireSource, bool) {
+	src, ok := ctx.Value(hireKey{}).(HireSource)
+	return src, ok && src != nil
+}
 
 // WithPrincipal returns ctx carrying p.
 func WithPrincipal(ctx context.Context, p Principal) context.Context {

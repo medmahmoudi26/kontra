@@ -9,13 +9,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
-
-	"kontra.sh/kontra/internal/unimpl"
 )
 
 // NewTaskID mints a gate task id (UUIDv7). A caller can never choose one (spec §3.4.1). UUIDv7 ids of
@@ -73,6 +72,11 @@ var Namespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://kontra.sh/ns/v1"
 // same id in every process and every release; any language can recompute it (Python:
 // uuid.uuid5(ns, "".join(f"{len(p.encode())}:{p}," for p in [kind, *parts]))).
 func Derive(kind string, parts ...string) uuid.UUID {
+	return uuid.NewSHA1(Namespace, []byte(netstrings(kind, parts...)))
+}
+
+// netstrings is Derive's name: "<len>:<bytes>," for kind and then for each part.
+func netstrings(kind string, parts ...string) string {
 	var b strings.Builder
 	for _, p := range append([]string{kind}, parts...) {
 		b.WriteString(strconv.Itoa(len(p)))
@@ -80,7 +84,7 @@ func Derive(kind string, parts ...string) uuid.UUID {
 		b.WriteString(p)
 		b.WriteByte(',')
 	}
-	return uuid.NewSHA1(Namespace, []byte(b.String()))
+	return b.String()
 }
 
 // AnonymousBuyer is the buyer of the `anonymous` principal (spec §2.3, D20): on a team gate one fixed id
@@ -100,10 +104,22 @@ func OIDCBuyer(issuer, sub string) (uuid.UUID, error) {
 	return Derive("oidc", issuer, sub), nil
 }
 
-// NodeBuyer is UUIDv5(gate namespace ‖ key_id) for a node hiring without an API key (spec §2.3). Hiring
-// streams (spec/tunnel.md §9) are M3: M2 hosts only, and writes tunnels.hire_principal without serving it.
+// nodeKeyIDRE is a node key id (spec/tunnel.md §2.2; tunnel_keys.key_id's CHECK).
+var nodeKeyIDRE = regexp.MustCompile(`^k1_[a-z2-7]{26}$`)
+
+// NodeBuyer is UUIDv5(gate namespace ‖ key_id) for a node hiring without an API key (spec/relay.md §2.3): the
+// buyer of the principal node:<key_id> on the streams the node opens (spec/tunnel.md §9). gateNamespace is the
+// namespace of the gate's derived ids, Namespace; the name is encoded as Derive encodes it, so NodeBuyer(Namespace,
+// k) equals Derive("node", k) and is the same in every process, replica and release. The key id must have the
+// shape §2.2 gives it.
 func NodeBuyer(gateNamespace uuid.UUID, keyID string) (uuid.UUID, error) {
-	return uuid.Nil, unimpl.Error("ids.NodeBuyer", "M3 WP-03")
+	if gateNamespace == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("ids: a node buyer needs the gate namespace")
+	}
+	if !nodeKeyIDRE.MatchString(keyID) {
+		return uuid.Nil, fmt.Errorf("ids: %q is not a node key id (k1_ and 26 base32 characters)", keyID)
+	}
+	return uuid.NewSHA1(gateNamespace, []byte(netstrings("node", keyID))), nil
 }
 
 // NewReplicaID returns a replica id unique per process start, "<host>-<8 hex>" (spec §14.2): it names the
