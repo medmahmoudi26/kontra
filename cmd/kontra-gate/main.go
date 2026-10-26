@@ -1,6 +1,6 @@
 // Command kontra-gate is the gate server: serve, migrate, enroll (note 2 §4, PRD §11).
 //
-//	kontra-gate serve -f kontra.yaml [--listen addr] [--metrics-listen addr]
+//	kontra-gate serve -f kontra.yaml [--listen addr] [--metrics-listen addr] [--peer-listen addr]
 //	kontra-gate migrate [-f kontra.yaml | --postgres URL] [up|down|status]
 //	kontra-gate enroll -f kontra.yaml --api-key <name> [--scope hire] [--prefix <p>]   (M1)
 //	kontra-gate enroll -f kontra.yaml <service>                                       (M2)
@@ -39,7 +39,7 @@ import (
 )
 
 const usage = `usage:
-  kontra-gate serve -f kontra.yaml [--listen <addr>] [--metrics-listen <addr>]
+  kontra-gate serve -f kontra.yaml [--listen <addr>] [--metrics-listen <addr>] [--peer-listen <addr>]
   kontra-gate migrate [-f kontra.yaml | --postgres <url>] [up|down|status]
   kontra-gate enroll -f kontra.yaml --api-key <name> [--scope <scope>]... [--prefix <p>]
   kontra-gate enroll -f kontra.yaml <service>
@@ -96,6 +96,7 @@ func serveConfig(args []string) (*config.Config, error) {
 	file := fs.String("f", "kontra.yaml", "configuration file")
 	listen := fs.String("listen", "", "public listener for this replica, overriding listen:")
 	metricsListen := fs.String("metrics-listen", "", "metrics listener for this replica, overriding metrics.listen:")
+	peerListen := fs.String("peer-listen", "", "peer listener for this replica, overriding peer.listen: (spec §11.2)")
 	if err := fs.Parse(args); err != nil {
 		return nil, usageError{"serve: " + err.Error()}
 	}
@@ -108,6 +109,9 @@ func serveConfig(args []string) (*config.Config, error) {
 	}
 	if *metricsListen != "" {
 		opts = append(opts, config.WithMetricsListen(*metricsListen))
+	}
+	if *peerListen != "" {
+		opts = append(opts, config.WithPeerListen(*peerListen))
 	}
 	return config.Load(*file, opts...)
 }

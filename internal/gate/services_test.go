@@ -1369,3 +1369,112 @@ func (l *logBuffer) String() string {
 	defer l.mu.Unlock()
 	return l.buf.String()
 }
+
+// The registry serves kind: mcp rows to the MCP relay (M3 WP-04): the services: block's tools, tasks and
+// annotations (tool_meta, initialize_meta) as the relay reads them, a direct mcp: {url} backend pinned to its URL,
+// none for a tunnel service; an a2a service is no MCP service; a change to an MCP row's policy is announced
+// (OnChange, which drops the tools cache); a row whose tools cannot be read is left out.
+func TestMCPServicesInTheRegistry(t *testing.T) {
+	pool := pgtest.Pool(t, pgtest.Migrated(t))
+	ctx := context.Background()
+	var changed []string
+	var mu sync.Mutex
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", OnChange: func(ref store.ServiceRef) {
+		mu.Lock()
+		changed = append(changed, ref.Name)
+		mu.Unlock()
+	}})
+	cfg := parseConfig(t, `services:
+  web:
+    kind: mcp
+    backend: { mcp: { url: "http://127.0.0.1:9/mcp", allow_private: true } }
+    allow: ["org:default"]
+    tools: { allow: ["read_*", "list_*"], deny: ["read_secret"] }
+    tasks: passthrough
+    session_idle_s: 120
+    annotations: { tool_meta: { "*": { "sh.kontra/price": "1 USD" } }, initialize_meta: { "sh.kontra/price": "per session" } }
+  fs:
+    kind: mcp
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+    tools: { deny: ["write_*"] }
+  hello:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+`)
+	if err := s.Sync(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	web, err := s.MCPService(ctx, TeamTenant, "web")
+	if err != nil || web == nil {
+		t.Fatalf("web: %+v %v", web, err)
+	}
+	if web.Tasks != config.TasksPassthrough || web.SessionIdle != 120*time.Second || web.Direct == nil ||
+		web.Direct.Base().String() != "http://127.0.0.1:9/mcp" || web.Ref.Kind != config.KindMCP {
+		t.Errorf("web: %+v", web)
+	}
+	if ok, _ := web.Tools.Allows("read_file"); !ok {
+		t.Error("read_file is not allowed")
+	}
+	if ok, _ := web.Tools.Allows("read_secret"); ok {
+		t.Error("read_secret is allowed")
+	}
+	if ok, _ := web.Tools.Allows("write_file"); ok {
+		t.Error("write_file is allowed outside allow")
+	}
+	if string(web.ToolMeta["*"]["sh.kontra/price"]) != `"1 USD"` || string(web.InitializeMeta["sh.kontra/price"]) != `"per session"` {
+		t.Errorf("annotations %v %v", web.ToolMeta, web.InitializeMeta)
+	}
+	fs, _ := s.MCPService(ctx, TeamTenant, "fs")
+	if fs == nil || fs.Direct != nil || fs.Tasks != config.TasksDurable {
+		t.Errorf("fs: %+v", fs)
+	}
+	if ok, _ := fs.Tools.Allows("write_x"); ok {
+		t.Error("deny-only policy allows write_x")
+	}
+	if ok, _ := fs.Tools.Allows("read_x"); !ok {
+		t.Error("deny-only policy (no allow) refuses read_x")
+	}
+	if got := scalar[string](t, pool, `select tools::text from kontra.services where name = 'fs'`); strings.Contains(got, "allow") {
+		t.Errorf("a configuration without allow stored one: %s", got)
+	}
+	if h, _ := s.MCPService(ctx, TeamTenant, "hello"); h != nil {
+		t.Errorf("an a2a service is an MCP service: %+v", h)
+	}
+	if byID, _ := s.MCPServiceByID(ctx, web.Ref.TenantID, "web"); byID != web {
+		t.Error("MCPServiceByID")
+	}
+	mu.Lock()
+	changed = nil
+	mu.Unlock()
+	if _, err := pool.Exec(ctx, `update kontra.services set tools = '{"allow": [], "deny": []}' where name = 'fs'`); err != nil {
+		t.Fatal(err)
+	}
+	s.Notify(TeamTenant + "/fs")
+	mu.Lock()
+	if !slices.Contains(changed, "fs") {
+		t.Errorf("a policy change was not announced: %v", changed)
+	}
+	mu.Unlock()
+	if fs, _ := s.MCPService(ctx, TeamTenant, "fs"); fs == nil {
+		t.Fatal("fs is gone")
+	} else if ok, _ := fs.Tools.Allows("read_x"); ok {
+		t.Error("the new policy is not applied")
+	}
+	if _, err := pool.Exec(ctx, `update kontra.services set tools = '{"allow": "not a list"}' where name = 'fs'`); err != nil {
+		t.Fatal(err)
+	}
+	s.Notify(TeamTenant + "/fs")
+	if fs, _ := s.MCPService(ctx, TeamTenant, "fs"); fs != nil {
+		t.Errorf("a row whose tools cannot be read is served: %+v", fs)
+	}
+	// Disabled: still found (the route answers it as unknown).
+	if _, err := pool.Exec(ctx, `update kontra.services set disabled_at = now() where name = 'web'`); err != nil {
+		t.Fatal(err)
+	}
+	s.Notify(TeamTenant + "/web")
+	if web, _ := s.MCPService(ctx, TeamTenant, "web"); web == nil || !web.Disabled {
+		t.Errorf("disabled web: %+v", web)
+	}
+}

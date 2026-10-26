@@ -36,7 +36,9 @@ import (
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/jws"
 	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/migrate"
+	"kontra.sh/kontra/internal/peer"
 	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/push"
 	"kontra.sh/kontra/internal/relay"
@@ -181,6 +183,16 @@ type Replica struct {
 	blobs       blob.Store
 	render      *blob.Renderer
 
+	// The MCP relay (spec §11; M3 WP-04): its handler, the sessions it pins, the tools cache, and the peer hop
+	// (§11.2, D163): the peer listener's server and listener, and the address this replica advertises (empty
+	// without peer.listen; gate_replicas.peer_addr). peerWarned is the multi-replica warning's (D179).
+	mcp        *mcprelay.Handler
+	tools      *mcprelay.ToolsCache
+	peerSrv    *http.Server
+	peerLn     net.Listener
+	peerAddr   string
+	peerWarned atomic.Bool
+
 	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
 	pgUp       atomic.Bool
@@ -236,6 +248,9 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 			if r.metrics != nil {
 				_ = r.metrics.Shutdown(context.WithoutCancel(ctx))
 			}
+			if r.peerLn != nil {
+				_ = r.peerLn.Close()
+			}
 			r.close()
 		}
 	}()
@@ -279,6 +294,9 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 		return nil, err
 	}
 	if _, err = r.metrics.Listen(); err != nil {
+		return nil, err
+	}
+	if err = r.listenPeer(); err != nil {
 		return nil, err
 	}
 	if err = r.register(ctx); err != nil {
@@ -351,6 +369,11 @@ func (r *Replica) assemble() error {
 			if handlers != nil {
 				handlers.Invalidate(ref)
 			}
+			// The MCP tools cache follows the row as the cards do (§11.3): a changed or removed service is drained
+			// again at its next tools/list.
+			if r.tools != nil {
+				r.tools.Invalidate(mcprelay.ToolsKey{TenantID: ref.TenantID, Service: ref.Name})
+			}
 		},
 		Tunnels: r.tunnels, Sessions: r.tunnels, TunnelCardRefresh: r.opts.tunnelCards,
 	})
@@ -420,6 +443,11 @@ func (r *Replica) assemble() error {
 		Services: r.services, Handlers: handlers, SSE: writer, Auth: authn,
 		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
 	}).Register(routes)
+	// /mcp/{svc} (spec §11; M3 WP-04): plain MCP requests, sessions pinned to a tunnel session or a direct backend,
+	// and the peer hop to the replica holding a tunnel session (§11.2). The gate's own /mcp is M4's (D170).
+	if err := r.assembleMCP(routes, authn); err != nil {
+		return err
+	}
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))
 	// GET /.well-known/jwks.json (spec §2.1, D166): the card-signing public keys, every key of the file.
 	if r.signingKeys != nil {
@@ -468,6 +496,47 @@ func (r *Replica) assemble() error {
 		return err
 	}
 	r.metrics = edge.NewMetrics(cfg.Metrics.Listen, http.HandlerFunc(r.serveMetrics))
+	return nil
+}
+
+// assembleMCP builds the MCP relay over the replica's registry, sessions and tunnels, mounts its routes, and the
+// peer listener's handler when peer.listen is set.
+func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator) error {
+	cfg := r.cfg
+	signer, peerClient, err := peerSetup(cfg)
+	if err != nil {
+		return err
+	}
+	r.tools = mcprelay.NewToolsCache()
+	var ops []hooks.Operation
+	if a := cfg.Hooks.Admission; a != nil {
+		// The remote Admission hook is refused at load until M5 (C3); its operations are read for when it is not.
+		for _, op := range a.Operations {
+			ops = append(ops, hooks.Operation(op))
+		}
+	}
+	deps := mcprelay.Deps{
+		ReplicaID: r.id, Services: r.services, Auth: authn, Multi: cfg.Tenancy == config.TenancyMulti,
+		Sessions: mcprelay.NewSessions(r.pool), Tools: r.tools, Meter: mcprelay.NewMeter(r.pool),
+		Admission: hooks.BuiltinAdmission{}, AdmissionOps: ops, Tunnels: r.tunnels, Picker: tunnelgate.NewPicker(r.pool),
+		AllowedOrigins: cfg.MCP.AllowedOrigins, Log: r.log,
+	}
+	if peerClient != nil {
+		deps.Peer = peerClient
+	}
+	h, err := mcprelay.NewHandler(deps)
+	if err != nil {
+		return err
+	}
+	h.Register(routes)
+	r.mcp = h
+	if signer != nil {
+		ps, err := peer.NewServer(signer, h, peer.WithMaxBody(cfg.Limits.Body.Int64()), peer.WithLogger(r.log.With("component", "peer")))
+		if err != nil {
+			return err
+		}
+		r.peerSrv = peer.NewHTTPServer(ps, r.log)
+	}
 	return nil
 }
 
@@ -589,6 +658,7 @@ func (r *Replica) Run(ctx context.Context) error {
 	r.checkHealth(bg)
 	goLoop("health", r.healthLoop)
 	goLoop("sweeps", r.RunSweeps)
+	goLoop("peer", r.servePeer)
 	if r.opts.hup {
 		goLoop("sighup", r.hupLoop)
 	}
@@ -793,7 +863,8 @@ func (r *Replica) hupLoop(ctx context.Context) error {
 
 // register inserts the replica's gate_replicas row (before any worker polls, spec/tunnel.md §11).
 func (r *Replica) register(ctx context.Context) error {
-	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version) values ($1, $2)`, r.id, version.Get())
+	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version, peer_addr) values ($1, $2, $3)`,
+		r.id, version.Get(), r.peerAddrArg())
 	if err != nil {
 		return fmt.Errorf("gate: register replica %s: %w", r.id, err)
 	}
@@ -809,15 +880,18 @@ func (r *Replica) beat(ctx context.Context) error {
 	if r.deregistered {
 		return nil
 	}
-	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version, draining_at)
-		values ($1, $2, case when $3 then now() end)
-		on conflict (replica_id) do update set last_seen_at = now(),
-			draining_at = coalesce(gate_replicas.draining_at, excluded.draining_at)`, r.id, version.Get(), r.draining.Load())
+	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version, draining_at, peer_addr)
+		values ($1, $2, case when $3 then now() end, $4)
+		on conflict (replica_id) do update set last_seen_at = now(), peer_addr = excluded.peer_addr,
+			draining_at = coalesce(gate_replicas.draining_at, excluded.draining_at)`, r.id, version.Get(), r.draining.Load(), r.peerAddrArg())
 	return err
 }
 
 // reap deletes the rows of replicas silent for more than ReplicaSilence (their tunnels rows cascade) and
-// closes the MCP sessions pinned to them, tunnel_lost (spec/tunnel.md §11). It returns the reaped ids.
+// closes the MCP sessions pinned to them, tunnel_lost (spec/tunnel.md §11). mcp_sessions.replica_id names the
+// replica holding a session's tunnel, never the one its client reached (D179): a row whose holder is live stays
+// open when the replica that wrote it is reaped, and a direct backend's row (replica_id NULL) is never closed here.
+// It returns the reaped ids.
 func (r *Replica) reap(ctx context.Context) ([]string, error) {
 	rows, err := r.pool.Query(ctx, `with gone as (
 			delete from kontra.gate_replicas
@@ -875,6 +949,7 @@ func (r *Replica) replicaLoop(ctx context.Context) error {
 		if err := r.beat(bctx); err != nil && ctx.Err() == nil {
 			r.log.Warn("gate_replicas heartbeat failed", "error", err)
 		}
+		r.warnWithoutPeer(bctx)
 		if gone, err := r.reap(bctx); err != nil && ctx.Err() == nil {
 			r.log.Warn("reaping silent replicas failed", "error", err)
 		} else if len(gone) > 0 {

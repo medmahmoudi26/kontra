@@ -26,6 +26,7 @@ import (
 	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/relay"
 	"kontra.sh/kontra/internal/ssrf"
@@ -118,6 +119,7 @@ type Services struct {
 
 var (
 	_ a2ahttp.Services          = (*Services)(nil)
+	_ mcprelay.Services         = (*Services)(nil)
 	_ lifecycle.BackendResolver = (*Services)(nil)
 	_ relay.Backends            = (*Services)(nil)
 )
@@ -137,6 +139,8 @@ type entry struct {
 	backend   backendSpec
 	backendJS string // services.backend as read: the persist and touch guards compare it
 	served    *a2ahttp.Service
+	mcp       *mcprelay.Service // a kind: mcp service as the MCP relay serves it
+	mcpKey    string            // what mcp was built from: a change is announced (OnChange)
 	keeper    *card.Keeper
 	keeperKey string             // what the keeper was built from: rebuilt when it changes
 	stop      context.CancelFunc // the keeper's Run, nil when not started
@@ -324,7 +328,12 @@ func desiredOf(s config.Service) (desired, error) {
 	if s.Kind == config.KindMCP {
 		d.tasksMode = s.Tasks
 		if s.Tools != nil {
-			t := map[string]any{"allow": nonNil(s.Tools.Allow), "deny": nonNil(s.Tools.Deny)}
+			// An absent allow allows every tool (spec §11.3), an empty one none: allow is written only when the file
+			// names it, so the relay can tell the two apart (mcprelay.Policy).
+			t := map[string]any{"deny": nonNil(s.Tools.Deny)}
+			if s.Tools.Allow != nil {
+				t["allow"] = s.Tools.Allow
+			}
 			tb, err := json.Marshal(t)
 			if err != nil {
 				return desired{}, err
@@ -534,24 +543,31 @@ type row struct {
 	sellerKeys  []byte // seller_keys as text, nil when SQL NULL or JSON null
 	upstream    []byte
 	fetchedAt   *time.Time
+	tools       []byte // services.tools as text (mcp only), nil when NULL
+	tasksMode   string // services.tasks_mode (mcp only), "" when NULL
+	sessionIdle int    // services.session_idle_s
 }
 
 const selectServices = `select s.tenant_id, t.slug, s.name, s.kind, s.backend::text, s.allow, s.listed,
 	s.disabled_at is not null, s.timeout_s, s.retries, s.retention_s, s.annotations::text, s.sealed,
 	case when s.seller_keys is null or s.seller_keys = 'null'::jsonb then null else s.seller_keys::text end,
-	s.upstream_card, s.card_fetched_at
+	s.upstream_card, s.card_fetched_at, s.tools::text, coalesce(s.tasks_mode, ''), s.session_idle_s
   from kontra.services s join kontra.tenants t on t.id = s.tenant_id
  where t.deleted_at is null and (t.expires_at is null or t.expires_at > now())`
 
 func scanRow(r pgx.CollectableRow) (row, error) {
 	var x row
 	var backend, annots string
-	var keys *string
+	var keys, tools *string
 	err := r.Scan(&x.tenantID, &x.tenant, &x.name, &x.kind, &backend, &x.allow, &x.listed, &x.disabled,
-		&x.timeoutS, &x.retries, &x.retentionS, &annots, &x.sealed, &keys, &x.upstream, &x.fetchedAt)
+		&x.timeoutS, &x.retries, &x.retentionS, &annots, &x.sealed, &keys, &x.upstream, &x.fetchedAt,
+		&tools, &x.tasksMode, &x.sessionIdle)
 	x.backend, x.annotations = []byte(backend), []byte(annots)
 	if keys != nil {
 		x.sellerKeys = []byte(*keys)
+	}
+	if tools != nil {
+		x.tools = []byte(*tools)
 	}
 	return x, err
 }
@@ -691,7 +707,7 @@ func (s *Services) drop(key string, e *entry) {
 
 func sameEntry(a, b *entry) bool {
 	return a.ref == b.ref && a.listed == b.listed && a.disabled == b.disabled && a.backendJS == b.backendJS &&
-		a.keeperKey == b.keeperKey && slices.Equal(a.allowRaw, b.allowRaw)
+		a.keeperKey == b.keeperKey && a.mcpKey == b.mcpKey && slices.Equal(a.allowRaw, b.allowRaw)
 }
 
 // build returns the entry for x, reusing old's keeper when what it was built from did not change; s.mu is
@@ -756,7 +772,81 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 		cards = e.keeper.Current
 	}
 	e.served = &a2ahttp.Service{Ref: e.ref, Allow: allow, Listed: x.listed, Disabled: x.disabled, Cards: cards}
+	if x.kind == config.KindMCP {
+		m, err := s.mcpService(e, x, b)
+		if err != nil {
+			return nil, err
+		}
+		e.mcp = m
+		e.mcpKey = string(x.tools) + "|" + x.tasksMode + "|" + x.sealed + "|" + string(x.annotations) + "|" + fmt.Sprint(x.sessionIdle)
+	}
 	return e, nil
+}
+
+// mcpService is a kind: mcp row as the MCP relay serves it (spec §11): its policy (services.tools), its tasks:
+// mode, its sealed flag, its session_idle_s, its tool_meta and initialize_meta annotations (§13.4), and for a
+// direct mcp: {url} backend the SSRF-safe backend pinned to that URL's host:port (D71), which is the endpoint
+// itself. A value that cannot be read leaves the row out (its policy must never be applied half).
+func (s *Services) mcpService(e *entry, x row, b backendSpec) (*mcprelay.Service, error) {
+	m := &mcprelay.Service{Ref: e.ref, Allow: e.allow, Disabled: x.disabled, Tasks: x.tasksMode,
+		Sealed: x.sealed != string(config.SealedOff), SessionIdle: time.Duration(x.sessionIdle) * time.Second}
+	if m.Tasks == "" {
+		m.Tasks = config.TasksDurable
+	}
+	if len(x.tools) > 0 && string(x.tools) != "null" {
+		var t struct {
+			Allow []string `json:"allow"`
+			Deny  []string `json:"deny"`
+		}
+		if err := json.Unmarshal(x.tools, &t); err != nil {
+			return nil, fmt.Errorf("services.tools: %w", err)
+		}
+		for _, g := range slices.Concat(t.Allow, t.Deny) {
+			if g == "" {
+				return nil, errors.New("services.tools: an empty glob")
+			}
+		}
+		m.Tools = mcprelay.Policy{Allow: t.Allow, Deny: t.Deny}
+	}
+	if len(bytes.TrimSpace(x.annotations)) > 0 {
+		var a struct {
+			ToolMeta       map[string]map[string]json.RawMessage `json:"tool_meta"`
+			InitializeMeta map[string]json.RawMessage            `json:"initialize_meta"`
+		}
+		if err := json.Unmarshal(x.annotations, &a); err != nil {
+			return nil, fmt.Errorf("services.annotations: tool_meta and initialize_meta must be objects of objects: %w", err)
+		}
+		m.ToolMeta, m.InitializeMeta = a.ToolMeta, a.InitializeMeta
+	}
+	if b.Kind == config.KindMCP && !x.disabled {
+		be, err := upstream.NewDirect(b.URL, b.AllowPrivate)
+		if err != nil {
+			return nil, err
+		}
+		m.Direct = be
+	}
+	return m, nil
+}
+
+// MCPService implements mcprelay.Services: the tenant's MCP service of that name, disabled ones included (the
+// route answers them as unknown), nil when there is none or it is an a2a service.
+func (s *Services) MCPService(_ context.Context, tenant, name string) (*mcprelay.Service, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if e := s.byName[tenant+"/"+name]; e != nil {
+		return e.mcp, nil
+	}
+	return nil, nil
+}
+
+// MCPServiceByID implements mcprelay.Services by the tenant's id.
+func (s *Services) MCPServiceByID(_ context.Context, tenantID uuid.UUID, name string) (*mcprelay.Service, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if e := s.byID[svcID{tenantID, name}]; e != nil {
+		return e.mcp, nil
+	}
+	return nil, nil
 }
 
 // refusable applies to every row the refusals config.Validate makes for a services: entry, so a row the

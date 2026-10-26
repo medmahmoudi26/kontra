@@ -23,6 +23,9 @@ const (
 	OrphanAge         = 2 * time.Minute
 	RetentionInterval = 10 * time.Minute
 	OverlapInterval   = time.Minute
+	// IdleInterval is how often the MCP sessions idle past their service's session_idle_s are closed (spec
+	// §11.2).
+	IdleInterval = time.Minute
 )
 
 // Per-pass bounds. A pass checks at most OrphanBudget candidates (one Temporal DescribeWorkflowExecution
@@ -50,10 +53,13 @@ func (r *Replica) RunSweeps(ctx context.Context) error {
 	defer retention.Stop()
 	overlaps := time.NewTicker(OverlapInterval)
 	defer overlaps.Stop()
+	idle := time.NewTicker(IdleInterval)
+	defer idle.Stop()
 	keys := enroll.NewStore(r.pool, enroll.Options{Logger: r.log})
 	r.sweepOrphans(ctx)
 	r.sweepRetention(ctx)
 	r.sweepOverlaps(ctx, keys)
+	r.sweepIdle(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -64,7 +70,20 @@ func (r *Replica) RunSweeps(ctx context.Context) error {
 			r.sweepRetention(ctx)
 		case <-overlaps.C:
 			r.sweepOverlaps(ctx, keys)
+		case <-idle.C:
+			r.sweepIdle(ctx)
 		}
+	}
+}
+
+// sweepIdle closes the MCP sessions idle past their service's session_idle_s, with a best-effort upstream DELETE
+// (spec §11.2): those whose tunnels this replica holds, and those of direct backends.
+func (r *Replica) sweepIdle(ctx context.Context) {
+	if r.mcp == nil {
+		return
+	}
+	if _, err := r.mcp.SweepIdle(ctx); err != nil && ctx.Err() == nil {
+		r.log.Warn("mcp idle sweep", "error", err)
 	}
 }
 

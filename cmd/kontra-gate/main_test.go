@@ -71,6 +71,24 @@ func TestServeConfigOverrides(t *testing.T) {
 	if _, err := serveConfig([]string{"-f", "does-not-exist.yaml"}); err == nil {
 		t.Error("a missing file loads")
 	}
+	// --peer-listen (spec §11.2): a file without peer: still needs its secret_env.
+	if _, err := serveConfig([]string{"-f", "../../examples/sellers/hello-exec/kontra.yaml", "--peer-listen", "127.0.0.1:18444"}); err == nil ||
+		!strings.Contains(err.Error(), "peer.secret_env") {
+		t.Errorf("--peer-listen without peer: = %v", err)
+	}
+	dir := t.TempDir()
+	doc, err := os.ReadFile("../../examples/sellers/hello-exec/kontra.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "kontra.yaml")
+	if err := os.WriteFile(path, append(doc, []byte("\npeer: { listen: \"127.0.0.1:8444\", secret_env: KONTRA_PEER_SECRET }\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = serveConfig([]string{"-f", path, "--peer-listen", "127.0.0.1:18444"})
+	if err != nil || cfg.Peer.Listen != "127.0.0.1:18444" || cfg.Peer.SecretEnv != "KONTRA_PEER_SECRET" {
+		t.Errorf("--peer-listen: %+v %v", cfg, err)
+	}
 }
 
 func TestVersion(t *testing.T) {

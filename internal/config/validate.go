@@ -152,6 +152,9 @@ func (c *Config) validateListeners(v *validator) {
 		v.add("metrics.listen %q: must differ from listen %q, which binds the same port (metrics never share the public listener, spec §2.1)",
 			c.Metrics.Listen, c.Listen)
 	}
+	if p := c.Peer; p != nil {
+		c.validatePeer(v, p)
+	}
 	if err := checkHostPort(c.Temporal.Address); err != nil {
 		v.add("temporal.address %q: %v", c.Temporal.Address, err)
 	}
@@ -165,6 +168,38 @@ func (c *Config) validateListeners(v *validator) {
 	case TenancySingle, TenancyMulti:
 	default:
 		v.add("tenancy %q: want single or multi", c.Tenancy)
+	}
+}
+
+// peerSecretRE is the shape of peer.secret_env (spec/schema/config.json).
+var peerSecretRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+// validatePeer checks peer: (spec/relay.md §11.2, §17; D163, D179): listen a host:port that is neither the public
+// nor the metrics listener's port (the peer listener is never the public one), advertise a host:port with a host
+// and a port when set, and secret_env the name of an environment variable. The secret itself is read at start
+// (at least 32 bytes), not here: a configuration is checked where the secret may not be set.
+func (c *Config) validatePeer(v *validator, p *Peer) {
+	if p.Listen == "" {
+		v.add("peer.listen: required (the peer listener's host:port, spec §11.2)")
+	} else if err := checkHostPort(p.Listen); err != nil {
+		v.add("peer.listen %q: %v", p.Listen, err)
+	} else {
+		for _, other := range []struct{ key, addr string }{{"listen", c.Listen}, {"metrics.listen", c.Metrics.Listen}} {
+			if checkHostPort(other.addr) == nil && listenersCollide(p.Listen, other.addr) {
+				v.add("peer.listen %q: must differ from %s %q, which binds the same port (the peer listener is never the public one, spec §11.2)",
+					p.Listen, other.key, other.addr)
+			}
+		}
+	}
+	if p.Advertise != "" {
+		host, port, err := net.SplitHostPort(p.Advertise)
+		n, perr := strconv.Atoi(port)
+		if err != nil || host == "" || perr != nil || n < 1 || n > 65535 {
+			v.add("peer.advertise %q: want host:port, a host and a port from 1 to 65535", p.Advertise)
+		}
+	}
+	if !peerSecretRE.MatchString(p.SecretEnv) {
+		v.add("peer.secret_env %q: required, the name of the environment variable holding the shared secret (at least 32 bytes)", p.SecretEnv)
 	}
 }
 
@@ -738,7 +773,8 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 // (nobody is admitted by it, nothing is served for it); keys that would fail open are refused by
 // Validate instead (the remote hooks, sealed on any backend). seller_keys on an MCP service, which has no card
 // (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
-// served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02.
+// served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
+// M3 WP-04.
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
@@ -746,10 +782,9 @@ func (c *Config) unbuilt() []string {
 		note("auth.oidc: OIDC callers are not built in this release; their bearer tokens are refused (401)")
 	}
 	if c.Auth.MCPOAuth != nil {
-		note("auth.mcp_oauth: the MCP endpoints are not built in this release (M3)")
-	}
-	if c.Peer != nil {
-		note("peer: the replica-to-replica hop is not built in this release (M3 WP-04)")
+		// D170: the MCP OAuth resource server comes with the OIDC principals in M5; until then /mcp/{svc} accepts API
+		// keys and node principals, and a bearer JWT is refused (401).
+		note("auth.mcp_oauth: the MCP OAuth resource server is not built in this release (M5, D170); /mcp/{svc} accepts API keys and node principals")
 	}
 	if c.Tunnel.Anonymous {
 		// Fails closed: an M2 gate creates no anonymous tenant, so a hello with neither enroll nor auth from an
@@ -758,9 +793,6 @@ func (c *Config) unbuilt() []string {
 	}
 	for _, name := range sortedKeys(c.Services) {
 		s := c.Services[name]
-		if s.Kind == KindMCP {
-			note("services.%s: MCP services are not built in this release", name)
-		}
 		if !s.SellerKeys.IsZero() && s.Kind == KindMCP {
 			note("services.%s.seller_keys: an MCP service has no card, so its seller_keys verify nothing (spec §3)", name)
 		}

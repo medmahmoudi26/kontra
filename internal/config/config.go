@@ -596,6 +596,17 @@ func WithListen(addr string) Option { return func(c *Config) { c.Listen = addr }
 // WithMetricsListen overrides metrics.listen.
 func WithMetricsListen(addr string) Option { return func(c *Config) { c.Metrics.Listen = addr } }
 
+// WithPeerListen overrides peer.listen (spec §11.2), so the replicas of one host can share one kontra.yaml. A file
+// without peer: gets one with this listen only, which validation refuses until it names peer.secret_env.
+func WithPeerListen(addr string) Option {
+	return func(c *Config) {
+		if c.Peer == nil {
+			c.Peer = &Peer{}
+		}
+		c.Peer.Listen = addr
+	}
+}
+
 // Load reads and validates kontra.yaml, applying the defaults. Relative file paths in it (tls.cert,
 // tls.key, tls.acme.cache_dir, signing_key file:…) are relative to the file's directory.
 func Load(path string, opts ...Option) (*Config, error) {

@@ -454,6 +454,14 @@ func TestLoadErrors(t *testing.T) {
 		{"remote lifecycle hook (M5)", head + "hooks: { lifecycle: { task_queue: cloud-lifecycle } }\n", "remote Lifecycle hook is not built"},
 		{"oidc over http", head + "auth: { oidc: { issuer: http://login.example.com, audience: kontra } }\n", "auth.oidc.issuer"},
 		{"oidc without audience", head + "auth: { oidc: { issuer: https://login.example.com } }\n", "auth.oidc.audience: required"},
+		// peer: (spec §11.2, §17; D163, D179).
+		{"peer without secret_env", head + "peer: { listen: \"127.0.0.1:8444\" }\n", "peer.secret_env"},
+		{"peer secret_env not a variable name", head + "peer: { listen: \"127.0.0.1:8444\", secret_env: \"peer-secret\" }\n", "peer.secret_env"},
+		{"peer without listen", head + "peer: { secret_env: PEER }\n", "peer.listen: required"},
+		{"peer on the public listener's port", head + "listen: \":9000\"\npeer: { listen: \"127.0.0.1:9000\", secret_env: PEER }\n", "the peer listener is never the public one"},
+		{"peer on the metrics port", head + "metrics: { listen: \"127.0.0.1:9100\" }\npeer: { listen: \":9100\", secret_env: PEER }\n", "must differ from metrics.listen"},
+		{"peer listen not host:port", head + "peer: { listen: \"8444\", secret_env: PEER }\n", "peer.listen"},
+		{"peer advertise without a host", head + "peer: { listen: \":8444\", advertise: \":8444\", secret_env: PEER }\n", "peer.advertise"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := parseErr(t, tc.yaml)
@@ -598,8 +606,15 @@ postgres: "postgres://k@db/k?pool_max_conns=7&pool_max_conn_lifetime=1h"
 			if c.Services["fs"].Tasks != TasksPassthrough {
 				t.Errorf("tasks = %q", c.Services["fs"].Tasks)
 			}
-			if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "services.fs: MCP services are not built") {
-				t.Errorf("warnings = %q", c.Warnings)
+			if len(c.Warnings) != 0 {
+				t.Errorf("MCP services are built since M3 WP-04; warnings = %q", c.Warnings)
+			}
+		}},
+		{"peer hop (M3 WP-04)", minimal + `
+peer: { listen: ":8444", advertise: "gate-0.gate.kontra.svc:8444", secret_env: KONTRA_PEER_SECRET }
+`, func(t *testing.T, c *Config) {
+			if c.Peer == nil || c.Peer.Listen != ":8444" || c.Peer.SecretEnv != "KONTRA_PEER_SECRET" || len(c.Warnings) != 0 {
+				t.Errorf("peer %+v, warnings %q", c.Peer, c.Warnings)
 			}
 		}},
 	} {
@@ -688,7 +703,8 @@ func TestParseAllowEntry(t *testing.T) {
 }
 
 // Fail-closed keys this build ignores are reported as warnings, so an operator is not surprised. A tunnel
-// service is served (M2): it gets none; neither do blobs: and signing_key, built in M3 WP-02.
+// service is served (M2): it gets none; neither do blobs: and signing_key, built in M3 WP-02, nor MCP services and
+// peer:, built in M3 WP-04.
 func TestUnbuiltWarnings(t *testing.T) {
 	c := parse(t, minimal+`
   remote:
@@ -702,8 +718,9 @@ blobs: s3://kontra-parts
 signing_key: file:./kontra.key
 auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra } }
 tunnel: { anonymous: true }
+peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 `)
-	want := []string{"auth.oidc", "services.files: MCP services", "services.files.seller_keys", "tunnel.anonymous"}
+	want := []string{"auth.oidc", "services.files.seller_keys", "tunnel.anonymous"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)
