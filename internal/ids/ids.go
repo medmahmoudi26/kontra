@@ -100,9 +100,10 @@ func OIDCBuyer(issuer, sub string) (uuid.UUID, error) {
 	return Derive("oidc", issuer, sub), nil
 }
 
-// NodeBuyer is UUIDv5(gate namespace ‖ key_id) for a node hiring without an API key (spec §2.3, M2).
+// NodeBuyer is UUIDv5(gate namespace ‖ key_id) for a node hiring without an API key (spec §2.3). Hiring
+// streams (spec/tunnel.md §9) are M3: M2 hosts only, and writes tunnels.hire_principal without serving it.
 func NodeBuyer(gateNamespace uuid.UUID, keyID string) (uuid.UUID, error) {
-	return uuid.Nil, unimpl.Error("ids.NodeBuyer", "M2")
+	return uuid.Nil, unimpl.Error("ids.NodeBuyer", "M3")
 }
 
 // NewReplicaID returns a replica id unique per process start, "<host>-<8 hex>" (spec §14.2): it names the
