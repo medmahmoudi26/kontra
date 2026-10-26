@@ -205,6 +205,27 @@ func TestRevocationsView(t *testing.T) {
 		r.BindingRevoked("k1_d", "recon") || !r.KeyUsable("k1_d", now) {
 		t.Fatalf("binding: emitted %+v", got)
 	}
+	// The same binding revoked again (enrolled in between, which sends no NOTIFY): another revoked_at is
+	// another revocation, emitted once; the same revoked_at, or none, is not.
+	again := at.Add(time.Second)
+	r.emit(r.markBinding(bindingRef{"k1_d", "hello"}, &again))
+	r.emit(r.markBinding(bindingRef{"k1_d", "hello"}, &again))
+	r.emit(r.markBinding(bindingRef{"k1_d", "hello"}, nil))
+	if len(got) != 5 || got[4] != (Revocation{KeyID: "k1_d", Service: "hello"}) {
+		t.Fatalf("binding revoked again: emitted %+v", got)
+	}
+	// Held from a NOTIFY payload (no time yet): emitted once, when its row dates it.
+	r.mu.Lock()
+	r.holdBindingLocked(bindingRef{"k1_e", "hello"})
+	r.mu.Unlock()
+	if len(got) != 5 || !r.BindingRevoked("k1_e", "hello") {
+		t.Fatalf("held binding: emitted %+v", got)
+	}
+	r.emit(r.markBinding(bindingRef{"k1_e", "hello"}, &at))
+	r.emit(r.markBinding(bindingRef{"k1_e", "hello"}, &at))
+	if len(got) != 6 || got[5] != (Revocation{KeyID: "k1_e", Service: "hello"}) {
+		t.Fatalf("held binding dated: emitted %+v", got)
+	}
 	// A subscriber that panics does not stop the others.
 	r.Subscribe(func(Revocation) { panic("boom") })
 	var after int
@@ -237,8 +258,10 @@ func TestRevocationsNotifyIgnores(t *testing.T) {
 		"binding:k1_aaaaaaaaaaaaaaaaaaaaaaaaaa/Bad_Name", "nonsense", ""} {
 		r.Notify(p) // a nil pool would panic if any of these reached a query
 	}
-	if n != 0 {
-		t.Errorf("%d revocations from unreadable payloads", n)
+	r.drainers.Wait()
+	if n != 0 || r.draining || len(r.pending) != 0 || len(r.keys) != 0 || len(r.bindings) != 0 {
+		t.Errorf("%d revocations, %d queued, %d keys and %d bindings held from unreadable payloads", n, len(r.pending),
+			len(r.keys), len(r.bindings))
 	}
 	if KeyRevokePayload("k1_x") != "key:k1_x" || BindingRevokePayload("k1_x", "hello") != "binding:k1_x/hello" {
 		t.Error("payload format")

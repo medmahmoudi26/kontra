@@ -883,7 +883,8 @@ func TestAdmitAPIKey(t *testing.T) {
 	}
 }
 
-// Rotation (§12): the new key in the old key's tenant with the old key's active bindings, the old key
+// Rotation (§12): the new key in the old key's tenant with the old key's bindings (a revoked one stays
+// revoked, TestAdmitRotationKeepsRevokedBindings), the old key
 // rotated with a 24 h overlap, under a row lock: of two concurrent rotations one wins. A rotated
 // rotate_from is enroll_invalid, a revoked one revoked; the rotated key itself is revoked; the new key
 // reconnects alone (the node's answer to a lost welcome).
@@ -940,7 +941,7 @@ func TestAdmitRotation(t *testing.T) {
 	rows, _ := e.pool.Query(ctx, `select service from kontra.key_services where key_id = $1 and revoked_at is null order by service`, nk.kid)
 	newServices, err = pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil || !slices.Equal(newServices, []string{"hello"}) {
-		t.Errorf("new key's bindings %v %v (only the active ones are copied)", newServices, err)
+		t.Errorf("new key's active bindings %v %v (recon's revoked row is carried over revoked)", newServices, err)
 	}
 	ev := e.verifyAudit()
 	last := ev[len(ev)-1]
@@ -1058,4 +1059,140 @@ func TestRecipients(t *testing.T) {
 	if got, err := e.store.Recipients(ctx, e.team, "nope"); err != nil || len(got) != 0 {
 		t.Errorf("an unknown service: %v %v", got, err)
 	}
+}
+
+// A revoked binding stays left out whatever standing authority the hello carries (§5): the auth API key
+// rides on every hello as the hiring principal, so even with enroll:* (or enroll:<svc>) and
+// tunnel.enroll_with_api_key it never enrolls the binding again. Only a one-time token in the hello does
+// (SPEC-CONFLICT, admit.go).
+func TestAdmitAPIKeyKeepsRevokedBinding(t *testing.T) {
+	e := newPGEnv(t, func(o *Options) { o.EnrollWithAPIKey = true })
+	ctx := context.Background()
+	e.service(e.team, "hello", "a2a", false)
+	e.service(e.team, "recon", "a2a", false)
+	all, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "node", Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconOnly, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "recon", Scopes: []auth.Scope{auth.EnrollScope("recon")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := newTestKey(t)
+	h := hello(k, a2a("hello"), a2a("recon"))
+	h.Auth = all.Secret
+	if d := e.mustAdmit(k, h); len(d.Served) != 2 {
+		t.Fatalf("enrolled by enroll:*: served %v", served(d))
+	}
+	if err := e.store.RevokeBinding(ctx, k.kid, "recon", "test"); err != nil {
+		t.Fatal(err)
+	}
+	enrolledRows := func() int {
+		n := 0
+		for _, ev := range events(e.verifyAudit()) {
+			if ev == EventEnrolled {
+				n++
+			}
+		}
+		return n
+	}
+	before := enrolledRows()
+	helloOnly := []string{"a2a:hello@https://gate.example/agents/hello"}
+	for _, key := range []auth.Minted{all, reconOnly} {
+		h := hello(k, a2a("hello"), a2a("recon"))
+		h.Auth = key.Secret
+		d := e.mustAdmit(k, h)
+		if got := served(d); !slices.Equal(got, helloOnly) {
+			t.Errorf("auth %v: served %v, want hello alone (recon's binding was revoked)", key.Scopes, got)
+		}
+		if d.HirePrincipal != key.Principal() {
+			t.Errorf("hire principal %q, want %q", d.HirePrincipal, key.Principal())
+		}
+	}
+	if n := e.count(`select count(*) from kontra.key_services where key_id = $1 and service = 'recon' and revoked_at is not null`, k.kid); n != 1 {
+		t.Error("the auth API key cleared recon's revocation")
+	}
+	if n := enrolledRows(); n != before {
+		t.Errorf("%d enrollment audit rows appended by handshakes that enroll nothing", n-before)
+	}
+	// A one-time service token in the hello is the operator's explicit re-enrollment.
+	h2 := hello(k, a2a("hello"), a2a("recon"))
+	h2.Auth = all.Secret
+	h2.Enroll = []string{e.token(e.team, "recon")}
+	if d := e.mustAdmit(k, h2); len(d.Served) != 2 {
+		t.Errorf("a service token re-enrolling recon: served %v", served(d))
+	}
+	ev := e.verifyAudit()
+	last := ev[len(ev)-1]
+	if svcs := last["services"].([]any); len(svcs) != 1 || svcs[0].(map[string]any)["via"] != viaServiceToken {
+		t.Errorf("re-enrollment audit %v", last)
+	}
+}
+
+// A rotation carries a revoked binding over as revoked (SPEC-CONFLICT, rotate.go): the new key's later
+// handshakes declaring the same services leave it out as the old key's did, rather than refusing the whole
+// handshake with service_denied (the node's redial after a lost welcome, a restart with the same --serve).
+// The carried row grants nothing; a fresh token enrolls the new key for it again.
+func TestAdmitRotationKeepsRevokedBindings(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	e.service(e.team, "hello", "a2a", false)
+	e.service(e.team, "recon", "a2a", false)
+	old := e.enrolled("hello", "recon")
+	if err := e.store.RevokeBinding(ctx, old.kid, "recon", "test"); err != nil {
+		t.Fatal(err)
+	}
+	var revokedAt time.Time
+	if err := e.pool.QueryRow(ctx, `select revoked_at from kontra.key_services where key_id = $1 and service = 'recon'`, old.kid).
+		Scan(&revokedAt); err != nil {
+		t.Fatal(err)
+	}
+	helloOnly := []string{"a2a:hello@https://gate.example/agents/hello"}
+	if got := served(e.mustAdmit(old, hello(old, a2a("hello"), a2a("recon")))); !slices.Equal(got, helloOnly) {
+		t.Fatalf("the old key: served %v", got)
+	}
+	nk := newTestKey(t)
+	d, err := e.admit(nk, hello(nk, a2a("hello"), a2a("recon")), old)
+	if err != nil || !slices.Equal(served(d), helloOnly) {
+		t.Fatalf("the rotation: %v %v", d, err)
+	}
+	// The redial with the new key alone and the same services.
+	d, err = e.admit(nk, hello(nk, a2a("hello"), a2a("recon")), nil)
+	if err != nil {
+		t.Fatalf("the new key declaring the services it declared before the rotation: %v", err)
+	}
+	if got := served(d); !slices.Equal(got, helloOnly) {
+		t.Errorf("the new key: served %v", got)
+	}
+	var carried *time.Time
+	if err := e.pool.QueryRow(ctx, `select revoked_at from kontra.key_services where key_id = $1 and service = 'recon'`, nk.kid).
+		Scan(&carried); err != nil {
+		t.Fatalf("the new key has no recon row: %v", err)
+	}
+	if carried == nil || !carried.Equal(revokedAt) {
+		t.Errorf("the new key's recon row: revoked_at %v, want the old row's %s", carried, revokedAt)
+	}
+	if got, err := e.store.Recipients(ctx, e.team, "recon"); err != nil || len(got) != 0 {
+		t.Errorf("recon's recipients %v %v: a carried revoked row grants nothing", got, err)
+	}
+	ev := e.verifyAudit()
+	var rotated map[string]any
+	for _, r := range ev {
+		if r["event"] == EventRotated {
+			rotated = r
+		}
+	}
+	if s, ok := rotated["services"].([]any); !ok || len(s) != 1 || s[0] != "hello" {
+		t.Errorf("rotation audit services %v", rotated["services"])
+	}
+	if s, ok := rotated["revoked_services"].([]any); !ok || len(s) != 1 || s[0] != "recon" {
+		t.Errorf("rotation audit revoked_services %v", rotated["revoked_services"])
+	}
+	// A fresh token enrolls the new key for recon again.
+	h := hello(nk, a2a("hello"), a2a("recon"))
+	h.Enroll = []string{e.token(e.team, "recon")}
+	if d := e.mustAdmit(nk, h); len(d.Served) != 2 {
+		t.Errorf("re-enrolling recon for the new key: served %v", served(d))
+	}
+	e.verifyAudit()
 }

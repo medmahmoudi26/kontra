@@ -42,11 +42,38 @@ func (s *Store) LookupKey(ctx context.Context, keyID string) (*Key, error) {
 	return &k, nil
 }
 
+// successorHops bounds Successor's walk of a rotation chain.
+const successorHops = 64
+
+// Successor follows a key's rotated_to chain (§12) to the newest key and returns that key's row, nil when
+// the key was never rotated. RevokeKey and RevokeBinding do not follow the chain, so the operator's
+// commands use it to say which key still serves the node.
+func (s *Store) Successor(ctx context.Context, keyID string) (*Key, error) {
+	cur, err := s.LookupKey(ctx, keyID)
+	if err != nil {
+		return nil, err
+	}
+	var last *Key
+	seen := map[string]bool{keyID: true}
+	for hops := 0; cur.RotatedTo != ""; hops++ {
+		if hops == successorHops || seen[cur.RotatedTo] {
+			return nil, fmt.Errorf("enroll: the rotations of %s do not end within %d keys", keyID, successorHops)
+		}
+		seen[cur.RotatedTo] = true
+		if cur, err = s.LookupKey(ctx, cur.RotatedTo); err != nil {
+			return nil, err
+		}
+		last = cur
+	}
+	return last, nil
+}
+
 // RevokeKey sets tunnel_keys.revoked_at (reason owner or operator), appends the audit row and sends
 // NOTIFY kontra_revoke 'key:<key_id>' in one transaction (§12, `kontra-gate enroll --revoke <key_id>`).
 // The replica holding the key's session closes it on the notification (or at its next re-read), and the
 // key's next handshake is revoked. A key already revoked is left as it is (nil); an unknown id is
-// ErrKeyNotFound. Revoking a rotated key inside its overlap ends the overlap at once.
+// ErrKeyNotFound. Revoking a rotated key inside its overlap ends the overlap at once; the key it was
+// rotated to stays enrolled (Successor; see the SPEC-CONFLICT on `kontra-gate enroll --revoke`).
 func (s *Store) RevokeKey(ctx context.Context, keyID, reason, actor string) error {
 	switch reason {
 	case ReasonOwner, ReasonOperator, ReasonExpired:

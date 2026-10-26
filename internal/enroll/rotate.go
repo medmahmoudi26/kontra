@@ -2,6 +2,7 @@ package enroll
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -49,22 +50,48 @@ func (a *admission) checkRotation(ctx context.Context) error {
 }
 
 // rotate completes a rotation whose new key write already inserted in the old key's tenant: it copies the
-// old key's active key_services rows to the new key and marks the old key revoked_reason = 'rotated',
+// old key's key_services rows to the new key and marks the old key revoked_reason = 'rotated',
 // rotated_to = <new>, overlap_until = now + 24 h (revoked_at is set when the overlap ends, EndOverlaps), with
 // its audit row. It returns the old key as it now is.
+//
+// SPEC-CONFLICT (§12 "copies its active key_services rows", with §5 and §4; M2 WP-02 review): a revoked row
+// is copied too, keeping its revoked_at. It grants nothing (it stays out of Served, the relay's candidates
+// and Recipients), but it keeps §5's rule for the new key: a declared service whose binding was revoked is
+// left out and the handshake succeeds. Copying only the active rows would turn that service into one the
+// new key "was never enrolled for", so the new key's next handshake with the node's unchanged --serve (the
+// redial after a lost welcome, which the audit's C2 protocol relies on, or a restart) would be
+// service_denied, which is final and all-or-nothing: the node would lose every service.
 func (a *admission) rotate(ctx context.Context) (*Key, error) {
 	oldID, newID := a.old.KeyID, a.key.KeyID
 	rows, err := a.tx.Query(ctx, `
-		insert into kontra.key_services (key_id, tenant_id, service)
-		select $1, tenant_id, service from kontra.key_services where key_id = $2 and revoked_at is null
-		returning service`, newID, oldID)
+		insert into kontra.key_services (key_id, tenant_id, service, revoked_at)
+		select $1, tenant_id, service, revoked_at from kontra.key_services where key_id = $2
+		returning service, revoked_at is not null`, newID, oldID)
 	if err != nil {
 		return nil, err
 	}
-	copied, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	type row struct {
+		service string
+		revoked bool
+	}
+	got, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (row, error) {
+		var x row
+		err := r.Scan(&x.service, &x.revoked)
+		return x, err
+	})
 	if err != nil {
 		return nil, err
 	}
+	copied, revokedCopies := []string{}, []string{}
+	for _, x := range got {
+		if x.revoked {
+			revokedCopies = append(revokedCopies, x.service)
+		} else {
+			copied = append(copied, x.service)
+		}
+	}
+	sort.Strings(copied)
+	sort.Strings(revokedCopies)
 	var overlap time.Time
 	err = a.tx.QueryRow(ctx, `
 		update kontra.tunnel_keys
@@ -74,20 +101,18 @@ func (a *admission) rotate(ctx context.Context) (*Key, error) {
 	if err != nil {
 		return nil, err
 	}
-	if copied == nil {
-		copied = []string{}
-	}
 	if _, err := audit.Append(ctx, a.tx, EventRotated, audit.Fields{
-		"actor":         "tunnel handshake",
-		"old_key":       oldID,
-		"new_key":       newID,
-		"tenant":        a.old.Tenant,
-		"tenant_id":     a.old.TenantID,
-		"node_name":     a.h.Name,
-		"services":      copied,
-		"overlap_until": overlap,
-		"session_id":    a.req.SessionID,
-		"replica_id":    a.req.ReplicaID,
+		"actor":            "tunnel handshake",
+		"old_key":          oldID,
+		"new_key":          newID,
+		"tenant":           a.old.Tenant,
+		"tenant_id":        a.old.TenantID,
+		"node_name":        a.h.Name,
+		"services":         copied,
+		"revoked_services": revokedCopies,
+		"overlap_until":    overlap,
+		"session_id":       a.req.SessionID,
+		"replica_id":       a.req.ReplicaID,
 	}); err != nil {
 		return nil, err
 	}

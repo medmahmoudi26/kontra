@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/tunnel"
@@ -382,7 +383,11 @@ func TestRevocationsReenrolledBinding(t *testing.T) {
 	k := e.enrolled("hello", "recon")
 	r := NewRevocations(e.pool)
 	r.Catchup()
-	r.Notify("binding:" + k.kid + "/hello") // not revoked: nothing marked
+	r.Notify("binding:" + k.kid + "/hello") // held at once (fail closed), then its row, not revoked, clears it
+	if !r.BindingRevoked(k.kid, "hello") {
+		t.Error("a binding NOTIFY is not held until its row is read")
+	}
+	r.drainers.Wait()
 	if r.BindingRevoked(k.kid, "hello") {
 		t.Error("an active binding marked revoked from a NOTIFY")
 	}
@@ -412,6 +417,7 @@ func TestRevocationsReenrolledBinding(t *testing.T) {
 	// A key whose row is gone (its tenant deleted) is revoked as far as the view knows.
 	gone := "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
 	r.Notify("key:" + gone)
+	r.drainers.Wait()
 	if r.KeyUsable(gone, time.Now()) {
 		t.Error("a NOTIFY for a key with no row left it usable")
 	}
@@ -423,5 +429,117 @@ func TestRevocationsReenrolledBinding(t *testing.T) {
 	}
 	if ok, err := r.Usable(ctx, k.kid, "recon"); err != nil || ok {
 		t.Errorf("Usable(revoked key) = %v %v", ok, err)
+	}
+}
+
+// A binding revoked, enrolled again and revoked again is two revocations, and the view emits each, by
+// NOTIFY or by re-read: an enrollment sends no NOTIFY, so the view may still hold the first revocation when
+// the second arrives, and tells them apart by revoked_at.
+func TestRevocationsBindingRevokedAgain(t *testing.T) {
+	for _, notify := range []bool{true, false} {
+		e := newPGEnv(t)
+		ctx := context.Background()
+		e.service(e.team, "hello", "a2a", false)
+		e.service(e.team, "recon", "a2a", false)
+		k := e.enrolled("hello", "recon")
+		r, revs := e.revocationsFor(time.Hour, notify)
+		want := Revocation{KeyID: k.kid, Service: "recon"}
+		for i := range 3 {
+			if err := e.store.RevokeBinding(ctx, k.kid, "recon", "t"); err != nil {
+				t.Fatal(err)
+			}
+			if !notify {
+				r.Catchup()
+			}
+			select {
+			case rev := <-revs:
+				if rev != want {
+					t.Errorf("notify %v, revocation %d: %+v", notify, i+1, rev)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("notify %v: revocation %d of the same binding was never emitted", notify, i+1)
+			}
+			if !r.BindingRevoked(k.kid, "recon") {
+				t.Errorf("notify %v, revocation %d: not held", notify, i+1)
+			}
+			h := hello(k, a2a("hello"), a2a("recon"))
+			h.Enroll = []string{e.token(e.team, "recon")}
+			if d := e.mustAdmit(k, h); len(d.Served) != 2 {
+				t.Fatalf("re-enrolling recon: served %v", served(d))
+			}
+		}
+		// The next re-read forgets the binding enrolled again, and emits nothing.
+		r.Catchup()
+		if r.BindingRevoked(k.kid, "recon") {
+			t.Errorf("notify %v: the binding enrolled again is still held as revoked after a re-read", notify)
+		}
+		select {
+		case rev := <-revs:
+			t.Errorf("notify %v: emitted again: %+v", notify, rev)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// Notify never waits on the database (pg.Listener runs every channel's callbacks on one goroutine): with the
+// view's pool exhausted it returns at once, the key and the binding are refused at once (fail closed), and
+// each revocation is emitted once, with the key's reason, when a connection is free.
+func TestRevocationsNotifyDoesNotBlock(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	e.service(e.team, "hello", "a2a", false)
+	k := e.enrolled("hello")
+	b := e.enrolled("hello")
+	cfg, err := pgxpool.ParseConfig(e.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	r := NewRevocations(pool)
+	revs := make(chan Revocation, 8)
+	r.Subscribe(func(rev Revocation) { revs <- rev })
+	r.Catchup()
+	if err := e.store.RevokeKey(ctx, k.kid, ReasonOwner, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.RevokeBinding(ctx, b.kid, "hello", "t"); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pool.Acquire(ctx) // the view's only connection
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	r.Notify(KeyRevokePayload(k.kid))
+	r.Notify(BindingRevokePayload(b.kid, "hello"))
+	took := time.Since(start)
+	refused := !r.KeyUsable(k.kid, time.Now()) && r.BindingRevoked(b.kid, "hello")
+	conn.Release()
+	if took > 250*time.Millisecond {
+		t.Errorf("Notify waited %s on an exhausted pool", took)
+	}
+	if !refused {
+		t.Error("the key or the binding is usable until its row is read")
+	}
+	got := map[Revocation]int{}
+	for range 2 {
+		rev, _ := waitRevocation(t, revs, 3*time.Second)
+		got[rev]++
+	}
+	for _, want := range []Revocation{{KeyID: k.kid, Reason: ReasonOwner}, {KeyID: b.kid, Service: "hello"}} {
+		if got[want] != 1 {
+			t.Errorf("emitted %v, want %+v once", got, want)
+		}
+	}
+	r.Catchup()
+	select {
+	case rev := <-revs:
+		t.Errorf("emitted again: %+v", rev)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

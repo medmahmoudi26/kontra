@@ -53,10 +53,15 @@ const (
 // the inserts and the audit rows. A refusal is a *tunnel.HandshakeError; anything else is the gate's own
 // failure.
 //
-// The key's row is locked (SELECT … FOR UPDATE) for the whole transaction, so concurrent handshakes of one
-// key serialize: a rotation, an enrollment and a revocation of it see each other's commits. The tokens are
-// consumed in sorted order with UPDATE … SET used_at = now() … WHERE used_at IS NULL AND expires_at > now()
-// RETURNING, so of concurrent handshakes presenting one token exactly one commits it.
+// The key's row is locked (SELECT … FOR UPDATE) for the whole of Admit's transaction, so concurrent
+// admissions of one key serialize: a rotation, an enrollment and a revocation of it see each other's
+// commits. The lock ends when Admit commits, before the session is registered, so it does not serialize
+// two handshakes of one key through the registry: both are admitted, one after the other, and then race
+// in tunnelgate.Registry.Add. The M2 audit's row lock "on tunnel_keys in Add so concurrent handshakes of
+// one key serialize" (confirmed conflict on §11 and §5) is therefore still open for WP-04: Add must lock
+// the key's tunnel_keys row in its supersede transaction. The tokens are consumed in sorted order with
+// UPDATE … SET used_at = now() … WHERE used_at IS NULL AND expires_at > now() RETURNING, so of concurrent
+// handshakes presenting one token exactly one commits it.
 //
 // Precedence. The checks run in this order and the first refusal wins (the M2 plan audit asked for one,
 // relay.md §16 key_scope):
@@ -79,6 +84,9 @@ const (
 //     scope, a disabled or non-tunnel one, a tenant token for a service that already has a key).
 //
 // So a hello carrying a consumed token and a service nothing enrolls is enroll_invalid, not service_denied.
+// A declared service whose binding was revoked is never refused: it is left out of Served (§5), and only a
+// one-time token in the hello enrolls it again, never the auth API key's enroll: scope (SPEC-CONFLICT in
+// run).
 func (s *Store) Admit(ctx context.Context, req Request) (*Decision, error) {
 	if err := checkRequest(req); err != nil {
 		return nil, err
@@ -281,8 +289,8 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 		}
 	}
 
-	// The key's bindings: its own, or the old key's on a rotation (the active ones are copied; a revoked one
-	// is left out of the served set as it was before the rotation).
+	// The key's bindings: its own, or the old key's on a rotation (every row is copied with its revoked_at,
+	// so a revoked one is left out of the served set as it was before the rotation, and stays so).
 	bindings, err := a.bindings(ctx)
 	if err != nil {
 		return nil, err
@@ -290,6 +298,13 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 
 	// Which authority enrolls each declared service that is not bound yet: a service token, else an enroll:
 	// scope, else a tenant token (the narrowest authority last: it never adds a key to a served service).
+	//
+	// SPEC-CONFLICT (§5, §12; M2 WP-02 review): a declared service whose binding was revoked is "left out"
+	// (§5), and §5 does not say what may enroll it again. The auth API key never does: it rides on every
+	// hello as the hiring principal, so with an enroll: scope it would undo the operator's revocation at the
+	// node's next handshake (a restart with the same --serve). Only a one-time token in this hello, a service
+	// token or a tenant token under its own rule, enrolls a revoked binding again: minting one is the
+	// operator's explicit act. The owner decides whether a revoked binding may be enrolled again at all.
 	scopes := a.principal != nil && a.s.opts.EnrollWithAPIKey
 	plans := make([]*planned, len(h.Services))
 	enrolls, usesScope := false, false
@@ -308,7 +323,8 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 				break
 			}
 		}
-		if p.via == "" && scopes && (a.principal.HasScope(auth.ScopeEnrollAll) || a.principal.HasScope(auth.EnrollScope(d.Name))) {
+		if p.via == "" && !p.revoked && scopes &&
+			(a.principal.HasScope(auth.ScopeEnrollAll) || a.principal.HasScope(auth.EnrollScope(d.Name))) {
 			p.via = viaAPIKey
 			usesScope = true
 		}

@@ -395,6 +395,14 @@ func enrollToken(ctx context.Context, file, service string, stdout, stderr io.Wr
 //
 // SPEC-CONFLICT (M2 plan, C9): §12 names `kontra-gate enroll --revoke <key_id>` for a key and no command for
 // one binding; --service is the plan's proposal (operator CLI, not wire protocol).
+//
+// SPEC-CONFLICT (§12, §15; M2 WP-02 review): §15 says Revoke ends "the session and every future handshake"
+// of a stolen identity key, but a rotation (§12) needs only proof of the old key, so a thief can rotate the
+// stolen key to one of their own first; revoking the stolen key id then leaves the thief's successor
+// enrolled. Revocation does not follow rotated_to: a rotation is often made because the old key leaked, and
+// revoking the old key afterwards only ends its overlap early. So the command names the newest key of the
+// chain when it is still enrolled, and how to revoke it; the owner decides whether Revoke should follow the
+// chain (or offer a flag that does).
 func enrollRevoke(ctx context.Context, file, keyID, service string, stderr io.Writer) error {
 	if !config.NodeKeyIDRE.MatchString(keyID) {
 		return usageError{fmt.Sprintf("enroll: --revoke %q: want a node key id, k1_ and 26 base32 characters", keyID)}
@@ -419,18 +427,34 @@ func enrollRevoke(ctx context.Context, file, keyID, service string, stderr io.Wr
 	if err != nil {
 		return err
 	}
+	// The newest key of the chain this key was rotated along, when it is still enrolled.
+	var successor *enrollpkg.Key
+	if before.RotatedTo != "" {
+		k, err := store.Successor(ctx, keyID)
+		if err != nil {
+			return err
+		}
+		if k != nil && k.RevokedAt == nil {
+			successor = k
+		}
+	}
 	const actor = "kontra-gate enroll --revoke"
 	if service == "" {
 		if before.RevokedAt != nil {
 			fmt.Fprintf(stderr, "node key %s (%s, tenant %s) was already revoked at %s\n", keyID, before.NodeName, before.Tenant,
 				before.RevokedAt.UTC().Format(time.RFC3339))
-			return nil
+		} else {
+			if err := store.RevokeKey(ctx, keyID, enrollpkg.ReasonOperator, actor); err != nil {
+				return err
+			}
+			fmt.Fprintf(stderr, "revoked node key %s (%s, tenant %s): its session closes and its next handshake is refused\n",
+				keyID, before.NodeName, before.Tenant)
 		}
-		if err := store.RevokeKey(ctx, keyID, enrollpkg.ReasonOperator, actor); err != nil {
-			return err
+		if successor != nil {
+			fmt.Fprintf(stderr, "warning: node key %s was rotated to %s (%s), which stays enrolled and keeps serving the node's services; "+
+				"to cut the node off, revoke it too: kontra-gate enroll -f %s --revoke %s\n", keyID, successor.KeyID, successor.NodeName,
+				file, successor.KeyID)
 		}
-		fmt.Fprintf(stderr, "revoked node key %s (%s, tenant %s): its session closes and its next handshake is refused\n",
-			keyID, before.NodeName, before.Tenant)
 		return nil
 	}
 	err = store.RevokeBinding(ctx, keyID, service, actor)
@@ -442,6 +466,11 @@ func enrollRevoke(ctx context.Context, file, keyID, service string, stderr io.Wr
 	}
 	fmt.Fprintf(stderr, "revoked the binding of node key %s (%s, tenant %s) to %s: its session stops serving %s\n",
 		keyID, before.NodeName, before.Tenant, service, service)
+	if successor != nil {
+		fmt.Fprintf(stderr, "warning: node key %s was rotated to %s (%s), which has its own copy of the binding: unless that was revoked "+
+			"too, the node keeps serving %s; revoke it with: kontra-gate enroll -f %s --revoke %s --service %s\n", keyID,
+			successor.KeyID, successor.NodeName, service, file, successor.KeyID, service)
+	}
 	return nil
 }
 

@@ -400,3 +400,59 @@ func TestEnrollRevoke(t *testing.T) {
 		t.Errorf("an unknown key: %v", err)
 	}
 }
+
+// Revoking a rotated key, or one of its bindings, says that the key it was rotated to (the newest of the
+// chain) stays enrolled and keeps serving: revocation never follows rotated_to (SPEC-CONFLICT, main.go), so
+// the operator is told to revoke that key too. A successor already revoked is not mentioned.
+func TestEnrollRevokeRotatedKey(t *testing.T) {
+	dsn := pgtest.Database(t)
+	cfg := writeConfig(t, dsn, tunnelServices)
+	ctx := context.Background()
+	if _, err := runCmd(t, "migrate", "-f", cfg); err != nil {
+		t.Fatal(err)
+	}
+	pool := pgtest.Pool(t, dsn)
+	gateRows(t, pool)
+	tok, _, err := runSplit(t, "enroll", "-f", cfg, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := newNodeKey(t)
+	if _, err := admitWith(t, pool, old, []string{"hello"}, strings.TrimSpace(tok)); err != nil {
+		t.Fatal(err)
+	}
+	rotate := func(from, to nodeKey) {
+		t.Helper()
+		h := &tunnel.Hello{T: tunnel.MsgHello, V: tunnel.Version, Origin: "http://localhost:8080", KID: to.kid, Recipient: to.recipient,
+			Name: "box", Agent: "kontra/test", Services: []tunnel.Service{{Kind: tunnel.KindA2A, Name: "hello"}},
+			RotateFrom: &tunnel.KeyRef{KID: from.kid, Recipient: from.recipient}}
+		store := enrollpkg.NewStore(pool, enrollpkg.Options{PublicURL: "http://localhost:8080"})
+		if _, err := store.Admit(ctx, enrollpkg.Request{Hello: h, PubKey: to.pub, OldPubKey: from.pub, SessionID: uuid.Must(uuid.NewV7())}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mid, newest := newNodeKey(t), newNodeKey(t)
+	rotate(old, mid)
+	rotate(mid, newest)
+
+	_, stderr, err := runSplit(t, "enroll", "-f", cfg, "--revoke", old.kid, "--service", "hello")
+	if err != nil || !strings.Contains(stderr, newest.kid) || !strings.Contains(stderr, "--revoke "+newest.kid+" --service hello") {
+		t.Errorf("--revoke a rotated key's binding: %q %v, want it to name %s and how to revoke its binding", stderr, err, newest.kid)
+	}
+	_, stderr, err = runSplit(t, "enroll", "-f", cfg, "--revoke", old.kid)
+	if err != nil || !strings.Contains(stderr, "revoked node key "+old.kid) || !strings.Contains(stderr, newest.kid) ||
+		!strings.Contains(stderr, "stays enrolled") {
+		t.Errorf("--revoke a rotated key: %q %v, want it to say that %s stays enrolled", stderr, err, newest.kid)
+	}
+	// So it does: the newest key still connects and serves hello.
+	if d, err := admitWith(t, pool, newest, []string{"hello"}); err != nil || len(d.Served) != 1 {
+		t.Errorf("the successor after its predecessor's revocation: %+v %v", d, err)
+	}
+	if _, stderr, err = runSplit(t, "enroll", "-f", cfg, "--revoke", newest.kid); err != nil || strings.Contains(stderr, "stays enrolled") {
+		t.Errorf("--revoke the newest key: %q %v", stderr, err)
+	}
+	// Once the successor is revoked, the rotated keys say nothing more about it.
+	if _, stderr, err = runSplit(t, "enroll", "-f", cfg, "--revoke", mid.kid); err != nil || strings.Contains(stderr, newest.kid) {
+		t.Errorf("--revoke a rotated key whose successor is revoked: %q %v", stderr, err)
+	}
+}

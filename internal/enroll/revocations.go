@@ -2,7 +2,6 @@ package enroll
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -35,9 +34,11 @@ const (
 	// a revocation committed learns of it from Subscribe; this covers a session registered just after the
 	// revocation was delivered (its admission read the row before the revocation committed).
 	revocationRetain = 10 * time.Minute
-	// revocationReadTimeout bounds one re-read; notifyReadTimeout the read of one row on a NOTIFY.
+	// revocationReadTimeout bounds one re-read; notifyReadTimeout the read of the rows of a batch of NOTIFY
+	// payloads, at most notifyBatch of them.
 	revocationReadTimeout = 5 * time.Second
 	notifyReadTimeout     = time.Second
+	notifyBatch           = 1000
 )
 
 // Revocations is the replica's view of revoked node keys and key–service bindings (relay.md §2.3, the
@@ -59,11 +60,14 @@ type Revocations struct {
 
 	mu        sync.Mutex
 	keys      map[string]*keyState
-	bindings  map[bindingRef]time.Time // revoked binding → when it was revoked (the database's clock)
+	bindings  map[bindingRef]*bindingState
 	subs      []func(Revocation)
 	watermark time.Time // the database's clock at the start of the last successful read
 	lastOK    time.Time // this process's clock at the start of the last successful read
 	kick      chan struct{}
+	pending   []notice // NOTIFY payloads whose rows drain has still to read
+	draining  bool     // a drain goroutine is running
+	drainers  sync.WaitGroup
 
 	readMu sync.Mutex // one re-read at a time
 	emitMu sync.Mutex // subscribers are called one revocation at a time, in the order learned
@@ -71,12 +75,26 @@ type Revocations struct {
 
 type bindingRef struct{ key, service string }
 
+// notice is one kontra_revoke payload of the tunnel: a key ("key:<key_id>", service empty) or a binding.
+type notice struct{ key, service string }
+
 // keyState is a key the view holds: revoked, or rotated and inside its overlap.
 type keyState struct {
-	revokedAt    *time.Time // nil: rotated, not revoked yet
+	revokedAt *time.Time // nil: rotated, not revoked yet
+	// fromPayload: revokedAt was set from a NOTIFY payload whose row has not been read yet (Notify).
+	fromPayload  bool
 	reason       string
 	overlapUntil *time.Time
 	emitted      bool
+}
+
+// bindingState is a binding the view holds as revoked.
+type bindingState struct {
+	// at is the row's revoked_at when exact; otherwise when the view learned of the revocation (the
+	// database's clock): from a NOTIFY payload whose row is not read yet, is gone, or could not be read.
+	at      time.Time
+	exact   bool
+	emitted bool
 }
 
 // RevocationsOption configures a Revocations.
@@ -97,7 +115,7 @@ func NewRevocations(db *pgxpool.Pool, opts ...RevocationsOption) *Revocations {
 		interval: RevocationRefresh,
 		retain:   revocationRetain,
 		keys:     map[string]*keyState{},
-		bindings: map[bindingRef]time.Time{},
+		bindings: map[bindingRef]*bindingState{},
 		kick:     make(chan struct{}, 1),
 	}
 	for _, o := range opts {
@@ -127,75 +145,215 @@ func (r *Revocations) Run(ctx context.Context) error {
 }
 
 // Notify applies one kontra_revoke payload (pg.Listener.OnChannel); API key payloads are auth's, and
-// anything else is ignored (the tables are the truth). The row is read to learn the reason; when it cannot
-// be read, the payload alone marks the key or binding revoked (the NOTIFY is delivered only once the
-// revoking transaction committed) and a re-read is asked for. A binding whose row says it is not revoked
-// (enrolled again since) is not marked.
+// anything else is ignored (the tables are the truth). It never waits on the database: pg.Listener runs
+// every channel's callbacks (kontra_services, the API key revocation cache, the registry's) one at a time
+// on one goroutine, which a read here would hold up for as long as the pool is busy.
+//
+// The payload marks the key or binding revoked at once (fail closed: the NOTIFY is delivered only once the
+// revoking transaction committed, and only a revocation sends one), so KeyUsable and BindingRevoked turn
+// before any row is read. The view's own goroutine then reads the rows of the payloads queued meanwhile
+// (one statement per kind) and emits each revocation with what the row says (the key's reason). A row that
+// is gone is a revocation too (its tenant was deleted); a row that cannot be read leaves the payload's
+// mark, emits it without a reason and asks for a re-read; a binding whose row is not revoked (enrolled
+// again since) loses the payload's mark.
 func (r *Revocations) Notify(payload string) {
+	var n notice
 	switch {
 	case strings.HasPrefix(payload, revokeKeyPrefix):
-		id := strings.TrimPrefix(payload, revokeKeyPrefix)
-		if !config.NodeKeyIDRE.MatchString(id) {
+		n.key = strings.TrimPrefix(payload, revokeKeyPrefix)
+		if !config.NodeKeyIDRE.MatchString(n.key) {
 			r.log.Debug("node revocations: unreadable payload", "payload", payload)
 			return
 		}
-		r.notifyKey(id)
 	case strings.HasPrefix(payload, revokeBindingPrefix):
 		id, svc, ok := strings.Cut(strings.TrimPrefix(payload, revokeBindingPrefix), "/")
 		if !ok || !config.NodeKeyIDRE.MatchString(id) || !config.NameRE.MatchString(svc) {
 			r.log.Debug("node revocations: unreadable payload", "payload", payload)
 			return
 		}
-		r.notifyBinding(id, svc)
-	}
-}
-
-func (r *Revocations) notifyKey(id string) {
-	ctx, cancel := context.WithTimeout(context.Background(), notifyReadTimeout)
-	defer cancel()
-	var (
-		at, overlap *time.Time
-		reason      string
-	)
-	err := r.db.QueryRow(ctx, `select revoked_at, coalesce(revoked_reason, ''), overlap_until
-		from kontra.tunnel_keys where key_id = $1`, id).Scan(&at, &reason, &overlap)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		r.emit(r.markKey(id, nil, "", nil)) // the key is gone (its tenant was deleted): it serves nothing
-	case err != nil:
-		r.log.Warn("node revocations: the revoked key's row could not be read; marked from the NOTIFY", "key_id", id, "error", err)
-		r.emit(r.markKey(id, nil, "", nil))
-		r.askRead()
-	case at == nil:
-		// Not revoked (the table is the truth): at most a rotation's overlap to note.
-		if overlap != nil {
-			r.emit(r.markKey(id, nil, reason, overlap))
-		}
+		n = notice{key: id, service: svc}
 	default:
-		r.emit(r.markKey(id, at, reason, overlap))
+		return
+	}
+	r.mu.Lock()
+	if n.service == "" {
+		r.holdKeyLocked(n.key)
+	} else {
+		r.holdBindingLocked(bindingRef{n.key, n.service})
+	}
+	r.pending = append(r.pending, n)
+	start := !r.draining
+	if start {
+		r.draining = true
+		r.drainers.Add(1)
+	}
+	r.mu.Unlock()
+	if start {
+		go r.drain()
 	}
 }
 
-func (r *Revocations) notifyBinding(id, svc string) {
-	ctx, cancel := context.WithTimeout(context.Background(), notifyReadTimeout)
-	defer cancel()
-	var at *time.Time
-	err := r.db.QueryRow(ctx, `select revoked_at from kontra.key_services where key_id = $1 and service = $2`, id, svc).Scan(&at)
-	ref := bindingRef{id, svc}
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		r.emit(r.markBinding(ref, nil))
-	case err != nil:
-		r.log.Warn("node revocations: the revoked binding's row could not be read; marked from the NOTIFY", "key_id", id, "service", svc, "error", err)
-		r.emit(r.markBinding(ref, nil))
-		r.askRead()
-	case at == nil:
+// holdKeyLocked marks a key revoked from its NOTIFY payload, until drain reads its row.
+func (r *Revocations) holdKeyLocked(id string) {
+	st := r.keys[id]
+	if st == nil {
+		st = &keyState{}
+		r.keys[id] = st
+	}
+	if st.revokedAt == nil {
+		t := r.clock()
+		st.revokedAt, st.fromPayload = &t, true
+	}
+}
+
+// holdBindingLocked marks a binding revoked from its NOTIFY payload, until drain reads its row. A binding
+// already held stays as it is: the row's revoked_at tells a new revocation from the one held.
+func (r *Revocations) holdBindingLocked(ref bindingRef) {
+	if r.bindings[ref] == nil {
+		r.bindings[ref] = &bindingState{at: r.clock()}
+	}
+}
+
+// drain reads the rows of the queued NOTIFY payloads, a batch at a time, until none is left.
+func (r *Revocations) drain() {
+	defer r.drainers.Done()
+	for {
 		r.mu.Lock()
-		delete(r.bindings, ref)
+		if len(r.pending) == 0 {
+			r.draining = false
+			r.mu.Unlock()
+			return
+		}
+		n := min(len(r.pending), notifyBatch)
+		batch := r.pending[:n:n]
+		r.pending = append([]notice(nil), r.pending[n:]...)
 		r.mu.Unlock()
-	default:
-		r.emit(r.markBinding(ref, at))
+		r.apply(batch)
 	}
+}
+
+// noticedKey is a tunnel_keys row read for a NOTIFY payload.
+type noticedKey struct {
+	at, overlap *time.Time
+	reason      string
+}
+
+// apply reads the rows the batch names and applies each payload in order.
+func (r *Revocations) apply(batch []notice) {
+	ctx, cancel := context.WithTimeout(context.Background(), notifyReadTimeout)
+	defer cancel()
+	var keyIDs, bindingKeys, bindingServices []string
+	for _, n := range batch {
+		if n.service == "" {
+			keyIDs = append(keyIDs, n.key)
+		} else {
+			bindingKeys = append(bindingKeys, n.key)
+			bindingServices = append(bindingServices, n.service)
+		}
+	}
+	keys, bindings, err := r.readNoticed(ctx, keyIDs, bindingKeys, bindingServices)
+	if err != nil {
+		r.log.Warn("node revocations: the revoked rows could not be read; marked from the NOTIFY", "payloads", len(batch), "error", err)
+	}
+	var learned []Revocation
+	r.mu.Lock()
+	for _, n := range batch {
+		if n.service == "" {
+			k, ok := keys[n.key]
+			switch {
+			case err != nil || !ok:
+				// Unreadable, or the key is gone (its tenant was deleted): it serves nothing.
+				learned = append(learned, r.markKeyLocked(n.key, nil, "", nil)...)
+			case k.at == nil:
+				// Not revoked (the table is the truth): drop the payload's mark, keep a rotation's overlap.
+				if st := r.keys[n.key]; st != nil && st.fromPayload {
+					st.revokedAt, st.fromPayload = nil, false
+					if st.overlapUntil == nil && k.overlap == nil {
+						delete(r.keys, n.key)
+					}
+				}
+				if k.overlap != nil {
+					learned = append(learned, r.markKeyLocked(n.key, nil, k.reason, k.overlap)...)
+				}
+			default:
+				learned = append(learned, r.markKeyLocked(n.key, k.at, k.reason, k.overlap)...)
+			}
+			continue
+		}
+		ref := bindingRef{n.key, n.service}
+		at, ok := bindings[ref]
+		switch {
+		case err != nil || !ok:
+			learned = append(learned, r.markBindingLocked(ref, nil)...)
+		case at == nil:
+			// Enrolled again since: drop the payload's mark. A dated revocation stays until a re-read clears
+			// it: a re-read may have learned it after this read (fail closed).
+			if st := r.bindings[ref]; st != nil && !st.exact {
+				delete(r.bindings, ref)
+			}
+		default:
+			learned = append(learned, r.markBindingLocked(ref, at)...)
+		}
+	}
+	r.mu.Unlock()
+	if err != nil {
+		r.askRead()
+	}
+	r.emit(learned)
+}
+
+// readNoticed reads the tunnel_keys rows of keyIDs and the key_services rows of the (key, service) pairs:
+// a key or binding absent from the maps has no row; a binding mapped to nil is not revoked.
+func (r *Revocations) readNoticed(ctx context.Context, keyIDs, bindingKeys, bindingServices []string) (map[string]noticedKey, map[bindingRef]*time.Time, error) {
+	keys := map[string]noticedKey{}
+	if len(keyIDs) > 0 {
+		rows, err := r.db.Query(ctx, `select key_id, revoked_at, coalesce(revoked_reason, ''), overlap_until
+			from kontra.tunnel_keys where key_id = any($1::text[])`, keyIDs)
+		if err != nil {
+			return nil, nil, err
+		}
+		type row struct {
+			id string
+			k  noticedKey
+		}
+		got, err := pgx.CollectRows(rows, func(cr pgx.CollectableRow) (row, error) {
+			var x row
+			err := cr.Scan(&x.id, &x.k.at, &x.k.reason, &x.k.overlap)
+			return x, err
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, x := range got {
+			keys[x.id] = x.k
+		}
+	}
+	bindings := map[bindingRef]*time.Time{}
+	if len(bindingKeys) > 0 {
+		rows, err := r.db.Query(ctx, `
+			select ks.key_id, ks.service, ks.revoked_at
+			  from kontra.key_services ks join unnest($1::text[], $2::text[]) as u(k, s) on ks.key_id = u.k and ks.service = u.s`,
+			bindingKeys, bindingServices)
+		if err != nil {
+			return nil, nil, err
+		}
+		type row struct {
+			ref bindingRef
+			at  *time.Time
+		}
+		got, err := pgx.CollectRows(rows, func(cr pgx.CollectableRow) (row, error) {
+			var x row
+			err := cr.Scan(&x.ref.key, &x.ref.service, &x.at)
+			return x, err
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, x := range got {
+			bindings[x.ref] = x.at
+		}
+	}
+	return keys, bindings, nil
 }
 
 func (r *Revocations) askRead() {
@@ -230,7 +388,7 @@ func (r *Revocations) markKeyLocked(id string, at *time.Time, reason string, ove
 	switch {
 	case at != nil:
 		t := *at
-		st.revokedAt = &t
+		st.revokedAt, st.fromPayload = &t, false
 	case overlap == nil && st.revokedAt == nil:
 		t := r.clock()
 		st.revokedAt = &t
@@ -248,15 +406,36 @@ func (r *Revocations) markBinding(ref bindingRef, at *time.Time) []Revocation {
 	return r.markBindingLocked(ref, at)
 }
 
+// markBindingLocked records a binding's revocation: at is its row's revoked_at, nil when the row is gone
+// or unreadable. It returns the revocation to emit, if the view has not emitted this one yet.
+//
+// A binding can be revoked, enrolled again and revoked again, and an enrollment sends no NOTIFY: until a
+// re-read forgets the first revocation, the view still holds it when the second arrives. So the row's
+// revoked_at tells them apart: a held revocation whose time differs from the row's is a new one, emitted
+// again. A revocation held from its NOTIFY alone (no time yet) that a row then dates is taken as the same
+// revocation: telling it from a later one would need the NOTIFY to carry the time, and the window (a
+// revocation whose row could not be read, enrolled and revoked again before the next successful read) is
+// one the registry already covers by reading the rows itself while the view is not Fresh.
 func (r *Revocations) markBindingLocked(ref bindingRef, at *time.Time) []Revocation {
-	if _, ok := r.bindings[ref]; ok {
+	st := r.bindings[ref]
+	switch {
+	case st == nil:
+		st = &bindingState{at: r.clock()}
+		if at != nil {
+			st.at, st.exact = *at, true
+		}
+		r.bindings[ref] = st
+	case at == nil:
+		// Learned again, without its time.
+	case !st.exact:
+		st.at, st.exact = *at, true
+	case !st.at.Equal(*at):
+		st.at, st.emitted = *at, false // revoked again after an enrollment the view had not seen
+	}
+	if st.emitted {
 		return nil
 	}
-	t := r.clock()
-	if at != nil {
-		t = *at
-	}
-	r.bindings[ref] = t
+	st.emitted = true
 	return []Revocation{{KeyID: ref.key, Service: ref.service}}
 }
 
@@ -303,8 +482,10 @@ func (r *Revocations) Catchup() {
 	}
 }
 
-// Subscribe registers fn for every revocation learned, by NOTIFY or re-read, once each. fn runs on the
-// goroutine that learned it (the LISTEN callbacks' or Run's) and must not block for long.
+// Subscribe registers fn for every revocation learned, by NOTIFY or re-read, once each (a binding revoked,
+// enrolled again and revoked again is two revocations). fn runs on the goroutine that learned it (the
+// view's NOTIFY reader, Run's, or Catchup's caller's), one revocation at a time, and must not block for
+// long.
 func (r *Revocations) Subscribe(fn func(Revocation)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -329,7 +510,9 @@ func (r *Revocations) KeyUsable(keyID string, now time.Time) bool {
 	return true
 }
 
-// BindingRevoked reports whether the key's binding to service was revoked.
+// BindingRevoked reports whether the key's binding to service was revoked. A binding enrolled again (an
+// enrollment sends no NOTIFY) is reported revoked until the next re-read forgets it (at most 3 s while
+// re-reads succeed): fail closed.
 func (r *Revocations) BindingRevoked(keyID, service string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -378,9 +561,11 @@ func (r *Revocations) refresh(ctx context.Context) error {
 		since = &s
 	}
 	var heldKeys, heldServices []string
-	for ref := range r.bindings {
+	held := make(map[bindingRef]bindingState, len(r.bindings))
+	for ref, st := range r.bindings {
 		heldKeys = append(heldKeys, ref.key)
 		heldServices = append(heldServices, ref.service)
+		held[ref] = *st
 	}
 	r.mu.Unlock()
 
@@ -478,13 +663,17 @@ func (r *Revocations) refresh(ctx context.Context) error {
 		}
 	}
 	for _, ref := range cleared {
-		delete(r.bindings, ref)
+		// Forget a binding enrolled again, unless the view learned a revocation of it since the snapshot
+		// above (a NOTIFY applied meanwhile): the read that cleared it may predate that revocation.
+		if st := r.bindings[ref]; st != nil && st.at.Equal(held[ref].at) && st.exact == held[ref].exact {
+			delete(r.bindings, ref)
+		}
 	}
 	for _, b := range bindings {
 		learned = append(learned, r.markBindingLocked(b.ref, &b.at)...)
 	}
-	for ref, at := range r.bindings {
-		if now.Sub(at) > r.retain {
+	for ref, st := range r.bindings {
+		if now.Sub(st.at) > r.retain {
 			delete(r.bindings, ref)
 		}
 	}

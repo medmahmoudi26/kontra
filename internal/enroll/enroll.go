@@ -16,8 +16,9 @@
 //
 // A token is consumed in the transaction that inserts key_services, after the proof verified. The
 // handshake is all-or-nothing: a declared service the key was never enrolled for and is not enrolling now
-// is service_denied and nothing is enrolled; a binding the operator revoked is left out of the served set.
-// The key's tenant is fixed by its first enrollment.
+// is service_denied and nothing is enrolled; a binding the operator revoked is left out of the served set
+// (a rotation carries it over revoked), and only a one-time token in a hello enrolls it again, never the
+// auth API key. The key's tenant is fixed by its first enrollment.
 //
 // Every query that recognizes a node key is keyed by its full public key (§2.2): a key id alone never
 // authenticates anything. Operator commands (revocation) name a key by its id, which is how operators see
