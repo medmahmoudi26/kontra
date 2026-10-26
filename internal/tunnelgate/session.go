@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
 
+	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/tunnel"
 )
@@ -36,6 +37,15 @@ type Session struct {
 	reg       *Registry // set by Registry.Add; nil for sessions no registry holds (the Handler's tests)
 	control   net.Conn  // the control stream, the first one the gate opened (set by the Handler)
 	controlMu sync.Mutex
+
+	// Hiring (spec/tunnel.md §9, §12; set by the Handler): the auth API key's principal as the admission
+	// authenticated it (nil: the session hires as node:<key_id>), whether it was found revoked, the NodeStreams
+	// that serve the session's node-opened streams, and their counts.
+	hire         *auth.Principal
+	hireRevoked  atomic.Bool
+	hiring       *NodeStreams
+	nodeAccepted atomic.Int64
+	nodeInFlight atomic.Int64
 
 	mu         sync.Mutex
 	served     map[string]string // service name → kind

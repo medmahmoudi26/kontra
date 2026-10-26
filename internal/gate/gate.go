@@ -316,6 +316,9 @@ func (r *Replica) assemble() error {
 		DB: r.pool, ReplicaID: r.id, Revocations: r.nodeKeys, Logger: log, LastPingEvery: r.opts.tunnelPing,
 	})
 	r.nodeKeys.Subscribe(r.tunnels.Revoked)
+	// An API key revocation (NOTIFY kontra_revoke 'apikey:<id>', or the re-read that finds it) reaches the
+	// sessions hiring with that key: 401 on their later streams, {"t": "auth_revoked"} (tunnel.md §12).
+	r.revoked.Subscribe(r.tunnels.APIKeyRevoked)
 	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
 	r.enroll = enroll.NewStore(r.pool, enroll.Options{
 		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti,
@@ -426,20 +429,41 @@ func (r *Replica) assemble() error {
 		}
 		routes.Handle("GET "+jws.JWKSPath, jwks)
 	}
+	ecfg, err := edge.FromConfig(cfg, log)
+	if err != nil {
+		return err
+	}
+	// The streams nodes open (tunnel.md §9, §8.3; D34): hiring requests are served by the same routes as the
+	// network's, behind an edge of their own whose per-address counts are per session (the session is the
+	// client, NodeStreams gives each its own address; never X-Forwarded-For) and whose in-flight cap is the
+	// session's stream cap; their principal is the session's (auth.HireSource); blob streams are served from
+	// the bucket for the tasks the session serves or hires.
+	//
+	// SPEC-CONFLICT (tunnel.md §9 "its edge limits are the session's (§6.2 for anonymous sessions; otherwise the
+	// API key's)"; relay.md §2.2): the edge counts in flight per presented credential and rates per client
+	// address, and a hiring request carries neither (the gate holds no API key secret after the handshake, and
+	// the session has no address of its own). The closest faithful behaviour: the edge's limits apply with the
+	// session as the client: limits.body and the body timeout as on the network, rps_per_ip per session, and in
+	// flight the session's stream cap (§14: 32, inflight_per_key's default), not shared with the same key's
+	// requests from the network. The owner may want §9 to say so.
+	nodeStreams := &tunnelgate.NodeStreams{
+		Hire:   edge.Middleware(edge.MiddlewareConfig{Limits: ecfg.Limits, ClientIP: edge.ClientIP{From: config.ClientIPRemote}}, routes),
+		Blobs:  &tunnelgate.Blobs{DB: r.pool, Store: r.blobs, Logger: log},
+		Logger: log.With("component", "tunnel"),
+	}
+	if r.keys != nil {
+		nodeStreams.Keys = r.keys
+	}
 	// GET /v1/tunnel (spec §2.1, tunnel.md §3): the node's WebSocket upgrade. A draining replica refuses new
 	// tunnels (relay.md §14.3).
 	th, err := tunnelgate.NewHandler(tunnelgate.HandlerConfig{
 		PublicURL: cfg.PublicURL, ChannelBinding: cfg.Tunnel.ChannelBinding, ReplicaID: r.id,
-		Admitter: r.enroll, Registry: r.tunnels, Draining: r.draining.Load, Logger: log,
+		Admitter: r.enroll, Registry: r.tunnels, Draining: r.draining.Load, Logger: log, NodeStreams: nodeStreams,
 	})
 	if err != nil {
 		return err
 	}
 	routes.Handle("GET "+tunnel.Path, th)
-	ecfg, err := edge.FromConfig(cfg, log)
-	if err != nil {
-		return err
-	}
 	if r.server, err = edge.New(ecfg, routes); err != nil {
 		return err
 	}

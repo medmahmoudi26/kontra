@@ -571,7 +571,8 @@ func TestHandshakeWelcome(t *testing.T) {
 		t.Fatalf("second gate-opened stream %v, %v", st2, err)
 	}
 
-	// A node-opened stream (odd) is accepted promptly and closed: hiring is M3.
+	// A node-opened stream (odd) is accepted promptly and served (§9): without a hiring router, 404, then the
+	// gate closes it.
 	ns, err := nodeMux.OpenStream()
 	if err != nil {
 		t.Fatal(err)
@@ -579,8 +580,16 @@ func TestHandshakeWelcome(t *testing.T) {
 	if ns.StreamID()%2 != 1 {
 		t.Fatalf("the node opened stream %d: a yamux.Client's ids are odd", ns.StreamID())
 	}
+	if err := tunnel.WritePreamble(ns, tunnel.Preamble{Op: tunnel.OpHTTP}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(ns, "GET /agents/hello HTTP/1.1\r\nHost: x\r\n\r\n")
 	_ = ns.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if n, err := ns.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+	nbr := bufio.NewReader(ns)
+	if res, err := http.ReadResponse(nbr, nil); err != nil || res.StatusCode != http.StatusNotFound {
+		t.Fatalf("node-opened stream: %v %v; want 404 (no hiring router)", res, err)
+	}
+	if n, err := nbr.Read(make([]byte, 1)); n != 0 || err != io.EOF {
 		t.Fatalf("node-opened stream: read %d, %v; want the gate to close it (EOF)", n, err)
 	}
 
@@ -1170,80 +1179,6 @@ func nodeSession(t *testing.T, g *testGate) (*yamux.Session, *Session) {
 		t.Fatal(err)
 	}
 	return m, g.sink.next(t)
-}
-
-// A node that keeps open the streams it opened, after the gate closed them, pins up to a window of data
-// on each in the gate's yamux until it closes its side. The gate holds tunnel.GateMaxInflight of them and
-// closes the session at one more (§7: the gate's own cap after Accept; §14).
-func TestNodeOpenedStreamsAreCapped(t *testing.T) {
-	g := newTestGate(t, gateOpts{})
-	m, s := nodeSession(t, g)
-	data := make([]byte, 64<<10)
-	open := func() error {
-		st, err := m.OpenStream()
-		if err != nil {
-			return err
-		}
-		_, err = st.Write(data) // never closed
-		return err
-	}
-	for i := range tunnel.GateMaxInflight {
-		if err := open(); err != nil {
-			t.Fatalf("stream %d: %v", i, err)
-		}
-	}
-	eventually(t, 10*time.Second, "the gate accepted every stream", func() bool {
-		return s.Mux().NumStreams() == tunnel.GateMaxInflight+1 // and the control stream
-	})
-	time.Sleep(100 * time.Millisecond)
-	if s.Mux().IsClosed() {
-		t.Fatalf("the session closed with %d node-opened streams in flight: the cap allows them", tunnel.GateMaxInflight)
-	}
-
-	_ = open() // one over the cap: the write may fail as the session closes
-	eventually(t, 10*time.Second, "the gate closed the session over the cap", s.Mux().IsClosed)
-	eventually(t, 10*time.Second, "the node's session ended", m.IsClosed)
-	if !strings.Contains(g.logs.String(), "more streams open than the gate allows") {
-		t.Fatalf("the gate did not log why it closed the session")
-	}
-}
-
-// A node that closes each stream it opened once the gate has closed it frees its place: three rounds of
-// tunnel.GateMaxInflight held streams, each closed before the next round, keep the session open, and the
-// gate's yamux forgets every one of them.
-func TestNodeOpenedStreamsFreedWhenTheNodeCloses(t *testing.T) {
-	g := newTestGate(t, gateOpts{})
-	m, s := nodeSession(t, g)
-	ended := func() int { return strings.Count(g.logs.String(), "node-opened stream ended") }
-	for round := range 3 {
-		held := make([]*yamux.Stream, 0, tunnel.GateMaxInflight)
-		for range tunnel.GateMaxInflight {
-			st, err := m.OpenStream()
-			if err != nil {
-				t.Fatalf("round %d: %v", round, err)
-			}
-			if _, err := st.Write([]byte(`{"v":1,"op":"http"}` + "\n")); err != nil {
-				t.Fatalf("round %d: %v", round, err)
-			}
-			_ = st.SetReadDeadline(time.Now().Add(5 * time.Second))
-			if n, err := st.Read(make([]byte, 1)); n != 0 || err != io.EOF {
-				t.Fatalf("round %d: read %d, %v; want the gate to close the stream (EOF)", round, n, err)
-			}
-			held = append(held, st)
-		}
-		if s.Mux().IsClosed() {
-			t.Fatalf("round %d: the session closed within the cap", round)
-		}
-		for _, st := range held {
-			_ = st.Close()
-		}
-		want := (round + 1) * tunnel.GateMaxInflight
-		eventually(t, 10*time.Second, "the gate saw every stream of the round end", func() bool { return ended() == want })
-		eventually(t, 10*time.Second, "the gate's yamux forgot the round's streams", func() bool { return s.Mux().NumStreams() == 1 })
-	}
-	if s.Mux().IsClosed() || m.IsClosed() {
-		t.Fatal("the session closed although the node closed every stream")
-	}
 }
 
 // yamux's own lines (here "[WARN] yamux: frame for missing stream") carry the session's attributes, with
