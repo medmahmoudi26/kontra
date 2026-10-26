@@ -70,6 +70,16 @@ const (
 	// another terminal state, continues otherwise; the workflow writes canceled only for the upstream's
 	// canceled status (spec §8).
 	changeCancelAnswer = "cancel-answer"
+	// changeNoSession: a tunnel service's prepare that finds no candidate session writes the attempt
+	// no_session and dispatches nothing; the workflow retries after 1 s, 2 s, 4 s … while task.retries
+	// allows, then fails no_session (spec §6.4). Before it, prepare refused tunnel services
+	// (service_unavailable), so no recorded history reaches this branch.
+	changeNoSession = "tunnel-no-session"
+	// changeCancelTunnelLost: a cancel of a tunnel attempt whose sticky session is gone (forward_cancel
+	// answers tunnel_lost, or is not started within 10 s on the session replica's control queue) fails the
+	// task tunnel_lost and answers the caller with it, instead of "the task continues" (spec §8's row
+	// "exists, session gone"; lifecycle.CancelTunnelLost).
+	changeCancelTunnelLost = "cancel-tunnel-lost"
 )
 
 // phase is the task's state as the workflow knows it, from its own Updates and activity results.
@@ -131,6 +141,7 @@ type step struct {
 	wait   time.Duration
 	prev   string // the outcome prepare records on the attempt a lost dispatch left open
 	resume bool   // stepAgain: the dispatch that was not started was a resume
+	avoid  string // stepRetry: the tunnel session the retry leaves for another, when one exists (§6.4)
 }
 
 // lc is one run of TaskLifecycle. Every field is workflow state: it changes only in workflow code, so a
@@ -149,7 +160,8 @@ type lc struct {
 	n       int    // the current attempt, 0 before the first prepare
 	queue   string // its dispatch queue
 	backend string
-	resumes int // successive resume (or not started) dispatches of the current attempt in this turn
+	session string // a tunnel attempt's session, "" for a direct one or a no_session attempt
+	resumes int    // successive resume (or not started) dispatches of the current attempt in this turn
 
 	turns    int             // kontra.message Updates accepted (the turn numbers)
 	started  int             // turns started
@@ -745,15 +757,23 @@ func (l *lc) active(ctx workflow.Context) {
 			continue
 		}
 		l.phase = phaseRunning
+		first := step{kind: stepDispatch}
 		if l.n == 0 {
-			if l.prepare(ctx, 1, "") != prepared {
+			switch l.prepare(ctx, 1, "", "") {
+			case prepared:
+			case prepareNoSession:
+				first = l.noSession(ctx)
+			default:
 				continue
 			}
 			if !l.listedAtStart {
 				l.listPush(ctx)
 			}
+			if first.kind == stepDone {
+				continue
+			}
 		}
-		l.runTurn(ctx, wid)
+		l.runTurn(ctx, wid, first)
 	}
 }
 
@@ -764,10 +784,12 @@ const (
 	prepared           prepareResult = iota // attempt n is written; dispatch it
 	prepareEnded                            // the task ended instead
 	prepareHasUpstream                      // a retry refused: attempt n-1 records a first upstream task id
+	prepareNoSession                        // attempt n is written no_session: nothing to dispatch (§6.4)
 )
 
 // prepare writes attempt n and learns its queue (and, the first time, the deadline that arms the timer).
-func (l *lc) prepare(ctx workflow.Context, n int, prev string) prepareResult {
+// avoid is the tunnel session a retry after tunnel_lost leaves for another (§6.4).
+func (l *lc) prepare(ctx workflow.Context, n int, prev, avoid string) prepareResult {
 	budget := time.Duration(l.in.TimeoutSeconds) * time.Second
 	if !l.deadline.IsZero() {
 		budget = l.deadline.Sub(workflow.Now(ctx))
@@ -778,7 +800,7 @@ func (l *lc) prepare(ctx workflow.Context, n int, prev string) prepareResult {
 		RetryPolicy: &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 2, MaximumInterval: lifecycleMaxInterval},
 	})
 	var r PrepareResult
-	err := workflow.ExecuteActivity(pctx, ActPrepare, PrepareInput{TaskID: l.in.TaskID, N: n, PreviousOutcome: prev}).Get(ctx, &r)
+	err := workflow.ExecuteActivity(pctx, ActPrepare, PrepareInput{TaskID: l.in.TaskID, N: n, PreviousOutcome: prev, AvoidSession: avoid}).Get(ctx, &r)
 	switch {
 	case err == nil:
 	case isType(err, ErrTypeTaskGone):
@@ -798,7 +820,7 @@ func (l *lc) prepare(ctx workflow.Context, n int, prev string) prepareResult {
 		l.timeout(ctx)
 		return prepareEnded
 	}
-	l.n, l.queue, l.backend, l.resumes = n, r.Queue, r.Backend, 0
+	l.n, l.queue, l.backend, l.session, l.resumes = n, r.Queue, r.Backend, r.SessionID, 0
 	if l.deadline.IsZero() {
 		l.deadline = r.Deadline
 		if l.deadline.IsZero() {
@@ -806,13 +828,28 @@ func (l *lc) prepare(ctx workflow.Context, n int, prev string) prepareResult {
 		}
 		l.armTimer(ctx)
 	}
+	if r.NoSession {
+		if workflow.GetVersion(ctx, changeNoSession, workflow.DefaultVersion, 1) < 1 {
+			// Before the change prepare refused a tunnel service, which failed it service_unavailable.
+			l.fail(ctx, store.ReasonServiceUnavailable, "", "")
+			return prepareEnded
+		}
+		return prepareNoSession
+	}
 	return prepared
 }
 
-// runTurn runs one turn: dispatch, then the retry table (spec §6.4), until the turn ends at
-// input-required or the task is terminal.
-func (l *lc) runTurn(ctx workflow.Context, wid string) {
-	next := step{kind: stepDispatch}
+// noSession is the retry table's no_session row (spec §6.4) for attempt l.n, which prepare wrote ended
+// no_session: retry after 1 s, 2 s, 4 s … (capped at the deadline by the timer) while task.retries allows,
+// then failed: no_session. Each no_session attempt counts against task.retries, as the row's attempt does
+// (M2 plan, confirmed conflict on the row: "exhausted" read as task.retries, §6.4's opening sentence).
+func (l *lc) noSession(ctx workflow.Context) step {
+	return l.retry(ctx, AttemptState{}, store.ReasonNoSession, 0, "")
+}
+
+// runTurn runs one turn from its first step (a dispatch, or the retry after a no_session first attempt),
+// then the retry table (spec §6.4), until the turn ends at input-required or the task is terminal.
+func (l *lc) runTurn(ctx workflow.Context, wid string, next step) {
 	l.resumes = 0
 	for l.phase != phaseTerminal && ctx.Err() == nil {
 		if next.wait > 0 {
@@ -836,8 +873,13 @@ func (l *lc) runTurn(ctx workflow.Context, wid string) {
 			continue
 		}
 		if next.kind == stepRetry {
-			switch l.prepare(ctx, l.n+1, next.prev) {
+			switch l.prepare(ctx, l.n+1, next.prev, next.avoid) {
 			case prepared:
+			case prepareNoSession:
+				if next = l.noSession(ctx); next.kind == stepDone {
+					return
+				}
+				continue
 			case prepareHasUpstream:
 				// The lost dispatch recorded the attempt's first upstream task id after attempt_state was
 				// read (D77): the attempt is followed as §6.4 says for a lost dispatch after that id.
@@ -1036,7 +1078,12 @@ func (l *lc) retry(ctx workflow.Context, st AttemptState, reason store.FailureRe
 	}
 	wait := time.Second << min(l.n-1, maxRetryShift)
 	wait = max(wait, retryAfter)
-	return step{kind: stepRetry, wait: wait, prev: prev}
+	next := step{kind: stepRetry, wait: wait, prev: prev}
+	if reason == store.ReasonTunnelLost && l.backend == string(store.BackendTunnel) {
+		// "Retry on another session if one exists" (§6.4): prepare leaves this one when it can.
+		next.avoid = l.session
+	}
+	return next
 }
 
 // attemptState reads attempt_state for the current attempt; false when the task ended (or is gone).
@@ -1236,6 +1283,11 @@ func (l *lc) cancelDispatching(ctx workflow.Context, c *call) {
 		return
 	}
 	r, err := l.forwardCancel(ctx, st, true)
+	if l.tunnelSessionGone(ctx, st, r, err) {
+		l.cancelSessionGone(ctx, op, c)
+		return
+	}
+	err = notGone(r, err)
 	if err == nil {
 		r = l.cancelAnswer(ctx, r)
 	}
@@ -1291,6 +1343,11 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 		return
 	}
 	r, err := l.forwardCancel(ctx, st, false)
+	if l.tunnelSessionGone(ctx, st, r, err) {
+		l.cancelSessionGone(ctx, op, nil)
+		return
+	}
+	err = notGone(r, err)
 	if err == nil {
 		r = l.cancelAnswer(ctx, r)
 	}
@@ -1305,6 +1362,56 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 	default:
 		l.finish(op, CancelResult{Outcome: r.Outcome, UpstreamError: r.UpstreamError}, nil)
 	}
+}
+
+// tunnelSessionGone reports whether forward_cancel found a tunnel attempt's sticky session gone: it answered
+// tunnel_lost (the session replica's registry does not hold the session, or it no longer serves the
+// service: closed, its key or binding revoked), or it was not started within 10 s on kontra-ctl-<session
+// replica> (the replica holding the session is gone, spec §14.2). A session that is up never answers
+// tunnel_lost (CancelTunnelLost): a node's own answer is forward_cancel's error, and the task continues.
+//
+// SPEC-CONFLICT (M2 plan, confirmed conflict on spec §8's row "active or input-required | exists, session
+// gone"): see CancelTunnelLost. Behind changeCancelTunnelLost; a direct attempt never takes this branch (its
+// tunnel_lost answer is errNotGone).
+func (l *lc) tunnelSessionGone(ctx workflow.Context, st AttemptState, r ForwardCancelResult, err error) bool {
+	if st.Backend != string(store.BackendTunnel) {
+		return false
+	}
+	gone := (err == nil && r.Outcome == CancelTunnelLost) || (err != nil && isTimeout(err, enums.TIMEOUT_TYPE_SCHEDULE_TO_START))
+	return gone && workflow.GetVersion(ctx, changeCancelTunnelLost, workflow.DefaultVersion, 1) >= 1
+}
+
+// errNotGone is a forward_cancel that answered tunnel_lost for an attempt tunnelSessionGone does not take for
+// gone: only a tunnel attempt's sticky session can be gone, so for any other (a direct attempt whose service
+// became a tunnel service, answered so by a replica) nothing was forwarded, and the task continues as for
+// forward_cancel's error: the caller is told the service could not be reached (M2 WP-05 review). The
+// answer is the Update's result only and schedules nothing, so it needs no GetVersion.
+var errNotGone = errors.New("forward_cancel answered tunnel_lost for an attempt that is not on a tunnel session")
+
+// notGone is forward_cancel's answer once tunnelSessionGone declined it: a tunnel_lost outcome is errNotGone.
+func notGone(r ForwardCancelResult, err error) error {
+	if err == nil && r.Outcome == CancelTunnelLost {
+		return errNotGone
+	}
+	return err
+}
+
+// cancelSessionGone is §8's row "exists, session gone": nothing could be forwarded; the task fails
+// tunnel_lost (the attempt's outcome too, even while it waited at input-required: its session is gone, §7
+// row 2), the running dispatch, if any, is stopped (the terminal rule already refuses its appends), and the
+// caller gets the task as it is after that.
+func (l *lc) cancelSessionGone(ctx workflow.Context, op *cancelOp, c *call) {
+	l.logger.Info("cancel: the tunnel attempt's session is gone; the task fails tunnel_lost", "attempt", l.n)
+	tr := l.writeTerminal(ctx, WriteTerminalInput{State: string(store.StateFailed), Reason: string(store.ReasonTunnelLost),
+		EndAttempt: string(store.OutcomeTunnelLost), EndAttemptAsIs: true})
+	if c != nil && !c.done {
+		c.cancel()
+	}
+	if tr.State == string(store.StateFailed) {
+		l.finish(op, CancelResult{Outcome: CancelTunnelLost}, nil)
+		return
+	}
+	l.finishEnded(op, tr.State)
 }
 
 // ended runs after the terminal event: once nothing holds the task, the held patches, OnTerminal, the

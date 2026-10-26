@@ -509,14 +509,23 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 		v.add("%s.sealed: sealing needs backend tunnel: the recipients are the service's enrolled node keys and "+
 			"the hosting node unseals (ext-sealed.md §1); a direct backend has neither", at)
 	}
+	tunnelled := s.Backend.Tunnel != nil && n == 1
+	if s.Sealed.Mode != SealedOff && tunnelled {
+		// SPEC-CONFLICT (D91 amended for M2, M2 plan WP-04): D91 accepted sealed: on a tunnel service with a
+		// warning while tunnel backends were not served. This build serves them and does not seal (M3), so
+		// it would relay the service's parts in plaintext (fail open): refused, as on a direct backend.
+		v.add("%s.sealed: sealing is not built in this release (M3), and this build serves tunnel services: it "+
+			"would relay the service's parts in plaintext; remove sealed until sealing is built (ext-sealed.md §1)", at)
+	}
 	if !s.SellerKeys.IsZero() {
 		if err := checkSellerKeys(s.SellerKeys); err != nil {
 			v.add("%s.seller_keys: %v", at, err)
-		} else if direct && s.Kind == KindA2A {
-			// SPEC-CONFLICT (D90): spec §3 makes a service whose card no configured key verifies unavailable
-			// (503 card routes, service_unavailable at the first attempt). Verification is M3; ignoring
-			// the keys would serve the card unverified (fail open), and this build has no unavailable
-			// state for a direct service, so it refuses to start instead, as for the remote hooks.
+		} else if (direct && s.Kind == KindA2A) || tunnelled {
+			// SPEC-CONFLICT (D90; amended for tunnel services in M2, M2 plan WP-04): spec §3 makes a service
+			// whose card no configured key verifies unavailable (503 card routes, service_unavailable at the
+			// first attempt). Verification is M3; ignoring the keys would serve the card unverified (fail
+			// open), so the gate refuses to start instead, as for the remote hooks. This build serves tunnel
+			// services and their cards, so D90's warning for them no longer fails closed.
 			v.add("%s.seller_keys: seller card signatures are not verified in this release (M3); remove seller_keys "+
 				"rather than serve the card unverified (spec §3)", at)
 		}
@@ -695,10 +704,9 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 
 // unbuilt lists the keys this build accepts but does not act on yet. Each one fails closed when ignored
 // (nobody is admitted by it, nothing is served for it); keys that would fail open are refused by
-// Validate instead (the remote hooks, sealed on a direct backend, seller_keys on a direct a2a backend).
-// sealed and seller_keys load only on services this build does not serve (tunnel, mcp), so they fail
-// closed only while those are unbuilt: the work that serves tunnel services (M2) must refuse both, or
-// build them, before it removes the tunnel entry. Remove an entry when the work that builds it lands.
+// Validate instead (the remote hooks, sealed on any backend, seller_keys on a direct a2a backend or a
+// tunnel service). seller_keys loads only on a direct MCP service, which has no card and is not built
+// either. Remove an entry when the work that builds it lands. Tunnel backends are served since M2.
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
@@ -714,16 +722,15 @@ func (c *Config) unbuilt() []string {
 	if c.SigningKey != "" {
 		note("signing_key: cards are not signed in this release (M3)")
 	}
+	if c.Tunnel.Anonymous {
+		// Fails closed: an M2 gate creates no anonymous tenant, so a hello with neither enroll nor auth from an
+		// unknown key is unknown_key (spec/tunnel.md §4, §6).
+		note("tunnel.anonymous: anonymous sessions are not built in this release (M4); a node key that is not enrolled is refused unknown_key")
+	}
 	for _, name := range sortedKeys(c.Services) {
 		s := c.Services[name]
-		switch {
-		case s.Kind == KindMCP:
+		if s.Kind == KindMCP {
 			note("services.%s: MCP services are not built in this release", name)
-		case s.Backend.Tunnel != nil:
-			note("services.%s: tunnel backends are not built in this release (M2)", name)
-		}
-		if s.Sealed.Mode != SealedOff {
-			note("services.%s.sealed: sealing is not built in this release (M3)", name)
 		}
 		if !s.SellerKeys.IsZero() {
 			note("services.%s.seller_keys: seller card signatures are not verified in this release (M3)", name)

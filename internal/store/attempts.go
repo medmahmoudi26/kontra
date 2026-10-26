@@ -120,12 +120,19 @@ func (l *Log) BeginAttempt(ctx context.Context, a Attempt) error {
 // empty), and attempt n inserted. A dispatch of n-1 that Temporal timed out but whose process is alive
 // (D77) can record its first upstream id until this transaction commits, and never after it
 // (SetFirstUpstreamID is fenced): either the retry sees the id and refuses, or the dispatch is fenced.
+//
+// A tunnel attempt is inserted with its session, key and replica (the tunnel_has_session check), or, when
+// no session was a candidate, already ended with a.Outcome no_session (spec §4, §6.1): the only outcome an
+// attempt can be inserted with.
 func (l *Log) BeginRetry(ctx context.Context, a Attempt, previous Outcome) error {
 	if a.N < 1 {
 		return fmt.Errorf("store: attempt %d", a.N)
 	}
 	if a.Backend != BackendDirect && a.Backend != BackendTunnel {
 		return fmt.Errorf("store: backend %q", a.Backend)
+	}
+	if a.Outcome != "" && (a.Outcome != OutcomeNoSession || a.Backend != BackendTunnel) {
+		return fmt.Errorf("store: an attempt is inserted open, or tunnel with outcome no_session, not %s/%q", a.Backend, a.Outcome)
 	}
 	if previous != "" && !previous.Valid() {
 		return fmt.Errorf("store: attempt outcome %q", previous)
@@ -156,11 +163,12 @@ func (l *Log) BeginRetry(ctx context.Context, a Attempt, previous Outcome) error
 				}
 			}
 		}
-		tag, err := tx.Exec(ctx, `insert into kontra.attempts (task_id, n, backend, tunnel_session, key_id, replica_id)
-				select $1::uuid, $2::integer, $3::text, $4::uuid, $5::text, $6::text
+		tag, err := tx.Exec(ctx, `insert into kontra.attempts (task_id, n, backend, tunnel_session, key_id, replica_id, ended_at, outcome)
+				select $1::uuid, $2::integer, $3::text, $4::uuid, $5::text, $6::text,
+				       case when $7::text is null then null else now() end, $7::text
 				 where $2::integer = coalesce((select max(n) from kontra.attempts where task_id = $1::uuid), 0) + 1
 				on conflict (task_id, n) do nothing`,
-			a.TaskID, a.N, string(a.Backend), a.TunnelSession, nullString(a.KeyID), nullString(a.ReplicaID))
+			a.TaskID, a.N, string(a.Backend), a.TunnelSession, nullString(a.KeyID), nullString(a.ReplicaID), nullString(string(a.Outcome)))
 		if err != nil {
 			return err
 		}
@@ -333,20 +341,31 @@ func (l *Log) LatestAttempt(ctx context.Context, taskID uuid.UUID) (*Attempt, er
 // (a hash of services.backend), matched exactly.
 const SameDirectBackend = `a.started_at > s.updated_at`
 
+// SameBackend is the SQL condition, on an attempts row a of service row s, that the attempt was placed on
+// the backend of the attempt being dispatched, whose backend is the parameter backendParam and whose tunnel
+// session sessionParam (spec §4: a recorded upstream context id is reused, and referenceTaskIds mapped,
+// only on "the same tunnel session or the same direct backend"): a tunnel attempt on the same session
+// (M2 plan audit: node 1's upstream contextId never reaches node 2), a direct attempt on the service's
+// current direct backend (SameDirectBackend).
+func SameBackend(backendParam, sessionParam string) string {
+	return `(a.backend = ` + backendParam + `::text and (a.backend = 'direct' and ` + SameDirectBackend +
+		` or a.backend = 'tunnel' and a.tunnel_session = ` + sessionParam + `::uuid))`
+}
+
 // PreviousContextAttempt returns the attempt that last recorded an upstream context id among the
 // caller's tasks in the same gate context, service and backend, for the upstream context id reuse of spec
 // §4 (nil when there is none). Contexts are scoped by (tenant, service, buyer, context id), so another
-// buyer's identical context string is never found (D53). A direct attempt counts only while the service's
+// buyer's identical context string is never found (D53). The backend is the attempt being dispatched's
+// (SameBackend): a tunnel attempt counts only on the same session, a direct one only while the service's
 // backend is the one it was placed on (SameDirectBackend).
-func (l *Log) PreviousContextAttempt(ctx context.Context, svc ServiceRef, o Owner, contextID string, backend Backend) (*Attempt, error) {
+func (l *Log) PreviousContextAttempt(ctx context.Context, svc ServiceRef, o Owner, contextID string, backend Backend, session *uuid.UUID) (*Attempt, error) {
 	a, err := scanAttempt(l.db.QueryRow(ctx, `select `+attemptCols+` from kontra.attempts a
 		join kontra.tasks t on t.id = a.task_id
 		join kontra.services s on s.tenant_id = t.tenant_id and s.name = t.service
 		where t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.context_id = $4
-		  and a.backend = $5 and a.upstream_context_id is not null
-		  and (a.backend <> 'direct' or `+SameDirectBackend+`)
+		  and a.upstream_context_id is not null and `+SameBackend("$5", "$6")+`
 		order by a.first_upstream_id_at desc, a.task_id desc, a.n desc limit 1`,
-		svc.TenantID, svc.Name, o.BuyerID, contextID, string(backend)))
+		svc.TenantID, svc.Name, o.BuyerID, contextID, string(backend), session))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

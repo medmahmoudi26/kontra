@@ -110,6 +110,9 @@ func (p *PatchRefusals) Counts() []PatchRefusal {
 type LifecycleActivities struct {
 	Log      *store.Log
 	Backends BackendResolver
+	// Sessions chooses the session of a tunnel service's attempt (spec §6.1; *tunnelgate.Picker). Without
+	// it a tunnel service's prepare fails service_unavailable.
+	Sessions SessionPicker
 	Push     PushConfigLister // nil: no push configs are listed
 	// Rules are the §13.2 key and size rules apply_metadata and submit enforce on every operator patch,
 	// and that pick the operator-written keys of a TaskRef.
@@ -148,10 +151,18 @@ func parseTask(taskID string) (uuid.UUID, error) {
 	return id, nil
 }
 
-// Prepare picks the backend (spec §6.1; direct in M1), ends the previous attempt when its dispatch was
-// lost (PreviousOutcome), writes attempt N and returns the queue to dispatch on and the stored deadline.
-// It is retried, so every write is idempotent: BeginRetry accepts an attempt that already exists with the
-// same backend, and ends an open previous attempt only once.
+// Prepare picks the backend (spec §6.1), ends the previous attempt when its dispatch was lost
+// (PreviousOutcome), writes attempt N and returns the queue to dispatch on and the stored deadline. It is
+// retried, so every write is idempotent: BeginRetry accepts an attempt that already exists with the same
+// backend, and ends an open previous attempt only once.
+//
+// A direct service's attempt is dispatched on kontra-direct. A tunnel service's is placed on the session
+// Sessions chooses (§6.1: the candidate query, round-robin, the context's previous session first, another
+// than AvoidSession when one exists): the attempt records tunnel_session, key_id and replica_id, and is
+// dispatched on QueueTunnel(replica), which only the replica holding the session polls (§14.2). With no
+// candidate the attempt is written ended with outcome no_session and NoSession is answered: nothing is
+// dispatched, and the workflow retries while task.retries allows (§6.4). A retried prepare answers what
+// the attempt row says, so the session a first try wrote is the one dispatched to.
 //
 // A retry (N > 1) is refused, ErrTypeAttemptHasUpstream, when attempt N-1 records a first upstream task id:
 // a dispatch Temporal timed out but whose process is still alive (D77) can record it after the workflow
@@ -179,25 +190,108 @@ func (a *LifecycleActivities) Prepare(ctx context.Context, in PrepareInput) (Pre
 		// service_unavailable). The registry is in memory, so this is not a transient failure.
 		return PrepareResult{}, nonRetryable(ErrTypeServiceUnavailable, fmt.Errorf("service %s: %v", row.Service, err))
 	}
-	if backend != store.BackendDirect {
-		// Tunnel sessions (spec §6.1's candidate query, no_session) are M2.
-		return PrepareResult{}, nonRetryable(ErrTypeServiceUnavailable, fmt.Errorf("service %s: backend %q is not served by this gate yet", row.Service, backend))
-	}
 	o := store.Outcome(in.PreviousOutcome)
 	if o != "" && !o.Valid() {
 		o = store.OutcomeFailed
 	}
-	err = a.Log.BeginRetry(ctx, store.Attempt{TaskID: id, N: in.N, Backend: backend}, o)
-	if errors.Is(err, store.ErrAttemptHasUpstream) {
-		return PrepareResult{}, nonRetryable(ErrTypeAttemptHasUpstream,
-			fmt.Errorf("attempt %d of task %s has a first upstream task id: it is not retried", in.N-1, id))
+	var res PrepareResult
+	switch backend {
+	case store.BackendDirect:
+		if res, err = a.prepareDirect(ctx, id, in.N, o); err != nil {
+			return PrepareResult{}, err
+		}
+	case store.BackendTunnel:
+		if res, err = a.prepareTunnel(ctx, row, in, o); err != nil {
+			return PrepareResult{}, err
+		}
+	default:
+		return PrepareResult{}, nonRetryable(ErrTypeServiceUnavailable, fmt.Errorf("service %s: backend %q is not served by this gate", row.Service, backend))
 	}
-	if err != nil {
-		return PrepareResult{}, taskGone(err)
-	}
-	res := PrepareResult{Queue: QueueDirect, Backend: string(backend)}
 	if row.Deadline != nil {
 		res.Deadline = row.Deadline.UTC()
+	}
+	return res, nil
+}
+
+// beginRetry is BeginRetry with its refusals as the workflow reads them.
+func (a *LifecycleActivities) beginRetry(ctx context.Context, att store.Attempt, prev store.Outcome) error {
+	err := a.Log.BeginRetry(ctx, att, prev)
+	if errors.Is(err, store.ErrAttemptHasUpstream) {
+		return nonRetryable(ErrTypeAttemptHasUpstream,
+			fmt.Errorf("attempt %d of task %s has a first upstream task id: it is not retried", att.N-1, att.TaskID))
+	}
+	if err != nil {
+		return taskGone(err)
+	}
+	return nil
+}
+
+func (a *LifecycleActivities) prepareDirect(ctx context.Context, id uuid.UUID, n int, prev store.Outcome) (PrepareResult, error) {
+	if err := a.beginRetry(ctx, store.Attempt{TaskID: id, N: n, Backend: store.BackendDirect}, prev); err != nil {
+		return PrepareResult{}, err
+	}
+	return PrepareResult{Queue: QueueDirect, Backend: string(store.BackendDirect)}, nil
+}
+
+// prepareTunnel places attempt N of a tunnel service (spec §6.1, §6.4): on the chosen session, or written
+// no_session when there is no candidate. A retried prepare whose first try wrote the attempt answers that
+// attempt, without choosing again.
+func (a *LifecycleActivities) prepareTunnel(ctx context.Context, row *store.TaskRow, in PrepareInput, prev store.Outcome) (PrepareResult, error) {
+	id := row.ID
+	if existing, err := a.Log.GetAttempt(ctx, id, in.N); err == nil && existing.Backend == store.BackendTunnel {
+		return tunnelResult(existing)
+	} else if err != nil && !errors.Is(err, store.ErrAttemptNotFound) {
+		return PrepareResult{}, err
+	}
+	if a.Sessions == nil {
+		return PrepareResult{}, nonRetryable(ErrTypeServiceUnavailable, fmt.Errorf("service %s: this gate places no tunnel attempts", row.Service))
+	}
+	req := SessionRequest{TenantID: row.TenantID, Service: row.Service, TaskID: id, N: in.N,
+		BuyerID: row.Owner.BuyerID, ContextID: row.ContextID}
+	if in.AvoidSession != "" {
+		if s, err := uuid.Parse(in.AvoidSession); err == nil {
+			req.Avoid = &s
+		}
+	}
+	att := store.Attempt{TaskID: id, N: in.N, Backend: store.BackendTunnel}
+	picked, err := a.Sessions.PickSession(ctx, req)
+	switch {
+	case errors.Is(err, ErrNoSession):
+		att.Outcome = store.OutcomeNoSession
+	case err != nil:
+		return PrepareResult{}, err // a read that failed: prepare is retried
+	default:
+		att.TunnelSession, att.KeyID, att.ReplicaID = &picked.SessionID, picked.KeyID, picked.ReplicaID
+	}
+	if err := a.beginRetry(ctx, att, prev); err != nil {
+		return PrepareResult{}, err
+	}
+	written, err := a.Log.GetAttempt(ctx, id, in.N)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	res, err := tunnelResult(written)
+	if err == nil {
+		log := a.logger().With("task_id", id.String(), "attempt", in.N)
+		if res.NoSession {
+			log.Info("no tunnel session serves the service; the attempt is no_session", "service", row.Service)
+		} else {
+			log.Info("tunnel attempt placed", "tunnel_session", res.SessionID, "replica", written.ReplicaID)
+		}
+	}
+	return res, err
+}
+
+// tunnelResult is prepare's answer for a tunnel attempt as written.
+func tunnelResult(att *store.Attempt) (PrepareResult, error) {
+	res := PrepareResult{Backend: string(store.BackendTunnel)}
+	switch {
+	case att.Outcome == store.OutcomeNoSession:
+		res.NoSession = true
+	case att.TunnelSession == nil || att.ReplicaID == "":
+		return PrepareResult{}, fmt.Errorf("attempt %d of task %s is a tunnel attempt without its session", att.N, att.TaskID)
+	default:
+		res.Queue, res.SessionID = QueueTunnel(att.ReplicaID), att.TunnelSession.String()
 	}
 	return res, nil
 }
@@ -308,7 +402,11 @@ func (a *LifecycleActivities) WriteTerminal(ctx context.Context, in WriteTermina
 		return TerminalResult{}, taskGone(err)
 	}
 	if in.EndAttempt != "" && endedBy(after, w) {
-		if err := a.endLatest(ctx, id, before.State, store.Outcome(in.EndAttempt)); err != nil {
+		prior := before.State
+		if in.EndAttemptAsIs {
+			prior = "" // the outcome stands, whatever the task waited for
+		}
+		if err := a.endLatest(ctx, id, prior, store.Outcome(in.EndAttempt)); err != nil {
 			return TerminalResult{}, err
 		}
 	}

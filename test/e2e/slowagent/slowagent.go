@@ -10,7 +10,10 @@
 //
 // A first message whose text starts with "ask" stops at input-required; the follow-up that answers it
 // streams the chunks and completes (spec §7). CancelTask ends a task canceled at once, whatever it is
-// doing (spec §8). With TalksAfterCancel the agent is a seller that ignores its own cancel: the stream that
+// doing (spec §8), and is recorded with the task it names and the Host it arrived with, so a test can tell
+// a cancel forwarded through `kontra connect` (the target's Host, no X-Forwarded-*) from any other. With
+// FirstEventDelay a task's first turn yields nothing for that long, so its upstream task id stays unknown
+// to the gate meanwhile (the tunnel tests' before-the-first-upstream-id variants, spec §6.4). With TalksAfterCancel the agent is a seller that ignores its own cancel: the stream that
 // carried the canceled status goes on with one more chunk and a completed status, which a2a-go itself
 // never sends (its processor ends an execution at the canceled event and drops what it yields after).
 //
@@ -52,6 +55,9 @@ type Config struct {
 	// goes on with an artifact chunk and a completed status for the same task, written right after it on
 	// the same response (cancel_forwarded: the gate must log neither, spec §8).
 	TalksAfterCancel bool
+	// FirstEventDelay holds a first turn's first event (the submitted task) back this long: until it
+	// passes, the gate has no upstream task id (spec §6.4's before-the-first-id rows).
+	FirstEventDelay time.Duration
 }
 
 // ChunkMarker starts the text of every chunk the agent streams, so a test can look for chunk text where it
@@ -71,9 +77,11 @@ const Legacy025Card = `{"capabilities":{"streaming":true},"defaultInputModes":["
 // Request is one HTTP request the agent received.
 type Request struct {
 	Method string      // the JSON-RPC method, or "METHOD /path" on HTTP+JSON and for card GETs
+	Host   string      // the request's Host (net/http keeps it out of Header)
 	Header http.Header // as received
 	Body   []byte
-	// The message's ids, when the request carries a message (a send).
+	// The message's ids, when the request carries a message (a send). TaskID is also the task a JSON-RPC
+	// CancelTask, GetTask or SubscribeToTask names (params.id).
 	MessageID, TaskID, ContextID string
 }
 
@@ -208,6 +216,18 @@ func (a *Agent) Requests() []Request {
 	return append([]Request(nil), a.requests...)
 }
 
+// Calls returns the requests received whose Method is method, in arrival order (CancelTask: the cancels
+// that reached the agent, each with the task it named and the Host it arrived with).
+func (a *Agent) Calls(method string) []Request {
+	var out []Request
+	for _, r := range a.Requests() {
+		if r.Method == method {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // Count is the number of requests received whose Method is method.
 func (a *Agent) Count(method string) int {
 	n := 0
@@ -247,11 +267,12 @@ func (a *Agent) record(next http.Handler) http.Handler {
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		req := Request{Method: r.Method + " " + r.URL.Path, Header: r.Header.Clone(), Body: body}
+		req := Request{Method: r.Method + " " + r.URL.Path, Host: r.Host, Header: r.Header.Clone(), Body: body}
 		var env struct {
 			Method string `json:"method"`
 			Params struct {
 				Message *msgIDs `json:"message"`
+				ID      string  `json:"id"`
 			} `json:"params"`
 			Message *msgIDs `json:"message"`
 		}
@@ -260,6 +281,7 @@ func (a *Agent) record(next http.Handler) http.Handler {
 			if env.Method != "" {
 				req.Method = env.Method
 				m = env.Params.Message
+				req.TaskID = env.Params.ID
 			}
 			if m != nil {
 				req.MessageID, req.TaskID, req.ContextID = m.MessageID, m.TaskID, m.ContextID
@@ -388,6 +410,15 @@ func (a *Agent) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Se
 	}
 	stop := a.stopChan(ec.TaskID)
 	return func(yield func(a2a.Event, error) bool) {
+		if !followUp && a.cfg.FirstEventDelay > 0 {
+			select {
+			case <-time.After(a.cfg.FirstEventDelay):
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
 		if !followUp && !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}

@@ -6,8 +6,11 @@ go 1.26.0
 toolchain go1.26.10
 
 require (
+	filippo.io/age v1.3.2
 	github.com/a2aproject/a2a-go/v2 v2.7.0
+	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
+	github.com/hashicorp/yamux v0.1.2
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/pressly/goose/v3 v3.29.0
 	github.com/stretchr/testify v1.12.1
@@ -22,6 +25,7 @@ require (
 )
 
 require (
+	filippo.io/hpke v0.4.0 // indirect
 	github.com/a2aproject/a2a-go v0.3.15 // indirect
 	github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect

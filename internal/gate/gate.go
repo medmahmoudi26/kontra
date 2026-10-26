@@ -28,6 +28,7 @@ import (
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
+	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/lifecycle"
@@ -38,6 +39,8 @@ import (
 	"kontra.sh/kontra/internal/sse"
 	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/tunnel"
+	"kontra.sh/kontra/internal/tunnelgate"
 	"kontra.sh/kontra/internal/version"
 )
 
@@ -64,6 +67,12 @@ const (
 	ServeGrace = 5 * time.Second
 	// TemporalDialTimeout bounds the Temporal connection at start.
 	TemporalDialTimeout = 30 * time.Second
+	// DrainMarkRetry is how often the drain retries writing gate_replicas.draining_at when it fails: the
+	// tunnel nodes are told to reconnect elsewhere only once it has committed (M2 plan audit).
+	DrainMarkRetry = time.Second
+	// DrainMarkTimeout bounds one attempt at that write (a row held by another transaction, a Postgres that
+	// stopped answering); the write is also abandoned once the workers have drained.
+	DrainMarkTimeout = 5 * time.Second
 )
 
 // Option configures a replica.
@@ -75,6 +84,7 @@ type options struct {
 	// timing (tests shorten it)
 	beatEvery, silence, healthEvery, servicesEvery, cardWait, serveGrace time.Duration
 	orphanEvery, orphanAge, retentionEvery                               time.Duration
+	tunnelPing, tunnelCards                                              time.Duration
 	executor                                                             relay.ExecutorOptions
 	hup                                                                  bool
 	hupCh                                                                <-chan os.Signal
@@ -91,7 +101,10 @@ func WithReload(fn func() (*config.Config, error)) Option { return func(o *optio
 type Timing struct {
 	Beat, Silence, Health, ServicesRefresh, CardWait, ServeGrace time.Duration
 	OrphanEvery, OrphanAge, RetentionEvery                       time.Duration
-	Executor                                                     relay.ExecutorOptions
+	// TunnelPing is the tunnel registry's last_ping_at interval and row check (tunnel.LastPingEvery);
+	// TunnelCards a tunnel card's refetch while serving (card.Refresh).
+	TunnelPing, TunnelCards time.Duration
+	Executor                relay.ExecutorOptions
 }
 
 // WithTiming replaces the replica's intervals (tests).
@@ -111,6 +124,8 @@ func WithTiming(t Timing) Option {
 		set(&o.orphanEvery, t.OrphanEvery)
 		set(&o.orphanAge, t.OrphanAge)
 		set(&o.retentionEvery, t.RetentionEvery)
+		set(&o.tunnelPing, t.TunnelPing)
+		set(&o.tunnelCards, t.TunnelCards)
 		o.executor = t.Executor
 	}
 }
@@ -149,6 +164,12 @@ type Replica struct {
 	workers   *lifecycle.Workers
 	server    *edge.Server
 	metrics   *edge.Metrics
+
+	// The tunnel (spec/tunnel.md): the replica's view of revoked node keys and bindings, the enrollment
+	// tables, and the registry of the sessions this replica holds.
+	nodeKeys *enroll.Revocations
+	enroll   *enroll.Store
+	tunnels  *tunnelgate.Registry
 
 	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
@@ -259,6 +280,23 @@ func (r *Replica) assemble() error {
 	authn := auth.NewAuthenticator(r.keys) // nil keys: every bearer credential is refused (auth.api_keys false)
 	r.lifecycle = lifecycle.NewClient(r.temporal)
 
+	// The tunnel (spec/tunnel.md §11–§13): node-key and binding revocations reach the registry by NOTIFY
+	// kontra_revoke (beside the API key cache), a re-read every 3 s and a catch-up on every LISTEN reconnect;
+	// the registry's own gate-internal NOTIFY kontra_tunnel carries supersedes and enrollments between
+	// replicas.
+	r.nodeKeys = enroll.NewRevocations(r.pool, enroll.WithRevocationsLogger(log))
+	r.listener.OnChannel(pg.ChannelRevoke, r.nodeKeys.Notify)
+	r.listener.OnReconnect(r.nodeKeys.Catchup)
+	r.tunnels = tunnelgate.NewRegistry(tunnelgate.RegistryConfig{
+		DB: r.pool, ReplicaID: r.id, Revocations: r.nodeKeys, Logger: log, LastPingEvery: r.opts.tunnelPing,
+	})
+	r.nodeKeys.Subscribe(r.tunnels.Revoked)
+	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
+	r.enroll = enroll.NewStore(r.pool, enroll.Options{
+		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti,
+		EnrollWithAPIKey: cfg.Tunnel.EnrollWithAPIKey, Keys: r.keys, Logger: log,
+	})
+
 	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate, Resolver: pushResolver(log)}
 	pushStore := push.NewConfigStore(r.pool, r.lifecycle, policy, log)
 	rules := hooks.KeyRules{OperatorPrefixes: cfg.OperatorMetadataPrefixes, CallerMetadata: cfg.CallerMetadata}
@@ -276,6 +314,7 @@ func (r *Replica) assemble() error {
 				handlers.Invalidate(ref)
 			}
 		},
+		Tunnels: r.tunnels, Sessions: r.tunnels, TunnelCardRefresh: r.opts.tunnelCards,
 	})
 	r.listener.OnChannel(pg.ChannelServices, r.services.Notify)
 	r.listener.OnReconnect(func() {
@@ -315,8 +354,10 @@ func (r *Replica) assemble() error {
 		Signals: r.lifecycle, Logger: log,
 	}}
 	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log})
-	acts := &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Push: pushStore, Rules: rules,
-		Refusals: &r.refusals, Logger: log}
+	// prepare places a tunnel service's attempts on the sessions of every replica (spec §6.1); the
+	// dispatch runs on kontra-tunnel-<the session's replica> (§14.2).
+	acts := &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Sessions: tunnelgate.NewPicker(r.pool),
+		Push: pushStore, Rules: rules, Refusals: &r.refusals, Logger: log}
 	var err error
 	r.workers, err = lifecycle.NewWorkers(r.temporal, lifecycle.WorkerConfig{
 		ReplicaID:     r.id,
@@ -341,6 +382,16 @@ func (r *Replica) assemble() error {
 		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
 	}).Register(routes)
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))
+	// GET /v1/tunnel (spec §2.1, tunnel.md §3): the node's WebSocket upgrade. A draining replica refuses new
+	// tunnels (relay.md §14.3).
+	th, err := tunnelgate.NewHandler(tunnelgate.HandlerConfig{
+		PublicURL: cfg.PublicURL, ChannelBinding: cfg.Tunnel.ChannelBinding, ReplicaID: r.id,
+		Admitter: r.enroll, Registry: r.tunnels, Draining: r.draining.Load, Logger: log,
+	})
+	if err != nil {
+		return err
+	}
+	routes.Handle("GET "+tunnel.Path, th)
 	ecfg, err := edge.FromConfig(cfg, log)
 	if err != nil {
 		return err
@@ -369,6 +420,9 @@ func (r *Replica) MetricsAddr() net.Addr {
 
 // Services is the replica's service registry.
 func (r *Replica) Services() *Services { return r.services }
+
+// Tunnels is the replica's tunnel session registry.
+func (r *Replica) Tunnels() *tunnelgate.Registry { return r.tunnels }
 
 // Draining reports whether the replica has begun its drain.
 func (r *Replica) Draining() bool { return r.draining.Load() }
@@ -419,6 +473,8 @@ func (r *Replica) Run(ctx context.Context) error {
 
 	goLoop("listen", r.listener.Run)
 	goLoop("revocation", r.revoked.Run)
+	goLoop("node revocations", r.nodeKeys.Run)
+	goLoop("tunnels", r.tunnels.Run)
 	goLoop("services", func(ctx context.Context) error { r.services.Run(ctx, r.opts.servicesEvery); return nil })
 	goLoop("replicas", r.replicaLoop)
 	r.checkHealth(bg)
@@ -464,18 +520,33 @@ func (r *Replica) Run(ctx context.Context) error {
 }
 
 // drain is spec §14.3 / D76 for this replica; ctx is not canceled.
+//
+// The tunnel (spec/tunnel.md §13, D35): the Handler refuses new tunnels from the start (draining). The
+// connected nodes are told {"t": "drain"} once gate_replicas.draining_at has committed, and not before (M2
+// plan audit): a node that redials another replica would otherwise supersede its session here and cut the
+// tasks on it, since only a draining replica's sessions are kept (tunnel.md §11). The write is retried every
+// DrainMarkRetry, each attempt within DrainMarkTimeout, until it commits or the workers have drained, which
+// abandons it: then the nodes are not told. The sessions keep serving their streams while the workers
+// drain, and are closed, their rows deleted, once the workers have stopped.
 func (r *Replica) drain(ctx context.Context, cause error) {
 	r.draining.Store(true)
-	r.log.Info("draining", "cause", cause, "drain_timeout", r.cfg.DrainTimeout.String(), "dispatches", r.InFlight())
-	if err := r.markDraining(ctx); err != nil {
-		r.log.Warn("gate_replicas.draining_at not written", "error", err)
-	}
+	r.log.Info("draining", "cause", cause, "drain_timeout", r.cfg.DrainTimeout.String(), "dispatches", r.InFlight(),
+		"tunnel_sessions", r.tunnels.Count())
+	stopTelling := make(chan struct{})
+	told := make(chan struct{})
+	go func() {
+		defer close(told)
+		r.markThenTellTunnels(ctx, stopTelling)
+	}()
 	if err := r.workers.Drain(); err != nil {
 		r.log.Warn("drain_timeout passed with dispatches still running; each is re-attached on another replica after its heartbeat timeout",
 			"error", err, "dispatches", r.InFlight())
 	} else {
 		r.log.Info("the replica's dispatches have ended; its workers are stopped")
 	}
+	close(stopTelling)
+	<-told
+	r.tunnels.CloseAll(ctx)
 	sctx, cancel := context.WithTimeout(ctx, r.opts.serveGrace)
 	defer cancel()
 	if err := r.server.Shutdown(sctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -491,6 +562,48 @@ func (r *Replica) drain(ctx context.Context, cause error) {
 		r.log.Warn("gate_replicas row not deleted; other replicas reap it after 30 s", "error", err)
 	}
 	r.log.Info("drained")
+}
+
+// markThenTellTunnels writes gate_replicas.draining_at, retrying every DrainMarkRetry until it commits or
+// stop closes, and then tells the tunnel sessions to reconnect elsewhere (tunnelgate.Registry.Drain).
+//
+// Each attempt is bounded by DrainMarkTimeout, and the one in progress is abandoned when stop closes (the
+// workers have drained): ctx has no deadline, so a write waiting on the row (another transaction holding it,
+// a connection that stopped answering) would otherwise hold the drain, and CloseAll after it, for as long
+// as it waits (M2 review of WP-04).
+func (r *Replica) markThenTellTunnels(ctx context.Context, stop <-chan struct{}) {
+	mctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-mctx.Done():
+		}
+	}()
+	const stopped = "the drain ended before gate_replicas.draining_at was written: the tunnel nodes were not told, and their sessions close now"
+	for {
+		actx, acancel := context.WithTimeout(mctx, DrainMarkTimeout)
+		err := r.markDraining(actx)
+		acancel()
+		if err == nil {
+			tctx, cancel := context.WithTimeout(ctx, tunnel.ConnectionWriteTimeout+time.Second)
+			r.tunnels.Drain(tctx)
+			cancel()
+			return
+		}
+		if mctx.Err() != nil {
+			r.log.Warn(stopped, "error", err)
+			return
+		}
+		r.log.Warn("gate_replicas.draining_at not written; the tunnel nodes are told to reconnect elsewhere once it is", "error", err)
+		select {
+		case <-mctx.Done():
+			r.log.Warn(stopped)
+			return
+		case <-time.After(DrainMarkRetry):
+		}
+	}
 }
 
 // close releases the Temporal client and the pool (Run's end, or a New that failed).
@@ -723,6 +836,7 @@ func (r *Replica) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 	gauge("kontra_gate_draining", "1 once the replica has begun its drain.", b(r.draining.Load()))
 	gauge("kontra_gate_dispatches_in_flight", "Dispatches running on this replica.", r.InFlight())
 	gauge("kontra_gate_services", "Enabled services in the registry.", r.services.Count())
+	gauge("kontra_gate_tunnel_sessions", "Tunnel sessions this replica holds.", r.tunnels.Count())
 	writePatchRefusals(w, r.id, &r.refusals)
 }
 

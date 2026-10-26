@@ -1,7 +1,9 @@
 # Relay
 
 Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning; revision 2 was the adversarial
-review). Revision 4 brings the text in line with the M1 code (D82–D122), accepted by the owner on 26 Oct. Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+review). Revision 4 brings the text in line with the M1 code (D82–D122), accepted by the owner on 26 Oct.
+Revision 5 brings it in line with the M2 code (D141–D143, D145–D150, D154), decided under the owner's
+standing instruction on 26 Oct. Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,
@@ -205,6 +207,13 @@ is produced from it as raw JSON and kept as `json` (`services.card`), never `jso
 reorders keys (D49). The gate never round-trips a card through a typed struct, because that drops fields it
 does not know (D11).
 
+**A tunnel service** has one card: its nodes are expected to serve the same one, and the last good fetch through
+any of its sessions is the service's card (D142). A session whose card fetch fails (its node started before its
+agent) still becomes a candidate; its card is fetched again with backoff, 1 s doubling to 1 min, and at once when
+a task is dispatched without it. A tunnel service none of whose nodes has connected for 30 minutes is unavailable
+until a session connects, and a task dispatched while the service has no card fetched in the last 30 minutes is
+retried like `no_session` (§6.4, D143).
+
 **Normalization.** A 1.0 card is used as is, unless it also carries 0.x members (`url`, `preferredTransport`,
 `additionalInterfaces`, `protocolVersion`, `security`, `supportsAuthenticatedExtendedCard`, a skill's
 `security`): for those it is normalized like a pre-1.0 card, the interface members dropped and the rest
@@ -407,10 +416,10 @@ A new task's first attempt picks a backend:
    WHERE t.tenant_id = $tenant AND $service = ANY (t.services)
   ```
 
-  Among them, round-robin, skipping replicas at their dispatch capacity (§14.2). For a new task in a known
-  context, the session of the context's previous task is preferred while it is connected (best effort, PRD
-  §7). No candidate: the attempt fails `no_session` before any upstream task exists, which is retryable
-  (§6.4).
+  Among them, round-robin, per replica; no replica is skipped for its load, which its `kontra-tunnel-<id>` worker
+  bounds (§14.2, D145). For a new task in a known context, the session of the context's previous task is preferred
+  while it is connected (best effort, PRD §7). No candidate: the attempt fails `no_session` before any upstream
+  task exists, which is retryable (§6.4).
 
 **The service comes from the key, never from the request.** The candidate set is computed from the
 enrollment tables only. And **before opening any stream to a node** — a dispatch, a follow-up, a poll, an
@@ -477,9 +486,9 @@ Temporal retries an activity on its original queue, which for a dead replica is 
 
 | Failure | No upstream task id yet | Upstream task id exists |
 |---|---|---|
-| No candidate session (`no_session`) | retry after 1 s, 2 s, 4 s … (capped at the deadline); `failed: no_session` when exhausted | — |
+| No candidate session (`no_session`) | retry after 1 s, 2 s, 4 s … (capped at the deadline), each retry a new attempt counted against `task.retries`; `failed: no_session` when they are spent (D146) | — |
 | Tunnel stream could not be opened, session closed or revoked, or replica lost (`tunnel_lost`) | retry on another session if one exists, else the same rules as `no_session` | `failed: tunnel_lost`, no retry |
-| A response the node wrote itself (`Kontra-Node` other than `sealed_rejected`, [`tunnel.md`](tunnel.md) §8.2) | retry on another session, as `tunnel_lost` | `full`: the dispatch retries the poll with backoff; any other: `failed: tunnel_lost` |
+| A response the node wrote itself (`Kontra-Node` other than `sealed_rejected`, [`tunnel.md`](tunnel.md) §8.2) | retry on another session, as `tunnel_lost` | `full`: the exchange (a poll, a follow-up, a stream) is made again with the poll's backoff for at most 30 s, then `failed: tunnel_lost` (D147); any other: `failed: tunnel_lost` |
 | Dispatch heartbeat timeout, **tunnel** backend (the replica holding the socket died; ≤ 30 s) | retry | `failed: tunnel_lost`, no retry |
 | Dispatch heartbeat timeout or lost context, **direct** backend (a gate replica died; the upstream is untouched) | retry; `failed: upstream_unreachable` when exhausted (D99) | **re-attach** (below; D42) |
 | Dispatch not started within its schedule-to-start (no replica polled its queue) | as a lost dispatch, above | direct: the same turn's dispatch again on the same attempt, as it was (a follow-up stays the turn's first dispatch, a resume a resume), backing off and capped with re-attaches, `failed: upstream_unreachable` at the cap; tunnel: `failed: tunnel_lost` (D100) |
@@ -487,7 +496,7 @@ Temporal retries an activity on its original queue, which for a dead replica is 
 | Upstream protocol error (JSON-RPC error, HTTP 4xx other than 408/429, malformed body) | `failed: upstream_error` with the upstream message, no retry | `failed: upstream_error` with the upstream message |
 | HTTP 408 / 429 | retry, honouring `Retry-After` | `failed: upstream_error`, no retry |
 | An upstream limit exceeded (§6.6) | `failed: upstream_error` | `failed: upstream_error` |
-| Card unavailable (signature fails, fetch fails) | `failed: service_unavailable`, no retry | — |
+| Card unavailable (signature fails, fetch fails) | `failed: service_unavailable`, no retry; a tunnel service with no card fetched in the last 30 minutes: retried like `no_session`, `failed: service_unavailable` when spent (§3, D143) | — |
 | A hosting node refused a sealed part ([`ext-sealed.md`](ext-sealed.md) §6) | `failed: sealed_rejected`, no retry | same |
 | `task.timeout` reached | `failed: timeout` | `forward_cancel` (best effort), then `failed: timeout` |
 
@@ -597,8 +606,8 @@ that wins completes the Update only once the terminal `canceled` event is in the
 | terminal | — | nothing | `TaskNotCancelableError` (`-32002`, HTTP `400`) |
 | `quoted` | — | `canceled`, `kontra.canceled = "client"`; nothing was held | the `canceled` task |
 | active | none yet | aborts the running dispatch **in process**: `abort(task, attempt)` on the attempt's replica's control queue cancels the dispatch's context through the replica's registry (Temporal's own activity cancellation is requested too, as a backstop, D44). The workflow writes `canceled` only once the dispatch has stopped; if the dispatch had recorded a first upstream task id meanwhile, it sends `forward_cancel` first. The attempt is recorded `aborted` | the `canceled` task |
-| active or `input-required` | exists, session up | `forward_cancel(task, attempt)` sends `CancelTask` upstream **inside the tunnel the node opened** | whatever the upstream answers, with gate ids: a `canceled` task (the upstream's `canceled` status is logged as the terminal event; for an `input-required` task, where no dispatch runs, the workflow writes it with `write_terminal`), or the upstream's error (`TaskNotCancelableError`, `UnsupportedOperationError`) while **the task continues**; an upstream task still running (no error, not `canceled`) is answered with the task as the gate stores it, and the task continues (D107) |
-| active or `input-required` | exists, session gone | nothing to forward; the dispatch is already failing `tunnel_lost` | the task as it is after that (`failed: tunnel_lost`) |
+| active or `input-required` | exists, session up | `forward_cancel(task, attempt)` sends `CancelTask` upstream **inside the tunnel the node opened** | whatever the upstream answers, with gate ids: a `canceled` task (the upstream's `canceled` status is logged as the terminal event; for an `input-required` task, where no dispatch runs, the workflow writes it with `write_terminal`), or the upstream's error (`TaskNotCancelableError`, `UnsupportedOperationError`) while **the task continues**; an upstream task still running (no error, not `canceled`) is answered with the task as the gate stores it, and the task continues (D107); an answer the node writes itself (`Kontra-Node`) is not delivered either: `TaskNotCancelableError`, and the task continues (D148) |
+| active or `input-required` | exists, session gone | nothing to forward: `forward_cancel` answers `tunnel_lost`, opening no stream, when its replica does not hold the session or the session no longer serves the service, and for a tunnel attempt that, or a `forward_cancel` not started within 10 s, makes the workflow write `failed: tunnel_lost`; a running dispatch is failing `tunnel_lost` anyway (D148) | the task as it is after that (`failed: tunnel_lost`) |
 
 **The dispatching replica is gone.** `abort`, and a direct task's `forward_cancel` while a dispatch runs, go
 to `kontra-ctl-<replica>` (§14.2). When that replica has died and the dispatch's heartbeat has not yet timed out,
@@ -1247,10 +1256,10 @@ reason. v4 needs no continue-as-new.
 
 | Activity | Queue | Options | Does |
 |---|---|---|---|
-| `prepare(taskId, n)` | `kontra-lifecycle` | start-to-close 10 s; retried, max interval 30 s | Picks the backend and session (§6.1), skipping replicas at their dispatch capacity; writes the attempt row; returns `{queue, sessionId}` |
+| `prepare(taskId, n)` | `kontra-lifecycle` | start-to-close 10 s; retried, max interval 30 s | Picks the backend and session (§6.1, D145); writes the attempt row; returns `{queue, sessionId}` |
 | `dispatch(taskId, n, workItemId, resume)` | `kontra-tunnel-<replica_id>` or `kontra-direct` | schedule-to-start 15 s; heartbeat timeout 30 s, beats every 5 s; start-to-close = time to deadline + 30 s; `MaximumAttempts: 1`; `WaitForCancellation` | Writes `attempts.replica_id` and a fresh `attempts.dispatch_id` first, as every dispatch does (a new attempt, a follow-up turn, a resume), which fences every earlier dispatch of the task; every append it makes is fenced (§6.4, D77). Loads the work item by `(id, taskId)`, consuming it on the turn's first dispatch (§14.1, D66), and runs a2a-go's handler for it (§15) with the relay executor; `resume` re-attaches (§6.4). Discards the handler's result and returns `{outcome, reason, retryAfterSeconds}` only: the failure reason, never its text, and an upstream's `Retry-After` (D102) |
 | `abort(taskId, n)` | `kontra-ctl-<attempts.replica_id>` | schedule-to-start 10 s, start-to-close 10 s | Cancels the running dispatch through the replica's local registry (§8). If no replica is recorded yet, the workflow instead cancels the scheduled dispatch through Temporal, which completes at once for an activity that has not started. Not started within 10 s (the replica is gone): for A2A `CancelTask` the workflow waits for the dispatch's heartbeat timeout, then applies §8's table; an MCP `tasks/cancel` keeps §11.6's 10 s (§8, D79) |
-| `forward_cancel(taskId, n)` | tunnel: `kontra-ctl-<the session's replica>`; direct: `kontra-ctl-<attempts.replica_id>` while a dispatch runs, falling back to `kontra-direct-ctl` when it is not started within 10 s (§8, D79); else the shared `kontra-direct-ctl` every replica's control worker polls | schedule-to-start 10 s, start-to-close 30 s, `MaximumAttempts: 1` | Sends `CancelTask` (or MCP `tasks/cancel`) upstream inside the tunnel or to the direct URL; returns the upstream's answer |
+| `forward_cancel(taskId, n)` | tunnel: `kontra-ctl-<the session's replica>`; direct: `kontra-ctl-<attempts.replica_id>` while a dispatch runs, falling back to `kontra-direct-ctl` when it is not started within 10 s (§8, D79); else the shared `kontra-direct-ctl` every replica's control worker polls | schedule-to-start 10 s, start-to-close 30 s, `MaximumAttempts: 1` | Sends `CancelTask` (or MCP `tasks/cancel`) upstream inside the tunnel or to the direct URL; returns the upstream's answer. Through the tunnel it answers `tunnel_lost`, opening no stream, when its replica does not hold the session (§8, D148), and sends a cancel the node answers `full` again for up to 20 s (D147) |
 | `attempt_state(taskId, n)` | `kontra-lifecycle` | 10 s, retried | Reads `first_upstream_id_at` and `replica_id` from Postgres: the retry decision is taken on what Postgres recorded, never on heartbeat details, which a crash loses; the workflow reads it before scheduling `abort` or `forward_cancel` |
 | `list_push_configs(taskId)` | `kontra-lifecycle` | 10 s, retried | Returns the task's live push config ids (§10.2) |
 | `write_terminal(taskId, state, reason)` | `kontra-lifecycle` | 10 s, retried | Writes the terminal event through the store when no handler can: retries exhausted, owner replica dead, timeout, the cancel of an `input-required` task |
@@ -1272,7 +1281,8 @@ Worker settings: dispatch workers (`kontra-tunnel-<id>`, `kontra-direct`) are ac
 `MaxConcurrentActivityExecutionSize` (`limits.dispatch_slots`, default 10,000) so load never looks like a dead
 replica, and `MaxHeartbeatThrottleInterval` 10 s; the control worker (`kontra-ctl-<id>`) has its own slots, so
 `abort` and `forward_cancel` are never queued behind dispatches; `kontra-push` has `limits.push_slots` (default
-2,000). A dispatch that finds its session missing from the replica's registry fails `tunnel_lost` at once. The
+2,000). A dispatch that finds its session missing from the replica's registry fails `tunnel_lost` at once, opening
+no stream; after the first upstream task id it logs `failed: tunnel_lost` itself, under its fence (D149). The
 gate's Temporal server runs with `frontend.WorkerCommandsEnabled` and `system.enableCancelActivityWorkerCommand`
 on, so Temporal's own activity cancellation reaches a worker without waiting for a heartbeat; `abort` does not
 depend on it.
@@ -1280,18 +1290,22 @@ depend on it.
 ### 14.3 Draining
 
 On `SIGTERM` a replica marks itself draining (`gate_replicas.draining_at`), fails its readiness check, stops
-accepting tunnels, tells its connected nodes to reconnect elsewhere ([`tunnel.md`](tunnel.md) §13), and stops
-being selected for new attempts: §6.1 skips it for tunnel sessions, and it stops its `kontra-direct` pollers at
-once, with `WorkerStopTimeout` = `drain_timeout`, so the dispatches already running keep running and
-heartbeating. It **keeps polling** `kontra-lifecycle`, `kontra-push`, `kontra-direct-ctl` and its per-replica
-queues (`kontra-tunnel-<id>`, `kontra-ctl-<id>`) until its last dispatch has ended or `drain_timeout` (default 10
-min) passes, so that, on a gate of one replica too, Updates such as a cancel are still accepted, dispatch results
-are recorded, and `abort` and `forward_cancel` for its tasks run. Only then, after a 2 s settle in which the last
-dispatch's result is recorded (D118), does it stop them (`WorkerStopTimeout` a few seconds) and exit (D76). Its
-public listener keeps serving during the drain (`/healthz` answers `503`) and closes after the workers stop,
-giving open streams 5 s; their callers resume elsewhere with `Last-Event-ID` (D119). Kubernetes must give it `terminationGracePeriodSeconds` ≥
-`drain_timeout` + 30 s. A task still dispatching on the drained replica when `drain_timeout` ends is a lost
-session like any other (§6.4): rolling deploys do not cut tasks that finish within `drain_timeout`.
+accepting tunnels, tells its connected nodes to reconnect elsewhere once that mark has committed
+([`tunnel.md`](tunnel.md) §13, D141), and stops being selected for new attempts: §6.1 skips it for tunnel
+sessions, and it stops its `kontra-direct` pollers at once, with `WorkerStopTimeout` = `drain_timeout`, so the
+dispatches already running keep running and heartbeating. It **keeps polling** `kontra-lifecycle`, `kontra-push`,
+`kontra-direct-ctl` and its per-replica queues (`kontra-tunnel-<id>`, `kontra-ctl-<id>`) until its last dispatch
+has ended or `drain_timeout` (default 10 min) passes, so that, on a gate of one replica too, Updates such as a
+cancel are still accepted, dispatch results are recorded, and `abort` and `forward_cancel` for its tasks run. Only
+then, after a 2 s settle in which the last dispatch's result is recorded (D118), does it stop them
+(`WorkerStopTimeout` a few seconds) and exit (D76). A tunnel dispatch that starts during the settle (a follow-up)
+is waited for, within the same `drain_timeout`, and the settle runs again; once none has started, the replica
+closes `kontra-tunnel-<id>`, so that a dispatch its worker still starts returns at once having sent nothing, and
+the worker stops within 5 s (D150). Its public listener keeps serving during the drain (`/healthz`
+answers `503`) and closes after the workers stop, giving open streams 5 s; their callers resume elsewhere with
+`Last-Event-ID` (D119). Kubernetes must give it `terminationGracePeriodSeconds` ≥ `drain_timeout` + 30 s. A task
+still dispatching on the drained replica when `drain_timeout` ends is a lost session like any other (§6.4):
+rolling deploys do not cut tasks that finish within `drain_timeout`.
 
 ### 14.4 Versioning and access
 
@@ -1344,7 +1358,9 @@ of these specs added the rest.
 M1 runs `relay_resume`, `replica_kill` (direct variant), `cancel_forwarded` (direct, against an a2a-go seller that
 handles cancel: a2a-cli v0.3.1's exec mode can end `failed` instead of `canceled` on a cancel), `push_delivery`,
 `ssrf_webhook`, `card_compat`, `cross_buyer` and `version_conflict`. The tunnel variants and the other tests come
-with their milestones (D80).
+with their milestones (D80). M2 runs the tunnel variants of `replica_kill` (after and before the first upstream
+task id) and `cancel_forwarded`, `input_required_sticky` and `key_scope`, with [`tunnel.md`](tunnel.md) §16's
+`tunnel_kill` and `sidecar_not_a_proxy`, and the helloworld seller through the tunnel (D154).
 
 | Test | Expected |
 |---|---|

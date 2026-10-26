@@ -119,6 +119,26 @@ const (
 	// error the upstream never sent. The closest faithful behaviour is this fourth outcome, whose caller
 	// answer is the stored task; an upstream task already terminal otherwise is not_cancelable.
 	CancelContinues CancelOutcome = "continues"
+	// CancelTunnelLost is forward_cancel finding the tunnel attempt's sticky session gone: its replica does
+	// not hold it, or it no longer serves the service (closed, its key or binding revoked), found before the
+	// exchange or right after one that ended without a complete response. Nothing could be forwarded, and
+	// the task fails tunnel_lost. As a kontra.cancel outcome, the caller gets the task as it is after that
+	// (failed: tunnel_lost). It is never the answer for a session that is up (§8's row "session up"): a
+	// response the node wrote itself (Kontra-Node: target_unreachable, not_hosted, kind_mismatch, any other
+	// value) or an exchange cut while the session stays held is forward_cancel's error, a cancel not
+	// delivered, and the task continues. Only a tunnel attempt has a session to lose: the workflow takes this
+	// outcome for any other attempt as a cancel not delivered too (M2 WP-05 review).
+	//
+	// SPEC-CONFLICT (M2 plan, confirmed conflict on spec §8's row "active or input-required | exists,
+	// session gone"): the row says the dispatch is already failing tunnel_lost and the caller gets the task
+	// as it is after that, but for an input-required task no dispatch runs, so nothing would fail it, and
+	// M1's workflow answered a forward_cancel that failed (or was not started within 10 s) with "the task
+	// continues". The closest faithful behaviour implements the row's stated outcome: forward_cancel
+	// answers this typed outcome, and the workflow, for a tunnel attempt, takes it (or a forward_cancel not
+	// started within 10 s on the session replica's control queue) for the sticky session being gone and
+	// writes failed: tunnel_lost (write_terminal, attempt outcome tunnel_lost), as §7's row 2 would fail the
+	// next follow-up; behind workflow.GetVersion (changeCancelTunnelLost).
+	CancelTunnelLost CancelOutcome = "tunnel_lost"
 )
 
 // UpstreamError is an upstream's JSON-RPC error, relayed to the caller of a cancel (spec §8). It crosses
@@ -144,13 +164,19 @@ type (
 		TaskID          string `json:"taskId"`
 		N               int    `json:"n"`
 		PreviousOutcome string `json:"previousOutcome,omitempty"`
+		// AvoidSession is the tunnel session a retry after tunnel_lost leaves: another candidate is chosen
+		// when one exists (spec §6.4, "retry on another session if one exists").
+		AvoidSession string `json:"avoidSession,omitempty"`
 	}
 	// PrepareResult is prepare's result.
 	PrepareResult struct {
-		Queue     string    `json:"queue"`               // QueueDirect, or QueueTunnel(replica) in M2
+		Queue     string    `json:"queue"`               // QueueDirect, or QueueTunnel(replica); empty with NoSession
 		Backend   string    `json:"backend"`             // direct | tunnel
 		SessionID string    `json:"sessionId,omitempty"` // tunnel only
 		Deadline  time.Time `json:"deadline"`            // tasks.deadline, as stored
+		// NoSession is a tunnel service with no candidate session: attempt N is written ended, outcome
+		// no_session, and nothing is dispatched; the workflow retries while task.retries allows (spec §6.4).
+		NoSession bool `json:"noSession,omitempty"`
 	}
 	// DispatchInput is dispatch's input.
 	DispatchInput struct {
@@ -194,8 +220,10 @@ type (
 		Canceled string `json:"canceled,omitempty"`
 		Text     string `json:"text"`
 		// EndAttempt, when set, ends the task's latest attempt if it is still open, with this outcome; when
-		// the task was waiting at input-required, the outcome is interrupted instead (D77).
-		EndAttempt string `json:"endAttempt,omitempty"`
+		// the task was waiting at input-required, the outcome is interrupted instead (D77), unless
+		// EndAttemptAsIs: a tunnel attempt whose sticky session is gone ends tunnel_lost (spec §7, §8).
+		EndAttempt     string `json:"endAttempt,omitempty"`
+		EndAttemptAsIs bool   `json:"endAttemptAsIs,omitempty"`
 	}
 	// TerminalResult is write_terminal's result: the terminal row's seq and the task's terminal state,
 	// which is another one when the task had already ended (the write is then left undone).
@@ -247,7 +275,7 @@ const (
 	DispatchTerminal    DispatchOutcome = "terminal"     // the relay logged a terminal event
 	DispatchInterrupted DispatchOutcome = "interrupted"  // input-required: the turn ended
 	DispatchRetryable   DispatchOutcome = "retryable"    // failed before the first upstream task id
-	DispatchTunnelLost  DispatchOutcome = "tunnel_lost"  // tunnel backends (M2)
+	DispatchTunnelLost  DispatchOutcome = "tunnel_lost"  // the attempt's session is not held here (or no longer serves it): no stream opened
 	DispatchContextLost DispatchOutcome = "context_lost" // direct: re-attach (D42)
 	DispatchAborted     DispatchOutcome = "aborted"      // abort() stopped it (spec §8)
 )

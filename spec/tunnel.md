@@ -1,6 +1,7 @@
 # Tunnel
 
-Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning). Normative. RFC 2119
+Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning). Revision 4 brings the text in line
+with the M2 code (D123–D157), decided under the owner's standing instruction on 26 Oct. Normative. RFC 2119
 key words.
 
 The tunnel is how a node (`kontra connect`) and a gate (`kontra-gate`) talk: one outbound connection from the
@@ -76,7 +77,13 @@ time has passed; an MCP session's key when the session closes and every task cre
 API keys (`kontra login`, `--api-key`) and enrollment tokens (`--enroll`) are kept per gate origin in
 `~/.kontra/credentials` (0600) and sent only to the origin they were issued for: a node never sends a credential
 issued by one gate to another. `--api-key` and `--enroll` accept a value, `@file` or `-` (stdin), so a secret
-need not appear in a process list.
+need not appear in a process list. The file also keeps, per gate, the SHA-256 of every token a `welcome`
+confirmed, which the node never sends again, and of the tokens a hello in flight carries. A handshake whose
+outcome the node did not receive (the connection cut after the proof, a `1011` close, the process stopped) is
+followed by a probe: a hello with the active key alone, without `enroll`, `rotate_from` or `auth`. Its `welcome`
+means the change committed; `unknown_key`, or `service_denied` for a known key, means it did not, and the full
+hello follows at once. Tokens refused `enroll_invalid` and an API key refused `auth_invalid` are removed from the
+file (D124).
 
 ## 3. Connection
 
@@ -87,7 +94,9 @@ handshake, inside TLS, so they never reach a proxy's access log.
 - `{gate}` is the gate's `public_url` (`--gate`, default `https://gateway.kontra.sh`). It must be `https://`,
   except `http://localhost`, `http://127.0.0.1` and `http://[::1]` (contributors' gates).
 - The gate refuses an upgrade without the subprotocol (`400`), and the node closes a connection on which the
-  gate did not select it.
+  gate did not select it. A gate that binds `tls-exporter` (§4) also refuses an upgrade it cannot channel-bind:
+  `400` when the client's TLS has no exporter (TLS 1.2 without Extended Master Secret), `500` when its own
+  listener has no TLS. The node retries it as a failed dial (D135).
 - The WebSocket carries binary messages only after the handshake; compression is off.
 
 ## 4. Handshake
@@ -158,7 +167,13 @@ is present only when M1 carried `rotate_from`.
 `service_denied`, `kind_mismatch`, `anonymous_unavailable`, `rate_limited`, `draining`, `auth_invalid`. The gate
 then closes with WebSocket status 4000 + the code's index in that list. The node does not retry `bad_origin`,
 `bad_proof`, `revoked`, `enroll_invalid`, `service_denied`, `kind_mismatch` or `auth_invalid` (an `auth` API key
-that is revoked, expired or unknown) without a change by its operator; it retries the others with backoff (§13).
+that is revoked, expired or unknown) without a change by its operator; it retries the others with backoff (§13). A
+hello of the wrong shape (a field of the wrong type, a `name` outside 1–64 characters, a `nonce` that is not 32
+bytes, a NUL) is refused with the code of its subject: `bad_origin` for the origin, `bad_proof` for a `kid` or
+`recipient` that does not match, `service_denied` for a service's kind or name; one with no listed subject, and a
+binary message during the handshake, is `unsupported_version` (D134). A gate that fails itself during the
+handshake (Postgres unreachable during the admission) sends neither `welcome` nor `error` and closes with
+WebSocket status `1011`, which the node retries, probing first (§2.4, D136).
 
 ### 4.1 The proof
 
@@ -219,10 +234,16 @@ the proof. A service the gate creates during a handshake gets `allow: [org:<its 
   used_at = now() WHERE token_hash = $h AND used_at IS NULL AND expires_at > now() RETURNING …`).
 - An enrollment that would bind a key already enrolled under another tenant is `enroll_invalid`; a token for a
   service of another `kind` than declared is `kind_mismatch`.
-- A declared service the key was never enrolled for, and is not enrolling in this handshake, is
-  `service_denied`, and nothing is enrolled (the handshake is all-or-nothing). A declared service whose binding
+- A service token is minted only for an existing, enabled tunnel service, and an `enroll:` scope binds only such
+  services (naming another is `service_denied`); only a tenant token creates a service. A bound service that is no
+  longer an enabled tunnel service is left out like a revoked binding. A token that applies to no declared service
+  is `enroll_invalid` and is not consumed (D132).
+- A declared service the key was never enrolled for, and is not enrolling in this handshake, is `service_denied`,
+  and nothing is enrolled (the handshake is all-or-nothing); an unknown key that nothing in its hello enrolls is
+  `unknown_key`, whatever else the hello carries (D133). A declared service whose binding
   was revoked (`key_services.revoked_at` set) is left out of `welcome.services` and `tunnels.services`; the
-  handshake still succeeds for the others.
+  handshake still succeeds for the others. Only a service or tenant token in the hello enrolls it again, never the
+  `auth` API key's `enroll:` scope (D130).
 - **The service a session serves comes from `key_services`, never from a request** ([`relay.md`](relay.md)
   §6.1). The `services` in M1 only narrow it.
 - Every enrollment, revocation and rotation is a row in `audit`.
@@ -279,8 +300,9 @@ Both sides call `websocket.NetConn(ctx, conn, websocket.MessageBinary)` and star
 | `StreamCloseTimeout` | 5 min | |
 
 Both sides accept streams promptly and enforce their own in-flight caps **after** `Accept` (answering `503` over
-HTTP when full): yamux bounds only the backlog, not established streams. The first stream the gate opens after
-`welcome` is the **control stream** (§13).
+HTTP when full): yamux bounds only the backlog, not established streams. Every write to the WebSocket, on both
+sides, has the deadline `ConnectionWriteTimeout`, so a peer that stops reading closes the session within 15 s
+(D155). The first stream the gate opens after `welcome` is the **control stream** (§13).
 
 ## 8. Hosting: streams the gate opens
 
@@ -315,8 +337,11 @@ The node is a **fixed-target reverse proxy**, not a SOCKS proxy (`sidecar_not_a_
 - It sends the request to the configured target of the named service and nowhere else. The request's `Host`
   header and an absolute-form request target are ignored; the scheme, host and port always come from
   `--serve`.
-- It percent-decodes and cleans the request path (`.`, `..`, `//`), prefixes the target's base path, and answers
-  `400` if the result is not under that base path.
+- It percent-decodes and cleans the request path (`.`, `..`, `//`), forwards a path already under the target's
+  base path as it is and prefixes any other with the base (the gate's paths come from the upstream card's
+  interface, which already holds the base, [`relay.md`](relay.md) §6.2), and answers `400` if the result is not
+  under that base path. Until the node forwards by this rule, `kontra connect` refuses a `--serve` target with a
+  path: M2 serves every target at its root (D123).
 - `Host` is set to the target's host. `Origin` is removed (MCP servers on loopback refuse a foreign `Host` and
   may refuse a browser `Origin`).
 - Hop-by-hop headers are removed. `CONNECT` and requests with `Upgrade` are refused with `400`. `TRACE` is
@@ -327,7 +352,9 @@ The node is a **fixed-target reverse proxy**, not a SOCKS proxy (`sidecar_not_a_
 
 **Responses the node writes itself** carry a `Kontra-Node` header, so the gate never mistakes them for the
 service's own ([`relay.md`](relay.md) §6.4): `not_hosted` (404), `kind_mismatch` (404), `full` (503),
-`target_unreachable` (502), or `sealed_rejected` (400, [`ext-sealed.md`](ext-sealed.md) §6). The node removes any
+`target_unreachable` (502), or `sealed_rejected` (400, [`ext-sealed.md`](ext-sealed.md) §6). The node's `400`s for
+`CONNECT`, `Upgrade`, `TRACE`, a path outside the base and an unreadable preamble carry no `Kontra-Node`: the gate
+takes them as the service's own, and fails the task `upstream_error` (D151). The node removes any
 `Kontra-Node` and `Kontra-Sealed-Reject` header from the service's own responses. A stream that ends without a complete
 HTTP response, or while the session is closing, is `tunnel_lost` to the gate.
 
@@ -405,8 +432,12 @@ target like any other.
   row when the session closes.
 - **One session per key per gate.** A completed handshake for a key that already has a non-draining session at
   this gate supersedes it: the gate closes the older session (its dispatches fail `tunnel_lost`, its row is
-  deleted). Only during make-before-break (a drain, §13, or a rotation, §12) are two kept. Several nodes may serve
-  one service, each with its own key.
+  deleted). The older is the earlier handshake, by session id (UUIDv7, minted at the challenge): a registration
+  that finds a newer session of its key on a replica that is not draining inserts nothing and closes (D139). The
+  replica that supersedes a session another replica holds tells it with `NOTIFY kontra_tunnel, 'session:<id>'` in
+  the same transaction; an admission's transaction sends `'enrolled:<key_id>/<tenant_id>/<service>'` on the same
+  channel, for §5's `{"t": "enrolled"}` (D138). Only during make-before-break (a drain, §13, or a rotation, §12)
+  are two kept. Several nodes may serve one service, each with its own key.
 - Each replica upserts `gate_replicas.last_seen_at` every 10 s, and every 10 s deletes the rows of replicas silent
   for more than 30 s (cascading to their `tunnels` rows) and closes the `mcp_sessions` pinned to them
   (`tunnel_lost`). The relay never selects a session on a replica silent for 30 s ([`relay.md`](relay.md) §6.1).
@@ -416,15 +447,19 @@ target like any other.
 - **Revoke** (console, `kontra-gate enroll --revoke <key_id>`, or anonymous expiry): `tunnel_keys.revoked_at` is
   set and `NOTIFY kontra_revoke, 'key:<key_id>'` is sent; the replica holding the session closes every open
   `mcp_sessions` row pinned to it as `revoked`, sends `{"t": "revoked"}` on the control stream and closes it. The
-  next handshake is `revoked`.
-- **Revoke one binding** (`key_services.revoked_at`, `NOTIFY kontra_revoke, 'binding:<key_id>/<service>'`): the
+  next handshake is `revoked`. Revocation does not follow `rotated_to`: a key rotated from the revoked one stays
+  enrolled, and `kontra-gate enroll --revoke` names the newest still-enrolled key of the chain and the command
+  that revokes it (D128).
+- **Revoke one binding** (`kontra-gate enroll --revoke <key_id> --service <name>`, D131;
+  `key_services.revoked_at`, `NOTIFY kontra_revoke, 'binding:<key_id>/<service>'`): the
   replica holding the key's session removes the service from the session's served set and from
   `tunnels.services`, closes every open `mcp_sessions` row pinned to (that session, that service) as `revoked`,
   aborts the session's in-flight dispatches for the service (they fail `tunnel_lost`, or are retried if no
   upstream task exists), and then sends `{"t": "revoked", "service": "<name>"}` on the control stream; the node
-  stops declaring that service until its operator changes `--serve`. The gate does not rely on the node
-  honouring that message: it opens no further stream for the service ([`relay.md`](relay.md) §6.1,
-  `mcp_session_revoked`).
+  stops declaring that service until its operator changes `--serve` (a revocation that reaches the session of a
+  rotated key in its overlap stops only that session serving it: the active key has its own binding, D129). The
+  gate does not rely on the node honouring that message: it opens no further stream for the service
+  ([`relay.md`](relay.md) §6.1, `mcp_session_revoked`).
 - **Revoke an API key** (`NOTIFY kontra_revoke, 'apikey:<id>'`): every later stream a session opens with it as
   its hiring principal gets `401`, and the replica sends `{"t": "auth_revoked"}` on that session's control stream.
   Hosting on the session is unaffected.
@@ -432,15 +467,20 @@ target like any other.
   connection (re)connects and at least every 5 s ([`relay.md`](relay.md) §2.3).
 - **Rotate** (`kontra connect --rotate`): the node writes a new first line to `identity.key` (the old one stays
   below it, decrypt-only) and connects with the new key and `rotate_from` naming the old one, proving both (§4.1).
-  No token is needed: holding the enrolled old key is the authority. `rotate_from` must name a key of this gate that
-  is neither revoked nor already rotated (a revoked one is `revoked`, a rotated one `enroll_invalid`), and the new
-  key must not exist yet; the rotation is one transaction, under a row lock on the old key. The gate inserts the new key in the old
-  key's tenant, copies its active `key_services` rows, and marks the old key `revoked_reason = 'rotated'`,
-  `rotated_to = <new>`, `overlap_until = now + 24 h` (`revoked_at` is set when the overlap ends). Rotation is
+  No token is needed: holding the enrolled old key is the authority. `rotate_from` must name a key of this gate
+  that is neither revoked nor already rotated (a revoked one is `revoked`, a rotated one `enroll_invalid`; the
+  node so refused sends its hello again at once without `rotate_from`, and names that key to that gate no more, so
+  that its tokens or `enroll:` scope enroll the new key there, D125), and the new key must not exist yet; the
+  rotation is one transaction, under a row lock on the old key. The gate inserts the new key in the old key's
+  tenant, copies its `key_services` rows, a revoked one as revoked (D129), and marks the old key
+  `revoked_reason = 'rotated'`, `rotated_to = <new>`, `overlap_until = now + 24 h` (`revoked_at` is set when the
+  overlap ends, and the old key's session is then closed without `{"t": "revoked"}`, D140). Rotation is
   make-before-break: the old key's session keeps serving the tasks already on it until they end or the overlap
-  passes; new attempts never select a rotated key. The service's recipients are republished at once without the
-  old key, so new parts are sealed only to the new one; parts already sealed to the old key still open on the
-  node, which keeps the old line for those 24 h (PRD §8) and then drops it.
+  passes; new attempts never select a rotated key, and a new handshake of it is refused `revoked` (D127). The
+  service's recipients are republished at once without the old key, so new parts are sealed only to the new one;
+  parts already sealed to the old key still open on the node, which keeps the old line until 24 h after the last
+  gate that confirmed the rotation (PRD §8, D126) and then drops it. The node rewrites `identity.key` under a file
+  lock (`flock(2)`); where there is none, it refuses to rotate (D153).
 - **Recipients** of a sealed service are the keys enrolled for it, not revoked and not rotated, whether or not
   they are connected (D61; PRD §8 said "connected"), so a task sealed while one replica is offline can still be
   served by it when it returns.
@@ -475,10 +515,14 @@ an hour (D36).
 | Handshake message | 16 KiB; handshake 10 s |
 | Preamble | 4096 bytes |
 | Inbound streams in flight per session (node) | 64 (`--max-inflight`); over it the node answers `503` with `Kontra-Node: full` |
-| Node-opened streams in flight per session (gate) | 32, 8 for anonymous sessions; over it `429` |
+| Node-opened streams in flight per session (gate) | 32, 8 for anonymous sessions; over it `429`. M2, which serves no hiring, closes the session instead (D137) |
+| Gate-opened streams the gate has closed and the node has not (gate) | 256; over it the gate closes the session (D157) |
+| Ping SYNs from a node (gate) | 16 at once, then one every 500 ms; over it the gate closes the session (D155) |
 | Blob size per fetch | 64 MiB |
 | Sessions per key per gate | 1, plus one during make-before-break |
 | Stream ids | yamux allows about 2³¹ opens per side; on `ErrStreamsExhausted` the node reconnects |
+
+A stream is in flight until both its halves have ended, on either side (D137, D157).
 
 ## 15. Security properties
 
@@ -490,14 +534,17 @@ an hour (D36).
 | A key cannot be impersonated at another gate by a gate it dialed | §4.1 origin binding (and channel binding); §2.4 credentials go only to their own origin |
 | The node's local endpoint cannot be driven by a web page | §9 Host and Origin checks (`local_rebinding`) |
 | The gate holds no private key and learns nothing that opens a part | §2, §4.1 |
-| A stolen identity key | Revoke (§12) ends the session and every future handshake. It does **not** protect parts already sealed to it: age has no forward secrecy, so whoever holds the key and the ciphertext (a database or bucket breach) reads them. Retention ([`relay.md`](relay.md) §5.4) bounds that. |
+| A stolen identity key | Revoke (§12) ends the session and every future handshake of that key, not of a key it was rotated to, which is revoked in turn (D128). It does **not** protect parts already sealed to it: age has no forward secrecy, so whoever holds the key and the ciphertext (a database or bucket breach) reads them. Retention ([`relay.md`](relay.md) §5.4) bounds that. |
 
 ## 16. Named tests
+
+M2 runs `tunnel_kill`, `sidecar_not_a_proxy` and `key_scope`, with [`relay.md`](relay.md) §16's tunnel tests;
+`anon_limits`, `local_rebinding` and `stdio_roots` come with M3 and M4 (D154).
 
 | Test | Expected |
 |---|---|
 | `tunnel_kill` | §11, §13; [`relay.md`](relay.md) §6.4: SIGKILL the node mid-task; the task fails `tunnel_lost` once an upstream task exists; the node re-registers within 60 s; the next task succeeds |
-| `sidecar_not_a_proxy` | §8.2–§8.3: a foreign `Host`, an absolute URL, a `..` or encoded path outside the base, `CONNECT`, `Upgrade`, and a `url` part pointing at a private address all reach only the configured target or are refused, and the node dials nothing else |
+| `sidecar_not_a_proxy` | §8.2–§8.3: a foreign `Host`, an absolute URL, a `..` or encoded path outside the base (M2: the root base, D123), `CONNECT`, `Upgrade`, and a `url` part pointing at a private address all reach only the configured target or are refused, and the node dials nothing else |
 | `key_scope` | §5, §8.1; [`relay.md`](relay.md) §6.1 |
 | `replica_kill` | §11; [`relay.md`](relay.md) §14.2 |
 | `anon_limits` | §6.2: a 4th anonymous tenant from one /24 is `rate_limited`; a 5th declared service is `service_denied`; a 5th concurrent task is `429`; the services are absent from `search`; at `expires_at` the session closes `revoked` and the URLs answer `404` |

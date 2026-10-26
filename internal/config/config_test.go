@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // minimal is the smallest valid file: a localhost gate with one direct a2a service.
@@ -23,8 +26,7 @@ services:
     backend: { a2a: { url: "https://hello.example.com" } }
 `
 
-// tunnelled is minimal with a tunnel backend: sealing and seller keys belong to tunnel services, which
-// this build does not serve, so ignoring them fails closed.
+// tunnelled is minimal with a tunnel backend, which this build serves (M2).
 const tunnelled = `
 public_url: http://localhost:8080
 postgres: postgres://kontra@localhost:5432/kontra
@@ -33,6 +35,30 @@ services:
     kind: a2a
     backend: { tunnel: {} }
 `
+
+// mcpDirect is minimal with a direct MCP service: MCP services are not built and have no card, so
+// seller_keys on it fails closed and loads with a warning.
+const mcpDirect = `
+public_url: http://localhost:8080
+postgres: postgres://kontra@localhost:5432/kontra
+services:
+  hello:
+    kind: mcp
+    backend: { mcp: { url: "https://mcp.example.com/mcp" } }
+`
+
+// decodeSealed decodes one sealed: value as Parse does, without validating the file: sealing is refused
+// on every backend until M3, so no configuration that loads carries it.
+func decodeSealed(t *testing.T, y string) (Sealed, error) {
+	t.Helper()
+	var v struct {
+		Sealed Sealed `yaml:"sealed"`
+	}
+	dec := yaml.NewDecoder(strings.NewReader("sealed: " + y + "\n"))
+	dec.KnownFields(true)
+	err := dec.Decode(&v)
+	return v.Sealed, err
+}
 
 func parse(t *testing.T, y string, opts ...Option) *Config {
 	t.Helper()
@@ -183,28 +209,41 @@ func TestSealedShapes(t *testing.T) {
 		{"{required: true}", SealedRequired},
 		{"{}", SealedRequired},
 	} {
-		c := parse(t, tunnelled+"    sealed: "+tc.yaml+"\n")
-		if got := c.Services["hello"].Sealed.Mode; got != tc.want {
-			t.Errorf("sealed: %s loads as %q, want %q", tc.yaml, got, tc.want)
+		got, err := decodeSealed(t, tc.yaml)
+		if err != nil || got.Mode != tc.want {
+			t.Errorf("sealed: %s decodes as %q (%v), want %q", tc.yaml, got.Mode, err, tc.want)
 		}
 	}
 	for _, bad := range []string{`"yes"`, "1", "{require: true}", "{required: maybe}", "[true]"} {
+		if _, err := decodeSealed(t, bad); err == nil {
+			t.Errorf("sealed: %s decoded", bad)
+		}
 		err := parseErr(t, tunnelled+"    sealed: "+bad+"\n")
 		if !strings.Contains(err.Error(), "sealed") {
 			t.Errorf("sealed: %s: error %q does not name sealed", bad, err)
 		}
 	}
+	// sealed: false is the default, on any backend.
+	if c := parse(t, tunnelled+"    sealed: false\n"); c.Services["hello"].Sealed.Mode != SealedOff {
+		t.Errorf("sealed: false on a tunnel service loads as %q", c.Services["hello"].Sealed.Mode)
+	}
 }
 
 // Sealing and seller-key verification are not built (M3). A key this build would ignore on a service it
 // serves fails open, so it is refused: sealed on a direct backend (which can never be sealed: no node
-// unseals for it) and seller_keys on a direct a2a backend (its card would be served unverified).
+// unseals for it), sealed on a tunnel service (served since M2: its parts would be relayed in plaintext),
+// and seller_keys on a direct a2a backend or a tunnel service (its card would be served unverified).
 func TestFailOpenKeysRefused(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, want string }{
 		{"sealed on a direct a2a backend", minimal + "    sealed: true\n", "services.hello.sealed: sealing needs backend tunnel"},
 		{"optional sealing on a direct a2a backend", minimal + "    sealed: { required: false }\n", "sealing needs backend tunnel"},
 		{"sealed on a direct mcp backend", minimal + "  fs:\n    kind: mcp\n    backend: { mcp: { url: \"https://mcp.example.com\" } }\n    sealed: true\n", "services.fs.sealed: sealing needs backend tunnel"},
 		{"seller_keys on a direct a2a backend", minimal + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.seller_keys: seller card signatures are not verified in this release"},
+		{"sealed on a tunnel service", tunnelled + "    sealed: true\n", "services.hello.sealed: sealing is not built in this release (M3), and this build serves tunnel services"},
+		{"optional sealing on a tunnel service", tunnelled + "    sealed: { required: false }\n", "services.hello.sealed: sealing is not built"},
+		{"sealed on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    sealed: true\n", "services.fs.sealed: sealing is not built"},
+		{"seller_keys on a tunnel service", tunnelled + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.seller_keys: seller card signatures are not verified in this release"},
+		{"seller_keys on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.fs.seller_keys: seller card signatures are not verified"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := parseErr(t, tc.yaml); !strings.Contains(err.Error(), tc.want) {
@@ -528,7 +567,7 @@ func TestRemoteAdmissionRefusedAsUnbuilt(t *testing.T) {
 
 // The seller_keys mapping decodes (the skeleton's json.RawMessage could not), as JSON.
 func TestSellerKeysDecodeAsJSON(t *testing.T) {
-	c := parse(t, tunnelled+`
+	c := parse(t, mcpDirect+`
     seller_keys:
       keys:
         - { kty: EC, crv: P-256, x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0", kid: "k1", use: sig }
@@ -545,7 +584,7 @@ func TestSellerKeysDecodeAsJSON(t *testing.T) {
 	if len(v.Keys) != 1 || v.Keys[0]["kid"] != "k1" || v.Keys[0]["crv"] != "P-256" || v.Extra != 3 {
 		t.Errorf("seller_keys = %s", got)
 	}
-	c = parse(t, tunnelled+"    seller_keys: { url: \"https://seller.example.com/.well-known/jwks.json\" }\n")
+	c = parse(t, mcpDirect+"    seller_keys: { url: \"https://seller.example.com/.well-known/jwks.json\" }\n")
 	if string(c.Services["hello"].SellerKeys) != `{"url":"https://seller.example.com/.well-known/jwks.json"}` {
 		t.Errorf("seller_keys {url} = %s", c.Services["hello"].SellerKeys)
 	}
@@ -591,23 +630,40 @@ func TestParseAllowEntry(t *testing.T) {
 	}
 }
 
-// Fail-closed keys this build ignores are reported as warnings, so an operator is not surprised.
+// Fail-closed keys this build ignores are reported as warnings, so an operator is not surprised. A tunnel
+// service is served (M2): it gets none.
 func TestUnbuiltWarnings(t *testing.T) {
 	c := parse(t, minimal+`
   remote:
     kind: a2a
     backend: { tunnel: {} }
-    sealed: true
+  files:
+    kind: mcp
+    backend: { mcp: { url: "https://mcp.example.com/mcp" } }
     seller_keys: { url: "https://seller.example.com/jwks.json" }
 blobs: s3://kontra-parts
 signing_key: file:./kontra.key
 auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra } }
+tunnel: { anonymous: true }
 `)
-	want := []string{"auth.oidc", "blobs", "signing_key", "services.remote.sealed", "services.remote.seller_keys", "services.remote: tunnel backends"}
+	want := []string{"auth.oidc", "blobs", "signing_key", "services.files: MCP services", "services.files.seller_keys",
+		"tunnel.anonymous"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)
 		}
+	}
+	if len(c.Warnings) != len(want) {
+		t.Errorf("warnings %q, want only %q", c.Warnings, want)
+	}
+	for _, w := range c.Warnings {
+		if strings.Contains(w, "services.remote") || strings.Contains(w, "tunnel backends") {
+			t.Errorf("a served tunnel service is warned about: %q", w)
+		}
+	}
+	// The plain tunnel service loads with no warning at all.
+	if c := parse(t, tunnelled); len(c.Warnings) != 0 {
+		t.Errorf("a tunnel service: warnings %q", c.Warnings)
 	}
 }
 
@@ -680,17 +736,86 @@ func TestHelloExecLoads(t *testing.T) {
 	}
 }
 
-// The schema's fixture is also a configuration the gate loads, with the values it says.
+// The examples' tunnel gates (M2) load as their READMEs describe: one tunnel service each, for the team's
+// tenant, on a plaintext localhost gate whose tunnel channel binding is therefore none, with no warning (no
+// sealed or seller_keys, which a tunnel service refuses in M2).
+func TestTunnelExamplesLoad(t *testing.T) {
+	for path, name := range map[string]string{
+		"../../examples/sellers/hello-exec/kontra-tunnel.yaml": "hello",
+		"../../examples/sellers/helloworld/kontra.yaml":        "hello",
+		"../../examples/sellers/booking/kontra.yaml":           "booking",
+	} {
+		c, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if len(c.Services) != 1 {
+			t.Errorf("%s: services %v, want only %s", path, slices.Sorted(maps.Keys(c.Services)), name)
+		}
+		s, ok := c.Services[name]
+		if !ok || s.Kind != KindA2A || s.Backend.Tunnel == nil || s.Backend.Direct() != nil {
+			t.Fatalf("%s: services.%s = %+v, want an a2a tunnel service", path, name, s)
+		}
+		if !slices.Equal(s.Allow, []string{"org:default"}) || s.Task.Timeout.D() != 10*time.Minute || s.Task.RetryCount() != 2 ||
+			s.Sealed.Mode != SealedOff || len(s.SellerKeys) != 0 {
+			t.Errorf("%s: services.%s = %+v", path, name, s)
+		}
+		if c.PublicURL != "http://localhost:8080" || c.Listen != "127.0.0.1:8080" || !c.Auth.APIKeys ||
+			c.Tunnel.ChannelBinding != ChannelBindingNone || len(c.Warnings) != 0 {
+			t.Errorf("%s: public_url %q listen %q auth %+v channel binding %q warnings %q",
+				path, c.PublicURL, c.Listen, c.Auth, c.Tunnel.ChannelBinding, c.Warnings)
+		}
+	}
+}
+
+// The schema's fixture is also a configuration the gate loads, with the values it says, but for sealing:
+// its two tunnel services set sealed, which this build refuses until M3 (M2 serves tunnel services and
+// does not seal; D91 as amended for M2). The fixture is refused for exactly those two keys, and loads
+// without them.
 func TestTeamFixtureLoads(t *testing.T) {
-	c, err := Load("../../spec/schema/examples/config.team.json")
+	const path = "../../spec/schema/examples/config.team.json"
+	_, err := Load(path)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || len(ve.Problems) != 2 || !strings.HasPrefix(ve.Problems[0], "services.fs.sealed: sealing is not built") ||
+		!strings.HasPrefix(ve.Problems[1], "services.recon.sealed: sealing is not built") {
+		t.Fatalf("Load(%s) = %v, want the two sealed refusals only", path, err)
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	sealed := map[string]Sealed{}
+	for name, svc := range doc["services"].(map[string]any) {
+		m := svc.(map[string]any)
+		if v, ok := m["sealed"]; ok {
+			vb, _ := json.Marshal(v)
+			if sealed[name], err = decodeSealed(t, string(vb)); err != nil {
+				t.Fatalf("services.%s.sealed: %v", name, err)
+			}
+			delete(m, "sealed")
+		}
+	}
+	b, _ = json.Marshal(doc)
+	unsealed := filepath.Join(t.TempDir(), "config.team.json")
+	if err := os.WriteFile(unsealed, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(unsealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SigningKey != "file:"+filepath.Join(filepath.Dir(unsealed), "kontra.key") {
+		t.Errorf("signing_key %q", c.SigningKey)
+	}
+	if sealed["recon"].Mode != SealedRequired || sealed["fs"].Mode != SealedOptional || c.Services["triage"].Sealed.Mode != SealedOff {
+		t.Errorf("sealed = %q, %q, %q", sealed["recon"].Mode, sealed["fs"].Mode, c.Services["triage"].Sealed.Mode)
+	}
 	if !slices.Equal(c.TLS.ACME.Domains, []string{"agents.acme.io"}) {
 		t.Errorf("acme domains = %v", c.TLS.ACME.Domains)
-	}
-	if c.Services["recon"].Sealed.Mode != SealedRequired || c.Services["fs"].Sealed.Mode != SealedOptional || c.Services["triage"].Sealed.Mode != SealedOff {
-		t.Errorf("sealed = %q, %q, %q", c.Services["recon"].Sealed.Mode, c.Services["fs"].Sealed.Mode, c.Services["triage"].Sealed.Mode)
 	}
 	if tr := c.Services["triage"]; tr.Task.RetryCount() != 0 || tr.Task.Retention.D() != 14*24*time.Hour {
 		t.Errorf("triage task = %+v", tr.Task)

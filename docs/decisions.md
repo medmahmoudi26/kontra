@@ -976,7 +976,8 @@ registry: its routes answer as an unknown service and its tasks fail `service_un
 service, which M1 does not serve, the key is accepted with a warning. The spec is unchanged: this is M1's scope,
 and the work that verifies signatures removes the refusal (`internal/config/validate.go`,
 `internal/gate/services.go` `refusable`, `TestFailOpenKeysRefused`,
-`TestRegistryRefusesWhatTheConfigurationRefuses`).
+`TestRegistryRefusesWhatTheConfigurationRefuses`). Amended for tunnel services by D144: M2 serves them, and
+refuses `seller_keys` on them too.
 
 ### D91. `sealed:` needs a tunnel backend
 
@@ -986,7 +987,8 @@ has neither, so a sealed direct service could never be served as declared, and a
 relay it in plaintext. Decision: `sealed:` on a direct backend is refused at start, and a row the operator writes
 with it is left out of the registry, as in D90 ([`relay.md`](../spec/relay.md) §17; `internal/config/validate.go`,
 `internal/gate/services.go` `refusable`, `TestFailOpenKeysRefused`,
-`TestRegistryRefusesWhatTheConfigurationRefuses`).
+`TestRegistryRefusesWhatTheConfigurationRefuses`). Amended by D144: until sealing is built (M3), `sealed:` on a
+tunnel service is refused as well.
 
 ### D92. "The same direct backend", without a column for it — **accepted by the owner, 26 Oct**
 
@@ -1317,4 +1319,422 @@ relay.md §16: `card_compat` serves "a 0.2.5 helloworld upstream" as 1.0. The se
 package. Decision: until it is built, `card_compat` runs against `slowagent`'s `Legacy025` stand-in: that seller's
 0.2.5 card byte for byte at `/.well-known/agent.json`, a2a-go's 0.x JSON-RPC server, and a "Hello World" message
 answer, as the Python seller gives. The expected result is unchanged ([`relay.md`](../spec/relay.md) §16;
-`test/e2e/card_compat_test.go` `TestCardCompat`).
+`test/e2e/card_compat_test.go` `TestCardCompat`). M2 built the helloworld seller at a2a-samples `6603ba3` (a2a-sdk
+1.1.0, a 1.0 card), not the 0.2.5 one, so this stands (D154).
+
+## From building M2 (26 Oct)
+
+Building M2 (the tunnel: work packages WP-01 to WP-08 and the reviews after them) met places where the approved
+specs say nothing, contradict themselves, or say what the code cannot or should not do. The M2 plan's audit
+confirmed ten of its eleven conflicts (C1–C7, C9–C11; C8, `anonymous_unavailable`, is M4's) and corrected some of
+their proposals; the builders met more. Each was resolved in the code with the closest faithful behaviour, marked
+`SPEC-CONFLICT` where that departs from the text. The owner said on 26 Oct "Don't ask me anything": the entries that
+change documented behaviour, once marked as needing the owner, are **decided under the owner's standing instruction,
+26 Oct**, each with the option it recommends, and say which. Where a proposal would add to what both binaries speak
+on the wire (a handshake code, a `Kontra-Node` reason), the built behaviour is the option taken. The others settle a
+silence or a contradiction. The specs now say what the code does and cite the entry
+([`tunnel.md`](../spec/tunnel.md) revision 4, [`relay.md`](../spec/relay.md) revision 5), except where an entry says
+the spec is unchanged.
+
+### D123. A `--serve` target is served at its root — **decided under the owner's standing instruction, 26 Oct** (C1)
+
+[`tunnel.md`](../spec/tunnel.md) §8.2 has the node prefix the target's base path to every request path, while the
+gate calls the path of the upstream card's interface ([`relay.md`](../spec/relay.md) §6.2, §3, D71), which already
+holds that base: `http://h:9/base` with interface `/base/rpc` would be called at `/base/base/rpc`. The gate cannot
+strip a base it does not know without new wire protocol. Decision: M2 fails closed: `kontra connect` refuses a
+`--serve` target whose path is not empty or `/` (`ErrBasePath`, naming this conflict); every example serves its
+agent at the root. The node's proxy still refuses a path outside a non-root base (`400`), which only a unit test can
+reach (`internal/node` `TestProxyConfines` builds a `Serve` directly), so `sidecar_not_a_proxy` checks confinement
+under the root base instead: `/../../etc/passwd` reaches the target as `/etc/passwd`. Decided: the proposal. §8.2
+now forwards a path already under the base as it is and prefixes any other, and says that `kontra connect` refuses a
+target with a path until the node forwards by that rule; with the root base the two rules are one, so M2's refusal
+stands and every example still serves its agent at the root ([`tunnel.md`](../spec/tunnel.md) §8.2;
+`internal/node/serve.go`, `TestSidecarNotAProxy`).
+
+### D124. A hello whose outcome was lost is probed; a confirmed token is never sent again — **decided under the owner's standing instruction, 26 Oct** (C2)
+
+§5 makes enrollment tokens single use and §12 refuses a `rotate_from` naming an already rotated key
+`enroll_invalid`; §4 does not retry `enroll_invalid`. A node whose welcome was lost after the gate committed
+(the connection cut after the proof, the gate's own failure, D136, or the process stopped), or that restarts with
+the same `--enroll` as a compose sidecar or a systemd unit does, would send a used token again and be refused for
+good. Decision, the node's side within the spec's text: `~/.kontra/credentials` keeps, per gate, the sha256 of
+every token a welcome confirmed (never sent again, whatever the command line) and of the tokens a hello in flight
+carries. The next handshake after a lost outcome is a probe: the active key alone, no tokens, no `rotate_from`, no
+API key. Its welcome means the change committed (and confirms the tokens only if it serves every declared
+service); `unknown_key`, or `service_denied` for a known key, means it did not, and the full hello follows at once.
+Tokens the gate refused `enroll_invalid`, and an API key it refused `auth_invalid`, are removed from the
+credentials file. Residual: the node cannot tell which services a token binds, so a declared service whose binding
+was revoked makes a committed probe read as not committed (its welcome leaves that service out); the full hello then
+resends the used token, and its `enroll_invalid` stops the node for good. Decided: the node's probe as built, which
+§2.4 now states. The alternatives that would close the residual, an idempotent admission at the gate or a welcome
+that says what the hello enrolled, are not taken: each changes the gate's side of §5 and §12, while the probe needs
+nothing of the gate ([`tunnel.md`](../spec/tunnel.md) §2.4, §4, §5, §12; `internal/node/run.go` `connect`,
+`TestConsumedTokenIsNotSentAgain`, `TestLostWelcomeProbe`, `TestRealAdmissionLostWelcome`; end to end,
+`TestTunnelLostWelcome` loses a first hello's welcome and `TestTunnelKill` restarts its node with its original
+`--enroll`).
+
+### D125. `rotate_from` at a gate that cannot carry the rotation — **decided under the owner's standing instruction, 26 Oct**
+
+§12 has a rotated node connect with `rotate_from` naming the old key, which must be a key of this gate, neither
+revoked (`revoked`) nor rotated (`enroll_invalid`), and §4 retries neither. But one key is enrolled separately at
+each gate (§2.1), and the key file records which gates confirmed a rotation, not which hold the old key: a first
+enrollment at a gate that never knew the old key, or a rotation after a leak followed by revoking the old key
+(§12, §15), would be refused on every start. Decision: the node sends `rotate_from` to a gate that has not
+settled the rotation, and when that gate refuses it `enroll_invalid` or `revoked`, sends the hello again at once
+without it and does not name that key there again in this process; the hello's tokens or `enroll:` scope then
+enroll the new key, and a gate that knows neither key answers `unknown_key`, which is retried. Any welcome of the
+active key settles the rotation at its gate. Decided: the node's side as built, the proposal's first form in effect
+(the node stops naming the old key to a gate that cannot carry the rotation), which §12 now states; the second form,
+a gate that ignores such a `rotate_from`, is not taken ([`tunnel.md`](../spec/tunnel.md) §12;
+`internal/node/run.go` `connect`, `TestRealAdmissionRotationAtANewGate`,
+`TestRealAdmissionRotationAfterOldKeyRevoked`, `TestNodeRotateAfterLeak`).
+
+### D126. The old key is pruned 24 h after the last gate that confirmed the rotation — **decided under the owner's standing instruction, 26 Oct**
+
+§12 times the node's 24 h from the rotation's commit at the one gate it rotates at; §2.1 enrolls one key at each
+gate the node dials, and gives the node no list of them. Decision: `nodekey.Prune` drops an old key only when at
+least one gate has confirmed the rotation (`# rotated: <time> <gate>`) and every confirming gate's stamp is 24 h
+old; a key no gate confirmed is never dropped. A gate the node has not redialed since is not waited for. Decided as
+built, and §12 now says so; waiting for every enrolled gate, which needs that set from the credentials file, is not
+taken ([`tunnel.md`](../spec/tunnel.md) §2.1, §12; `internal/nodekey/nodekey.go` `Prune`, `TestPrune`).
+
+### D127. A new handshake of a rotated key inside its overlap is refused `revoked`
+
+§12 keeps a rotated key valid for 24 h for the tasks already on its session, and says nothing of a new handshake
+with it. Decision: such a hello is refused `revoked`: the old session keeps its tasks, but a new session of the key
+could serve nothing new, since new attempts never select a rotated key ([`tunnel.md`](../spec/tunnel.md) §12;
+`internal/enroll/admit.go` `refuseUnusable`, `TestAdmitRotation`).
+
+### D128. Revoking a key does not follow its rotation — **decided under the owner's standing instruction, 26 Oct**
+
+§15: revoking a stolen identity key ends its session and every future handshake. But a rotation needs only proof
+of the old key, so a thief can rotate the stolen key to one of their own first. Following `rotated_to` on revoke
+would also revoke the new key of the legitimate flow (rotate after a leak, then revoke the old key to end its
+overlap early). Decision, as built and now in §12 and §15: revocation does not follow the chain;
+`kontra-gate enroll --revoke` warns on stderr with the newest still-enrolled key of the chain and the command that
+revokes it. Following the chain, by default or behind a flag, is not taken ([`tunnel.md`](../spec/tunnel.md) §12,
+§15; `internal/enroll/revoke.go` `Successor`, `cmd/kontra-gate` `enrollRevoke`, `TestEnrollRevokeRotatedKey`).
+
+### D129. A rotation copies every binding with its revocation — **decided under the owner's standing instruction, 26 Oct**
+
+§12: the rotation "copies its active `key_services` rows". With only the active rows, a service whose binding was
+revoked would be one the new key was never enrolled for, and the node's next handshake with its unchanged `--serve`
+would be `service_denied`, final for every service. Decision, as built and now in §12: every row is copied with its
+`revoked_at`; a revoked copy grants nothing but keeps §5's "left out" for the new key. A binding being per key, a
+binding revocation that reaches a session of the rotated key in its overlap is that key's alone: the node stops
+serving the service on that session and keeps declaring it with the active key (M2 review)
+([`tunnel.md`](../spec/tunnel.md) §5, §12; `internal/enroll/rotate.go`, `TestAdmitRotationKeepsRevokedBindings`;
+`internal/node/run.go` `bindingRevoked`, `TestRotatedKeyBindingRevocationKeepsTheNewKeysService`).
+
+### D130. A revoked binding is enrolled again only by a one-time token — **decided under the owner's standing instruction, 26 Oct**
+
+§5 leaves a revoked binding out of `welcome.services` but does not say what may enroll it again. The hello's
+standing API key rides on every handshake as the hiring principal, so letting its `enroll:` scope do it would undo
+the operator's revocation at the node's next connect. Decision, as built and now in §5: only a service or tenant
+token in the hello re-enrolls a revoked binding, as the operator's explicit act ([`tunnel.md`](../spec/tunnel.md)
+§5; `internal/enroll/admit.go`, `TestAdmitAPIKeyKeepsRevokedBinding`, `TestRevocationsReenrolledBinding`).
+
+### D131. `kontra-gate enroll --revoke <key_id> --service <name>` revokes one binding — **decided under the owner's standing instruction, 26 Oct** (C9)
+
+§12 defines a binding's revocation, and `key_scope` needs one, but names only the key's command, and a team gate has
+no console. Decision, as built and now in §12:
+`kontra-gate enroll -f kontra.yaml --revoke <key_id> --service <name>` revokes one binding
+(the audit row and `NOTIFY kontra_revoke 'binding:…'` in one transaction); without `--service` it revokes the key.
+It is operator CLI, not wire protocol ([`tunnel.md`](../spec/tunnel.md) §12; `internal/enroll/revoke.go`
+`RevokeBinding`, `cmd/kontra-gate` `enrollRevoke`, `TestEnrollRevoke`, `TestKeyScope`).
+
+### D132. What an enrollment authority may bind (C10)
+
+§5 does not say what a token for a service that is not a tunnel service does, what an `enroll:` scope naming a
+missing service does, or what becomes of a bound service the operator later moved to a direct backend or
+disabled. Decision: minting a token for an unknown, disabled or non-tunnel service is an error and writes nothing;
+an `enroll:` scope binds existing, enabled tunnel services only (a missing one is `service_denied`); only tenant
+tokens create services. A bound service that is no longer an enabled tunnel service is left out of the served set,
+like a revoked binding, not `service_denied`: the handshake is all-or-nothing and `service_denied` is final, so the
+node would lose its other services (the audit's correction). A token that applies to no declared service is
+`enroll_invalid` and, the transaction rolled back, not consumed; a bound service declared as another kind is
+`kind_mismatch` ([`tunnel.md`](../spec/tunnel.md) §5; `internal/enroll/tokens.go`, `internal/enroll/admit.go`,
+`TestMintServiceToken`, `TestAdmitRefusals`).
+
+### D133. An unknown key that nothing in its hello enrolls is `unknown_key`
+
+§4's step 6, read literally, makes an unknown key whose hello carries only an API key that cannot enroll
+`service_denied`, which the node never retries; but the lost-welcome probe (D124) needs `unknown_key` to learn that
+nothing committed. Decision: an unknown key that nothing in the hello enrolls is `unknown_key`, whatever else the
+hello carries; `service_denied` stays for known keys and for hellos that enroll some declared services but not all
+(`key_scope`'s step 2) ([`tunnel.md`](../spec/tunnel.md) §4, §5; `internal/enroll/admit.go`, `TestAdmitRefusals`,
+`TestKeyScope`).
+
+### D134. A hello of the wrong shape takes its subject's code — **decided under the owner's standing instruction, 26 Oct**
+
+§4's twelve codes are a closed list, with none for a malformed hello (a name outside 1–64 characters, a nonce that
+is not 32 bytes, a field of the wrong type, a NUL) or for a binary message during the handshake. Decision: each
+refusal takes the code of its subject: `bad_origin` for the origin, `bad_proof` for a key id or recipient that does
+not match, `service_denied` for a bad service kind or name; a shape error with no listed subject, and a binary
+message, are `unsupported_version`, which the node retries. Decided as built, and §4 now says so; the non-retryable
+code proposed for a malformed handshake is not added: §4's list of codes stays closed as both binaries speak it
+([`tunnel.md`](../spec/tunnel.md) §4; `internal/tunnel/handshake.go` `ParseHello`, `TestParseHelloRefusals`).
+
+### D135. A connection that cannot be channel-bound is refused at the upgrade — **decided under the owner's standing instruction, 26 Oct**
+
+§4 binds `tls-exporter` whenever the gate terminates TLS and has no code for a connection that cannot export (TLS
+1.2 without Extended Master Secret), and the audit forbids falling back to `none` for one connection. Decision: the
+gate refuses the upgrade itself, so no challenge is sent: `400` when the client's TLS has no exporter, `500` when
+the gate binds `tls-exporter` on a listener without TLS. The node sees a failed dial and retries. Decided as built,
+and §3 now says so; no §4 code is added for it, since the refusal comes before the handshake begins
+([`tunnel.md`](../spec/tunnel.md) §3, §4, §4.1; `internal/tunnelgate/handler.go`,
+`TestExporterUnavailableIsRefused`).
+
+### D136. The gate's own failure during a handshake closes `1011` — **decided under the owner's standing instruction, 26 Oct**
+
+§4's last message is welcome or error, and error's codes have none for the gate's own failure (Postgres
+unreachable during the admission). Decision: the gate sends neither and closes with WebSocket `1011`; the node
+retries it, and since the admission may have committed, probes first (D124). Decided as built, and §4 now says so;
+no code is added for it, since the `1011` close already has the node retry ([`tunnel.md`](../spec/tunnel.md) §4;
+`internal/tunnelgate/handler.go` `ServeHTTP`, `TestAdmitOutcomes`).
+
+### D137. A node-opened stream is in flight until both halves end — **decided under the owner's standing instruction, 26 Oct**
+
+§14 answers a node-opened stream over the cap (32) with `429` and keeps the session. M2 serves no hiring, so every
+node-opened stream is refused at once, and a refusal frees nothing while the node keeps its half open (yamux
+buffers up to a window per half-closed stream and has no reset). Decision: the gate counts a node-opened stream as
+in flight from its accept until both halves have ended, and closes the session when one more than the cap would be.
+M3's `429` needs the same count. Decided as built: §14 now says that a stream is in flight until both halves end, on
+either side (with D157), and that M2, which serves no hiring, closes the session over the cap
+([`tunnel.md`](../spec/tunnel.md) §7, §14; `internal/tunnelgate/handler.go` `acceptNodeStreams`,
+`TestNodeOpenedStreamsAreCapped`, `TestNodeOpenedStreamsFreedWhenTheNodeCloses`).
+
+### D138. Replicas tell each other of supersedes and enrollments: `NOTIFY kontra_tunnel` (C4)
+
+§11 (a newer session of a key supersedes the older) and §5 (a service's other nodes are told of a new key) need one
+replica to act on a session another replica holds; tunnel.md's `kontra_revoke` covers keys, bindings and API keys
+only. Decision: a gate-internal channel, `kontra_tunnel`: `'session:<id>'` is sent in the superseding transaction,
+and `'enrolled:<key_id>/<tenant_id>/<service>'` in the admission's own transaction, so the notice rides the
+binding's commit and every replica, the admitting one included, sends `{"t": "enrolled"}`. The 60 s row check stays
+the supersede's fallback. Registrations of one key serialize on a row lock on its `tunnel_keys` row. It is Postgres
+between replicas, not tunnel wire protocol, and needs no migration ([`tunnel.md`](../spec/tunnel.md) §5, §11;
+`internal/tunnelgate/registry.go`, `internal/enroll/enroll.go` `EnrolledPayload`, `TestSupersedeAcrossReplicas`,
+`TestAddSerializesOneKey`, `TestEnrolledNotices`, `TestAdmitAnnouncesEnrollments`).
+
+### D139. "Older" is the order of the handshakes
+
+§11 closes "the older session". A session registers only after its card fetch (up to 10 s), so the order of the
+registrations' commits can differ from the handshakes': a half-open session whose welcome was lost could register
+after the node's live redial and close it. Decision: the order is the session ids' (UUIDv7, minted at the
+challenge); a registration that finds a newer session of its key on a replica that is not draining inserts nothing
+and closes. Within a replica the ids are monotonic; across replicas they follow the clocks, so a skew larger than
+the time between two handshakes of one key can order them wrongly, and the wrongly refused session's node redials
+([`tunnel.md`](../spec/tunnel.md) §11; `internal/tunnelgate/registry.go`, `TestOlderHandshakeDoesNotSupersedeNewer`;
+end to end, `TestTunnelLostWelcome`: the half-open session registers 10 s after the redialed one and closes).
+
+### D140. The end of a rotated key's overlap closes its session without `{"t": "revoked"}`
+
+§12's Revoke sends `{"t": "revoked"}`, on which the node stops for good. A rotated key whose overlap ends also gets
+`revoked_at`, but belongs to the Rotate bullet, and the node has moved to its new key. Decision: a key revoked
+with reason `rotated` has its session closed without the message; every other key revocation (owner, operator,
+expired, a row that is gone) sends it, then closes. On the node's side, `{"t": "revoked"}` stops the node only when
+the session's key is the key file's active key: a session of a key rotated since, by this process or by another
+`kontra connect` sharing the file, closes alone, and the active key's session is dialed at once (M2 review)
+([`tunnel.md`](../spec/tunnel.md) §12, §13; `internal/tunnelgate/control.go`, `TestAllowsRefusals`,
+`TestRevokedWithoutDatabase`; `internal/node/run.go` `keyRevoked`, `TestRevokedRotatedKeyBeforeTheMaintainTick`).
+
+### D141. The drain tells the nodes only after `draining_at` commits
+
+§13's `{"t": "drain"}` makes the node dial a new session at once, and §11 keeps two sessions of a key only while
+one is on a draining replica: a node told before the replica's `gate_replicas.draining_at` commits would supersede
+its own session there and cut its tasks. Decision: the drain message is sent once the mark has committed; the write
+is retried every second, each attempt within 5 s (`DrainMarkTimeout`), and abandoned once the workers have drained,
+in which case the nodes are not told and their sessions close with the replica ([`tunnel.md`](../spec/tunnel.md)
+§11, §13; `internal/gate/gate.go` `markThenTellTunnels`, `TestDrainTellsTunnelsAfterDrainingAtCommits`;
+`TestTunnelDrain` holds the draining replica's row across its SIGTERM, and fails if the node is told while
+the write waits on it).
+
+### D142. One card per tunnel service (C11)
+
+[`relay.md`](../spec/relay.md) §3 keeps one upstream card per service, while several nodes, each with its own
+target, may serve one tunnel service (§6.2, tunnel.md §11), and the dispatch reads its interface from that card
+whichever session runs it. Decision: the nodes of one service are expected to serve one card; the last good fetch
+through any session is the service's card, and a fetch whose bytes differ from the card served is logged as a
+warning. §3's 30 minutes are read literally: a tunnel service none of whose nodes connected for 30 minutes is
+unavailable, and becomes available again as soon as a session connects (its card is fetched before the session
+becomes a candidate). §3 now says that a service's nodes serve the same card ([`relay.md`](../spec/relay.md) §3;
+`internal/gate/services.go` `newTunnelKeeper`, `TestTunnelCardKeepers`).
+
+### D143. A task placed before a tunnel service's first card is retried — **decided under the owner's standing instruction, 26 Oct**
+
+§3 fetches a tunnel service's card when a session for it connects, and §6.4 fails a task whose card is unavailable
+`service_unavailable`, with no retry. A node started before its agent (a sidecar's order) has a session whose card
+fetch failed (`502 Kontra-Node: target_unreachable`); withholding the session would take down the node's other
+services, the handshake being all-or-nothing. Decision (the audit's second option for its gap 3): the session
+becomes a candidate anyway, its card is retried on the keeper's backoff (1 s doubling to 1 min), and a dispatch for
+a tunnel service whose keeper has no usable card is retried like `no_session` (`relay.ErrCardPending`), failing
+`service_unavailable` only once `task.retries` are spent. No usable card is none yet, or only one whose last good
+fetch is older than the keeper's 30 minutes: a node back after a longer absence, its agent not up yet, is in the
+same race (M2 review). That dispatch has the card fetched again at once (at
+most once a second), never later than the fetch already due: a dispatch that only restarted the backoff left an
+agent that came up after its node to a refetch up to a minute away, and the task failed meanwhile. Decided as built,
+with the M2 review's extension to a card older than 30 minutes; §3 and §6.4 now say so
+([`relay.md`](../spec/relay.md) §3, §6.4; `internal/gate/services.go` `tunnelConnected`, `runTunnelCard`,
+`TestTunnelBackend`, `TestTunnelCardPendingFetchesAtOnce`, `TestTunnelExpiredCardIsPending`; end to end,
+`TestTunnelCardPending`, whose task is sent as its node's agent comes up).
+
+### D144. `sealed:` and `seller_keys` on a tunnel service are refused — **decided under the owner's standing instruction, 26 Oct** (amends D90, D91)
+
+D90 and D91 accepted `seller_keys` and `sealed:` on tunnel services with a warning while M1 did not serve them. M2
+serves tunnel services and neither seals nor verifies seller signatures (M3), so both would fail open. Decision:
+either key on a tunnel service refuses to start, and a row with it is left out of the registry. Consequence: the
+spec's team fixture, `spec/schema/examples/config.team.json` (`sealed` on `recon` and `fs`, both tunnel services),
+no longer loads; `TestTeamFixtureLoads` asserts exactly those two refusals. Decided as built. The spec is unchanged:
+this is M2's scope, as D90 was M1's, and the work that builds sealing and verification lifts both refusals
+([`relay.md`](../spec/relay.md) §3, §17; `internal/config/validate.go`, `internal/gate/services.go` `refusable`).
+
+### D145. No capacity skip in the session choice (C5)
+
+[`relay.md`](../spec/relay.md) §6.1 and §14.2 skip replicas at their dispatch capacity, but 0001 records no
+replica's dispatches in flight, `prepare` runs on any replica, and `attempts` has no index on `replica_id`.
+Decision: M2 does not skip by capacity; load is bounded by each replica's `kontra-tunnel-<id>` worker
+(`limits.dispatch_slots`) and by §6.4's schedule-to-start row. The round-robin among candidates is per replica.
+A capacity-aware choice waits for a column written with the replica's heartbeat ([`relay.md`](../spec/relay.md)
+§6.1, §14.2; `internal/tunnelgate/picker.go`, `TestPickerCandidates`).
+
+### D146. `no_session` attempts count against `task.retries` — **decided under the owner's standing instruction, 26 Oct** (C6)
+
+§6.4's `no_session` row ("retry after 1 s, 2 s, 4 s … capped at the deadline; failed: no_session when exhausted")
+does not say what is exhausted. Decision: read with the section's opening sentence, `task.retries` bounds the new
+attempts, and a `no_session` attempt is one: with the default 2, a task sent while its only node reconnects fails
+`no_session` within about 3 s. Decided as built, and §6.4 now says so; the alternative, waiting for a node until the
+deadline, is not taken ([`relay.md`](../spec/relay.md) §6.4; `TestNoSessionRetriesThenFails`, `TestKeyScope`).
+
+### D147. A `full` answer after the first upstream id is retried for 30 s (C7)
+
+§6.4's tunnel row retries only a poll refused `Kontra-Node: full` after the first upstream id; a follow-up's
+`SendMessage` or a stream refused so would read as "any other: failed: `tunnel_lost`", although `full` proves the
+node forwarded nothing. Decision: before the first id, `full` is a retryable `tunnel_lost` (another session); after
+it, any exchange refused `full` is made again on the poll's backoff (1 s doubling to 5 s) for at most 30 s (D97's
+grace), then fails `tunnel_lost`. `forward_cancel` retries a `full` answer for up to 20 s, after which the cancel
+counts as not delivered ([`relay.md`](../spec/relay.md) §6.4, §8; `internal/relay/executor.go` `nodeFull`,
+`TestTunnelNodeFullWhilePolling`).
+
+### D148. The cancel of a tunnel task whose session is gone fails it `tunnel_lost` — **decided under the owner's standing instruction, 26 Oct** (C3)
+
+§8's row "active or `input-required` | exists, session gone" answers "the task as it is after that (failed:
+`tunnel_lost`)", assuming a dispatch that is failing. For a task at `input-required` no dispatch runs, and M1's
+workflow answered a `forward_cancel` that failed, or did not start within 10 s, with "the task continues". D77 would
+also end a waiting attempt `interrupted`. Decision (the audit's accepted proposal, as built and now in §8 and
+§14.2): `forward_cancel` answers `tunnel_lost` when this replica does not hold the session, or the session no longer
+serves the service, with no stream opened; for a tunnel attempt that, or a `forward_cancel` not started within 10 s
+on `kontra-ctl-<session replica>`, makes the workflow write `failed: tunnel_lost` (the attempt's outcome
+`tunnel_lost`, kept as it is), behind `GetVersion` `cancel-tunnel-lost`, and the caller gets that task. A node's own
+answer to a cancel on a live session (`target_unreachable`, `not_hosted`, `kind_mismatch`) is §8's "session up"
+row: not delivered, `TaskNotCancelableError`, and the task continues; §6.4's "after the first id: failed" covers the
+dispatch's own exchanges only ([`relay.md`](../spec/relay.md) §8; `internal/lifecycle/workflow.go`,
+`internal/relay/dispatcher.go` `ForwardCancel`, `TestCancelWhenTheTunnelSessionIsGone`,
+`TestTunnelForwardCancelSessionUp`, `TestCancelForwardedTunnel`).
+
+### D149. A dispatch whose session is gone
+
+§6.4 fails a tunnel attempt whose session is lost `tunnel_lost`, retried before the first upstream id. Decision:
+before the first id the dispatch returns `tunnel_lost` at once, opening no stream and logging nothing, and the
+next attempt avoids that session; after it, the dispatch itself logs `failed: tunnel_lost` under its fence, still
+opening no stream, so an attempt that waited at `input-required` ends `tunnel_lost`, not `interrupted`
+([`relay.md`](../spec/relay.md) §6.4, §7; `internal/relay/executor.go`, `TestTunnelSessionMissing`,
+`TestTunnelLostRetriesOnAnotherSession`, `TestInputRequiredSticky`).
+
+### D150. The tunnel worker's drain
+
+The M2 plan gave `kontra-tunnel-<id>` a `WorkerStopTimeout` of `drain_timeout`; §14.3 keeps the per-replica queues
+polling until their last dispatch ends or `drain_timeout` passes, and then stops them with "a few seconds". With
+`drain_timeout` as the stop timeout a drain could wait twice. Decision: the spec over the plan: the worker stops
+within 5 s, after the drain has waited on a count of the tunnel dispatches in flight until it is zero or
+`drain_timeout` has passed since the drain began; a dispatch cut at `drain_timeout` reports it. The worker polls
+until it stops, so a follow-up can start during the settle: the drain waits for it and settles again, and once no
+dispatch runs after a settle it closes the queue, so that a dispatch the worker still starts before its stop
+returns `context_lost` at once, having sent nothing, instead of being cut 5 s later after it delivered the
+follow-up (M2 review; [`relay.md`](../spec/relay.md) §14.3; `internal/lifecycle/workers.go`,
+`TestDrainWaitsForTunnelDispatches`, `TestDrainWaitsForAFollowUpThatStartsDuringTheSettle`, `TestTunnelDrain`).
+
+### D151. A `400` the node writes carries no `Kontra-Node` — **decided under the owner's standing instruction, 26 Oct**
+
+§8.2's node-written answers carry `Kontra-Node` with a reason from a closed list (`not_hosted`, `kind_mismatch`,
+`full`, `target_unreachable`, `sealed_rejected`), and the same section has the node answer `400` to `CONNECT`, an
+`Upgrade`, `TRACE`, a path outside the base and an unreadable preamble, which no listed reason fits. A new value
+would change the wire, and the gate reads unknown values as `tunnel_lost`, retried elsewhere. Decision: those `400`s
+carry no `Kontra-Node`, so the gate takes them as the service's own `400` (`upstream_error`, not retried), which
+suits requests no gate sends. Decided: the proposal's second form, the rule that a node-written `400` carries no
+`Kontra-Node` and is final, which is what the node does and what §8.2 now says; no reason such as `refused` is added
+to the closed list ([`tunnel.md`](../spec/tunnel.md) §8.2; `internal/node/proxy.go`, `TestProxyRefusesMethods`,
+`TestSidecarNotAProxy`).
+
+### D152. `kontra connect` reads `KONTRA_KEY` only — **decided under the owner's standing instruction, 26 Oct**
+
+PRD §6 has `KONTRA_GATE`, `KONTRA_AGENT`, `KONTRA_TO` and `KONTRA_ENROLL` mirror the flags of `kontra tunnel`, which
+note 1 replaced with `kontra connect`; tunnel.md, the authority, names only `KONTRA_KEY` (§2.1). Decision, as built:
+the mirrors are dropped: `kontra connect` reads `KONTRA_KEY` and `HOME`; a container passes flags, and secrets as
+`--enroll @file`. The spec is unchanged: §2.1 already names `KONTRA_KEY` alone ([`tunnel.md`](../spec/tunnel.md)
+§2.1; `internal/node/node.go`).
+
+### D153. Rotation needs a file lock
+
+Rotate, MarkRotated and Prune rewrite the identity file, which another `kontra connect` may be rewriting (one
+process per gate, one key file); `flock(2)` serializes them. Decision: on platforms without it (Windows, plain
+Solaris) those three refuse with an error rather than rewrite the file unlocked; loading and creating a key work
+everywhere. The specs name no node platforms ([`tunnel.md`](../spec/tunnel.md) §2.1, §12;
+`internal/nodekey/lock_other.go`).
+
+### D154. The named tests M2 runs
+
+Like D80 for M1. [`tunnel.md`](../spec/tunnel.md) §16 and [`relay.md`](../spec/relay.md) §16 name the tunnel tests
+without saying which are M2's. Decision: M2 runs `tunnel_kill` (with its before-the-first-upstream-id variant),
+`input_required_sticky`, `cancel_forwarded` through the tunnel (a working task, a seller that talks after its cancel,
+an `input-required` task, a seller unreachable behind a live node, and a node gone), `key_scope`,
+`sidecar_not_a_proxy`, `replica_kill`'s tunnel variant (after and before the first upstream id), the
+make-before-break drain, and the helloworld seller through the tunnel, plus the rotation after a leak at the binary
+level, a welcome lost after the gate committed (D124, D139), a stream refused while the revocation view is stale, and
+a task placed before a tunnel service's first card (D143). The harness puts `public_url` on a TCP front the test
+routes to either replica, runs nodes as `kontra connect` processes, and uses two in-process doubles: a node that
+ignores the control stream (`key_scope`: the gate never relies on the node honouring a revocation) and a gate with a
+fixed admission (`sidecar_not_a_proxy`, no Postgres or Temporal). `sidecar_not_a_proxy` checks confinement under the
+root base (D123), and reads the node's own sockets through `/proc/<pid>/fd`, since `/proc/<pid>/net/tcp` lists the
+whole network namespace. The helloworld test runs the a2a-samples seller at `6603ba3` unmodified and is skipped,
+saying why, only without `uv`, the pinned checkout (`$KONTRA_A2A_SAMPLES` or a clone) or a free `127.0.0.1:9999`;
+with `KONTRA_REQUIRE_HELLOWORLD` set it fails instead, as do `run.sh`'s guards (examples/sellers/helloworld), and
+CI's e2e and integration jobs set it, install `uv` and fetch the pinned checkout first, so that CI never passes
+without running them (M2 review; `internal/ci` `TestHelloworldRunsInCI`).
+Only the `6603ba3` seller is built (WP-07), so D122 and `card_compat`'s stand-in for the 0.2.5 seller stay as they
+are. `anon_limits`, `local_rebinding`, `stdio_roots` and the MCP tests come with M3 and M4 (`test/e2e`).
+
+### D155. The gate bounds a node's pings, and every write has a deadline — **decided under the owner's standing instruction, 26 Oct**
+
+§7 sets yamux's knobs and says `AcceptBacklog` bounds what a hostile peer can pin, but yamux v0.1.2 answers each
+ping on a goroutine of its own that waits up to `ConnectionWriteTimeout` (15 s) to queue its pong, and its send
+loop writes with no deadline: a node that floods pings while it stops reading pinned a goroutine for every 12
+bytes it sent, enough to take a replica's memory and every tenant's sessions with it. Decision: the gate reads
+each session's frames through a token bucket of ping SYNs, 16 at once and one more every 500 ms (a node pings
+once per `ping_s`, at least 1 s, §11, and waits for each pong), and closes the session over it; and every write
+to the WebSocket, on both sides, has `ConnectionWriteTimeout`, so a peer that stops reading fails the send loop and
+closes the session within 15 s. Decided: the proposal: §14 lists the ping budget among the per-session limits, and
+§7 the write deadline ([`tunnel.md`](../spec/tunnel.md) §7, §11, §14; `internal/tunnel/guard.go`,
+`internal/tunnel/mux.go`, `TestGatePingBudget`, `TestStalledPeerClosesTheSession`).
+
+### D156. yamux's log lines are rate-limited per session
+
+yamux v0.1.2 logs a line for every frame of a stream it does not hold, and the session's logger adds its
+attributes, so one node could make the gate write about 25 bytes of log for each byte it sent. Decision: a
+session's yamux lines pass 10 at once and one more a second; the first line over that says lines are being
+suppressed, and the next line let through is preceded by the count suppressed. The frames themselves are
+read and dropped as yamux always did ([`tunnel.md`](../spec/tunnel.md) §7; `internal/tunnel/guard.go`,
+`TestYamuxLinesAreRateLimited`).
+
+### D157. A gate-opened stream is counted until both halves end — **decided under the owner's standing instruction, 26 Oct**
+
+D137 counts a node-opened stream until both halves end, but nothing bounded the streams the gate opens, closes,
+and the node does not: yamux v0.1.2 keeps such a stream, and buffers up to a window (256 KiB) of what the node
+still sends on it, for `StreamCloseTimeout` (5 min). A node that answers every exchange and never closes its half
+pinned a window per stream, at the rate the gate opens streams to it (a poll every 5 s per task). Decision: once
+the gate closes its half (or aborts the stream) it reads and discards what the node sends until the node's half
+ends, its close timeout passes or the session ends, and counts the stream until then; a session with more than
+256 such streams (`GateMaxHalfClosed`, four times the node's default in-flight cap) is closed. A node closes its
+half when it has written its response, or at once when the gate's half closes, so only one that keeps them open
+reaches the cap. Decided: the proposal, with D137's: §14 now says that a stream is in flight until both halves end,
+on either side, and gives this cap ([`tunnel.md`](../spec/tunnel.md) §7, §14; `internal/tunnelgate/session.go`
+`linger`, `TestHalfClosedStreamsAreCapped`).

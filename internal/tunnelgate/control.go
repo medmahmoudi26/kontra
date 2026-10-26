@@ -1,0 +1,199 @@
+package tunnelgate
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/google/uuid"
+
+	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/tunnel"
+)
+
+// sessionPrefix starts NOTIFY kontra_tunnel's (pg.ChannelTunnel) payload for a superseded session; the
+// enrollment's is enroll.EnrolledPayload. Both are gate-internal: see Registry.
+const sessionPrefix = "session:"
+
+// SessionPayload is NOTIFY kontra_tunnel's payload for a superseded session, "session:<session_id>": the
+// replica holding it closes it (its row is already deleted).
+func SessionPayload(id uuid.UUID) string { return sessionPrefix + id.String() }
+
+// Revoked applies one revocation (enroll.Revocations.Subscribe), §12. It runs on the goroutine that learned
+// the revocation and does not wait on the network or the database: what does is done on goroutines of its
+// own, an aborted stream's FIN included (exchange.abort).
+//
+//   - A key: its sessions take no new stream and their streams are aborted at once; then each is told
+//     {"t": "revoked"} and closed (its dispatches fail tunnel_lost), and its open mcp_sessions rows are
+//     closed revoked. A rotated key whose overlap ended (revoked_reason rotated, §12: "revoked_at is set when
+//     the overlap ends") is not an operator's revocation: its session closes without the message, which
+//     would end a node that has moved to its new key.
+//   - A binding: the service leaves the session's served set at once and its streams on the session are
+//     aborted (an aborted stream reads as a lost session: tunnel_lost, or a retry before the first upstream
+//     id; M2 plan audit), then tunnels.services drops it, the open mcp_sessions rows of (session, service)
+//     are closed revoked, and the node is told {"t": "revoked", "service"}. The gate never relies on the
+//     node honouring it: Allows refuses every later stream for the service.
+func (r *Registry) Revoked(rev enroll.Revocation) {
+	for _, s := range r.all() {
+		if s.KeyID != rev.KeyID {
+			continue
+		}
+		if rev.Service == "" {
+			r.revokeKey(s, rev.Reason)
+		} else {
+			r.revokeBinding(s, rev.Service)
+		}
+	}
+}
+
+func (r *Registry) revokeKey(s *Session, reason string) {
+	why, tell := "its key was revoked (§12)", true
+	if reason == enroll.ReasonRotated {
+		why, tell = "its key's rotation overlap ended (§12)", false
+	}
+	if !s.shut(why) {
+		return
+	}
+	log := r.log.With(obs.KeyTunnelSession, s.ID, "key_id", s.KeyID)
+	log.Info("tunnel session closed", "reason", why)
+	r.goAsync(func() {
+		if tell {
+			if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil {
+				log.Debug("tunnel session: {t: revoked} not delivered", "error", err)
+			}
+		}
+		r.closeMCP(s.ID, "")
+		_ = s.close(why, false)
+	})
+}
+
+func (r *Registry) revokeBinding(s *Session, service string) {
+	why := fmt.Errorf("%w: the binding of key %s to %s was revoked (§12)", ErrSessionGone, s.KeyID, service)
+	if !s.dropService(service, why) {
+		return
+	}
+	r.goAsync(func() {
+		log := r.log.With(obs.KeyTunnelSession, s.ID, "key_id", s.KeyID, "service", service)
+		log.Info("tunnel session: binding revoked; the service is no longer served on it")
+		if r.cfg.DB != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+			if _, err := r.cfg.DB.Exec(ctx, `update kontra.tunnels set services = array_remove(services, $2) where session_id = $1`,
+				s.ID, service); err != nil {
+				// The candidate query also joins key_services, so the row's stale services selects nothing.
+				log.Warn("tunnels.services not updated after a binding revocation", "error", err)
+			}
+			cancel()
+		}
+		r.closeMCP(s.ID, service)
+		if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked, Service: service}); err != nil {
+			log.Debug("tunnel session: {t: revoked, service} not delivered", "error", err)
+		}
+	})
+}
+
+// closeMCP closes the open mcp_sessions rows pinned to a session (and service, when not empty) as revoked
+// (§12). MCP hosting is M3, so in M2 there are none; the statement keeps §12's order for when there are.
+func (r *Registry) closeMCP(session uuid.UUID, service string) {
+	if r.cfg.DB == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	if _, err := r.cfg.DB.Exec(ctx, `update kontra.mcp_sessions set closed_at = now(), close_reason = 'revoked'
+		where tunnel_session = $1 and closed_at is null and ($2 = '' or service = $2)`, session, service); err != nil {
+		r.log.Warn("mcp_sessions pinned to a revoked tunnel session not closed", obs.KeyTunnelSession, session, "service", service, "error", err)
+	}
+}
+
+// Enrolled tells this replica's sessions hosting the binding's service that another key was enrolled for
+// it: {"t": "enrolled", "service", "key"} (§5). The enrolled key's own sessions are not told.
+func (r *Registry) Enrolled(b enroll.Binding) {
+	for _, s := range r.all() {
+		if s.TenantID != b.TenantID || s.KeyID == b.KeyID || !s.open() || !s.Serves(b.Service) {
+			continue
+		}
+		r.goAsync(func() {
+			if err := s.WriteControl(tunnel.Control{T: tunnel.CtlEnrolled, Service: b.Service, Key: b.KeyID}); err != nil {
+				r.log.Debug("tunnel session: {t: enrolled} not delivered", obs.KeyTunnelSession, s.ID, "error", err)
+			}
+		})
+	}
+}
+
+// Notify applies one gate-internal NOTIFY kontra_tunnel (pg.Listener.OnChannel): 'session:<id>', sent by
+// the replica whose handshake superseded a session held here, closes it (its row is gone already);
+// 'enrolled:<key_id>/<tenant_id>/<service>' (enroll.EnrolledPayload), sent by the admission that committed
+// the binding, is told to this replica's sessions hosting the service (§5), on every replica, the admitting
+// one included. Anything else is ignored. It never waits on the database (pg.Listener runs every channel's
+// callbacks on one goroutine).
+//
+// SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): see Registry; this channel is not tunnel wire
+// protocol.
+func (r *Registry) Notify(payload string) {
+	switch {
+	case strings.HasPrefix(payload, sessionPrefix):
+		id, err := uuid.Parse(strings.TrimPrefix(payload, sessionPrefix))
+		if err != nil {
+			return
+		}
+		if s := r.lookup(id); s != nil {
+			s.mu.Lock()
+			s.rowGone = true // the superseding transaction deleted it
+			s.mu.Unlock()
+			r.goAsync(func() { _ = s.Close("superseded by a newer session of its key on another replica (§11)") })
+		}
+	default:
+		if b, ok := enroll.ParseEnrolledPayload(payload); ok {
+			r.Enrolled(b)
+		}
+	}
+}
+
+// Drain sends {"t": "drain"} on every session's control stream (§13, D35): the nodes dial new sessions at
+// once and keep serving the streams on these, which close when CloseAll runs at the end of the drain. A
+// session added afterwards is told as soon as it is registered. It returns when every message was written
+// or ctx ends.
+//
+// The gate calls it once gate_replicas.draining_at has committed (M2 plan audit): a node dialing another
+// replica then supersedes nothing here (Add keeps a draining replica's sessions), and the tasks on these
+// sessions run to their end within drain_timeout.
+func (r *Registry) Drain(ctx context.Context) {
+	r.mu.Lock()
+	r.drained = true
+	all := make([]*Session, 0, len(r.sessions))
+	for _, s := range r.sessions {
+		all = append(all, s)
+	}
+	r.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, s := range all {
+		wg.Go(func() { r.tellDrain(s) })
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// tellDrain writes {"t": "drain"} on a session's control stream, once.
+func (r *Registry) tellDrain(s *Session) {
+	s.mu.Lock()
+	told := s.toldDrain || s.closed
+	s.toldDrain = true
+	s.mu.Unlock()
+	if told {
+		return
+	}
+	if err := s.WriteControl(tunnel.Control{T: tunnel.CtlDrain}); err != nil {
+		r.log.Debug("tunnel session: {t: drain} not delivered", obs.KeyTunnelSession, s.ID, "error", err)
+	}
+}
+
+// goAsync runs fn on its own goroutine, counted for CloseAll.
+func (r *Registry) goAsync(fn func()) {
+	r.async.Go(fn)
+}

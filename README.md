@@ -17,8 +17,16 @@ that deploys and configures this one; nothing here imports from it.
 
 ## Status
 
-Specification stage (M0). `docs/` is the design; `spec/` is the protocol specification written from it;
-code lands against both. Read in this order:
+Tunnel stage (M2). `kontra-gate` relays A2A tasks durably, to a direct backend since M1 and, since M2, to an agent
+on a node's localhost: `kontra connect --gate <url> --serve a2a:<name>=<url>` dials the gate once, outbound, and
+the gate sends each request for `<name>` over that connection; the node forwards it to `<url>` and nowhere else.
+Stock agents run unmodified behind it: the a2a-samples helloworld seller is hosted through the tunnel in
+[`examples/sellers/helloworld`](examples/sellers/helloworld/README.md), and the other built sellers are listed in
+[`examples/`](examples/README.md). MCP hosting and sealing come with M3; the console, anonymous sessions and the
+public gate with M4 (PRD §14).
+
+`docs/` is the design; `spec/` is the protocol specification written from it; code lands against both. Read in
+this order:
 
 1. [`docs/prd-v4.md`](docs/prd-v4.md) — the v4 PRD (21 Oct 2026). The relay, data model,
    security model, milestones and acceptance tests.
@@ -34,6 +42,37 @@ code lands against both. Read in this order:
    Every place they depart from the documents above is numbered in [`docs/decisions.md`](docs/decisions.md).
 
 Where a note and the PRD disagree, the later document wins; `docs/README.md` has the section map.
+
+## Through the tunnel today (M2)
+
+A team gate run from source, and the helloworld seller hosted through `kontra connect`. From the repository root,
+with Docker, Go, [uv](https://docs.astral.sh/uv/) and a2a-cli v0.3.1 as `a2a` (its install is in
+[`examples/sellers/hello-exec`](examples/sellers/hello-exec/README.md#install-a2a-cli-v031)):
+
+```sh
+docker compose -f compose.dev.yaml up -d --wait           # Postgres and Temporal
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
+
+./kontra-gate migrate -f examples/sellers/helloworld/kontra.yaml
+export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/sellers/helloworld/kontra.yaml --api-key demo)"
+./kontra-gate serve -f examples/sellers/helloworld/kontra.yaml &     # loads services: into the database
+
+examples/sellers/helloworld/run.sh &                                 # the seller, unmodified, on 127.0.0.1:9999
+
+# once the gate answers (curl localhost:8080/healthz): a one-time token for hello, then the node
+./kontra connect --gate http://localhost:8080 --serve a2a:hello=http://127.0.0.1:9999 \
+  --enroll "$(./kontra-gate enroll -f examples/sellers/helloworld/kontra.yaml hello)" &
+#  kontra connect: connected to http://localhost:8080 as k1_… (tenant default, session …)
+#    a2a hello  http://localhost:8080/agents/hello
+
+a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "hi"
+#  → completed, with the artifact "Hello, World! I have received your request (hi)"
+```
+
+The gate never dials the seller, and the seller imports nothing from Kontra. `--serve` names the agent's root
+URL: M2 refuses a target with a path (D123 in [`docs/decisions.md`](docs/decisions.md)). What a lost node or a
+seller that is down does to a task, and how to restart the node, is in the
+[helloworld README](examples/sellers/helloworld/README.md#restarts-order-and-failures).
 
 ## Five minutes (the M4 target)
 

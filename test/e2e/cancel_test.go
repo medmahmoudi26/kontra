@@ -18,8 +18,15 @@ import (
 // completed after canceled), and the upstream task itself is canceled.
 func checkCanceledForGood(t *testing.T, ctx context.Context, h *Harness, taskID a2a.TaskID, wait time.Duration) {
 	t.Helper()
+	checkCanceledForGoodOn(t, ctx, h, "", h.Upstream, taskID, wait)
+}
+
+// checkCanceledForGoodOn is checkCanceledForGood for the task of service svc ("" is slow) whose upstream is
+// agent.
+func checkCanceledForGoodOn(t *testing.T, ctx context.Context, h *Harness, svc string, agent *slowagent.Agent, taskID a2a.TaskID, wait time.Duration) {
+	t.Helper()
 	for _, g := range h.Gates {
-		task, err := h.BuyerA().Client(t, g, "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+		task, err := h.BuyerA().Client(t, g, svc).GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
 		if err != nil || task.Status.State != a2a.TaskStateCanceled {
 			t.Fatalf("GetTask on %s right after CancelTask: %v %v, want canceled (D79)", g.Name, task, err)
 		}
@@ -61,7 +68,7 @@ func checkCanceledForGood(t *testing.T, ctx context.Context, h *Harness, taskID 
 	if err != nil || len(as) != 1 {
 		t.Fatalf("attempts %v %v", as, err)
 	}
-	up, err := h.Upstream.Task(ctx, a2a.TaskID(as[0].UpstreamTaskID))
+	up, err := agent.Task(ctx, a2a.TaskID(as[0].UpstreamTaskID))
 	if err != nil || up.Status.State != a2a.TaskStateCanceled {
 		t.Fatalf("the upstream task: %v %v, want canceled", up, err)
 	}

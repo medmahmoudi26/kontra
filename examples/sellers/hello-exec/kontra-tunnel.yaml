@@ -1,0 +1,16 @@
+# A team gate on one machine, for the hello-exec seller hosted through the tunnel (M2): `kontra connect`, next to
+# the seller, dials the gate and forwards the gate's requests to it; the gate never dials the seller. Plaintext
+# is allowed only because public_url is a localhost origin (PRD §11); the tunnel's channel binding is then none
+# (spec/tunnel.md §4, D69). Postgres and Temporal are the repository's compose.dev.yaml, as for kontra.yaml.
+listen: 127.0.0.1:8080
+public_url: http://localhost:8080 # a node's --gate must be this origin (spec/tunnel.md §4: bad_origin otherwise)
+postgres: postgres://kontra:kontra@localhost:5432/kontra
+temporal: { address: localhost:7233, namespace: kontra }
+auth: { api_keys: true }
+
+services:
+  hello:
+    kind: a2a
+    backend: { tunnel: {} }          # hosted by the nodes enrolled for it; the node holds the seller's URL
+    allow: ["org:default"]           # every API key of this gate's one tenant
+    task: { timeout: 10m, retries: 2 }

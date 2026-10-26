@@ -8,15 +8,19 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
 	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/store"
 )
 
 // Sweep intervals: orphans once a minute (spec §14.5, tasks older than 2 minutes in submitted or quoted
-// with no workflow end failed: lifecycle_unavailable), retention every 10 minutes (spec §5.4).
+// with no workflow end failed: lifecycle_unavailable), retention every 10 minutes (spec §5.4), and the ends
+// of rotation overlaps once a minute (spec/tunnel.md §12: a rotated key's revoked_at is set when its 24 h
+// overlap passes; the registry already stops using the key at overlap_until, enroll.Revocations.KeyUsable).
 const (
 	OrphanInterval    = time.Minute
 	OrphanAge         = 2 * time.Minute
 	RetentionInterval = 10 * time.Minute
+	OverlapInterval   = time.Minute
 )
 
 // Per-pass bounds. A pass checks at most OrphanBudget candidates (one Temporal DescribeWorkflowExecution
@@ -35,15 +39,19 @@ type WorkflowChecker interface {
 	WorkflowExists(ctx context.Context, taskID a2a.TaskID) (bool, error)
 }
 
-// RunSweeps runs both sweeps until ctx ends, each once at start and then on its interval. Any replica may
+// RunSweeps runs the sweeps until ctx ends, each once at start and then on its interval. Any replica may
 // run them; each pass is idempotent.
 func (r *Replica) RunSweeps(ctx context.Context) error {
 	orphans := time.NewTicker(r.opts.orphanEvery)
 	defer orphans.Stop()
 	retention := time.NewTicker(r.opts.retentionEvery)
 	defer retention.Stop()
+	overlaps := time.NewTicker(OverlapInterval)
+	defer overlaps.Stop()
+	keys := enroll.NewStore(r.pool, enroll.Options{Logger: r.log})
 	r.sweepOrphans(ctx)
 	r.sweepRetention(ctx)
+	r.sweepOverlaps(ctx, keys)
 	for {
 		select {
 		case <-ctx.Done():
@@ -52,8 +60,26 @@ func (r *Replica) RunSweeps(ctx context.Context) error {
 			r.sweepOrphans(ctx)
 		case <-retention.C:
 			r.sweepRetention(ctx)
+		case <-overlaps.C:
+			r.sweepOverlaps(ctx, keys)
 		}
 	}
+}
+
+func (r *Replica) sweepOverlaps(ctx context.Context, keys *enroll.Store) {
+	ended, err := SweepOverlaps(ctx, keys)
+	if err != nil && ctx.Err() == nil {
+		r.log.Warn("overlap sweep", "error", err, "ended", len(ended))
+	} else if len(ended) > 0 {
+		r.log.Info("overlap sweep: rotated node keys past their 24 h overlap revoked", "keys", ended)
+	}
+}
+
+// SweepOverlaps is one pass of the overlap sweep (spec/tunnel.md §12): every rotated node key whose
+// overlap_until has passed gets revoked_at, an audit row and NOTIFY kontra_revoke 'key:<key_id>', so the
+// replica holding its session closes it. It returns the keys it ended.
+func SweepOverlaps(ctx context.Context, keys *enroll.Store) ([]string, error) {
+	return keys.EndOverlaps(ctx)
 }
 
 func (r *Replica) sweepOrphans(ctx context.Context) {

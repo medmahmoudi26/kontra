@@ -34,6 +34,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 
 	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/tunnel"
 )
 
 // Upstream limits (spec §6.6). Exceeding one fails the exchange upstream_error (service_unavailable for a
@@ -164,6 +165,11 @@ type Exchange struct {
 	retryAfter time.Duration
 	limit      bool
 	broken     bool
+	// tunnelled is an exchange made through a tunnel backend, and node the Kontra-Node header of its last
+	// response: a response the node wrote itself (tunnel.md §8.2). Only a tunnel's transport reads the
+	// header, so a direct service cannot pass its own answer off as a node's.
+	tunnelled bool
+	node      tunnel.NodeReason
 }
 
 type exchangeKey struct{}
@@ -195,7 +201,46 @@ func (e *Exchange) Reset() {
 		return
 	}
 	e.mu.Lock()
-	e.status, e.retryAfter, e.limit, e.broken = 0, 0, false, false
+	e.status, e.retryAfter, e.limit, e.broken, e.node = 0, 0, false, false, ""
+	e.mu.Unlock()
+}
+
+// Node is the Kontra-Node header of the last response through a tunnel backend: "" when the response is
+// the service's own, or when none arrived (tunnel.md §8.2).
+func (e *Exchange) Node() tunnel.NodeReason {
+	if e == nil {
+		return ""
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.node
+}
+
+// Tunnelled reports whether the last call under this exchange went through a tunnel backend.
+func (e *Exchange) Tunnelled() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tunnelled
+}
+
+func (e *Exchange) markTunnelled() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.tunnelled = true
+	e.mu.Unlock()
+}
+
+func (e *Exchange) recordNode(n tunnel.NodeReason) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.node = n
 	e.mu.Unlock()
 }
 
@@ -266,18 +311,29 @@ func RetryAfter(h string, now time.Time) time.Duration {
 }
 
 // limitTransport reads every upstream body through a limit: an SSE stream event by event (MaxSSEEvent),
-// anything else as a whole (MaxBody). It also records the response in the request's Exchange.
+// anything else as a whole (MaxBody). It also records the response in the request's Exchange; a tunnel's
+// (tunnel set) marks the exchange tunnelled before the stream is opened, records the response's
+// Kontra-Node header, and hands the request's context to the dial that opens the stream
+// (withRequestContext), which bounds the open by the request.
 type limitTransport struct {
-	next http.RoundTripper
+	next   http.RoundTripper
+	tunnel bool
 }
 
 func (t *limitTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	ex := exchangeFrom(r.Context())
+	if t.tunnel {
+		ex.markTunnelled()
+		r = withRequestContext(r)
+	}
 	resp, err := t.next.RoundTrip(r)
 	if err != nil {
 		return nil, err
 	}
-	ex := exchangeFrom(r.Context())
 	ex.record(resp.StatusCode, RetryAfter(resp.Header.Get("Retry-After"), time.Now()))
+	if t.tunnel {
+		ex.recordNode(tunnel.NodeReason(strings.TrimSpace(resp.Header.Get(tunnel.HeaderNode))))
+	}
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if mt == "text/event-stream" {
 		resp.Body = &sseLimitReader{rc: resp.Body, max: MaxSSEEvent, ex: ex, atLineStart: true}
@@ -644,15 +700,31 @@ type Failure struct {
 const MaxMessage = 1 << 10
 
 // Classify maps an error from an upstream call made under ctx (and its Exchange) to §6.4's classes.
+//
+// Through a tunnel (relay.md §6.4, tunnel.md §8.2) the node is the only peer the gate talks to, so an
+// exchange that got no complete HTTP response (the stream could not be opened, the session closed, the
+// body was cut) is ClassTunnelLost, never Unreachable; a response the node wrote itself is told by its
+// Kontra-Node header: full is ClassNodeFull, sealed_rejected ClassSealedRejected, and any other
+// (not_hosted, kind_mismatch, target_unreachable) ClassTunnelLost. A response without the header is the
+// service's own and is classified as a direct backend's: its own 503 is Unreachable.
 func Classify(ctx context.Context, err error, ex *Exchange) Failure {
 	f := Failure{Err: err}
 	status, retryAfter := ex.Status()
+	node, tunnelled := ex.Node(), ex.Tunnelled()
 	var a2aErr *a2a.Error
 	switch {
 	case ctx.Err() != nil:
 		f.Class, f.Message = Canceled, "the dispatch ended"
 	case errors.Is(err, ErrLimit) || ex.LimitExceeded():
 		f.Class, f.Message = Limit, "the service sent more than the gate accepts (spec §6.6)"
+	case tunnelled && node == tunnel.NodeFull:
+		f.Class, f.Message = ClassNodeFull, "the node hosting the service is at its limit of exchanges in flight"
+	case tunnelled && node == tunnel.NodeSealedRejected:
+		f.Class, f.Message = ClassSealedRejected, "the node hosting the service refused a sealed part"
+	case tunnelled && node != "":
+		f.Class, f.Message = ClassTunnelLost, nodeMessage(node)
+	case tunnelled && (status == 0 || ex.Broken() || errors.Is(err, ErrTunnelLost)):
+		f.Class, f.Message = ClassTunnelLost, "the tunnel session to the service was lost"
 	case status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout:
 		f.Class, f.Message = Unreachable, fmt.Sprintf("the service answered HTTP %d", status)
 	case status == http.StatusRequestTimeout || status == http.StatusTooManyRequests:
@@ -669,6 +741,20 @@ func Classify(ctx context.Context, err error, ex *Exchange) Failure {
 	}
 	f.Message = Cap(f.Message)
 	return f
+}
+
+// nodeMessage is the gate's words for a response a node wrote itself; a value outside tunnel.md §8.2's list
+// is not repeated (the node's text never reaches the task's log).
+func nodeMessage(n tunnel.NodeReason) string {
+	switch n {
+	case tunnel.NodeNotHosted:
+		return "the node does not host the service on this session (Kontra-Node: not_hosted)"
+	case tunnel.NodeKindMismatch:
+		return "the node hosts the service with another kind (Kontra-Node: kind_mismatch)"
+	case tunnel.NodeTargetUnreachable:
+		return "the node could not reach the service (Kontra-Node: target_unreachable)"
+	}
+	return "the node hosting the service answered for it"
 }
 
 // Cap trims s to MaxMessage bytes on a rune boundary, as valid UTF-8.

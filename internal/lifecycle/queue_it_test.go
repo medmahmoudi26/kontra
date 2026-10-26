@@ -479,16 +479,21 @@ func recordHistory(t *testing.T, c client.Client, taskID, name string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The workers' identity (pid@host) and sticky queues name the host: replay reads neither, and the files
-	// need not name it.
-	js = identity.ReplaceAll(js, []byte(`"identity": "kontra-test"`))
-	if host, err := os.Hostname(); err == nil && host != "" {
-		js = bytes.ReplaceAll(js, []byte(host), []byte("kontra-test"))
-	}
+	js = scrubHost(js)
 	if err := os.MkdirAll(filepath.Join("testdata", "histories"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join("testdata", "histories", name+".json"), append(js, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// scrubHost removes the host from a recorded history: the workers' identity (pid@host) and sticky queues
+// name it, and replay reads neither.
+func scrubHost(js []byte) []byte {
+	js = identity.ReplaceAll(js, []byte(`"identity": "kontra-test"`))
+	if host, err := os.Hostname(); err == nil && host != "" {
+		js = bytes.ReplaceAll(js, []byte(host), []byte("kontra-test"))
+	}
+	return js
 }

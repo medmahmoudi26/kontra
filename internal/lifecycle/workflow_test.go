@@ -43,7 +43,11 @@ type world struct {
 	onTerminal hooks.Patch
 	onClosed   hooks.Patch
 
-	prepareFn  func(in PrepareInput) error // nil: every prepare succeeds
+	prepareFn func(in PrepareInput) error // nil: every prepare succeeds
+	// prepareRes, when set, is prepare's answer (a tunnel attempt, NoSession); backend is attempt_state's
+	// attempt backend ("direct" when empty).
+	prepareRes func(in PrepareInput) PrepareResult
+	backend    string
 	dispatchFn func(ctx context.Context, k int, in DispatchInput) (DispatchResult, error)
 	forwardFn  func(ctx context.Context, k int, queue string) (ForwardCancelResult, error)
 	abortErr   error
@@ -56,6 +60,7 @@ type world struct {
 
 	events     []string // ordered log of what happened, "dispatch:1", "terminal:failed", …
 	prepares   []PrepareInput
+	prepareAt  []time.Time
 	dispatches []dispatchRec
 	terminals  []WriteTerminalInput
 	forwards   []string // queues
@@ -96,7 +101,7 @@ func (w *world) snapshot() world {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return world{
-		events: slices.Clone(w.events), prepares: slices.Clone(w.prepares), dispatches: slices.Clone(w.dispatches),
+		events: slices.Clone(w.events), prepares: slices.Clone(w.prepares), prepareAt: slices.Clone(w.prepareAt), dispatches: slices.Clone(w.dispatches),
 		terminals: slices.Clone(w.terminals), forwards: slices.Clone(w.forwards), aborts: slices.Clone(w.aborts),
 		patches: slices.Clone(w.patches), pushes: slices.Clone(w.pushes), pushQueues: slices.Clone(w.pushQueues),
 		hookCalls: slices.Clone(w.hookCalls), lists: w.lists, submits: slices.Clone(w.submits),
@@ -125,13 +130,19 @@ func (w *world) block(ctx context.Context) error {
 func (w *world) prepare(ctx context.Context, in PrepareInput) (PrepareResult, error) {
 	w.mu.Lock()
 	w.prepares = append(w.prepares, in)
-	fn := w.prepareFn
+	w.prepareAt = append(w.prepareAt, w.now())
+	fn, res := w.prepareFn, w.prepareRes
 	w.mu.Unlock()
 	w.event(fmt.Sprintf("prepare:%d", in.N))
 	if fn != nil {
 		if err := fn(in); err != nil {
 			return PrepareResult{}, err
 		}
+	}
+	if res != nil {
+		r := res(in)
+		r.Deadline = w.deadline
+		return r, nil
 	}
 	return PrepareResult{Queue: QueueDirect, Backend: "direct", Deadline: w.deadline}, nil
 }
@@ -142,6 +153,9 @@ func (w *world) attemptState(ctx context.Context, in AttemptRef) (AttemptState, 
 	st := AttemptState{TaskState: w.state}
 	if in.N > 0 {
 		st.Backend, st.ReplicaID = "direct", w.replica
+		if w.backend != "" {
+			st.Backend = w.backend
+		}
 		if w.firstID[in.N] {
 			ts := t0
 			st.FirstUpstreamIDAt = &ts
