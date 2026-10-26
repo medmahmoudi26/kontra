@@ -392,6 +392,7 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 		HirePrincipal: dec.HirePrincipal,
 		CLIVersion:    a.hello.Agent,
 		NodeName:      a.hello.Name,
+		Enrolled:      dec.Enrolled,
 		mux:           mux,
 		served:        make(map[string]string, len(dec.Served)),
 		control:       control,

@@ -32,10 +32,15 @@ const (
 	// ChannelRevoke carries "apikey:<id>", "key:<key_id>" or "binding:<key_id>/<service>" (spec §2.3,
 	// spec/tunnel.md §12).
 	ChannelRevoke Channel = "kontra_revoke"
+	// ChannelTunnel is gate-internal, between replicas (not tunnel wire protocol): "session:<session_id>"
+	// after a handshake superseded a session another replica holds, "enrolled:<key_id>/<tenant_id>/<service>"
+	// after a key was enrolled for a service that already had one (spec/tunnel.md §11, §5; the M2 plan's
+	// confirmed spec conflict, internal/tunnelgate).
+	ChannelTunnel Channel = "kontra_tunnel"
 )
 
 // Channels is every channel the LISTEN connection listens on.
-var Channels = []Channel{ChannelTaskEvents, ChannelServices, ChannelRevoke}
+var Channels = []Channel{ChannelTaskEvents, ChannelServices, ChannelRevoke, ChannelTunnel}
 
 // Connection bounds (pg-store brief §5.3; the kontra-cloud operations doc): a peer that stops answering
 // is given up after TCPUserTimeout of unacknowledged data, or after keepalives fail for
