@@ -5,6 +5,13 @@ Every example runs **unmodified** behind the gate: none of them imports Kontra c
 the Go ones), and none has a Kontra-specific endpoint. If an example needs a change to work through the
 tunnel, the gate is wrong, not the example.
 
+Since M2 the A2A sellers run behind the gate either way: as a direct backend, which the gate dials
+(`backend: { a2a: { url } }` in `kontra.yaml`), or hosted through the tunnel (`backend: { tunnel: {} }`, no URL at
+the gate), where `kontra connect --serve a2a:<name>=<url>`, running next to the seller, dials the gate and forwards
+the gate's requests to `<url>` and nowhere else. `--serve` names the seller's root URL; M2 refuses a target with a
+path (D123 in [`../docs/decisions.md`](../docs/decisions.md)). Each built seller's README gives the commands from
+an empty database: `hello-exec` both ways, `helloworld` and `booking` through the tunnel.
+
 | Directory | What | Milestone |
 |---|---|---|
 | `sellers/hello-exec` | `a2a server --exec 'echo Hello World'` (a2a-cli v0.3.1): the README demo seller, as a direct backend (`kontra.yaml`) and through `kontra connect` (`kontra-tunnel.yaml`) | M1 (direct), M2 (tunnel): built |
