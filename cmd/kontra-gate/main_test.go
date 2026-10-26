@@ -32,6 +32,13 @@ func TestUsageErrors(t *testing.T) {
 		{"serve", "--nope"},
 		{"serve", "-f", "x.yaml", "extra"},
 		{"enroll"},
+		{"enroll", "a", "b"},
+		{"enroll", "Not_A_Service"},
+		{"enroll", "--service", "hello"},
+		{"enroll", "--revoke", "not-a-key"},
+		{"enroll", "--revoke", "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa", "hello"},
+		{"enroll", "--revoke", "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa", "--service", "Bad_Name"},
+		{"enroll", "--api-key", "x", "--service", "hello"},
 	} {
 		_, err := runCmd(t, args...)
 		var u usageError

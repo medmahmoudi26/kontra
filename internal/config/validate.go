@@ -714,6 +714,11 @@ func (c *Config) unbuilt() []string {
 	if c.SigningKey != "" {
 		note("signing_key: cards are not signed in this release (M3)")
 	}
+	if c.Tunnel.Anonymous {
+		// Fails closed: an M2 gate creates no anonymous tenant, so a hello with neither enroll nor auth from an
+		// unknown key is unknown_key (spec/tunnel.md §4, §6).
+		note("tunnel.anonymous: anonymous sessions are not built in this release (M4); a node key that is not enrolled is refused unknown_key")
+	}
 	for _, name := range sortedKeys(c.Services) {
 		s := c.Services[name]
 		switch {

@@ -602,8 +602,10 @@ func TestUnbuiltWarnings(t *testing.T) {
 blobs: s3://kontra-parts
 signing_key: file:./kontra.key
 auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra } }
+tunnel: { anonymous: true }
 `)
-	want := []string{"auth.oidc", "blobs", "signing_key", "services.remote.sealed", "services.remote.seller_keys", "services.remote: tunnel backends"}
+	want := []string{"auth.oidc", "blobs", "signing_key", "services.remote.sealed", "services.remote.seller_keys", "services.remote: tunnel backends",
+		"tunnel.anonymous"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)

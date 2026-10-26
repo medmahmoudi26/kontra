@@ -3,7 +3,8 @@
 //	kontra-gate serve -f kontra.yaml [--listen addr] [--metrics-listen addr]
 //	kontra-gate migrate [-f kontra.yaml | --postgres URL] [up|down|status]
 //	kontra-gate enroll -f kontra.yaml --api-key <name> [--scope hire] [--prefix <p>]   (M1)
-//	kontra-gate enroll -f kontra.yaml <service> | --revoke <key_id>                    (M2)
+//	kontra-gate enroll -f kontra.yaml <service>                                       (M2)
+//	kontra-gate enroll -f kontra.yaml --revoke <key_id> [--service <name>]            (M2)
 //	kontra-gate version
 package main
 
@@ -23,10 +24,12 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pressly/goose/v3"
 
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
+	enrollpkg "kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/gate"
 	"kontra.sh/kontra/internal/migrate"
 	"kontra.sh/kontra/internal/obs"
@@ -39,7 +42,8 @@ const usage = `usage:
   kontra-gate serve -f kontra.yaml [--listen <addr>] [--metrics-listen <addr>]
   kontra-gate migrate [-f kontra.yaml | --postgres <url>] [up|down|status]
   kontra-gate enroll -f kontra.yaml --api-key <name> [--scope <scope>]... [--prefix <p>]
-  kontra-gate enroll -f kontra.yaml <service> | --revoke <key_id>
+  kontra-gate enroll -f kontra.yaml <service>
+  kontra-gate enroll -f kontra.yaml --revoke <key_id> [--service <name>]
   kontra-gate version
 `
 
@@ -269,36 +273,176 @@ func printResult(w io.Writer, r *goose.MigrationResult) {
 	fmt.Fprintf(w, "%s %s %s (%s)\n", state, r.Direction, filepath.Base(r.Source.Path), r.Duration.Round(time.Millisecond))
 }
 
-// enroll mints an API key (`--api-key <name>`, M1) and prints it alone on stdout, so
-// KONTRA_API_KEY="$(kontra-gate enroll -f kontra.yaml --api-key demo)" works; what was minted is said on
-// stderr. The key goes to the team tenant, created when it does not exist yet (the README order is
-// migrate, enroll, serve), in the transaction that also appends its audit row. Service enrollment tokens
-// and node-key revocation are the tunnel's (M2).
+// enroll mints an API key (`--api-key <name>`, M1) or a service enrollment token (`<service>`, M2) and
+// prints it alone on stdout, so KONTRA_API_KEY="$(kontra-gate enroll -f kontra.yaml --api-key demo)" and
+// `kontra connect --enroll "$(kontra-gate enroll hello)"` work; what was minted is said on stderr. The key
+// goes to the team tenant, created when it does not exist yet (the README order is migrate, enroll, serve),
+// in the transaction that also appends its audit row. `--revoke <key_id>` revokes a node key, and with
+// `--service <name>` one of its bindings (spec/tunnel.md §12); it prints nothing on stdout.
 func enroll(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	file := fs.String("f", "kontra.yaml", "configuration file")
 	apiKey := fs.String("api-key", "", "mint an API key with this name and print it once")
 	prefix := fs.String("prefix", "", "operator prefix of the key, 1-16 [a-z0-9], so key: globs can name a group (key:kk_<prefix>_*)")
-	revoke := fs.String("revoke", "", "revoke a node key (M2)")
+	revoke := fs.String("revoke", "", "revoke a node key (k1_…)")
+	service := fs.String("service", "", "with --revoke: revoke only the key's binding to this service")
 	var scopes multiFlag
 	fs.Var(&scopes, "scope", "API key scope: hire (default), enroll:<service> or enroll:* (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return usageError{"enroll: " + err.Error()}
 	}
+	// A service name may come before the flags too (`kontra-gate enroll hello -f kontra.yaml`).
+	var names []string
+	for fs.NArg() > 0 {
+		names = append(names, fs.Arg(0))
+		if err := fs.Parse(fs.Args()[1:]); err != nil {
+			return usageError{"enroll: " + err.Error()}
+		}
+	}
 	switch {
-	case *apiKey != "" && (*revoke != "" || fs.NArg() > 0):
+	case *apiKey != "" && (*revoke != "" || *service != "" || len(names) > 0):
 		return usageError{"enroll: --api-key mints a key; it takes no service and no --revoke"}
 	case *apiKey != "":
 		return enrollAPIKey(ctx, *file, *apiKey, *prefix, scopes, stdout, stderr)
 	case *prefix != "" || len(scopes) > 0:
 		return usageError{"enroll: --prefix and --scope go with --api-key <name>"}
-	case *revoke != "" || fs.NArg() > 0:
-		// Service enrollment tokens and node-key revocation belong to the tunnel (spec/tunnel.md §5, §12).
-		fmt.Fprintln(stdout, "kontra-gate enroll <service> and --revoke: not until M2 (the tunnel, spec/tunnel.md §5)")
-		return nil
+	case *revoke != "" && len(names) > 0:
+		return usageError{"enroll: --revoke takes a key id; name one service with --service"}
+	case *revoke != "":
+		return enrollRevoke(ctx, *file, *revoke, *service, stderr)
+	case *service != "":
+		return usageError{"enroll: --service goes with --revoke <key_id>; to mint a token, name the service alone"}
+	case len(names) == 1:
+		return enrollToken(ctx, *file, names[0], stdout, stderr)
+	case len(names) > 1:
+		return usageError{"enroll: one service at a time, not " + strings.Join(names, " ")}
 	}
 	return usageError{"enroll: want --api-key <name>, <service> or --revoke <key_id>"}
+}
+
+// openDB opens a pool on the configuration's database once its schema is current (file names the
+// configuration in the error that asks for a migration).
+func openDB(ctx context.Context, cfg *config.Config, file string) (*pgxpool.Pool, error) {
+	m, err := migrate.Open(ctx, cfg.Postgres)
+	if err != nil {
+		return nil, err
+	}
+	err = m.Check(ctx)
+	m.Close()
+	if errors.Is(err, migrate.ErrSchemaNotCurrent) {
+		return nil, fmt.Errorf("%w: run kontra-gate migrate -f %s first", err, file)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return pg.NewPool(ctx, cfg.Postgres)
+}
+
+// enrollToken mints a service enrollment token (spec/tunnel.md §5) for a tunnel service of the team tenant
+// and prints it alone on stdout. The service is the row `kontra-gate serve` loaded from services: (the
+// table is the truth): it must exist, be enabled and have backend tunnel. Nothing is written otherwise.
+func enrollToken(ctx context.Context, file, service string, stdout, stderr io.Writer) error {
+	if !config.NameRE.MatchString(service) {
+		return usageError{fmt.Sprintf("enroll: %q is not a service name (%s)", service, config.NameRE)}
+	}
+	cfg, err := config.Load(file)
+	if err != nil {
+		return err
+	}
+	if cfg.Tenancy != config.TenancySingle {
+		return errors.New("enroll <service> mints tokens for a team gate's one tenant; a multi-tenant gate's operator mints its own (spec/tunnel.md §5)")
+	}
+	pool, err := openDB(ctx, cfg, file)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	tenantID, err := tenant.Lookup(ctx, pool, tenant.TeamSlug)
+	if errors.Is(err, tenant.ErrNotFound) {
+		return fmt.Errorf("enroll %s: this gate has no services yet: start kontra-gate serve -f %s, which loads services: into the database", service, file)
+	}
+	if err != nil {
+		return err
+	}
+	store := enrollpkg.NewStore(pool, enrollpkg.Options{})
+	token, minted, err := store.MintServiceTokenInfo(ctx, tenantID, service, "kontra-gate enroll")
+	switch {
+	case errors.Is(err, enrollpkg.ErrUnknownService):
+		hint := ""
+		if _, inFile := cfg.Services[service]; inFile {
+			hint = fmt.Sprintf(" (it is in %s: start kontra-gate serve, or send it SIGHUP, to load it)", file)
+		}
+		return fmt.Errorf("enroll %s: no such service%s", service, hint)
+	case errors.Is(err, enrollpkg.ErrServiceDisabled):
+		return fmt.Errorf("enroll %s: the service is disabled (no longer in services:)", service)
+	case errors.Is(err, enrollpkg.ErrNotTunnel):
+		return fmt.Errorf("enroll %s: the service's backend is not tunnel; only nodes host tunnel services (spec/tunnel.md §5)", service)
+	case err != nil:
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, token); err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "minted an enrollment token for service %s (tenant %s): single use, valid until %s; it is shown once\n",
+		service, minted.Tenant, minted.ExpiresAt.UTC().Format(time.RFC3339))
+	return nil
+}
+
+// enrollRevoke revokes a node key (reason operator), or with service one of its bindings (spec/tunnel.md
+// §12). Each is one transaction with its audit row and NOTIFY kontra_revoke; the replica holding the key's
+// session acts on it within 5 s.
+//
+// SPEC-CONFLICT (M2 plan, C9): §12 names `kontra-gate enroll --revoke <key_id>` for a key and no command for
+// one binding; --service is the plan's proposal (operator CLI, not wire protocol).
+func enrollRevoke(ctx context.Context, file, keyID, service string, stderr io.Writer) error {
+	if !config.NodeKeyIDRE.MatchString(keyID) {
+		return usageError{fmt.Sprintf("enroll: --revoke %q: want a node key id, k1_ and 26 base32 characters", keyID)}
+	}
+	if service != "" && !config.NameRE.MatchString(service) {
+		return usageError{fmt.Sprintf("enroll: --service %q is not a service name (%s)", service, config.NameRE)}
+	}
+	cfg, err := config.Load(file)
+	if err != nil {
+		return err
+	}
+	pool, err := openDB(ctx, cfg, file)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	store := enrollpkg.NewStore(pool, enrollpkg.Options{})
+	before, err := store.LookupKey(ctx, keyID)
+	if errors.Is(err, enrollpkg.ErrKeyNotFound) {
+		return fmt.Errorf("enroll --revoke: this gate has no node key %s", keyID)
+	}
+	if err != nil {
+		return err
+	}
+	const actor = "kontra-gate enroll --revoke"
+	if service == "" {
+		if before.RevokedAt != nil {
+			fmt.Fprintf(stderr, "node key %s (%s, tenant %s) was already revoked at %s\n", keyID, before.NodeName, before.Tenant,
+				before.RevokedAt.UTC().Format(time.RFC3339))
+			return nil
+		}
+		if err := store.RevokeKey(ctx, keyID, enrollpkg.ReasonOperator, actor); err != nil {
+			return err
+		}
+		fmt.Fprintf(stderr, "revoked node key %s (%s, tenant %s): its session closes and its next handshake is refused\n",
+			keyID, before.NodeName, before.Tenant)
+		return nil
+	}
+	err = store.RevokeBinding(ctx, keyID, service, actor)
+	if errors.Is(err, enrollpkg.ErrBindingNotFound) {
+		return fmt.Errorf("enroll --revoke: node key %s is not enrolled for %s", keyID, service)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "revoked the binding of node key %s (%s, tenant %s) to %s: its session stops serving %s\n",
+		keyID, before.NodeName, before.Tenant, service, service)
+	return nil
 }
 
 func enrollAPIKey(ctx context.Context, file, name, prefix string, scopeArgs []string, stdout, stderr io.Writer) error {
@@ -328,19 +472,7 @@ func enrollAPIKey(ctx context.Context, file, name, prefix string, scopeArgs []st
 	if !cfg.Auth.APIKeys {
 		fmt.Fprintln(stderr, "warning: auth.api_keys is not true in "+file+": this gate refuses API keys until it is")
 	}
-	m, err := migrate.Open(ctx, cfg.Postgres)
-	if err != nil {
-		return err
-	}
-	err = m.Check(ctx)
-	m.Close()
-	if errors.Is(err, migrate.ErrSchemaNotCurrent) {
-		return fmt.Errorf("%w: run kontra-gate migrate -f %s first", err, file)
-	}
-	if err != nil {
-		return err
-	}
-	pool, err := pg.NewPool(ctx, cfg.Postgres)
+	pool, err := openDB(ctx, cfg, file)
 	if err != nil {
 		return err
 	}
