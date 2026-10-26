@@ -132,4 +132,18 @@ imagePullSecrets:
 {{- if and .Values.ingressRouteTCP.enabled (not .Values.ingressRouteTCP.hosts) }}
 {{- fail "ingressRouteTCP.hosts: name at least one host (HostSNI)" }}
 {{- end }}
+{{- if gt (int .Values.gate.replicas) 1 }}
+{{- if .Values.persistence.enabled }}
+{{- fail "gate.replicas above 1 with persistence.enabled: the ACME cache volume is one replica's (D70, D183); set persistence.enabled=false and use a provided certificate or a TLS-terminating front" }}
+{{- end }}
+{{- if not .Values.gate.peer.enabled }}
+{{- fail "gate.replicas above 1 needs gate.peer.enabled: without the peer hop an MCP session pinned to another replica's tunnel ends with a 404 (spec/relay.md §11.2, D179, D183)" }}
+{{- end }}
+{{- end }}
+{{- if lt (int .Values.gate.replicas) 1 }}
+{{- fail "gate.replicas: at least 1" }}
+{{- end }}
+{{- if and .Values.gate.peer.enabled (not .Values.gate.peer.secret.existingSecret) }}
+{{- fail "gate.peer.secret.existingSecret: required with gate.peer.enabled (a Secret holding the shared secret, at least 32 bytes)" }}
+{{- end }}
 {{- end }}

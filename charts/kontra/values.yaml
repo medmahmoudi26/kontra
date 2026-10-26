@@ -1,6 +1,6 @@
-# One Kontra gate: a Deployment of one replica (built-in ACME is for one replica, D70, and the ACME cache is
-# a ReadWriteOnce volume), with an optional bundled Postgres and Temporal development server for small
-# deployments. Every pod and container runs under the restricted Pod Security Standard: non-root,
+# One Kontra gate: a Deployment of one replica by default (built-in ACME is for one replica, D70, and the ACME
+# cache is a ReadWriteOnce volume; more replicas need the peer hop, gate.peer, D183), with an optional bundled
+# Postgres and Temporal development server for small deployments. Every pod and container runs under the restricted Pod Security Standard: non-root,
 # seccomp RuntimeDefault, no privilege escalation, every capability dropped, a read-only root filesystem.
 #
 #   helm install kontra charts/kontra -n kontra --create-namespace -f my-values.yaml
@@ -52,6 +52,24 @@ signingKey:
 gate:
   port: 8443 # the public listener (kontra.yaml listen:)
   metricsPort: 9090 # the metrics listener (kontra.yaml metrics.listen)
+  # Replicas of the gate (D183). More than one needs gate.peer.enabled (spec/relay.md §11.2, D179: without the peer
+  # hop an MCP session pinned to a tunnel another replica holds ends with a 404 at every other request) and
+  # persistence.enabled false (built-in ACME and its one ReadWriteOnce cache are one replica's, D70: use a provided
+  # certificate or a TLS-terminating front then). The chart refuses either combination.
+  replicas: 1
+  # The peer hop (spec/relay.md §11.2, D163, D179, D183): each replica listens on port for MCP exchanges of the
+  # tunnel sessions it holds, which the other replicas forward there. The port is reachable only from the
+  # release's gate pods (the NetworkPolicy below); the shared secret comes from a Secret you manage, at least 32
+  # bytes, in the environment variable secretEnv. kontra.yaml names both:
+  #
+  #   peer: {listen: ":8444", secret_env: KONTRA_PEER_SECRET}   # advertise defaults to the pod's address
+  peer:
+    enabled: false
+    port: 8444
+    secretEnv: KONTRA_PEER_SECRET
+    secret:
+      existingSecret: "" # required when enabled
+      key: secret
   runAsUser: 65532 # distroless nonroot
   # spec/relay.md §14.3: at least drain_timeout (default 10 min) + 30 s.
   terminationGracePeriodSeconds: 630
