@@ -19,12 +19,22 @@
 // and from a service (upstream_error), and every rendering resolves a ref through the blobs table for the task
 // its row names only, never for another task that carries the same ref.
 //
+// How a part gets here (Externalize), how its row reaches the event's transaction (Pending, InsertPending) and how
+// it leaves the gate (Renderer) are in the package's other files.
+//
 // Work packages: M3 WP-02 (the store, the blobs table, rendering), M3 WP-03 (blob streams, Fetch).
 package blob
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
+	"errors"
+	"fmt"
 	"io"
+	"net/url"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,12 +54,46 @@ const (
 	MaxObject = 64 << 20
 )
 
-// Ref names one object: 128 random bits, base32 without padding, lowercase.
+// Ref names one object: 128 random bits, base32 without padding, lowercase (26 characters).
 type Ref string
+
+// refEncoding is base32 (RFC 4648) without padding; refs are written lowercase.
+var refEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+// refRE is the shape of a ref (the blobs.ref CHECK in migration 0002).
+var refRE = regexp.MustCompile(`^[a-z2-7]{26}$`)
 
 // NewRef mints a ref.
 func NewRef() (Ref, error) {
-	return "", unimpl.Error("blob.NewRef", "M3 WP-03")
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("blob: mint a ref: %w", err)
+	}
+	return Ref(strings.ToLower(refEncoding.EncodeToString(b[:]))), nil
+}
+
+// Valid reports whether r has a ref's shape.
+func (r Ref) Valid() bool { return refRE.MatchString(string(r)) }
+
+// URL is the part URL that names r: kontra-blob:<ref>.
+func (r Ref) URL() string { return URIScheme + string(r) }
+
+// RefOf returns the ref a part URL names when it is exactly the gate's form, kontra-blob:<ref>.
+func RefOf(u string) (Ref, bool) {
+	rest, ok := strings.CutPrefix(u, URIScheme)
+	if !ok || !Ref(rest).Valid() {
+		return "", false
+	}
+	return Ref(rest), true
+}
+
+// Reserved reports whether a part URL uses the gate's reserved scheme, in any case and after leading white space
+// (D181): such a part from a caller is InvalidRequest, from a service upstream_error, whether or not it is a
+// well-formed ref, so every kontra-blob: part in the log is one the gate wrote. A URL scheme is case-insensitive
+// (RFC 3986 §3.1), so KONTRA-BLOB: is the same scheme.
+func Reserved(u string) bool {
+	u = strings.TrimLeft(u, " \t\r\n\f\v")
+	return len(u) >= len(URIScheme) && strings.EqualFold(u[:len(URIScheme)], URIScheme)
 }
 
 // Key is where an object lives.
@@ -62,14 +106,88 @@ type Key struct {
 // Config is a parsed blobs: URL.
 type Config struct {
 	Bucket   string
-	Prefix   string
-	Endpoint string // empty: the provider's default (AWS)
+	Prefix   string // without a leading or trailing slash; empty for the bucket's root
+	Endpoint string // empty: the provider's default (AWS); else scheme://host[:port]
 	Region   string
 }
 
-// ParseURL parses blobs: (validated at start by internal/config).
+// bucketRE is an S3 bucket name: 3 to 63 lowercase letters, digits, dots and hyphens, starting and ending with
+// a letter or a digit.
+var bucketRE = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+
+// prefixRE is one segment of a prefix: what an object key may hold without escaping.
+var prefixRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// regionRE is an S3 region name.
+var regionRE = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+
+// ParseURL parses blobs: s3://<bucket>[/<prefix>][?endpoint=<URL>&region=<region>] (validated at start by
+// internal/config too). Credentials never appear in it: they come from AWS_ACCESS_KEY_ID and
+// AWS_SECRET_ACCESS_KEY. The endpoint is http:// or https:// with a host, an optional port and nothing else.
 func ParseURL(s string) (Config, error) {
-	return Config{}, unimpl.Error("blob.ParseURL", "M3 WP-03")
+	u, err := url.Parse(s)
+	if err != nil {
+		return Config{}, fmt.Errorf("blob: blobs: not a URL")
+	}
+	switch {
+	case u.Scheme != "s3":
+		return Config{}, errors.New("blob: blobs: want s3://<bucket>[/<prefix>]")
+	case u.User != nil:
+		return Config{}, errors.New("blob: blobs: credentials do not belong in the URL (they come from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)")
+	case u.Fragment != "" || u.Opaque != "":
+		return Config{}, errors.New("blob: blobs: no fragment")
+	case !bucketRE.MatchString(u.Host) || strings.Contains(u.Host, ".."):
+		return Config{}, fmt.Errorf("blob: blobs: %q is not an S3 bucket name", u.Host)
+	}
+	cfg := Config{Bucket: u.Host}
+	if p := strings.Trim(u.Path, "/"); p != "" {
+		for seg := range strings.SplitSeq(p, "/") {
+			if !prefixRE.MatchString(seg) || seg == "." || seg == ".." {
+				return Config{}, fmt.Errorf("blob: blobs: prefix %q: segments of letters, digits, '.', '_' and '-' only", p)
+			}
+		}
+		cfg.Prefix = p
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return Config{}, fmt.Errorf("blob: blobs: query: %w", err)
+	}
+	for k, v := range q {
+		if len(v) != 1 {
+			return Config{}, fmt.Errorf("blob: blobs: %s given %d times", k, len(v))
+		}
+		switch k {
+		case "endpoint":
+			e, err := url.Parse(v[0])
+			if err != nil || (e.Scheme != "http" && e.Scheme != "https") || e.Host == "" || e.Hostname() == "" ||
+				e.User != nil || (e.Path != "" && e.Path != "/") || e.RawQuery != "" || e.Fragment != "" {
+				return Config{}, errors.New("blob: blobs: endpoint: want http(s)://host[:port] and nothing else")
+			}
+			cfg.Endpoint = e.Scheme + "://" + e.Host
+		case "region":
+			if !regionRE.MatchString(v[0]) {
+				return Config{}, fmt.Errorf("blob: blobs: region %q", v[0])
+			}
+			cfg.Region = v[0]
+		default:
+			return Config{}, fmt.Errorf("blob: blobs: unknown parameter %q (endpoint and region only)", k)
+		}
+	}
+	return cfg, nil
+}
+
+// ObjectName is k's object key under prefix: <prefix>/<tenant>/<task>/<ref>.
+func ObjectName(prefix string, k Key) string {
+	return taskPrefix(prefix, k.Tenant, k.Task) + string(k.Ref)
+}
+
+// taskPrefix is the key prefix of every object of a task, slash included.
+func taskPrefix(prefix string, tenant, task uuid.UUID) string {
+	p := tenant.String() + "/" + task.String() + "/"
+	if prefix != "" {
+		p = prefix + "/" + p
+	}
+	return p
 }
 
 // Store is the bucket.
@@ -84,10 +202,8 @@ type Store interface {
 	DeleteTask(ctx context.Context, tenant, task uuid.UUID) error
 }
 
-// Open connects to the bucket cfg names and checks that it exists and is writable.
-func Open(ctx context.Context, cfg Config) (Store, error) {
-	return nil, unimpl.Error("blob.Open", "M3 WP-03")
-}
+// ErrNotFound is an object the bucket does not hold.
+var ErrNotFound = errors.New("blob: no such object")
 
 // Resolver finds the task a ref belongs to, for a blob stream's authorization (spec/tunnel.md §8.3).
 type Resolver interface {
