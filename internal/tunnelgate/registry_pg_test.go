@@ -200,6 +200,10 @@ func (n *testNode) accept(agent http.Handler) {
 }
 
 // prefixed reads through the reader that read the preamble.
+// exchangeOrigin is the origin of the requests a test writes on a tunnel stream: a placeholder, as the node
+// sends each request to its --serve target (§8.2).
+const exchangeOrigin = "http://kontra-node.invalid"
+
 type prefixed struct {
 	net.Conn
 	r *bufio.Reader
