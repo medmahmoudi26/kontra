@@ -1,9 +1,12 @@
-# The end-to-end tests (`make test-e2e`, test/e2e; spec/relay.md §16, D80): two gate replicas as processes,
-# a Temporal development server from the pinned CLI and Postgres 17. They take about a quarter of an hour.
-# They run nightly, on demand, and on every pull request that changes the gate's code, its migrations or
-# these tests: a pull_request workflow runs from the pull request's own branch, so the M1 gate (relay_resume,
-# replica_kill) runs before a merge, while schedule and workflow_dispatch need the file on the default
-# branch. A newer push to the same pull request cancels the run in progress.
+# The end-to-end tests (`make test-e2e`, test/e2e; spec/relay.md §16, D80; spec/tunnel.md §16, D154): two gate
+# replicas as processes, a Temporal development server from the pinned CLI, Postgres 17, the tunnel tests'
+# `kontra connect` nodes, and the a2a-samples helloworld seller, which TestHelloworldTunnel clones at its pinned
+# commit and runs with uv (examples/sellers/helloworld/run.sh; without uv the test is skipped). They take
+# about a quarter of an hour. They run nightly, on demand, and on every pull request that changes the gate's
+# or the node's code, its migrations, these tests or the helloworld example: a pull_request workflow runs from
+# the pull request's own branch, so the M1 and M2 gates (relay_resume, replica_kill, tunnel_kill, …) run
+# before a merge, while schedule and workflow_dispatch need the file on the default branch. A newer push to
+# the same pull request cancels the run in progress.
 name: e2e
 on:
   schedule:
@@ -15,6 +18,7 @@ on:
       - "internal/**"
       - "migrations/**"
       - "test/e2e/**"
+      - "examples/sellers/helloworld/**"
       - "go.mod"
       - "go.sum"
       - "Makefile"
@@ -46,6 +50,10 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.10"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.7"
+          python-version: "3.12"
       - name: Install the pinned Temporal CLI
         run: |
           archive="temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
