@@ -85,8 +85,10 @@ func TestTunnelStaleRevocationView(t *testing.T) {
 	if requestWith(h.Upstream, msg.ID) != nil {
 		t.Fatal("the follow-up reached the seller: a stream was opened")
 	}
-	if as, err := h.Attempts(ctx, waiting.ID); err != nil || len(as) != 1 || as[0].Outcome != "tunnel_lost" || as[0].TunnelSession != sess {
-		t.Fatalf("the task's attempts %+v %v: want its one attempt on %s ended tunnel_lost", as, err, sess)
+	// The attempt ends after the failed event that answered the follow-up (Dispatcher.settle; M2 review,
+	// robustness-1).
+	if a := endedAttempt(t, ctx, h, waiting.ID); a.Outcome != "tunnel_lost" || a.TunnelSession != sess {
+		t.Fatalf("the task's attempt %+v: want its one attempt on %s ended tunnel_lost", a, sess)
 	}
 	if err := hold.Rollback(ctx); err != nil {
 		t.Fatal(err)

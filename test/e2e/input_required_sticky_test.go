@@ -127,11 +127,12 @@ func TestInputRequiredSticky(t *testing.T) {
 		if stray := requestWith(x.other, msg.ID); stray != nil {
 			t.Fatalf("the reply to %s reached the other seller: %+v", x.task.ID, stray)
 		}
-		as, err := h.Attempts(ctx, x.task.ID)
-		if err != nil || len(as) != 1 || as[0].N != 1 || as[0].TunnelSession != x.att.TunnelSession ||
-			as[0].ReplicaID != x.replica.ReplicaID || as[0].Outcome != "completed" {
-			t.Fatalf("task %s's attempts after the reply %+v %v: want attempt 1 on %s, dispatched on %s, completed",
-				x.task.ID, as, err, x.att.TunnelSession, x.replica.Name)
+		// The dispatch ends the attempt (ended_at, outcome) only after it logged the terminal event that
+		// answered the reply (Dispatcher.settle): wait for it (M2 review, robustness-1).
+		if a := endedAttempt(t, ctx, h, x.task.ID); a.N != 1 || a.TunnelSession != x.att.TunnelSession ||
+			a.ReplicaID != x.replica.ReplicaID || a.Outcome != "completed" {
+			t.Fatalf("task %s's attempt after the reply %+v: want attempt 1 on %s, dispatched on %s, completed",
+				x.task.ID, a, x.att.TunnelSession, x.replica.Name)
 		}
 		turns := 0
 		for _, tn := range x.mine.Turns() {
@@ -159,9 +160,8 @@ func TestInputRequiredSticky(t *testing.T) {
 	if after := s2.Requests(); len(after) != before || requestWith(s2, msg.ID) != nil {
 		t.Fatalf("S2 received %d requests after N1 died, the reply among them: %v", len(after)-before, requestWith(s2, msg.ID) != nil)
 	}
-	as, err := h.Attempts(ctx, t3.ID)
-	if err != nil || len(as) != 1 || as[0].Outcome != "tunnel_lost" || as[0].TunnelSession != a3.TunnelSession {
-		t.Fatalf("task 3's attempts %+v %v: want its one attempt ended tunnel_lost, and no new attempt", as, err)
+	if a := endedAttempt(t, ctx, h, t3.ID); a.Outcome != "tunnel_lost" || a.TunnelSession != a3.TunnelSession {
+		t.Fatalf("task 3's attempt %+v: want its one attempt ended tunnel_lost, and no new attempt", a)
 	}
 	checkHistory(t, h, t3.ID, "e2e_input_required_sticky_session_gone", tunnelForbidden(h)...)
 

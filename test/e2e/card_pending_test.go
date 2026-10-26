@@ -68,9 +68,13 @@ func TestTunnelCardPending(t *testing.T) {
 	if !ok || task.Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("a task placed before the first card: %#v, want completed on a later attempt", res)
 	}
-	as, err := h.Attempts(ctx, task.ID)
-	if err != nil || len(as) < 2 {
-		t.Fatalf("its attempts %+v %v: want a pending-card attempt, then the completed one", as, err)
+	// The last attempt ends after the completed event that answered the buyer (Dispatcher.settle; M2 review,
+	// robustness-1).
+	as := attemptsOf(t, ctx, h, task.ID, 30*time.Second, "the last attempt of "+string(task.ID)+" ended", func(as []Attempt) bool {
+		return len(as) > 0 && as[len(as)-1].EndedAt != nil
+	})
+	if len(as) < 2 {
+		t.Fatalf("its attempts %+v: want a pending-card attempt, then the completed one", as)
 	}
 	for _, at := range as[:len(as)-1] {
 		if at.Outcome != "service_unavailable" || at.UpstreamTaskID != "" || at.TunnelSession != sess {
