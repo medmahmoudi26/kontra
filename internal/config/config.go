@@ -35,8 +35,8 @@ import (
 type Config struct {
 	Listen    string `yaml:"listen"`     // public listener, default ":8080"
 	PublicURL string `yaml:"public_url"` // the URL callers use; the served card carries it (spec §3)
-	// SigningKey is the card-signing key (file:… or a KMS reference). Unused in M1: cards are rewritten
-	// but not signed until M3 (PRD §14).
+	// SigningKey is the card-signing key: file:<path> of a PEM file of ECDSA P-256 private keys, the first signs
+	// and every key is in the JWKS (spec §3, D166). Required off loopback when A2A services are configured.
 	SigningKey string   `yaml:"signing_key"`
 	TLS        TLS      `yaml:"tls"`
 	Edge       Edge     `yaml:"edge"`
@@ -688,9 +688,9 @@ func (e *ValidationError) Error() string {
 // names matching ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$, TLS required when public_url is not a localhost
 // origin (or terminated by a declared front proxy, D69), https backend URLs unless allow_private (D67),
 // URL ports from 1 to 65535, kind-only keys, allow: entries that can match (D68), durations and seconds
-// that fit the integer columns of services, listen and metrics.listen on different ports, and no key
-// this build would ignore by failing open (sealed on any backend, seller_keys on a direct a2a backend or
-// a tunnel service, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
+// that fit the integer columns of services, listen and metrics.listen on different ports, a signing_key
+// off loopback when A2A services are configured (D166), and no key this build would ignore by failing open
+// (sealed on any backend, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
 // Defaults must have been applied (Parse and Load do).
 func (c *Config) Validate() error {
 	v := &validator{}
@@ -698,6 +698,7 @@ func (c *Config) Validate() error {
 	c.validateListeners(v)
 	pub := c.validatePublicURL(v)
 	c.validateTLS(v, pub)
+	c.validateSigningKey(v, pub)
 	c.validateEdge(v)
 	c.validateLimits(v)
 	c.validateBackends(v)

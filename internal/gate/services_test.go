@@ -25,10 +25,12 @@ import (
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/jws"
 	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/pgtest"
 	"kontra.sh/kontra/internal/relay"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -554,56 +556,49 @@ func helloConfig(t *testing.T, sellerURL, allow, extra string) *config.Config {
 `+extra)
 }
 
-// A card Postgres refuses as json (here a description that is not UTF-8, which the gate serves byte for
-// byte) is still recorded: upstream_card verbatim and card_fetched_at, with services.card NULL, the
-// best-effort copy (the audit's proposal for services.card). A replica that starts while the seller is down
-// serves it from upstream_card.
-func TestCardPersistsWhenPostgresRefusesTheServedCard(t *testing.T) {
+// A card that is not valid UTF-8 (here a description with a Latin-1 byte, which M1 served byte for byte and
+// Postgres refuses as json) has no RFC 8785 form, so the gate can neither hash it for kontra.upstream and
+// services.card_hash nor sign the served card (spec §3, D166). It is never installed, unsigned or altered: the
+// service has no card (503 card routes, service_unavailable dispatch) and nothing is recorded. A valid card from
+// the same seller afterwards is served and recorded as usual.
+func TestUnsignableCardIsNotServed(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
 	ctx := context.Background()
 	raw := strings.Replace(fakeCard, `"says hello"`, "\"caf\xe9\"", 1)
 	seller := newFakeSeller(t, raw)
 	cfg := helloConfig(t, seller.srv.URL, `"org:default"`, "")
-	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
+	keys, _ := jws.EphemeralKeySet()
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Signer: &card.JWSSigner{Keys: keys}})
 	if err := s.Sync(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := keeperOf(t, s, "default/hello").Refresh(ctx); err != nil {
-		t.Fatalf("a fetch of a card Postgres refuses as json: %v", err)
+	k := keeperOf(t, s, "default/hello")
+	if err := k.Refresh(ctx); !errors.Is(err, card.ErrBadCard) {
+		t.Fatalf("a fetch of a card that is not UTF-8: %v, want ErrBadCard", err)
 	}
 	hello, _ := s.Lookup(ctx, TeamTenant, "hello")
-	served, err := hello.Cards()
-	if err != nil || !bytes.Contains(served.Body, []byte("caf\xe9")) {
-		t.Fatalf("served %v %s", err, served.Body)
+	if served, err := hello.Cards(); !errors.Is(err, card.ErrUnavailable) || served != nil {
+		t.Fatalf("an unsignable card is served: %v %+v", err, served)
 	}
-	var (
-		up        []byte
-		cardNull  bool
-		fetchedAt *time.Time
-	)
-	if err := pool.QueryRow(ctx, `select upstream_card, card is null, card_fetched_at from kontra.services where name = 'hello'`).Scan(&up, &cardNull, &fetchedAt); err != nil {
-		t.Fatal(err)
+	if _, _, err := s.Backend(ctx, hello.Ref, nil); !errors.Is(err, card.ErrUnavailable) {
+		t.Errorf("Backend for an unsignable card: %v", err)
 	}
-	if !bytes.Equal(up, []byte(raw)) || !cardNull || fetchedAt == nil {
-		t.Fatalf("stored upstream_card %q, card null %v, card_fetched_at %v", up, cardNull, fetchedAt)
+	var up []byte
+	if err := pool.QueryRow(ctx, `select upstream_card from kontra.services where name = 'hello'`).Scan(&up); err != nil || up != nil {
+		t.Fatalf("an unsignable card was recorded: %q %v", up, err)
 	}
-
 	seller.mu.Lock()
-	seller.down = true
+	seller.card = []byte(fakeCard)
 	seller.mu.Unlock()
-	other := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
-	if err := other.Sync(ctx, cfg); err != nil {
+	if err := k.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	o, _ := other.Lookup(ctx, TeamTenant, "hello")
-	if seeded, err := o.Cards(); err != nil || seeded.ETag != served.ETag {
-		t.Fatalf("a replica started while the seller is down: %v %+v", err, seeded)
+	if served, err := hello.Cards(); err != nil || !bytes.Contains(served.Body, []byte(`"signatures":[`)) {
+		t.Fatalf("the valid card: %v", err)
 	}
 }
 
-// A persist that fails (here once, refused by a trigger) is made again at the next good fetch of the same
-// bytes, so upstream_card does not stay unrecorded until the seller changes its card.
 func TestCardPersistRetriedAfterAFailure(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
@@ -688,9 +683,11 @@ func TestCardColumnFollowsTheServedBody(t *testing.T) {
 
 // A db-sourced row (Cloud, spec §13.5) gets the refusals the configuration has for the same service
 // (config/validate.go's SPEC-CONFLICT resolutions, D90 and D91, amended for M2): sealed on a direct backend
-// or a tunnel service, which this build would relay in plaintext, and seller_keys on a direct a2a service or
-// a tunnel service, whose card this build would serve unverified. Such a row is left out (the
-// unknown-service answer, service_unavailable for its tasks) instead of served.
+// or a tunnel service, which this build would relay in plaintext. Such a row is left out (the unknown-service
+// answer, service_unavailable for its tasks) instead of served. seller_keys are verified since M3 WP-02, which
+// lifts D90 and the seller_keys half of D144: rows with them are served on direct and tunnel services, unless
+// the keys cannot be read (no key the gate verifies with), which leaves the row out rather than serve its card
+// unverified.
 func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
@@ -716,10 +713,14 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 		{"sealed-tunnel", "a2a", `{"tunnel": {}}`, "required", nil},
 		{"optional-tunnel", "a2a", `{"tunnel": {}}`, "optional", nil},
 		{"plain-tunnel", "a2a", `{"tunnel": {}}`, "off", nil},
-		{"keys-direct", "a2a", direct, "off", `{"keys": []}`},
+		{"keys-direct", "a2a", direct, "off", sellerJWKS},
+		{"keys-url-direct", "a2a", direct, "off", `{"url": "https://seller.example/jwks.json"}`},
+		{"keys-empty", "a2a", direct, "off", `{"keys": []}`},
+		{"keys-http-url", "a2a", direct, "off", `{"url": "http://seller.example/jwks.json"}`},
 		{"keys-null", "a2a", direct, "off", `null`},
-		{"keys-tunnel", "a2a", `{"tunnel": {}}`, "off", `{"keys": []}`},
+		{"keys-tunnel", "a2a", `{"tunnel": {}}`, "off", sellerJWKS},
 		{"keys-mcp-tunnel", "mcp", `{"tunnel": {}}`, "off", `{"keys": []}`},
+		{"keys-sealed-tunnel", "a2a", `{"tunnel": {}}`, "required", sellerJWKS},
 	} {
 		exec(`insert into kontra.services (tenant_id, name, kind, backend, allow, sealed, seller_keys, source)
 			values ($1, $2, $3, $4::jsonb, '{org:acme}', $5, $6::jsonb, 'db')`, acme, row.name, row.kind, row.backend, row.sealed, row.sellerKeys)
@@ -731,7 +732,8 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	for name, served := range map[string]bool{
 		"plain": true, "sealed-direct": false, "optional-direct": false, "sealed-mcp": false,
 		"sealed-tunnel": false, "optional-tunnel": false, "plain-tunnel": true,
-		"keys-direct": false, "keys-null": true, "keys-tunnel": false, "keys-mcp-tunnel": false,
+		"keys-direct": true, "keys-url-direct": true, "keys-empty": false, "keys-http-url": false, "keys-null": true,
+		"keys-tunnel": true, "keys-mcp-tunnel": true, "keys-sealed-tunnel": false,
 	} {
 		got, _ := s.Lookup(ctx, "acme", name)
 		if (got != nil) != served {
@@ -752,6 +754,135 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	if got, _ := s.Lookup(ctx, "acme", "plain"); got == nil {
 		t.Fatal("the fixed row is not served")
 	}
+
+	// D166: a gate off loopback without a signing key leaves every a2a row out (their cards would be unsigned)
+	// and serves the MCP ones.
+	public := NewServices(pool, ServicesOptions{PublicURL: "https://gate.example", Multi: true})
+	if err := public.Sync(ctx, parseConfig(t, "tenancy: multi\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := public.Lookup(ctx, "acme", "plain"); got != nil {
+		t.Error("an a2a row is served unsigned off loopback")
+	}
+	if got, _ := public.Lookup(ctx, "acme", "keys-mcp-tunnel"); got == nil {
+		t.Error("an MCP row is not served on a gate without a signing key")
+	}
+	keys, _ := jws.EphemeralKeySet()
+	signed := NewServices(pool, ServicesOptions{PublicURL: "https://gate.example", Multi: true, Signer: &card.JWSSigner{Keys: keys}})
+	if err := signed.Sync(ctx, parseConfig(t, "tenancy: multi\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := signed.Lookup(ctx, "acme", "plain"); got == nil {
+		t.Error("an a2a row is not served by a gate with a signing key")
+	}
+}
+
+// sellerJWKS is an inline seller key set (RFC 7515's example P-256 key).
+const sellerJWKS = `{"keys": [{"kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}]}`
+
+// The registry signs every served card and records its upstream card's hash (spec §3, D13, D166): the served
+// card carries exactly the gate's signature, services.card stores it, and services.card_hash is the SHA-256 of
+// the upstream card's JCS. With seller_keys a verified card is served and recorded; when the seller then
+// publishes a card no key verifies, its card routes answer 503, a dispatch fails service_unavailable, and the
+// row keeps the last verified card. A tunnel service whose card does not verify is not "pending" (retried):
+// it fails service_unavailable too.
+func TestCardSignedVerifiedAndHashed(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	pool := pgtest.Pool(t, dsn)
+	ctx := context.Background()
+	gateKeys, _ := jws.EphemeralKeySet()
+	seller, _ := jws.EphemeralKeySet()
+	stranger, _ := jws.EphemeralKeySet()
+	signedBy := func(k *jws.KeySet) string {
+		sig, err := k.Sign([]byte(fakeCard), "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sb, _ := json.Marshal(sig)
+		return strings.TrimSuffix(fakeCard, "}") + `,"signatures":[` + string(sb) + `]}`
+	}
+	good, bad := signedBy(seller), signedBy(stranger)
+	fs := newFakeSeller(t, good)
+	jwks, _ := seller.JWKS()
+	cfg := helloConfig(t, fs.srv.URL, `"org:default"`, "    seller_keys: "+string(jwks)+"\n")
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Signer: &card.JWSSigner{Keys: gateKeys, JWKSURL: "http://localhost:8080/.well-known/jwks.json"}})
+	if err := s.Sync(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	k := keeperOf(t, s, "default/hello")
+	if err := k.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hello, _ := s.Lookup(ctx, TeamTenant, "hello")
+	served, err := hello.Cards()
+	if err != nil || !served.Verified {
+		t.Fatalf("a verified card: %+v %v", served, err)
+	}
+	var sigs []jws.Signature
+	m, _ := strictjson.Members(served.Body)
+	if err := json.Unmarshal(m["signatures"], &sigs); err != nil || len(sigs) != 1 {
+		t.Fatalf("served signatures %s", m["signatures"])
+	}
+	pub, _ := jws.ParseJWKS(must(gateKeys.JWKS()))
+	h, err := jws.Verify(served.Body, sigs[0], pub)
+	if err != nil || h.Upstream == nil || !h.Upstream.Verified || h.Upstream.URL != "http://localhost:8080/agents/hello/.well-known/agent-card.upstream.json" {
+		t.Fatalf("the gate's signature: %+v %v", h, err)
+	}
+	want, _ := card.UpstreamHash([]byte(good))
+	var (
+		hash   []byte
+		stored string
+	)
+	if err := pool.QueryRow(ctx, `select card_hash, card::text from kontra.services where name = 'hello'`).Scan(&hash, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(hash, want[:]) || stored != string(served.Body) {
+		t.Fatalf("card_hash %x (want %x), card %s", hash, want, stored)
+	}
+	// The seller publishes a card signed by another key.
+	fs.mu.Lock()
+	fs.card = []byte(bad)
+	fs.mu.Unlock()
+	if err := k.Refresh(ctx); !errors.Is(err, card.ErrNotVerified) {
+		t.Fatalf("an unverifiable card: %v", err)
+	}
+	if c, err := hello.Cards(); err == nil || c == nil || !c.Unavailable {
+		t.Fatalf("an unverifiable card is served: %+v %v", c, err)
+	}
+	if _, _, err := s.Backend(ctx, hello.Ref, nil); !errors.Is(err, card.ErrUnavailable) {
+		t.Errorf("Backend for an unverifiable card: %v", err)
+	}
+	var up []byte
+	if err := pool.QueryRow(ctx, `select upstream_card from kontra.services where name = 'hello'`).Scan(&up); err != nil || string(up) != good {
+		t.Errorf("the row lost the last verified card: %s %v", up, err)
+	}
+
+	// A tunnel service whose card no key verifies fails service_unavailable, not the pending retry.
+	tun := &fakeTunnels{}
+	tun.set(bad, true)
+	sid := uuid.Must(uuid.NewV7())
+	sess := &fakeSessions{held: map[uuid.UUID]bool{sid: true}}
+	ts := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Tunnels: tun, Sessions: sess,
+		Signer: &card.JWSSigner{Keys: gateKeys}})
+	if err := ts.Sync(ctx, parseConfig(t, "services:\n  remote:\n    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: "+string(jwks)+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	tk := keeperOf(t, ts, "default/remote")
+	if err := tk.Refresh(ctx); !errors.Is(err, card.ErrNotVerified) {
+		t.Fatalf("a tunnel card no key verifies: %v", err)
+	}
+	remote, _ := ts.Lookup(ctx, TeamTenant, "remote")
+	_, _, err = ts.Backend(ctx, remote.Ref, &store.Attempt{Backend: store.BackendTunnel, TunnelSession: &sid})
+	if err == nil || errors.Is(err, relay.ErrCardPending) || !errors.Is(err, card.ErrNotVerified) {
+		t.Errorf("Backend for a tunnel card no key verifies: %v", err)
+	}
+}
+
+func must(b []byte, err error) []byte {
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 // fakeTunnels is TunnelCards without sessions: it serves a card as if fetched through a session it holds

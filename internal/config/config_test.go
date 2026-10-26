@@ -36,8 +36,8 @@ services:
     backend: { tunnel: {} }
 `
 
-// mcpDirect is minimal with a direct MCP service: MCP services are not built and have no card, so
-// seller_keys on it fails closed and loads with a warning.
+// mcpDirect is minimal with a direct MCP service: an MCP service has no card, so seller_keys on it verify nothing
+// and load with a note.
 const mcpDirect = `
 public_url: http://localhost:8080
 postgres: postgres://kontra@localhost:5432/kontra
@@ -229,27 +229,81 @@ func TestSealedShapes(t *testing.T) {
 	}
 }
 
-// Sealing and seller-key verification are not built (M3). A key this build would ignore on a service it
-// serves fails open, so it is refused: sealed on a direct backend (which can never be sealed: no node
-// unseals for it), sealed on a tunnel service (served since M2: its parts would be relayed in plaintext),
-// and seller_keys on a direct a2a backend or a tunnel service (its card would be served unverified).
+// Sealing is not built until M3 WP-08. A key this build would ignore on a service it serves fails open, so it is
+// refused: sealed on a direct backend (which can never be sealed: no node unseals for it) and sealed on a tunnel
+// service (served since M2: its parts would be relayed in plaintext). Seller card signatures are verified (M3
+// WP-02 lifts D90 and the seller_keys half of D144): seller_keys loads on direct and tunnel a2a services, with no
+// warning, and on MCP services with a note (no card to verify).
 func TestFailOpenKeysRefused(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, want string }{
 		{"sealed on a direct a2a backend", minimal + "    sealed: true\n", "services.hello.sealed: sealing needs backend tunnel"},
 		{"optional sealing on a direct a2a backend", minimal + "    sealed: { required: false }\n", "sealing needs backend tunnel"},
 		{"sealed on a direct mcp backend", minimal + "  fs:\n    kind: mcp\n    backend: { mcp: { url: \"https://mcp.example.com\" } }\n    sealed: true\n", "services.fs.sealed: sealing needs backend tunnel"},
-		{"seller_keys on a direct a2a backend", minimal + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.seller_keys: seller card signatures are not verified in this release"},
 		{"sealed on a tunnel service", tunnelled + "    sealed: true\n", "services.hello.sealed: sealing is not built in this release (M3), and this build serves tunnel services"},
 		{"optional sealing on a tunnel service", tunnelled + "    sealed: { required: false }\n", "services.hello.sealed: sealing is not built"},
 		{"sealed on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    sealed: true\n", "services.fs.sealed: sealing is not built"},
-		{"seller_keys on a tunnel service", tunnelled + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.seller_keys: seller card signatures are not verified in this release"},
-		{"seller_keys on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.fs.seller_keys: seller card signatures are not verified"},
+		{"sealed with seller_keys on a tunnel service", tunnelled + "    sealed: true\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.sealed: sealing is not built"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := parseErr(t, tc.yaml); !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q\nwant it to contain %q", err, tc.want)
 			}
 		})
+	}
+	const inline = "    seller_keys: { keys: [ { kty: EC, crv: P-256, x: \"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\", y: \"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\" } ] }\n"
+	for _, tc := range []struct{ name, yaml, svc string }{
+		{"seller_keys {url} on a direct a2a backend", minimal + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello"},
+		{"inline seller_keys on a direct a2a backend", minimal + inline, "hello"},
+		{"seller_keys {url} on a tunnel service", tunnelled + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello"},
+		{"inline seller_keys on a tunnel service", tunnelled + inline, "hello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := parse(t, tc.yaml)
+			if c.Services[tc.svc].SellerKeys.IsZero() || len(c.Warnings) != 0 {
+				t.Errorf("seller_keys %s, warnings %q", c.Services[tc.svc].SellerKeys, c.Warnings)
+			}
+		})
+	}
+	c := parse(t, minimal+"  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n")
+	if !slices.ContainsFunc(c.Warnings, func(w string) bool {
+		return strings.HasPrefix(w, "services.fs.seller_keys: an MCP service has no card")
+	}) {
+		t.Errorf("seller_keys on a tunnel mcp service: warnings %q", c.Warnings)
+	}
+	// An inline set the gate cannot verify with is refused at load, not left to fail every fetch.
+	if err := parseErr(t, minimal+"    seller_keys: { keys: [ { kty: RSA, n: abc, e: AQAB } ] }\n"); !strings.Contains(err.Error(), "no EC P-256 signing key") {
+		t.Errorf("an RSA-only set: %v", err)
+	}
+	if err := parseErr(t, minimal+"    seller_keys: { keys: [ { kty: EC, crv: P-256, x: AAAA, y: AAAA } ] }\n"); !strings.Contains(err.Error(), "services.hello.seller_keys") {
+		t.Errorf("a malformed key: %v", err)
+	}
+}
+
+// signing_key (spec §3, D166): file:<path> only; required when public_url is not a loopback origin and the
+// configuration serves A2A services, naming D166 and the services; not required on loopback (the gate mints a key
+// at start) or for a gate without A2A services.
+func TestSigningKey(t *testing.T) {
+	const public = "public_url: https://agents.acme.io\npostgres: postgres://k@db/k\ntls: { terminated_by_proxy: true }\n"
+	const a2aSvc = "services:\n  hello:\n    kind: a2a\n    backend: { tunnel: {} }\n  book:\n    kind: a2a\n    backend: { a2a: { url: \"https://seller.example.com\" } }\n"
+	const mcpSvc = "services:\n  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n"
+	err := parseErr(t, public+a2aSvc)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "signing_key: required (D166)") ||
+		!strings.Contains(ve.Problems[0], "(book, hello)") {
+		t.Fatalf("a public gate with A2A services and no signing_key: %v", err)
+	}
+	c := parse(t, public+"signing_key: file:/etc/kontra/signing/kontra.key\n"+a2aSvc)
+	if c.SigningKey != "file:/etc/kontra/signing/kontra.key" {
+		t.Errorf("signing_key %q", c.SigningKey)
+	}
+	parse(t, public+mcpSvc) // no A2A service: no card to sign
+	parse(t, public)        // no service at all (Cloud: the operator writes rows)
+	parse(t, minimal)       // loopback: a key is minted at start
+	parse(t, strings.Replace(minimal, "http://localhost:8080", "http://127.0.0.1:8080", 1))
+	for _, bad := range []string{"signing_key: kms:scaleway/key-1\n", "signing_key: \"file:\"\n", "signing_key: ./kontra.key\n"} {
+		if err := parseErr(t, minimal+bad); !strings.Contains(err.Error(), "signing_key: want file:<path>") {
+			t.Errorf("%s: %v", strings.TrimSpace(bad), err)
+		}
 	}
 }
 
@@ -366,6 +420,9 @@ func TestLoadErrors(t *testing.T) {
 		{"postgres bad pool size", "public_url: http://localhost:8080\npostgres: \"postgres://k@db/k?pool_max_conns=many\"\n", "pool_max_conns"},
 		{"postgres misspelt pool parameter", "public_url: http://localhost:8080\npostgres: \"postgres://k@db/k?pool_max_conn=3\"\n", "unknown pool parameter \"pool_max_conn\""},
 		{"blobs not s3", head + "blobs: https://bucket.example.com\n", "want s3://"},
+		{"blobs with an unknown parameter", head + "blobs: \"s3://parts?bucket=x\"\n", "unknown parameter \"bucket\""},
+		{"blobs with an endpoint path", head + "blobs: \"s3://parts?endpoint=https://s3.example.com/x\"\n", "endpoint"},
+		{"blobs with a bad bucket name", head + "blobs: s3://Parts\n", "not an S3 bucket name"},
 		{"listen without port", head + "listen: localhost\n", "listen \"localhost\""},
 		{"metrics on the public listener", head + "listen: :8080\nmetrics: { listen: \":8080\" }\n", "must differ from listen"},
 		{"metrics on the public port, wildcard spelt out", head + "listen: :8080\nmetrics: { listen: \"0.0.0.0:8080\" }\n", "must differ from listen"},
@@ -631,7 +688,7 @@ func TestParseAllowEntry(t *testing.T) {
 }
 
 // Fail-closed keys this build ignores are reported as warnings, so an operator is not surprised. A tunnel
-// service is served (M2): it gets none.
+// service is served (M2): it gets none; neither do blobs: and signing_key, built in M3 WP-02.
 func TestUnbuiltWarnings(t *testing.T) {
 	c := parse(t, minimal+`
   remote:
@@ -646,8 +703,7 @@ signing_key: file:./kontra.key
 auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra } }
 tunnel: { anonymous: true }
 `)
-	want := []string{"auth.oidc", "blobs", "signing_key", "services.files: MCP services", "services.files.seller_keys",
-		"tunnel.anonymous"}
+	want := []string{"auth.oidc", "services.files: MCP services", "services.files.seller_keys", "tunnel.anonymous"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)

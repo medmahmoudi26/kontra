@@ -9,8 +9,10 @@
 // same-URI seller entries) and signatures. A card is never round-tripped through a typed struct: every
 // other member keeps its bytes and its place.
 //
-// M1 rewrites without signing (PRD §14): the served card carries no signatures field and the seller's
-// signatures are not copied (D13). Signer is the M3 seam.
+// The served card carries exactly one signature, the gate's (D13, D166): ES256 over the JCS of the served card
+// without signatures, whose protected header binds the upstream card (kontra.upstream: its JCS hash, the URL it
+// is served at, and whether a configured seller key verified it). The seller's signatures stay on the upstream
+// card. JWSSigner signs; SellerKeys verifies a seller's signatures against the keys the operator configured.
 package card
 
 import (
@@ -509,8 +511,9 @@ func v0Skills(raw json.RawMessage) (json.RawMessage, error) {
 	return b.Bytes(), nil
 }
 
-// Rewrite returns the served card bytes: the normalized card with the gate's fields of §3 set and its
-// signatures removed (M1 does not sign). Members the gate does not own keep their bytes and order.
+// Rewrite returns the served card bytes before signing: the normalized card with the gate's fields of §3 set and
+// its signatures removed (the keeper then adds the gate's one signature, D13). Members the gate does not own
+// keep their bytes and order.
 func Rewrite(in Input) ([]byte, error) {
 	norm, err := Normalize(in.Upstream)
 	if err != nil {
@@ -614,18 +617,21 @@ func extensions(caps object, in Input) (json.RawMessage, error) {
 	return b.Bytes(), nil
 }
 
-// Signer signs a served card (ES256 over RFC 8785 JCS, protected header with kontra.upstream, D13). M3.
+// Signer signs a served card (ES256 over RFC 8785 JCS, protected header with kontra.upstream, D13): it returns
+// one AgentCardSignature's JSON. JWSSigner is the gate's.
 type Signer interface {
 	Sign(ctx context.Context, served []byte, upstreamSHA256 [32]byte, upstreamURL string, verified bool) (json.RawMessage, error)
 }
 
 // Served is one service's current cards.
 type Served struct {
-	Body         []byte // the served card
+	Body         []byte // the served card, signed when the keeper has a Signer
 	Upstream     []byte // the upstream card, verbatim
 	ETag         string // hash of Body
 	LastModified time.Time
-	Unavailable  bool // configured seller keys and no verifying signature (M3), or no fetch for 30 min: card routes answer 503
+	Unavailable  bool     // configured seller keys and no verifying signature, or no fetch for 30 min: card routes answer 503
+	Hash         [32]byte // SHA-256 over the JCS of Upstream (kontra.upstream.sha256, services.card_hash)
+	Verified     bool     // a configured seller key verified a signature of Upstream (kontra.upstream.verified)
 }
 
 // ETag is the strong entity tag of a served body: a quoted hex SHA-256 prefix. Replicas that fetched the

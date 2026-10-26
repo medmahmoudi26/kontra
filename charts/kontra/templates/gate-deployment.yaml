@@ -104,6 +104,11 @@ spec:
               mountPath: /var/lib/kontra-gate
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.signingKey.existingSecret }}
+            - name: signing-key
+              mountPath: /etc/kontra/signing
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           secret:
@@ -121,3 +126,13 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.signingKey.existingSecret }}
+        # The card-signing key (D166, D183): kontra.yaml's signing_key: file:/etc/kontra/signing/kontra.key.
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.signingKey.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.signingKey.key }}
+                path: kontra.key
+        {{- end }}

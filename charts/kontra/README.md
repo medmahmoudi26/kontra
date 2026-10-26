@@ -28,6 +28,20 @@ What it runs:
   public addresses on 443, never the private ranges; the bundled Postgres and Temporal take connections from
   the gate alone.
 
+**The card-signing key** (D166, D183). A gate that serves A2A services at a public `public_url` (not a loopback
+origin) signs every served card and refuses to start without `signing_key`. Put a PEM file of ECDSA P-256 private
+keys in a Secret and name it in `signingKey.existingSecret` (and `signingKey.key`, default `kontra.key`): the chart
+mounts that one key read-only at `/etc/kontra/signing/kontra.key` with mode `0440`, readable through the pod's
+`fsGroup`, in the gate container only (the migrate init container does not see it). `kontra.yaml` then says
+`signing_key: file:/etc/kontra/signing/kontra.key`. Every replica reads the same file; the first key signs and
+every key is published at `/.well-known/jwks.json`, so a rotation prepends the new key and drops the old one later.
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt > kontra.key
+kubectl -n kontra create secret generic kontra-signing-key --from-file=kontra.key
+helm upgrade kontra charts/kontra -n kontra -f my-values.yaml --set signingKey.existingSecret=kontra-signing-key
+```
+
 Every pod and container meets the `restricted` Pod Security Standard (non-root, seccomp `RuntimeDefault`, no
 privilege escalation, all capabilities dropped, read-only root), so the namespace can enforce it:
 `kubectl label namespace kontra pod-security.kubernetes.io/enforce=restricted`.

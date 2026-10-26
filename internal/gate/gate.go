@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"reflect"
@@ -26,11 +27,13 @@ import (
 
 	"kontra.sh/kontra/internal/a2ahttp"
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/jws"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/migrate"
 	"kontra.sh/kontra/internal/pg"
@@ -171,6 +174,10 @@ type Replica struct {
 	enroll   *enroll.Store
 	tunnels  *tunnelgate.Registry
 
+	// Card signing (spec §3, D166): the key set, nil on a gate off loopback without signing_key (which serves no
+	// a2a service).
+	signingKeys *jws.KeySet
+
 	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
 	pgUp       atomic.Bool
@@ -244,6 +251,9 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 		return nil, err
 	}
 	r.temporalUp.Store(true)
+	if r.signingKeys, err = loadSigningKeys(cfg, r.log); err != nil {
+		return nil, err
+	}
 	if err = r.assemble(); err != nil {
 		return nil, err
 	}
@@ -306,9 +316,16 @@ func (r *Replica) assemble() error {
 	}
 	snapshot := lifecycle.HooksSnapshot{LifecycleQueue: hookQueue, OperatorPrefixes: cfg.OperatorMetadataPrefixes}
 
+	var signer card.Signer
+	if r.signingKeys != nil {
+		signer = &card.JWSSigner{Keys: r.signingKeys, JWKSURL: strings.TrimRight(cfg.PublicURL, "/") + jws.JWKSPath}
+	}
+
 	var handlers *relay.Handlers
 	r.services = NewServices(r.pool, ServicesOptions{
-		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
+		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti, Logger: log, Signer: signer,
+		// seller_keys {url} sets: the SSRF dialer with its address checks always on (spec §3, §10.3).
+		SellerKeysClient: ssrf.NewClient(ssrf.Policy{Resolver: pushResolver(log)}),
 		OnChange: func(ref store.ServiceRef) {
 			if handlers != nil {
 				handlers.Invalidate(ref)
@@ -382,6 +399,14 @@ func (r *Replica) assemble() error {
 		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
 	}).Register(routes)
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))
+	// GET /.well-known/jwks.json (spec §2.1, D166): the card-signing public keys, every key of the file.
+	if r.signingKeys != nil {
+		jwks, err := card.JWKSHandler(r.signingKeys)
+		if err != nil {
+			return err
+		}
+		routes.Handle("GET "+jws.JWKSPath, jwks)
+	}
 	// GET /v1/tunnel (spec §2.1, tunnel.md §3): the node's WebSocket upgrade. A draining replica refuses new
 	// tunnels (relay.md §14.3).
 	th, err := tunnelgate.NewHandler(tunnelgate.HandlerConfig{
@@ -401,6 +426,39 @@ func (r *Replica) assemble() error {
 	}
 	r.metrics = edge.NewMetrics(cfg.Metrics.Listen, http.HandlerFunc(r.serveMetrics))
 	return nil
+}
+
+// loadSigningKeys is the card-signing key set (spec §3, D166): the PEM file signing_key names (a file the gate
+// cannot use refuses the start); without one, on a loopback public_url, a key minted at start, logged with its
+// kid (one replica, development: another replica's cards would not verify against this one's JWKS); off
+// loopback, none, and the registry leaves every a2a service out (the configuration refuses a file that names
+// one).
+func loadSigningKeys(cfg *config.Config, log *slog.Logger) (*jws.KeySet, error) {
+	if p, ok := strings.CutPrefix(cfg.SigningKey, "file:"); ok {
+		keys, err := jws.LoadKeySet(p)
+		if err != nil {
+			return nil, fmt.Errorf("gate: signing_key: %w", err)
+		}
+		kid, _ := keys.KeyID()
+		log.Info("card-signing keys loaded", "kid", kid, "keys", len(keys.KeyIDs()))
+		return keys, nil
+	}
+	if cfg.SigningKey != "" {
+		return nil, fmt.Errorf("gate: signing_key: want file:<path> (D166)")
+	}
+	u, err := url.Parse(cfg.PublicURL)
+	if err != nil || !config.IsLocalhost(u.Hostname()) {
+		log.Warn("no signing_key: this gate serves no a2a service (their cards must be signed, D166)")
+		return nil, nil
+	}
+	keys, err := jws.EphemeralKeySet()
+	if err != nil {
+		return nil, err
+	}
+	kid, _ := keys.KeyID()
+	log.Warn("no signing_key: the served cards are signed with a key minted at start, which only this process's "+
+		"JWKS lists (a loopback gate of one replica, for development; set signing_key: file:<path>, D166)", "kid", kid)
+	return keys, nil
 }
 
 // ID is the replica id.

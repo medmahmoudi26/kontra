@@ -20,11 +20,13 @@ package jws
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -272,7 +274,8 @@ func (k *KeySet) JWKS() ([]byte, error) {
 //
 // The protected header is itself the JCS of those members, jku is left out when empty, and kontra.upstream is
 // never named in crit. A top-level signatures member of payload is left out of what is signed, as A2A 1.0 §8.4
-// and a2a-go's verifier do. The signature is ES256's R ‖ S, 64 bytes, base64url without padding.
+// and a2a-go's verifier do. The signature is ES256's R ‖ S, 64 bytes, base64url without padding, and
+// deterministic (RFC 6979): the same payload, header and key always sign to the same bytes.
 func (k *KeySet) Sign(payload []byte, jku string, up *Upstream) (Signature, error) {
 	if k == nil || len(k.keys) == 0 {
 		return Signature{}, errors.New("jws: empty key set")
@@ -291,10 +294,18 @@ func (k *KeySet) Sign(payload []byte, jku string, up *Upstream) (Signature, erro
 	}
 	protected := base64.RawURLEncoding.EncodeToString(hb)
 	digest := sha256.Sum256([]byte(protected + "." + base64.RawURLEncoding.EncodeToString(canon)))
-	r, s, err := ecdsa.Sign(rand.Reader, k.keys[0], digest[:])
+	// Deterministic ECDSA (RFC 6979: crypto/ecdsa signs so when its random source is nil): replicas that sign
+	// the same served card with the same key produce the same bytes, so the card's ETag is the same on every
+	// replica and across refreshes (spec/relay.md §3's caching; M3 WP-02).
+	der, err := k.keys[0].Sign(nil, digest[:], crypto.SHA256)
 	if err != nil {
 		return Signature{}, fmt.Errorf("jws: sign: %w", err)
 	}
+	var rs struct{ R, S *big.Int }
+	if rest, err := asn1.Unmarshal(der, &rs); err != nil || len(rest) != 0 {
+		return Signature{}, fmt.Errorf("jws: sign: an ECDSA signature that is not one ASN.1 sequence")
+	}
+	r, s := rs.R, rs.S
 	sig := make([]byte, 2*coordSize)
 	r.FillBytes(sig[:coordSize])
 	s.FillBytes(sig[coordSize:])
@@ -431,6 +442,19 @@ func (s *KeySetPublic) Thumbprints() ([]string, error) {
 	}
 	slices.Sort(out)
 	return out, nil
+}
+
+// Thumbprint is the RFC 7638 thumbprint of the set's key named kid (the key a Verify used, by its header's kid).
+func (s *KeySetPublic) Thumbprint(kid string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	k, ok := s.keys[kid]
+	if !ok {
+		return "", false
+	}
+	t, err := thumbprint(k)
+	return t, err == nil
 }
 
 // Verify checks sig over the JCS of payload against keys, by the protected header's kid, and returns that

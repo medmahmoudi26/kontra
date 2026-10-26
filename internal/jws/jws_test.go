@@ -597,3 +597,31 @@ func TestLoadKeySetRefusesSkippedBlocks(t *testing.T) {
 		}
 	}
 }
+
+// Signing is deterministic (RFC 6979): the same card, header and key sign to the same bytes, which still verify,
+// so replicas sharing a key serve one ETag (M3 WP-02).
+func TestSignIsDeterministic(t *testing.T) {
+	ks, err := EphemeralKeySet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := []byte(`{"name":"hello","signatures":[{"protected":"x","signature":"y"}]}`)
+	up := &Upstream{SHA256: "00", URL: "https://gate.example/agents/hello/.well-known/agent-card.upstream.json", Verified: true}
+	a, err := ks.Sign(card, "https://gate.example/.well-known/jwks.json", up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := ks.Sign([]byte(`{"name": "hello"}`), "https://gate.example/.well-known/jwks.json", up)
+	if a.Protected != b.Protected || a.Signature != b.Signature {
+		t.Fatalf("two signatures of one card differ: %+v / %+v", a, b)
+	}
+	jwks, _ := ks.JWKS()
+	pub, _ := ParseJWKS(jwks)
+	if _, err := Verify(card, a, pub); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := ks.Sign([]byte(`{"name":"other"}`), "https://gate.example/.well-known/jwks.json", up)
+	if c.Signature == a.Signature {
+		t.Error("two cards signed to the same signature")
+	}
+}
