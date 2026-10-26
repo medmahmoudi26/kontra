@@ -52,6 +52,7 @@ type Config struct {
 	OperatorMetadataPrefixes []string `yaml:"operator_metadata_prefixes"` // §13.2
 	Push                     Push     `yaml:"push"`
 	MCP                      MCP      `yaml:"mcp"`
+	Peer                     *Peer    `yaml:"peer"` // spec §11.2, D163; M3 WP-04
 	Hooks                    Hooks    `yaml:"hooks"`
 	DrainTimeout             Duration `yaml:"drain_timeout"` // §14.3 and D76, default 10m
 	Tunnel                   Tunnel   `yaml:"tunnel"`        // spec/tunnel.md; M2
@@ -184,6 +185,15 @@ type Push struct {
 // MCP holds the MCP relay settings (spec §11). M3.
 type MCP struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
+}
+
+// Peer is the replica-to-replica hop for MCP requests whose tunnel session another replica holds (spec
+// §11.2, D163). Absent, only this replica's tunnel sessions serve MCP requests, which is all one replica needs.
+// M3 WP-04 validates and serves it.
+type Peer struct {
+	Listen    string `yaml:"listen"`     // host:port or :port; never the public listener
+	Advertise string `yaml:"advertise"`  // what other replicas dial; default Listen, or the default route's address
+	SecretEnv string `yaml:"secret_env"` // the variable holding the shared HMAC secret, at least 32 bytes
 }
 
 // Hooks selects the built-in or remote hook implementations (spec §13, D26).

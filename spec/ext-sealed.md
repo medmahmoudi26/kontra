@@ -31,6 +31,9 @@ A2A, in the served card's `capabilities.extensions`, written by the gate for a s
   message to the service that carries an unsealed part (§5).
 - The extension entry itself is `required: false`: a client that ignores it can still call a service whose
   `params.required` is false, unsealed.
+- A sealed A2A service needs an upstream card that offers an A2A 1.0 interface: the nodes seal and open the 1.0
+  JSON-RPC and HTTP+JSON shapes only. Without one the service is unavailable, as for an unverified seller card
+  ([`relay.md`](relay.md) §3): card routes answer `503` and tasks fail `service_unavailable` (D165).
 
 MCP (revision 2025-11-25, which has no `capabilities.extensions`): the same object in the `initialize` result
 under `capabilities.experimental["sh.kontra/sealed"]` (D27). It is not signed: a hiring node takes it from an
@@ -50,7 +53,10 @@ requests, the client's results to them, and the task's `statusMessage` (which th
 `"sealed"`). Not sealed: the tool name, `isError`, `_meta` outside `sh.kontra/sealed`, `tools/list`, task states,
 and every other method (`resources/*`, `prompts/*`, notifications). Sealing applies only when **both ends run
 `kontra connect`**: a stock MCP client talking straight to the gate sees no envelope (note 1 §6). So the gate holds
-no plaintext of a sealed MCP call, plain or durable (D62).
+no plaintext of a sealed MCP call, plain or durable (D62). Envelope v1 binds an MCP call to a 2025-11-25 session
+(§3, `session`), so a sealed MCP service is served to 2025-11-25 and 2025-06-18 requests only: the gate answers a
+2026-07-28 request to it as a legacy server would, and a dual-era client falls back to `initialize`
+([`relay.md`](relay.md) §11.12, D162). The hiring node never sends `Mcp-Param-*` headers for a sealed call.
 
 ## 3. Envelope v1
 
@@ -73,7 +79,7 @@ it parsed and compares bytes: a header that is not canonical, has a duplicate ke
 | `contextId` | the message's `contextId` (always set: the hiring node mints one for a new sealed task) | the task's context id | — | — |
 | `session` | — | — | lowercase hex SHA-256 of the gate `Mcp-Session-Id` | same |
 | `tool` | — | — | `params.name` | same |
-| `messageId` / `artifactId` | the message's `messageId` | the message's `messageId`, or the artifact's `artifactId` | the client's JSON-RPC request id, as a string | same |
+| `messageId` / `artifactId` | the message's `messageId` | the message's `messageId`, or the artifact's `artifactId` | the client's JSON-RPC request id, as a string; for an answer to an input request, that request's `messageId` | same; for an input request, the upstream server's JSON-RPC id of it, as a string |
 | `chunk` | — | for artifact updates, the 0-based count of updates for that `artifactId` this node sealed; 0 for a whole artifact | — | — |
 | `part`, `parts` | the part's index in its message, and the message's number of sealed parts | the part's index and the count in its message, artifact or update | `0`, `1` | `0`, `1` |
 | `kind` | `"text"` \| `"raw"` \| `"url"` \| `"data"` | same | `"data"` | `"data"` |
@@ -112,11 +118,16 @@ and drops `structuredContent`:
 
 `isError` stays outside: the gate meters on it ([`relay.md`](relay.md) §11.4).
 
-An upstream's `elicitation/create` or `sampling/createMessage` inside a sealed task is sealed by the hosting node
-like a reply (`dir: "res"`, to the job's `replyTo`, with `auth`), its `params` replaced by `{"_meta": {<the
-related-task key>, "sh.kontra/sealed": {"v": 1, "envelope": "…"}}}`, the body the JCS of the original `params`
-without `_meta`, `messageId` the gate request id the gate gives it. The hiring node's answer is sealed like a
-request (`dir: "req"`, to the recipients, the job's `replyTo` and `rk`), its `result` replaced the same way.
+An upstream's `elicitation/create` or `sampling/createMessage` inside a sealed task (an **input request**) is
+sealed by the hosting node like a reply (`dir: "res"`, to the job's `replyTo`, with `auth`), its `params` replaced
+by `{"_meta": {<the related-task key>, "sh.kontra/sealed": {"v": 1, "envelope": "…"}}}`, the body the JCS of the
+original `params` without `_meta`, `session` and `tool` those of the call that created the task, and `messageId`
+the upstream server's own JSON-RPC id for the request, as a string, which the hosting node reads as it relays the
+request (D175). The gate rewrites that JSON-RPC id to its own gate request id (`k.<taskId>.<seq>`,
+[`relay.md`](relay.md) §11.7) and back on the answer, and never touches the envelope, which §2.5 of
+[`relay.md`](relay.md) keeps exactly there (D174). The hiring node's answer is sealed like a request (`dir:
+"req"`, `iat`, to the recipients, with the job's `replyTo` and `rk`) with the same `session`, `tool` and
+`messageId` as the input request it answers, its `result` replaced the same way.
 
 ## 4. Keys and who holds them
 
@@ -142,7 +153,9 @@ carries the extension):
    byte-identical repeat (the hosting node reuses ciphertext), that each chunk's parts are exactly `0..parts-1`,
    and that chunks arrive in order; an `append: false` artifact replaces everything the node held for that
    `artifactId`. A part that fails is dropped and the local client receives a failed status (`kontra.failure:
-   sealed_rejected`).
+   sealed_rejected`). An MCP input request must carry the job's `session` and the task's `tool`, and a
+   `messageId` it has not opened before in that task (`replayed` otherwise, and dropped); the node keeps which
+   gate request id carried it, so that it seals the local client's answer to that id with that `messageId` (§3).
 4a. In a job whose request was sealed, it refuses every unsealed part of a message, artifact or result, except the
    single text part of a terminal status message the gate wrote (it carries `metadata["kontra.failure"]`, or names
    an upstream terminal state that came without a message, [`relay.md`](relay.md) §6.3–§6.4), which it hands to
@@ -152,7 +165,8 @@ carries the extension):
 
 **Gate:**
 
-- Never decrypts, never re-encrypts, never alters a sealed part.
+- Never decrypts, never re-encrypts, never alters a sealed part or an MCP envelope, which its scrub of Kontra's
+  keys keeps exactly where §3 puts it ([`relay.md`](relay.md) §2.5, D174).
 - For a service with `params.required: true`, refuses before dispatch a message with a part whose `mediaType` is
   not the envelope type, or an MCP `tools/call` without `sh.kontra/sealed`, with `InvalidRequest` (`-32600`, as
   PRD §8 says; `sealed_unsealed_part`). With `required: false`, an unsealed part passes, and the gate sets
@@ -165,9 +179,15 @@ carries the extension):
 **Hosting node.** It keeps **durable job state** under `~/.kontra/hosted/<gate host>/<service>/` (0600, node-local
 clocks only: a job is kept until 7 days after its last exchange; the per-service sets below for at least
 `--sealed-max-age`). Per job (keyed by the gate task id; for plain MCP calls, by the session hash): the `replyTo`
-and `rk` of its first sealed request, the upstream task and context ids the service returned for it, and the
-`(messageId, part)` pairs it forwarded. Per service: every `replyTo` that opened a job, with that job's gate task
-id; the upstream context id recorded for each gate context; and, for MCP, every `(session, messageId)` forwarded.
+and `rk` of its first sealed request, the upstream task and context ids the service returned for it, the
+`(messageId, part)` pairs it forwarded, and, per gate task of the job, the MCP input requests it sealed and has
+not seen answered, each with the time it sealed it. Per service: every `replyTo` that opened a job, with that
+job's gate task id; the upstream context id recorded for each gate context; and, for MCP, every `(session,
+messageId)` forwarded.
+It reads every body it checks or seals with exact keys, as [`relay.md`](relay.md) §11.1 does, and refuses one with
+a repeated or case-variant key at a level it reads, a service's reply included (`bad_header`, D172): the gate is
+not trusted to have checked a request, and the node seals and opens bodies by re-encoding what it parsed, never
+by patching bytes in place.
 For each sealed part of an inbound message it decrypts with its identity keys, then checks:
 
 1. `dir: "req"` and the message's parts exactly `0..parts-1`, each once (`bad_header`); its own key id in `kids`
@@ -183,12 +203,26 @@ For each sealed part of an inbound message it decrypts with its identity keys, t
 3. **A2A, `taskId` T in the header**: T equals the preamble's `task`, job T exists, and the header's `replyTo` and
    `rk` equal the job's (`wrong_job` otherwise); the forwarded body's `taskId`/`contextId` are T's recorded
    upstream ids.
-4. **MCP**: `tool` = `params.name`, `session` = the preamble's `mcp_session`, `messageId` = the preamble's
-   `mcp_request_id`; once a job exists for the session, the header's `replyTo` and `rk` equal the job's
-   (`wrong_job`); for a durable task the node binds the upstream `taskId` in the `CreateTaskResult` to the job and
-   seals that task's `tasks/result` content, input requests and `statusMessage` to the job's `replyTo`.
-5. The `(messageId, part)` pair has not been forwarded before for the job, and for MCP the `(session, messageId)`
-   pair not before for this service, whatever the job (`replayed`).
+4. **MCP request** (a `tools/call`): `tool` = `params.name`, `session` = the preamble's `mcp_session`,
+   `messageId` = the preamble's `mcp_request_id` (`wrong_message` otherwise); once a job exists for the session,
+   the header's `replyTo` and `rk` equal the job's (`wrong_job`); for a durable task the node binds the upstream
+   `taskId` in the `CreateTaskResult` to the job and seals that task's `tasks/result` content, input requests and
+   `statusMessage` to the job's `replyTo`.
+4b. **MCP answer to an input request** (a JSON-RPC response the gate forwards on an exchange of a durable task):
+   `session` = the preamble's `mcp_session`, `tool` = that of the call that created the preamble's `task`, and
+   `messageId` = the response's JSON-RPC id, which names an input request this node sealed for that task less than
+   `max_age` ago (`wrong_message` otherwise) and has not seen answered (`replayed`); the header's `replyTo` and
+   `rk` equal the job's (`wrong_job`). Once the service has accepted it, the input request is answered.
+5. For a request (rules 2–4), the `(messageId, part)` pair has not been forwarded before for the job, and for MCP
+   the `(session, messageId)` pair not before for this service, whatever the job (`replayed`). An answer is
+   checked by rule 4b alone: its `messageId` is the server's id, from another id space than the client's.
+
+**Answers must be sealed (D175).** In a job whose request was sealed, a JSON-RPC response whose id is that of an
+input request this node sealed MUST itself be sealed and pass rule 4b. One that carries no
+`_meta["sh.kontra/sealed"]`, or one whose envelope is not exactly `{"v": 1, "envelope": "<base64>"}`, is refused
+`bad_header` (§6), and nothing of it is forwarded to the service; a sealed one that fails a check above is refused
+with that check's reason. This is the hosting node's half of the hiring node's rule 4a: a gate cannot answer the
+service's question in plaintext on the buyer's behalf.
 
 A job is opened, and its `replyTo` and pairs recorded, **only once the service has accepted the request**; a
 request the node answered itself (a node-written `502`, say) opens and records nothing, so the gate's retry of it
@@ -224,8 +258,9 @@ the task's failure) and does not retry it (`sealed_replay`).
 `kontra connect` keeps a **pin per (gate, service)** in `~/.kontra/pins`: whether the service is sealed, the
 recipient key ids, the seller key thumbprints that verified its upstream card, and whether the upstream card was
 signed. A change from sealed to unsealed, or from signed to unsigned, is always refused. With `--pin-recipients`,
-any new recipient or seller key is refused; without it, the change is shown on the console (`:7778`) and in the
-log and needs `--accept-change <service>`. An enrollment that adds a recipient is announced to the service's other
+any new recipient or seller key is refused; without it, the change is refused too until the operator accepts it
+with `--accept-change <service>`, and `kontra connect` names the change on stderr and in its log (there is no
+local console, D164). An enrollment that adds a recipient is announced to the service's other
 nodes ([`tunnel.md`](tunnel.md) §5).
 
 | Threat | Holds? |
@@ -235,8 +270,9 @@ nodes ([`tunnel.md`](tunnel.md) §5).
 | A gate replaying, reordering, dropping or duplicating sealed parts within a task | **Yes**: `messageId`/`artifactId`, `part`/`parts`, `chunk`, `iat` and the persisted job state |
 | A gate replaying a first message to **another** hosting node of the same service within `max_age` | **No**: that node has not seen the `replyTo`. The service re-executes the request; the reply still goes to the original buyer's key |
 | A gate forging a reply | **Yes** for service content: it does not know `rk`. The gate can still write its own failure text, which the hiring node marks unsealed (§5, rule 4a) |
+| A gate answering a sealed task's input request itself: in plaintext, with an answer replayed, or for a request never sealed or sealed more than `max_age` ago | **Yes**: the hosting node forwards only a sealed answer that passes rule 4b; an unsealed one is refused `bad_header`, and the service never sees it (§5, D175) |
 | A gate forging a request of its own | Not prevented (age does not authenticate senders), but it gains nothing it could not get as a buyer: the reply goes to its own key, and it cannot continue another buyer's job (`wrong_job`) |
-| A gate that **substitutes recipients**, drops the extension, or strips the seller's signature | **Only with pins**: the buyer learns recipients from what the gate serves. Pins refuse a downgrade always, and a new recipient or seller key when `--pin-recipients` is set. The seller's key ids are shown in the operator's console for out-of-band comparison |
+| A gate that **substitutes recipients**, drops the extension, or strips the seller's signature | **Only with pins**: the buyer learns recipients from what the gate serves. Pins refuse a downgrade always, and a new recipient or seller key when `--pin-recipients` is set. `kontra connect` prints the recipient key ids and the seller key thumbprints on stderr and in its log when it first sees a service and on every change, for out-of-band comparison (D164, D187) |
 | An MCP task's input requests, answers and status messages | **Yes**, for a task a sealed call created (§2) |
 | A stolen identity key | Revocation stops future use. Parts already sealed to it open for whoever holds the key and the ciphertext: age has no forward secrecy. Retention ([`relay.md`](relay.md) §5.4) bounds the exposure |
 
@@ -255,5 +291,5 @@ together. Not v4 work.
 | Test | Expected |
 |---|---|
 | `sealed_no_plaintext` | A sealed task (A2A, a plain MCP call, and a durable MCP call whose upstream asks one elicitation) carrying a known marker string in every input, answer and output: the marker is absent from Postgres, the gate's logs and the bucket's objects |
-| `sealed_replay` | A sealed part resent under another task id is rejected by the receiving node (`wrong_job` for a follow-up, `replayed` for a first message on the same node, `replayed` for an MCP call on the same service), and the gate records the rejection; the gate's own retry of the same task after a node-written `502` is accepted; the residual of §7 (another node within `max_age`) is stated, not tested as a pass |
+| `sealed_replay` | A sealed part resent under another task id is rejected by the receiving node (`wrong_job` for a follow-up, `replayed` for a first message on the same node, `replayed` for an MCP call resent on the same session and `wrong_message` for one resent on another session), and the gate records the rejection; the gate's own retry of the same task after a node-written `502` is accepted; the residual of §7 (another node within `max_age`) is stated, not tested as a pass |
 | `sealed_unsealed_part` | An unsealed part to a `required: true` service: `InvalidRequest` before dispatch |

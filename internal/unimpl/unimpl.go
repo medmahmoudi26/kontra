@@ -1,4 +1,4 @@
-// Package unimpl marks the M1 skeleton's function bodies.
+// Package unimpl marks the skeletons' function bodies (M1, M3).
 //
 // Every exported function of the skeleton that is not built yet returns (or, without an error result,
 // panics with) an error wrapping ErrNotImplemented that names the operation and the work package that

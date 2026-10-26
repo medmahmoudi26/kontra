@@ -1738,3 +1738,473 @@ half when it has written its response, or at once when the gate's half closes, s
 reaches the cap. Decided: the proposal, with D137's: §14 now says that a stream is in flight until both halves end,
 on either side, and gives this cap ([`tunnel.md`](../spec/tunnel.md) §7, §14; `internal/tunnelgate/session.go`
 `linger`, `TestHalfClosedStreamsAreCapped`).
+
+## From M3 planning (26 Oct)
+
+M3 builds sealing and MCP hosting (PRD §14's M3 row as the owner restated it on 26 Oct: envelope v1, `kontra seal`,
+card re-signing with a JWKS, the claim-check bucket; `/mcp/{name}` with session affinity, `TaskLifecycle` for
+task-augmented calls, per-tool policy and the stdio bridge). Planning it met the points below. The owner said on
+26 Oct "Don't ask me anything": the entries marked **decided under the owner's standing instruction, 26 Oct**
+settle open points with the recommended option and change the specs where they say so; the others record the
+owner's own decisions (kontra-cloud#60) where they land. The 2026-07-28 evidence is the MCP specification at tag
+`2026-07-28` (`5f5440bb`) and the tasks extension at `v0.2.2` (`5246bc3d`), pinned in [`relay.md`](../spec/relay.md) §0.
+
+### D158. A request's era is read from its method and its `MCP-Protocol-Version` — **decided under the owner's standing instruction, 26 Oct** (carries out D24)
+
+D24 has the gate serve 2025-11-25 and 2026-07-28 on the same endpoints and asked for the text before M3 builds the
+relay; it left open how one endpoint tells the eras apart, and what happens when the upstream speaks only one.
+2026-07-28 has a dual-era server select "from how the client opens" (an `initialize` is legacy, per-request `_meta`
+is modern; Versioning, "Backward Compatibility"), requires `MCP-Protocol-Version` on every modern POST, equal to
+`_meta`'s version (Streamable HTTP, "Protocol Version Header"), and has a dual-era client fall back to `initialize`
+on a `400` whose body is not a recognized modern error. Decision ([`relay.md`](../spec/relay.md) §11.12):
+`initialize` is legacy whatever its headers; `MCP-Protocol-Version: 2026-07-28` is modern, and its `Mcp-Session-Id`
+and `Last-Event-ID` are ignored; a legacy or absent header needs a session, and without one gets a `-32000` body,
+as legacy servers send: `400` with `-32000` `Bad Request: No valid session ID provided` (the text of
+`server-everything@1.0.0`'s `GET` handler, `dist/transports/streamableHttp.js:143-151`; its `POST` without a
+session goes to a new SDK transport, lines 87-111, which answers its own `-32000` body and is never closed, D176);
+any other version is `-32022` listing the three the gate speaks. The gate never translates between eras: a modern
+request goes upstream as it came, and a legacy-only upstream's own `400` reaches the client, which falls back. A
+service is modern exactly when its upstream is, and no translation between server-to-client requests and multi
+round-trip results is built. The gate validates `Mcp-Method` and `Mcp-Name` against the body (`-32020`) because it
+processes the body; policy still reads the body only (research brief C15). Amended by D176 (the version checks) and
+D177 (the service's era).
+
+### D159. Modern clients get gate-owned tasks through the tasks extension; the gate decides, and answers in line when the task ends within 2 s — **decided under the owner's standing instruction, 26 Oct** (carries out D24)
+
+D24 makes the `io.modelcontextprotocol/tasks` extension the durable surface for modern clients. The extension has no
+per-request opt-in and 2026-07-28 removed `Tool.execution`: "the server is the sole decider" (ext-tasks
+`tasks.md`, "Capability Negotiation"), and a `CreateTaskResult` must not be returned before the task is durable.
+§11.5's step 0 (`execution.taskSupport`) therefore has nothing to read, and note 1's default ("never run the task
+shape over a plain upstream call") must be kept. Two shapes were weighed. Adopting the upstream's task after the
+fact would start work before Admission, so a quote (D45) could never precede it. Deciding up front keeps Admission
+first. Decision: on a `durable` service whose upstream declared the extension in `server/discover`, every modern
+`tools/call` that declares the extension becomes a gate-owned task (Admission `task`, a quote possible), and the
+gate waits up to 2 s before answering: a task that ended is answered with its outcome in line, the client never
+seeing a task; one that did not, or a quoted one (D21), is answered `CreateTaskResult` with `pollIntervalMs` 1000.
+The dispatch speaks to the upstream in the era of the request that created the task (the modern dispatch polls
+upstream `tasks/get`, sends `tasks/update`, and handles an upstream `InputRequiredResult` the same way), and the log
+stays era-neutral: an input request is logged once per upstream key under the gate id `k.<taskId>.<seq>`, so either
+era can read the task. `tasks/update` logs answers once each and signals `kontra.input_response`; `tasks/cancel`
+sends `kontra.cancel` without awaiting it (D57 still writes `canceled` within 10 s); `tasks/result` and
+`tasks/list` are `-32601`, as the extension requires. A terminal task is presented to a modern reader by its
+terminal event: a stored `CallToolResult` is `completed` even with `isError: true` (the extension forbids `failed`
+for it), a JSON-RPC error or a gate failure is `failed`. Consequence: every such call on such a service starts a
+workflow; an operator who wants plain calls sets `tasks: off` ([`relay.md`](../spec/relay.md) §11.12). Amended
+by D178 (a client that leaves cancels; the first upstream id of a multi round-trip call; what such a task keeps).
+
+### D160. `per_session` for modern clients is a virtual session per principal and service — **decided under the owner's standing instruction, 26 Oct** (carries out D24)
+
+D24 redefines `per_session` for modern clients as "per principal per service per period" without saying what the
+gate records. `per_session` prices carry `idleTimeoutSeconds` ([`schema/price.json`](../spec/schema/price.json)),
+and Admission has a `session` operation. Decision: the gate keeps one `mcp_sessions` row per service and principal
+for modern requests, `protocol_version = '2026-07-28'`, keyed by the hash of a random id it never sends, with no
+upstream or tunnel ids; it is opened by the principal's first modern request (after Admission `session`), closed
+`idle` after `session_idle_s`, and named by its `calls` rows. It pins nothing ([`relay.md`](../spec/relay.md)
+§11.12). Amended by D177: 0001's columns hold the row, but one open row per principal and service needs a unique
+index (migration 0002), and the row opens only after the upstream answered a modern request.
+
+### D161. What modern clients are not offered in v4.0 — **decided under the owner's standing instruction, 26 Oct**
+
+Four parts of the modern surface have no faithful mapping yet. A `passthrough` task's later `tasks/get` would need
+routing to the node holding the upstream task, with no session to pin it to; the gate removes the extension from
+those services' requests and discovery, so their modern clients get plain calls. `notifications/tasks` would make
+the gate write into a relayed `subscriptions/listen` stream (§11.7 forbids it); `taskIds` is removed and clients
+poll. A stdio child speaks one era per process, and the bridge (tunnel.md §10) is built for 2025-11-25's
+session-per-child; it answers a modern request with the legacy `400`, so dual-era clients fall back. Sealed services:
+D162 ([`relay.md`](../spec/relay.md) §11.12, [`tunnel.md`](../spec/tunnel.md) §10).
+
+### D162. Sealed MCP is legacy-era only in envelope v1 — **decided under the owner's standing instruction, 26 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §3 binds a sealed MCP call to `session` (the hash of the gate
+`Mcp-Session-Id`) and `messageId` (the JSON-RPC id, unique within that session), and §5 keeps per-session replay
+state. 2026-07-28 has neither a session nor ids unique beyond a connection, and its `Mcp-Param-*` headers would
+copy argument values outside the envelope. Decision: a sealed MCP service is served to 2025-11-25 and 2025-06-18
+requests only; a modern request to it gets the legacy `400` (D158), so a dual-era client falls back and the
+guarantee of D31 and D62 holds unchanged. The hiring node never sends `Mcp-Param-*` for a sealed call. A modern
+binding (a per-call nonce in place of `session`) is an envelope v2 question.
+
+### D163. A tunnel session held by another replica is reached through a peer hop — **decided under the owner's standing instruction, 26 Oct**
+
+[`relay.md`](../spec/relay.md) §11.2 routes every later request of a pinned MCP session "to the same tunnel
+session", but only the replica holding the socket can open a stream on it ([`tunnel.md`](../spec/tunnel.md) §11),
+and A2A reaches it through Temporal (per-replica queues), which a plain MCP request must not use (no durability,
+and events never in history). The spec named no mechanism, so on a gate of several replicas a client routed to a
+replica other than its session's could not be served. Decision: each replica may run a peer listener
+(`peer.listen`, advertised in a new `gate_replicas.peer_addr` column) that accepts one route: an MCP exchange for a
+tunnel session it holds, carried with an assertion of the principal, the session, the service and the preamble's MCP
+fields, a nonce and the time, under HMAC-SHA256 with a shared secret (`peer.secret_env`) over the assertion, method,
+path and body hash; refused after 30 s or on a seen nonce. The holding replica only checks §6.1 and runs the
+exchange; the receiving replica applies every other rule once. Without `peer.listen` only local sessions are
+candidates, which is all one replica needs. The listener is a new internal surface: it never serves the public
+routes, and on Kubernetes the gate's egress policy (443 only, kontra-cloud#60) must allow the peer port within the
+namespace ([`relay.md`](../spec/relay.md) §11.2, §17). Amended by D179 (what the HMAC covers, `replica_id`, more
+than one replica) and D183 (this repository's chart).
+
+### D164. No local console — **decided by the owner, 26 Oct** (kontra-cloud#60)
+
+Note 2 put a read-only console on `:7778`, served by `kontra connect`, and [`ext-sealed.md`](../spec/ext-sealed.md)
+§7 showed recipient changes on it. The owner's final decisions on 26 Oct: no local console; the CLI is `connect`,
+`login`, `seal` and `publish`. Decision: the node serves no port but `:7777`; a pin change is named on `kontra
+connect`'s stderr and in its log and waits for `--accept-change <service>`; `local_rebinding` covers `:7777`
+([`ext-sealed.md`](../spec/ext-sealed.md) §7, [`tunnel.md`](../spec/tunnel.md) §9, §16; `cmd/kontra` drops
+`console`).
+
+### D165. Sealing needs an A2A 1.0 upstream — **decided under the owner's standing instruction, 26 Oct**
+
+The hosting node replaces sealed parts in whatever the gate forwards and seals every part of every reply
+([`ext-sealed.md`](../spec/ext-sealed.md) §5), so it must parse each A2A binding and version the dispatch can
+speak. The dispatch prefers 1.0 JSON-RPC, then 1.0 HTTP+JSON, then 0.3 (`internal/upstream` `pickInterface`); 0.3
+parts have another shape (`kind`, `file.bytes`, `mimeType`) and predate extensions. Decision: a sealed service whose
+upstream card offers no 1.0 interface is unavailable as a seller-key failure is (card routes `503`, tasks
+`service_unavailable`, [`relay.md`](../spec/relay.md) §3), so the hosting and hiring nodes handle 1.0 JSON-RPC and
+1.0 HTTP+JSON only, unary and SSE. The hiring side sees only 1.0 anyway: the gate serves 1.0 only.
+
+### D166. The card-signing key is a PEM file; the first key signs, the rest stay published — **decided under the owner's standing instruction, 26 Oct**
+
+PRD §8 and §11: `signing_key: file:./kontra.key`, "or Scaleway Key Manager in Cloud", rotated by `kid` "with
+overlap"; [`relay.md`](../spec/relay.md) §3 signs ES256 and serves `/.well-known/jwks.json`; neither says what a
+gate without a key does. Decision: `signing_key: file:<path>` names a PEM file of ECDSA P-256 private keys; the
+first signs, every key is in the JWKS (`kid` = RFC 7638 thumbprint, `Cache-Control: max-age=300`), so a rotation is
+"prepend the new key, deploy, drop the old one after the cache and the card refresh have passed". Every replica
+reads the same file. Without the key a gate whose `public_url` is loopback signs with a key minted at start (one
+replica, development) and logs it; any other gate serving A2A services refuses to start, since an unsigned card is
+one `kontra connect` refuses to serve locally ([`tunnel.md`](../spec/tunnel.md) §9). A KMS reference is Cloud's
+(M5). The JCS is `github.com/gowebpki/jcs` v1.0.2 behind `internal/jcs`; the JWS is the gate's own (D13), checked
+against a2a-go's verifier (`card_passthrough`). `services.card_hash` is now filled. Amended by D183: the
+repository's chart mounts the key.
+
+### D167. The claim-check bucket is S3-compatible, its refs live in the parts and a `blobs` table, and its objects die with their task — **decided under the owner's standing instruction, 26 Oct** (lifts D104)
+
+[`relay.md`](../spec/relay.md) §10.4 names `blobs:` and presigned GETs, and has the event row carry
+`payload_ref`, but says nothing of the store's API, the object names, who deletes objects, or how a blob stream
+finds a ref's task ([`tunnel.md`](../spec/tunnel.md) §8.3). One `payload_ref` column also cannot name the several
+large parts one message or artifact may hold. Decision: `blobs: s3://<bucket>[/<prefix>][?endpoint=…&region=…]`
+through the S3 API (`minio-go` v7; Scaleway Object Storage in Cloud, any S3-compatible store for a team gate),
+credentials from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. A part over 256 KiB is stored as an object whose
+key is `<prefix>/<tenant>/<task>/<ref>` (`ref` 128 random bits) and logged in the event's payload as a `url`
+part `kontra-blob:<ref>`, which is a name, not a URL anyone dials; a new `blobs(ref, tenant_id, task_id, size,
+created_at)` table (migration 0002, cascading with the task) maps each ref to its task; `payload_ref` stays
+unused. Reads render the part per reader: a presigned GET valid 15 minutes for a caller, a push receiver or a
+direct backend, `kontra-blob:<ref>` for a node. A blob stream's ref is checked against the session asking: a task
+one of its attempts serves, or one its hiring principal's buyer owns. Retention deletes a task's objects (by
+prefix) before its rows. The bucket carries A2A parts only: MCP has no parts, and its bodies stay under the edge's
+body limit. Without `blobs:` the gate behaves as D104 says; with it, D104's refusal is lifted. Amended by D181
+(`kontra-blob:` is reserved; the blob stream's framing).
+
+### D168. The team-gate compose comes with M3, and the pentest runs on it — **decided by the owner, 26 Oct** (the M3 goal; amends D43's milestone and PRD §14's "VPS")
+
+PRD §14 runs M3's pentest "against a VPS deployment with no proxy in front"; D43 placed the compose in M4. The
+owner's M3 goal: "PRD §12 pentest list run on a compose team gate". Decision: M3 adds `compose.yaml` as D43
+describes it (the gate built from this repository's `Dockerfile`, `temporalio/server:1.32.1` with its dynamic
+config and the two `admin-tools` jobs, Postgres 16, no Temporal or Postgres port published), with the gate
+terminating TLS itself from a provided certificate, as on a VPS with no proxy. The pentest drives it from the host:
+nodes, sellers and attackers are host processes, as a team's machines would be. M4 runs it from a clean VPS.
+Amended by D186 (what the pentest overlay publishes on this host).
+
+### D169. "Escrow dispute after release" is tested at the hook boundary — **decided under the owner's standing instruction, 26 Oct**
+
+PRD §12's pentest list ends with "escrow dispute after release". The open-source gate has no money code (PRD §13);
+what it owns is the review window ([`relay.md`](../spec/relay.md) §13.3, D106): a review-window message is accepted
+only while the window the Lifecycle hook opened is open. Decision: the pentest runs a test Lifecycle worker on its
+own queue (`hooks.lifecycle.task_queue`) whose `ReviewWindow` is 5 s, and asserts that a dispute message sent after
+the window closed is refused and reaches no hook. The money side of the item is Cloud's, tested in M5. Amended by
+D186: the worker reaches Temporal through the pentest overlay, and M3 lifts the load-time refusal of
+`hooks.lifecycle`.
+
+### D170. What M3 leaves to M4 and M5 — **decided under the owner's standing instruction, 26 Oct**
+
+The owner's plan (26 Oct) puts the gate's own `/mcp` with `hire` and URL elicitation, anonymous sessions, the pinned
+TCK and the README demo in M4, and Cloud's JWTs as principals in M5. Decision: M3 does not build
+[`relay.md`](../spec/relay.md) §12 (`/mcp` answers as an unknown route until M4), `kontra login`, `--public` and
+anonymous sessions ([`tunnel.md`](../spec/tunnel.md) §6, `anon_limits`), nor the MCP OAuth resource server
+(§12.1, `auth.mcp_oauth`), which comes with the OIDC principals in M5; until then `/mcp/{svc}` accepts API keys and
+node principals, and `auth.mcp_oauth` keeps its start-time note. M3 builds direct `mcp: {url}` backends as well as
+tunnel ones: the relay is the same, and direct backends never hop.
+
+### D171. The named tests M3 runs — **decided under the owner's standing instruction, 26 Oct**
+
+Like D80 and D154. The gate tests the owner named: `sealed_no_plaintext` (an A2A task, a plain MCP call and a
+durable MCP call whose upstream asks one elicitation, each carrying a marker; the marker is absent from every table,
+both replicas' logs at debug level, the Temporal histories and the bucket's objects), `sealed_replay`,
+`sealed_unsealed_part`, `mcp_session_cross_node`, `mcp_tool_denied` and `mcp_task_resume` (both variants). With them:
+`card_passthrough`, `mcp_batch_refused`, `mcp_meta_spoof`, `mcp_session_revoked`, `stdio_roots`, `local_rebinding`,
+`mcp_modern_task`, `mcp_era_fallback` and `mcp_peer_hop`, and a sealed part over 256 KiB through the bucket. The
+stock upstreams are `@modelcontextprotocol/server-everything@1.0.0` and `server-filesystem@1.0.0` (Node 22); both
+2.0.0 releases need Node 24, so the modern-era tests run against an in-repository dual-era upstream double, and
+against `server-everything@2.0.0` too, skipped saying why, when Node 24 is not installed. `anon_limits` and the TCK
+tests are M4's. Amended by D172 (`mcp_case_smuggling` and `a2a_case_smuggling` join them) and D173 (`stdio_roots`
+asserts the node's roots).
+
+## From the M3 plan's audit (26 Oct)
+
+An adversarial audit of the M3 plan, its spec text and its skeleton found five blockers (D172–D176) and smaller
+problems in all three. The owner's standing instruction ("Don't ask me anything") covers them: the five blockers
+were settled as recorded below, and the rest with the audit's proposals, changing the specs where the entries say
+so. The builders' corrections to the plan follow from these entries.
+
+### D172. JSON-RPC bodies are decoded with exact keys, and a repeated or case-variant key is `-32600` — **decided under the owner's standing instruction, 26 Oct**
+
+The skeleton's `mcpwire.Message` decoded through `encoding/json` struct tags, which match keys case-insensitively
+and keep the last of a repeated key. On go1.26.10, `{"method": "tools/call", "METHOD": "ping"}` read as `ping` and
+`{"name": "echo", "NAME": "add"}` as `add`, while Node upstreams (`JSON.parse`) and go-sdk v1.8.0 (which turns case
+folding off on purpose, `internal/json/json.go:32`) read `tools/call` and `echo`. The relay forwards the bytes it
+received ([`relay.md`](../spec/relay.md) §11.2), so a denied tool would run with no `calls` row, and a seller
+answering `{"isError": true, "ISERROR": false}` would be metered as a success. The A2A JSON-RPC route has two
+readers as well: `internal/a2ahttp` reads the method (to route streams), `params.tenant` and the id, and a2a-go
+decodes the body again. Decision: the gate decodes every JSON-RPC body it acts on with exact, case-sensitive keys,
+and refuses a message in which a key repeats, or two keys are equal under Unicode case folding, at a level it reads
+or rewrites. On MCP, from a client: the message, `params`, `params._meta`,
+`params._meta["io.modelcontextprotocol/clientCapabilities"]` and its `extensions`, `params.capabilities`, the top
+level of `params.arguments` and of `params.inputResponses`, `result` and `result._meta`. On MCP, from an upstream:
+the message, `params` and `params._meta` (of requests and notifications), `result`, `result._meta`, each of
+`result.tools` and its `_meta`, `result.capabilities` and its `experimental` and `extensions`, the task objects it
+reads (`result.task`; `result.inputRequests`, each of its entries and their `params` and `params._meta`;
+`result.result` and `result.error`), and `error`. On A2A JSON-RPC: the request, `params`, `params.metadata`,
+`params.configuration`, `params.message`, `params.message.metadata`, each part and each part's `metadata`. (The
+first text named only the levels that route and meter; the revision check of the M3 planning extended them to the
+levels the gate reads or rewrites, §2.5's scrub locations included, so that `internal/strictjson`, `mcpwire` and
+`a2ahttp` list exactly the spec's levels.) A client's message is refused with `-32600` and HTTP `400` before
+policy, metering, Admission or dispatch; an upstream's is not relayed (`502` with `-32603`, the `calls` row
+`is_error` true, a dispatch `upstream_error`). The hosting node and the node's MCP filters read the same way, since
+the gate is not trusted to have done it. A2A HTTP+JSON is decoded by a2a-go alone and is not checked. Consequence:
+a tool whose arguments have two names that differ only in case cannot be called through the gate
+([`relay.md`](../spec/relay.md) §2.1, §2.4, §11.1; [`ext-sealed.md`](../spec/ext-sealed.md) §5;
+[`tunnel.md`](../spec/tunnel.md) §10; `internal/strictjson`, `mcpwire.Parse`, `a2ahttp`'s `strictJSONRPC`;
+`mcp_case_smuggling`, `a2a_case_smuggling`).
+
+### D173. Roots never leave the node — **decided under the owner's standing instruction, 26 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §10 routed a stdio server's `roots/list` to the remote client, and `stdio_roots`
+asserted a first call "using the client's roots". `server-filesystem@1.0.0` replaces the directories it was started
+with by the client's roots (`dist/server.js:590-643`), so a buyer, or the gate forging the answer, that sent a root
+of `file:///` would read and write the node's whole filesystem: `~/.kontra/identity.key` and the job keys, and code
+execution by writing `~/.bashrc` or `~/.ssh`. That breaks PRD §12 (the gate never executes code) and tunnel.md §15
+(the node is not a proxy). Decision: for every MCP server a node hosts, stdio or `mcp:<name>=<url>`, the node
+answers `roots/list` itself from roots its operator names (`kontra connect --roots <name>=<dir>`, repeatable with
+one directory per flag, as in `--roots fs=/a --roots fs=/b`; none by default, which is an empty list), replaces the
+client's `capabilities.roots` in the `initialize` it forwards with its own (present only when roots are
+configured), and never relays `roots/list`, `notifications/roots/list_changed` or the client's roots in either
+direction; on a 2026-07-28 exchange it removes the roots capability, roots answers and roots requests, and
+configured roots are offered to legacy sessions only. A separate flag was chosen over a `,roots=` suffix on
+`--serve` because a stdio command line or a URL may contain commas, and one directory per flag because a
+directory's name may contain one too. `stdio_roots` now asserts that the server sees only the node's configured
+roots, and `examples/mcp/fs-stdio` passes its allowed directory on its command line ([`relay.md`](../spec/relay.md)
+§11.10; [`tunnel.md`](../spec/tunnel.md) §8.2, §10, §15, §16; `internal/mcproots`, `stdiobridge.Config.Roots`).
+
+### D174. The sealed envelope is kept exactly where ext-sealed §3 puts it — **decided under the owner's standing instruction, 26 Oct** (SPEC-CONFLICT)
+
+[`relay.md`](../spec/relay.md) §2.5 removed every `sh.kontra/` key from the `params._meta` of upstream requests,
+which is where [`ext-sealed.md`](../spec/ext-sealed.md) §3 puts the envelope of a sealed `elicitation/create` or
+`sampling/createMessage`, so `sealed_no_plaintext` (c) could not pass; and it had no rule for MCP callers, whose
+sealed `tools/call` and answers carry the envelope in `_meta` too. Both texts predate M3. Decision: §2.5 scrubs
+`sh.kontra/` keys from MCP callers as well (`params._meta` of requests and notifications, `result._meta` of
+responses), and on a service with `sealed` set, for 2025-11-25 and 2025-06-18 messages, keeps
+`_meta["sh.kontra/sealed"]` in the `params._meta` of a caller's `tools/call` and of an upstream `elicitation/create`
+or `sampling/createMessage`, and in the `result._meta` of the caller's answer to one, when its value is exactly
+`{"v": 1, "envelope": <base64>}`, as the A2A rule keeps `kontra.sealed` on envelope parts. Any other `sh.kontra/`
+key, and `sh.kontra/sealed` anywhere else or on another service, is removed. A sealed result's envelope is in
+`content`, which §2.5 never reads (`mcpwire.ScrubParams` and `ScrubResult` take the direction, the method and the
+service's sealed flag; `mcp_meta_spoof` gains the case of a service without `sealed`).
+
+### D175. A sealed MCP input request is bound to the upstream's own request id — **decided under the owner's standing instruction, 26 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §3 sealed an upstream's input request with `messageId` "the gate request
+id the gate gives it" (`k.<taskId>.<seq>`), which the hosting node cannot know when it seals, and hosting rule 4,
+written for `tools/call`, would then refuse the hiring node's answer (its `tool` and `messageId` match no preamble
+field), or rule 5 would call it replayed. Rule 4's mismatches had no reason either, so `sealed_replay`'s MCP call
+resent on another session had none to assert. Decision: the hosting node seals an input request with `messageId` =
+the upstream server's JSON-RPC id for it, which it reads as it relays the request, and with the `session` and
+`tool` of the call that created the task. The gate rewrites JSON-RPC ids for routing and never touches the
+envelope. The hiring node checks `session`, `tool` and that the `messageId` is new in the task, keeps which gate
+request id carried it, and seals the local client's answer with the same `messageId` and the job's `replyTo` and
+`rk`. A new hosting rule 4b accepts an answer only for an input request the node sealed for the preamble's task
+less than `max_age` ago, once (`wrong_message`, `replayed`, `wrong_job`), and rule 5 applies to requests only,
+since a server's ids are another space than the client's. A mismatch of rule 4's `session`, `tool` or `messageId`
+is `wrong_message`, already a §6 reason. In a job whose request was sealed, an answer to an input request the node
+sealed must itself be sealed and pass rule 4b: an unsealed one is refused `bad_header` and nothing of it reaches
+the service, so a gate cannot answer the server's question in plaintext for the buyer (the hosting node's half of
+the hiring node's rule 4a; added by the revision check). A per-job input id minted by the node (the audit's other
+option) was not taken: it needs a new header member and a preamble field for answer exchanges, while the upstream's
+id already reaches the node on both legs ([`ext-sealed.md`](../spec/ext-sealed.md) §3, §5, §9; `sealing.Hosting`,
+`sealing.Job`; `sealed_replay`).
+
+### D176. A modern request's version is checked as 2026-07-28 says, and D158's evidence is corrected — **decided under the owner's standing instruction, 26 Oct**
+
+[`relay.md`](../spec/relay.md) §11.12 answered a `_meta` `protocolVersion` that differs from
+`MCP-Protocol-Version` with `-32602`. 2026-07-28 Streamable HTTP, "Protocol Version Header": the header MUST
+match `_meta`'s version, and a mismatch MUST be rejected with `400` and `HeaderMismatch` (`-32020`); `-32602` is
+for a missing required `_meta` field (basic, "Per-request protocol fields"). §11.12 also gave `-32021` no HTTP
+status (basic requires `400`), and removed `notifications.taskIds` from a `subscriptions/listen` that does not
+declare the tasks extension, which the extension (v0.2.2, "Task Status Notifications") answers with `-32021`.
+D158 cited `server-everything@1.0.0` `dist/transports/streamableHttp.js:143-151` for "exactly what legacy servers
+answer": that is its `GET` handler; its `POST` without a session goes to a new SDK transport (lines 87-111) that
+answers its own `-32000` body and is never closed. Decision: a missing `protocolVersion` or `clientCapabilities` is
+`400` with `-32602`; a `protocolVersion` other than the header is `400` with `-32020`; `-32021` is `400` with
+`data.requiredCapabilities` naming the extension; a `subscriptions/listen` asking for `taskIds` without declaring
+the extension is `400` with `-32021`, and any other has them removed. Rule 3's body stays: a `-32000` body is what
+legacy servers send and is not a modern error, so D158's conclusion holds, and D177 stops forwarding modern probes
+to upstreams known to be legacy-only ([`relay.md`](../spec/relay.md) §11.12; `mcpwire.CheckModern`).
+
+### D177. The gate learns each service's era, and opens one virtual session per principal and service after a modern answer — **decided under the owner's standing instruction, 26 Oct** (SPEC-CONFLICT)
+
+Four problems with D158 and D160 as written. A modern request to a legacy-only upstream was always forwarded: each
+probe of `server-everything@1.0.0` leaks a server and its transport on the seller's node (D176), and it opened a
+virtual session after Admission `session` for a service the client then uses through a legacy session.
+`mcp_sessions` has no unique constraint for open modern rows, and Claude Code sends `server/discover` and
+`tools/list` at once, so two first requests wrote two rows; D160's "no schema change" was wrong. The plan had the
+gate refuse modern requests to stdio services, which it cannot tell apart (the hello declares kind `mcp` only,
+[`tunnel.md`](../spec/tunnel.md) §10). And 2026-07-28 makes the era a property of the server that a client SHOULD
+cache per origin (Versioning, "Backward Compatibility"), while one gate origin serves modern services beside
+legacy-only, sealed and stdio ones. Decision: the gate keeps each service's era. A `server/discover` result makes a
+service modern (its cached rewrite, or the answer to one the gate sends itself when it has none, which a modern
+request finding the era unknown waits for). Only an explicit legacy answer to the gate's own `server/discover`
+makes it legacy-only: rule 3's `-32000` body, a `404` or `405`, or a `200` or `400` whose body is not a 2026-07-28
+response. A response to a client's request never does: a `400`, `404` or `405` answering a client's modern request
+is relayed to that client and changes nothing for other principals, since otherwise one principal could make a
+modern service legacy-only for every other with a request its upstream refuses (the revision check). The era is
+kept 10 minutes like the tools list and dropped when a node of the service connects or disconnects; while a service
+is legacy-only, a modern request is answered with rule 3's `400` at the gate, as for a sealed service. A virtual
+session opens only once the upstream has answered a modern request with a modern result, after Admission `session`;
+migration `0002_m3.sql` adds a partial unique index on `mcp_sessions (tenant_id, service, principal) nulls not
+distinct where protocol_version = '2026-07-28' and closed_at is null`, and the insert is `on conflict do nothing`
+followed by a read, so concurrent first requests share one row (Admission may still be asked twice by two replicas:
+it decides and moves no money, §13.1). The gate refuses modern requests itself for sealed services only; a stdio
+service is learned like any upstream, from the bridge's answer to the gate's probe. The per-origin cache stays a
+residual, logged by a new `mcp_era_fallback` variant (a modern success on `/mcp/a`, then a legacy-only `/mcp/b` on
+the same origin), and Claude Code runs against the compose gate before M4 ([`relay.md`](../spec/relay.md) §11.12,
+§16).
+
+### D178. A modern client that leaves cancels its task, an `InputRequiredResult` is the first upstream id, and a gate-owned task's retention is stated — **decided under the owner's standing instruction, 26 Oct**
+
+Three gaps in D159. A client that closes its stream during the 2 s inline wait never learns the task's id, but the
+task ran on; 2026-07-28 Streamable HTTP ("Cancellation") has the server treat a closed response stream as a
+cancellation. An `InputRequiredResult` answering the dispatch's `tools/call` set no first upstream id (§11.12 named
+only a `CreateTaskResult`'s `taskId`), so a retried attempt sent the original call again: the upstream ran it again
+and asked again under new keys, and the first input requests stayed outstanding in `tasks/get`. And D159 recorded
+only the cost of making every modern call on a durable service a task, not that its arguments and result are then
+kept in `work_items` and `task_events` for the retention period, where a plain call keeps nothing. Decision: a
+client that closes its stream before the inline answer or the `CreateTaskResult` makes the gate send
+`kontra.cancel` (D57); the first `InputRequiredResult` counts as the first upstream task id (the attempt records
+its first `inputRequests` key in `upstream_task_id`), so a tunnel lost after it fails the task `tunnel_lost`; and
+§11.12 and the operator docs next to `tasks: off` state the retention. A `tasks: durable_tools` allowlist was
+considered and not added: `tasks: off` is the switch in v4.0 ([`relay.md`](../spec/relay.md) §11.12, §16:
+`mcp_modern_task`, `mcp_task_resume`).
+
+### D179. The peer hop signs what the holder forwards, `mcp_sessions.replica_id` names the holder, and several replicas SHOULD set `peer.listen` — **decided under the owner's standing instruction, 26 Oct**
+
+D163's HMAC covered the assertion, the method, the path and the body's hash, but not the headers the holding
+replica sends upstream: the upstream `Mcp-Session-Id` it substitutes, `Last-Event-ID`, `MCP-Protocol-Version`,
+`Mcp-Method`, `Mcp-Name` and `Mcp-Param-*`. On a plaintext peer link, anyone on the path could steer a vetted
+request to another client's upstream session on the same tunnel. The tunnel reaper closed "the `mcp_sessions`
+pinned to" a dead replica, but with the hop the replica that wrote a row (the one the client reached) may not hold
+its tunnel, and nothing said which one `replica_id` names. Nothing said either that a gate of two replicas behind a
+balancer and without `peer.listen` sends about half of its pinned requests to a `404` and a new `initialize`.
+Decision: the assertion carries the upstream session id and the SHA-256 of the other forwarded headers in a
+canonical form (names lowercased and sorted, one `name: value` line each), and the holder builds the upstream
+request from signed data only and refuses a request whose headers do not match; the peer address is reachable only
+from the replicas, or carries TLS; `mcp_sessions.replica_id` is the replica holding the tunnel session, NULL for a
+direct backend, so killing a replica that held only a client's connection closes nothing (a reaper unit test); and
+a gate of more than one replica SHOULD set `peer.listen` (§11.2, §17, the config schema). D183 covers this
+repository's chart; Cloud's Helm values open the peer port within the namespace (D163)
+([`relay.md`](../spec/relay.md) §11.2, §17; [`tunnel.md`](../spec/tunnel.md) §11; `peer.Assertion`,
+`peer.ForwardedHeaders`; `mcp_peer_hop`).
+
+### D180. A modern exchange's preamble carries no MCP session — **decided under the owner's standing instruction, 26 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §8.1 defined `mcp_session` as the hash of the client's gate `Mcp-Session-Id`,
+which a 2026-07-28 exchange does not have, so its value for modern requests and modern dispatches was undefined. A
+virtual session's hash (D160) would hand nodes an identifier that binds nothing, and a first modern request has
+none yet (D177). Decision: on an exchange for a modern request, and on every exchange of a task a modern request
+created, `mcp_session` and `mcp_request_id` are absent, and a node must not rely on them there; sealed services,
+which need them, are never sent a modern request (D162).
+
+### D181. `kontra-blob:` is reserved, and a blob stream answers with one line — **decided under the owner's standing instruction, 26 Oct**
+
+D167 renders every `kontra-blob:<ref>` part as a presigned GET and authorizes a blob stream for a task the session
+serves, but nothing refused a `kontra-blob:` part that a caller or an upstream wrote: anyone who learned a ref (a
+node serving several buyers, say) could put it into another task and receive a presigned URL or a blob stream for
+another buyer's object. The plan also wrote the stream's framing twice, once without `too_large`. Decision: a `url`
+part whose URL starts with `kontra-blob:` is refused from a caller (`InvalidRequest`) and from a service
+(`upstream_error`); egress rendering and blob streams resolve a ref through `blobs`, and only for the task its row
+names; a blob stream answers with one JSON line, `{"size": n}` and then exactly `n` bytes, or `{"error":
+"not_found" | "forbidden" | "too_large"}`, and closes ([`relay.md`](../spec/relay.md) §10.4;
+[`tunnel.md`](../spec/tunnel.md) §8.3; `blob.Fetch`, `tunnelgate.NodeStreams`).
+
+### D182. A node-opened stream over the cap gets `429`, and a node that keeps refused streams open loses its session — **decided under the owner's standing instruction, 26 Oct** (settles D137's text)
+
+[`tunnel.md`](../spec/tunnel.md) §14 answered a node-opened stream over the cap with `429` and kept the session.
+yamux v0.1.2's `Stream` exports `Close`, `Read`, `Write` and the deadline setters only (`forceClose` and
+`closeTimeout` are unexported), so there is no reset, and a refused stream frees nothing while the node holds its
+half; D137 counted a stream from its accept until both halves end, and left §14's text open. Decision: §14 says
+that a stream counts from its accept until both halves end; over the cap (32, 8 for an anonymous session) the gate
+answers `429`, and a node that keeps more than the cap of refused streams open loses its session.
+
+### D183. The repository's chart mounts the signing key, and runs more than one replica only with a peer port — **decided under the owner's standing instruction, 26 Oct**
+
+`charts/kontra` mounted only `kontra.yaml` from its config Secret, so after D166 a chart deployment serving A2A
+services at a public `public_url` refuses to start: it has no file for `signing_key`. It runs one replica and its
+NetworkPolicy admits only the public and metrics ports, and no work package listed it. Decision: M3 WP-02 adds
+`signingKey: {existingSecret, key}` to the chart's values, mounted read-only at `/etc/kontra/signing/` with mode
+`0440`, which the pod's `fsGroup` makes readable and `jws.LoadKeySet` accepts, and the values document
+`signing_key: file:/etc/kontra/signing/kontra.key`. M3 WP-04 adds `gate.peer: {enabled, port, secret:
+{existingSecret, key}}` (the container port, the `peer.secret_env` variable from that Secret, and NetworkPolicy
+ingress to the peer port from the release's gate pods with the matching egress) and `gate.replicas` (default 1),
+which the chart refuses above 1 while `persistence.enabled` holds the one-replica ACME cache (D70) or without
+`gate.peer.enabled` (D179).
+
+### D184. A stdio child is stopped with its process group — **decided under the owner's standing instruction, 26 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §10 closed the child's stdin, then sent `SIGTERM` after 5 s, to the child only.
+The pinned commands start with `npx`, which runs `node` as its child, so killing the `npx` pid could leave `node`
+running past `--max-sessions` and past the e2e leak check. Decision: the bridge starts each child in its own
+process group, sends the group `SIGTERM` 5 s after closing stdin and `SIGKILL` 5 s later, and does the same on
+idle, on a crash and on `Close`; WP-05's tests assert that no process of the group survives
+(`stdiobridge.KillAfter`).
+
+### D185. The e2e and pentest harnesses keep stock servers on loopback, with nothing to leak — **decided under the owner's standing instruction, 26 Oct**
+
+`server-everything@1.0.0` listens on every interface (`dist/transports/listen.js`, `app.listen(port)`) with CORS
+`*`, and ships `get-env` (all of `process.env`) and `gzip-file-as-resource` (fetches any URL while
+`GZIP_ALLOWED_DOMAINS` is empty). Started with the harness's environment on this shared host, it would hand the
+network `KONTRA_TEST_PG`'s credentials, the bucket's keys and `KONTRA_PEER_SECRET`. The bridge's scrubbed
+environment also hides stdio children from `scripts/test_e2e.sh`, which finds leftovers by their `KONTRA_E2E_*`
+variables. Decision: every server the harnesses start listens on `127.0.0.1` only (Go servers bind it; the npm
+servers start with a `--require` preload from `test/e2e/testdata` that makes a port-only `listen` bind
+`127.0.0.1`), with a minimal environment (`PATH`, `HOME`, `LANG` and the run's marker variables) and
+`GZIP_ALLOWED_DOMAINS` set to a name that matches nothing; MCP services deny `get-env` and `gzip-file-as-resource`
+unless a test needs them; stdio services get `--env KONTRA_E2E_RUN --env KONTRA_E2E_SESSION`, and the leak check
+also matches children by process group. `examples/mcp/everything` tells operators the same.
+
+### D186. The pentest runs on this host's Docker without touching its neighbours — **decided under the owner's standing instruction, 26 Oct**
+
+Five things stopped the pentest from running as D168 and D169 describe it. The D169 test Lifecycle worker needs
+Temporal's frontend, which `compose.yaml` does not publish; and the `hooks.lifecycle` key it needs is refused at
+load until M5 (`internal/config/validate.go`), although the gate's half (the hooks snapshot, and the five
+activities scheduled by type name on the configured queue, `lifecycle.WorkerConfig.RemoteHooks`) is built since
+M1. Port 8333, SeaweedFS's S3 default, is held on this host by `windmill-seaweedfs`. SigV4 presigning signs the
+host, so a presigned GET works only through the endpoint the gate signed it for, which the gate's container and
+the host's attackers must both reach. `go test`'s default 10-minute timeout is shorter than building the gate
+image on 2 CPUs and running the targets, and would panic with the stack left up. And a key file bind-mounted
+root-owned at `0440` is unreadable to the image's uid 65532. Decision: `compose.yaml` publishes no Temporal or
+Postgres port; `compose.pentest.yaml` publishes Temporal's frontend on `127.0.0.1` and a free port for the test
+worker, which runs on the host, and the D169 probe alone runs with `hooks.lifecycle` set (a second gate
+configuration, applied by a restart); M3 lifts the load-time refusal of `hooks.lifecycle`, with an integration
+test of a worker on its own queue, while `hooks.admission` stays refused until M5. The driver creates the run's
+network first, reads its gateway address and publishes the bucket on that address and a free port, which is
+`blobs`' `endpoint`. It passes `-timeout 90m` (`KONTRA_PENTEST_TIMEOUT` overrides it), builds the image once
+(`make pentest-image`) before `go test`, and tears down in `t.Cleanup` and in the make target's trap. The run's
+signing key and certificate are owned by uid 65532 before `up`, and the acceptance asserts that the gate starts
+with them.
+
+### D187. `kontra connect` prints key ids and thumbprints where the console showed them — **decided under the owner's standing instruction, 26 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §7's threat table still said "The seller's key ids are shown in the
+operator's console for out-of-band comparison", though D164 removed the local console and a team gate has none.
+Decision: `kontra connect` prints the recipient key ids and the seller key thumbprints on stderr and in its log
+when it first sees a service and on every change.
+
+### D188. Cloud's thread URL is `https://app.kontra.sh/#/t/<taskId>` — **decided by the owner, 26 Oct** (kontra-cloud#60)
+
+[`relay.md`](../spec/relay.md) §12.3, the hooks fixture and the docs named `https://app.kontra.run/t/<taskId>`.
+The owner's final decisions (kontra-cloud#60) put the app at `app.kontra.sh`, with hash routes. Decision: the
+examples use `https://app.kontra.sh/#/t/<taskId>`. The URL stays the operator's, and the gate never builds it.

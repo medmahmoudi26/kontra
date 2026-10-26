@@ -28,7 +28,8 @@ type Preamble struct {
 	Task    string `json:"task,omitempty"`    // the gate task the exchange belongs to (sealed headers, ext-sealed.md)
 	Context string `json:"context,omitempty"` // the gate context of that task
 	// MCPSession and MCPRequestID are MCP's (M3): the hex SHA-256 of the client's gate Mcp-Session-Id, and
-	// a tools/call's original JSON-RPC id as a string.
+	// a tools/call's original JSON-RPC id as a string (on every exchange of a durable task, the creating
+	// call's). Both are absent on a 2026-07-28 exchange, which has no session (spec/tunnel.md §8.1, D180).
 	MCPSession   string `json:"mcp_session,omitempty"`
 	MCPRequestID string `json:"mcp_request_id,omitempty"`
 	Ref          string `json:"ref,omitempty"` // blob streams (M3)

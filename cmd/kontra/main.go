@@ -1,10 +1,11 @@
-// Command kontra is the node CLI: connect, console, login, seal, publish (note 2 §1).
+// Command kontra is the node CLI: connect, login, seal, publish (note 2 §1; there is no local console, D164).
 //
 //	kontra connect [--gate URL] --serve a2a:<name>=<url> … (M2, spec/tunnel.md; internal/node)
+//	kontra seal --service <service URL> [file | -] (M3, spec/ext-sealed.md §5.1; internal/sealing)
 //	kontra version
 //
-// The other subcommands come with their milestones (PRD §14, note 2 §4): seal with sealing (M3), console
-// and login with the anonymous sessions on the public gate (M4), publish with Cloud's listings (M5).
+// The other subcommands come with their milestones (PRD §14, note 2 §4): login with the anonymous sessions on
+// the public gate (M4), publish with Cloud's listings (M5).
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 
 	"kontra.sh/kontra/internal/node"
 	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/sealing"
 	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/version"
 )
@@ -28,6 +30,8 @@ const usage = `usage:
   kontra connect [--gate <url>] --serve a2a:<name>=<url> [--serve …] [--key <path>] [--enroll <token>|@file|-]
                  [--api-key <key>|@file|-] [--name <name>] [--rotate] [--require-channel-binding]
                  [--max-inflight <n>] [--log json]
+  kontra seal --service <service URL> [--context <id>] [--task <id>] [file | -]
+  kontra seal --open <part.json>
   kontra version
 
 kontra connect hosts the services on this machine at a gate, through one outbound connection (spec/tunnel.md):
@@ -44,10 +48,9 @@ kontra connect hosts the services on this machine at a gate, through one outboun
 Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only.
 `
 
-// later is when each subcommand that is not built yet comes (PRD §14, note 2 §4).
+// later is when each subcommand that is not built yet comes (PRD §14, note 2 §4). There is no console
+// subcommand: the owner dropped the local console (D164).
 var later = map[string]string{
-	"seal":    "M3", // sealing: `kontra seal` (PRD §14 M3)
-	"console": "M4", // the console on :7778 (note 2 §1; the README's M4 target)
 	"login":   "M4", // turns an anonymous session into an account (tunnel.md §6.1; M4)
 	"publish": "M5", // listings (PRD §14 M5)
 }
@@ -87,6 +90,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "kontra connect:", tunnel.Printable(err.Error()))
 			return 1
 		}
+	case "seal":
+		if err := sealing.SealCommand(ctx, args[1:], os.Stdin, stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, "kontra seal:", err)
+			return 1
+		}
+		return 0
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0

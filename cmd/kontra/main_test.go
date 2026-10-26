@@ -34,8 +34,8 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"version"}, 0, "kontra", ""},
 		{nil, 2, "", "usage:"},
 		{[]string{"nope"}, 2, "", "usage:"},
-		{[]string{"seal"}, 1, "", "kontra seal: not until M3"},
-		{[]string{"console"}, 1, "", "kontra console: not until M4"},
+		{[]string{"seal"}, 1, "", "kontra seal: sealing.SealCommand: not implemented (M3 WP-08)"},
+		{[]string{"console"}, 2, "", "usage:"}, // no local console (D164)
 		{[]string{"login"}, 1, "", "kontra login: not until M4"},
 		{[]string{"publish"}, 1, "", "kontra publish: not until M5"},
 		{[]string{"connect", "-h"}, 0, "--serve a2a:NAME=URL", ""},

@@ -722,6 +722,9 @@ func (c *Config) unbuilt() []string {
 	if c.SigningKey != "" {
 		note("signing_key: cards are not signed in this release (M3)")
 	}
+	if c.Peer != nil {
+		note("peer: the replica-to-replica hop is not built in this release (M3 WP-04)")
+	}
 	if c.Tunnel.Anonymous {
 		// Fails closed: an M2 gate creates no anonymous tenant, so a hello with neither enroll nor auth from an
 		// unknown key is unknown_key (spec/tunnel.md §4, §6).
