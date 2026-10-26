@@ -77,7 +77,8 @@ const (
 //  5. enroll_invalid: a token that is malformed, unknown, used or expired, of another tenant than the key's
 //     or the other authorities', or that applies to no declared service (a service token for a service the
 //     hello does not declare; a tenant token listing none of them);
-//  6. unknown_key: an unknown key that nothing in the hello enrolls;
+//  6. unknown_key: an unknown key that nothing in the hello enrolls, unless its hello declares no service and
+//     carries an auth API key with the hire scope: such a key is admitted hire-only (spec/tunnel.md §9);
 //  7. kind_mismatch: a declared service the hello enrolls, or the key is bound to, whose kind is not the
 //     declared one;
 //  8. service_denied: a declared service the key was never enrolled for and that no authority in the hello
@@ -197,6 +198,9 @@ type admission struct {
 	old    *Key // rotate_from's row
 	tenant uuid.UUID
 	slug   string
+	// hireOnly: a new key admitted on its auth API key alone, with no service (step 6's second
+	// SPEC-CONFLICT).
+	hireOnly bool
 }
 
 // keyRow is a tunnel_keys row with its tenant's state.
@@ -360,10 +364,23 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	// lost redials with its active key and no tokens to learn whether the gate committed: welcome means it
 	// did, and unknown_key (retried, §4) that it did not, so that it may send its tokens again. Such a
 	// hello is therefore unknown_key whatever else it carries; service_denied stays for a known key, and
-	// for a hello that enrolls something but not everything it declares. A hire-only node (auth, no
-	// services) is not registered either: hiring is M3, which decides what key row it needs.
+	// for a hello that enrolls something but not everything it declares.
+	//
+	// SPEC-CONFLICT (spec/tunnel.md §5 and D133 against §4 and §9; the M3 plan's conflict on §4–§5, WP-03):
+	// §5 makes an unknown key that nothing in its hello enrolls unknown_key "whatever else the hello carries",
+	// while §4 lets a hello declare no services ("a node that only hires") and §9 gives its streams the
+	// principal of the hello's auth API key; a session needs a tunnel_keys row (tunnels.key_id references it).
+	// The closest faithful behaviour: an unknown key whose hello declares no service and carries an auth API
+	// key with the hire scope (and no token, which step 5 refused already) is admitted hire-only, its
+	// tunnel_keys row in the API key's tenant and no binding, audited with the API key; without such a key it
+	// stays unknown_key (D133), so the lost-welcome probe, which carries no auth, still learns that nothing
+	// committed. The owner may want §5 to say so.
 	if a.key == nil && a.old == nil && !enrolls {
-		return nil, tunnel.Refuse(tunnel.CodeUnknownKey, "the key %s is not enrolled at this gate, and nothing in this hello enrolls it", h.KID)
+		if len(h.Services) > 0 || a.principal == nil || !a.principal.MayHire() || a.principal.TenantID == nil {
+			return nil, tunnel.Refuse(tunnel.CodeUnknownKey, "the key %s is not enrolled at this gate, and nothing in this hello enrolls it", h.KID)
+		}
+		a.hireOnly = true
+		a.tenant = *a.principal.TenantID
 	}
 	if a.slug == "" && a.tenant != uuid.Nil {
 		if err := a.readTenant(ctx); err != nil {
@@ -694,8 +711,11 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 			"session_id": a.req.SessionID,
 			"replica_id": a.req.ReplicaID,
 		}
-		if apiKeyUse {
+		if apiKeyUse || a.hireOnly {
 			f["api_key"] = a.principal.ID
+		}
+		if a.hireOnly {
+			f["hire_only"] = true
 		}
 		if len(toks) > 0 {
 			ids := make([]string, len(toks))
@@ -731,6 +751,8 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 	}
 	if a.principal != nil {
 		d.HirePrincipal = a.principal.ID
+		hire := *a.principal
+		d.Hire = &hire
 	} else {
 		d.HirePrincipal = string(auth.KindNode) + ":" + keyID
 	}
