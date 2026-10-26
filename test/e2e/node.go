@@ -376,6 +376,10 @@ func (n *Node) args() []string {
 	if n.opts.Key != "" {
 		args = append(args, "--key", n.opts.Key)
 	}
+	// The hiring endpoint (spec/tunnel.md §9) on a free loopback port: 7777 is one per host.
+	if !slices.Contains(n.opts.Args, "--listen") {
+		args = append(args, "--listen", "127.0.0.1:0")
+	}
 	return append(args, n.opts.Args...)
 }
 

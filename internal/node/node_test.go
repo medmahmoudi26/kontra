@@ -232,6 +232,7 @@ func testConfig(t *testing.T, gate *url.URL, home string, serves ...Serve) Confi
 		MaxInflight:     tunnel.NodeMaxInflight,
 		CredentialsPath: filepath.Join(home, nodekey.DirName, CredentialsFile),
 		Version:         "test",
+		Listen:          "127.0.0.1:0", // never 7777, which another node on this host may hold
 	}
 }
 
@@ -1345,6 +1346,23 @@ func TestParseArgs(t *testing.T) {
 		t.Fatalf("serves %+v", cfg.Serves)
 	}
 
+	if cfg.Listen != "127.0.0.1:7777" || cfg.LocalToken != "" || len(cfg.AllowOrigins) != 0 {
+		t.Fatalf("hiring defaults: %q %q %v", cfg.Listen, cfg.LocalToken, cfg.AllowOrigins)
+	}
+
+	// A node that only hires: no --serve (spec/tunnel.md §4, §9); the hiring flags.
+	tokenFile := filepath.Join(t.TempDir(), "local-token")
+	os.WriteFile(tokenFile, []byte("0123456789abcdef-local\n"), 0o600)
+	cfg, err = parseArgs([]string{"--listen", "0.0.0.0:7700", "--local-token", tokenFile, "--allow-origin", "http://app.local:3000",
+		"--allow-origin", "https://other.example"}, defaultEnv, nil)
+	if err != nil || len(cfg.Serves) != 0 || cfg.Listen != "0.0.0.0:7700" || cfg.LocalToken != "0123456789abcdef-local" ||
+		!slices.Equal(cfg.AllowOrigins, []string{"http://app.local:3000", "https://other.example"}) {
+		t.Fatalf("hire-only with the hiring flags: %+v %v", cfg, err)
+	}
+	if cfg, err := parseArgs(nil, defaultEnv, nil); err != nil || len(cfg.Serves) != 0 {
+		t.Fatalf("no flags at all (hire only): %v", err)
+	}
+
 	// KONTRA_KEY, then --key over it.
 	cfg, _ = parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999"}, env(map[string]string{"HOME": home, "KONTRA_KEY": "/run/secrets/key"}), nil)
 	if cfg.KeyPath != "/run/secrets/key" {
@@ -1390,7 +1408,11 @@ func TestParseArgs(t *testing.T) {
 		stdin string
 		want  string
 	}{
-		{[]string{}, "", "--serve"},
+		{[]string{"--listen", "0.0.0.0:7777"}, "", "--local-token"},
+		{[]string{"--listen", "10.1.2.3:7777"}, "", "--local-token"},
+		{[]string{"--listen", "7777"}, "", "host:port"},
+		{[]string{"--local-token", "/nonexistent/token"}, "", "--local-token"},
+		{[]string{"--allow-origin", "http://app.local/path"}, "", "--allow-origin"},
 		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000"}, "", "not until M3"},
 		{[]string{"--serve", "mcp:fs=stdio:npx server"}, "", "not until M3"},
 		{[]string{"--serve", "a2a:x=http://h:1/base"}, "", "base path"},

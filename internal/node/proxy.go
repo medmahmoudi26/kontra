@@ -2,6 +2,7 @@ package node
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"kontra.sh/kontra/internal/a2awire"
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
 )
@@ -49,7 +52,12 @@ var errSteered = errors.New("node: a dial to an address other than the --serve t
 //   - Kontra-Node and Kontra-Sealed-Reject are removed from the service's responses; a target that does not
 //     answer is 502 with Kontra-Node: target_unreachable.
 //
-// A url part in a body is never dialed: the node does not read bodies (D56).
+// A url part in a body is never dialed (D56). The node reads the JSON body of a request to an A2A service only to
+// find the parts the gate wrote as kontra-blob:<ref> (relay.md §10.4: a part over 256 KiB reaches a node so), and
+// replaces each with a raw part holding the object, fetched on a blob stream it opens in the same session
+// (§8.3; at most 64 MiB each, spilled to a temporary file over 8 MiB), so that a stock agent never sees the
+// scheme. A request whose part cannot be fetched is 400 and never reaches the service. Nothing else in a body is
+// read or changed.
 //
 // The target's transport never uses a proxy from the environment (HTTP_PROXY would otherwise carry a
 // non-loopback target's traffic to that proxy), dials only the target's own host:port whatever address it
@@ -83,6 +91,9 @@ type Proxy struct {
 	errLog     *log.Logger                // net/http's own lines about a stream
 	// onControl serves the session's control stream (op control, §13); nil refuses it.
 	onControl func(stream net.Conn, br *bufio.Reader)
+	// inline fetches the kontra-blob: parts of a request on the session's blob streams (setBlobOpener); nil
+	// forwards bodies as they came.
+	inline *a2awire.Inliner
 
 	mu       sync.Mutex
 	served   map[string]bool
@@ -131,6 +142,18 @@ func (p *Proxy) forSession(served []string, logger *slog.Logger) *Proxy {
 	}
 	q.SetServed(served)
 	return q
+}
+
+// setBlobOpener makes the proxy inline the kontra-blob: parts of A2A requests, fetched on blob streams that open
+// opens (the session's own, §8.3).
+func (p *Proxy) setBlobOpener(open func(ctx context.Context) (net.Conn, error)) {
+	p.inline = &a2awire.Inliner{Fetch: func(ctx context.Context, ref blob.Ref, w io.Writer) (int64, error) {
+		st, err := open(ctx)
+		if err != nil {
+			return 0, err
+		}
+		return blob.Fetch(ctx, st, ref, w)
+	}}
 }
 
 // closeIdle closes the targets' idle connections (the node is stopping).
@@ -279,6 +302,13 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			nodeAnswer(w, http.StatusBadRequest, "", "the request target is not a path under the service's base path")
 			return
 		}
+		if sv.Kind == tunnel.KindA2A && p.inline != nil {
+			done, ok := p.inlineBody(w, r, log)
+			if !ok {
+				return
+			}
+			defer done()
+		}
 		target := sv.Target
 		rp := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
@@ -316,6 +346,67 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		log.Debug("tunnel exchange", "method", r.Method, "path", out, "status", sw.status,
 			"duration_ms", time.Since(start).Milliseconds())
 	}
+}
+
+// inlineBody replaces the request's body with one whose kontra-blob: parts are inlined (§8.3, relay.md §10.4),
+// when it is JSON and holds the scheme; done releases what the inlining holds once the exchange is over. A
+// request whose parts cannot be fetched (the gate refused a ref, the stream failed, the body is not an A2A 1.0
+// body with exact keys) is answered 400 here, without Kontra-Node (D151: the gate fails the task
+// upstream_error), and ok is false.
+//
+// SPEC-CONFLICT (spec/tunnel.md §8.2, §8.3): §8.3 has the node refuse an announced size over 64 MiB and more bytes
+// than announced, and §8.2 closes the list of reasons a node's own answer carries; neither says what the exchange
+// whose part cannot be fetched answers. The closest faithful behaviour is D151's for the node's other 400s: no
+// Kontra-Node, so the gate takes it as final (upstream_error) rather than as a lost session retried elsewhere: a
+// ref the gate refuses stays refused, and the request never reached the service. A blob stream that failed in
+// transit is final too; the owner may want it retried (a Kontra-Node reason for it).
+func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Logger) (done func(), ok bool) {
+	none := func() {}
+	if r.Body == nil || r.Body == http.NoBody {
+		return none, true
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" && !a2awire.IsJSON(ct) {
+		return none, true
+	}
+	b, err := io.ReadAll(io.LimitReader(r.Body, a2awire.MaxBody+1))
+	if err != nil {
+		nodeAnswer(w, http.StatusBadRequest, "", "kontra connect: the request's body could not be read")
+		return nil, false
+	}
+	if len(b) > a2awire.MaxBody {
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(b), r.Body), r.Body}
+		return none, true
+	}
+	if !a2awire.HasRefs(b) {
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		return none, true
+	}
+	body, err := p.inline.Inline(r.Context(), b)
+	if err != nil {
+		log.Warn("tunnel exchange refused: a kontra-blob: part could not be fetched", "err", err)
+		nodeAnswer(w, http.StatusBadRequest, "", "kontra connect: a part of the request could not be fetched from the gate")
+		return nil, false
+	}
+	pr, pw := io.Pipe()
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		_, err := body.WriteTo(pw)
+		_ = pw.CloseWithError(err)
+	}()
+	r.Body = pr
+	r.ContentLength = body.Len()
+	r.Header.Del("Content-Length")
+	r.TransferEncoding = nil
+	log.Debug("tunnel exchange: kontra-blob: parts inlined", "bytes", body.Len())
+	return func() {
+		_ = pr.Close()
+		<-wrote
+		_ = body.Close()
+	}, true
 }
 
 // targetPath is the path a request goes to (§8.2): the request path, which net/http has percent-decoded

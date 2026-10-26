@@ -1,6 +1,7 @@
 // Command kontra is the node CLI: connect, login, seal, publish (note 2 §1; there is no local console, D164).
 //
-//	kontra connect [--gate URL] --serve a2a:<name>=<url> … (M2, spec/tunnel.md; internal/node)
+//	kontra connect [--gate URL] [--serve a2a:<name>=<url> …] [--listen 127.0.0.1:7777] … (M2, M3; spec/tunnel.md;
+//	               internal/node, internal/hiring)
 //	kontra seal --service <service URL> [file | -] (M3, spec/ext-sealed.md §5.1; internal/sealing)
 //	kontra version
 //
@@ -27,23 +28,30 @@ import (
 )
 
 const usage = `usage:
-  kontra connect [--gate <url>] --serve a2a:<name>=<url> [--serve …] [--key <path>] [--enroll <token>|@file|-]
+  kontra connect [--gate <url>] [--serve a2a:<name>=<url> …] [--key <path>] [--enroll <token>|@file|-]
                  [--api-key <key>|@file|-] [--name <name>] [--rotate] [--require-channel-binding]
-                 [--max-inflight <n>] [--log json]
+                 [--max-inflight <n>] [--listen <addr>] [--local-token <file>] [--allow-origin <origin> …]
+                 [--log json]
   kontra seal --service <service URL> [--context <id>] [--task <id>] [file | -]
   kontra seal --open <part.json>
   kontra version
 
-kontra connect hosts the services on this machine at a gate, through one outbound connection (spec/tunnel.md):
+kontra connect hosts the services on this machine at a gate, and lets local clients hire the gate's services,
+through one outbound connection (spec/tunnel.md):
   --gate URL                 the gate's public URL (default https://gateway.kontra.sh); https:// except on localhost
-  --serve a2a:NAME=URL       an A2A agent to host, at its root URL; repeatable (mcp: is not until M3)
+  --serve a2a:NAME=URL       an A2A agent to host, at its root URL; repeatable (mcp: is not until M3); none: hire only
   --key PATH                 the identity key (default ~/.kontra/identity.key, or $KONTRA_KEY)
   --enroll TOKEN|@FILE|-     a one-time enrollment token from kontra-gate enroll <service>; repeatable
-  --api-key KEY|@FILE|-      an API key for this gate
+  --api-key KEY|@FILE|-      an API key for this gate: who this node hires as (else node:<key id>); a node that only
+                             hires is admitted on it
   --name NAME                the node's name in the operator's view (default the hostname)
   --rotate                   rotate the identity key (the old one stays decrypt-only for 24 h)
   --require-channel-binding  refuse a gate that offers no TLS channel binding
   --max-inflight N           requests in flight per session (default 64)
+  --listen ADDR              where local clients hire through the gate (default 127.0.0.1:7777): /agents/…, /mcp/…,
+                             /mcp and /.well-known/… are forwarded with this node's principal
+  --local-token FILE         a token every local request must carry (Authorization: Bearer); required off loopback
+  --allow-origin ORIGIN      a browser Origin allowed to call --listen; repeatable (default none)
   --log json                 JSON logs on stderr (default text)
 Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only.
 `

@@ -1,21 +1,26 @@
 // Package node is `kontra connect` (spec/tunnel.md; note 2 §1–§2): one outbound WebSocket to a gate the
-// node chose, over which the gate sends HTTP requests to services on the node's localhost (hosting).
+// node chose, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the
+// node sends local clients' requests to the gate (hiring).
 //
-// M2 builds hosting A2A services only:
-//
-//	kontra connect [--gate URL] --serve a2a:<name>=<url> [--serve …] [--key PATH] [--enroll TOKEN|@file|-]…
+//	kontra connect [--gate URL] [--serve a2a:<name>=<url> …] [--key PATH] [--enroll TOKEN|@file|-]…
 //	               [--api-key KEY|@file|-] [--name NAME] [--rotate] [--require-channel-binding]
-//	               [--max-inflight 64] [--log json]
+//	               [--max-inflight 64] [--listen 127.0.0.1:7777] [--local-token FILE] [--allow-origin ORIGIN]…
+//	               [--log json]
 //
-// The hiring side (127.0.0.1:7777, --listen, --local-token, --allow-origin, §9), blob streams (§8.3),
-// sealing and per-job keys (§2.3) are M3, with `kontra proxy`'s deliverables (PRD §14 M3 row); MCP hosting,
-// `mcp:<name>=<url>` and `mcp:<name>=stdio:<cmd>` (§10), is M3; anonymous sessions and `--public` (§6),
-// and the console on :7778, are M4.
+// Hosting (§8): the node is a fixed-target reverse proxy, not a SOCKS proxy (§8.2, sidecar_not_a_proxy): a
+// stream's preamble names a hosted service, and its one request goes to that service's --serve target and
+// nowhere else. The kontra-blob: parts of an A2A request are fetched on blob streams inside the node's own
+// tunnel and inlined (§8.3); a URL taken from a part is never dialed (D56).
 //
-// The node is a fixed-target reverse proxy, not a SOCKS proxy (§8.2, sidecar_not_a_proxy): a stream's
-// preamble names a hosted service, and its one request goes to that service's --serve target and nowhere
-// else. It holds no task state: after any close but `revoked` it redials with the same key, backing off
-// from 1 s to 60 s with full jitter, reset after a session that lived 60 s (§13).
+// Hiring (§9, internal/hiring): the node serves --listen (default 127.0.0.1:7777) to local clients and forwards
+// each request on a stream it opens on its current session, never on a draining one (§13). A node with no
+// --serve only hires; its key is admitted on its --api-key (hire scope) alone.
+//
+// MCP hosting, `mcp:<name>=<url>` and `mcp:<name>=stdio:<cmd>` (§10), is M3 WP-05; sealing and per-job keys
+// (§2.3) M3 WP-08; anonymous sessions and `--public` (§6) M4. There is no local console (D164).
+//
+// The node holds no task state: after any close but `revoked` it redials with the same key, backing off from 1 s
+// to 60 s with full jitter, reset after a session that lived 60 s (§13).
 //
 // Environment. KONTRA_KEY (the key file, as --key, §2.1) is the only variable kontra connect reads, with
 // HOME for ~/.kontra. The PRD's KONTRA_GATE, KONTRA_AGENT, KONTRA_TO and KONTRA_ENROLL (PRD §6) mirrored
@@ -23,7 +28,8 @@
 // none of them, so they are not honoured (M2 plan audit, the PRD's environment mirrors): a container passes
 // flags, as note 2's compose sidecar does, and a secret as --enroll @/run/secrets/<file>.
 //
-// Work packages: WP-03 (dial.go: the dial and the node's half of the handshake), WP-06 (the rest).
+// Work packages: M2 WP-03 (dial.go: the dial and the node's half of the handshake), M2 WP-06 (the rest), M3
+// WP-03 (hiring, blob streams).
 package node
 
 import (
@@ -44,6 +50,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 
+	"kontra.sh/kontra/internal/hiring"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/tunnel"
 )
@@ -59,6 +66,9 @@ type Config struct {
 	Rotate                bool     // --rotate (§12)
 	RequireChannelBinding bool     // --require-channel-binding: refuse cb none (§4.1)
 	MaxInflight           int      // --max-inflight, default tunnel.NodeMaxInflight
+	Listen                string   // --listen, default hiring.DefaultListen (§9)
+	LocalToken            string   // --local-token <file>, read: required when Listen is not loopback
+	AllowOrigins          []string // --allow-origin, repeatable
 	LogJSON               bool     // --log json; human-readable on stderr otherwise
 	CredentialsPath       string   // ~/.kontra/credentials (§2.4)
 	Version               string   // for hello.agent and the User-Agent
@@ -93,8 +103,8 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	fs := flag.NewFlagSet("kontra connect", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var (
-		serves, enrolls []string
-		apiKey          *string
+		serves, enrolls, origins []string
+		apiKey                   *string
 	)
 	gate := fs.String("gate", tunnel.DefaultGate, "")
 	key := fs.String("key", "", "")
@@ -103,7 +113,10 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	requireCB := fs.Bool("require-channel-binding", false, "")
 	maxInflight := fs.Int("max-inflight", tunnel.NodeMaxInflight, "")
 	logFormat := fs.String("log", "text", "")
+	listen := fs.String("listen", hiring.DefaultListen, "")
+	localToken := fs.String("local-token", "", "")
 	fs.Func("serve", "", func(v string) error { serves = append(serves, v); return nil })
+	fs.Func("allow-origin", "", func(v string) error { origins = append(origins, v); return nil })
 	fs.Func("enroll", "", func(v string) error { enrolls = append(enrolls, v); return nil })
 	fs.Func("api-key", "", func(v string) error {
 		if apiKey != nil {
@@ -129,9 +142,8 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	}
 	cfg.Gate = u
 
-	if len(serves) == 0 {
-		return Config{}, usage("--serve a2a:<name>=<url> is required: an M2 node hosts services (hiring through 127.0.0.1:7777 is M3)")
-	}
+	// No --serve: the node only hires (§4: a hello may declare no services; its key is admitted on its
+	// --api-key alone).
 	seen := map[string]bool{}
 	for _, v := range serves {
 		s, err := ParseServe(v)
@@ -206,6 +218,20 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 		return Config{}, usage("--max-inflight %d: want 1 or more", *maxInflight)
 	}
 	cfg.MaxInflight = *maxInflight
+	if *localToken != "" {
+		if cfg.LocalToken, err = hiring.ReadLocalToken(*localToken); err != nil {
+			return Config{}, &UsageError{Err: err}
+		}
+	}
+	if err := hiring.CheckListen(*listen, cfg.LocalToken); err != nil {
+		return Config{}, &UsageError{Err: err}
+	}
+	cfg.Listen = *listen
+	if _, err := hiring.New(hiring.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: origins, Gate: cfg.Gate},
+		noOpener{}, nil); err != nil {
+		return Config{}, &UsageError{Err: err}
+	}
+	cfg.AllowOrigins = origins
 	switch *logFormat {
 	case "json":
 		cfg.LogJSON = true
@@ -276,9 +302,13 @@ type Node struct {
 	// stamp could not be written (connect's SPEC-CONFLICT on §12).
 	skipRotation string
 	sessions     map[*session]struct{}
-	lastPrune    time.Time
-	revoked      chan struct{} // closed when the gate revoked the active key
-	revokeOnce   sync.Once
+	// current is the session hiring streams go on (setCurrent); currentCh is closed whenever it changes.
+	current    *session
+	currentCh  chan struct{}
+	hire       *hiring.Server
+	lastPrune  time.Time
+	revoked    chan struct{} // closed when the gate revoked the active key
+	revokeOnce sync.Once
 }
 
 // New loads (or creates) the identity key, refuses a group- or other-readable key file, resolves the
@@ -307,9 +337,6 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 	origin, err := tunnel.CanonicalOrigin(gate)
 	if err != nil {
 		return nil, fmt.Errorf("--gate: %w", err)
-	}
-	if len(cfg.Serves) == 0 {
-		return nil, errors.New("node: no --serve")
 	}
 	seen := map[string]bool{}
 	for _, s := range cfg.Serves {
@@ -351,7 +378,16 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		maintainEvery: maintainEvery,
 		declared:      slices.Clone(cfg.Serves),
 		sessions:      map[*session]struct{}{},
+		currentCh:     make(chan struct{}),
 		revoked:       make(chan struct{}),
+	}
+	if cfg.Listen == "" {
+		cfg.Listen = hiring.DefaultListen
+		n.cfg.Listen = cfg.Listen
+	}
+	if n.hire, err = hiring.New(hiring.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: cfg.AllowOrigins, Gate: gate},
+		n, log); err != nil {
+		return nil, err
 	}
 	now := n.now()
 

@@ -39,6 +39,7 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"login"}, 1, "", "kontra login: not until M4"},
 		{[]string{"publish"}, 1, "", "kontra publish: not until M5"},
 		{[]string{"connect", "-h"}, 0, "--serve a2a:NAME=URL", ""},
+		{[]string{"connect", "-h"}, 0, "--listen ADDR", ""},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := run(ctx, c.args, &stdout, &stderr); code != c.code ||
@@ -123,7 +124,9 @@ func TestConnectRefusesFlags(t *testing.T) {
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--gate", "http://gate.example"}, "--gate"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--gate", "https://gate.example/?k=v"}, "no query"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--enroll", "nope"}, "not an enrollment token"},
-		{[]string{"--gate", "https://gate.example"}, "--serve"},
+		{[]string{"--gate", "https://gate.example", "--listen", "0.0.0.0:7777"}, "--local-token"},
+		{[]string{"--listen", "127.0.0.1"}, "host:port"},
+		{[]string{"--local-token", "/nonexistent/token-file"}, "--local-token"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--bogus"}, "bogus"},
 	} {
 		var stdout, stderr bytes.Buffer
@@ -148,7 +151,7 @@ func TestConnectRefusesAReadableKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"connect", "--gate", "http://127.0.0.1:1", "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
+	code := run(context.Background(), []string{"connect", "--gate", "http://127.0.0.1:1", "--listen", "127.0.0.1:0", "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "mode 0644") {
 		t.Fatalf("connect with a 0644 key = %d, %q", code, stderr.String())
 	}
@@ -182,7 +185,7 @@ func TestConnectExitsOnANonRetryableCode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
-	code := run(ctx, []string{"connect", "--gate", srv.URL, "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
+	code := run(ctx, []string{"connect", "--gate", srv.URL, "--listen", "127.0.0.1:0", "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
 	if ctx.Err() != nil {
 		t.Fatal("kontra connect kept retrying a non-retryable code")
 	}
@@ -218,7 +221,7 @@ func TestConnectPrintsNoGateEscapes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
-	code := run(ctx, []string{"connect", "--gate", srv.URL, "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
+	code := run(ctx, []string{"connect", "--gate", srv.URL, "--listen", "127.0.0.1:0", "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "service_denied") {
 		t.Fatalf("connect = %d, stderr %q", code, stderr.String())
 	}

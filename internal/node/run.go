@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"slices"
 	"time"
 
@@ -60,6 +61,24 @@ func (n *Node) Run(ctx context.Context) error {
 	tick := time.NewTicker(n.maintainEvery)
 	defer tick.Stop()
 
+	// Hiring (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
+	// stops kontra connect at once; its requests wait for a session.
+	ln, err := net.Listen("tcp", n.cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>)", n.cfg.Listen, err)
+	}
+	hdone := make(chan struct{})
+	go func() {
+		defer close(hdone)
+		if err := n.hire.Serve(ctx, ln); err != nil {
+			n.logger.Error("the local hiring endpoint stopped", "err", err)
+		}
+	}()
+	defer func() { cancel(); <-hdone }()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	fmt.Fprintf(n.out, "kontra connect: hiring at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
+	n.logger.Info("hiring: serving local clients", "listen", ln.Addr().String())
+
 	var wait time.Duration
 	for {
 		if wait > 0 {
@@ -98,7 +117,9 @@ func (n *Node) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Serve the current session until it closes, or a new one must be dialed while it goes on.
+		// Serve the current session until it closes, or a new one must be dialed while it goes on. Hiring
+		// streams go on it (OpenHire) until then.
+		n.setCurrent(s)
 	watch:
 		for {
 			select {
@@ -107,6 +128,7 @@ func (n *Node) Run(ctx context.Context) error {
 			case <-n.revoked:
 				return ErrRevoked
 			case <-s.mux.CloseChan():
+				n.clearCurrent(s)
 				lived := time.Since(s.opened)
 				n.backoff.SessionEnded(lived)
 				if s.replaced.Load() {
@@ -282,10 +304,14 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 				"code", herr.Code, "message", herr.Message)
 			return nil, nextFatal, err
 		}
-		if herr.Code == tunnel.CodeUnknownKey {
+		switch {
+		case herr.Code == tunnel.CodeUnknownKey && len(h.Services) == 0:
+			log.Error("the gate does not know this node's key: a node that only hires is admitted on an --api-key with "+
+				"the hire scope (spec/tunnel.md §9)", "message", herr.Message)
+		case herr.Code == tunnel.CodeUnknownKey:
 			log.Error("the gate does not know this node's key: enroll it with --enroll <token> (kontra-gate enroll <service>)",
 				"message", herr.Message)
-		} else {
+		default:
 			log.Warn("the gate refused the handshake; retrying", "code", herr.Code, "message", herr.Message)
 		}
 		return nil, nextRetry, err
@@ -528,6 +554,9 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	}
 	s.proxy = n.proxy.forSession(served, log)
 	s.proxy.onControl = s.readControl
+	// The kontra-blob: parts of what the gate forwards are fetched on this session's own blob streams (§8.3):
+	// the gate serves a ref to the session one of whose attempts holds its task.
+	s.proxy.setBlobOpener(func(ctx context.Context) (net.Conn, error) { return openStream(ctx, mux, nil) })
 	n.mu.Lock()
 	n.sessions[s] = struct{}{}
 	n.mu.Unlock()
@@ -584,6 +613,7 @@ func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 // ceiling left from failures before that session.
 func (n *Node) retire(s *session, why string) {
 	s.retired.Store(true)
+	n.clearCurrent(s) // §13: no new hiring streams on a draining session
 	n.backoff.SessionEnded(time.Since(s.opened))
 	s.log.Info(why)
 }

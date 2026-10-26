@@ -80,12 +80,14 @@ func (s *session) accept() {
 // it and ignores the types it does not know. Only the first control stream of a session is read.
 //
 //   - drain: Run dials a new session at once; this one goes on serving the streams the gate opens on it
-//     and closes when the gate closes it (make-before-break). The node opens no hiring streams on it (M3).
+//     and closes when the gate closes it (make-before-break). The node opens no hiring streams on it: they go
+//     on the new session (Node.OpenHire).
 //   - revoked: the key (no service): the node stops and does not redial (§12); a rotated key's session ends
 //     alone (Node.keyRevoked). revoked with a service: the active key's binding: the service is dropped
 //     from every session's served set and from the next hello (Node.dropService); a rotated key's binding:
 //     from that session alone (Node.bindingRevoked).
-//   - auth_revoked, enrolled and expiring are logged (hiring is M3, anonymous sessions M4).
+//   - auth_revoked (the gate answers the session's hiring requests 401 from now on; hosting goes on), enrolled
+//     and expiring are logged (anonymous sessions are M4).
 func (s *session) readControl(stream net.Conn, br *bufio.Reader) {
 	if !s.control.CompareAndSwap(false, true) {
 		s.log.Warn("a second control stream on one session is refused")
