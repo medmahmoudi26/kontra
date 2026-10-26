@@ -1151,3 +1151,144 @@ func TestWriteControlWithoutStream(t *testing.T) {
 		t.Fatal("WriteControl on a closed stream succeeded")
 	}
 }
+
+// nodeSession is a node's yamux.Client over a completed handshake, with the gate's control stream
+// accepted (an unacknowledged open would close the gate's session after StreamOpenTimeout), and the
+// session the gate registered.
+func nodeSession(t *testing.T, g *testGate) (*yamux.Session, *Session) {
+	t.Helper()
+	d, _, err := g.connect(t, newIdentity(t), newHello("hello"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := tunnel.ClientSession(context.Background(), d.WS, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if _, err := m.AcceptStream(); err != nil {
+		t.Fatal(err)
+	}
+	return m, g.sink.next(t)
+}
+
+// A node that keeps open the streams it opened, after the gate closed them, pins up to a window of data
+// on each in the gate's yamux until it closes its side. The gate holds tunnel.GateMaxInflight of them and
+// closes the session at one more (§7: the gate's own cap after Accept; §14).
+func TestNodeOpenedStreamsAreCapped(t *testing.T) {
+	g := newTestGate(t, gateOpts{})
+	m, s := nodeSession(t, g)
+	data := make([]byte, 64<<10)
+	open := func() error {
+		st, err := m.OpenStream()
+		if err != nil {
+			return err
+		}
+		_, err = st.Write(data) // never closed
+		return err
+	}
+	for i := range tunnel.GateMaxInflight {
+		if err := open(); err != nil {
+			t.Fatalf("stream %d: %v", i, err)
+		}
+	}
+	eventually(t, 10*time.Second, "the gate accepted every stream", func() bool {
+		return s.Mux().NumStreams() == tunnel.GateMaxInflight+1 // and the control stream
+	})
+	time.Sleep(100 * time.Millisecond)
+	if s.Mux().IsClosed() {
+		t.Fatalf("the session closed with %d node-opened streams in flight: the cap allows them", tunnel.GateMaxInflight)
+	}
+
+	_ = open() // one over the cap: the write may fail as the session closes
+	eventually(t, 10*time.Second, "the gate closed the session over the cap", s.Mux().IsClosed)
+	eventually(t, 10*time.Second, "the node's session ended", m.IsClosed)
+	if !strings.Contains(g.logs.String(), "more streams open than the gate allows") {
+		t.Fatalf("the gate did not log why it closed the session")
+	}
+}
+
+// A node that closes each stream it opened once the gate has closed it frees its place: three rounds of
+// tunnel.GateMaxInflight held streams, each closed before the next round, keep the session open, and the
+// gate's yamux forgets every one of them.
+func TestNodeOpenedStreamsFreedWhenTheNodeCloses(t *testing.T) {
+	g := newTestGate(t, gateOpts{})
+	m, s := nodeSession(t, g)
+	ended := func() int { return strings.Count(g.logs.String(), "node-opened stream ended") }
+	for round := range 3 {
+		held := make([]*yamux.Stream, 0, tunnel.GateMaxInflight)
+		for range tunnel.GateMaxInflight {
+			st, err := m.OpenStream()
+			if err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+			if _, err := st.Write([]byte(`{"v":1,"op":"http"}` + "\n")); err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+			_ = st.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if n, err := st.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+				t.Fatalf("round %d: read %d, %v; want the gate to close the stream (EOF)", round, n, err)
+			}
+			held = append(held, st)
+		}
+		if s.Mux().IsClosed() {
+			t.Fatalf("round %d: the session closed within the cap", round)
+		}
+		for _, st := range held {
+			_ = st.Close()
+		}
+		want := (round + 1) * tunnel.GateMaxInflight
+		eventually(t, 10*time.Second, "the gate saw every stream of the round end", func() bool { return ended() == want })
+		eventually(t, 10*time.Second, "the gate's yamux forgot the round's streams", func() bool { return s.Mux().NumStreams() == 1 })
+	}
+	if s.Mux().IsClosed() || m.IsClosed() {
+		t.Fatal("the session closed although the node closed every stream")
+	}
+}
+
+// yamux's own lines (here "[WARN] yamux: frame for missing stream") carry the session's attributes, with
+// the default configuration and with one the caller supplied (PRD §11: tunnel_session on every line).
+func TestYamuxLogsCarryTheSession(t *testing.T) {
+	for name, mod := range map[string]func(*HandlerConfig){
+		"default":  nil,
+		"supplied": func(c *HandlerConfig) { c.Yamux = tunneltest.ShortConfig(time.Second) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newTestGate(t, gateOpts{mod: mod})
+			id := newIdentity(t)
+			d, _, err := g.connect(t, id, newHello("hello"), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := g.sink.next(t)
+			// A window update for stream 99, which the node never opened (version 0, type 1, no flags).
+			frame := []byte{0, 1, 0, 0, 0, 0, 0, 99, 0, 0, 0, 0}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := d.WS.Write(ctx, websocket.MessageBinary, frame); err != nil {
+				t.Fatal(err)
+			}
+			var line string
+			eventually(t, 10*time.Second, "yamux logged the frame", func() bool {
+				for _, l := range strings.Split(g.logs.String(), "\n") {
+					if strings.Contains(l, "frame for missing stream") {
+						line = l
+						return true
+					}
+				}
+				return false
+			})
+			for _, want := range []string{
+				"component=yamux", "tunnel_session=" + s.ID.String(), "key_id=" + id.KeyID(), "tenant=team",
+				"node=build-box-3", "remote=",
+			} {
+				if !strings.Contains(line, want) {
+					t.Errorf("yamux's line %q lacks %s", line, want)
+				}
+			}
+			if strings.Count(line, "component=") != 1 {
+				t.Errorf("yamux's line %q names more than one component", line)
+			}
+		})
+	}
+}

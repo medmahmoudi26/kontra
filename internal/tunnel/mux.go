@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"sync/atomic"
@@ -24,16 +25,13 @@ const (
 	StreamCloseTimeout     = 5 * time.Minute
 )
 
-// YamuxConfig is §7's table, logging through logger at Warn (yamux needs exactly one of LogOutput and
+// YamuxConfig is §7's table, logging through YamuxLogger(logger) (yamux needs exactly one of LogOutput and
 // Logger): EnableKeepAlive false, because yamux closes on the first missed pong; liveness is the ping loop
 // of liveness.go. A nil logger discards yamux's lines.
 //
-// yamux writes every line with one level prefix ("[ERR] yamux: …", "[WARN] yamux: …"); they all reach
-// the handler at Warn, with component=yamux.
+// The configuration is per session when its lines must say which session they are about: logger then
+// carries the session's attributes (the gate's Handler does so).
 func YamuxConfig(logger *slog.Logger) *yamux.Config {
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
-	}
 	c := yamux.DefaultConfig()
 	c.AcceptBacklog = AcceptBacklog
 	c.EnableKeepAlive = false
@@ -43,8 +41,18 @@ func YamuxConfig(logger *slog.Logger) *yamux.Config {
 	c.StreamOpenTimeout = StreamOpenTimeout
 	c.StreamCloseTimeout = StreamCloseTimeout
 	c.LogOutput = nil
-	c.Logger = slog.NewLogLogger(logger.With("component", "yamux").Handler(), slog.LevelWarn)
+	c.Logger = YamuxLogger(logger)
 	return c
+}
+
+// YamuxLogger is yamux's Logger writing through logger: yamux writes every line with one level prefix
+// ("[ERR] yamux: …", "[WARN] yamux: …"), and they all reach logger's handler at Warn, with
+// component=yamux, so logger should carry no component of its own. A nil logger discards yamux's lines.
+func YamuxLogger(logger *slog.Logger) *log.Logger {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return slog.NewLogLogger(logger.With("component", "yamux").Handler(), slog.LevelWarn)
 }
 
 // NetConn is websocket.NetConn over binary messages, after the handshake; compression stays off (§3, §7):

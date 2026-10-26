@@ -16,5 +16,6 @@
 //     naming the service (§8.1), one HTTP/1.1 exchange, never reused (§8.2).
 //
 // Node-opened streams (hiring §9, blobs §8.3) are M3: an M2 gate accepts them promptly (§7) and closes
-// them. MCP hosting (§10, relay.md §11) and anonymous sessions (§6) are M3 and M4.
+// them, and closes the session of a node that keeps more than tunnel.GateMaxInflight of them open (§14).
+// MCP hosting (§10, relay.md §11) and anonymous sessions (§6) are M3 and M4.
 package tunnelgate
