@@ -547,6 +547,80 @@ func TestTunnelForwardCancel(t *testing.T) {
 	}
 }
 
+// forward_cancel answers tunnel_lost only when the attempt's sticky session is gone (§8's row "exists,
+// session gone", CancelTunnelLost's SPEC-CONFLICT; M2 WP-05 review). A node that answers the cancel itself on
+// a session this replica still holds (target_unreachable, not_hosted, kind_mismatch, a value outside §8.2's
+// list), and an exchange cut while that session stays held, did not deliver the cancel: forward_cancel's
+// error, on which the workflow answers that the service could not be reached and the task continues (§8's
+// row "session up"). An exchange cut because the session went away during it is tunnel_lost. A direct
+// attempt whose service has become a tunnel service has no session to be gone: the cancel was not
+// delivered either.
+func TestTunnelForwardCancelSessionUp(t *testing.T) {
+	s1 := newSession()
+	e, ss, nodes := tunnelEnv(t, envOptions{}, false, askingAgent(), s1)
+	n := nodes[s1]
+	waiting := func(session *uuid.UUID) a2a.TaskID {
+		t.Helper()
+		id, _ := e.newTask(taskSpec{owner: buyerA, text: "q", session: session})
+		e.firstID(id, 1, "up-"+string(id), "c-"+string(id))
+		return id
+	}
+	notDelivered := func(what string, id a2a.TaskID) {
+		t.Helper()
+		res, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id), N: 1})
+		if err == nil || res.Outcome != "" {
+			t.Fatalf("%s: %+v %v, want the cancel not delivered", what, res, err)
+		}
+		if row := e.row(id); row.State != store.StateSubmitted {
+			t.Fatalf("%s: forward_cancel changed the task: %s", what, row.State)
+		}
+	}
+	cancelAnswered := func(fn func(w http.ResponseWriter)) {
+		n.setAnswer(func(method string, _ json.RawMessage, _ int, w http.ResponseWriter) bool {
+			if method != "CancelTask" {
+				return false
+			}
+			fn(w)
+			return true
+		})
+	}
+	for _, reason := range []tunnel.NodeReason{tunnel.NodeTargetUnreachable, tunnel.NodeNotHosted, tunnel.NodeKindMismatch, "something_else"} {
+		status := http.StatusNotFound
+		if reason == tunnel.NodeTargetUnreachable {
+			status = http.StatusBadGateway
+		}
+		cancelAnswered(func(w http.ResponseWriter) { nodeAnswer(w, status, reason) })
+		calls := n.calls("CancelTask")
+		notDelivered("Kontra-Node: "+string(reason), waiting(&s1))
+		if n.calls("CancelTask") != calls+1 {
+			t.Fatalf("Kontra-Node: %s: %d CancelTask exchanges", reason, n.calls("CancelTask")-calls)
+		}
+	}
+
+	// The exchange cut, its session still held: not delivered.
+	cancelAnswered(cutExchange)
+	notDelivered("an exchange cut on a held session", waiting(&s1))
+
+	// The exchange cut because the session went away during it: tunnel_lost.
+	id := waiting(&s1)
+	cancelAnswered(func(w http.ResponseWriter) {
+		ss.drop(s1)
+		cutExchange(w)
+	})
+	res, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id), N: 1})
+	if err != nil || res.Outcome != lifecycle.CancelTunnelLost {
+		t.Fatalf("an exchange cut by the session's loss: %+v %v", res, err)
+	}
+
+	// A direct attempt, its service now a tunnel service (the backends answer it ErrTunnelLost): not
+	// delivered, and nothing opened.
+	opens := n.opens.Load()
+	notDelivered("a direct attempt of a tunnel service", waiting(nil))
+	if n.opens.Load() != opens {
+		t.Fatalf("a direct attempt's cancel opened %d streams", n.opens.Load()-opens)
+	}
+}
+
 // Upstream context ids and referenceTaskIds are reused only on the same tunnel session (spec §4, D53; the M2
 // plan audit's gap: node 1's upstream contextId must never reach node 2): a second task of the gate context
 // on the first task's session carries the recorded upstream context and its mapped reference; one placed on

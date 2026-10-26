@@ -1287,6 +1287,7 @@ func (l *lc) cancelDispatching(ctx workflow.Context, c *call) {
 		l.cancelSessionGone(ctx, op, c)
 		return
 	}
+	err = notGone(r, err)
 	if err == nil {
 		r = l.cancelAnswer(ctx, r)
 	}
@@ -1346,6 +1347,7 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 		l.cancelSessionGone(ctx, op, nil)
 		return
 	}
+	err = notGone(r, err)
 	if err == nil {
 		r = l.cancelAnswer(ctx, r)
 	}
@@ -1363,18 +1365,35 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 }
 
 // tunnelSessionGone reports whether forward_cancel found a tunnel attempt's sticky session gone: it answered
-// tunnel_lost (the session replica's registry does not hold the session, or its key or binding no longer
-// allow it), or it was not started within 10 s on kontra-ctl-<session replica> (the replica holding the
-// session is gone, spec §14.2).
+// tunnel_lost (the session replica's registry does not hold the session, or it no longer serves the
+// service: closed, its key or binding revoked), or it was not started within 10 s on kontra-ctl-<session
+// replica> (the replica holding the session is gone, spec §14.2). A session that is up never answers
+// tunnel_lost (CancelTunnelLost): a node's own answer is forward_cancel's error, and the task continues.
 //
 // SPEC-CONFLICT (M2 plan, confirmed conflict on spec §8's row "active or input-required | exists, session
-// gone"): see CancelTunnelLost. Behind changeCancelTunnelLost; a direct attempt never takes this branch.
+// gone"): see CancelTunnelLost. Behind changeCancelTunnelLost; a direct attempt never takes this branch (its
+// tunnel_lost answer is errNotGone).
 func (l *lc) tunnelSessionGone(ctx workflow.Context, st AttemptState, r ForwardCancelResult, err error) bool {
 	if st.Backend != string(store.BackendTunnel) {
 		return false
 	}
 	gone := (err == nil && r.Outcome == CancelTunnelLost) || (err != nil && isTimeout(err, enums.TIMEOUT_TYPE_SCHEDULE_TO_START))
 	return gone && workflow.GetVersion(ctx, changeCancelTunnelLost, workflow.DefaultVersion, 1) >= 1
+}
+
+// errNotGone is a forward_cancel that answered tunnel_lost for an attempt tunnelSessionGone does not take for
+// gone: only a tunnel attempt's sticky session can be gone, so for any other (a direct attempt whose service
+// became a tunnel service, answered so by a replica) nothing was forwarded, and the task continues as for
+// forward_cancel's error: the caller is told the service could not be reached (M2 WP-05 review). The
+// answer is the Update's result only and schedules nothing, so it needs no GetVersion.
+var errNotGone = errors.New("forward_cancel answered tunnel_lost for an attempt that is not on a tunnel session")
+
+// notGone is forward_cancel's answer once tunnelSessionGone declined it: a tunnel_lost outcome is errNotGone.
+func notGone(r ForwardCancelResult, err error) error {
+	if err == nil && r.Outcome == CancelTunnelLost {
+		return errNotGone
+	}
+	return err
 }
 
 // cancelSessionGone is §8's row "exists, session gone": nothing could be forwarded; the task fails

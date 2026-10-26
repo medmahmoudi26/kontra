@@ -63,8 +63,41 @@ func TaskFrom(ctx context.Context) (ExchangeTask, bool) {
 // service and kind it was made for, and the task of TaskFrom(ctx). An error the session caused (a stream
 // that could not be opened, a session closing, a key or binding that no longer allows it) should wrap
 // ErrTunnelLost; NewTunnel's dial wraps any other error that is not ctx's own.
+//
+// ctx bounds the open only, and ends with the exchange's request: its cancellation and its deadline are the
+// request's (dialContext), so an open still waiting when its request is abandoned returns, and opens no
+// stream after it.
 type StreamOpener interface {
 	OpenExchange(ctx context.Context) (net.Conn, error)
+}
+
+type requestContextKey struct{}
+
+// withRequestContext returns r carrying its own context as a value, which survives into the dial:
+// http.Transport hands its dial the request context's values but detaches it from the request's
+// cancellation and deadline (net/http getConn: context.WithoutCancel), so that a dial may outlive its
+// request for a later one. A tunnel stream is never reused (DisableKeepAlives), so a dial that outlives its
+// request only leaks: a stuck open (the key and binding read while the revocation view is not fresh, a yamux
+// open behind un-acknowledged ones) would wait past the request's end, and then open a stray stream.
+func withRequestContext(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), requestContextKey{}, r.Context()))
+}
+
+// dialContext is the dial's context bound to its request again (withRequestContext): the request's own
+// context, so it carries the request's deadline and ends with the request (deadline or cancel, with the
+// request's error), and it also ends when the transport ends the dial itself (CloseIdleConnections). stop
+// releases it once the dial returned.
+func dialContext(ctx context.Context) (dctx context.Context, stop func()) {
+	rc, ok := ctx.Value(requestContextKey{}).(context.Context)
+	if !ok {
+		return ctx, func() {}
+	}
+	dctx, cancel := context.WithCancelCause(rc)
+	unhook := context.AfterFunc(ctx, func() { cancel(context.Cause(ctx)) })
+	return dctx, func() {
+		unhook()
+		cancel(nil)
+	}
 }
 
 // exchangeOrigin is the origin of the requests the gate writes on a tunnel stream: a placeholder, since the
@@ -103,6 +136,8 @@ func NewTunnel(service, kind string, open StreamOpener) (*Tunnel, error) {
 	tr := &http.Transport{
 		Proxy: nil, // never the environment's proxy: the request rides the stream
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			ctx, stop := dialContext(ctx)
+			defer stop()
 			c, err := open.OpenExchange(ctx)
 			if err == nil {
 				return c, nil

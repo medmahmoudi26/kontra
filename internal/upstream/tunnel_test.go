@@ -384,3 +384,89 @@ func TestClassifyTunnel(t *testing.T) {
 		t.Errorf("a direct 503 with Kontra-Node: %+v", f)
 	}
 }
+
+// stuckOpener is a session's opener stuck before its stream opens (the key and binding read in Postgres, a
+// yamux open behind un-acknowledged ones): each open waits for its context's end or for release. An open
+// released while its context is still live opens a stream, which the test counts.
+type stuckOpener struct {
+	release   chan struct{}
+	ended     chan error // ctx.Err() of each open whose context ended first
+	deadlines chan time.Time
+	opened    atomic.Int64
+}
+
+func (o *stuckOpener) OpenExchange(ctx context.Context) (net.Conn, error) {
+	d, _ := ctx.Deadline()
+	o.deadlines <- d
+	select {
+	case <-ctx.Done():
+		o.ended <- ctx.Err()
+		return nil, ctx.Err()
+	case <-o.release:
+	}
+	o.opened.Add(1)
+	gate, node := net.Pipe()
+	_ = node.Close()
+	return gate, nil
+}
+
+// A tunnel exchange's open is bounded by its request (M2 WP-05 review): http.Transport detaches its dial
+// from the request's cancellation, so without the tunnel's own binding a stuck open would outlive an
+// abandoned request and then open a stray stream. The open's context carries the request's deadline and
+// ends with the request, by deadline or by cancel, and nothing is opened after it.
+func TestTunnelOpenEndsWithItsRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		{"deadline", func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 200*time.Millisecond)
+		}, context.DeadlineExceeded},
+		{"cancel", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(200*time.Millisecond, cancel)
+			return ctx, cancel
+		}, context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			op := &stuckOpener{release: make(chan struct{}), ended: make(chan error, 1), deadlines: make(chan time.Time, 1)}
+			tb, err := NewTunnel("hello", tunnel.KindA2A, op)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			want, _ := ctx.Deadline()
+			ctx, ex := WithExchange(ctx)
+			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, tb.Base().JoinPath("a2a").String(), strings.NewReader("{}"))
+			start := time.Now()
+			_, rerr := tb.HTTPClient().Do(req)
+			if !errors.Is(rerr, tc.want) {
+				t.Fatalf("the request: %v", rerr)
+			}
+			if d := <-op.deadlines; !d.Equal(want) {
+				t.Errorf("the open's deadline %v, want the request's %v", d, want)
+			}
+			select {
+			case err := <-op.ended:
+				if !errors.Is(err, tc.want) {
+					t.Errorf("the open ended with %v", err)
+				}
+				if took := time.Since(start); took > 2*time.Second {
+					t.Errorf("the open ended %v after the request started", took)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("the open outlived its request by 3 s")
+			}
+			close(op.release)
+			time.Sleep(100 * time.Millisecond)
+			if n := op.opened.Load(); n != 0 {
+				t.Fatalf("%d streams opened after the request was abandoned", n)
+			}
+			if f := Classify(ctx, rerr, ex); f.Class != Canceled {
+				t.Errorf("class %d", f.Class)
+			}
+		})
+	}
+}

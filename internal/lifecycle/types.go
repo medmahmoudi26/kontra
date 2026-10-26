@@ -119,9 +119,15 @@ const (
 	// error the upstream never sent. The closest faithful behaviour is this fourth outcome, whose caller
 	// answer is the stored task; an upstream task already terminal otherwise is not_cancelable.
 	CancelContinues CancelOutcome = "continues"
-	// CancelTunnelLost is forward_cancel finding the tunnel attempt's sticky session gone (not held by its
-	// replica, or its key or binding revoked): nothing could be forwarded, and the task fails tunnel_lost.
-	// As a kontra.cancel outcome, the caller gets the task as it is after that (failed: tunnel_lost).
+	// CancelTunnelLost is forward_cancel finding the tunnel attempt's sticky session gone: its replica does
+	// not hold it, or it no longer serves the service (closed, its key or binding revoked), found before the
+	// exchange or right after one that ended without a complete response. Nothing could be forwarded, and
+	// the task fails tunnel_lost. As a kontra.cancel outcome, the caller gets the task as it is after that
+	// (failed: tunnel_lost). It is never the answer for a session that is up (§8's row "session up"): a
+	// response the node wrote itself (Kontra-Node: target_unreachable, not_hosted, kind_mismatch, any other
+	// value) or an exchange cut while the session stays held is forward_cancel's error, a cancel not
+	// delivered, and the task continues. Only a tunnel attempt has a session to lose: the workflow takes this
+	// outcome for any other attempt as a cancel not delivered too (M2 WP-05 review).
 	//
 	// SPEC-CONFLICT (M2 plan, confirmed conflict on spec §8's row "active or input-required | exists,
 	// session gone"): the row says the dispatch is already failing tunnel_lost and the caller gets the task

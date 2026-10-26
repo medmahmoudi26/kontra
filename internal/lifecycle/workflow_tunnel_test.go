@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -278,5 +279,63 @@ func TestCancelWhenTheTunnelSessionIsGone(t *testing.T) {
 	}
 	if len(s.terminals) != 0 || len(s.dispatches) != 2 {
 		t.Fatalf("terminal writes %+v, dispatches %d: the task continues", s.terminals, len(s.dispatches))
+	}
+}
+
+// Only a tunnel attempt's session can be gone (M2 WP-05 review): a forward_cancel that answers tunnel_lost for
+// a direct attempt (its service became a tunnel service while it waited, on a replica that answers so) is a
+// cancel not delivered. The caller is told the service could not be reached and the task continues, as
+// for forward_cancel's error, whether it waits at input-required or a dispatch runs; nothing is written.
+func TestCancelTunnelLostOfADirectAttempt(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		t.Run(fmt.Sprintf("running=%v", running), func(t *testing.T) {
+			w := newWorld(t)
+			w.firstID[1] = true
+			w.forwardFn = func(context.Context, int, string) (ForwardCancelResult, error) {
+				return ForwardCancelResult{Outcome: CancelTunnelLost}, nil
+			}
+			release := make(chan struct{})
+			w.dispatchFn = func(ctx context.Context, k int, _ DispatchInput) (DispatchResult, error) {
+				if running && k == 0 {
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return DispatchResult{}, ctx.Err()
+					}
+					w.setState(string(store.StateCompleted))
+					return DispatchResult{Outcome: DispatchTerminal}, nil
+				}
+				if k == 0 {
+					w.setState(string(store.StateInputRequired))
+					return DispatchResult{Outcome: DispatchInterrupted}, nil
+				}
+				w.setState(string(store.StateCompleted))
+				return DispatchResult{Outcome: DispatchTerminal}, nil
+			}
+			env := w.env()
+			u := newUpdates()
+			if running {
+				env.RegisterDelayedCallback(func() { env.UpdateWorkflow(UpdateCancel, "c1", u.cb("c1"), CancelUpdate{}) }, 200*time.Millisecond)
+				env.RegisterDelayedCallback(func() { close(release) }, time.Second)
+			} else {
+				env.RegisterDelayedCallback(func() { env.UpdateWorkflow(UpdateCancel, "c1", u.cb("c1"), CancelUpdate{}) }, time.Minute)
+				env.RegisterDelayedCallback(func() {
+					env.UpdateWorkflow(UpdateMessage, "wi-2", u.cb("wi-2"), MessageUpdate{WorkItemID: "wi-2", After: 3})
+				}, 2*time.Minute)
+			}
+			start(env, u, input(2))
+			done(t, env)
+			r, err := u.result("c1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.(CancelResult); got.Outcome != CancelNotCancelable || got.UpstreamError == nil || got.UpstreamError.Code != -32603 {
+				t.Fatalf("cancel %+v, want the service could not be reached", got)
+			}
+			s := w.snapshot()
+			if len(s.terminals) != 0 {
+				t.Fatalf("terminal writes %+v: the task continues", s.terminals)
+			}
+		})
 	}
 }

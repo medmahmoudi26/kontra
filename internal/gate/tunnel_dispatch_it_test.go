@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"iter"
 	"net"
@@ -105,6 +106,22 @@ type agentNode struct {
 	preambles []tunnel.Preamble
 	methods   []string
 	controls  chan tunnel.Control
+	itself    map[string]tunnel.NodeReason // a JSON-RPC method the node answers itself (tunnel.md §8.2)
+}
+
+// answerItself makes the node answer method itself with Kontra-Node: reason (status 502 for
+// target_unreachable, 404 otherwise), never reaching the agent; an empty reason undoes it.
+func (n *agentNode) answerItself(method string, reason tunnel.NodeReason) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.itself == nil {
+		n.itself = map[string]tunnel.NodeReason{}
+	}
+	if reason == "" {
+		delete(n.itself, method)
+		return
+	}
+	n.itself[method] = reason
 }
 
 func dialAgentNode(t *testing.T, base string, id *nodekey.Identity, tokens []string, a *agentSeller) *agentNode {
@@ -145,7 +162,17 @@ func dialAgentNode(t *testing.T, base string, id *nodekey.Identity, tokens []str
 		_ = json.Unmarshal(body, &call)
 		n.mu.Lock()
 		n.methods = append(n.methods, call.Method)
+		reason := n.itself[call.Method]
 		n.mu.Unlock()
+		if reason != "" {
+			status := http.StatusNotFound
+			if reason == tunnel.NodeTargetUnreachable {
+				status = http.StatusBadGateway
+			}
+			w.Header().Set(tunnel.HeaderNode, string(reason))
+			w.WriteHeader(status)
+			return
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		rpc.ServeHTTP(w, r)
 	})
@@ -425,6 +452,30 @@ func TestDispatchThroughTheTunnel(t *testing.T) {
 	}
 	if n1.called("CancelTask") != 1 {
 		t.Fatalf("%d CancelTask exchanges reached the node", n1.called("CancelTask"))
+	}
+
+	// A cancel the node answers itself on a session that is up (Kontra-Node: target_unreachable, its agent
+	// restarting): not delivered, spec §8's row "session up" (M2 WP-05 review). The caller is told the
+	// service could not be reached, the task continues at input-required, and its follow-up completes it.
+	waits := sendMessage(t, c, text("ask"), false)
+	if waits.Status.State != a2a.TaskStateInputRequired {
+		t.Fatalf("ask: %+v", waits.Status)
+	}
+	n1.answerItself("CancelTask", tunnel.NodeTargetUnreachable)
+	if _, err := c.CancelTask(ctx, &a2a.CancelTaskRequest{ID: waits.ID}); !errors.Is(err, a2a.ErrTaskNotCancelable) {
+		t.Fatalf("a cancel the node answered target_unreachable: %v", err)
+	}
+	n1.answerItself("CancelTask", "")
+	if n1.called("CancelTask") != 2 {
+		t.Fatalf("%d CancelTask exchanges reached the node", n1.called("CancelTask"))
+	}
+	if st, failure := taskState(t, e, waits.ID); st != "input-required" || failure != "" {
+		t.Fatalf("the task is %s/%s after a cancel that was not delivered", st, failure)
+	}
+	fu = text("still here")
+	fu.TaskID, fu.ContextID = waits.ID, waits.ContextID
+	if after := sendMessage(t, c, fu, false); after.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("the follow-up after a cancel not delivered: %+v", after.Status)
 	}
 
 	// key_scope (relay.md §6.1, §16): two tasks wait at input-required; the binding is revoked.

@@ -312,8 +312,9 @@ func RetryAfter(h string, now time.Time) time.Duration {
 
 // limitTransport reads every upstream body through a limit: an SSE stream event by event (MaxSSEEvent),
 // anything else as a whole (MaxBody). It also records the response in the request's Exchange; a tunnel's
-// (tunnel set) marks the exchange tunnelled before the stream is opened, and records the response's
-// Kontra-Node header.
+// (tunnel set) marks the exchange tunnelled before the stream is opened, records the response's
+// Kontra-Node header, and hands the request's context to the dial that opens the stream
+// (withRequestContext), which bounds the open by the request.
 type limitTransport struct {
 	next   http.RoundTripper
 	tunnel bool
@@ -323,6 +324,7 @@ func (t *limitTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	ex := exchangeFrom(r.Context())
 	if t.tunnel {
 		ex.markTunnelled()
+		r = withRequestContext(r)
 	}
 	resp, err := t.next.RoundTrip(r)
 	if err != nil {

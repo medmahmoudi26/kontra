@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -13,7 +15,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/tunnel/tunneltest"
@@ -199,5 +203,88 @@ func TestSessionCloseCutsACloseDelimitedBody(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the body read did not end when the session closed")
+	}
+}
+
+// silentPostgres is a Postgres that accepts connections and never answers: every read through pool waits
+// for its context.
+func silentPostgres(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	pool, err := pgxpool.New(context.Background(), fmt.Sprintf("postgres://kontra@%s/kontra?sslmode=disable&connect_timeout=0", l.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		_ = l.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return pool
+}
+
+// The key and binding read an exchange's stream makes while the revocation view is not fresh is bounded by
+// allowsReadTimeout whatever the exchange's own context (M2 WP-05 review; WP-04's fail-closed bound): with
+// Postgres not answering, an exchange with no deadline of its own fails closed as a lost session within that
+// bound, and no stream reaches the node.
+func TestExchangeKeyReadFailsClosed(t *testing.T) {
+	rev := enroll.NewRevocations(silentPostgres(t)) // never read: not fresh
+	r := NewRegistry(RegistryConfig{Revocations: rev})
+	s, node, _ := httpSession(t, r, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.WriteString(w, "hello from the node")
+	}), "hello")
+	be, err := r.Backend(s.ID, store.ServiceRef{TenantID: testTenantID, Name: "hello", Kind: "a2a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, ex := upstream.WithExchange(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, upstream.Endpoint(be, upstream.Info{Path: "/x"}), nil)
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		resp, err := be.HTTPClient().Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if took := time.Since(start); took < allowsReadTimeout-200*time.Millisecond || took > allowsReadTimeout+2*time.Second {
+			t.Errorf("the exchange failed after %v, want about %v", took, allowsReadTimeout)
+		}
+		if f := upstream.Classify(ctx, err, ex); err == nil || f.Class != upstream.ClassTunnelLost || !errors.Is(err, upstream.ErrTunnelLost) {
+			t.Fatalf("an exchange whose key cannot be read: %v (%+v)", err, f)
+		}
+	case <-time.After(allowsReadTimeout + 5*time.Second):
+		t.Fatalf("the exchange waited on the key's read for over %v", allowsReadTimeout+5*time.Second)
+	}
+	if n := len(node.seen()); n != 0 {
+		t.Fatalf("%d streams reached the node", n)
+	}
+	if n := s.InFlight(); n != 0 {
+		t.Fatalf("%d exchanges in flight", n)
 	}
 }

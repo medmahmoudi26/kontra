@@ -32,6 +32,8 @@ import (
 // attempt's session is not held here, or no longer serves the service) is a lost session and opens no
 // stream; one wrapping ErrCardPending (a tunnel service whose card no fetch has produced yet) is retried
 // like no_session; any other (no usable card, a service removed or disabled) fails service_unavailable.
+// forward_cancel takes upstream.ErrTunnelLost for a gone session only for a tunnel attempt, and asks again
+// after an exchange that ended without a complete response (Dispatcher.ForwardCancel).
 type Backends interface {
 	Backend(ctx context.Context, svc store.ServiceRef, attempt *store.Attempt) (upstream.Backend, upstream.Info, error)
 }

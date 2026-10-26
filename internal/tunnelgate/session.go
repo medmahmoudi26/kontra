@@ -116,7 +116,9 @@ func (s *Session) revocations() *enroll.Revocations {
 
 // OpenExchange checks Allows, opens a stream and writes its preamble (§8.1); the caller writes one HTTP/1.1
 // request on it. A stream that could not be opened, a session closing, and every refusal of Allows wrap
-// ErrSessionGone; ctx's own end is ctx's error.
+// ErrSessionGone; ctx's own end is ctx's error. Allows' read of the key and binding (the revocation view not
+// fresh) is bounded by allowsReadTimeout as well as by ctx, so a Postgres that does not answer fails the
+// exchange closed within it, whatever ctx's own deadline (M2 WP-05 review).
 //
 // The stream is the session's until it is closed: a binding revocation aborts the streams of its service,
 // and closing the session aborts all of them. An aborted stream's reads and writes fail at once with an
@@ -129,7 +131,13 @@ func (s *Session) OpenExchange(ctx context.Context, p tunnel.Preamble) (net.Conn
 	if p.Op != tunnel.OpHTTP {
 		return nil, fmt.Errorf("tunnelgate: an exchange's preamble has op http, not %q", p.Op)
 	}
-	if err := s.allows(ctx, p.Service, p.Kind); err != nil {
+	actx, cancel := context.WithTimeout(ctx, allowsReadTimeout)
+	err := s.allows(actx, p.Service, p.Kind)
+	cancel()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	st, err := s.openStream(ctx)

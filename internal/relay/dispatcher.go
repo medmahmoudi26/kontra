@@ -395,6 +395,15 @@ func cancelAnswer(t *a2a.Task) lifecycle.ForwardCancelResult {
 // it full, within the activity's 30 s start-to-close (spec §14.2).
 const forwardCancelFullFor = 20 * time.Second
 
+// sessionGone resolves a tunnel attempt's backend again after its exchange ended without a complete
+// response: the session is gone when this replica no longer holds it, or it no longer serves the service
+// (Backends answers upstream.ErrTunnelLost). A cut exchange alone does not tell: the node may have reset
+// one stream of a session that is still up.
+func (d *Dispatcher) sessionGone(ctx context.Context, svc store.ServiceRef, attempt *store.Attempt) bool {
+	_, _, err := d.Backends.Backend(ctx, svc, attempt)
+	return errors.Is(err, upstream.ErrTunnelLost)
+}
+
 // ForwardCancel implements lifecycle.DispatchActivities: CancelTask upstream on the attempt's upstream
 // task, returning the upstream's answer (a canceled status is logged by the running dispatch, or by the
 // workflow through write_terminal for an input-required task; any other state the upstream answers is not
@@ -403,12 +412,18 @@ const forwardCancelFullFor = 20 * time.Second
 // content never crosses history); the service's message is logged here, on the replica.
 //
 // A tunnel attempt's cancel goes inside the tunnel the node opened (spec §8): the workflow schedules it on
-// kontra-ctl-<the session's replica>, and the backend is the attempt's session on this replica. When this
-// replica does not hold the session, or it no longer serves the service, or it is lost during the call,
-// the answer is lifecycle.CancelTunnelLost (no stream opened in the first two cases), on which the
-// workflow fails the task tunnel_lost (spec §8's row "exists, session gone"). A node's full answer
-// (nothing forwarded) is made again with backoff for up to forwardCancelFullFor; past it, the cancel was not
-// delivered and the task continues, as for an unreachable service.
+// kontra-ctl-<the session's replica>, and the backend is the attempt's session on this replica. The answer
+// is lifecycle.CancelTunnelLost, on which the workflow fails the task tunnel_lost (spec §8's row "exists,
+// session gone"), only when the session is gone: this replica does not hold it, or it no longer serves the
+// service (Backends answers upstream.ErrTunnelLost; no stream is opened), or the exchange ended without a
+// complete response and the session is found gone right after it (sessionGone). Otherwise the session is up
+// (§8's row "session up") and anything but the service's own answer means the cancel was not delivered: an
+// error, on which the workflow answers that the service could not be reached and the task continues, as
+// for an unreachable direct service. That covers a response the node wrote itself (Kontra-Node:
+// target_unreachable, not_hosted, kind_mismatch, any other value; tunnel.md §8.2), an exchange cut while the
+// session stays held, and a node's full answer (nothing forwarded), which is first made again with backoff
+// for up to forwardCancelFullFor. An attempt that is not a tunnel's has no session to be gone: Backends'
+// ErrTunnelLost for it (a direct attempt whose service became a tunnel service) is not delivered either.
 func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef) (lifecycle.ForwardCancelResult, error) {
 	taskUUID, err := ids.ParseTaskID(in.TaskID)
 	if err != nil {
@@ -433,12 +448,16 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 	if attempt.TunnelSession != nil {
 		log = log.With(obs.KeyTunnelSession, attempt.TunnelSession.String())
 	}
+	tunnelled := attempt.Backend == store.BackendTunnel
 	backend, info, err := d.Backends.Backend(ctx, svc, attempt)
-	if errors.Is(err, upstream.ErrTunnelLost) {
+	switch {
+	case errors.Is(err, upstream.ErrTunnelLost) && tunnelled:
 		log.Info("forward_cancel: the attempt's tunnel session is gone; nothing to forward", "error", err)
 		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelTunnelLost}, nil
-	}
-	if err != nil {
+	case errors.Is(err, upstream.ErrTunnelLost):
+		log.Info("forward_cancel: the service is now a tunnel service; the attempt's upstream task cannot be reached", "backend", string(attempt.Backend), "error", err)
+		return lifecycle.ForwardCancelResult{}, fmt.Errorf("relay: forward_cancel of task %s: the service no longer has the backend its attempt was placed on", in.TaskID)
+	case err != nil:
 		return lifecycle.ForwardCancelResult{}, err
 	}
 	client, err := upstream.NewClient(ctx, backend, info, nil)
@@ -472,18 +491,22 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 		}
 		wait = min(2*wait, 5*time.Second)
 	}
-	if f.Class == upstream.ClassTunnelLost {
+	if f.Class == upstream.ClassTunnelLost && tunnelled && ex.Node() == "" && d.sessionGone(ctx, svc, attempt) {
 		log.Info("forward_cancel: the tunnel session was lost", "error", f.Message)
 		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelTunnelLost}, nil
 	}
 	var a2aErr *a2a.Error
 	if f.Class != upstream.Protocol || !errors.As(err, &a2aErr) {
-		// Not an answer from the service (unreachable, throttled, over a limit, malformed): the cancel was
-		// not delivered, and the workflow decides (§8).
+		// Not an answer from the service (unreachable, throttled, over a limit, malformed, a node's own
+		// answer or a cut exchange on a session that is still up): the cancel was not delivered, and the
+		// workflow decides (§8).
 		log.Info("forward_cancel got no answer from the service", "class", int(f.Class), "error", f.Message)
-		msg := f.Message // the gate's words: unreachable, HTTP status, over a limit
-		if f.Class == upstream.Protocol {
+		msg := f.Message // the gate's words: unreachable, HTTP status, over a limit, the node's reason
+		switch {
+		case f.Class == upstream.Protocol:
 			msg = "the service sent a malformed answer"
+		case f.Class == upstream.ClassTunnelLost && ex.Node() == "":
+			msg = "the exchange through the tunnel ended without a complete response; the session is still up"
 		}
 		return lifecycle.ForwardCancelResult{}, fmt.Errorf("relay: forward_cancel of task %s: %s", in.TaskID, msg)
 	}
