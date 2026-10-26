@@ -2,9 +2,17 @@ package tunnel
 
 import (
 	"crypto/ecdh"
+	"crypto/hpke"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
-
-	"kontra.sh/kontra/internal/unimpl"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"hash"
+	"strings"
 )
 
 // Proof of possession (§4.1, D30): the gate encapsulates to the node's X25519 key with HPKE (RFC 9180, Go
@@ -20,6 +28,10 @@ const (
 	// ProofSize is the exported length; NonceSize the random bytes of either nonce.
 	ProofSize = 32
 	NonceSize = 32
+	// EncSize is the length of an HPKE encapsulated key of DHKEM(X25519): an X25519 public key.
+	EncSize = 32
+	// ChannelBindingSize is the length of the RFC 9266 tls-exporter value.
+	ChannelBindingSize = 32
 )
 
 // Transcript is what the proof binds (§4.1):
@@ -39,34 +51,149 @@ type Transcript struct {
 }
 
 // Info is the transcript's info hash.
+//
+// Every field is far below lp's 65,535-byte bound: the origin and the session come from handshake
+// messages of at most MaxHandshakeMessage bytes, and the rest are hashes, nonces, exporters and a cb
+// name. A longer field is a programming error and panics rather than being framed ambiguously.
 func (t Transcript) Info() []byte {
-	panic(unimpl.Error("tunnel.Transcript.Info", "WP-01"))
+	h := sha256.New()
+	h.Write([]byte(TranscriptLabel))
+	h.Write([]byte{0})
+	lp(h, []byte(t.Origin))
+	lp(h, []byte(t.CB))
+	lp(h, t.CBValue)
+	hello := sha256.Sum256(t.Hello)
+	lp(h, hello[:])
+	lp(h, []byte(t.Session))
+	lp(h, t.GateNonce)
+	return h.Sum(nil)
+}
+
+// lp writes uint16_be(len(x)) || x.
+func lp(h hash.Hash, x []byte) {
+	if len(x) > 0xffff {
+		panic(fmt.Sprintf("tunnel: transcript field of %d bytes", len(x)))
+	}
+	var n [2]byte
+	binary.BigEndian.PutUint16(n[:], uint16(len(x)))
+	h.Write(n[:])
+	h.Write(x)
 }
 
 // Encapsulate is the gate's half: HPKE SetupBaseS to recipient with info, and the export under label. It
-// returns enc for the challenge and the proof the gate expects.
+// returns enc for the challenge and the proof the gate expects. A recipient that is not an X25519 key, or
+// is a low-order point, is an error.
 func Encapsulate(recipient *ecdh.PublicKey, info []byte, label string) (enc, want []byte, err error) {
-	return nil, nil, unimpl.Error("tunnel.Encapsulate", "WP-01")
+	if recipient == nil || recipient.Curve() != ecdh.X25519() {
+		return nil, nil, errors.New("tunnel: encapsulate: not an X25519 public key")
+	}
+	pk, err := hpke.NewDHKEMPublicKey(recipient)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tunnel: encapsulate: %w", err)
+	}
+	enc, s, err := hpke.NewSender(pk, hpke.HKDFSHA256(), hpke.ExportOnly(), info)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tunnel: encapsulate: %w", err)
+	}
+	want, err = s.Export(label, ProofSize)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tunnel: encapsulate: %w", err)
+	}
+	return enc, want, nil
 }
 
 // Prove is the node's half: HPKE SetupBaseR with the identity's private key; a low-order enc is an error.
 func Prove(enc []byte, identity *ecdh.PrivateKey, info []byte, label string) ([]byte, error) {
-	return nil, unimpl.Error("tunnel.Prove", "WP-01")
+	if identity == nil || identity.Curve() != ecdh.X25519() {
+		return nil, errors.New("tunnel: prove: not an X25519 private key")
+	}
+	if len(enc) != EncSize {
+		return nil, fmt.Errorf("tunnel: prove: enc of %d bytes, want %d", len(enc), EncSize)
+	}
+	sk, err := hpke.NewDHKEMPrivateKey(identity)
+	if err != nil {
+		return nil, fmt.Errorf("tunnel: prove: %w", err)
+	}
+	r, err := hpke.NewRecipient(enc, sk, hpke.HKDFSHA256(), hpke.ExportOnly(), info)
+	if err != nil {
+		return nil, fmt.Errorf("tunnel: prove: %w", err)
+	}
+	proof, err := r.Export(label, ProofSize)
+	if err != nil {
+		return nil, fmt.Errorf("tunnel: prove: %w", err)
+	}
+	return proof, nil
 }
 
-// Accept compares a proof with the expected one in constant time.
+// Accept compares a proof with the expected one in constant time. Both must be ProofSize bytes: an empty
+// expectation never accepts anything.
 func Accept(proof, want []byte) bool {
-	panic(unimpl.Error("tunnel.Accept", "WP-01"))
+	if len(want) != ProofSize || len(proof) != ProofSize {
+		return false
+	}
+	return subtle.ConstantTimeCompare(proof, want) == 1
 }
 
 // ChannelBinding is the RFC 9266 tls-exporter value of a TLS connection: ExportKeyingMaterial(
 // ExporterLabel, nil, 32). The gate reads it from the upgrade request's TLS state, the node from the
 // dial's response (§4.1); both are equal only on one TLS leg.
-func ChannelBinding(cs *tls.ConnectionState) ([]byte, error) {
-	return nil, unimpl.Error("tunnel.ChannelBinding", "WP-01")
+//
+// It is an error, never an empty value, when there is no completed TLS handshake or the connection
+// cannot export (TLS 1.2 without Extended Master Secret, renegotiation enabled): a gate configured for
+// tls-exporter must then refuse the connection rather than fall back to none.
+func ChannelBinding(cs *tls.ConnectionState) (cb []byte, err error) {
+	if cs == nil || !cs.HandshakeComplete {
+		return nil, errors.New("tunnel: channel binding: no completed TLS handshake")
+	}
+	defer func() {
+		// A ConnectionState not obtained from a tls.Conn has no exporter and panics when asked.
+		if r := recover(); r != nil {
+			cb, err = nil, errors.New("tunnel: channel binding: the connection state has no exporter")
+		}
+	}()
+	v, err := cs.ExportKeyingMaterial(ExporterLabel, nil, ChannelBindingSize)
+	if err != nil {
+		return nil, fmt.Errorf("tunnel: channel binding: %w", err)
+	}
+	if len(v) != ChannelBindingSize {
+		return nil, fmt.Errorf("tunnel: channel binding: exporter of %d bytes", len(v))
+	}
+	return v, nil
 }
 
 // NewNonce returns NonceSize random bytes and their base64url form.
 func NewNonce() (raw []byte, encoded string, err error) {
-	return nil, "", unimpl.Error("tunnel.NewNonce", "WP-01")
+	raw = make([]byte, NonceSize)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, "", fmt.Errorf("tunnel: nonce: %w", err)
+	}
+	return raw, EncodeBase64URL(raw), nil
+}
+
+// EncodeBase64URL is the base64url form, without padding, of nonces, enc, enc_old, proof and proof_old.
+func EncodeBase64URL(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+// DecodeBase64URL decodes a base64url field strictly; padding is tolerated, nothing else (encoding/base64
+// would skip line breaks).
+func DecodeBase64URL(s string) ([]byte, error) {
+	if strings.ContainsAny(s, "\r\n") {
+		return nil, errors.New("base64url: line break")
+	}
+	enc := base64.RawURLEncoding.Strict()
+	if strings.HasSuffix(s, "=") {
+		enc = base64.URLEncoding.Strict()
+	}
+	return enc.DecodeString(s)
+}
+
+// decodeSized decodes a base64url field of exactly n bytes.
+func decodeSized(field, s string, n int) ([]byte, error) {
+	b, err := DecodeBase64URL(s)
+	if err != nil {
+		return nil, fmt.Errorf("%s: not base64url", field)
+	}
+	if len(b) != n {
+		return nil, fmt.Errorf("%s: %d bytes, want %d", field, len(b), n)
+	}
+	return b, nil
 }

@@ -25,7 +25,8 @@ const (
 	// Subprotocol is the one Sec-WebSocket-Protocol value; the gate refuses an upgrade without it (400)
 	// and the node closes a connection on which the gate did not select it.
 	Subprotocol = "kontra-tunnel.v1"
-	// Version is the "v" of every handshake message, preamble and control line.
+	// Version is the "v" of every handshake message and stream preamble (§4, §8.1). Control lines carry
+	// none (§13).
 	Version = 1
 	// DefaultGate is `--gate`'s default (§3).
 	DefaultGate = "https://gateway.kontra.sh"

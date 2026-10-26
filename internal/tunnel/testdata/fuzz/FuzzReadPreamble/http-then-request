@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"v\":1,\"op\":\"http\",\"service\":\"hello\",\"kind\":\"a2a\",\"task\":\"t\",\"context\":\"c\"}\nPOST /rpc HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}")

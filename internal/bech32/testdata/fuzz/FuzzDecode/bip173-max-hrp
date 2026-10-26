@@ -1,0 +1,2 @@
+go test fuzz v1
+string("an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1tt5tgs")

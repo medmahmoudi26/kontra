@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"t\":\"error\",\"v\":1,\"code\":\"from_v9\",\"message\":\"m\"}")

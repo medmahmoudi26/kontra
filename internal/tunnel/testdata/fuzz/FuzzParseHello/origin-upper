@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"t\":\"hello\",\"v\":1,\"origin\":\"https://Gate.example\",\"kid\":\"k1_ofzgayjauurj5m6yd73yrukwcw\",\"recipient\":\"age1q4fswtsuh49t6q030nkj696mjz2ss022uta9x2cm4vkx254vs3asl09jlq\",\"name\":\"build-box-3\",\"nonce\":\"Ok4gHJILfRFC6W8sa4zUUBMvNMlszjhJRIutFsaqyrI\",\"services\":[{\"kind\":\"a2a\",\"name\":\"hello\"}],\"rotate_from\":{\"kid\":\"k1_75i5ictpcsdyyd2e74wxxhnaq2\",\"recipient\":\"age1ja885gtstlmkpn2pnj7g9s57xhwurngnqcf3zkmmswv35wg4wvrsv4m3yc\"},\"agent\":\"kontra/4.0.0 (linux/amd64)\"}")

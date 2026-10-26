@@ -1,0 +1,32 @@
+{
+  "about": "Computed independently of the Go code (Python: hashlib, hmac, cryptography's raw X25519, RFC 9180 written out) by transcript-vector.py in this directory (its RFC 9180 code reproduces RFC 9180 A.7 exports); spec/tunnel.md \u00a72.2, \u00a74.1.",
+  "node_scalar_hex": "bf6c857df3ca0b73821398a83abd0d9a21f92c26c8e04d718b87129fdf261673",
+  "node_secret_key": "AGE-SECRET-KEY-1HAKG2L0NEG9H8QSNNZ5R40GDNGSLJTPXERSY6UVTSUFFLHEXZEES7RZLD7",
+  "recipient": "age1q4fswtsuh49t6q030nkj696mjz2ss022uta9x2cm4vkx254vs3asl09jlq",
+  "kid": "k1_ofzgayjauurj5m6yd73yrukwcw",
+  "old_scalar_hex": "e00c0f82a87ae29b04406287feb2ea91a012788dd0bb8410898947b99af64648",
+  "old_recipient": "age1ja885gtstlmkpn2pnj7g9s57xhwurngnqcf3zkmmswv35wg4wvrsv4m3yc",
+  "old_kid": "k1_75i5ictpcsdyyd2e74wxxhnaq2",
+  "origin": "https://gate.example",
+  "hello": "{\"t\":\"hello\",\"v\":1,\"origin\":\"https://gate.example\",\"kid\":\"k1_ofzgayjauurj5m6yd73yrukwcw\",\"recipient\":\"age1q4fswtsuh49t6q030nkj696mjz2ss022uta9x2cm4vkx254vs3asl09jlq\",\"name\":\"build-box-3\",\"nonce\":\"Ok4gHJILfRFC6W8sa4zUUBMvNMlszjhJRIutFsaqyrI\",\"services\":[{\"kind\":\"a2a\",\"name\":\"hello\"}],\"rotate_from\":{\"kid\":\"k1_75i5ictpcsdyyd2e74wxxhnaq2\",\"recipient\":\"age1ja885gtstlmkpn2pnj7g9s57xhwurngnqcf3zkmmswv35wg4wvrsv4m3yc\"},\"agent\":\"kontra/4.0.0 (linux/amd64)\"}",
+  "session": "0192f0b4-0000-7000-8000-000000000001",
+  "gate_nonce_hex": "06791521b86eb3e7479e9610816673bfe91003d3c559210efe24171d49cbe866",
+  "enc_hex": "99f06393a4992d6a9e90be6e5e814d479801c75f91c5669e28f1219c0e944252",
+  "enc_old_hex": "dde499ea38ea85d7f614302bb0f93d11ed2cbe2627e49c1faf673d02dc5e0948",
+  "cases": [
+    {
+      "cb": "tls-exporter",
+      "cb_value_hex": "b74f48fd555066a966c52970c007cb2d2ec9e6fa252d07eaa159ec70d07e90b1",
+      "info_hex": "8799e51379148360a3e70f164043ae4103ccec703f5862dfb6fffabfc3598f98",
+      "proof_hex": "23724e0e0212744620a14a2f90866e71c233177c3deabd54db24e3972ce871e5",
+      "proof_old_hex": "687a5f12de6171a66fd5e0d507c46f9e27776df257a919f460b76e77bc9c37d2"
+    },
+    {
+      "cb": "none",
+      "cb_value_hex": "",
+      "info_hex": "953a832ed7f64aaca0fe92ee2801b8cb1b62decd9815ac5e6eea2295743da6cc",
+      "proof_hex": "dc9bfdc03a6dbb9f4eee534f0adf37f28821693033608807d007f6060f76c48a",
+      "proof_old_hex": "946f43f6c96a2c759cdbab7f13c2ced199b5d33fe7630b9892a785a3d45698ed"
+    }
+  ]
+}
