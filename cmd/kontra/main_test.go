@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/hashicorp/yamux"
 
@@ -187,5 +188,46 @@ func TestConnectExitsOnANonRetryableCode(t *testing.T) {
 	}
 	if code != 1 || !strings.Contains(stderr.String(), "bad_origin") {
 		t.Fatalf("connect = %d, stderr %q", code, stderr.String())
+	}
+}
+
+// refuseHostile refuses every hello service_denied with a message carrying terminal escape sequences: an
+// OSC 52 clipboard write, a screen clear and a bidi override.
+type refuseHostile struct{}
+
+func (refuseHostile) Admit(context.Context, enroll.Request) (*enroll.Decision, error) {
+	return nil, tunnel.Refuse(tunnel.CodeServiceDenied, "denied\x1b]52;c;cm0gLXJmIH4K\x07\x1b[2J\u202etxt.exe")
+}
+
+// What a gate says reaches the operator's terminal without its escape sequences (M2 review, security-5): a
+// refusal's message, printed as kontra connect's final error, has its control characters escaped, as the
+// logs' quoted values do.
+func TestConnectPrintsNoGateEscapes(t *testing.T) {
+	isolate(t)
+	var h http.Handler
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r) }))
+	defer srv.Close()
+	gate, err := tunnelgate.NewHandler(tunnelgate.HandlerConfig{
+		PublicURL: srv.URL, ChannelBinding: tunnel.CBNone, ReplicaID: "r", Admitter: refuseHostile{},
+		Registry: noSink{}, Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = gate
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	code := run(ctx, []string{"connect", "--gate", srv.URL, "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "service_denied") {
+		t.Fatalf("connect = %d, stderr %q", code, stderr.String())
+	}
+	for name, out := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String()} {
+		if i := strings.IndexFunc(out, func(r rune) bool { return r != '\n' && !unicode.IsGraphic(r) }); i >= 0 {
+			t.Fatalf("%s carries %q from the gate: %q", name, out[i:i+1], out)
+		}
+	}
+	if !strings.Contains(stderr.String(), `denied\x1b]52;c;cm0gLXJmIH4K\a\x1b[2J\u202etxt.exe`) {
+		t.Fatalf("the refusal's message is not shown escaped:\n%s", stderr.String())
 	}
 }

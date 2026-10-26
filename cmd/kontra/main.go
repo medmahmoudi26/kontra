@@ -20,6 +20,7 @@ import (
 
 	"kontra.sh/kontra/internal/node"
 	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/version"
 )
 
@@ -78,11 +79,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprint(stdout, usage)
 			return 0
 		case errors.As(err, &uerr):
-			fmt.Fprintln(stderr, "kontra connect:", err)
+			fmt.Fprintln(stderr, "kontra connect:", tunnel.Printable(err.Error()))
 			fmt.Fprintln(stderr, "(kontra --help for the flags)")
 			return 2
 		default:
-			fmt.Fprintln(stderr, "kontra connect:", err)
+			// A refusal carries the gate's words: never an escape sequence on the operator's terminal.
+			fmt.Fprintln(stderr, "kontra connect:", tunnel.Printable(err.Error()))
 			return 1
 		}
 	case "-h", "--help", "help":

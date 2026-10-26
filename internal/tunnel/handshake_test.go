@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"filippo.io/age"
 )
@@ -528,6 +529,65 @@ func TestParseOutcomeRefusals(t *testing.T) {
 	var he *HandshakeError
 	if !errors.As(err, &he) || he.Code != "overloaded" || !he.Code.Retryable() {
 		t.Fatalf("unknown code: %v", err)
+	}
+}
+
+// What a gate writes and the node prints on the operator's terminal carries no escape sequence (M2 review,
+// security-5): a welcome whose tenant, service kind, name or URL is not of the shape the gate writes is the
+// node's own error, never printed, and a refusal's code and message print with every control character, and
+// every invisible formatting character such as a bidi override, escaped.
+func TestOutcomeCarriesNoTerminalEscapes(t *testing.T) {
+	welcome := func(tenant string, svc WelcomeService) []byte {
+		t.Helper()
+		b, err := Encode(&Welcome{Session: "0192f0b4-0000-7000-8000-000000000001", Replica: "gate-a", PingS: 20, Tenant: tenant,
+			Services: []WelcomeService{svc}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	good := WelcomeService{Kind: KindA2A, Name: "hello", URL: "https://gate.team.internal/agents/acme/hello"}
+	if _, err := ParseOutcome(welcome("acme", good)); err != nil {
+		t.Fatalf("a welcome of the gate's shape: %v", err)
+	}
+	if _, err := ParseOutcome(welcome("", good)); err != nil {
+		t.Fatalf("a welcome without a tenant: %v", err)
+	}
+	osc52 := "\x1b]52;c;ZWNobyBvd25lZA==\x07"
+	for name, b := range map[string][]byte{
+		"an escape in the tenant":      welcome("acme"+osc52, good),
+		"an uppercase tenant":          welcome("Acme", good),
+		"an escape in the URL":         welcome("acme", WelcomeService{Kind: KindA2A, Name: "hello", URL: "https://gate.example/agents/hello" + osc52}),
+		"a bidi override in the URL":   welcome("acme", WelcomeService{Kind: KindA2A, Name: "hello", URL: "https://gate.example/\u202ehello"}),
+		"a URL that is not http(s)":    welcome("acme", WelcomeService{Kind: KindA2A, Name: "hello", URL: "javascript:alert(1)"}),
+		"a URL without a host":         welcome("acme", WelcomeService{Kind: KindA2A, Name: "hello", URL: "https:///agents/hello"}),
+		"an escape in the name":        welcome("acme", WelcomeService{Kind: KindA2A, Name: "hello" + osc52, URL: good.URL}),
+		"a kind that is not a2a / mcp": welcome("acme", WelcomeService{Kind: "a2a\x1b[2J", Name: "hello", URL: good.URL}),
+	} {
+		w, err := ParseOutcome(b)
+		var he *HandshakeError
+		if err == nil || errors.As(err, &he) {
+			t.Errorf("%s: ParseOutcome(%s) = %+v, %v; want the node's own error", name, b, w, err)
+		}
+	}
+
+	_, err := ParseOutcome([]byte(`{"t":"error","v":1,"code":"bad_origin\u001b[31m","message":"go to \u001b]8;;https://evil.example\u0007here\u001b]8;;\u0007 \u202eexe.\nkontra connect: connected"}`))
+	var he *HandshakeError
+	if !errors.As(err, &he) {
+		t.Fatalf("a refusal: %v", err)
+	}
+	msg := err.Error()
+	if strings.ContainsFunc(msg, func(r rune) bool { return !unicode.IsGraphic(r) }) {
+		t.Fatalf("the refusal prints as %q: a character that is not graphic", msg)
+	}
+	if !strings.Contains(msg, `\x1b]8;;https://evil.example\a`) || !strings.Contains(msg, `\u202e`) || !strings.Contains(msg, `\n`) {
+		t.Fatalf("the refusal prints as %q, want its escapes visible", msg)
+	}
+	if got := Printable("a plain refusal: origin \"https://gate.example\" is not this gate's"); got != "a plain refusal: origin \"https://gate.example\" is not this gate's" {
+		t.Fatalf("Printable changed a printable message: %q", got)
+	}
+	if got := Printable("bad \xff byte"); got != `bad \xff byte` {
+		t.Fatalf("Printable of an invalid byte: %q", got)
 	}
 }
 

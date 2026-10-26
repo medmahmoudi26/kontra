@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -185,7 +187,36 @@ type HandshakeError struct {
 	Message string
 }
 
-func (e *HandshakeError) Error() string { return fmt.Sprintf("tunnel: %s: %s", e.Code, e.Message) }
+// Error is the refusal for a log or the operator's terminal: the code and the message are the gate's
+// words, so they print through Printable (M2 review, security-5).
+func (e *HandshakeError) Error() string {
+	return fmt.Sprintf("tunnel: %s: %s", Printable(string(e.Code)), Printable(e.Message))
+}
+
+// Printable is s with every rune that is not graphic written as its Go escape (\x1b, \a, \n, \u202e), and
+// every byte that is not UTF-8 as \xNN: text a gate chose (a refusal's message, a close reason), printed on
+// the operator's terminal without the escape sequences it could carry (an OSC 52 clipboard write, a screen
+// clear, a bidi override; M2 review, security-5). Graphic text, spaces and quotes included, is unchanged.
+func Printable(s string) string {
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsGraphic(r) }) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, w := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && w == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case unicode.IsGraphic(r):
+			b.WriteRune(r)
+		default:
+			q := strconv.QuoteRuneToGraphic(r)
+			b.WriteString(q[1 : len(q)-1])
+		}
+		i += w
+	}
+	return b.String()
+}
 
 // Refuse returns a HandshakeError with a formatted message.
 func Refuse(code Code, format string, args ...any) *HandshakeError {
@@ -515,6 +546,9 @@ func ParseOutcome(b []byte) (*Welcome, error) {
 		if w.PingS < 1 {
 			return nil, fmt.Errorf("tunnel: welcome: ping_s %d", w.PingS)
 		}
+		if err := checkWelcome(&w); err != nil {
+			return nil, fmt.Errorf("tunnel: welcome: %w", err)
+		}
 		return &w, nil
 	case MsgError:
 		if err := open(b, MsgError); err != nil {
@@ -531,6 +565,47 @@ func ParseOutcome(b []byte) (*Welcome, error) {
 	default:
 		return nil, fmt.Errorf("tunnel: outcome: t %q, want %s or %s", e.T, MsgWelcome, MsgError)
 	}
+}
+
+// maxWelcomeURL bounds a welcome service's URL.
+const maxWelcomeURL = 2048
+
+// checkWelcome accepts the welcome's text of the shape the gate writes, which the node prints on the
+// operator's terminal (M2 review, security-5): a tenant that is empty or a tenant name (relay.md §2.1), a
+// replica id of graphic characters, and services of kind a2a or mcp, a service name, and an http(s) URL with
+// a host, in printable ASCII ({public_url}/agents/[{tenant}/]{name}).
+func checkWelcome(w *Welcome) error {
+	if w.Tenant != "" && !serviceNameRE.MatchString(w.Tenant) {
+		return fmt.Errorf("tenant %s is not a tenant name", strconv.QuoteToASCII(w.Tenant))
+	}
+	if Printable(w.Replica) != w.Replica || len(w.Replica) > 256 {
+		return fmt.Errorf("replica %s", strconv.QuoteToASCII(w.Replica))
+	}
+	for _, sv := range w.Services {
+		switch {
+		case sv.Kind != KindA2A && sv.Kind != KindMCP:
+			return fmt.Errorf("service kind %s", strconv.QuoteToASCII(sv.Kind))
+		case !serviceNameRE.MatchString(sv.Name):
+			return fmt.Errorf("service name %s", strconv.QuoteToASCII(sv.Name))
+		}
+		if err := checkWelcomeURL(sv.URL); err != nil {
+			return fmt.Errorf("service %s: %w", sv.Name, err)
+		}
+	}
+	return nil
+}
+
+// checkWelcomeURL accepts an absolute http(s) URL with a host, written in printable ASCII.
+func checkWelcomeURL(s string) error {
+	bad := len(s) == 0 || len(s) > maxWelcomeURL || strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r > '~' })
+	if !bad {
+		u, err := url.Parse(s)
+		bad = err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil
+	}
+	if bad {
+		return fmt.Errorf("url %s is not an http(s) URL in printable ASCII", strconv.QuoteToASCII(s))
+	}
+	return nil
 }
 
 // checkSession accepts a session id in the canonical UUID form the gate writes (tunnels.session_id).

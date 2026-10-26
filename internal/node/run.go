@@ -562,14 +562,18 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	return s, nil
 }
 
-// printWelcome writes the welcome's services and their gate URLs (the CLI's stdout).
+// printWelcome writes the welcome's services and their gate URLs (the CLI's stdout). The gate's text was
+// checked by tunnel.ParseOutcome (a tenant and service names, http(s) URLs in printable ASCII), and prints
+// through tunnel.Printable besides, so that nothing a gate writes reaches the terminal as an escape sequence
+// (M2 review, security-5).
 func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
-	fmt.Fprintf(n.out, "kontra connect: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), w.Tenant, w.Session)
+	p := tunnel.Printable
+	fmt.Fprintf(n.out, "kontra connect: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), p(w.Tenant), p(w.Session))
 	if len(w.Services) == 0 {
 		fmt.Fprintln(n.out, "  no service is served on this session")
 	}
 	for _, s := range w.Services {
-		fmt.Fprintf(n.out, "  %s %s  %s\n", s.Kind, s.Name, s.URL)
+		fmt.Fprintf(n.out, "  %s %s  %s\n", p(s.Kind), p(s.Name), p(s.URL))
 	}
 }
 
