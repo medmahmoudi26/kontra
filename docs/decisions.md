@@ -1673,7 +1673,10 @@ ignores the control stream (`key_scope`: the gate never relies on the node honou
 fixed admission (`sidecar_not_a_proxy`, no Postgres or Temporal). `sidecar_not_a_proxy` checks confinement under the
 root base (D123), and reads the node's own sockets through `/proc/<pid>/fd`, since `/proc/<pid>/net/tcp` lists the
 whole network namespace. The helloworld test runs the a2a-samples seller at `6603ba3` unmodified and is skipped,
-saying why, only without `uv`, the pinned checkout (`$KONTRA_A2A_SAMPLES` or a clone) or a free `127.0.0.1:9999`.
+saying why, only without `uv`, the pinned checkout (`$KONTRA_A2A_SAMPLES` or a clone) or a free `127.0.0.1:9999`;
+with `KONTRA_REQUIRE_HELLOWORLD` set it fails instead, as do `run.sh`'s guards (examples/sellers/helloworld), and
+CI's e2e and integration jobs set it, install `uv` and fetch the pinned checkout first, so that CI never passes
+without running them (M2 review; `internal/ci` `TestHelloworldRunsInCI`).
 Only the `6603ba3` seller is built (WP-07), so D122 and `card_compat`'s stand-in for the 0.2.5 seller stay as they
 are. `anon_limits`, `local_rebinding`, `stdio_roots` and the MCP tests come with M3 and M4 (`test/e2e`).
 

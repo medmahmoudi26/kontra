@@ -1,7 +1,8 @@
 # The end-to-end tests (`make test-e2e`, test/e2e; spec/relay.md §16, D80; spec/tunnel.md §16, D154): two gate
 # replicas as processes, a Temporal development server from the pinned CLI, Postgres 17, the tunnel tests'
-# `kontra connect` nodes, and the a2a-samples helloworld seller, which TestHelloworldTunnel clones at its pinned
-# commit and runs with uv (examples/sellers/helloworld/run.sh; without uv the test is skipped). They take
+# `kontra connect` nodes, and the a2a-samples helloworld seller, fetched at its pinned commit into
+# KONTRA_A2A_SAMPLES and run by TestHelloworldTunnel with uv (examples/sellers/helloworld/run.sh;
+# KONTRA_REQUIRE_HELLOWORLD makes a missing prerequisite fail that test instead of skipping it). They take
 # about a quarter of an hour. They run nightly, on demand, and on every pull request that changes the gate's
 # or the node's code, its migrations, these tests or the helloworld example: a pull_request workflow runs from
 # the pull request's own branch, so the M1 and M2 gates (relay_resume, replica_kill, tunnel_kill, …) run
@@ -42,6 +43,8 @@ jobs:
           --health-cmd "pg_isready -U kontra" --health-interval 2s --health-timeout 2s --health-retries 30
     env:
       KONTRA_TEST_PG: postgres://kontra:kontra@localhost:5432/kontra?sslmode=disable
+      KONTRA_REQUIRE_HELLOWORLD: "1"
+      A2A_SAMPLES_PIN: 6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3
       TEMPORAL_CLI_VERSION: "1.9.1"
       TEMPORAL_CLI_ARCHIVE_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
       TEMPORAL_CLI_BINARY_SHA256: 712217694cac9f786a72d4b6c876cd15f3dcf1bf31434d9fed6af25242a327a0
@@ -54,6 +57,17 @@ jobs:
         with:
           version: "0.11.7"
           python-version: "3.12"
+      # The a2a-samples checkout at the commit examples/sellers/helloworld/run.sh pins (D154). With
+      # KONTRA_REQUIRE_HELLOWORLD the helloworld tests fail, instead of skipping, without it, uv or a free
+      # 127.0.0.1:9999 (M2 review): hello-world unmodified behind the tunnel is a hard rule of M2.
+      - name: Fetch a2a-samples at the pinned commit
+        run: |
+          dir="$RUNNER_TEMP/a2a-samples"
+          git init -q "$dir"
+          git -C "$dir" fetch -q --depth 1 https://github.com/a2aproject/a2a-samples "$A2A_SAMPLES_PIN"
+          git -C "$dir" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$A2A_SAMPLES_PIN"
+          echo "KONTRA_A2A_SAMPLES=$dir" >> "$GITHUB_ENV"
       - name: Install the pinned Temporal CLI
         run: |
           archive="temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"

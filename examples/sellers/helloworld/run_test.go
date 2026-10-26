@@ -33,6 +33,20 @@ const sample = "samples/python/agents/helloworld"
 // harness reads the same variable).
 const samplesEnv = "KONTRA_A2A_SAMPLES"
 
+// requireEnv, set (CI's integration job sets it), turns these tests' skips (no checkout, no uv, a tool or
+// 127.0.0.1:9999 missing) into failures, so that run.sh's guards cannot pass by not running (M2 review,
+// robustness-2). The e2e harness reads it too.
+const requireEnv = "KONTRA_REQUIRE_HELLOWORLD"
+
+// skipOrFail skips the test saying why, or fails it when requireEnv is set.
+func skipOrFail(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv(requireEnv) != "" {
+		t.Fatalf(format+" (%s is set: the test must run)", append(args, requireEnv)...)
+	}
+	t.Skipf(format, args...)
+}
+
 // tools is what run.sh needs besides uv; toolPath links them alone into a directory used as PATH.
 var tools = []string{"bash", "env", "dirname", "git", "mkdir", "mv", "rm"}
 
@@ -42,7 +56,7 @@ func toolPath(t *testing.T) string {
 	for _, name := range tools {
 		p, err := exec.LookPath(name)
 		if err != nil {
-			t.Skipf("%s not found: %v", name, err)
+			skipOrFail(t, "%s not found: %v", name, err)
 		}
 		if err := os.Symlink(p, filepath.Join(dir, name)); err != nil {
 			t.Fatal(err)
@@ -85,22 +99,23 @@ func script(t *testing.T, env ...string) (int, string) {
 	return 0, ""
 }
 
-// holdPort9999 listens on 127.0.0.1:9999 for the test, or skips it when something else already does.
+// holdPort9999 listens on 127.0.0.1:9999 for the test, or skips it (fails it under requireEnv) when something
+// else already does.
 func holdPort9999(t *testing.T) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:9999")
 	if err != nil {
-		t.Skipf("127.0.0.1:9999 is in use by something else: %v", err)
+		skipOrFail(t, "127.0.0.1:9999 is in use by something else: %v", err)
 	}
 	t.Cleanup(func() { l.Close() })
 }
 
-// needPort9999 skips the test unless 127.0.0.1:9999 is free.
+// needPort9999 skips the test (fails it under requireEnv) unless 127.0.0.1:9999 is free.
 func needPort9999(t *testing.T) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:9999")
 	if err != nil {
-		t.Skipf("127.0.0.1:9999 is in use: %v", err)
+		skipOrFail(t, "127.0.0.1:9999 is in use: %v", err)
 	}
 	l.Close()
 }
@@ -194,12 +209,12 @@ func TestRunShRefusesAnotherCommit(t *testing.T) {
 	}
 }
 
-// pinnedCheckout returns the checkout named by KONTRA_A2A_SAMPLES, or skips.
+// pinnedCheckout returns the checkout named by KONTRA_A2A_SAMPLES, or skips (fails under requireEnv).
 func pinnedCheckout(t *testing.T) string {
 	t.Helper()
 	dir := os.Getenv(samplesEnv)
 	if dir == "" {
-		t.Skipf("%s is not set (an a2a-samples checkout at %s)", samplesEnv, pin)
+		skipOrFail(t, "%s is not set (an a2a-samples checkout at %s)", samplesEnv, pin)
 	}
 	if head := git(t, dir, "rev-parse", "HEAD"); head != pin {
 		t.Fatalf("%s=%s is at %s, want %s", samplesEnv, dir, head, pin)
@@ -330,7 +345,7 @@ func TestRunShIgnoresSurroundingVirtualenvs(t *testing.T) {
 	src := pinnedCheckout(t)
 	uv, err := exec.LookPath("uv")
 	if err != nil {
-		t.Skip("uv not found")
+		skipOrFail(t, "uv not found")
 	}
 	needPort9999(t)
 
@@ -399,7 +414,7 @@ func TestRunShStartsTheUnmodifiedSample(t *testing.T) {
 	}
 	dir := pinnedCheckout(t)
 	if _, err := exec.LookPath("uv"); err != nil {
-		t.Skip("uv not found")
+		skipOrFail(t, "uv not found")
 	}
 	needPort9999(t)
 

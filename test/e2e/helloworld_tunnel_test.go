@@ -30,6 +30,11 @@ const (
 	// SamplesEnv names an a2a-samples checkout at samplesPin; unset, the test clones that commit under
 	// TempRoot.
 	SamplesEnv = "KONTRA_A2A_SAMPLES"
+	// RequireHelloworldEnv, set (CI's e2e job sets it), turns the test's skips into failures: without uv, the
+	// checkout or a free 127.0.0.1:9999 the run would otherwise pass without the hard rule it checks, that
+	// hello-world runs unmodified behind the tunnel (M2 review, robustness-2). examples/sellers/helloworld's
+	// tests read it too.
+	RequireHelloworldEnv = "KONTRA_REQUIRE_HELLOWORLD"
 	// helloAddr is where the sample listens: its __main__.py fixes it.
 	helloAddr = "127.0.0.1:9999"
 	// helloAnswer is what the sample answers "hi" with (its artifact).
@@ -84,6 +89,15 @@ func samplesCheckout() (string, error) {
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
+
+// skipOrFail skips the test saying why, or fails it when RequireHelloworldEnv is set.
+func skipOrFail(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv(RequireHelloworldEnv) != "" {
+		t.Fatalf(format+" (%s is set: the test must run)", append(args, RequireHelloworldEnv)...)
+	}
+	t.Skipf(format, args...)
+}
 
 // sampleChanges is git status of the sample's directory, ignored and untracked files included.
 func sampleChanges(dir string) (string, error) {
@@ -158,23 +172,24 @@ func startSeller(t *testing.T, h *Harness, uv, checkout string) {
 // is still unmodified, and the node refused no preamble.
 //
 // It needs uv, the checkout ($KONTRA_A2A_SAMPLES, or a clone of the pinned commit) and a free
-// 127.0.0.1:9999; without one of them it is skipped, saying which.
+// 127.0.0.1:9999; without one of them it is skipped, saying which, or fails when $KONTRA_REQUIRE_HELLOWORLD
+// is set, as in CI.
 func TestHelloworldTunnel(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: needs Postgres, the temporal CLI, two gate replicas and the Python seller; skipped under -short")
 	}
 	uv, err := exec.LookPath("uv")
 	if err != nil {
-		t.Skip("the helloworld seller needs uv (https://docs.astral.sh/uv/), which is not on PATH")
+		skipOrFail(t, "the helloworld seller needs uv (https://docs.astral.sh/uv/), which is not on PATH")
 	}
 	if l, err := net.Listen("tcp", helloAddr); err != nil {
-		t.Skipf("%s is taken (the sample listens there and only there): %v", helloAddr, err)
+		skipOrFail(t, "%s is taken (the sample listens there and only there): %v", helloAddr, err)
 	} else {
 		l.Close()
 	}
 	checkout, err := samplesCheckout()
 	if err != nil {
-		t.Skipf("no a2a-samples checkout at %s (set %s, or let the test clone %s): %v", samplesPin[:7], SamplesEnv, samplesRepo, err)
+		skipOrFail(t, "no a2a-samples checkout at %s (set %s, or let the test clone %s): %v", samplesPin[:7], SamplesEnv, samplesRepo, err)
 	}
 	if changes, err := sampleChanges(checkout); err != nil || changes != "" {
 		t.Fatalf("the checkout %s is not the unmodified sample: %v\n%s", checkout, err, changes)

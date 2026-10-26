@@ -1,6 +1,7 @@
 package ci
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 type workflow struct {
 	On   map[string]any `yaml:"on"`
 	Jobs map[string]struct {
+		Env   map[string]any `yaml:"env"`
 		Steps []struct {
 			Uses string         `yaml:"uses"`
 			With map[string]any `yaml:"with"`
@@ -109,4 +111,54 @@ func keys(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// The helloworld seller's tests run in CI and cannot pass by skipping (M2 review, robustness-2): the e2e job
+// (TestHelloworldTunnel: hello-world unmodified behind the tunnel, a hard rule of M2) and the integration job
+// (run.sh's guards, examples/sellers/helloworld) install uv, fetch a2a-samples at the commit run.sh pins
+// into KONTRA_A2A_SAMPLES before the tests, and set KONTRA_REQUIRE_HELLOWORLD, which turns the tests' skips
+// (no uv, no checkout, 127.0.0.1:9999 taken) into failures.
+func TestHelloworldRunsInCI(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "examples", "sellers", "helloworld", "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^pin=([0-9a-f]{40})$`).FindSubmatch(b)
+	if m == nil {
+		t.Fatal("run.sh pins no a2a-samples commit")
+	}
+	pin := string(m[1])
+	ws := workflows(t)
+	for _, c := range []struct{ file, job, tests string }{
+		{"e2e.yml", "e2e", "make test-e2e"},
+		{"check.yml", "integration", "make test-integration"},
+	} {
+		j, ok := ws[c.file].Jobs[c.job]
+		if !ok {
+			t.Errorf("%s has no job %s", c.file, c.job)
+			continue
+		}
+		if fmt.Sprint(j.Env["KONTRA_REQUIRE_HELLOWORLD"]) != "1" {
+			t.Errorf("%s %s: KONTRA_REQUIRE_HELLOWORLD is %v, want 1", c.file, c.job, j.Env["KONTRA_REQUIRE_HELLOWORLD"])
+		}
+		uv, fetch, tests := -1, -1, -1
+		for i, s := range j.Steps {
+			switch {
+			case strings.HasPrefix(s.Uses, "astral-sh/setup-uv@"):
+				uv = i
+			case strings.Contains(s.Run, "https://github.com/a2aproject/a2a-samples") && strings.Contains(s.Run, "KONTRA_A2A_SAMPLES=") &&
+				strings.Contains(s.Run, "$GITHUB_ENV") && strings.Contains(s.Run, "rev-parse HEAD"):
+				fetch = i
+			case strings.Contains(s.Run, c.tests):
+				tests = i
+			}
+		}
+		if p := fmt.Sprint(j.Env["A2A_SAMPLES_PIN"]); fetch >= 0 && p != pin {
+			t.Errorf("%s %s: A2A_SAMPLES_PIN %s, want run.sh's %s", c.file, c.job, p, pin)
+		}
+		if uv < 0 || fetch < 0 || tests < 0 || uv > tests || fetch > tests {
+			t.Errorf("%s %s: setup-uv at step %d, the a2a-samples fetch at %d, %s at %d: want both before the tests",
+				c.file, c.job, uv, fetch, c.tests, tests)
+		}
+	}
 }
