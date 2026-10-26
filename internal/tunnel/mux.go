@@ -48,11 +48,14 @@ func YamuxConfig(logger *slog.Logger) *yamux.Config {
 // YamuxLogger is yamux's Logger writing through logger: yamux writes every line with one level prefix
 // ("[ERR] yamux: …", "[WARN] yamux: …"), and they all reach logger's handler at Warn, with
 // component=yamux, so logger should carry no component of its own. A nil logger discards yamux's lines.
+//
+// The lines are rate-limited per logger, so per session (LogBurst, LogRefill): a peer can make yamux log a
+// line for every 12-byte frame it sends (M2 review, security-2).
 func YamuxLogger(logger *slog.Logger) *log.Logger {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return slog.NewLogLogger(logger.With("component", "yamux").Handler(), slog.LevelWarn)
+	return slog.NewLogLogger(newLimitHandler(logger.With("component", "yamux").Handler()), slog.LevelWarn)
 }
 
 // NetConn is websocket.NetConn over binary messages, after the handshake; compression stays off (§3, §7):
@@ -62,8 +65,19 @@ func YamuxLogger(logger *slog.Logger) *log.Logger {
 // Closing it closes the WebSocket with StatusNormalClosure, and a peer's StatusNormalClosure or
 // StatusGoingAway reads as io.EOF, so yamux ends without logging "[ERR] yamux: Failed to read header"
 // (research tunnel-crypto §3.5.8). Each yamux frame is two WebSocket messages (header, then body).
+//
+// Each write has ConnectionWriteTimeout: a write still blocked then fails and closes the connection.
 func NetConn(ctx context.Context, c *websocket.Conn) net.Conn {
-	return &quietConn{Conn: websocket.NetConn(ctx, c, websocket.MessageBinary), ctx: ctx}
+	return netConn(ctx, c, ConnectionWriteTimeout)
+}
+
+// netConn is NetConn whose writes each have writeTimeout (none when it is not positive). yamux's send loop
+// is the connection's only writer, and it writes with no deadline of its own: a peer that stops reading
+// would hold it, and every frame queued behind it, until the session ends some other way. With the deadline
+// the loop fails within writeTimeout and the session closes, as yamux's own stream writes and pings give
+// up after the same time (ConnectionWriteTimeout; M2 review, security-1).
+func netConn(ctx context.Context, c *websocket.Conn, writeTimeout time.Duration) *quietConn {
+	return &quietConn{Conn: websocket.NetConn(ctx, c, websocket.MessageBinary), ctx: ctx, writeTimeout: writeTimeout}
 }
 
 // quietConn keeps the ends of a session out of yamux's error log, which takes every read error but io.EOF
@@ -74,8 +88,22 @@ func NetConn(ctx context.Context, c *websocket.Conn) net.Conn {
 //     is io.EOF, as one closed with StatusNormalClosure is. The session's owner logs its end.
 type quietConn struct {
 	net.Conn
-	ctx    context.Context
-	closed atomic.Bool
+	ctx          context.Context
+	writeTimeout time.Duration
+	closed       atomic.Bool
+}
+
+// Write writes p as one WebSocket message within writeTimeout. websocket.NetConn closes the connection
+// when a deadline passes during a write; the deadline is cleared after each write, since one that passes
+// between writes would fail the next write too.
+func (c *quietConn) Write(p []byte) (int, error) {
+	if c.writeTimeout <= 0 {
+		return c.Conn.Write(p)
+	}
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	n, err := c.Conn.Write(p)
+	_ = c.Conn.SetWriteDeadline(time.Time{})
+	return n, err
 }
 
 func (c *quietConn) Read(p []byte) (int, error) {
@@ -107,11 +135,15 @@ func ClientSession(ctx context.Context, c *websocket.Conn, logger *slog.Logger) 
 
 // ServerSessionWith is ServerSession with a configuration of the caller's (tests shorten its durations).
 // The configuration must keep yamux's keepalive off (D33), and c must have negotiated Subprotocol.
+//
+// The gate's session reads the node's frames through a ping budget (PingBurst, PingRefill): a node that
+// sends more ping SYNs ends its session (ErrPingFlood). Each write to the connection has the
+// configuration's ConnectionWriteTimeout.
 func ServerSessionWith(ctx context.Context, c *websocket.Conn, cfg *yamux.Config) (*yamux.Session, error) {
 	if err := checkMux(c, cfg); err != nil {
 		return nil, err
 	}
-	s, err := yamux.Server(NetConn(ctx, c), cfg)
+	s, err := yamux.Server(newPingGuard(netConn(ctx, c, cfg.ConnectionWriteTimeout)), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: yamux server: %w", err)
 	}
@@ -119,12 +151,13 @@ func ServerSessionWith(ctx context.Context, c *websocket.Conn, cfg *yamux.Config
 }
 
 // ClientSessionWith is ClientSession with a configuration of the caller's (tests shorten its durations).
-// The configuration must keep yamux's keepalive off (D33), and c must have negotiated Subprotocol.
+// The configuration must keep yamux's keepalive off (D33), and c must have negotiated Subprotocol. Each
+// write to the connection has the configuration's ConnectionWriteTimeout.
 func ClientSessionWith(ctx context.Context, c *websocket.Conn, cfg *yamux.Config) (*yamux.Session, error) {
 	if err := checkMux(c, cfg); err != nil {
 		return nil, err
 	}
-	s, err := yamux.Client(NetConn(ctx, c), cfg)
+	s, err := yamux.Client(netConn(ctx, c, cfg.ConnectionWriteTimeout), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: yamux client: %w", err)
 	}

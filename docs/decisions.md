@@ -1671,3 +1671,24 @@ whole network namespace. The helloworld test runs the a2a-samples seller at `660
 saying why, only without `uv`, the pinned checkout (`$KONTRA_A2A_SAMPLES` or a clone) or a free `127.0.0.1:9999`.
 Only the `6603ba3` seller is built (WP-07), so D122 and `card_compat`'s stand-in for the 0.2.5 seller stay as they
 are. `anon_limits`, `local_rebinding`, `stdio_roots` and the MCP tests come with M3 and M4 (`test/e2e`).
+
+### D155. The gate bounds a node's pings, and every write has a deadline
+
+§7 sets yamux's knobs and says `AcceptBacklog` bounds what a hostile peer can pin, but yamux v0.1.2 answers each
+ping on a goroutine of its own that waits up to `ConnectionWriteTimeout` (15 s) to queue its pong, and its send
+loop writes with no deadline: a node that floods pings while it stops reading pinned a goroutine for every 12
+bytes it sent, enough to take a replica's memory and every tenant's sessions with it. Decision: the gate reads
+each session's frames through a token bucket of ping SYNs, 16 at once and one more every 500 ms (a node pings
+once per `ping_s`, at least 1 s, §11, and waits for each pong), and closes the session over it; and every write
+to the WebSocket, on both sides, has `ConnectionWriteTimeout`, so a peer that stops reading fails the send loop
+and closes the session within 15 s ([`tunnel.md`](../spec/tunnel.md) §7, §11; `internal/tunnel/guard.go`,
+`internal/tunnel/mux.go`, `TestGatePingBudget`, `TestStalledPeerClosesTheSession`).
+
+### D156. yamux's log lines are rate-limited per session
+
+yamux v0.1.2 logs a line for every frame of a stream it does not hold, and the session's logger adds its
+attributes, so one node could make the gate write about 25 bytes of log for each byte it sent. Decision: a
+session's yamux lines pass 10 at once and one more a second; the first line over that says lines are being
+suppressed, and the next line let through is preceded by the count suppressed. The frames themselves are
+read and dropped as yamux always did ([`tunnel.md`](../spec/tunnel.md) §7; `internal/tunnel/guard.go`,
+`TestYamuxLinesAreRateLimited`).
