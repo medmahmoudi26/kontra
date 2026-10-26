@@ -1163,6 +1163,168 @@ func TestRotationByAnotherProcess(t *testing.T) {
 	}
 }
 
+// A binding revocation is per key (§12, D129: the rotation copied the binding to the new key). The gate
+// revokes the rotated (old) key's binding to hello during its overlap, on the old key's session: that session
+// stops serving hello, while the new key's session goes on serving it and the next hello still declares it
+// (M2 review, tunnel-spec-1: the node dropped hello everywhere, and the new key's session answered
+// not_hosted).
+func TestRotatedKeyBindingRevocationKeepsTheNewKeysService(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	tn := mustNode(t, g, cfg)
+	tn.n.maintainEvery = 50 * time.Millisecond
+	tn.run(t)
+	g.adm.next(t)
+	s1 := g.session(t)
+	if _, err := nodekey.Rotate(cfg.KeyPath, time.Now()); err != nil { // another kontra connect rotated the key file
+		t.Fatal(err)
+	}
+	if r := g.adm.next(t); r.Hello.RotateFrom == nil {
+		t.Fatal("the new key's hello carries no rotate_from")
+	}
+	s2 := g.session(t)
+	if resp, _ := exchange(t, s2, "hello", "/new"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the new key's session before the revocation: %d", resp.StatusCode)
+	}
+	if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlRevoked, Service: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "the old key's session refusing hello not_hosted", func() bool {
+		resp, _ := exchange(t, s1, "hello", "/old")
+		return resp.StatusCode == http.StatusNotFound && resp.Header.Get(tunnel.HeaderNode) == string(tunnel.NodeNotHosted)
+	})
+	if resp, _ := exchange(t, s2, "hello", "/new"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the new key's session after the old key's binding revocation: %d %s=%q", resp.StatusCode,
+			tunnel.HeaderNode, resp.Header.Get(tunnel.HeaderNode))
+	}
+	if !tn.running() {
+		t.Fatal("Run ended")
+	}
+	// Both sessions lost: the redial (the new key) still declares hello.
+	for _, w := range g.wires.All() {
+		_ = w.Cut()
+	}
+	if r := g.adm.next(t); !slices.Equal(serviceNames(r.Hello), []string{"hello"}) {
+		t.Fatalf("the next hello declares %v, want [hello]", serviceNames(r.Hello))
+	}
+	g.session(t)
+}
+
+// Another `kontra connect` rotates the shared key file, and the gate revokes the old key before this process's
+// maintain tick has seen the rotation (rotate after a leak, then revoke the old key: D125, D128). The node
+// does not stop: it closes the old key's session and dials the new key's at once (M2 review, tunnel-spec-2:
+// it compared with the key of its last dial and ended Run with ErrRevoked).
+func TestRevokedRotatedKeyBeforeTheMaintainTick(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	tn := mustNode(t, g, cfg)
+	tn.n.maintainEvery = time.Hour // the tick does not come during the test
+	tn.n.backoff = Backoff{rand: func() float64 { return 0.999 }}
+	tn.n.backoff.attempt = 6 // a redial that waited would take up to a minute
+	tn.run(t)
+	old := g.adm.next(t).Hello
+	s1 := g.session(t)
+	id, err := nodekey.Rotate(cfg.KeyPath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil { // the operator revokes the old key
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "the old key's session closed", s1.Mux().IsClosed)
+	start := time.Now()
+	r := g.adm.next(t)
+	if r.Hello.KID != id.KeyID() || r.Hello.KID == old.KID {
+		t.Fatalf("the redial's key %s, want the new key %s", r.Hello.KID, id.KeyID())
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("the new key's session was dialed %v after the old key's revocation, want at once", took)
+	}
+	g.session(t)
+	time.Sleep(200 * time.Millisecond)
+	if !tn.running() {
+		t.Fatalf("Run ended after the rotated key's revocation: %v", tn.result(t, time.Second))
+	}
+}
+
+// A session that lived BackoffReset or more resets the reconnect backoff when it is retired (a drain), as
+// when it closes (§13: "reset after a session that lived 60 s"): a redial refused after the drain of a
+// two-hour session waits under BackoffMin, not on the ceiling left from failures before that session (M2
+// review, tunnel-spec-3).
+func TestRetiredSessionResetsTheBackoff(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		aged bool
+	}{
+		{"a session of two hours", true},
+		{"a session of seconds", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newTestGate(t, nil)
+			rec := newRecorder(t)
+			tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url())))
+			tn.n.backoff = Backoff{rand: func() float64 { return 0.999 }}
+			tn.n.backoff.attempt = 6 // dials failed for a while before this session (the gate was down)
+			tn.run(t)
+			s1 := g.session(t)
+			g.adm.next(t)
+			tn.welcomed(t) // the node holds its session
+			if tc.aged {
+				tn.n.mu.Lock()
+				aged := 0
+				for s := range tn.n.sessions {
+					s.opened = time.Now().Add(-2 * time.Hour)
+					aged++
+				}
+				tn.n.mu.Unlock()
+				if aged != 1 {
+					t.Fatalf("the node holds %d sessions, want 1", aged)
+				}
+			}
+			g.adm.set(func(n int, req enroll.Request) (*enroll.Decision, error) {
+				return nil, tunnel.Refuse(tunnel.CodeDraining, "draining") // the redial reached the draining replica
+			})
+			if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlDrain}); err != nil {
+				t.Fatal(err)
+			}
+			var wait time.Duration
+			eventually(t, 10*time.Second, "a redial refused and waited on", func() bool {
+				w, ok := firstWait(tn.logs.String())
+				wait = w
+				return ok
+			})
+			if tc.aged && wait >= BackoffMin {
+				t.Fatalf("after the drain of a two-hour session the refused redial waits %v, want under %v", wait, BackoffMin)
+			}
+			if !tc.aged && wait < 30*time.Second {
+				t.Fatalf("after the drain of a session of seconds the refused redial waits %v: the backoff was reset", wait)
+			}
+		})
+	}
+}
+
+// firstWait reads the wait of the first "redialing the gate after a wait" line of a node's text log.
+func firstWait(log string) (time.Duration, bool) {
+	for _, l := range strings.Split(log, "\n") {
+		if !strings.Contains(l, "redialing the gate after a wait") {
+			continue
+		}
+		i := strings.Index(l, " wait=")
+		if i < 0 {
+			return 0, false
+		}
+		v := l[i+len(" wait="):]
+		if j := strings.IndexByte(v, ' '); j >= 0 {
+			v = v[:j]
+		}
+		d, err := time.ParseDuration(v)
+		return d, err == nil
+	}
+	return 0, false
+}
+
 func TestParseArgs(t *testing.T) {
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 	home := t.TempDir()

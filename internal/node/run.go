@@ -109,6 +109,14 @@ func (n *Node) Run(ctx context.Context) error {
 			case <-s.mux.CloseChan():
 				lived := time.Since(s.opened)
 				n.backoff.SessionEnded(lived)
+				if s.replaced.Load() {
+					// The gate revoked the key of this session, which another `kontra connect` has rotated
+					// since it was dialed (keyRevoked): the active key's session is dialed at once.
+					s.log.Info("tunnel session of a rotated key closed: dialing a session of the active key at once",
+						"lived", lived.Round(time.Second))
+					wait = 0
+					break watch
+				}
 				wait = n.backoff.Next()
 				s.log.Info("tunnel session closed: redialing after a wait", "lived", lived.Round(time.Second),
 					"wait", wait.Round(time.Millisecond))
@@ -566,8 +574,13 @@ func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 }
 
 // retire keeps a session serving what the gate sends on it until the gate closes it, but never redials it.
+// Run is then no longer watching it, so its life is recorded now (§13: a session that lived 60 s resets
+// the backoff, whether it closes or is retired by a drain, a rotation or its stream ids; M2 review,
+// tunnel-spec-3): a redial refused after the drain of a long session waits under BackoffMin, not on the
+// ceiling left from failures before that session.
 func (n *Node) retire(s *session, why string) {
 	s.retired.Store(true)
+	n.backoff.SessionEnded(time.Since(s.opened))
 	s.log.Info(why)
 }
 
@@ -588,17 +601,50 @@ func (n *Node) closeAll() {
 // keyRevoked is {"t": "revoked"} on a session's control stream (§12): the node stops when it is the key
 // the node now uses. A session of a rotated key, still serving its tasks in the 24 h overlap, ends alone:
 // its key's overlap is over, and the new key's session goes on.
+//
+// The key the node uses is the key file's active key (activeRecipient), not the key of its last dial: another
+// `kontra connect` may have rotated the shared file since, and this process sees it only at its next
+// maintain tick, up to a minute later. A revocation of the old key in that window (rotate after a leak,
+// then revoke the old key: D125, D128) closes the old key's session, which Run then replaces at once with a
+// session of the new key (session.replaced), as maintain would have (M2 review, tunnel-spec-2).
 func (n *Node) keyRevoked(s *session) {
-	n.mu.Lock()
-	active := n.activeKey
-	n.mu.Unlock()
-	if s.key != active {
+	if s.key != n.activeRecipient() {
 		s.log.Info("the gate revoked the session's rotated key: closing that session; the new key's goes on")
+		s.replaced.Store(true)
 		_ = s.mux.Close()
 		return
 	}
 	s.log.Error("the gate revoked this node's key: kontra connect stops and does not redial (§12)")
 	n.revokeOnce.Do(func() { close(n.revoked) })
+}
+
+// bindingRevoked is {"t": "revoked", "service"} on a session's control stream (§12): the gate revoked the
+// binding of the session's key to service. When that key is the node's active key, the service is no longer
+// served or declared (dropService). A binding is per key, and a rotation copied the old key's to the new one
+// (D129), so a revocation that reaches a session of a rotated key, still serving out its 24 h overlap, is
+// that key's alone: only that session stops serving the service, and the active key's sessions and the next
+// hello keep it (M2 review, tunnel-spec-1).
+func (n *Node) bindingRevoked(s *session, service string) {
+	if s.key != n.activeRecipient() {
+		s.proxy.Drop(service)
+		s.log.Warn("the gate revoked the rotated key's binding to a service: that key's session no longer serves it; "+
+			"the active key's sessions do", "service", service)
+		return
+	}
+	n.dropService(service)
+}
+
+// activeRecipient is the recipient of the key file's active key, the key the next hello is made with; the
+// key of the last dial when the file cannot be read.
+func (n *Node) activeRecipient() string {
+	id, err := nodekey.Load(n.cfg.KeyPath)
+	if err == nil {
+		return id.Recipient()
+	}
+	n.logger.Warn("the key file could not be read: taking the key of the last dial as the active key", "err", err)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.activeKey
 }
 
 // maintain runs every maintainEvery: it prunes rotated keys hourly, and reports whether the key file's
