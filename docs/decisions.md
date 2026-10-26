@@ -1625,9 +1625,12 @@ The M2 plan gave `kontra-tunnel-<id>` a `WorkerStopTimeout` of `drain_timeout`; 
 polling until their last dispatch ends or `drain_timeout` passes, and then stops them with "a few seconds". With
 `drain_timeout` as the stop timeout a drain could wait twice. Decision: the spec over the plan: the worker stops
 within 5 s, after the drain has waited on a count of the tunnel dispatches in flight until it is zero or
-`drain_timeout` has passed since the drain began; a dispatch cut at `drain_timeout` reports it
-([`relay.md`](../spec/relay.md) §14.3; `internal/lifecycle/workers.go`, `TestDrainWaitsForTunnelDispatches`,
-`TestTunnelDrain`).
+`drain_timeout` has passed since the drain began; a dispatch cut at `drain_timeout` reports it. The worker polls
+until it stops, so a follow-up can start during the settle: the drain waits for it and settles again, and once no
+dispatch runs after a settle it closes the queue, so that a dispatch the worker still starts before its stop
+returns `context_lost` at once, having sent nothing, instead of being cut 5 s later after it delivered the
+follow-up (M2 review; [`relay.md`](../spec/relay.md) §14.3; `internal/lifecycle/workers.go`,
+`TestDrainWaitsForTunnelDispatches`, `TestDrainWaitsForAFollowUpThatStartsDuringTheSettle`, `TestTunnelDrain`).
 
 ### D151. A `400` the node writes carries no `Kontra-Node` — **needs the owner**
 

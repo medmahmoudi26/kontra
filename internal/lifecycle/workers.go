@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -92,6 +93,9 @@ type Workers struct {
 	tunnelInflight                                  atomic.Int64        // dispatches running on kontra-tunnel-<replica>
 	now                                             func() time.Time    // tests
 	sleep                                           func(time.Duration) // tests
+
+	tunnelMu     sync.Mutex // orders a tunnel dispatch's start against the drain's closing of the queue
+	tunnelClosed bool       // the drain is done with kontra-tunnel-<replica>: a dispatch it still starts is refused
 }
 
 // NewWorkers builds the workers; Start begins polling.
@@ -146,9 +150,7 @@ func NewWorkers(c client.Client, cfg WorkerConfig, acts Activities) (*Workers, e
 	})
 	dispatch := acts.Dispatch.Dispatch
 	w.tunnel.RegisterActivityWithOptions(func(ctx context.Context, in DispatchInput) (DispatchResult, error) {
-		w.tunnelInflight.Add(1)
-		defer w.tunnelInflight.Add(-1)
-		return dispatch(ctx, in)
+		return w.runTunnel(ctx, in, dispatch)
 	}, activity.RegisterOptions{Name: ActDispatch})
 
 	w.directCtl = worker.New(c, QueueDirectCtl, worker.Options{DisableWorkflowWorker: true, WorkerStopTimeout: StopTimeout})
@@ -166,6 +168,35 @@ func NewWorkers(c client.Client, cfg WorkerConfig, acts Activities) (*Workers, e
 		w.push.RegisterActivityWithOptions(acts.Push.PushWebhook, activity.RegisterOptions{Name: ActPushWebhook})
 	}
 	return w, nil
+}
+
+// runTunnel runs a dispatch of kontra-tunnel-<replica>, counted while it runs, so that the drain waits for
+// it. Once the drain has closed the queue (closeTunnel) it is refused before it starts: it returns
+// context_lost at once, having sent nothing, as a dispatch whose activity ended before it started does, and
+// the workflow handles it as a lost dispatch (a new attempt before the first upstream id, tunnel_lost after
+// it: the replica's sessions close with the drain).
+func (w *Workers) runTunnel(ctx context.Context, in DispatchInput, dispatch func(context.Context, DispatchInput) (DispatchResult, error)) (DispatchResult, error) {
+	w.tunnelMu.Lock()
+	if w.tunnelClosed {
+		w.tunnelMu.Unlock()
+		return DispatchResult{Outcome: DispatchContextLost}, nil
+	}
+	w.tunnelInflight.Add(1)
+	w.tunnelMu.Unlock()
+	defer w.tunnelInflight.Add(-1)
+	return dispatch(ctx, in)
+}
+
+// closeTunnel closes kontra-tunnel-<replica> to new dispatches (runTunnel) if none runs, or whatever runs
+// when force is set; it reports whether it closed the queue.
+func (w *Workers) closeTunnel(force bool) bool {
+	w.tunnelMu.Lock()
+	defer w.tunnelMu.Unlock()
+	if !force && w.tunnelInflight.Load() > 0 {
+		return false
+	}
+	w.tunnelClosed = true
+	return true
 }
 
 // HookRegistry is what the built-in hooks register on: a worker, or a test environment.
@@ -226,10 +257,14 @@ var ErrDrainTimeout = errors.New("lifecycle: drain_timeout passed with dispatche
 // cancels the ones still running; then the drain waits, within the same drain_timeout, until no dispatch
 // runs on kontra-tunnel-<replica>. The other workers then keep polling for Settle more: a dispatch's
 // completion schedules a workflow task, and on a gate of one replica only this replica can run it, record
-// the result and answer the Update that waits on it (a cancel completes once canceled is logged, D79). Then
-// they stop, each within StopTimeout (kontra-tunnel's cancels a dispatch still running at drain_timeout: a
-// lost session, §14.3), the control queue last. Drain returns ErrDrainTimeout when drain_timeout cut
-// dispatches. It is Stop with the settle and that report; calling either again is a no-op.
+// the result and answer the Update that waits on it (a cancel completes once canceled is logged, D79). A
+// tunnel dispatch that started during the settle (a follow-up: kontra-tunnel-<replica> still polls) is
+// waited for and settled in turn, within the same drain_timeout; once none runs after a settle, the tunnel
+// queue is closed, and a dispatch its worker still starts before it stops returns context_lost without
+// sending anything (D150). Then they stop, each within StopTimeout (kontra-tunnel's cancels a dispatch still
+// running at drain_timeout: a lost session, §14.3), the control queue last. Drain returns ErrDrainTimeout
+// when drain_timeout cut dispatches. It is Stop with the settle and that report; calling either again is a
+// no-op.
 func (w *Workers) Drain() error {
 	return w.drain(w.settle)
 }
@@ -257,11 +292,26 @@ func (w *Workers) drain(settle time.Duration) error {
 		w.direct.Stop()
 	}
 	timedOut := w.drainTimeout > 0 && now().Sub(start) >= w.drainTimeout
-	if !w.waitTunnel(start, now, sleep) {
-		timedOut = true
-	}
-	if settle > 0 {
-		sleep(settle)
+	for {
+		if !w.waitTunnel(start, now, sleep) {
+			// drain_timeout: the dispatches still running are cut by the worker's stop (a lost session).
+			timedOut = true
+			w.closeTunnel(true)
+			if settle > 0 {
+				sleep(settle)
+			}
+			break
+		}
+		if settle > 0 {
+			sleep(settle)
+		}
+		// kontra-tunnel-<replica> kept polling through the settle: a follow-up of a task on this replica's
+		// sessions may have started meanwhile. It is waited for, and settled, like the others; the queue is
+		// closed once none runs, so that a dispatch the worker still starts before it stops is refused before
+		// it sends anything, never cut after it sent the follow-up (M2 review, relay-tunnel-2, robustness-4).
+		if w.closeTunnel(false) {
+			break
+		}
 	}
 	w.stopAfterDirect()
 	if timedOut {

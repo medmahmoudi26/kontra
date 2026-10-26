@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"sync"
@@ -168,5 +169,89 @@ func TestDrainWaitsForTunnelDispatches(t *testing.T) {
 				t.Error("the drain did not wait for the tunnel dispatch")
 			}
 		})
+	}
+}
+
+// tunnelStop is kontra-tunnel-<replica>'s stop: it records the tunnel dispatches still running then, which
+// the SDK's stop cancels after StopTimeout.
+type tunnelStop struct {
+	stopRecorder
+	w       *Workers
+	running *int64
+}
+
+func (s tunnelStop) Stop() {
+	*s.running = s.w.tunnelInflight.Load()
+	s.stopRecorder.Stop()
+}
+
+// A follow-up of a task on this replica's sessions that starts on kontra-tunnel-<replica> during the settle
+// (the worker still polls: the drain saw no tunnel dispatch running, and the buyer's reply came a second
+// later) is waited for, and settled, before the worker stops; the worker never stops with a dispatch running
+// that drain_timeout has not cut (spec §14.3: "rolling deploys do not cut tasks that finish within
+// drain_timeout"; M2 review, relay-tunnel-2 and robustness-4). Once the drain has closed the queue, a
+// dispatch the worker still starts before it stops is refused before it sends anything.
+func TestDrainWaitsForAFollowUpThatStartsDuringTheSettle(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		got   []string
+		clock = time.Unix(0, 0)
+	)
+	rec := func(name string) worker.Worker { return stopRecorder{name: name, mu: &mu, log: &got} }
+	var runningAtStop int64 = -1
+	w := &Workers{lifecycle: rec(QueueLifecycle), direct: rec(QueueDirect), directCtl: rec(QueueDirectCtl), ctl: rec(QueueCtl("r1")),
+		push: rec(QueuePush), drainTimeout: 10 * time.Second, settle: 2 * time.Second, now: func() time.Time { return clock }}
+	w.tunnel = tunnelStop{stopRecorder: stopRecorder{name: QueueTunnel("r1"), mu: &mu, log: &got}, w: w, running: &runningAtStop}
+
+	followUp := make(chan struct{})
+	ended := make(chan DispatchResult, 1)
+	settles := 0
+	w.sleep = func(d time.Duration) {
+		if d == drainPoll {
+			clock = clock.Add(d)
+			if clock.Sub(time.Unix(0, 0)) >= 4*time.Second {
+				close(followUp) // the follow-up's dispatch ends 2 s after it started
+				<-ended
+			}
+			return
+		}
+		mu.Lock()
+		got = append(got, "settle "+d.String())
+		mu.Unlock()
+		clock = clock.Add(d)
+		if settles++; settles == 1 {
+			// The buyer's reply arrives during the settle: its dispatch starts on kontra-tunnel-<replica>.
+			started := make(chan struct{})
+			go func() {
+				res, _ := w.runTunnel(context.Background(), DispatchInput{TaskID: "t1"}, func(context.Context, DispatchInput) (DispatchResult, error) {
+					close(started)
+					<-followUp
+					return DispatchResult{Outcome: DispatchInterrupted}, nil
+				})
+				ended <- res
+			}()
+			<-started
+		}
+	}
+	if err := w.Drain(); err != nil {
+		t.Fatalf("Drain = %v", err)
+	}
+	want := []string{QueueDirect, "settle 2s", "settle 2s", QueueLifecycle, QueuePush, QueueDirectCtl, QueueTunnel("r1"), QueueCtl("r1")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("drain order %v, want %v", got, want)
+	}
+	if runningAtStop != 0 {
+		t.Fatalf("kontra-tunnel-<replica> stopped with %d dispatches running: the follow-up was cut", runningAtStop)
+	}
+
+	// After the drain, a dispatch the worker still starts is refused: nothing is sent, and the workflow
+	// handles it as a lost context (a new attempt before the first upstream id, tunnel_lost after it).
+	called := false
+	res, err := w.runTunnel(context.Background(), DispatchInput{TaskID: "t2"}, func(context.Context, DispatchInput) (DispatchResult, error) {
+		called = true
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	})
+	if err != nil || called || res.Outcome != DispatchContextLost {
+		t.Fatalf("a dispatch after the drain: %+v %v, called %v; want context_lost without the dispatch", res, err, called)
 	}
 }
