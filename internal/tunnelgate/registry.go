@@ -52,17 +52,19 @@ type Session struct {
 	CLIVersion    string
 	NodeName      string
 
-	mux     *yamux.Session
-	mu      sync.Mutex
-	served  map[string]string // service name → kind
-	control net.Conn          // the control stream, the first one the gate opened
+	mux       *yamux.Session
+	mu        sync.Mutex
+	served    map[string]string // service name → kind
+	control   net.Conn          // the control stream, the first one the gate opened (set by the Handler)
+	controlMu sync.Mutex        // serializes WriteControl
 }
 
-// Add registers a session after its admission: it inserts the tunnels row (session_id, key_id, tenant_id,
-// replica_id, services, hire_principal, cli_version), supersedes the key's other non-draining session at
-// this gate (closing it here, or telling the replica that holds it; its row is deleted in the same
-// transaction), opens the control stream, and starts the session's ping loop and last_ping_at updates.
-// It returns once the session can carry streams.
+// Add registers a session after its admission (SessionSink): it inserts the tunnels row (session_id,
+// key_id, tenant_id, replica_id, services, hire_principal, cli_version), supersedes the key's other
+// non-draining session at this gate (closing it here, or telling the replica that holds it; its row is
+// deleted in the same transaction), and starts the session's last_ping_at updates. The Handler has sent
+// welcome, opened the control stream (s.control) and started the ping loop before it calls Add; the
+// session is removed when mux.CloseChan() closes. It returns once the session is a candidate for streams.
 func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, served []tunnel.WelcomeService) error {
 	return unimpl.Error("tunnelgate.Registry.Add", "WP-04")
 }
