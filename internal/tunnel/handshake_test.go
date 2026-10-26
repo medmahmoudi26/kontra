@@ -539,7 +539,9 @@ func TestRefuse(t *testing.T) {
 }
 
 // FuzzParseHello: no panic; an accepted hello keeps the input as Raw, and re-encodes to a hello that
-// parses to the same message.
+// parses to the same message and encodes to the same bytes. An absent, null or empty list (services may
+// be empty, §4; enroll and public are optional) is one value: Encode writes services as [] and leaves
+// out an empty enroll or public, so the comparison treats nil and empty alike.
 func FuzzParseHello(f *testing.F) {
 	k, _ := age.GenerateX25519Identity()
 	r := k.Recipient().String()
@@ -577,11 +579,34 @@ func FuzzParseHello(f *testing.F) {
 		if err != nil {
 			t.Fatalf("re-encoded hello refused: %v", err)
 		}
-		h2.Raw, h.Raw = nil, nil
-		if !reflect.DeepEqual(h, h2) {
+		if !bytes.Equal(h2.Raw, again) {
+			t.Fatal("Raw of the re-encoded hello differs from its bytes")
+		}
+		h2.Raw = nil
+		third, err := Encode(h2)
+		if err != nil || !bytes.Equal(third, again) {
+			t.Fatalf("a re-parsed hello encodes to other bytes: %s\n%s, %v", again, third, err)
+		}
+		h.Raw, h2.Raw = nil, nil
+		if !reflect.DeepEqual(normalHello(h), normalHello(h2)) {
 			t.Fatalf("%+v\n%+v", h, h2)
 		}
 	})
+}
+
+// normalHello is a copy of h with each empty list nil.
+func normalHello(h *Hello) Hello {
+	c := *h
+	if len(c.Services) == 0 {
+		c.Services = nil
+	}
+	if len(c.Enroll) == 0 {
+		c.Enroll = nil
+	}
+	if len(c.Public) == 0 {
+		c.Public = nil
+	}
+	return c
 }
 
 // FuzzParseOutcome: no panic, and a refusal is never mistaken for a welcome.

@@ -50,12 +50,50 @@ type Transcript struct {
 	GateNonce []byte
 }
 
-// Info is the transcript's info hash.
+// Validate checks the transcript is one §4.1 defines: cb is tls-exporter with a ChannelBindingSize
+// cb_value, or none with an empty one; the gate nonce is NonceSize bytes; origin, hello and session are
+// present; and every field fits lp's 16-bit length.
 //
-// Every field is far below lp's 65,535-byte bound: the origin and the session come from handshake
-// messages of at most MaxHandshakeMessage bytes, and the rest are hashes, nonces, exporters and a cb
-// name. A longer field is a programming error and panics rather than being framed ambiguously.
-func (t Transcript) Info() []byte {
+// A cb and a cb_value that do not match are refused, never hashed: a missing exporter (Dialed.CBValue is
+// nil over plain http) is reported as missing on the side that lacks it, rather than surfacing as a
+// bad_proof the node does not retry, and a side never falls back to an unbound transcript for one
+// connection.
+func (t Transcript) Validate() error {
+	switch t.CB {
+	case CBTLSExporter:
+		if len(t.CBValue) != ChannelBindingSize {
+			return fmt.Errorf("tunnel: transcript: cb %s with a cb_value of %d bytes, want %d", t.CB, len(t.CBValue), ChannelBindingSize)
+		}
+	case CBNone:
+		if len(t.CBValue) != 0 {
+			return fmt.Errorf("tunnel: transcript: cb %s with a cb_value of %d bytes, want none", t.CB, len(t.CBValue))
+		}
+	default:
+		return fmt.Errorf("tunnel: transcript: cb %q, want %s or %s", t.CB, CBTLSExporter, CBNone)
+	}
+	if len(t.GateNonce) != NonceSize {
+		return fmt.Errorf("tunnel: transcript: gate nonce of %d bytes, want %d", len(t.GateNonce), NonceSize)
+	}
+	for _, f := range []struct {
+		name string
+		n    int
+	}{{"origin", len(t.Origin)}, {"hello", len(t.Hello)}, {"session", len(t.Session)}} {
+		if f.n == 0 {
+			return fmt.Errorf("tunnel: transcript: no %s", f.name)
+		}
+		if f.n > 0xffff {
+			return fmt.Errorf("tunnel: transcript: %s of %d bytes, over lp's 65535", f.name, f.n)
+		}
+	}
+	return nil
+}
+
+// Info is the transcript's info hash, after Validate: a transcript Validate refuses has no info. Both
+// sides call it, the gate before Encapsulate and the node before Prove.
+func (t Transcript) Info() ([]byte, error) {
+	if err := t.Validate(); err != nil {
+		return nil, err
+	}
 	h := sha256.New()
 	h.Write([]byte(TranscriptLabel))
 	h.Write([]byte{0})
@@ -66,14 +104,11 @@ func (t Transcript) Info() []byte {
 	lp(h, hello[:])
 	lp(h, []byte(t.Session))
 	lp(h, t.GateNonce)
-	return h.Sum(nil)
+	return h.Sum(nil), nil
 }
 
-// lp writes uint16_be(len(x)) || x.
+// lp writes uint16_be(len(x)) || x. Validate has bounded every field Info frames.
 func lp(h hash.Hash, x []byte) {
-	if len(x) > 0xffff {
-		panic(fmt.Sprintf("tunnel: transcript field of %d bytes", len(x)))
-	}
 	var n [2]byte
 	binary.BigEndian.PutUint16(n[:], uint16(len(x)))
 	h.Write(n[:])

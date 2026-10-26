@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -146,7 +147,7 @@ func TestTranscriptVector(t *testing.T) {
 			Session:   v.Session,
 			GateNonce: unhex(t, v.GateNonceHex),
 		}
-		info := tr.Info()
+		info := mustInfo(t, tr)
 		if got := hex.EncodeToString(info); got != c.InfoHex {
 			t.Fatalf("cb %s: info %s, want %s", c.CB, got, c.InfoHex)
 		}
@@ -194,6 +195,16 @@ func TestProveIsRFC9180ExportOnly(t *testing.T) {
 	}
 }
 
+// mustInfo is tr.Info() for a transcript the test made valid.
+func mustInfo(t *testing.T, tr Transcript) []byte {
+	t.Helper()
+	info, err := tr.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
+}
+
 func newKey(t *testing.T) *ecdh.PrivateKey {
 	t.Helper()
 	k, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -220,14 +231,14 @@ func baseTranscript() Transcript {
 func TestEncapsulateProve(t *testing.T) {
 	node := newKey(t)
 	base := baseTranscript()
-	enc, want, err := Encapsulate(node.PublicKey(), base.Info(), LabelPoP)
+	enc, want, err := Encapsulate(node.PublicKey(), mustInfo(t, base), LabelPoP)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(enc) != EncSize || len(want) != ProofSize {
 		t.Fatalf("enc %d bytes, want %d bytes", len(enc), len(want))
 	}
-	proof, err := Prove(enc, node, base.Info(), LabelPoP)
+	proof, err := Prove(enc, node, mustInfo(t, base), LabelPoP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,21 +247,20 @@ func TestEncapsulateProve(t *testing.T) {
 	}
 
 	changes := map[string]func(*Transcript){
-		"origin":      func(tr *Transcript) { tr.Origin = "https://gate.example:8443" },
-		"cb":          func(tr *Transcript) { tr.CB = CBNone },
-		"cb_value":    func(tr *Transcript) { tr.CBValue = bytes.Repeat([]byte{8}, 32) },
-		"no cb_value": func(tr *Transcript) { tr.CBValue = nil },
-		"hello":       func(tr *Transcript) { tr.Hello = []byte(`{"t":"hello","v":1} `) },
-		"session":     func(tr *Transcript) { tr.Session = "0192f0b4-0000-7000-8000-000000000002" },
-		"gate nonce":  func(tr *Transcript) { tr.GateNonce = bytes.Repeat([]byte{10}, 32) },
+		"origin":     func(tr *Transcript) { tr.Origin = "https://gate.example:8443" },
+		"cb":         func(tr *Transcript) { tr.CB, tr.CBValue = CBNone, nil }, // cb_value is empty exactly when cb is none
+		"cb_value":   func(tr *Transcript) { tr.CBValue = bytes.Repeat([]byte{8}, 32) },
+		"hello":      func(tr *Transcript) { tr.Hello = []byte(`{"t":"hello","v":1} `) },
+		"session":    func(tr *Transcript) { tr.Session = "0192f0b4-0000-7000-8000-000000000002" },
+		"gate nonce": func(tr *Transcript) { tr.GateNonce = bytes.Repeat([]byte{10}, 32) },
 	}
 	for name, change := range changes {
 		tr := base
 		change(&tr)
-		if bytes.Equal(tr.Info(), base.Info()) {
+		if bytes.Equal(mustInfo(t, tr), mustInfo(t, base)) {
 			t.Fatalf("%s: the info hash did not change", name)
 		}
-		p, err := Prove(enc, node, tr.Info(), LabelPoP)
+		p, err := Prove(enc, node, mustInfo(t, tr), LabelPoP)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -259,7 +269,7 @@ func TestEncapsulateProve(t *testing.T) {
 		}
 	}
 
-	other, err := Prove(enc, newKey(t), base.Info(), LabelPoP)
+	other, err := Prove(enc, newKey(t), mustInfo(t, base), LabelPoP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +277,7 @@ func TestEncapsulateProve(t *testing.T) {
 		t.Fatal("another key's proof is accepted")
 	}
 
-	old, err := Prove(enc, node, base.Info(), LabelPoPOld)
+	old, err := Prove(enc, node, mustInfo(t, base), LabelPoPOld)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +286,7 @@ func TestEncapsulateProve(t *testing.T) {
 	}
 
 	// A second encapsulation to the same key is fresh: replaying the first proof does not verify.
-	enc2, want2, err := Encapsulate(node.PublicKey(), base.Info(), LabelPoP)
+	enc2, want2, err := Encapsulate(node.PublicKey(), mustInfo(t, base), LabelPoP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +299,7 @@ func TestEncapsulateProve(t *testing.T) {
 // by the gate and by ParseRecipient.
 func TestLowOrderPoints(t *testing.T) {
 	node := newKey(t)
-	info := baseTranscript().Info()
+	info := mustInfo(t, baseTranscript())
 	lowOrder := [][]byte{
 		make([]byte, 32),                       // 0
 		append([]byte{1}, make([]byte, 31)...), // 1
@@ -345,18 +355,58 @@ func TestNoRelayToAnotherGate(t *testing.T) {
 	for name, received := range map[string][]byte{"forwarded": helloA, "rewritten": helloB} {
 		// Gate B: its own origin (it requires hello.origin to equal it), the hello as it received it.
 		atB := Transcript{Origin: "https://b", CB: CBNone, Hello: received, Session: sessionB, GateNonce: nonceB}
-		enc, want, err := Encapsulate(node.PublicKey(), atB.Info(), LabelPoP)
+		enc, want, err := Encapsulate(node.PublicKey(), mustInfo(t, atB), LabelPoP)
 		if err != nil {
 			t.Fatal(err)
 		}
 		// The node, connected to gate A, answers B's relayed challenge with what it dialed and sent.
 		atNode := Transcript{Origin: "https://a", CB: CBNone, Hello: helloA, Session: sessionB, GateNonce: nonceB}
-		proof, err := Prove(enc, node, atNode.Info(), LabelPoP)
+		proof, err := Prove(enc, node, mustInfo(t, atNode), LabelPoP)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if Accept(proof, want) {
 			t.Fatalf("%s hello: gate B accepts a proof the node made for gate A", name)
+		}
+	}
+}
+
+// §4.1: cb_value is the 32-byte exporter exactly when cb is tls-exporter and empty exactly when cb is none,
+// and the gate nonce is NonceSize bytes. Info refuses any other transcript, on either side, rather than
+// hashing it: a missing exporter is reported as missing, never as a later bad_proof or as an unbound
+// transcript (the node skeleton's Dialed.CBValue is nil over plain http).
+func TestTranscriptInfoRefusesMismatches(t *testing.T) {
+	ok := map[string]Transcript{
+		"tls-exporter": baseTranscript(),
+		"none":         {Origin: "https://gate.example", CB: CBNone, Hello: []byte(`{}`), Session: "s", GateNonce: make([]byte, NonceSize)},
+		"none, empty":  {Origin: "https://gate.example", CB: CBNone, CBValue: []byte{}, Hello: []byte(`{}`), Session: "s", GateNonce: make([]byte, NonceSize)},
+	}
+	for name, tr := range ok {
+		if info, err := tr.Info(); err != nil || len(info) != sha256.Size {
+			t.Fatalf("%s: Info = %x, %v", name, info, err)
+		}
+	}
+	bad := map[string]func(*Transcript){
+		"tls-exporter without cb_value":   func(tr *Transcript) { tr.CBValue = nil },
+		"tls-exporter with 31 bytes":      func(tr *Transcript) { tr.CBValue = tr.CBValue[:31] },
+		"tls-exporter with 33 bytes":      func(tr *Transcript) { tr.CBValue = append(bytes.Clone(tr.CBValue), 0) },
+		"none with a 32-byte cb_value":    func(tr *Transcript) { tr.CB = CBNone },
+		"none with a 1-byte cb_value":     func(tr *Transcript) { tr.CB, tr.CBValue = CBNone, []byte{1} },
+		"empty cb":                        func(tr *Transcript) { tr.CB = "" },
+		"another cb":                      func(tr *Transcript) { tr.CB = "tls-unique" },
+		"no gate nonce":                   func(tr *Transcript) { tr.GateNonce = nil },
+		"short gate nonce":                func(tr *Transcript) { tr.GateNonce = tr.GateNonce[:31] },
+		"long gate nonce":                 func(tr *Transcript) { tr.GateNonce = append(bytes.Clone(tr.GateNonce), 0) },
+		"no origin":                       func(tr *Transcript) { tr.Origin = "" },
+		"no hello":                        func(tr *Transcript) { tr.Hello = nil },
+		"no session":                      func(tr *Transcript) { tr.Session = "" },
+		"an origin over lp's 65535 bytes": func(tr *Transcript) { tr.Origin = "https://" + strings.Repeat("a", 0x10000) },
+	}
+	for name, change := range bad {
+		tr := baseTranscript()
+		change(&tr)
+		if info, err := tr.Info(); err == nil || info != nil {
+			t.Fatalf("%s: Info = %x, %v; want an error", name, info, err)
 		}
 	}
 }

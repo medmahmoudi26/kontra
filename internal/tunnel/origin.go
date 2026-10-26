@@ -57,32 +57,46 @@ func CanonicalOrigin(u *url.URL) (string, error) {
 
 // CheckGateURL parses --gate (§3): https://, or http:// only on localhost, 127.0.0.1 and [::1]
 // (contributors' gates); no userinfo, query or fragment.
+//
+// A refusal never quotes the value back: a credential can sit in the userinfo, the path, the query or the
+// fragment, and §3 keeps credentials out of anything a log would see. It names at most the scheme and
+// scheme://host[:port], which is enough to find the mistake.
 func CheckGateURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		var ue *url.Error
 		if errors.As(err, &ue) {
-			err = ue.Err
+			err = ue.Err // without the URL url.Error quotes
 		}
 		return nil, fmt.Errorf("--gate: %v", err)
 	}
+	gate := redactGate(u)
 	switch {
-	case u.User != nil || strings.Contains(u.Opaque, "@"): // first, so that no message below quotes them
+	case u.User != nil || strings.Contains(u.Opaque, "@"): // first, so that no message below can name them
 		return nil, errors.New("--gate: no credentials in the URL (they go in the handshake, §3)")
 	case u.Scheme != "https" && u.Scheme != "http":
-		return nil, fmt.Errorf("--gate %q: want an https:// URL", raw)
+		return nil, fmt.Errorf("--gate: scheme %q: want an https:// URL", clip(u.Scheme))
 	case u.Opaque != "" || u.Host == "":
-		return nil, fmt.Errorf("--gate %q: no host", raw)
+		return nil, fmt.Errorf("--gate %s: no host", gate)
 	case u.RawQuery != "" || u.ForceQuery:
-		return nil, fmt.Errorf("--gate %q: no query", raw)
+		return nil, fmt.Errorf("--gate %s: no query", gate)
 	case u.Fragment != "" || strings.Contains(raw, "#"):
-		return nil, fmt.Errorf("--gate %q: no fragment", raw)
+		return nil, fmt.Errorf("--gate %s: no fragment", gate)
 	}
 	if _, err := CanonicalOrigin(u); err != nil {
-		return nil, fmt.Errorf("--gate %q: %v", raw, err)
+		return nil, fmt.Errorf("--gate %s: %v", gate, err)
 	}
 	if u.Scheme == "http" && !plainHosts[strings.ToLower(u.Hostname())] {
-		return nil, fmt.Errorf("--gate %q: http:// only for localhost, 127.0.0.1 and [::1]; a gate elsewhere is https://", raw)
+		return nil, fmt.Errorf("--gate %s: http:// only for localhost, 127.0.0.1 and [::1]; a gate elsewhere is https://", gate)
 	}
 	return u, nil
+}
+
+// redactGate is what a refusal of --gate may quote: scheme://host[:port], or the scheme alone when there
+// is no host. Userinfo, path, query and fragment, where a credential could be, are left out.
+func redactGate(u *url.URL) string {
+	if u.Host == "" || u.Opaque != "" {
+		return fmt.Sprintf("%q", clip(u.Scheme+"://"))
+	}
+	return fmt.Sprintf("%q", clip(u.Scheme+"://"+u.Host))
 }

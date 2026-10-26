@@ -266,6 +266,30 @@ func TestCheckGateURL(t *testing.T) {
 			t.Fatalf("a refused --gate with credentials quotes them: %v", err)
 		}
 	}
+	// A credential elsewhere than in userinfo (a query, a fragment, a path) is not quoted either: an error
+	// names at most scheme://host[:port] (§3: credentials never reach a log).
+	for _, raw := range []string{
+		"https://gate.example/?api_key=kk_acme_SECRETSECRET",
+		"https://gate.example/#kk_acme_SECRETSECRET",
+		"https://gate.example/kk_acme_SECRETSECRET?",
+		"http://gate.example/kk_acme_SECRETSECRET",
+		"http://gate.example:8080/?token=kk_acme_SECRETSECRET",
+		"ftp://gate.example/?api_key=kk_acme_SECRETSECRET",
+		"gate.example/?api_key=kk_acme_SECRETSECRET",
+		"https:///kk_acme_SECRETSECRET",
+		"https://gate.example:99999/kk_acme_SECRETSECRET",
+		"https://gate.example:0/?kk_acme_SECRETSECRET",
+	} {
+		_, err := CheckGateURL(raw)
+		if err == nil || strings.Contains(err.Error(), "SECRETSECRET") {
+			t.Fatalf("CheckGateURL(%q) quotes the secret: %v", raw, err)
+		}
+	}
+	// What it does quote is enough to find the mistake.
+	if _, err := CheckGateURL("http://gate.example:8080/?token=kk_acme_SECRETSECRET"); err == nil ||
+		!strings.Contains(err.Error(), "http://gate.example:8080") {
+		t.Fatalf("the refusal does not name the gate: %v", err)
+	}
 }
 
 // FuzzReadPreamble: no panic, never more than one line consumed, and an accepted preamble round-trips.

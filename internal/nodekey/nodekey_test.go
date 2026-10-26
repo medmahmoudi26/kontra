@@ -186,6 +186,9 @@ func TestLoadRefusesOpenModes(t *testing.T) {
 		if _, err := Rotate(path, t0); err == nil {
 			t.Fatalf("Rotate accepted mode %04o", mode)
 		}
+		if _, err := Prune(path, t0); err == nil {
+			t.Fatalf("Prune accepted mode %04o", mode)
+		}
 	}
 	for _, mode := range []os.FileMode{0o600, 0o400} {
 		os.Chmod(path, mode)
@@ -243,8 +246,11 @@ func TestAgeInterop(t *testing.T) {
 		t.Fatal("PrivateKey().PublicKey() is not ParseRecipient(Recipient())")
 	}
 	// The key proves possession (§4.1).
-	info := tunnel.Transcript{Origin: "https://gate.example", CB: tunnel.CBNone, Hello: []byte("{}"), Session: "s",
+	info, err := tunnel.Transcript{Origin: "https://gate.example", CB: tunnel.CBNone, Hello: []byte("{}"), Session: "s",
 		GateNonce: make([]byte, 32)}.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
 	enc, want, err := tunnel.Encapsulate(pub, info, tunnel.LabelPoP)
 	if err != nil {
 		t.Fatal(err)
@@ -301,8 +307,9 @@ func TestLoadForeignFiles(t *testing.T) {
 	}
 }
 
-// §12: --rotate writes a new first key; the old one stays below it, decrypt-only, with a "# rotated:"
-// stamp, and still opens what was sealed to it and proves for rotate_from.
+// §12: --rotate writes a new first key; the old one stays below it, decrypt-only, with a "# rotating:"
+// stamp, and still opens what was sealed to it and proves for rotate_from. A gate's welcome is recorded
+// per gate with "# rotated: <time> <gate>".
 func TestRotate(t *testing.T) {
 	path := keyPath(t)
 	old, _, err := LoadOrCreate(path, t0)
@@ -337,11 +344,60 @@ func TestRotate(t *testing.T) {
 		"# created: 2026-10-25T10:00:00Z",
 		"# public key: " + old.Recipient(),
 		"# kontra key id: " + old.KeyID(),
-		"# rotated: 2026-10-27T10:00:00Z",
+		"# rotating: 2026-10-27T10:00:00Z",
 		old.Active.String(),
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("file:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	// No gate has confirmed the rotation: a hello to any gate names the old key in rotate_from.
+	const gateA, gateB = "https://gate-a.example", "http://localhost:8080"
+	for _, x := range []*Identity{id, loaded} {
+		if p, ok := x.PendingRotation(gateA); !ok || p.Recipient().String() != old.Recipient() {
+			t.Fatalf("PendingRotation(%s) = %v, %v", gateA, p, ok)
+		}
+	}
+	if p, ok := old.PendingRotation(gateA); ok {
+		t.Fatalf("a key that replaced none has a pending rotation: %v", p)
+	}
+	// Gate A's welcome confirms it, a minute later: only gate A is recorded, and a second confirmation
+	// keeps the first time.
+	if err := MarkRotated(path, old.Recipient(), gateA, at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkRotated(path, old.Recipient(), gateA, at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	want = append(want[:len(want)-1], "# rotated: 2026-10-27T10:01:00Z "+gateA, old.Active.String())
+	if got := lines(t, path); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("file after MarkRotated:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	loaded, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := loaded.PendingRotation(gateA); ok {
+		t.Fatalf("gate A confirmed, and its rotation is still pending: %v", p)
+	}
+	if p, ok := loaded.PendingRotation(gateB); !ok || p.Recipient().String() != old.Recipient() {
+		t.Fatalf("gate B has not confirmed: PendingRotation = %v, %v", p, ok)
+	}
+	for name, err := range map[string]error{
+		"the active key":          MarkRotated(path, id.Recipient(), gateA, at),
+		"an unknown key":          MarkRotated(path, "age1nope", gateA, at),
+		"an upper-case gate":      MarkRotated(path, old.Recipient(), "https://Gate-A.example", at),
+		"a gate with a path":      MarkRotated(path, old.Recipient(), gateA+"/", at),
+		"a gate with a port 443":  MarkRotated(path, old.Recipient(), "https://gate-a.example:443", at),
+		"a gate without a scheme": MarkRotated(path, old.Recipient(), "gate-a.example", at),
+		"no gate":                 MarkRotated(path, old.Recipient(), "", at),
+	} {
+		if err == nil {
+			t.Fatalf("MarkRotated of %s", name)
+		}
+	}
+	if got := lines(t, path); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatal("a refused MarkRotated changed the file")
 	}
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode after rotation %04o", fi.Mode().Perm())
@@ -370,8 +426,11 @@ func TestRotate(t *testing.T) {
 	if !oldPriv.PublicKey().Equal(oldPub) || !priv.PublicKey().Equal(newPub) {
 		t.Fatal("a scalar does not match its recipient")
 	}
-	info := tunnel.Transcript{Origin: "https://gate.example", CB: tunnel.CBNone, Hello: []byte("{}"), Session: "s",
+	info, err := tunnel.Transcript{Origin: "https://gate.example", CB: tunnel.CBNone, Hello: []byte("{}"), Session: "s",
 		GateNonce: make([]byte, 32)}.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
 	encOld, wantOld, err := tunnel.Encapsulate(oldPub, info, tunnel.LabelPoPOld)
 	if err != nil {
 		t.Fatal(err)
@@ -392,8 +451,11 @@ func TestRotate(t *testing.T) {
 	}
 }
 
-// §12, PRD §8: the old line goes only after 24 h; the active key and an unstamped key never go.
+// §12, PRD §8: the node keeps the old line for the 24 h the gate keeps the old key serving, timed from the
+// gate's commit (the welcome, MarkRotated), not from when Rotate wrote the file; with several gates, from
+// the last one's. A key no gate has confirmed, the active key and an unstamped key never go.
 func TestPrune(t *testing.T) {
+	const gateA, gateB = "https://gate-a.example", "https://gate-b.example:8443"
 	path := keyPath(t)
 	first, _, err := LoadOrCreate(path, t0)
 	if err != nil {
@@ -408,22 +470,40 @@ func TestPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 	sealedToFirst := encryptTo(t, first.Recipient(), []byte("first"))
-	before, _ := os.ReadFile(path)
+	unchanged := func(at time.Time, why string) {
+		t.Helper()
+		before, _ := os.ReadFile(path)
+		changed, err := Prune(path, at)
+		if err != nil || changed {
+			t.Fatalf("Prune %s: %v, %v", why, changed, err)
+		}
+		if after, _ := os.ReadFile(path); !bytes.Equal(after, before) {
+			t.Fatalf("Prune %s changed the file", why)
+		}
+	}
 
-	changed, err := Prune(path, t0.Add(time.Hour+RotationOverlap-time.Second))
-	if err != nil || changed {
-		t.Fatalf("Prune before 24 h: %v, %v", changed, err)
+	// Rotated, but no gate has committed it (the node is offline, or the gate answers draining): the old
+	// key must still prove rotate_from, however long that takes.
+	unchanged(t0.Add(1000*time.Hour), "with no gate's confirmation")
+
+	// Gate A commits the first rotation 5 h after Rotate wrote the file.
+	if err := MarkRotated(path, first.Recipient(), gateA, t0.Add(6*time.Hour)); err != nil {
+		t.Fatal(err)
 	}
-	if after, _ := os.ReadFile(path); !bytes.Equal(after, before) {
-		t.Fatal("Prune before 24 h changed the file")
-	}
+	unchanged(t0.Add(time.Hour+RotationOverlap+time.Second), "24 h after Rotate but not after the commit")
+	unchanged(t0.Add(6*time.Hour+RotationOverlap-time.Second), "a second before 24 h after the commit")
 	if pt, err := decryptWithFile(path, sealedToFirst); err != nil || string(pt) != "first" {
-		t.Fatalf("23:59:59 after rotation the old key no longer decrypts: %v", err)
+		t.Fatalf("within the overlap the old key no longer decrypts: %v", err)
 	}
+	// Gate B commits it 2 h after gate A: the line stays until B's overlap has passed too.
+	if err := MarkRotated(path, first.Recipient(), gateB, t0.Add(8*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	unchanged(t0.Add(6*time.Hour+RotationOverlap+time.Second), "after gate A's overlap but within gate B's")
 
-	changed, err = Prune(path, t0.Add(time.Hour+RotationOverlap+time.Second))
+	changed, err := Prune(path, t0.Add(8*time.Hour+RotationOverlap+time.Second))
 	if err != nil || !changed {
-		t.Fatalf("Prune after 24 h: %v, %v", changed, err)
+		t.Fatalf("Prune after both gates' 24 h: %v, %v", changed, err)
 	}
 	id, err := Load(path)
 	if err != nil {
@@ -439,6 +519,10 @@ func TestPrune(t *testing.T) {
 		t.Fatal("the pruned key still decrypts")
 	}
 
+	// The second key: confirmed at gate A as Rotate wrote it, dropped at exactly 24 h.
+	if err := MarkRotated(path, second.Recipient(), gateA, t0.Add(10*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	changed, err = Prune(path, t0.Add(10*time.Hour+RotationOverlap))
 	if err != nil || !changed {
 		t.Fatalf("Prune of the second key at exactly 24 h: %v, %v", changed, err)
@@ -454,23 +538,195 @@ func TestPrune(t *testing.T) {
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode after pruning %04o", fi.Mode().Perm())
 	}
-	if changed, err := Prune(path, t0.Add(1000*time.Hour)); err != nil || changed {
-		t.Fatalf("Prune with nothing to drop: %v, %v", changed, err)
-	}
+	unchanged(t0.Add(1000*time.Hour), "with nothing to drop")
 
-	// A decrypt-only key the operator added without a stamp is never pruned.
+	// A decrypt-only key the operator added without a stamp is never pruned, nor is a "# rotated:" line
+	// of another shape (the gate is missing) taken as a confirmation.
 	extra, _ := age.GenerateX25519Identity()
+	odd, _ := age.GenerateX25519Identity()
 	b, _ := os.ReadFile(path)
-	os.WriteFile(path, append(b, []byte("# my old laptop key\n"+extra.String()+"\n# trailing note\n")...), 0o600)
-	if changed, err := Prune(path, t0.Add(1000*time.Hour)); err != nil || changed {
-		t.Fatalf("Prune dropped an unstamped key: %v, %v", changed, err)
-	}
-	// Rotating keeps it and the operator's lines.
+	added := "# my old laptop key\n" + extra.String() + "\n# rotated: 2026-10-25T10:00:00Z\n" + odd.String() + "\n# trailing note\n"
+	os.WriteFile(path, append(b, []byte(added)...), 0o600)
+	unchanged(t0.Add(1000*time.Hour), "of an unstamped key")
+	// Rotating keeps them and the operator's lines.
 	if _, err := Rotate(path, t0.Add(2000*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(path); !bytes.Contains(b, []byte("# my old laptop key\n"+extra.String()+"\n# trailing note\n")) {
+	if b, _ := os.ReadFile(path); !bytes.Contains(b, []byte(added)) {
 		t.Fatalf("rotation lost the operator's lines:\n%s", b)
+	}
+}
+
+// Rotate, MarkRotated and Prune hold the file's lock from the read to the rename: run together (two
+// `kontra connect` processes on one key, §2.1), none loses another's change, and the key Rotate returns is
+// the key in the file. flock(2) locks belong to the open file, so goroutines that each open the file
+// exclude each other as processes do.
+func TestRotatePruneConcurrent(t *testing.T) {
+	const gate = "https://gate.example"
+	for range 50 {
+		path := keyPath(t)
+		first, _, err := LoadOrCreate(path, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := Rotate(path, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkRotated(path, first.Recipient(), gate, t0); err != nil {
+			t.Fatal(err)
+		}
+		at := t0.Add(48 * time.Hour)
+		var (
+			wg      sync.WaitGroup
+			r1, r2  *Identity
+			e1, e2  error
+			pruned  bool
+			pruneEr error
+		)
+		wg.Add(3)
+		go func() { defer wg.Done(); r1, e1 = Rotate(path, at) }()
+		go func() { defer wg.Done(); pruned, pruneEr = Prune(path, at) }()
+		go func() { defer wg.Done(); r2, e2 = Rotate(path, at) }()
+		wg.Wait()
+		for _, err := range []error{e1, e2, pruneEr} {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !pruned {
+			t.Fatal("Prune dropped nothing")
+		}
+		// The later rotation replaced the earlier one's key, which stays decrypt-only.
+		last, earlier := r1, r2
+		if len(r2.Older) > 0 && r2.Older[0].Recipient().String() == r1.Recipient() {
+			last, earlier = r2, r1
+		}
+		id, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var older []string
+		for _, o := range id.Older {
+			older = append(older, o.Recipient().String())
+		}
+		want := []string{earlier.Recipient(), second.Recipient()}
+		if id.Recipient() != last.Recipient() || strings.Join(older, " ") != strings.Join(want, " ") {
+			t.Fatalf("file: active %s, older %v; want active %s (returned by Rotate), older %v",
+				id.Recipient(), older, last.Recipient(), want)
+		}
+		entries, _ := os.ReadDir(filepath.Dir(path))
+		if len(entries) != 1 {
+			t.Fatalf("temporary files left: %v", entries)
+		}
+	}
+}
+
+// A key file reached through a symbolic link (a key on a persistent volume) is rotated, confirmed and
+// pruned at its target: the link stays a link, and the target holds the key Rotate returned.
+func TestRotateThroughSymlink(t *testing.T) {
+	const gate = "https://gate.example"
+	dir := t.TempDir()
+	vol := filepath.Join(dir, "vol", FileName)
+	old, _, err := LoadOrCreate(vol, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "home", DirName, FileName)
+	if err := os.MkdirAll(filepath.Dir(link), DirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "..", "vol", FileName), link); err != nil { // relative, as a mount often is
+		t.Fatal(err)
+	}
+	isLink := func() {
+		t.Helper()
+		fi, err := os.Lstat(link)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link was replaced: %v, %v", fi, err)
+		}
+		if entries, _ := os.ReadDir(filepath.Dir(link)); len(entries) != 1 {
+			t.Fatalf("files beside the link: %v", entries)
+		}
+	}
+	id, err := Rotate(link, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isLink()
+	if id.Path != link {
+		t.Fatalf("Path %s, want the caller's %s", id.Path, link)
+	}
+	onVol, err := Load(vol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onVol.Recipient() != id.Recipient() || len(onVol.Older) != 1 || onVol.Older[0].Recipient().String() != old.Recipient() {
+		t.Fatalf("the volume holds active %s, not the rotated %s", onVol.Recipient(), id.Recipient())
+	}
+	if err := MarkRotated(link, old.Recipient(), gate, t0); err != nil {
+		t.Fatal(err)
+	}
+	isLink()
+	if changed, err := Prune(link, t0.Add(RotationOverlap)); err != nil || !changed {
+		t.Fatalf("Prune through the link: %v, %v", changed, err)
+	}
+	isLink()
+	onVol, _ = Load(vol)
+	if onVol.Recipient() != id.Recipient() || len(onVol.Older) != 0 {
+		t.Fatal("the volume's file was not pruned")
+	}
+	if fi, _ := os.Stat(vol); fi.Mode().Perm() != FileMode {
+		t.Fatalf("the target's mode is %04o", fi.Mode().Perm())
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(vol)); len(entries) != 1 {
+		t.Fatalf("temporary files left on the volume: %v", entries)
+	}
+}
+
+// The operator's lines are kept (package doc): a note at the top of the file stays at the top when Rotate
+// writes a new first key, and a note among a key's lines survives Prune dropping that key.
+func TestOperatorLinesKept(t *testing.T) {
+	const gate = "https://gate.example"
+	path := keyPath(t)
+	old, _, err := LoadOrCreate(path, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := []string{"# operator: do not delete this file, see runbook X", ""}
+	b, _ := os.ReadFile(path)
+	created, rest, _ := strings.Cut(string(b), "\n")
+	inner := "# operator: this key is on the build box"
+	os.WriteFile(path, []byte(strings.Join(header, "\n")+"\n"+created+"\n"+inner+"\n"+rest), 0o600)
+
+	id, err := Rotate(path, t0.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := lines(t, path)
+	if strings.Join(got[:2], "\n") != strings.Join(header, "\n") || got[2] != CommentCreated+"2026-10-25T11:00:00Z" ||
+		got[5] != id.Active.String() {
+		t.Fatalf("the header did not stay above the new key:\n%s", strings.Join(got, "\n"))
+	}
+	if err := MarkRotated(path, old.Recipient(), gate, t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := Prune(path, t0.Add(25*time.Hour)); err != nil || !changed {
+		t.Fatalf("Prune: %v, %v", changed, err)
+	}
+	got = lines(t, path)
+	want := append(append([]string(nil), header...),
+		CommentCreated+"2026-10-25T11:00:00Z",
+		CommentPublic+id.Recipient(),
+		CommentKeyID+id.KeyID(),
+		id.Active.String(),
+		inner,
+	)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("file:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if loaded, err := Load(path); err != nil || loaded.Recipient() != id.Recipient() || len(loaded.Older) != 0 {
+		t.Fatalf("Load after pruning: %v", err)
 	}
 }
 

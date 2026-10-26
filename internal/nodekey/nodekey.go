@@ -10,11 +10,18 @@
 //	AGE-SECRET-KEY-1…
 //
 // The first AGE-SECRET-KEY-1 line is the active key: it proves possession in the handshake (§4.1) and is
-// the sealing recipient of every service the node hosts (D29). Later lines are decrypt-only: `--rotate`
-// writes a new first line and keeps the old one below it, stamped "# rotated: <time>", for
-// RotationOverlap; Prune then drops it (§12, PRD §8). Lines the node did not write (an operator's notes, a
-// decrypt-only key without a stamp) are kept as they are. The CLI refuses to start when the file is
-// readable or writable by group or others. One key per node, enrolled separately at each gate it dials.
+// the sealing recipient of every service the node hosts (D29). Later lines are decrypt-only. `--rotate`
+// (Rotate) writes a new first line and keeps the old one below it, stamped "# rotating: <time>"; when a
+// gate's welcome confirms the rotation (a hello with rotate_from, §12), MarkRotated stamps it
+// "# rotated: <time> <gate origin>", and Prune drops it RotationOverlap after the last gate's stamp (§12,
+// PRD §8). Lines the node did not write (an operator's notes, a decrypt-only key without a stamp) are kept:
+// Rotate leaves the file's leading notes at the top, and Prune keeps the notes of a key it drops.
+//
+// Rotate, MarkRotated and Prune rewrite the file under an exclusive flock(2), so that several processes on
+// one key (one `kontra connect` per gate, §2.1) never lose each other's change. A symbolic link (a key on a
+// mounted volume) is resolved first and its target rewritten in place. The CLI refuses to start when the
+// file is readable or writable by group or others. One key per node, enrolled separately at each gate it
+// dials.
 //
 // age keeps the raw scalar unexported: PrivateKey bech32-decodes the AGE-SECRET-KEY-1 line itself (BIP-173
 // without the 90-character limit, internal/bech32) for crypto/ecdh and crypto/hpke.
@@ -31,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,18 +60,33 @@ const (
 	DirMode  = 0o700
 )
 
-// RotationOverlap is how long a rotated key's line stays in the file, decrypt-only (§12: the gate keeps
-// the old key serving its tasks for 24 h, and parts sealed to it still open).
+// RotationOverlap is how long a rotated key's line stays in the file, decrypt-only, after a gate confirmed
+// the rotation (§12: the gate sets overlap_until = now + 24 h when it commits the rotation, keeps the old
+// key serving its tasks until then, and parts sealed to it still open on the node).
 const RotationOverlap = 24 * time.Hour
 
-// The comment lines of a key (age-keygen writes the first two; §2.1 adds the key id). A rotated key gets
-// a fourth, which Prune reads.
+// The comment lines of a key. age-keygen writes the first two and §2.1 adds the key id. Rotate stamps the
+// key it replaces with CommentRotating; MarkRotated adds a CommentRotated line per gate that confirmed the
+// rotation ("# rotated: <time> <gate origin>"), and Prune reads those.
 const (
-	CommentCreated = "# created: "
-	CommentPublic  = "# public key: "
-	CommentKeyID   = "# kontra key id: "
-	CommentRotated = "# rotated: "
+	CommentCreated  = "# created: "
+	CommentPublic   = "# public key: "
+	CommentKeyID    = "# kontra key id: "
+	CommentRotating = "# rotating: "
+	CommentRotated  = "# rotated: "
 )
+
+// nodeComments are the prefixes of the lines this package writes; every other line is the operator's.
+var nodeComments = []string{CommentCreated, CommentPublic, CommentKeyID, CommentRotating, CommentRotated}
+
+func nodeLine(l string) bool {
+	for _, p := range nodeComments {
+		if strings.HasPrefix(l, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // maxFileSize is age.ParseIdentities' own limit.
 const maxFileSize = 1 << 24
@@ -75,7 +98,8 @@ type Identity struct {
 	Older   []*age.X25519Identity // decrypt-only lines, newest first
 	Created time.Time             // the active line's "# created:" comment
 
-	all []age.Identity // every key in the file, in order, as age parsed it
+	all  []age.Identity // every key in the file, in order, as age parsed it
+	file *keyFile       // the file's blocks, parallel to all
 }
 
 // Resolve picks the path: the --key flag, else $KONTRA_KEY, else ~/.kontra/identity.key. getenv reads the
@@ -106,6 +130,8 @@ func Resolve(flag string, getenv func(string) string) (string, error) {
 //
 // The new file is written in full to a temporary file in the same directory and then linked into place,
 // so a concurrent start never reads half a key and never overwrites one: the loser loads the winner's.
+// Creating takes no lock: the link puts a file only where there is none, and Rotate, MarkRotated and Prune
+// only change a file that exists.
 func LoadOrCreate(path string, now time.Time) (id *Identity, created bool, err error) {
 	if _, err := os.Stat(path); err == nil {
 		id, err := Load(path)
@@ -195,65 +221,197 @@ func (i *Identity) Identities() []age.Identity {
 	return ids
 }
 
-// Rotate writes a new first line (with its comments and a "# rotated:" stamp on the old one) and keeps
-// every older line below it, atomically (write a temporary file in the same directory, fsync, rename).
-// It returns the new identity; the caller connects with rotate_from naming the old key (§12).
+// PendingRotation is the key the active one replaced (the decrypt-only line directly below it that
+// Rotate stamped "# rotating:") while gate, a canonical origin, has not confirmed that rotation
+// (MarkRotated). A hello to gate then names it in rotate_from and proves it (§12). ok is false when the
+// active key replaced none, or gate has confirmed.
+//
+// After a connection lost between proof and welcome, or a restart, the node does not know whether gate
+// committed the rotation, and a rotate_from naming an already rotated key is enroll_invalid: it redials
+// with the active key and no rotate_from first, and a welcome means the rotation committed (MarkRotated),
+// unknown_key that it did not.
+func (i *Identity) PendingRotation(gate string) (old *age.X25519Identity, ok bool) {
+	if i.file == nil || len(i.file.blocks) < 2 || len(i.all) != len(i.file.blocks) {
+		return nil, false
+	}
+	b := i.file.blocks[1]
+	if b.rotating.IsZero() {
+		return nil, false
+	}
+	if _, done := b.rotated[gate]; done {
+		return nil, false
+	}
+	old, ok = i.all[1].(*age.X25519Identity)
+	return old, ok
+}
+
+// Rotate writes a new first line (with its comments, and a "# rotating:" stamp on the old one) and keeps
+// every older line below it, atomically (write a temporary file in the same directory, fsync, rename),
+// under the file's lock. The operator's lines at the top of the file stay at the top. It returns the new
+// identity; the caller connects with rotate_from naming the old key (PendingRotation) and calls
+// MarkRotated when the gate's welcome confirms it (§12).
 func Rotate(path string, now time.Time) (*Identity, error) {
-	_, f, err := load(path)
+	var id *Identity
+	err := change(path, func(f *keyFile) (bool, error) {
+		key, err := age.GenerateX25519Identity()
+		if err != nil {
+			return false, fmt.Errorf("nodekey: generate: %w", err)
+		}
+		old := &f.blocks[0]
+		// The lines above the old key's own comments are the file's header (an operator's note), not the
+		// old key's: they stay above the new key.
+		head := len(old.lines)
+		for i, l := range old.lines {
+			if nodeLine(l) {
+				head = i
+				break
+			}
+		}
+		nb := newBlock(key, now)
+		nb.lines = append(append([]string(nil), old.lines[:head]...), nb.lines...)
+		old.lines = append([]string(nil), old.lines[head:]...)
+		if old.rotating.IsZero() {
+			old.lines = append(old.lines, CommentRotating+stamp(now))
+			old.rotating = now
+		}
+		f.blocks = append([]block{nb}, f.blocks...)
+		id, _, err = parse(path, f.bytes())
+		return true, err
+	})
 	if err != nil {
-		return nil, err
-	}
-	key, err := age.GenerateX25519Identity()
-	if err != nil {
-		return nil, fmt.Errorf("nodekey: generate: %w", err)
-	}
-	if old := &f.blocks[0]; old.rotated.IsZero() {
-		old.lines = append(old.lines, CommentRotated+stamp(now))
-		old.rotated = now
-	}
-	f.blocks = append([]block{newBlock(key, now)}, f.blocks...)
-	data := f.bytes()
-	id, _, err := parse(path, data)
-	if err != nil {
-		return nil, err
-	}
-	if err := replace(path, data); err != nil {
 		return nil, err
 	}
 	return id, nil
 }
 
-// Prune drops the decrypt-only lines rotated more than RotationOverlap before now; it reports whether the
-// file changed. The active key, and a later key without a "# rotated:" stamp, are never dropped.
-//
-// The stamp is the time Rotate wrote the file, not the time a gate committed the rotation. A caller prunes
-// only after the gates it uses have welcomed the rotated key (a hello with rotate_from, §12): a key pruned
-// before then can no longer prove rotate_from, and the new key is unknown at a gate that has not
-// committed the rotation.
-func Prune(path string, now time.Time) (bool, error) {
-	_, f, err := load(path)
-	if err != nil {
-		return false, err
+// MarkRotated records that gate (a canonical origin) confirmed the rotation away from recipient, a
+// decrypt-only key in the file, at at: the welcome to a hello whose rotate_from named it, or to a later
+// hello of the active key without rotate_from (the lost-welcome probe, PendingRotation). It appends
+// "# rotated: <at> <gate>" to that key's lines; a gate already recorded keeps its first record. The gate
+// set overlap_until when it committed, which is never after the node saw the welcome, so the node keeps
+// the line at least as long as the gate keeps the old key serving.
+func MarkRotated(path, recipient, gate string, at time.Time) error {
+	if u, err := url.Parse(gate); err != nil {
+		return fmt.Errorf("nodekey: gate %q is not an origin", gate)
+	} else if c, err := tunnel.CanonicalOrigin(u); err != nil || c != gate {
+		return fmt.Errorf("nodekey: gate %q is not a canonical origin (scheme://host[:port])", gate)
 	}
-	kept := []block{f.blocks[0]}
-	for _, b := range f.blocks[1:] {
-		if !b.rotated.IsZero() && !now.Before(b.rotated.Add(RotationOverlap)) {
-			continue
+	return change(path, func(f *keyFile) (bool, error) {
+		for i := range f.blocks {
+			if f.blocks[i].recipient != recipient {
+				continue
+			}
+			if i == 0 {
+				return false, fmt.Errorf("nodekey: %s is the active key of %s, not a rotated one", recipient, path)
+			}
+			b := &f.blocks[i]
+			if _, ok := b.rotated[gate]; ok {
+				return false, nil
+			}
+			b.lines = append(b.lines, CommentRotated+stamp(at)+" "+gate)
+			return true, nil
 		}
-		kept = append(kept, b)
+		return false, fmt.Errorf("nodekey: %s holds no decrypt-only key for %s", path, recipient)
+	})
+}
+
+// Prune drops the decrypt-only keys whose rotation every gate that confirmed it did so RotationOverlap
+// or more before now; it reports whether the file changed. The active key, a key no gate has confirmed
+// rotating (only "# rotating:"), and a key without any stamp (the operator's) are never dropped. The
+// operator's lines of a dropped key (anything but this package's comments) are kept.
+//
+// SPEC-CONFLICT: §12 times the overlap from the commit of the rotation at the one gate the node
+// rotates at, and §2.1 enrolls one key at each gate a node dials. The file records the gates that
+// confirmed (MarkRotated), not the gates the key is enrolled at, so a gate that has not seen rotate_from
+// yet (one whose `kontra connect` has not redialed) is not waited for: once the last confirmation is
+// 24 h old, the old key is dropped and that gate can no longer be shown rotate_from. Each node process
+// should therefore redial its gate with rotate_from (PendingRotation) soon after a rotation; waiting for
+// every enrolled gate needs the set of gates, which no spec gives the node.
+func Prune(path string, now time.Time) (bool, error) {
+	var changed bool
+	err := change(path, func(f *keyFile) (bool, error) {
+		kept := []block{f.blocks[0]}
+		var carry []string // the operator's lines of dropped keys, kept above the next line
+		for _, b := range f.blocks[1:] {
+			if b.expired(now) {
+				for _, l := range b.lines {
+					if !nodeLine(l) {
+						carry = append(carry, l)
+					}
+				}
+				continue
+			}
+			if carry != nil {
+				b.lines = append(carry, b.lines...)
+				carry = nil
+			}
+			kept = append(kept, b)
+		}
+		if len(kept) == len(f.blocks) {
+			return false, nil
+		}
+		f.blocks = kept
+		f.trailer = append(carry, f.trailer...)
+		changed = true
+		return true, nil
+	})
+	return changed, err
+}
+
+// change rewrites the key file at path under its lock: it resolves path's symbolic links, locks the file
+// (lockKey), reads it, lets edit change it and, when edit reports a change, writes it back atomically in
+// the target's directory. The lock is held from the read to the rename, so a concurrent Rotate, MarkRotated
+// or Prune (another process on the same key) reads what this one wrote.
+func change(path string, edit func(*keyFile) (bool, error)) error {
+	target, fh, err := lockKey(path)
+	if err != nil {
+		return err
 	}
-	if len(kept) == len(f.blocks) {
-		return false, nil
+	defer fh.Close() // releases the lock
+	_, f, err := read(path, fh)
+	if err != nil {
+		return err
 	}
-	f.blocks = kept
+	changed, err := edit(f)
+	if err != nil || !changed {
+		return err
+	}
 	data := f.bytes()
 	if _, _, err := parse(path, data); err != nil {
-		return false, err
+		return err
 	}
-	if err := replace(path, data); err != nil {
-		return false, err
+	return replace(target, data)
+}
+
+// lockKey resolves path's symbolic links and holds an exclusive flock on the file it names: closing the
+// returned file releases it. A key file reached through a link (a key on a mounted volume) is rewritten
+// at its target, so the link keeps pointing at the current key. The lock is on the file now at target: a
+// process that waited while another renamed a new file over it retakes the lock on the new one.
+func lockKey(path string) (target string, fh *os.File, err error) {
+	target, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", nil, fmt.Errorf("nodekey: %w", err)
 	}
-	return true, nil
+	for range 1000 {
+		fh, err := os.Open(target)
+		if err != nil {
+			return "", nil, fmt.Errorf("nodekey: %w", err)
+		}
+		if err := lockFile(fh); err != nil {
+			fh.Close()
+			return "", nil, fmt.Errorf("nodekey: lock %s: %w", target, err)
+		}
+		held, err := fh.Stat()
+		if err != nil {
+			fh.Close()
+			return "", nil, fmt.Errorf("nodekey: %w", err)
+		}
+		if now, err := os.Lstat(target); err == nil && os.SameFile(held, now) {
+			return target, fh, nil
+		}
+		fh.Close()
+	}
+	return "", nil, fmt.Errorf("nodekey: %s keeps being replaced", target)
 }
 
 // load opens the file, checks the mode of what it opened, and parses it.
@@ -263,6 +421,11 @@ func load(path string) (*Identity, *keyFile, error) {
 		return nil, nil, fmt.Errorf("nodekey: %w", err)
 	}
 	defer fh.Close()
+	return read(path, fh)
+}
+
+// read checks the mode of the open file fh and parses it.
+func read(path string, fh *os.File) (*Identity, *keyFile, error) {
 	fi, err := fh.Stat()
 	if err != nil {
 		return nil, nil, fmt.Errorf("nodekey: %w", err)
@@ -280,7 +443,7 @@ func load(path string) (*Identity, *keyFile, error) {
 	return parse(path, data)
 }
 
-// parse reads an identity file as age does, and its blocks as Rotate and Prune rewrite them.
+// parse reads an identity file as age does, and its blocks as Rotate, MarkRotated and Prune rewrite them.
 func parse(path string, data []byte) (*Identity, *keyFile, error) {
 	ids, err := age.ParseIdentities(bytes.NewReader(data))
 	if err != nil {
@@ -294,10 +457,13 @@ func parse(path string, data []byte) (*Identity, *keyFile, error) {
 	if len(f.blocks) != len(ids) {
 		return nil, nil, fmt.Errorf("nodekey: %s: %d keys read, age reads %d", path, len(f.blocks), len(ids))
 	}
-	id := &Identity{Path: path, Active: active, Created: f.blocks[0].created, all: ids}
-	for _, x := range ids[1:] {
+	id := &Identity{Path: path, Active: active, Created: f.blocks[0].created, all: ids, file: f}
+	for i, x := range ids {
 		if o, ok := x.(*age.X25519Identity); ok {
-			id.Older = append(id.Older, o)
+			f.blocks[i].recipient = o.Recipient().String()
+			if i > 0 {
+				id.Older = append(id.Older, o)
+			}
 		}
 	}
 	return id, f, nil
@@ -311,10 +477,26 @@ type keyFile struct {
 }
 
 type block struct {
-	lines   []string // the comment and blank lines above the key
-	key     string   // the AGE-SECRET-KEY… line
-	created time.Time
-	rotated time.Time // zero unless a "# rotated:" line stamps the key
+	lines     []string // the comment and blank lines above the key
+	key       string   // the AGE-SECRET-KEY… line
+	recipient string   // its age1… recipient; empty for a key that is not X25519
+	created   time.Time
+	rotating  time.Time            // "# rotating:": when Rotate replaced it as the active key
+	rotated   map[string]time.Time // "# rotated: <time> <gate>": the earliest confirmation by each gate
+}
+
+// expired reports whether Prune drops the key: at least one gate confirmed its rotation, and every gate
+// that did so RotationOverlap or more before now.
+func (b *block) expired(now time.Time) bool {
+	if len(b.rotated) == 0 {
+		return false
+	}
+	for _, at := range b.rotated {
+		if now.Before(at.Add(RotationOverlap)) {
+			return false
+		}
+	}
+	return true
 }
 
 // parseFile splits the file the way age.ParseIdentities reads it: lines starting with "#" and empty lines
@@ -335,8 +517,25 @@ func parseFile(data []byte) *keyFile {
 				if v, ok := strings.CutPrefix(c, CommentCreated); ok {
 					b.created, _ = time.Parse(time.RFC3339, strings.TrimSpace(v))
 				}
+				if v, ok := strings.CutPrefix(c, CommentRotating); ok {
+					b.rotating, _ = time.Parse(time.RFC3339, strings.TrimSpace(v))
+				}
+				// "# rotated: <time> <gate>"; a line of another shape confirms nothing, so the key is kept.
 				if v, ok := strings.CutPrefix(c, CommentRotated); ok {
-					b.rotated, _ = time.Parse(time.RFC3339, strings.TrimSpace(v))
+					fields := strings.Fields(v)
+					if len(fields) != 2 {
+						continue
+					}
+					at, err := time.Parse(time.RFC3339, fields[0])
+					if err != nil {
+						continue
+					}
+					if prev, ok := b.rotated[fields[1]]; !ok || at.Before(prev) {
+						if b.rotated == nil {
+							b.rotated = map[string]time.Time{}
+						}
+						b.rotated[fields[1]] = at
+					}
 				}
 			}
 			f.blocks = append(f.blocks, b)
