@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/strictjson"
@@ -197,6 +198,74 @@ func TestInline(t *testing.T) {
 	}
 }
 
+// A2A 0.3 (spec/relay.md §10.4 with §6.2): the gate speaks a2av0 to a tunnel service whose card offers only 0.3,
+// and a2a-go's conversion writes a kontra-blob: url part as a FilePart {"kind": "file", "file": {"uri": …}}. The
+// hosting node inlines it as the FilePart's bytes (base64), keeping its name, mimeType and metadata; a file whose
+// uri is anything else is passed as it came and never fetched (D56).
+func TestInlineLegacyFilePart(t *testing.T) {
+	ref := newRef(t)
+	obj := bytes.Repeat([]byte{0, 3, 'k', 0xff}, 300<<10/4)
+	f := &fakeObjects{objs: map[blob.Ref][]byte{ref: obj}}
+	legacy, err := json.Marshal(a2av0.FromV1Parts(a2a.ContentParts{
+		{Content: a2a.URL(ref.URL()), MediaType: "application/octet-stream", Filename: "big.bin", Metadata: map[string]any{"k": "v"}},
+		{Content: a2a.URL("http://169.254.169.254/latest/meta-data")},
+		a2a.NewTextPart("hi"),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"kind":"message","messageId":"m","role":"user","parts":` +
+		string(legacy) + `}}}`
+	out, err := (&Inliner{Fetch: f.fetch}).Inline(context.Background(), []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	b, err := out.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte(blob.URIScheme)) {
+		t.Fatalf("a 0.3 FilePart kept the kontra-blob: scheme: %.300s", b)
+	}
+	var req struct {
+		Params struct {
+			Message struct {
+				Parts []struct {
+					Kind     string         `json:"kind"`
+					Text     string         `json:"text"`
+					Metadata map[string]any `json:"metadata"`
+					File     struct {
+						URI      *string `json:"uri"`
+						Bytes    []byte  `json:"bytes"`
+						MimeType string  `json:"mimeType"`
+						Name     string  `json:"name"`
+					} `json:"file"`
+				} `json:"parts"`
+			} `json:"message"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(b, &req); err != nil {
+		t.Fatalf("the inlined 0.3 body does not decode: %v", err)
+	}
+	parts := req.Params.Message.Parts
+	if len(parts) != 3 {
+		t.Fatalf("%d parts", len(parts))
+	}
+	p0 := parts[0]
+	if p0.Kind != "file" || p0.File.URI != nil || !bytes.Equal(p0.File.Bytes, obj) || p0.File.Name != "big.bin" ||
+		p0.File.MimeType != "application/octet-stream" || p0.Metadata["k"] != "v" {
+		t.Fatalf("the inlined FilePart: kind %q, uri %v, %d bytes, %q %q %v", p0.Kind, p0.File.URI, len(p0.File.Bytes), p0.File.Name,
+			p0.File.MimeType, p0.Metadata)
+	}
+	if parts[1].File.URI == nil || *parts[1].File.URI != "http://169.254.169.254/latest/meta-data" || parts[2].Text != "hi" {
+		t.Fatalf("the other parts changed: %.300s", b)
+	}
+	if len(f.fetched) != 1 {
+		t.Fatalf("fetched %v, want the one ref", f.fetched)
+	}
+}
+
 // Markers are spliced in the body's order whatever the order of the visits (a Task's status is visited after
 // its history, and re-encoded after it as well; artifacts before both).
 func TestInlineOrder(t *testing.T) {
@@ -253,7 +322,7 @@ func TestInlineRefusals(t *testing.T) {
 		}
 	}
 	in.MaxTotal = SpillOver
-	if _, err := in.Inline(context.Background(), []byte(`{"message":{"parts":[{"url":"`+ok.URL()+`"}]}}`)); err == nil ||
+	if _, err := in.Inline(context.Background(), []byte(`{"message":{"parts":[{"url":"`+ok.URL()+`"}]}}`)); !errors.Is(err, ErrTooMuch) ||
 		!strings.Contains(err.Error(), "more than") {
 		t.Fatalf("over MaxTotal: %v", err)
 	}

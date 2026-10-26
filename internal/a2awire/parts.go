@@ -11,6 +11,9 @@
 // HTTP+JSON and as a JSON-RPC response's result. Nothing below those levels is read: metadata, a data part's
 // data and a part's own members other than its content are carried as they came.
 //
+// The inliner also reads A2A 0.3's FilePart ({"kind": "file", "file": {"uri": …}}) at those levels: the gate
+// speaks 0.3 to a tunnel service whose card offers only 0.3, and a large part reaches it so (Inliner).
+//
 // Every level read is decoded with exact keys (internal/strictjson, D172): a repeated key, or two equal under
 // case folding, is refused, since the gate is not trusted to have checked what it forwards. A body is re-encoded
 // from what was parsed, only along the levels that changed, never patched in place: the members of a changed

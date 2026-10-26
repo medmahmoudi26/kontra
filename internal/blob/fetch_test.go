@@ -94,7 +94,7 @@ func TestFetchRefusals(t *testing.T) {
 func TestFetchRefusesAnnouncedSizeOver64MiB(t *testing.T) {
 	start := time.Now()
 	_, got, _, err := fetchFrom(t, []byte(`{"size":`+strconv.Itoa(65<<20)+"}\n"), true)
-	if err == nil || !strings.Contains(err.Error(), "over") || len(got) != 0 {
+	if !errors.Is(err, ErrBadAnswer) || !strings.Contains(err.Error(), "over") || len(got) != 0 {
 		t.Fatalf("65 MiB announced: %v (%d bytes)", err, len(got))
 	}
 	if time.Since(start) > 5*time.Second {
@@ -107,10 +107,11 @@ func TestFetchRefusesAnnouncedSizeOver64MiB(t *testing.T) {
 
 // One byte more than announced is refused, as are fewer bytes than announced.
 func TestFetchRefusesMoreOrFewerBytes(t *testing.T) {
-	if _, _, _, err := fetchFrom(t, []byte("{\"size\":3}\nabcd"), false); err == nil || !strings.Contains(err.Error(), "more than") {
+	if _, _, _, err := fetchFrom(t, []byte("{\"size\":3}\nabcd"), false); !errors.Is(err, ErrBadAnswer) || !strings.Contains(err.Error(), "more than") {
 		t.Fatalf("one byte more: %v", err)
 	}
-	if _, _, _, err := fetchFrom(t, []byte("{\"size\":5}\nabc"), false); !errors.Is(err, io.ErrUnexpectedEOF) {
+	// Fewer: a stream that ended early, which asking again may cure (not ErrBadAnswer).
+	if _, _, _, err := fetchFrom(t, []byte("{\"size\":5}\nabc"), false); !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, ErrBadAnswer) {
 		t.Fatalf("two bytes fewer: %v", err)
 	}
 	if n, got, _, err := fetchFrom(t, []byte("{\"size\":3}\nabc"), false); err != nil || n != 3 || string(got) != "abc" {
@@ -127,13 +128,13 @@ func TestFetchRefusesMalformedLines(t *testing.T) {
 	} {
 		_, got, _, err := fetchFrom(t, []byte(line+"\nx"), false)
 		var fe *FetchError
-		if err == nil || errors.As(err, &fe) || len(got) != 0 {
+		if !errors.Is(err, ErrBadAnswer) || errors.As(err, &fe) || len(got) != 0 {
 			t.Errorf("%q: %v (%d bytes)", line, err, len(got))
 		}
 	}
-	// No line at all: the gate closed at once.
-	if _, _, _, err := fetchFrom(t, nil, false); err == nil {
-		t.Error("an empty answer was accepted")
+	// No line at all: the gate closed at once (as over its cap of node-opened streams), which is no bad answer.
+	if _, _, _, err := fetchFrom(t, nil, false); err == nil || errors.Is(err, ErrBadAnswer) {
+		t.Errorf("an empty answer: %v", err)
 	}
 }
 

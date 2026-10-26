@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/strictjson"
 )
 
 // Inlining bounds (spec/tunnel.md §8.3, §14).
@@ -40,6 +41,11 @@ type Fetcher func(ctx context.Context, ref blob.Ref, w io.Writer) (int64, error)
 // bytes, fetched on blob streams, so that a stock agent or client never sees the scheme (spec/relay.md §10.4,
 // spec/tunnel.md §8.3; D56: the node never dials a URL taken from a part). The part keeps its filename,
 // mediaType and metadata.
+//
+// A2A 0.3's FilePart too: the gate speaks a2av0 to a tunnel service whose card offers only 0.3 (relay.md §6.2),
+// and a2a-go's conversion writes a url part as {"kind": "file", "file": {"uri": …, "mimeType", "name"}}, at the
+// same levels (a request's params.message.parts). Its file becomes {"bytes": <base64>, "mimeType", "name"}, the
+// 0.3 FileWithBytes, keeping the part's other members.
 type Inliner struct {
 	Fetch Fetcher
 	// TempDir holds spilled objects ("" is os.TempDir()).
@@ -51,6 +57,9 @@ type Inliner struct {
 // ErrReservedURL is a url part with the kontra-blob: scheme that does not name a ref in the gate's form
 // (D181: only the gate writes the scheme).
 var ErrReservedURL = errors.New("a2awire: a kontra-blob: url part that is not a ref")
+
+// ErrTooMuch is a body whose kontra-blob: parts hold more than MaxInlineTotal (or MaxTotal) bytes in all.
+var ErrTooMuch = errors.New("a2awire: too many bytes to inline in one body")
 
 // HasRefs reports whether b may hold a kontra-blob: part: it holds the scheme in any case (blob.Reserved's rule).
 // A body without it is passed on without being parsed.
@@ -68,7 +77,7 @@ func HasRefs(b []byte) bool {
 // kontra-blob: is returned as it came, unparsed. The result must be closed (its spilled objects are removed).
 // An error leaves nothing behind: a fetch the gate refused (*blob.FetchError), a body that is not an A2A 1.0
 // body at a level read (ErrShape, *strictjson.KeyError), a malformed kontra-blob: part (ErrReservedURL), more
-// than MaxInlineTotal in all.
+// than MaxInlineTotal in all (ErrTooMuch), or the Fetcher's own error, wrapped.
 func (in *Inliner) Inline(ctx context.Context, body []byte) (*Body, error) {
 	if !HasRefs(body) {
 		return &Body{segs: []segment{{lit: body}}}, nil
@@ -85,6 +94,13 @@ func (in *Inliner) Inline(ctx context.Context, body []byte) (*Body, error) {
 	}
 	rewritten, changed, err := Rewrite(body, func(p Part) (Part, error) {
 		u, ok := p.URL()
+		var file map[string]json.RawMessage // an A2A 0.3 FilePart's file
+		if !ok {
+			var err error
+			if file, u, ok, err = legacyFile(p); err != nil {
+				return nil, err
+			}
+		}
 		if !ok || !blob.Reserved(u) {
 			return nil, nil
 		}
@@ -100,11 +116,25 @@ func (in *Inliner) Inline(ctx context.Context, body []byte) (*Body, error) {
 		}
 		if total += n; total > limit {
 			sp.Close()
-			return nil, fmt.Errorf("a2awire: inlining more than %d bytes in one body", limit)
+			return nil, fmt.Errorf("%w: more than %d bytes", ErrTooMuch, limit)
 		}
 		key := fmt.Sprintf("%s%d", marker, len(out.spills))
 		out.spills = append(out.spills, sp)
 		np := Part{}
+		if file != nil {
+			nf := map[string]json.RawMessage{}
+			for k, v := range file {
+				if k != "uri" {
+					nf[k] = v
+				}
+			}
+			nf["bytes"] = json.RawMessage(`"` + key + `"`)
+			for k, v := range p {
+				np[k] = v
+			}
+			np["file"] = encode(nf)
+			return np, nil
+		}
 		for k, v := range p {
 			if k != "url" {
 				np[k] = v
@@ -144,6 +174,23 @@ func (in *Inliner) Inline(ctx context.Context, body []byte) (*Body, error) {
 	}
 	out.segs = append(out.segs, segment{lit: rewritten[from:]})
 	return out, nil
+}
+
+// legacyFile reads an A2A 0.3 FilePart's file member, {"uri": …, "mimeType", "name"} (FileWithURI), with exact
+// keys; ok is false for a part without one, or whose file holds no uri string (FileWithBytes).
+func legacyFile(p Part) (file map[string]json.RawMessage, uri string, ok bool, err error) {
+	raw, has := p["file"]
+	if !has || firstByte(raw) != '{' {
+		return nil, "", false, nil
+	}
+	if file, err = strictjson.Members(raw); err != nil {
+		return nil, "", false, err
+	}
+	v, has := file["uri"]
+	if !has || json.Unmarshal(v, &uri) != nil {
+		return nil, "", false, nil
+	}
+	return file, uri, true, nil
 }
 
 // Body is an inlined body: Len bytes that WriteTo writes, objects streamed from memory or their spill files as

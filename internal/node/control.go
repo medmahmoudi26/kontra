@@ -21,7 +21,7 @@ type event int
 
 const (
 	evDrain     event = iota + 1 // {"t": "drain"}: dial a new session at once (make-before-break, D35)
-	evExhausted                  // the gate's stream ids are nearly exhausted (§14): dial a new session
+	evExhausted                  // the gate's or the node's stream ids are (nearly) exhausted (§14): dial a new session
 )
 
 // streamIDHeadroom is how many stream ids before yamux's limit (it refuses an open at id MaxUint32-1) the
@@ -45,6 +45,10 @@ type session struct {
 	log     *slog.Logger
 	events  chan event
 	ctx     context.Context // ends when the session closes, or Run ends
+	// auth is the API key the session's hello carried (its hiring principal), "" for none.
+	auth string
+	// slots bounds the node-opened streams in flight on the session to the gate's cap (§14; session.open).
+	slots chan struct{}
 
 	retired  atomic.Bool // drained or replaced: serves on, never redialed
 	replaced atomic.Bool // its key, rotated since, was revoked: Run dials the active key's session at once
@@ -69,8 +73,8 @@ func (s *session) accept() {
 		if err != nil {
 			return
 		}
-		if nearExhaustion(st.StreamID()) && s.exhaust.CompareAndSwap(false, true) {
-			s.signal(evExhausted)
+		if nearExhaustion(st.StreamID()) {
+			s.streamsExhausted()
 		}
 		go s.proxy.ServeStream(s.ctx, st)
 	}
@@ -86,8 +90,10 @@ func (s *session) accept() {
 //     alone (Node.keyRevoked). revoked with a service: the active key's binding: the service is dropped
 //     from every session's served set and from the next hello (Node.dropService); a rotated key's binding:
 //     from that session alone (Node.bindingRevoked).
-//   - auth_revoked (the gate answers the session's hiring requests 401 from now on; hosting goes on), enrolled
-//     and expiring are logged (anonymous sessions are M4).
+//   - auth_revoked: the gate answers the session's hiring requests 401 from now on, and hosting goes on (§12,
+//     §13). The revoked API key is dropped from the credentials and from every later hello (Node.authRevoked),
+//     since the next handshake would otherwise be refused auth_invalid, which §4 makes final.
+//   - enrolled and expiring are logged (anonymous sessions are M4).
 func (s *session) readControl(stream net.Conn, br *bufio.Reader) {
 	if !s.control.CompareAndSwap(false, true) {
 		s.log.Warn("a second control stream on one session is refused")
@@ -114,7 +120,7 @@ func (s *session) readControl(stream net.Conn, br *bufio.Reader) {
 			}
 			s.n.bindingRevoked(s, c.Service)
 		case tunnel.CtlAuthRevoked:
-			s.log.Warn("the gate revoked the session's hiring API key; hosting goes on (§12)")
+			s.n.authRevoked(s)
 		case tunnel.CtlEnrolled:
 			s.log.Info("another key was enrolled for a service this node hosts (§5)", "service", c.Service, "enrolled_key_id", c.Key)
 		case tunnel.CtlExpiring:

@@ -12,9 +12,11 @@
 //
 // Cards: the node verifies the gate's signature on every card it serves locally, with a jku equal to
 // {the origin it dialed}/.well-known/jwks.json, and rewrites supportedInterfaces[].url to its own
-// http://localhost:<port>/… URLs; a card whose signature does not verify is not served. Sealing and opening for
-// sealed services happen around the forwarding (internal/sealing, M3 WP-08); blobs a reply names as
-// kontra-blob:<ref> are fetched on blob streams and inlined (internal/blob).
+// http://localhost:<port>/… URLs; a card whose signature does not verify is not served, whatever the answer's
+// Content-Type and the case of its member names. Sealing and opening for sealed services happen around the
+// forwarding (internal/sealing, M3 WP-08); blobs an A2A answer (/agents/…) names as kontra-blob:<ref> are fetched
+// on blob streams and inlined (internal/blob). A node keeps at most the gate's cap of node-opened streams in
+// flight per session (spec/tunnel.md §14): a request that finds none free in time is 429 (ErrBusy).
 //
 // Work package: M3 WP-03 (listener, checks, forwarding, cards), M3 WP-08 (sealing around it).
 package hiring
@@ -66,10 +68,16 @@ type Config struct {
 }
 
 // Opener opens one node-opened stream in the current session, preamble written; it fails while the node has no
-// session or is draining (no new hiring streams on a draining session, spec/tunnel.md §13).
+// session or is draining (no new hiring streams on a draining session, spec/tunnel.md §13), and with an error
+// wrapping ErrBusy while the session has as many node-opened streams in flight as the gate allows (§14).
 type Opener interface {
 	OpenHire(ctx context.Context) (net.Conn, error)
 }
+
+// ErrBusy is an Opener's refusal to open one more node-opened stream on a session that already has the gate's cap
+// of them in flight (spec/tunnel.md §14: 32, 8 for an anonymous session) after a short wait: the local client gets
+// 429 with Retry-After, and no stream is opened, so the gate never meets more streams than it allows.
+var ErrBusy = errors.New("the tunnel session has as many node-opened streams in flight as the gate allows")
 
 // BlobOpener opens a blob stream in the current session, its preamble not yet written (blob.Fetch writes it).
 // An Opener that is one too lets the server inline the kontra-blob: parts of the gate's answers.
@@ -345,6 +353,9 @@ func hiringPath(p string) bool {
 
 func isMCPPath(p string) bool { return p == "/mcp" || strings.HasPrefix(p, "/mcp/") }
 
+// isA2APath reports a path of the gate's A2A routes, the only answers whose parts are walked.
+func isA2APath(p string) bool { return strings.HasPrefix(p, "/agents/") }
+
 // refuse answers a local refusal: on an MCP path a JSON-RPC error without id (MCP's rule for an Origin it
 // refuses), else plain text. It opens no stream.
 func refuse(w http.ResponseWriter, r *http.Request, status int, msg string) {
@@ -370,11 +381,14 @@ func refuse(w http.ResponseWriter, r *http.Request, status int, msg string) {
 // errNoSession is the forwarding's error while the node has no session to open a stream on.
 var errNoSession = errors.New("hiring: no tunnel session to forward on")
 
-// proxyError answers a forwarding that failed: 503 while there is no session, 502 otherwise (a card that does
-// not verify included).
+// proxyError answers a forwarding that failed: 429 while the session has the gate's cap of node-opened streams in
+// flight, 503 while there is no session, 502 otherwise (a card that does not verify included).
 func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 	status, msg := http.StatusBadGateway, "kontra connect: the gate's answer could not be forwarded"
 	switch {
+	case errors.Is(err, ErrBusy):
+		status, msg = http.StatusTooManyRequests, "kontra connect: as many requests are in flight on the tunnel as the gate allows; try again"
+		w.Header().Set("Retry-After", "1")
 	case errors.Is(err, errNoSession):
 		status, msg = http.StatusServiceUnavailable, "kontra connect: no tunnel session to the gate right now; try again"
 	case errors.Is(err, ErrCardNotVerified):
@@ -390,7 +404,18 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // modify is the ReverseProxy's ModifyResponse: a card is verified and rewritten (relay.md §3, tunnel.md §9), and
-// the kontra-blob: parts of an answer are inlined (relay.md §10.4), JSON and SSE.
+// the kontra-blob: parts of an A2A answer are inlined (relay.md §10.4), JSON and SSE.
+//
+// Cards. Every GET answer in 2xx on a card route is read whatever its Content-Type: a2a-go's resolver decodes
+// any body with encoding/json, which ignores the Content-Type and matches member names without regard to case.
+// On a route that must answer a card ({svc}/.well-known/agent-card.json), the answer is a card; on one that may
+// ({svc}), it is a card when any of its members is a card's member under case folding (isCard). A card is
+// verified (RewriteCard) and is never served unverified; an answer on a card route that is not one JSON object
+// with exact keys, an event stream included, is not served either (502).
+//
+// Parts. Only answers on A2A routes (/agents/…) are walked: MCP and the gate's own routes carry no kontra-blob:
+// part (D167: the bucket carries A2A parts only), and an MCP answer is no A2A body (an MCP task's status is a
+// string).
 func (s *Server) modify(res *http.Response) error {
 	req := res.Request
 	ctx := req.Context()
@@ -399,9 +424,13 @@ func (s *Server) modify(res *http.Response) error {
 	if req.Method == http.MethodGet && res.StatusCode/100 == 2 {
 		must, may = isCardRoute(req.URL.Path)
 	}
+	cardRoute := must || may
+	inline := s.inline != nil && isA2APath(req.URL.Path)
 	switch {
+	case cardRoute && a2awire.IsEventStream(ct):
+		return fmt.Errorf("%w: an event stream on a card route", ErrCardNotVerified)
 	case a2awire.IsEventStream(ct):
-		if s.inline == nil {
+		if !inline {
 			return nil
 		}
 		pr, pw := io.Pipe()
@@ -415,7 +444,9 @@ func (s *Server) modify(res *http.Response) error {
 		res.Header.Del("Content-Length")
 		res.ContentLength = -1
 		return nil
-	case !a2awire.IsJSON(ct) && !must:
+	case cardRoute:
+		// Read whatever its Content-Type (above).
+	case !a2awire.IsJSON(ct) || !inline:
 		return nil
 	}
 	b, err := io.ReadAll(io.LimitReader(res.Body, a2awire.MaxBody+1))
@@ -423,7 +454,7 @@ func (s *Server) modify(res *http.Response) error {
 		return err
 	}
 	if len(b) > a2awire.MaxBody {
-		if must || may {
+		if cardRoute {
 			return fmt.Errorf("%w: an answer over %d bytes on a card route", ErrCardNotVerified, a2awire.MaxBody)
 		}
 		// Too long to read whole: passed as it came.
@@ -450,7 +481,7 @@ func (s *Server) modify(res *http.Response) error {
 		res.Header.Del("ETag") // the hash of the gate's body, not of this one
 		return nil
 	}
-	if s.inline != nil && a2awire.HasRefs(b) {
+	if inline && a2awire.HasRefs(b) {
 		body, err := s.inline.Inline(ctx, b)
 		if err != nil {
 			return err
@@ -489,6 +520,9 @@ func (t *streamTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		if req.Body != nil {
 			_ = req.Body.Close()
+		}
+		if errors.Is(err, ErrBusy) {
+			return nil, fmt.Errorf("hiring: %w", err)
 		}
 		return nil, fmt.Errorf("%w: %v", errNoSession, err)
 	}

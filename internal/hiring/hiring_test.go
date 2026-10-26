@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -147,6 +148,9 @@ type fakeGate struct {
 	jkus   atomic.Value
 	ref    blob.Ref
 	jwksN  atomic.Int32
+	// cardType replaces the card's Content-Type (application/json) when set; cardBody the signed card.
+	cardType atomic.Pointer[string]
+	cardBody atomic.Pointer[[]byte]
 }
 
 func newFakeGate(t *testing.T, public string) *fakeGate {
@@ -183,10 +187,17 @@ func (g *fakeGate) handler(t *testing.T) http.Handler {
 	mux := http.NewServeMux()
 	serveCard := func(w http.ResponseWriter, r *http.Request) {
 		c := g.signedCard(t)
+		if b := g.cardBody.Load(); b != nil {
+			c = *b
+		}
 		if g.tamper.Load() {
 			c = bytes.Replace(c, []byte(`"says hello"`), []byte(`"says hullo"`), 1)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		ct := "application/json"
+		if v := g.cardType.Load(); v != nil {
+			ct = *v
+		}
+		w.Header().Set("Content-Type", ct)
 		w.Header().Set("ETag", `"gate"`)
 		_, _ = w.Write(c)
 	}
@@ -216,8 +227,16 @@ func (g *fakeGate) handler(t *testing.T) http.Handler {
 	}
 	mux.HandleFunc("POST /agents/hello", echo)
 	mux.HandleFunc("POST /mcp/fs", echo)
+	mux.HandleFunc("GET /mcp/fs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "id: 1\ndata: "+mcpTaskAnswer+"\n\n")
+	})
 	return mux
 }
+
+// mcpTaskAnswer is an MCP answer (a CreateTaskResult) whose text mentions the kontra-blob: scheme: its task's
+// status is a string, which an A2A body never has.
+const mcpTaskAnswer = `{"jsonrpc":"2.0","id":3,"result":{"task":{"taskId":"t1","status":"completed","statusMessage":"wrote kontra-blob: notes"}}}`
 
 type testServer struct {
 	s      *Server
@@ -459,7 +478,7 @@ func TestForwarding(t *testing.T) {
 	}
 }
 
-// No session: 503, saying so.
+// No session: 503, saying so. No slot for one more node-opened stream (spec/tunnel.md §14): 429 with Retry-After.
 func TestNoSession(t *testing.T) {
 	ts := startServer(t, nil)
 	ts.tun.mu.Lock()
@@ -467,6 +486,12 @@ func TestNoSession(t *testing.T) {
 	ts.tun.mu.Unlock()
 	if res, _ := ts.do(t, http.MethodPost, "/agents/hello", "", nil, "{}"); res.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("no session: %d", res.StatusCode)
+	}
+	ts.tun.mu.Lock()
+	ts.tun.fail = fmt.Errorf("node: %w", ErrBusy)
+	ts.tun.mu.Unlock()
+	if res, _ := ts.do(t, http.MethodPost, "/agents/hello", "", nil, "{}"); res.StatusCode != http.StatusTooManyRequests || res.Header.Get("Retry-After") == "" {
+		t.Fatalf("no slot: %d Retry-After %q, want 429 with Retry-After", res.StatusCode, res.Header.Get("Retry-After"))
 	}
 }
 
@@ -529,6 +554,67 @@ func TestCards(t *testing.T) {
 		t.Fatalf("a card whose jku is another origin: %d", res.StatusCode)
 	}
 	ts.gate.jkus.Store(ts.gate.public + jws.JWKSPath)
+
+	// Whatever its Content-Type: a2a-go decodes any answer as a card (encoding/json), so the node reads every
+	// GET answer on a card route. The gate's own card served as text/plain is verified and rewritten; a tampered
+	// one is not served, and a2a-go resolves nothing.
+	resolves := func() bool {
+		_, err := agentcard.DefaultResolver.Resolve(context.Background(), ts.url+"/agents/hello")
+		return err == nil
+	}
+	plain := "text/plain"
+	ts.gate.cardType.Store(&plain)
+	if res, body := ts.do(t, http.MethodGet, "/agents/hello", "", nil, ""); res.StatusCode != 200 ||
+		bytes.Contains(body, []byte("127.0.0.1:18443")) || !bytes.Contains(body, []byte("http://localhost:"+ts.port+"/agents/hello")) {
+		t.Fatalf("the gate's card as text/plain: %d %.300s, want it verified and rewritten", res.StatusCode, body)
+	}
+	ts.gate.tamper.Store(true)
+	if res, body := ts.do(t, http.MethodGet, "/agents/hello", "", nil, ""); res.StatusCode != http.StatusBadGateway ||
+		strings.Contains(string(body), "hullo") || strings.Contains(string(body), "127.0.0.1:18443") {
+		t.Fatalf("a tampered card as text/plain: %d %.300s, want 502 and nothing of it", res.StatusCode, body)
+	}
+	if resolves() {
+		t.Fatal("a2a-go resolved a tampered card served as text/plain")
+	}
+	ts.gate.tamper.Store(false)
+	// A forged, unsigned card whose members are case variants of a card's (encoding/json matches them anyway), as
+	// JSON and as text/plain; and an event stream on a card route.
+	forged := []byte(`{"name":"hello","description":"forged","version":"1.0.0",` +
+		`"SupportedInterfaces":[{"url":"http://attacker.example/agents/hello","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],` +
+		`"Capabilities":{"streaming":true},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],"Skills":[]}`)
+	ts.gate.cardBody.Store(&forged)
+	for _, ct := range []string{"application/json", "text/plain", "text/event-stream"} {
+		ts.gate.cardType.Store(&ct)
+		if res, body := ts.do(t, http.MethodGet, "/agents/hello", "", nil, ""); res.StatusCode != http.StatusBadGateway ||
+			strings.Contains(string(body), "attacker.example") {
+			t.Fatalf("a forged card with case-variant members as %s: %d %.300s, want 502", ct, res.StatusCode, body)
+		}
+		if resolves() {
+			t.Fatalf("a2a-go resolved a forged card served as %s through the node", ct)
+		}
+	}
+	ts.gate.cardBody.Store(nil)
+	ts.gate.cardType.Store(nil)
+	if !resolves() {
+		t.Fatal("the gate's own card no longer resolves")
+	}
+}
+
+// MCP answers are never walked as A2A bodies (D167: the bucket carries A2A parts only): an MCP task whose text
+// mentions kontra-blob: passes as it came, JSON and SSE, and no blob stream is opened.
+func TestMCPAnswersAreNotInlined(t *testing.T) {
+	ts := startServer(t, nil)
+	res, body := ts.do(t, http.MethodPost, "/mcp/fs", "", http.Header{"Content-Type": {"application/json"}}, mcpTaskAnswer)
+	if res.StatusCode != 200 || string(body) != mcpTaskAnswer {
+		t.Fatalf("an MCP answer mentioning the scheme: %d %.300s", res.StatusCode, body)
+	}
+	res, body = ts.do(t, http.MethodGet, "/mcp/fs", "", nil, "")
+	if res.StatusCode != 200 || string(body) != "id: 1\ndata: "+mcpTaskAnswer+"\n\n" {
+		t.Fatalf("an MCP SSE answer mentioning the scheme: %d %q", res.StatusCode, body)
+	}
+	if _, blobs := ts.tun.counts(); blobs != 0 {
+		t.Fatalf("%d blob streams for MCP answers", blobs)
+	}
 }
 
 // RewriteCard alone: a card signed by another key than the dialed gate's is refused even after a fresh fetch of

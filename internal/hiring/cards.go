@@ -91,7 +91,7 @@ func RewriteCard(ctx context.Context, card []byte, gate *url.URL, local *url.URL
 	for attempt := 0; attempt < 2 && !verified; attempt++ {
 		keys, err := keySet(ctx, jwks, jku, attempt > 0)
 		if err != nil {
-			return nil, fmt.Errorf("%w: the key set at %s: %v", ErrCardNotVerified, jku, err)
+			return nil, fmt.Errorf("%w: the key set at %s: %w", ErrCardNotVerified, jku, err)
 		}
 		for _, sig := range sigs {
 			h, err := jws.Verify(card, sig, keys)
@@ -263,7 +263,8 @@ func jsonString(s string) []byte {
 }
 
 // cardMembers are members only a card has (A2A 1.0, and 0.x's url and additionalInterfaces): an answer with any of
-// them on a card route is a card, verified before it is served. A Task, a Message and a list have none.
+// them on a card route, under case folding, is a card, verified before it is served. A Task, a Message and a list
+// have none.
 var cardMembers = []string{"supportedInterfaces", "signatures", "url", "additionalInterfaces", "preferredTransport", "skills", "capabilities"}
 
 // isCardRoute reports a GET path that may answer a served card: {svc} (/agents/{name} or /agents/{tenant}/{name})
@@ -281,17 +282,20 @@ func isCardRoute(path string) (must, may bool) {
 	return false, len(segs) == 1 || len(segs) == 2
 }
 
-// isCard reports whether a GET answer on a card route is a card: one with a member only a card has. A body that
-// is not one JSON object with exact keys is an error: the node does not serve what it cannot read exactly on a
-// route that may carry a card.
+// isCard reports whether a GET answer on a card route is a card: one with a member only a card has, compared under
+// case folding (strings.EqualFold), since a2a-go decodes a card with encoding/json, which matches member names so:
+// {"SupportedInterfaces": …} is a card to it. A body that is not one JSON object with exact keys is an error: the
+// node does not serve what it cannot read exactly on a route that may carry a card.
 func isCard(body []byte) (bool, error) {
 	m, err := strictjson.Members(body)
 	if err != nil {
 		return false, err
 	}
-	for _, k := range cardMembers {
-		if _, ok := m[k]; ok {
-			return true, nil
+	for k := range m {
+		for _, c := range cardMembers {
+			if strings.EqualFold(k, c) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil

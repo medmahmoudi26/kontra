@@ -1175,7 +1175,8 @@ func TestTunnelBackend(t *testing.T) {
 		t.Fatalf("no card yet: %v", err)
 	}
 	ft.set(tunnelCardV1, true) // the agent is up now
-	if _, _, err := s.Backend(ctx, ref, on(held)); !errors.Is(err, relay.ErrCardPending) {
+	// Still pending, unless the keeper's loop, woken by the call above, has fetched the card already.
+	if _, _, err := s.Backend(ctx, ref, on(held)); err != nil && !errors.Is(err, relay.ErrCardPending) {
 		t.Fatalf("no card yet: %v", err)
 	}
 	deadline := time.Now().Add(10 * time.Second)

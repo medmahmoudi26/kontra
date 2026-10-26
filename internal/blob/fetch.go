@@ -28,6 +28,13 @@ const maxSizeLine = 256
 // closes the stream once it has written them (§8.3), and a byte more than announced is refused.
 const eofWait = 10 * time.Second
 
+// ErrBadAnswer is a blob stream's answer the node refuses for what it says rather than for how it travelled
+// (spec/tunnel.md §8.3, D181): a first line that is not {"size": n} or {"error": …} with exact keys, an announced
+// size over MaxObject, more bytes than announced. Asking again would get the same answer. Fetch's other errors,
+// but a *FetchError, are a stream that failed or ended early (the gate closes a blob stream over its cap of
+// node-opened streams unanswered, §14), which asking again may cure.
+var ErrBadAnswer = errors.New("the gate's answer breaks spec/tunnel.md §8.3")
+
 // FetchError is the gate's refusal of a blob stream: "not_found", "forbidden" or "too_large".
 type FetchError struct {
 	Reason string
@@ -57,7 +64,8 @@ func WriteRefusal(w io.Writer, reason string) error {
 // MaxObject before reading any of them, fewer bytes than announced, and more (a byte after the n, before the
 // gate's close). The line is read with exact keys (D172): a repeated or case-variant member, a member besides
 // size or error, or a size that is not a positive integer is refused. On an error w may hold part of the
-// object, which the caller discards. Fetch closes stream, at once when ctx ends.
+// object, which the caller discards. Fetch closes stream, at once when ctx ends. An answer refused for what it
+// says wraps ErrBadAnswer.
 //
 // The caller authenticates a sealed part's whole age file before acting on it (internal/sealing, WP-08). The
 // node never dials a URL taken from a part (D56): the stream is one it opened in its own tunnel.
@@ -88,10 +96,10 @@ func Fetch(ctx context.Context, stream io.ReadWriteCloser, ref Ref, w io.Writer)
 		if errors.As(err, &fe) {
 			return 0, fe
 		}
-		return 0, fmt.Errorf("blob: fetch %s: %w", ref, err)
+		return 0, fmt.Errorf("blob: fetch %s: %w: %v", ref, ErrBadAnswer, err)
 	}
 	if n > MaxObject {
-		return 0, fmt.Errorf("blob: fetch %s: the gate announced %d bytes, over %d (spec/tunnel.md §14)", ref, n, int64(MaxObject))
+		return 0, fmt.Errorf("blob: fetch %s: %w: the gate announced %d bytes, over %d (spec/tunnel.md §14)", ref, ErrBadAnswer, n, int64(MaxObject))
 	}
 	got, err := io.CopyN(w, br, n)
 	if err != nil {
@@ -107,7 +115,7 @@ func Fetch(ctx context.Context, stream io.ReadWriteCloser, ref Ref, w io.Writer)
 	for {
 		k, err := br.Read(one[:])
 		if k > 0 {
-			return 0, fmt.Errorf("blob: fetch %s: the gate sent more than the %d bytes it announced", ref, n)
+			return 0, fmt.Errorf("blob: fetch %s: %w: the gate sent more than the %d bytes it announced", ref, ErrBadAnswer, n)
 		}
 		if errors.Is(err, io.EOF) {
 			return n, nil
@@ -133,7 +141,7 @@ func readSizeLine(br *bufio.Reader) ([]byte, error) {
 			return line, nil
 		}
 		if len(line) >= maxSizeLine {
-			return nil, fmt.Errorf("a first line over %d bytes", maxSizeLine)
+			return nil, fmt.Errorf("%w: a first line over %d bytes", ErrBadAnswer, maxSizeLine)
 		}
 		line = append(line, b)
 	}

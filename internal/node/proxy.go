@@ -22,6 +22,7 @@ import (
 	"kontra.sh/kontra/internal/a2awire"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -350,16 +351,22 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 
 // inlineBody replaces the request's body with one whose kontra-blob: parts are inlined (§8.3, relay.md §10.4),
 // when it is JSON and holds the scheme; done releases what the inlining holds once the exchange is over. A
-// request whose parts cannot be fetched (the gate refused a ref, the stream failed, the body is not an A2A 1.0
-// body with exact keys) is answered 400 here, without Kontra-Node (D151: the gate fails the task
-// upstream_error), and ok is false.
+// request whose parts cannot be fetched never reaches the service, and ok is false:
 //
-// SPEC-CONFLICT (spec/tunnel.md §8.2, §8.3): §8.3 has the node refuse an announced size over 64 MiB and more bytes
-// than announced, and §8.2 closes the list of reasons a node's own answer carries; neither says what the exchange
-// whose part cannot be fetched answers. The closest faithful behaviour is D151's for the node's other 400s: no
-// Kontra-Node, so the gate takes it as final (upstream_error) rather than as a lost session retried elsewhere: a
-// ref the gate refuses stays refused, and the request never reached the service. A blob stream that failed in
-// transit is final too; the owner may want it retried (a Kontra-Node reason for it).
+//   - for good (inlineFinal: the gate refused a ref, the gate's answer breaks §8.3, the body is not an A2A body
+//     with exact keys, too much in all): 400 without Kontra-Node (D151: the gate fails the task upstream_error);
+//   - for now (a blob stream that found no slot of the session within its wait, could not be opened, failed in
+//     transit or ended unanswered, as the gate ends one over its cap of node-opened streams): 503 with Kontra-Node:
+//     full, which the gate retries (on another session before the first upstream task id, with backoff after it,
+//     relay.md §6.4).
+//
+// SPEC-CONFLICT (spec/tunnel.md §8.2, §8.3, §14): §8.3 has the node refuse an announced size over 64 MiB and more
+// bytes than announced, and §8.2 closes the list of reasons a node's own answer carries; neither says what the
+// exchange whose part cannot be fetched answers. The closest faithful behaviour: a refusal that would come again is
+// D151's 400 without Kontra-Node, final, like the node's other 400s; a fetch that may succeed if asked again is
+// §8.2's full (503), the reason the gate already retries, since the node then had no room for the exchange's
+// stream: the node keeps its node-opened streams under the gate's cap (§14) and waits for a slot first. full
+// otherwise names the node's own in-flight cap (--max-inflight); the owner may want a reason of its own for it.
 func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Logger) (done func(), ok bool) {
 	none := func() {}
 	if r.Body == nil || r.Body == http.NoBody {
@@ -386,6 +393,12 @@ func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Log
 	}
 	body, err := p.inline.Inline(r.Context(), b)
 	if err != nil {
+		if !inlineFinal(err) {
+			log.Warn("tunnel exchange refused for now: a kontra-blob: part could not be fetched; the gate retries it", "err", err)
+			nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull,
+				"kontra connect: a part of the request could not be fetched from the gate now; try again")
+			return nil, false
+		}
 		log.Warn("tunnel exchange refused: a kontra-blob: part could not be fetched", "err", err)
 		nodeAnswer(w, http.StatusBadRequest, "", "kontra connect: a part of the request could not be fetched from the gate")
 		return nil, false
@@ -407,6 +420,20 @@ func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Log
 		<-wrote
 		_ = body.Close()
 	}, true
+}
+
+// inlineFinal reports an inlining that would fail again if asked again: a ref the gate refused (*blob.FetchError:
+// not_found, forbidden, too_large), an answer that breaks §8.3 (blob.ErrBadAnswer: a malformed size line, a size
+// over 64 MiB, more bytes than announced), a body that is not an A2A body with exact keys (a2awire.ErrShape,
+// *strictjson.KeyError), a kontra-blob: url that names no ref (a2awire.ErrReservedURL), more than the inlining's
+// total (a2awire.ErrTooMuch). Anything else is the stream's: its slot, its open, its transit.
+func inlineFinal(err error) bool {
+	var (
+		fe *blob.FetchError
+		ke *strictjson.KeyError
+	)
+	return errors.As(err, &fe) || errors.As(err, &ke) || errors.Is(err, blob.ErrBadAnswer) || errors.Is(err, a2awire.ErrShape) ||
+		errors.Is(err, a2awire.ErrReservedURL) || errors.Is(err, a2awire.ErrTooMuch) || errors.Is(err, strictjson.ErrNotObject)
 }
 
 // targetPath is the path a request goes to (§8.2): the request path, which net/http has percent-decoded

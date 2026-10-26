@@ -43,7 +43,7 @@ through one outbound connection (spec/tunnel.md):
   --key PATH                 the identity key (default ~/.kontra/identity.key, or $KONTRA_KEY)
   --enroll TOKEN|@FILE|-     a one-time enrollment token from kontra-gate enroll <service>; repeatable
   --api-key KEY|@FILE|-      an API key for this gate: who this node hires as (else node:<key id>); a node that only
-                             hires is admitted on it
+                             hires is admitted on it, and only while it is valid
   --name NAME                the node's name in the operator's view (default the hostname)
   --rotate                   rotate the identity key (the old one stays decrypt-only for 24 h)
   --require-channel-binding  refuse a gate that offers no TLS channel binding

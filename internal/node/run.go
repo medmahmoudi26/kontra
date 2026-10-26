@@ -49,8 +49,9 @@ const (
 // keeps serving the streams the gate opens on it until the gate closes it, and is never redialed. So is a
 // session whose key another process has rotated (the new key's session is dialed at once, with rotate_from)
 // and one whose stream ids are nearly exhausted (§14: the node reconnects; yamux allows about 2³¹ opens per
-// side, and only the gate opens streams in M2, so the node watches the ids it accepts and dials a new
-// session before the gate's run out).
+// side): the node watches both the ids it accepts and its own (hiring, the key set and blob fetches open streams
+// from the node since M3, session.open), and dials a new session before either side's run out, or as soon as an
+// open of its own is refused ErrStreamsExhausted.
 //
 // It returns nil when ctx ends, ErrRevoked when the gate revokes the key, a *tunnel.HandshakeError for a
 // refusal that is not retried, ErrChannelBindingRequired, or an error reading the key file.
@@ -63,6 +64,14 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Hiring (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
 	// stops kontra connect at once; its requests wait for a session.
+	//
+	// SPEC-CONFLICT (spec/tunnel.md §9; M3 WP-03 review): §9 has every node serve 127.0.0.1:7777 (--listen), and
+	// none turns it off. So every kontra connect binds it, hosting-only ones included: a second node on the same
+	// host stops at start unless it is given another --listen (this host's kontra-node-hello and
+	// kontra-seller-hello units would collide on an upgrade), and every hosting node offers its hiring principal
+	// (its --api-key, or node:<key_id>, which org:<tenant> admits) to every local process without a token. Built as
+	// written; the owner decides whether a node that hosts serves the endpoint by default, or whether hiring can
+	// be turned off (for example --listen off).
 	ln, err := net.Listen("tcp", n.cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>)", n.cfg.Listen, err)
@@ -273,7 +282,7 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 				return nil, nextAgain, nil
 			}
 		}
-		s, err := n.startSession(ctx, d, w, id)
+		s, err := n.startSession(ctx, d, w, id, h.Auth)
 		if err != nil {
 			log.Warn("the tunnel session did not start", "err", err)
 			return nil, nextRetry, err
@@ -522,8 +531,9 @@ func hashes(tokens []string) []string {
 }
 
 // startSession starts the yamux client over the welcomed connection (§7), and the session's accept loop,
-// ping loop and control stream reader; it prints the welcome's service URLs.
-func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, id *nodekey.Identity) (*session, error) {
+// ping loop and control stream reader; it prints the welcome's service URLs. auth is the API key the hello
+// carried.
+func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, id *nodekey.Identity, auth string) (*session, error) {
 	sctx, cancel := context.WithCancel(ctx)
 	log := n.logger.With(obs.KeyTunnelSession, w.Session, obs.KeyReplica, w.Replica, "key_id", id.KeyID())
 	cfg := tunnel.YamuxConfig(log)
@@ -541,6 +551,11 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	for _, ws := range w.Services {
 		served = append(served, ws.Name)
 	}
+	// The gate's cap of node-opened streams in flight (§14, §6.2): the node keeps under it (session.open).
+	limit := tunnel.GateMaxInflight
+	if w.Anonymous != nil {
+		limit = tunnel.GateMaxInflightAnonymous
+	}
 	s := &session{
 		n:       n,
 		id:      w.Session,
@@ -551,12 +566,15 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 		log:     log,
 		events:  make(chan event, 4),
 		ctx:     sctx,
+		auth:    auth,
+		slots:   make(chan struct{}, limit),
 	}
 	s.proxy = n.proxy.forSession(served, log)
 	s.proxy.onControl = s.readControl
 	// The kontra-blob: parts of what the gate forwards are fetched on this session's own blob streams (§8.3):
-	// the gate serves a ref to the session one of whose attempts holds its task.
-	s.proxy.setBlobOpener(func(ctx context.Context) (net.Conn, error) { return openStream(ctx, mux, nil) })
+	// the gate serves a ref to the session one of whose attempts holds its task. They share the session's slots
+	// with hiring (§14).
+	s.proxy.setBlobOpener(func(ctx context.Context) (net.Conn, error) { return s.open(ctx, nil) })
 	n.mu.Lock()
 	n.sessions[s] = struct{}{}
 	n.mu.Unlock()
@@ -650,6 +668,29 @@ func (n *Node) keyRevoked(s *session) {
 	}
 	s.log.Error("the gate revoked this node's key: kontra connect stops and does not redial (§12)")
 	n.revokeOnce.Do(func() { close(n.revoked) })
+}
+
+// authRevoked is {"t": "auth_revoked"} on a session's control stream (§12, §13): the gate revoked the API key the
+// session's hello carried, its hiring principal. The session's hiring requests are 401 from now on, and its
+// hosting goes on. The key is dropped from this origin's credentials (when it is still the one stored) and so
+// from every later hello: otherwise the next handshake (a network blip, a replica's restart, the make-before-break
+// dial of a drain) would carry it and be refused auth_invalid, which §4 makes final, and kontra connect would stop
+// hosting. Later sessions hire as node:<key_id> (§9); a key that only hires is refused until its operator gives a
+// new --api-key (enroll.Admit).
+func (n *Node) authRevoked(s *session) {
+	s.log.Error("the gate revoked the session's hiring API key (auth_revoked): hiring requests on this session are refused 401 "+
+		"and hosting goes on; the key is removed from the credentials file and no later hello carries it (spec/tunnel.md §12)",
+		"path", n.creds.Path())
+	if s.auth == "" {
+		return
+	}
+	if err := n.updateCredential(func(c *Credential) {
+		if c.APIKey == s.auth {
+			c.APIKey = ""
+		}
+	}); err != nil {
+		s.log.Error("the credentials file could not be updated", "err", err)
+	}
 }
 
 // bindingRevoked is {"t": "revoked", "service"} on a session's control stream (§12): the gate revoked the

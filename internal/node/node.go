@@ -13,8 +13,9 @@
 // tunnel and inlined (§8.3); a URL taken from a part is never dialed (D56).
 //
 // Hiring (§9, internal/hiring): the node serves --listen (default 127.0.0.1:7777) to local clients and forwards
-// each request on a stream it opens on its current session, never on a draining one (§13). A node with no
-// --serve only hires; its key is admitted on its --api-key (hire scope) alone.
+// each request on a stream it opens on its current session, never on a draining one (§13), keeping at most the
+// gate's cap of node-opened streams in flight per session (§14). A node with no --serve only hires; its key is
+// admitted on its --api-key (hire scope) alone, on every hello, and the gate refuses it once that key is revoked.
 //
 // MCP hosting, `mcp:<name>=<url>` and `mcp:<name>=stdio:<cmd>` (§10), is M3 WP-05; sealing and per-job keys
 // (§2.3) M3 WP-08; anonymous sessions and `--public` (§6) M4. There is no local console (D164).
@@ -288,6 +289,9 @@ type Node struct {
 	muxConfig     *yamux.Config
 	maintainEvery time.Duration
 	backoff       Backoff
+	// slotWait is how long a node-opened stream waits for one of its session's slots (§14) before the open
+	// gives up (hiring: 429; a hosted exchange's blob fetch: 503 full); tests shorten it.
+	slotWait time.Duration
 
 	creds  *Credentials
 	credMu sync.Mutex // serializes updateCredential
@@ -376,6 +380,7 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		proxy:         NewProxy(cfg.Serves, cfg.MaxInflight, log),
 		now:           time.Now,
 		maintainEvery: maintainEvery,
+		slotWait:      defaultSlotWait,
 		declared:      slices.Clone(cfg.Serves),
 		sessions:      map[*session]struct{}{},
 		currentCh:     make(chan struct{}),

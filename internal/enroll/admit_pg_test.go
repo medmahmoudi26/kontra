@@ -1278,8 +1278,11 @@ func TestAdmitAnnouncesEnrollments(t *testing.T) {
 // A node that only hires (spec/tunnel.md §4 "a node that only hires", §9; the M3 plan's conflict on §4–§5,
 // WP-03): an unknown key whose hello declares no service and carries an API key with the hire scope is admitted
 // with a tunnel_keys row in the API key's tenant and no binding, its hiring principal the API key's; without such
-// a key it stays unknown_key (D133), and so does one declaring services nothing enrolls. The key reconnects
-// without auth as a known key, hiring as node:<key_id>.
+// a key it stays unknown_key (D133), and so does one declaring services nothing enrolls. Such a key, which no
+// binding makes a node of its tenant, never hires as node:<key_id>: every later hello of it must carry an API key
+// with the hire scope (unknown_key otherwise), so that revoking the API key it was admitted on ends its hiring
+// (§12) instead of leaving a credential behind that org:<tenant> admits; one carrying the revoked key is
+// auth_invalid. A rotation of it is held to the same rule.
 func TestAdmitHireOnly(t *testing.T) {
 	e := newPGEnv(t)
 	ctx := context.Background()
@@ -1341,12 +1344,17 @@ func TestAdmitHireOnly(t *testing.T) {
 		t.Fatalf("audit %v", last)
 	}
 
-	// The same key again, without auth: a known key that hires as itself.
-	again := e.mustAdmit(k, hello(k))
-	if again.HirePrincipal != "node:"+k.kid || again.Hire != nil || len(again.Served) != 0 || again.Key.TenantID != acme {
-		t.Fatalf("the hire-only key without auth: %+v", again)
+	// The same key again, without auth, or with an API key without the hire scope: refused, never node:<key_id>.
+	d0, err := e.admit(k, hello(k), nil)
+	wantCode(t, "the hire-only key without auth", err, tunnel.CodeUnknownKey)
+	if d0 != nil {
+		t.Fatalf("the hire-only key without auth was admitted: hire principal %s", d0.HirePrincipal)
 	}
-	// And with auth again: the API key's principal, no second row.
+	noHire := hello(k)
+	noHire.Auth = enrollOnly.Secret
+	_, err = e.admit(k, noHire, nil)
+	wantCode(t, "the hire-only key with an API key without the hire scope", err, tunnel.CodeUnknownKey)
+	// With auth again: the API key's principal, no second row.
 	h2 := hello(k)
 	h2.Auth = hire.Secret
 	if d := e.mustAdmit(k, h2); d.HirePrincipal != hire.Principal() || d.Hire == nil {
@@ -1354,5 +1362,52 @@ func TestAdmitHireOnly(t *testing.T) {
 	}
 	if n := e.count(`select count(*) from kontra.tunnel_keys where tenant_id = $1`, acme); n != 1 {
 		t.Fatalf("%d keys in acme", n)
+	}
+
+	// The API key it was admitted on is revoked: with it, auth_invalid; without it, unknown_key (the review's
+	// probe: it was admitted as node:<key_id>, which org:acme admits).
+	if _, err := e.keys.Revoke(ctx, hire.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	h3 := hello(k)
+	h3.Auth = hire.Secret
+	_, err = e.admit(k, h3, nil)
+	wantCode(t, "the hire-only key with its revoked API key", err, tunnel.CodeAuthInvalid)
+	d4, err := e.admit(k, hello(k), nil)
+	wantCode(t, "the hire-only key after its API key was revoked", err, tunnel.CodeUnknownKey)
+	if d4 != nil {
+		t.Fatalf("after its API key was revoked the hire-only key was admitted: hire principal %s", d4.HirePrincipal)
+	}
+	// Another API key with the hire scope: admitted, hiring as that key.
+	other := mint(acme, auth.ScopeHire)
+	h5 := hello(k)
+	h5.Auth = other.Secret
+	if d := e.mustAdmit(k, h5); d.HirePrincipal != other.Principal() {
+		t.Fatalf("the hire-only key with another API key: %+v", d)
+	}
+
+	// A rotation of the hire-only key: without auth unknown_key (nothing written), with it admitted.
+	k2 := newTestKey(t)
+	_, err = e.admit(k2, hello(k2), k)
+	wantCode(t, "a rotation of a hire-only key without auth", err, tunnel.CodeUnknownKey)
+	if n := e.count(`select count(*) from kontra.tunnel_keys where key_id = $1`, k2.kid); n != 0 {
+		t.Fatal("the refused rotation wrote the new key")
+	}
+	h6 := hello(k2)
+	h6.Auth = other.Secret
+	if d, err := e.admit(k2, h6, k); err != nil || d.HirePrincipal != other.Principal() || d.Rotated == nil {
+		t.Fatalf("a rotation of a hire-only key with auth: %+v %v", d, err)
+	}
+
+	// A key with a binding, all of it revoked since, is a node of its tenant: it still hires as node:<key_id> (§9).
+	n := newTestKey(t)
+	nh := hello(n, a2a("hello"))
+	nh.Enroll = []string{e.token(acme, "hello")}
+	e.mustAdmit(n, nh)
+	if _, err := e.pool.Exec(ctx, `update kontra.key_services set revoked_at = now() where key_id = $1`, n.kid); err != nil {
+		t.Fatal(err)
+	}
+	if d := e.mustAdmit(n, hello(n)); d.HirePrincipal != "node:"+n.kid {
+		t.Fatalf("a key whose bindings were revoked: hire principal %s", d.HirePrincipal)
 	}
 }

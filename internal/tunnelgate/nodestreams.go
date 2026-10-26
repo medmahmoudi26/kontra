@@ -348,9 +348,12 @@ func acceptNodeStreams(ctx context.Context, s *Session, mux *yamux.Session, ns *
 // timeout), nothing on any other.
 //
 // SPEC-CONFLICT (spec/tunnel.md §14 "over it 429" with §8.3's framing): a blob stream is no HTTP exchange, and
-// §8.3's error line names not_found, forbidden and too_large only. The closest faithful behaviour: a blob stream
-// over the cap is closed unanswered, which blob.Fetch reports as a failed fetch; the node's hosting exchange or
-// hiring answer then fails like any other fetch. The owner may want a "busy" reason in §8.3.
+// §8.3's error line names not_found, forbidden and too_large only, with no "busy". The closest faithful behaviour:
+// a blob stream over the cap is closed unanswered, which blob.Fetch reports as a stream that ended early (no
+// blob.ErrBadAnswer). kontra connect keeps its node-opened streams under the cap itself (internal/node,
+// session.open: a stream waits for a slot), so a node that behaves meets this only when the gate still counts a
+// stream the node has seen end; its hosting exchange is then answered 503 Kontra-Node: full, which the relay
+// retries, and a hiring answer 502. The owner may want a "busy" reason in §8.3.
 func (n *NodeStreams) refuse(st *yamux.Stream) {
 	_ = st.SetReadDeadline(time.Now().Add(n.headerTimeout()))
 	pre, err := tunnel.ReadPreamble(bufio.NewReaderSize(st, tunnel.MaxPreamble))
