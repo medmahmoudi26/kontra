@@ -679,8 +679,8 @@ func (e *ValidationError) Error() string {
 // origin (or terminated by a declared front proxy, D69), https backend URLs unless allow_private (D67),
 // URL ports from 1 to 65535, kind-only keys, allow: entries that can match (D68), durations and seconds
 // that fit the integer columns of services, listen and metrics.listen on different ports, and no key
-// this build would ignore by failing open (sealed on a direct backend, seller_keys on a direct a2a
-// backend, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
+// this build would ignore by failing open (sealed on any backend, seller_keys on a direct a2a backend or
+// a tunnel service, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
 // Defaults must have been applied (Parse and Load do).
 func (c *Config) Validate() error {
 	v := &validator{}
