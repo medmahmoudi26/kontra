@@ -87,6 +87,12 @@ func lingerSession(t *testing.T, n *lingerNode) (*Session, upstream.Backend) {
 	return s, be
 }
 
+func lingerCtx(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func lingerGet(ctx context.Context, be upstream.Backend) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, upstream.Endpoint(be, upstream.Info{Path: "/x"}), nil)
 	resp, err := be.HTTPClient().Do(req)
@@ -105,10 +111,8 @@ func lingerGet(ctx context.Context, be upstream.Backend) error {
 // opens streams to it (M2 review, security-3; D157). A node that closes its halves, even late, never comes
 // near the cap.
 func TestHalfClosedStreamsAreCapped(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	t.Run("a node that never closes its halves", func(t *testing.T) {
+		ctx := lingerCtx(t)
 		s, be := lingerSession(t, &lingerNode{})
 		for i := 0; i < tunnel.GateMaxHalfClosed; i++ {
 			if err := lingerGet(ctx, be); err != nil {
@@ -121,11 +125,11 @@ func TestHalfClosedStreamsAreCapped(t *testing.T) {
 		}
 		_ = lingerGet(ctx, be) // one more
 		eventually(t, 5*time.Second, "the session closed past the cap", s.Mux().IsClosed)
-		// yamux ends the streams once the WebSocket's close is done, up to 5 s after the session's close.
 		eventually(t, 30*time.Second, "the half-closed streams ended with the session", func() bool { return s.HalfClosed() == 0 })
 	})
 
 	t.Run("a node that closes its halves late", func(t *testing.T) {
+		ctx := lingerCtx(t)
 		n := &lingerNode{}
 		s, be := lingerSession(t, n)
 		for range 2 {
@@ -143,6 +147,7 @@ func TestHalfClosedStreamsAreCapped(t *testing.T) {
 	})
 
 	t.Run("a node that closes each half after its response", func(t *testing.T) {
+		ctx := lingerCtx(t)
 		s, be := lingerSession(t, &lingerNode{closeHalves: true})
 		for i := 0; i < 2*tunnel.GateMaxHalfClosed; i++ {
 			if err := lingerGet(ctx, be); err != nil {

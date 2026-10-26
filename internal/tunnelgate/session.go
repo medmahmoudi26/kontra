@@ -45,7 +45,10 @@ type Session struct {
 	rowGone    bool              // its tunnels row was deleted by this replica
 	toldDrain  bool
 	exchanges  map[*exchange]struct{}
-	halfClosed int // gate-opened streams the gate has closed and the node has not (exchange.linger)
+	// Gate-opened streams the gate has closed and the node has not (exchange.linger), and the watch that
+	// wakes their reads when the session closes.
+	lingeringSet map[*exchange]struct{}
+	lingerWatch  sync.Once
 }
 
 // Allows is the key_scope check made before every stream (relay.md §6.1): the session is open, its key is
@@ -347,16 +350,27 @@ func (s *Session) InFlight() int {
 func (s *Session) HalfClosed() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.halfClosed
+	return len(s.lingeringSet)
 }
 
-// lingering counts a stream the gate has closed until its node half ends (done), and closes the session
+// lingering counts x, a stream the gate has closed, until its node half ends (done), and closes the session
 // when more than tunnel.GateMaxHalfClosed would be counted (D157).
-func (s *Session) lingering() (done func()) {
+func (s *Session) lingering(x *exchange) (done func()) {
 	s.mu.Lock()
-	s.halfClosed++
-	over := s.halfClosed > tunnel.GateMaxHalfClosed
+	if s.lingeringSet == nil {
+		s.lingeringSet = map[*exchange]struct{}{}
+	}
+	s.lingeringSet[x] = struct{}{}
+	over := len(s.lingeringSet) > tunnel.GateMaxHalfClosed
 	s.mu.Unlock()
+	if s.mux != nil {
+		s.lingerWatch.Do(func() {
+			go func() {
+				<-s.mux.CloseChan()
+				s.wakeLingering()
+			}()
+		})
+	}
 	if over {
 		// Not on the caller's goroutine: the close deletes the session's tunnels row.
 		go func() {
@@ -365,8 +379,24 @@ func (s *Session) lingering() (done func()) {
 	}
 	return func() {
 		s.mu.Lock()
-		s.halfClosed--
+		delete(s.lingeringSet, x)
 		s.mu.Unlock()
+	}
+}
+
+// wakeLingering ends the discarding reads of the lingering streams once the session has closed. yamux v0.1.2
+// marks a session's streams closed only after its connection's close is done (up to 5 s for the WebSocket's
+// close handshake), and until then a read blocked on one of them spins, its wait woken by the session's
+// shutdown at once and again; a deadline that has passed ends it.
+func (s *Session) wakeLingering() {
+	s.mu.Lock()
+	xs := make([]*exchange, 0, len(s.lingeringSet))
+	for x := range s.lingeringSet {
+		xs = append(xs, x)
+	}
+	s.mu.Unlock()
+	for _, x := range xs {
+		_ = x.Stream.SetReadDeadline(time.Now())
 	}
 }
 
@@ -450,7 +480,7 @@ func (x *exchange) leave() {
 // and then the deadline is cleared for the discarding reads; a Read from then on fails with the abort's
 // error before it reads.
 func (x *exchange) linger() {
-	done := x.s.lingering()
+	done := x.s.lingering(x)
 	go func() {
 		defer done()
 		if x.abortErr() != nil {
@@ -458,7 +488,12 @@ func (x *exchange) linger() {
 				time.Sleep(time.Millisecond)
 			}
 			_ = x.Stream.SetReadDeadline(time.Time{})
+			if x.s.mux.IsClosed() {
+				return // the session's close set the deadline that was just cleared (wakeLingering)
+			}
 		}
+		// It ends at the node's FIN or reset (EOF), at the close timeout, or when the session closes
+		// (wakeLingering's deadline).
 		_, _ = io.Copy(io.Discard, x.Stream)
 	}()
 }
