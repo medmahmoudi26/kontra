@@ -24,8 +24,9 @@ import (
 // own file: tunnel_kill_test.go (TestTunnelKill, and TestNodeRotateAfterLeak), input_required_sticky_test.go
 // (TestInputRequiredSticky), cancel_tunnel_test.go (TestCancelForwardedTunnel), key_scope_test.go
 // (TestKeyScope), sidecar_test.go (TestSidecarNotAProxy), replica_kill_tunnel_test.go (TestReplicaKillTunnel),
-// helloworld_tunnel_test.go (TestHelloworldTunnel) and tunnel_drain_test.go (TestTunnelDrain). This file holds
-// what they share.
+// helloworld_tunnel_test.go (TestHelloworldTunnel) and tunnel_drain_test.go (TestTunnelDrain), with
+// lost_welcome_test.go (TestTunnelLostWelcome), stale_view_test.go (TestTunnelStaleRevocationView) and
+// card_pending_test.go (TestTunnelCardPending) beside them. This file holds what they share.
 
 // retries is a task.retries value for Options and TunnelService.
 func retries(n int) *int { return &n }

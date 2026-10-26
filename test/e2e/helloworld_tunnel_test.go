@@ -228,7 +228,7 @@ func TestHelloworldTunnel(t *testing.T) {
 				t.Fatalf("%s: a served interface %+v, want the gate's %s at %s", g.Name, i, svc, a2a.Version)
 			}
 		}
-		if bytes.Contains(served, []byte(helloAddr)) || bytes.Contains(served, []byte("9999")) {
+		if namesSeller(served) {
 			t.Fatalf("%s's served card names the seller's address: %s", g.Name, served)
 		}
 	}
@@ -290,6 +290,23 @@ func TestHelloworldTunnel(t *testing.T) {
 	for _, line := range append(n.Log("tunnel exchange refused"), n.Log("tunnel stream refused")...) {
 		t.Fatalf("the node refused a preamble: %s", line)
 	}
+}
+
+// sellerAddrs are the forms the seller's own address takes in a card: the sample's card names
+// http://127.0.0.1:9999 (its __main__.py), and localhost or [::1] would be the same listener.
+var sellerAddrs = []string{helloAddr, "localhost:9999", "[::1]:9999"}
+
+// namesSeller reports whether a card the gate serves names the seller's own address. It looks for the
+// address, never the bare port: every served interface names public_url, the Front, whose ephemeral port
+// may hold 9999 (39999, 49999, 59999), and the interface loop already checks each URL is the Front's (M2
+// review of WP-08).
+func namesSeller(card []byte) bool {
+	for _, a := range sellerAddrs {
+		if bytes.Contains(card, []byte(a)) {
+			return true
+		}
+	}
+	return false
 }
 
 // artifactTexts are the texts of a task's artifact parts.

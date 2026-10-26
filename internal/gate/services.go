@@ -909,16 +909,27 @@ func (s *Services) tunnelConnected(ctx context.Context, tenantID uuid.UUID, serv
 	}
 }
 
+// tunnelCardKick is the least time between two fetches of a tunnel card that kicks start (runTunnelCard).
+const tunnelCardKick = time.Second
+
 // runTunnelCard refetches a tunnel service's card every cardEvery while this replica holds a session
 // serving it (spec §3: "again every 10 minutes while serving"), on a backoff of 1 s doubling to 1 min after
 // a failure; a keeper without a card fetches at once. Without a session there is nothing to fetch through:
 // the stored card is served (seedTunnel).
+//
+// A kick (a session whose fetch failed when it connected, a dispatch that found no card: relay.ErrCardPending)
+// fetches at once, or tunnelCardKick after the loop's previous fetch when that is later, and never later than the
+// fetch already due. Restarting the backoff instead (the WP-04 loop) left a node's agent that came up after
+// it to the next refetch, up to a minute away, while each dispatch's kick postponed it again: a task placed
+// meanwhile spent its retries and failed service_unavailable (M2 review of WP-08, TestTunnelCardPending).
 func (s *Services) runTunnelCard(ctx context.Context, ref store.ServiceRef, k *card.Keeper, tc *tunnelCard) {
 	wait, backoff := s.cardEvery, time.Second
 	if _, err := k.Current(); err != nil {
 		wait = 0
 	}
+	var last time.Time // the previous fetch
 	for {
+		due := time.Now().Add(wait)
 		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -926,7 +937,7 @@ func (s *Services) runTunnelCard(ctx context.Context, ref store.ServiceRef, k *c
 			return
 		case <-tc.kick:
 			t.Stop()
-			wait = backoff
+			wait = max(0, min(time.Until(due), tunnelCardKick-time.Since(last)))
 			continue
 		case <-t.C:
 		}
@@ -934,6 +945,7 @@ func (s *Services) runTunnelCard(ctx context.Context, ref store.ServiceRef, k *c
 			wait, backoff = s.cardEvery, time.Second
 			continue
 		}
+		last = time.Now()
 		if err := k.Refresh(ctx); err != nil {
 			if ctx.Err() != nil {
 				return

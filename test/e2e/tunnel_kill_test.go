@@ -95,8 +95,8 @@ func TestTunnelKill(t *testing.T) {
 	if sessions, err := h.Sessions(ctx, n.KeyID); err != nil || len(sessions) != 1 || sessions[second] == "" {
 		t.Fatalf("the key's tunnels rows %v %v: want exactly the new session %s", sessions, err, second)
 	}
-	if len(n.Log("not sent again")) == 0 {
-		t.Fatal("the restarted node did not report that its consumed token is not sent again")
+	if !skippedUsedToken(n) {
+		t.Fatalf("the restarted node did not report that its consumed token is not sent again:\n%s", tail(n.LogPath, 20))
 	}
 	if refused := n.Log(`"code":"enroll_invalid"`); len(refused) > 0 {
 		t.Fatalf("the restarted node resent a consumed token: %s", refused[0])
@@ -164,6 +164,19 @@ func TestTunnelKill(t *testing.T) {
 	}
 	t.Logf("task 3: %d attempts, outcomes %v", len(as), outcomes(as))
 	checkHistory(t, h, task3, "e2e_tunnel_kill_before_first_id", tunnelForbidden(h)...)
+}
+
+// nodeLogSkipped is what a node logs at start for an --enroll token a welcome already confirmed at its gate
+// (internal/node node.go: the token's sha256 is in ~/.kontra/credentials' Consumed). Only a launch after
+// the confirming one can log it; the confirmation itself logs "the gate confirmed the enrollment: its
+// tokens are not sent again".
+const nodeLogSkipped = "an --enroll token this node already enrolled with at this gate is not sent again"
+
+// skippedUsedToken reports whether the node's current launch (a restart) left out an --enroll token a
+// welcome had confirmed at this gate. It reads that launch's lines only (Node.LaunchLog): the first
+// launch's confirmation must not pass for the restart's report (M2 review of WP-08).
+func skippedUsedToken(n *Node) bool {
+	return len(n.LaunchLog(nodeLogSkipped)) > 0
 }
 
 // outcomes lists the attempts' outcomes, for a log line.

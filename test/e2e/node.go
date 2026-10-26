@@ -57,6 +57,8 @@ type Front struct {
 	to    *Gate                 // nil: new connections are refused
 	conns map[net.Conn]struct{} // both ends of every forwarded connection
 	count map[string]int        // connections forwarded, by replica name
+	lose  int                   // the next connections whose welcome is lost (LoseWelcome)
+	lost  []string              // the session ids of the welcomes lost, in order
 }
 
 // NewFront listens on a loopback port; until Route, it refuses every connection.
@@ -101,8 +103,13 @@ func (f *Front) serve() {
 		}
 		f.mu.Lock()
 		g := f.to
+		lose := false
 		if g != nil {
 			f.count[g.Name]++
+			if f.lose > 0 {
+				f.lose--
+				lose = true
+			}
 		}
 		f.mu.Unlock()
 		if g == nil {
@@ -112,11 +119,11 @@ func (f *Front) serve() {
 			c.Close()
 			continue
 		}
-		go f.forward(c, g)
+		go f.forward(c, g, lose)
 	}
 }
 
-func (f *Front) forward(c net.Conn, g *Gate) {
+func (f *Front) forward(c net.Conn, g *Gate, lose bool) {
 	u, err := net.DialTimeout("tcp", g.Addr, 5*time.Second)
 	if err != nil {
 		c.Close()
@@ -125,16 +132,107 @@ func (f *Front) forward(c net.Conn, g *Gate) {
 	f.mu.Lock()
 	f.conns[c], f.conns[u] = struct{}{}, struct{}{}
 	f.mu.Unlock()
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(u, c); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(c, u); done <- struct{}{} }()
-	<-done
+	if lose {
+		f.loseWelcome(c, u)
+	} else {
+		done := make(chan struct{}, 2)
+		go func() { _, _ = io.Copy(u, c); done <- struct{}{} }()
+		go func() { _, _ = io.Copy(c, u); done <- struct{}{} }()
+		<-done
+	}
 	c.Close()
 	u.Close()
 	f.mu.Lock()
 	delete(f.conns, c)
 	delete(f.conns, u)
 	f.mu.Unlock()
+}
+
+// welcomeMarker opens the gate's welcome (spec/tunnel.md §4 M4): a text message the gate writes unmasked
+// and uncompressed (internal/tunnelgate: CompressionDisabled), so its JSON is in the TCP stream as is.
+var (
+	welcomeMarker  = []byte(`"t":"welcome"`)
+	welcomeSession = regexp.MustCompile(`"session":"([0-9a-f-]{36})"`)
+)
+
+// LoseWelcome makes the Front lose the gate's welcome on each of the next n connections it forwards (a
+// welcome lost after the gate committed the admission: D124, D139). Such a connection is forwarded both
+// ways until the gate writes its welcome; the Front then closes the node's side without passing the welcome
+// on, and holds the gate's side open and silent, reading and discarding whatever the gate sends, until the
+// gate closes it or the Front closes. The node sees its connection end after the proof (internal/node
+// ErrNoOutcome) and redials; the gate sees a live connection, a half-open session it goes on to register
+// after its card fetch through the session, which the node never answers, has timed out.
+func (f *Front) LoseWelcome(n int) {
+	f.mu.Lock()
+	f.lose += n
+	f.mu.Unlock()
+}
+
+// LostWelcomes returns the session ids of the welcomes the Front lost, in order.
+func (f *Front) LostWelcomes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.lost)
+}
+
+// lostSession records the session id of a lost welcome once *welcome holds it, and then clears *welcome;
+// it gives up on a welcome that names none within 4 KiB.
+func (f *Front) lostSession(welcome *[]byte) {
+	if *welcome == nil {
+		return
+	}
+	if m := welcomeSession.FindSubmatch(*welcome); m != nil {
+		f.mu.Lock()
+		f.lost = append(f.lost, string(m[1]))
+		f.mu.Unlock()
+		*welcome = nil
+	} else if len(*welcome) > 4<<10 {
+		*welcome = nil
+	}
+}
+
+// loseWelcome forwards c (the node) and u (the gate) for LoseWelcome. It returns once the gate's side has
+// ended.
+func (f *Front) loseWelcome(c, u net.Conn) {
+	go func() { _, _ = io.Copy(u, c) }() // ends with the node's side; the gate's side stays open
+	buf := make([]byte, 32<<10)
+	var (
+		window  []byte // the end of what was forwarded, for a marker split across two reads
+		welcome []byte // the lost welcome, from its marker on, until its session id is read
+		dropped bool
+	)
+	for {
+		k, err := u.Read(buf)
+		if k > 0 {
+			chunk := buf[:k]
+			switch {
+			case dropped:
+				if welcome != nil {
+					welcome = append(welcome, chunk...)
+				}
+			default:
+				window = append(window, chunk...)
+				i := bytes.Index(window, welcomeMarker)
+				if i < 0 {
+					if _, werr := c.Write(chunk); werr != nil {
+						return
+					}
+					window = window[max(0, len(window)-len(welcomeMarker)):]
+					break
+				}
+				// The welcome: the node's side ends here, without it (its session id recorded first, when
+				// this read holds it, so a node that sees the end finds it in LostWelcomes).
+				dropped = true
+				welcome = append([]byte(nil), window[i:]...)
+				f.lostSession(&welcome)
+				c.Close()
+			}
+			f.lostSession(&welcome) // a welcome split across reads: its session id may come later
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // Close stops the Front and closes every connection it forwards.
@@ -194,7 +292,8 @@ type NodeOptions struct {
 }
 
 // Node is one `kontra connect` subprocess. Its stdout (the welcome lines) goes to OutPath and its JSON log
-// to LogPath, both appended to across restarts.
+// to LogPath, both appended to across restarts: Log reads every launch's lines, LaunchLog only the current
+// launch's.
 type Node struct {
 	Name    string
 	Home    string
@@ -212,6 +311,7 @@ type Node struct {
 	done    chan struct{}
 	waitErr error
 	seen    []string // session ids of the welcomes before the current launch
+	logFrom int64    // LogPath's size when the current launch began: where its lines start
 }
 
 // welcomeRE is the line `kontra connect` prints on stdout for each welcome (internal/node printWelcome).
@@ -289,9 +389,11 @@ func (n *Node) launch() error {
 		out.Close()
 		return err
 	}
-	n.mu.Lock()
-	n.seen = n.sessionIDs()
-	n.mu.Unlock()
+	if err := n.markLaunch(); err != nil {
+		out.Close()
+		logf.Close()
+		return err
+	}
 	cmd := exec.Command(n.bin, n.args()...)
 	cmd.Env = n.env
 	cmd.Stdout, cmd.Stderr = out, logf
@@ -314,6 +416,23 @@ func (n *Node) launch() error {
 		n.mu.Unlock()
 		close(done)
 	}()
+	return nil
+}
+
+// markLaunch records what the launch about to start must not count as its own: the welcomes printed so
+// far, and where LogPath ends now. The previous launch has exited, so nothing writes the log meanwhile.
+func (n *Node) markLaunch() error {
+	var size int64
+	switch fi, err := os.Stat(n.LogPath); {
+	case err == nil:
+		size = fi.Size()
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	seen := n.sessionIDs()
+	n.mu.Lock()
+	n.seen, n.logFrom = seen, size
+	n.mu.Unlock()
 	return nil
 }
 
@@ -499,12 +618,30 @@ func (n *Node) Restart(ctx context.Context, h *Harness) error {
 	return err
 }
 
-// Log returns the node's JSON log lines that contain every one of substrs.
+// Log returns the node's JSON log lines, of every launch, that contain every one of substrs.
 func (n *Node) Log(substrs ...string) []string {
+	return n.logLines(0, substrs)
+}
+
+// LaunchLog is Log over the current launch's lines only: what a restarted node logged, never what an
+// earlier launch did (a check after Restart or Relaunch).
+func (n *Node) LaunchLog(substrs ...string) []string {
+	n.mu.Lock()
+	from := n.logFrom
+	n.mu.Unlock()
+	return n.logLines(from, substrs)
+}
+
+// logLines returns the lines of LogPath from the byte offset from on that contain every one of substrs.
+func (n *Node) logLines(from int64, substrs []string) []string {
 	b, err := os.ReadFile(n.LogPath)
 	if err != nil {
 		return nil
 	}
+	if from > int64(len(b)) {
+		return nil
+	}
+	b = b[from:]
 	var out []string
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	sc.Buffer(make([]byte, 64<<10), 4<<20)

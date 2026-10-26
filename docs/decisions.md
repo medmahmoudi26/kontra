@@ -1356,10 +1356,14 @@ carries. The next handshake after a lost outcome is a probe: the active key alon
 API key. Its welcome means the change committed (and confirms the tokens only if it serves every declared
 service); `unknown_key`, or `service_denied` for a known key, means it did not, and the full hello follows at once.
 Tokens the gate refused `enroll_invalid`, and an API key it refused `auth_invalid`, are removed from the
-credentials file. The owner's alternative is an idempotent admission at the gate, or a welcome that says what the
-hello enrolled ([`tunnel.md`](../spec/tunnel.md) §4, §5, §12; `internal/node/run.go` `connect`,
-`TestConsumedTokenIsNotSentAgain`, `TestLostWelcomeProbe`, `TestRealAdmissionLostWelcome`; `TestTunnelKill`
-restarts its node with its original `--enroll`).
+credentials file. Residual: the node cannot tell which services a token binds, so a declared service whose binding
+was revoked makes a committed probe read as not committed (its welcome leaves that service out); the full hello
+then resends the used token, and its `enroll_invalid` stops the node for good. The owner's alternative, which would
+close it, is an idempotent admission at the gate, or a welcome that says what the hello enrolled
+([`tunnel.md`](../spec/tunnel.md) §4, §5, §12; `internal/node/run.go` `connect`,
+`TestConsumedTokenIsNotSentAgain`, `TestLostWelcomeProbe`, `TestRealAdmissionLostWelcome`; end to end,
+`TestTunnelLostWelcome` loses a first hello's welcome and `TestTunnelKill` restarts its node with its original
+`--enroll`).
 
 ### D125. `rotate_from` at a gate that cannot carry the rotation — **needs the owner**
 
@@ -1503,7 +1507,8 @@ after the node's live redial and close it. Decision: the order is the session id
 challenge); a registration that finds a newer session of its key on a replica that is not draining inserts nothing
 and closes. Within a replica the ids are monotonic; across replicas they follow the clocks, so a skew larger than
 the time between two handshakes of one key can order them wrongly, and the wrongly refused session's node redials
-([`tunnel.md`](../spec/tunnel.md) §11; `internal/tunnelgate/registry.go`, `TestOlderHandshakeDoesNotSupersedeNewer`).
+([`tunnel.md`](../spec/tunnel.md) §11; `internal/tunnelgate/registry.go`, `TestOlderHandshakeDoesNotSupersedeNewer`;
+end to end, `TestTunnelLostWelcome`: the half-open session registers 10 s after the redialed one and closes).
 
 ### D140. The end of a rotated key's overlap closes its session without `{"t": "revoked"}`
 
@@ -1520,8 +1525,9 @@ one is on a draining replica: a node told before the replica's `gate_replicas.dr
 its own session there and cut its tasks. Decision: the drain message is sent once the mark has committed; the write
 is retried every second, each attempt within 5 s (`DrainMarkTimeout`), and abandoned once the workers have drained,
 in which case the nodes are not told and their sessions close with the replica ([`tunnel.md`](../spec/tunnel.md)
-§11, §13; `internal/gate/gate.go` `markThenTellTunnels`, `TestDrainTellsTunnelsAfterDrainingAtCommits`,
-`TestTunnelDrain`).
+§11, §13; `internal/gate/gate.go` `markThenTellTunnels`, `TestDrainTellsTunnelsAfterDrainingAtCommits`;
+`TestTunnelDrain` holds the draining replica's row across its SIGTERM, and fails if the node is told while
+the write waits on it).
 
 ### D142. One card per tunnel service (C11)
 
@@ -1542,8 +1548,12 @@ fetch failed (`502 Kontra-Node: target_unreachable`); withholding the session wo
 services, the handshake being all-or-nothing. Decision (the audit's second option for its gap 3): the session
 becomes a candidate anyway, its card is retried on the keeper's backoff (1 s doubling to 1 min), and a dispatch for
 a tunnel service whose keeper has no card yet is retried like `no_session` (`relay.ErrCardPending`), failing
-`service_unavailable` only once `task.retries` are spent ([`relay.md`](../spec/relay.md) §3, §6.4;
-`internal/gate/services.go` `tunnelConnected`, `TestTunnelBackend`, `TestHelloworldTunnel`).
+`service_unavailable` only once `task.retries` are spent. That dispatch has the card fetched again at once (at
+most once a second), never later than the fetch already due: a dispatch that only restarted the backoff left an
+agent that came up after its node to a refetch up to a minute away, and the task failed meanwhile
+([`relay.md`](../spec/relay.md) §3, §6.4; `internal/gate/services.go` `tunnelConnected`, `runTunnelCard`,
+`TestTunnelBackend`, `TestTunnelCardPendingFetchesAtOnce`; end to end, `TestTunnelCardPending`, whose task is sent
+as its node's agent comes up).
 
 ### D144. `sealed:` and `seller_keys` on a tunnel service are refused — **needs the owner** (amends D90, D91)
 
@@ -1647,16 +1657,17 @@ everywhere. The specs name no node platforms ([`tunnel.md`](../spec/tunnel.md) �
 
 Like D80 for M1. [`tunnel.md`](../spec/tunnel.md) §16 and [`relay.md`](../spec/relay.md) §16 name the tunnel tests
 without saying which are M2's. Decision: M2 runs `tunnel_kill` (with its before-the-first-upstream-id variant),
-`input_required_sticky`, `cancel_forwarded` through the tunnel (a working task, a seller that talks after its
-cancel, an `input-required` task, a seller unreachable behind a live node, and a node gone), `key_scope`,
-`sidecar_not_a_proxy`, `replica_kill`'s tunnel variant (after and before the first upstream id), the make-before-break
-drain, and the helloworld seller through the tunnel, plus the rotation after a leak at the binary level. The harness
-puts `public_url` on a TCP front the test routes to either replica, runs nodes as `kontra connect` processes, and
-uses two in-process doubles: a node that ignores the control stream (`key_scope`: the gate never relies on the node
-honouring a revocation) and a gate with a fixed admission (`sidecar_not_a_proxy`, no Postgres or Temporal).
-`sidecar_not_a_proxy` checks confinement under the root base (D123), and reads the node's own sockets through
-`/proc/<pid>/fd`, since `/proc/<pid>/net/tcp` lists the whole network namespace. The helloworld test runs the
-a2a-samples seller at `6603ba3` unmodified and is skipped, saying why, only without `uv`, the pinned checkout
-(`$KONTRA_A2A_SAMPLES` or a clone) or a free `127.0.0.1:9999`. Only the `6603ba3` seller is built (WP-07), so D122
-and `card_compat`'s stand-in for the 0.2.5 seller stay as they are. `anon_limits`, `local_rebinding`, `stdio_roots`
-and the MCP tests come with M3 and M4 (`test/e2e`).
+`input_required_sticky`, `cancel_forwarded` through the tunnel (a working task, a seller that talks after its cancel,
+an `input-required` task, a seller unreachable behind a live node, and a node gone), `key_scope`,
+`sidecar_not_a_proxy`, `replica_kill`'s tunnel variant (after and before the first upstream id), the
+make-before-break drain, and the helloworld seller through the tunnel, plus the rotation after a leak at the binary
+level, a welcome lost after the gate committed (D124, D139), a stream refused while the revocation view is stale, and
+a task placed before a tunnel service's first card (D143). The harness puts `public_url` on a TCP front the test
+routes to either replica, runs nodes as `kontra connect` processes, and uses two in-process doubles: a node that
+ignores the control stream (`key_scope`: the gate never relies on the node honouring a revocation) and a gate with a
+fixed admission (`sidecar_not_a_proxy`, no Postgres or Temporal). `sidecar_not_a_proxy` checks confinement under the
+root base (D123), and reads the node's own sockets through `/proc/<pid>/fd`, since `/proc/<pid>/net/tcp` lists the
+whole network namespace. The helloworld test runs the a2a-samples seller at `6603ba3` unmodified and is skipped,
+saying why, only without `uv`, the pinned checkout (`$KONTRA_A2A_SAMPLES` or a clone) or a free `127.0.0.1:9999`.
+Only the `6603ba3` seller is built (WP-07), so D122 and `card_compat`'s stand-in for the 0.2.5 seller stay as they
+are. `anon_limits`, `local_rebinding`, `stdio_roots` and the MCP tests come with M3 and M4 (`test/e2e`).

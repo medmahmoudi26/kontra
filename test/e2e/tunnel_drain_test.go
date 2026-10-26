@@ -1,12 +1,14 @@
 package e2e
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
+	"kontra.sh/kontra/internal/gate"
 	"kontra.sh/kontra/test/e2e/slowagent"
 )
 
@@ -16,14 +18,20 @@ const (
 	nodeLogRedialed = "the gate is draining this replica: dialing a new session at once (make-before-break)"
 )
 
-// TestTunnelDrain is the make-before-break drain (spec/tunnel.md §11, §13; relay.md §14.3; D35, D76): a node's
-// session is on replica A (drain_timeout 30 s) while a 10 s streaming task runs on it. The Front is routed
-// to B and A gets SIGTERM. A marks itself draining (gate_replicas.draining_at) and only then tells the node
-// {"t": "drain"} (M2 plan audit: a node told before the mark commits could supersede its own session and
-// cut its tasks); the node logs it and dials B at once. Within 5 s of the SIGTERM the node's key has a
-// session on B while its session on A remains: a draining replica's session is never superseded. The task
-// completes on A's session, with no tunnel_lost; a task sent once the B session is in runs on it. A exits
-// after its last dispatch has ended, and its session's row and its own are deleted.
+// TestTunnelDrain is the make-before-break drain (spec/tunnel.md §11, §13; relay.md §14.3; D35, D76, D141):
+// a node's session is on replica A (drain_timeout 30 s) while a 10 s streaming task runs on it. The Front
+// is routed to B and A gets SIGTERM. A marks itself draining (gate_replicas.draining_at) and only then
+// tells the node {"t": "drain"} (M2 plan audit: a node told before the mark commits could supersede its
+// own session and cut its tasks).
+//
+// The order is checked, not assumed: before the SIGTERM the test holds A's gate_replicas row (select … for
+// no key update, in an open transaction), so A's draining_at write waits on it. While the test sees that
+// write waiting (pg_blocking_pids) and draining_at still null, for 2×DrainMarkRetry, the node must log no
+// drain; a gate that told the nodes before its mark committed fails here (M2 review of WP-08). Once the
+// row is released the write commits, the node logs the drain and dials B at once, and within 5 s its key
+// has a session on B while its session on A remains: a draining replica's session is never superseded.
+// The task completes on A's session, with no tunnel_lost; a task sent once the B session is in runs on
+// it. A exits after its last dispatch has ended, and its session's row and its own are deleted.
 func TestTunnelDrain(t *testing.T) {
 	h := start(t, Options{
 		Upstream:     slowagent.Config{Chunks: 20, Interval: 500 * time.Millisecond, Streaming: true},
@@ -47,22 +55,56 @@ func TestTunnelDrain(t *testing.T) {
 	})
 
 	h.Front.Route(b)
+
+	// The test holds A's gate_replicas row across the SIGTERM: A's draining_at write waits on it, and the node
+	// must not be told meanwhile. For no key update blocks the row's updates (the mark, A's heartbeat) and
+	// not the key-share locks of the tunnels rows that reference it.
+	hold, err := h.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hold.Rollback(context.WithoutCancel(ctx)) }()
+	var holder int
+	if err := hold.QueryRow(ctx, `select pg_backend_pid() from kontra.gate_replicas where replica_id = $1 for no key update`,
+		a.ReplicaID).Scan(&holder); err != nil {
+		t.Fatalf("holding A's gate_replicas row: %v", err)
+	}
 	if err := a.Term(); err != nil {
 		t.Fatal(err)
 	}
 	termed := time.Now()
+	eventually(t, 5*time.Second, "A's draining_at write waiting on the held row", func() bool {
+		var waiting int
+		err := h.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity
+			where $1 = any (pg_blocking_pids(pid)) and starts_with(query, 'update kontra.gate_replicas set draining_at')`, holder).Scan(&waiting)
+		return err == nil && waiting > 0
+	})
+	for held := time.Now(); time.Since(held) < 2*gate.DrainMarkRetry; time.Sleep(100 * time.Millisecond) {
+		var draining bool
+		if err := h.Pool.QueryRow(ctx, `select draining_at is not null from kontra.gate_replicas where replica_id = $1`, a.ReplicaID).Scan(&draining); err != nil || draining {
+			t.Fatalf("A's draining_at while the test holds its row: set %v (%v), want null", draining, err)
+		}
+		if lines := n.Log(nodeLogDrain); len(lines) > 0 {
+			t.Fatalf("the node was told to drain %.1f s after A's SIGTERM, while A's draining_at write waited on the held row: %s",
+				time.Since(termed).Seconds(), lines[0])
+		}
+	}
+	if err := hold.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	released := time.Now()
 
-	// The node is told once draining_at has committed, and redials at once.
-	eventually(t, 5*time.Second, "the node logs the drain", func() bool { return len(n.Log(nodeLogDrain)) > 0 })
+	// The mark commits, then the node is told and redials at once.
+	eventually(t, 5*time.Second, "the node logs the drain once A's row is released", func() bool { return len(n.Log(nodeLogDrain)) > 0 })
 	var draining bool
 	if err := h.Pool.QueryRow(ctx, `select draining_at is not null from kontra.gate_replicas where replica_id = $1`, a.ReplicaID).Scan(&draining); err != nil || !draining {
-		t.Fatalf("the node was told to drain before A's gate_replicas.draining_at was set (%v)", err)
+		t.Fatalf("the node was told to drain and A's gate_replicas.draining_at is not set (%v)", err)
 	}
 	if len(n.Log(nodeLogRedialed)) == 0 {
 		t.Fatalf("the node did not dial a new session at once on the drain:\n%s", tail(n.LogPath, 20))
 	}
 	var onB string
-	eventually(t, time.Until(termed.Add(5*time.Second)), "the node's session on B within 5 s of the SIGTERM", func() bool {
+	eventually(t, time.Until(released.Add(5*time.Second)), "the node's session on B within 5 s of the mark's release", func() bool {
 		sessions, err := h.Sessions(ctx, n.KeyID)
 		for id, r := range sessions {
 			if r == b.ReplicaID {
@@ -74,7 +116,8 @@ func TestTunnelDrain(t *testing.T) {
 	if r := sessionReplica(ctx, h, onA); r != a.ReplicaID {
 		t.Fatalf("A's session row is gone once B's is in (replica %q): a draining replica's session was superseded", r)
 	}
-	t.Logf("the node's session on B is in %.1f s after A's SIGTERM; A's session remains", time.Since(termed).Seconds())
+	t.Logf("the node's session on B is in %.1f s after A's SIGTERM, %.1f s after the release of A's row; A's session remains",
+		time.Since(termed).Seconds(), time.Since(released).Seconds())
 
 	// A task sent now runs on the B session.
 	s2, err := h.BuyerA().SendStreaming(ctx, b, newMessage("tunnel drain 2"), Call{})

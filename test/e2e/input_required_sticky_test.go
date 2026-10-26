@@ -177,7 +177,7 @@ func TestInputRequiredSticky(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, nd := range []*Node{n1, n2} {
-		if len(nd.Log("not sent again")) == 0 || len(nd.Log(`"code":"enroll_invalid"`)) > 0 {
+		if !skippedUsedToken(nd) || len(nd.Log(`"code":"enroll_invalid"`)) > 0 {
 			t.Fatalf("node %s restarted without skipping its used token (or was refused enroll_invalid):\n%s", nd.Name, tail(nd.LogPath, 20))
 		}
 	}

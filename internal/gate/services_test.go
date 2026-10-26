@@ -757,11 +757,13 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 // fakeTunnels is TunnelCards without sessions: it serves a card as if fetched through a session it holds
 // while serving, and records the OnConnect callbacks.
 type fakeTunnels struct {
-	mu      sync.Mutex
-	card    string
-	serving bool
-	fetches int
-	connect []func(context.Context, uuid.UUID, string)
+	mu        sync.Mutex
+	card      string
+	serving   bool
+	agentDown bool        // a session serves the service, but its node's agent is down: every fetch fails
+	fetches   int         // fetches that returned the card
+	tries     []time.Time // every fetch through a session, failed or not
+	connect   []func(context.Context, uuid.UUID, string)
 }
 
 func (f *fakeTunnels) FetchCard(_ context.Context, _ uuid.UUID, _ string) (*upstream.Fetched, error) {
@@ -770,8 +772,31 @@ func (f *fakeTunnels) FetchCard(_ context.Context, _ uuid.UUID, _ string) (*upst
 	if !f.serving {
 		return nil, errors.New("fakeTunnels: no session here")
 	}
+	f.tries = append(f.tries, time.Now())
+	if f.agentDown {
+		return nil, errors.New("fakeTunnels: 502 Kontra-Node: target_unreachable")
+	}
 	f.fetches++
 	return &upstream.Fetched{Raw: []byte(f.card), Path: "/.well-known/agent-card.json"}, nil
+}
+
+func (f *fakeTunnels) setAgentDown(down bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.agentDown = down
+}
+
+// triesSince counts the fetches made at or after t.
+func (f *fakeTunnels) triesSince(t time.Time) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, at := range f.tries {
+		if !at.Before(t) {
+			n++
+		}
+	}
+	return n
 }
 
 func (f *fakeTunnels) OnConnect(fn func(context.Context, uuid.UUID, string)) {
@@ -1061,6 +1086,72 @@ func TestTunnelBackend(t *testing.T) {
 	fs.mu.Unlock()
 	if len(asks) == 0 || asks[len(asks)-1] != gone {
 		t.Fatalf("sessions asked %v", asks)
+	}
+}
+
+// A dispatch that finds no card (relay.ErrCardPending) has the card fetched again at once, however far the
+// keeper's backoff has grown while the node's agent was down, and a burst of such dispatches neither
+// postpones that fetch nor makes one fetch each (M2 review of WP-08: TestTunnelCardPending in test/e2e). A
+// sidecar's agent that comes up after its node would otherwise see a task placed meanwhile spend its
+// task.retries, 3 s with the default 2, waiting on a refetch due up to a minute later, and fail
+// service_unavailable, since each dispatch's kick restarted that wait.
+func TestTunnelCardPendingFetchesAtOnce(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	pool := pgtest.Pool(t, dsn)
+	ctx := context.Background()
+	cfg := parseConfig(t, `services:
+  echo:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+`)
+	held := uuid.Must(uuid.NewV7())
+	ft := &fakeTunnels{}
+	ft.set(tunnelCardV1, true)
+	ft.setAgentDown(true)
+	fs := &fakeSessions{held: map[uuid.UUID]bool{held: true}}
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Tunnels: ft, Sessions: fs, TunnelCardRefresh: time.Hour})
+	if err := s.Sync(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer func() { stop(); wg.Wait() }()
+	wg.Go(func() { s.Run(runCtx, time.Hour) })
+	e, _ := s.Lookup(ctx, TeamTenant, "echo")
+	attempt := &store.Attempt{Backend: store.BackendTunnel, TunnelSession: &held, KeyID: "k1_x", ReplicaID: "r1"}
+
+	// The agent is down: the keeper fetches at once, then 1 s and 2 s later; the next try is 4 s away.
+	start := time.Now()
+	eventually(t, 10*time.Second, "three failed fetches", func() bool { return ft.triesSince(start) >= 3 })
+	if _, _, err := s.Backend(ctx, e.Ref, attempt); !errors.Is(err, relay.ErrCardPending) {
+		t.Fatalf("no card yet: %v", err)
+	}
+
+	// The agent comes up; three dispatches, as a task's attempts would be, find no card.
+	ft.setAgentDown(false)
+	up := time.Now()
+	for range 3 {
+		if _, _, err := s.Backend(ctx, e.Ref, attempt); err == nil {
+			break
+		} else if !errors.Is(err, relay.ErrCardPending) {
+			t.Fatalf("no card yet: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var err error
+	deadline := up.Add(1500 * time.Millisecond)
+	for {
+		if _, _, err = s.Backend(ctx, e.Ref, attempt); err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("the card was not fetched within 1.5 s of the dispatches that found none (%d fetches since): %v", ft.triesSince(up), err)
+	}
+	if n := ft.triesSince(up); n > 2 {
+		t.Fatalf("%d fetches for a burst of dispatches, want at most one a second", n)
 	}
 }
 

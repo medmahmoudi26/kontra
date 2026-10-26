@@ -40,7 +40,10 @@
 // (TestCancelForwardedTunnel), key_scope (TestKeyScope), sidecar_not_a_proxy (TestSidecarNotAProxy),
 // replica_kill's tunnel variant (TestReplicaKillTunnel), the helloworld seller through the tunnel
 // (TestHelloworldTunnel) and the make-before-break drain (TestTunnelDrain), plus the rotation after a leak
-// at the binary level (TestNodeRotateAfterLeak, D125). Each test that ends a task
+// at the binary level (TestNodeRotateAfterLeak, D125), a welcome lost after the gate committed
+// (TestTunnelLostWelcome, D124, D139), a stream refused while the revocation view is stale
+// (TestTunnelStaleRevocationView) and a task placed before a tunnel service's first card
+// (TestTunnelCardPending, D143). Each test that ends a task
 // exports its TaskLifecycle history and replays it against the current workflow; with
 // KONTRA_RECORD_HISTORIES=1 it also writes it to internal/lifecycle/testdata/histories, never over an
 // existing file.
