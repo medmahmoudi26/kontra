@@ -122,7 +122,8 @@ var errClosing = errors.New("tunnelgate: the replica is shutting down its tunnel
 //     candidate: a task placed on it then finds the card (relay.md §3; M2 plan audit, gap 3). A fetch that
 //     fails (the node's agent not listening yet: 502 target_unreachable) does not keep the session from
 //     becoming a candidate, since it may serve other services; a dispatch for a tunnel service whose
-//     keeper has no card yet is a retryable outcome instead (the audit's second option, WP-05's Backend).
+//     keeper has no card yet is a retryable outcome instead (the audit's second option: gate.Services.Backend's
+//     relay.ErrCardPending).
 //  4. One transaction, under a row lock on the key (§11, §12): the key must still be usable (not revoked,
 //     not past a rotation's overlap); the session must still be open (a closed one supersedes nothing) and
 //     no newer session of the key may be registered on a replica that is not draining (s is then the

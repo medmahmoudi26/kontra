@@ -39,18 +39,31 @@ var (
 
 const replica = "replica-test-1"
 
-// staticBackends answers one backend and card info for every service.
+// staticBackends answers one backend and card info for every service, or, when by is set, what by
+// answers for the attempt (the tunnel tests' sessions).
 type staticBackends struct {
 	mu   sync.Mutex
 	b    upstream.Backend
 	info upstream.Info
 	err  error
+	by   Backends
 }
 
-func (s *staticBackends) Backend(context.Context, store.ServiceRef) (upstream.Backend, upstream.Info, error) {
+func (s *staticBackends) Backend(ctx context.Context, svc store.ServiceRef, a *store.Attempt) (upstream.Backend, upstream.Info, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b, s.info, s.err
+	by := s.by
+	b, info, err := s.b, s.info, s.err
+	s.mu.Unlock()
+	if by != nil {
+		return by.Backend(ctx, svc, a)
+	}
+	return b, info, err
+}
+
+func (s *staticBackends) use(by Backends) {
+	s.mu.Lock()
+	s.by = by
+	s.mu.Unlock()
 }
 
 func (s *staticBackends) set(b upstream.Backend, info upstream.Info, err error) {
@@ -209,6 +222,7 @@ type taskSpec struct {
 	headers   map[string][]string // extra service params in the stored call context
 	config    *a2a.SendMessageConfig
 	metadata  map[string]any
+	session   *uuid.UUID // attempt 1 on this tunnel session (key k1_…, replica the test's), direct when nil
 }
 
 // newTask pre-creates a gate task as the work queue does: the task at seq 1 (submitted), its work item,
@@ -240,11 +254,18 @@ func (e *env) newTask(s taskSpec) (a2a.TaskID, uuid.UUID) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	if err := e.log.BeginAttempt(ctx, store.Attempt{TaskID: id, N: 1, Backend: store.BackendDirect}); err != nil {
+	att := store.Attempt{TaskID: id, N: 1, Backend: store.BackendDirect}
+	if s.session != nil {
+		att = store.Attempt{TaskID: id, N: 1, Backend: store.BackendTunnel, TunnelSession: s.session, KeyID: testKeyID, ReplicaID: replica}
+	}
+	if err := e.log.BeginAttempt(ctx, att); err != nil {
 		e.t.Fatal(err)
 	}
 	return a2a.TaskID(id.String()), wid
 }
+
+// testKeyID is the node key of the tunnel attempts the tests write.
+const testKeyID = "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 // followUp stores a follow-up turn's work item, as kontra.message's Write does.
 func (e *env) followUp(taskID a2a.TaskID, o store.Owner, text string) uuid.UUID {

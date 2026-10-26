@@ -28,7 +28,6 @@ import (
 	"kontra.sh/kontra/internal/relay"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/tenant"
-	"kontra.sh/kontra/internal/unimpl"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -82,7 +81,8 @@ const RefreshEvery = time.Minute
 // replica re-reads the row and seeds its keeper with it, and every re-read seeds a newer card_fetched_at, so
 // the 30 minutes without a good fetch count from the gate's last fetch through any session (D89). A
 // service none of whose nodes has connected for 30 minutes is unavailable like a direct service whose
-// fetches fail. The dispatch over a session is WP-05's (Backend).
+// fetches fail. A tunnel attempt's dispatch and forward_cancel run over its session on the replica that
+// holds it (Backend, TunnelSessions), with the Info of this one card.
 type Services struct {
 	db        *pgxpool.Pool
 	logger    *slog.Logger
@@ -91,6 +91,7 @@ type Services struct {
 	keeperOpt []card.KeeperOption
 	onChange  func(store.ServiceRef)
 	tunnels   TunnelCards
+	sessions  TunnelSessions
 	cardEvery time.Duration // a tunnel card's refetch while serving (card.Refresh)
 
 	// readMu makes each re-read (its query and its apply) one step, so a read that began before a change
@@ -163,6 +164,13 @@ type TunnelCards interface {
 	Serves(tenantID uuid.UUID, service string) bool
 }
 
+// TunnelSessions is how a tunnel attempt reaches its node: the backend over the attempt's session on this
+// replica (*tunnelgate.Registry), an error wrapping upstream.ErrTunnelLost when this replica does not hold
+// it or it no longer serves the service (spec §6.1, §14.2).
+type TunnelSessions interface {
+	Backend(session uuid.UUID, svc store.ServiceRef) (upstream.Backend, error)
+}
+
 // backendSpec is services.backend: {"tunnel": {}} | {"a2a": {"url", "allow_private"}} | {"mcp": {…}}.
 type backendSpec struct {
 	Kind         string // tunnel, a2a or mcp
@@ -212,6 +220,9 @@ type ServicesOptions struct {
 	// Tunnels serves the cards of tunnel services (*tunnelgate.Registry). Without it a tunnel service has
 	// no card keeper, as in M1.
 	Tunnels TunnelCards
+	// Sessions gives a tunnel attempt its backend (*tunnelgate.Registry). Without it a tunnel attempt's
+	// dispatch fails service_unavailable.
+	Sessions TunnelSessions
 	// TunnelCardRefresh replaces card.Refresh, a tunnel card's refetch interval while serving (tests).
 	TunnelCardRefresh time.Duration
 }
@@ -224,7 +235,7 @@ func NewServices(db *pgxpool.Pool, o ServicesOptions) *Services {
 	s := &Services{
 		db: db, logger: o.Logger, publicURL: o.PublicURL, multi: o.Multi, keeperOpt: o.KeeperOptions,
 		onChange: o.OnChange, byName: map[string]*entry{}, byID: map[svcID]*entry{}, tunnels: o.Tunnels,
-		cardEvery: o.TunnelCardRefresh,
+		sessions: o.Sessions, cardEvery: o.TunnelCardRefresh,
 	}
 	if s.cardEvery <= 0 {
 		s.cardEvery = card.Refresh
@@ -815,7 +826,7 @@ func (s *Services) newKeeper(e *entry, b backendSpec, in card.Input, x row) (*ca
 }
 
 // newTunnelKeeper builds the keeper of a tunnel service: no backend of its own (the dispatch's is the
-// session's, WP-05), a fetch through this replica's sessions (TunnelCards.FetchCard), and the persist hook
+// attempt's session's, tunnelBackend), a fetch through this replica's sessions (TunnelCards.FetchCard), and the persist hook
 // with NOTIFY kontra_services, so the replicas without a session seed the new card at once.
 //
 // SPEC-CONFLICT (M2 plan, confirmed conflict on relay.md §3 with §6.2 and tunnel.md §11): §3 keeps one upstream
@@ -870,8 +881,8 @@ func (s *Services) seedTunnel(e *entry, x row) {
 // Of the audit's two options for gap 3 the build therefore takes the second (M2 review of WP-04): a
 // dispatch for a tunnel service whose keeper has no card yet (Dispatch's ErrUnavailable before any good
 // fetch or seed) must be a retryable outcome, like no_session, not failed: service_unavailable. That is
-// WP-05's Backend for tunnel services (Backend answers unimpl until then); a keeper that has a card, fetched
-// or seeded from services.upstream_card, dispatches with it whatever this fetch did.
+// Backend's relay.ErrCardPending for tunnel services (tunnelBackend); a keeper that has a card, fetched or
+// seeded from services.upstream_card, dispatches with it whatever this fetch did.
 func (s *Services) tunnelConnected(ctx context.Context, tenantID uuid.UUID, service string) {
 	s.mu.RLock()
 	e := s.byID[svcID{tenantID, service}]
@@ -1124,21 +1135,61 @@ func (s *Services) BackendFor(_ context.Context, tenantID uuid.UUID, service str
 	return store.BackendTunnel, nil
 }
 
-// Backend implements relay.Backends: the direct backend and the upstream card Info a dispatch or a
-// forward_cancel uses, from the service's keeper (card.Keeper.Dispatch). No usable card is an error, and
-// the dispatch fails service_unavailable (spec §6.4).
-func (s *Services) Backend(_ context.Context, svc store.ServiceRef) (upstream.Backend, upstream.Info, error) {
+// Backend implements relay.Backends: the backend and the upstream card Info a dispatch or a forward_cancel
+// of the attempt uses (spec §6.2). A direct service's come from its keeper (card.Keeper.Dispatch). A tunnel
+// service's backend is the attempt's session on this replica (TunnelSessions.Backend: an error wrapping
+// upstream.ErrTunnelLost when this replica does not hold it, or it no longer serves the service), with the
+// Info of the service's one card (spec §3). No usable card is an error, and the dispatch fails
+// service_unavailable (spec §6.4), except a tunnel service's card that no fetch has produced yet (its
+// session has just connected and the fetch failed): relay.ErrCardPending, which is retried, and the card is
+// fetched again at once.
+func (s *Services) Backend(_ context.Context, svc store.ServiceRef, attempt *store.Attempt) (upstream.Backend, upstream.Info, error) {
 	e, err := s.live(svc.TenantID, svc.Name)
 	if err != nil {
 		return nil, upstream.Info{}, err
 	}
 	if e.backend.Kind == backendTunnel {
-		// The backend of a tunnel attempt is its session's (tunnelgate.Registry.Backend), with the Info of
-		// this keeper's card: WP-05's change to relay.Backends.
-		return nil, upstream.Info{}, unimpl.Error("gate.Services.Backend for a tunnel service", "WP-05")
+		return s.tunnelBackend(e, svc, attempt)
+	}
+	if attempt != nil && attempt.Backend == store.BackendTunnel {
+		// The service moved from a tunnel to a direct backend while the task ran: the attempt's upstream
+		// task lives on a node, never at this URL (spec §4).
+		return nil, upstream.Info{}, fmt.Errorf("gate: service %s/%s is no longer a tunnel service; its attempt was placed on a tunnel session", e.ref.Tenant, e.ref.Name)
 	}
 	if e.keeper == nil {
 		return nil, upstream.Info{}, fmt.Errorf("gate: service %s/%s has no card this gate fetches (backend %s)", e.ref.Tenant, e.ref.Name, e.backend.Kind)
 	}
 	return e.keeper.Dispatch()
+}
+
+// tunnelBackend is Backend for a tunnel service. The session is checked first: a dispatch whose session is
+// gone opens no stream and is a lost session whatever the card (spec §14.2).
+func (s *Services) tunnelBackend(e *entry, svc store.ServiceRef, attempt *store.Attempt) (upstream.Backend, upstream.Info, error) {
+	name := e.ref.Tenant + "/" + e.ref.Name
+	switch {
+	case s.sessions == nil:
+		return nil, upstream.Info{}, fmt.Errorf("gate: service %s is a tunnel service and this replica holds no tunnel sessions", name)
+	case attempt == nil || attempt.Backend != store.BackendTunnel || attempt.TunnelSession == nil:
+		return nil, upstream.Info{}, fmt.Errorf("%w: the attempt of tunnel service %s was placed on no session", upstream.ErrTunnelLost, name)
+	}
+	be, err := s.sessions.Backend(*attempt.TunnelSession, svc)
+	if err != nil {
+		return nil, upstream.Info{}, err
+	}
+	if e.keeper == nil {
+		return nil, upstream.Info{}, fmt.Errorf("gate: tunnel service %s has no card keeper", name)
+	}
+	_, info, err := e.keeper.Dispatch()
+	if err != nil {
+		if cur, _ := e.keeper.Current(); cur == nil && e.tunnel != nil {
+			// No card yet (none fetched, none stored): fetch again now, on the keeper's loop.
+			select {
+			case e.tunnel.kick <- struct{}{}:
+			default:
+			}
+			return nil, upstream.Info{}, fmt.Errorf("%w: %s: %w", relay.ErrCardPending, name, err)
+		}
+		return nil, upstream.Info{}, err
+	}
+	return be, info, nil
 }

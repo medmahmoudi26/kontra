@@ -314,7 +314,7 @@ func (r *Replica) assemble() error {
 				handlers.Invalidate(ref)
 			}
 		},
-		Tunnels: r.tunnels, TunnelCardRefresh: r.opts.tunnelCards,
+		Tunnels: r.tunnels, Sessions: r.tunnels, TunnelCardRefresh: r.opts.tunnelCards,
 	})
 	r.listener.OnChannel(pg.ChannelServices, r.services.Notify)
 	r.listener.OnReconnect(func() {
@@ -354,8 +354,10 @@ func (r *Replica) assemble() error {
 		Signals: r.lifecycle, Logger: log,
 	}}
 	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log})
-	acts := &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Push: pushStore, Rules: rules,
-		Refusals: &r.refusals, Logger: log}
+	// prepare places a tunnel service's attempts on the sessions of every replica (spec §6.1); the
+	// dispatch runs on kontra-tunnel-<the session's replica> (§14.2).
+	acts := &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Sessions: tunnelgate.NewPicker(r.pool),
+		Push: pushStore, Rules: rules, Refusals: &r.refusals, Logger: log}
 	var err error
 	r.workers, err = lifecycle.NewWorkers(r.temporal, lifecycle.WorkerConfig{
 		ReplicaID:     r.id,

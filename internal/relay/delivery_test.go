@@ -31,11 +31,11 @@ type hookBackends struct {
 	hook atomic.Pointer[func()]
 }
 
-func (h *hookBackends) Backend(ctx context.Context, svc store.ServiceRef) (upstream.Backend, upstream.Info, error) {
+func (h *hookBackends) Backend(ctx context.Context, svc store.ServiceRef, a *store.Attempt) (upstream.Backend, upstream.Info, error) {
 	if f := h.hook.Swap(nil); f != nil {
 		(*f)()
 	}
-	return h.staticBackends.Backend(ctx, svc)
+	return h.staticBackends.Backend(ctx, svc, a)
 }
 
 // onNextBackend arms the hook for the next dispatch.

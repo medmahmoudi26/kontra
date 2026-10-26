@@ -178,9 +178,9 @@ type abortingBackends struct {
 	abort func()
 }
 
-func (a *abortingBackends) Backend(ctx context.Context, svc store.ServiceRef) (upstream.Backend, upstream.Info, error) {
+func (a *abortingBackends) Backend(ctx context.Context, svc store.ServiceRef, att *store.Attempt) (upstream.Backend, upstream.Info, error) {
 	a.abort()
-	return a.staticBackends.Backend(ctx, svc)
+	return a.staticBackends.Backend(ctx, svc, att)
 }
 
 // An abort (spec §8) that reaches this replica once the dispatch has recorded it in attempts.replica_id,

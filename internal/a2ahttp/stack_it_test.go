@@ -106,7 +106,7 @@ type backends struct {
 	info upstream.Info
 }
 
-func (b backends) Backend(context.Context, store.ServiceRef) (upstream.Backend, upstream.Info, error) {
+func (b backends) Backend(context.Context, store.ServiceRef, *store.Attempt) (upstream.Backend, upstream.Info, error) {
 	return b.b, b.info, nil
 }
 

@@ -23,12 +23,24 @@ import (
 	"kontra.sh/kontra/internal/upstream"
 )
 
-// Backends resolves a service's backend and upstream card info for dispatch and forward_cancel. The
-// service registry implements it over each direct service's card.Keeper (Keeper.Dispatch): a service
-// without a usable card answers an error, and the dispatch fails service_unavailable (spec §6.4).
+// Backends resolves the backend and upstream card info a dispatch or a forward_cancel of an attempt uses.
+// The service registry implements it: a direct service's backend and Info from its card.Keeper
+// (Keeper.Dispatch); a tunnel service's backend is the attempt's session on this replica
+// (tunnelgate.Registry.Backend), with the Info of the service's one card (spec §3, §6.2).
+//
+// The error says what the dispatch does (spec §6.4, §14.2): one wrapping upstream.ErrTunnelLost (the
+// attempt's session is not held here, or no longer serves the service) is a lost session and opens no
+// stream; one wrapping ErrCardPending (a tunnel service whose card no fetch has produced yet) is retried
+// like no_session; any other (no usable card, a service removed or disabled) fails service_unavailable.
 type Backends interface {
-	Backend(ctx context.Context, svc store.ServiceRef) (upstream.Backend, upstream.Info, error)
+	Backend(ctx context.Context, svc store.ServiceRef, attempt *store.Attempt) (upstream.Backend, upstream.Info, error)
 }
+
+// ErrCardPending is a tunnel service whose card no fetch through a session has produced yet: a task placed
+// on a session that has just connected, whose card fetch failed (its node's agent not listening yet). The
+// dispatch is retryable before the first upstream task id, like no_session, rather than failed:
+// service_unavailable (M2 plan audit, gap 3, the audit's second option; see gate.Services.tunnelConnected).
+var ErrCardPending = errors.New("relay: the tunnel service's card has not been fetched yet")
 
 // ServiceHandler is one service's a2a-go handler and the HandlerFn its work queue registered.
 type ServiceHandler struct {

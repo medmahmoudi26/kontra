@@ -642,3 +642,31 @@ func TestAttemptStateEndsTheAttemptOfAnEndedTask(t *testing.T) {
 		t.Errorf("a running task's attempt ended: %+v", st)
 	}
 }
+
+// write_terminal's EndAttemptAsIs (the cancel of a tunnel task whose session is gone, spec §8): the
+// attempt ends with the given outcome although the task waited at input-required, where it would
+// otherwise end interrupted (D77).
+func TestWriteTerminalEndAttemptAsIs(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		asIs bool
+		want store.Outcome
+	}{{true, store.OutcomeTunnelLost}, {false, store.OutcomeInterrupted}} {
+		id := e.task(store.StateSubmitted, nil)
+		s := uuid.Must(uuid.NewV7())
+		if err := e.log.BeginAttempt(ctx, store.Attempt{TaskID: id, N: 1, Backend: store.BackendTunnel, TunnelSession: &s,
+			KeyID: "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa", ReplicaID: "r1"}); err != nil {
+			t.Fatal(err)
+		}
+		e.status(id, a2a.TaskStateInputRequired)
+		r, err := e.acts.WriteTerminal(ctx, WriteTerminalInput{TaskID: id.String(), State: "failed", Reason: "tunnel_lost",
+			EndAttempt: string(store.OutcomeTunnelLost), EndAttemptAsIs: tc.asIs})
+		if err != nil || r.State != "failed" {
+			t.Fatalf("write_terminal %+v %v", r, err)
+		}
+		if a, _ := e.log.GetAttempt(ctx, id, 1); a.Outcome != tc.want || a.EndedAt == nil {
+			t.Errorf("as is %v: attempt %+v, want %s", tc.asIs, a, tc.want)
+		}
+	}
+}

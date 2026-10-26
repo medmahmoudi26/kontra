@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -153,6 +154,9 @@ type dispatchInfo struct {
 	workItem  uuid.UUID
 	delivered bool
 	since     int64
+	// session is the attempt's tunnel session, which the executor reads with the attempt: the Dispatcher's
+	// lines about the dispatch's end carry it too (obs.KeyTunnelSession).
+	session atomic.Pointer[uuid.UUID]
 }
 
 type dispatchKey struct{}
@@ -195,7 +199,8 @@ type run struct {
 
 	ids       IDs
 	taskUUID  uuid.UUID
-	proj      *a2a.Task // the gate projection as this run's yields leave it
+	attempt   *store.Attempt // the attempt as the run began: its backend and tunnel session (§4)
+	proj      *a2a.Task      // the gate projection as this run's yields leave it
 	info      upstream.Info
 	client    *a2aclient.Client
 	ex        *upstream.Exchange
@@ -213,6 +218,10 @@ type run struct {
 	// shows is the previous turn's end, which the upstream shows until it processes the follow-up, not this
 	// turn's (D81).
 	turnOpen bool
+	// full is the run of exchanges a tunnel's node refused with Kontra-Node: full after the first upstream
+	// task id (nodeFull); resendFull asks send to send the turn's message again.
+	full       fullRetry
+	resendFull bool
 }
 
 func (r *run) execute(ctx context.Context) {
@@ -242,13 +251,36 @@ func (r *run) execute(ctx context.Context) {
 		r.finish(nil, err)
 		return
 	}
+	r.attempt = attempt
+	if attempt.TunnelSession != nil {
+		r.logger = r.logger.With(obs.KeyTunnelSession, attempt.TunnelSession.String())
+		d.session.Store(attempt.TunnelSession)
+	}
 	r.ids = IDs{
 		GateTaskID: r.ec.TaskID, GateContextID: r.ec.ContextID,
 		UpstreamTaskID: a2a.TaskID(attempt.UpstreamTaskID), UpstreamContextID: attempt.UpstreamContextID,
 	}
 	r.firstTask = r.ids.UpstreamTaskID == ""
-	backend, info, err := r.e.backends.Backend(ctx, d.svc)
-	if err != nil {
+	backend, info, err := r.e.backends.Backend(ctx, d.svc, attempt)
+	switch {
+	case err == nil:
+	case errors.Is(err, upstream.ErrTunnelLost):
+		// The attempt's session is not held by this replica, or no longer serves the service (spec §6.1
+		// key_scope, §14.2): no stream is opened. Before the first upstream task id the workflow retries on
+		// another session; after it (a follow-up turn of a sticky task) the task fails tunnel_lost here (§7).
+		r.logger.Info("the attempt's tunnel session is gone; no stream opened", "error", err)
+		if r.ids.UpstreamTaskID != "" {
+			r.fail(store.ReasonTunnelLost, "the tunnel session to the service was lost")
+			return
+		}
+		d.running.SetOutcome(lifecycle.DispatchTunnelLost, store.ReasonTunnelLost)
+		r.finish(nil, err)
+		return
+	case errors.Is(err, ErrCardPending) && r.ids.UpstreamTaskID == "":
+		r.logger.Info("the tunnel service's card has not been fetched yet; the attempt is retried", "error", err)
+		r.retry(store.ReasonServiceUnavailable, 0, err)
+		return
+	default:
 		r.fail(store.ReasonServiceUnavailable, "the service is unavailable: no usable agent card")
 		return
 	}
@@ -261,6 +293,8 @@ func (r *run) execute(ctx context.Context) {
 	r.client = client
 	defer client.Destroy()
 	ctx, r.ex = upstream.WithExchange(ctx)
+	// A tunnel stream's preamble names the gate task and context (tunnel.md §8.1).
+	ctx = upstream.WithTask(ctx, upstream.ExchangeTask{TaskID: string(r.ec.TaskID), ContextID: r.ec.ContextID})
 	if d.resume {
 		r.resume(ctx)
 		return
@@ -397,12 +431,68 @@ func (r *run) upstreamFailed(ctx context.Context, err error) {
 		r.fail(store.ReasonUpstreamError, f.Message)
 	case upstream.Limit:
 		r.fail(store.ReasonUpstreamError, f.Message)
+	case upstream.ClassTunnelLost:
+		// Spec §6.4's tunnel rows: before the first upstream task id, retry on another session; after it,
+		// the upstream task's state is unrecoverable from outside.
+		if !first {
+			r.retry(store.ReasonTunnelLost, 0, err)
+			return
+		}
+		r.fail(store.ReasonTunnelLost, f.Message)
+	case upstream.ClassNodeFull:
+		if !first {
+			r.retry(store.ReasonTunnelLost, 0, err)
+			return
+		}
+		// The node never forwarded the message (a full answer proves it): send it again (nodeFull).
+		r.resendFull = r.nodeFull(ctx, f)
+	case upstream.ClassSealedRejected:
+		r.fail(store.ReasonSealedRejected, f.Message)
 	default:
 		if r.resent && !r.answered {
 			r.refusedResend(ctx, f)
 			return
 		}
 		r.fail(store.ReasonUpstreamError, "the service returned an error: "+f.Message)
+	}
+}
+
+// fullRetry is the run of exchanges a node refused with Kontra-Node: full after the attempt's first
+// upstream task id.
+type fullRetry struct {
+	since time.Time     // the first refusal of the current run
+	wait  time.Duration // the next wait: PollInterval doubling to PollMax
+}
+
+// nodeFull applies the full row of spec §6.4 after the first upstream task id: the exchange is made again
+// after the poll's backoff (1 s doubling to 5 s), for at most GetTaskGrace (30 s), then the task fails
+// tunnel_lost. It waits the backoff and reports whether to make the exchange again; false when the turn
+// ended (the grace ran out, or the dispatch's context ended).
+//
+// SPEC-CONFLICT (M2 plan, confirmed conflict on spec §6.4's tunnel row "Kontra-Node … full: the dispatch
+// retries the poll with backoff"): after the first upstream id the row names only a poll. A follow-up's
+// SendMessage, or a stream, refused with full would read as "any other: failed: tunnel_lost", yet a full
+// answer proves the node never forwarded the message, so sending it again cannot deliver it twice. The
+// closest faithful behaviour: every exchange refused full after the first upstream id is made again with
+// the poll's backoff for at most the 30 s grace of D97, then the task fails tunnel_lost.
+func (r *run) nodeFull(ctx context.Context, f upstream.Failure) bool {
+	o := r.e.opts
+	if r.full.since.IsZero() {
+		r.full.since, r.full.wait = time.Now(), o.PollInterval
+	}
+	if time.Since(r.full.since) >= o.GetTaskGrace {
+		r.fail(store.ReasonTunnelLost, "the node hosting the service stayed at its limit of exchanges in flight for "+o.GetTaskGrace.String())
+		return false
+	}
+	wait := r.full.wait
+	r.full.wait = min(2*r.full.wait, o.PollMax)
+	r.logger.Info("the node is full; the exchange is made again", "wait", wait, "full_for", time.Since(r.full.since), "error", f.Message)
+	select {
+	case <-ctx.Done():
+		r.finish(nil, context.Cause(ctx))
+		return false
+	case <-time.After(wait):
+		return true
 	}
 }
 
@@ -419,13 +509,25 @@ func (r *run) send(ctx context.Context) {
 		req.Config = &a2a.SendMessageConfig{AcceptedOutputModes: q.Config.AcceptedOutputModes}
 	}
 	r.sent = true
-	if r.info.Streaming {
-		if fallback := r.stream(ctx, req); !fallback {
+	streaming := r.info.Streaming
+	for {
+		r.resendFull = false
+		if streaming {
+			fallback := r.stream(ctx, req)
+			if r.resendFull && !r.finished {
+				continue // the node refused the exchange full (nodeFull): send it again
+			}
+			if !fallback {
+				return
+			}
+			r.logger.Info("the upstream refused streaming; polling (D15)")
+			streaming = false
+		}
+		r.poll(ctx, req)
+		if !r.resendFull || r.finished {
 			return
 		}
-		r.logger.Info("the upstream refused streaming; polling (D15)")
 	}
-	r.poll(ctx, req)
 }
 
 // upstreamMessage is the caller's message with the upstream ids of §4: on a follow-up the attempt's
@@ -438,7 +540,7 @@ func (r *run) upstreamMessage(ctx context.Context) (*a2a.Message, error) {
 	m := r.ids
 	if m.UpstreamTaskID == "" {
 		m.UpstreamContextID = ""
-		prev, err := r.e.log.PreviousContextAttempt(ctx, r.d.svc, r.d.task.Owner, r.d.task.ContextID, store.BackendDirect)
+		prev, err := r.e.log.PreviousContextAttempt(ctx, r.d.svc, r.d.task.Owner, r.d.task.ContextID, r.attempt.Backend, r.attempt.TunnelSession)
 		if err != nil {
 			return nil, err
 		}
@@ -454,8 +556,8 @@ func (r *run) upstreamMessage(ctx context.Context) (*a2a.Message, error) {
 }
 
 // references maps the caller's referenceTaskIds to the upstream task ids of the caller's own tasks in the
-// same gate context on the service's current direct backend (spec §4, store.SameDirectBackend); the rest
-// are dropped.
+// same gate context on the same backend as this attempt (spec §4, store.SameBackend): the same tunnel
+// session, or the service's current direct backend (store.SameDirectBackend); the rest are dropped.
 func (r *run) references(ctx context.Context) (map[a2a.TaskID]a2a.TaskID, error) {
 	var want []uuid.UUID
 	for _, ref := range r.ec.Message.ReferenceTasks {
@@ -469,11 +571,11 @@ func (r *run) references(ctx context.Context) (map[a2a.TaskID]a2a.TaskID, error)
 	rows, err := r.e.log.DB().Query(ctx, `select t.id, a.upstream_task_id from kontra.tasks t
 		join kontra.services s on s.tenant_id = t.tenant_id and s.name = t.service
 		join lateral (select a.upstream_task_id from kontra.attempts a
-		               where a.task_id = t.id and a.backend = 'direct' and a.upstream_task_id is not null
-		                 and `+store.SameDirectBackend+`
+		               where a.task_id = t.id and a.upstream_task_id is not null
+		                 and `+store.SameBackend("$6", "$7")+`
 		               order by a.n desc limit 1) a on true
 		where t.id = any($1::uuid[]) and t.tenant_id = $2 and t.service = $3 and t.buyer_id = $4 and t.context_id = $5`,
-		want, r.d.svc.TenantID, r.d.svc.Name, r.d.task.Owner.BuyerID, r.d.task.ContextID)
+		want, r.d.svc.TenantID, r.d.svc.Name, r.d.task.Owner.BuyerID, r.d.task.ContextID, string(r.attempt.Backend), r.attempt.TunnelSession)
 	if err != nil {
 		return nil, fmt.Errorf("relay: referenced tasks: %w", err)
 	}
@@ -624,11 +726,13 @@ func (r *run) follow(ctx context.Context) {
 type getTasks struct {
 	failingSince time.Time     // the start of the first call of the current run of failures
 	retryAfter   time.Duration // the last throttled answer's Retry-After
+	fullWait     time.Duration // a tunnel node's full answers: the poll's backoff, PollInterval doubling to PollMax
 }
 
-// next is the wait before the next call: the interval, or a throttled answer's Retry-After up to the grace.
+// next is the wait before the next call: the interval, a throttled answer's Retry-After up to the grace,
+// or the backoff after a node's full answer.
 func (g *getTasks) next(interval, grace time.Duration) time.Duration {
-	return max(interval, min(g.retryAfter, grace))
+	return max(interval, min(g.retryAfter, grace), g.fullWait)
 }
 
 // getTask issues one GetTask (historyLength history, 0 but for refusedResend), bounded by GetTaskTimeout,
@@ -648,6 +752,10 @@ func (g *getTasks) next(interval, grace time.Duration) time.Duration {
 // a malformed body) fails the task upstream_error with the upstream's message, and a body over its limit
 // (§6.6) fails it upstream_error, at the first such answer. The call that carries the message
 // (SendMessage, SendStreamingMessage) keeps the table's rule (upstreamFailed).
+//
+// Through a tunnel (§6.4's tunnel rows; GetTask always comes after the first upstream task id): a lost
+// session fails the task tunnel_lost at once, a node's full answer is retried with the poll's backoff
+// within the same grace, then tunnel_lost (nodeFull), and a node's sealed_rejected fails sealed_rejected.
 func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 	start := time.Now()
 	cctx, cancel := context.WithTimeout(ctx, r.e.opts.GetTaskTimeout)
@@ -655,6 +763,8 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 	r.ex.Reset()
 	t, err := r.client.GetTask(cctx, &a2a.GetTaskRequest{ID: r.ids.UpstreamTaskID, HistoryLength: &history})
 	g.retryAfter = 0
+	full := g.fullWait
+	g.fullWait = 0
 	if err == nil && t == nil {
 		r.fail(store.ReasonUpstreamError, "the service answered GetTask without a task")
 		return nil
@@ -676,6 +786,19 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 	}
 	switch f.Class {
 	case upstream.Unreachable, upstream.Throttled:
+	case upstream.ClassNodeFull:
+		// Spec §6.4's tunnel row: the dispatch retries the poll with backoff (1 s doubling to 5 s), within
+		// the 30 s grace (nodeFull's SPEC-CONFLICT), then tunnel_lost.
+		g.fullWait = r.e.opts.PollInterval
+		if full > 0 {
+			g.fullWait = min(2*full, r.e.opts.PollMax)
+		}
+	case upstream.ClassTunnelLost:
+		r.fail(store.ReasonTunnelLost, f.Message)
+		return nil
+	case upstream.ClassSealedRejected:
+		r.fail(store.ReasonSealedRejected, f.Message)
+		return nil
 	case upstream.Limit:
 		r.fail(store.ReasonUpstreamError, f.Message)
 		return nil
@@ -693,6 +816,10 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 	r.logger.Info("GetTask failed", "class", int(f.Class), "failing_for", failing, "error", f.Message)
 	if failing < r.e.opts.GetTaskGrace {
 		g.retryAfter = f.RetryAfter
+		return nil
+	}
+	if f.Class == upstream.ClassNodeFull {
+		r.fail(store.ReasonTunnelLost, "the node hosting the service stayed at its limit of exchanges in flight for "+r.e.opts.GetTaskGrace.String())
 		return nil
 	}
 	if f.Class == upstream.Throttled {

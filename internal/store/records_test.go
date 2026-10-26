@@ -310,7 +310,7 @@ func TestAttempts(t *testing.T) {
 	}
 
 	// The upstream context of a gate context is reused only within the caller's own scope (spec §4, D53).
-	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendDirect); err != nil || p == nil || p.UpstreamContextID != "up-ctx-1" {
+	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendDirect, nil); err != nil || p == nil || p.UpstreamContextID != "up-ctx-1" {
 		t.Fatalf("A's previous attempt: %+v %v", p, err)
 	}
 	later := e.newTask(e.svc, buyerA, "c1", "q2")
@@ -318,16 +318,92 @@ func TestAttempts(t *testing.T) {
 	if lf, err := e.log.BeginDispatch(ctx, uid(t, later.ID), 1, "r1"); err == nil {
 		_ = e.log.SetFirstUpstreamID(ctx, lf, "up-3", "up-ctx-3")
 	}
-	if p, _ := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendDirect); p.UpstreamContextID != "up-ctx-3" {
+	if p, _ := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendDirect, nil); p.UpstreamContextID != "up-ctx-3" {
 		t.Errorf("A's latest upstream context %q", p.UpstreamContextID)
 	}
 	for name, p := range map[string]func() (*Attempt, error){
-		"buyer B, same string": func() (*Attempt, error) { return e.log.PreviousContextAttempt(ctx, e.svc, buyerB, "c1", BackendDirect) },
-		"another context":      func() (*Attempt, error) { return e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c2", BackendDirect) },
-		"another backend":      func() (*Attempt, error) { return e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendTunnel) },
+		"buyer B, same string": func() (*Attempt, error) {
+			return e.log.PreviousContextAttempt(ctx, e.svc, buyerB, "c1", BackendDirect, nil)
+		},
+		"another context": func() (*Attempt, error) {
+			return e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c2", BackendDirect, nil)
+		},
+		"another backend": func() (*Attempt, error) {
+			return e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendTunnel, nil)
+		},
 	} {
 		if a, err := p(); a != nil || err != nil {
 			t.Errorf("%s: %+v %v", name, a, err)
+		}
+	}
+
+	// A tunnel attempt's upstream context is reused only on the same tunnel session (spec §4; M2 plan audit:
+	// node 1's upstream contextId never reaches node 2).
+	s1, s2 := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	onTunnel := e.newTask(e.svc, buyerA, "t1", "q-t")
+	tid := uid(t, onTunnel.ID)
+	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: tid, N: 1, Backend: BackendTunnel, TunnelSession: &s1, KeyID: "k1_x", ReplicaID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	tf, err := e.log.BeginDispatch(ctx, tid, 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamID(ctx, tf, "up-t", "up-ctx-t"); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "t1", BackendTunnel, &s1); err != nil || p == nil || p.UpstreamContextID != "up-ctx-t" {
+		t.Fatalf("the same session: %+v %v", p, err)
+	}
+	for name, sess := range map[string]*uuid.UUID{"another session": &s2, "no session": nil} {
+		if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "t1", BackendTunnel, sess); p != nil || err != nil {
+			t.Errorf("%s: %+v %v", name, p, err)
+		}
+	}
+	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "t1", BackendDirect, &s1); p != nil || err != nil {
+		t.Errorf("a direct attempt found a tunnel one: %+v %v", p, err)
+	}
+}
+
+// A tunnel attempt is written with its session, key and replica, or, with no candidate session, already
+// ended no_session (the tunnel_has_session check, spec §4, §6.1); no other outcome is inserted.
+func TestTunnelAttempts(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	id := uid(t, e.newTask(e.svc, buyerA, "", "q").ID)
+	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendTunnel}); err == nil {
+		t.Fatal("an open tunnel attempt without a session was written")
+	}
+	for range 2 { // prepare is retried: idempotent
+		if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendTunnel, Outcome: OutcomeNoSession}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := e.log.GetAttempt(ctx, id, 1)
+	if err != nil || a.Outcome != OutcomeNoSession || a.EndedAt == nil || a.TunnelSession != nil || a.ReplicaID != "" {
+		t.Fatalf("no_session attempt %+v %v", a, err)
+	}
+	if _, err := e.log.BeginDispatch(ctx, id, 1, "r1"); !errors.Is(err, ErrAttemptNotOpen) {
+		t.Errorf("a dispatch on a no_session attempt: %v", err)
+	}
+	s := uuid.Must(uuid.NewV7())
+	if err := e.log.BeginRetry(ctx, Attempt{TaskID: id, N: 2, Backend: BackendTunnel, TunnelSession: &s, KeyID: "k1_y", ReplicaID: "r2"}, OutcomeTunnelLost); err != nil {
+		t.Fatal(err)
+	}
+	if a1, _ := e.log.GetAttempt(ctx, id, 1); a1.Outcome != OutcomeNoSession {
+		t.Errorf("the retry changed the ended no_session attempt: %+v", a1)
+	}
+	a2, err := e.log.GetAttempt(ctx, id, 2)
+	if err != nil || a2.Backend != BackendTunnel || a2.TunnelSession == nil || *a2.TunnelSession != s || a2.KeyID != "k1_y" ||
+		a2.ReplicaID != "r2" || a2.EndedAt != nil || a2.Outcome != "" {
+		t.Fatalf("attempt 2 %+v %v", a2, err)
+	}
+	for _, bad := range []Attempt{
+		{TaskID: id, N: 3, Backend: BackendTunnel, Outcome: OutcomeTunnelLost},
+		{TaskID: id, N: 3, Backend: BackendDirect, Outcome: OutcomeNoSession},
+	} {
+		if err := e.log.BeginRetry(ctx, bad, OutcomeFailed); err == nil {
+			t.Errorf("attempt %+v was written", bad)
 		}
 	}
 }
