@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -240,5 +241,86 @@ func TestJobKeysRefuseOpenDirectory(t *testing.T) {
 	}
 	if _, err := OpenJobKeys(home, "other"); err == nil {
 		t.Fatal("a world-readable jobs directory is accepted")
+	}
+}
+
+// TestJobKeysRenameRetry: a Rename interrupted after the link and before the removal leaves both names on one
+// key; the retry finishes it instead of calling the job's own key a foreign one.
+func TestJobKeysRenameRetry(t *testing.T) {
+	j, err := OpenJobKeys(t.TempDir(), "gate.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov, err := j.Mint("p-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, _ := j.Path("p-1")
+	dst, _ := j.Path("t-1")
+	if err := os.Link(src, dst); err != nil { // the process died here
+		t.Fatal(err)
+	}
+	if err := j.Rename("p-1", "t-1"); err != nil {
+		t.Fatalf("the retried Rename: %v", err)
+	}
+	if _, err := os.Lstat(src); !os.IsNotExist(err) {
+		t.Fatalf("the provisional name is still there: %v", err)
+	}
+	if k, err := j.Load("t-1"); err != nil || k.String() != prov.String() {
+		t.Fatalf("Load after the retry: %v", err)
+	}
+	// A key that merely has the same bytes is another file: still refused.
+	if _, err := j.Mint("p-2", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	src2, _ := j.Path("p-2")
+	b, _ := os.ReadFile(dst)
+	if err := os.WriteFile(src2, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Rename("p-2", "t-1"); err == nil {
+		t.Fatal("Rename onto another file with the same key succeeded")
+	}
+	if _, err := os.Lstat(src2); err != nil {
+		t.Fatalf("the refused Rename removed the provisional key: %v", err)
+	}
+}
+
+// TestJobKeysRenameWithoutHardLinks: on a file system without hard links Rename falls back to a rename that
+// never replaces a key, as Mint's createNew does.
+func TestJobKeysRenameWithoutHardLinks(t *testing.T) {
+	defer func(l func(string, string) error) { link = l }(link)
+	link = func(oldname, newname string) error {
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: syscall.EPERM}
+	}
+	j, err := OpenJobKeys(t.TempDir(), "gate.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov, err := j.Mint("p-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Rename("p-1", "t-1"); err != nil {
+		t.Fatalf("Rename without hard links: %v", err)
+	}
+	if k, err := j.Load("t-1"); err != nil || k.String() != prov.String() {
+		t.Fatalf("Load after Rename: %v", err)
+	}
+	if _, err := j.Load("p-1"); err == nil {
+		t.Fatal("the provisional id still has a key")
+	}
+	other, err := j.Mint("p-2", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Rename("p-2", "t-1"); err == nil {
+		t.Fatal("Rename without hard links replaced a job's key")
+	}
+	if k, _ := j.Load("t-1"); k.String() != prov.String() {
+		t.Fatal("the job's key was replaced")
+	}
+	if k, _ := j.Load("p-2"); k.String() != other.String() {
+		t.Fatal("the provisional key was lost")
 	}
 }

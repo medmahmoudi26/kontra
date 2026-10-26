@@ -26,7 +26,10 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"filippo.io/age"
 
@@ -154,12 +157,12 @@ func (h Header) validate() error {
 			return bad("a reply carries no iat, replyTo or rk")
 		}
 	default:
-		return bad("direction %q is neither req nor res", h.Dir)
+		return bad("direction %s is neither req nor res", strictjson.Quote(string(h.Dir)))
 	}
 	switch h.Kind {
 	case KindText, KindRaw, KindURL, KindData:
 	default:
-		return bad("kind %q is not text, raw, url or data", h.Kind)
+		return bad("kind %s is not text, raw, url or data", strictjson.Quote(string(h.Kind)))
 	}
 	if h.IAT < 0 {
 		return bad("iat is negative")
@@ -216,7 +219,7 @@ func ParseHeader(b []byte) (Header, error) {
 	}
 	for k := range m {
 		if !headerMembers[k] {
-			return Header{}, reject(RejectBadHeader, fmt.Sprintf("header member %q is unknown", k))
+			return Header{}, reject(RejectBadHeader, "header member "+strictjson.Quote(k)+" is unknown")
 		}
 	}
 	// Every key is now exactly one of Header's names, once, so encoding/json's case-insensitive matching has
@@ -404,7 +407,8 @@ const (
 var Reasons = []Reject{RejectUndecryptable, RejectBadHeader, RejectWrongTask, RejectWrongContext,
 	RejectWrongMessage, RejectWrongJob, RejectReplayed, RejectNotRecipient}
 
-// RejectError is a refusal with its reason. Detail is for the node's log, never sent.
+// RejectError is a refusal with its reason. Detail is for the node's log, never sent: at most maxDetail bytes,
+// with no line break or other control character, since it may quote the sender's bytes.
 type RejectError struct {
 	Reason Reject
 	Detail string
@@ -412,7 +416,33 @@ type RejectError struct {
 
 func (e *RejectError) Error() string { return "sealed part rejected: " + string(e.Reason) }
 
-func reject(r Reject, detail string) *RejectError { return &RejectError{Reason: r, Detail: detail} }
+// maxDetail bounds a RejectError's Detail.
+const maxDetail = 256
+
+func reject(r Reject, detail string) *RejectError {
+	return &RejectError{Reason: r, Detail: boundDetail(detail)}
+}
+
+// boundDetail keeps a log detail to one bounded line: what a decoder's or age's error copied of the input (a number
+// literal, a stanza) is cut to maxDetail bytes plus "…", and its control characters are escaped.
+func boundDetail(s string) string {
+	cut := func(s string) string {
+		if len(s) <= maxDetail {
+			return s
+		}
+		n := maxDetail
+		for n > 0 && !utf8.RuneStart(s[n]) {
+			n--
+		}
+		return s[:n] + "…"
+	}
+	s = cut(s)
+	if strings.IndexFunc(s, unicode.IsControl) >= 0 {
+		q := strconv.Quote(s)
+		s = cut(q[1 : len(q)-1])
+	}
+	return s
+}
 
 // ReasonOf is err's refusal reason, ok false when err is not a *RejectError.
 func ReasonOf(err error) (Reject, bool) {

@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"filippo.io/age"
 	"filippo.io/age/armor"
@@ -651,5 +653,53 @@ func TestMCPForms(t *testing.T) {
 	back, err := ParseMCPEnvelope(b)
 	if err != nil || !bytes.Equal(back, ct) {
 		t.Fatalf("ParseMCPEnvelope = %q, %v", back, err)
+	}
+}
+
+// TestRejectDetailIsBounded: a refusal's Detail, which goes to the node's log, never copies the sender's bytes
+// unbounded or with a raw line break, whatever part of the header carries them.
+func TestRejectDetailIsBounded(t *testing.T) {
+	id := newID(t)
+	g, err := requestHeader(t, kidsOf(id)).Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := "y\ntime=2026 level=INFO msg=forged " + strings.Repeat("y", 1<<20)
+	bigKey, _ := json.Marshal(big)
+	bigUpper, _ := json.Marshal(strings.ToUpper(big))
+	for _, c := range []struct{ name, hdr string }{
+		{"unknown member", `{"v":1,` + string(bigKey) + `:1}`},
+		{"case-variant pair", `{"v":1,` + string(bigKey) + `:1,` + string(bigUpper) + `:2}`},
+		{"long dir", strings.Replace(string(g), `"dir":"req"`, `"dir":`+string(bigKey), 1)},
+		{"long kind", strings.Replace(string(g), `"kind":"text"`, `"kind":`+string(bigKey), 1)},
+		{"long number", strings.Replace(string(g), `"iat":1761490000`, `"iat":1`+strings.Repeat("0", 1<<20), 1)},
+		{"long string for a number", strings.Replace(string(g), `"part":0`, `"part":`+string(bigKey), 1)},
+		{"not JSON", `{"v":1,` + string(bigKey)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ParseHeader([]byte(c.hdr))
+			wantReason(t, err, RejectBadHeader)
+			var re *RejectError
+			if !errors.As(err, &re) {
+				t.Fatal(err)
+			}
+			if len(re.Detail) > 300 || strings.ContainsAny(re.Detail, "\n\r") || re.Detail == "" {
+				t.Fatalf("Detail is %d bytes (line break %v): %.300q", len(re.Detail),
+					strings.ContainsAny(re.Detail, "\n\r"), re.Detail)
+			}
+		})
+	}
+}
+
+func TestBoundDetail(t *testing.T) {
+	for _, in := range []string{"", "plain", strings.Repeat("\x00", 1000), strings.Repeat("é", 1000),
+		"a\nb\rc\x1b[31m", strings.Repeat("x", 255) + "é"} {
+		out := boundDetail(in)
+		if len(out) > maxDetail+len("…") || strings.IndexFunc(out, unicode.IsControl) >= 0 || !utf8.ValidString(out) {
+			t.Errorf("boundDetail(%.40q) = %.60q (%d bytes)", in, out, len(out))
+		}
+	}
+	if got := boundDetail("plain detail"); got != "plain detail" {
+		t.Errorf("a short detail changed: %q", got)
 	}
 }

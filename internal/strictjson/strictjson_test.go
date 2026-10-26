@@ -192,3 +192,106 @@ func TestFoldKeyIsEqualFold(t *testing.T) {
 		}
 	}
 }
+
+// TestKeyErrorIsBounded: a KeyError's text quotes at most a short prefix of the key, escaped, so that one
+// request cannot write megabytes or a forged line into every log line that prints it.
+func TestKeyErrorIsBounded(t *testing.T) {
+	k := "k\ntime=2026 level=INFO msg=\"forged line\"" + strings.Repeat("x", 1<<20)
+	k1, _ := json.Marshal(k)
+	k2, _ := json.Marshal(strings.ToUpper(k))
+	for _, err := range []error{
+		func() error { _, err := Members([]byte(`{` + string(k1) + `:1,` + string(k2) + `:2}`)); return err }(),
+		Check([]byte(`{"params":{`+string(k1)+`:1,`+string(k1)+`:2}}`), Path{"params"}),
+		CheckReads(map[string]json.RawMessage{strings.ToUpper(k): json.RawMessage(`1`)}, nil, []Path{{k}}),
+	} {
+		ke := keyErr(t, err)
+		if ke.Key == "" {
+			t.Fatal("the KeyError lost its key")
+		}
+		s := err.Error()
+		if len(s) > 160 || strings.ContainsAny(s, "\n\r") {
+			t.Errorf("KeyError text is %d bytes (newline %v): %.200q", len(s), strings.ContainsAny(s, "\n\r"), s)
+		}
+		if !strings.Contains(s, `"K\nTIME`) && !strings.Contains(s, `"k\ntime`) {
+			t.Errorf("KeyError text %q does not quote the key's start", s)
+		}
+	}
+}
+
+// TestSyntaxIsNotObject: input that is not JSON at all is ErrSyntax (which is also ErrNotObject); valid JSON
+// that is not one object is ErrNotObject only, so a reader can answer them differently (-32700, -32600).
+func TestSyntaxIsNotObject(t *testing.T) {
+	for _, in := range []string{``, ` `, `{"a":1`, `{"a"}`, `{1:2}`, `{} x`, `{}{}`, `{"a":1} {"b":2}`, `[1,`, `nul`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}`} {
+		_, err := Members([]byte(in))
+		if !errors.Is(err, ErrSyntax) || !errors.Is(err, ErrNotObject) {
+			t.Errorf("Members(%q) = %v, want ErrSyntax (and ErrNotObject)", in, err)
+		}
+		if err := Check([]byte(in), Path{"params"}); !errors.Is(err, ErrSyntax) {
+			t.Errorf("Check(%q) = %v, want ErrSyntax", in, err)
+		}
+	}
+	for _, in := range []string{`[]`, `[{"a":1}]`, `"x"`, `1`, `null`, `true`, ` [1, {"a": [2]}] `} {
+		_, err := Members([]byte(in))
+		if !errors.Is(err, ErrNotObject) || errors.Is(err, ErrSyntax) {
+			t.Errorf("Members(%q) = %v, want ErrNotObject and not ErrSyntax", in, err)
+		}
+	}
+}
+
+// TestCheckReads: a lone key equal under case folding to a member the reader reads at that level, without being
+// it, is a *KeyError naming the member it stands for; the exact member, other keys, and variants at levels or of
+// names that are not read pass.
+func TestCheckReads(t *testing.T) {
+	levels := []Path{{"params"}, {"params", "_meta"}, {"result"}, {"result", "tools", "*"}}
+	reads := []Path{{"method"}, {"id"}, {"params"}, {"params", "name"}, {"params", "task"}, {"params", "_meta"},
+		{"result", "isError"}, {"result", "tools", "*", "name"}}
+	check := func(in string) error {
+		top, err := Members([]byte(in))
+		if err != nil {
+			t.Fatalf("Members(%s): %v", in, err)
+		}
+		return CheckReads(top, levels, reads)
+	}
+	for _, in := range []string{
+		`{"method":"tools/call","id":1,"params":{"name":"echo","task":{},"_meta":{}}}`,
+		`{"method":"x","params":{"name":"echo","arguments":{"NAME":"y"}}}`,         // arguments is not a level here
+		`{"method":"x","params":{"name":"echo","Message":"m","_meta":{"NAME":1}}}`, // name is not read in _meta
+		`{"result":{"content":[{"ISERROR":true}],"isError":false}}`,                // content items are not a level
+		`{"result":{"tools":[{"name":"a","Title":"t"},{"name":"b"}]}}`,
+		`{"params":null,"result":"x"}`, // absent, null and non-object levels are skipped
+	} {
+		if err := check(in); err != nil {
+			t.Errorf("CheckReads(%s) = %v, want nil", in, err)
+		}
+	}
+	for _, c := range []struct {
+		in      string
+		path    []string
+		key, of string
+	}{
+		{`{"METHOD":"tools/call","id":1}`, nil, "METHOD", "method"},
+		{`{"method":"tools/call","Id":1}`, nil, "Id", "id"},
+		{`{"method":"tools/call","PARAMS":{"name":"rm"}}`, nil, "PARAMS", "params"},
+		{`{"method":"tools/call","params":{"NAME":"rm"}}`, []string{"params"}, "NAME", "name"},
+		{"{\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"tasK\":{}}}", []string{"params"}, "tasK", "task"},
+		{`{"params":{"name":"echo","_Meta":{}}}`, []string{"params"}, "_Meta", "_meta"},
+		{`{"result":{"content":[],"ISERROR":true}}`, []string{"result"}, "ISERROR", "isError"},
+		{`{"result":{"tools":[{"name":"a"},{"NAME":"rm"}]}}`, []string{"result", "tools", "1"}, "NAME", "name"},
+	} {
+		ke := keyErr(t, check(c.in))
+		if !slices.Equal(ke.Path, c.path) || ke.Key != c.key || ke.Of != c.of {
+			t.Errorf("CheckReads(%s): KeyError{%v, %q, of %q}, want {%v, %q, of %q}", c.in, ke.Path, ke.Key, ke.Of,
+				c.path, c.key, c.of)
+		}
+	}
+	// A repeated or case-variant pair is still refused at every level, and the top's problems come first.
+	top, _ := Members([]byte(`{"METHOD":"x","params":{"a":1,"A":2}}`))
+	if ke := keyErr(t, CheckReads(top, levels, reads)); len(ke.Path) != 0 || ke.Of != "method" {
+		t.Errorf("KeyError %+v, want the top level's METHOD first", ke)
+	}
+	top, _ = Members([]byte(`{"method":"x","params":{"a":1,"A":2}}`))
+	if ke := keyErr(t, CheckReads(top, levels, reads)); !slices.Equal(ke.Path, []string{"params"}) || ke.Of != "" {
+		t.Errorf("KeyError %+v, want the pair in params", ke)
+	}
+}

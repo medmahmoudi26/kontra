@@ -3,6 +3,7 @@ package mcpwire
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -89,9 +90,14 @@ func probe(path string, variant string) string {
 			v = `{"` + out[i] + `":` + v + `}`
 		}
 	}
-	// v is {"params": …} or {"result": …} or {"error": …}: merge it into a message.
+	// v is {"params": …} or {"result": …} or {"error": …}: merge it into a message of a valid shape (a request
+	// for params, a response for result and error).
 	body := strings.TrimSuffix(v, "}")
-	return `{"jsonrpc":"2.0","id":7,` + strings.TrimPrefix(body, "{") + `}`
+	method := ""
+	if out[0] == "params" {
+		method = `"method":"m",`
+	}
+	return `{"jsonrpc":"2.0","id":7,` + method + strings.TrimPrefix(body, "{") + `}`
 }
 
 // TestEveryLevelIsChecked sends, for every level of each list, a message with a case variant at exactly that
@@ -216,11 +222,21 @@ func TestParseUpstreamProbes(t *testing.T) {
 }
 
 func TestParseShapes(t *testing.T) {
-	for _, in := range []string{`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, `[]`, `1`, `"x"`, `null`, ``,
-		`{"jsonrpc":"2.0","id":1,"method":"ping"} {"jsonrpc":"2.0","id":2,"method":"ping"}`, `{"jsonrpc":"2.0"}x`} {
+	for _, in := range []string{`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, `[]`, `1`, `"x"`, `null`, ` true `} {
 		m, err := Parse([]byte(in), FromClient)
-		if !errors.Is(err, ErrBatch) || m != nil {
+		if !errors.Is(err, ErrBatch) || errors.Is(err, ErrParse) || m != nil {
 			t.Errorf("Parse(%q) = %v, %v; want ErrBatch and no message", in, m, err)
+		}
+	}
+	// Bytes that are not one JSON value are a parse error (-32700), not a batch.
+	for _, in := range []string{``, ` `, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}`,
+		`{"jsonrpc":"2.0","id":1,"method":"ping"} {"jsonrpc":"2.0","id":2,"method":"ping"}`, `{"jsonrpc":"2.0"}x`,
+		`[{"jsonrpc":"2.0","id":1,"method":"ping"}`, `{"jsonrpc":"2.0","id":1,"method":"ping",}`} {
+		for _, src := range []Source{FromClient, FromUpstream} {
+			m, err := Parse([]byte(in), src)
+			if !errors.Is(err, ErrParse) || errors.Is(err, ErrBatch) || m != nil {
+				t.Errorf("Parse(%q, %d) = %v, %v; want ErrParse and no message", in, src, m, err)
+			}
 		}
 	}
 	for _, in := range []string{
@@ -332,4 +348,273 @@ func TestErrorBody(t *testing.T) {
 	if _, err := ErrorBody(json.RawMessage(`{"a":1}`), 1, "m", nil); err == nil {
 		t.Error("an object id is written")
 	}
+}
+
+// TestParseRefusesWhatIsNotAMessage: Parse accepts exactly a request (a string method and a string or number
+// id), a notification (a string method and no id) or a response (an id, no method, and exactly one of result or
+// a non-null error), with jsonrpc "2.0" and params, when present, an object. Anything else is ErrInvalid, with
+// the id when the message object was read unambiguously.
+func TestParseRefusesWhatIsNotAMessage(t *testing.T) {
+	for _, c := range []struct{ name, body, id string }{
+		{"no method, no result, no error", `{"jsonrpc":"2.0","id":1,"params":{"name":"x"}}`, "1"},
+		{"nothing but jsonrpc", `{"jsonrpc":"2.0"}`, ""},
+		{"empty object", `{}`, ""},
+		{"method and result", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"},"result":{}}`, "1"},
+		{"method and null result", `{"jsonrpc":"2.0","id":1,"method":"tools/call","result":null}`, "1"},
+		{"method and error", `{"jsonrpc":"2.0","id":1,"method":"ping","error":{"code":1,"message":"m"}}`, "1"},
+		{"notification with result", `{"jsonrpc":"2.0","method":"notifications/x","result":{}}`, ""},
+		{"result and error", `{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":1,"message":"m"}}`, "1"},
+		{"null error alone", `{"jsonrpc":"2.0","id":1,"error":null}`, "1"},
+		{"result without id", `{"jsonrpc":"2.0","result":{}}`, ""},
+		{"error without id", `{"jsonrpc":"2.0","error":{"code":1,"message":"m"}}`, ""},
+		{"request with a null id", `{"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"x"}}`, "null"},
+		{"result with a null id", `{"jsonrpc":"2.0","id":null,"result":{}}`, "null"},
+		{"params a string", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"x"}`, "1"},
+		{"params an array", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":["x"]}`, "1"},
+		{"params a number", `{"jsonrpc":"2.0","method":"notifications/x","params":1}`, ""},
+		{"params null", `{"jsonrpc":"2.0","id":1,"method":"ping","params":null}`, "1"},
+		{"no jsonrpc", `{"id":1,"method":"ping"}`, "1"},
+		{"jsonrpc 1.0", `{"jsonrpc":"1.0","id":1,"method":"ping"}`, "1"},
+		{"jsonrpc 2", `{"jsonrpc":"2","id":1,"method":"ping"}`, "1"},
+		{"jsonrpc with space", `{"jsonrpc":"2.0 ","id":1,"method":"ping"}`, "1"},
+		{"empty method", `{"jsonrpc":"2.0","id":1,"method":""}`, "1"},
+		{"empty method in a notification", `{"jsonrpc":"2.0","method":"","params":{}}`, ""},
+	} {
+		for _, src := range []Source{FromClient, FromUpstream} {
+			m, err := Parse([]byte(c.body), src)
+			if !errors.Is(err, ErrInvalid) {
+				t.Errorf("%s (source %d): Parse(%s) = %v, want ErrInvalid", c.name, src, c.body, err)
+				continue
+			}
+			got := ""
+			if m != nil {
+				got = string(m.ID)
+			}
+			if got != c.id {
+				t.Errorf("%s (source %d): the refusal's id is %q, want %q", c.name, src, got, c.id)
+			}
+		}
+	}
+
+	for _, c := range []struct {
+		body   string
+		method string
+		resp   bool
+	}{
+		{`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}`, "tools/call", false},
+		{`{"jsonrpc":"2.0","id":"a","method":"ping"}`, "ping", false},
+		{`{"jsonrpc":"2.0","method":"notifications/initialized"}`, "notifications/initialized", false},
+		{`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}`, "notifications/progress", false},
+		{`{"jsonrpc":"2.0","id":1,"result":{}}`, "", true},
+		{`{"jsonrpc":"2.0","id":1,"result":null}`, "", true},
+		{`{"jsonrpc":"2.0","id":1,"result":{},"error":null}`, "", true},
+		{`{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}`, "", true},
+		{`{"jsonrpc":"2.0","id":"s1","error":{"code":-1,"message":"m","data":null}}`, "", true},
+	} {
+		for _, src := range []Source{FromClient, FromUpstream} {
+			m, err := Parse([]byte(c.body), src)
+			if err != nil {
+				t.Errorf("source %d: Parse(%s) = %v, want nil", src, c.body, err)
+				continue
+			}
+			if m.Method != c.method || m.JSONRPC != "2.0" || (m.Result == nil && m.Error == nil) != !c.resp {
+				t.Errorf("source %d: Parse(%s) = %+v", src, c.body, m)
+			}
+		}
+	}
+}
+
+// TestParseLoneCaseVariants: a key that a decoder matching keys case-insensitively (encoding/json into a struct,
+// as mark3labs/mcp-go reads a message) takes for a member the relay reads, while the relay reads that member as
+// absent, is ErrAmbiguous. The review's probes: each of them was accepted, and an encoding/json peer read
+// tools/call, the denied tool's name, or isError true.
+func TestParseLoneCaseVariants(t *testing.T) {
+	for _, c := range []struct {
+		name, body string
+		src        Source
+		of         string
+		top        bool
+	}{
+		{"METHOD", `{"jsonrpc":"2.0","id":1,"METHOD":"tools/call","params":{"name":"x"}}`, FromClient, "method", true},
+		{"METHOD with a null result", `{"jsonrpc":"2.0","id":1,"METHOD":"tools/call","params":{"name":"x"},"result":null}`, FromClient, "method", true},
+		{"ID", `{"jsonrpc":"2.0","ID":1,"method":"tools/call","params":{"name":"denied"}}`, FromClient, "id", true},
+		{"PARAMS", `{"jsonrpc":"2.0","id":1,"method":"tools/call","PARAMS":{"name":"denied"}}`, FromClient, "params", true},
+		{"JSONRPC", `{"JSONRPC":"2.0","id":1,"method":"ping"}`, FromClient, "jsonrpc", true},
+		{"Result", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"},"Result":{}}`, FromClient, "result", true},
+		{"ERROR", `{"jsonrpc":"2.0","id":1,"result":{},"ERROR":{"code":1,"message":"m"}}`, FromUpstream, "error", true},
+		{"NAME", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"NAME":"denied","arguments":{}}}`, FromClient, "name", false},
+		{"Kelvin task", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"tas\u212a\":{\"ttl\":1}}}", FromClient, "task", false},
+		{"Kelvin task escaped", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","tas\u212a":{"ttl":1}}}`, FromClient, "task", false},
+		{"URI", `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"URI":"file:///etc/passwd"}}`, FromClient, "uri", false},
+		{"TASKID", `{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"TASKID":"t"}}`, FromClient, "taskId", false},
+		{"_META", `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_META":{}}}`, FromClient, "_meta", false},
+		{"ARGUMENTS", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","ARGUMENTS":{"a":1}}}`, FromClient, "arguments", false},
+		{"modern protocolVersion", `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"IO.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`, FromClient, MetaProtocolVersion, false},
+		{"ISERROR", `{"jsonrpc":"2.0","id":1,"result":{"content":[],"ISERROR":true}}`, FromUpstream, "isError", false},
+		{"terminal ISERROR", `{"jsonrpc":"2.0","id":1,"result":{"taskId":"t","status":"completed","result":{"content":[],"IsError":true}}}`, FromUpstream, "isError", false},
+		{"tool NAME", `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo"},{"NAME":"rm","inputSchema":{}}]}}`, FromUpstream, "name", false},
+		{"tool EXECUTION", `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","Execution":{"taskSupport":"required"}}]}}`, FromUpstream, "execution", false},
+		{"TASK", `{"jsonrpc":"2.0","id":1,"result":{"TASK":{"taskId":"t","status":"working"}}}`, FromUpstream, "task", false},
+		{"TOOLS", `{"jsonrpc":"2.0","id":1,"result":{"Tools":[{"name":"rm"}]}}`, FromUpstream, "tools", false},
+		{"related-task", `{"jsonrpc":"2.0","id":1,"method":"elicitation/create","params":{"message":"m","_meta":{"io.modelcontextprotocol/RELATED-TASK":{"taskId":"t"}}}}`, FromUpstream, MetaRelatedTask, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m, err := Parse([]byte(c.body), c.src)
+			if !errors.Is(err, ErrAmbiguous) {
+				t.Fatalf("Parse = %v, %v; want ErrAmbiguous", m, err)
+			}
+			var ke *strictjson.KeyError
+			if !errors.As(err, &ke) || ke.Of != c.of {
+				t.Fatalf("%v: want a KeyError naming %q", err, c.of)
+			}
+			if c.top && m != nil {
+				t.Fatalf("a message ambiguous at the top returns %+v", m)
+			}
+			if !c.top && (m == nil || string(m.ID) != "1") {
+				t.Fatalf("the id read unambiguously is lost: %+v", m)
+			}
+		})
+	}
+	// A case variant of a name the relay does not read at that level, or of one it reads elsewhere, is the
+	// parties' business.
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"NAME":"x","Uri":"y","TaskId":1}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","Message":"m","_meta":{"NAME":1,"progressToken":1}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"x/custom","params":{"Value":1,"LIST":[1]}}`,
+	} {
+		if _, err := Parse([]byte(body), FromClient); err != nil {
+			t.Errorf("Parse(%s) = %v, want nil", body, err)
+		}
+	}
+	if _, err := Parse([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","TEXT":"t","ISERROR":true}],"isError":false}}`), FromUpstream); err != nil {
+		t.Errorf("content items are not a level: %v", err)
+	}
+}
+
+// TestReadsAreAtLevels: every member clientReads and upstreamReads name lies at the message object or at a level of
+// the spec's lists, and every level is read at its parent, so the lone-variant rule never widens the levels.
+func TestReadsAreAtLevels(t *testing.T) {
+	for _, c := range []struct {
+		levels []string
+		reads  []strictjson.Path
+	}{{specClientLevels, clientReads}, {specUpstreamLevels, upstreamReads}} {
+		got := map[string]bool{}
+		for _, r := range c.reads {
+			at := strings.Join(r[:len(r)-1], ".")
+			if at != "" && !slices.Contains(c.levels, at) {
+				t.Errorf("read %v is at %q, which is not a level", r, at)
+			}
+			got[strings.Join(r, ".")] = true
+		}
+		for _, lvl := range c.levels {
+			if !got[strings.TrimSuffix(lvl, ".*")] {
+				t.Errorf("level %s is not read at its parent", lvl)
+			}
+		}
+		for _, top := range []string{"jsonrpc", "id", "method", "params", "result", "error"} {
+			if !got[top] {
+				t.Errorf("the message object's %s is not read", top)
+			}
+		}
+	}
+}
+
+// FuzzParseAgreesWithStructDecoding: whatever Parse accepts, a peer that decodes it with encoding/json into
+// structs (matching names case-insensitively and keeping the last of a repeated one, as mark3labs/mcp-go does)
+// reads the same method, the same presence of an id, and the same params.name, params.uri, params.taskId and
+// result.isError as the relay's exact reading.
+func FuzzParseAgreesWithStructDecoding(f *testing.F) {
+	for _, s := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":1,"METHOD":"tools/call","params":{"name":"x"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"NAME":"denied","arguments":{}}}`,
+		`{"jsonrpc":"2.0","ID":1,"method":"tools/call","params":{"name":"denied"}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"content":[],"ISERROR":true}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"content":[],"isError":true,"ISERROR":false}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"Uri":"file:///etc/passwd"}}`,
+		`{"jsonrpc":"2.0","id":"a","method":"tasks/get","params":{"taskId":"t","TaskID":"u"}}`,
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"tasK\":{}}}",
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"m"}}`,
+		`{"jsonrpc":"2.0","00":"","method":""}`,
+	} {
+		f.Add([]byte(s))
+	}
+	type params struct {
+		Name   *string `json:"name"`
+		URI    *string `json:"uri"`
+		TaskID *string `json:"taskId"`
+	}
+	type result struct {
+		IsError *bool `json:"isError"`
+	}
+	str := func(p *string) string {
+		if p == nil {
+			return "<absent>"
+		}
+		return *p
+	}
+	exact := func(obj json.RawMessage, key string) string {
+		if obj == nil {
+			return "<absent>"
+		}
+		m, err := strictjson.Members(obj)
+		if err != nil {
+			return "<absent>"
+		}
+		v, ok := m[key]
+		if !ok {
+			return "<absent>"
+		}
+		var s any
+		if json.Unmarshal(v, &s) != nil {
+			return "<bad>"
+		}
+		return fmt.Sprint(s)
+	}
+	f.Fuzz(func(t *testing.T, b []byte) {
+		for _, src := range []Source{FromClient, FromUpstream} {
+			m, err := Parse(b, src)
+			if err != nil {
+				continue
+			}
+			var loose struct {
+				Method *string         `json:"method"`
+				ID     json.RawMessage `json:"id"`
+				Params *params         `json:"params"`
+				Result *result         `json:"result"`
+			}
+			if json.Unmarshal(b, &loose) != nil {
+				continue // the peer refuses it too
+			}
+			if got := str(loose.Method); (m.Method == "" && loose.Method != nil) || (m.Method != "" && got != m.Method) {
+				t.Fatalf("source %d, %q: the relay reads method %q, encoding/json %q", src, b, m.Method, got)
+			}
+			if (len(m.ID) == 0) != (len(loose.ID) == 0) {
+				t.Fatalf("source %d, %q: the relay reads id %q, encoding/json %q", src, b, m.ID, loose.ID)
+			}
+			var lp params
+			if loose.Params != nil {
+				lp = *loose.Params
+			}
+			for _, c := range []struct {
+				key   string
+				loose *string
+			}{{"name", lp.Name}, {"uri", lp.URI}, {"taskId", lp.TaskID}} {
+				if e := exact(m.Params, c.key); c.loose != nil && e != *c.loose || c.loose == nil && e != "<absent>" && e != "<nil>" {
+					t.Fatalf("source %d, %q: the relay reads params.%s %q, encoding/json %q", src, b, c.key, e, str(c.loose))
+				}
+			}
+			if src == FromUpstream && loose.Result != nil {
+				e := exact(m.Result, "isError")
+				l := "<absent>"
+				if loose.Result.IsError != nil {
+					l = fmt.Sprint(*loose.Result.IsError)
+				}
+				if e != l && !(e == "<nil>" && l == "<absent>") {
+					t.Fatalf("%q: the relay reads isError %s, encoding/json %s", b, e, l)
+				}
+			}
+		}
+	})
 }

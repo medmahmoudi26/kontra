@@ -18,6 +18,12 @@
 //   - internal/a2ahttp's jsonrpcLevels, an A2A JSON-RPC request: params, params.metadata, params.configuration,
 //     params.message, params.message.metadata, each of params.message.parts and each part's metadata.
 //
+// CheckReads also refuses a lone key equal under case folding to a member its reader reads at that level without
+// being it ({"METHOD": ...} where the reader reads method): a decoder matching names case-insensitively takes it
+// for the member, an exact one finds the member absent. internal/mcpwire names those members (its clientReads and
+// upstreamReads). Input that is not JSON at all is ErrSyntax, which a JSON-RPC reader answers -32700 rather than
+// -32600; every error quotes the sender's keys bounded and escaped (Quote).
+//
 // The hosting node (internal/sealing) and the node's MCP filters (internal/mcproots, internal/stdiobridge) use
 // it too, since a gate is not trusted to have checked what it forwards.
 //
@@ -33,26 +39,62 @@ import (
 	"slices"
 	"strconv"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ErrNotObject is a level that is not one JSON object (with nothing after it).
 var ErrNotObject = errors.New("strictjson: not a JSON object")
 
-// KeyError is a level with a repeated key, or two keys equal under case folding. Path names the level, Key the
-// second of the two keys; both are for the log, never sent.
+// ErrSyntax is input that is not one JSON value at all: a syntax error, nothing, or anything but white space after
+// the value. It wraps ErrNotObject, so a reader that refuses both alike need not tell them apart; one that answers
+// them differently (JSON-RPC's -32700 against -32600) tests ErrSyntax first.
+var ErrSyntax = fmt.Errorf("%w: not valid JSON", ErrNotObject)
+
+// KeyError is a level with a repeated key, or two keys equal under case folding, or (CheckReads) a lone key equal
+// under case folding to a member the reader reads there without being it. Path names the level, Key the second of
+// the two keys or the lone one, Of the member a lone key stands for ("" for a pair). All three are for the log,
+// never sent, and may be the sender's bytes: Error quotes a bounded prefix of Key only.
 type KeyError struct {
 	Path []string
 	Key  string
+	Of   string
 }
 
-func (e *KeyError) Error() string { return "strictjson: repeated or case-variant key " + e.Key }
+func (e *KeyError) Error() string {
+	if e.Of != "" {
+		return fmt.Sprintf("strictjson: key %s is a case variant of %s", Quote(e.Key), Quote(e.Of))
+	}
+	return "strictjson: repeated or case-variant key " + Quote(e.Key)
+}
+
+// quoteMax bounds how much of a key an error quotes, as internal/jcs does.
+const quoteMax = 32
+
+// Quote is s for an error or a log line: Go-quoted (control characters, quotes and invalid UTF-8 escaped), and
+// cut to its first 32 bytes plus "…" when longer, so that a sender's key can neither fill a log nor forge a line.
+func Quote(s string) string {
+	if len(s) <= quoteMax {
+		return strconv.Quote(s)
+	}
+	cut := quoteMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strconv.Quote(s[:cut]) + "…"
+}
 
 // Members decodes one JSON object and returns its members by their exact keys, refusing (*KeyError) a key that
 // appears twice or two keys equal under case folding, and refusing (ErrNotObject) anything but one object.
 //
 // Keys are compared after JSON unescaping, so "method" and "\u006dethod" are the same key. The values are the
 // members' raw bytes, valid JSON each.
+//
+// Input that is not one JSON value (a syntax error, nothing, two values) is ErrSyntax; one JSON value that is not
+// an object (an array, a scalar) is ErrNotObject only.
 func Members(b []byte) (map[string]json.RawMessage, error) {
+	if !json.Valid(b) {
+		return nil, syntaxError(b)
+	}
 	m, err := members(b, nil)
 	if err != nil {
 		return nil, err
@@ -61,6 +103,22 @@ func Members(b []byte) (map[string]json.RawMessage, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNotObject, kindOf(b))
 	}
 	return m, nil
+}
+
+// syntaxError says why b, which json.Valid refused, is not one JSON value: the decoder's message, which names a
+// character and an offset at most, never quotes the input.
+func syntaxError(b []byte) error {
+	var v json.RawMessage
+	err := json.Unmarshal(b, &v)
+	var se *json.SyntaxError
+	switch {
+	case errors.As(err, &se):
+		return fmt.Errorf("%w: %s at offset %d", ErrSyntax, se.Error(), se.Offset)
+	case len(bytes.TrimLeft(b, " \t\r\n")) == 0:
+		return fmt.Errorf("%w: empty", ErrSyntax)
+	default:
+		return ErrSyntax
+	}
 }
 
 // members decodes b as one object; it returns nil, nil for a value that is valid JSON but not an object (the
@@ -205,39 +263,89 @@ func Check(body []byte, paths ...Path) error {
 
 // CheckMembers is Check for an object whose members Members has already returned.
 func CheckMembers(top map[string]json.RawMessage, paths ...Path) error {
-	return newTrie(paths).walkMembers(top, nil)
+	return newTrie(paths, nil).walkMembers(top, nil)
 }
 
-// trie is the levels paths name, merged, so that each level is decoded once.
+// CheckReads is CheckMembers over levels that also refuses, at the top object and at each level, a lone key equal
+// under case folding to a member the reader reads there without being it (a *KeyError whose Of names that
+// member). Each Path of reads names one such member: its last element is the member's name, the elements before
+// it the level holding it (none for the top object; "*" as in levels).
+//
+// A pair of keys equal under case folding is refused at every level whatever reads says; this adds the lone key
+// that a decoder matching names case-insensitively (encoding/json into a struct) takes for the member while an
+// exact reader finds the member absent: {"METHOD": "tools/call"} is a request to the first and nothing to the
+// second. At each level the lone keys are looked for before the levels below it, so a problem in the top object is
+// reported before one deeper down.
+func CheckReads(top map[string]json.RawMessage, levels []Path, reads []Path) error {
+	return newTrie(levels, reads).walkMembers(top, nil)
+}
+
+// trie is the levels paths name, merged, so that each level is decoded once, with the member names read at each.
 type trie struct {
 	children map[string]*trie
 	star     *trie
+	reads    map[string]string // foldKey(name) -> name, for the members read at this level
 }
 
-func newTrie(paths []Path) *trie {
+func newTrie(paths, reads []Path) *trie {
 	root := &trie{}
 	for _, p := range paths {
-		n := root
-		for _, seg := range p {
-			if seg == "*" {
-				if n.star == nil {
-					n.star = &trie{}
-				}
-				n = n.star
-				continue
-			}
-			if n.children == nil {
-				n.children = map[string]*trie{}
-			}
-			c := n.children[seg]
-			if c == nil {
-				c = &trie{}
-				n.children[seg] = c
-			}
-			n = c
+		root.node(p)
+	}
+	for _, p := range reads {
+		if len(p) == 0 || p[len(p)-1] == "*" {
+			continue
 		}
+		n := root.node(p[:len(p)-1])
+		if n.reads == nil {
+			n.reads = map[string]string{}
+		}
+		name := p[len(p)-1]
+		n.reads[foldKey(name)] = name
 	}
 	return root
+}
+
+// node returns the node of path p, adding it and its parents when missing.
+func (n *trie) node(p Path) *trie {
+	for _, seg := range p {
+		if seg == "*" {
+			if n.star == nil {
+				n.star = &trie{}
+			}
+			n = n.star
+			continue
+		}
+		if n.children == nil {
+			n.children = map[string]*trie{}
+		}
+		c := n.children[seg]
+		if c == nil {
+			c = &trie{}
+			n.children[seg] = c
+		}
+		n = c
+	}
+	return n
+}
+
+// loneVariant refuses a key of m that stands for a member read at this level under case folding without being
+// it. members has refused two keys of one fold class already, so such a key is alone: the member is absent.
+func (n *trie) loneVariant(m map[string]json.RawMessage, at []string) error {
+	if len(n.reads) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		if name, ok := n.reads[foldKey(k)]; ok && k != name {
+			return &KeyError{Path: slices.Clone(at), Key: k, Of: name}
+		}
+	}
+	return nil
 }
 
 // walk checks the level raw, at path at, and the levels below it that n names.
@@ -267,6 +375,9 @@ func (n *trie) walk(raw json.RawMessage, at []string) error {
 }
 
 func (n *trie) walkMembers(m map[string]json.RawMessage, at []string) error {
+	if err := n.loneVariant(m, at); err != nil {
+		return err
+	}
 	// Named members first, in a fixed order, then every member for "*": the first KeyError found is the same
 	// on every run.
 	names := make([]string, 0, len(n.children))

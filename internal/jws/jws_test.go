@@ -550,3 +550,50 @@ func TestParseJWKS(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadKeySetRefusesSkippedBlocks: pem.Decode skips a block it cannot decode and any text before a block. A
+// rotation that prepends a mangled new key (D166) must fail, not leave the old key active without a word.
+func TestLoadKeySetRefusesSkippedBlocks(t *testing.T) {
+	two, err := os.ReadFile(filepath.Join("testdata", "two-keys.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(two)
+	i := strings.Index(s, "-----BEGIN EC PARAMETERS-----")
+	first, rest := s[:i], s[i:] // the PKCS #8 key (kidA), then the EC PARAMETERS and SEC 1 key (kidB)
+	if ks, err := LoadKeySet(writeKey(t, []byte(rest), 0o600)); err != nil || ks.kids[0] != kidB {
+		t.Fatalf("the second key alone does not load: %v", err)
+	}
+	// One base64 character of the new key changed to '!'.
+	j := strings.Index(first, "MIGHAgEA") + 20
+	mangled := first[:j] + "!" + first[j+1:]
+	noEnd := strings.Replace(first, "-----END PRIVATE KEY-----\n", "", 1)
+	for _, c := range []struct{ name, data string }{
+		{"mangled first key", mangled + rest},
+		{"undecodable block between keys", first + "-----BEGIN PRIVATE KEY-----\n!!!notbase64!!!\n-----END PRIVATE KEY-----\n" + rest},
+		{"first key without END", noEnd + rest},
+		{"last key without END", first + strings.Replace(rest, "-----END EC PRIVATE KEY-----", "", 1)},
+		{"text before the first block", "new key below\n" + s},
+		{"text between blocks", first + "old key below\n" + rest},
+		{"END without BEGIN", first + "-----END PRIVATE KEY-----\n" + rest},
+		{"BEGIN inside a line", "x -----BEGIN PRIVATE KEY-----\n" + s},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ks, err := LoadKeySet(writeKey(t, []byte(c.data), 0o600))
+			if err == nil {
+				t.Fatalf("LoadKeySet loaded %v (active %s); want a refusal", ks.KeyIDs(), ks.kids[0])
+			}
+			if strings.Contains(err.Error(), "PRIVATE KEY-----") || strings.Contains(err.Error(), "MIG") ||
+				strings.Contains(err.Error(), "below") {
+				t.Fatalf("the error quotes the key file: %v", err)
+			}
+		})
+	}
+	// White space before, between and after blocks is fine, and so are CRLF line ends.
+	for _, data := range []string{"\n\n" + first + "\n  \n" + rest + "\n\n", strings.ReplaceAll(s, "\n", "\r\n")} {
+		ks, err := LoadKeySet(writeKey(t, []byte(data), 0o600))
+		if err != nil || len(ks.kids) != 2 || ks.kids[0] != kidA {
+			t.Fatalf("LoadKeySet(%q) = %v", data[:20], err)
+		}
+	}
+}

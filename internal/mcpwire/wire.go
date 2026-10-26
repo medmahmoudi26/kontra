@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"kontra.sh/kontra/internal/strictjson"
@@ -49,7 +50,7 @@ const (
 
 // JSON-RPC error codes the relay sends or reads.
 const (
-	CodeParse                 = -32700
+	CodeParse                 = -32700 // a body that is not JSON (ErrParse)
 	CodeInvalidRequest        = -32600 // also "batch not supported" (§11.1)
 	CodeMethodNotFound        = -32601
 	CodeInvalidParams         = -32602 // also "Unknown tool: <name>" (§11.3) and an unknown or foreign task
@@ -72,18 +73,29 @@ const (
 	KontraPrefix = "sh.kontra/"
 )
 
-// ErrBatch is a POST body that is not a single JSON object (§11.1).
+// ErrBatch is a POST body that is one JSON value but not an object: an array or a scalar (§11.1). From a client it
+// is 400 with an id-less -32600 "batch not supported"; an upstream's message is not relayed.
 var ErrBatch = errors.New("mcpwire: batch not supported")
 
+// ErrParse is a body that is not JSON at all: a syntax error (a truncated body, a missing brace), nothing, or
+// anything but white space after one value. From a client it is 400 with JSON-RPC 2.0's parse error, -32700 and id
+// null (CodeParse); an upstream's message is not relayed, as for ErrBatch. Neither is ever forwarded.
+var ErrParse = errors.New("mcpwire: parse error")
+
 // ErrAmbiguous is a message with a repeated key, or two keys equal under case folding, at a level the relay
-// reads (§11.1, D172). From a client it is 400 with -32600; from an upstream the message is not relayed (502
-// with -32603 on a JSON response, the end of an SSE stream, is_error true, a dispatch's upstream_error). It wraps
-// the *strictjson.KeyError that names the level for the log.
+// reads (§11.1, D172), or a lone case variant of a member the relay reads (clientReads, upstreamReads). From a
+// client it is 400 with -32600; from an upstream the message is not relayed (502 with -32603 on a JSON response,
+// the end of an SSE stream, is_error true, a dispatch's upstream_error). It wraps the *strictjson.KeyError that
+// names the level for the log.
 var ErrAmbiguous = errors.New("mcpwire: repeated or case-variant key")
 
-// ErrInvalid is a message whose members Parse fills have the wrong JSON type: a jsonrpc or method that is not a
-// string, an id that is not a string, a number or null, an error that is not {code: integer, message: string,
-// data?}. A client's is answered like ErrAmbiguous (400, -32600); an upstream's is not relayed.
+// ErrInvalid is a JSON object that is not a JSON-RPC 2.0 message as MCP sends them: jsonrpc absent or not the
+// string "2.0"; a method that is not a non-empty string; an id that is not a string, a number or null; params that are not
+// an object; an error that is not {code: integer, message: string, data?}; or a shape that is none of a request
+// (a method and a non-null id, no result or error), a notification (a method, no id, no result or error) and a
+// response (an id, no method, and exactly one of result and an error that is not null; a result's id not null).
+// A client's is answered like ErrAmbiguous (400, -32600, JSON-RPC 2.0's "invalid request"); an upstream's is not
+// relayed.
 var ErrInvalid = errors.New("mcpwire: invalid JSON-RPC message")
 
 // Source is who wrote a message, which decides the levels Parse checks and the scrub's exceptions (§2.5).
@@ -136,6 +148,56 @@ var UpstreamLevels = []strictjson.Path{
 	{"error"},
 }
 
+// clientReads and upstreamReads are the members Parse, the relay and the node's filters read, by exact name, at the
+// message object and at the levels of ClientLevels and UpstreamLevels (the last element of each path is the
+// member, the elements before it its level; every level is also a member read at its parent). A lone key that
+// equals one of them under case folding without being it is ErrAmbiguous, like a pair: a decoder that matches names
+// case-insensitively (encoding/json into a struct, as mark3labs/mcp-go reads a message) takes {"METHOD":
+// "tools/call"} for a request, or {"NAME": "rm"} for the tool rm, where the relay reads no method or no name and
+// would let the message through as a response or past per-tool policy; and an upstream's {"ISERROR": true} would
+// be metered as a success while such a client reads a failure.
+//
+// SPEC-CONFLICT: relay §11.1 and D172 refuse a level in which "a key repeats, or two keys are equal under Unicode
+// case folding", which a lone variant is not, and would let it through. The review of M3 WP-01 (and the plan
+// audit's gaps[0] fix: "any key that equals a member it reads ... case-insensitively but not exactly") refuses it
+// too, with the same answer as a pair; §11.1 should say so. A reader that starts reading another member adds it
+// here, as a level is added to the spec first.
+var (
+	clientReads = withLevels(ClientLevels,
+		strictjson.Path{"jsonrpc"}, strictjson.Path{"id"}, strictjson.Path{"method"}, strictjson.Path{"error"},
+		strictjson.Path{"params", "name"}, strictjson.Path{"params", "uri"}, strictjson.Path{"params", "taskId"},
+		strictjson.Path{"params", "task"},
+		strictjson.Path{"params", "_meta", MetaProtocolVersion}, strictjson.Path{"params", "_meta", MetaClientInfo},
+		strictjson.Path{"params", "_meta", MetaRelatedTask},
+	)
+	upstreamReads = withLevels(UpstreamLevels,
+		strictjson.Path{"jsonrpc"}, strictjson.Path{"id"}, strictjson.Path{"method"},
+		strictjson.Path{"params", "name"}, strictjson.Path{"params", "uri"}, strictjson.Path{"params", "taskId"},
+		strictjson.Path{"params", "task"}, strictjson.Path{"params", "_meta", MetaRelatedTask},
+		strictjson.Path{"result", "isError"}, strictjson.Path{"result", "protocolVersion"},
+		strictjson.Path{"result", "tools", "*", "name"}, strictjson.Path{"result", "tools", "*", "execution"},
+		strictjson.Path{"result", "capabilities", "tasks"},
+		strictjson.Path{"result", "inputRequests", "*", "method"},
+		strictjson.Path{"result", "result", "isError"},
+		strictjson.Path{"error", "code"}, strictjson.Path{"error", "message"},
+	)
+)
+
+// withLevels is reads plus each level of levels as a member read at its parent; a level ending in "*" (every
+// element of result.tools) names the member holding them (tools, read at result).
+func withLevels(levels []strictjson.Path, reads ...strictjson.Path) []strictjson.Path {
+	var out []strictjson.Path
+	for _, p := range levels {
+		for len(p) > 0 && p[len(p)-1] == "*" {
+			p = p[:len(p)-1]
+		}
+		if len(p) > 0 && !slices.ContainsFunc(out, func(q strictjson.Path) bool { return slices.Equal(p, q) }) {
+			out = append(out, p)
+		}
+	}
+	return append(out, reads...)
+}
+
 // Message is one JSON-RPC 2.0 message with its members kept raw. A request has Method and ID, a notification
 // Method and no ID, a response ID and Result or Error. Parse fills it from members read with exact keys; the
 // struct tags are for writing only, never for decoding a message a client or an upstream sent.
@@ -156,27 +218,31 @@ type Error struct {
 }
 
 // Parse decodes one message from src: a POST body, or one message of an upstream's JSON or SSE response.
-// Anything but one JSON object (an array, a scalar, trailing data) is ErrBatch, refused with 400 and an id-less
-// -32600 before any forwarding, whatever the version header says. The message object and every level of
-// ClientLevels or UpstreamLevels are decoded with exact, case-sensitive keys (internal/strictjson); a repeated or
-// case-variant key at any of them is ErrAmbiguous, so the relay never reads another method, tool name, uri,
-// taskId, _meta or isError than the party behind it reads from the same bytes (D172).
+// Bytes that are not one JSON value are ErrParse (400, -32700); one JSON value that is not an object (an array, a
+// scalar) is ErrBatch, refused with 400 and an id-less -32600 before any forwarding, whatever the version header
+// says. The message object and every level of ClientLevels or UpstreamLevels are decoded with exact,
+// case-sensitive keys (internal/strictjson); a repeated or case-variant key at any of them, or a lone case variant
+// of a member the relay reads there (clientReads, upstreamReads), is ErrAmbiguous, so the relay never reads
+// another method, tool name, uri, taskId, _meta or isError than the party behind it reads from the same bytes
+// (D172).
 //
 // Message is filled from the message object's exact members, and a response's error object is decoded with exact
-// keys too (a repeated or case-variant key in it is ErrAmbiguous from either source: Parse reads it). A member of
-// the wrong type is ErrInvalid. Unknown members are left in the bytes, which the relay forwards.
+// keys too (a repeated or case-variant key in it is ErrAmbiguous from either source: Parse reads it). The object
+// must be exactly one of a request, a notification and a response, with jsonrpc "2.0" and params, when present, an
+// object; anything else, or a member of the wrong type, is ErrInvalid (see there). Unknown members are left in the
+// bytes, which the relay forwards.
 //
 // When the message object itself was read unambiguously and its id is valid, Parse returns a message carrying that
-// id beside an ErrAmbiguous or ErrInvalid found elsewhere, so that a client's refusal carries it (§11.1: "the id
-// when it was read unambiguously, null otherwise"); nothing else of that message may be used. Otherwise the
-// message is nil.
+// id beside an ErrAmbiguous found below the message object or an ErrInvalid, so that a client's refusal carries it
+// (§11.1: "the id when it was read unambiguously, null otherwise"); nothing else of that message may be used.
+// Otherwise the message is nil.
 func Parse(body []byte, src Source) (*Message, error) {
-	var levels []strictjson.Path
+	var levels, reads []strictjson.Path
 	switch src {
 	case FromClient:
-		levels = ClientLevels
+		levels, reads = ClientLevels, clientReads
 	case FromUpstream:
-		levels = UpstreamLevels
+		levels, reads = UpstreamLevels, upstreamReads
 	default:
 		return nil, fmt.Errorf("mcpwire: unknown source %d", src)
 	}
@@ -184,39 +250,62 @@ func Parse(body []byte, src Source) (*Message, error) {
 	if err != nil {
 		return nil, wrapStrict(err)
 	}
-	m := &Message{}
-	id, ok := top["id"]
-	if ok {
-		if !validID(id) {
-			return nil, fmt.Errorf("%w: id is not a string, a number or null", ErrInvalid)
+	id, hasID := top["id"]
+	if hasID && !validID(id) {
+		return nil, fmt.Errorf("%w: id is not a string, a number or null", ErrInvalid)
+	}
+	if err := strictjson.CheckReads(top, levels, reads); err != nil {
+		var ke *strictjson.KeyError
+		if errors.As(err, &ke) && len(ke.Path) == 0 {
+			return nil, wrapStrict(err) // the message object itself is ambiguous: no id was read unambiguously
 		}
-		m.ID = id
+		return &Message{ID: id}, wrapStrict(err)
 	}
-	if err := strictjson.CheckMembers(top, levels...); err != nil {
-		return m, wrapStrict(err)
+	invalid := func(why string) (*Message, error) {
+		return &Message{ID: id}, fmt.Errorf("%w: %s", ErrInvalid, why)
 	}
-	if v, ok := top["jsonrpc"]; ok {
-		if err := json.Unmarshal(v, &m.JSONRPC); err != nil || firstByte(v) != '"' {
-			return m, fmt.Errorf("%w: jsonrpc is not a string", ErrInvalid)
-		}
+	m := &Message{ID: id}
+	if v, ok := top["jsonrpc"]; !ok || firstByte(v) != '"' || json.Unmarshal(v, &m.JSONRPC) != nil || m.JSONRPC != "2.0" {
+		return invalid(`jsonrpc is not "2.0"`)
 	}
-	if v, ok := top["method"]; ok {
-		if err := json.Unmarshal(v, &m.Method); err != nil || firstByte(v) != '"' {
-			return m, fmt.Errorf("%w: method is not a string", ErrInvalid)
+	method, hasMethod := top["method"]
+	if hasMethod {
+		// An empty method is refused too, so that Method == "" means a response and nothing else.
+		if firstByte(method) != '"' || json.Unmarshal(method, &m.Method) != nil || m.Method == "" {
+			return invalid("method is not a non-empty string")
 		}
 	}
 	if v, ok := top["params"]; ok {
+		if firstByte(v) != '{' {
+			return invalid("params is not an object")
+		}
 		m.Params = v
 	}
-	if v, ok := top["result"]; ok {
-		m.Result = v
+	result, hasResult := top["result"]
+	if hasResult {
+		m.Result = result
 	}
 	if v, ok := top["error"]; ok {
 		e, err := parseError(v)
 		if err != nil {
-			return m, err
+			return &Message{ID: id}, err
 		}
 		m.Error = e
+	}
+	null := hasID && bytes.Equal(bytes.TrimSpace(id), []byte("null"))
+	switch {
+	case hasMethod && (hasResult || m.Error != nil):
+		return invalid("a request or notification carries a result or an error")
+	case hasMethod && null:
+		return invalid("a request's id is null") // MCP: "the ID MUST NOT be null"
+	case hasMethod:
+		return m, nil // a request, or a notification without an id
+	case !hasID:
+		return invalid("no method and no id: neither a request, a notification nor a response")
+	case hasResult == (m.Error != nil):
+		return invalid("a response carries exactly one of result and error")
+	case hasResult && null:
+		return invalid("a result's id is null")
 	}
 	return m, nil
 }
@@ -227,6 +316,8 @@ func wrapStrict(err error) error {
 	switch {
 	case errors.As(err, &ke):
 		return fmt.Errorf("%w: %w", ErrAmbiguous, err)
+	case errors.Is(err, strictjson.ErrSyntax):
+		return fmt.Errorf("%w: %w", ErrParse, err)
 	case errors.Is(err, strictjson.ErrNotObject):
 		return fmt.Errorf("%w: %w", ErrBatch, err)
 	default:

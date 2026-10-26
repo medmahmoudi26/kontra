@@ -131,7 +131,10 @@ func (j *JobKeys) Load(jobID string) (*age.X25519Identity, error) {
 // Rename moves a key minted under a provisional id (a new task's first message, sent before the gate's task
 // id exists) to the gate's job id once the first answer names it.
 //
-// It never replaces a key: a to that already has one is an error and from's key stays where it was.
+// It never replaces a key: a to that already has another key is an error and from's key stays where it was. A
+// Rename interrupted after linking to and before removing from (both names on one file) is finished by the next
+// Rename(from, to). On a file system without hard links it renames instead, unless to exists, as Mint does
+// (createNew); a Rename retried after from is gone is an error, since to's key cannot be told to be from's.
 func (j *JobKeys) Rename(from, to string) error {
 	src, err := j.Path(from)
 	if err != nil {
@@ -144,17 +147,41 @@ func (j *JobKeys) Rename(from, to string) error {
 	if src == dst {
 		return nil
 	}
-	if err := os.Link(src, dst); err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("nodekey: job %s already has a key (%s): a job's key is never replaced", to, dst)
+	exists := func() error {
+		return fmt.Errorf("nodekey: job %s already has a key (%s): a job's key is never replaced", to, dst)
+	}
+	if err := link(src, dst); err != nil {
+		switch {
+		case errors.Is(err, fs.ErrExist):
+			// An earlier Rename may have linked and died before the removal: the same file under both names.
+			si, serr := os.Lstat(src)
+			di, derr := os.Lstat(dst)
+			if serr != nil || derr != nil || !os.SameFile(si, di) {
+				return exists()
+			}
+		case errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("nodekey: job key: %w", err)
+		default:
+			// A file system without hard links: rename, unless to appeared meanwhile.
+			if _, serr := os.Lstat(dst); serr == nil {
+				return exists()
+			} else if !errors.Is(serr, fs.ErrNotExist) {
+				return fmt.Errorf("nodekey: job key: %w", serr)
+			}
+			if err := os.Rename(src, dst); err != nil {
+				return fmt.Errorf("nodekey: job key: %w", err)
+			}
+			return syncDir(j.dir)
 		}
-		return fmt.Errorf("nodekey: job key: %w", err)
 	}
 	if err := os.Remove(src); err != nil {
 		return fmt.Errorf("nodekey: job key: %w", err)
 	}
 	return syncDir(j.dir)
 }
+
+// link is os.Link, replaced in tests by a file system without hard links.
+var link = os.Link
 
 // Delete removes jobID's key: when the job is terminal and any kontra.keyRetainUntil has passed; for an MCP
 // session, when it closes and every task created in it is done (spec/tunnel.md §2.3).

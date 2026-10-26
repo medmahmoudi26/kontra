@@ -100,8 +100,10 @@ type KeySet struct {
 // fsGroup is group-readable), a key of another curve, and a file with no key.
 //
 // A symbolic link (a mounted secret's ..data link) is followed and its target checked. An "EC PARAMETERS" block
-// (openssl ecparam -genkey writes one) is skipped; any other PEM block, a key listed twice, and anything but white
-// space after the last block are refused.
+// (openssl ecparam -genkey writes one) is skipped; any other PEM block, a key listed twice, a block that cannot be
+// decoded (bad base64, no END line, text after the END marker on its line), and anything but white space before,
+// between or after the blocks are refused. encoding/pem alone skips an undecodable block and any text before a
+// block, so a rotation that prepended a mangled new key would keep the old key active without a word (D166).
 func LoadKeySet(path string) (*KeySet, error) {
 	// Refuse a FIFO or a device before opening it (an open could block), and check what was opened again.
 	if fi, err := os.Stat(path); err != nil {
@@ -140,15 +142,33 @@ func LoadKeySet(path string) (*KeySet, error) {
 	return ks, nil
 }
 
+// pemBegin starts every PEM block's first line.
+var pemBegin = []byte("-----BEGIN ")
+
 func parseKeys(data []byte) (*KeySet, error) {
 	ks := &KeySet{}
 	rest := data
 	for n := 1; ; n++ {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
+		rest = bytes.TrimLeft(rest, " \t\r\n")
+		if len(rest) == 0 {
 			break
 		}
+		if !bytes.HasPrefix(rest, pemBegin) {
+			if n == 1 {
+				return nil, errors.New("text before the first PEM block")
+			}
+			if !bytes.Contains(rest, pemBegin) {
+				return nil, errors.New("data after the last PEM block")
+			}
+			return nil, fmt.Errorf("text between PEM blocks %d and %d", n-1, n)
+		}
+		block, next := pem.Decode(rest)
+		// pem.Decode skips a block it cannot decode and returns the next one: the block must be the one rest starts
+		// with, so what it consumed holds exactly one BEGIN line.
+		if block == nil || bytes.Count(rest[:len(rest)-len(next)], pemBegin) != 1 {
+			return nil, fmt.Errorf("PEM block %d cannot be decoded (bad base64, or no END line)", n)
+		}
+		rest = next
 		var key any
 		var err error
 		switch block.Type {
@@ -180,9 +200,6 @@ func parseKeys(data []byte) (*KeySet, error) {
 		}
 		ks.keys = append(ks.keys, ec)
 		ks.kids = append(ks.kids, kid)
-	}
-	if len(bytes.TrimSpace(rest)) != 0 {
-		return nil, errors.New("data after the last PEM block")
 	}
 	if len(ks.keys) == 0 {
 		return nil, errors.New("no ECDSA P-256 private key in the file")
