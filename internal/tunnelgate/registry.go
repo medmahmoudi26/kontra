@@ -26,6 +26,16 @@ import (
 // and no stream is opened.
 var ErrSessionGone = errors.New("tunnelgate: the tunnel session is gone or no longer serves the service")
 
+// ErrRevoked wraps ErrSessionGone for a session whose key or binding was revoked, or whose key is past its
+// rotation's overlap (relay.md §6.1: a pinned MCP session's row then closes revoked, not tunnel_lost, M3 WP-04).
+// For A2A it is a lost session like any other.
+var ErrRevoked = fmt.Errorf("%w: its key or binding was revoked", ErrSessionGone)
+
+// ErrCheckUnavailable wraps ErrSessionGone for a key_scope check that could not read the key's revocation state
+// (the view not fresh and Postgres not answering): the stream is refused (fail closed), but nothing says the
+// session is gone, so a pinned MCP session's row is left open.
+var ErrCheckUnavailable = fmt.Errorf("%w: the key's revocation state cannot be read", ErrSessionGone)
+
 // Timing of the registry.
 const (
 	// CardWait bounds the card fetch through a session that has just connected, before its tunnels row
@@ -464,6 +474,9 @@ func (r *Registry) remove(s *Session, reason string, logged bool) error {
 	if logged {
 		r.log.Info("tunnel session closed", obs.KeyTunnelSession, s.ID, "key_id", s.KeyID, "reason", reason)
 	}
+	// The MCP sessions pinned to it die with it (relay.md §11.2): revoked when a revocation closed it (its own
+	// statement ran first, Revoked), tunnel_lost otherwise.
+	r.closeMCP(s.ID, "", s.closeReason())
 	if !del {
 		return nil
 	}
@@ -594,6 +607,11 @@ func (r *Registry) CloseAll(ctx context.Context) {
 	if r.cfg.DB != nil {
 		if _, err := r.cfg.DB.Exec(ctx, `delete from kontra.tunnels where replica_id = $1`, r.cfg.ReplicaID); err != nil {
 			r.log.Warn("tunnel sessions closed but their rows were not deleted; other replicas reap them with this replica's row", "error", err)
+		}
+		// The MCP sessions pinned to them die with them (relay.md §11.2); replica_id names the holder (D179).
+		if _, err := r.cfg.DB.Exec(ctx, `update kontra.mcp_sessions set closed_at = now(), close_reason = 'tunnel_lost'
+			where replica_id = $1 and closed_at is null`, r.cfg.ReplicaID); err != nil {
+			r.log.Warn("mcp_sessions pinned to this replica's tunnel sessions not closed; the reaper closes them with its row", "error", err)
 		}
 	}
 	done := make(chan struct{})

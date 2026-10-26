@@ -148,3 +148,68 @@ func (p *Picker) remember(k pickKey, s uuid.UUID) {
 func (c candidate) picked() lifecycle.PickedSession {
 	return lifecycle.PickedSession{SessionID: c.session, KeyID: c.keyID, ReplicaID: c.replica}
 }
+
+// mcpCandidatesSQL is candidatesSQL with each holder's peer address (gate_replicas.peer_addr, M3 WP-04).
+const mcpCandidatesSQL = `select t.session_id, t.key_id, t.replica_id, coalesce(r.peer_addr, '') from kontra.tunnels t
+  join kontra.tunnel_keys k   on k.key_id = t.key_id and k.revoked_at is null and k.revoked_reason is distinct from 'rotated'
+  join kontra.key_services ks on ks.key_id = t.key_id and ks.service = $2 and ks.revoked_at is null
+  join kontra.gate_replicas r on r.replica_id = t.replica_id and r.last_seen_at > now() - interval '30 seconds' and r.draining_at is null
+ where t.tenant_id = $1 and $2 = any (t.services)
+ order by t.session_id`
+
+// MCPPick is the tunnel session chosen for an MCP initialize (relay.md §11.2) or a 2026-07-28 request (§11.12).
+type MCPPick struct {
+	Session  uuid.UUID
+	KeyID    string
+	Replica  string // the replica holding it, which mcp_sessions.replica_id names (D179)
+	PeerAddr string // that replica's peer listener; "" when it is this replica
+}
+
+// PickMCP chooses a tunnel session for an MCP session of the service (relay.md §11.2, §6.1): §6.1's candidates,
+// this replica's own first (round-robin among them); only when it holds none and remote is set (this replica runs
+// a peer listener, peer.listen), another live replica's session whose replica advertises a peer address,
+// round-robin too. Without remote, only this replica's sessions are candidates. Sessions in avoid (ones the caller
+// found unusable) are skipped. No candidate is lifecycle.ErrNoSession.
+func (p *Picker) PickMCP(ctx context.Context, tenantID uuid.UUID, service, local string, remote bool, avoid ...uuid.UUID) (MCPPick, error) {
+	if p.db == nil {
+		return MCPPick{}, errors.New("tunnelgate: the picker has no database")
+	}
+	rows, err := p.db.Query(ctx, mcpCandidatesSQL, tenantID, service)
+	if err != nil {
+		return MCPPick{}, fmt.Errorf("tunnelgate: candidate sessions of %s: %w", service, err)
+	}
+	all, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (MCPPick, error) {
+		var c MCPPick
+		err := row.Scan(&c.Session, &c.KeyID, &c.Replica, &c.PeerAddr)
+		return c, err
+	})
+	if err != nil {
+		return MCPPick{}, fmt.Errorf("tunnelgate: candidate sessions of %s: %w", service, err)
+	}
+	all = slices.DeleteFunc(all, func(c MCPPick) bool { return slices.Contains(avoid, c.Session) })
+	mine := slices.DeleteFunc(slices.Clone(all), func(c MCPPick) bool { return c.Replica != local })
+	cands := mine
+	if len(cands) == 0 && remote {
+		cands = slices.DeleteFunc(all, func(c MCPPick) bool { return c.Replica == local || c.PeerAddr == "" })
+	}
+	if len(cands) == 0 {
+		return MCPPick{}, lifecycle.ErrNoSession
+	}
+	for i := range cands {
+		if cands[i].Replica == local {
+			cands[i].PeerAddr = ""
+		}
+	}
+	key := pickKey{tenantID, "mcp:" + service}
+	p.mu.Lock()
+	last, seen := p.last[key]
+	p.mu.Unlock()
+	pick := cands[0]
+	if seen {
+		if i := slices.IndexFunc(cands, func(c MCPPick) bool { return bytes.Compare(c.Session[:], last[:]) > 0 }); i >= 0 {
+			pick = cands[i]
+		}
+	}
+	p.remember(key, pick.Session)
+	return pick, nil
+}

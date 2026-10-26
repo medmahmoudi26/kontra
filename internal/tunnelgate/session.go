@@ -49,6 +49,8 @@ type Session struct {
 
 	mu         sync.Mutex
 	served     map[string]string // service name → kind
+	revokedSvc map[string]bool   // services whose binding was revoked on this session (dropService)
+	revoked    bool              // its key was revoked, or its rotation overlap ended (markRevoked)
 	closed     bool              // no new stream: closing, closed, revoked or superseded
 	why        string            // why it closed, for the streams refused after
 	registered bool              // its tunnels row is in (Add committed)
@@ -86,21 +88,28 @@ func (s *Session) allows(ctx context.Context, service, kind string) error {
 	ok, err := rev.Usable(ctx, s.KeyID, service)
 	switch {
 	case err != nil:
-		return fmt.Errorf("%w: the key's revocation state cannot be read (%v)", ErrSessionGone, err)
+		return fmt.Errorf("%w (%v)", ErrCheckUnavailable, err)
 	case !ok:
-		return fmt.Errorf("%w: key %s is revoked or past its rotation's overlap, or its binding to %s was revoked", ErrSessionGone, s.KeyID, service)
+		return fmt.Errorf("%w: key %s is revoked or past its rotation's overlap, or its binding to %s was revoked", ErrRevoked, s.KeyID, service)
 	}
 	return nil
 }
 
 // allowsLocal is Allows without a database read: the session's own state, and the revocation view when it
 // is fresh.
+//
+// A refusal because the key or the binding was revoked, or the key is past its rotation's overlap, wraps
+// ErrRevoked (relay.md §6.1: a pinned MCP session then closes revoked); any other wraps ErrSessionGone only.
 func (s *Session) allowsLocal(service, kind string) error {
 	s.mu.Lock()
-	closed, why := s.closed, s.why
+	closed, why, revoked, svcRevoked := s.closed, s.why, s.revoked, s.revokedSvc[service]
 	k, ok := s.served[service]
 	s.mu.Unlock()
 	switch {
+	case revoked:
+		return fmt.Errorf("%w: %s", ErrRevoked, why)
+	case svcRevoked && !ok:
+		return fmt.Errorf("%w: the binding of key %s to %s was revoked", ErrRevoked, s.KeyID, service)
 	case closed:
 		return fmt.Errorf("%w: %s", ErrSessionGone, why)
 	case s.mux != nil && s.mux.IsClosed():
@@ -115,12 +124,31 @@ func (s *Session) allowsLocal(service, kind string) error {
 		return nil
 	}
 	if !rev.KeyUsable(s.KeyID, time.Now()) {
-		return fmt.Errorf("%w: key %s is revoked or past its rotation's overlap", ErrSessionGone, s.KeyID)
+		return fmt.Errorf("%w: key %s is revoked or past its rotation's overlap", ErrRevoked, s.KeyID)
 	}
 	if rev.BindingRevoked(s.KeyID, service) {
-		return fmt.Errorf("%w: the binding of key %s to %s was revoked", ErrSessionGone, s.KeyID, service)
+		return fmt.Errorf("%w: the binding of key %s to %s was revoked", ErrRevoked, s.KeyID, service)
 	}
 	return nil
+}
+
+// markRevoked records that the session's key was revoked or its rotation overlap ended: its later refusals wrap
+// ErrRevoked, and its pinned MCP sessions close revoked.
+func (s *Session) markRevoked() {
+	s.mu.Lock()
+	s.revoked = true
+	s.mu.Unlock()
+}
+
+// closeReason is the close_reason of the MCP sessions pinned to s when it closes: revoked after a key revocation,
+// tunnel_lost otherwise.
+func (s *Session) closeReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.revoked {
+		return mcpRevoked
+	}
+	return mcpTunnelLost
 }
 
 func (s *Session) revocations() *enroll.Revocations {
@@ -300,6 +328,12 @@ func (s *Session) dropService(service string, why error) bool {
 	s.mu.Lock()
 	_, had := s.served[service]
 	delete(s.served, service)
+	if errors.Is(why, ErrRevoked) {
+		if s.revokedSvc == nil {
+			s.revokedSvc = map[string]bool{}
+		}
+		s.revokedSvc[service] = true
+	}
 	var xs []*exchange
 	for x := range s.exchanges {
 		if x.service == service {

@@ -53,6 +53,9 @@ func (r *Registry) revokeKey(s *Session, reason string) {
 	if reason == enroll.ReasonRotated {
 		why, tell = "its key's rotation overlap ended (§12)", false
 	}
+	// Either way a pinned MCP session closes revoked (relay.md §6.1: "the key or binding is revoked or the key is
+	// past its rotation overlap"), and a stream refused from now on says so (ErrRevoked).
+	s.markRevoked()
 	if !s.shut(why) {
 		return
 	}
@@ -64,13 +67,13 @@ func (r *Registry) revokeKey(s *Session, reason string) {
 				log.Debug("tunnel session: {t: revoked} not delivered", "error", err)
 			}
 		}
-		r.closeMCP(s.ID, "")
+		r.closeMCP(s.ID, "", mcpRevoked)
 		_ = s.close(why, false)
 	})
 }
 
 func (r *Registry) revokeBinding(s *Session, service string) {
-	why := fmt.Errorf("%w: the binding of key %s to %s was revoked (§12)", ErrSessionGone, s.KeyID, service)
+	why := fmt.Errorf("%w: the binding of key %s to %s was revoked (§12)", ErrRevoked, s.KeyID, service)
 	if !s.dropService(service, why) {
 		return
 	}
@@ -86,7 +89,7 @@ func (r *Registry) revokeBinding(s *Session, service string) {
 			}
 			cancel()
 		}
-		r.closeMCP(s.ID, service)
+		r.closeMCP(s.ID, service, mcpRevoked)
 		if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked, Service: service}); err != nil {
 			log.Debug("tunnel session: {t: revoked, service} not delivered", "error", err)
 		}
@@ -105,17 +108,26 @@ func (r *Registry) APIKeyRevoked(id uuid.UUID) {
 	}
 }
 
-// closeMCP closes the open mcp_sessions rows pinned to a session (and service, when not empty) as revoked
-// (§12). MCP hosting is M3, so in M2 there are none; the statement keeps §12's order for when there are.
-func (r *Registry) closeMCP(session uuid.UUID, service string) {
+// mcp_sessions.close_reason values the registry writes (relay.md §11.2).
+const (
+	mcpRevoked    = "revoked"
+	mcpTunnelLost = "tunnel_lost"
+)
+
+// closeMCP closes the open mcp_sessions rows pinned to a session (and service, when not empty) with reason:
+// revoked on a key or binding revocation (§12, before the node is told), tunnel_lost when the session closes for
+// any other reason (relay.md §11.2: a pinned session dies with its tunnel). Closing a closed row changes nothing,
+// so the revocation's reason stands when the session's own close follows it.
+func (r *Registry) closeMCP(session uuid.UUID, service, reason string) {
 	if r.cfg.DB == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
-	if _, err := r.cfg.DB.Exec(ctx, `update kontra.mcp_sessions set closed_at = now(), close_reason = 'revoked'
-		where tunnel_session = $1 and closed_at is null and ($2 = '' or service = $2)`, session, service); err != nil {
-		r.log.Warn("mcp_sessions pinned to a revoked tunnel session not closed", obs.KeyTunnelSession, session, "service", service, "error", err)
+	if _, err := r.cfg.DB.Exec(ctx, `update kontra.mcp_sessions set closed_at = now(), close_reason = $3
+		where tunnel_session = $1 and closed_at is null and ($2 = '' or service = $2)`, session, service, reason); err != nil {
+		r.log.Warn("mcp_sessions pinned to a tunnel session not closed", obs.KeyTunnelSession, session, "service", service,
+			"reason", reason, "error", err)
 	}
 }
 
