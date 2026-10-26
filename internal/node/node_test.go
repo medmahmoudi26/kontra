@@ -1,0 +1,1303 @@
+package node
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/google/uuid"
+	"github.com/hashicorp/yamux"
+
+	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/nodekey"
+	"kontra.sh/kontra/internal/tunnel"
+	"kontra.sh/kontra/internal/tunnel/tunneltest"
+	"kontra.sh/kontra/internal/tunnelgate"
+	"kontra.sh/kontra/internal/upstream"
+	"kontra.sh/kontra/test/e2e/slowagent"
+)
+
+var testTenantID = uuid.MustParse("0192f5e0-0000-7000-8000-0000000000aa")
+
+const (
+	tokA = "ket_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	tokB = "ket_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+)
+
+// admitter is a fake tunnelgate.Admitter: it records every request and lets the test decide each answer
+// (the n-th request, from 0); the default admits every declared service.
+type admitter struct {
+	mu   sync.Mutex
+	reqs []enroll.Request
+	fn   func(n int, req enroll.Request) (*enroll.Decision, error)
+	seen chan enroll.Request
+}
+
+func newAdmitter() *admitter { return &admitter{seen: make(chan enroll.Request, 64)} }
+
+func (a *admitter) Admit(_ context.Context, req enroll.Request) (*enroll.Decision, error) {
+	a.mu.Lock()
+	n := len(a.reqs)
+	a.reqs = append(a.reqs, req)
+	fn := a.fn
+	a.mu.Unlock()
+	a.seen <- req
+	if fn != nil {
+		return fn(n, req)
+	}
+	return admitAll(req), nil
+}
+
+func (a *admitter) set(fn func(n int, req enroll.Request) (*enroll.Decision, error)) {
+	a.mu.Lock()
+	a.fn = fn
+	a.mu.Unlock()
+}
+
+func (a *admitter) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.reqs)
+}
+
+// next is the next request the gate admitted (or refused at Admit).
+func (a *admitter) next(t *testing.T) enroll.Request {
+	t.Helper()
+	select {
+	case r := <-a.seen:
+		return r
+	case <-time.After(15 * time.Second):
+		t.Fatal("no hello reached Admit")
+		return enroll.Request{}
+	}
+}
+
+func admitAll(req enroll.Request) *enroll.Decision {
+	served := []tunnel.WelcomeService{}
+	for _, s := range req.Hello.Services {
+		served = append(served, tunnel.WelcomeService{Kind: s.Kind, Name: s.Name, URL: "https://gate.example/agents/" + s.Name})
+	}
+	return &enroll.Decision{
+		Key:           enroll.Key{KeyID: req.Hello.KID, TenantID: testTenantID, Tenant: "team", PubKey: req.PubKey},
+		Served:        served,
+		HirePrincipal: "node:" + req.Hello.KID,
+	}
+}
+
+// sink is a fake tunnelgate.SessionSink: it hands the test every session the Handler registers.
+type sink struct{ added chan *tunnelgate.Session }
+
+func (s *sink) Add(_ context.Context, sess *tunnelgate.Session, _ *yamux.Session, _ []tunnel.WelcomeService) error {
+	s.added <- sess
+	return nil
+}
+
+// logBuf is a log's output, printed when the test fails.
+type logBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// testGate is an in-process gate: tunnelgate.Handler behind httptest with a fake Admitter and sink. The
+// node's connections are wires the test can cut.
+type testGate struct {
+	srv    *httptest.Server
+	adm    *admitter
+	sink   *sink
+	wires  *tunneltest.Wires
+	url    *url.URL
+	logs   *logBuf
+	active sync.WaitGroup
+}
+
+func newTestGate(t *testing.T, mod func(*tunnelgate.HandlerConfig)) *testGate {
+	t.Helper()
+	g := &testGate{adm: newAdmitter(), sink: &sink{added: make(chan *tunnelgate.Session, 16)}, wires: &tunneltest.Wires{}, logs: &logBuf{}}
+	var h http.Handler
+	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.active.Add(1)
+		defer g.active.Done()
+		h.ServeHTTP(w, r)
+	}))
+	g.url, _ = url.Parse(g.srv.URL)
+	cfg := tunnelgate.HandlerConfig{
+		PublicURL:      g.srv.URL,
+		ChannelBinding: tunnel.CBNone,
+		ReplicaID:      "r-test",
+		Admitter:       g.adm,
+		Registry:       g.sink,
+		Logger:         slog.New(slog.NewTextHandler(g.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	if mod != nil {
+		mod(&cfg)
+	}
+	handler, err := tunnelgate.NewHandler(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = handler
+	t.Cleanup(func() {
+		for _, w := range g.wires.All() {
+			_ = w.Cut()
+		}
+		done := make(chan struct{})
+		go func() { g.active.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Error("a tunnel handler did not return after its node's connection was cut")
+		}
+		g.srv.Close()
+		if t.Failed() {
+			t.Logf("gate log:\n%s", g.logs.String())
+		}
+	})
+	return g
+}
+
+// session is the next session the gate registered.
+func (g *testGate) session(t *testing.T) *tunnelgate.Session {
+	t.Helper()
+	select {
+	case s := <-g.sink.added:
+		return s
+	case <-time.After(15 * time.Second):
+		t.Fatal("no session was registered")
+		return nil
+	}
+}
+
+// noSession checks that no session is registered within d.
+func (g *testGate) noSession(t *testing.T, d time.Duration) {
+	t.Helper()
+	select {
+	case s := <-g.sink.added:
+		t.Fatalf("an unexpected session %s was registered", s.ID)
+	case <-time.After(d):
+	}
+}
+
+// testNode is a node under test with its own HOME.
+type testNode struct {
+	n    *Node
+	cfg  Config
+	out  *logBuf
+	logs *logBuf
+	home string
+	done chan error
+	stop context.CancelFunc
+}
+
+func testConfig(t *testing.T, gate *url.URL, home string, serves ...Serve) Config {
+	t.Helper()
+	if home == "" {
+		home = t.TempDir()
+	}
+	return Config{
+		Gate:            gate,
+		Serves:          serves,
+		KeyPath:         filepath.Join(home, nodekey.DirName, nodekey.FileName),
+		Name:            "test-node",
+		MaxInflight:     tunnel.NodeMaxInflight,
+		CredentialsPath: filepath.Join(home, nodekey.DirName, CredentialsFile),
+		Version:         "test",
+	}
+}
+
+// newTestNode builds the node (New) without running it: its dials ride g's wires, and its retries do not
+// wait.
+func newTestNode(t *testing.T, g *testGate, cfg Config) (*testNode, error) {
+	t.Helper()
+	tn := &testNode{cfg: cfg, out: &logBuf{}, logs: &logBuf{}, home: filepath.Dir(filepath.Dir(cfg.KeyPath))}
+	cfg.Out = tn.out
+	logger := slog.New(slog.NewTextHandler(tn.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	n, err := New(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	if g != nil {
+		n.dialer.HTTPClient = g.wires.Client(nil)
+	}
+	n.backoff = Backoff{rand: func() float64 { return 0 }}
+	tn.n = n
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("node log:\n%s", tn.logs.String())
+		}
+	})
+	return tn, nil
+}
+
+func mustNode(t *testing.T, g *testGate, cfg Config) *testNode {
+	t.Helper()
+	tn, err := newTestNode(t, g, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tn
+}
+
+// run runs the node until the test ends (or stop).
+func (tn *testNode) run(t *testing.T) *testNode {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	tn.done = make(chan error, 1)
+	tn.stop = cancel
+	go func() { tn.done <- tn.n.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-tn.done:
+		case <-time.After(20 * time.Second):
+			t.Error("Run did not return after its context ended")
+		}
+	})
+	return tn
+}
+
+// result is what Run returned, within d.
+func (tn *testNode) result(t *testing.T, d time.Duration) error {
+	t.Helper()
+	select {
+	case err := <-tn.done:
+		tn.done <- err // for the cleanup
+		return err
+	case <-time.After(d):
+		t.Fatalf("Run did not return within %v", d)
+		return nil
+	}
+}
+
+// welcomed waits until the node has processed a welcome and opened its session (it prints the welcome
+// then), so that stopping it is not a lost welcome.
+func (tn *testNode) welcomed(t *testing.T) {
+	t.Helper()
+	eventually(t, 10*time.Second, "the node's session open", func() bool {
+		return strings.Contains(tn.out.String(), "kontra connect: connected to")
+	})
+}
+
+func (tn *testNode) running() bool {
+	select {
+	case err := <-tn.done:
+		tn.done <- err
+		return false
+	default:
+		return true
+	}
+}
+
+func (tn *testNode) creds(t *testing.T) Credential {
+	t.Helper()
+	c, err := LoadCredentials(tn.cfg.CredentialsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _ := tunnel.CanonicalOrigin(tn.cfg.Gate)
+	return c.For(o)
+}
+
+// sessOpener opens exchange streams on a gate session, as the gate's tunnel backend does.
+type sessOpener struct {
+	s       *tunnelgate.Session
+	service string
+	kind    string
+}
+
+func (o sessOpener) OpenExchange(ctx context.Context) (net.Conn, error) {
+	kind := o.kind
+	if kind == "" {
+		kind = tunnel.KindA2A
+	}
+	return o.s.OpenExchange(ctx, tunnel.Preamble{Op: tunnel.OpHTTP, Service: o.service, Kind: kind})
+}
+
+// exchange sends one GET through a gate session and returns the response, the body read.
+func exchange(t *testing.T, s *tunnelgate.Session, service, path string) (*http.Response, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tb, err := upstream.NewTunnel(service, tunnel.KindA2A, sessOpener{s: s, service: service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, upstream.Endpoint(tb, upstream.Info{Path: path}), nil)
+	resp, err := tb.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s through the tunnel: %v", path, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp, string(b)
+}
+
+func eventually(t *testing.T, within time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("not within %v: %s", within, what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func startAgent(t *testing.T, cfg slowagent.Config) *slowagent.Agent {
+	t.Helper()
+	a := slowagent.New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); a.Close() })
+	if _, err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func agentServe(t *testing.T, name string, a *slowagent.Agent) Serve {
+	t.Helper()
+	s, err := ParseServe("a2a:" + name + "=" + a.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func handshakeCode(err error) tunnel.Code {
+	var herr *tunnel.HandshakeError
+	if errors.As(err, &herr) {
+		return herr.Code
+	}
+	return ""
+}
+
+func serviceNames(h *tunnel.Hello) []string {
+	var out []string
+	for _, s := range h.Services {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
+// Against an in-process gate: the welcome prints the service URLs, and a gate-opened stream reaches an
+// a2a-go agent at the --serve target, whose card and JSON-RPC answer come back through the tunnel.
+func TestRunServesAnAgent(t *testing.T) {
+	g := newTestGate(t, nil)
+	agent := startAgent(t, slowagent.Config{Chunks: 2, Interval: 10 * time.Millisecond})
+	tn := mustNode(t, g, testConfig(t, g.url, "", agentServe(t, "hello", agent))).run(t)
+	s := g.session(t)
+	req := g.adm.next(t)
+	if req.Hello.Name != "test-node" || req.Hello.Agent != UserAgent("test") || !slices.Equal(serviceNames(req.Hello), []string{"hello"}) {
+		t.Fatalf("hello %+v", req.Hello)
+	}
+	eventually(t, 5*time.Second, "the welcome's service URLs printed", func() bool {
+		return strings.Contains(tn.out.String(), "a2a hello  https://gate.example/agents/hello")
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	tb, err := upstream.NewTunnel("hello", tunnel.KindA2A, sessOpener{s: s, service: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := upstream.FetchCard(ctx, tb)
+	if err != nil {
+		t.Fatalf("the card through the tunnel: %v", err)
+	}
+	info, err := upstream.ReadInfo(f.Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := upstream.NewClient(ctx, tb, info, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.SendMessage(upstream.WithTask(ctx, upstream.ExchangeTask{TaskID: "t1", ContextID: "c1"}),
+		&a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))})
+	if task, ok := res.(*a2a.Task); err != nil || !ok || task.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("SendMessage through the tunnel: %T %+v %v", res, res, err)
+	}
+	if agent.Sends() != 1 {
+		t.Fatalf("the agent received %d sends", agent.Sends())
+	}
+	for _, r := range agent.Requests() {
+		if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("Forwarded") != "" || r.Header.Get("Origin") != "" {
+			t.Errorf("a forwarding header reached the agent: %v", r.Header)
+		}
+	}
+}
+
+// {"t": "drain"} makes the node dial a second session at once, while the first goes on serving its
+// in-flight SSE to the end (make-before-break, §13, D35); the drained session is not redialed when the gate
+// closes it.
+func TestRunDrainIsMakeBeforeBreak(t *testing.T) {
+	g := newTestGate(t, nil)
+	agent := startAgent(t, slowagent.Config{Chunks: 6, Interval: 300 * time.Millisecond, Streaming: true})
+	tn := mustNode(t, g, testConfig(t, g.url, "", agentServe(t, "hello", agent)))
+	// A redial that waited would take a second at least: the drain's must not wait.
+	tn.n.backoff = Backoff{rand: func() float64 { return 0.999 }}
+	tn.n.backoff.attempt = 5
+	tn.run(t)
+	s1 := g.session(t)
+	g.adm.next(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tb, _ := upstream.NewTunnel("hello", tunnel.KindA2A, sessOpener{s: s1, service: "hello"})
+	f, err := upstream.FetchCard(ctx, tb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := upstream.ReadInfo(f.Raw)
+	c, err := upstream.NewClient(ctx, tb, info, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := 0
+	chunks := 0
+	var final a2a.TaskState
+	drained := false
+	for ev, err := range c.SendStreamingMessage(ctx, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("go"))}) {
+		if err != nil {
+			t.Fatalf("the SSE through the drained session broke after %d events: %v", events, err)
+		}
+		events++
+		switch e := ev.(type) {
+		case *a2a.TaskArtifactUpdateEvent:
+			chunks++
+		case *a2a.TaskStatusUpdateEvent:
+			final = e.Status.State
+		case *a2a.Task:
+			final = e.Status.State
+		}
+		if !drained {
+			drained = true
+			start := time.Now()
+			if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlDrain}); err != nil {
+				t.Fatal(err)
+			}
+			s2 := g.session(t)
+			if took := time.Since(start); took > 5*time.Second {
+				t.Errorf("the new session took %v after the drain", took)
+			}
+			if s2.ID == s1.ID || s1.Mux().IsClosed() {
+				t.Fatalf("make-before-break: s1 %s closed=%v, s2 %s", s1.ID, s1.Mux().IsClosed(), s2.ID)
+			}
+			defer func() {
+				if s2.Mux().IsClosed() {
+					t.Error("the new session closed")
+				}
+			}()
+		}
+	}
+	if chunks != 6 || final != a2a.TaskStateCompleted {
+		t.Fatalf("after the drain the SSE carried %d chunks and ended %s", chunks, final)
+	}
+	// The gate closes the drained session at the end of its drain: the node does not redial it.
+	_ = s1.Mux().Close()
+	g.noSession(t, 1500*time.Millisecond)
+	if n := g.adm.count(); n != 2 {
+		t.Fatalf("%d handshakes, want 2", n)
+	}
+	if !tn.running() {
+		t.Fatal("Run ended")
+	}
+}
+
+// {"t": "revoked"} ends Run with ErrRevoked and no redial (§12, §13).
+func TestRunRevokedStops(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url()))).run(t)
+	s := g.session(t)
+	if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tn.result(t, 10*time.Second); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("Run = %v, want ErrRevoked", err)
+	}
+	g.noSession(t, time.Second)
+	if n := g.adm.count(); n != 1 {
+		t.Fatalf("%d handshakes after the revocation", n)
+	}
+	eventually(t, 5*time.Second, "the session closed", s.Mux().IsClosed)
+}
+
+// {"t": "revoked", "service"} drops the service: its next preamble is refused 404 not_hosted while the
+// session's other service goes on, and the next hello no longer declares it (§12).
+func TestRunRevokedServiceIsDropped(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url()), a2aServe("other", rec.url()))).run(t)
+	s := g.session(t)
+	if r := g.adm.next(t); !slices.Equal(serviceNames(r.Hello), []string{"hello", "other"}) {
+		t.Fatalf("first hello declares %v", serviceNames(r.Hello))
+	}
+	if resp, _ := exchange(t, s, "hello", "/x"); resp.StatusCode != 200 {
+		t.Fatalf("before the revocation: %d", resp.StatusCode)
+	}
+	if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked, Service: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "hello refused not_hosted", func() bool {
+		resp, _ := exchange(t, s, "hello", "/x")
+		return resp.StatusCode == http.StatusNotFound && resp.Header.Get(tunnel.HeaderNode) == string(tunnel.NodeNotHosted)
+	})
+	if resp, _ := exchange(t, s, "other", "/x"); resp.StatusCode != 200 {
+		t.Fatalf("the other service: %d", resp.StatusCode)
+	}
+	if !tn.running() {
+		t.Fatal("Run ended on a binding revocation")
+	}
+	// A lost session: the redial declares only the other service.
+	for _, w := range g.wires.All() {
+		_ = w.Cut()
+	}
+	if r := g.adm.next(t); !slices.Equal(serviceNames(r.Hello), []string{"other"}) {
+		t.Fatalf("the next hello declares %v", serviceNames(r.Hello))
+	}
+	g.session(t)
+}
+
+// A handshake refused with a code the node does not retry (bad_origin) ends Run with that code, after one
+// dial; the CLI then exits 1 (cmd/kontra's test).
+func TestRunNonRetryableCode(t *testing.T) {
+	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.PublicURL = "https://gate.example" })
+	rec := newRecorder(t)
+	tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url()))).run(t)
+	err := tn.result(t, 10*time.Second)
+	if handshakeCode(err) != tunnel.CodeBadOrigin {
+		t.Fatalf("Run = %v, want bad_origin", err)
+	}
+	if n := len(g.wires.All()); n != 1 {
+		t.Fatalf("%d dials, want 1", n)
+	}
+
+	// Retryable codes are retried with backoff (draining at the hello).
+	draining := true
+	var mu sync.Mutex
+	g2 := newTestGate(t, func(c *tunnelgate.HandlerConfig) {
+		c.Draining = func() bool { mu.Lock(); defer mu.Unlock(); return draining }
+	})
+	mustNode(t, g2, testConfig(t, g2.url, "", a2aServe("hello", rec.url()))).run(t)
+	eventually(t, 10*time.Second, "three dials to a draining gate", func() bool { return len(g2.wires.All()) >= 3 })
+	mu.Lock()
+	draining = false
+	mu.Unlock()
+	g2.session(t)
+}
+
+// --require-channel-binding refuses a gate that offers cb none, and does not retry (§4.1).
+func TestRunRequireChannelBinding(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	cfg.RequireChannelBinding = true
+	tn := mustNode(t, g, cfg).run(t)
+	if err := tn.result(t, 10*time.Second); !errors.Is(err, ErrChannelBindingRequired) {
+		t.Fatalf("Run = %v", err)
+	}
+	if n := g.adm.count(); n != 0 {
+		t.Fatalf("the gate admitted %d hellos", n)
+	}
+}
+
+// First run: ~/.kontra (0700) holds the new identity.key and the credentials file, both 0600. A key file
+// readable by others stops kontra connect, as does such a credentials file (§2.1, §2.4).
+func TestNewFiles(t *testing.T) {
+	home := t.TempDir()
+	rec := newRecorder(t)
+	gate, _ := url.Parse("https://gate.example")
+	cfg := testConfig(t, gate, home, a2aServe("hello", rec.url()))
+	cfg.Enroll = []string{tokA}
+	tn := mustNode(t, nil, cfg)
+	for path, want := range map[string]fs.FileMode{
+		filepath.Join(home, ".kontra"):                 0o700 | fs.ModeDir,
+		filepath.Join(home, ".kontra", "identity.key"): 0o600,
+		filepath.Join(home, ".kontra", "credentials"):  0o600,
+	} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode() != want {
+			t.Errorf("%s: mode %v, want %v", path, fi.Mode(), want)
+		}
+	}
+	id, err := nodekey.Load(cfg.KeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tn.n.activeKey != id.Recipient() {
+		t.Error("the node's key is not the file's")
+	}
+	if c := tn.creds(t); !slices.Equal(c.Enroll, []string{tokA}) {
+		t.Errorf("credentials for the gate: %+v", c)
+	}
+	// A second start loads the same key.
+	tn2 := mustNode(t, nil, cfg)
+	if tn2.n.activeKey != tn.n.activeKey {
+		t.Error("a second start made a new key")
+	}
+
+	if err := os.Chmod(cfg.KeyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newTestNode(t, nil, cfg); err == nil || !strings.Contains(err.Error(), "mode 0644") {
+		t.Fatalf("a 0644 key file: %v", err)
+	}
+	os.Chmod(cfg.KeyPath, 0o600)
+	if err := os.Chmod(cfg.CredentialsPath, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newTestNode(t, nil, cfg); err == nil || !strings.Contains(err.Error(), "mode 0640") {
+		t.Fatalf("a 0640 credentials file: %v", err)
+	}
+}
+
+// A credential kept for gate A is never sent to gate B: the hello to B carries only B's (§2.4), and B's
+// flags are kept under B's origin, A's entry untouched.
+func TestCredentialsStayWithTheirOrigin(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	home := t.TempDir()
+	credPath := filepath.Join(home, ".kontra", CredentialsFile)
+	if err := ensureDir(filepath.Dir(credPath)); err != nil {
+		t.Fatal(err)
+	}
+	creds, err := LoadCredentials(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := Credential{APIKey: "kk_live_gate_a_key", Enroll: []string{tokA}}
+	if err := creds.Save("https://gate-a.example", a); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t, g.url, home, a2aServe("hello", rec.url()))
+	tn := mustNode(t, g, cfg).run(t)
+	r := g.adm.next(t)
+	if len(r.Hello.Enroll) != 0 || r.Hello.Auth != "" {
+		t.Fatalf("gate B received A's credentials: enroll %v auth %q", r.Hello.Enroll, r.Hello.Auth)
+	}
+	g.session(t)
+	tn.welcomed(t)
+	tn.stop()
+	tn.result(t, 10*time.Second)
+
+	cfg.APIKey = "kk_live_gate_b_key"
+	cfg.Enroll = []string{tokB}
+	mustNode(t, g, cfg).run(t)
+	r = g.adm.next(t)
+	if !slices.Equal(r.Hello.Enroll, []string{tokB}) || r.Hello.Auth != "kk_live_gate_b_key" {
+		t.Fatalf("gate B's hello: enroll %v auth %q", r.Hello.Enroll, r.Hello.Auth)
+	}
+	g.session(t)
+	origin, _ := tunnel.CanonicalOrigin(g.url)
+	var all *Credentials
+	eventually(t, 5*time.Second, "B's token recorded consumed", func() bool {
+		all, err = LoadCredentials(credPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := all.For(origin)
+		return got.APIKey == "kk_live_gate_b_key" && len(got.Enroll) == 0 && slices.Equal(got.Consumed, []string{TokenHash(tokB)})
+	})
+	if got := all.For("https://gate-a.example"); got.APIKey != a.APIKey || !slices.Equal(got.Enroll, a.Enroll) {
+		t.Errorf("A's entry changed: %+v", got)
+	}
+	b, _ := os.ReadFile(credPath)
+	if strings.Contains(string(b), tokB) {
+		t.Error("a confirmed token is still in the credentials file")
+	}
+}
+
+// A token a welcome confirmed is never sent again, even when a restart passes the same --enroll (M2 plan
+// audit, gap 1).
+func TestConsumedTokenIsNotSentAgain(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	cfg.Enroll = []string{tokA}
+	tn := mustNode(t, g, cfg).run(t)
+	if r := g.adm.next(t); !slices.Equal(r.Hello.Enroll, []string{tokA}) {
+		t.Fatalf("first hello: %v", r.Hello.Enroll)
+	}
+	g.session(t)
+	eventually(t, 5*time.Second, "the token recorded consumed", func() bool {
+		c := tn.creds(t)
+		return len(c.Enroll) == 0 && len(c.Unconfirmed) == 0 && slices.Equal(c.Consumed, []string{TokenHash(tokA)})
+	})
+	tn.stop()
+	tn.result(t, 10*time.Second)
+
+	// The same flag again (a compose restart), and a reconnect.
+	tn2 := mustNode(t, g, cfg).run(t)
+	if r := g.adm.next(t); len(r.Hello.Enroll) != 0 {
+		t.Fatalf("a consumed token was sent again: %v", r.Hello.Enroll)
+	}
+	g.session(t)
+	for _, w := range g.wires.All() {
+		_ = w.Cut()
+	}
+	if r := g.adm.next(t); len(r.Hello.Enroll) != 0 {
+		t.Fatalf("a consumed token was sent on the redial: %v", r.Hello.Enroll)
+	}
+	g.session(t)
+	_ = tn2
+}
+
+// gateFails is an admission the gate failed on its own side (Postgres gone): the Handler closes 1011
+// without welcome or error, so the node cannot tell whether it committed (ErrNoOutcome).
+var gateFails = errors.New("the admission's database went away")
+
+// A connection lost between proof and welcome (M2 plan audit gap 1, conflict C2): the node probes with
+// the active key and no tokens. A welcome means the enrollment committed (the tokens are consumed and
+// never sent again); unknown_key means it did not, and the full hello goes again at once.
+func TestLostWelcomeProbe(t *testing.T) {
+	for _, committed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("committed=%v", committed), func(t *testing.T) {
+			g := newTestGate(t, nil)
+			rec := newRecorder(t)
+			g.adm.set(func(n int, req enroll.Request) (*enroll.Decision, error) {
+				switch {
+				case n == 0:
+					return nil, gateFails
+				case n == 1 && !committed:
+					return nil, tunnel.Refuse(tunnel.CodeUnknownKey, "this key is not enrolled at this gate")
+				}
+				return admitAll(req), nil
+			})
+			cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+			cfg.Enroll = []string{tokA}
+			tn := mustNode(t, g, cfg).run(t)
+			if r := g.adm.next(t); !slices.Equal(r.Hello.Enroll, []string{tokA}) {
+				t.Fatalf("first hello: %v", r.Hello.Enroll)
+			}
+			probe := g.adm.next(t)
+			if len(probe.Hello.Enroll) != 0 || probe.Hello.RotateFrom != nil || probe.Hello.KID != tn.n.cfgKeyID(t) {
+				t.Fatalf("the probe carried enroll %v rotate_from %v", probe.Hello.Enroll, probe.Hello.RotateFrom)
+			}
+			if !committed {
+				if r := g.adm.next(t); !slices.Equal(r.Hello.Enroll, []string{tokA}) {
+					t.Fatalf("after unknown_key the hello must carry the tokens again: %v", r.Hello.Enroll)
+				}
+			}
+			g.session(t)
+			eventually(t, 5*time.Second, "the token recorded consumed", func() bool {
+				c := tn.creds(t)
+				return len(c.Enroll) == 0 && len(c.Unconfirmed) == 0 && slices.Equal(c.Consumed, []string{TokenHash(tokA)})
+			})
+			tn.stop()
+			tn.result(t, 10*time.Second)
+			// A restart with the same flag sends nothing again.
+			mustNode(t, g, cfg).run(t)
+			if r := g.adm.next(t); len(r.Hello.Enroll) != 0 {
+				t.Fatalf("restart: the hello carried %v", r.Hello.Enroll)
+			}
+			g.session(t)
+		})
+	}
+}
+
+// cfgKeyID is the key id of the node's key file.
+func (n *Node) cfgKeyID(t *testing.T) string {
+	t.Helper()
+	id, err := nodekey.Load(n.cfg.KeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id.KeyID()
+}
+
+// A process stopped while a hello with tokens was unanswered: the next start probes first (the outcome is
+// kept in the credentials file as Unconfirmed). A known key that the earlier hello would have bound a
+// service for gets service_denied to the probe, which is "not committed": the full hello follows.
+func TestRestartWhileUnconfirmed(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	origin, _ := tunnel.CanonicalOrigin(g.url)
+	if err := ensureDir(filepath.Dir(cfg.CredentialsPath)); err != nil {
+		t.Fatal(err)
+	}
+	creds, _ := LoadCredentials(cfg.CredentialsPath)
+	if err := creds.Save(origin, Credential{Enroll: []string{tokA}, Unconfirmed: []string{TokenHash(tokA)}}); err != nil {
+		t.Fatal(err)
+	}
+	g.adm.set(func(n int, req enroll.Request) (*enroll.Decision, error) {
+		if len(req.Hello.Enroll) == 0 {
+			return nil, tunnel.Refuse(tunnel.CodeServiceDenied, "the key was never enrolled for hello")
+		}
+		return admitAll(req), nil
+	})
+	tn := mustNode(t, g, cfg).run(t)
+	if r := g.adm.next(t); len(r.Hello.Enroll) != 0 {
+		t.Fatalf("the first hello after the restart is not the probe: %v", r.Hello.Enroll)
+	}
+	if r := g.adm.next(t); !slices.Equal(r.Hello.Enroll, []string{tokA}) {
+		t.Fatalf("after the probe's service_denied: %v", r.Hello.Enroll)
+	}
+	g.session(t)
+	eventually(t, 5*time.Second, "consumed", func() bool { return slices.Equal(tn.creds(t).Consumed, []string{TokenHash(tokA)}) })
+}
+
+// A token the gate refused (enroll_invalid: unknown, used or expired) ends Run with that code, and is
+// removed from the credentials file so that the next start does not send it again.
+func TestEnrollInvalidDropsTokens(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	g.adm.set(func(n int, req enroll.Request) (*enroll.Decision, error) {
+		return nil, tunnel.Refuse(tunnel.CodeEnrollInvalid, "an enrollment token is unknown, already used or expired")
+	})
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	cfg.Enroll = []string{tokA}
+	tn := mustNode(t, g, cfg).run(t)
+	if err := tn.result(t, 10*time.Second); handshakeCode(err) != tunnel.CodeEnrollInvalid {
+		t.Fatalf("Run = %v", err)
+	}
+	if c := tn.creds(t); len(c.Enroll) != 0 || len(c.Unconfirmed) != 0 || len(c.Consumed) != 0 {
+		t.Fatalf("credentials after enroll_invalid: %+v", c)
+	}
+	if n := g.adm.count(); n != 1 {
+		t.Fatalf("%d hellos", n)
+	}
+}
+
+// --rotate writes a new first line, and the next hello carries rotate_from and proof_old (the Handler
+// verifies both). After the welcome the old line is stamped for this gate, kept 24 h, then pruned (§12).
+func TestRotate(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	home := t.TempDir()
+	cfg := testConfig(t, g.url, home, a2aServe("hello", rec.url()))
+
+	// --rotate on a key just created is refused: nothing is enrolled.
+	rot := cfg
+	rot.Rotate = true
+	if _, err := newTestNode(t, g, rot); err == nil || !strings.Contains(err.Error(), "just created") {
+		t.Fatalf("--rotate on a new key: %v", err)
+	}
+	old, err := nodekey.Load(cfg.KeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t0 := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	tn := mustNode(t, g, rot)
+	tn.n.now = func() time.Time { return t0 }
+	id, err := nodekey.Load(cfg.KeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Recipient() == old.Recipient() || len(id.Older) != 1 || id.Older[0].Recipient().String() != old.Recipient() {
+		t.Fatalf("after --rotate: active %s, older %d", id.KeyID(), len(id.Older))
+	}
+	b, _ := os.ReadFile(cfg.KeyPath)
+	if first := firstKeyLine(string(b)); first != id.Active.String() {
+		t.Fatal("the new key is not the file's first key line")
+	}
+	// A second --rotate before this gate confirmed the first is refused.
+	if _, err := newTestNode(t, g, rot); err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("a second --rotate: %v", err)
+	}
+
+	tn.run(t)
+	r := g.adm.next(t)
+	if r.Hello.KID != id.KeyID() || r.Hello.RotateFrom == nil || r.Hello.RotateFrom.KID != old.KeyID() ||
+		r.Hello.RotateFrom.Recipient != old.Recipient() || r.OldPubKey == nil {
+		t.Fatalf("the hello: kid %s rotate_from %+v old key %v", r.Hello.KID, r.Hello.RotateFrom, r.OldPubKey != nil)
+	}
+	g.session(t)
+	origin, _ := tunnel.CanonicalOrigin(g.url)
+	eventually(t, 5*time.Second, "the rotation stamped for this gate", func() bool {
+		b, _ := os.ReadFile(cfg.KeyPath)
+		return strings.Contains(string(b), nodekey.CommentRotated+"2026-10-26T10:00:00Z "+origin)
+	})
+	if id, _ := nodekey.Load(cfg.KeyPath); func() bool { _, ok := id.PendingRotation(origin); return ok }() {
+		t.Fatal("the rotation is still pending after the welcome")
+	}
+
+	// 23 h later the old line is kept; 24 h after the welcome it is pruned (the node's hourly maintenance,
+	// driven here with its clock moved, once Run has returned).
+	tn.stop()
+	if err := tn.result(t, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	tn.n.now = func() time.Time { return t0.Add(23 * time.Hour) }
+	tn.n.lastPrune = time.Time{}
+	tn.n.maintain(nil)
+	if id, _ := nodekey.Load(cfg.KeyPath); len(id.Older) != 1 {
+		t.Fatalf("pruned before 24 h: %d older keys", len(id.Older))
+	}
+	tn.n.now = func() time.Time { return t0.Add(24*time.Hour + time.Minute) }
+	tn.n.lastPrune = time.Time{}
+	tn.n.maintain(nil)
+	if id, _ := nodekey.Load(cfg.KeyPath); len(id.Older) != 0 || id.Recipient() != r.Hello.Recipient {
+		t.Fatalf("after 24 h: %d older keys", len(id.Older))
+	}
+}
+
+func firstKeyLine(s string) string {
+	for _, l := range strings.Split(s, "\n") {
+		if strings.HasPrefix(l, "AGE-SECRET-KEY-1") {
+			return l
+		}
+	}
+	return ""
+}
+
+// A rotation whose welcome was lost (C2): the node probes with the new key alone; a welcome confirms the
+// rotation (MarkRotated) without sending rotate_from again, which would be enroll_invalid.
+func TestRotateLostWelcome(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	mustNode(t, nil, cfg) // creates the key
+	rot := cfg
+	rot.Rotate = true
+	tn := mustNode(t, g, rot)
+	g.adm.set(func(n int, req enroll.Request) (*enroll.Decision, error) {
+		if req.Hello.RotateFrom != nil {
+			if n > 0 {
+				return nil, tunnel.Refuse(tunnel.CodeEnrollInvalid, "rotate_from: the key was already rotated")
+			}
+			return nil, gateFails // committed, and the welcome is lost
+		}
+		return admitAll(req), nil
+	})
+	tn.run(t)
+	if r := g.adm.next(t); r.Hello.RotateFrom == nil {
+		t.Fatal("the first hello has no rotate_from")
+	}
+	if r := g.adm.next(t); r.Hello.RotateFrom != nil || r.Hello.KID != tn.n.cfgKeyID(t) {
+		t.Fatalf("the probe: kid %s rotate_from %+v", r.Hello.KID, r.Hello.RotateFrom)
+	}
+	g.session(t)
+	origin, _ := tunnel.CanonicalOrigin(g.url)
+	eventually(t, 5*time.Second, "the rotation confirmed", func() bool {
+		id, err := nodekey.Load(cfg.KeyPath)
+		if err != nil {
+			return false
+		}
+		_, pending := id.PendingRotation(origin)
+		return !pending
+	})
+}
+
+// Another `kontra connect` (another gate) rotates the shared key file: the running node dials a session of
+// the new key with rotate_from at once, while the old key's session keeps serving; when the gate ends the
+// old key's overlap ({"t": "revoked"} on that session), only that session closes.
+func TestRotationByAnotherProcess(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	tn := mustNode(t, g, cfg)
+	tn.n.maintainEvery = 50 * time.Millisecond
+	tn.run(t)
+	old := g.adm.next(t).Hello
+	s1 := g.session(t)
+
+	id, err := nodekey.Rotate(cfg.KeyPath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := g.adm.next(t)
+	if r.Hello.KID != id.KeyID() || r.Hello.RotateFrom == nil || r.Hello.RotateFrom.KID != old.KID {
+		t.Fatalf("after the rotation: kid %s rotate_from %+v", r.Hello.KID, r.Hello.RotateFrom)
+	}
+	s2 := g.session(t)
+	if s1.Mux().IsClosed() {
+		t.Fatal("the old key's session closed before the gate closed it")
+	}
+	if resp, _ := exchange(t, s1, "hello", "/old"); resp.StatusCode != 200 {
+		t.Fatalf("the old session no longer serves: %d", resp.StatusCode)
+	}
+	if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "the old key's session closed", s1.Mux().IsClosed)
+	time.Sleep(200 * time.Millisecond)
+	if !tn.running() || s2.Mux().IsClosed() {
+		t.Fatal("the revocation of the rotated key stopped the node")
+	}
+	if resp, _ := exchange(t, s2, "hello", "/new"); resp.StatusCode != 200 {
+		t.Fatalf("the new session: %d", resp.StatusCode)
+	}
+	if n := g.adm.count(); n != 2 {
+		t.Fatalf("%d handshakes", n)
+	}
+}
+
+func TestParseArgs(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	home := t.TempDir()
+	defaultEnv := env(map[string]string{"HOME": home})
+	hostname = func() (string, error) { return "build-box-3", nil }
+	t.Cleanup(func() { hostname = os.Hostname })
+
+	cfg, err := parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999"}, defaultEnv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Gate.String() != "https://gateway.kontra.sh" || cfg.MaxInflight != 64 || cfg.Name != "build-box-3" ||
+		cfg.KeyPath != filepath.Join(home, ".kontra", "identity.key") || cfg.CredentialsPath != filepath.Join(home, ".kontra", "credentials") ||
+		cfg.LogJSON || cfg.Rotate || cfg.RequireChannelBinding || len(cfg.Enroll) != 0 || cfg.APIKey != "" {
+		t.Fatalf("defaults: %+v", cfg)
+	}
+	if len(cfg.Serves) != 1 || cfg.Serves[0].Kind != "a2a" || cfg.Serves[0].Name != "hello" || cfg.Serves[0].Target.String() != "http://127.0.0.1:9999/" {
+		t.Fatalf("serves %+v", cfg.Serves)
+	}
+
+	// KONTRA_KEY, then --key over it.
+	cfg, _ = parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999"}, env(map[string]string{"HOME": home, "KONTRA_KEY": "/run/secrets/key"}), nil)
+	if cfg.KeyPath != "/run/secrets/key" {
+		t.Errorf("KONTRA_KEY: %s", cfg.KeyPath)
+	}
+	cfg, _ = parseArgs([]string{"--key", "/k", "--serve", "a2a:hello=http://127.0.0.1:9999"}, env(map[string]string{"HOME": home, "KONTRA_KEY": "/run/secrets/key"}), nil)
+	if cfg.KeyPath != "/k" {
+		t.Errorf("--key: %s", cfg.KeyPath)
+	}
+
+	// Secrets: a value, @file and - (stdin).
+	file := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(file, []byte(tokB+"\n"), 0o600)
+	cfg, err = parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--enroll", tokA, "--enroll", "@" + file,
+		"--api-key", "-", "--gate", "http://localhost:8080", "--name", "n1", "--rotate", "--require-channel-binding",
+		"--max-inflight", "8", "--log", "json"}, defaultEnv, strings.NewReader("kk_live_from_stdin\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.Enroll, []string{tokA, tokB}) || cfg.APIKey != "kk_live_from_stdin" || cfg.Gate.String() != "http://localhost:8080" ||
+		cfg.Name != "n1" || !cfg.Rotate || !cfg.RequireChannelBinding || cfg.MaxInflight != 8 || !cfg.LogJSON {
+		t.Fatalf("flags: %+v", cfg)
+	}
+	cfg, err = parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--enroll", "-"}, defaultEnv, strings.NewReader(tokA))
+	if err != nil || !slices.Equal(cfg.Enroll, []string{tokA}) {
+		t.Fatalf("--enroll -: %v %v", cfg.Enroll, err)
+	}
+
+	// A long hostname is cut to 64 characters (its first label when that fits).
+	hostname = func() (string, error) { return strings.Repeat("a", 70) + ".example.com", nil }
+	if cfg, _ := parseArgs([]string{"--serve", "a2a:h=http://127.0.0.1:1"}, defaultEnv, nil); cfg.Name != strings.Repeat("a", 64) {
+		t.Errorf("long hostname: %q", cfg.Name)
+	}
+	hostname = func() (string, error) { return strings.Repeat("b", 30) + "." + strings.Repeat("c", 40), nil }
+	if cfg, _ := parseArgs([]string{"--serve", "a2a:h=http://127.0.0.1:1"}, defaultEnv, nil); cfg.Name != strings.Repeat("b", 30) {
+		t.Errorf("long FQDN: %q", cfg.Name)
+	}
+	hostname = func() (string, error) { return "build-box-3", nil }
+
+	serve := "a2a:hello=http://127.0.0.1:9999"
+	for _, x := range []struct {
+		args  []string
+		stdin string
+		want  string
+	}{
+		{[]string{}, "", "--serve"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000"}, "", "not until M3"},
+		{[]string{"--serve", "mcp:fs=stdio:npx server"}, "", "not until M3"},
+		{[]string{"--serve", "a2a:x=http://h:1/base"}, "", "base path"},
+		{[]string{"--serve", "grpc:x=http://h:1"}, "", "kind"},
+		{[]string{"--serve", "a2a:Hello=http://h:1"}, "", "name"},
+		{[]string{"--serve", "a2a:hello"}, "", "name=url"},
+		{[]string{"--serve", "a2a:hello=ftp://h"}, "", "scheme"},
+		{[]string{"--serve", "a2a:hello=http://u:p@h:1"}, "", "userinfo"},
+		{[]string{"--serve", "a2a:hello=http://h:1/?x=1"}, "", "query"},
+		{[]string{"--serve", "a2a:hello=http://h:99999"}, "", "port"},
+		{[]string{"--serve", serve, "--serve", "a2a:hello=http://h:2"}, "", "twice"},
+		{[]string{"--serve", serve, "--gate", "http://gate.example"}, "", "http:// only for localhost"},
+		{[]string{"--serve", serve, "--gate", "https://user:secret@gate.example"}, "", "no credentials"},
+		{[]string{"--serve", serve, "--gate", "ftp://gate.example"}, "", "scheme"},
+		{[]string{"--serve", serve, "--enroll", "not-a-token"}, "", "not an enrollment token"},
+		{[]string{"--serve", serve, "--enroll", "@/nonexistent/token"}, "", "--enroll"},
+		{[]string{"--serve", serve, "--enroll", "-"}, "", "empty"},
+		{[]string{"--serve", serve, "--enroll", "-", "--api-key", "-"}, tokA, "already read"},
+		{[]string{"--serve", serve, "--api-key", "two words"}, "", "white space"},
+		{[]string{"--serve", serve, "--api-key", "a", "--api-key", "b"}, "", "twice"},
+		{[]string{"--serve", serve, "--name", strings.Repeat("n", 65)}, "", "65 characters"},
+		{[]string{"--serve", serve, "--name", "a\x00b"}, "", "control"},
+		{[]string{"--serve", serve, "--max-inflight", "0"}, "", "--max-inflight"},
+		{[]string{"--serve", serve, "--log", "xml"}, "", "--log"},
+		{[]string{"--serve", serve, "--nope"}, "", "not defined"},
+		{[]string{"--serve", serve, "extra"}, "", "unexpected argument"},
+	} {
+		_, err := parseArgs(x.args, defaultEnv, strings.NewReader(x.stdin))
+		var uerr *UsageError
+		if err == nil || !errors.As(err, &uerr) || !strings.Contains(err.Error(), x.want) {
+			t.Errorf("%q: %v, want a usage error with %q", x.args, err, x.want)
+		}
+		if err != nil && (strings.Contains(err.Error(), "user:secret") || strings.Contains(err.Error(), "u:p") ||
+			strings.Contains(err.Error(), "two words")) {
+			t.Errorf("%q: the error quotes a credential: %v", x.args, err)
+		}
+	}
+	if _, err := parseArgs([]string{"-h"}, defaultEnv, nil); !errors.Is(err, flag.ErrHelp) {
+		t.Errorf("-h: %v", err)
+	}
+}
+
+// The node's patterns agree with the gate's: relay.md §2.1's service names (config.NameRE) and §5's
+// token shape (enroll.ValidToken).
+func TestPatternsMatchTheGate(t *testing.T) {
+	if serviceNameRE.String() != config.NameRE.String() {
+		t.Errorf("service names: node %s, gate %s", serviceNameRE, config.NameRE)
+	}
+	for _, tok := range []string{tokA, "ket_short", "ket_" + strings.Repeat("-", 32), "xet_" + strings.Repeat("a", 32), tokA + "a"} {
+		if tokenRE.MatchString(tok) != enroll.ValidToken(tok) {
+			t.Errorf("%q: node %v, gate %v", tok, tokenRE.MatchString(tok), enroll.ValidToken(tok))
+		}
+	}
+}
+
+func TestReadSecret(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "s")
+	os.WriteFile(file, []byte("  s3cret\r\n"), 0o600)
+	for _, x := range []struct {
+		v, stdin, want string
+		ok             bool
+	}{
+		{"value", "", "value", true},
+		{"@" + file, "", "s3cret", true},
+		{"-", "piped\n", "piped", true},
+		{"@", "", "", false},
+		{"-", "", "", false},
+		{"-", "a\nb\n", "", false},
+		{"@" + file + ".missing", "", "", false},
+	} {
+		got, err := readSecret(x.v, strings.NewReader(x.stdin))
+		if (err == nil) != x.ok || got != x.want {
+			t.Errorf("readSecret(%q) = %q, %v", x.v, got, err)
+		}
+		if err != nil && strings.Contains(err.Error(), x.stdin) && x.stdin != "" {
+			t.Errorf("readSecret(%q): the error quotes the secret: %v", x.v, err)
+		}
+	}
+	big := strings.Repeat("a", maxSecret+1)
+	if _, err := readSecret("-", strings.NewReader(big)); err == nil {
+		t.Error("a secret over the limit")
+	}
+}
+
+func TestCredentialsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "credentials")
+	c, err := LoadCredentials(path)
+	if err != nil || len(c.For("https://a.example").Enroll) != 0 {
+		t.Fatalf("absent: %v", err)
+	}
+	if err := c.Save("https://a.example", Credential{APIKey: "k", Consumed: []string{"h"}}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Dir(path)); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("directory: %v %v", fi.Mode(), err)
+	}
+	// Another process's save is kept: Save re-reads the file under its lock.
+	other, _ := LoadCredentials(path)
+	if err := other.Save("https://b.example", Credential{Enroll: []string{tokB}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Save("https://a.example", Credential{APIKey: "k2"}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := LoadCredentials(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all.For("https://a.example").APIKey != "k2" || !slices.Equal(all.For("https://b.example").Enroll, []string{tokB}) {
+		t.Fatalf("after two processes' saves: %+v %+v", all.For("https://a.example"), all.For("https://b.example"))
+	}
+	// An empty credential removes the entry.
+	if err := c.Save("https://a.example", Credential{}); err != nil {
+		t.Fatal(err)
+	}
+	all, _ = LoadCredentials(path)
+	if _, ok := all.byOrigin["https://a.example"]; ok {
+		t.Error("an empty credential kept its entry")
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v", fi.Mode())
+	}
+	// Concurrent saves of different origins lose nothing.
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			cc, err := LoadCredentials(path)
+			if err == nil {
+				err = cc.Save(fmt.Sprintf("https://g%d.example", i), Credential{APIKey: fmt.Sprint(i)})
+			}
+			if err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	all, _ = LoadCredentials(path)
+	for i := range 20 {
+		if all.For(fmt.Sprintf("https://g%d.example", i)).APIKey != fmt.Sprint(i) {
+			t.Errorf("origin %d lost", i)
+		}
+	}
+	os.WriteFile(path, []byte("{not json"), 0o600)
+	if _, err := LoadCredentials(path); err == nil || strings.Contains(err.Error(), "not json") {
+		t.Errorf("a broken file: %v", err)
+	}
+}
+
+func TestNearExhaustion(t *testing.T) {
+	const limit = 1<<32 - 2 // yamux refuses an open at this id
+	for id, want := range map[uint32]bool{2: false, 1 << 31: false, limit - streamIDHeadroom - 2: false, limit - streamIDHeadroom: true, limit - 2: true} {
+		if got := nearExhaustion(id); got != want {
+			t.Errorf("nearExhaustion(%d) = %v", id, got)
+		}
+	}
+}
+
+// A control stream line of an unknown type is ignored; the session goes on.
+func TestControlIgnoresUnknown(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url()))).run(t)
+	s := g.session(t)
+	for _, c := range []tunnel.Control{{T: "future-thing"}, {T: tunnel.CtlAuthRevoked}, {T: tunnel.CtlEnrolled, Service: "hello", Key: "k1_x"}} {
+		if err := s.WriteControl(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if resp, _ := exchange(t, s, "hello", "/x"); resp.StatusCode != 200 || !tn.running() {
+		t.Fatalf("after the control lines: %d, running %v", resp.StatusCode, tn.running())
+	}
+	if !strings.Contains(tn.logs.String(), "hiring API key") || !strings.Contains(tn.logs.String(), "another key was enrolled") {
+		t.Errorf("auth_revoked and enrolled are not logged:\n%s", tn.logs.String())
+	}
+}
