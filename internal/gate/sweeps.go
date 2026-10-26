@@ -92,7 +92,7 @@ func (r *Replica) sweepOrphans(ctx context.Context) {
 }
 
 func (r *Replica) sweepRetention(ctx context.Context) {
-	n, err := SweepRetention(ctx, r.storeLog, time.Now())
+	n, err := SweepRetention(ctx, r.storeLog, time.Now(), r.objects())
 	if err != nil && ctx.Err() == nil {
 		r.log.Warn("retention sweep", "error", err, "deleted", n)
 	} else if n > 0 {
@@ -142,12 +142,13 @@ func SweepOrphans(ctx context.Context, log *store.Log, wf WorkflowChecker, older
 }
 
 // SweepRetention is one pass of the retention sweep (spec §5.4): terminal tasks past retention_until are
-// deleted with their task_events, attempts, work_items and push_configs, in batches, and MCP sessions closed
-// for longer than their service's retention go the same way. It returns how many tasks it deleted.
-func SweepRetention(ctx context.Context, log *store.Log, now time.Time) (int, error) {
+// deleted with their task_events, attempts, work_items, push_configs and blobs rows, in batches, each task's
+// bucket objects first when the gate has a bucket (objects, nil without one; D167), and MCP sessions closed for
+// longer than their service's retention go the same way. It returns how many tasks it deleted.
+func SweepRetention(ctx context.Context, log *store.Log, now time.Time, objects store.ObjectDeleter) (int, error) {
 	total := 0
 	for range retentionBatches {
-		n, err := log.DeleteExpired(ctx, now, retentionBatch)
+		n, err := log.DeleteExpired(ctx, now, retentionBatch, objects)
 		total += n
 		if err != nil {
 			return total, err

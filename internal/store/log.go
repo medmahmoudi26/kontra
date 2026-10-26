@@ -18,6 +18,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"kontra.sh/kontra/internal/blob"
 )
 
 // WriteTimeout bounds every write. Writes run on a context detached from the caller's cancellation (D8),
@@ -306,9 +308,31 @@ with u as (
 
 // appendSQL is the one write of spec §5.2 as a single statement: appendCTEs and pg_notify. Zero rows is a
 // refusal, classified by classifySQL.
-const appendSQL = appendCTEs + `)
+const appendSQL = appendCTEs + appendSelect
+
+// appendSelect ends an append statement that records no delivery.
+const appendSelect = `)
 select e.seq, u.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text), false
   from e join u on u.id = e.task_id`
+
+// blobsCTE writes the blobs rows of the large parts an event names (spec §10.4, D167) in the event's own
+// statement, so a row exists exactly when its event commits; it writes nothing when the UPDATE was refused. The
+// rows' arrays are the statement's last three parameters, numbered from $%d.
+const blobsCTE = `), b as (
+	insert into kontra.blobs (ref, tenant_id, task_id, size)
+	select x.ref, x.tenant_id, u.id, x.size from u, unnest($%d::text[], $%d::uuid[], $%d::bigint[]) as x(ref, tenant_id, size)
+	on conflict (ref) do nothing
+	returning ref`
+
+// appendBlobs adds blobsCTE to an append statement, before its final select, binding the rows' arrays after
+// args.
+func appendBlobs(stmt string, args []any, rows []blob.Row) (string, []any) {
+	refs, tenants, _, sizes := blob.Columns(rows)
+	n := len(args) + 1
+	cte := fmt.Sprintf(blobsCTE, n, n+1, n+2)
+	i := strings.LastIndex(stmt, ")\nselect ")
+	return stmt[:i] + cte + stmt[i:], append(args, refs, tenants, sizes)
+}
 
 // appendDeliverSQL is appendSQL for a write that also records a follow-up's delivery (D81), in the same
 // statement: delivered_at of work item $17 is set from the tasks row the UPDATE wrote, so a refused (fenced,
@@ -357,6 +381,9 @@ func fenceArgs(f *Fence) (n, dispatch any) {
 // item's delivered_at in the same statement, so it commits exactly when the event does (D81). Once a write
 // carrying the fence's armed delivery succeeds on its own (tx nil), the delivery is disarmed; in a caller's
 // transaction it stays armed, since only the caller knows whether that transaction commits.
+//
+// The blobs rows pending on ctx (blob.Pending) for the large parts w.Payload names are written in the same
+// statement, and only when the event is (spec §10.4, D167).
 func (l *Log) Append(ctx context.Context, tx pgx.Tx, w Write) (Appended, error) {
 	if err := w.validate(); err != nil {
 		return Appended{}, err
@@ -392,6 +419,9 @@ func (l *Log) Append(ctx context.Context, tx pgx.Tx, w Write) (Appended, error) 
 	}
 	if w.Deliver != uuid.Nil {
 		stmt, args = appendDeliverSQL, append(args, w.Deliver)
+	}
+	if rows := blob.PendingRows(ctx, w.TaskID, w.Payload); len(rows) > 0 {
+		stmt, args = appendBlobs(stmt, args, rows)
 	}
 
 	ctx, cancel := l.writeCtx(ctx)
@@ -518,10 +548,21 @@ with t as (
 select e.seq, t.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text)
   from e join t on t.id = e.task_id`
 
+// createBlobsSQL is createSQL that also writes the blobs rows of the large parts of the caller's first message
+// (spec §10.4, D167), in the statement that creates the task; the rows' arrays are $18 to $20.
+var createBlobsSQL = strings.Replace(createSQL, ")\nselect e.seq", `), b as (
+	insert into kontra.blobs (ref, tenant_id, task_id, size)
+	select x.ref, x.tenant_id, t.id, x.size from t, unnest($18::text[], $19::uuid[], $20::bigint[]) as x(ref, tenant_id, size)
+	on conflict (ref) do nothing
+	returning ref
+)
+select e.seq`, 1)
+
 // CreateTask inserts tasks at version 1 and task_events seq 1 (kind task) in tx (or on its own when tx is
 // nil) and notifies. A duplicate id is taskstore.ErrTaskAlreadyExists; a contextId outside 1..256
 // characters, a messageId over 256, or either one not UTF-8 text without U+0000, is a2a.ErrInvalidParams;
-// a service that does not exist is an error.
+// a service that does not exist is an error. The blobs rows pending on ctx for the large parts of the first
+// message are written in the same statement (spec §10.4, D167).
 func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, error) {
 	if err := t.validate(); err != nil {
 		return Appended{}, err
@@ -538,15 +579,21 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 	if t.FirstMessageID != "" {
 		firstMsg, firstReq = t.FirstMessageID, t.FirstRequest[:]
 	}
-	ctx, cancel := l.writeCtx(ctx)
-	defer cancel()
-	var out Appended
-	err = l.writeRow(ctx, tx, createSQL, []any{
+	args := []any{
 		t.ID, t.Service.TenantID, t.Service.Name, string(t.Protocol), t.Owner.BuyerID, t.Owner.Principal,
 		t.Owner.Via, t.ContextID, firstMsg, firstReq, string(t.State), snap,
 		nullTime(StatusTime(t.Snapshot.Status.Timestamp)), t.QuoteExpiresAt,
 		micros(t.Service.Timeout), micros(t.Service.Retention), payload,
-	}, &out.Seq, &out.Deadline, nil)
+	}
+	stmt := createSQL
+	if rows := blob.PendingRows(ctx, t.ID, payload); len(rows) > 0 {
+		refs, tenants, _, sizes := blob.Columns(rows)
+		stmt, args = createBlobsSQL, append(args, refs, tenants, sizes)
+	}
+	ctx, cancel := l.writeCtx(ctx)
+	defer cancel()
+	var out Appended
+	err = l.writeRow(ctx, tx, stmt, args, &out.Seq, &out.Deadline, nil)
 	var pgErr *pgconn.PgError
 	switch {
 	case err == nil:
@@ -698,6 +745,24 @@ func (l *Log) findResend(ctx context.Context, q querier, svc ServiceRef, o Owner
 		return nil, fmt.Errorf("store: find resend: %w", err)
 	}
 	return r, nil
+}
+
+type requestHashKey struct{}
+
+// WithRequestHash attaches the hash of a request as the caller sent it (RequestHash, after §2.5's stripping),
+// before the relay replaced its large parts by kontra-blob: refs of its own (spec §10.4): a resend of the request
+// is given other refs, so only this hash recognizes it (RequestHashOf).
+func WithRequestHash(ctx context.Context, h [32]byte) context.Context {
+	return context.WithValue(ctx, requestHashKey{}, h)
+}
+
+// RequestHashOf is the hash attached to ctx by WithRequestHash, or else RequestHash(req): tasks.first_request,
+// and the key of a resend (spec §15).
+func RequestHashOf(ctx context.Context, req *a2a.SendMessageRequest) ([32]byte, error) {
+	if h, ok := ctx.Value(requestHashKey{}).([32]byte); ok {
+		return h, nil
+	}
+	return RequestHash(req)
 }
 
 // RequestHash is tasks.first_request for an A2A task (spec §15, D74): SHA-256 of Go's json.Marshal of the

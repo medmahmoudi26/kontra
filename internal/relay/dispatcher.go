@@ -14,6 +14,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/obs"
@@ -181,7 +182,9 @@ func (d *Dispatcher) dispatch(ctx, pctx context.Context, log *slog.Logger, taskU
 	}
 	info := &dispatchInfo{n: in.N, resume: in.Resume, fence: fence, running: running, task: row, svc: svc, request: wi.Payload.Request,
 		followUp: followUp, workItem: wi.ID, delivered: wi.DeliveredAt != nil, since: wi.TaskVersion}
-	dctx = withDispatch(store.WithFence(dctx, fence), info)
+	// The objects the dispatch stores in the bucket are pending on its context until the append that logs their
+	// parts writes their rows (blob.Pending, spec §10.4).
+	dctx = withDispatch(store.WithFence(blob.WithPending(dctx, blob.NewPending()), fence), info)
 	dctx = workqueue.AttachHeartbeater(dctx, hb)
 	_, herr := sh.HandlerFn(dctx, payload)
 	cause := context.Cause(dctx)

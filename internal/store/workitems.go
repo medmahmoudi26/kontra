@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"kontra.sh/kontra/internal/blob"
 )
 
 // WorkItemKind is work_items.kind.
@@ -98,7 +100,8 @@ type storedPayload struct {
 // InsertWorkItem stores wi in tx (the same transaction that pre-creates a new task, or that reads a
 // follow-up's position), or on its own when tx is nil. CreatedAt, ConsumedAt and DeliveredAt are the
 // table's; TaskVersion is the task's version read before the insert in the same transaction (wi's is
-// ignored). A task that does not exist is a2a.ErrTaskNotFound.
+// ignored). The blobs rows pending on ctx for the parts the request names are written in the same
+// transaction (blob.Pending). A task that does not exist is a2a.ErrTaskNotFound.
 func (l *Log) InsertWorkItem(ctx context.Context, tx pgx.Tx, wi WorkItem) error {
 	if wi.ID == uuid.Nil || wi.TaskID == uuid.Nil {
 		return errors.New("store: a work item needs its id and task")
@@ -124,9 +127,14 @@ func (l *Log) InsertWorkItem(ctx context.Context, tx pgx.Tx, wi WorkItem) error 
 		if err != nil {
 			return fmt.Errorf("store: encode work item payload: %w", err)
 		}
-		_, err = q.Exec(ctx, `insert into kontra.work_items (id, task_id, kind, payload) values ($1, $2, $3, $4::json)`,
-			wi.ID, wi.TaskID, string(wi.Kind), payload)
-		return err
+		if _, err = q.Exec(ctx, `insert into kontra.work_items (id, task_id, kind, payload) values ($1, $2, $3, $4::json)`,
+			wi.ID, wi.TaskID, string(wi.Kind), payload); err != nil {
+			return err
+		}
+		// A follow-up's large parts are in the bucket already (the relay's interceptors stored them): their rows
+		// go in the item's transaction, since the message's own event is logged later, by its dispatch (spec
+		// §10.4, D167).
+		return blob.Insert(ctx, q, blob.PendingRows(ctx, wi.TaskID, payload))
 	}
 	var err error
 	if tx != nil {

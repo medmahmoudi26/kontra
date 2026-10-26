@@ -9,11 +9,14 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -25,6 +28,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/obs"
@@ -48,6 +52,12 @@ type ExecutorOptions struct {
 	// MaxPart is the largest part stored inline: without a bucket, an upstream part over it fails the
 	// task upstream_error (§10.4).
 	MaxPart int64
+	// Bucket is the claim-check bucket (blobs:, spec §10.4, D167): an upstream part over MaxPart is stored in it
+	// and logged as a url part kontra-blob:<ref>. Nil: no bucket.
+	Bucket blob.Store
+	// Render renders kontra-blob: parts as presigned GETs in the message a dispatch sends to a direct backend
+	// (spec §10.4: "direct backends get presigned URLs, like callers"); a tunnel dispatch keeps the refs.
+	Render *blob.Renderer
 	// RecordBackoff is the first wait before the attempt's first upstream task id is recorded again after
 	// the gate's store failed to record it, doubling to 5 s (recordFirst). 250 ms.
 	RecordBackoff time.Duration
@@ -222,6 +232,8 @@ type run struct {
 	// task id (nodeFull); resendFull asks send to send the turn's message again.
 	full       fullRetry
 	resendFull bool
+	// digests are the SHA-256 of the objects this run stored or read, by ref (sameObjects).
+	digests map[blob.Ref][sha256.Size]byte
 }
 
 func (r *run) execute(ctx context.Context) {
@@ -499,6 +511,11 @@ func (r *run) nodeFull(ctx context.Context, f upstream.Failure) bool {
 // send is a turn's first dispatch: the caller's message upstream, streaming first.
 func (r *run) send(ctx context.Context) {
 	msg, err := r.upstreamMessage(ctx)
+	if err == nil && r.attempt.Backend == store.BackendDirect {
+		// A direct backend gets presigned GETs for the parts in the bucket, as a caller does; a node keeps
+		// kontra-blob:<ref> and fetches each through its own tunnel (spec §10.4, tunnel.md §8.3).
+		msg, err = r.e.opts.Render.Message(ctx, r.taskUUID, msg)
+	}
 	if err != nil {
 		r.d.running.SetOutcome(lifecycle.DispatchContextLost, "")
 		r.finish(nil, err)
@@ -996,11 +1013,22 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 		r.fail(store.ReasonUpstreamError, "the service sent an event for another task")
 		return true
 	}
+	if CheckReserved(gate) != nil {
+		r.fail(store.ReasonUpstreamError, "the service sent a url part in the gate's reserved kontra-blob: scheme")
+		return true
+	}
 	gate = wirePrecision(gate)
 	// Only a Task that is the attempt's very first upstream event is logged whole; any later one (after
 	// events, from polling, after a re-attach) logs its difference from the projection.
 	first := isTask && r.firstTask
 	r.firstTask = false
+	if t, ok := gate.(*a2a.Task); ok && !first {
+		if gate, err = r.sameObjects(ctx, t); err != nil {
+			r.d.running.SetOutcome(lifecycle.DispatchContextLost, "")
+			r.finish(nil, err)
+			return true
+		}
+	}
 	evs, err := Translate(gate, r.proj, first)
 	if err != nil {
 		r.fail(store.ReasonUpstreamError, "the service sent a malformed event: "+err.Error())
@@ -1024,6 +1052,16 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 		evs = slices.DeleteFunc(evs, func(e a2a.Event) bool { _, st := e.(*a2a.TaskStatusUpdateEvent); return st })
 	}
 	for _, out := range evs {
+		out, err := r.externalize(ctx, out)
+		if err != nil {
+			// The bucket refused the object: nothing of the event is logged, and a dispatch that cannot store
+			// what the upstream sent hands the turn back like a lost store (D42): before the first upstream
+			// task id it is retried, after it a later dispatch re-attaches.
+			r.logger.Warn("an upstream part over the inline limit could not be stored in the bucket", "error", err)
+			r.d.running.SetOutcome(lifecycle.DispatchContextLost, "")
+			r.finish(nil, err)
+			return true
+		}
 		if msg, ok := r.overLimit(out); ok {
 			r.fail(store.ReasonUpstreamError, msg)
 			return true
@@ -1153,8 +1191,9 @@ func (r *run) recordFirst(ctx context.Context, upTask a2a.TaskID, upCtx string) 
 	return true
 }
 
-// overLimit checks what an event would store against §6.6 and §10.4: one part over MaxPart, or the task's
-// stored bytes over TaskBytes, fails the task upstream_error.
+// overLimit checks what an event would store against §6.6 and §10.4: one part over MaxPart (left by externalize
+// only without a bucket), or the task's stored bytes over TaskBytes, fails the task upstream_error. The bytes
+// counted are the logged event's: a part in the bucket counts as its url part, not as the object.
 //
 // SPEC-CONFLICT (D103): §6.6's table names limits.task_bytes as "Parts stored per task", while its rule is that
 // "nothing an upstream sends is unbounded", and task_bytes is the only bound on what one task accumulates.
@@ -1198,23 +1237,185 @@ func encodedSize(v any) int64 {
 	return int64(len(b))
 }
 
-// partSize is a part's decoded size: text and URL bytes, raw bytes before base64, data as JSON.
-func partSize(p *a2a.Part) int64 {
-	if p == nil {
-		return 0
+// partSize is a part's decoded size: text and URL bytes, raw bytes before base64, data as JSON (blob.PartSize).
+func partSize(p *a2a.Part) int64 { return blob.PartSize(p) }
+
+// externalize stores every part of ev over MaxPart in the bucket and returns ev with each replaced by its url
+// part kontra-blob:<ref> (spec §10.4, D167): the logged event, which limits.task_bytes then counts, not the
+// object. The objects' rows are pending on the dispatch's context and written by the append that logs ev
+// (blob.Pending, store.Log.Append). Without a bucket ev is returned as it is, and overLimit fails the task. ev is
+// not modified.
+func (r *run) externalize(ctx context.Context, ev a2a.Event) (a2a.Event, error) {
+	if r.e.opts.Bucket == nil {
+		return ev, nil
 	}
-	switch c := p.Content.(type) {
-	case a2a.Text:
-		return int64(len(c))
-	case a2a.Raw:
-		return int64(len(c))
-	case a2a.URL:
-		return int64(len(c))
-	case a2a.Data:
-		b, _ := json.Marshal(c.Value)
-		return int64(len(b))
+	// parts returns ps with each part over MaxPart stored, or nil when none is.
+	parts := func(ps a2a.ContentParts) (a2a.ContentParts, error) {
+		var out a2a.ContentParts
+		for i, p := range ps {
+			if partSize(p) <= r.e.opts.MaxPart {
+				continue
+			}
+			np, err := r.storePart(ctx, p)
+			if err != nil {
+				return nil, err
+			}
+			if out == nil {
+				out = append(a2a.ContentParts(nil), ps...)
+			}
+			out[i] = np
+		}
+		return out, nil
 	}
-	return 0
+	switch e := ev.(type) {
+	case *a2a.TaskArtifactUpdateEvent:
+		if e.Artifact == nil {
+			return ev, nil
+		}
+		ps, err := parts(e.Artifact.Parts)
+		if err != nil || ps == nil {
+			return ev, err
+		}
+		cp, art := *e, *e.Artifact
+		art.Parts = ps
+		cp.Artifact = &art
+		return &cp, nil
+	case *a2a.TaskStatusUpdateEvent:
+		if e.Status.Message == nil {
+			return ev, nil
+		}
+		ps, err := parts(e.Status.Message.Parts)
+		if err != nil || ps == nil {
+			return ev, err
+		}
+		cp, msg := *e, *e.Status.Message
+		msg.Parts = ps
+		cp.Status.Message = &msg
+		return &cp, nil
+	}
+	return ev, nil
+}
+
+// storePart stores one part's content as an object of this task and returns its url part.
+func (r *run) storePart(ctx context.Context, p *a2a.Part) (*a2a.Part, error) {
+	if partSize(p) > blob.MaxObject {
+		return nil, fmt.Errorf("relay: an upstream part of %d bytes is over the bucket's %d", partSize(p), blob.MaxObject)
+	}
+	np, row, err := blob.Externalize(ctx, r.e.opts.Bucket, r.d.task.TenantID, r.taskUUID, p)
+	if err != nil {
+		return nil, err
+	}
+	if pending := blob.PendingFrom(ctx); pending != nil {
+		pending.Add(row)
+	} else {
+		return nil, errors.New("relay: a dispatch without a pending set cannot record its objects")
+	}
+	if b, _, err := blob.Content(p); err == nil {
+		r.digest(row.Ref, sha256.Sum256(b))
+	}
+	return np, nil
+}
+
+func (r *run) digest(ref blob.Ref, sum [sha256.Size]byte) {
+	if r.digests == nil {
+		r.digests = map[blob.Ref][sha256.Size]byte{}
+	}
+	r.digests[ref] = sum
+}
+
+// sameObjects returns a later upstream Task (polled, or the first after a re-attach) with each artifact part
+// that the projection already holds as an object of this task replaced by the projection's url part, when the
+// part's content is that object's (the same bytes, by SHA-256) and its media type, filename and metadata are
+// what the logged part kept. Translate then logs only what changed (a2aevent.Recover compares parts whole):
+// without it, every poll of a task with a large artifact would store it and log it again. A ref's digest is the
+// one this run computed when it stored the object, or that of the object read back from the bucket once. t is
+// not modified.
+func (r *run) sameObjects(ctx context.Context, t *a2a.Task) (*a2a.Task, error) {
+	if r.e.opts.Bucket == nil || r.proj == nil || len(t.Artifacts) == 0 {
+		return t, nil
+	}
+	var out *a2a.Task
+	for ai, a := range t.Artifacts {
+		if a == nil {
+			continue
+		}
+		pi := slices.IndexFunc(r.proj.Artifacts, func(p *a2a.Artifact) bool { return p != nil && p.ID == a.ID })
+		if pi < 0 {
+			continue
+		}
+		prev := r.proj.Artifacts[pi].Parts
+		var parts a2a.ContentParts
+		for i, p := range a.Parts {
+			if i >= len(prev) || prev[i] == nil || p == nil || partSize(p) <= r.e.opts.MaxPart {
+				continue
+			}
+			u, ok := prev[i].Content.(a2a.URL)
+			if !ok {
+				continue
+			}
+			ref, ok := blob.RefOf(string(u))
+			if !ok {
+				continue
+			}
+			b, mt, err := blob.Content(p)
+			if err != nil {
+				continue
+			}
+			want := &a2a.Part{Content: u, Filename: p.Filename, MediaType: mt, Metadata: p.Metadata}
+			if !reflect.DeepEqual(want, prev[i]) {
+				continue
+			}
+			sum, err := r.objectDigest(ctx, ref)
+			if err != nil {
+				return nil, err
+			}
+			if sum != sha256.Sum256(b) {
+				continue
+			}
+			if parts == nil {
+				parts = append(a2a.ContentParts(nil), a.Parts...)
+			}
+			parts[i] = prev[i]
+		}
+		if parts == nil {
+			continue
+		}
+		if out == nil {
+			cp := *t
+			cp.Artifacts = append([]*a2a.Artifact(nil), t.Artifacts...)
+			out = &cp
+		}
+		art := *a
+		art.Parts = parts
+		out.Artifacts[ai] = &art
+	}
+	if out == nil {
+		return t, nil
+	}
+	return out, nil
+}
+
+// objectDigest is the SHA-256 of one of this task's objects: remembered, or read back from the bucket.
+func (r *run) objectDigest(ctx context.Context, ref blob.Ref) ([sha256.Size]byte, error) {
+	if sum, ok := r.digests[ref]; ok {
+		return sum, nil
+	}
+	rc, _, err := r.e.opts.Bucket.Open(ctx, blob.Key{Tenant: r.d.task.TenantID, Task: r.taskUUID, Ref: ref})
+	if errors.Is(err, blob.ErrNotFound) {
+		return [sha256.Size]byte{}, nil // gone: never the same content
+	}
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("relay: read object %s back: %w", ref, err)
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(rc, blob.MaxObject)); err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("relay: read object %s back: %w", ref, err)
+	}
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
+	r.digest(ref, sum)
+	return sum, nil
 }
 
 // taskBytes is what the projection already stores: its status, metadata, artifacts and history, each

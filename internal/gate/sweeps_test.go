@@ -14,6 +14,8 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"kontra.sh/kontra/internal/audit"
+	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/blob/blobtest"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/pgtest"
@@ -218,7 +220,7 @@ func TestRetentionSweep(t *testing.T) {
 		values ($1, $2, 'hello', $3, 'anonymous', 'anonymous', '2025-11-25', now() - interval '2 hours', 'deleted'),
 		       ($4, $2, 'hello', $3, 'anonymous', 'anonymous', '2025-11-25', null, null)`, oldSvc, e.svc.TenantID, uuid.New(), openSess)
 
-	n, err := SweepRetention(ctx, e.log, time.Now())
+	n, err := SweepRetention(ctx, e.log, time.Now(), nil)
 	if err != nil || n != 1 {
 		t.Fatalf("retention sweep: %d %v", n, err)
 	}
@@ -240,7 +242,7 @@ func TestRetentionSweep(t *testing.T) {
 		t.Fatalf("a session within retention or still open was deleted (%d left)", c)
 	}
 	// Nothing left to delete.
-	if n, err := SweepRetention(ctx, e.log, time.Now()); err != nil || n != 0 {
+	if n, err := SweepRetention(ctx, e.log, time.Now(), nil); err != nil || n != 0 {
 		t.Fatalf("a second pass: %d %v", n, err)
 	}
 }
@@ -319,5 +321,93 @@ func TestOverlapSweep(t *testing.T) {
 	}
 	if ended, err := SweepOverlaps(ctx, keys); err != nil || len(ended) != 0 {
 		t.Errorf("a second pass: %v %v", ended, err)
+	}
+}
+
+// orderedDeleter is the bucket as the retention sweep sees it, recording for each DeleteTask whether the task's
+// row still existed when its objects were deleted.
+type orderedDeleter struct {
+	store.ObjectDeleter
+	pool *pgxpool.Pool
+	fail error
+	mu   sync.Mutex
+	seen map[uuid.UUID]bool // task -> its row existed at the call
+}
+
+func (d *orderedDeleter) DeleteTask(ctx context.Context, tenant, task uuid.UUID) error {
+	var exists bool
+	if err := d.pool.QueryRow(ctx, `select exists (select 1 from kontra.tasks where id = $1)`, task).Scan(&exists); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.seen[task] = exists
+	d.mu.Unlock()
+	if d.fail != nil {
+		return d.fail
+	}
+	return d.ObjectDeleter.DeleteTask(ctx, tenant, task)
+}
+
+// Retention with a bucket (spec §5.4, D167): a task's objects go first, by prefix, then its rows (its blobs rows
+// with them); a task within retention keeps its objects. A bucket that refuses the delete keeps the task's rows,
+// so the next pass tries again.
+func TestRetentionDeletesObjectsBeforeRows(t *testing.T) {
+	e := newSweepEnv(t)
+	ctx := context.Background()
+	bt := blobtest.New(t, "ret")
+	expired := e.task(store.StateSubmitted, time.Hour)
+	kept := e.task(store.StateSubmitted, time.Hour)
+	for _, id := range []uuid.UUID{expired, kept} {
+		_, row, err := blob.Externalize(ctx, bt.Store, e.svc.TenantID, id, &a2a.Part{Content: a2a.Raw(make([]byte, 300<<10))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := blob.Insert(ctx, e.pool, []blob.Row{row}); err != nil {
+			t.Fatal(err)
+		}
+		// An object without a row (stored for an event that was then refused) goes with its task too.
+		ref, _ := blob.NewRef()
+		if err := bt.Store.Put(ctx, blob.Key{Tenant: e.svc.TenantID, Task: id, Ref: ref}, strings.NewReader("x"), 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: id, State: store.StateCompleted, Text: "done"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.exec(`update kontra.tasks set retention_until = now() - interval '1 minute' where id = $1`, expired)
+
+	// The bucket refuses: nothing is deleted, and the error is reported.
+	failing := &orderedDeleter{ObjectDeleter: bt.Store, pool: e.pool, fail: errors.New("bucket down"), seen: map[uuid.UUID]bool{}}
+	if n, err := SweepRetention(ctx, e.log, time.Now(), failing); err == nil || n != 0 {
+		t.Fatalf("a sweep whose bucket refuses: %d %v", n, err)
+	}
+	if c := scalar[int](t, e.pool, `select count(*) from kontra.tasks where id = $1`, expired); c != 1 || len(bt.Keys(t)) != 4 {
+		t.Fatalf("a refused object delete removed the task (%d) or objects (%v)", c, bt.Keys(t))
+	}
+
+	d := &orderedDeleter{ObjectDeleter: bt.Store, pool: e.pool, seen: map[uuid.UUID]bool{}}
+	n, err := SweepRetention(ctx, e.log, time.Now(), d)
+	if err != nil || n != 1 {
+		t.Fatalf("retention sweep: %d %v", n, err)
+	}
+	if existed, called := d.seen[expired]; !called || !existed {
+		t.Fatalf("DeleteTask for the expired task: called %v, its row existed %v (want the objects deleted first)", called, existed)
+	}
+	if _, called := d.seen[kept]; called {
+		t.Error("the objects of a task within retention were deleted")
+	}
+	for _, k := range bt.Keys(t) {
+		if strings.Contains(k, expired.String()) {
+			t.Errorf("object %s of the expired task is left", k)
+		}
+	}
+	if left := bt.Keys(t); len(left) != 2 {
+		t.Errorf("objects left %v, want the kept task's two", left)
+	}
+	if c := scalar[int](t, e.pool, `select count(*) from kontra.blobs where task_id = $1`, expired); c != 0 {
+		t.Errorf("%d blobs rows of the expired task left", c)
+	}
+	if c := scalar[int](t, e.pool, `select count(*) from kontra.blobs where task_id = $1`, kept); c != 1 {
+		t.Errorf("the kept task has %d blobs rows", c)
 	}
 }

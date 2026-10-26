@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/pg"
@@ -116,6 +117,7 @@ type env struct {
 	signals  *signalRecorder
 	queue    *fakeQueue
 	intc     *Interceptors
+	render   *blob.Renderer
 }
 
 type envOptions struct {
@@ -130,6 +132,8 @@ type envOptions struct {
 	writeTimeout time.Duration
 	// wrapTaskStore wraps each service's task store beneath the dispatch's store-failure notes.
 	wrapTaskStore func(*store.Store) taskstore.Store
+	// bucket is the claim-check bucket (blobs:), nil without one.
+	bucket blob.Store
 }
 
 func newEnv(t *testing.T, o envOptions) *env {
@@ -150,8 +154,10 @@ func newEnv(t *testing.T, o envOptions) *env {
 		o.opts.PollInterval = 50 * time.Millisecond
 	}
 	e.queue = &fakeQueue{e: e, done: make(chan dispatchDone, 64)}
+	e.render = blob.NewRenderer(o.bucket, e.pool, nil)
+	o.opts.Bucket, o.opts.Render = o.bucket, e.render
 	e.intc = &Interceptors{Svc: e.svc, Log: e.log, Rules: o.rules, Admit: o.admit, Canceler: o.canceler, Reviews: o.reviews,
-		PushPolicy: o.policy}
+		PushPolicy: o.policy, Bucket: o.bucket, Render: e.render}
 	e.handlers = NewHandlers(HandlerDeps{
 		Log: e.log, Puller: store.NewPullerProvider(e.log, listener), PushStore: o.push,
 		Queue:        func(store.ServiceRef) workqueue.Queue { q, _ := workqueue.NewPushQueue(e.queue); return q },

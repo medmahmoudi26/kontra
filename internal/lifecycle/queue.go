@@ -142,7 +142,8 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	if !ok || adm.TaskID == "" || (adm.Decision.Outcome != hooks.Allow && adm.Decision.Outcome != hooks.Quote) {
 		return "", a2a.NewError(a2a.ErrInternalError, "admission unavailable")
 	}
-	hash, err := store.RequestHash(req)
+	// The hash of the request as the caller sent it, before the relay stored its large parts (spec §10.4, §15).
+	hash, err := store.RequestHashOf(ctx, req)
 	if err != nil {
 		return "", err
 	}

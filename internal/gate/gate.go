@@ -27,6 +27,7 @@ import (
 
 	"kontra.sh/kontra/internal/a2ahttp"
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
@@ -175,8 +176,10 @@ type Replica struct {
 	tunnels  *tunnelgate.Registry
 
 	// Card signing (spec §3, D166): the key set, nil on a gate off loopback without signing_key (which serves no
-	// a2a service).
+	// a2a service). The claim-check bucket (spec §10.4, D167), nil without blobs:, and the egress renderer.
 	signingKeys *jws.KeySet
+	blobs       blob.Store
+	render      *blob.Renderer
 
 	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
@@ -254,6 +257,18 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 	if r.signingKeys, err = loadSigningKeys(cfg, r.log); err != nil {
 		return nil, err
 	}
+	if cfg.Blobs != "" {
+		bcfg, err := blob.ParseURL(cfg.Blobs)
+		if err != nil {
+			return nil, err
+		}
+		// Open checks that the bucket exists and is writable: a gate that cannot store a large part refuses to
+		// start rather than fail the first one.
+		if r.blobs, err = blob.Open(ctx, bcfg); err != nil {
+			return nil, fmt.Errorf("gate: blobs: %w", err)
+		}
+		r.log.Info("claim-check bucket ready", "bucket", bcfg.Bucket, "prefix", bcfg.Prefix, "endpoint", bcfg.Endpoint)
+	}
 	if err = r.assemble(); err != nil {
 		return nil, err
 	}
@@ -316,6 +331,9 @@ func (r *Replica) assemble() error {
 	}
 	snapshot := lifecycle.HooksSnapshot{LifecycleQueue: hookQueue, OperatorPrefixes: cfg.OperatorMetadataPrefixes}
 
+	// Egress rendering (spec §10.4): kontra-blob: parts become presigned GETs for callers, push receivers and
+	// direct backends.
+	r.render = blob.NewRenderer(r.blobs, r.pool, log)
 	var signer card.Signer
 	if r.signingKeys != nil {
 		signer = &card.JWSSigner{Keys: r.signingKeys, JWKSURL: strings.TrimRight(cfg.PublicURL, "/") + jws.JWKSPath}
@@ -345,6 +363,7 @@ func (r *Replica) assemble() error {
 	registry := relay.NewRegistry()
 	executor := r.opts.executor
 	executor.TaskBytes = cfg.Limits.TaskBytes.Int64()
+	executor.Bucket, executor.Render = r.blobs, r.render
 	handlers = relay.NewHandlers(relay.HandlerDeps{
 		Log:       r.storeLog,
 		Puller:    store.NewPullerProvider(r.storeLog, r.listener),
@@ -356,7 +375,7 @@ func (r *Replica) assemble() error {
 		},
 		Interceptors: func(svc store.ServiceRef) []a2asrv.CallInterceptor {
 			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Canceler: r.lifecycle,
-				Reviews: r.lifecycle, PushPolicy: policy}
+				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render}
 			return i.Chain()
 		},
 		Registry: registry,
@@ -370,7 +389,7 @@ func (r *Replica) assemble() error {
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Handlers: handlers, Backends: r.services,
 		Signals: r.lifecycle, Logger: log,
 	}}
-	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log})
+	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log, Render: r.render})
 	// prepare places a tunnel service's attempts on the sessions of every replica (spec §6.1); the
 	// dispatch runs on kontra-tunnel-<the session's replica> (§14.2).
 	acts := &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Sessions: tunnelgate.NewPicker(r.pool),
@@ -392,7 +411,7 @@ func (r *Replica) assemble() error {
 		return err
 	}
 
-	writer := sse.NewWriterWithOptions(r.storeLog, r.listener, sse.Options{Logger: log})
+	writer := sse.NewWriterWithOptions(r.storeLog, r.listener, sse.Options{Logger: log, Render: r.render})
 	routes := edge.NewRouter()
 	a2ahttp.New(a2ahttp.Deps{
 		Services: r.services, Handlers: handlers, SSE: writer, Auth: authn,
@@ -459,6 +478,14 @@ func loadSigningKeys(cfg *config.Config, log *slog.Logger) (*jws.KeySet, error) 
 	log.Warn("no signing_key: the served cards are signed with a key minted at start, which only this process's "+
 		"JWKS lists (a loopback gate of one replica, for development; set signing_key: file:<path>, D166)", "kid", kid)
 	return keys, nil
+}
+
+// objects is the bucket as the retention sweep deletes from it, nil without one.
+func (r *Replica) objects() store.ObjectDeleter {
+	if r.blobs == nil {
+		return nil
+	}
+	return r.blobs
 }
 
 // ID is the replica id.
