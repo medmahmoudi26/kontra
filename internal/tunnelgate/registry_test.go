@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/yamux"
 
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/tunnel"
@@ -177,41 +180,38 @@ func TestOpenExchangeRefusals(t *testing.T) {
 }
 
 // The gate-internal NOTIFY payloads (pg.ChannelTunnel): a superseded session held here is closed; an
-// enrollment is announced to this replica's sessions of the tenant serving the service, unless this
-// replica announced it itself or the session is the enrolled key's; anything malformed is ignored.
+// enrollment (enroll.EnrolledPayload, sent by Admit) is announced to this replica's sessions of the tenant
+// serving the service, each time it arrives, unless the session is the enrolled key's; anything malformed
+// is ignored.
 func TestNotifyPayloads(t *testing.T) {
 	r := NewRegistry(RegistryConfig{ReplicaID: "r-test"})
 	held, n := muxSession(t, "hello")
 	hold(r, held)
 
 	b := enroll.Binding{KeyID: "k1_" + strings.Repeat("b", 26), TenantID: testTenantID, Service: "hello"}
-	if got := EnrolledPayload(b); got != "enrolled:"+b.KeyID+"/"+testTenantID.String()+"/hello" {
+	if got := enroll.EnrolledPayload(b); got != "enrolled:"+b.KeyID+"/"+testTenantID.String()+"/hello" {
 		t.Fatalf("EnrolledPayload = %s", got)
 	}
+	if got, ok := enroll.ParseEnrolledPayload(enroll.EnrolledPayload(b)); !ok || got != b {
+		t.Fatalf("ParseEnrolledPayload = %+v, %v", got, ok)
+	}
 	for _, p := range []string{"", "session:", "session:nope", "enrolled:x/y/z", "enrolled:" + b.KeyID + "/" + testTenantID.String(),
-		"enrolled:" + b.KeyID + "/nope/hello", "key:" + b.KeyID, "other"} {
+		"enrolled:" + b.KeyID + "/nope/hello", "enrolled:" + b.KeyID + "/" + testTenantID.String() + "/hello/x", "key:" + b.KeyID, "other"} {
 		r.Notify(p)
 	}
 	n.noControl(t)
-	// Another replica's enrollment: told.
-	r.Notify(EnrolledPayload(b))
-	if c := n.control(t); c != (tunnel.Control{T: tunnel.CtlEnrolled, Service: "hello", Key: b.KeyID}) {
-		t.Fatalf("control %+v", c)
+	// An enrollment of the service: told, and told again when it arrives again (Admit sends one per commit).
+	for range 2 {
+		r.Notify(enroll.EnrolledPayload(b))
+		if c := n.control(t); c != (tunnel.Control{T: tunnel.CtlEnrolled, Service: "hello", Key: b.KeyID}) {
+			t.Fatalf("control %+v", c)
+		}
 	}
-	// This replica's own (remembered before its commit), another tenant's, the session's own key's, and a
-	// service it does not serve: not told.
-	own := enroll.Binding{KeyID: "k1_" + strings.Repeat("c", 26), TenantID: testTenantID, Service: "hello"}
-	r.remember(EnrolledPayload(own))
-	r.Notify(EnrolledPayload(own))
-	r.Notify(EnrolledPayload(enroll.Binding{KeyID: b.KeyID, TenantID: uuid.Must(uuid.NewV7()), Service: "hello"}))
-	r.Notify(EnrolledPayload(enroll.Binding{KeyID: held.KeyID, TenantID: testTenantID, Service: "hello"}))
-	r.Notify(EnrolledPayload(enroll.Binding{KeyID: b.KeyID, TenantID: testTenantID, Service: "recon"}))
+	// Another tenant's, the session's own key's, and a service it does not serve: not told.
+	r.Notify(enroll.EnrolledPayload(enroll.Binding{KeyID: b.KeyID, TenantID: uuid.Must(uuid.NewV7()), Service: "hello"}))
+	r.Notify(enroll.EnrolledPayload(enroll.Binding{KeyID: held.KeyID, TenantID: testTenantID, Service: "hello"}))
+	r.Notify(enroll.EnrolledPayload(enroll.Binding{KeyID: b.KeyID, TenantID: testTenantID, Service: "recon"}))
 	n.noControl(t)
-	// The memo is used once: the same payload again is another enrollment.
-	r.Notify(EnrolledPayload(own))
-	if c := n.control(t); c.Key != own.KeyID {
-		t.Fatalf("control %+v", c)
-	}
 
 	if got := SessionPayload(held.ID); got != "session:"+held.ID.String() {
 		t.Fatalf("SessionPayload = %s", got)
@@ -294,5 +294,94 @@ func TestDrainWithoutDatabase(t *testing.T) {
 	_, gm := tunneltest.NewPair(t).Sessions(t, nil)
 	if err := r.Add(context.Background(), &Session{ID: uuid.Must(uuid.NewV7())}, gm, nil); !errors.Is(err, errClosing) {
 		t.Fatalf("Add after CloseAll: %v", err)
+	}
+}
+
+// stallConn is the node's end of a net.Pipe that stops reading once stalled: the gate's writes then block
+// (a pipe has no buffer), as they do against a node that stopped reading its TCP connection.
+type stallConn struct {
+	net.Conn
+	stalled atomic.Bool
+	done    chan struct{}
+}
+
+func (c *stallConn) Read(p []byte) (int, error) {
+	if c.stalled.Load() {
+		<-c.done
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Read(p)
+}
+
+// Revoked runs on the goroutine that learned the revocation (the revocation view's emitter; on a LISTEN
+// reconnect, the listener's), and must not wait on the network: against a node that stopped reading, each
+// aborted stream's FIN would otherwise hold it for ConnectionWriteTimeout (M2 review of WP-04). A binding
+// revocation and a key revocation each return at once with three streams in flight, and the streams read
+// as a lost session.
+func TestRevokedDoesNotWaitOnTheNetwork(t *testing.T) {
+	cfg := tunnel.YamuxConfig(nil)
+	cfg.ConnectionWriteTimeout = 2 * time.Second
+	gc, nc := net.Pipe()
+	node := &stallConn{Conn: nc, done: make(chan struct{})}
+	gm, err := yamux.Server(gc, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nm, err := yamux.Client(node, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		close(node.done)
+		_ = gm.Close()
+		_ = nm.Close()
+	})
+	preambles := make(chan tunnel.Preamble, 16)
+	go func() {
+		for {
+			st, err := nm.AcceptStream()
+			if err != nil {
+				return
+			}
+			go func() {
+				if p, err := tunnel.ReadPreamble(bufio.NewReader(st)); err == nil {
+					preambles <- p
+				}
+			}()
+		}
+	}()
+	r := NewRegistry(RegistryConfig{ReplicaID: "r-test"})
+	s := &Session{ID: uuid.Must(uuid.NewV7()), KeyID: "k1_" + strings.Repeat("a", 26), TenantID: testTenantID, mux: gm,
+		served: map[string]string{"hello": tunnel.KindA2A, "recon": tunnel.KindA2A}}
+	hold(r, s)
+	var streams []net.Conn
+	for _, service := range []string{"hello", "hello", "hello", "recon", "recon", "recon"} {
+		x, err := s.OpenExchange(context.Background(), tunnel.Preamble{Op: tunnel.OpHTTP, Service: service, Kind: tunnel.KindA2A})
+		if err != nil {
+			t.Fatal(err)
+		}
+		streams = append(streams, x)
+		select {
+		case <-preambles:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the node did not read a preamble")
+		}
+	}
+	node.stalled.Store(true)
+
+	for _, rev := range []enroll.Revocation{
+		{KeyID: s.KeyID, Service: "hello"},
+		{KeyID: s.KeyID, Reason: enroll.ReasonOperator},
+	} {
+		start := time.Now()
+		r.Revoked(rev)
+		if took := time.Since(start); took > 500*time.Millisecond {
+			t.Fatalf("Revoked(%+v) returned after %v with three streams in flight (ConnectionWriteTimeout %v)", rev, took, cfg.ConnectionWriteTimeout)
+		}
+	}
+	for i, x := range streams {
+		if _, err := x.Read(make([]byte, 1)); !errors.Is(err, ErrSessionGone) {
+			t.Fatalf("stream %d after the revocations: %v", i, err)
+		}
 	}
 }

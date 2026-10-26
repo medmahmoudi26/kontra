@@ -29,9 +29,6 @@ type Session struct {
 	HirePrincipal string
 	CLIVersion    string
 	NodeName      string
-	// Enrolled are the bindings the session's handshake added to services that already had another key
-	// (enroll.Decision.Enrolled): the registry tells those services' other nodes (§5).
-	Enrolled []enroll.Binding
 
 	mux       *yamux.Session
 	reg       *Registry // set by Registry.Add; nil for sessions no registry holds (the Handler's tests)
@@ -385,8 +382,16 @@ func (x *exchange) Close() error {
 }
 
 // abort fails the stream's reads and writes with err from now on: the deadline wakes a read or write in
-// progress, and the gate's half is closed. yamux v0.1.2 has no stream reset, so what the node still sends
-// is buffered (up to a window) until it closes its half or StreamCloseTimeout passes.
+// progress, the stream leaves the session's in-flight set, and the gate's half is closed. yamux v0.1.2 has
+// no stream reset, so what the node still sends is buffered (up to a window) until it closes its half or
+// StreamCloseTimeout passes.
+//
+// abort does not wait on the network. Closing the gate's half sends a FIN, and yamux's Stream.Close waits
+// for that frame to be written, up to ConnectionWriteTimeout (15 s) per stream, against a node that stopped
+// reading (wedged, or hostile: a stolen key being revoked). Its callers are a revocation (Registry.Revoked,
+// on the revocation view's emitter, or on the LISTEN goroutine during a reconnect's catch-up), CloseAll and
+// a session's close, so the FIN goes out on a goroutine of its own (M2 review of WP-04): the stream's reads
+// and writes already fail with err, and the session's close ends a FIN still waiting.
 func (x *exchange) abort(err error) {
 	if err == nil {
 		err = ErrSessionGone
@@ -400,5 +405,6 @@ func (x *exchange) abort(err error) {
 	}
 	x.mu.Unlock()
 	_ = x.Stream.SetDeadline(time.Now())
-	_ = x.Close()
+	x.once.Do(func() { x.s.untrack(x) })
+	go func() { _ = x.Stream.Close() }()
 }

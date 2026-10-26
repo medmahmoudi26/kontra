@@ -863,6 +863,15 @@ func (s *Services) seedTunnel(e *entry, x row) {
 // not yet a candidate; its card is fetched through it now (spec §3; M2 plan audit, gap 3), within ctx. A
 // service this replica has not read yet (a tenant token created it in the same handshake, and its NOTIFY
 // kontra_services is on its way) is read first. A fetch that fails is retried on the keeper loop's backoff.
+//
+// A failed fetch does not keep the session from becoming a candidate (the registry inserts its row
+// anyway): a node whose agent is not listening yet (a compose or systemd sidecar started before its agent:
+// 502 target_unreachable) may serve other services on the session, and the handshake is all-or-nothing.
+// Of the audit's two options for gap 3 the build therefore takes the second (M2 review of WP-04): a
+// dispatch for a tunnel service whose keeper has no card yet (Dispatch's ErrUnavailable before any good
+// fetch or seed) must be a retryable outcome, like no_session, not failed: service_unavailable. That is
+// WP-05's Backend for tunnel services (Backend answers unimpl until then); a keeper that has a card, fetched
+// or seeded from services.upstream_card, dispatches with it whatever this fetch did.
 func (s *Services) tunnelConnected(ctx context.Context, tenantID uuid.UUID, service string) {
 	s.mu.RLock()
 	e := s.byID[svcID{tenantID, service}]

@@ -33,9 +33,6 @@ const (
 	CardWait = 10 * time.Second
 	// writeTimeout bounds the registry's own statements (the tunnels row, a revocation's updates).
 	writeTimeout = 10 * time.Second
-	// enrolledMemo is how long an announcement this replica made itself is remembered, so that its own
-	// NOTIFY, which every replica (this one included) receives, does not tell the nodes twice.
-	enrolledMemo = time.Minute
 )
 
 // RegistryConfig configures a Registry.
@@ -54,12 +51,21 @@ type RegistryConfig struct {
 // Registry is this replica's tunnel sessions (§11, §12, §13).
 //
 // One session per key per gate (§11). Add runs one transaction under a row lock on the key's tunnel_keys
-// row, so the handshakes of one key serialize (M2 plan audit): it re-reads the key and the bindings the
-// session serves, deletes the rows of the key's other sessions whose replica is not draining, and inserts
+// row, so the registrations of one key serialize (M2 plan audit): it re-reads the key and the bindings the
+// session serves, deletes the rows of the key's older sessions whose replica is not draining, and inserts
 // the new row. A superseded session on this replica is closed once the transaction commits; one on another
 // replica is told by NOTIFY kontra_tunnel 'session:<id>', and closes at the latest at its replica's next row
 // check (Run), which closes every session whose row is gone (superseded, reaped with its replica, or
 // deleted with its key or tenant).
+//
+// "Older" is the order of the handshakes, not of the registrations' commits (M2 review of WP-04): a session
+// commits only after its card fetch (up to CardWait), so an older handshake whose fetch is slow (a lost
+// welcome's connection, half-open, while the node has already redialed: M2 plan audit gap 1) would
+// otherwise commit last and close the node's live session. A session's id is a UUIDv7 minted at its
+// handshake (the challenge), so the order is the ids'. A registration that finds a newer session of its key
+// on a replica that is not draining inserts nothing and closes. Within a replica the ids are monotonic;
+// across replicas they follow the replicas' clocks (NTP), so a skew larger than the time between two
+// handshakes of one key can order them wrongly: the wrongly refused session closes, and its node redials.
 //
 // SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): tunnel.md names no way for one replica to act
 // on a session another replica holds (a supersede, an "enrolled" notice): kontra_revoke's payloads cover keys,
@@ -78,7 +84,6 @@ type Registry struct {
 	drained   bool // Drain ran: a session added later is told at once
 	closing   bool // CloseAll ran: Add refuses
 	onConnect []func(ctx context.Context, tenantID uuid.UUID, service string)
-	announced map[string]time.Time // enrolled payloads this replica announced itself
 
 	async sync.WaitGroup // control messages and revocation writes in flight
 }
@@ -90,7 +95,7 @@ func NewRegistry(cfg RegistryConfig) *Registry {
 	}
 	r := &Registry{
 		cfg: cfg, log: cfg.Logger.With("component", "tunnel"), every: cfg.LastPingEvery, wait: cfg.CardWait,
-		sessions: map[uuid.UUID]*Session{}, announced: map[string]time.Time{},
+		sessions: map[uuid.UUID]*Session{},
 	}
 	if r.every <= 0 {
 		r.every = tunnel.LastPingEvery
@@ -111,20 +116,27 @@ var errClosing = errors.New("tunnelgate: the replica is shutting down its tunnel
 //  1. The session joins this replica's registry, not yet a candidate (no row): a revocation from now on
 //     reaches it, and the session is removed when mux.CloseChan() closes.
 //  2. A served binding the revocation view still holds as revoked (a binding this handshake enrolled
-//     again: an enrollment sends no NOTIFY) makes the view read again (enroll.Revocations.Catchup), so the
-//     stream checks do not refuse it for up to 3 s.
+//     again: an enrollment sends no NOTIFY kontra_revoke) makes the view read again
+//     (enroll.Revocations.Catchup), so the stream checks do not refuse it for up to 3 s.
 //  3. The cards of its a2a services are fetched through it (OnConnect, within CardWait), before it is a
-//     candidate: a task placed on it then finds the card (relay.md §3; M2 plan audit, gap 3).
+//     candidate: a task placed on it then finds the card (relay.md §3; M2 plan audit, gap 3). A fetch that
+//     fails (the node's agent not listening yet: 502 target_unreachable) does not keep the session from
+//     becoming a candidate, since it may serve other services; a dispatch for a tunnel service whose
+//     keeper has no card yet is a retryable outcome instead (the audit's second option, WP-05's Backend).
 //  4. One transaction, under a row lock on the key (§11, §12): the key must still be usable (not revoked,
-//     not past a rotation's overlap); bindings revoked since the admission leave the served set; the rows of
-//     the key's other sessions whose replica is not draining are deleted (superseded), with NOTIFY
-//     kontra_tunnel 'session:<id>' for those of other replicas; the tunnels row (session_id, key_id,
-//     tenant_id, replica_id, services, hire_principal, cli_version) is inserted; and each binding the
-//     handshake added to a service that already had a key is announced with NOTIFY kontra_tunnel
-//     'enrolled:<key_id>/<tenant_id>/<service>' (§5).
-//  5. After the commit: superseded sessions of this replica are closed, the enrolled bindings are announced
-//     to this replica's sessions (its own NOTIFY is then ignored here), and a session added after Drain is
-//     told {"t": "drain"} (§13).
+//     not past a rotation's overlap); the session must still be open (a closed one supersedes nothing) and
+//     no newer session of the key may be registered on a replica that is not draining (s is then the
+//     superseded one: it inserts nothing); bindings revoked since the admission leave the served set; the
+//     rows of the key's older sessions whose replica is not draining are deleted (superseded), with NOTIFY
+//     kontra_tunnel 'session:<id>' for those of other replicas; and the tunnels row (session_id, key_id,
+//     tenant_id, replica_id, services, hire_principal, cli_version) is inserted.
+//  5. After the commit: the superseded sessions of this replica are closed, whatever became of s meanwhile
+//     (their rows are gone); then s, if it closed while its row went in, has its row deleted again; and a
+//     session added after Drain is told {"t": "drain"} (§13).
+//
+// The enrollments of the session's handshake are not Add's to announce: Admit's transaction sends NOTIFY
+// kontra_tunnel 'enrolled:…' (enroll.EnrolledPayload), which every replica applies, this one included (§5),
+// so the notice is not lost when the session never registers.
 //
 // An error closes the session (the Handler closes it): the node has its welcome and redials as after any
 // close.
@@ -171,17 +183,18 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 
 	r.connected(ctx, s)
 
-	// The NOTIFY announcing this handshake's enrollments reaches this replica too, possibly before Add
-	// resumes after the commit: remember them first, so that it is not applied twice.
-	for _, b := range s.Enrolled {
-		r.remember(EnrolledPayload(b))
-	}
 	superseded, err := r.insert(ctx, s)
 	if err != nil {
-		for _, b := range s.Enrolled {
-			r.unremember(EnrolledPayload(b))
-		}
 		return fail(err)
+	}
+	// The commit deleted their rows: they close whatever becomes of s.
+	for _, id := range superseded {
+		if old := r.lookup(id); old != nil {
+			old.mu.Lock()
+			old.rowGone = true // deleted by the commit
+			old.mu.Unlock()
+			_ = old.Close("superseded by session " + s.ID.String() + " of its key (§11)")
+		}
 	}
 	s.mu.Lock()
 	s.registered = true
@@ -204,14 +217,6 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 		}
 		return fmt.Errorf("%w: closed while it was registered", ErrSessionGone)
 	}
-	for _, id := range superseded {
-		if old := r.lookup(id); old != nil {
-			_ = old.Close("superseded by session " + s.ID.String() + " of its key (§11)")
-		}
-	}
-	for _, b := range s.Enrolled {
-		r.Enrolled(b)
-	}
 	if drained {
 		r.tellDrain(s)
 	}
@@ -231,7 +236,7 @@ func (r *Registry) insert(ctx context.Context, s *Session) ([]uuid.UUID, error) 
 		if _, err := tx.Exec(ctx, `select set_config('statement_timeout', $1, true)`, fmt.Sprint(writeTimeout.Milliseconds())); err != nil {
 			return err
 		}
-		// One session per key per gate (§11): the key's row lock serializes its handshakes.
+		// One session per key per gate (§11): the key's row lock serializes its registrations.
 		var (
 			revoked bool
 			overlap *time.Time
@@ -248,6 +253,23 @@ func (r *Registry) insert(ctx context.Context, s *Session) ([]uuid.UUID, error) 
 			return fmt.Errorf("%w: key %s was revoked", ErrSessionGone, s.KeyID)
 		case overlap != nil && !overlap.After(now):
 			return fmt.Errorf("%w: key %s is past its rotation's overlap", ErrSessionGone, s.KeyID)
+		}
+		// A session that closed while it waited (its connection cut during the card fetch) supersedes
+		// nothing: its node is gone, and the key's registered session may be the live one.
+		if !s.open() {
+			return fmt.Errorf("%w: it closed before its row went in", ErrSessionGone)
+		}
+		// The handshakes' order (see Registry): a newer session of the key, registered on a replica that is
+		// not draining, supersedes this one, which inserts nothing.
+		var newer uuid.UUID
+		err = tx.QueryRow(ctx, `select t.session_id from kontra.tunnels t join kontra.gate_replicas g on g.replica_id = t.replica_id
+			where t.key_id = $1 and t.session_id > $2 and g.draining_at is null
+			order by t.session_id desc limit 1`, s.KeyID, s.ID).Scan(&newer)
+		switch {
+		case err == nil:
+			return fmt.Errorf("%w: a newer session %s of its key is registered (§11)", ErrSessionGone, newer)
+		case !errors.Is(err, pgx.ErrNoRows):
+			return err
 		}
 		// What the session serves: the welcome's services less the bindings revoked since (§5, §12).
 		names := s.Served()
@@ -267,9 +289,9 @@ func (r *Registry) insert(ctx context.Context, s *Session) ([]uuid.UUID, error) 
 		if dropped := s.keepServed(keep); len(dropped) > 0 {
 			r.log.Info("tunnel session: bindings revoked since its admission are not served", obs.KeyTunnelSession, s.ID, "services", dropped)
 		}
-		// Supersede the key's other sessions, except on a draining replica (make-before-break, §11, §13).
+		// Supersede the key's older sessions, except on a draining replica (make-before-break, §11, §13).
 		rows, err = tx.Query(ctx, `delete from kontra.tunnels t using kontra.gate_replicas g
-			where t.key_id = $1 and t.session_id <> $2 and g.replica_id = t.replica_id and g.draining_at is null
+			where t.key_id = $1 and t.session_id < $2 and g.replica_id = t.replica_id and g.draining_at is null
 			returning t.session_id, t.replica_id`, s.KeyID, s.ID)
 		if err != nil {
 			return err
@@ -306,11 +328,6 @@ func (r *Registry) insert(ctx context.Context, s *Session) ([]uuid.UUID, error) 
 		if _, err := tx.Exec(ctx, `insert into kontra.tunnels (session_id, key_id, tenant_id, replica_id, services, hire_principal, cli_version)
 			values ($1, $2, $3, $4, $5::text[], $6, $7)`, s.ID, s.KeyID, s.TenantID, r.cfg.ReplicaID, s.Served(), hire, cli); err != nil {
 			return err
-		}
-		for _, b := range s.Enrolled {
-			if _, err := tx.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelTunnel), EnrolledPayload(b)); err != nil {
-				return err
-			}
 		}
 		return nil
 	})
@@ -502,9 +519,13 @@ func (r *Registry) check(ctx context.Context) error {
 	if r.cfg.DB == nil {
 		return nil
 	}
-	var ids, held []uuid.UUID
+	// held is never nil: pgx sends a nil slice as NULL, and "not (session_id = any(NULL))" is NULL, which
+	// would delete nothing while the replica holds no session (M2 review of WP-04). The SQL coalesces too.
+	all := r.all()
+	held := make([]uuid.UUID, 0, len(all))
+	var ids []uuid.UUID
 	byID := map[uuid.UUID]*Session{}
-	for _, s := range r.all() {
+	for _, s := range all {
 		held = append(held, s.ID)
 		s.mu.Lock()
 		ok := s.registered && !s.closed
@@ -516,7 +537,7 @@ func (r *Registry) check(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	if _, err := r.cfg.DB.Exec(ctx, `delete from kontra.tunnels where replica_id = $1 and not (session_id = any($2::uuid[]))
+	if _, err := r.cfg.DB.Exec(ctx, `delete from kontra.tunnels where replica_id = $1 and not (session_id = any(coalesce($2::uuid[], '{}')))
 		and last_ping_at < now() - $3::bigint * interval '1 microsecond'`, r.cfg.ReplicaID, held, (2 * r.every).Microseconds()); err != nil {
 		return err
 	}

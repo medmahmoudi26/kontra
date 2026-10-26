@@ -944,3 +944,130 @@ func TestReplicaTunnelSessions(t *testing.T) {
 		t.Fatal("the drained session's row stayed")
 	}
 }
+
+// lockReplicaRow holds the replica's gate_replicas row (FOR NO KEY UPDATE, what an UPDATE of draining_at
+// takes, so foreign keys to the row still check) until the returned release runs: the drain's write of
+// draining_at waits on it, as it waits on a Postgres that does not answer.
+func lockReplicaRow(t *testing.T, pool *pgxpool.Pool, replica string) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `select 1 from kontra.gate_replicas where replica_id = $1 for no key update`, replica); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release = func() { once.Do(func() { _ = tx.Rollback(ctx) }) }
+	t.Cleanup(release)
+	return release
+}
+
+// The drain tells the tunnel nodes {"t":"drain"} only once gate_replicas.draining_at has committed (the M2
+// plan audit's make-before-break drain; spec/tunnel.md §11, §13): before, a node redialing another replica would supersede its
+// session here and cut the tasks on it. While the write cannot commit (the row held), no node is told, for
+// as long as a dispatch keeps the drain going; once it commits, they are. And when the workers have drained
+// before the write ever committed, the drain does not wait for it: the sessions close at CloseAll, the nodes
+// never told (M2 review of WP-04: the write had no bound, so the drain hung on it).
+func TestDrainTellsTunnelsAfterDrainingAtCommits(t *testing.T) {
+	e := newGateEnv(t)
+	ctx := context.Background()
+	const services = `services:
+  hello:
+    kind: a2a
+    backend: { a2a: { url: "%s/base", allow_private: true } }
+    allow: ["org:default"]
+    task: { timeout: 10m, retries: 1 }
+  echo:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+`
+	timing := fastTiming
+	timing.TunnelPing = 500 * time.Millisecond
+	team, err := tenant.EnsureTeam(ctx, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := enroll.NewStore(e.pool, enroll.Options{})
+	token := func() []string {
+		t.Helper()
+		tok, err := store.MintServiceToken(ctx, team, "echo", "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []string{tok}
+	}
+	draining := func(replica string) bool {
+		return scalar[bool](t, e.pool, `select draining_at is not null from kontra.gate_replicas where replica_id = $1`, replica)
+	}
+
+	// A: a dispatch in flight keeps the drain going while draining_at cannot be written.
+	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, fmt.Sprintf(services, e.seller.srv.URL)), timing)
+	n1, err := dialNode(t, a.url, newNodeIdentity(t), echoCard, token(), "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 15*time.Second, "the node's tunnels row on A", func() bool {
+		return scalar[int](t, e.pool, `select count(*) from kontra.tunnels where session_id = $1`, n1.session) == 1
+	})
+	c := a2aClient(t, a.url, e.mintKey("buyer"))
+	slow := send(t, c, "slow", true)
+	eventually(t, 20*time.Second, "the slow task's dispatch runs on A", func() bool { return a.r.InFlight() == 1 })
+	release := lockReplicaRow(t, e.pool, a.r.ID())
+	a.drain()
+	select {
+	case c := <-n1.controls:
+		t.Fatalf("the node read %+v while draining_at could not be written", c)
+	case <-time.After(2 * time.Second):
+	}
+	if draining(a.r.ID()) {
+		t.Fatal("draining_at was written through the held row")
+	}
+	release()
+	if c := n1.nextControl(t, 2*DrainMarkRetry+5*time.Second); c.T != tunnel.CtlDrain {
+		t.Fatalf("the node read %+v, want drain", c)
+	}
+	if !draining(a.r.ID()) {
+		t.Fatal("the node was told to drain before draining_at committed")
+	}
+	if n1.closed(0) {
+		t.Fatal("the drain closed the session before the workers drained")
+	}
+	e.seller.release("slow")
+	if err := a.wait(t, 60*time.Second); err != nil {
+		t.Fatalf("A's Run after the drain: %v", err)
+	}
+	if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, string(slow.ID)); st != "completed" {
+		t.Fatalf("the dispatch in flight during the drain ended %s", st)
+	}
+	if !n1.closed(5 * time.Second) {
+		t.Fatal("A's session stayed open after its drain")
+	}
+
+	// B: nothing in flight, so the workers drain at once while draining_at still cannot be written. The
+	// drain does not wait for the write: the session closes at CloseAll, the node never told.
+	b := e.start("b", e.replicaConfig(freePort(t), time.Minute, fmt.Sprintf(services, e.seller.srv.URL)), timing)
+	n2, err := dialNode(t, b.url, newNodeIdentity(t), echoCard, token(), "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 15*time.Second, "the node's tunnels row on B", func() bool {
+		return scalar[int](t, e.pool, `select count(*) from kontra.tunnels where session_id = $1`, n2.session) == 1
+	})
+	release = lockReplicaRow(t, e.pool, b.r.ID())
+	b.drain()
+	if !n2.closed(DrainMarkTimeout + 5*time.Second) {
+		t.Fatal("B's drain waited on draining_at's write after its workers had drained: the session stayed open")
+	}
+	select {
+	case c := <-n2.controls:
+		t.Fatalf("B's node read %+v although draining_at was never written", c)
+	default:
+	}
+	release()
+	if err := b.wait(t, 30*time.Second); err != nil {
+		t.Fatalf("B's Run after the drain: %v", err)
+	}
+}

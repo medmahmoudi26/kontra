@@ -639,22 +639,39 @@ func TestAddSerializesOneKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Concurrent registrations: one row stays, the newest committed.
+	// Concurrent registrations, committed in any order: one row stays, the newest handshake's (the highest
+	// session id, a UUIDv7); a registration that finds a newer session's row is refused as superseded.
+	sessions := make([]*Session, 8)
+	for i := range sessions {
+		sessions[i] = session()
+	}
+	newest := sessions[len(sessions)-1]
 	var wg sync.WaitGroup
-	for range 8 {
+	for i := len(sessions) - 1; i >= 0; i-- { // the newest first: every older one then finds it
 		wg.Go(func() {
-			if _, err := a.reg.insert(ctx, session()); err != nil {
+			if _, err := a.reg.insert(ctx, sessions[i]); err != nil && !errors.Is(err, ErrSessionGone) {
 				t.Error(err)
 			}
 		})
 	}
 	wg.Wait()
-	var rows int
-	if err := e.pool.QueryRow(ctx, `select count(*) from kontra.tunnels where key_id = $1`, id.KeyID()).Scan(&rows); err != nil {
+	var rows []uuid.UUID
+	r, err := e.pool.Query(ctx, `select session_id from kontra.tunnels where key_id = $1`, id.KeyID())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if rows != 1 {
-		t.Fatalf("%d tunnels rows for one key after concurrent registrations, want 1", rows)
+	for r.Next() {
+		var sid uuid.UUID
+		if err := r.Scan(&sid); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, sid)
+	}
+	if err := r.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0] != newest.ID {
+		t.Fatalf("tunnels rows %v for one key after concurrent registrations, want the newest handshake's (%s)", rows, newest.ID)
 	}
 	if e.hasRow(t, n.session) || e.hasRow(t, s1.ID) {
 		t.Fatal("an older session of the key kept its row")
@@ -1015,4 +1032,236 @@ func TestTenantDeletionClosesSessions(t *testing.T) {
 	if _, ok := a.reg.Get(n.session); ok {
 		t.Fatal("the registry still holds it")
 	}
+}
+
+// connectHook is an OnConnect callback a test arms for the next session that connects: fn is called with
+// the session being registered (the newest one not registered yet), during its card fetch.
+type connectHook struct {
+	mu   sync.Mutex
+	next func(ctx context.Context, s *Session)
+}
+
+func hookConnect(r *Registry) *connectHook {
+	h := &connectHook{}
+	r.OnConnect(func(ctx context.Context, tid uuid.UUID, service string) {
+		h.mu.Lock()
+		fn := h.next
+		h.next = nil
+		h.mu.Unlock()
+		if fn == nil {
+			return
+		}
+		for _, s := range r.ForService(tid, service) {
+			s.mu.Lock()
+			pending := !s.registered
+			s.mu.Unlock()
+			if pending {
+				fn(ctx, s)
+				return
+			}
+		}
+	})
+	return h
+}
+
+func (h *connectHook) arm(fn func(ctx context.Context, s *Session)) {
+	h.mu.Lock()
+	h.next = fn
+	h.mu.Unlock()
+}
+
+// returned waits for one of the replica's handshakes (ServeHTTP) to return.
+func (r *replica) returned(t *testing.T, within time.Duration) {
+	t.Helper()
+	select {
+	case <-r.gate.returned:
+	case <-time.After(within):
+		t.Fatalf("no tunnel handler returned within %v", within)
+	}
+}
+
+// One session per key per gate (§11) follows the order of the handshakes, not of their commits (M2 review of
+// WP-04): an older handshake whose card fetch outlasts a newer one's (a lost welcome's redial while the old
+// connection is still being registered, M2 plan audit gap 1) finds the newer session registered, inserts
+// nothing and closes; the newer session keeps its row and stays open.
+func TestOlderHandshakeDoesNotSupersedeNewer(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	a := e.replica("a", replicaOpts{cardWait: 10 * time.Second})
+	hook := hookConnect(a.reg)
+	id := newIdentity(t)
+	ag := newAgent()
+	first := e.enrollNode(t, a, id, ag, "hello")
+
+	fetching, release := make(chan uuid.UUID, 1), make(chan struct{})
+	hook.arm(func(ctx context.Context, s *Session) {
+		fetching <- s.ID
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	})
+	older, err := a.startNode(t, id, newHello("hello"), ag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-fetching:
+		if got != older.session {
+			t.Fatalf("the held card fetch is session %s's, want %s", got, older.session)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the older session's card fetch did not start")
+	}
+	newer := e.connectNode(t, a, id, ag, "hello")
+	if !first.closed(5 * time.Second) {
+		t.Fatal("the newer session did not supersede the first")
+	}
+	close(release)
+	if !older.closed(5 * time.Second) {
+		t.Fatal("the older handshake's session stayed open although a newer one of its key is registered")
+	}
+	if newer.closed(500 * time.Millisecond) {
+		t.Fatal("the older handshake closed the newer session")
+	}
+	if !e.hasRow(t, newer.session) || e.hasRow(t, older.session) || e.hasRow(t, first.session) {
+		t.Fatalf("rows: newer %v, older %v, first %v; want only the newer's", e.hasRow(t, newer.session), e.hasRow(t, older.session), e.hasRow(t, first.session))
+	}
+	if _, ok := a.reg.Get(newer.session); !ok {
+		t.Fatal("the newer session is not held")
+	}
+	if _, ok := a.reg.Get(older.session); ok {
+		t.Fatal("the older session is held")
+	}
+	if !strings.Contains(a.gate.logs.String(), "newer session "+newer.session.String()) {
+		t.Fatal("the older session's refusal does not name the newer session")
+	}
+}
+
+// A session that closed before its row went in (its connection cut while the gate fetched its card)
+// supersedes nothing (M2 review of WP-04): the key's registered session keeps its row and stays open.
+func TestClosedSessionSupersedesNothing(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	a := e.replica("a", replicaOpts{})
+	hook := hookConnect(a.reg)
+	id := newIdentity(t)
+	ag := newAgent()
+	first := e.enrollNode(t, a, id, ag, "hello")
+
+	hook.arm(func(_ context.Context, s *Session) { _ = s.mux.Close() })
+	cut, err := a.startNode(t, id, newHello("hello"), ag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.returned(t, 10*time.Second) // the cut session's Add has ended
+	if !cut.closed(5 * time.Second) {
+		t.Fatal("the cut session stayed open")
+	}
+	if e.hasRow(t, cut.session) || !e.hasRow(t, first.session) {
+		t.Fatalf("rows: cut %v, first %v; want only the first's", e.hasRow(t, cut.session), e.hasRow(t, first.session))
+	}
+	if _, ok := a.reg.Get(first.session); !ok || first.closed(200*time.Millisecond) {
+		t.Fatal("a closed session's registration closed the key's live session")
+	}
+}
+
+// A session that closes while its row goes in still closes the sessions its commit superseded (M2 review of
+// WP-04): their rows are gone, so they must not stay reachable here until the next row check.
+func TestSupersededCloseWhenTheNewSessionClosesAtCommit(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	a := e.replica("a", replicaOpts{every: time.Hour})
+	id := newIdentity(t)
+	ag := newAgent()
+	first := e.enrollNode(t, a, id, ag, "hello")
+	ctx := context.Background()
+
+	// The first session's row is held: the new session's transaction waits on it, after its checks.
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `select 1 from kontra.tunnels where session_id = $1 for update`, first.session); err != nil {
+		t.Fatal(err)
+	}
+	second, err := a.startNode(t, id, newHello("hello"), ag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 10*time.Second, "the new session's transaction waits on the first session's row", func() bool {
+		var n int
+		if err := e.pool.QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock' and query like '%delete from kontra.tunnels t%'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	})
+	_ = second.mux.Close() // the node leaves while its row goes in
+	eventually(t, 5*time.Second, "the replica sees the new session closed", func() bool { return a.reg.lookup(second.session) == nil })
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !first.closed(5 * time.Second) {
+		t.Fatal("the superseded session stayed open after the commit that deleted its row")
+	}
+	if _, ok := a.reg.Get(first.session); ok {
+		t.Fatal("the superseded session is still held")
+	}
+	eventually(t, 5*time.Second, "no row of the key remains", func() bool { return !e.hasRow(t, first.session) && !e.hasRow(t, second.session) })
+}
+
+// The row check deletes this replica's leftover rows also when it holds no session (M2 review of WP-04):
+// the commonest case, the replica's only session closed during a database blip and its delete failed. An
+// empty set of held sessions must not read as NULL, which matches nothing.
+func TestRowCheckWithNoSessionHeld(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	const every = 300 * time.Millisecond
+	a := e.replica("a", replicaOpts{every: every})
+	id := newIdentity(t)
+	n := e.enrollNode(t, a, id, newAgent(), "hello")
+	if err := a.held(t, n).Close("test"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "the registry holds no session", func() bool { return a.reg.Count() == 0 })
+	stale := uuid.Must(uuid.NewV7())
+	if _, err := e.pool.Exec(context.Background(), `insert into kontra.tunnels (session_id, key_id, tenant_id, replica_id, services, cli_version, last_ping_at)
+		values ($1, $2, $3, $4, '{hello}', 'test', now() - interval '1 hour')`, stale, id.KeyID(), e.team, a.id); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 3*every+2*time.Second, "the row check deletes the leftover row of a replica holding no session", func() bool { return !e.hasRow(t, stale) })
+}
+
+// The {"t":"enrolled"} notice (§5) follows the enrollment's commit (Admit's NOTIFY kontra_tunnel), not the
+// new key's registration (M2 review of WP-04): the first key's node, on the same replica, is told even when
+// the new key's session closes before its row goes in, and told once.
+func TestEnrolledNoticeWhenTheNewSessionCloses(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	a := e.replica("a", replicaOpts{})
+	hook := hookConnect(a.reg)
+	ctx := context.Background()
+	first := e.enrollNode(t, a, newIdentity(t), newAgent(), "hello")
+
+	hook.arm(func(_ context.Context, s *Session) { _ = s.mux.Close() })
+	k2 := newIdentity(t)
+	tok, err := e.store.MintServiceToken(ctx, e.team, "hello", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHello("hello")
+	h.Enroll = []string{tok}
+	second, err := a.startNode(t, k2, h, newAgent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.closed(5 * time.Second) {
+		t.Fatal("the new key's session stayed open")
+	}
+	var bound bool
+	if err := e.pool.QueryRow(ctx, `select exists (select 1 from kontra.key_services where key_id = $1 and service = 'hello' and revoked_at is null)`,
+		k2.KeyID()).Scan(&bound); err != nil || !bound {
+		t.Fatalf("the new key's binding: %v, %v", bound, err)
+	}
+	if c := first.nextControl(t, 2*time.Second); c != (tunnel.Control{T: tunnel.CtlEnrolled, Service: "hello", Key: k2.KeyID()}) {
+		t.Fatalf("control %+v, want enrolled hello %s", c, k2.KeyID())
+	}
+	first.noControl(t, 500*time.Millisecond)
 }

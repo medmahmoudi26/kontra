@@ -41,6 +41,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -165,10 +166,45 @@ type Decision struct {
 	// §2.3). Hiring streams are M3.
 	HirePrincipal string
 	// Enrolled are the bindings this handshake added to services that already had a key: their other
-	// nodes are told on their control streams (§5).
+	// nodes are told on their control streams (§5). Admit announces each with NOTIFY kontra_tunnel
+	// (EnrolledPayload) in its own transaction, so the notice rides the binding's commit.
 	Enrolled []Binding
 	// Rotated is the old key when the handshake rotated (§12).
 	Rotated *Key
+}
+
+// enrolledPrefix starts the gate-internal NOTIFY kontra_tunnel payload of an enrollment (EnrolledPayload).
+const enrolledPrefix = "enrolled:"
+
+// EnrolledPayload is NOTIFY kontra_tunnel's payload (pg.ChannelTunnel) for a key enrolled for a service that
+// already had another key, "enrolled:<key_id>/<tenant_id>/<service>": every replica, the one that admitted
+// it included, tells its sessions hosting the service (§5; tunnelgate.Registry.Notify). Admit sends it in
+// the transaction that inserts the binding, so the notice is never lost to what becomes of the new key's
+// session (a welcome lost, a connection cut while the gate fetches its card: M2 review of WP-04).
+//
+// SPEC-CONFLICT (M2 plan, confirmed conflict on tunnel.md §11 and §5): the spec names no way for one
+// replica to reach the sessions another one holds; the channel is gate-internal, Postgres between
+// replicas, not tunnel wire protocol (see tunnelgate.Registry).
+func EnrolledPayload(b Binding) string {
+	return enrolledPrefix + b.KeyID + "/" + b.TenantID.String() + "/" + b.Service
+}
+
+// ParseEnrolledPayload reads an EnrolledPayload; ok is false for anything else, a malformed one included.
+// The binding's Tenant (its slug) is not carried.
+func ParseEnrolledPayload(payload string) (b Binding, ok bool) {
+	rest, ok := strings.CutPrefix(payload, enrolledPrefix)
+	if !ok {
+		return Binding{}, false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 || !config.NodeKeyIDRE.MatchString(parts[0]) || !config.NameRE.MatchString(parts[2]) {
+		return Binding{}, false
+	}
+	tid, err := uuid.Parse(parts[1])
+	if err != nil {
+		return Binding{}, false
+	}
+	return Binding{KeyID: parts[0], TenantID: tid, Service: parts[2]}, true
 }
 
 // Payload prefixes of the tunnel's NOTIFY kontra_revoke (§12). API keys' ("apikey:<id>") are auth's.

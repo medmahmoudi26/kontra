@@ -70,6 +70,9 @@ const (
 	// DrainMarkRetry is how often the drain retries writing gate_replicas.draining_at when it fails: the
 	// tunnel nodes are told to reconnect elsewhere only once it has committed (M2 plan audit).
 	DrainMarkRetry = time.Second
+	// DrainMarkTimeout bounds one attempt at that write (a row held by another transaction, a Postgres that
+	// stopped answering); the write is also abandoned once the workers have drained.
+	DrainMarkTimeout = 5 * time.Second
 )
 
 // Option configures a replica.
@@ -520,8 +523,9 @@ func (r *Replica) Run(ctx context.Context) error {
 // connected nodes are told {"t": "drain"} once gate_replicas.draining_at has committed, and not before (M2
 // plan audit): a node that redials another replica would otherwise supersede its session here and cut the
 // tasks on it, since only a draining replica's sessions are kept (tunnel.md §11). The write is retried every
-// DrainMarkRetry until it commits or the workers have drained. The sessions keep serving their streams while
-// the workers drain, and are closed, their rows deleted, once the workers have stopped.
+// DrainMarkRetry, each attempt within DrainMarkTimeout, until it commits or the workers have drained, which
+// abandons it: then the nodes are not told. The sessions keep serving their streams while the workers
+// drain, and are closed, their rows deleted, once the workers have stopped.
 func (r *Replica) drain(ctx context.Context, cause error) {
 	r.draining.Store(true)
 	r.log.Info("draining", "cause", cause, "drain_timeout", r.cfg.DrainTimeout.String(), "dispatches", r.InFlight(),
@@ -560,19 +564,40 @@ func (r *Replica) drain(ctx context.Context, cause error) {
 
 // markThenTellTunnels writes gate_replicas.draining_at, retrying every DrainMarkRetry until it commits or
 // stop closes, and then tells the tunnel sessions to reconnect elsewhere (tunnelgate.Registry.Drain).
+//
+// Each attempt is bounded by DrainMarkTimeout, and the one in progress is abandoned when stop closes (the
+// workers have drained): ctx has no deadline, so a write waiting on the row (another transaction holding it,
+// a connection that stopped answering) would otherwise hold the drain, and CloseAll after it, for as long
+// as it waits (M2 review of WP-04).
 func (r *Replica) markThenTellTunnels(ctx context.Context, stop <-chan struct{}) {
+	mctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-mctx.Done():
+		}
+	}()
+	const stopped = "the drain ended before gate_replicas.draining_at was written: the tunnel nodes were not told, and their sessions close now"
 	for {
-		err := r.markDraining(ctx)
+		actx, acancel := context.WithTimeout(mctx, DrainMarkTimeout)
+		err := r.markDraining(actx)
+		acancel()
 		if err == nil {
 			tctx, cancel := context.WithTimeout(ctx, tunnel.ConnectionWriteTimeout+time.Second)
 			r.tunnels.Drain(tctx)
 			cancel()
 			return
 		}
+		if mctx.Err() != nil {
+			r.log.Warn(stopped, "error", err)
+			return
+		}
 		r.log.Warn("gate_replicas.draining_at not written; the tunnel nodes are told to reconnect elsewhere once it is", "error", err)
 		select {
-		case <-stop:
-			r.log.Warn("the drain ended before gate_replicas.draining_at was written: the tunnel nodes were not told, and their sessions close now")
+		case <-mctx.Done():
+			r.log.Warn(stopped)
 			return
 		case <-time.After(DrainMarkRetry):
 		}

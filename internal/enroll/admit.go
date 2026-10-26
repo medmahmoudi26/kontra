@@ -50,8 +50,9 @@ const (
 // Admit decides a proven hello in one transaction (§4, §5, §12): the key's lookup (a known key's stored
 // public key must equal the hello's), revocation (revoked), the API key (auth_invalid), the tokens and
 // scopes (enroll_invalid, kind_mismatch, service_denied), the rotation (under a row lock on the old key),
-// the inserts and the audit rows. A refusal is a *tunnel.HandshakeError; anything else is the gate's own
-// failure.
+// the inserts and the audit rows, and the NOTIFY kontra_tunnel announcing each binding added to a service
+// that already had a key (EnrolledPayload, §5). A refusal is a *tunnel.HandshakeError; anything else is the
+// gate's own failure.
 //
 // The key's row is locked (SELECT … FOR UPDATE) for the whole of Admit's transaction, so concurrent
 // admissions of one key serialize: a rotation, an enrollment and a revocation of it see each other's
@@ -709,6 +710,13 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 	}
 	for _, name := range created {
 		if _, err := a.tx.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelServices), a.slug+"/"+name); err != nil {
+			return nil, err
+		}
+	}
+	// §5: the services' other nodes are told once the binding commits, by every replica (this one included)
+	// on its NOTIFY kontra_tunnel, whatever becomes of the new key's session afterwards.
+	for _, b := range enrolled {
+		if _, err := a.tx.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelTunnel), EnrolledPayload(b)); err != nil {
 			return nil, err
 		}
 	}

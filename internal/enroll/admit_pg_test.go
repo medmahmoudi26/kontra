@@ -18,6 +18,7 @@ import (
 
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/pgtest"
 	"kontra.sh/kontra/internal/tenant"
 	"kontra.sh/kontra/internal/tunnel"
@@ -1195,4 +1196,81 @@ func TestAdmitRotationKeepsRevokedBindings(t *testing.T) {
 		t.Errorf("re-enrolling recon for the new key: served %v", served(d))
 	}
 	e.verifyAudit()
+}
+
+// Admit announces each binding it adds to a service that already had a key with NOTIFY kontra_tunnel
+// 'enrolled:<key_id>/<tenant_id>/<service>' in its own transaction (§5; M2 review of WP-04): the notice
+// rides the binding's commit, so it reaches every replica whatever becomes of the new key's session. The
+// service's first key, a reconnect, and a refused admission announce nothing.
+func TestAdmitAnnouncesEnrollments(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	e.service(e.team, "hello", "a2a", false)
+	e.service(e.team, "recon", "a2a", false)
+	listener, err := pgx.Connect(ctx, e.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close(context.Background()) })
+	if _, err := listener.Exec(ctx, `listen `+string(pg.ChannelTunnel)); err != nil {
+		t.Fatal(err)
+	}
+	next := func(within time.Duration) (string, bool) {
+		t.Helper()
+		wctx, cancel := context.WithTimeout(ctx, within)
+		defer cancel()
+		n, err := listener.WaitForNotification(wctx)
+		if err != nil {
+			if wctx.Err() == nil {
+				t.Fatal(err)
+			}
+			return "", false
+		}
+		return n.Payload, true
+	}
+
+	first := newTestKey(t)
+	h := hello(first, a2a("hello"))
+	h.Enroll = []string{e.token(e.team, "hello")}
+	e.mustAdmit(first, h)
+	if p, ok := next(300 * time.Millisecond); ok {
+		t.Fatalf("the service's first key announced %q", p)
+	}
+
+	second := newTestKey(t)
+	h2 := hello(second, a2a("hello"), a2a("recon"))
+	h2.Enroll = []string{e.token(e.team, "hello"), e.token(e.team, "recon")}
+	d := e.mustAdmit(second, h2)
+	want := Binding{KeyID: second.kid, TenantID: e.team, Service: "hello"}
+	if len(d.Enrolled) != 1 || d.Enrolled[0].Service != "hello" {
+		t.Fatalf("enrolled %+v", d.Enrolled)
+	}
+	p, ok := next(5 * time.Second)
+	if !ok || p != EnrolledPayload(want) {
+		t.Fatalf("NOTIFY kontra_tunnel %q (%v), want %q", p, ok, EnrolledPayload(want))
+	}
+	if got, ok := ParseEnrolledPayload(p); !ok || got != want {
+		t.Fatalf("ParseEnrolledPayload(%q) = %+v, %v", p, got, ok)
+	}
+	if p, ok := next(300 * time.Millisecond); ok {
+		t.Fatalf("a second announcement %q (recon had no other key)", p)
+	}
+
+	// A reconnect enrolls nothing; a refused admission (a used token) commits nothing.
+	e.mustAdmit(second, hello(second, a2a("hello")))
+	third := newTestKey(t)
+	h3 := hello(third, a2a("hello"))
+	h3.Enroll = h2.Enroll[:1]
+	_, err = e.admit(third, h3, nil)
+	wantCode(t, "a used token", err, tunnel.CodeEnrollInvalid)
+	if p, ok := next(300 * time.Millisecond); ok {
+		t.Fatalf("announced %q without an enrollment", p)
+	}
+
+	for _, bad := range []string{"enrolled:", "enrolled:" + second.kid + "/" + e.team.String(), "enrolled:x/" + e.team.String() + "/hello",
+		"enrolled:" + second.kid + "/nope/hello", "enrolled:" + second.kid + "/" + e.team.String() + "/Hello", "session:" + e.team.String()} {
+		if b, ok := ParseEnrolledPayload(bad); ok {
+			t.Errorf("ParseEnrolledPayload(%q) = %+v", bad, b)
+		}
+	}
 }

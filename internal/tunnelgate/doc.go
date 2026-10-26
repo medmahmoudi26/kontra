@@ -5,11 +5,12 @@
 //     yamux server, the ping loop and the control stream (§7, §11, §13). The gate never dials a node.
 //   - Registry (WP-04) holds this replica's sessions: the tunnels row (inserted once welcome is sent and the
 //     session's cards are fetched, last_ping_at every 60 s, deleted at close), one session per key per gate
-//     (a newer handshake supersedes the older under a row lock on the key, except on a draining replica:
-//     make-before-break), revocations (close the key's sessions, drop a service from the served set and
+//     (a newer handshake supersedes the older, in the order of the handshakes' session ids, under a row lock
+//     on the key, except on a draining replica: make-before-break), revocations (close the key's sessions, drop a service from the served set and
 //     abort its streams), "enrolled" notices, the drain message, and the key_scope check before every stream
-//     (relay.md §6.1). Replicas tell each other of supersedes and enrollments by a gate-internal NOTIFY
-//     kontra_tunnel (pg.ChannelTunnel), with the 60 s row check as the fallback.
+//     (relay.md §6.1). Replicas learn of supersedes (sent by the superseding registration) and enrollments
+//     (sent by the admission that committed them, enroll.EnrolledPayload) by a gate-internal NOTIFY
+//     kontra_tunnel (pg.ChannelTunnel), with the 60 s row check as the supersede's fallback.
 //   - Cards (WP-04): a tunnel service's upstream card is fetched through a session when one for the service
 //     connects, before it becomes a candidate, and every 10 minutes while serving (the keeper in
 //     internal/gate), and stored on the services row (relay.md §3); replicas without a session serve the

@@ -5,36 +5,25 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 
-	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// Payload prefixes of NOTIFY kontra_tunnel (pg.ChannelTunnel), gate-internal: see Registry.
-const (
-	sessionPrefix  = "session:"
-	enrolledPrefix = "enrolled:"
-)
+// sessionPrefix starts NOTIFY kontra_tunnel's (pg.ChannelTunnel) payload for a superseded session; the
+// enrollment's is enroll.EnrolledPayload. Both are gate-internal: see Registry.
+const sessionPrefix = "session:"
 
 // SessionPayload is NOTIFY kontra_tunnel's payload for a superseded session, "session:<session_id>": the
 // replica holding it closes it (its row is already deleted).
 func SessionPayload(id uuid.UUID) string { return sessionPrefix + id.String() }
 
-// EnrolledPayload is NOTIFY kontra_tunnel's payload for a key enrolled for a service that already had
-// another key, "enrolled:<key_id>/<tenant_id>/<service>": every replica tells its sessions hosting the
-// service (§5).
-func EnrolledPayload(b enroll.Binding) string {
-	return enrolledPrefix + b.KeyID + "/" + b.TenantID.String() + "/" + b.Service
-}
-
 // Revoked applies one revocation (enroll.Revocations.Subscribe), §12. It runs on the goroutine that learned
 // the revocation and does not wait on the network or the database: what does is done on goroutines of its
-// own.
+// own, an aborted stream's FIN included (exchange.abort).
 //
 //   - A key: its sessions take no new stream and their streams are aborted at once; then each is told
 //     {"t": "revoked"} and closed (its dispatches fail tunnel_lost), and its open mcp_sessions rows are
@@ -133,32 +122,12 @@ func (r *Registry) Enrolled(b enroll.Binding) {
 	}
 }
 
-// remember records an enrollment a handshake on this replica announces itself (Add tells this replica's
-// sessions at once), so that the NOTIFY it sends for the other replicas, which reaches this one too, is not
-// applied twice. Entries older than enrolledMemo are dropped.
-func (r *Registry) remember(payload string) {
-	now := time.Now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for k, at := range r.announced {
-		if now.Sub(at) > enrolledMemo {
-			delete(r.announced, k)
-		}
-	}
-	r.announced[payload] = now
-}
-
-// unremember drops an announcement whose transaction did not commit.
-func (r *Registry) unremember(payload string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.announced, payload)
-}
-
-// Notify applies one gate-internal NOTIFY kontra_tunnel (pg.Listener.OnChannel), sent by the replica that
-// ran a handshake: 'session:<id>' closes a session another replica superseded (its row is gone already),
-// 'enrolled:<key_id>/<tenant_id>/<service>' announces an enrollment (§5). Anything else is ignored. It never
-// waits on the database (pg.Listener runs every channel's callbacks on one goroutine).
+// Notify applies one gate-internal NOTIFY kontra_tunnel (pg.Listener.OnChannel): 'session:<id>', sent by
+// the replica whose handshake superseded a session held here, closes it (its row is gone already);
+// 'enrolled:<key_id>/<tenant_id>/<service>' (enroll.EnrolledPayload), sent by the admission that committed
+// the binding, is told to this replica's sessions hosting the service (§5), on every replica, the admitting
+// one included. Anything else is ignored. It never waits on the database (pg.Listener runs every channel's
+// callbacks on one goroutine).
 //
 // SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): see Registry; this channel is not tunnel wire
 // protocol.
@@ -175,23 +144,10 @@ func (r *Registry) Notify(payload string) {
 			s.mu.Unlock()
 			r.goAsync(func() { _ = s.Close("superseded by a newer session of its key on another replica (§11)") })
 		}
-	case strings.HasPrefix(payload, enrolledPrefix):
-		parts := strings.Split(strings.TrimPrefix(payload, enrolledPrefix), "/")
-		if len(parts) != 3 || !config.NodeKeyIDRE.MatchString(parts[0]) || !config.NameRE.MatchString(parts[2]) {
-			return
+	default:
+		if b, ok := enroll.ParseEnrolledPayload(payload); ok {
+			r.Enrolled(b)
 		}
-		tid, err := uuid.Parse(parts[1])
-		if err != nil {
-			return
-		}
-		r.mu.Lock()
-		_, mine := r.announced[payload]
-		delete(r.announced, payload)
-		r.mu.Unlock()
-		if mine {
-			return
-		}
-		r.Enrolled(enroll.Binding{KeyID: parts[0], TenantID: tid, Service: parts[2]})
 	}
 }
 

@@ -392,7 +392,6 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 		HirePrincipal: dec.HirePrincipal,
 		CLIVersion:    a.hello.Agent,
 		NodeName:      a.hello.Name,
-		Enrolled:      dec.Enrolled,
 		mux:           mux,
 		served:        make(map[string]string, len(dec.Served)),
 		control:       control,
@@ -407,7 +406,13 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 	go func() { live <- tunnel.KeepAlive(ctx, mux, h.ping, tunnel.PingFailures) }()
 
 	if err := h.cfg.Registry.Add(ctx, s, mux, dec.Served); err != nil {
-		log.Error("tunnel session not registered: closing it", "err", err)
+		// ErrSessionGone is a registration the session's own state ended (it closed, a newer session of its
+		// key is registered, its key was revoked meanwhile): expected, not the gate's failure.
+		lvl := slog.LevelError
+		if errors.Is(err, ErrSessionGone) {
+			lvl = slog.LevelWarn
+		}
+		log.Log(ctx, lvl, "tunnel session not registered: closing it", "err", err)
 		return
 	}
 	log.Info("tunnel session open", "services", servedNames(dec.Served), "agent", a.hello.Agent)
