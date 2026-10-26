@@ -2,18 +2,21 @@ package upstream
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 
-	"kontra.sh/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/tunnel"
 )
 
-// M2 seam (WP-05): the tunnel backend (spec/tunnel.md §8; relay.md §6.2, §6.4). Behind the same Backend
-// interface as Direct, so the a2a-go client and the card fetch above it do not change. Classify gains the
-// tunnel's classes when WP-05 builds it: a stream that could not be opened, a session that closed, a
-// response that ended incomplete, and a response the node wrote itself (Kontra-Node other than full and
-// sealed_rejected) are ClassTunnelLost; Kontra-Node: full is ClassNodeFull.
+// The tunnel backend (spec/tunnel.md §8; relay.md §6.2, §6.4). Behind the same Backend interface as Direct,
+// so the a2a-go client and the card fetch above it do not change. Classify gains the tunnel's classes for an
+// exchange over it: a stream that could not be opened, a session that closed, a response that ended
+// incomplete, and a response the node wrote itself (Kontra-Node other than full and sealed_rejected) are
+// ClassTunnelLost; Kontra-Node: full is ClassNodeFull; Kontra-Node: sealed_rejected is ClassSealedRejected.
 
 // Failure classes of a tunnel exchange (relay.md §6.4's tunnel rows).
 const (
@@ -21,14 +24,56 @@ const (
 	// after it.
 	ClassTunnelLost Class = 100 + iota
 	// ClassNodeFull: the node's in-flight cap (503, Kontra-Node: full): retried on another session before
-	// the first upstream task id; after it, a poll is retried with backoff.
+	// the first upstream task id; after it, the exchange is retried with backoff (relay.md §6.4).
 	ClassNodeFull
+	// ClassSealedRejected: a hosting node refused a sealed part (400, Kontra-Node: sealed_rejected,
+	// ext-sealed.md §6): failed: sealed_rejected, never retried. Sealing is M3; the class exists so that
+	// such an answer is never taken for the service's own.
+	ClassSealedRejected
 )
 
-// StreamOpener opens one tunnel stream for one exchange with its preamble written (tunnel.md §8.1).
+// ErrTunnelLost is an exchange whose tunnel session is gone: the stream could not be opened, the session
+// is not held by this replica, or its key, binding or session no longer allow the stream (key_scope,
+// relay.md §6.1). The dispatch fails tunnel_lost (relay.md §6.4, §14.2).
+var ErrTunnelLost = errors.New("upstream: the tunnel session to the service is gone")
+
+// ExchangeTask is the gate task an exchange belongs to: the preamble's task and context (tunnel.md §8.1),
+// which the node needs to check sealed headers (ext-sealed.md). It travels in the request's context (the
+// dispatch and forward_cancel set it, WithTask) because one backend serves every task of its session and
+// service: http.Transport hands the request context's values to the dial that opens the stream.
+type ExchangeTask struct {
+	TaskID    string
+	ContextID string
+}
+
+type exchangeTaskKey struct{}
+
+// WithTask returns ctx carrying the gate task of the exchanges made with it.
+func WithTask(ctx context.Context, t ExchangeTask) context.Context {
+	return context.WithValue(ctx, exchangeTaskKey{}, t)
+}
+
+// TaskFrom returns the gate task WithTask set, if any (a card fetch belongs to no task).
+func TaskFrom(ctx context.Context) (ExchangeTask, bool) {
+	t, ok := ctx.Value(exchangeTaskKey{}).(ExchangeTask)
+	return t, ok
+}
+
+// StreamOpener opens one tunnel stream for one exchange with its preamble written (tunnel.md §8.1): the
+// service and kind it was made for, and the task of TaskFrom(ctx). An error the session caused (a stream
+// that could not be opened, a session closing, a key or binding that no longer allows it) should wrap
+// ErrTunnelLost; NewTunnel's dial wraps any other error that is not ctx's own.
 type StreamOpener interface {
 	OpenExchange(ctx context.Context) (net.Conn, error)
 }
+
+// exchangeOrigin is the origin of the requests the gate writes on a tunnel stream: a placeholder, since the
+// node sends each request to its --serve target and sets Host itself, whatever the request says (§8.2).
+// .invalid never resolves (RFC 6761), so it can never be dialed by mistake.
+const exchangeOrigin = "http://kontra-node.invalid"
+
+// maxTunnelHeaderBytes bounds a response header read through the tunnel (as ssrf's transport does).
+const maxTunnelHeaderBytes = 64 << 10
 
 // Tunnel is a backend over one tunnel session for one service: every exchange is a fresh stream carrying
 // one HTTP/1.1 request in origin form with Connection: close; the client has no overall timeout
@@ -46,20 +91,52 @@ var _ Backend = (*Tunnel)(nil)
 
 // NewTunnel returns the backend of one service over a session's opener.
 func NewTunnel(service, kind string, open StreamOpener) (*Tunnel, error) {
-	return nil, unimpl.Error("upstream.NewTunnel", "WP-05")
+	switch {
+	case service == "":
+		return nil, errors.New("upstream: a tunnel backend needs its service")
+	case kind != tunnel.KindA2A && kind != tunnel.KindMCP:
+		return nil, fmt.Errorf("upstream: a tunnel backend's kind %q", kind)
+	case open == nil:
+		return nil, errors.New("upstream: a tunnel backend needs its session's opener")
+	}
+	t := &Tunnel{Service: service, ServiceKind: kind, open: open}
+	tr := &http.Transport{
+		Proxy: nil, // never the environment's proxy: the request rides the stream
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			c, err := open.OpenExchange(ctx)
+			if err == nil {
+				return c, nil
+			}
+			if ctx.Err() == nil && !errors.Is(err, ErrTunnelLost) {
+				err = fmt.Errorf("%w: %w", ErrTunnelLost, err)
+			}
+			return nil, err
+		},
+		// One exchange per stream, never reused (§8.2): the transport sends Connection: close and closes the
+		// stream after the response.
+		DisableKeepAlives:      true,
+		MaxResponseHeaderBytes: maxTunnelHeaderBytes,
+	}
+	t.client = &http.Client{Transport: &limitTransport{next: tr, tunnel: true}, CheckRedirect: ssrf.NoRedirects}
+	return t, nil
 }
 
 // Kind implements Backend.
 func (t *Tunnel) Kind() Kind { return KindTunnel }
 
 // Origin implements Backend: a fixed placeholder origin; the node ignores it (§8.2).
-func (t *Tunnel) Origin() *url.URL { panic(unimpl.Error("upstream.Tunnel.Origin", "WP-05")) }
+func (t *Tunnel) Origin() *url.URL {
+	u, _ := url.Parse(exchangeOrigin)
+	return u
+}
 
 // Base implements Backend: "/" of Origin. The node prefixes its target's base path (§8.2; see the M2
-// plan's spec conflict on a non-root base).
-func (t *Tunnel) Base() *url.URL { panic(unimpl.Error("upstream.Tunnel.Base", "WP-05")) }
+// plan's spec conflict on a non-root base, which kontra connect refuses until the owner decides).
+func (t *Tunnel) Base() *url.URL {
+	u := t.Origin()
+	u.Path = "/"
+	return u
+}
 
 // HTTPClient implements Backend.
-func (t *Tunnel) HTTPClient() *http.Client {
-	panic(unimpl.Error("upstream.Tunnel.HTTPClient", "WP-05"))
-}
+func (t *Tunnel) HTTPClient() *http.Client { return t.client }

@@ -54,7 +54,7 @@ func (s *Session) fetchCard(ctx context.Context, service string) (*upstream.Fetc
 
 // cardBackend is the upstream.Backend of one card fetch over one session: every request is a fresh stream
 // (DisableKeepAlives sends Connection: close and never reuses one, §8.2), in origin form, with no proxy and
-// no redirect followed. The dispatch's backend over a session is WP-05's upstream.Tunnel.
+// no redirect followed. The dispatch's backend over a session is Registry.Backend's upstream.Tunnel.
 type cardBackend struct {
 	s       *Session
 	service string
