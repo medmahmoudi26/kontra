@@ -1680,7 +1680,7 @@ without running them (M2 review; `internal/ci` `TestHelloworldRunsInCI`).
 Only the `6603ba3` seller is built (WP-07), so D122 and `card_compat`'s stand-in for the 0.2.5 seller stay as they
 are. `anon_limits`, `local_rebinding`, `stdio_roots` and the MCP tests come with M3 and M4 (`test/e2e`).
 
-### D155. The gate bounds a node's pings, and every write has a deadline
+### D155. The gate bounds a node's pings, and every write has a deadline — **needs the owner**
 
 §7 sets yamux's knobs and says `AcceptBacklog` bounds what a hostile peer can pin, but yamux v0.1.2 answers each
 ping on a goroutine of its own that waits up to `ConnectionWriteTimeout` (15 s) to queue its pong, and its send
@@ -1689,8 +1689,9 @@ bytes it sent, enough to take a replica's memory and every tenant's sessions wit
 each session's frames through a token bucket of ping SYNs, 16 at once and one more every 500 ms (a node pings
 once per `ping_s`, at least 1 s, §11, and waits for each pong), and closes the session over it; and every write
 to the WebSocket, on both sides, has `ConnectionWriteTimeout`, so a peer that stops reading fails the send loop
-and closes the session within 15 s ([`tunnel.md`](../spec/tunnel.md) §7, §11; `internal/tunnel/guard.go`,
-`internal/tunnel/mux.go`, `TestGatePingBudget`, `TestStalledPeerClosesTheSession`).
+and closes the session within 15 s. Proposal: §14 lists the ping budget among the per-session limits
+([`tunnel.md`](../spec/tunnel.md) §7, §11; `internal/tunnel/guard.go`, `internal/tunnel/mux.go`,
+`TestGatePingBudget`, `TestStalledPeerClosesTheSession`).
 
 ### D156. yamux's log lines are rate-limited per session
 
@@ -1701,7 +1702,7 @@ suppressed, and the next line let through is preceded by the count suppressed. T
 read and dropped as yamux always did ([`tunnel.md`](../spec/tunnel.md) §7; `internal/tunnel/guard.go`,
 `TestYamuxLinesAreRateLimited`).
 
-### D157. A gate-opened stream is counted until both halves end
+### D157. A gate-opened stream is counted until both halves end — **needs the owner**
 
 D137 counts a node-opened stream until both halves end, but nothing bounded the streams the gate opens, closes,
 and the node does not: yamux v0.1.2 keeps such a stream, and buffers up to a window (256 KiB) of what the node
@@ -1711,5 +1712,6 @@ the gate closes its half (or aborts the stream) it reads and discards what the n
 ends, its close timeout passes or the session ends, and counts the stream until then; a session with more than
 256 such streams (`GateMaxHalfClosed`, four times the node's default in-flight cap) is closed. A node closes its
 half when it has written its response, or at once when the gate's half closes, so only one that keeps them open
-reaches the cap ([`tunnel.md`](../spec/tunnel.md) §7, §14; `internal/tunnelgate/session.go` `linger`,
+reaches the cap. Proposal, with D137's: §14 says a stream is in flight until both halves end, on either side,
+and gives this cap ([`tunnel.md`](../spec/tunnel.md) §7, §14; `internal/tunnelgate/session.go` `linger`,
 `TestHalfClosedStreamsAreCapped`).

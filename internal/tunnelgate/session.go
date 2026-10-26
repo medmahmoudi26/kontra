@@ -439,6 +439,13 @@ func (x *exchange) leave() {
 // Discarding frees the data; the session counts these streams and closes past tunnel.GateMaxHalfClosed
 // (M2 review, security-3; D157), as node-opened streams are counted until both halves end (D137).
 //
+// SPEC-CONFLICT (spec/tunnel.md §7, §14; D157, like D137): §14 caps the streams in flight per session but
+// counts neither a stream the gate has closed and the node has not, nor any limit that closes a session for
+// them. The closest faithful behaviour is D137's for node-opened streams: count the stream until both halves
+// end, and close the session past tunnel.GateMaxHalfClosed, which a node that closes its half when it has
+// answered never reaches. Proposal for the owner: §14 says that a stream is in flight until both halves end,
+// on either side, and that over 256 half-closed gate-opened streams the gate closes the session.
+//
 // An aborted stream's read deadline has passed, to wake the reads in progress (abort): they return first,
 // and then the deadline is cleared for the discarding reads; a Read from then on fails with the abort's
 // error before it reads.

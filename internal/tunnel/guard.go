@@ -21,6 +21,13 @@ import (
 // (at least 1 s, §11) and waits for each pong, so the gate's yamux.Server takes PingBurst ping SYNs at
 // once and one more every PingRefill; over that the session closes. At most PingBurst + 15 s / PingRefill
 // pongs (46) can be waiting on one session.
+//
+// SPEC-CONFLICT (spec/tunnel.md §7, §11, §14; D155): the spec bounds what a hostile peer pins with yamux's
+// AcceptBacklog and lists the per-session limits in §14, but says nothing of pings beyond §11's interval,
+// and no limit closes a session for them. The closest faithful behaviour is a budget no node that follows
+// §11 reaches (it pings once per ping_s, at least 1 s, and waits for each pong) and the session's close past
+// it, which the node treats as any lost session (§13: it redials). Proposal for the owner: §14 lists "ping
+// SYNs: 16 at once, then 2 a second; over it the gate closes the session".
 const (
 	PingBurst  = 16
 	PingRefill = 500 * time.Millisecond
