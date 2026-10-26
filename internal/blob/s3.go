@@ -190,6 +190,22 @@ func (s *s3Store) Presign(ctx context.Context, k Key, ttl time.Duration) (string
 	return u.String(), nil
 }
 
+// Delete removes one object; an object the bucket does not hold is no error (S3's DeleteObject answers 204 for a
+// missing key).
+func (s *s3Store) Delete(ctx context.Context, k Key) error {
+	name, err := s.name(k)
+	if err != nil {
+		return err
+	}
+	if err := s.c.RemoveObject(ctx, s.bucket, name, minio.RemoveObjectOptions{}); err != nil {
+		if errors.Is(s.mapErr(name, err), ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("blob: delete %s: %w", name, err)
+	}
+	return nil
+}
+
 // DeleteTask removes every object under the task's prefix, <prefix>/<tenant>/<task>/. A task without objects is
 // no error.
 func (s *s3Store) DeleteTask(ctx context.Context, tenant, task uuid.UUID) error {

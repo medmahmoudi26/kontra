@@ -198,6 +198,9 @@ type Store interface {
 	Open(ctx context.Context, k Key) (io.ReadCloser, int64, error)
 	// Presign returns a GET URL valid for ttl, for a caller (never for a node).
 	Presign(ctx context.Context, k Key, ttl time.Duration) (string, error)
+	// Delete removes one object: one a refused request stored, which nothing will ever read. An object the bucket
+	// does not hold is no error.
+	Delete(ctx context.Context, k Key) error
 	// DeleteTask removes every object of a task (retention).
 	DeleteTask(ctx context.Context, tenant, task uuid.UUID) error
 }

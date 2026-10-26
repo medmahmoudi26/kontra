@@ -20,6 +20,7 @@ import (
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/blob/blobtest"
+	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
 	ssew "kontra.sh/kontra/internal/sse"
 	"kontra.sh/kontra/internal/store"
@@ -353,13 +354,12 @@ func TestUpstreamReservedSchemeFails(t *testing.T) {
 }
 
 // An upstream part over 256 KiB on a gate with a bucket (spec §10.4) is stored as an object and logged as its
-// url part, its row in the event's own transaction, and the task completes instead of failing upstream_error;
-// limits.task_bytes counts the logged event, not the object. GetTask and the gate's SSE writer render it as a
-// presigned GET that fetches the same bytes.
+// url part, its row in the event's own transaction, and the task completes instead of failing upstream_error.
+// GetTask and the gate's SSE writer render it as a presigned GET that fetches the same bytes.
 func TestUpstreamPartGoesToTheBucket(t *testing.T) {
 	bt := blobtest.New(t, "")
-	e := newEnv(t, envOptions{bucket: bt.Store, opts: ExecutorOptions{TaskBytes: 64 << 10}})
-	data := bytes.Repeat([]byte("artifact"), 300<<10/8) // 300 KiB, over task_bytes as well
+	e := newEnv(t, envOptions{bucket: bt.Store, opts: ExecutorOptions{TaskBytes: 400 << 10}})
+	data := bytes.Repeat([]byte("artifact"), 300<<10/8) // 300 KiB
 	seller := &recordingSeller{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
 		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
@@ -503,4 +503,249 @@ func mustPayload(t *testing.T, msg *a2a.Message, o store.Owner) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// bigPart is a caller part over the inline limit.
+func bigPart(b byte) *a2a.Part {
+	return &a2a.Part{Content: a2a.Raw(bytes.Repeat([]byte{b}, 300<<10)), MediaType: "application/octet-stream"}
+}
+
+// objectsOf lists the bucket's objects under a task.
+func objectsOf(t *testing.T, bt *blobtest.Server, task a2a.TaskID) []string {
+	t.Helper()
+	var out []string
+	for _, k := range bt.Keys(t) {
+		if strings.Contains(k, "/"+string(task)+"/") {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// A new task's large parts go to the bucket only once nothing before the work queue can refuse the request, and
+// a request refused anyway, or answered with another task, leaves no object behind (spec §5.4, §10.4: objects die
+// with their task, and a refused request has none): an inline push URL the SSRF rules refuse, a message a2a-go
+// refuses after the interceptors, a work queue that fails, and two identical requests of which the second is
+// answered with the first's task (the resend race: both passed the interceptors' resend check).
+func TestRefusedNewTaskLeavesNoObjects(t *testing.T) {
+	bt := blobtest.New(t, "")
+	e := newEnv(t, envOptions{bucket: bt.Store})
+	h := e.handler()
+	tasks := e.countRows("tasks")
+
+	// The push URL is refused after Admission.
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("read this"), bigPart(1))
+	_, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg,
+		Config: &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: "https://10.0.0.1/hook"}}})
+	if err == nil || !strings.Contains(err.Error(), "push") {
+		t.Fatalf("a private push URL: %v", err)
+	}
+	if keys := bt.Keys(t); len(keys) != 0 {
+		t.Errorf("a request refused for its push URL left objects %v", keys)
+	}
+
+	// a2a-go refuses a message without an id after every interceptor ran.
+	msg = a2a.NewMessage(a2a.MessageRoleUser, bigPart(2))
+	msg.ID = ""
+	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Fatalf("a message without an id: %v", err)
+	}
+	if keys := bt.Keys(t); len(keys) != 0 {
+		t.Errorf("a request a2a-go refused left objects %v", keys)
+	}
+
+	// The work queue fails.
+	e.queue.failNew = errors.New("the database is gone")
+	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, bigPart(3))}); err == nil {
+		t.Fatal("a failed work queue answered")
+	}
+	e.queue.failNew = nil
+	if keys := bt.Keys(t); len(keys) != 0 {
+		t.Errorf("a request the work queue failed left objects %v", keys)
+	}
+	if n := e.countRows("tasks"); n != tasks {
+		t.Fatalf("refused requests created %d tasks", n-tasks)
+	}
+
+	// The resend race: the first request created its task; the second, identical, stored its own objects under
+	// the task Admission pre-minted for it, and the work queue answers it with the first task.
+	seller := &recordingSeller{}
+	_, b, info := newAgent(t, seller, agentConfig{streaming: true})
+	info.Streaming = true
+	e.backends.set(b, info, nil)
+	first := a2a.NewMessage(a2a.MessageRoleUser, bigPart(4))
+	res, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.queue.wait(t)
+	kept := res.(*a2a.Task).ID
+	before := objectsOf(t, bt, kept)
+	if len(before) != 1 {
+		t.Fatalf("the first task's objects: %v", before)
+	}
+	// The race itself cannot be timed here: a second request that passed the interceptors' resend check (another
+	// message id, so it does) is answered by the work queue with the first task, as lifecycle.Queue answers the
+	// later of two identical requests under the resend key's lock.
+	e.queue.resendTo = kept
+	res, err = h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, bigPart(4))})
+	e.queue.resendTo = ""
+	if err != nil {
+		t.Fatalf("the resend: %v", err)
+	}
+	if got := res.(*a2a.Task).ID; got != kept {
+		t.Fatalf("the resend was answered with %s, want %s", got, kept)
+	}
+	if keys := bt.Keys(t); len(keys) != 1 || keys[0] != before[0] {
+		t.Errorf("objects after the resend race: %v, want only the first task's %v", keys, before)
+	}
+	if rows := e.blobRows(kept); len(rows) != 1 {
+		t.Errorf("the first task's blobs rows: %+v", rows)
+	}
+}
+
+// A follow-up's or a review-window message's large parts are stored once the task is known to take the message,
+// and a message refused afterwards leaves neither objects nor blobs rows (spec §7, §10.4: a refused follow-up's
+// content is not kept; per-task totals are bounded): a review message the window refuses, rejects, or whose
+// caller metadata is over 16 KiB; a follow-up whose new push URL is refused; a follow-up the workflow refuses. A
+// review message not accepted in time keeps its work item, and so its objects (D66); an accepted one is
+// appended, naming them.
+func TestRefusedMessagesLeaveNoObjects(t *testing.T) {
+	bt := blobtest.New(t, "")
+	fr := &fakeReviews{}
+	e := newEnv(t, envOptions{bucket: bt.Store, reviews: fr, rules: hooks.KeyRules{CallerMetadata: []string{"kontra.escrow.dispute"}}})
+	fr.e = e
+	h := e.handler()
+	done, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	e.setState(done, a2a.TaskStateCompleted)
+	send := func(id a2a.TaskID, b byte, md map[string]any, cfg *a2a.SendMessageConfig) error {
+		m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("about this"), bigPart(b))
+		m.TaskID, m.Metadata = id, md
+		_, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m, Config: cfg})
+		return err
+	}
+	clean := func(what string, id a2a.TaskID) {
+		t.Helper()
+		if keys := objectsOf(t, bt, id); len(keys) != 0 {
+			t.Errorf("%s: objects %v left", what, keys)
+		}
+		if rows := e.blobRows(id); len(rows) != 0 {
+			t.Errorf("%s: blobs rows %+v left", what, rows)
+		}
+	}
+	for i, mode := range []string{"refuse", "reject"} {
+		fr.mode = mode
+		if err := send(done, byte(i), nil, nil); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		clean("a review message the window "+mode+"s", done)
+	}
+	fr.mode = "accept"
+	if err := send(done, 5, map[string]any{"kontra.escrow.dispute": strings.Repeat("x", 17<<10)}, nil); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Fatalf("caller metadata over 16 KiB: %v", err)
+	}
+	clean("a review message with too much caller metadata", done)
+	if len(fr.got) != 2 {
+		t.Fatalf("the window was asked %d times", len(fr.got))
+	}
+
+	// Not accepted in time: the work item is kept, so are its objects.
+	fr.mode = "timeout"
+	if err := send(done, 6, nil, nil); !errors.Is(err, a2a.ErrInternalError) {
+		t.Fatalf("timeout: %v", err)
+	}
+	if keys, rows := objectsOf(t, bt, done), e.blobRows(done); len(keys) != 1 || len(rows) != 1 {
+		t.Fatalf("a review message not accepted in time: objects %v, rows %+v (want its one, kept with its work item)", keys, rows)
+	}
+	// Accepted: appended, naming its object.
+	fr.mode = "accept"
+	if err := send(done, 7, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := e.blobRows(done)
+	if keys := objectsOf(t, bt, done); len(keys) != 2 || len(rows) != 2 {
+		t.Fatalf("an accepted review message: objects %v, rows %+v", keys, rows)
+	}
+	if !strings.Contains(e.logText(done), rows[1].Ref.URL()) {
+		t.Error("the accepted message's row names no logged ref")
+	}
+
+	// Follow-ups to a task waiting for input.
+	waiting, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	e.setState(waiting, a2a.TaskStateInputRequired)
+	if err := send(waiting, 8, nil, &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: "https://10.0.0.2/hook"}}); err == nil {
+		t.Fatal("a follow-up with a private push URL was taken")
+	}
+	clean("a follow-up refused for its push URL", waiting)
+	e.queue.refuseFollowUp = true
+	if err := send(waiting, 9, nil, nil); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+		t.Fatalf("a refused follow-up: %v", err)
+	}
+	e.queue.refuseFollowUp = false
+	clean("a follow-up the workflow refused", waiting)
+}
+
+// Objects count toward limits.task_bytes (spec §6.6 "nothing an upstream sends is unbounded", §10.4 "per-task
+// totals are bounded"): a seller that streams large artifacts fails the task upstream_error once the objects it
+// stored and the events logged would exceed the limit, the object that would cross it never written; and a
+// dispatch starts from the objects the task already holds (the caller's too, by their blobs rows).
+func TestObjectsCountTowardTaskBytes(t *testing.T) {
+	bt := blobtest.New(t, "")
+	e := newEnv(t, envOptions{bucket: bt.Store, opts: ExecutorOptions{TaskBytes: 1 << 20}})
+	chunk := bytes.Repeat([]byte("z"), 300<<10)
+	seller := &recordingSeller{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
+		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
+			return
+		}
+		for range 20 {
+			if !yield(a2a.NewArtifactEvent(ec, &a2a.Part{Content: a2a.Raw(chunk)}), nil) {
+				return
+			}
+		}
+		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
+	}}
+	_, b, info := newAgent(t, seller, agentConfig{streaming: true})
+	info.Streaming = true
+	e.backends.set(b, info, nil)
+	id, wid := e.newTask(taskSpec{owner: buyerA, text: "stream"})
+	res := e.dispatch(context.Background(), id, 1, wid, false)
+	p := projection(t, e, id)
+	if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateFailed || p.Metadata[store.MetaFailure] != "upstream_error" ||
+		!strings.Contains(p.Status.Message.Parts[0].Text(), "limits.task_bytes") {
+		t.Fatalf("a seller storing 20 objects of 300 KiB under a 1 MiB task_bytes: %+v %v %v", res, p.Status.State, p.Metadata)
+	}
+	if keys := objectsOf(t, bt, id); len(keys) != 3 || len(e.blobRows(id)) != 3 {
+		t.Fatalf("objects %v, rows %d: want the three that fit in 1 MiB", keys, len(e.blobRows(id)))
+	}
+
+	// The caller's objects count: a task whose first message holds a 300 KiB object has 212 KiB left of 512 KiB,
+	// and a 300 KiB artifact fails it.
+	e2 := newEnv(t, envOptions{bucket: bt.Store, opts: ExecutorOptions{TaskBytes: 512 << 10}})
+	one := &recordingSeller{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
+		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
+			return
+		}
+		if !yield(a2a.NewArtifactEvent(ec, &a2a.Part{Content: a2a.Raw(chunk)}), nil) {
+			return
+		}
+		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
+	}}
+	_, b2, info2 := newAgent(t, one, agentConfig{streaming: true})
+	info2.Streaming = true
+	e2.backends.set(b2, info2, nil)
+	id2, wid2 := e2.newTask(taskSpec{owner: buyerA, text: "with an attachment"})
+	_, row, err := blob.Externalize(context.Background(), bt.Store, e2.svc.TenantID, uid(t, id2), bigPart(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := blob.Insert(context.Background(), e2.pool, []blob.Row{row}); err != nil {
+		t.Fatal(err)
+	}
+	e2.dispatch(context.Background(), id2, 1, wid2, false)
+	if p := projection(t, e2, id2); p.Status.State != a2a.TaskStateFailed || p.Metadata[store.MetaFailure] != "upstream_error" {
+		t.Fatalf("an artifact over what the caller's object left: %v %v", p.Status.State, p.Metadata)
+	}
+	if keys := objectsOf(t, bt, id2); len(keys) != 1 {
+		t.Errorf("objects %v: the artifact's object was written although it did not fit", keys)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -22,20 +23,47 @@ type ObjectDeleter interface {
 	DeleteTask(ctx context.Context, tenant, task uuid.UUID) error
 }
 
+// ObjectDeleteTimeout bounds the deletion of one task's objects by the retention sweep: a bucket that hangs on one
+// prefix fails that task, which keeps its rows for a later pass, instead of holding the sweep.
+const ObjectDeleteTimeout = time.Minute
+
+// objectDeleters is how many tasks' objects one DeleteExpired batch deletes at once (one LIST, then the deletes,
+// each).
+const objectDeleters = 8
+
+// ExpiredBatch is what one DeleteExpired batch did.
+type ExpiredBatch struct {
+	// Deleted is how many tasks it deleted.
+	Deleted int
+	// Found is how many expired tasks it took up: fewer than its limit means no other expired task is left, but
+	// those it was told to skip and those another pass holds.
+	Found int
+	// Kept are the tasks whose bucket objects could not be deleted, with the error: their rows are kept, so a later
+	// pass tries again.
+	Kept []KeptTask
+}
+
+// KeptTask is an expired task whose objects could not be deleted.
+type KeptTask struct {
+	ID  uuid.UUID
+	Err error
+}
+
 // DeleteExpired deletes up to limit terminal tasks whose retention_until is at or before now, with their
-// task_events, attempts, work_items, push_configs and blobs rows (each references tasks on delete cascade), and
-// returns how many it deleted (spec §5.4). Rows another pass is deleting are skipped, not waited for. It runs on
-// ctx, not on the writers' timeout: a batch of tasks with long logs may take a while, and the sweep decides how
-// long it waits.
+// task_events, attempts, work_items, push_configs and blobs rows (each references tasks on delete cascade) (spec
+// §5.4). Rows another pass is deleting are skipped, not waited for. It runs on ctx, not on the writers' timeout: a
+// batch of tasks with long logs may take a while, and the sweep decides how long it waits.
 //
 // With a bucket (objects not nil) a task's objects go first, then its rows (D167): objects.DeleteTask is called
 // for each expired task, by prefix, whether or not it has a blobs row (an object stored for an event that was
-// then refused, or a follow-up whose work item was never written, has none), and only the tasks whose objects
-// are gone are deleted. A task whose objects could not be deleted keeps its rows, so the next pass finds it and
-// tries again; its error is returned after the rest of the batch.
-func (l *Log) DeleteExpired(ctx context.Context, now time.Time, limit int, objects ObjectDeleter) (int, error) {
+// then refused has none), up to objectDeleters at once and each within ObjectDeleteTimeout, and only the tasks
+// whose objects are gone are deleted. A task whose objects could not be deleted keeps its rows and is reported in
+// Kept, not as an error: the batch goes on, and the caller passes it in skip to the next batch of the same pass, so
+// one task the bucket refuses (an object lock, an access-denied prefix) does not head every batch. The error is
+// the database's.
+func (l *Log) DeleteExpired(ctx context.Context, now time.Time, limit int, objects ObjectDeleter, skip []uuid.UUID) (ExpiredBatch, error) {
 	if limit <= 0 {
-		return 0, nil
+		return ExpiredBatch{}, nil
 	}
 	if objects == nil {
 		tag, err := l.db.Exec(ctx, `delete from kontra.tasks t
@@ -46,16 +74,20 @@ func (l *Log) DeleteExpired(ctx context.Context, now time.Time, limit int, objec
 			         for update skip locked) x
 			 where t.id = x.id`, now, limit)
 		if err != nil {
-			return 0, fmt.Errorf("store: delete expired tasks: %w", err)
+			return ExpiredBatch{}, fmt.Errorf("store: delete expired tasks: %w", err)
 		}
-		return int(tag.RowsAffected()), nil
+		n := int(tag.RowsAffected())
+		return ExpiredBatch{Deleted: n, Found: n}, nil
+	}
+	if skip == nil {
+		skip = []uuid.UUID{} // a NULL array would match nothing in "not (id = any(...))"
 	}
 	rows, err := l.db.Query(ctx, `select id, tenant_id from kontra.tasks
-		 where retention_until is not null and retention_until <= $1
+		 where retention_until is not null and retention_until <= $1 and not (id = any($3::uuid[]))
 		 order by retention_until
-		 limit $2`, now, limit)
+		 limit $2`, now, limit, skip)
 	if err != nil {
-		return 0, fmt.Errorf("store: expired tasks: %w", err)
+		return ExpiredBatch{}, fmt.Errorf("store: expired tasks: %w", err)
 	}
 	type expired struct{ id, tenant uuid.UUID }
 	found, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (expired, error) {
@@ -64,26 +96,35 @@ func (l *Log) DeleteExpired(ctx context.Context, now time.Time, limit int, objec
 		return x, err
 	})
 	if err != nil {
-		return 0, fmt.Errorf("store: expired tasks: %w", err)
+		return ExpiredBatch{}, fmt.Errorf("store: expired tasks: %w", err)
 	}
-	var (
-		gone     []uuid.UUID
-		firstErr error
-	)
-	for _, x := range found {
-		if err := objects.DeleteTask(ctx, x.tenant, x.id); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("store: delete the bucket objects of task %s: %w", x.id, err)
+	out := ExpiredBatch{Found: len(found)}
+	errs := make([]error, len(found))
+	sem := make(chan struct{}, objectDeleters)
+	var wg sync.WaitGroup
+	for n, x := range found {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			dctx, cancel := context.WithTimeout(ctx, ObjectDeleteTimeout)
+			defer cancel()
+			if err := objects.DeleteTask(dctx, x.tenant, x.id); err != nil {
+				errs[n] = fmt.Errorf("store: delete the bucket objects of task %s: %w", x.id, err)
 			}
-			if ctx.Err() != nil {
-				break
-			}
+		}()
+	}
+	wg.Wait()
+	var gone []uuid.UUID
+	for n, x := range found {
+		if errs[n] != nil {
+			out.Kept = append(out.Kept, KeptTask{ID: x.id, Err: errs[n]})
 			continue
 		}
 		gone = append(gone, x.id)
 	}
 	if len(gone) == 0 {
-		return 0, firstErr
+		return out, nil
 	}
 	tag, err := l.db.Exec(ctx, `delete from kontra.tasks t
 		 using (select id from kontra.tasks
@@ -91,9 +132,10 @@ func (l *Log) DeleteExpired(ctx context.Context, now time.Time, limit int, objec
 		         for update skip locked) x
 		 where t.id = x.id`, gone, now)
 	if err != nil {
-		return 0, fmt.Errorf("store: delete expired tasks: %w", err)
+		return out, fmt.Errorf("store: delete expired tasks: %w", err)
 	}
-	return int(tag.RowsAffected()), firstErr
+	out.Deleted = int(tag.RowsAffected())
+	return out, nil
 }
 
 // DeleteClosedSessions deletes up to limit mcp_sessions rows closed for longer than the retention of their

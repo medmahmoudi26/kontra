@@ -118,3 +118,57 @@ func TestPendingBlobRowsGoWithTheirWrite(t *testing.T) {
 		t.Error("RequestHashOf ignored the attached hash")
 	}
 }
+
+// DropUnnamedBlobs settles the objects of a request that was not taken (spec §10.4, §5.4): refs the task's creation
+// row, message rows or work items name are kept with their rows; the others are returned and their rows deleted;
+// a task that does not exist names none. BlobBytes sums what the task's rows name.
+func TestDropUnnamedBlobs(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	pending := blob.NewPending()
+	pctx := blob.WithPending(ctx, pending)
+	id := uuid.Must(uuid.NewV7())
+	created, queued, refused := pendingRow(t, e.tenant, id), pendingRow(t, e.tenant, id), pendingRow(t, e.tenant, id)
+	for _, r := range []blob.Row{created, queued, refused} {
+		pending.Add(r)
+	}
+	msg := a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.URL(created.Ref.URL())})
+	msg.TaskID, msg.ContextID = a2a.TaskID(id.String()), "ctx"
+	task := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: "ctx", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{msg}}
+	if _, err := e.log.CreateTask(pctx, nil, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA, ContextID: "ctx",
+		State: StateSubmitted, Snapshot: task}); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []blob.Row{queued, refused} {
+		m := a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.URL(r.Ref.URL())})
+		m.TaskID = task.ID
+		wid := uuid.Must(uuid.NewV7())
+		if err := e.log.InsertWorkItem(pctx, nil, WorkItem{ID: wid, TaskID: id, Kind: WorkExecute,
+			Payload: WorkPayload{Request: &a2a.SendMessageRequest{Message: m}, Owner: buyerA}}); err != nil {
+			t.Fatal(err)
+		}
+		if r == refused {
+			if err := e.log.DeleteWorkItem(ctx, wid, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if n, err := e.log.BlobBytes(ctx, id); err != nil || n != 3*(300<<10) {
+		t.Fatalf("BlobBytes = %d %v", n, err)
+	}
+	gone, err := e.log.DropUnnamedBlobs(ctx, id, []blob.Ref{created.Ref, queued.Ref, refused.Ref})
+	if err != nil || len(gone) != 1 || gone[0] != refused.Ref {
+		t.Fatalf("DropUnnamedBlobs = %v %v, want only the refused follow-up's ref", gone, err)
+	}
+	if n := e.blobCount(id); n != 2 {
+		t.Fatalf("%d rows left, want the two named ones", n)
+	}
+	if n, _ := e.log.BlobBytes(ctx, id); n != 2*(300<<10) {
+		t.Errorf("BlobBytes after = %d", n)
+	}
+	// A task that does not exist (a request refused before its row was written) names nothing.
+	stray, _ := blob.NewRef()
+	if gone, err := e.log.DropUnnamedBlobs(ctx, uuid.Must(uuid.NewV7()), []blob.Ref{stray}); err != nil || len(gone) != 1 || gone[0] != stray {
+		t.Errorf("no task: %v %v", gone, err)
+	}
+}

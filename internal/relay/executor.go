@@ -47,7 +47,7 @@ type ExecutorOptions struct {
 	// which counts toward GetTaskGrace. 10 s, and at most GetTaskGrace.
 	GetTaskTimeout time.Duration
 	// TaskBytes caps the bytes stored per task (limits.task_bytes, 256 MiB, §6.6): every logged event's
-	// whole encoding, not only its parts (overLimit).
+	// whole encoding, not only its parts (overLimit), and every object the task holds in the bucket (storePart).
 	TaskBytes int64
 	// MaxPart is the largest part stored inline: without a bucket, an upstream part over it fails the
 	// task upstream_error (§10.4).
@@ -256,6 +256,17 @@ func (r *run) execute(ctx context.Context) {
 	}
 	r.proj = r.ec.StoredTask
 	r.bytes = taskBytes(r.proj)
+	if r.e.opts.Bucket != nil {
+		// The task's objects count too (storePart): the caller's large parts and every earlier turn's.
+		objects, err := r.e.log.BlobBytes(ctx, id)
+		if err != nil {
+			// Nothing was sent: the workflow retries or re-attaches, as for an attempt it could not read.
+			d.running.SetOutcome(lifecycle.DispatchContextLost, "")
+			r.finish(nil, err)
+			return
+		}
+		r.bytes += objects
+	}
 	attempt, err := r.e.log.GetAttempt(ctx, id, d.n)
 	if err != nil {
 		// Nothing was sent: the workflow re-reads the attempt and retries or re-attaches.
@@ -1053,6 +1064,10 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 	}
 	for _, out := range evs {
 		out, err := r.externalize(ctx, out)
+		if errors.Is(err, errOverTaskBytes) {
+			r.fail(store.ReasonUpstreamError, fmt.Sprintf("the task's stored bytes exceed limits.task_bytes (%d bytes)", r.e.opts.TaskBytes))
+			return true
+		}
 		if err != nil {
 			// The bucket refused the object: nothing of the event is logged, and a dispatch that cannot store
 			// what the upstream sent hands the turn back like a lost store (D42): before the first upstream
@@ -1193,7 +1208,8 @@ func (r *run) recordFirst(ctx context.Context, upTask a2a.TaskID, upCtx string) 
 
 // overLimit checks what an event would store against §6.6 and §10.4: one part over MaxPart (left by externalize
 // only without a bucket), or the task's stored bytes over TaskBytes, fails the task upstream_error. The bytes
-// counted are the logged event's: a part in the bucket counts as its url part, not as the object.
+// counted here are the logged event's, where a part in the bucket is its url part; its object was counted when
+// it was stored (storePart).
 //
 // SPEC-CONFLICT (D103): §6.6's table names limits.task_bytes as "Parts stored per task", while its rule is that
 // "nothing an upstream sends is unbounded", and task_bytes is the only bound on what one task accumulates.
@@ -1241,10 +1257,10 @@ func encodedSize(v any) int64 {
 func partSize(p *a2a.Part) int64 { return blob.PartSize(p) }
 
 // externalize stores every part of ev over MaxPart in the bucket and returns ev with each replaced by its url
-// part kontra-blob:<ref> (spec §10.4, D167): the logged event, which limits.task_bytes then counts, not the
-// object. The objects' rows are pending on the dispatch's context and written by the append that logs ev
-// (blob.Pending, store.Log.Append). Without a bucket ev is returned as it is, and overLimit fails the task. ev is
-// not modified.
+// part kontra-blob:<ref> (spec §10.4, D167): the logged event, which overLimit then counts; each object counts
+// toward limits.task_bytes as it is stored (storePart), and one that would cross it is errOverTaskBytes. The
+// objects' rows are pending on the dispatch's context and written by the append that logs ev (blob.Pending,
+// store.Log.Append). Without a bucket ev is returned as it is, and overLimit fails the task. ev is not modified.
 func (r *run) externalize(ctx context.Context, ev a2a.Event) (a2a.Event, error) {
 	if r.e.opts.Bucket == nil {
 		return ev, nil
@@ -1296,15 +1312,35 @@ func (r *run) externalize(ctx context.Context, ev a2a.Event) (a2a.Event, error) 
 	return ev, nil
 }
 
-// storePart stores one part's content as an object of this task and returns its url part.
+// errOverTaskBytes is an upstream part whose object would take the task's stored bytes over limits.task_bytes:
+// the task fails upstream_error, and the object is never written.
+var errOverTaskBytes = errors.New("relay: the task's stored bytes would exceed limits.task_bytes")
+
+// storePart stores one part's content as an object of this task and returns its url part. The object counts
+// toward limits.task_bytes, checked before it is written: one that would cross it is errOverTaskBytes.
+//
+// SPEC-CONFLICT (§6.6 with §10.4): §6.6's table counts in limits.task_bytes "each logged event's whole encoding"
+// (D103), and the M3 plan counted a part moved to the bucket only as its logged url part. But §6.6's rule is that
+// "nothing an upstream sends is unbounded", and §10.4 says of the bucket "the gate stores bytes it does not
+// interpret; per-task totals are bounded (§6.6)". Counting the url part only bounded a task's objects in number
+// (task_bytes over a url part's few hundred bytes), each up to an SSE event's 4 MiB: thousands of times
+// task_bytes in bytes. The closest faithful behaviour: task_bytes bounds everything the gate stores
+// for the task, each logged event's whole encoding plus each object in the bucket (blobs.size); a dispatch starts
+// from the projection and the task's blobs rows, the caller's objects included, as D103 counts the caller's
+// history.
 func (r *run) storePart(ctx context.Context, p *a2a.Part) (*a2a.Part, error) {
-	if partSize(p) > blob.MaxObject {
-		return nil, fmt.Errorf("relay: an upstream part of %d bytes is over the bucket's %d", partSize(p), blob.MaxObject)
+	size := partSize(p)
+	if size > blob.MaxObject {
+		return nil, fmt.Errorf("relay: an upstream part of %d bytes is over the bucket's %d", size, blob.MaxObject)
+	}
+	if r.bytes+size > r.e.opts.TaskBytes {
+		return nil, errOverTaskBytes
 	}
 	np, row, err := blob.Externalize(ctx, r.e.opts.Bucket, r.d.task.TenantID, r.taskUUID, p)
 	if err != nil {
 		return nil, err
 	}
+	r.bytes += row.Size
 	if pending := blob.PendingFrom(ctx); pending != nil {
 		pending.Add(row)
 	} else {

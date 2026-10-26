@@ -411,3 +411,75 @@ func TestRetentionDeletesObjectsBeforeRows(t *testing.T) {
 		t.Errorf("the kept task has %d blobs rows", c)
 	}
 }
+
+// pickyDeleter is a bucket that refuses to delete one task's objects (an object lock, an access-denied prefix)
+// and counts the calls for each task.
+type pickyDeleter struct {
+	store.ObjectDeleter
+	fail  uuid.UUID
+	mu    sync.Mutex
+	calls map[uuid.UUID]int
+}
+
+func (d *pickyDeleter) DeleteTask(ctx context.Context, tenant, task uuid.UUID) error {
+	d.mu.Lock()
+	d.calls[task]++
+	d.mu.Unlock()
+	if task == d.fail {
+		return errors.New("access denied")
+	}
+	return d.ObjectDeleter.DeleteTask(ctx, tenant, task)
+}
+
+// One task whose objects cannot be deleted does not hold retention back (spec §5.4): it keeps its rows, is not
+// tried again in the same pass, the expired tasks after it are deleted batch after batch, closed MCP sessions are
+// still swept, and the pass reports the failure without ending early.
+func TestRetentionSurvivesAFailingTask(t *testing.T) {
+	e := newSweepEnv(t)
+	ctx := context.Background()
+	bt := blobtest.New(t, "")
+	var ids []uuid.UUID
+	for i := range 3 {
+		id := e.task(store.StateSubmitted, time.Hour)
+		_, row, err := blob.Externalize(ctx, bt.Store, e.svc.TenantID, id, &a2a.Part{Content: a2a.Raw(make([]byte, 300<<10))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := blob.Insert(ctx, e.pool, []blob.Row{row}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: id, State: store.StateCompleted, Text: "done"}); err != nil {
+			t.Fatal(err)
+		}
+		// The failing task's retention_until is the oldest: it heads every query.
+		e.exec(`update kontra.tasks set retention_until = now() - $2::bigint * interval '1 minute' where id = $1`, id, 10-i)
+		ids = append(ids, id)
+	}
+	old := uuid.New()
+	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version, closed_at, close_reason)
+		values ($1, $2, 'anonymous', 'anonymous', '2025-11-25', now() - interval '8 days', 'idle')`, append(old[:], old[:]...), uuid.New())
+
+	d := &pickyDeleter{ObjectDeleter: bt.Store, fail: ids[0], calls: map[uuid.UUID]int{}}
+	n, err := retentionPass(ctx, e.log, time.Now(), d, 2, 10)
+	if err == nil || !strings.Contains(err.Error(), ids[0].String()) {
+		t.Errorf("the pass did not report the failing task: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("deleted %d tasks, want the two after the failing one", n)
+	}
+	if c := scalar[int](t, e.pool, `select count(*) from kontra.tasks where id = $1`, ids[0]); c != 1 {
+		t.Error("the task whose objects could not be deleted lost its rows")
+	}
+	if c := scalar[int](t, e.pool, `select count(*) from kontra.tasks where id = any($1)`, ids[1:]); c != 0 {
+		t.Errorf("%d expired tasks after the failing one were kept", c)
+	}
+	if d.calls[ids[0]] != 1 {
+		t.Errorf("the failing task was tried %d times in one pass", d.calls[ids[0]])
+	}
+	if c := scalar[int](t, e.pool, `select count(*) from kontra.mcp_sessions`); c != 0 {
+		t.Error("a closed MCP session past retention was not swept")
+	}
+	if keys := bt.Keys(t); len(keys) != 1 || !strings.Contains(keys[0], ids[0].String()) {
+		t.Errorf("objects left %v, want only the failing task's", keys)
+	}
+}

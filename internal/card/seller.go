@@ -27,8 +27,8 @@ const SellerKeysMax = 256 << 10
 // at its first attempt; a failed fetch keeps the last verified card for 30 minutes (D89). Building it lifts
 // D90's refusal and the seller_keys half of D144.
 //
-// A {url} set is fetched again with the card, every Refresh (10 minutes): Keeper.Refresh calls Refresh first,
-// and a fetch that fails is a failed refresh of the card.
+// A {url} set is fetched again with the card, every Refresh (10 minutes): Keeper.Refresh fetches it alongside the
+// card, each within its own FetchTimeout, and a fetch that fails is a failed refresh of the card.
 //
 // Work package: M3 WP-02.
 type SellerKeys struct {
@@ -89,12 +89,15 @@ func NewSellerKeys(raw json.RawMessage, client *http.Client) (*SellerKeys, error
 func (s *SellerKeys) Raw() json.RawMessage { return s.raw }
 
 // Refresh fetches a {url} set (an inline set has nothing to fetch): one GET through the SSRF-safe client, a 200
-// with at most SellerKeysMax bytes of a JWK Set holding at least one EC P-256 key. A failure keeps the set last
-// fetched and is returned.
+// with at most SellerKeysMax bytes of a JWK Set holding at least one EC P-256 key, within FetchTimeout at most
+// (the SSRF-safe client has no overall timeout, and a key host that accepts the request and never answers, or
+// trickles its body, would otherwise hold the caller). A failure keeps the set last fetched and is returned.
 func (s *SellerKeys) Refresh(ctx context.Context) error {
 	if s == nil || s.url == "" {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, FetchTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
 	if err != nil {
 		return fmt.Errorf("card: seller_keys: %w", err)

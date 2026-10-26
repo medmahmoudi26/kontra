@@ -3,9 +3,11 @@ package gate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/google/uuid"
 
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
@@ -145,26 +147,52 @@ func SweepOrphans(ctx context.Context, log *store.Log, wf WorkflowChecker, older
 // deleted with their task_events, attempts, work_items, push_configs and blobs rows, in batches, each task's
 // bucket objects first when the gate has a bucket (objects, nil without one; D167), and MCP sessions closed for
 // longer than their service's retention go the same way. It returns how many tasks it deleted.
+//
+// A task whose objects the bucket would not delete keeps its rows and is skipped by the pass's later batches; the
+// pass goes on, sweeps the sessions, and reports those tasks in its error. Once a batch's worth of tasks failed
+// so in one pass (the bucket is likely down), it deletes no more tasks until the next pass.
 func SweepRetention(ctx context.Context, log *store.Log, now time.Time, objects store.ObjectDeleter) (int, error) {
-	total := 0
-	for range retentionBatches {
-		n, err := log.DeleteExpired(ctx, now, retentionBatch, objects)
-		total += n
-		if err != nil {
-			return total, err
+	return retentionPass(ctx, log, now, objects, retentionBatch, retentionBatches)
+}
+
+func retentionPass(ctx context.Context, log *store.Log, now time.Time, objects store.ObjectDeleter, batch, batches int) (int, error) {
+	var (
+		total int
+		kept  []uuid.UUID
+		first error
+		errs  []error
+	)
+	for range batches {
+		b, err := log.DeleteExpired(ctx, now, batch, objects, kept)
+		total += b.Deleted
+		for _, k := range b.Kept {
+			kept = append(kept, k.ID)
+			if first == nil {
+				first = k.Err
+			}
 		}
-		if n < retentionBatch {
+		if err != nil {
+			errs = append(errs, err)
+			break
+		}
+		// Another full batch may wait, unless this one was the last, another pass holds some of its tasks (it
+		// deletes them; the next batch would find them again), or too many failed.
+		if b.Found < batch || b.Deleted+len(b.Kept) < b.Found || len(kept) >= batch || ctx.Err() != nil {
 			break
 		}
 	}
-	for range retentionBatches {
-		n, err := log.DeleteClosedSessions(ctx, now, config.DefaultTaskRetention, retentionBatch)
+	if len(kept) > 0 {
+		errs = append(errs, fmt.Errorf("the bucket objects of %d expired tasks could not be deleted; their rows are kept for the next pass (%w)", len(kept), first))
+	}
+	for range batches {
+		n, err := log.DeleteClosedSessions(ctx, now, config.DefaultTaskRetention, batch)
 		if err != nil {
-			return total, err
+			errs = append(errs, err)
+			break
 		}
-		if n < retentionBatch {
+		if n < batch {
 			break
 		}
 	}
-	return total, nil
+	return total, errors.Join(errs...)
 }

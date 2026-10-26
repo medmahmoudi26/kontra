@@ -16,6 +16,7 @@ import (
 	"kontra.sh/kontra/internal/jws"
 	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/strictjson"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 func mustSellerKeys(t *testing.T, raw string, client *http.Client) *SellerKeys {
@@ -272,5 +273,115 @@ func TestSellerKeysURLThroughTheSSRFDialer(t *testing.T) {
 		if _, _, err := keys.Verify(context.Background(), []byte(`{"name":"x"}`)); !errors.Is(err, ErrNoSellerKeys) {
 			t.Errorf("%s: Verify with no keys fetched: %v", tc.url, err)
 		}
+	}
+}
+
+func (h *jwksHost) setBody(b []byte) { h.mu.Lock(); h.body = b; h.mu.Unlock() }
+
+// A {url} key fetch is bounded on its own (spec §6.5's rule for every upstream exchange; the card fetch's 30 s
+// budget): a key host that accepts the request and never answers fails RefreshSellerKeys, the replicas-without-a-
+// session path whose loop context never ends, instead of blocking it; and a slow key host does not eat into the
+// card fetch's budget on the session path.
+func TestSellerKeyFetchIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	var delay atomic.Int64 // 0: hang until the test ends
+	seller, _ := jws.EphemeralKeySet()
+	body := mustJWKS(t, seller)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if d := time.Duration(delay.Load()); d > 0 {
+			time.Sleep(d)
+			_, _ = w.Write(body)
+			return
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+	keys := mustSellerKeys(t, `{"url": "`+srv.URL+`/jwks.json"}`, srv.Client())
+	card := sellerSigned(t, seller, string(read(t, "a2a-cli-exec.json")))
+	var fetchErr atomic.Value
+	fetch := func(ctx context.Context, _ upstream.Backend) (*upstream.Fetched, error) {
+		select {
+		case <-time.After(250 * time.Millisecond): // a seller answering in a quarter of a second
+		case <-ctx.Done():
+			fetchErr.Store(ctx.Err())
+			return nil, ctx.Err()
+		}
+		return &upstream.Fetched{Raw: []byte(card)}, nil
+	}
+	k := NewKeeper(nil, Input{PublicURL: "https://gate.example", ServicePath: "/agents/hello"},
+		WithSellerKeys(keys), WithFetchTimeout(400*time.Millisecond), WithFetch(fetch))
+
+	done := make(chan error, 1)
+	go func() { done <- k.RefreshSellerKeys(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("a key host that never answers: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RefreshSellerKeys is still waiting on a key host that never answers")
+	}
+
+	// The key host answers in 300 ms, the seller in 250 ms: each within the 400 ms budget, not both in one.
+	delay.Store(int64(300 * time.Millisecond))
+	if err := k.Refresh(context.Background()); err != nil {
+		t.Fatalf("a refresh whose key and card fetches each fit their budget: %v (card fetch: %v)", err, fetchErr.Load())
+	}
+	if s, err := k.Current(); err != nil || !s.Verified {
+		t.Fatalf("the card: verified %v, %v", s != nil && s.Verified, err)
+	}
+}
+
+// A card refused against a stale {url} key set is verified again when the keys are refreshed (spec §3): after a
+// seller rotates its key and re-signs its card, a replica that holds no session (it serves the stored card the
+// NOTIFY seeded) serves it as soon as its key refresh fetches the new key, and so does the session path when the
+// card fetch fails but the keys arrive.
+func TestRefusedCardReverifiedAfterKeyRefresh(t *testing.T) {
+	old, _ := jws.EphemeralKeySet()
+	rotated, _ := jws.EphemeralKeySet()
+	card := sellerSigned(t, rotated, string(read(t, "a2a-cli-exec.json")))
+	host := newJWKSHost(t, mustJWKS(t, old))
+	in := Input{PublicURL: "https://gate.example", ServicePath: "/agents/hello"}
+	ctx := context.Background()
+
+	// No session: RefreshSellerKeys.
+	k := NewKeeper(nil, in, WithSellerKeys(mustSellerKeys(t, `{"url": "`+host.srv.URL+`/jwks.json"}`, host.srv.Client())))
+	if err := k.RefreshSellerKeys(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Seed([]byte(card), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Current(); !errors.Is(err, ErrNotVerified) {
+		t.Fatalf("a card signed by a key the stale set lacks: %v", err)
+	}
+	host.setBody(mustJWKS(t, rotated))
+	if err := k.RefreshSellerKeys(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := k.Current(); err != nil || !s.Verified {
+		t.Fatalf("after the key refresh: verified %v, %v", s != nil && s.Verified, err)
+	}
+
+	// A session whose card fetch fails while the keys arrive.
+	host.setBody(mustJWKS(t, old))
+	cs := newCardServer(t, "")
+	cs.set("", http.StatusBadGateway)
+	k2 := NewKeeper(backend(t, cs), in, WithSellerKeys(mustSellerKeys(t, `{"url": "`+host.srv.URL+`/jwks.json"}`, host.srv.Client())))
+	if err := k2.RefreshSellerKeys(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := k2.Seed([]byte(card), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	host.setBody(mustJWKS(t, rotated))
+	if err := k2.Refresh(ctx); err == nil {
+		t.Fatal("a refresh whose card fetch failed succeeded")
+	}
+	if s, err := k2.Current(); err != nil || !s.Verified {
+		t.Fatalf("after a refresh that fetched the keys only: verified %v, %v", s != nil && s.Verified, err)
 	}
 }

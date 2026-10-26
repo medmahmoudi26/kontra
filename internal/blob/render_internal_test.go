@@ -25,6 +25,7 @@ func (f *fakeStore) Open(context.Context, Key) (io.ReadCloser, int64, error) {
 	return nil, 0, ErrNotFound
 }
 func (f *fakeStore) DeleteTask(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+func (f *fakeStore) Delete(context.Context, Key) error                      { return nil }
 func (f *fakeStore) Presign(_ context.Context, k Key, ttl time.Duration) (string, error) {
 	if f.fail != nil {
 		return "", f.fail

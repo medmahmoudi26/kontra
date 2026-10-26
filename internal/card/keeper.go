@@ -77,7 +77,8 @@ type Keeper struct {
 
 	mu       sync.RWMutex
 	served   *Served
-	recorded *Served // the card the persist hook last recorded, nil before its first success
+	servedAt time.Time // when the served card was fetched (or the stored one was), for a verdict given later
+	recorded *Served   // the card the persist hook last recorded, nil before its first success
 	info     upstream.Info
 	lastOK   time.Time
 	lastErr  error
@@ -166,24 +167,34 @@ func (k *Keeper) verify(ctx context.Context, raw []byte) (verdict, error) {
 	return verdict{verified: ok, refused: !ok}, nil
 }
 
-// Refresh fetches the card once, within FetchTimeout, and a {url} seller key set with it. On success it
+// Refresh fetches the card once, within FetchTimeout, and a {url} seller key set with it, at the same time and
+// within a FetchTimeout of its own (a slow key host does not eat into the card's budget). On success it
 // replaces the last good card and calls the persist hook while that card is unrecorded (a failed call is
 // returned, and made again at the next good fetch), or the touch hook when it is recorded; on failure, a fetch
 // that ran out of time included, the last good card stays and the error is returned. A fetched card that no
-// configured seller key verifies is installed unavailable and returned as an error.
+// configured seller key verifies is installed unavailable and returned as an error. When the keys were fetched
+// and the card was not, the current card is verified again against them (reverify).
 func (k *Keeper) Refresh(ctx context.Context) error {
+	keysDone := make(chan error, 1)
+	if k.seller == nil {
+		keysDone <- nil
+	} else {
+		go func() { keysDone <- k.refreshKeys(ctx) }()
+	}
 	fctx, cancel := context.WithTimeout(ctx, k.fetchTimeout)
-	keysErr := k.seller.Refresh(fctx)
 	f, err := k.fetch(fctx, k.backend) // the body is read whole before fetch returns
 	cancel()
+	keysErr := <-keysDone
 	if err != nil && ctx.Err() == nil && errors.Is(fctx.Err(), context.DeadlineExceeded) {
 		err = fmt.Errorf("card: the fetch did not finish within %v: %w", k.fetchTimeout, err)
+	}
+	if err != nil && keysErr == nil {
+		k.reverify(ctx)
 	}
 	if err == nil && keysErr != nil {
 		err = keysErr
 	}
 	if err != nil {
-		k.reverifyPending(ctx)
 		k.mu.Lock()
 		k.lastErr = err
 		k.mu.Unlock()
@@ -205,40 +216,54 @@ func (k *Keeper) Refresh(ctx context.Context) error {
 	return k.record(ctx)
 }
 
-// RefreshSellerKeys fetches a {url} seller key set (an inline set, or none, does nothing) and verifies the
-// current card against it when that card waits for it: a replica that holds no session of a tunnel service
-// fetches no card of its own, and its seeded card would otherwise wait for keys forever.
+// RefreshSellerKeys fetches a {url} seller key set (an inline set, or none, does nothing), within FetchTimeout,
+// and verifies the current card against it again when it waits for it or was refused (reverify): a replica that
+// holds no session of a tunnel service fetches no card of its own, and its seeded card would otherwise wait for
+// keys forever, or stay refused against a set from before the seller rotated its key.
 func (k *Keeper) RefreshSellerKeys(ctx context.Context) error {
 	if k.seller == nil {
 		return nil
 	}
-	if err := k.seller.Refresh(ctx); err != nil {
+	if err := k.refreshKeys(ctx); err != nil {
 		return err
 	}
-	k.reverifyPending(ctx)
+	k.reverify(ctx)
 	return nil
+}
+
+// refreshKeys fetches a {url} seller key set within a FetchTimeout of its own: a key host that accepts the request
+// and never answers, or trickles its body, fails that fetch instead of holding the caller (the tunnel card loop's
+// context never ends).
+func (k *Keeper) refreshKeys(ctx context.Context) error {
+	kctx, cancel := context.WithTimeout(ctx, k.fetchTimeout)
+	defer cancel()
+	err := k.seller.Refresh(kctx)
+	if err != nil && ctx.Err() == nil && errors.Is(kctx.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("card: the seller's keys were not fetched within %v: %w", k.fetchTimeout, err)
+	}
+	return err
 }
 
 // ErrNotVerified is a card none of whose signatures the service's configured seller keys verify (spec §3).
 var ErrNotVerified = errors.New("card: no signature of the seller's card verifies against the configured seller keys")
 
-// reverifyPending verifies a seeded card that waited for its {url} keys, once a refresh fetched them although the
-// card itself could not be fetched (the seller down while its key host is up).
-func (k *Keeper) reverifyPending(ctx context.Context) {
+// reverify verifies the current card again once a refresh fetched the {url} keys although the card itself was not
+// fetched (the seller down while its key host is up, or a replica with no session, which serves the stored card):
+// a seeded card that waited for the keys, and a card refused against the set fetched before (the seller rotated
+// its key and re-signed its card, which reached this replica before its own key refresh). A card that verifies is
+// installed as of when it was fetched, so D89's 30 minutes run from its fetch, not from now.
+func (k *Keeper) reverify(ctx context.Context) {
 	k.mu.RLock()
-	s, pending := k.served, k.verifyPending
+	s, at, waiting := k.served, k.servedAt, k.verifyPending || k.unverified
 	k.mu.RUnlock()
-	if !pending || s == nil {
+	if !waiting || s == nil {
 		return
 	}
 	v, err := k.verify(ctx, s.Upstream)
 	if err != nil {
 		return
 	}
-	k.mu.RLock()
-	at := k.lastOK
-	k.mu.RUnlock()
-	_ = k.install(ctx, s.Upstream, at, v)
+	_ = k.installOver(ctx, s.Upstream, at, v, s) // unless a concurrent refresh installed another card meanwhile
 }
 
 // record calls the persist hook when the current card is not the one it last recorded, and the touch hook when
@@ -269,6 +294,11 @@ func sameCard(a, b *Served) bool {
 
 // install rewrites raw, signs it, and makes it the current card, with v's verdict.
 func (k *Keeper) install(ctx context.Context, raw []byte, at time.Time, v verdict) error {
+	return k.installOver(ctx, raw, at, v, nil)
+}
+
+// installOver is install, which changes nothing when prev is not nil and is no longer the current card.
+func (k *Keeper) installOver(ctx context.Context, raw []byte, at time.Time, v verdict, prev *Served) error {
 	info, err := upstream.ReadInfo(raw)
 	if err != nil {
 		return err
@@ -300,11 +330,15 @@ func (k *Keeper) install(ctx context.Context, raw []byte, at time.Time, v verdic
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if prev != nil && k.served != prev {
+		return nil
+	}
 	lastMod := at
 	if k.served != nil && bytes.Equal(k.served.Body, body) {
 		lastMod = k.served.LastModified // the same body keeps its Last-Modified, so caches stay valid
 	}
 	k.served = &Served{Body: body, Upstream: raw, ETag: ETag(body), LastModified: lastMod, Hash: hash, Verified: v.verified}
+	k.servedAt = at
 	k.info = info
 	k.unverified, k.verifyPending = v.refused, v.pending
 	if at.After(k.lastOK) && !v.refused {

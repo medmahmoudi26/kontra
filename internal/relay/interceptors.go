@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -58,21 +59,25 @@ type ReviewMessenger interface {
 //     blobs", §10.4), and so is a contextId or messageId over 256 characters (§4), before any task row.
 //  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow in M1. The pre-minted task
 //     id and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
-//     4b. Large parts of a new task (spec §10.4, D167): with a bucket, each part over 256 KiB is stored as an
-//     object of the pre-minted task and replaced by its url part kontra-blob:<ref>; the rows are pending on the
-//     context for the transaction that creates the task. A follow-up's are stored by 5, once the task is
-//     known to be the caller's.
 //  5. Follow-up checks (spec §7): a message with a taskId is refused UnsupportedOperationError unless the
 //     task is input-required; a taskId/contextId disagreement is InvalidParams; a terminal task is
 //     UnsupportedOperationError (a2a-go itself answers InvalidParams there); a review-window message is
-//     stored as a work item and sent as kontra.review_message, answered here as an early response.
+//     stored as a work item and sent as kontra.review_message, answered here as an early response (its large
+//     parts are stored with its work item, and deleted again when the window does not take it).
 //  6. Push URLs (spec §10.1): an inline config's URL, and a CreateTaskPushNotificationConfig's, is
 //     checked now (push.CheckURL), so a refused URL is a synchronous InvalidParams and nothing is stored;
 //     the work queue saves an inline config with the task. A follow-up's inline config is checked only
 //     when its URL is new for the task (push.CheckSet): a follow-up that sends its unchanged config again
 //     is never refused for a DNS change.
-//  7. CancelInterceptor.
-//  8. GetExtendedAgentCard is UnsupportedOperationError (spec §3: capabilities.extendedAgentCard false).
+//  7. Large parts (spec §10.4, D167; largeParts): with a bucket, each part over 256 KiB of a new task's first
+//     message (an object of the pre-minted task) or of an input-required task's follow-up is stored and replaced
+//     by its url part kontra-blob:<ref>; the rows are pending on the context for the transaction that creates
+//     the task or stores the follow-up's work item. Last of the interceptors that can refuse a message, so none
+//     of them leaves an object behind; once the request is over, the objects no record of the task names (a2a-go
+//     or the work queue refused it, or answered it with another task) are deleted, rows and all (spec §5.4:
+//     objects go with their task, and a refused request has none).
+//  8. CancelInterceptor.
+//  9. GetExtendedAgentCard is UnsupportedOperationError (spec §3: capabilities.extendedAgentCard false).
 //
 // After them, on the way out, a blocking SendMessage that a2a-go answered eventqueue.ErrQueueClosed gets the
 // stored task instead (finishedTurn).
@@ -120,9 +125,9 @@ func (i *Interceptors) Chain() []a2asrv.CallInterceptor {
 		interceptor(ii.anonymous),
 		interceptor(ii.callerKeys),
 		interceptor(ii.admission),
-		interceptor(ii.newTaskParts),
 		interceptor(ii.followUp),
 		interceptor(ii.pushURLs),
+		&largeParts{i: &ii},
 		&CancelInterceptor{Svc: ii.Svc, Log: ii.Log, Canceler: ii.Canceler},
 		interceptor(extendedCard),
 	}
@@ -337,83 +342,177 @@ func codeForError(err error) int {
 	return -32603
 }
 
-// newTaskParts stores the large parts of a new task's first message (spec §10.4, D167): with a bucket, each part
-// over MaxPart becomes an object of the task Admission pre-minted and is replaced, in the request, by its url part
-// kontra-blob:<ref>; the rows are pending on the returned context, and the transaction that creates the task
-// writes them (store.Log.CreateTask). The request's hash as the caller sent it goes with them
-// (store.WithRequestHash), so a resend is still recognized whatever refs its parts were given (spec §15); a
-// resend is recognized here first, and stores nothing.
-func (i *Interceptors) newTaskParts(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+// largeParts is the interceptor that stores large parts (spec §10.4, D167): with a bucket, each part over MaxPart
+// of a new task's first message becomes an object of the task Admission pre-minted, and each of an input-required
+// task's follow-up an object of that task, replaced in the request by its url part kontra-blob:<ref>; the rows are
+// pending on the returned context, and the transaction that creates the task (store.Log.CreateTask) or stores the
+// follow-up's work item (store.Log.InsertWorkItem) writes them. For a new task, the request's hash as the caller
+// sent it goes with them (store.WithRequestHash), so a resend is still recognized whatever refs its parts were
+// given (spec §15); a resend is recognized here first, and stores nothing.
+//
+// It comes after every interceptor that can refuse a message, so none of them leaves an object behind. a2a-go
+// (a message without an id, a task that ended meanwhile) and the work queue (a refused follow-up, a failed write,
+// the later of two identical requests, answered with the earlier one's task) still can: After settles what the
+// request stored once it is over, deleting the objects no record of their task names, with their rows (spec §5.4:
+// a task's objects go with it, and a request that made no task, or whose message was not taken, has none).
+type largeParts struct {
+	a2asrv.PassthroughCallInterceptor
+	i *Interceptors
+}
+
+// followUpKey carries the task row the followUp interceptor read for a follow-up it lets through.
+type followUpKey struct{}
+
+// storedKey carries what largeParts stored for the request.
+type storedKey struct{}
+
+func (l *largeParts) Before(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+	i := l.i
 	if i.Bucket == nil || (cc.Method() != "SendMessage" && cc.Method() != "SendStreamingMessage") {
 		return ctx, nil, nil
 	}
 	r, ok := req.Payload.(*a2a.SendMessageRequest)
-	if !ok || r == nil || r.Message == nil || r.Message.TaskID != "" || !slices.ContainsFunc(r.Message.Parts, i.large) {
+	if !ok || r == nil || r.Message == nil || !slices.ContainsFunc(r.Message.Parts, i.large) {
 		return ctx, nil, nil
 	}
-	adm, ok := hooks.AdmittedFrom(ctx)
-	if !ok {
-		return ctx, nil, nil // the work queue refuses a new task without Admission's decision
+	var tenant, task uuid.UUID
+	if r.Message.TaskID != "" {
+		row, ok := ctx.Value(followUpKey{}).(*store.TaskRow)
+		if !ok {
+			// followUp lets a follow-up through only once it read the caller's task, input-required.
+			return ctx, nil, a2a.NewError(a2a.ErrInternalError, "the follow-up's task was not read")
+		}
+		tenant, task = row.TenantID, row.ID
+	} else {
+		adm, ok := hooks.AdmittedFrom(ctx)
+		if !ok {
+			return ctx, nil, nil // the work queue refuses a new task without Admission's decision
+		}
+		var err error
+		if task, err = ids.ParseTaskID(adm.TaskID); err != nil {
+			return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		}
+		hash, err := store.RequestHash(r)
+		if err != nil {
+			return ctx, nil, err
+		}
+		ctx = store.WithRequestHash(ctx, hash)
+		o, err := CallerOwner(ctx)
+		if err != nil {
+			return ctx, nil, err
+		}
+		prev, err := i.Log.FindResend(ctx, i.Svc, o, r.Message.ID, hash, time.Now().Add(-lifecycle.ResendWindow))
+		if err != nil {
+			return ctx, nil, err
+		}
+		if prev != nil {
+			return ctx, nil, nil // a resend: the work queue answers it with its task, and nothing is stored
+		}
+		tenant = i.Svc.TenantID
 	}
-	task, err := ids.ParseTaskID(adm.TaskID)
-	if err != nil {
-		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
-	}
-	hash, err := store.RequestHash(r)
+	ctx, msg, st, err := i.externalize(ctx, r.Message, tenant, task)
 	if err != nil {
 		return ctx, nil, err
 	}
-	ctx = store.WithRequestHash(ctx, hash)
-	o, err := CallerOwner(ctx)
-	if err != nil {
-		return ctx, nil, err
+	cp := *r
+	cp.Message = msg
+	req.Payload = &cp
+	return context.WithValue(ctx, storedKey{}, st), nil, nil
+}
+
+// After settles the request's objects once it is over: the first answer (a blocking SendMessage's, a stream's
+// first event) or its error, after the work queue's Write returned.
+func (l *largeParts) After(ctx context.Context, _ *a2asrv.CallContext, _ *a2asrv.Response) error {
+	if st, ok := ctx.Value(storedKey{}).(*storedParts); ok {
+		st.once.Do(func() { l.i.settle(ctx, st) })
 	}
-	prev, err := i.Log.FindResend(ctx, i.Svc, o, r.Message.ID, hash, time.Now().Add(-lifecycle.ResendWindow))
-	if err != nil {
-		return ctx, nil, err
-	}
-	if prev != nil {
-		return ctx, nil, nil // a resend: the work queue answers it with its task, and nothing is stored
-	}
-	ctx, err = i.storeParts(ctx, req, i.Svc.TenantID, task)
-	return ctx, nil, err
+	return nil
 }
 
 // large reports whether a part goes to the bucket.
 func (i *Interceptors) large(p *a2a.Part) bool { return partSize(p) > i.maxPart() }
 
-// storeParts stores every part of the request's message over MaxPart in the bucket as an object of task and
-// replaces it, in a copy of the request, by its url part kontra-blob:<ref> (spec §10.4, D167). The objects' rows
-// are pending on the returned context, for the transaction that stores the request. A bucket that refuses an
-// object is the caller's -32603: nothing is stored for the request.
-func (i *Interceptors) storeParts(ctx context.Context, req *a2asrv.Request, tenant, task uuid.UUID) (context.Context, error) {
-	r, ok := req.Payload.(*a2a.SendMessageRequest)
-	if i.Bucket == nil || !ok || r == nil || r.Message == nil || !slices.ContainsFunc(r.Message.Parts, i.large) {
-		return ctx, nil
+// storedParts is what one request stored in the bucket: the objects of its message's large parts, all of one
+// task.
+type storedParts struct {
+	tenant, task uuid.UUID
+	rows         []blob.Row
+	once         sync.Once
+}
+
+func (s *storedParts) refs() []blob.Ref {
+	out := make([]blob.Ref, 0, len(s.rows))
+	for _, r := range s.rows {
+		out = append(out, r.Ref)
 	}
+	return out
+}
+
+// settleTimeout bounds the settling of one request's objects, which runs detached from the caller's cancellation:
+// a caller that went away must not leave them behind.
+const settleTimeout = 30 * time.Second
+
+// externalize stores every part of msg over MaxPart in the bucket as an object of task and returns a copy of msg
+// with each replaced by its url part kontra-blob:<ref> (spec §10.4, D167), and what it stored. The objects' rows
+// are pending on the returned context, for the transaction that stores the message. A bucket that refuses an
+// object is the caller's -32603: the objects already stored for msg are deleted, and nothing is stored for it.
+func (i *Interceptors) externalize(ctx context.Context, msg *a2a.Message, tenant, task uuid.UUID) (context.Context, *a2a.Message, *storedParts, error) {
 	pending := blob.PendingFrom(ctx)
 	if pending == nil {
 		pending = blob.NewPending()
 		ctx = blob.WithPending(ctx, pending)
 	}
-	msg := *r.Message
-	msg.Parts = append(a2a.ContentParts(nil), r.Message.Parts...)
-	for n, p := range msg.Parts {
+	out := *msg
+	out.Parts = append(a2a.ContentParts(nil), msg.Parts...)
+	st := &storedParts{tenant: tenant, task: task}
+	for n, p := range out.Parts {
 		if !i.large(p) {
 			continue
 		}
 		np, row, err := blob.Externalize(ctx, i.Bucket, tenant, task, p)
 		if err != nil {
 			slog.Default().Warn("relay: a caller part over the inline limit could not be stored in the bucket", "task", task, "error", err)
-			return ctx, a2a.NewError(a2a.ErrInternalError, "the part could not be stored")
+			i.deleteObjects(ctx, st, st.refs())
+			return ctx, nil, nil, a2a.NewError(a2a.ErrInternalError, "the part could not be stored")
 		}
 		pending.Add(row)
-		msg.Parts[n] = np
+		st.rows = append(st.rows, row)
+		out.Parts[n] = np
 	}
-	cp := *r
-	cp.Message = &msg
-	req.Payload = &cp
-	return ctx, nil
+	return ctx, &out, st, nil
+}
+
+// settle deletes the objects st holds that no record of their task names now that the request is over, with their
+// blobs rows (store.Log.DropUnnamedBlobs): those of a new task whose row was never written, or of a message whose
+// work item was deleted (refused). A message the work queue or the review window may still take keeps its work
+// item, and so its objects, which retention deletes with the task otherwise (D66).
+func (i *Interceptors) settle(ctx context.Context, st *storedParts) {
+	if st == nil || len(st.rows) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancel()
+	gone, err := i.Log.DropUnnamedBlobs(ctx, st.task, st.refs())
+	if err != nil {
+		slog.Default().Warn("relay: the objects of a request that was not taken could not be settled", "task", st.task, "error", err)
+		return
+	}
+	i.deleteObjects(ctx, st, gone)
+}
+
+// deleteObjects deletes objects of st's task by key, best effort: one left is logged (retention deletes it with
+// its task, when the task exists).
+func (i *Interceptors) deleteObjects(ctx context.Context, st *storedParts, refs []blob.Ref) {
+	if len(refs) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancel()
+	for _, ref := range refs {
+		if err := i.Bucket.Delete(ctx, blob.Key{Tenant: st.tenant, Task: st.task, Ref: ref}); err != nil {
+			slog.Default().Warn("relay: an object of a request that was not taken could not be deleted", "task", st.task, "ref", ref, "error", err)
+		}
+	}
 }
 
 func (i *Interceptors) followUp(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
@@ -439,19 +538,10 @@ func (i *Interceptors) followUp(ctx context.Context, cc *a2asrv.CallContext, req
 	if r.Message.ContextID != "" && r.Message.ContextID != row.ContextID {
 		return ctx, nil, invalid("the message's taskId and contextId disagree")
 	}
-	if row.State == store.StateInputRequired || (row.State == store.StateCompleted && i.Reviews != nil) {
-		// The follow-up (or the review-window message) is the caller's and may be taken: its large parts go to
-		// the bucket now, their rows with its work item (spec §10.4, D167). One refused afterwards (the review
-		// window closed, the turn not accepted) leaves its objects under the task's prefix, which retention
-		// deletes with the task.
-		if ctx, err = i.storeParts(ctx, req, row.TenantID, row.ID); err != nil {
-			return ctx, nil, err
-		}
-		r, _ = req.Payload.(*a2a.SendMessageRequest)
-	}
 	switch row.State {
 	case store.StateInputRequired:
-		return ctx, nil, nil
+		// The follow-up may be taken: largeParts stores its large parts once pushURLs has checked it.
+		return context.WithValue(ctx, followUpKey{}, row), nil, nil
 	case store.StateSubmitted, store.StateWorking:
 		return ctx, nil, unsupported("the task is running; it takes no input until it asks for some")
 	case store.StateAuthRequired:
@@ -485,6 +575,17 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 	}
 	stored := *r
 	msg := *r.Message
+	var parts *storedParts
+	if i.Bucket != nil && slices.ContainsFunc(msg.Parts, i.large) {
+		// The work item holds the message as the window's append will log it, so its large parts go to the bucket
+		// now, their rows with the item (spec §10.4, D167); a message the window does not take has them deleted
+		// with its item (settle).
+		var m *a2a.Message
+		if ctx, m, parts, err = i.externalize(ctx, &msg, row.TenantID, row.ID); err != nil {
+			return nil, err
+		}
+		msg = *m
+	}
 	msg.TaskID, msg.ContextID = a2a.TaskID(row.ID.String()), row.ContextID
 	stored.Message = &msg
 	if r.Config != nil && r.Config.PushConfig != nil {
@@ -501,6 +602,7 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 	if err := i.Log.InsertWorkItem(ctx, nil, store.WorkItem{
 		ID: wid, TaskID: row.ID, Kind: store.WorkExecute, Payload: store.WorkPayload{Request: &stored, Owner: o},
 	}); err != nil {
+		i.settle(ctx, parts)
 		return nil, err
 	}
 	res, err := i.Reviews.ReviewMessage(ctx, a2a.TaskID(row.ID.String()), lifecycle.ReviewMessageUpdate{
@@ -509,12 +611,15 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 	switch {
 	case errors.Is(err, a2a.ErrUnsupportedOperation):
 		i.deleteItem(ctx, wid, row.ID)
+		i.settle(ctx, parts)
 		return nil, unsupported("the task is completed and no review window is open")
 	case err != nil:
-		// Not accepted (or not completed) within 10 s: the item is kept, the workflow may still take it (D66).
+		// Not accepted (or not completed) within 10 s: the item is kept, the workflow may still take it (D66), and
+		// so are its objects.
 		return nil, notInTime("the review message was not accepted in time", err)
 	case !res.Accepted:
 		i.deleteItem(ctx, wid, row.ID)
+		i.settle(ctx, parts)
 		return nil, unsupported("the review message was not accepted")
 	}
 	after, err := i.Log.LoadScoped(ctx, i.Svc, o, row.ID)

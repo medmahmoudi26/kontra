@@ -208,6 +208,19 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err := s.Store.DeleteTask(ctx, tenant, task); err != nil {
 		t.Errorf("DeleteTask of a task without objects = %v", err)
 	}
+	// Delete removes one object by its key; a missing one is no error.
+	if err := s.Store.Delete(ctx, keys[2]); err != nil {
+		t.Fatal(err)
+	}
+	if left := s.Keys(t); len(left) != 0 {
+		t.Fatalf("after Delete: %v", left)
+	}
+	if err := s.Store.Delete(ctx, keys[2]); err != nil {
+		t.Errorf("Delete of a missing object = %v", err)
+	}
+	if err := s.Store.Delete(ctx, blob.Key{Tenant: tenant, Task: task, Ref: "BAD"}); err == nil {
+		t.Error("Delete under a malformed ref succeeded")
+	}
 }
 
 // Externalize stores a part's content and returns the url part that replaces it, keeping the part's filename,
