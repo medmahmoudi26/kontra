@@ -38,8 +38,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
-	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Fixed values (spec/relay.md §10.4, spec/tunnel.md §8.3, §14).
@@ -212,18 +210,3 @@ var ErrNotFound = errors.New("blob: no such object")
 type Resolver interface {
 	TaskOf(ctx context.Context, ref Ref) (tenant, task uuid.UUID, err error)
 }
-
-// Fetch reads one object on a node-opened blob stream (the node's half of spec/tunnel.md §8.3, D181): it writes
-// the preamble {"v": 1, "op": "blob", "ref": ref} and reads one JSON line, {"size": n} or {"error": "not_found"
-// | "forbidden" | "too_large"} (a FetchError), then exactly n bytes; it refuses an announced size over MaxObject
-// and more bytes than announced. The caller authenticates a sealed part's whole age file before acting on it.
-func Fetch(ctx context.Context, stream io.ReadWriteCloser, ref Ref, w io.Writer) (int64, error) {
-	return 0, unimpl.Error("blob.Fetch", "M3 WP-03")
-}
-
-// FetchError is the gate's refusal of a blob stream: "not_found", "forbidden" or "too_large".
-type FetchError struct {
-	Reason string
-}
-
-func (e *FetchError) Error() string { return "blob: refused: " + e.Reason }
