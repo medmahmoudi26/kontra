@@ -1155,6 +1155,71 @@ func TestTunnelCardPendingFetchesAtOnce(t *testing.T) {
 	}
 }
 
+// A tunnel service whose stored card is past card.UnavailableAfter (its node was away for more than 30
+// minutes) and whose node is back with its agent not up yet is in the same race as one that never had a
+// card: a dispatch then is relay.ErrCardPending, retried, and has the card fetched again at once, not
+// failed service_unavailable (M2 review, relay-tunnel-3; D143).
+func TestTunnelExpiredCardIsPending(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	pool := pgtest.Pool(t, dsn)
+	ctx := context.Background()
+	cfg := parseConfig(t, `services:
+  echo:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+`)
+	// Another replica fetched the card 31 minutes ago; the node then went away.
+	first := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Tunnels: &fakeTunnels{}, TunnelCardRefresh: time.Hour})
+	if err := first.Sync(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `update kontra.services set upstream_card = $1, card_fetched_at = now() - interval '31 minutes'
+		where name = 'echo'`, []byte(tunnelCardV1)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The node is back on this replica, before its agent.
+	held := uuid.Must(uuid.NewV7())
+	ft := &fakeTunnels{}
+	ft.set(tunnelCardV1, true)
+	ft.setAgentDown(true)
+	fs := &fakeSessions{held: map[uuid.UUID]bool{held: true}}
+	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Tunnels: ft, Sessions: fs, TunnelCardRefresh: time.Hour})
+	if err := s.Sync(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer func() { stop(); wg.Wait() }()
+	wg.Go(func() { s.Run(runCtx, time.Hour) })
+	e, _ := s.Lookup(ctx, TeamTenant, "echo")
+	if c, err := e.Cards(); !errors.Is(err, card.ErrUnavailable) || c == nil || !c.Unavailable || string(c.Upstream) != tunnelCardV1 {
+		t.Fatalf("the stored card, 31 minutes old: %+v, %v; want it seeded and unavailable", c, err)
+	}
+	attempt := &store.Attempt{Backend: store.BackendTunnel, TunnelSession: &held, KeyID: "k1_x", ReplicaID: "r1"}
+	eventually(t, 10*time.Second, "a failed fetch through the new session", func() bool { return ft.triesSince(time.Time{}) >= 1 })
+	if _, _, err := s.Backend(ctx, e.Ref, attempt); !errors.Is(err, relay.ErrCardPending) || errors.Is(err, upstream.ErrTunnelLost) {
+		t.Fatalf("a dispatch with the expired card and the agent down: %v, want relay.ErrCardPending", err)
+	}
+
+	// The agent comes up: the dispatch that finds no usable card has it fetched at once.
+	ft.setAgentDown(false)
+	up := time.Now()
+	if _, _, err := s.Backend(ctx, e.Ref, attempt); !errors.Is(err, relay.ErrCardPending) {
+		t.Fatalf("no usable card yet: %v", err)
+	}
+	var err error
+	for deadline := up.Add(1500 * time.Millisecond); ; time.Sleep(20 * time.Millisecond) {
+		if _, _, err = s.Backend(ctx, e.Ref, attempt); err == nil || time.Now().After(deadline) {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("the card was not fetched within 1.5 s of the dispatch that found none usable: %v", err)
+	}
+}
+
 // logBuffer is a logger's output, safe for concurrent writes.
 type logBuffer struct {
 	mu  sync.Mutex

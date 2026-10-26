@@ -1152,9 +1152,9 @@ func (s *Services) BackendFor(_ context.Context, tenantID uuid.UUID, service str
 // service's backend is the attempt's session on this replica (TunnelSessions.Backend: an error wrapping
 // upstream.ErrTunnelLost when this replica does not hold it, or it no longer serves the service), with the
 // Info of the service's one card (spec §3). No usable card is an error, and the dispatch fails
-// service_unavailable (spec §6.4), except a tunnel service's card that no fetch has produced yet (its
-// session has just connected and the fetch failed): relay.ErrCardPending, which is retried, and the card is
-// fetched again at once.
+// service_unavailable (spec §6.4), except a tunnel service's card that no fetch has produced yet, or whose
+// last good fetch is older than card.UnavailableAfter (its session has just connected and the fetch failed):
+// relay.ErrCardPending, which is retried, and the card is fetched again at once.
 func (s *Services) Backend(_ context.Context, svc store.ServiceRef, attempt *store.Attempt) (upstream.Backend, upstream.Info, error) {
 	e, err := s.live(svc.TenantID, svc.Name)
 	if err != nil {
@@ -1193,8 +1193,11 @@ func (s *Services) tunnelBackend(e *entry, svc store.ServiceRef, attempt *store.
 	}
 	_, info, err := e.keeper.Dispatch()
 	if err != nil {
-		if cur, _ := e.keeper.Current(); cur == nil && e.tunnel != nil {
-			// No card yet (none fetched, none stored): fetch again now, on the keeper's loop.
+		if cur, _ := e.keeper.Current(); (cur == nil || cur.Unavailable) && e.tunnel != nil {
+			// No usable card: none fetched or stored yet, or only one past card.UnavailableAfter (the node was
+			// away for more than 30 minutes, and its agent is not up yet now that it is back). The attempt's
+			// session is held here and live, so a fetch through it can still produce the card: fetch again
+			// now, on the keeper's loop, and retry the dispatch (D143; M2 review, relay-tunnel-3).
 			select {
 			case e.tunnel.kick <- struct{}{}:
 			default:

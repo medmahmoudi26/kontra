@@ -1547,13 +1547,15 @@ becomes a candidate). Proposal: §3 says a service's nodes serve the same card (
 fetch failed (`502 Kontra-Node: target_unreachable`); withholding the session would take down the node's other
 services, the handshake being all-or-nothing. Decision (the audit's second option for its gap 3): the session
 becomes a candidate anyway, its card is retried on the keeper's backoff (1 s doubling to 1 min), and a dispatch for
-a tunnel service whose keeper has no card yet is retried like `no_session` (`relay.ErrCardPending`), failing
-`service_unavailable` only once `task.retries` are spent. That dispatch has the card fetched again at once (at
+a tunnel service whose keeper has no usable card is retried like `no_session` (`relay.ErrCardPending`), failing
+`service_unavailable` only once `task.retries` are spent. No usable card is none yet, or only one whose last good
+fetch is older than the keeper's 30 minutes: a node back after a longer absence, its agent not up yet, is in the
+same race (M2 review). That dispatch has the card fetched again at once (at
 most once a second), never later than the fetch already due: a dispatch that only restarted the backoff left an
 agent that came up after its node to a refetch up to a minute away, and the task failed meanwhile
 ([`relay.md`](../spec/relay.md) §3, §6.4; `internal/gate/services.go` `tunnelConnected`, `runTunnelCard`,
-`TestTunnelBackend`, `TestTunnelCardPendingFetchesAtOnce`; end to end, `TestTunnelCardPending`, whose task is sent
-as its node's agent comes up).
+`TestTunnelBackend`, `TestTunnelCardPendingFetchesAtOnce`, `TestTunnelExpiredCardIsPending`; end to end,
+`TestTunnelCardPending`, whose task is sent as its node's agent comes up).
 
 ### D144. `sealed:` and `seller_keys` on a tunnel service are refused — **needs the owner** (amends D90, D91)
 
