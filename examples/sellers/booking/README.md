@@ -16,16 +16,21 @@ it.
 - A first message stops the task at `input-required` and asks for the date of whatever the message says:
   "For which date shall I book "a table for two"? Reply with the date as YYYY-MM-DD."
 - A reply (a message with the task's id) carrying a `YYYY-MM-DD` calendar date books it: `working`, an artifact
-  named `booking` ("Booked "a table for two" on Monday, 2026-11-02."), then `completed`. A reply without a
-  date it can read (or with an impossible one, `2026-02-30`) asks again and the task keeps waiting.
+  named `booking` ("Booked "a table for two" on Monday, 2026-11-02."), then `completed`. The date may be the
+  date of an ISO 8601 date-time (`2026-11-02T19:00:00Z` books 2026-11-02; the time is not used). A reply
+  without a date it can read (or with an impossible one, `2026-02-30`) asks again and the task keeps waiting.
 - `CancelTask` ends a task that is not over yet `canceled`, while it waits for its date as well as while it is
   being booked; a completed task is not cancelable (`TaskNotCancelableError`).
 - Tasks live in memory: a restarted agent knows none of its old tasks.
+- A request body over 4 MiB, the gate's default `limits.body`, is refused (a parse error: JSON-RPC `-32700`,
+  HTTP+JSON `400`), and the agent quotes at most the first 80 characters of a message back.
 
 One thing in `main.go` is there for a2a-go rather than for the booking: a2a-go v2.7.0 can fail a `CancelTask`
 that arrives while the turn that just stopped at `input-required` is still being cleaned up
 (`TaskNotCancelableError` or "queue is closed", a race its own code marks as a TODO), so `cancelRetry` makes
-such a cancel again while the task is still waiting.
+such a cancel again while the task is still waiting. A cancel that loses the same race to a reply that
+completes the booking would fail "queue is closed", an internal error; `cancelRetry` answers it
+`TaskNotCancelableError`, as any cancel of a completed task is answered.
 
 ```
 booking [--host 127.0.0.1] [--port 9998] [--binding both|jsonrpc|http+json]

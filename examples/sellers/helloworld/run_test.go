@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -139,6 +140,24 @@ func git(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// changes is what git reports changed, added or ignored under paths of the checkout dir (all of it with no
+// paths), as run.sh asks it: --untracked-files=all, so that no git config can hide an extra file.
+func changes(t *testing.T, dir string, paths ...string) string {
+	t.Helper()
+	return git(t, dir, append([]string{"status", "--porcelain", "--ignored", "--untracked-files=all", "--"}, paths...)...)
+}
+
+// noUntrackedConfig writes a global git config that hides untracked files from git status, as many users have
+// (a $HOME dotfile repository), and returns its path, for GIT_CONFIG_GLOBAL.
+func noUntrackedConfig(t *testing.T) string {
+	t.Helper()
+	cfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(cfg, []byte("[status]\n\tshowUntrackedFiles = no\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
 // A checkout at another commit, or one that is not a checkout, is refused before uv runs.
 func TestRunShRefusesAnotherCommit(t *testing.T) {
 	needPort9999(t)
@@ -188,59 +207,186 @@ func pinnedCheckout(t *testing.T) string {
 	return dir
 }
 
+// clonePinned clones the checkout src, at pin, into a scratch directory the test may change.
+func clonePinned(t *testing.T, src string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "a2a-samples")
+	git(t, filepath.Dir(dir), "clone", "-q", "--no-checkout", src, dir)
+	git(t, dir, "-c", "advice.detachedHead=false", "checkout", "-q", pin)
+	return dir
+}
+
 // A modified sample, or one with an extra file (even an ignored one, such as __pycache__), is refused: the
-// example runs the sample unmodified.
+// example runs the sample unmodified. That holds whatever the user's git config says about untracked files.
 func TestRunShRefusesModifiedSample(t *testing.T) {
 	needPort9999(t)
 	src := pinnedCheckout(t)
 	path := toolPath(t)
 	uv, ran := fakeUV(t)
+	dir := clonePinned(t, src)
 
-	dir := filepath.Join(t.TempDir(), "a2a-samples")
-	git(t, filepath.Dir(dir), "clone", "-q", "--no-checkout", src, dir)
-	git(t, dir, "-c", "advice.detachedHead=false", "checkout", "-q", pin)
+	for config, gitConfig := range map[string]string{"the default git config": "", "status.showUntrackedFiles=no": noUntrackedConfig(t)} {
+		t.Run(config, func(t *testing.T) {
+			env := []string{"PATH=" + path, "UV=" + uv, "A2A_SAMPLES=" + dir}
+			if gitConfig != "" {
+				t.Setenv("GIT_CONFIG_GLOBAL", gitConfig) // for this test's own git too
+				env = append(env, "GIT_CONFIG_GLOBAL="+gitConfig)
+			}
 
-	code, stderr := script(t, "PATH="+path, "UV="+uv, "A2A_SAMPLES="+dir)
-	if code != 0 {
-		t.Fatalf("the clean pinned checkout: exit %d, stderr %q", code, stderr)
-	}
-	args, err := os.ReadFile(ran)
-	if err != nil {
-		t.Fatalf("uv did not run for the clean pinned checkout: %v", err)
-	}
-	if got, want := strings.TrimSpace(string(args)), "run --no-project --python 3.12 --exclude-newer 2026-08-05T00:00:00Z --with-requirements requirements.txt python __main__.py"; got != want {
-		t.Fatalf("uv ran with %q, want %q", got, want)
-	}
-	os.Remove(ran)
-
-	for name, change := range map[string]func(){
-		"an edited file": func() {
-			f, err := os.OpenFile(filepath.Join(dir, sample, "agent_executor.py"), os.O_APPEND|os.O_WRONLY, 0)
+			code, stderr := script(t, env...)
+			if code != 0 {
+				t.Fatalf("the clean pinned checkout: exit %d, stderr %q", code, stderr)
+			}
+			args, err := os.ReadFile(ran)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("uv did not run for the clean pinned checkout: %v", err)
 			}
-			f.WriteString("# edited\n")
-			f.Close()
+			if got, want := strings.TrimSpace(string(args)), "run --no-project --isolated --python 3.12 --exclude-newer 2026-08-05T00:00:00Z --with-requirements requirements.txt python __main__.py"; got != want {
+				t.Fatalf("uv ran with %q, want %q", got, want)
+			}
+			os.Remove(ran)
+
+			for name, change := range map[string]func(){
+				"an edited file": func() {
+					f, err := os.OpenFile(filepath.Join(dir, sample, "agent_executor.py"), os.O_APPEND|os.O_WRONLY, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					f.WriteString("# edited\n")
+					f.Close()
+				},
+				// Python puts the script's directory first on sys.path: this file would be imported as uvicorn.
+				"an extra file": func() {
+					if err := os.WriteFile(filepath.Join(dir, sample, "uvicorn.py"), []byte("raise SystemExit('not uvicorn')\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				},
+				"an ignored file": func() {
+					if err := os.MkdirAll(filepath.Join(dir, sample, "__pycache__"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dir, sample, "__pycache__", "x.pyc"), []byte{0}, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				},
+			} {
+				change()
+				if changes(t, dir, sample) == "" {
+					t.Fatalf("%s: this test's own check does not see it", name)
+				}
+				code, stderr := script(t, env...)
+				if code != 1 || !strings.Contains(stderr, "is not the unmodified sample") {
+					t.Fatalf("%s: exit %d, stderr %q", name, code, stderr)
+				}
+				if _, err := os.Stat(ran); err == nil {
+					t.Fatalf("%s: uv ran", name)
+				}
+				git(t, dir, "checkout", "-q", "--", sample)
+				git(t, dir, "clean", "-q", "-fdx", "--", sample)
+			}
+		})
+	}
+}
+
+// decoyVenv creates a Python 3.12 virtualenv at dir whose uvicorn is a stand-in at version 0.0.1, which no
+// resolution of the sample's requirements picks, and returns dir.
+func decoyVenv(t *testing.T, uv, dir string) string {
+	t.Helper()
+	if out, err := exec.Command(uv, "venv", "-q", "--python", "3.12", dir).CombinedOutput(); err != nil {
+		t.Fatalf("uv venv %s: %v\n%s", dir, err, out)
+	}
+	out, err := exec.Command(filepath.Join(dir, "bin", "python"), "-c", `import sysconfig; print(sysconfig.get_paths()["purelib"])`).Output()
+	if err != nil {
+		t.Fatalf("the decoy's site-packages: %v", err)
+	}
+	site := strings.TrimSpace(string(out))
+	files := map[string]string{
+		"uvicorn/__init__.py":               "__version__ = '0.0.1'\n",
+		"uvicorn-0.0.1.dist-info/METADATA":  "Metadata-Version: 2.1\nName: uvicorn\nVersion: 0.0.1\n",
+		"uvicorn-0.0.1.dist-info/INSTALLER": "uv\n",
+		"uvicorn-0.0.1.dist-info/RECORD":    "uvicorn/__init__.py,,\nuvicorn-0.0.1.dist-info/METADATA,,\nuvicorn-0.0.1.dist-info/INSTALLER,,\nuvicorn-0.0.1.dist-info/RECORD,,\n",
+	}
+	for name, content := range files {
+		p := filepath.Join(site, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// The toolchain stays pinned whatever virtualenv surrounds the run: an active one (VIRTUAL_ENV), as the
+// sample's own README has its users make, or a .venv above the sample (samples/python/.venv, which a plain
+// `uv run` in the sample creates and which run.sh's unmodified check does not cover). Each holds a decoy
+// uvicorn 0.0.1; uv runs with run.sh's arguments, but a probe of the environment in place of __main__.py, and
+// must not find the decoy. Needs KONTRA_A2A_SAMPLES and uv; uv may download Python 3.12 and the requirements.
+func TestRunShIgnoresSurroundingVirtualenvs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs uv (integration)")
+	}
+	src := pinnedCheckout(t)
+	uv, err := exec.LookPath("uv")
+	if err != nil {
+		t.Skip("uv not found")
+	}
+	needPort9999(t)
+
+	probe := filepath.Join(t.TempDir(), "uv")
+	if err := os.WriteFile(probe, []byte(`#!/bin/sh
+# uv with run.sh's arguments, but "python -c <probe>" in place of "python __main__.py".
+n=$#
+for a in "$@"; do
+  if [ "$a" = __main__.py ]; then
+    set -- "$@" -c 'import importlib.metadata as m; print("probe: uvicorn", m.version("uvicorn"))'
+  else
+    set -- "$@" "$a"
+  fi
+done
+shift "$n"
+exec '`+uv+`' "$@"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "VIRTUAL_ENV=") {
+			env = append(env, kv)
+		}
+	}
+
+	for name, setup := range map[string]func(t *testing.T, dir string) []string{
+		"an active virtualenv": func(t *testing.T, _ string) []string {
+			return []string{"VIRTUAL_ENV=" + decoyVenv(t, uv, filepath.Join(t.TempDir(), "venv"))}
 		},
-		"an ignored file": func() {
-			if err := os.MkdirAll(filepath.Join(dir, sample, "__pycache__"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, sample, "__pycache__", "x.pyc"), []byte{0}, 0o644); err != nil {
-				t.Fatal(err)
-			}
+		"a .venv above the sample": func(t *testing.T, dir string) []string {
+			decoyVenv(t, uv, filepath.Join(dir, "samples", "python", ".venv"))
+			return nil
 		},
 	} {
-		change()
-		code, stderr := script(t, "PATH="+path, "UV="+uv, "A2A_SAMPLES="+dir)
-		if code != 1 || !strings.Contains(stderr, "is not the unmodified sample") {
-			t.Fatalf("%s: exit %d, stderr %q", name, code, stderr)
-		}
-		if _, err := os.Stat(ran); err == nil {
-			t.Fatalf("%s: uv ran", name)
-		}
-		git(t, dir, "checkout", "-q", "--", sample)
-		git(t, dir, "clean", "-q", "-fdx", "--", sample)
+		t.Run(name, func(t *testing.T) {
+			dir := clonePinned(t, src)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "./run.sh")
+			cmd.Env = append(slices.Clone(env), "A2A_SAMPLES="+dir, "UV="+probe)
+			cmd.Env = append(cmd.Env, setup(t, dir)...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("run.sh: %v\n%s", err, out)
+			}
+			var got string
+			for _, line := range strings.Split(string(out), "\n") {
+				if v, ok := strings.CutPrefix(line, "probe: uvicorn "); ok {
+					got = v
+				}
+			}
+			if got == "" || got == "0.0.1" {
+				t.Fatalf("the seller's uvicorn is %q, want the pinned resolution, not the decoy's 0.0.1\n%s", got, out)
+			}
+		})
 	}
 }
 
@@ -337,7 +483,7 @@ func TestRunShStartsTheUnmodifiedSample(t *testing.T) {
 		conn.Close()
 		t.Fatal("127.0.0.1:9999 still answers after run.sh stopped")
 	}
-	if st := git(t, dir, "status", "--porcelain", "--ignored"); st != "" {
+	if st := changes(t, dir); st != "" {
 		t.Fatalf("the checkout changed:\n%s", st)
 	}
 }

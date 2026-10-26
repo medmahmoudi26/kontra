@@ -8,7 +8,7 @@ PRD §14 M2 deliverable "helloworld example through the tunnel".
 |---|---|
 | `run.sh` | Starts `samples/python/agents/helloworld` of a2a-samples at `6603ba3` as it is, with a pinned toolchain |
 | `kontra.yaml` | A team gate on one machine with the tunnel service `hello` |
-| `run_test.go` | Tests of `run.sh` (`go test ./examples/sellers/helloworld`; the ones that start the real seller need `KONTRA_A2A_SAMPLES`, a checkout at `6603ba3`); the seller itself has no Go code |
+| `run_test.go` | Tests of `run.sh` (`go test ./examples/sellers/helloworld`; the ones that use the real sample need `KONTRA_A2A_SAMPLES`, a checkout at `6603ba3`, and those that run uv need uv); the seller itself has no Go code |
 
 ## What the seller is
 
@@ -35,7 +35,7 @@ pinned commit of a2a-samples into `${XDG_CACHE_HOME:-~/.cache}/kontra/a2a-sample
 checkout of your own (it must be at `6603ba3`). It then runs, in the sample's directory:
 
 ```sh
-uv run --no-project --python 3.12 --exclude-newer 2026-08-05T00:00:00Z \
+uv run --no-project --isolated --python 3.12 --exclude-newer 2026-08-05T00:00:00Z \
   --with-requirements requirements.txt python __main__.py
 ```
 
@@ -44,12 +44,17 @@ That is the sample's own requirements file and entry point, with the toolchain p
 day after the commit. Nothing in the checkout is written: uv builds the environment in its cache, and
 `PYTHONDONTWRITEBYTECODE=1` keeps `__pycache__` out. `--no-project` matters: without it uv finds the
 repository's `samples/python/pyproject.toml` above the sample, syncs that project into `samples/python/.venv`
-and rewrites the tracked `samples/python/uv.lock`. `git -C ~/.cache/kontra/a2a-samples status --ignored` is
-clean before and after.
+and rewrites the tracked `samples/python/uv.lock`. `--isolated` matters too: an active virtualenv
+(`VIRTUAL_ENV`, such as the one the sample's own README has you `source`) and a `.venv` in or above the sample's
+directory are ignored. Without it `uv run --no-project` builds on such an environment, and the unpinned
+requirements are whatever it holds. `git -C ~/.cache/kontra/a2a-samples status --ignored --untracked-files=all`
+is clean before and after.
 
 `run.sh` refuses to start, with a message saying why, when uv is missing (`UV` names another binary),
 `127.0.0.1:9999` is already taken, the checkout is at another commit, or anything in the sample's directory
-differs from the commit (an edit, an extra file, even an ignored one). `Ctrl-C` or `SIGTERM` stops it.
+differs from the commit (an edit, an extra file, even an ignored one). It asks git with `--untracked-files=all`,
+so a git config that hides untracked files (`status.showUntrackedFiles=no`) cannot hide an extra file.
+`Ctrl-C` or `SIGTERM` stops it.
 
 ## Through the tunnel (M2)
 

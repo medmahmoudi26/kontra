@@ -12,7 +12,10 @@
 # repository's samples/python/pyproject.toml is not synced), and Python writes no __pycache__. The toolchain is
 # pinned without touching the sample: CPython 3.12 and the requirements resolved as of the day after the
 # commit (--exclude-newer), so the sample's unpinned uvicorn and sse-starlette resolve to what it was written
-# against.
+# against. --isolated keeps that resolution whatever virtualenv is around: without it, `uv run --no-project`
+# builds on an active one (VIRTUAL_ENV) or on a .venv in the sample's directory or above it (such as the
+# samples/python/.venv that the sample's README, or a plain `uv run` there, creates), and the unpinned
+# requirements are whatever that environment holds.
 set -euo pipefail
 
 pin=6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3
@@ -53,11 +56,14 @@ head="$(git -C "$dir" rev-parse HEAD 2>/dev/null)" || die "$dir is not a git che
 [[ "$head" == "$pin" ]] ||
   die "$dir is at $head, not at the pinned $pin: git -C $dir fetch $repo $pin && git -C $dir checkout $pin"
 # Unmodified means exactly that: no change, no extra file, not even an ignored one, in the sample's directory.
-changes="$(git -C "$dir" status --porcelain --ignored -- "$sample")"
-[[ -z "$changes" ]] || die "$dir/$sample is not the unmodified sample (git -C $dir status --ignored -- $sample):
+# --untracked-files=all: git config (status.showUntrackedFiles=no, common in a $HOME dotfile repository) would
+# otherwise hide extra files, ignored ones included.
+changes="$(git -C "$dir" status --porcelain --ignored --untracked-files=all -- "$sample")"
+[[ -z "$changes" ]] || die "$dir/$sample is not the unmodified sample (git -C $dir status --ignored --untracked-files=all -- $sample):
 $changes"
 
 cd "$dir/$sample"
 export PYTHONDONTWRITEBYTECODE=1
-exec "$uv" run --no-project --python "$python" --exclude-newer "$exclude_newer" \
+unset VIRTUAL_ENV # --isolated already ignores it; uv sets the seller's own
+exec "$uv" run --no-project --isolated --python "$python" --exclude-newer "$exclude_newer" \
   --with-requirements requirements.txt python __main__.py

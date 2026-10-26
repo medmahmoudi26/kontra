@@ -11,7 +11,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,10 +28,16 @@ import (
 // serve starts the agent with binding on an httptest server and returns its root URL.
 func serve(t *testing.T, binding string) string {
 	t.Helper()
+	return serveAgent(t, agent{}, binding)
+}
+
+// serveAgent is serve for an agent a test pauses (agent.pause).
+func serveAgent(t *testing.T, a agent, binding string) string {
+	t.Helper()
 	var h http.Handler
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r) }))
 	t.Cleanup(srv.Close)
-	h = newHandler(srv.URL, binding, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h = newHandler(a, srv.URL, binding, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return srv.URL
 }
 
@@ -205,8 +214,10 @@ func TestCancel(t *testing.T) {
 }
 
 // A cancel right after a turn ended at input-required cancels the task. a2a-go v2.7.0 may still be cleaning up
-// the turn's execution then and send the cancel to it, which used to fail TaskNotCancelableError or "queue is
-// closed" for a task that is cancelable (cancelRetry). Many tries, so that the window is hit.
+// the turn's execution then and send the cancel to it, which fails TaskNotCancelableError or "queue is closed"
+// for a task that is cancelable unless cancelRetry makes it again. A smoke test at full speed: whether a try
+// hits that window is chance (without cancelRetry about half of the runs still pass);
+// TestCancelWhileTheTurnEnds hits it every time.
 func TestCancelRightAfterInputRequired(t *testing.T) {
 	for name, protocol := range bindings() {
 		t.Run(name, func(t *testing.T) {
@@ -221,6 +232,121 @@ func TestCancelRightAfterInputRequired(t *testing.T) {
 				if canceled.Status.State != a2a.TaskStateCanceled {
 					t.Fatalf("try %d: CancelTask returned %s", i, canceled.Status.State)
 				}
+			}
+		})
+	}
+}
+
+// A cancel that arrives while the turn that stopped at input-required is still ending cancels the task. The turn
+// is held after its input-required event until the cancel has reached the agent, so a2a-go sends every cancel
+// to the ending turn first and that cancel fails (without cancelRetry, every try fails); cancelRetry makes it
+// again once the turn is gone.
+func TestCancelWhileTheTurnEnds(t *testing.T) {
+	for name, protocol := range bindings() {
+		t.Run(name, func(t *testing.T) {
+			var cancels atomic.Int32
+			canceling := make(chan struct{}, 1)
+			base := serveAgent(t, agent{pause: func(at string) {
+				switch at {
+				case pauseCancel:
+					cancels.Add(1)
+					select {
+					case canceling <- struct{}{}:
+					default:
+					}
+				case pauseAsked:
+					select {
+					case <-canceling:
+					case <-time.After(10 * time.Second):
+					}
+				}
+			}}, bindingBoth)
+			c := client(t, base, protocol)
+			ctx := ctxT(t)
+			for i := range 5 {
+				select { // a cancel the last try made again
+				case <-canceling:
+				default:
+				}
+				cancels.Store(0)
+				waiting := send(t, c, "a seat", nil)
+				canceled, err := c.CancelTask(ctx, &a2a.CancelTaskRequest{ID: waiting.ID})
+				if err != nil {
+					t.Fatalf("try %d: CancelTask while the input-required turn ends: %v", i, err)
+				}
+				if canceled.Status.State != a2a.TaskStateCanceled {
+					t.Fatalf("try %d: CancelTask returned %s", i, canceled.Status.State)
+				}
+				// One cancel reached the ending turn and failed, a later one canceled: the race was hit.
+				if n := cancels.Load(); n < 2 {
+					t.Fatalf("try %d: the agent saw %d cancel(s), want the one sent to the ending turn and a retry", i, n)
+				}
+			}
+		})
+	}
+}
+
+// A cancel that loses its race with a reply that books is refused TaskNotCancelableError, as any cancel of a
+// completed task is, not an internal error. The reply is held after its working event until the cancel has
+// reached the agent, so a2a-go sends the cancel to the reply's turn; the cancel is then held until that turn
+// has completed the task and has been cleaned up, so its canceled event finds the turn's queue closed.
+func TestCancelLosingToTheBooking(t *testing.T) {
+	for name, protocol := range bindings() {
+		t.Run(name, func(t *testing.T) {
+			working, canceling, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			base := serveAgent(t, agent{pause: func(at string) {
+				switch at {
+				case pauseWorking:
+					close(working)
+					select {
+					case <-canceling:
+					case <-time.After(10 * time.Second):
+					}
+				case pauseCancel:
+					once.Do(func() { close(canceling) })
+					select {
+					case <-release:
+					case <-time.After(10 * time.Second):
+					}
+				}
+			}}, bindingBoth)
+			releaseCancel := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(releaseCancel) // before the server closes, should the test fail early
+			c := client(t, base, protocol)
+			ctx := ctxT(t)
+
+			first := send(t, c, "a table for six", nil)
+			booked := make(chan *a2a.Task, 1)
+			go func() {
+				res, err := c.SendMessage(ctx, message("2026-11-02", first))
+				task, _ := res.(*a2a.Task)
+				if err != nil {
+					t.Errorf("the reply: %v", err)
+				}
+				booked <- task
+			}()
+			select {
+			case <-working:
+			case task := <-booked:
+				t.Fatalf("the reply returned %+v before it reached working", task)
+			}
+			canceled := make(chan error, 1)
+			go func() {
+				_, err := c.CancelTask(ctx, &a2a.CancelTaskRequest{ID: first.ID})
+				canceled <- err
+			}()
+			if task := <-booked; task == nil || task.Status.State != a2a.TaskStateCompleted {
+				t.Fatalf("the reply returned %+v, want the completed task", task)
+			}
+			time.Sleep(100 * time.Millisecond) // a2a-go cleans the reply's turn up (its queue closes)
+			releaseCancel()
+			if err := <-canceled; !errors.Is(err, a2a.ErrTaskNotCancelable) {
+				t.Fatalf("CancelTask that lost to the booking: %v, want TaskNotCancelable", err)
+			}
+			if got, err := c.GetTask(ctx, &a2a.GetTaskRequest{ID: first.ID}); err != nil || got.Status.State != a2a.TaskStateCompleted ||
+				artifactText(got) != `Booked "a table for six" on Monday, 2026-11-02.` {
+				t.Fatalf("the task after the cancel: %+v, %v", got, err)
 			}
 		})
 	}
@@ -246,7 +372,7 @@ func (s *scriptedCancels) CancelTask(_ context.Context, req *a2a.CancelTaskReque
 func TestCancelRetry(t *testing.T) {
 	ctx := ctxT(t)
 	store := taskstore.NewInMemory(nil)
-	for id, state := range map[a2a.TaskID]a2a.TaskState{"waiting": a2a.TaskStateInputRequired, "done": a2a.TaskStateCompleted} {
+	for id, state := range map[a2a.TaskID]a2a.TaskState{"waiting": a2a.TaskStateInputRequired, "done": a2a.TaskStateCompleted, "canceled": a2a.TaskStateCanceled} {
 		if _, err := store.Create(ctx, &a2a.Task{ID: id, ContextID: "c", Status: a2a.TaskStatus{State: state}}); err != nil {
 			t.Fatal(err)
 		}
@@ -262,6 +388,8 @@ func TestCancelRetry(t *testing.T) {
 	}{
 		{"lost the race twice, then canceled", "waiting", []error{notCancelable, closed}, 3, nil},
 		{"a completed task is not retried", "done", []error{notCancelable}, 1, a2a.ErrTaskNotCancelable},
+		{"a completed task's closed queue is TaskNotCancelable", "done", []error{closed}, 1, a2a.ErrTaskNotCancelable},
+		{"a task canceled meanwhile is canceled again (a2a-go answers it with the task)", "canceled", []error{closed}, 2, nil},
 		{"another error is not retried", "waiting", []error{a2a.ErrTaskNotFound}, 1, a2a.ErrTaskNotFound},
 		{"an unknown task is not retried", "nope", []error{notCancelable}, 1, a2a.ErrTaskNotCancelable},
 		{"bounded", "waiting", slices.Repeat([]error{closed}, cancelRetries+5), cancelRetries, eventqueue.ErrQueueClosed},
@@ -464,15 +592,27 @@ func TestRunUsage(t *testing.T) {
 
 func TestParseDate(t *testing.T) {
 	for in, want := range map[string]string{
-		"2026-11-02":                "2026-11-02",
-		"on 2026-11-02, at noon":    "2026-11-02",
-		"2026-02-30 or 2026-03-01":  "2026-03-01",
-		"2026-13-01":                "",
-		"tomorrow":                  "",
-		"20261102":                  "",
-		"x2026-11-02":               "",
-		"2024-02-29 (a leap day)":   "2024-02-29",
-		"2026-11-02 and 2026-11-03": "2026-11-02",
+		"2026-11-02":                     "2026-11-02",
+		"on 2026-11-02, at noon":         "2026-11-02",
+		"2026-02-30 or 2026-03-01":       "2026-03-01",
+		"2026-02-30 2026-03-01":          "2026-03-01",
+		"2026-13-01":                     "",
+		"tomorrow":                       "",
+		"20261102":                       "",
+		"x2026-11-02":                    "",
+		"12026-11-02":                    "",
+		"2026-11-022":                    "",
+		"2026-11-02x":                    "",
+		"2026-11-02_evening":             "",
+		"2026-11-02T":                    "",
+		"2026-11-02Tuesday":              "",
+		"2024-02-29 (a leap day)":        "2024-02-29",
+		"2026-11-02 and 2026-11-03":      "2026-11-02",
+		"2026-11-02T19:00:00Z":           "2026-11-02",
+		"2026-11-02T19:00":               "2026-11-02",
+		"at 2026-11-02t19:00:00+01:00.":  "2026-11-02",
+		"2026-02-30T10:00 or 2026-03-01": "2026-03-01",
+		"«2026-11-02»":                   "2026-11-02",
 	} {
 		d, ok := parseDate(in)
 		got := ""
@@ -482,5 +622,31 @@ func TestParseDate(t *testing.T) {
 		if got != want {
 			t.Errorf("parseDate(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A request body over maxBody is refused before it reaches the agent, over both bindings, and the agent quotes
+// at most maxQuote runes of a message back.
+func TestBodyLimit(t *testing.T) {
+	big := strings.Repeat("x", maxBody)
+	for name, protocol := range bindings() {
+		t.Run(name, func(t *testing.T) {
+			c := client(t, serve(t, bindingBoth), protocol)
+			ctx := ctxT(t)
+			if res, err := c.SendMessage(ctx, message(big, nil)); !errors.Is(err, a2a.ErrParseError) {
+				t.Fatalf("a %d-byte message: %T, %v, want it refused (a2a-go answers a parse error)", len(big), res, err)
+			}
+
+			long := strings.Repeat("é", 1000)
+			first := send(t, c, long, nil)
+			want := strconv.Quote(strings.Repeat("é", maxQuote) + "…")
+			if q := statusText(first); !strings.Contains(q, want) || len(q) > 2*len(want)+200 {
+				t.Fatalf("the question quotes %d bytes of a %d-byte message: %q", len(q), len(long), q)
+			}
+			again := send(t, c, long, first)
+			if q := statusText(again); again.Status.State != a2a.TaskStateInputRequired || !strings.Contains(q, "I could not read a date in "+want) || len(q) > 2*len(want)+200 {
+				t.Fatalf("asking again quotes %d bytes of a %d-byte reply (%s): %q", len(q), len(long), again.Status.State, q)
+			}
+		})
 	}
 }
