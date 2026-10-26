@@ -407,12 +407,49 @@ type Refusal struct {
 	Body   []byte
 }
 
+// LegacyNoSessionBody is §11.12 rule 3's answer, what a legacy server sends a request without a session: a
+// dual-era client reads it as "not a modern server" and falls back to initialize.
+var LegacyNoSessionBody = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Bad Request: No valid session ID provided"}}`)
+
 // Classify applies §11.12's rules 1–5 to a request whose body (nil for GET and DELETE) Parse accepted:
 // initialize is legacy; MCP-Protocol-Version 2026-07-28 is modern; a legacy or absent header needs
 // Mcp-Session-Id, else the legacy 400 (-32000); any other version is -32022; GET and DELETE without a session
 // are 405.
+//
+// Built by M3 WP-04, which serves the legacy era and needs rules 1, 3, 4 and 5; WP-07 serves what rule 2 sends
+// it.
 func Classify(r *http.Request, m *Message) (Era, *Refusal) {
-	return 0, &Refusal{Status: http.StatusNotImplemented, Body: []byte(unimpl.Error("mcpwire.Classify", "M3 WP-07").Error())}
+	sid := r.Header.Get(HeaderSessionID)
+	if r.Method != http.MethodPost {
+		// Rule 5: GET and DELETE are legacy only.
+		if sid == "" {
+			return 0, &Refusal{Status: http.StatusMethodNotAllowed}
+		}
+		return EraLegacy, nil
+	}
+	if m != nil && m.Method == MethodInitialize {
+		return EraLegacy, nil // rule 1, whatever the headers say
+	}
+	switch v := r.Header.Get(HeaderProtocolVersion); v {
+	case V20260728:
+		return EraModern, nil // rule 2: its Mcp-Session-Id and Last-Event-ID are never read
+	case V20251125, V20250618, "":
+		if sid == "" {
+			return 0, &Refusal{Status: http.StatusBadRequest, Body: LegacyNoSessionBody} // rule 3
+		}
+		return EraLegacy, nil
+	default:
+		var id json.RawMessage
+		if m != nil {
+			id = m.ID
+		}
+		b, err := ErrorBody(id, CodeUnsupportedVersion, "Unsupported protocol version",
+			map[string]any{"supported": Supported, "requested": v})
+		if err != nil {
+			b, _ = ErrorBody(nil, CodeUnsupportedVersion, "Unsupported protocol version", map[string]any{"supported": Supported, "requested": v})
+		}
+		return 0, &Refusal{Status: http.StatusBadRequest, Body: b} // rule 4
+	}
 }
 
 // CheckModern applies §11.12's checks to a modern request: _meta's protocolVersion and clientCapabilities
@@ -421,26 +458,6 @@ func Classify(r *http.Request, m *Message) (Era, *Refusal) {
 // decoding (400, -32020). A response from a modern client is 400 with -32600.
 func CheckModern(h http.Header, m *Message) *Refusal {
 	return &Refusal{Status: http.StatusNotImplemented, Body: []byte(unimpl.Error("mcpwire.CheckModern", "M3 WP-07").Error())}
-}
-
-// ScrubResult removes every sh.kontra/ key from the protocol-level locations of a result to method (§2.5). From
-// an upstream: the result's _meta, tools[]._meta of tools/list, initialize's and server/discover's _meta and
-// capabilities (capabilities.experimental["sh.kontra/sealed"], sh.kontra/ keys of capabilities.extensions), task
-// objects' _meta and inputRequests[*].params._meta. From a client (its response to a server-to-client request
-// method): the result's _meta. It never descends into content, structuredContent or arguments.
-//
-// sealed is the service's sealed flag on a 2025-11-25 or 2025-06-18 message (D162, D174): a client's response to
-// elicitation/create or sampling/createMessage then keeps _meta["sh.kontra/sealed"] when SealedEnvelope accepts
-// it. Nothing else keeps it.
-func ScrubResult(src Source, method string, result json.RawMessage, sealed bool) (json.RawMessage, error) {
-	return nil, unimpl.Error("mcpwire.ScrubResult", "M3 WP-04")
-}
-
-// ScrubParams does the same for the params of a request or notification (params._meta). With sealed set
-// (D174), _meta["sh.kontra/sealed"] that SealedEnvelope accepts is kept on a client's tools/call and on an
-// upstream's elicitation/create or sampling/createMessage, and removed everywhere else.
-func ScrubParams(src Source, method string, params json.RawMessage, sealed bool) (json.RawMessage, error) {
-	return nil, unimpl.Error("mcpwire.ScrubParams", "M3 WP-04")
 }
 
 // SealedEnvelope reports whether v, the value of _meta["sh.kontra/sealed"], is exactly {"v": 1, "envelope":
