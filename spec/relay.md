@@ -1,8 +1,7 @@
 # Relay
 
 Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning; revision 2 was the adversarial
-review). Revision 4 brings the text in line with the M1 code (D82–D122); the entries marked **needs the owner**
-await sign-off. Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+review). Revision 4 brings the text in line with the M1 code (D82–D122), accepted by the owner on 26 Oct. Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,

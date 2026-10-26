@@ -882,7 +882,7 @@ so and names its entry here. The specs now say what the code does and cite the e
 the spec is unchanged. **Needs the owner** marks the entries that change documented behaviour; the others settle a
 silence or a contradiction.
 
-### D82. Built-in ACME validates with TLS-ALPN-01 only — **needs the owner** (narrows D70)
+### D82. Built-in ACME validates with TLS-ALPN-01 only — **accepted by the owner, 26 Oct** (narrows D70)
 
 relay.md §2.2 and D70: built-in ACME is "autocert, HTTP-01 and TLS-ALPN-01". HTTP-01 is validated on port 80, and
 no key (§17) opens a second, plaintext listener there: the gate's one public listener is its TLS listener, so an
@@ -891,7 +891,7 @@ its TLS listener; the CA connects to port 443, so `listen` is `:443` or forwarde
 the seam for HTTP-01 once a key for a port-80 listener exists ([`relay.md`](../spec/relay.md) §2.2;
 `internal/edge/tls.go` `ACME`, `TestACMEIssuesIntoDirectoryCache`).
 
-### D83. An IPv6 client is counted by its /64 — **needs the owner** (amends D73)
+### D83. An IPv6 client is counted by its /64 — **accepted by the owner, 26 Oct** (amends D73)
 
 relay.md §2.2 and D73 count `rps_per_ip` and `conns_per_ip` "by the client address". One end site (a home, a cloud
 instance, a phone) commonly holds a whole IPv6 /64, so counting each address gives such a client a fresh token
@@ -917,7 +917,7 @@ long a body may take to arrive, and the HTTP server's `ReadTimeout` cannot be th
 KiB/s) is refused `408` before the handler runs. It is a constant, not a configuration key
 ([`relay.md`](../spec/relay.md) §2.2; `internal/edge/edge.go` `DefaultBodyTimeout`, `TestSlowBodyIsCut`).
 
-### D86. An HTTP status beside a JSON-RPC code is the HTTP+JSON binding's — **needs the owner**
+### D86. An HTTP status beside a JSON-RPC code is the HTTP+JSON binding's — **accepted by the owner, 26 Oct**
 
 relay.md §2.4 ("`VersionNotSupportedError` (`-32009`, HTTP `400`)"), §7 and §14.1 ("`-32603` (HTTP `503`)") and §8
 (`TaskNotCancelableError`, HTTP `400`) pair a JSON-RPC code with an HTTP status without saying which binding the
@@ -940,7 +940,7 @@ request without a credential is the `anonymous` principal and gets the `404` unl
 a key without the `hire` scope is not admitted, so it gets the `404` too ([`relay.md`](../spec/relay.md) §2.1;
 `internal/a2ahttp/a2ahttp.go`, `TestBadCredential`, `TestUnknownServiceIsOneAnswer`).
 
-### D88. A card in both shapes is normalized like a 0.x card for its 0.x members — **needs the owner**
+### D88. A card in both shapes is normalized like a 0.x card for its 0.x members — **accepted by the owner, 26 Oct**
 
 relay.md §3: "A 1.0 card is used as is", and every seller-authored member but the gate's is kept. A seller built on
 a2a-go v2 that also serves 0.3 clients (`a2av0`'s card producers) publishes one card with `supportedInterfaces` and
@@ -965,7 +965,7 @@ bytes equal the stored `upstream_card` also moves `card_fetched_at` (guarded by 
 minutes count from the gate's last good fetch on any replica ([`relay.md`](../spec/relay.md) §3;
 `internal/gate/services.go` `touchCard`, `TestCardKeepersPersistAndSeed`).
 
-### D90. `seller_keys` on a direct A2A service is refused until verification is built — **needs the owner** (M1 only)
+### D90. `seller_keys` on a direct A2A service is refused until verification is built — **accepted by the owner, 26 Oct** (M1 only)
 
 relay.md §3 and §17: with `seller_keys` configured, a card no key verifies makes the service unavailable (`503`
 card routes, `service_unavailable` at the first attempt). M1 does not verify seller signatures (M3), and has no
@@ -988,7 +988,7 @@ with it is left out of the registry, as in D90 ([`relay.md`](../spec/relay.md) �
 `internal/gate/services.go` `refusable`, `TestFailOpenKeysRefused`,
 `TestRegistryRefusesWhatTheConfigurationRefuses`).
 
-### D92. "The same direct backend", without a column for it — **needs the owner**
+### D92. "The same direct backend", without a column for it — **accepted by the owner, 26 Oct**
 
 relay.md §4 reuses a recorded upstream context id only on "the same tunnel session or the same direct backend", and
 maps `referenceTaskIds` only within the same backend. But 0001's `attempts` records no direct backend's identity,
@@ -1035,7 +1035,7 @@ re-attach's ("a subscription that ends without a terminal event falls back to po
 task id exists, the dispatch follows the task by `GetTask` polling; before one, the attempt fails `upstream_error`
 ([`relay.md`](../spec/relay.md) §6.2; `internal/relay/executor.go` `stream`).
 
-### D97. The 30 s `GetTask` rule applies to every `GetTask` loop — **needs the owner**
+### D97. The 30 s `GetTask` rule applies to every `GetTask` loop — **accepted by the owner, 26 Oct**
 
 relay.md §6.4 states "only `GetTask` failing for 30 s fails the task" for the re-attach, while its table fails a
 task whose upstream id exists at the first refused or reset connection or `502/503/504` (`upstream_unreachable`)
@@ -1048,7 +1048,7 @@ protocol error or an over-limit body fails the task `upstream_error` at once. Th
 (`SendMessage`, `SendStreamingMessage`) keeps the table's rule ([`relay.md`](../spec/relay.md) §6.4;
 `internal/relay/executor.go` `getTask`, `TestGetTaskFailures`, `TestGetTaskNeverAnswered`).
 
-### D98. A resent follow-up the upstream refuses — **needs the owner** (refines D81)
+### D98. A resent follow-up the upstream refuses — **accepted by the owner, 26 Oct** (refines D81)
 
 relay.md §6.4's table fails a task at an upstream protocol error once its upstream id exists, while D81 resends an
 undelivered follow-up and "then continues as a re-attach". An upstream that already took the follow-up refuses the
@@ -1107,7 +1107,7 @@ never crosses history: the relay, or the dispatcher for a missing work item, wri
 the dispatch's fence, and ends the attempt whenever the dispatch ends it ([`relay.md`](../spec/relay.md) §14.2;
 `internal/lifecycle/types.go` `DispatchResult`, `TestRetryHonoursRetryAfter`).
 
-### D103. `limits.task_bytes` counts each event's whole encoding — **needs the owner**
+### D103. `limits.task_bytes` counts each event's whole encoding — **accepted by the owner, 26 Oct**
 
 relay.md §6.6's table names `limits.task_bytes` "Parts stored per task", while its rule is that "nothing an
 upstream sends is unbounded", and `task_bytes` is the only bound on what one task accumulates. Counting parts only
@@ -1120,7 +1120,7 @@ restarts from the projection at every dispatch, so the status rows of many follo
 every append rewrites the whole snapshot, which may want a cap on rows or on write volume
 ([`relay.md`](../spec/relay.md) §6.6; `internal/relay/executor.go` `overLimit`, `TestTaskBytesCountsWholeEvents`).
 
-### D104. No bucket in M1: parts over 256 KiB are refused even with `blobs:` — **needs the owner** (M1 only)
+### D104. No bucket in M1: parts over 256 KiB are refused even with `blobs:` — **accepted by the owner, 26 Oct** (M1 only)
 
 relay.md §10.4 stores a part over 256 KiB in the bucket `blobs:` names, and refuses it only on a gate without one.
 M1 has no bucket code (the claim-check bucket is M3's). Decision: `blobs:` is validated and accepted with a warning
@@ -1130,7 +1130,7 @@ work that builds the bucket removes the warning ([`relay.md`](../spec/relay.md) 
 `internal/config/validate.go` `unbuilt`, `internal/relay/interceptors.go`, `TestCallerLimits`,
 `TestUpstreamPartLimit`, `TestUnbuiltWarnings`).
 
-### D105. A follow-up to a turn end the workflow has not processed yet is not refused — **needs the owner**
+### D105. A follow-up to a turn end the workflow has not processed yet is not refused — **accepted by the owner, 26 Oct**
 
 relay.md §7 and §14.1 refuse a follow-up "while the previous turn of the same task is still being dispatched", by a
 validator that reads workflow state only (D66). But a caller learns that a turn ended from the log: the dispatch
@@ -1147,7 +1147,7 @@ end. One not accepted within the 10 s is `-32603` (HTTP+JSON `503`), and since n
 item is deleted, not kept ([`relay.md`](../spec/relay.md) §7, §14.1; `internal/lifecycle/queue.go` `message`,
 `TestMessageRefusalSaysWhetherTheWorkflowIsBehind`, `TestQueueRacesOverTemporal`).
 
-### D106. A review-window message sent before the window is decided waits for it — **needs the owner**
+### D106. A review-window message sent before the window is decided waits for it — **accepted by the owner, 26 Oct**
 
 relay.md §14.1's `kontra.review_message` validator refuses "unless the window is open". A caller sends the message
 once it reads `completed` from the log, which can be before the workflow learns that the turn ended and before
@@ -1217,7 +1217,7 @@ task's (at most 10) by it. The ref is stable: a config deleted and set again wit
 ([`relay.md`](../spec/relay.md) §10.2, §14.1, §14.2; `internal/lifecycle/pushref.go` `ConfigRef`, `TestConfigRef`,
 `TestPushWebhookFindsItsConfigByRef`).
 
-### D113. Operator metadata prefixes lie under `kontra.` — **needs the owner**
+### D113. Operator metadata prefixes lie under `kontra.` — **accepted by the owner, 26 Oct**
 
 relay.md §13.2 and [`schema/config.json`](../spec/schema/config.json) accept any non-empty
 `operator_metadata_prefixes` entry. But §2.5 strips only `kontra.` keys from callers and services, and a2a-go
@@ -1238,7 +1238,7 @@ ids, the state and the operator-written metadata (at most 16 KiB), which D59 let
 or service content, except the caller's `contextId` (D115) ([`relay.md`](../spec/relay.md) §13.3;
 `internal/lifecycle/workflow.go` `taskRef`, `TestTaskRefCarriesOperatorKeysOnly`).
 
-### D115. Two caller-chosen identifiers cross history — **needs the owner** (amends D59)
+### D115. Two caller-chosen identifiers cross history — **accepted by the owner, 26 Oct** (amends D59)
 
 relay.md §14 and D59: "the one caller-authored value that crosses history is a review-window message's
 `caller_metadata` keys". Yet §13.3 and [`schema/hooks.json`](../spec/schema/hooks.json) put `contextId` in every
