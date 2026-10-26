@@ -56,9 +56,21 @@ var errSteered = errors.New("node: a dial to an address other than the --serve t
 // is asked for, and follows no redirect: a 3xx goes back to the gate as the service's answer (M2 plan
 // audit).
 //
-// The 400s for a refused method, an upgrade, a path outside the base and an unreadable preamble carry no
-// Kontra-Node header: §8.2 lists the node's own answers with a reason each, and none of these; the gate
-// never sends such a request. Every answer the node writes itself has Connection: close.
+// net/http's own answer to OPTIONS * (200, with no Kontra-Node) is off: OPTIONS * reaches the handler and,
+// its request target being no path, is 400 like a path outside the base. Every answer the node writes
+// itself has Connection: close.
+//
+// SPEC-CONFLICT (spec/tunnel.md §8.2 with relay.md §6.4; M2 WP-06 review): §8.2 says the responses the node
+// writes itself carry a Kontra-Node header, so the gate never mistakes them for the service's own, and
+// lists the reasons as a closed set (not_hosted, kind_mismatch, full, target_unreachable, sealed_rejected);
+// the same section has the node answer 400 to CONNECT, an Upgrade, TRACE and a path outside the base, and a
+// stream must open with a preamble the node can read (§8.1). No listed reason fits those answers. They
+// carry no Kontra-Node header: the gate (upstream.Classify) then takes them as the service's own 400,
+// failed upstream_error and never retried, which suits them, since the gate never sends such a request and
+// another session would refuse it alike. A value outside §8.2's list would be a wire change, and the gate
+// reads any Kontra-Node other than full and sealed_rejected as tunnel_lost, retried on another session.
+// Proposal for the owner: a reason for them, such as `refused` (400, not retried), or the rule that a 400
+// the node writes carries no Kontra-Node and is final.
 //
 // One Proxy serves one session: the in-flight count and the served set are the session's (§14: inbound
 // streams in flight per session). The sessions of one node share the targets' transports (forSession).
@@ -214,6 +226,8 @@ func (p *Proxy) serveExchange(ctx context.Context, c *bufferedConn, pre tunnel.P
 		ReadHeaderTimeout: StreamHeaderTimeout, // and nothing else: never a write timeout (SSE)
 		ErrorLog:          p.errLog,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
+		// OPTIONS * goes to the handler (400), not to net/http's own 200 without Kontra-Node.
+		DisableGeneralOptionsHandler: true,
 	}
 	srv.SetKeepAlivesEnabled(false)
 	l := newOneConnListener(c)
@@ -261,8 +275,8 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		}
 		out, ok := targetPath(basePath(sv.Target), r.URL.Path)
 		if !ok {
-			log.Warn("tunnel exchange refused: the path is outside the target's base path")
-			nodeAnswer(w, http.StatusBadRequest, "", "the path is outside the service's base path")
+			log.Warn("tunnel exchange refused: the request target is not a path under the target's base path")
+			nodeAnswer(w, http.StatusBadRequest, "", "the request target is not a path under the service's base path")
 			return
 		}
 		target := sv.Target

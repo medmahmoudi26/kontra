@@ -229,7 +229,9 @@ func (i *Identity) Identities() []age.Identity {
 // After a connection lost between proof and welcome, or a restart, the node does not know whether gate
 // committed the rotation, and a rotate_from naming an already rotated key is enroll_invalid: it redials
 // with the active key and no rotate_from first, and a welcome means the rotation committed (MarkRotated),
-// unknown_key that it did not.
+// unknown_key that it did not. A gate that refuses rotate_from (it never held the old key, or revoked it)
+// gets the hello again without it, and its welcome of the active key settles the rotation there too
+// (internal/node, connect; the SPEC-CONFLICT on Prune).
 func (i *Identity) PendingRotation(gate string) (old *age.X25519Identity, ok bool) {
 	if i.file == nil || len(i.file.blocks) < 2 || len(i.all) != len(i.file.blocks) {
 		return nil, false
@@ -286,7 +288,9 @@ func Rotate(path string, now time.Time) (*Identity, error) {
 
 // MarkRotated records that gate (a canonical origin) confirmed the rotation away from recipient, a
 // decrypt-only key in the file, at at: the welcome to a hello whose rotate_from named it, or to a later
-// hello of the active key without rotate_from (the lost-welcome probe, PendingRotation). It appends
+// hello of the active key without rotate_from (the lost-welcome probe, PendingRotation), or any other
+// welcome of the active key at that gate, which knows the new key and would refuse a rotate_from (a gate
+// that refused rotate_from and enrolled the new key on the hello's other authorities). It appends
 // "# rotated: <at> <gate>" to that key's lines; a gate already recorded keeps its first record. The gate
 // set overlap_until when it committed, which is never after the node saw the welcome, so the node keeps
 // the line at least as long as the gate keeps the old key serving.
@@ -327,6 +331,18 @@ func MarkRotated(path, recipient, gate string, at time.Time) error {
 // 24 h old, the old key is dropped and that gate can no longer be shown rotate_from. Each node process
 // should therefore redial its gate with rotate_from (PendingRotation) soon after a rotation; waiting for
 // every enrolled gate needs the set of gates, which no spec gives the node.
+//
+// SPEC-CONFLICT (§12 with §2.1, §5 and §15; M2 WP-06 review), the gates' side of the one above: §12's
+// rotate_from must name a key of the gate, neither revoked nor rotated, and §4 retries neither refusal, but
+// a rotated key file does not say which gates hold the old key. A gate that never knew it (a first
+// enrollment after a rotation elsewhere) or revoked it (rotate after a leak, then revoke the old key)
+// refuses rotate_from for good, and as this file never drops a key no gate confirmed, every start would
+// send it again. internal/node therefore sends the hello again without rotate_from when a gate refuses it,
+// and stamps "# rotated:" for a gate whose welcome of the active key settles the rotation there, whether
+// or not that gate made it. Such a stamp is never earlier than a confirming gate's, so it can only delay a
+// prune; it also lets a key no gate could rotate (revoked before the rotation reached the gate) be pruned
+// 24 h after the new key's welcome rather than never. Proposal for the owner: §12 says what a node does at
+// a gate that does not hold the old key.
 func Prune(path string, now time.Time) (bool, error) {
 	var changed bool
 	err := change(path, func(f *keyFile) (bool, error) {

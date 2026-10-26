@@ -34,8 +34,14 @@ const maxCredentialsFile = 1 << 20
 // whose outcome the node did not learn (the connection ended after the proof, ErrNoOutcome) is listed in
 // Unconfirmed until a later handshake settles it (M2 plan audit, gap 1; see Node.Run).
 //
-// Several `kontra connect` processes (one per gate) share the file: Save rewrites one origin's entry under
-// an exclusive flock(2), re-reading the others.
+// A token waiting for a welcome belongs to the key of the `kontra connect` it was given to (Keys, by key
+// id): several nodes may serve one service, each with its own key (§11), and two `kontra connect` with
+// different --key under one HOME share this file, so a token given to one is never sent in the other's
+// hello, nor confirmed by the other's probe. The API key and Consumed are the origin's.
+//
+// Several `kontra connect` processes (one per gate, or one per key at a gate) share the file: Update
+// changes one origin's entry under an exclusive flock(2), applying the change to what the file holds at
+// that moment, so that no process's change is lost.
 type Credentials struct {
 	path     string
 	byOrigin map[string]Credential
@@ -43,26 +49,90 @@ type Credentials struct {
 
 // Credential is what the node holds for one gate origin.
 type Credential struct {
-	APIKey string   `json:"api_key,omitempty"`
-	Enroll []string `json:"enroll,omitempty"` // tokens no welcome has confirmed yet: sent in the next hello
-	// Unconfirmed are the sha256 (hex) of tokens sent in a hello whose outcome is unknown: the next
-	// handshake is the lost-welcome probe (no tokens), whose welcome confirms them.
-	Unconfirmed []string `json:"unconfirmed,omitempty"`
-	// Consumed are the sha256 (hex) of tokens a welcome confirmed: never sent again.
+	APIKey string `json:"api_key,omitempty"`
+	// Consumed are the sha256 (hex) of tokens a welcome confirmed at this origin: never sent again, by any
+	// key.
 	Consumed []string `json:"consumed,omitempty"`
+	// Keys are the tokens waiting for a welcome, by the key id (§2.2) of the node they were given to.
+	Keys map[string]*KeyCredential `json:"keys,omitempty"`
+}
+
+// KeyCredential is one key's enrollment tokens at one origin that no welcome has confirmed yet.
+type KeyCredential struct {
+	Enroll []string `json:"enroll,omitempty"` // sent in this key's next hello
+	// Unconfirmed are the sha256 (hex) of tokens this key sent in a hello whose outcome is unknown: its next
+	// handshake is the lost-welcome probe (no tokens), whose welcome may confirm them.
+	Unconfirmed []string `json:"unconfirmed,omitempty"`
+}
+
+func (k *KeyCredential) empty() bool {
+	return k == nil || len(k.Enroll) == 0 && len(k.Unconfirmed) == 0
+}
+
+func (k *KeyCredential) clone() *KeyCredential {
+	if k == nil {
+		return nil
+	}
+	return &KeyCredential{Enroll: slices.Clone(k.Enroll), Unconfirmed: slices.Clone(k.Unconfirmed)}
 }
 
 // empty reports whether c holds nothing worth a line in the file.
 func (c Credential) empty() bool {
-	return c.APIKey == "" && len(c.Enroll) == 0 && len(c.Unconfirmed) == 0 && len(c.Consumed) == 0
+	if c.APIKey != "" || len(c.Consumed) > 0 {
+		return false
+	}
+	for _, k := range c.Keys {
+		if !k.empty() {
+			return false
+		}
+	}
+	return true
 }
 
 func (c Credential) clone() Credential {
-	return Credential{
-		APIKey:      c.APIKey,
-		Enroll:      slices.Clone(c.Enroll),
-		Unconfirmed: slices.Clone(c.Unconfirmed),
-		Consumed:    slices.Clone(c.Consumed),
+	out := Credential{APIKey: c.APIKey, Consumed: slices.Clone(c.Consumed)}
+	if c.Keys != nil {
+		out.Keys = make(map[string]*KeyCredential, len(c.Keys))
+		for kid, k := range c.Keys {
+			out.Keys[kid] = k.clone()
+		}
+	}
+	return out
+}
+
+// Key is a copy of one key's waiting tokens (empty when it has none).
+func (c Credential) Key(kid string) KeyCredential {
+	if k := c.Keys[kid]; k != nil {
+		return *k.clone()
+	}
+	return KeyCredential{}
+}
+
+// key is kid's entry, made when missing (Update drops an entry left empty).
+func (c *Credential) key(kid string) *KeyCredential {
+	if c.Keys == nil {
+		c.Keys = map[string]*KeyCredential{}
+	}
+	k := c.Keys[kid]
+	if k == nil {
+		k = &KeyCredential{}
+		c.Keys[kid] = k
+	}
+	return k
+}
+
+// consumed reports whether a welcome at this origin confirmed the token.
+func (c Credential) consumed(token string) bool { return slices.Contains(c.Consumed, TokenHash(token)) }
+
+// tidy drops the key entries left empty.
+func (c *Credential) tidy() {
+	for kid, k := range c.Keys {
+		if k.empty() {
+			delete(c.Keys, kid)
+		}
+	}
+	if len(c.Keys) == 0 {
+		c.Keys = nil
 	}
 }
 
@@ -102,41 +172,50 @@ func LoadCredentials(path string) (*Credentials, error) {
 // Path is the file's path.
 func (c *Credentials) Path() string { return c.path }
 
-// For returns the credential of a gate origin (a copy).
+// For returns the credential of a gate origin as last read or written (a copy).
 func (c *Credentials) For(origin string) Credential {
 	return c.byOrigin[origin].clone()
 }
 
-// Save writes the credential of a gate origin atomically, 0600: under the file's lock it re-reads the
-// file, replaces that origin's entry (removes it when cred is empty), writes a temporary file in the same
-// directory and renames it over the file. A missing directory is created 0700.
-func (c *Credentials) Save(origin string, cred Credential) error {
+// Update changes the credential of a gate origin and writes the file atomically, 0600: under the file's
+// lock it re-reads the file, applies change to that origin's entry as the file holds it now (another
+// process's changes included), drops what is left empty (the whole entry, when nothing is), writes a
+// temporary file in the same directory and renames it over the file. A missing directory is created 0700.
+// It returns the origin's credential as written.
+//
+// change must express a change, never restore an earlier copy: it adds and removes the tokens and hashes
+// of its own key, adds to Consumed, sets the API key. That is what keeps two processes at one origin (two
+// keys under one HOME, §11) from erasing each other's records (M2 WP-06 review).
+func (c *Credentials) Update(origin string, change func(*Credential)) (Credential, error) {
 	if err := ensureDir(filepath.Dir(c.path)); err != nil {
-		return err
+		return Credential{}, err
 	}
 	target, fh, err := lockCredentials(c.path)
 	if err != nil {
-		return err
+		return Credential{}, err
 	}
 	defer fh.Close() // releases the lock
 	m, err := readCredentials(c.path, fh)
 	if err != nil {
-		return err
+		return Credential{}, err
 	}
+	cred := m[origin].clone()
+	change(&cred)
+	cred.tidy()
 	if cred.empty() {
 		delete(m, origin)
 	} else {
-		m[origin] = cred.clone()
+		m[origin] = cred
 	}
 	b, err := json.MarshalIndent(credentialsDoc{V: 1, Gates: m}, "", "  ")
 	if err != nil {
-		return fmt.Errorf("node: credentials: %w", err)
+		return Credential{}, fmt.Errorf("node: credentials: %w", err)
 	}
 	if err := replaceFile(target, append(b, '\n')); err != nil {
-		return err
+		return Credential{}, err
 	}
 	c.byOrigin = m
-	return nil
+	return cred.clone(), nil
 }
 
 // readCredentials checks the mode of the open file and parses it.
@@ -175,6 +254,7 @@ func readCredentials(path string, fh *os.File) (map[string]Credential, error) {
 		return nil, fmt.Errorf("node: credentials: %s has version %d, this version reads 1", path, doc.V)
 	}
 	for o, cr := range doc.Gates {
+		cr.tidy()
 		m[o] = cr
 	}
 	return m, nil

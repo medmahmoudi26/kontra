@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -317,14 +318,39 @@ func (tn *testNode) running() bool {
 	}
 }
 
-func (tn *testNode) creds(t *testing.T) Credential {
+// credView is what the credentials file holds for a node at its gate: the origin's API key and consumed
+// tokens, and the waiting tokens of the node's active key.
+type credView struct {
+	APIKey              string
+	Enroll, Unconfirmed []string
+	Consumed            []string
+}
+
+func (tn *testNode) creds(t *testing.T) credView {
 	t.Helper()
 	c, err := LoadCredentials(tn.cfg.CredentialsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	o, _ := tunnel.CanonicalOrigin(tn.cfg.Gate)
-	return c.For(o)
+	cr := c.For(o)
+	k := cr.Key(tn.n.cfgKeyID(t))
+	return credView{APIKey: cr.APIKey, Enroll: k.Enroll, Unconfirmed: k.Unconfirmed, Consumed: cr.Consumed}
+}
+
+// mustUpdate changes a credentials file's entry for origin.
+func mustUpdate(t *testing.T, path, origin string, change func(*Credential)) {
+	t.Helper()
+	if err := ensureDir(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadCredentials(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Update(origin, change); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // sessOpener opens exchange streams on a gate session, as the gate's tunnel backend does.
@@ -691,19 +717,17 @@ func TestCredentialsStayWithTheirOrigin(t *testing.T) {
 	rec := newRecorder(t)
 	home := t.TempDir()
 	credPath := filepath.Join(home, ".kontra", CredentialsFile)
-	if err := ensureDir(filepath.Dir(credPath)); err != nil {
-		t.Fatal(err)
-	}
-	creds, err := LoadCredentials(credPath)
+	const aKey = "kk_live_gate_a_key"
+	cfg := testConfig(t, g.url, home, a2aServe("hello", rec.url()))
+	id, _, err := nodekey.LoadOrCreate(cfg.KeyPath, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := Credential{APIKey: "kk_live_gate_a_key", Enroll: []string{tokA}}
-	if err := creds.Save("https://gate-a.example", a); err != nil {
-		t.Fatal(err)
-	}
+	mustUpdate(t, credPath, "https://gate-a.example", func(c *Credential) {
+		c.APIKey = aKey
+		c.key(id.KeyID()).Enroll = []string{tokA}
+	})
 
-	cfg := testConfig(t, g.url, home, a2aServe("hello", rec.url()))
 	tn := mustNode(t, g, cfg).run(t)
 	r := g.adm.next(t)
 	if len(r.Hello.Enroll) != 0 || r.Hello.Auth != "" {
@@ -730,15 +754,63 @@ func TestCredentialsStayWithTheirOrigin(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := all.For(origin)
-		return got.APIKey == "kk_live_gate_b_key" && len(got.Enroll) == 0 && slices.Equal(got.Consumed, []string{TokenHash(tokB)})
+		return got.APIKey == "kk_live_gate_b_key" && len(got.Key(id.KeyID()).Enroll) == 0 && slices.Equal(got.Consumed, []string{TokenHash(tokB)})
 	})
-	if got := all.For("https://gate-a.example"); got.APIKey != a.APIKey || !slices.Equal(got.Enroll, a.Enroll) {
+	if got := all.For("https://gate-a.example"); got.APIKey != aKey || !slices.Equal(got.Key(id.KeyID()).Enroll, []string{tokA}) {
 		t.Errorf("A's entry changed: %+v", got)
 	}
 	b, _ := os.ReadFile(credPath)
 	if strings.Contains(string(b), tokB) {
 		t.Error("a confirmed token is still in the credentials file")
 	}
+}
+
+// Two `kontra connect` with different keys under one HOME, at one gate (§11: several nodes serve one
+// service, each with its own key): a token given to A is never sent in B's hello, B's lost-welcome probe
+// confirms only B's own tokens, and neither erases the other's records (M2 WP-06 review: the waiting
+// tokens were the origin's, so B sent A's token, and B's probe recorded it consumed).
+func TestCredentialsSharedAcrossKeys(t *testing.T) {
+	g := newTestGate(t, nil)
+	g.adm.set(func(n int, req enroll.Request) (*enroll.Decision, error) {
+		if n == 0 {
+			return nil, gateFails // B's first hello: its outcome is lost
+		}
+		return admitAll(req), nil
+	})
+	rec := newRecorder(t)
+	home := t.TempDir()
+	cfgA := testConfig(t, g.url, home, a2aServe("alpha", rec.url()))
+	cfgA.KeyPath = filepath.Join(home, "a.key")
+	cfgA.Enroll = []string{tokA}
+	tnA := mustNode(t, g, cfgA) // A started; its hello is not sent yet
+
+	cfgB := testConfig(t, g.url, home, a2aServe("beta", rec.url()))
+	cfgB.KeyPath = filepath.Join(home, "b.key")
+	cfgB.Enroll = []string{tokB}
+	tnB := mustNode(t, g, cfgB).run(t)
+	if r := g.adm.next(t); !slices.Equal(r.Hello.Enroll, []string{tokB}) {
+		t.Fatalf("B's hello carried %v, want only B's token", r.Hello.Enroll)
+	}
+	if r := g.adm.next(t); len(r.Hello.Enroll) != 0 {
+		t.Fatalf("B's probe carried %v", r.Hello.Enroll)
+	}
+	g.session(t)
+	eventually(t, 5*time.Second, "B's token consumed", func() bool {
+		return slices.Equal(tnB.creds(t).Consumed, []string{TokenHash(tokB)})
+	})
+	if c := tnA.creds(t); !slices.Equal(c.Enroll, []string{tokA}) || slices.Contains(c.Consumed, TokenHash(tokA)) {
+		t.Fatalf("A's records after B's: %+v", c)
+	}
+
+	tnA.run(t)
+	if r := g.adm.next(t); !slices.Equal(r.Hello.Enroll, []string{tokA}) || r.Hello.KID != tnA.n.cfgKeyID(t) {
+		t.Fatalf("A's hello carried %v", r.Hello.Enroll)
+	}
+	g.session(t)
+	eventually(t, 5*time.Second, "both tokens consumed", func() bool {
+		c := tnA.creds(t)
+		return len(c.Enroll) == 0 && slices.Equal(c.Consumed, []string{TokenHash(tokB), TokenHash(tokA)})
+	})
 }
 
 // A token a welcome confirmed is never sent again, even when a restart passes the same --enroll (M2 plan
@@ -847,13 +919,13 @@ func TestRestartWhileUnconfirmed(t *testing.T) {
 	rec := newRecorder(t)
 	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
 	origin, _ := tunnel.CanonicalOrigin(g.url)
-	if err := ensureDir(filepath.Dir(cfg.CredentialsPath)); err != nil {
+	id, _, err := nodekey.LoadOrCreate(cfg.KeyPath, time.Now())
+	if err != nil {
 		t.Fatal(err)
 	}
-	creds, _ := LoadCredentials(cfg.CredentialsPath)
-	if err := creds.Save(origin, Credential{Enroll: []string{tokA}, Unconfirmed: []string{TokenHash(tokA)}}); err != nil {
-		t.Fatal(err)
-	}
+	mustUpdate(t, cfg.CredentialsPath, origin, func(c *Credential) {
+		*c.key(id.KeyID()) = KeyCredential{Enroll: []string{tokA}, Unconfirmed: []string{TokenHash(tokA)}}
+	})
 	g.adm.set(func(n int, req enroll.Request) (*enroll.Decision, error) {
 		if len(req.Hello.Enroll) == 0 {
 			return nil, tunnel.Refuse(tunnel.CodeServiceDenied, "the key was never enrolled for hello")
@@ -964,6 +1036,39 @@ func TestRotate(t *testing.T) {
 	tn.n.maintain(nil)
 	if id, _ := nodekey.Load(cfg.KeyPath); len(id.Older) != 0 || id.Recipient() != r.Hello.Recipient {
 		t.Fatalf("after 24 h: %d older keys", len(id.Older))
+	}
+}
+
+// `kontra connect --rotate --enroll <token>`: the token, kept under the key the node started with, is
+// sent with the new key, alongside rotate_from (the tokens are the node's, by its key file, not a
+// replaced key's).
+func TestRotateWithEnroll(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	cfg := testConfig(t, g.url, "", a2aServe("hello", rec.url()))
+	mustNode(t, nil, cfg) // creates the key
+	old, err := nodekey.Load(cfg.KeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rot := cfg
+	rot.Rotate = true
+	rot.Enroll = []string{tokA}
+	tn := mustNode(t, g, rot).run(t)
+	r := g.adm.next(t)
+	if r.Hello.RotateFrom == nil || r.Hello.RotateFrom.KID != old.KeyID() || r.Hello.KID == old.KeyID() ||
+		!slices.Equal(r.Hello.Enroll, []string{tokA}) {
+		t.Fatalf("the hello: kid %s rotate_from %+v enroll %v", r.Hello.KID, r.Hello.RotateFrom, r.Hello.Enroll)
+	}
+	g.session(t)
+	eventually(t, 5*time.Second, "the token consumed", func() bool {
+		c := tn.creds(t)
+		return len(c.Enroll) == 0 && slices.Equal(c.Consumed, []string{TokenHash(tokA)})
+	})
+	all, _ := LoadCredentials(cfg.CredentialsPath)
+	origin, _ := tunnel.CanonicalOrigin(g.url)
+	if got := all.For(origin); len(got.Keys) != 0 {
+		t.Fatalf("waiting tokens left: %+v", got.Keys)
 	}
 }
 
@@ -1212,48 +1317,55 @@ func TestCredentialsFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "credentials")
 	c, err := LoadCredentials(path)
-	if err != nil || len(c.For("https://a.example").Enroll) != 0 {
+	if err != nil || !c.For("https://a.example").empty() {
 		t.Fatalf("absent: %v", err)
 	}
-	if err := c.Save("https://a.example", Credential{APIKey: "k", Consumed: []string{"h"}}); err != nil {
+	if _, err := c.Update("https://a.example", func(c *Credential) { c.APIKey = "k"; c.Consumed = append(c.Consumed, "h") }); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Stat(filepath.Dir(path)); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("directory: %v %v", fi.Mode(), err)
 	}
-	// Another process's save is kept: Save re-reads the file under its lock.
+	// Another process's change is kept: Update re-reads the file under its lock.
 	other, _ := LoadCredentials(path)
-	if err := other.Save("https://b.example", Credential{Enroll: []string{tokB}}); err != nil {
+	if _, err := other.Update("https://b.example", func(c *Credential) { c.key("k1_b").Enroll = []string{tokB} }); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Save("https://a.example", Credential{APIKey: "k2"}); err != nil {
+	got, err := c.Update("https://a.example", func(c *Credential) { c.APIKey = "k2" })
+	if err != nil {
 		t.Fatal(err)
+	}
+	if got.APIKey != "k2" || !slices.Equal(got.Consumed, []string{"h"}) {
+		t.Fatalf("Update returned %+v", got)
 	}
 	all, err := LoadCredentials(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if all.For("https://a.example").APIKey != "k2" || !slices.Equal(all.For("https://b.example").Enroll, []string{tokB}) {
-		t.Fatalf("after two processes' saves: %+v %+v", all.For("https://a.example"), all.For("https://b.example"))
+	if all.For("https://a.example").APIKey != "k2" || !slices.Equal(all.For("https://b.example").Key("k1_b").Enroll, []string{tokB}) {
+		t.Fatalf("after two processes' changes: %+v %+v", all.For("https://a.example"), all.For("https://b.example"))
 	}
-	// An empty credential removes the entry.
-	if err := c.Save("https://a.example", Credential{}); err != nil {
+	// An entry left empty is removed, a key's as the origin's.
+	if _, err := other.Update("https://b.example", func(c *Credential) { c.key("k1_b").Enroll = nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Update("https://a.example", func(c *Credential) { c.APIKey, c.Consumed = "", nil }); err != nil {
 		t.Fatal(err)
 	}
 	all, _ = LoadCredentials(path)
-	if _, ok := all.byOrigin["https://a.example"]; ok {
-		t.Error("an empty credential kept its entry")
+	if len(all.byOrigin) != 0 {
+		t.Errorf("empty credentials kept their entries: %+v", all.byOrigin)
 	}
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Errorf("mode %v", fi.Mode())
 	}
-	// Concurrent saves of different origins lose nothing.
+	// Concurrent changes of different origins lose nothing.
 	var wg sync.WaitGroup
 	for i := range 20 {
 		wg.Go(func() {
 			cc, err := LoadCredentials(path)
 			if err == nil {
-				err = cc.Save(fmt.Sprintf("https://g%d.example", i), Credential{APIKey: fmt.Sprint(i)})
+				_, err = cc.Update(fmt.Sprintf("https://g%d.example", i), func(c *Credential) { c.APIKey = fmt.Sprint(i) })
 			}
 			if err != nil {
 				t.Error(err)
@@ -1270,6 +1382,98 @@ func TestCredentialsFile(t *testing.T) {
 	os.WriteFile(path, []byte("{not json"), 0o600)
 	if _, err := LoadCredentials(path); err == nil || strings.Contains(err.Error(), "not json") {
 		t.Errorf("a broken file: %v", err)
+	}
+}
+
+// Two `kontra connect` with different keys under one HOME, at one gate (§11: several nodes serve one
+// service, each with its own key), each holding the copy it read at start: a change by one never erases
+// the other's (M2 WP-06 review). Before Update, Save wrote the caller's whole copy of the origin's entry, so
+// B's save of its stale copy erased A's Consumed record, and A's restart with the same --enroll then sent a
+// used token (enroll_invalid, final).
+func TestCredentialsStaleCopiesAtOneOrigin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".kontra", CredentialsFile)
+	const o = "https://gate.example"
+	a, _ := LoadCredentials(path)
+	b, _ := LoadCredentials(path) // B starts before A's welcome
+	if _, err := a.Update(o, func(c *Credential) { c.key("k1_a").Enroll = []string{tokA} }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Update(o, func(c *Credential) { // A's welcome
+		c.Consumed = append(c.Consumed, TokenHash(tokA))
+		c.key("k1_a").Enroll = nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Update(o, func(c *Credential) { c.key("k1_b").Enroll = []string{tokB} }); err != nil { // B, from its stale copy
+		t.Fatal(err)
+	}
+	all, _ := LoadCredentials(path)
+	got := all.For(o)
+	if !slices.Equal(got.Consumed, []string{TokenHash(tokA)}) || !slices.Equal(got.Key("k1_b").Enroll, []string{tokB}) ||
+		len(got.Key("k1_a").Enroll) != 0 {
+		t.Fatalf("after A's welcome and B's change: %+v", got)
+	}
+}
+
+// envCredsHelper makes the test binary a `kontra connect` stand-in for TestCredentialsTwoProcesses.
+const envCredsHelper = "KONTRA_TEST_CREDENTIALS_HELPER"
+
+// Two processes change one origin's entry at once, each its own key's tokens and the shared Consumed list,
+// through flock(2) on the shared file: nothing is lost.
+func TestCredentialsTwoProcesses(t *testing.T) {
+	if spec := os.Getenv(envCredsHelper); spec != "" {
+		credentialsHelper(t, spec)
+		return
+	}
+	path := filepath.Join(t.TempDir(), ".kontra", CredentialsFile)
+	const rounds = 40
+	var wg sync.WaitGroup
+	for _, kid := range []string{"k1_a", "k1_b"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCredentialsTwoProcesses$", "-test.count=1")
+		cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%s|%s|%d", envCredsHelper, path, kid, rounds))
+		wg.Go(func() {
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("process %s: %v\n%s", kid, err, out)
+			}
+		})
+	}
+	wg.Wait()
+	all, err := LoadCredentials(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := all.For("https://gate.example")
+	if len(got.Consumed) != 2*rounds {
+		t.Errorf("%d consumed hashes, want %d", len(got.Consumed), 2*rounds)
+	}
+	for _, kid := range []string{"k1_a", "k1_b"} {
+		if n := len(got.Key(kid).Enroll); n != rounds {
+			t.Errorf("%s: %d tokens, want %d", kid, n, rounds)
+		}
+	}
+}
+
+func credentialsHelper(t *testing.T, spec string) {
+	parts := strings.Split(spec, "|")
+	if len(parts) != 3 {
+		t.Fatalf("helper spec %q", spec)
+	}
+	path, kid := parts[0], parts[1]
+	var rounds int
+	fmt.Sscan(parts[2], &rounds)
+	c, err := LoadCredentials(path) // loaded once: every later change is made from this stale copy
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range rounds {
+		tok := fmt.Sprintf("ket_%s%028d", strings.TrimPrefix(kid, "k1_")+"xxx", i)
+		if _, err := c.Update("https://gate.example", func(c *Credential) {
+			k := c.key(kid)
+			k.Enroll = append(k.Enroll, tok)
+			c.Consumed = append(c.Consumed, TokenHash(kid+tok))
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -24,6 +24,10 @@ import (
 // committed) or unknown_key (it did not; the node then rotates again) answers (internal/node, WP-06). The
 // owner's alternative, accepting a rotate_from whose rotated_to is the hello's key as a reconnect, is not
 // built.
+//
+// A rotate_from naming no key of this gate, or a revoked one, is refused as §12 says; the node then sends
+// its hello again without rotate_from, so that its tokens or API key may enroll the new key (SPEC-CONFLICT
+// in internal/node's connect and on nodekey.Prune, M2 WP-06 review).
 func (a *admission) checkRotation(ctx context.Context) error {
 	h := a.h
 	rf := h.RotateFrom

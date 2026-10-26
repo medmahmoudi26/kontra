@@ -143,49 +143,85 @@ func (n *Node) Run(ctx context.Context) error {
 // carried tokens or rotate_from and lost its outcome (the connection ended after the proof, ErrNoOutcome;
 // or the process stopped meanwhile) may have committed, and sending it again would be refused
 // enroll_invalid for good. The node's own fix within the spec text: the next handshake is a probe, the
-// same hello with the active key and neither tokens nor rotate_from. Its welcome means the change committed
-// (the tokens are recorded consumed, the rotation confirmed with nodekey.MarkRotated); unknown_key (a new
-// or rotated key the gate does not know), or service_denied (a known key declaring the service the tokens
-// were to bind), means it did not, and the full hello is sent again at once. A consumed token is never
-// sent again, not even when a restart passes the same --enroll. The probe's service_denied is taken as
-// "not committed" although §4 does not retry service_denied: the full hello it is followed by differs, and
-// its own refusal is final. The owner's alternative is a gate that accepts a replayed rotation or token as
-// a reconnect (idempotent admission).
+// same hello with the active key and no enrollment authority: neither tokens nor rotate_from, nor the API
+// key, whose enroll: scope (tunnel.enroll_with_api_key) would otherwise enroll the new key of a rotation
+// that did not commit, a welcome the node would take for the rotation's (M2 WP-06 review). Its welcome
+// means the change committed: the rotation is confirmed (nodekey.MarkRotated), and the tokens are recorded
+// consumed if the welcome serves every declared service. unknown_key (a new or rotated key the gate does
+// not know), or service_denied (a known key declaring the service the tokens were to bind), means it did
+// not, and the full hello is sent again at once. So does a welcome that leaves a declared service out: a
+// token that re-enrolls a revoked binding and did not commit leaves it out that way (§5: a revoked binding
+// is left out, not refused). A consumed token is never sent again, not even when a restart passes the same
+// --enroll. The probe's service_denied is taken as "not committed" although §4 does not retry
+// service_denied: the full hello it is followed by differs, and its own refusal is final. Residual: the
+// node cannot tell which services a token binds, so a probe welcomed without a declared service the
+// tokens did not concern (a binding revoked earlier and still declared) is read as "not committed" even
+// when the tokens did commit; the full hello then carries consumed tokens and is refused enroll_invalid,
+// which ends Run and drops them, as for any refused token. The owner's alternative is a gate that accepts
+// a replayed rotation or token as a reconnect (idempotent admission), or a welcome that says what the
+// hello enrolled.
+//
+// SPEC-CONFLICT (spec/tunnel.md §12 with §2.1, §5 and §15; M2 WP-06 review): §12 has the node connect with
+// rotate_from naming the old key, which must be a key of this gate and neither revoked (revoked) nor
+// rotated (enroll_invalid), and §4 retries neither. But one key is enrolled separately at each gate the
+// node dials (§2.1), and the key file records which gates confirmed a rotation, not which hold the old
+// key. A node that rotated and then enrolls at a gate that never knew the old key (a first enrollment with
+// --enroll, §5), or at a gate that revoked the old key (rotate after a leak, then revoke the old key, §12
+// and §15), would send a rotate_from refused for good on every start, which only editing identity.key
+// would undo. The node therefore sends rotate_from to a gate that has not settled the rotation, and when
+// that gate refuses it enroll_invalid or revoked, sends the hello again at once without it, and never names
+// that key in rotate_from at this gate again in this process: tokens or an enroll: scope in that hello
+// enroll the new key, a gate that already knows the new key welcomes it, and a gate that knows neither key
+// answers unknown_key, retried until the operator enrolls the key with --enroll. Any welcome of the active
+// key settles the rotation at its gate (nodekey.MarkRotated), so rotate_from is never sent there again. A
+// rotate_from refused because the same hello's tokens are bad costs one more handshake, whose
+// enroll_invalid is final as before. Proposal for the owner: §12 says what a node does at a gate that does
+// not hold the old key (send no rotate_from there; its other authorities enroll the new key), or the gate
+// admits such a hello on its other authorities and ignores the rotate_from.
 func (n *Node) connect(ctx context.Context) (*session, next, error) {
 	id, err := nodekey.Load(n.cfg.KeyPath)
 	if err != nil {
 		return nil, nextFatal, fmt.Errorf("node: the identity key: %w", err)
 	}
+	kid := id.KeyID()
 	n.mu.Lock()
 	n.activeKey = id.Recipient()
 	probe := n.unsure
+	skip := n.skipRotation
 	n.mu.Unlock()
+	log := n.logger.With("key_id", kid)
 
-	h := &tunnel.Hello{Name: n.cfg.Name, Agent: UserAgent(n.cfg.Version), Services: n.declaredServices(), Auth: n.credential().APIKey}
+	// A rotation this gate has not settled: the next hello names the old key in rotate_from, unless this gate
+	// refused it; the tokens given to the old key are the new key's.
 	var rotateOld string
+	if old, ok := id.PendingRotation(n.origin); ok {
+		rotateOld = old.Recipient().String()
+		n.adoptTokens(tunnel.KeyID(rotateOld), kid, log)
+	}
+	cred := n.credential()
+	h := &tunnel.Hello{Name: n.cfg.Name, Agent: UserAgent(n.cfg.Version), Services: n.declaredServices()}
 	if !probe {
-		h.Enroll = n.credential().Enroll
-		if old, ok := id.PendingRotation(n.origin); ok {
-			rotateOld = old.Recipient().String()
+		h.Auth = cred.APIKey
+		h.Enroll = cred.Key(kid).Enroll
+		if rotateOld != "" && rotateOld != skip {
 			h.RotateFrom = &tunnel.KeyRef{KID: tunnel.KeyID(rotateOld), Recipient: rotateOld}
 		}
 	}
 	sent := slices.Clone(h.Enroll)
-	log := n.logger.With("key_id", id.KeyID())
 	if probe {
 		log.Info("dialing with the active key alone: the outcome of an earlier hello that carried enrollment " +
 			"tokens or rotate_from is unknown")
 	}
 	if len(sent) > 0 {
 		// Before anything is sent: a stop after the proof leaves the probe for the next start.
-		if err := n.updateCredential(func(c *Credential) { c.Unconfirmed = hashes(sent) }); err != nil {
+		if err := n.updateCredential(func(c *Credential) { c.key(kid).Unconfirmed = hashes(sent) }); err != nil {
 			return nil, nextFatal, err
 		}
 	}
 
 	d, err := n.dialer.Dial(ctx, n.cfg.Gate)
 	if err != nil {
-		n.settled(sent, probe)
+		n.settled(kid, sent, probe)
 		log.Warn("the gate could not be dialed", "err", err)
 		return nil, nextRetry, err
 	}
@@ -193,15 +229,19 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 	var herr *tunnel.HandshakeError
 	switch {
 	case err == nil:
-		if err := n.welcomed(id, h, probe, rotateOld, log); err != nil {
-			log.Error("the credentials file could not be updated after the welcome", "err", err)
+		if err := n.welcomed(kid, h, w, probe, rotateOld, log); err != nil {
+			log.Error("the credentials or key file could not be updated after the welcome", "err", err)
 		}
-		if probe && len(n.credential().Enroll) > 0 {
-			// Tokens given since the hello whose outcome was lost: they were not in the probe, so this session
-			// does not serve what they enroll. Dial again at once with them (this session is seconds old).
-			_ = d.WS.Close(websocket.StatusNormalClosure, "")
-			log.Info("the earlier hello was admitted; dialing again with the enrollment tokens given since")
-			return nil, nextAgain, nil
+		if probe {
+			if cred := n.credential(); len(cred.Key(kid).Enroll) > 0 || cred.APIKey != "" {
+				// The probe carried neither the tokens still waiting (given since the hello whose outcome was
+				// lost, or that hello's own when this welcome did not confirm them) nor the API key, the
+				// session's hiring principal: dial again at once with the full hello (this session is seconds
+				// old).
+				_ = d.WS.Close(websocket.StatusNormalClosure, "")
+				log.Info("the probe was welcomed; dialing again with the full hello")
+				return nil, nextAgain, nil
+			}
 		}
 		s, err := n.startSession(ctx, d, w, id)
 		if err != nil {
@@ -214,16 +254,21 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 		if probe && (herr.Code == tunnel.CodeUnknownKey || herr.Code == tunnel.CodeServiceDenied) {
 			// Nothing committed: the tokens are still unused (the full hello marks them unconfirmed again).
 			n.setUnsure(false)
-			if len(n.credential().Unconfirmed) > 0 {
-				if err := n.updateCredential(func(c *Credential) { c.Unconfirmed = nil }); err != nil {
-					log.Error("the credentials file could not be updated", "err", err)
-				}
-			}
+			n.clearUnconfirmed(kid, log)
 			log.Info("the earlier hello was not admitted: sending it again", "code", herr.Code)
 			return nil, nextAgain, nil
 		}
-		n.settled(sent, probe)
-		n.refused(herr, h, sent, log)
+		n.settled(kid, sent, probe)
+		if h.RotateFrom != nil && (herr.Code == tunnel.CodeEnrollInvalid || herr.Code == tunnel.CodeRevoked) {
+			n.mu.Lock()
+			n.skipRotation = rotateOld
+			n.mu.Unlock()
+			log.Warn("the gate refused rotate_from, so this gate cannot carry the rotation: sending the hello again "+
+				"without it (its tokens or API key may enroll the new key)", "code", herr.Code, "message", herr.Message,
+				"old_key_id", tunnel.KeyID(rotateOld))
+			return nil, nextAgain, nil
+		}
+		n.refused(kid, herr, h, sent, log)
 		if !herr.Code.Retryable() {
 			log.Error("the gate refused the handshake; kontra connect does not retry this without a change by its operator",
 				"code", herr.Code, "message", herr.Message)
@@ -238,7 +283,7 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 		return nil, nextRetry, err
 
 	case errors.Is(err, ErrChannelBindingRequired):
-		n.settled(sent, probe)
+		n.settled(kid, sent, probe)
 		log.Error("the gate offers no channel binding (cb none) and --require-channel-binding is set")
 		return nil, nextFatal, err
 
@@ -251,22 +296,33 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 
 	default:
 		// Nothing was admitted: the failure came before the proof was sent.
-		n.settled(sent, probe)
+		n.settled(kid, sent, probe)
 		log.Warn("the handshake failed", "err", err)
 		return nil, nextRetry, err
 	}
 }
 
-// welcomed records what a welcome confirms: the hello's tokens consumed (a probe's: the earlier hello's,
-// Unconfirmed), and the rotation committed at this gate (MarkRotated, from which Prune counts 24 h).
-func (n *Node) welcomed(id *nodekey.Identity, h *tunnel.Hello, probe bool, rotateOld string, log *slog.Logger) error {
+// welcomed records what a welcome of the active key settles at this gate:
+//
+//   - a rotation the key file holds as pending here (rotateOld) is stamped (nodekey.MarkRotated): the gate
+//     knows the active key, by this rotation or otherwise, so a rotate_from would now be refused (the new
+//     key exists) and is never sent here again; Prune counts its 24 h from the latest stamp;
+//   - the tokens: a full hello's are recorded consumed; a probe's welcome confirms the earlier hello's
+//     (Unconfirmed) only if it serves every service the probe declared (connect's SPEC-CONFLICT), and
+//     otherwise leaves them waiting, to be sent again.
+func (n *Node) welcomed(kid string, h *tunnel.Hello, w *tunnel.Welcome, probe bool, rotateOld string, log *slog.Logger) error {
 	n.setUnsure(false)
+	cur := n.credential().Key(kid)
 	var confirmed []string
-	cur := n.credential()
-	if probe {
-		confirmed = cur.Unconfirmed
-	} else {
+	switch {
+	case !probe:
 		confirmed = hashes(h.Enroll)
+	case len(cur.Unconfirmed) == 0:
+	case servesAll(w, h.Services):
+		confirmed = cur.Unconfirmed
+	default:
+		log.Info("the probe's welcome leaves out a declared service that the earlier hello's tokens may enroll: "+
+			"they are sent again", "served", welcomeNames(w))
 	}
 	var err error
 	if len(confirmed) > 0 || len(cur.Unconfirmed) > 0 {
@@ -276,50 +332,103 @@ func (n *Node) welcomed(id *nodekey.Identity, h *tunnel.Hello, probe bool, rotat
 					c.Consumed = append(c.Consumed, x)
 				}
 			}
-			c.Enroll = slices.DeleteFunc(c.Enroll, func(t string) bool { return slices.Contains(confirmed, TokenHash(t)) })
-			c.Unconfirmed = nil
+			k := c.key(kid)
+			k.Enroll = slices.DeleteFunc(k.Enroll, func(t string) bool { return slices.Contains(confirmed, TokenHash(t)) })
+			k.Unconfirmed = nil
 		})
 		if len(confirmed) > 0 {
 			log.Info("the gate confirmed the enrollment: its tokens are not sent again", "enrollments", len(confirmed))
 		}
 	}
-	if rotateOld == "" && probe {
-		if old, ok := id.PendingRotation(n.origin); ok {
-			rotateOld = old.Recipient().String()
-		}
-	}
 	if rotateOld != "" {
 		if merr := nodekey.MarkRotated(n.cfg.KeyPath, rotateOld, n.origin, n.now()); merr != nil {
+			// Not named in rotate_from here again by this process (the gate would refuse it); a restart probes.
+			n.mu.Lock()
+			n.skipRotation = rotateOld
+			n.mu.Unlock()
 			err = errors.Join(err, merr)
-		} else {
+		} else if h.RotateFrom != nil {
 			log.Info("the gate confirmed the key's rotation: the old key is kept, decrypt-only, for 24 h (§12)",
 				"old_key_id", tunnel.KeyID(rotateOld))
+		} else {
+			log.Info("the gate knows the rotated key: the rotation is settled at this gate, and the old key is kept, "+
+				"decrypt-only, for 24 h (§12)", "old_key_id", tunnel.KeyID(rotateOld))
 		}
 	}
 	return err
 }
 
+// servesAll reports whether the welcome lists every declared service.
+func servesAll(w *tunnel.Welcome, declared []tunnel.Service) bool {
+	for _, d := range declared {
+		if !slices.ContainsFunc(w.Services, func(s tunnel.WelcomeService) bool { return s.Name == d.Name }) {
+			return false
+		}
+	}
+	return true
+}
+
+func welcomeNames(w *tunnel.Welcome) []string {
+	out := make([]string, 0, len(w.Services))
+	for _, s := range w.Services {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
 // settled records that a hello's outcome is known and was not a welcome: its tokens are no longer
 // unconfirmed. A probe carries no tokens, and leaves the earlier hello's in place.
-func (n *Node) settled(sent []string, probe bool) {
+func (n *Node) settled(kid string, sent []string, probe bool) {
 	if probe || len(sent) == 0 {
 		return
 	}
-	if err := n.updateCredential(func(c *Credential) { c.Unconfirmed = nil }); err != nil {
-		n.logger.Error("the credentials file could not be updated", "err", err)
+	n.clearUnconfirmed(kid, n.logger)
+}
+
+// clearUnconfirmed empties the key's Unconfirmed.
+func (n *Node) clearUnconfirmed(kid string, log *slog.Logger) {
+	if len(n.credential().Key(kid).Unconfirmed) == 0 {
+		return
+	}
+	if err := n.updateCredential(func(c *Credential) { c.key(kid).Unconfirmed = nil }); err != nil {
+		log.Error("the credentials file could not be updated", "err", err)
+	}
+}
+
+// adoptTokens moves the tokens waiting under the key the active one replaced to the active key: they were
+// given to this node (its key file) before the rotation, by --enroll with --rotate or earlier.
+func (n *Node) adoptTokens(from, to string, log *slog.Logger) {
+	if len(n.credential().Key(from).Enroll) == 0 {
+		return
+	}
+	if err := n.updateCredential(func(c *Credential) {
+		old := c.Keys[from]
+		if old == nil {
+			return
+		}
+		k := c.key(to)
+		for _, t := range old.Enroll {
+			if !c.consumed(t) && !slices.Contains(k.Enroll, t) {
+				k.Enroll = append(k.Enroll, t)
+			}
+		}
+		old.Enroll = nil
+	}); err != nil {
+		log.Error("the credentials file could not be updated", "err", err)
 	}
 }
 
 // refused drops from the credentials file what the gate refused as invalid, so that it is not sent again:
-// the tokens of a hello refused enroll_invalid (unknown, used or expired; a hello with rotate_from is not
-// told apart from its rotation's refusal, so its tokens are kept), and the API key of one refused
+// the tokens of a hello refused enroll_invalid (unknown, used or expired; a hello with rotate_from never
+// gets here, as connect sends it again without rotate_from first), and the API key of one refused
 // auth_invalid. The operator gives new ones (§4: not retried without a change by its operator).
-func (n *Node) refused(herr *tunnel.HandshakeError, h *tunnel.Hello, sent []string, log *slog.Logger) {
+func (n *Node) refused(kid string, herr *tunnel.HandshakeError, h *tunnel.Hello, sent []string, log *slog.Logger) {
 	var err error
 	switch {
 	case herr.Code == tunnel.CodeEnrollInvalid && len(sent) > 0 && h.RotateFrom == nil:
 		err = n.updateCredential(func(c *Credential) {
-			c.Enroll = slices.DeleteFunc(c.Enroll, func(t string) bool { return slices.Contains(sent, t) })
+			k := c.key(kid)
+			k.Enroll = slices.DeleteFunc(k.Enroll, func(t string) bool { return slices.Contains(sent, t) })
 		})
 		log.Warn("the gate refused the enrollment tokens: they are removed from the credentials file", "enrollments", len(sent),
 			"path", n.creds.Path())
@@ -342,14 +451,26 @@ func (n *Node) credential() Credential {
 	return n.cred.clone()
 }
 
-// updateCredential changes this origin's credential and saves it.
-func (n *Node) updateCredential(f func(*Credential)) error {
+// updateCredential changes this origin's credential: the node's copy at once, and the file under its lock,
+// where change applies to what the file holds then (Credentials.Update); the node's copy is then the
+// file's. change is applied to both, so it must express a change (add, remove, set), never a copy.
+func (n *Node) updateCredential(change func(*Credential)) error {
+	n.credMu.Lock()
+	defer n.credMu.Unlock()
 	n.mu.Lock()
 	c := n.cred.clone()
-	f(&c)
+	change(&c)
+	c.tidy()
 	n.cred = c
 	n.mu.Unlock()
-	return n.creds.Save(n.origin, c)
+	saved, err := n.creds.Update(n.origin, change)
+	if err != nil {
+		return err
+	}
+	n.mu.Lock()
+	n.cred = saved
+	n.mu.Unlock()
+	return nil
 }
 
 func (n *Node) setUnsure(v bool) {

@@ -263,30 +263,35 @@ type Node struct {
 	maintainEvery time.Duration
 	backoff       Backoff
 
-	creds *Credentials
+	creds  *Credentials
+	credMu sync.Mutex // serializes updateCredential
 
-	mu         sync.Mutex
-	cred       Credential // this origin's
-	declared   []Serve    // --serve, less the services whose binding the gate revoked (§12)
-	activeKey  string     // the recipient of the identity's active key at the last dial
-	unsure     bool       // a hello that carried tokens or rotate_from may have been admitted: probe first
-	sessions   map[*session]struct{}
-	lastPrune  time.Time
-	revoked    chan struct{} // closed when the gate revoked the active key
-	revokeOnce sync.Once
+	mu        sync.Mutex
+	cred      Credential // this origin's, as last read or written
+	declared  []Serve    // --serve, less the services whose binding the gate revoked (§12)
+	activeKey string     // the recipient of the identity's active key at the last dial
+	unsure    bool       // a hello that carried tokens or rotate_from may have been admitted: probe first
+	// skipRotation is the recipient of a rotated key this process no longer names in rotate_from at this
+	// gate: the gate refused it (enroll_invalid or revoked), or welcomed the new key while the key file's
+	// stamp could not be written (connect's SPEC-CONFLICT on §12).
+	skipRotation string
+	sessions     map[*session]struct{}
+	lastPrune    time.Time
+	revoked      chan struct{} // closed when the gate revoked the active key
+	revokeOnce   sync.Once
 }
 
 // New loads (or creates) the identity key, refuses a group- or other-readable key file, resolves the
 // credentials for the gate's origin, and checks the --serve targets.
 //
 // It merges the command line's credentials into ~/.kontra/credentials under the gate's origin (§2.4): an
-// --api-key replaces the stored one, and an --enroll token is kept until a welcome confirms it, unless a
-// welcome already did (its sha256 is in Consumed), in which case it is not sent again (M2 plan audit,
-// gap 1). With --rotate it writes a new first line to the key file (nodekey.Rotate); it refuses a rotation
-// of a key it has just created, one while an earlier rotation is still unconfirmed by this gate (its
-// rotate_from would name a key the gate never saw), and one while an earlier enrollment at this gate is
-// unconfirmed (the lost-welcome probe needs the key that hello was made with). Decrypt-only keys whose
-// rotation every confirming gate stamped 24 h ago or more are pruned (§12).
+// --api-key replaces the stored one, and an --enroll token is kept, for this node's key, until a welcome
+// confirms it, unless a welcome already did (its sha256 is in Consumed), in which case it is not sent again
+// (M2 plan audit, gap 1). With --rotate it writes a new first line to the key file (nodekey.Rotate); it
+// refuses a rotation of a key it has just created, one while an earlier rotation is still unconfirmed by
+// this gate (its rotate_from would name a key the gate never saw), and one while an earlier enrollment of
+// the key at this gate is unconfirmed (the lost-welcome probe needs the key that hello was made with).
+// Decrypt-only keys whose rotation every confirming gate stamped 24 h ago or more are pruned (§12).
 func New(cfg Config, logger *slog.Logger) (*Node, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -350,28 +355,6 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 	}
 	now := n.now()
 
-	// Credentials (§2.4).
-	creds, err := LoadCredentials(cfg.CredentialsPath)
-	if err != nil {
-		return nil, err
-	}
-	n.creds = creds
-	cred := creds.For(origin)
-	if cfg.APIKey != "" {
-		cred.APIKey = cfg.APIKey
-	}
-	for _, t := range cfg.Enroll {
-		h := TokenHash(t)
-		switch {
-		case slices.Contains(cred.Consumed, h):
-			log.Info("an --enroll token this node already enrolled with at this gate is not sent again", "enroll_sha256", h[:12])
-		case slices.Contains(cred.Enroll, t):
-		default:
-			cred.Enroll = append(cred.Enroll, t)
-		}
-	}
-	n.cred = cred
-
 	// The identity (§2.1).
 	id, created, err := nodekey.LoadOrCreate(cfg.KeyPath, now)
 	if err != nil {
@@ -380,6 +363,15 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 	if created {
 		log.Info("created the node's identity key", "path", cfg.KeyPath, "key_id", id.KeyID())
 	}
+	kid := id.KeyID()
+
+	// Credentials (§2.4): the tokens are this key's.
+	creds, err := LoadCredentials(cfg.CredentialsPath)
+	if err != nil {
+		return nil, err
+	}
+	n.creds = creds
+	n.cred = creds.For(origin)
 	_, pending := id.PendingRotation(origin)
 	if cfg.Rotate {
 		switch {
@@ -388,21 +380,36 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		case pending:
 			return nil, fmt.Errorf("--rotate: the previous rotation of %s is not confirmed by %s yet; run kontra connect "+
 				"without --rotate first, so that the gate confirms it", cfg.KeyPath, origin)
-		case len(cred.Unconfirmed) > 0:
+		case len(n.cred.Key(kid).Unconfirmed) > 0:
 			return nil, fmt.Errorf("--rotate: an enrollment at %s is not confirmed yet; run kontra connect without --rotate first", origin)
 		}
 	}
-	if err := creds.Save(origin, n.cred); err != nil {
+	for _, t := range cfg.Enroll {
+		if n.cred.consumed(t) {
+			log.Info("an --enroll token this node already enrolled with at this gate is not sent again", "enroll_sha256", TokenHash(t)[:12])
+		}
+	}
+	if err := n.updateCredential(func(c *Credential) {
+		if cfg.APIKey != "" {
+			c.APIKey = cfg.APIKey
+		}
+		k := c.key(kid)
+		for _, t := range cfg.Enroll {
+			if !c.consumed(t) && !slices.Contains(k.Enroll, t) {
+				k.Enroll = append(k.Enroll, t)
+			}
+		}
+	}); err != nil {
 		return nil, err
 	}
 	if cfg.Rotate {
-		old := id.KeyID()
 		if id, err = nodekey.Rotate(cfg.KeyPath, now); err != nil {
 			return nil, err
 		}
+		// The tokens waiting under the old key move to the new one at the first dial (connect).
 		log.Info("rotated the node's identity key: the next hello names the old key in rotate_from (§12)",
-			"key_id", id.KeyID(), "old_key_id", old)
-	} else if pending || len(cred.Unconfirmed) > 0 {
+			"key_id", id.KeyID(), "old_key_id", kid)
+	} else if pending || len(n.cred.Key(kid).Unconfirmed) > 0 {
 		// A hello with rotate_from or tokens may have been admitted before this process started (§12 with
 		// §4; the audit's lost-welcome protocol): the first hello is the probe.
 		n.unsure = true

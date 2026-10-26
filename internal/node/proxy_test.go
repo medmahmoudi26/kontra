@@ -339,10 +339,16 @@ func TestProxyRefusesMethods(t *testing.T) {
 		"Upgrade: h2c":        "GET / HTTP/1.1\r\nHost: x\r\nUpgrade: h2c\r\nConnection: Upgrade, HTTP2-Settings\r\nHTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n\r\n",
 		"Connection: upgrade": get("/", "x", "Connection: keep-alive, upgrade"),
 		"TRACE":               "TRACE / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+		// net/http answers OPTIONS * itself (200) unless the server turns that off (M2 WP-06 review).
+		"OPTIONS *": "OPTIONS * HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
 	} {
 		resp, body, _ := pp.raw(t, hostedPreamble("hello"), req)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("%s: %d %q, want 400", name, resp.StatusCode, body)
+		}
+		// No §8.2 reason fits these 400s: they carry no Kontra-Node (the SPEC-CONFLICT on Proxy).
+		if v := resp.Header.Get(tunnel.HeaderNode); v != "" {
+			t.Errorf("%s: Kontra-Node %q", name, v)
 		}
 	}
 	if n := rec.count(); n != 0 {
