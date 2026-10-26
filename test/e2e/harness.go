@@ -271,9 +271,13 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// freePorts returns n distinct free loopback ports. Every probe listener stays open until all n are
-// chosen: a probe closed before the next one binds can hand the same port out twice (a replica's --listen
-// and --metrics-listen once collided that way).
+// freePorts returns n distinct free loopback ports, reserved for the minute that follows. Every probe
+// listener stays open until all n are chosen: a probe closed before the next one binds can hand the same
+// port out twice (a replica's --listen and --metrics-listen once collided that way). And each port is left
+// in TIME_WAIT by a connection its listening side closes first: for a minute the kernel then gives it to no
+// other bind(:0), such as the Temporal development server's own choice of ports for its internal services
+// (a collision there once panicked its start), while an explicit bind still succeeds, Go setting
+// SO_REUSEADDR on every listener. The temporal CLI's devserver.GetFreePort reserves its ports the same way.
 func freePorts(n int) ([]int, error) {
 	ports := make([]int, 0, n)
 	for i := 0; i < n; i++ {
@@ -282,6 +286,16 @@ func freePorts(n int) ([]int, error) {
 			return nil, err
 		}
 		defer l.Close()
+		c, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			return nil, err
+		}
+		defer c.Close() // after the accepted side: the listening side closes first
+		a, err := l.Accept()
+		if err != nil {
+			return nil, err
+		}
+		a.Close()
 		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
 	}
 	return ports, nil
@@ -977,18 +991,36 @@ func createDatabase(ctx context.Context, server, name string) (*postgres, error)
 // --- Temporal ---
 
 // startTemporal starts the pinned development server, in memory, on free loopback ports, with the
-// settings spec §14.2 asks of the gate's server.
+// settings spec §14.2 asks of the gate's server. A server that exits while it starts (its own port choice
+// colliding with another process, say) is started again on fresh ports, three times at most; its panic
+// line is in the error.
 func (h *Harness) startTemporal(ctx context.Context) error {
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err = h.startTemporalOnce(ctx, attempt); !errors.Is(err, errTemporalExited) {
+			return err
+		}
+	}
+	return err
+}
+
+// errTemporalExited is a development server that exited before it was ready.
+var errTemporalExited = errors.New("e2e: the Temporal development server exited at start")
+
+func (h *Harness) startTemporalOnce(ctx context.Context, attempt int) error {
 	ports, err := freePorts(3)
 	if err != nil {
 		return err
 	}
 	addr := "127.0.0.1:" + strconv.Itoa(ports[0])
-	f, err := os.Create(filepath.Join(h.Dir, "temporal.log"))
+	name := "temporal.log"
+	if attempt > 1 {
+		name = fmt.Sprintf("temporal-%d.log", attempt)
+	}
+	f, err := os.Create(filepath.Join(h.Dir, name))
 	if err != nil {
 		return err
 	}
-	h.tempLog = f
 	cmd := exec.Command(h.cli, "server", "start-dev", "--headless", "--ip", "127.0.0.1",
 		"--port", strconv.Itoa(ports[0]), "--http-port", strconv.Itoa(ports[1]), "--metrics-port", strconv.Itoa(ports[2]),
 		"--namespace", Namespace, "--log-level", "warn",
@@ -998,9 +1030,10 @@ func (h *Harness) startTemporal(ctx context.Context) error {
 	cmd.Stdout, cmd.Stderr = f, f
 	cmd.SysProcAttr = procAttr()
 	if err := cmd.Start(); err != nil {
+		f.Close()
 		return fmt.Errorf("e2e: start %s: %w", h.cli, err)
 	}
-	h.temporal = cmd
+	h.temporal, h.tempLog = cmd, f
 	rctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	for {
@@ -1008,12 +1041,41 @@ func (h *Harness) startTemporal(ctx context.Context) error {
 			h.Temporal = addr
 			return nil
 		}
+		if exited(cmd.Process.Pid) {
+			// Nothing has waited on it, so it is a zombie: reap it, and let Close find nothing to stop.
+			_ = stopProcess(cmd, time.Second)
+			h.temporal, h.tempLog = nil, nil
+			f.Close()
+			return fmt.Errorf("%w (attempt %d, %s): %s\n%s", errTemporalExited, attempt, addr,
+				panicLine(f.Name()), tail(f.Name(), 40))
+		}
 		select {
 		case <-rctx.Done():
-			return fmt.Errorf("e2e: the Temporal development server on %s did not become ready:\n%s", addr, tail(f.Name(), 20))
+			return fmt.Errorf("e2e: the Temporal development server on %s did not become ready:\n%s", addr, tail(f.Name(), 40))
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// panicLine is the first "panic:" line of a log, "" when there is none.
+func panicLine(path string) string {
+	b, _ := os.ReadFile(path)
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, "panic:") {
+			return l
+		}
+	}
+	return ""
+}
+
+// exited reports whether the child pid has exited and not been waited for (a zombie, state Z).
+func exited(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return true
+	}
+	i := bytes.LastIndexByte(b, ')')
+	return i >= 0 && i+2 < len(b) && b[i+2] == 'Z'
 }
 
 func temporalReady(ctx context.Context, addr string) error {
