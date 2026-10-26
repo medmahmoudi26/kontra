@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +45,7 @@ type Session struct {
 	rowGone    bool              // its tunnels row was deleted by this replica
 	toldDrain  bool
 	exchanges  map[*exchange]struct{}
+	halfClosed int // gate-opened streams the gate has closed and the node has not (exchange.linger)
 }
 
 // Allows is the key_scope check made before every stream (relay.md §6.1): the session is open, its key is
@@ -339,6 +342,34 @@ func (s *Session) InFlight() int {
 	return len(s.exchanges)
 }
 
+// HalfClosed is the number of streams the gate opened on the session and closed, whose node half has not
+// ended yet (exchange.linger).
+func (s *Session) HalfClosed() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.halfClosed
+}
+
+// lingering counts a stream the gate has closed until its node half ends (done), and closes the session
+// when more than tunnel.GateMaxHalfClosed would be counted (D157).
+func (s *Session) lingering() (done func()) {
+	s.mu.Lock()
+	s.halfClosed++
+	over := s.halfClosed > tunnel.GateMaxHalfClosed
+	s.mu.Unlock()
+	if over {
+		// Not on the caller's goroutine: the close deletes the session's tunnels row.
+		go func() {
+			_ = s.Close(fmt.Sprintf("the node keeps more than %d streams open that the gate has closed", tunnel.GateMaxHalfClosed))
+		}()
+	}
+	return func() {
+		s.mu.Lock()
+		s.halfClosed--
+		s.mu.Unlock()
+	}
+}
+
 // exchange is one gate-opened stream for one service. Once aborted, its reads and writes fail with the
 // abort's error, buffered data or not.
 type exchange struct {
@@ -349,6 +380,7 @@ type exchange struct {
 	mu      sync.Mutex
 	aborted error
 	once    sync.Once
+	reading atomic.Int32 // Reads in progress
 }
 
 func (x *exchange) abortErr() error {
@@ -358,6 +390,8 @@ func (x *exchange) abortErr() error {
 }
 
 func (x *exchange) Read(p []byte) (int, error) {
+	x.reading.Add(1)
+	defer x.reading.Add(-1)
 	if err := x.abortErr(); err != nil {
 		return 0, err
 	}
@@ -383,16 +417,49 @@ func (x *exchange) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Close closes the gate's half of the stream and leaves the session's in-flight set.
+// Close closes the gate's half of the stream and leaves the session's in-flight set; the stream lingers
+// until the node's half ends (linger).
 func (x *exchange) Close() error {
-	x.once.Do(func() { x.s.untrack(x) })
+	x.once.Do(x.leave)
 	return x.Stream.Close()
+}
+
+// leave takes the stream out of the session's in-flight set and has it linger.
+func (x *exchange) leave() {
+	x.s.untrack(x)
+	x.linger()
+}
+
+// linger reads and discards what the node still sends on a stream the gate has closed, until the node's half
+// ends: its FIN or reset, the stream's close timeout (StreamCloseTimeout after the gate's FIN) or the
+// session's end. yamux v0.1.2 keeps such a stream, and buffers up to a window (256 KiB) of what the node
+// sends on it, until then; it has no reset, and reading is the only way it tells that a stream ended. A
+// node that answers each exchange but never closes its half could otherwise pin a window of the gate's
+// memory per stream for 5 minutes, at the rate the gate opens streams to it (a poll every 5 s per task).
+// Discarding frees the data; the session counts these streams and closes past tunnel.GateMaxHalfClosed
+// (M2 review, security-3; D157), as node-opened streams are counted until both halves end (D137).
+//
+// An aborted stream's read deadline has passed, to wake the reads in progress (abort): they return first,
+// and then the deadline is cleared for the discarding reads; a Read from then on fails with the abort's
+// error before it reads.
+func (x *exchange) linger() {
+	done := x.s.lingering()
+	go func() {
+		defer done()
+		if x.abortErr() != nil {
+			for x.reading.Load() > 0 {
+				time.Sleep(time.Millisecond)
+			}
+			_ = x.Stream.SetReadDeadline(time.Time{})
+		}
+		_, _ = io.Copy(io.Discard, x.Stream)
+	}()
 }
 
 // abort fails the stream's reads and writes with err from now on: the deadline wakes a read or write in
 // progress, the stream leaves the session's in-flight set, and the gate's half is closed. yamux v0.1.2 has
-// no stream reset, so what the node still sends is buffered (up to a window) until it closes its half or
-// StreamCloseTimeout passes.
+// no stream reset, so the stream lingers, what the node still sends on it discarded, until the node closes
+// its half or StreamCloseTimeout passes (linger).
 //
 // abort does not wait on the network. Closing the gate's half sends a FIN, and yamux's Stream.Close waits
 // for that frame to be written, up to ConnectionWriteTimeout (15 s) per stream, against a node that stopped
@@ -413,6 +480,6 @@ func (x *exchange) abort(err error) {
 	}
 	x.mu.Unlock()
 	_ = x.Stream.SetDeadline(time.Now())
-	x.once.Do(func() { x.s.untrack(x) })
+	x.once.Do(x.leave)
 	go func() { _ = x.Stream.Close() }()
 }

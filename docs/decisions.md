@@ -1692,3 +1692,16 @@ session's yamux lines pass 10 at once and one more a second; the first line over
 suppressed, and the next line let through is preceded by the count suppressed. The frames themselves are
 read and dropped as yamux always did ([`tunnel.md`](../spec/tunnel.md) §7; `internal/tunnel/guard.go`,
 `TestYamuxLinesAreRateLimited`).
+
+### D157. A gate-opened stream is counted until both halves end
+
+D137 counts a node-opened stream until both halves end, but nothing bounded the streams the gate opens, closes,
+and the node does not: yamux v0.1.2 keeps such a stream, and buffers up to a window (256 KiB) of what the node
+still sends on it, for `StreamCloseTimeout` (5 min). A node that answers every exchange and never closes its half
+pinned a window per stream, at the rate the gate opens streams to it (a poll every 5 s per task). Decision: once
+the gate closes its half (or aborts the stream) it reads and discards what the node sends until the node's half
+ends, its close timeout passes or the session ends, and counts the stream until then; a session with more than
+256 such streams (`GateMaxHalfClosed`, four times the node's default in-flight cap) is closed. A node closes its
+half when it has written its response, or at once when the gate's half closes, so only one that keeps them open
+reaches the cap ([`tunnel.md`](../spec/tunnel.md) §7, §14; `internal/tunnelgate/session.go` `linger`,
+`TestHalfClosedStreamsAreCapped`).

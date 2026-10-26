@@ -47,6 +47,11 @@ const (
 	// gate; over them the gate answers 429 (§14, §6.2). Hiring is M3.
 	GateMaxInflight          = 32
 	GateMaxInflightAnonymous = 8
+	// GateMaxHalfClosed bounds, per session, the gate-opened streams that the gate has closed and the node
+	// has not: over it the gate closes the session (M2 review, security-3; D157). A node closes its half of
+	// an exchange when it has written the response, or at once when the gate's half closes, so a node that
+	// keeps its halves open is the only one that reaches it.
+	GateMaxHalfClosed = 4 * NodeMaxInflight
 	// MaxBlob is the most a blob stream carries (§8.3, M3).
 	MaxBlob = 64 << 20
 )
