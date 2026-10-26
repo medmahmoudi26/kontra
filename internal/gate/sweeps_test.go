@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
+	"kontra.sh/kontra/internal/audit"
+	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/pgtest"
 	"kontra.sh/kontra/internal/store"
@@ -265,5 +268,56 @@ func TestOrphanSweepAsksTemporal(t *testing.T) {
 	}
 	if r := e.row(started); r.State != store.StateSubmitted {
 		t.Fatalf("a task whose workflow exists: %s", r.State)
+	}
+}
+
+// The overlap sweep revokes a rotated node key once its 24 h overlap has passed (spec/tunnel.md §12), with
+// its audit row, and leaves a key still inside its overlap and an active key alone.
+func TestOverlapSweep(t *testing.T) {
+	e := newSweepEnv(t)
+	ctx := context.Background()
+	key := func(n byte) (string, []byte) {
+		pub := make([]byte, 32)
+		pub[0] = n
+		return "k1_" + strings.Repeat(string(rune('a'+n)), 26), pub
+	}
+	tid := e.svc.TenantID
+	due, duePub := key(1)
+	inOverlap, inPub := key(2)
+	active, activePub := key(3)
+	for _, k := range []struct {
+		id  string
+		pub []byte
+	}{{active, activePub}, {due, duePub}, {inOverlap, inPub}} {
+		e.exec(`insert into kontra.tunnel_keys (key_id, tenant_id, pubkey, node_name) values ($1, $2, $3, 'n')`, k.id, tid, k.pub)
+	}
+	e.exec(`update kontra.tunnel_keys set revoked_reason = 'rotated', rotated_to = $2, overlap_until = now() - interval '1 second' where key_id = $1`, due, active)
+	e.exec(`update kontra.tunnel_keys set revoked_reason = 'rotated', rotated_to = $2, overlap_until = now() + interval '1 hour' where key_id = $1`, inOverlap, active)
+
+	keys := enroll.NewStore(e.pool, enroll.Options{})
+	ended, err := SweepOverlaps(ctx, keys)
+	if err != nil || len(ended) != 1 || ended[0] != due {
+		t.Fatalf("SweepOverlaps = %v %v", ended, err)
+	}
+	var revoked []string
+	rows, err := e.pool.Query(ctx, `select key_id from kontra.tunnel_keys where revoked_at is not null order by key_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		revoked = append(revoked, id)
+	}
+	if len(revoked) != 1 || revoked[0] != due {
+		t.Errorf("revoked %v, want only %s", revoked, due)
+	}
+	if rows, err := audit.Verify(ctx, e.pool); err != nil || len(rows) != 1 {
+		t.Errorf("audit: %d rows, %v", len(rows), err)
+	}
+	if ended, err := SweepOverlaps(ctx, keys); err != nil || len(ended) != 0 {
+		t.Errorf("a second pass: %v %v", ended, err)
 	}
 }

@@ -19,21 +19,28 @@
 // is service_denied and nothing is enrolled; a binding the operator revoked is left out of the served set.
 // The key's tenant is fixed by its first enrollment.
 //
+// Every query that recognizes a node key is keyed by its full public key (§2.2): a key id alone never
+// authenticates anything. Operator commands (revocation) name a key by its id, which is how operators see
+// it.
+//
 // Work package: WP-02.
 package enroll
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/tunnel"
-	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Tokens (§5).
@@ -69,8 +76,22 @@ const (
 	EventServiceCreated = "tunnel.service_created"
 )
 
-// ErrNotTunnel is a token asked for a service whose backend is not tunnel.
-var ErrNotTunnel = errors.New("enroll: the service's backend is not tunnel")
+// Errors of the operator's calls (minting, revoking). A handshake's refusals are *tunnel.HandshakeError.
+var (
+	// ErrNotTunnel is a token asked for a service whose backend is not tunnel.
+	ErrNotTunnel = errors.New("enroll: the service's backend is not tunnel")
+	// ErrUnknownService is a token asked for a service the tenant does not have.
+	ErrUnknownService = errors.New("enroll: no such service")
+	// ErrServiceDisabled is a token asked for a disabled service (removed from the configuration, or
+	// unpublished).
+	ErrServiceDisabled = errors.New("enroll: the service is disabled")
+	// ErrUnknownTenant is a token asked for a tenant that does not exist or has ended.
+	ErrUnknownTenant = errors.New("enroll: no such tenant")
+	// ErrKeyNotFound is a revocation of a key id this gate does not have.
+	ErrKeyNotFound = errors.New("enroll: no such node key")
+	// ErrBindingNotFound is a binding revocation for a service the key was never enrolled for.
+	ErrBindingNotFound = errors.New("enroll: the key is not enrolled for the service")
+)
 
 // Options configure a Store.
 type Options struct {
@@ -79,7 +100,8 @@ type Options struct {
 	Multi     bool
 	// EnrollWithAPIKey is tunnel.enroll_with_api_key: an API key's enroll: scopes enroll.
 	EnrollWithAPIKey bool
-	// Keys authenticates hello's auth (auth_invalid when it does not authenticate).
+	// Keys authenticates hello's auth (auth_invalid when it does not authenticate). Nil (auth.api_keys
+	// false) refuses every auth with auth_invalid.
 	Keys   *auth.APIKeys
 	Logger *slog.Logger
 }
@@ -88,10 +110,18 @@ type Options struct {
 type Store struct {
 	db   *pgxpool.Pool
 	opts Options
+	// lockTimeout bounds Admit's lock waits (admitLockTimeout; tests that hold a lock on purpose raise it).
+	lockTimeout time.Duration
 }
 
 // NewStore returns a store over db.
-func NewStore(db *pgxpool.Pool, o Options) *Store { return &Store{db: db, opts: o} }
+func NewStore(db *pgxpool.Pool, o Options) *Store {
+	if o.Logger == nil {
+		o.Logger = slog.Default()
+	}
+	o.PublicURL = strings.TrimRight(o.PublicURL, "/")
+	return &Store{db: db, opts: o, lockTimeout: admitLockTimeout}
+}
 
 // Key is one tunnel_keys row.
 type Key struct {
@@ -104,17 +134,6 @@ type Key struct {
 	RevokedReason string
 	RotatedTo     string
 	OverlapUntil  *time.Time
-}
-
-// MintServiceToken mints a service token for one service of a tenant and returns it (shown once). The
-// service must exist, be enabled, and have backend tunnel (ErrNotTunnel).
-func (s *Store) MintServiceToken(ctx context.Context, tenantID uuid.UUID, service, actor string) (string, error) {
-	return "", unimpl.Error("enroll.MintServiceToken", "WP-02")
-}
-
-// MintTenantToken mints a tenant token bound to the service names it may bind (D40).
-func (s *Store) MintTenantToken(ctx context.Context, tenantID uuid.UUID, services []string, actor string) (string, error) {
-	return "", unimpl.Error("enroll.MintTenantToken", "WP-02")
 }
 
 // Request is a hello whose proof (and proof_old) verified, with what the gate decided around it.
@@ -151,36 +170,56 @@ type Decision struct {
 	Rotated *Key
 }
 
-// Admit decides a proven hello in one transaction (§4, §5, §12): the key's lookup (a known key's stored
-// public key must equal the hello's), revocation (revoked), the API key (auth_invalid), the tokens and
-// scopes (enroll_invalid, kind_mismatch, service_denied), the rotation (under a row lock on the old key),
-// the inserts and the audit rows. A refusal is a *tunnel.HandshakeError; anything else is the gate's own
-// failure.
-func (s *Store) Admit(ctx context.Context, req Request) (*Decision, error) {
-	return nil, unimpl.Error("enroll.Admit", "WP-02")
+// Payload prefixes of the tunnel's NOTIFY kontra_revoke (§12). API keys' ("apikey:<id>") are auth's.
+const (
+	revokeKeyPrefix     = "key:"
+	revokeBindingPrefix = "binding:"
+)
+
+// KeyRevokePayload is NOTIFY kontra_revoke's payload for a node key, "key:<key_id>".
+func KeyRevokePayload(keyID string) string { return revokeKeyPrefix + keyID }
+
+// BindingRevokePayload is NOTIFY kontra_revoke's payload for one binding, "binding:<key_id>/<service>".
+func BindingRevokePayload(keyID, service string) string {
+	return revokeBindingPrefix + keyID + "/" + service
 }
 
-// RevokeKey sets tunnel_keys.revoked_at (reason owner or operator), appends the audit row and sends
-// NOTIFY kontra_revoke 'key:<key_id>' in one transaction (§12, `kontra-gate enroll --revoke <key_id>`).
-func (s *Store) RevokeKey(ctx context.Context, keyID, reason, actor string) error {
-	return unimpl.Error("enroll.RevokeKey", "WP-02")
+// Timeouts of the operator's writes (mint, revoke, the overlap sweep): on the server (statement_timeout)
+// and on the client, detached from the caller's cancellation so that a write that started is not cut half
+// way (as auth's writes, D8).
+const writeTimeout = 10 * time.Second
+
+// write runs fn in one transaction bounded by writeTimeout.
+func (s *Store) write(ctx context.Context, fn func(pgx.Tx) error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout+2*time.Second)
+	defer cancel()
+	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `select set_config('statement_timeout', $1, true)`,
+			fmt.Sprint(writeTimeout.Milliseconds())); err != nil {
+			return err
+		}
+		return fn(tx)
+	})
 }
 
-// RevokeBinding sets key_services.revoked_at for one service, appends the audit row and sends NOTIFY
-// kontra_revoke 'binding:<key_id>/<service>' (§12).
-func (s *Store) RevokeBinding(ctx context.Context, keyID, service, actor string) error {
-	return unimpl.Error("enroll.RevokeBinding", "WP-02")
+// serviceURL is a served service's gate URL (relay.md §2.1): {public_url}/agents/[{tenant}/]{name} for A2A
+// and {public_url}/mcp/[{tenant}/]{name} for MCP.
+func (s *Store) serviceURL(kind, tenantSlug, name string) string {
+	root := "/agents/"
+	if kind == tunnel.KindMCP {
+		root = "/mcp/"
+	}
+	if s.opts.Multi {
+		return s.opts.PublicURL + root + tenantSlug + "/" + name
+	}
+	return s.opts.PublicURL + root + name
 }
 
-// EndOverlaps sets revoked_at on rotated keys whose overlap_until has passed, with their audit rows and a
-// NOTIFY 'key:<key_id>' each (§12: "revoked_at is set when the overlap ends"), and returns their ids. A
-// replica's sweep calls it.
-func (s *Store) EndOverlaps(ctx context.Context) ([]string, error) {
-	return nil, unimpl.Error("enroll.EndOverlaps", "WP-02")
-}
-
-// Recipients is a sealed service's recipients: the keys enrolled for it, neither revoked nor rotated,
-// connected or not (§12, D61). Sealing (M3) publishes them; M2 builds the query.
-func (s *Store) Recipients(ctx context.Context, tenantID uuid.UUID, service string) ([]string, error) {
-	return nil, unimpl.Error("enroll.Recipients", "WP-02")
+// pgCode is the SQLSTATE of a Postgres error, "" for any other error.
+func pgCode(err error) string {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		return pe.Code
+	}
+	return ""
 }
