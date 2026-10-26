@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -233,7 +234,9 @@ func (h *Handler) pinned(rq *request) {
 
 	if rq.r.Method == http.MethodGet && strings.HasPrefix(rq.r.Header.Get(mcpwire.HeaderLastEventID), "k.") {
 		// §11.7: a gate-written stream, served from task_events by any replica and never forwarded. Gate-owned
-		// tasks are M3 WP-06's; until then no such stream exists to resume.
+		// tasks are M3 WP-06's; until then no such stream exists to resume. §11.7 names every Last-Event-ID that
+		// starts with "k.", not only the gate's own form k.<taskId>.<seq>, so an upstream whose SSE event ids start
+		// with "k." cannot be resumed through the gate (left to the spec's owner).
 		writeEmpty(rq.w, http.StatusBadRequest)
 		return
 	}
@@ -272,14 +275,33 @@ func (h *Handler) pinned(rq *request) {
 	}
 }
 
-// isGateRequestID reports whether a JSON-RPC id is a gate-minted request id, the string k.<taskId>.<seq> (§11.7).
+// isGateRequestID reports whether a JSON-RPC id is a gate-minted request id (§11.7): exactly the string
+// k.<taskId>.<seq>, a gate task id as the gate writes it (a UUID, lowercase and hyphenated) and a decimal sequence
+// number without sign or leading zero. An upstream's own id that merely starts with "k." is not one: its client's
+// answer is forwarded like every other response (§11.2: upstream ids pass unchanged). M3 WP-06 mints the ids in this
+// form, and then also requires a task of the caller's buyer.
 func isGateRequestID(id json.RawMessage) bool {
 	id = bytes.TrimSpace(id)
 	if len(id) == 0 || id[0] != '"' {
 		return false
 	}
 	var s string
-	return json.Unmarshal(id, &s) == nil && strings.HasPrefix(s, "k.")
+	if json.Unmarshal(id, &s) != nil {
+		return false
+	}
+	rest, ok := strings.CutPrefix(s, "k.")
+	if !ok {
+		return false
+	}
+	task, seq, ok := strings.Cut(rest, ".")
+	if !ok {
+		return false
+	}
+	if u, err := uuid.Parse(task); err != nil || u.String() != task {
+		return false
+	}
+	n, err := strconv.ParseUint(seq, 10, 64)
+	return err == nil && strconv.FormatUint(n, 10) == seq
 }
 
 // pinnedTarget is where a pinned session's requests go (§11.2): its direct backend; its tunnel session on this
@@ -360,7 +382,8 @@ func (h *Handler) noSession(rq *request) {
 }
 
 // forward relays a request on its pinned session: a POST scrubbed (§2.5), a GET (its Last-Event-ID resume
-// included) as it came. A tools/call carries its meter.
+// included) as it came. A tools/call carries its meter, which writes the calls row once an answer came back (§11.4,
+// callMeter): an exchange that failed before any did writes none.
 func (h *Handler) forward(rq *request, t target, meter *callMeter) {
 	body := rq.body
 	o := &relayOpts{sid: rq.sid, sealed: h.sealed(rq), tunnel: t.tunnelled(), meter: meter, tools: h.toolsKey(rq)}
@@ -388,9 +411,9 @@ func (h *Handler) forward(rq *request, t target, meter *callMeter) {
 	}
 	resp, err := h.send(rq.ctx(), t, rq, rq.r.Method, body, forwardHeaders(rq.r, rq.sess), rq.sess.UpstreamSID, x)
 	if err != nil {
-		meter.fail()
+		// No answer reached the gate, so no response completes and there is no calls row (§11.4), as when §6.1's
+		// check refuses the session on this replica before anything is sent (pinnedTarget).
 		h.upstreamFailed(rq, err)
-		h.record(rq, meter, 0)
 		return
 	}
 	n := h.relayResponse(rq, resp, o)
@@ -507,36 +530,43 @@ func (e *upstreamRPCError) Error() string {
 }
 
 // pager fetches tools/list pages on the client's own upstream session, under the client's JSON-RPC id (it waits
-// for this answer, so no other request of it uses the id).
+// for this answer, so no other request of it uses the id). The cache runs the drain on a context of its own, which
+// may outlive the request (ToolsCache, DrainTimeout): what the pages need of it is read here, once.
 func (h *Handler) pager(rq *request, t target) Pager {
+	id := json.RawMessage(bytes.Clone(rq.msg.ID))
+	v := rq.r.Header.Get(mcpwire.HeaderProtocolVersion)
+	if v == "" {
+		v = rq.sess.ProtocolVersion
+	}
+	upstreamSID := rq.sess.UpstreamSID
+	x := upstream.MCPExchange{Session: rq.sess.HashHex()}
+	who := &request{svc: rq.svc, p: rq.p} // the peer hop's assertion names the service and the principal
+	tunnelled := t.tunnelled()
 	return func(ctx context.Context, cursor string) (json.RawMessage, error) {
 		params := map[string]any{}
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": rq.msg.ID, "method": mcpwire.MethodToolsList, "params": params})
+		body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": mcpwire.MethodToolsList, "params": params})
 		if err != nil {
 			return nil, err
 		}
 		hdr := http.Header{}
 		hdr.Set("Accept", "application/json, text/event-stream")
 		hdr.Set("Content-Type", "application/json")
-		v := rq.r.Header.Get(mcpwire.HeaderProtocolVersion)
-		if v == "" {
-			v = rq.sess.ProtocolVersion
-		}
 		hdr.Set(mcpwire.HeaderProtocolVersion, v)
-		resp, err := h.send(ctx, t, rq, http.MethodPost, body, hdr, rq.sess.UpstreamSID, upstream.MCPExchange{Session: rq.sess.HashHex()})
+		resp, err := h.send(ctx, t, who, http.MethodPost, body, hdr, upstreamSID, x)
 		if err != nil {
 			return nil, err
 		}
-		return h.readAnswer(resp, rq.msg.ID, t.tunnelled())
+		return h.readAnswer(resp, id, tunnelled)
 	}
 }
 
 // readAnswer reads the upstream's answer to a request the gate made itself (a tools/list page): a JSON body, or
 // the event of an event stream that answers id (the stream's other messages are not the client's and are dropped),
-// within MaxToolBytes, decoded strictly.
+// within MaxToolBytes, decoded strictly. The gate reads an event stream as a client does: the first answer, in an
+// event a client dispatches as a message (event.message).
 func (h *Handler) readAnswer(resp *http.Response, id json.RawMessage, tunnelled bool) (json.RawMessage, error) {
 	defer resp.Body.Close()
 	if tunnelled {
@@ -571,7 +601,7 @@ func (h *Handler) readAnswer(resp *http.Response, id json.RawMessage, tunnelled 
 			if err != nil {
 				return nil, fmt.Errorf("%w: the event stream ended without the answer: %w", ErrToolsLimit, err)
 			}
-			if !ev.hasData || strings.TrimSpace(ev.data) == "" {
+			if !ev.message() || !ev.hasData || strings.TrimSpace(ev.data) == "" {
 				continue
 			}
 			res, ok, err := answer([]byte(ev.data))

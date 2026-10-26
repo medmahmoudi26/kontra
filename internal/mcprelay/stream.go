@@ -12,13 +12,21 @@ import (
 )
 
 // event is one server-sent event as the upstream wrote it (WHATWG SSE): its lines, without their terminators and
-// without the blank line that ends it, and its data (the data lines' values joined by "\n").
+// without the blank line that ends it, its data (the data lines' values joined by "\n"), and its type (the value of
+// its last event field, "" when it has none).
 type event struct {
 	lines   []string
 	data    string
 	hasData bool
+	typ     string
 	size    int
 }
+
+// message reports whether a client dispatches the event as a message: its type is absent or "message" (WHATWG SSE's
+// default type). Streamable HTTP carries every JSON-RPC message in such events, and a stock client reads no other:
+// the TypeScript SDK's streamableHttp dispatches only `!event.event || event.event === "message"`, the Python SDK's
+// streamable_http only "message".
+func (e *event) message() bool { return e.typ == "" || e.typ == "message" }
 
 // errEventTooLarge is an event over upstream.MaxSSEEvent (spec §6.6).
 var errEventTooLarge = fmt.Errorf("%w: one SSE event over %d bytes", upstream.ErrLimit, upstream.MaxSSEEvent)
@@ -55,9 +63,12 @@ func (s *sseReader) next() (*event, error) {
 		}
 		ev.lines = append(ev.lines, line)
 		name, value, _ := strings.Cut(line, ":")
-		if name == "data" {
+		switch name {
+		case "data":
 			ev.hasData = true
 			data = append(data, strings.TrimPrefix(value, " "))
+		case "event":
+			ev.typ = strings.TrimPrefix(value, " ")
 		}
 	}
 }

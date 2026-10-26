@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +122,63 @@ func TestPeerHopGone(t *testing.T) {
 	}
 	if row := e.row(c.sid); !row.closed || *row.reason != string(CloseRevoked) {
 		t.Errorf("row %+v", row)
+	}
+}
+
+// §11.4: a calls row is written when the call's response completes, so a tools/call no answer came back for has
+// none, wherever the exchange failed: §6.1's check refusing the session on the replica holding the tunnel, reached
+// through the peer hop (peer.HeaderGone) or on this replica, and an upstream that cannot be reached. A call that
+// was answered is metered, and the client gets 404 or 502 either way.
+func TestNoCallsRowWithoutAnAnswer(t *testing.T) {
+	e := newEnv(t)
+	e.service("tun", "", nil)
+	a := e.replica("a", replicaOpts{peer: true})
+	b := e.replica("b", replicaOpts{peer: true, unsubscribed: true})
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
+	n := e.node(b, up, "tun")
+	key, _ := e.apiKey("buyer")
+	viaPeer, local := newClient(t, key), newClient(t, key)
+	viaPeer.initialize(a.url + "/mcp/tun")
+	local.initialize(b.url + "/mcp/tun")
+	// Each replica's tools cache is warm, so the next calls are dispatched without a drain.
+	if rep := viaPeer.call(a.url+"/mcp/tun", 1, "echo", "x"); rep.status != 200 {
+		t.Fatalf("through the peer hop: %d %s", rep.status, rep.body)
+	}
+	if rep := local.call(b.url+"/mcp/tun", 1, "echo", "x"); rep.status != 200 {
+		t.Fatalf("on the holder: %d %s", rep.status, rep.body)
+	}
+	if err := e.store.RevokeBinding(context.Background(), n.key, "tun", "test"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 10*time.Second, "B's view holds the binding revoked", func() bool { return b.rev.BindingRevoked(n.key, "tun") })
+	if rep := viaPeer.call(a.url+"/mcp/tun", 2, "echo", "x"); rep.status != 404 {
+		t.Errorf("refused by the holder through the hop: %d %s", rep.status, rep.body)
+	}
+	if rep := local.call(b.url+"/mcp/tun", 2, "echo", "x"); rep.status != 404 {
+		t.Errorf("refused on this replica: %d %s", rep.status, rep.body)
+	}
+	if rows := e.calls("tun"); len(rows) != 2 {
+		t.Errorf("%d calls rows, want the 2 answered calls'", len(rows))
+	}
+
+	// A direct backend that went away.
+	gone := mcptest.New()
+	gone.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
+	srv := httptest.NewServer(gone)
+	t.Cleanup(srv.Close)
+	e.service("gone", srv.URL+"/mcp", nil)
+	c := newClient(t, key)
+	c.initialize(a.url + "/mcp/gone")
+	if rep := c.call(a.url+"/mcp/gone", 1, "echo", "x"); rep.status != 200 {
+		t.Fatalf("direct: %d %s", rep.status, rep.body)
+	}
+	srv.Close()
+	if rep := c.call(a.url+"/mcp/gone", 2, "echo", "x"); rep.status != 502 || rep.errCode(t) != -32603 {
+		t.Errorf("an unreachable upstream: %d %s", rep.status, rep.body)
+	}
+	if rows := e.calls("gone"); len(rows) != 1 || rows[0].isError == nil || *rows[0].isError {
+		t.Errorf("calls rows %+v, want the answered call's only", rows)
 	}
 }
 

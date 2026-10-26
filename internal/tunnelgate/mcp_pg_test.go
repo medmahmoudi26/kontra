@@ -168,3 +168,113 @@ func TestMCPRowsFollowTheSession(t *testing.T) {
 		t.Errorf("after CloseAll: %s", reason(k3))
 	}
 }
+
+// A superseding session is registered (Get) as soon as its row commits, never after the superseded session's pinned
+// MCP sessions are closed (relay.md §11.2): that statement waits on Postgres, and the new row is visible to every
+// replica's picker from the commit on. A session that hosts no MCP service runs no such statement at all. Here
+// kontra.mcp_sessions is locked while each key's node reconnects: the new session is held at once, the A2A-only
+// key's close never waits on the table, and the MCP key's pinned row closes tunnel_lost once the lock is gone.
+func TestSupersedeIsNotHeldByMCPRows(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	ctx := context.Background()
+	if _, err := e.pool.Exec(ctx, `insert into kontra.services (tenant_id, name, kind, backend, source)
+		values ($1, 'fs', 'mcp', '{"tunnel": {}}'::jsonb, 'config')`, e.team); err != nil {
+		t.Fatal(err)
+	}
+	a := e.replica("a", replicaOpts{every: time.Hour})
+	lock := func() func() {
+		t.Helper()
+		tx, err := e.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `lock table kontra.mcp_sessions in exclusive mode`); err != nil {
+			t.Fatal(err)
+		}
+		release := func() { _ = tx.Rollback(ctx) }
+		t.Cleanup(release)
+		return release
+	}
+	waiting := func() int {
+		t.Helper()
+		var n int
+		if err := e.pool.QueryRow(ctx, `select count(*) from pg_stat_activity where datname = current_database()
+			and wait_event_type = 'Lock' and query like '%update kontra.mcp_sessions%'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	held := func(n *testNode) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if _, ok := a.reg.Get(n.session); ok {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the superseding session %s is not held 2 s after its row committed", n.session)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// A2A only: nothing to close, and no statement on mcp_sessions.
+	id := newIdentity(t)
+	ag := newAgent()
+	first := e.enrollNode(t, a, id, ag, "hello")
+	release := lock()
+	second := e.connectNode(t, a, id, ag, "hello")
+	held(second)
+	if !first.closed(5 * time.Second) {
+		t.Fatal("the superseded A2A session stayed open")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := waiting(); n != 0 {
+		t.Errorf("closing a session that hosts no MCP service waits on mcp_sessions (%d statements)", n)
+	}
+	release()
+
+	// MCP: the pinned row closes tunnel_lost, after the new session is held.
+	mid := newIdentity(t)
+	hello := func(enroll bool) *tunnel.Hello {
+		h := &tunnel.Hello{Name: "n", Agent: "kontra/test", Services: []tunnel.Service{{Kind: tunnel.KindMCP, Name: "fs"}}}
+		if enroll {
+			tok, err := e.store.MintServiceToken(ctx, e.team, "fs", "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.Enroll = append(h.Enroll, tok)
+		}
+		return h
+	}
+	old, err := a.startNode(t, mid, hello(true), newAgent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitRow(t, old.session)
+	held(old)
+	pin := sha256.Sum256([]byte("fs-pinned"))
+	if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via,
+		tunnel_session, replica_id, protocol_version) values ($1, $2, 'fs', $3, 'key:kk_t_x', 'api_key', $4, $5, '2025-11-25')`,
+		pin[:], e.team, uuid.New(), old.session, a.id); err != nil {
+		t.Fatal(err)
+	}
+	release = lock()
+	newer, err := a.startNode(t, mid, hello(false), newAgent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitRow(t, newer.session)
+	held(newer)
+	if !old.closed(5 * time.Second) {
+		t.Fatal("the superseded MCP session stayed open")
+	}
+	release()
+	eventually(t, 15*time.Second, "the superseded session's pinned row closed tunnel_lost", func() bool {
+		var reason *string
+		if err := e.pool.QueryRow(ctx, `select close_reason from kontra.mcp_sessions where client_sid_hash = $1`, pin[:]).Scan(&reason); err != nil {
+			t.Fatal(err)
+		}
+		return reason != nil && *reason == "tunnel_lost"
+	})
+}

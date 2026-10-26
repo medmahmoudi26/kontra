@@ -49,6 +49,7 @@ type Session struct {
 
 	mu         sync.Mutex
 	served     map[string]string // service name → kind
+	hostsMCP   bool              // an MCP service was in its served set when it was added (Add): MCP sessions may pin it
 	revokedSvc map[string]bool   // services whose binding was revoked on this session (dropService)
 	revoked    bool              // its key was revoked, or its rotation overlap ended (markRevoked)
 	closed     bool              // no new stream: closing, closed, revoked or superseded
@@ -138,6 +139,14 @@ func (s *Session) markRevoked() {
 	s.mu.Lock()
 	s.revoked = true
 	s.mu.Unlock()
+}
+
+// hostedMCP reports whether s hosted an MCP service when it was added, so that MCP sessions may be pinned to it
+// (relay.md §11.2), whatever bindings were revoked since.
+func (s *Session) hostedMCP() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hostsMCP
 }
 
 // closeReason is the close_reason of the MCP sessions pinned to s when it closes: revoked after a key revocation,

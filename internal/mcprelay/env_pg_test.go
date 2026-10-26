@@ -165,6 +165,7 @@ type replicaOpts struct {
 	origins      []string
 	admission    *fakeAdmission
 	ops          []hooks.Operation
+	drainTimeout time.Duration // the tools cache's bound on one drain (DrainTimeout when 0)
 }
 
 // replica starts one replica over the env's database.
@@ -191,9 +192,13 @@ func (e *env) replica(name string, o replicaOpts) *replica {
 	wg.Go(func() { _ = r.rev.Run(ctx) })
 	wg.Go(func() { _ = r.reg.Run(ctx) })
 
+	tools := NewToolsCache()
+	if o.drainTimeout > 0 {
+		tools.drainTimeout = o.drainTimeout
+	}
 	deps := Deps{
 		ReplicaID: r.id, Services: e.svcs, Auth: auth.NewAuthenticator(e.keys), Sessions: NewSessions(e.pool),
-		Tools: NewToolsCache(), Meter: NewMeter(e.pool), Tunnels: r.reg, Picker: tunnelgate.NewPicker(e.pool),
+		Tools: tools, Meter: NewMeter(e.pool), Tunnels: r.reg, Picker: tunnelgate.NewPicker(e.pool),
 		AllowedOrigins: o.origins, Log: logger, AdmissionOps: o.ops,
 	}
 	if o.admission != nil {

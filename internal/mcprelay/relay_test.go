@@ -341,6 +341,22 @@ func TestLegacyRules(t *testing.T) {
 	if rep.status != 400 || rep.errCode(t) != -32000 {
 		t.Errorf("modern: %d %s", rep.status, rep.body)
 	}
+	// §11.1 holds for GET and DELETE on a session too: another version is 400 with -32022 (id null); 2026-07-28 has
+	// no GET stream and no session (§11.12 rules 2 and 5), 405. Neither reaches the upstream, and the session stays.
+	c.hc.Timeout = 5 * time.Second // a GET that is forwarded opens the upstream's stream, which does not end
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		rep = c.do(method, r.url+"/mcp/direct", "", map[string]string{"MCP-Protocol-Version": "1999-01-01", "Accept": "text/event-stream"})
+		if rep.status != 400 || rep.errCode(t) != -32022 || rep.msg(t)["id"] != nil {
+			t.Errorf("%s with 1999-01-01: %d %s", method, rep.status, rep.body)
+		}
+		rep = c.do(method, r.url+"/mcp/direct", "", map[string]string{"MCP-Protocol-Version": "2026-07-28", "Accept": "text/event-stream"})
+		if rep.status != 405 {
+			t.Errorf("%s with 2026-07-28: %d %s", method, rep.status, rep.body)
+		}
+	}
+	if row := e.row(c.sid); row.closed {
+		t.Errorf("a refused DELETE closed the session: %+v", row)
+	}
 	if len(up.Requests()) != seen {
 		t.Error("a refused request reached the upstream")
 	}
@@ -355,5 +371,36 @@ func TestLegacyRules(t *testing.T) {
 	}
 	if rep := c.do(http.MethodPost, r.url+"/mcp/nothing", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, nil); rep.status != 404 || rep.errCode(t) != -32601 {
 		t.Errorf("unknown service: %d %s", rep.status, rep.body)
+	}
+}
+
+// §11.7: a client response is the gate's only when its id has the gate's form, k.<taskId>.<seq>; one answering an
+// upstream request whose own id merely starts with "k." is forwarded on the pinned session (§11.2: upstream ids pass
+// unchanged), and one with the gate's form is 202 and dropped (no gate-owned task exists before M3 WP-06).
+func TestGateRequestIDs(t *testing.T) {
+	e := newEnv(t)
+	up, url := upstreamDouble(t)
+	e.service("direct", url, nil)
+	r := e.replica("a", replicaOpts{})
+	key, _ := e.apiKey("buyer")
+	c := newClient(t, key)
+	c.initialize(r.url + "/mcp/direct")
+	answer := func(id string) string {
+		return `{"jsonrpc":"2.0","id":` + id + `,"result":{"action":"accept","content":{}}}`
+	}
+	for _, id := range []string{`"k.1"`, `"k.elicit-7"`, `"k.0193.4"`} {
+		before := len(up.Requests())
+		rep := c.do(http.MethodPost, r.url+"/mcp/direct", answer(id), nil)
+		got := up.Requests()
+		if rep.status != http.StatusAccepted || len(got) != before+1 || string(got[len(got)-1].ID) != id {
+			t.Errorf("the client's answer to the upstream's request %s: %d, not forwarded", id, rep.status)
+		}
+	}
+	before := len(up.Requests())
+	if rep := c.do(http.MethodPost, r.url+"/mcp/direct", answer(`"k.0192f0c4-8a5e-7c3b-9f1d-2b3c4d5e6f70.3"`), nil); rep.status != http.StatusAccepted || len(rep.body) != 0 {
+		t.Errorf("an answer to a gate request id: %d %s", rep.status, rep.body)
+	}
+	if len(up.Requests()) != before {
+		t.Error("an answer to a gate request id reached the upstream")
 	}
 }

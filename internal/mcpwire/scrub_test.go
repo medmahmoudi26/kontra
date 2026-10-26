@@ -252,6 +252,16 @@ func TestClassify(t *testing.T) {
 		{"GET without a session", req("GET", "", ""), nil, 0, 405},
 		{"DELETE without a session", req("DELETE", V20260728, ""), nil, 0, 405},
 		{"GET with a session", req("GET", "", "s"), nil, EraLegacy, 0},
+		// §11.1 holds for GET and DELETE on a session too: 2025-11-25, 2025-06-18 or none; another value is 400 with
+		// -32022; 2026-07-28 is modern, has no GET stream and its Mcp-Session-Id is never read (rules 2 and 5): 405.
+		{"GET with a session, 2025-11-25", req("GET", V20251125, "s"), nil, EraLegacy, 0},
+		{"GET with a session, 2025-06-18", req("GET", V20250618, "s"), nil, EraLegacy, 0},
+		{"DELETE with a session, 2025-11-25", req("DELETE", V20251125, "s"), nil, EraLegacy, 0},
+		{"GET with a session, another version", req("GET", "1999-01-01", "s"), nil, 0, 400},
+		{"DELETE with a session, another version", req("DELETE", "2025-03-26", "s"), nil, 0, 400},
+		{"GET with a session, 2026-07-28", req("GET", V20260728, "s"), nil, 0, 405},
+		{"DELETE with a session, 2026-07-28", req("DELETE", V20260728, "s"), nil, 0, 405},
+		{"GET without a session, another version", req("GET", "1999-01-01", ""), nil, 0, 405},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			era, ref := Classify(tc.r, tc.m)
@@ -284,5 +294,18 @@ func TestClassify(t *testing.T) {
 	if err := json.Unmarshal(ref.Body, &e); err != nil || e.Error.Code != CodeUnsupportedVersion || e.Error.Data.Requested != "2024-11-05" ||
 		len(e.Error.Data.Supported) != 3 || string(e.ID) != "7" {
 		t.Errorf("rule 4 body: %s", ref.Body)
+	}
+	for _, method := range []string{"GET", "DELETE"} {
+		_, ref = Classify(req(method, "1999-01-01", "s"), nil)
+		e.ID, e.Error.Code, e.Error.Data.Requested, e.Error.Data.Supported = nil, 0, "", nil
+		if ref == nil || json.Unmarshal(ref.Body, &e) != nil || e.Error.Code != CodeUnsupportedVersion || e.Error.Data.Requested != "1999-01-01" ||
+			len(e.Error.Data.Supported) != 3 || string(e.ID) != "null" {
+			t.Errorf("%s: §11.1's -32022 body: %+v", method, ref)
+		}
+	}
+	for _, method := range []string{"GET", "DELETE"} {
+		if _, ref = Classify(req(method, V20260728, "s"), nil); ref == nil || len(ref.Body) != 0 {
+			t.Errorf("%s 2026-07-28: %+v", method, ref)
+		}
 	}
 }

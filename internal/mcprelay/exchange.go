@@ -155,20 +155,27 @@ func (h *Handler) send(ctx context.Context, t target, rq *request, method string
 	return resp, nil
 }
 
-// callMeter is the calls row of a tools/call being relayed (§11.4).
+// callMeter is the calls row of a tools/call being relayed (§11.4). The row is written when the response completes
+// (record), so only for a call some answer came back for: the upstream's, or one its node wrote (Kontra-Node). A
+// call whose exchange failed before any answer reached the gate has none, wherever it failed: §6.1's check refusing
+// the session on this replica or on the one holding it (peer.HeaderGone), no peer hop, a key that could not be
+// checked, an upstream or a peer replica that could not be reached or was lost first, a client that left first.
+// Metering reads the outcome the client reads (D172): the first response to the call's id, from a message Parse
+// accepted, in an event a client dispatches.
 type callMeter struct {
 	call     Call
 	start    time.Time
 	task     bool // a passthrough task-augmented call: its row is written with is_error NULL (§11.5)
-	seen     bool // the response to the call was read
+	seen     bool // the response to the call was read, or the call failed
 	isError  *bool
 	disabled bool
 }
 
 // observe reads the response to the call: is_error true for a JSON-RPC error or a top-level isError true; for a
-// passthrough task-augmented call a CreateTaskResult is not observed (NULL).
+// passthrough task-augmented call a CreateTaskResult is not observed (NULL). Only the first response counts, as a
+// client takes the first response for its request's id (the relay ends the stream before a second one, relaySSE).
 func (c *callMeter) observe(m *mcpwire.Message) {
-	if c == nil {
+	if c == nil || c.seen {
 		return
 	}
 	c.seen = true
@@ -200,7 +207,8 @@ func hasMember(obj json.RawMessage, key string) bool {
 	return ok
 }
 
-// record writes the call's row once its response has completed: a call whose response never arrived is an error.
+// record writes the call's row once its response has completed (callMeter says when there is one): a call whose
+// answer started but whose response to the call never came (a stream that ended or was cut first) is an error.
 func (h *Handler) record(rq *request, c *callMeter, bytesOut int64) {
 	if c == nil || c.disabled {
 		return
@@ -229,6 +237,9 @@ type relayOpts struct {
 	meter  *callMeter
 	tools  ToolsKey
 	hold   bool // initialize: the headers wait for onResponse
+	// answered is set once the upstream's response to the client's request was relayed: JSON-RPC answers a request
+	// once, and a client takes the first response for an id, so the relay ends the stream before another.
+	answered bool
 	// onResponse sees the upstream's response to the client's request before it is written (initialize): it
 	// returns the message to write instead, or a refusal that is written in place of the whole response.
 	onResponse func(m *mcpwire.Message, raw []byte) ([]byte, *mcpwire.Refusal)
@@ -380,6 +391,7 @@ func (h *Handler) relayJSON(rq *request, resp *http.Response, o *relayOpts) int6
 func (h *Handler) process(o *relayOpts, m *mcpwire.Message, raw []byte) ([]byte, *mcpwire.Refusal) {
 	isResp := m.Method == "" && sameID(m.ID, o.reqID)
 	if isResp {
+		o.answered = true
 		o.meter.observe(m)
 		if o.onResponse != nil {
 			return o.onResponse(m, raw)
@@ -407,6 +419,16 @@ const keepAliveEvery = 15 * time.Second
 // relaySSE relays an event stream event by event, flushing each. An event whose data Parse refuses ends the
 // stream before it (§11.1). With o.hold the headers and the events wait for the response to the client's request
 // (onResponse decides it), within upstream.MaxBody.
+//
+// SPEC-CONFLICT (relay §11.1, §11.2, §11.4; D172): the spec says what happens to an event whose message fails strict
+// decoding, and that events otherwise pass unchanged, but not what happens to an event a client does not dispatch,
+// nor to a second response to one request, both of which let metering read another is_error than the client reads.
+// The closest faithful behaviour: the relay reads, meters and relays what a client reads, the events a client
+// dispatches as messages (type absent or "message", event.message). An event of another type is no MCP message to
+// any client; it is neither read nor relayed, so a seller cannot meter an answer in it that its client never sees,
+// nor carry Kontra's keys past the scrub in it. A second response to the client's request ends the stream before it,
+// as a refused message does, and the call stays metered as its first response says (a client takes the first
+// response for an id, and reports a later one as unknown).
 func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64 {
 	type item struct {
 		ev  *event
@@ -479,8 +501,12 @@ func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64
 				}
 				return cw.n
 			}
-			tick.Reset(keepAliveEvery)
 			ev := it.ev
+			if !ev.message() {
+				h.log.Debug("mcp: an upstream event of a type no client dispatches was not relayed", "service", rq.svc.Ref.Name)
+				continue
+			}
+			tick.Reset(keepAliveEvery)
 			b := ev.encode(false, "")
 			isResp := false
 			if ev.hasData && strings.TrimSpace(ev.data) != "" {
@@ -491,6 +517,11 @@ func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64
 					return refuse()
 				}
 				isResp = m.Method == "" && sameID(m.ID, o.reqID)
+				if isResp && o.answered {
+					h.log.Warn("mcp: an upstream answered a request twice; the stream ends before the second answer",
+						"service", rq.svc.Ref.Name)
+					return cw.n
+				}
 				msg, ref := h.process(o, m, []byte(ev.data))
 				if ref != nil {
 					if !out {

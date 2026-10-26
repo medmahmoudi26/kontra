@@ -549,9 +549,8 @@ func TestSupersedeOnOneReplica(t *testing.T) {
 	if e.hasRow(t, first.session) || !e.hasRow(t, second.session) {
 		t.Fatal("rows after the supersede: want only the second session's")
 	}
-	if _, ok := a.reg.Get(second.session); !ok {
-		t.Fatal("the new session is not held")
-	}
+	// Add registers the session just after its row commits, which connectNode waited for.
+	eventually(t, 5*time.Second, "the new session is held", func() bool { _, ok := a.reg.Get(second.session); return ok })
 	if !strings.Contains(a.logs.String(), "superseded by session "+second.session.String()) {
 		t.Fatal("the supersede is not logged with the session that superseded it")
 	}

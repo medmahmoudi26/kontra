@@ -67,7 +67,9 @@ func (r *Registry) revokeKey(s *Session, reason string) {
 				log.Debug("tunnel session: {t: revoked} not delivered", "error", err)
 			}
 		}
-		r.closeMCP(s.ID, "", mcpRevoked)
+		if s.hostedMCP() {
+			r.closeMCP(s.ID, "", mcpRevoked)
+		}
 		_ = s.close(why, false)
 	})
 }

@@ -416,16 +416,35 @@ var LegacyNoSessionBody = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32
 // Mcp-Session-Id, else the legacy 400 (-32000); any other version is -32022; GET and DELETE without a session
 // are 405.
 //
+// GET and DELETE with a session take §11.1's versions as a POST does: 2025-11-25, 2025-06-18 or none is legacy, and
+// anything else is 400 with -32022 (id null), not forwarded with the pinned request.
+//
+// SPEC-CONFLICT (relay §11.1, §11.12 rule 5): §11.1 makes a request with 2026-07-28 a modern one, and rule 5 makes
+// GET and DELETE legacy only; neither says what a GET or DELETE carrying 2026-07-28 and a session gets. The closest
+// faithful behaviour: it is modern, so its Mcp-Session-Id is never read (rule 2), and a modern request has no GET
+// stream and no session to delete: such a GET or DELETE is one without a session, 405 (rule 5), as a 2026-07-28
+// server answers a GET.
+//
 // Built by M3 WP-04, which serves the legacy era and needs rules 1, 3, 4 and 5; WP-07 serves what rule 2 sends
 // it.
 func Classify(r *http.Request, m *Message) (Era, *Refusal) {
 	sid := r.Header.Get(HeaderSessionID)
 	if r.Method != http.MethodPost {
 		// Rule 5: GET and DELETE are legacy only.
-		if sid == "" {
+		switch v := r.Header.Get(HeaderProtocolVersion); v {
+		case V20251125, V20250618, "":
+			if sid == "" {
+				return 0, &Refusal{Status: http.StatusMethodNotAllowed}
+			}
+			return EraLegacy, nil
+		case V20260728:
 			return 0, &Refusal{Status: http.StatusMethodNotAllowed}
+		default:
+			if sid == "" {
+				return 0, &Refusal{Status: http.StatusMethodNotAllowed}
+			}
+			return 0, unsupportedVersion(nil, v) // §11.1
 		}
-		return EraLegacy, nil
 	}
 	if m != nil && m.Method == MethodInitialize {
 		return EraLegacy, nil // rule 1, whatever the headers say
@@ -443,13 +462,19 @@ func Classify(r *http.Request, m *Message) (Era, *Refusal) {
 		if m != nil {
 			id = m.ID
 		}
-		b, err := ErrorBody(id, CodeUnsupportedVersion, "Unsupported protocol version",
-			map[string]any{"supported": Supported, "requested": v})
-		if err != nil {
-			b, _ = ErrorBody(nil, CodeUnsupportedVersion, "Unsupported protocol version", map[string]any{"supported": Supported, "requested": v})
-		}
-		return 0, &Refusal{Status: http.StatusBadRequest, Body: b} // rule 4
+		return 0, unsupportedVersion(id, v) // rule 4
 	}
+}
+
+// unsupportedVersion is rule 4's refusal of MCP-Protocol-Version v: 400 with -32022 naming the supported versions
+// and v, with id (null when there is none).
+func unsupportedVersion(id json.RawMessage, v string) *Refusal {
+	data := map[string]any{"supported": Supported, "requested": v}
+	b, err := ErrorBody(id, CodeUnsupportedVersion, "Unsupported protocol version", data)
+	if err != nil {
+		b, _ = ErrorBody(nil, CodeUnsupportedVersion, "Unsupported protocol version", data)
+	}
+	return &Refusal{Status: http.StatusBadRequest, Body: b}
 }
 
 // CheckModern applies §11.12's checks to a modern request: _meta's protocolVersion and clientCapabilities

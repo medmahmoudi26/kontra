@@ -82,6 +82,16 @@ const (
 	MaxToolBytes = 4 << 20
 )
 
+// DrainTimeout bounds one drain of an upstream's tools/list, every page included: §6.6's "nothing an upstream sends
+// is unbounded" holds in time too. Past it the drain fails upstream_error (ErrToolsLimit, a 502 with -32603 to the
+// request that started it).
+//
+// SPEC-CONFLICT (relay §6.6, §11.3): §6.6's table bounds a tools/list in pages and bytes only, while every request of
+// the service on a replica waits for the one drain in flight, so an upstream session that never answers would hold
+// them all for as long as the client that started it waits. The closest faithful behaviour: §6.6's own rule ("nothing
+// an upstream sends is unbounded") read as a time bound too, 30 s for a whole drain.
+const DrainTimeout = 30 * time.Second
+
 // ErrToolsLimit is a tools/list over §6.6's limits, or one that is not a tools/list result.
 var ErrToolsLimit = errors.New("mcprelay: the upstream's tools/list is over its limits or malformed")
 
@@ -109,8 +119,11 @@ type ToolView struct {
 // when it is shown (ToolView), so a policy or annotation change applies at once; answered as one page with no
 // cursor, so denied tools never shape page boundaries. Refreshed on an upstream notifications/tools/list_changed
 // (Invalidate) and once RefreshTools old, at the next request; one drain per service and era at a time, which the
-// other requests wait for. It is per replica; a services row that changes (NOTIFY kontra_services) invalidates it
-// as it does the cards.
+// other requests wait for. A drain runs on the gate's own context, not on the request that started it, within
+// DrainTimeout (§6.6): every request waiting for it, its starter included, returns at its own context, a drain whose
+// starter left still fills the cache, and a drain that fails or runs out of time lets each request still waiting
+// drain again through its own session. It is per replica; a services row that changes (NOTIFY kontra_services)
+// invalidates it as it does the cards.
 //
 // The modern list carries ttlMs (at most RefreshTools) and cacheScope "private". It also keeps the upstream's
 // server/discover capabilities, whose tasks extension decides gate-owned modern tasks (D159), and the service's era
@@ -128,6 +141,8 @@ type ToolsCache struct {
 	byService map[cacheKey]*tools
 	gen       map[ToolsKey]uint64 // bumped by Invalidate: a drain begun before it installs nothing
 	now       func() time.Time
+	// drainTimeout bounds one drain, every page included (DrainTimeout).
+	drainTimeout time.Duration
 }
 
 type cacheKey struct {
@@ -147,7 +162,7 @@ const RefreshTools = 10 * time.Minute
 
 // NewToolsCache returns an empty cache.
 func NewToolsCache() *ToolsCache {
-	return &ToolsCache{byService: map[cacheKey]*tools{}, gen: map[ToolsKey]uint64{}, now: time.Now}
+	return &ToolsCache{byService: map[cacheKey]*tools{}, gen: map[ToolsKey]uint64{}, now: time.Now, drainTimeout: DrainTimeout}
 }
 
 // List returns the service's tools for era as v shows them, draining the upstream through fetch when the cache
@@ -240,20 +255,56 @@ func (c *ToolsCache) get(ctx context.Context, key ToolsKey, era mcpwire.Era, fet
 		gen := c.gen[key]
 		c.mu.Unlock()
 
-		list, names, err := drain(ctx, fetch)
-		c.mu.Lock()
-		if err != nil || c.gen[key] != gen {
-			delete(c.byService, k)
-		} else {
-			c.byService[k] = &tools{list: list, names: names, fetched: c.now()}
+		done := make(chan *drained, 1)
+		go func() {
+			d := c.drain(ctx, fetch)
+			c.mu.Lock()
+			if d.err != nil || c.gen[key] != gen {
+				delete(c.byService, k)
+			} else {
+				c.byService[k] = &tools{list: d.list, names: d.names, fetched: c.now()}
+			}
+			close(ch)
+			c.mu.Unlock()
+			done <- d
+		}()
+		select {
+		case d := <-done:
+			if d.err != nil {
+				return nil, d.err
+			}
+			return &tools{list: d.list, names: d.names, fetched: c.now()}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		close(ch)
-		c.mu.Unlock()
-		if err != nil {
-			return nil, err
-		}
-		return &tools{list: list, names: names, fetched: c.now()}, nil
 	}
+}
+
+// drained is a drain's outcome.
+type drained struct {
+	list  []json.RawMessage
+	names []string
+	err   error
+}
+
+// drain runs one drain through fetch on a context of the cache's own, which keeps ctx's values but not its
+// cancellation, within drainTimeout: the drain belongs to every request waiting for it, so the one that started it
+// neither ends it by leaving nor holds the others by waiting on a session that never answers. Out of time, it fails
+// with ErrToolsLimit (upstream_error).
+func (c *ToolsCache) drain(ctx context.Context, fetch Pager) *drained {
+	bound := c.drainTimeout
+	if bound <= 0 {
+		bound = DrainTimeout
+	}
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bound)
+	defer cancel()
+	list, names, err := drain(dctx, fetch)
+	if err != nil && errors.Is(dctx.Err(), context.DeadlineExceeded) {
+		// Whatever the page in flight failed with, the cause is the bound; the error names nothing of the session,
+		// so the request that started the drain closes no row for it.
+		err = fmt.Errorf("%w: no complete tools/list within %v", ErrToolsLimit, bound)
+	}
+	return &drained{list: list, names: names, err: err}
 }
 
 // drain follows every page of the upstream's tools/list within MaxToolPages and MaxToolBytes, removes Kontra's

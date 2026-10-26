@@ -141,9 +141,11 @@ var errClosing = errors.New("tunnelgate: the replica is shutting down its tunnel
 //     rows of the key's older sessions whose replica is not draining are deleted (superseded), with NOTIFY
 //     kontra_tunnel 'session:<id>' for those of other replicas; and the tunnels row (session_id, key_id,
 //     tenant_id, replica_id, services, hire_principal, cli_version) is inserted.
-//  5. After the commit: the superseded sessions of this replica are closed, whatever became of s meanwhile
-//     (their rows are gone); then s, if it closed while its row went in, has its row deleted again; and a
-//     session added after Drain is told {"t": "drain"} (§13).
+//  5. After the commit: s is registered (Get finds it) at once, since its row is a candidate on every replica from
+//     the commit on; then the superseded sessions of this replica are closed, whatever became of s meanwhile
+//     (their rows are gone; closing one closes its pinned MCP sessions in Postgres, relay.md §11.2, which s's
+//     registration does not wait for); then s, if it closed while its row went in, has its row deleted again; and
+//     a session added after Drain is told {"t": "drain"} (§13).
 //
 // The enrollments of the session's handshake are not Add's to announce: Admit's transaction sends NOTIFY
 // kontra_tunnel 'enrolled:…' (enroll.EnrolledPayload), which every replica applies, this one included (§5),
@@ -162,6 +164,9 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 		for _, sv := range served {
 			s.served[sv.Name] = sv.Kind
 		}
+	}
+	for _, kind := range s.served {
+		s.hostsMCP = s.hostsMCP || kind == tunnel.KindMCP
 	}
 	s.mu.Unlock()
 
@@ -198,6 +203,10 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 	if err != nil {
 		return fail(err)
 	}
+	s.mu.Lock()
+	s.registered = true
+	closed := s.closed
+	s.mu.Unlock()
 	// The commit deleted their rows: they close whatever becomes of s.
 	for _, id := range superseded {
 		if old := r.lookup(id); old != nil {
@@ -207,10 +216,6 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 			_ = old.Close("superseded by session " + s.ID.String() + " of its key (§11)")
 		}
 	}
-	s.mu.Lock()
-	s.registered = true
-	closed := s.closed
-	s.mu.Unlock()
 	r.mu.Lock()
 	closing, drained := r.closing, r.drained
 	r.mu.Unlock()
@@ -475,8 +480,10 @@ func (r *Registry) remove(s *Session, reason string, logged bool) error {
 		r.log.Info("tunnel session closed", obs.KeyTunnelSession, s.ID, "key_id", s.KeyID, "reason", reason)
 	}
 	// The MCP sessions pinned to it die with it (relay.md §11.2): revoked when a revocation closed it (its own
-	// statement ran first, Revoked), tunnel_lost otherwise.
-	r.closeMCP(s.ID, "", s.closeReason())
+	// statement ran first, Revoked), tunnel_lost otherwise. Only a session that hosted an MCP service can have any.
+	if s.hostedMCP() {
+		r.closeMCP(s.ID, "", s.closeReason())
+	}
 	if !del {
 		return nil
 	}

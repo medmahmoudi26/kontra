@@ -2,13 +2,16 @@ package mcprelay
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -154,6 +157,148 @@ func TestMetering(t *testing.T) {
 				t.Errorf("arguments or content in the logs:\n%s", logs)
 			}
 		})
+	}
+}
+
+// D172, §11.4: metering reads the is_error the client reads. A client takes the first response for its request's id
+// and dispatches only the events whose type is message or absent (WHATWG SSE; the TypeScript SDK's streamableHttp,
+// the Python SDK's streamable_http). An upstream that answers one tools/call twice has its first answer relayed and
+// metered, and the stream ends before the second; an event of another type is neither relayed nor read, so a
+// success hidden in one is not metered and does not make the real answer a second one.
+func TestMeteringReadsWhatTheClientReads(t *testing.T) {
+	e := newEnv(t)
+	up, url := upstreamDouble(t)
+	up.Tools = []json.RawMessage{mcptest.Tool("twice", ""), mcptest.Tool("hidden", "")}
+	answer := func(id json.RawMessage, isError bool, text string) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":%q}],"isError":%v}}`, id, text, isError)
+	}
+	up.OnCall = func(r mcptest.Request) mcptest.Reply {
+		if strings.Contains(string(r.Params), `"twice"`) {
+			return mcptest.Reply{SSE: true, Raw: []byte(`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":2}}`),
+				Events: []string{
+					"id: a-1\nevent: message\ndata: " + answer(r.ID, true, "FIRST") + "\n\n",
+					"id: a-2\ndata: " + answer(r.ID, false, "SECOND") + "\n\n",
+				}}
+		}
+		return mcptest.Reply{Error: &mcptest.RPCError{Code: -32000, Message: "REAL"},
+			Events: []string{"id: h-1\nevent: kontra-hidden\ndata: " + answer(r.ID, false, "HIDDEN") + "\n\n"}}
+	}
+	e.service("fs", url, nil)
+	r := e.replica("a", replicaOpts{})
+	key, _ := e.apiKey("buyer")
+	c := newClient(t, key)
+	c.initialize(r.url + "/mcp/fs")
+
+	rep := c.call(r.url+"/mcp/fs", 7, "twice", "x")
+	if body := string(rep.body); rep.status != 200 || !strings.Contains(body, "FIRST") || strings.Contains(body, "SECOND") ||
+		strings.Contains(body, "notifications/progress") {
+		t.Errorf("an answer given twice: want the first only and the stream ended before the second: %d %s", rep.status, body)
+	}
+	rep = c.call(r.url+"/mcp/fs", 8, "hidden", "x")
+	if body := string(rep.body); rep.status != 200 || strings.Contains(body, "HIDDEN") || strings.Contains(body, "kontra-hidden") ||
+		!strings.Contains(body, "REAL") {
+		t.Errorf("an answer in an event of another type: want it dropped and the real answer relayed: %d %s", rep.status, body)
+	}
+	rows := e.calls("fs")
+	if len(rows) != 2 {
+		t.Fatalf("%d calls rows", len(rows))
+	}
+	for i, row := range rows {
+		if row.isError == nil || !*row.isError {
+			t.Errorf("row %d (%s): is_error %v, want true as the client read it", i, row.tool, row.isError)
+		}
+	}
+}
+
+// hangFirstList is an upstream whose first tools/list POST answers with an event stream that never carries the
+// answer, until the request ends; every other request goes to next.
+type hangFirstList struct {
+	next http.Handler
+	mu   sync.Mutex
+	hung bool
+}
+
+func (h *hangFirstList) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		b, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		h.mu.Lock()
+		hang := !h.hung && strings.Contains(string(b), `"tools/list"`)
+		h.hung = h.hung || hang
+		h.mu.Unlock()
+		if hang {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+	}
+	h.next.ServeHTTP(w, r)
+}
+
+func (h *hangFirstList) started() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.hung
+}
+
+// §6.6 (nothing an upstream sends is unbounded): a tools/list drain runs on the gate's context within its bound. A
+// drain on an upstream session that never answers fails upstream_error (502, -32603) at the bound, although its
+// client is still waiting; another principal's tools/call on its own session waits for it no longer than the bound,
+// then drains through its own session and is answered.
+func TestDrainIsBounded(t *testing.T) {
+	e := newEnv(t)
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
+	h := &hangFirstList{next: up}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	e.service("fs", srv.URL+"/mcp", nil)
+	const bound = time.Second
+	r := e.replica("a", replicaOpts{drainTimeout: bound})
+	key1, _ := e.apiKey("one")
+	key2, _ := e.apiKey("two")
+	c1, c2 := newClient(t, key1), newClient(t, key2)
+	c1.initialize(r.url + "/mcp/fs")
+	c2.initialize(r.url + "/mcp/fs")
+
+	first := make(chan reply, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodPost, r.url+"/mcp/fs", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		req.Header.Set("Authorization", "Bearer "+key1)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Mcp-Session-Id", c1.sid)
+		req.Header.Set("MCP-Protocol-Version", mcptest.Version)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+		if err != nil {
+			first <- reply{status: -1, body: []byte(err.Error())}
+			return
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		first <- reply{status: resp.StatusCode, header: resp.Header, body: b}
+	}()
+	eventually(t, 5*time.Second, "the first drain is in flight on the hung upstream session", h.started)
+
+	start := time.Now()
+	c2.hc.Timeout = bound + 4*time.Second
+	if rep := c2.call(r.url+"/mcp/fs", 2, "echo", "x"); rep.status != 200 || rep.msg(t)["result"] == nil {
+		t.Errorf("the other session's tools/call: %d %s", rep.status, rep.body)
+	}
+	if took := time.Since(start); took > bound+2*time.Second {
+		t.Errorf("the other session's tools/call waited %v on the hung drain (bound %v)", took, bound)
+	}
+	select {
+	case rep := <-first:
+		if rep.status != http.StatusBadGateway || rep.errCode(t) != -32603 {
+			t.Errorf("the hung drain's client: %d %s", rep.status, rep.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the hung drain was not bounded: its client has no answer")
 	}
 }
 
