@@ -10,6 +10,7 @@ require (
 	github.com/a2aproject/a2a-go/v2 v2.7.0
 	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
+	github.com/gowebpki/jcs v1.0.2
 	github.com/hashicorp/yamux v0.1.2
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/pressly/goose/v3 v3.29.0
