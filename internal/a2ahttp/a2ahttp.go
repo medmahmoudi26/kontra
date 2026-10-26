@@ -48,6 +48,7 @@ import (
 	"kontra.sh/kontra/internal/relay"
 	"kontra.sh/kontra/internal/sse"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/tenant"
 )
 
@@ -385,6 +386,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(auth.WithPrincipal(ctx, p))
 	if rt.kind == routeJSONRPC {
+		// Strict decoding (§2.4, D172): after the credential and service checks, before params.tenant, the method
+		// that routes a stream, the version and extension checks, Admission and any task row.
+		if refused := strictRefusal(body); refused != nil {
+			s.deps.Logger.Info("a2ahttp: a JSON-RPC request was refused by strict decoding", "path", rt.prefix, "error", refused)
+			sid := id
+			var ke *strictjson.KeyError
+			if errors.As(refused, &ke) && len(ke.Path) == 0 {
+				sid = nil // the request object itself is ambiguous: no id was read unambiguously
+			}
+			sse.WriteError(w, sse.JSONRPC, sid, http.StatusBadRequest, a2a.NewError(a2a.ErrInvalidRequest, "invalid request"))
+			return
+		}
 		s.serveJSONRPC(w, r, rt, svc, p, body)
 		return
 	}
