@@ -5,7 +5,8 @@ gate as a **direct backend** (M1) and, from M2, through `kontra connect` (the tu
 and imports nothing from Kontra.
 
 Status: works end to end with the M1 gate (`kontra-gate migrate`, `enroll --api-key` and `serve`): the polling
-fallback, streaming with `SELLER_CHUNK`, and a cancel forwarded to the seller.
+fallback, streaming with `SELLER_CHUNK`, and a cancel forwarded to the seller. Since M2 the same works through
+`kontra connect` (`kontra-tunnel.yaml`, [Through the tunnel](#through-the-tunnel-m2)).
 
 ## What the seller is
 
@@ -72,6 +73,10 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" -
 #  -> submitted, working, then "line 1", "line 2", "line 3" a second apart as artifact chunks, then completed
 ```
 
+a2a-cli's text output joins an artifact's chunks and prints the artifact once its last chunk is in
+(`[artifact] line 1line 2line 3`); `-o jsonl` prints each event as it arrives, which shows the chunks a second
+apart.
+
 ## A cancel (cancel_forwarded)
 
 ```sh
@@ -104,7 +109,54 @@ end (or until `drain_timeout`, 10 minutes by default), and then the gate exits (
 
 ## Through the tunnel (M2)
 
+The same seller, hosted through the tunnel: the gate never connects to it. `kontra connect`, running next to
+it, dials the gate once (outbound, WebSocket), proves its identity key, and from then on the gate sends each
+request for `hello` over that connection; the node forwards it to the `--serve` URL and nowhere else
+(spec/tunnel.md §8.2). `kontra-tunnel.yaml` is `kontra.yaml` with `hello` as a tunnel service
+(`backend: { tunnel: {} }`, no URL: the node holds it). From the repository root:
+
 ```sh
-./run.sh
-kontra connect --gate http://localhost:8080 --serve a2a:hello=http://localhost:9999 --enroll "$(kontra-gate enroll hello)"
+examples/sellers/hello-exec/run.sh &       # a2a server --exec 'echo Hello World' --host 127.0.0.1 --port 9999
+
+docker compose -f compose.dev.yaml up -d --wait
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
+
+./kontra-gate migrate -f examples/sellers/hello-exec/kontra-tunnel.yaml
+export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/sellers/hello-exec/kontra-tunnel.yaml --api-key demo)"
+./kontra-gate serve -f examples/sellers/hello-exec/kontra-tunnel.yaml &
+
+./kontra connect --gate http://localhost:8080 --serve a2a:hello=http://localhost:9999 \
+  --enroll "$(./kontra-gate enroll -f examples/sellers/hello-exec/kontra-tunnel.yaml hello)" &
+#  kontra connect: connected to http://localhost:8080 as k1_… (tenant default, session …)
+#    a2a hello  http://localhost:8080/agents/hello
+
+a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "hi"
+#  -> completed, with the artifact "Hello World"
 ```
+
+- `kontra-gate enroll … hello` prints a one-time service token (`ket_…`, 15 minutes, for `hello` only). It needs
+  the service in the database, so run it once the gate has started with `kontra-tunnel.yaml`. In the node's
+  first handshake the token binds the node's key (`k1_…`, in `~/.kontra/identity.key`, created on first run) to
+  `hello`; after that the key alone gets the node in (spec/tunnel.md §5).
+- Restart `kontra connect` with the same command, `--enroll` included: `~/.kontra/credentials` records the token
+  as used, so it is not sent again. Keep the two files together (one persistent volume in a container).
+- `--serve` names the seller's root URL; a URL with a path is refused in M2 (conflict C1 of the M2 plan).
+- Everything above works the same through the tunnel: the polling fallback (the gate logs `the upstream refused
+  streaming; polling (D15)`), streaming with `SELLER_CHUNK`, and the cancel, which the gate forwards through
+  the node and which exec mode answers once its command has ended.
+
+What a lost node or seller does to a running task (here `SELLER_CMD='sleep 20; echo done'`, sent with
+`a2a send --async -o json` for its id; exec mode refuses streaming, so the gate polls the seller's task):
+
+- **`kontra connect` is killed:** the gate loses the session and the task fails at once with `kontra.failure:
+  tunnel_lost` ("the tunnel session to the service was lost"); the seller already had it, so it is not
+  retried (spec/relay.md §6.4). Restarting `kontra connect` reconnects, and the next task completes.
+- **The seller stops, the node stays up:** a cancel sent now answers `Error: … the service could not be reached
+  to cancel the task` and the task goes on `working`: the cancel was not delivered. At the gate's next poll
+  the node answers for the seller (`502`, `Kontra-Node: target_unreachable`), and the task fails `tunnel_lost`
+  ("the node could not reach the service (Kontra-Node: target_unreachable)"): after the first upstream task id
+  a response the node wrote itself ends the task (spec/relay.md §6.4).
+
+So a failed cancel is not always `tunnel_lost`: only a cancel whose session is gone fails the task, and a cancel
+the node could not deliver leaves the task as it was. `sellers/booking` shows the same with a task waiting at
+`input-required`, where no poll follows.

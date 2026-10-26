@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -732,6 +733,38 @@ func TestHelloExecLoads(t *testing.T) {
 	}
 	if !c.Auth.APIKeys || c.Listen != "127.0.0.1:8080" || len(c.Warnings) != 0 {
 		t.Errorf("auth %+v listen %q warnings %q", c.Auth, c.Listen, c.Warnings)
+	}
+}
+
+// The examples' tunnel gates (M2) load as their READMEs describe: one tunnel service each, for the team's
+// tenant, on a plaintext localhost gate whose tunnel channel binding is therefore none, with no warning (no
+// sealed or seller_keys, which a tunnel service refuses in M2).
+func TestTunnelExamplesLoad(t *testing.T) {
+	for path, name := range map[string]string{
+		"../../examples/sellers/hello-exec/kontra-tunnel.yaml": "hello",
+		"../../examples/sellers/helloworld/kontra.yaml":        "hello",
+		"../../examples/sellers/booking/kontra.yaml":           "booking",
+	} {
+		c, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if len(c.Services) != 1 {
+			t.Errorf("%s: services %v, want only %s", path, slices.Sorted(maps.Keys(c.Services)), name)
+		}
+		s, ok := c.Services[name]
+		if !ok || s.Kind != KindA2A || s.Backend.Tunnel == nil || s.Backend.Direct() != nil {
+			t.Fatalf("%s: services.%s = %+v, want an a2a tunnel service", path, name, s)
+		}
+		if !slices.Equal(s.Allow, []string{"org:default"}) || s.Task.Timeout.D() != 10*time.Minute || s.Task.RetryCount() != 2 ||
+			s.Sealed.Mode != SealedOff || len(s.SellerKeys) != 0 {
+			t.Errorf("%s: services.%s = %+v", path, name, s)
+		}
+		if c.PublicURL != "http://localhost:8080" || c.Listen != "127.0.0.1:8080" || !c.Auth.APIKeys ||
+			c.Tunnel.ChannelBinding != ChannelBindingNone || len(c.Warnings) != 0 {
+			t.Errorf("%s: public_url %q listen %q auth %+v channel binding %q warnings %q",
+				path, c.PublicURL, c.Listen, c.Auth, c.Tunnel.ChannelBinding, c.Warnings)
+		}
 	}
 }
 
