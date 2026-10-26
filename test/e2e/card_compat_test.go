@@ -40,7 +40,8 @@ func getCard(t *testing.T, ctx context.Context, u, key string) []byte {
 // agent-card.upstream.json, and serves at {svc} a 1.0 card a stock a2a-go client resolves: the gate's own
 // interfaces at protocol 1.0, none of the 0.x interface members, and every seller member byte-identical.
 // A 1.0 call through the gate reaches the seller as a 0.x message/send and comes back as a completed task
-// carrying the seller's message (spec §6.3, D5), and a stream works the same way.
+// carrying the seller's message (spec §6.3, D5), and a stream works the same way. Every served interface
+// names public_url, the harness's Front, on both replicas; the stock client calls through it.
 func TestCardCompat(t *testing.T) {
 	h := start(t, Options{
 		Upstream: slowagent.Config{Chunks: 1, Interval: 10 * time.Millisecond, Streaming: true},
@@ -49,7 +50,7 @@ func TestCardCompat(t *testing.T) {
 	ctx := ctxFor(t, 3*time.Minute)
 	seller := h.Upstreams["hello025"]
 	upstreamCard := []byte(fmt.Sprintf(slowagent.Legacy025Card, seller.URL()+"/"))
-	publicURL := h.Gates[0].Svc("hello025") // public_url is replica A's origin in the shared kontra.yaml
+	publicURL := h.Front.URL + "/agents/hello025" // public_url is the Front's origin, whichever replica serves the card
 
 	for _, g := range h.Gates {
 		if got := getCard(t, ctx, g.Svc("hello025")+"/.well-known/agent-card.upstream.json", h.APIKey); string(got) != string(upstreamCard) {

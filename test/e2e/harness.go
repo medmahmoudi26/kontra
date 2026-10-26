@@ -7,27 +7,43 @@
 // frontend.WorkerCommandsEnabled and system.enableCancelActivityWorkerCommand on (spec §14.2); the slowagent
 // upstreams in the test process; and two kontra-gate replicas as subprocesses of the binary built once from
 // ./cmd/kontra-gate, sharing one kontra.yaml and given their own --listen and --metrics-listen (with
-// Options.PostgresProxy, replica A reads a copy whose postgres: is a proxy the test can cut). Two API keys
-// with distinct buyers are minted with `kontra-gate enroll --api-key`. The buyer is a minimal SSE client
-// that keeps every `id:` line, because a2a-go's client ignores them; unary calls use a2a-go's own client.
-// Everything the harness starts it removes, including on failure; every process it starts carries
-// KONTRA_E2E_RUN in its environment, and every file it writes lives under TempRoot, so `make test-e2e` can
-// prove none outlived the run.
+// Options.PostgresProxy, replica A reads a copy whose postgres: is a proxy the test can cut). public_url is
+// the Front, a TCP proxy in the test process that sends each new connection to the replica the test routes
+// it to (replica A by default), so a node's hello names public_url as its origin whichever replica its
+// tunnel lands on (spec/tunnel.md §4). Two API keys with distinct buyers are minted with `kontra-gate enroll
+// --api-key`. The buyer is a minimal SSE client that keeps every `id:` line, because a2a-go's client
+// ignores them; unary calls use a2a-go's own client.
+//
+// Tunnel services (Options.Tunnel, backend tunnel) are hosted by nodes: `kontra connect` subprocesses of the
+// binary built once from ./cmd/kontra (node.go), each with its own HOME, dialing the Front. Two in-process
+// doubles stand beside them: a FakeNode (fakenode.go) that completes the handshake with a node's key and
+// ignores the control stream, and a FakeGate (fakegate.go), the gate's tunnel handler with a fixed admission
+// and no Postgres or Temporal, which drives crafted streams at a real `kontra connect`.
+//
+// Everything the harness starts it removes, including on failure; every process it starts (replicas,
+// Temporal, nodes, the helloworld seller) carries KONTRA_E2E_RUN in its environment, and every file it writes
+// lives under TempRoot, so `make test-e2e` can prove none outlived the run.
 //
 // The pinned CLI is temporal 1.9.1 (Server 1.32.0); its linux amd64 binary's sha256 is
 // 712217694cac9f786a72d4b6c876cd15f3dcf1bf31434d9fed6af25242a327a0, which CI checks before it sets
 // KONTRA_TEMPORAL_CLI. The `temporal` on a developer's PATH is often another version, so the harness never
 // falls back to it.
 //
-// The tests are M1's (D80): relay_resume (TestRelayResume), replica_kill direct (TestReplicaKillDirect,
-// and its SIGSTOP variant TestReplicaStallDirect, D77), cancel_forwarded (TestCancelForwarded),
-// push_delivery (TestPushDelivery), ssrf_webhook (TestSSRFWebhook), card_compat (TestCardCompat),
-// cross_buyer (TestCrossBuyer) and version_conflict (TestVersionConflict), plus follow-up turns through
-// the real stack (TestFollowUp; TestFollowUpTemporalUnreachable, an Update Temporal does not accept;
-// TestFollowUpLateRead, a2a-go's read failing after Write accepted the turn) and the failed push config
-// set again (TestPushFailedRestart). Each test that ends a task exports its
-// TaskLifecycle history and replays it against the current workflow; with KONTRA_RECORD_HISTORIES=1 it
-// also writes it to internal/lifecycle/testdata/histories, never over an existing file.
+// M1's tests (D80): relay_resume (TestRelayResume), replica_kill direct (TestReplicaKillDirect, and its
+// SIGSTOP variant TestReplicaStallDirect, D77), cancel_forwarded (TestCancelForwarded), push_delivery
+// (TestPushDelivery), ssrf_webhook (TestSSRFWebhook), card_compat (TestCardCompat), cross_buyer
+// (TestCrossBuyer) and version_conflict (TestVersionConflict), plus follow-up turns through the real stack
+// (TestFollowUp; TestFollowUpTemporalUnreachable, an Update Temporal does not accept; TestFollowUpLateRead,
+// a2a-go's read failing after Write accepted the turn) and the failed push config set again
+// (TestPushFailedRestart). M2's (PRD §14 M2 row; spec/tunnel.md §16, spec/relay.md §16): tunnel_kill
+// (TestTunnelKill), input_required_sticky (TestInputRequiredSticky), cancel_forwarded through the tunnel
+// (TestCancelForwardedTunnel), key_scope (TestKeyScope), sidecar_not_a_proxy (TestSidecarNotAProxy),
+// replica_kill's tunnel variant (TestReplicaKillTunnel), the helloworld seller through the tunnel
+// (TestHelloworldTunnel) and the make-before-break drain (TestTunnelDrain), plus the rotation after a leak
+// at the binary level (TestNodeRotateAfterLeak, D125). Each test that ends a task
+// exports its TaskLifecycle history and replays it against the current workflow; with
+// KONTRA_RECORD_HISTORIES=1 it also writes it to internal/lifecycle/testdata/histories, never over an
+// existing file.
 package e2e
 
 import (
@@ -110,8 +126,27 @@ type Options struct {
 	// TCP proxy the test can cut (Harness.PostgresProxy); replica B and the test's own probes connect
 	// directly. Replica A then reads its own copy of kontra.yaml, which differs only in postgres:.
 	PostgresProxy bool
-	// Retries is services.slow.task.retries (default 2, spec §6.4).
+	// Retries is services.slow.task.retries (default 2, spec §6.4), and every other service's unless it
+	// sets its own.
 	Retries *int
+	// Tunnel declares tunnel services: backend tunnel, allow org:default, hosted by the nodes enrolled for
+	// them (StartNode). A name that is also `slow` or in Services keeps its slowagent (Upstreams[name]) for a
+	// node to serve, but the gate's configuration names no URL for it: the gate reaches it only through a
+	// tunnel. Without nodes, a tunnel service has no card and no candidate session.
+	Tunnel map[string]TunnelService
+	// DrainTimeout is drain_timeout (default 10 s, spec §14.3).
+	DrainTimeout time.Duration
+}
+
+// TunnelService is one tunnel service of Options.Tunnel.
+type TunnelService struct {
+	Retries *int // task.retries; nil: Options.Retries
+}
+
+// tunnelled reports whether name is one of Options.Tunnel.
+func (o Options) tunnelled(name string) bool {
+	_, ok := o.Tunnel[name]
+	return ok
 }
 
 // Harness is one running test environment.
@@ -129,7 +164,9 @@ type Harness struct {
 	TemporalProxy *Proxy
 	// PostgresProxy is set with Options.PostgresProxy: the address replica A dials for Postgres.
 	PostgresProxy *Proxy
-	Dir           string // config, logs
+	// Front is public_url: new connections go to the replica it is routed to (replica A at start).
+	Front *Front
+	Dir   string // config, logs
 
 	run         string
 	opts        Options
@@ -142,12 +179,18 @@ type Harness struct {
 	tempLog     *os.File
 	closeOnce   sync.Once
 	closeErr    error
+
+	mu      sync.Mutex
+	nodes   []*Node            // every `kontra connect` started, killed at Close
+	cleanup []func() error     // what tests added (sellers, fake doubles), run at Close, last first
+	agents  []*slowagent.Agent // slowagents started for a test (Agent), closed at Close
 }
 
 // Gate is one kontra-gate replica subprocess.
 type Gate struct {
 	Name      string
 	URL       string // http://127.0.0.1:<port>
+	Addr      string // 127.0.0.1:<port>, what the Front dials
 	ReplicaID string // what the process registered in gate_replicas
 	LogPath   string
 	cmd       *exec.Cmd
@@ -228,13 +271,20 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
+// freePorts returns n distinct free loopback ports. Every probe listener stays open until all n are
+// chosen: a probe closed before the next one binds can hand the same port out twice (a replica's --listen
+// and --metrics-listen once collided that way).
+func freePorts(n int) ([]int, error) {
+	ports := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		defer l.Close()
+		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port, nil
+	return ports, nil
 }
 
 // Start brings the environment up. On an error, everything already started is removed.
@@ -298,11 +348,12 @@ func Start(ctx context.Context, o Options) (h *Harness, err error) {
 	}
 	h.Upstream = h.Upstreams["slow"]
 
-	var ports [4]int
-	for i := range ports {
-		if ports[i], err = freePort(); err != nil {
-			return h, err
-		}
+	ports, err := freePorts(4)
+	if err != nil {
+		return h, err
+	}
+	if h.Front, err = NewFront(); err != nil {
+		return h, err
 	}
 	if err := h.writeConfig(temporalAddr, ports[0]); err != nil {
 		return h, err
@@ -332,8 +383,11 @@ func Start(ctx context.Context, o Options) (h *Harness, err error) {
 			return h, err
 		}
 	}
+	h.Front.Route(h.Gates[0])
+	// A tunnel service has no card before a node connects: readiness waits on the direct ones only.
+	direct := slices.DeleteFunc(slices.Sorted(mapKeys(services)), o.tunnelled)
 	for _, g := range h.Gates {
-		if err := h.waitReady(ctx, g, slices.Sorted(mapKeys(services))); err != nil {
+		if err := h.waitReady(ctx, g, direct); err != nil {
 			return h, err
 		}
 		// The id the replica logged is the one it registered: GateByReplica maps attempts.replica_id with it.
@@ -425,25 +479,53 @@ func (h *Harness) enroll(ctx context.Context, name string) (string, error) {
 	return key, nil
 }
 
-// writeConfig writes the one kontra.yaml both replicas share; each gets its own listeners by flag.
-func (h *Harness) writeConfig(temporalAddr string, publicPort int) error {
+// writeConfig writes the one kontra.yaml both replicas share; each gets its own listeners by flag, so
+// listen: is replica A's. public_url is the Front's: the origin of every served card's interfaces and the
+// one a node's hello must name (spec/tunnel.md §4). The tunnel's channel binding is none: the replicas do
+// not terminate TLS, and the Front and the nodes are on loopback (spec/tunnel.md §4, D69).
+func (h *Harness) writeConfig(temporalAddr string, listenPort int) error {
 	retries := 2
 	if h.opts.Retries != nil {
 		retries = *h.opts.Retries
 	}
+	drain := 10 * time.Second
+	if h.opts.DrainTimeout > 0 {
+		drain = h.opts.DrainTimeout
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, `# kontra.yaml of an e2e run: both replicas share it; each sets --listen and --metrics-listen.
 listen: 127.0.0.1:%d
-public_url: http://127.0.0.1:%d
+public_url: %s
 postgres: %q
 temporal: { address: %q, namespace: %s }
 metrics: { listen: "127.0.0.1:0" }
 auth: { api_keys: true }
-drain_timeout: 10s
+drain_timeout: %s
 push: { allow_private: %t }
+tunnel: { channel_binding: none }
 services:
-`, publicPort, publicPort, h.PostgresURL, temporalAddr, Namespace, h.opts.PushAllowPrivate)
-	for _, name := range slices.Sorted(mapKeys(h.Upstreams)) {
+`, listenPort, h.Front.URL, h.PostgresURL, temporalAddr, Namespace, drain, h.opts.PushAllowPrivate)
+	names := slices.Collect(mapKeys(h.Upstreams))
+	for name := range h.opts.Tunnel {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if ts, ok := h.opts.Tunnel[name]; ok {
+			r := retries
+			if ts.Retries != nil {
+				r = *ts.Retries
+			}
+			fmt.Fprintf(&b, `  %s:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+    task: { timeout: 10m, retries: %d }
+`, name, r)
+			continue
+		}
 		fmt.Fprintf(&b, `  %s:
     kind: a2a
     backend: { a2a: { url: %q, allow_private: true } }
@@ -472,7 +554,8 @@ func (h *Harness) writeConfigCopy(name, postgresURL string) (string, error) {
 // startGate starts one replica from the configuration file configPath and waits for its "replica ready to
 // serve" line.
 func (h *Harness) startGate(name, configPath string, port, metricsPort int) (*Gate, error) {
-	g := &Gate{Name: name, URL: "http://127.0.0.1:" + strconv.Itoa(port), LogPath: filepath.Join(h.Dir, "gate-"+name+".log"),
+	addr := "127.0.0.1:" + strconv.Itoa(port)
+	g := &Gate{Name: name, URL: "http://" + addr, Addr: addr, LogPath: filepath.Join(h.Dir, "gate-"+name+".log"),
 		done: make(chan struct{})}
 	f, err := os.Create(g.LogPath)
 	if err != nil {
@@ -585,13 +668,20 @@ func tail(path string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// LogTail returns the last lines of every replica's log and the Temporal server's, for a failed test.
+// LogTail returns the last lines of every replica's log, every node's and the Temporal server's, for a
+// failed test.
 func (h *Harness) LogTail(n int) string {
 	var b strings.Builder
 	for _, g := range h.Gates {
 		if g != nil {
 			fmt.Fprintf(&b, "--- gate %s (replica %s) ---\n%s\n", g.Name, g.ReplicaID, tail(g.LogPath, n))
 		}
+	}
+	h.mu.Lock()
+	nodes := slices.Clone(h.nodes)
+	h.mu.Unlock()
+	for _, nd := range nodes {
+		fmt.Fprintf(&b, "--- node %s (key %s) ---\n%s\n%s\n", nd.Name, nd.KeyID, tail(nd.OutPath, n/4), tail(nd.LogPath, n))
 	}
 	if h.tempLog != nil {
 		fmt.Fprintf(&b, "--- temporal ---\n%s\n", tail(h.tempLog.Name(), n))
@@ -604,6 +694,26 @@ func (h *Harness) LogTail(n int) string {
 func (h *Harness) Close() error {
 	h.closeOnce.Do(func() {
 		var errs []error
+		// The nodes first: a node outliving its gate only redials.
+		h.mu.Lock()
+		nodes, cleanup, agents := slices.Clone(h.nodes), slices.Clone(h.cleanup), slices.Clone(h.agents)
+		h.mu.Unlock()
+		for _, nd := range nodes {
+			if err := nd.Kill(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		for i := len(cleanup) - 1; i >= 0; i-- {
+			if err := cleanup[i](); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		for _, a := range agents {
+			a.Close()
+		}
+		if h.Front != nil {
+			h.Front.Close()
+		}
 		for _, g := range h.Gates {
 			if g != nil {
 				if err := g.Kill(); err != nil {
@@ -688,6 +798,19 @@ func (g *Gate) Kill() error {
 		return nil
 	case <-time.After(10 * time.Second):
 		return fmt.Errorf("e2e: gate %s (pid %d) did not exit after SIGKILL", g.Name, g.cmd.Process.Pid)
+	}
+}
+
+// Term sends SIGTERM: the replica drains (spec §14.3, D76) and exits.
+func (g *Gate) Term() error { return g.cmd.Process.Signal(syscall.SIGTERM) }
+
+// Wait waits up to within for the replica's process to exit and returns how it exited.
+func (g *Gate) Wait(within time.Duration) error {
+	select {
+	case <-g.done:
+		return g.waitErr
+	case <-time.After(within):
+		return fmt.Errorf("e2e: gate %s still running after %v", g.Name, within)
 	}
 }
 
@@ -856,13 +979,9 @@ func createDatabase(ctx context.Context, server, name string) (*postgres, error)
 // startTemporal starts the pinned development server, in memory, on free loopback ports, with the
 // settings spec §14.2 asks of the gate's server.
 func (h *Harness) startTemporal(ctx context.Context) error {
-	var ports [3]int
-	for i := range ports {
-		p, err := freePort()
-		if err != nil {
-			return err
-		}
-		ports[i] = p
+	ports, err := freePorts(3)
+	if err != nil {
+		return err
 	}
 	addr := "127.0.0.1:" + strconv.Itoa(ports[0])
 	f, err := os.Create(filepath.Join(h.Dir, "temporal.log"))
@@ -973,6 +1092,8 @@ func (h *Harness) ReplicaID(ctx context.Context, g *Gate) (string, error) {
 type Attempt struct {
 	N                 int
 	Backend           string
+	TunnelSession     string // "" for a direct attempt and a no_session one
+	KeyID             string
 	ReplicaID         string
 	DispatchID        *uuid.UUID
 	UpstreamTaskID    string
@@ -984,7 +1105,8 @@ type Attempt struct {
 
 // Attempts reads the task's attempts rows, by n.
 func (h *Harness) Attempts(ctx context.Context, taskID a2a.TaskID) ([]Attempt, error) {
-	rows, err := h.Pool.Query(ctx, `select n, backend, coalesce(replica_id, ''), dispatch_id, coalesce(upstream_task_id, ''),
+	rows, err := h.Pool.Query(ctx, `select n, backend, coalesce(tunnel_session::text, ''), coalesce(key_id, ''),
+		coalesce(replica_id, ''), dispatch_id, coalesce(upstream_task_id, ''),
 		coalesce(upstream_context_id, ''), first_upstream_id_at, ended_at, coalesce(outcome, '')
 		from kontra.attempts where task_id = $1 order by n`, string(taskID))
 	if err != nil {
@@ -992,8 +1114,8 @@ func (h *Harness) Attempts(ctx context.Context, taskID a2a.TaskID) ([]Attempt, e
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Attempt, error) {
 		var a Attempt
-		err := r.Scan(&a.N, &a.Backend, &a.ReplicaID, &a.DispatchID, &a.UpstreamTaskID, &a.UpstreamContextID,
-			&a.FirstUpstreamIDAt, &a.EndedAt, &a.Outcome)
+		err := r.Scan(&a.N, &a.Backend, &a.TunnelSession, &a.KeyID, &a.ReplicaID, &a.DispatchID, &a.UpstreamTaskID,
+			&a.UpstreamContextID, &a.FirstUpstreamIDAt, &a.EndedAt, &a.Outcome)
 		return a, err
 	})
 }
