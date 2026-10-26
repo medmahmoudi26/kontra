@@ -1,0 +1,64 @@
+# The contributor compose (note 2 §3): a Temporal and a Postgres beside a gate you run from source. It is
+# tooling for building Kontra, not a way to run a gate: the team-gate compose (the gate image,
+# temporalio/server and Postgres, D43) comes with M4.
+#
+#   docker compose -f compose.dev.yaml up -d --wait
+#   go run ./cmd/kontra-gate migrate -f examples/sellers/hello-exec/kontra.yaml
+#   export KONTRA_API_KEY="$(go run ./cmd/kontra-gate enroll -f examples/sellers/hello-exec/kontra.yaml --api-key demo)"
+#   go run ./cmd/kontra-gate serve -f examples/sellers/hello-exec/kontra.yaml
+#   docker compose -f compose.dev.yaml down -v        # -v drops both databases
+#
+# Postgres answers on 127.0.0.1:5432 (user, password and database kontra) and Temporal on 127.0.0.1:7233
+# (namespace kontra, its UI on 8233), which is what examples/sellers/hello-exec/kontra.yaml names. Both
+# ports bind loopback only: no node or caller ever reaches the gate's Temporal (spec/relay.md §14.4). Set
+# KONTRA_DEV_PG_PORT, KONTRA_DEV_TEMPORAL_PORT and KONTRA_DEV_TEMPORAL_UI_PORT to move them.
+#
+# Temporal is the CLI's development server (temporal 1.9.1, Server 1.32.0): the same pin the integration
+# tests start (internal/temporaltest), with the two settings spec/relay.md §14.2 asks of the gate's server,
+# so Temporal's activity cancellation reaches a worker without waiting for a heartbeat. Its state is a
+# SQLite file in a volume. The integration tests do not use this file: they take KONTRA_TEST_PG (a server
+# they create databases on, e.g. postgres://kontra:kontra@127.0.0.1:5432/kontra) and start their own
+# Temporal from KONTRA_TEMPORAL_CLI.
+name: kontra-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine # Cloud runs 16 (D43); the gate's schema also runs on 17 (make check-migrations)
+    environment:
+      POSTGRES_USER: kontra
+      POSTGRES_PASSWORD: kontra
+      POSTGRES_DB: kontra
+    ports:
+      - "127.0.0.1:${KONTRA_DEV_PG_PORT:-5432}:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kontra -d kontra"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  temporal:
+    image: temporalio/temporal:1.9.1
+    command:
+      - server
+      - start-dev
+      - --ip=0.0.0.0
+      - --namespace=kontra
+      - --db-filename=/home/temporal/temporal.db
+      - --dynamic-config-value=frontend.WorkerCommandsEnabled=true
+      - --dynamic-config-value=system.enableCancelActivityWorkerCommand=true
+    ports:
+      - "127.0.0.1:${KONTRA_DEV_TEMPORAL_PORT:-7233}:7233"
+      - "127.0.0.1:${KONTRA_DEV_TEMPORAL_UI_PORT:-8233}:8233"
+    volumes:
+      - temporal:/home/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "namespace", "describe", "--namespace", "kontra", "--address", "127.0.0.1:7233"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  postgres: {}
+  temporal: {}

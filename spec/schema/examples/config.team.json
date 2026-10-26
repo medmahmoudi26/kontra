@@ -1,0 +1,39 @@
+{
+  "listen": ":8443",
+  "public_url": "https://agents.acme.io",
+  "signing_key": "file:./kontra.key",
+  "tls": { "acme": { "email": "ops@acme.io", "cache_dir": "/var/lib/kontra-gate/acme" } },
+  "edge": { "client_ip": { "from": "remote" } },
+  "limits": { "body": "4MiB", "inflight_per_key": 32, "rps_per_ip": 50, "header_timeout": "10s", "idle": "60s", "conns_per_ip": 256, "max_conns": 10000 },
+  "temporal": { "address": "temporal:7233", "namespace": "kontra" },
+  "postgres": "postgres://kontra@db/kontra",
+  "auth": { "api_keys": true },
+  "metrics": { "listen": "127.0.0.1:9090" },
+  "drain_timeout": "10m",
+  "services": {
+    "recon": {
+      "kind": "a2a",
+      "backend": { "tunnel": {} },
+      "allow": ["key:kk_acme_*", "org:acme"],
+      "sealed": true,
+      "task": { "timeout": "2h", "retries": 2 }
+    },
+    "triage": {
+      "kind": "a2a",
+      "backend": { "a2a": { "url": "https://triage.internal:9000/agents/triage", "allow_private": true } },
+      "allow": ["org:acme"],
+      "task": { "timeout": "30m", "retries": 0, "retention": "14d" },
+      "listed": false,
+      "annotations": { "search": { "price": "1.00 EUR" } }
+    },
+    "fs": {
+      "kind": "mcp",
+      "backend": { "tunnel": {} },
+      "allow": ["key:kk_team_*"],
+      "tools": { "allow": ["read_*", "list_*"], "deny": ["delete_*"] },
+      "tasks": "passthrough",
+      "sealed": { "required": false },
+      "session_idle_s": 1800
+    }
+  }
+}

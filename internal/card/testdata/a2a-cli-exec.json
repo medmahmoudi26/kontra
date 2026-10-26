@@ -1,0 +1,1 @@
+{"supportedInterfaces":[{"url":"http://127.0.0.1:44947","protocolBinding":"HTTP+JSON","protocolVersion":"1.0"}],"capabilities":{"pushNotifications":false,"streaming":true},"defaultInputModes":["text"],"defaultOutputModes":["text"],"description":"Wraps command: echo Hello World","name":"Exec Agent","skills":[],"version":"1.0.0"}

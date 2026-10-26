@@ -1,0 +1,23 @@
+kontra-gate {{ default .Chart.AppVersion .Values.image.tag }} in namespace {{ .Release.Namespace }}.
+
+  Gate:      {{ include "kontra.gate" . }}:{{ .Values.gate.port }} (public listener), :{{ .Values.gate.metricsPort }} (metrics)
+  kontra.yaml: Secret {{ include "kontra.configSecret" . }}, mounted at /etc/kontra/kontra.yaml
+{{- if .Values.postgres.enabled }}
+  Postgres:  postgres://{{ .Values.postgres.user }}@{{ include "kontra.postgres" . }}:5432/{{ .Values.postgres.database }}
+             (the password reaches the gate as PGPASSWORD; leave it out of kontra.yaml)
+{{- end }}
+{{- if .Values.temporal.enabled }}
+  Temporal:  {{ include "kontra.temporal" . }}:7233, namespace {{ .Values.temporal.namespace }}
+{{- end }}
+{{- if .Values.ingressRouteTCP.enabled }}
+  Traefik:   IngressRouteTCP {{ include "kontra.gate" . }}, TLS passthrough for {{ join ", " .Values.ingressRouteTCP.hosts }}
+{{- if .Values.ingressRouteTCP.proxyProtocol.enabled }}
+             with PROXY protocol v{{ .Values.ingressRouteTCP.proxyProtocol.version }}: kontra.yaml needs
+             edge.client_ip: {from: proxy_protocol, trusted: [<the Traefik pods' CIDR>]}
+{{- end }}
+{{- end }}
+
+The init container applies the migrations before the gate starts. A changed kontra.yaml needs a new pod
+(helm upgrade does it for config.kontraYaml; for an existing Secret, `kubectl rollout restart`).
+terminationGracePeriodSeconds is {{ .Values.gate.terminationGracePeriodSeconds }}: keep it at least kontra.yaml's
+drain_timeout + 30 s (spec/relay.md §14.3).

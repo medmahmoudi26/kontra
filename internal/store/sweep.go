@@ -1,0 +1,146 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aevent"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+// The sweeps of spec §5.4 (retention) and §14.5 (orphans). Any replica runs them and every statement is
+// idempotent, so replicas need no coordination: two passes that meet skip each other's rows (retention) or
+// find the task already ended (orphans).
+
+// DeleteExpired deletes up to limit terminal tasks whose retention_until is at or before now, with their
+// task_events, attempts, work_items and push_configs (each references tasks on delete cascade), and returns
+// how many it deleted (spec §5.4). Rows another pass is deleting are skipped, not waited for. Bucket objects
+// are the caller's (M1 has no bucket, §10.4). It runs on ctx, not on the writers' timeout: a batch of tasks
+// with long logs may take a while, and the sweep decides how long it waits.
+func (l *Log) DeleteExpired(ctx context.Context, now time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	tag, err := l.db.Exec(ctx, `delete from kontra.tasks t
+		 using (select id from kontra.tasks
+		         where retention_until is not null and retention_until <= $1
+		         order by retention_until
+		         limit $2
+		         for update skip locked) x
+		 where t.id = x.id`, now, limit)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete expired tasks: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// DeleteClosedSessions deletes up to limit mcp_sessions rows closed for longer than the retention of their
+// service (spec §5.4: "mcp_sessions closed for longer than the retention go the same way"). A session of the
+// gate's own /mcp names no service and keeps defaultRetention. It returns how many it deleted.
+func (l *Log) DeleteClosedSessions(ctx context.Context, now time.Time, defaultRetention time.Duration, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	tag, err := l.db.Exec(ctx, `delete from kontra.mcp_sessions m
+		 using (select m2.client_sid_hash from kontra.mcp_sessions m2
+		          left join kontra.services s on s.tenant_id = m2.tenant_id and s.name = m2.service
+		         where m2.closed_at is not null
+		           and m2.closed_at + coalesce(s.retention_s * interval '1 second', $2::bigint * interval '1 microsecond') <= $1
+		         limit $3
+		         for update of m2 skip locked) x
+		 where m.client_sid_hash = x.client_sid_hash`, now, defaultRetention.Microseconds(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete closed MCP sessions: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// OrphanCandidate is a task the orphan sweep checks for a workflow: its id and creation time, which is also
+// the sweep's keyset cursor.
+type OrphanCandidate struct {
+	ID        uuid.UUID
+	CreatedAt time.Time
+}
+
+// OrphanCandidates returns up to limit tasks in submitted or quoted created before olderThan, in creation
+// order after the cursor after (the zero value starts at the oldest) (spec §14.5). The sweep checks each
+// one's workflow and ends those that have none with FailOrphan. A task that waits in submitted for a long
+// time while its workflow runs is a candidate at every pass; the cursor lets a sweep with a per-pass budget
+// reach every candidate in turn.
+func (l *Log) OrphanCandidates(ctx context.Context, olderThan time.Time, after OrphanCandidate, limit int) ([]OrphanCandidate, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := l.db.Query(ctx, `select id, created_at from kontra.tasks
+		 where terminal_at is null and state in ('submitted', 'quoted') and created_at < $1
+		   and (created_at, id) > ($2, $3)
+		 order by created_at, id
+		 limit $4`, olderThan, after.CreatedAt, after.ID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: orphan candidates: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (OrphanCandidate, error) {
+		var c OrphanCandidate
+		err := r.Scan(&c.ID, &c.CreatedAt)
+		return c, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: orphan candidates: %w", err)
+	}
+	return out, nil
+}
+
+// FailOrphan ends a task whose workflow does not exist with `failed: lifecycle_unavailable` (spec §14.5,
+// D63), written through the log like every terminal event, and in the same transaction marks the task's
+// push configs failed: no workflow will ever deliver them, and until then they would count toward the
+// buyer's delivering configs for the task's whole retention (spec §10.2). It reports whether it ended the
+// task: a task no longer in submitted or quoted (its workflow started meanwhile and moved it, or another
+// replica's sweep ended it) is left as it is. A task that does not exist is a2a.ErrTaskNotFound.
+func (l *Log) FailOrphan(ctx context.Context, taskID uuid.UUID) (bool, error) {
+	ctx, cancel := l.writeCtx(ctx)
+	defer cancel()
+	var ended bool
+	err := l.inTx(ctx, func(tx pgx.Tx) error {
+		ended = false
+		row, err := l.load(ctx, tx, taskID, " for update")
+		if err != nil {
+			return err
+		}
+		if row.State != StateSubmitted && row.State != StateQuoted {
+			return nil
+		}
+		ev := FailedStatus(row.Snapshot, ReasonLifecycleUnavailable, "")
+		next, err := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
+		if err != nil {
+			return fmt.Errorf("store: fail orphan %s: %w", taskID, err)
+		}
+		payload, err := json.Marshal(a2a.StreamResponse{Event: ev})
+		if err != nil {
+			return err
+		}
+		if _, err := l.Append(ctx, tx, Write{
+			TaskID: taskID, PrevVersion: row.Version, Kind: KindStatus, State: StateFailed,
+			StatusAt: StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
+		}); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `update kontra.push_configs set failed_at = now()
+			 where task_id = $1 and failed_at is null`, taskID); err != nil {
+			return fmt.Errorf("store: end the push configs of orphan %s: %w", taskID, err)
+		}
+		ended = true
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, a2a.ErrTaskNotFound) {
+			return false, err
+		}
+		return false, fmt.Errorf("store: fail orphan %s: %w", taskID, err)
+	}
+	return ended, nil
+}

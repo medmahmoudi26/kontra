@@ -1,0 +1,136 @@
+{{- if .Values.postgres.enabled }}
+{{- $name := include "kontra.postgres" . }}
+{{- if not .Values.postgres.auth.existingSecret }}
+{{- $password := .Values.postgres.auth.password }}
+{{- if not $password }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+{{- if and $existing $existing.data (hasKey $existing.data "password") }}
+{{- $password = index $existing.data "password" | b64dec }}
+{{- else }}
+{{- $password = randAlphaNum 32 }}
+{{- end }}
+{{- end }}
+# The bundled Postgres's password. Kept on uninstall: the data volume outlives the release, and initdb
+# wrote this password into it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kontra.labels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  password: {{ $password | b64enc | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kontra.labels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "kontra.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+---
+# Postgres for a small deployment: one instance, one volume, no TLS (the NetworkPolicy admits the gate
+# alone). PGDATA is a directory inside the volume, so the volume's own root (lost+found) is not initdb's.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kontra.labels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kontra.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kontra.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        {{- include "kontra.podSecurityContext" .Values.postgres.runAsUser | nindent 8 }}
+      {{- with include "kontra.scheduling" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kontra.postgresSecret" . }}
+                  key: {{ include "kontra.postgresSecretKey" . }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -U, {{ .Values.postgres.user | quote }}, -d, {{ .Values.postgres.database | quote }}]
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -U, {{ .Values.postgres.user | quote }}, -d, {{ .Values.postgres.database | quote }}]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            {{- include "kontra.containerSecurityContext" .Values.postgres.runAsUser | nindent 12 }}
+          {{- with .Values.postgres.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "kontra.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 10 }}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.postgres.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size }}
+{{- end }}

@@ -1,0 +1,11 @@
+# The gate image builds ./cmd/kontra-gate only; keep the context to the module's Go sources.
+.git
+.github
+charts
+docs
+examples
+spec
+test
+*.md
+Dockerfile
+.dockerignore

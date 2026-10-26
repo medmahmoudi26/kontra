@@ -1,0 +1,51 @@
+# The shape gateway.kontra.sh runs today, in namespace kontra:
+#
+#   helm template kontra charts/kontra -n kontra -f charts/kontra/ci/production-values.yaml
+#
+# one gate (Recreate, migrate init container, ports 8443 and 9090, tcpSocket probes, the ACME cache volume,
+# a read-only root), a bundled Postgres 17 (uid 70) and Temporal development server (uid 1000) with 10Gi
+# each, Traefik's TCP passthrough for gateway.kontra.sh with PROXY protocol v2, and NetworkPolicies. The
+# Secret names and the sellers rule are placeholders: set them to the live ones.
+
+config:
+  existingSecret: kontra-gate-config # holds kontra.yaml (placeholder name)
+
+postgres:
+  enabled: true
+  auth:
+    existingSecret: kontra-postgres # key: password (placeholder name)
+  persistence:
+    size: 10Gi
+
+temporal:
+  enabled: true
+  persistence:
+    size: 10Gi
+
+ingressRouteTCP:
+  enabled: true
+  entryPoints: [websecure]
+  hosts: [gateway.kontra.sh]
+  proxyProtocol:
+    enabled: true
+    version: 2
+
+networkPolicy:
+  enabled: true
+  gate:
+    # Traefik's pods (namespace traefik), on 8443 only.
+    ingressFrom:
+      - namespaceSelector:
+          matchLabels: {kubernetes.io/metadata.name: traefik}
+        podSelector:
+          matchLabels: {app.kubernetes.io/name: traefik}
+    # The sellers the gate dials inside the cluster (placeholder: the live sellers' namespace and port).
+    sellers:
+      - to:
+          - namespaceSelector:
+              matchLabels: {kubernetes.io/metadata.name: kontra-sellers}
+        ports:
+          - {protocol: TCP, port: 8000}
+    publicEgress:
+      enabled: true
+      ports: [443]
