@@ -16,9 +16,23 @@
 package sealed
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"slices"
+	"strings"
+
 	"filippo.io/age"
 
-	"kontra.sh/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/jcs"
+	"kontra.sh/kontra/internal/strictjson"
+	"kontra.sh/kontra/internal/tunnel"
 )
 
 // Identifiers of the extension (spec/ext-sealed.md §1, §3; D27).
@@ -39,6 +53,9 @@ const (
 	// MaxClockSkew is how far in the future a request's iat may be (§5 hosting rule 1).
 	MaxClockSkew = 300 // seconds
 )
+
+// maxCiphertext bounds what Open reads: the largest object a blob stream carries (spec/tunnel.md §14).
+const maxCiphertext = 64 << 20
 
 // Dir is a header's direction.
 type Dir string
@@ -91,43 +108,280 @@ type Header struct {
 	Auth      string   `json:"auth,omitempty"`
 }
 
+// headerMembers are the members Header knows, by their exact names.
+var headerMembers = map[string]bool{
+	"v": true, "dir": true, "iat": true, "taskId": true, "contextId": true, "session": true, "tool": true,
+	"messageId": true, "artifactId": true, "chunk": true, "part": true, "parts": true, "kind": true,
+	"mediaType": true, "kids": true, "replyTo": true, "rk": true, "auth": true,
+}
+
 // Canonical returns the header's JCS form, ASCII only (spec §3). It refuses a header no party may send: an
 // unknown version or direction, a missing kids, or a member that is not ASCII.
+//
+// It also refuses what the §3 table rules out whatever the party: an unknown kind; part outside 0..parts-1;
+// a negative iat or chunk; kids empty, unsorted or repeated (they are "sorted" key ids, one per recipient);
+// iat, replyTo or rk on a reply and auth on a request; an rk that is not RKSize bytes of base64url. Which ids a
+// header must carry for its exchange is each party's rule (internal/sealing).
 func (h Header) Canonical() ([]byte, error) {
-	return nil, unimpl.Error("sealed.Header.Canonical", "M3 WP-01")
+	if err := h.validate(); err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		return nil, fmt.Errorf("sealed: header: %w", err)
+	}
+	out, err := jcs.Transform(b)
+	if err != nil {
+		return nil, fmt.Errorf("sealed: header: %w", err)
+	}
+	return out, nil
+}
+
+func (h Header) validate() error {
+	bad := func(format string, a ...any) error {
+		return fmt.Errorf("sealed: header: %s", fmt.Sprintf(format, a...))
+	}
+	if h.V != Version {
+		return bad("version %d is not %d", h.V, Version)
+	}
+	switch h.Dir {
+	case DirRequest:
+		if h.Auth != "" {
+			return bad("a request carries no auth")
+		}
+	case DirReply:
+		if h.IAT != 0 || h.ReplyTo != "" || h.RK != "" {
+			return bad("a reply carries no iat, replyTo or rk")
+		}
+	default:
+		return bad("direction %q is neither req nor res", h.Dir)
+	}
+	switch h.Kind {
+	case KindText, KindRaw, KindURL, KindData:
+	default:
+		return bad("kind %q is not text, raw, url or data", h.Kind)
+	}
+	if h.IAT < 0 {
+		return bad("iat is negative")
+	}
+	if h.Chunk != nil && *h.Chunk < 0 {
+		return bad("chunk is negative")
+	}
+	if h.Parts < 1 || h.Part < 0 || h.Part >= h.Parts {
+		return bad("part %d is not in 0..parts-1 (parts %d)", h.Part, h.Parts)
+	}
+	if len(h.Kids) == 0 {
+		return bad("kids is missing")
+	}
+	for i, k := range h.Kids {
+		if k == "" {
+			return bad("an empty key id in kids")
+		}
+		if i > 0 && h.Kids[i-1] >= k {
+			return bad("kids are not sorted and unique")
+		}
+	}
+	if h.RK != "" {
+		if _, err := DecodeRK(h.RK); err != nil {
+			return bad("%v", err)
+		}
+	}
+	for _, s := range append([]string{string(h.Dir), h.TaskID, h.ContextID, h.Session, h.Tool, h.MessageID,
+		h.ArtifactID, string(h.Kind), h.MediaType, h.ReplyTo, h.RK, h.Auth}, h.Kids...) {
+		for i := 0; i < len(s); i++ {
+			if s[i] >= 0x80 {
+				return bad("a member is not ASCII")
+			}
+		}
+	}
+	return nil
 }
 
 // ParseHeader decodes a header and refuses it (RejectBadHeader) unless re-serializing it gives the same bytes:
 // a header that is not canonical, has a duplicate key or a member Header does not know is refused (spec §3).
+//
+// Every refusal is a *RejectError with RejectBadHeader: bytes that are not ASCII, not one JSON object, a repeated
+// or case-variant member, a member Header does not know (exact names only), a member of the wrong type, anything
+// Canonical refuses, and any difference between b and Canonical's bytes (white space, member order, number form,
+// an escape JCS would not write, an absent-not-empty member written empty).
 func ParseHeader(b []byte) (Header, error) {
-	return Header{}, unimpl.Error("sealed.ParseHeader", "M3 WP-01")
+	for _, c := range b {
+		if c >= 0x80 {
+			return Header{}, reject(RejectBadHeader, "header is not ASCII")
+		}
+	}
+	m, err := strictjson.Members(b)
+	if err != nil {
+		return Header{}, reject(RejectBadHeader, "header: "+err.Error())
+	}
+	for k := range m {
+		if !headerMembers[k] {
+			return Header{}, reject(RejectBadHeader, fmt.Sprintf("header member %q is unknown", k))
+		}
+	}
+	// Every key is now exactly one of Header's names, once, so encoding/json's case-insensitive matching has
+	// nothing to choose between.
+	var h Header
+	if err := json.Unmarshal(b, &h); err != nil {
+		return Header{}, reject(RejectBadHeader, "header: "+err.Error())
+	}
+	c, err := h.Canonical()
+	if err != nil {
+		return Header{}, reject(RejectBadHeader, err.Error())
+	}
+	if !bytes.Equal(c, b) {
+		return Header{}, reject(RejectBadHeader, "header is not canonical")
+	}
+	return h, nil
 }
 
 // Seal encrypts JCS(h) ‖ 0x00 ‖ body to every recipient, as one binary (not armored) age file.
+//
+// Recipients must be X25519 (age1…) ones, at least one, and h.Kids must be exactly their key ids
+// (spec/tunnel.md §2.2), sorted: a request's kids are its recipients', a reply's the per-job key's it is sealed to.
 func Seal(recipients []age.Recipient, h Header, body []byte) ([]byte, error) {
-	return nil, unimpl.Error("sealed.Seal", "M3 WP-01")
+	if len(recipients) == 0 {
+		return nil, errors.New("sealed: no recipient")
+	}
+	var kids []string
+	for _, r := range recipients {
+		x, ok := r.(*age.X25519Recipient)
+		if !ok {
+			return nil, fmt.Errorf("sealed: recipient %T is not an X25519 recipient (envelope v1)", r)
+		}
+		kid := tunnel.KeyID(x.String())
+		if !slices.Contains(kids, kid) {
+			kids = append(kids, kid)
+		}
+	}
+	slices.Sort(kids)
+	if !slices.Equal(kids, h.Kids) {
+		return nil, fmt.Errorf("sealed: header kids %v are not the recipients' key ids %v", h.Kids, kids)
+	}
+	hdr, err := h.Canonical()
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	w, err := age.Encrypt(&out, recipients...)
+	if err != nil {
+		return nil, fmt.Errorf("sealed: %w", err)
+	}
+	for _, b := range [][]byte{hdr, {0}, body} {
+		if _, err := w.Write(b); err != nil {
+			return nil, fmt.Errorf("sealed: %w", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, fmt.Errorf("sealed: %w", err)
+	}
+	return out.Bytes(), nil
 }
 
 // Open decrypts a whole age file with any of identities, splits header and body at the first 0x00 and parses
 // the header. A file none of identities opens is RejectUndecryptable; a header ParseHeader refuses is
 // RejectBadHeader. Open checks nothing about ids: that is each party's rule (internal/sealing).
+//
+// age authenticates chunk by chunk; Open reads to the end of the file, so its last chunk (and nothing after it)
+// is authenticated before anything is returned. A truncated, extended or altered file, an armored one and one
+// over 64 MiB are RejectUndecryptable too; a plaintext without 0x00 is RejectBadHeader.
 func Open(identities []age.Identity, ciphertext []byte) (Header, []byte, error) {
-	return Header{}, nil, unimpl.Error("sealed.Open", "M3 WP-01")
+	if len(identities) == 0 {
+		return Header{}, nil, reject(RejectUndecryptable, "no identity")
+	}
+	if len(ciphertext) > maxCiphertext {
+		return Header{}, nil, reject(RejectUndecryptable, "ciphertext over 64 MiB")
+	}
+	r, err := age.Decrypt(bytes.NewReader(ciphertext), identities...)
+	if err != nil {
+		return Header{}, nil, reject(RejectUndecryptable, err.Error())
+	}
+	plain, err := io.ReadAll(r)
+	if err != nil {
+		return Header{}, nil, reject(RejectUndecryptable, err.Error())
+	}
+	i := bytes.IndexByte(plain, 0)
+	if i < 0 {
+		return Header{}, nil, reject(RejectBadHeader, "no 0x00 after the header")
+	}
+	h, err := ParseHeader(plain[:i])
+	if err != nil {
+		return Header{}, nil, err
+	}
+	return h, plain[i+1:], nil
 }
 
 // Auth is a reply's auth member: base64url(HMAC-SHA256(rk, JCS(h without auth) ‖ 0x00 ‖ body)).
+//
+// base64url is without padding, as everywhere in the header. h.Auth is ignored (cleared before the JCS).
 func Auth(rk []byte, h Header, body []byte) (string, error) {
-	return "", unimpl.Error("sealed.Auth", "M3 WP-01")
+	mac, err := authMAC(rk, h, body)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(mac), nil
+}
+
+func authMAC(rk []byte, h Header, body []byte) ([]byte, error) {
+	if len(rk) != RKSize {
+		return nil, fmt.Errorf("sealed: reply key is %d bytes, not %d", len(rk), RKSize)
+	}
+	h.Auth = ""
+	c, err := h.Canonical()
+	if err != nil {
+		return nil, err
+	}
+	m := hmac.New(sha256.New, rk)
+	m.Write(c)
+	m.Write([]byte{0})
+	m.Write(body)
+	return m.Sum(nil), nil
 }
 
 // VerifyAuth checks a reply's auth in constant time; a missing or wrong one is RejectBadHeader.
 func VerifyAuth(rk []byte, h Header, body []byte) error {
-	return unimpl.Error("sealed.VerifyAuth", "M3 WP-01")
+	if h.Auth == "" {
+		return reject(RejectBadHeader, "no auth")
+	}
+	got, err := base64.RawURLEncoding.Strict().DecodeString(h.Auth)
+	if err != nil || strings.ContainsAny(h.Auth, "=\r\n") {
+		return reject(RejectBadHeader, "auth is not base64url")
+	}
+	want, err := authMAC(rk, h, body)
+	if err != nil {
+		return reject(RejectBadHeader, err.Error())
+	}
+	if !hmac.Equal(got, want) {
+		return reject(RejectBadHeader, "wrong auth")
+	}
+	return nil
 }
 
 // NewRK returns a fresh reply key.
 func NewRK() ([]byte, error) {
-	return nil, unimpl.Error("sealed.NewRK", "M3 WP-01")
+	rk := make([]byte, RKSize)
+	if _, err := rand.Read(rk); err != nil {
+		return nil, fmt.Errorf("sealed: %w", err)
+	}
+	return rk, nil
+}
+
+// EncodeRK is the header's rk member for a reply key: base64url without padding.
+func EncodeRK(rk []byte) string { return base64.RawURLEncoding.EncodeToString(rk) }
+
+// DecodeRK reads a header's rk member, refusing anything but RKSize bytes of unpadded base64url.
+func DecodeRK(s string) ([]byte, error) {
+	if strings.ContainsAny(s, "=\r\n") {
+		return nil, errors.New("sealed: rk is not unpadded base64url")
+	}
+	rk, err := base64.RawURLEncoding.Strict().DecodeString(s)
+	if err != nil {
+		return nil, errors.New("sealed: rk is not unpadded base64url")
+	}
+	if len(rk) != RKSize {
+		return nil, fmt.Errorf("sealed: rk is %d bytes, not %d", len(rk), RKSize)
+	}
+	return rk, nil
 }
 
 // Reject is a hosting node's refusal reason (spec/ext-sealed.md §6), sent as Kontra-Sealed-Reject with
@@ -146,6 +400,10 @@ const (
 	RejectNotRecipient  Reject = "not_a_recipient"
 )
 
+// Reasons are §6's reasons, in its order.
+var Reasons = []Reject{RejectUndecryptable, RejectBadHeader, RejectWrongTask, RejectWrongContext,
+	RejectWrongMessage, RejectWrongJob, RejectReplayed, RejectNotRecipient}
+
 // RejectError is a refusal with its reason. Detail is for the node's log, never sent.
 type RejectError struct {
 	Reason Reject
@@ -153,3 +411,14 @@ type RejectError struct {
 }
 
 func (e *RejectError) Error() string { return "sealed part rejected: " + string(e.Reason) }
+
+func reject(r Reject, detail string) *RejectError { return &RejectError{Reason: r, Detail: detail} }
+
+// ReasonOf is err's refusal reason, ok false when err is not a *RejectError.
+func ReasonOf(err error) (Reject, bool) {
+	var re *RejectError
+	if errors.As(err, &re) {
+		return re.Reason, true
+	}
+	return "", false
+}

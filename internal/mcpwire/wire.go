@@ -15,9 +15,13 @@
 package mcpwire
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/unimpl"
@@ -76,6 +80,11 @@ var ErrBatch = errors.New("mcpwire: batch not supported")
 // with -32603 on a JSON response, the end of an SSE stream, is_error true, a dispatch's upstream_error). It wraps
 // the *strictjson.KeyError that names the level for the log.
 var ErrAmbiguous = errors.New("mcpwire: repeated or case-variant key")
+
+// ErrInvalid is a message whose members Parse fills have the wrong JSON type: a jsonrpc or method that is not a
+// string, an id that is not a string, a number or null, an error that is not {code: integer, message: string,
+// data?}. A client's is answered like ErrAmbiguous (400, -32600); an upstream's is not relayed.
+var ErrInvalid = errors.New("mcpwire: invalid JSON-RPC message")
 
 // Source is who wrote a message, which decides the levels Parse checks and the scrub's exceptions (§2.5).
 type Source int
@@ -152,8 +161,143 @@ type Error struct {
 // ClientLevels or UpstreamLevels are decoded with exact, case-sensitive keys (internal/strictjson); a repeated or
 // case-variant key at any of them is ErrAmbiguous, so the relay never reads another method, tool name, uri,
 // taskId, _meta or isError than the party behind it reads from the same bytes (D172).
+//
+// Message is filled from the message object's exact members, and a response's error object is decoded with exact
+// keys too (a repeated or case-variant key in it is ErrAmbiguous from either source: Parse reads it). A member of
+// the wrong type is ErrInvalid. Unknown members are left in the bytes, which the relay forwards.
+//
+// When the message object itself was read unambiguously and its id is valid, Parse returns a message carrying that
+// id beside an ErrAmbiguous or ErrInvalid found elsewhere, so that a client's refusal carries it (§11.1: "the id
+// when it was read unambiguously, null otherwise"); nothing else of that message may be used. Otherwise the
+// message is nil.
 func Parse(body []byte, src Source) (*Message, error) {
-	return nil, unimpl.Error("mcpwire.Parse", "M3 WP-01")
+	var levels []strictjson.Path
+	switch src {
+	case FromClient:
+		levels = ClientLevels
+	case FromUpstream:
+		levels = UpstreamLevels
+	default:
+		return nil, fmt.Errorf("mcpwire: unknown source %d", src)
+	}
+	top, err := strictjson.Members(body)
+	if err != nil {
+		return nil, wrapStrict(err)
+	}
+	m := &Message{}
+	id, ok := top["id"]
+	if ok {
+		if !validID(id) {
+			return nil, fmt.Errorf("%w: id is not a string, a number or null", ErrInvalid)
+		}
+		m.ID = id
+	}
+	if err := strictjson.CheckMembers(top, levels...); err != nil {
+		return m, wrapStrict(err)
+	}
+	if v, ok := top["jsonrpc"]; ok {
+		if err := json.Unmarshal(v, &m.JSONRPC); err != nil || firstByte(v) != '"' {
+			return m, fmt.Errorf("%w: jsonrpc is not a string", ErrInvalid)
+		}
+	}
+	if v, ok := top["method"]; ok {
+		if err := json.Unmarshal(v, &m.Method); err != nil || firstByte(v) != '"' {
+			return m, fmt.Errorf("%w: method is not a string", ErrInvalid)
+		}
+	}
+	if v, ok := top["params"]; ok {
+		m.Params = v
+	}
+	if v, ok := top["result"]; ok {
+		m.Result = v
+	}
+	if v, ok := top["error"]; ok {
+		e, err := parseError(v)
+		if err != nil {
+			return m, err
+		}
+		m.Error = e
+	}
+	return m, nil
+}
+
+// wrapStrict turns internal/strictjson's refusals into Parse's.
+func wrapStrict(err error) error {
+	var ke *strictjson.KeyError
+	switch {
+	case errors.As(err, &ke):
+		return fmt.Errorf("%w: %w", ErrAmbiguous, err)
+	case errors.Is(err, strictjson.ErrNotObject):
+		return fmt.Errorf("%w: %w", ErrBatch, err)
+	default:
+		return err
+	}
+}
+
+// validID reports whether v is a JSON-RPC id: a string, a number or null.
+func validID(v json.RawMessage) bool {
+	switch c := firstByte(v); {
+	case c == '"':
+		var s string
+		return json.Unmarshal(v, &s) == nil
+	case c == 'n':
+		return bytes.Equal(bytes.TrimSpace(v), []byte("null"))
+	case c == '-' || (c >= '0' && c <= '9'):
+		var n json.Number
+		return json.Unmarshal(v, &n) == nil
+	}
+	return false
+}
+
+// parseError decodes an error object with exact keys: code an integer, message a string, data any value. A null
+// error (some JSON-RPC 1.0 habits write one beside a result) is no error.
+func parseError(v json.RawMessage) (*Error, error) {
+	if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		return nil, nil
+	}
+	mem, err := strictjson.Members(v)
+	if err != nil {
+		var ke *strictjson.KeyError
+		if errors.As(err, &ke) {
+			ke.Path = []string{"error"}
+			return nil, fmt.Errorf("%w: %w", ErrAmbiguous, ke)
+		}
+		return nil, fmt.Errorf("%w: error is not an object", ErrInvalid)
+	}
+	e := &Error{}
+	code, ok := mem["code"]
+	if !ok {
+		return nil, fmt.Errorf("%w: error has no code", ErrInvalid)
+	}
+	var n json.Number
+	if c := firstByte(code); !(c == '-' || c >= '0' && c <= '9') || json.Unmarshal(code, &n) != nil {
+		return nil, fmt.Errorf("%w: error code is not a number", ErrInvalid)
+	}
+	i, err := strconv.Atoi(n.String())
+	if err != nil {
+		return nil, fmt.Errorf("%w: error code is not an integer", ErrInvalid)
+	}
+	e.Code = i
+	msg, ok := mem["message"]
+	if !ok || firstByte(msg) != '"' || json.Unmarshal(msg, &e.Message) != nil {
+		return nil, fmt.Errorf("%w: error message is not a string", ErrInvalid)
+	}
+	if d, ok := mem["data"]; ok {
+		e.Data = d
+	}
+	return e, nil
+}
+
+// firstByte is the first byte of raw that is not JSON white space, 0 when there is none.
+func firstByte(raw []byte) byte {
+	for _, c := range raw {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		}
+		return c
+	}
+	return 0
 }
 
 // Era is a request's protocol era (§11.12).
@@ -210,11 +354,67 @@ func ScrubParams(src Source, method string, params json.RawMessage, sealed bool)
 
 // SealedEnvelope reports whether v, the value of _meta["sh.kontra/sealed"], is exactly {"v": 1, "envelope":
 // <a base64 string>} (spec/ext-sealed.md §3): no other member, decoded with exact keys.
+//
+// v must be the JSON number 1 exactly (not 1.0 or 1e0), and envelope a JSON string of standard base64 with
+// padding and nothing else (no white space), decoding to at least one byte. A repeated member, a case variant
+// ("V"), a third member, another v or a non-string envelope is false.
 func SealedEnvelope(v json.RawMessage) bool {
-	panic(unimpl.Error("mcpwire.SealedEnvelope", "M3 WP-01"))
+	m, err := strictjson.Members(v)
+	if err != nil || len(m) != 2 {
+		return false
+	}
+	ver, ok := m["v"]
+	if !ok || !bytes.Equal(bytes.TrimSpace(ver), []byte("1")) {
+		return false
+	}
+	env, ok := m["envelope"]
+	if !ok || firstByte(env) != '"' {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(env, &s); err != nil {
+		return false
+	}
+	return stdBase64(s)
+}
+
+// stdBase64 reports whether s is non-empty standard base64 with padding, in the alphabet only (Go's decoder
+// would skip CR and LF).
+func stdBase64(s string) bool {
+	if s == "" || len(s)%4 != 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '=') {
+			return false
+		}
+	}
+	b, err := base64.StdEncoding.Strict().DecodeString(s)
+	return err == nil && len(b) > 0
 }
 
 // ErrorBody is the JSON of a JSON-RPC error response (id nil writes "id": null).
+//
+// id must be a JSON-RPC id (a string, a number or null) as read by Parse; data, when not nil, is encoded with
+// encoding/json (a json.RawMessage is written as it is, and must be valid JSON).
 func ErrorBody(id json.RawMessage, code int, message string, data any) ([]byte, error) {
-	return nil, unimpl.Error("mcpwire.ErrorBody", "M3 WP-01")
+	if len(bytes.TrimSpace(id)) == 0 {
+		id = json.RawMessage("null")
+	} else if !validID(id) {
+		return nil, fmt.Errorf("mcpwire: %s is not a JSON-RPC id", id)
+	}
+	e := Error{Code: code, Message: message}
+	if data != nil {
+		d, err := json.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("mcpwire: error data: %w", err)
+		}
+		e.Data = d
+	}
+	return json.Marshal(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   Error           `json:"error"`
+	}{"2.0", id, e})
 }
