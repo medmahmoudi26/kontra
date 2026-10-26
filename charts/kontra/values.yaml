@@ -1,0 +1,171 @@
+# One Kontra gate: a Deployment of one replica (built-in ACME is for one replica, D70, and the ACME cache is
+# a ReadWriteOnce volume), with an optional bundled Postgres and Temporal development server for small
+# deployments. Every pod and container runs under the restricted Pod Security Standard: non-root,
+# seccomp RuntimeDefault, no privilege escalation, every capability dropped, a read-only root filesystem.
+#
+#   helm install kontra charts/kontra -n kontra --create-namespace -f my-values.yaml
+#
+# ci/production-values.yaml is the shape gateway.kontra.sh runs.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/kontra-sh/kontra-gate # D48
+  tag: "" # default: the chart's appVersion
+  digest: "" # sha256:…; wins over tag
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# kontra.yaml (spec/relay.md §17), mounted at /etc/kontra/kontra.yaml. Set exactly one of existingSecret (a
+# Secret you manage, with the file under existingSecretKey) or kontraYaml (the file's text; the chart keeps
+# it in a Secret, since it may name credentials). The keys that depend on this chart:
+#
+#   listen: ":8443"                          # gate.port
+#   metrics: {listen: ":9090"}               # gate.metricsPort; the default 127.0.0.1 is not scrapeable
+#   tls:
+#     acme: {email: ops@example.com, cache_dir: /var/lib/kontra-gate/acme}   # on the persistent volume
+#   edge:                                    # behind ingressRouteTCP with PROXY protocol (D69):
+#     client_ip: {from: proxy_protocol, trusted: ["10.42.0.0/16"]}           # the Traefik pods' CIDR
+#   postgres: postgres://kontra@kontra-postgres:5432/kontra   # bundled: <fullname>-postgres; the password
+#                                                             # comes from PGPASSWORD, set by the chart
+#   temporal: {address: "kontra-temporal:7233", namespace: kontra}           # bundled: <fullname>-temporal
+#   drain_timeout: 10m                       # gate.terminationGracePeriodSeconds >= this + 30 s (§14.3)
+config:
+  existingSecret: ""
+  existingSecretKey: kontra.yaml
+  kontraYaml: ""
+
+gate:
+  port: 8443 # the public listener (kontra.yaml listen:)
+  metricsPort: 9090 # the metrics listener (kontra.yaml metrics.listen)
+  runAsUser: 65532 # distroless nonroot
+  # spec/relay.md §14.3: at least drain_timeout (default 10 min) + 30 s.
+  terminationGracePeriodSeconds: 630
+  resources: {}
+  # e.g. requests: {cpu: 100m, memory: 128Mi}; limits: {memory: 512Mi}
+  migrateResources: {} # the init container that runs `kontra-gate migrate -f … up`
+  env: [] # extra env, e.g. a hook's secret_env from a Secret
+  envFrom: []
+  podAnnotations: {}
+  podLabels: {}
+  readinessProbe:
+    tcpSocket: {port: https}
+    periodSeconds: 10
+    failureThreshold: 3
+  livenessProbe:
+    tcpSocket: {port: https}
+    initialDelaySeconds: 10
+    periodSeconds: 20
+    failureThreshold: 6
+
+service:
+  type: ClusterIP
+  annotations: {}
+
+# The ACME directory cache (and the user cache dir: the chart sets XDG_CACHE_HOME here), mounted at
+# /var/lib/kontra-gate. Without it, a restart orders a new certificate.
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: "" # "" uses the cluster's default class
+  accessModes: [ReadWriteOnce]
+  size: 1Gi
+
+# For every pod of the release.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Postgres 17 for a small deployment, as a StatefulSet with one volume. Off: kontra.yaml names your own.
+postgres:
+  enabled: false
+  image:
+    repository: postgres
+    tag: 17-alpine
+    pullPolicy: IfNotPresent
+  runAsUser: 70 # the image's postgres user
+  database: kontra
+  user: kontra
+  auth:
+    # A Secret you manage, with the password under existingSecretKey; or password; or neither, and the chart
+    # generates one once and keeps it (the Secret is kept on uninstall, like the volume it unlocks).
+    existingSecret: ""
+    existingSecretKey: password
+    password: ""
+  persistence:
+    storageClass: ""
+    size: 10Gi
+  resources: {}
+
+# The Temporal CLI's development server (SQLite in its volume) for a small deployment. Its frontend has no
+# authorizer: anything that reaches 7233 holds the gate's authority over every task (spec §14.4), so the
+# NetworkPolicy below admits the gate alone. Off: kontra.yaml names your own Temporal.
+temporal:
+  enabled: false
+  image:
+    repository: temporalio/temporal
+    tag: 1.9.1 # the CLI the integration tests pin (Server 1.32.0)
+    pullPolicy: IfNotPresent
+  runAsUser: 1000 # the image's temporal user
+  namespace: kontra # kontra.yaml temporal.namespace
+  # spec/relay.md §14.2 asks the gate's server for both; {} drops them.
+  dynamicConfig:
+    frontend.WorkerCommandsEnabled: true
+    system.enableCancelActivityWorkerCommand: true
+  persistence:
+    storageClass: ""
+    size: 10Gi
+  resources: {}
+
+# A Traefik (v3, traefik.io/v1alpha1) IngressRouteTCP: TLS passthrough by SNI to the gate, which terminates
+# TLS itself (built-in ACME answers TLS-ALPN-01 through it, D82). With proxyProtocol, set kontra.yaml's
+# edge.client_ip to proxy_protocol and trust the Traefik pods (D69).
+ingressRouteTCP:
+  enabled: false
+  entryPoints: [websecure]
+  hosts: [] # HostSNI matches, e.g. [gateway.example.com]
+  proxyProtocol:
+    enabled: true
+    version: 2
+  annotations: {}
+
+networkPolicy:
+  enabled: true
+  # Egress to DNS, which every pod that dials a name needs.
+  dns:
+    namespace: kube-system
+    podLabels: {k8s-app: kube-dns}
+  gate:
+    # Who may reach the public listener: by default Traefik's pods. Behind a LoadBalancer Service instead,
+    # use an ipBlock.
+    ingressFrom:
+      - namespaceSelector:
+          matchLabels: {kubernetes.io/metadata.name: traefik}
+        podSelector:
+          matchLabels: {app.kubernetes.io/name: traefik}
+    # Who may scrape the metrics port (none by default).
+    metricsFrom: []
+    # Postgres and Temporal outside this release (when postgres.enabled or temporal.enabled is false): peers.
+    postgresTo: []
+    postgresPort: 5432
+    temporalTo: []
+    temporalPort: 7233
+    # Sellers the gate dials inside the cluster or on private addresses: NetworkPolicy egress rules
+    # ({to: [...], ports: [...]}), used as given.
+    sellers: []
+    # Public sellers, ACME, seller_keys URLs: anywhere but the private ranges, on these ports.
+    publicEgress:
+      enabled: true
+      ports: [443]
+      privateRanges:
+        - 0.0.0.0/8
+        - 10.0.0.0/8
+        - 100.64.0.0/10
+        - 127.0.0.0/8
+        - 169.254.0.0/16
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+  # Besides the gate, who may reach the bundled backends (e.g. a backup job, an operator's hook workers).
+  postgresExtraFrom: []
+  temporalExtraFrom: []

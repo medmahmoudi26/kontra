@@ -1,0 +1,36 @@
+# A small team gate: the bundled Postgres and Temporal, kontra.yaml from values, behind Traefik's TCP
+# passthrough. Used by helm lint and helm template; the host and the service are examples.
+
+config:
+  kontraYaml: |
+    listen: ":8443"
+    public_url: https://gate.example.com
+    tls:
+      acme: {email: ops@example.com, cache_dir: /var/lib/kontra-gate/acme}
+    edge:
+      client_ip: {from: proxy_protocol, trusted: ["10.42.0.0/16"]}
+    metrics: {listen: ":9090"}
+    postgres: postgres://kontra@kontra-postgres:5432/kontra
+    temporal: {address: "kontra-temporal:7233", namespace: kontra}
+    auth: {api_keys: true}
+    drain_timeout: 10m
+    services:
+      hello:
+        kind: a2a
+        backend: {a2a: {url: "https://hello.example.com/"}}
+        allow: ["key:kk_team_*"]
+
+postgres:
+  enabled: true
+
+temporal:
+  enabled: true
+
+ingressRouteTCP:
+  enabled: true
+  hosts: [gate.example.com]
+
+gate:
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}

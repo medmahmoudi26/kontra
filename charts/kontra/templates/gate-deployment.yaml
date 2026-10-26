@@ -1,0 +1,123 @@
+{{- include "kontra.validate" . }}
+# The gate: one replica, replaced with Recreate (the ACME cache volume is one replica's, D70). The init
+# container applies the migrations; the gate then serves and, on SIGTERM, drains (spec/relay.md §14.3).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kontra.gate" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kontra.labels" (dict "ctx" . "component" "gate") | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kontra.selectorLabels" (dict "ctx" . "component" "gate") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kontra.selectorLabels" (dict "ctx" . "component" "gate") | nindent 8 }}
+        {{- with .Values.gate.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or (not .Values.config.existingSecret) .Values.gate.podAnnotations }}
+      annotations:
+        {{- if not .Values.config.existingSecret }}
+        checksum/config: {{ include (print $.Template.BasePath "/config-secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.gate.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.gate.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- include "kontra.podSecurityContext" .Values.gate.runAsUser | nindent 8 }}
+      {{- with include "kontra.scheduling" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      initContainers:
+        - name: migrate
+          image: {{ include "kontra.gateImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [migrate, -f, /etc/kontra/kontra.yaml, up]
+          env:
+            {{- include "kontra.gateEnv" . | nindent 12 }}
+          {{- with .Values.gate.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "kontra.containerSecurityContext" .Values.gate.runAsUser | nindent 12 }}
+          {{- with .Values.gate.migrateResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kontra
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: gate
+          image: {{ include "kontra.gateImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [serve, -f, /etc/kontra/kontra.yaml]
+          env:
+            {{- include "kontra.gateEnv" . | nindent 12 }}
+          {{- with .Values.gate.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: https
+              containerPort: {{ .Values.gate.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.gate.metricsPort }}
+              protocol: TCP
+          {{- with .Values.gate.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.gate.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "kontra.containerSecurityContext" .Values.gate.runAsUser | nindent 12 }}
+          {{- with .Values.gate.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kontra
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/kontra-gate
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "kontra.configSecret" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ if .Values.config.existingSecret }}{{ .Values.config.existingSecretKey }}{{ else }}kontra.yaml{{ end }}
+                path: kontra.yaml
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "kontra.gate" .)) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}

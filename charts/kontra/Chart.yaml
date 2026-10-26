@@ -1,0 +1,11 @@
+apiVersion: v2
+name: kontra
+description: >-
+  One Kontra gate (kontra-gate, spec/relay.md), with an optional bundled Postgres and Temporal development
+  server for small deployments. Every container runs under the restricted Pod Security Standard.
+type: application
+version: 0.1.0
+# The gate image tag used when image.tag is empty (the Dockerfile's VERSION).
+appVersion: "v4.0.0-m1"
+kubeVersion: ">=1.25.0-0"
+keywords: [a2a, mcp, agents, gateway]

@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kontra.gate" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kontra.labels" (dict "ctx" . "component" "gate") | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "kontra.selectorLabels" (dict "ctx" . "component" "gate") | nindent 4 }}
+  ports:
+    # TLS (the gate terminates it) or, behind ingressRouteTCP, TLS after a PROXY header.
+    - name: https
+      port: {{ .Values.gate.port }}
+      targetPort: https
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.gate.metricsPort }}
+      targetPort: metrics
+      protocol: TCP

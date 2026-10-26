@@ -1,0 +1,137 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- $gate := include "kontra.selectorLabels" (dict "ctx" . "component" "gate") }}
+# The gate: reached on its public port from the front (Traefik by default) and on its metrics port from
+# whoever is listed; it reaches DNS, its Postgres and Temporal, the sellers listed, and public addresses on
+# the listed ports, never a private range there.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kontra.gate" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kontra.labels" (dict "ctx" . "component" "gate") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- $gate | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- with $np.gate.ingressFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: {{ $.Values.gate.port }}}
+    {{- end }}
+    {{- with $np.gate.metricsFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: {{ $.Values.gate.metricsPort }}}
+    {{- end }}
+  egress:
+    {{- with $np.dns }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .podLabels | nindent 14 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- end }}
+    {{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kontra.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: 5432}
+    {{- else if $np.gate.postgresTo }}
+    - to:
+        {{- toYaml $np.gate.postgresTo | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: {{ $np.gate.postgresPort }}}
+    {{- end }}
+    {{- if .Values.temporal.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kontra.selectorLabels" (dict "ctx" . "component" "temporal") | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: 7233}
+    {{- else if $np.gate.temporalTo }}
+    - to:
+        {{- toYaml $np.gate.temporalTo | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: {{ $np.gate.temporalPort }}}
+    {{- end }}
+    {{- with $np.gate.sellers }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if $np.gate.publicEgress.enabled }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- toYaml $np.gate.publicEgress.privateRanges | nindent 14 }}
+      ports:
+        {{- range $np.gate.publicEgress.ports }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+    {{- end }}
+{{- if .Values.postgres.enabled }}
+---
+# The bundled Postgres: the gate alone (and whoever is listed) reaches it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kontra.postgres" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kontra.labels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kontra.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- $gate | nindent 14 }}
+        {{- with $np.postgresExtraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: 5432}
+{{- end }}
+{{- if .Values.temporal.enabled }}
+---
+# The bundled Temporal: its frontend has no authorizer, so the gate alone (and whoever is listed) reaches it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kontra.temporal" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kontra.labels" (dict "ctx" . "component" "temporal") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kontra.selectorLabels" (dict "ctx" . "component" "temporal") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- $gate | nindent 14 }}
+        {{- with $np.temporalExtraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: 7233}
+{{- end }}
+{{- end }}
