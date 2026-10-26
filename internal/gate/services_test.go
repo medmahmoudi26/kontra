@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -17,12 +18,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"kontra.sh/kontra/internal/a2ahttp"
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/pgtest"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/upstream"
 )
 
 // parseConfig loads a kontra.yaml document with the fields every test needs filled in.
@@ -675,10 +679,10 @@ func TestCardColumnFollowsTheServedBody(t *testing.T) {
 }
 
 // A db-sourced row (Cloud, spec §13.5) gets the refusals the configuration has for the same service
-// (config/validate.go's SPEC-CONFLICT resolutions, D90 and D91): sealed on a direct backend, which this
-// build would relay in plaintext, and seller_keys on a direct a2a service, whose card this build would serve
-// unverified. Such a row is left out (the unknown-service answer, service_unavailable for its tasks)
-// instead of served.
+// (config/validate.go's SPEC-CONFLICT resolutions, D90 and D91, amended for M2): sealed on a direct backend
+// or a tunnel service, which this build would relay in plaintext, and seller_keys on a direct a2a service or
+// a tunnel service, whose card this build would serve unverified. Such a row is left out (the
+// unknown-service answer, service_unavailable for its tasks) instead of served.
 func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
@@ -702,9 +706,12 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 		{"optional-direct", "a2a", direct, "optional", nil},
 		{"sealed-mcp", "mcp", mcpDirect, "required", nil},
 		{"sealed-tunnel", "a2a", `{"tunnel": {}}`, "required", nil},
+		{"optional-tunnel", "a2a", `{"tunnel": {}}`, "optional", nil},
+		{"plain-tunnel", "a2a", `{"tunnel": {}}`, "off", nil},
 		{"keys-direct", "a2a", direct, "off", `{"keys": []}`},
 		{"keys-null", "a2a", direct, "off", `null`},
 		{"keys-tunnel", "a2a", `{"tunnel": {}}`, "off", `{"keys": []}`},
+		{"keys-mcp-tunnel", "mcp", `{"tunnel": {}}`, "off", `{"keys": []}`},
 	} {
 		exec(`insert into kontra.services (tenant_id, name, kind, backend, allow, sealed, seller_keys, source)
 			values ($1, $2, $3, $4::jsonb, '{org:acme}', $5, $6::jsonb, 'db')`, acme, row.name, row.kind, row.backend, row.sealed, row.sellerKeys)
@@ -714,8 +721,9 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, served := range map[string]bool{
-		"plain": true, "sealed-direct": false, "optional-direct": false, "sealed-mcp": false, "sealed-tunnel": true,
-		"keys-direct": false, "keys-null": true, "keys-tunnel": true,
+		"plain": true, "sealed-direct": false, "optional-direct": false, "sealed-mcp": false,
+		"sealed-tunnel": false, "optional-tunnel": false, "plain-tunnel": true,
+		"keys-direct": false, "keys-null": true, "keys-tunnel": false, "keys-mcp-tunnel": false,
 	} {
 		got, _ := s.Lookup(ctx, "acme", name)
 		if (got != nil) != served {
@@ -736,4 +744,215 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	if got, _ := s.Lookup(ctx, "acme", "plain"); got == nil {
 		t.Fatal("the fixed row is not served")
 	}
+}
+
+// fakeTunnels is TunnelCards without sessions: it serves a card as if fetched through a session it holds
+// while serving, and records the OnConnect callbacks.
+type fakeTunnels struct {
+	mu      sync.Mutex
+	card    string
+	serving bool
+	fetches int
+	connect []func(context.Context, uuid.UUID, string)
+}
+
+func (f *fakeTunnels) FetchCard(_ context.Context, _ uuid.UUID, _ string) (*upstream.Fetched, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.serving {
+		return nil, errors.New("fakeTunnels: no session here")
+	}
+	f.fetches++
+	return &upstream.Fetched{Raw: []byte(f.card), Path: "/.well-known/agent-card.json"}, nil
+}
+
+func (f *fakeTunnels) OnConnect(fn func(context.Context, uuid.UUID, string)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connect = append(f.connect, fn)
+}
+
+func (f *fakeTunnels) Serves(uuid.UUID, string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.serving
+}
+
+func (f *fakeTunnels) set(card string, serving bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.card, f.serving = card, serving
+}
+
+func (f *fakeTunnels) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fetches
+}
+
+// connected runs the OnConnect callbacks, as the registry does when a session for the service is added.
+func (f *fakeTunnels) connected(tid uuid.UUID, service string) {
+	f.mu.Lock()
+	fns := slices.Clone(f.connect)
+	f.mu.Unlock()
+	for _, fn := range fns {
+		fn(context.Background(), tid, service)
+	}
+}
+
+const tunnelCardV1 = `{"name":"echo","description":"echoes","version":"1.0.0",
+"supportedInterfaces":[{"url":"http://127.0.0.1:9999/","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
+"capabilities":{"streaming":false},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],"skills":[]}`
+
+// Tunnel cards (spec §3, M2): no card before a session connects (and WaitCards does not wait for one); when a
+// session connects its card is fetched through it at once, stored (upstream_card verbatim, card as json,
+// card_fetched_at) and served with the gate's interfaces; a replica without a session serves the stored card
+// after the NOTIFY kontra_services the record sends, and fetches nothing; a refetch every TunnelCardRefresh
+// while serving updates the card on both (logged, since a service's nodes should serve one card), and none
+// runs without a session. The dispatch over the tunnel is WP-05's.
+func TestTunnelCardKeepers(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	pool := pgtest.Pool(t, dsn)
+	ctx := context.Background()
+	cfg := parseConfig(t, `services:
+  echo:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+`)
+	var logs logBuffer
+	fa := &fakeTunnels{}
+	a := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Tunnels: fa, TunnelCardRefresh: 300 * time.Millisecond,
+		Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	fb := &fakeTunnels{}
+	b := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Tunnels: fb, TunnelCardRefresh: 300 * time.Millisecond})
+	for _, s := range []*Services{a, b} {
+		if err := s.Sync(ctx, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer func() { stop(); wg.Wait() }()
+	for _, s := range []*Services{a, b} {
+		wg.Go(func() { s.Run(runCtx, time.Hour) })
+	}
+	l := pg.NewListener(pool.Config().ConnConfig)
+	l.OnChannel(pg.ChannelServices, b.Notify)
+	wg.Go(func() { _ = l.Run(runCtx) })
+	deadline := time.Now().Add(10 * time.Second)
+	for !l.Healthy() {
+		if time.Now().After(deadline) {
+			t.Fatal("LISTEN not up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	echo := func(s *Services) *a2ahttp.Service {
+		t.Helper()
+		e, _ := s.Lookup(ctx, TeamTenant, "echo")
+		if e == nil {
+			t.Fatal("echo is not served")
+		}
+		return e
+	}
+	if _, err := echo(a).Cards(); !errors.Is(err, card.ErrUnavailable) {
+		t.Fatalf("a card before any session: %v", err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, time.Second)
+	missing := a.WaitCards(wctx)
+	cancel()
+	if len(missing) > 0 {
+		t.Fatalf("WaitCards waits for a tunnel card: %v", missing)
+	}
+	time.Sleep(time.Second) // no session: the refresh loop fetches nothing
+	if fa.count() != 0 {
+		t.Fatalf("%d fetches without a session", fa.count())
+	}
+
+	// A session connects on A: fetched at once, through it, before it is a candidate.
+	fa.set(tunnelCardV1, true)
+	tid := echo(a).Ref.TenantID
+	fa.connected(tid, "echo")
+	if fa.count() != 1 {
+		t.Fatalf("%d fetches at the connect, want 1", fa.count())
+	}
+	served, err := echo(a).Cards()
+	if err != nil || !bytes.Contains(served.Body, []byte(`"url":"http://localhost:8080/agents/echo"`)) ||
+		bytes.Contains(served.Body, []byte("127.0.0.1:9999")) || string(served.Upstream) != tunnelCardV1 {
+		t.Fatalf("A's card %s, %v", served.Body, err)
+	}
+	var (
+		up        []byte
+		stored    string
+		fetchedAt time.Time
+	)
+	if err := pool.QueryRow(ctx, `select upstream_card, card::text, card_fetched_at from kontra.services where name = 'echo'`).Scan(&up, &stored, &fetchedAt); err != nil {
+		t.Fatalf("the card was not stored: %v", err)
+	}
+	if string(up) != tunnelCardV1 || stored != string(served.Body) {
+		t.Fatalf("stored %s / %s", up, stored)
+	}
+	// B has no session: it serves the stored card, the same body and ETag, and fetched nothing.
+	waitCard := func(s *Services, want string) *card.Served {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			c, err := echo(s).Cards()
+			if err == nil && string(c.Upstream) == want {
+				return c
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the card %s is not served: %+v, %v", want, c, err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if c := waitCard(b, tunnelCardV1); c.ETag != served.ETag || !bytes.Equal(c.Body, served.Body) {
+		t.Fatalf("B serves %s (ETag %s), want A's (ETag %s)", c.Body, c.ETag, served.ETag)
+	}
+	if fb.count() != 0 {
+		t.Fatalf("B fetched %d times without a session", fb.count())
+	}
+
+	// The refetch while serving: a new card reaches both.
+	v2 := strings.Replace(tunnelCardV1, `"version":"1.0.0"`, `"version":"2.0.0"`, 1)
+	fa.set(v2, true)
+	waitCard(a, v2)
+	waitCard(b, v2)
+	if !strings.Contains(logs.String(), "differs from the one served") {
+		t.Fatal("a changed card is not logged")
+	}
+	if stored := scalar[[]byte](t, pool, `select upstream_card from kontra.services where name = 'echo'`); string(stored) != v2 {
+		t.Fatalf("stored %s after the refetch", stored)
+	}
+	// The session gone: no refetch.
+	fa.set(v2, false)
+	n := fa.count()
+	time.Sleep(time.Second)
+	if fa.count() != n {
+		t.Fatalf("%d refetches without a session", fa.count()-n)
+	}
+	// Dispatch over the tunnel is WP-05's.
+	if _, _, err := a.Backend(ctx, echo(a).Ref); err == nil || !strings.Contains(err.Error(), "WP-05") {
+		t.Fatalf("Backend of a tunnel service: %v", err)
+	}
+}
+
+// logBuffer is a logger's output, safe for concurrent writes.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
 }

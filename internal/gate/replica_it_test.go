@@ -28,10 +28,12 @@ import (
 
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/migrate"
 	"kontra.sh/kontra/internal/pgtest"
 	"kontra.sh/kontra/internal/temporaltest"
 	"kontra.sh/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/version"
 )
 
@@ -784,5 +786,161 @@ func TestBodyLimitIsTheConfiguredOne(t *testing.T) {
 				t.Fatalf("%s, %d MiB: HTTP %d %.200s; want %d with %q", route.path, tc.size>>20, resp.StatusCode, got, tc.status, tc.contains)
 			}
 		}
+	}
+}
+
+const echoCard = `{"name":"echo","description":"echoes","version":"1.0.0",
+"supportedInterfaces":[{"url":"http://127.0.0.1:9999/","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
+"capabilities":{"streaming":false},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],"skills":[]}`
+
+// cardRoute GETs a service's card on a replica with an API key and returns the status and body.
+func cardRoute(t *testing.T, base, key, service string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", base+"/agents/"+service+"/.well-known/agent-card.json", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+// The tunnel on running replicas (spec/tunnel.md §5, §11–§13; relay.md §3, §14.3), wired as kontra-gate
+// serve wires it. GET /v1/tunnel is mounted on the public listener; a node with a service token is admitted
+// (the enrollment store) and registered (its tunnels row on its replica), and the service's card is fetched
+// through its session, without a task, before the row exists; both replicas serve the card, the one without
+// a session included. A second key enrolled on the other replica is announced to the first node (NOTIFY
+// kontra_tunnel), and revoking it closes its session with {"t":"revoked"} (NOTIFY kontra_revoke into that
+// replica's revocation view). A replica that stops writing to Postgres is reaped by the other no sooner than
+// 30 s after its last heartbeat, its tunnels rows cascading. The drain tells the node {"t":"drain"} once
+// gate_replicas.draining_at has committed, keeps the session open meanwhile, then closes it with its row.
+func TestReplicaTunnelSessions(t *testing.T) {
+	e := newGateEnv(t)
+	ctx := context.Background()
+	const services = `services:
+  echo:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+`
+	timing := fastTiming
+	timing.TunnelPing = 500 * time.Millisecond
+	a := e.start("a", e.replicaConfig(freePort(t), 30*time.Second, services), timing)
+	b := e.start("b", e.replicaConfig(freePort(t), 30*time.Second, services), timing)
+	team, err := tenant.EnsureTeam(ctx, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := enroll.NewStore(e.pool, enroll.Options{})
+	token := func() []string {
+		t.Helper()
+		tok, err := store.MintServiceToken(ctx, team, "echo", "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []string{tok}
+	}
+	rowOn := func(n *tunnelNode, replica string) bool {
+		return scalar[int](t, e.pool, `select count(*) from kontra.tunnels where session_id = $1 and replica_id = $2`, n.session, replica) == 1
+	}
+	key := e.mintKey("buyer")
+
+	// A node on A: admitted, registered, its card fetched through the session and served by both replicas.
+	n1, err := dialNode(t, a.url, newNodeIdentity(t), echoCard, token(), "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(n1.welcome.Services) != 1 || n1.welcome.Services[0].URL != a.url+"/agents/echo" || n1.welcome.Replica != a.r.ID() {
+		t.Fatalf("welcome %+v", n1.welcome)
+	}
+	eventually(t, 15*time.Second, "the node's tunnels row on A", func() bool { return rowOn(n1, a.r.ID()) })
+	if n1.cardGets.Load() < 1 || n1.tasks.Load() != 0 {
+		t.Fatalf("card GETs through the session before its row: %d (preambles with a task: %d)", n1.cardGets.Load(), n1.tasks.Load())
+	}
+	if up := scalar[[]byte](t, e.pool, `select upstream_card from kontra.services where name = 'echo'`); string(up) != echoCard {
+		t.Fatalf("stored upstream card %s", up)
+	}
+	for _, run := range []*running{a, b} {
+		eventually(t, 10*time.Second, "the card served by "+run.url, func() bool {
+			status, body := cardRoute(t, run.url, key, "echo")
+			return status == http.StatusOK && strings.Contains(body, `"url":"`+run.url+`/agents/echo"`) && strings.Contains(body, "echoes")
+		})
+	}
+	if s, ok := a.r.Tunnels().Get(n1.session); !ok || !s.Serves("echo") {
+		t.Fatal("A does not hold the session")
+	}
+
+	// A second key, enrolled on B, is announced to the first node.
+	n2, err := dialNode(t, b.url, newNodeIdentity(t), echoCard, token(), "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 15*time.Second, "the second node's row on B", func() bool { return rowOn(n2, b.r.ID()) })
+	if c := n1.nextControl(t, 5*time.Second); c != (tunnel.Control{T: tunnel.CtlEnrolled, Service: "echo", Key: n2.id.KeyID()}) {
+		t.Fatalf("the first node read %+v", c)
+	}
+	// Its revocation reaches B's registry.
+	if err := store.RevokeKey(ctx, n2.id.KeyID(), enroll.ReasonOperator, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if c := n2.nextControl(t, 5*time.Second); c.T != tunnel.CtlRevoked || c.Service != "" {
+		t.Fatalf("the revoked node read %+v", c)
+	}
+	if !n2.closed(5 * time.Second) {
+		t.Fatal("the revoked key's session stayed open")
+	}
+	eventually(t, 5*time.Second, "the revoked session's row is deleted", func() bool { return !rowOn(n2, b.r.ID()) })
+
+	// B stops writing to Postgres (as a killed replica does): A reaps it no sooner than 30 s after its last
+	// heartbeat, and its tunnels rows cascade.
+	n3, err := dialNode(t, b.url, newNodeIdentity(t), echoCard, token(), "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 15*time.Second, "the third node's row on B", func() bool { return rowOn(n3, b.r.ID()) })
+	if c := n1.nextControl(t, 5*time.Second); c != (tunnel.Control{T: tunnel.CtlEnrolled, Service: "echo", Key: n3.id.KeyID()}) {
+		t.Fatalf("the first node read %+v", c)
+	}
+	b.r.pool.Close()
+	lastSeen := scalar[time.Time](t, e.pool, `select last_seen_at from kontra.gate_replicas where replica_id = $1`, b.r.ID())
+	var reapedAt time.Time
+	eventually(t, ReplicaSilence+15*time.Second, "A reaps B", func() bool {
+		gone := scalar[int](t, e.pool, `select count(*) from kontra.gate_replicas where replica_id = $1`, b.r.ID()) == 0
+		if gone {
+			reapedAt = scalar[time.Time](t, e.pool, `select now()`)
+		}
+		return gone
+	})
+	if after := reapedAt.Sub(lastSeen); after < ReplicaSilence {
+		t.Fatalf("B was reaped %v after its last heartbeat, before %v", after, ReplicaSilence)
+	}
+	if n := scalar[int](t, e.pool, `select count(*) from kontra.tunnels where replica_id = $1`, b.r.ID()); n != 0 {
+		t.Fatalf("%d tunnels rows of the reaped replica", n)
+	}
+	if !rowOn(n1, a.r.ID()) {
+		t.Fatal("A's session lost its row")
+	}
+
+	// The drain: {"t":"drain"} once draining_at has committed; the session stays until the workers stop.
+	a.drain()
+	if c := n1.nextControl(t, 10*time.Second); c.T != tunnel.CtlDrain {
+		t.Fatalf("the node read %+v, want drain", c)
+	}
+	if !scalar[bool](t, e.pool, `select draining_at is not null from kontra.gate_replicas where replica_id = $1`, a.r.ID()) {
+		t.Fatal("the node was told to drain before draining_at was written")
+	}
+	if n1.closed(0) {
+		t.Fatal("the drain closed the session at once")
+	}
+	if err := a.wait(t, 90*time.Second); err != nil {
+		t.Fatalf("Run after the drain: %v", err)
+	}
+	if !n1.closed(5 * time.Second) {
+		t.Fatal("the drained replica's session stayed open")
+	}
+	if n := scalar[int](t, e.pool, `select count(*) from kontra.tunnels where session_id = $1`, n1.session); n != 0 {
+		t.Fatal("the drained session's row stayed")
 	}
 }
