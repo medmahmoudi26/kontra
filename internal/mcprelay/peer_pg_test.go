@@ -96,6 +96,47 @@ func TestPeerHop(t *testing.T) {
 	}
 }
 
+// A GET stream whose upstream sends its headers and nothing else (the stdio bridge's, until a message comes) reaches
+// the client through the peer hop at once: the holding replica flushes the upstream's headers before any body
+// (M3 WP-09: stdio_roots' GET through the hop waited for a first event that never came).
+func TestPeerHopIdleGET(t *testing.T) {
+	e := newEnv(t)
+	e.service("tun", "", nil)
+	a := e.replica("a", replicaOpts{peer: true})
+	b := e.replica("b", replicaOpts{peer: true})
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
+	up.NoPriming = true
+	e.node(b, up, "tun")
+	key, _ := e.apiKey("buyer")
+	c := newClient(t, key)
+	c.initialize(a.url + "/mcp/tun")
+	row := e.row(c.sid)
+	if row.replica == nil || *row.replica != b.id {
+		t.Fatalf("row %+v: want the holder %s", row, b.id)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, a.url+"/mcp/tun", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Mcp-Session-Id", c.sid)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("the GET's headers did not come through the hop within 5 s: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("GET: %d %v", resp.StatusCode, resp.Header)
+	}
+	if err := up.Push(row.upstreamSID, []byte(`{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"late"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if evs := readEvents(t, resp, 1, 5*time.Second); len(evs) != 1 || !strings.Contains(evs[0], "late") {
+		t.Fatalf("GET events %q", evs)
+	}
+}
+
 // The holder's refusal, when only the hop knows: a binding revoked while B's registry is deaf to it (its stream
 // check reads the view) closes A's row revoked through peer.HeaderGone, and opens no stream.
 func TestPeerHopGone(t *testing.T) {

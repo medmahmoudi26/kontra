@@ -92,6 +92,9 @@ type Server struct {
 	// Hold, when set, is called with each request before the double serves it (a test blocks in it to make the
 	// double slow, or hang, on a method).
 	Hold func(r Request)
+	// NoPriming makes a GET stream start with its headers only, as the stdio bridge's does: no priming event until
+	// a message is pushed.
+	NoPriming bool
 
 	// Modern makes the double dual-era (modern.go): it serves 2026-07-28 requests beside 2025-11-25 sessions.
 	Modern bool
@@ -467,7 +470,12 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, req Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	fl, _ := w.(http.Flusher)
-	_, _ = fmt.Fprintf(w, "id: %s\ndata: \n\n", s.eventID())
+	s.mu.Lock()
+	priming := !s.NoPriming
+	s.mu.Unlock()
+	if priming {
+		_, _ = fmt.Fprintf(w, "id: %s\ndata: \n\n", s.eventID())
+	}
 	if fl != nil {
 		fl.Flush()
 	}

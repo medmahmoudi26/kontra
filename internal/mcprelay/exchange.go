@@ -674,6 +674,9 @@ func (h *Handler) RunExchange(ctx context.Context, a peer.Assertion, req *http.R
 	}
 	w.WriteHeader(resp.StatusCode)
 	rc := http.NewResponseController(w)
+	// The headers go back at once: an event stream may stay idle for long (a GET stream before its first message),
+	// and the receiving replica answers its client only once it has them.
+	_ = rc.Flush()
 	buf := make([]byte, 32<<10)
 	for {
 		n, rerr := resp.Body.Read(buf)
