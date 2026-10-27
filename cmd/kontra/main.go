@@ -1,7 +1,8 @@
 // Command kontra is the node CLI: connect, login, seal, publish (note 2 §1; there is no local console, D164).
 //
-//	kontra connect [--gate URL] [--serve a2a:<name>=<url> …] [--listen 127.0.0.1:7777] … (M2, M3; spec/tunnel.md;
-//	               internal/node, internal/hiring)
+//	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
+//	               [--listen 127.0.0.1:7777] … (M2, M3; spec/tunnel.md; internal/node, internal/hiring,
+//	               internal/stdiobridge)
 //	kontra seal --service <service URL> [file | -] (M3, spec/ext-sealed.md §5.1; internal/sealing)
 //	kontra version
 //
@@ -28,10 +29,11 @@ import (
 )
 
 const usage = `usage:
-  kontra connect [--gate <url>] [--serve a2a:<name>=<url> …] [--key <path>] [--enroll <token>|@file|-]
-                 [--api-key <key>|@file|-] [--name <name>] [--rotate] [--require-channel-binding]
-                 [--max-inflight <n>] [--listen <addr>] [--local-token <file>] [--allow-origin <origin> …]
-                 [--log json]
+  kontra connect [--gate <url>] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
+                 [--roots <name>=<dir> …] [--env <name> …] [--session-idle <duration>] [--max-sessions <n>]
+                 [--key <path>] [--enroll <token>|@file|-] [--api-key <key>|@file|-] [--name <name>] [--rotate]
+                 [--require-channel-binding] [--max-inflight <n>] [--listen <addr>] [--local-token <file>]
+                 [--allow-origin <origin> …] [--log json]
   kontra seal --service <service URL> [--context <id>] [--task <id>] [file | -]
   kontra seal --open <part.json>
   kontra version
@@ -39,7 +41,18 @@ const usage = `usage:
 kontra connect hosts the services on this machine at a gate, and lets local clients hire the gate's services,
 through one outbound connection (spec/tunnel.md):
   --gate URL                 the gate's public URL (default https://gateway.kontra.sh); https:// except on localhost
-  --serve a2a:NAME=URL       an A2A agent to host, at its root URL; repeatable (mcp: is not until M3); none: hire only
+  --serve a2a:NAME=URL       an A2A agent to host, at its root URL; repeatable; none: hire only
+  --serve mcp:NAME=URL       an MCP server (Streamable HTTP) to host, at its endpoint URL, e.g. http://127.0.0.1:3001/mcp
+  --serve 'mcp:NAME=stdio:CMD'
+                             an MCP server over stdio: CMD is one argument (quote it), split into words and run without
+                             a shell, one process per MCP session
+  --roots NAME=DIR           a directory the MCP service NAME may see: kontra connect answers its roots/list with these
+                             and never passes on a client's roots; repeatable, one directory each (default none)
+  --env NAME                 a variable of this environment the stdio servers also get (they get only PATH, HOME, LANG
+                             and these); repeatable
+  --session-idle DURATION    stop a stdio server whose MCP session has been idle this long (default 1h; at least the
+                             gate's session_idle_s)
+  --max-sessions N           stdio server processes per service at most, durable tasks included (default 8)
   --key PATH                 the identity key (default ~/.kontra/identity.key, or $KONTRA_KEY)
   --enroll TOKEN|@FILE|-     a one-time enrollment token from kontra-gate enroll <service>; repeatable
   --api-key KEY|@FILE|-      an API key for this gate: who this node hires as (else node:<key id>); a node that only

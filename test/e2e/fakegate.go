@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,8 +62,8 @@ func (s sink) Add(_ context.Context, sess *tunnelgate.Session, _ *yamux.Session,
 	}
 }
 
-// StartFakeGate serves GET /v1/tunnel on 127.0.0.1, admitting every node for the a2a services named;
-// logPath receives the handler's log.
+// StartFakeGate serves GET /v1/tunnel on 127.0.0.1, admitting every node for the services named: a2a services
+// by name, MCP services as "mcp:<name>" (M3 WP-05); logPath receives the handler's log.
 func StartFakeGate(services []string, logPath string) (*FakeGate, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -81,6 +82,10 @@ func StartFakeGate(services []string, logPath string) (*FakeGate, error) {
 	}
 	var served []tunnel.WelcomeService
 	for _, s := range services {
+		if name, ok := strings.CutPrefix(s, tunnel.KindMCP+":"); ok {
+			served = append(served, tunnel.WelcomeService{Kind: tunnel.KindMCP, Name: name, URL: f.URL + "/mcp/" + name})
+			continue
+		}
 		served = append(served, tunnel.WelcomeService{Kind: tunnel.KindA2A, Name: s, URL: f.URL + "/agents/" + s})
 	}
 	h, err := tunnelgate.NewHandler(tunnelgate.HandlerConfig{

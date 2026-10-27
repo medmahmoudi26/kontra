@@ -40,6 +40,8 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"publish"}, 1, "", "kontra publish: not until M5"},
 		{[]string{"connect", "-h"}, 0, "--serve a2a:NAME=URL", ""},
 		{[]string{"connect", "-h"}, 0, "--listen ADDR", ""},
+		{[]string{"connect", "-h"}, 0, "mcp:NAME=stdio:CMD", ""},
+		{[]string{"connect", "-h"}, 0, "--roots NAME=DIR", ""},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := run(ctx, c.args, &stdout, &stderr); code != c.code ||
@@ -118,7 +120,13 @@ func TestConnectRefusesFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000"}, "not until M3"},
+		{[]string{"--serve", "mcp:fs=stdio:npx 'unterminated"}, "unterminated"},
+		{[]string{"--serve", "mcp:fs=stdio:npx server > log"}, "without a shell"},
+		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--roots", "hello=/"}, "no --serve mcp:hello"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--roots", "fs=relative"}, "absolute"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--env", "A=b"}, "variable name"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--max-sessions", "0"}, "--max-sessions"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--session-idle", "0s"}, "--session-idle"},
 		{[]string{"--serve", "a2a:x=http://h:1/base"}, "base path"},
 		{[]string{"--serve", "a2a:x=http://h:1/base"}, "conflict"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--gate", "http://gate.example"}, "--gate"},

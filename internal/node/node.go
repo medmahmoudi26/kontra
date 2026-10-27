@@ -2,10 +2,11 @@
 // node chose, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the
 // node sends local clients' requests to the gate (hiring).
 //
-//	kontra connect [--gate URL] [--serve a2a:<name>=<url> …] [--key PATH] [--enroll TOKEN|@file|-]…
-//	               [--api-key KEY|@file|-] [--name NAME] [--rotate] [--require-channel-binding]
-//	               [--max-inflight 64] [--listen 127.0.0.1:7777] [--local-token FILE] [--allow-origin ORIGIN]…
-//	               [--log json]
+//	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
+//	               [--roots <name>=<dir> …] [--env NAME …] [--session-idle 1h] [--max-sessions 8]
+//	               [--key PATH] [--enroll TOKEN|@file|-]… [--api-key KEY|@file|-] [--name NAME] [--rotate]
+//	               [--require-channel-binding] [--max-inflight 64] [--listen 127.0.0.1:7777]
+//	               [--local-token FILE] [--allow-origin ORIGIN]… [--log json]
 //
 // Hosting (§8): the node is a fixed-target reverse proxy, not a SOCKS proxy (§8.2, sidecar_not_a_proxy): a
 // stream's preamble names a hosted service, and its one request goes to that service's --serve target and
@@ -17,8 +18,13 @@
 // gate's cap of node-opened streams in flight per session (§14). A node with no --serve only hires; its key is
 // admitted on its --api-key (hire scope) alone, on every hello, and the gate refuses it once that key is revoked.
 //
-// MCP hosting, `mcp:<name>=<url>` and `mcp:<name>=stdio:<cmd>` (§10), is M3 WP-05; sealing and per-job keys
-// (§2.3) M3 WP-08; anonymous sessions and `--public` (§6) M4. There is no local console (D164).
+// MCP hosting (§10, M3 WP-05): `mcp:<name>=<url>` goes through the same fixed-target proxy, which forwards MCP
+// exchanges unchanged except for roots (mcp.go; a URL target may name the server's endpoint path, which the gate's
+// "/" goes to); `mcp:<name>=stdio:<cmd>` is bridged in-process (internal/stdiobridge): one child per MCP session,
+// at most --max-sessions per service (a durable task holds one too, D22), stopped after --session-idle, in a
+// scrubbed environment (PATH, HOME, LANG and the --env names). For every MCP service the node answers the server's
+// roots/list itself from --roots and never relays the client's roots (D173, internal/mcproots). Sealing and per-job
+// keys (§2.3) are M3 WP-08; anonymous sessions and `--public` (§6) M4. There is no local console (D164).
 //
 // The node holds no task state: after any close but `revoked` it redials with the same key, backing off from 1 s
 // to 60 s with full jitter, reset after a session that lived 60 s (§13).
@@ -30,7 +36,7 @@
 // flags, as note 2's compose sidecar does, and a secret as --enroll @/run/secrets/<file>.
 //
 // Work packages: M2 WP-03 (dial.go: the dial and the node's half of the handshake), M2 WP-06 (the rest), M3
-// WP-03 (hiring, blob streams).
+// WP-03 (hiring, blob streams), M3 WP-05 (MCP hosting).
 package node
 
 import (
@@ -39,6 +45,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -52,7 +59,9 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"kontra.sh/kontra/internal/hiring"
+	"kontra.sh/kontra/internal/mcproots"
 	"kontra.sh/kontra/internal/nodekey"
+	"kontra.sh/kontra/internal/stdiobridge"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -71,8 +80,13 @@ type Config struct {
 	LocalToken            string   // --local-token <file>, read: required when Listen is not loopback
 	AllowOrigins          []string // --allow-origin, repeatable
 	LogJSON               bool     // --log json; human-readable on stderr otherwise
-	CredentialsPath       string   // ~/.kontra/credentials (§2.4)
-	Version               string   // for hello.agent and the User-Agent
+	// MCP hosting (§10): --roots per service, and for stdio services --env, --session-idle and --max-sessions.
+	Roots           map[string]*mcproots.Roots // --roots <name>=<dir>, repeatable; only names --serve mcp: serves
+	Env             []string                   // --env NAME, repeatable
+	SessionIdle     time.Duration              // --session-idle, default stdiobridge.DefaultSessionIdle
+	MaxSessions     int                        // --max-sessions, default stdiobridge.DefaultMaxSessions
+	CredentialsPath string                     // ~/.kontra/credentials (§2.4)
+	Version         string                     // for hello.agent and the User-Agent
 	// Out receives the welcome's service URLs (the CLI's stdout); nil discards them.
 	Out io.Writer
 }
@@ -104,8 +118,8 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	fs := flag.NewFlagSet("kontra connect", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var (
-		serves, enrolls, origins []string
-		apiKey                   *string
+		serves, enrolls, origins, roots, envs []string
+		apiKey                                *string
 	)
 	gate := fs.String("gate", tunnel.DefaultGate, "")
 	key := fs.String("key", "", "")
@@ -117,6 +131,10 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	listen := fs.String("listen", hiring.DefaultListen, "")
 	localToken := fs.String("local-token", "", "")
 	fs.Func("serve", "", func(v string) error { serves = append(serves, v); return nil })
+	fs.Func("roots", "", func(v string) error { roots = append(roots, v); return nil })
+	fs.Func("env", "", func(v string) error { envs = append(envs, v); return nil })
+	sessionIdle := fs.Duration("session-idle", stdiobridge.DefaultSessionIdle, "")
+	maxSessions := fs.Int("max-sessions", stdiobridge.DefaultMaxSessions, "")
 	fs.Func("allow-origin", "", func(v string) error { origins = append(origins, v); return nil })
 	fs.Func("enroll", "", func(v string) error { enrolls = append(enrolls, v); return nil })
 	fs.Func("api-key", "", func(v string) error {
@@ -143,11 +161,19 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	}
 	cfg.Gate = u
 
+	home := getenv("HOME")
+	if home == "" {
+		if home, err = os.UserHomeDir(); err != nil || home == "" {
+			return Config{}, usage("no home directory for ~/%s/%s: set HOME", nodekey.DirName, CredentialsFile)
+		}
+	}
+
 	// No --serve: the node only hires (§4: a hello may declare no services; its key is admitted on its
 	// --api-key alone).
 	seen := map[string]bool{}
+	mcp := map[string]bool{}
 	for _, v := range serves {
-		s, err := ParseServe(v)
+		s, err := parseServe(v, home)
 		if err != nil {
 			return Config{}, &UsageError{Err: err}
 		}
@@ -155,8 +181,33 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 			return Config{}, usage("--serve: the service %q is named twice", s.Name)
 		}
 		seen[s.Name] = true
+		mcp[s.Name] = s.Kind == tunnel.KindMCP
 		cfg.Serves = append(cfg.Serves, s)
 	}
+	// MCP hosting (§10).
+	if cfg.Roots, err = mcproots.Parse(roots); err != nil {
+		return Config{}, &UsageError{Err: err}
+	}
+	for _, name := range slices.Sorted(maps.Keys(cfg.Roots)) {
+		if !mcp[name] {
+			return Config{}, usage("--roots %s=…: no --serve mcp:%s=… serves %q", clipValue(name), clipValue(name), clipValue(name))
+		}
+	}
+	for _, e := range envs {
+		if err := stdiobridge.CheckEnvName(e); err != nil {
+			return Config{}, &UsageError{Err: err}
+		}
+		if !slices.Contains(cfg.Env, e) {
+			cfg.Env = append(cfg.Env, e)
+		}
+	}
+	if *sessionIdle <= 0 {
+		return Config{}, usage("--session-idle %v: want a positive duration, such as 1h (at least the gate's session_idle_s)", *sessionIdle)
+	}
+	if *maxSessions < 1 {
+		return Config{}, usage("--max-sessions %d: want 1 or more", *maxSessions)
+	}
+	cfg.SessionIdle, cfg.MaxSessions = *sessionIdle, *maxSessions
 
 	stdinUsed := false
 	secret := func(flagName, v string) (string, error) {
@@ -194,12 +245,6 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 
 	if cfg.KeyPath, err = nodekey.Resolve(*key, getenv); err != nil {
 		return Config{}, &UsageError{Err: err}
-	}
-	home := getenv("HOME")
-	if home == "" {
-		if home, err = os.UserHomeDir(); err != nil || home == "" {
-			return Config{}, usage("no home directory for ~/%s/%s: set HOME", nodekey.DirName, CredentialsFile)
-		}
 	}
 	cfg.CredentialsPath = filepath.Join(home, nodekey.DirName, CredentialsFile)
 
@@ -352,6 +397,11 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		}
 		seen[s.Name] = true
 	}
+	for name := range cfg.Roots {
+		if !slices.ContainsFunc(cfg.Serves, func(s Serve) bool { return s.Name == name && s.Kind == tunnel.KindMCP }) {
+			return nil, fmt.Errorf("--roots %s=…: no --serve mcp:%s=… serves it", clipValue(name), clipValue(name))
+		}
+	}
 	if err := checkName(cfg.Name); err != nil {
 		return nil, err
 	}
@@ -371,13 +421,18 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		out = io.Discard
 	}
 	log := logger.With("component", "node", "gate", origin)
+	proxy, err := NewMCPProxy(cfg.Serves, cfg.MaxInflight, MCPOptions{Env: cfg.Env, SessionIdle: cfg.SessionIdle,
+		MaxSessions: cfg.MaxSessions, Roots: cfg.Roots}, log)
+	if err != nil {
+		return nil, err
+	}
 	n := &Node{
 		cfg:           cfg,
 		logger:        log,
 		out:           out,
 		origin:        origin,
 		dialer:        Dialer{UserAgent: UserAgent(cfg.Version)},
-		proxy:         NewProxy(cfg.Serves, cfg.MaxInflight, log),
+		proxy:         proxy,
 		now:           time.Now,
 		maintainEvery: maintainEvery,
 		slotWait:      defaultSlotWait,

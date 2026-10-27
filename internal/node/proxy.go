@@ -21,7 +21,9 @@ import (
 
 	"kontra.sh/kontra/internal/a2awire"
 	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/mcproots"
 	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/stdiobridge"
 	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/tunnel"
 )
@@ -52,6 +54,12 @@ var errSteered = errors.New("node: a dial to an address other than the --serve t
 //     server sets a header read timeout only, never a write timeout;
 //   - Kontra-Node and Kontra-Sealed-Reject are removed from the service's responses; a target that does not
 //     answer is 502 with Kontra-Node: target_unreachable.
+//
+// MCP services (§10, M3 WP-05): a stdio service's exchanges go to its internal/stdiobridge Bridge, which runs the
+// server, one child per MCP session, and dials nothing; a URL service's go to its target like an A2A service's, the
+// gate's "/" to the target's endpoint path, through the roots filter of mcp.go (D173): the node reads an MCP body
+// with exact keys, answers the server's roots/list itself and never relays the client's roots; nothing else in an
+// MCP message is changed.
 //
 // A url part in a body is never dialed (D56). The node reads the JSON body of a request to an A2A service only to
 // find the parts the gate wrote as kontra-blob:<ref> (relay.md §10.4: a part over 256 KiB reaches a node so), and
@@ -95,14 +103,41 @@ type Proxy struct {
 	// inline fetches the kontra-blob: parts of a request on the session's blob streams (setBlobOpener); nil
 	// forwards bodies as they came.
 	inline *a2awire.Inliner
+	// bridges serve the stdio MCP services (internal/stdiobridge), mcp the URL MCP services' roots filter (mcp.go);
+	// both per service, shared by forSession's proxies. A proxy is the owner of the stdio sessions opened through it
+	// (its tunnel session's, release).
+	bridges map[string]*stdiobridge.Bridge
+	mcp     map[string]*mcpURL
 
 	mu       sync.Mutex
 	served   map[string]bool
 	inflight atomic.Int64
 }
 
-// NewProxy returns a proxy for the services the session serves.
+// MCPOptions configure the MCP services a proxy hosts (spec/tunnel.md §10): the stdio children's --env names,
+// --session-idle and --max-sessions, and each service's --roots.
+type MCPOptions struct {
+	Env         []string
+	SessionIdle time.Duration
+	MaxSessions int
+	Roots       map[string]*mcproots.Roots
+	// LookupEnv reads the node's environment for the children; nil is os.LookupEnv.
+	LookupEnv func(string) (string, bool)
+}
+
+// NewProxy returns a proxy for the services the session serves, its MCP services with MCPOptions' defaults.
 func NewProxy(serves []Serve, maxInflight int, logger *slog.Logger) *Proxy {
+	p, err := NewMCPProxy(serves, maxInflight, MCPOptions{}, logger)
+	if err != nil {
+		p.logger.Error("a hosted MCP service cannot be served", "err", err)
+	}
+	return p
+}
+
+// NewMCPProxy returns a proxy for the services the session serves, its MCP services configured by opts: a bridge per
+// stdio service (no child runs before an initialize) and a roots filter per URL service. On an error it still
+// returns the proxy, without the service that failed.
+func NewMCPProxy(serves []Serve, maxInflight int, opts MCPOptions, logger *slog.Logger) (*Proxy, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -116,15 +151,32 @@ func NewProxy(serves []Serve, maxInflight int, logger *slog.Logger) *Proxy {
 		transports:  make(map[string]*http.Transport, len(serves)),
 		errLog:      slog.NewLogLogger(logger.With("component", "node-http").Handler(), slog.LevelWarn),
 		served:      make(map[string]bool, len(serves)),
+		bridges:     map[string]*stdiobridge.Bridge{},
+		mcp:         map[string]*mcpURL{},
 	}
+	var errs []error
 	for _, s := range serves {
 		p.serves[s.Name] = s
 		p.served[s.Name] = true
 		if s.Target != nil {
 			p.transports[s.Name] = targetTransport(s.Target)
 		}
+		if s.Kind != tunnel.KindMCP {
+			continue
+		}
+		if s.Command == nil {
+			p.mcp[s.Name] = newMCPURL(s.Name, opts.Roots[s.Name], logger.With(obs.KeyService, s.Name))
+			continue
+		}
+		b, err := stdiobridge.New(stdiobridge.Config{Service: s.Name, Command: s.Command, Env: opts.Env, LookupEnv: opts.LookupEnv,
+			SessionIdle: opts.SessionIdle, MaxSessions: opts.MaxSessions, Roots: opts.Roots[s.Name]}, logger)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("--serve mcp:%s: %w", s.Name, err))
+			continue
+		}
+		p.bridges[s.Name] = b
 	}
-	return p
+	return p, errors.Join(errs...)
 }
 
 // forSession is a proxy for one session over the same targets and transports, serving served (the
@@ -140,6 +192,8 @@ func (p *Proxy) forSession(served []string, logger *slog.Logger) *Proxy {
 		transports:  p.transports,
 		errLog:      slog.NewLogLogger(logger.With("component", "node-http").Handler(), slog.LevelWarn),
 		served:      map[string]bool{},
+		bridges:     p.bridges,
+		mcp:         p.mcp,
 	}
 	q.SetServed(served)
 	return q
@@ -161,6 +215,26 @@ func (p *Proxy) setBlobOpener(open func(ctx context.Context) (net.Conn, error)) 
 func (p *Proxy) closeIdle() {
 	for _, t := range p.transports {
 		t.CloseIdleConnections()
+	}
+}
+
+// close stops every stdio child and its process group (the node is stopping) and closes the targets' idle
+// connections.
+func (p *Proxy) close() {
+	var wg sync.WaitGroup
+	for _, b := range p.bridges {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = b.Close() }()
+	}
+	wg.Wait()
+	p.closeIdle()
+}
+
+// release stops the stdio children of the MCP sessions opened through p, a session's proxy, whose tunnel session
+// closed: the gate ends those MCP sessions with it (relay.md §11.2), so nothing could reach them again.
+func (p *Proxy) release() {
+	for _, b := range p.bridges {
+		b.CloseOwner(p)
 	}
 }
 
@@ -297,7 +371,27 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			nodeAnswer(w, http.StatusBadRequest, "", "kontra connect refuses protocol upgrades")
 			return
 		}
+		if sv.Kind == tunnel.KindMCP && sv.Command != nil {
+			// A stdio MCP service: the bridge is the server's endpoint, whatever the path (§10); nothing is dialed.
+			b := p.bridges[sv.Name]
+			if b == nil {
+				nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, "kontra connect: the stdio service is not running")
+				return
+			}
+			sw := &statusWriter{ResponseWriter: w} // the bridge's own Kontra-Node answers (full, target_unreachable) are kept
+			b.ServeHTTP(sw, r.WithContext(stdiobridge.WithOwner(r.Context(), p)))
+			log.Debug("tunnel exchange (stdio)", "method", r.Method, "status", sw.status, "duration_ms", time.Since(start).Milliseconds())
+			return
+		}
 		out, ok := targetPath(basePath(sv.Target), r.URL.Path)
+		if sv.Kind == tunnel.KindMCP && (r.URL.Path == "/" || r.URL.Path == "") {
+			// SPEC-CONFLICT (spec/tunnel.md §8.2 with relay.md §11, M3 WP-05): the gate sends every MCP exchange of a
+			// tunnel service to "/" (upstream.Tunnel.Base), and §8.2 prefixes a path not under the base with it, which
+			// sends "/" to "<base>/": a server whose one endpoint is /mcp (a Go ServeMux pattern "/mcp") would answer
+			// 404 there. The closest faithful behaviour: the gate's root is the target itself, its endpoint exactly as
+			// --serve names it (ParseServe); every other path follows §8.2's rule.
+			out, ok = sv.Target.Path, true
+		}
 		if !ok {
 			log.Warn("tunnel exchange refused: the request target is not a path under the target's base path")
 			nodeAnswer(w, http.StatusBadRequest, "", "the request target is not a path under the service's base path")
@@ -309,6 +403,19 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 				return
 			}
 			defer done()
+		}
+		modify := stripResponse
+		if f := p.mcp[sv.Name]; sv.Kind == tunnel.KindMCP && f != nil {
+			x, ok := f.request(w, r, log, p.answerRoots(sv, out, log))
+			if !ok {
+				return
+			}
+			modify = func(res *http.Response) error {
+				if err := stripResponse(res); err != nil {
+					return err
+				}
+				return x.response(res)
+			}
 		}
 		target := sv.Target
 		rp := &httputil.ReverseProxy{
@@ -328,7 +435,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 				}
 			},
 			Transport:      p.transports[sv.Name],
-			ModifyResponse: stripResponse,
+			ModifyResponse: modify,
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 				if sw, ok := w.(*stripWriter); ok {
 					w = sw.ResponseWriter // the node's own answer keeps its Kontra-Node header
@@ -436,15 +543,18 @@ func inlineFinal(err error) bool {
 		errors.Is(err, a2awire.ErrReservedURL) || errors.Is(err, a2awire.ErrTooMuch) || errors.Is(err, strictjson.ErrNotObject)
 }
 
-// targetPath is the path a request goes to (§8.2): the request path, which net/http has percent-decoded
-// into URL.Path once, prefixed with the target's base path (without its trailing slash, "" for the root),
-// then cleaned (., .., //); ok is false when the result is not under the base. A trailing slash is kept, as
-// the service's routes may tell "/a/" from "/a". The decoded path is what is sent: an encoded '/' (%2F)
-// becomes a separator, so no segment can hide a '..' from the clean.
+// targetPath is the path a request goes to (§8.2): the request path, which net/http has percent-decoded into
+// URL.Path once, cleaned (., .., //); a path already under the target's base path (without its trailing slash, ""
+// for the root) is forwarded as it is, any other is prefixed with the base and cleaned again; ok is false when the
+// result is not under the base. A trailing slash is kept, as the service's routes may tell "/a/" from "/a". The
+// decoded path is what is sent: an encoded '/' (%2F) becomes a separator, so no segment can hide a '..' from the
+// clean.
 //
-// The prefix comes before the clean, so that a '..' climbing out of a non-root base is refused (400) and
-// not silently folded into it; with the root base every cleaned path is under it and is confined to the
-// target (M2 plan audit).
+// The prefix comes before the second clean, so that a '..' climbing out of a non-root base is refused (400) and
+// not silently folded into it; with the root base every cleaned path is under it and is confined to the target (M2
+// plan audit). The "already under the base" rule is §8.2's as D123 amended it: the gate's A2A paths come from the
+// upstream card's interface, which already holds the base, and an MCP URL target is its endpoint (exchange maps the
+// gate's "/" to it).
 func targetPath(base, reqPath string) (string, bool) {
 	if reqPath == "" {
 		reqPath = "/"
@@ -452,11 +562,18 @@ func targetPath(base, reqPath string) (string, bool) {
 	if reqPath[0] != '/' {
 		return "", false // "*" (OPTIONS *) and other non-paths
 	}
-	cleaned := path.Clean(base + reqPath)
-	if strings.HasSuffix(reqPath, "/") && cleaned != "/" {
-		cleaned += "/"
+	under := func(p string) bool { return base == "" || p == base || strings.HasPrefix(p, base+"/") }
+	keepSlash := func(c string) string {
+		if strings.HasSuffix(reqPath, "/") && c != "/" {
+			return c + "/"
+		}
+		return c
 	}
-	if base == "" || cleaned == base || strings.HasPrefix(cleaned, base+"/") {
+	if c := keepSlash(path.Clean(reqPath)); base != "" && under(c) {
+		return c, true
+	}
+	cleaned := keepSlash(path.Clean(base + reqPath))
+	if under(cleaned) {
 		return cleaned, true
 	}
 	return "", false
@@ -572,6 +689,32 @@ func (w *stripWriter) Flush() { _ = http.NewResponseController(w.ResponseWriter)
 
 // Unwrap lets http.ResponseController reach the stream's writer.
 func (w *stripWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// statusWriter records the status of a response it passes on unchanged.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if code >= 200 && w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush sends what was written (the bridge's event streams are flushed per event).
+func (w *statusWriter) Flush() { _ = http.NewResponseController(w.ResponseWriter).Flush() }
+
+// Unwrap lets http.ResponseController reach the stream's writer.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // targetTransport is the transport of one --serve target: no proxy from the environment, every dial to the
 // target's own host:port (an address other than it is refused), no compression added, no redirect followed

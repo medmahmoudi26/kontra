@@ -599,6 +599,8 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	go func() {
 		<-mux.CloseChan()
 		cancel()
+		// The stdio children of the MCP sessions opened on this session: the gate ends those sessions with it.
+		s.proxy.release()
 		n.mu.Lock()
 		delete(n.sessions, s)
 		n.mu.Unlock()
@@ -647,7 +649,8 @@ func (n *Node) closeAll() {
 	for _, s := range sessions {
 		_ = s.mux.Close()
 	}
-	n.proxy.closeIdle()
+	// Every stdio child and its process group (stdin closed, SIGTERM, SIGKILL: tunnel.md §10, D184).
+	n.proxy.close()
 }
 
 // keyRevoked is {"t": "revoked"} on a session's control stream (§12): the node stops when it is the key
