@@ -58,6 +58,9 @@ type Config struct {
 	// FirstEventDelay holds a first turn's first event (the submitted task) back this long: until it
 	// passes, the gate has no upstream task id (spec §6.4's before-the-first-id rows).
 	FirstEventDelay time.Duration
+	// CardHook, when set, is what the agent serves as its 1.0 card instead of Card(): it is given Card()'s bytes
+	// (card_passthrough signs them as a seller would).
+	CardHook func(card []byte) []byte
 }
 
 // ChunkMarker starts the text of every chunk the agent streams, so a test can look for chunk text where it
@@ -139,7 +142,11 @@ func (a *Agent) Start(ctx context.Context) (string, error) {
 	} else {
 		mux.HandleFunc("GET /.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(a.Card())
+			card := a.Card()
+			if a.cfg.CardHook != nil {
+				card = a.cfg.CardHook(card)
+			}
+			_, _ = w.Write(card)
 		})
 		if a.cfg.Binding == string(a2a.TransportProtocolHTTPJSON) {
 			mux.Handle("/rest/", http.StripPrefix("/rest", a2asrv.NewRESTHandler(a.handler)))

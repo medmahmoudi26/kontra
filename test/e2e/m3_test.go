@@ -305,3 +305,9 @@ func writeFile(t *testing.T, dir, name, content string) string {
 	}
 	return p
 }
+
+// readFile is a file's content, "" when it cannot be read.
+func readFile(path string) string {
+	b, _ := os.ReadFile(path)
+	return string(b)
+}

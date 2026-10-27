@@ -46,14 +46,15 @@ var (
 	repoRoot = filepath.Join("..", "..")
 )
 
-// npmInstall installs examples/mcp/<example>'s package-lock once per test binary, under TempRoot, and returns the
-// directory. npm runs with a minimal environment of its own; its download cache is kept between runs in the user's
-// cache directory, so a second run needs no network.
-func npmInstall(example string) (string, error) {
+// npmInstall installs the package-lock of src (a directory relative to the repository's root: examples/mcp/<name>,
+// or test/e2e/testdata/<name>) once per test binary, under TempRoot, and returns the directory. npm runs with a
+// minimal environment of its own; its download cache is kept between runs in the user's cache directory, so a second
+// run needs no network.
+func npmInstall(src string) (string, error) {
 	npmMu.Lock()
 	defer npmMu.Unlock()
-	if dir, ok := npmDirs[example]; ok {
-		return dir, npmErrs[example]
+	if dir, ok := npmDirs[src]; ok {
+		return dir, npmErrs[src]
 	}
 	dir, err := func() (string, error) {
 		npm, err := exec.LookPath("npm")
@@ -67,12 +68,12 @@ func npmInstall(example string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		dir, err := os.MkdirTemp(root, "npm-"+example+"-")
+		dir, err := os.MkdirTemp(root, "npm-"+filepath.Base(src)+"-")
 		if err != nil {
 			return "", err
 		}
 		for _, f := range []string{"package.json", "package-lock.json"} {
-			b, err := os.ReadFile(filepath.Join(repoRoot, "examples", "mcp", example, f))
+			b, err := os.ReadFile(filepath.Join(repoRoot, src, f))
 			if err != nil {
 				return "", err
 			}
@@ -92,18 +93,18 @@ func npmInstall(example string) (string, error) {
 			"npm_config_update_notifier=false"}
 		cmd.SysProcAttr = procAttr()
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("npm ci (examples/mcp/%s): %v\n%s", example, err, lastLines(out, 8))
+			return "", fmt.Errorf("npm ci (%s): %v\n%s", src, err, lastLines(out, 8))
 		}
 		return dir, nil
 	}()
-	npmDirs[example], npmErrs[example] = dir, err
+	npmDirs[src], npmErrs[src] = dir, err
 	return dir, err
 }
 
 // installed is npmInstall for a test: a failed install fails it, or skips it under KONTRA_E2E_OFFLINE=1.
-func installed(t testingTB, example, pkg string) string {
+func installed(t testingTB, src, pkg string) string {
 	t.Helper()
-	dir, err := npmInstall(example)
+	dir, err := npmInstall(src)
 	if err != nil {
 		if os.Getenv(OfflineEnv) == "1" {
 			t.Skipf("%s: the pinned package cannot be installed here (%s=1): %v", pkg, OfflineEnv, err)
@@ -133,7 +134,7 @@ func lastLines(b []byte, n int) string {
 // directory: "stdio:'<node>' '<entry>' '<dir>'".
 func (h *Harness) FilesystemCommand(t testingTB, dir string) string {
 	t.Helper()
-	pkgDir := installed(t, "fs-stdio", "server-filesystem@1.0.0")
+	pkgDir := installed(t, "examples/mcp/fs-stdio", "server-filesystem@1.0.0")
 	nodeBin, err := exec.LookPath("node")
 	if err != nil {
 		t.Fatalf("node: %v", err)
@@ -159,7 +160,18 @@ type StockServer struct {
 // when it closes.
 func (h *Harness) StartEverything(t testingTB, name string) *StockServer {
 	t.Helper()
-	pkgDir := installed(t, "everything", "server-everything@1.0.0")
+	return h.startEverything(t, name, "examples/mcp/everything", "server-everything@1.0.0")
+}
+
+// StartEverything2 runs server-everything@2.0.0 from testdata/everything-2's lock, which needs Node 24 (D171).
+func (h *Harness) StartEverything2(t testingTB, name string) *StockServer {
+	t.Helper()
+	return h.startEverything(t, name, "test/e2e/testdata/everything-2", "server-everything@2.0.0")
+}
+
+func (h *Harness) startEverything(t testingTB, name, src, pkg string) *StockServer {
+	t.Helper()
+	pkgDir := installed(t, src, pkg)
 	nodeBin, err := exec.LookPath("node")
 	if err != nil {
 		t.Fatalf("node: %v", err)

@@ -1,0 +1,8 @@
+{
+  "name": "kontra-e2e-mcp-everything-2",
+  "private": true,
+  "description": "server-everything@2.0.0 for the 2026-07-28 e2e test (Node 24; test/e2e mcp_modern_test.go)",
+  "dependencies": {
+    "@modelcontextprotocol/server-everything": "2.0.0"
+  }
+}
