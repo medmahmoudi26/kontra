@@ -2,10 +2,12 @@ package mcprelay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -73,10 +75,15 @@ type Dispatcher struct {
 	minPoll, maxPoll time.Duration // the bounds of the upstream's pollInterval (§11.5 step 4: 0.5–30 s)
 	failFor          time.Duration // how long a poll may fail to reach the upstream before the task fails (§6.4's 30 s)
 	cancelWait       time.Duration // forward_cancel's bound (§11.6: at most 10 s)
+	cancelHold       time.Duration // how long a run marked by forward_cancel waits for the workflow's end (holdForWorkflow)
 
 	// caps holds, per dispatch (relay.Key), whether its upstream declared tasks.cancel, for forward_cancel on this
 	// replica (§11.6: tasks/cancel is sent upstream only if the upstream declared it).
 	caps sync.Map
+	// cancels holds, per dispatch running on this replica (relay.Key), the flag forward_cancel sets before it sends
+	// tasks/cancel (legacyRun.cancelling): registered when the dispatch starts, before BeginDispatch records this
+	// replica as the one forward_cancel is routed to (spec §14.2).
+	cancels sync.Map
 }
 
 var _ lifecycle.DispatchActivities = (*Dispatcher)(nil)
@@ -123,6 +130,15 @@ func (d *Dispatcher) forwardCancelWait() time.Duration {
 	return 8 * time.Second
 }
 
+// cancelHoldFor bounds how long a dispatch marked by forward_cancel waits for the workflow's terminal event: the
+// workflow writes it at most 10 s after the cancel started (§11.6), or at once at the deadline (§6.5).
+func (d *Dispatcher) cancelHoldFor() time.Duration {
+	if d.cancelHold > 0 {
+		return d.cancelHold
+	}
+	return 30 * time.Second
+}
+
 func (d *Dispatcher) taskBytes() int64 {
 	if d.TaskBytes > 0 {
 		return d.TaskBytes
@@ -166,11 +182,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	key := relay.Key{TaskID: a2a.TaskID(in.TaskID), N: in.N}
 	release := d.Registry.Expect(key)
 	defer release()
+	cancelling := new(atomic.Bool)
+	d.cancels.Store(key, cancelling)
+	defer d.cancels.CompareAndDelete(key, cancelling)
 	fence, err := d.Log.BeginDispatch(pctx, taskID, in.N, d.ReplicaID)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
 	}
-	work, err := d.workItem(pctx, taskID, in)
+	wi, err := d.workItem(pctx, taskID, in)
 	if errors.Is(err, store.ErrWorkItemNotFound) {
 		log.Error("the task's work item is missing or another task's", "work_item", in.WorkItemID)
 		return d.failTask(ctx, log, fence, store.ReasonLifecycleUnavailable, "the task's request could not be found")
@@ -178,6 +197,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
 	}
+	work := wi.Payload.MCP
 	attempt, err := d.Log.GetAttempt(pctx, taskID, in.N)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
@@ -223,8 +243,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	}
 	defer d.caps.Delete(key)
 	r := &legacyRun{
-		d: d, log: log, key: key, taskID: taskID, n: in.N, fence: fence, row: row, work: work, attempt: attempt,
-		link: link, sealed: work.Sealed, resume: attempt.UpstreamTaskID != "",
+		d: d, log: log, key: key, taskID: taskID, n: in.N, fence: fence, row: row, workItem: wi.ID, work: work,
+		answered: wi.AnswersDelivered, attempt: attempt, link: link, sealed: work.Sealed, resume: attempt.UpstreamTaskID != "",
+		cancelling: cancelling,
 	}
 	// The dispatch beats every 5 s for its whole run (spec §14.2: heartbeat timeout 30 s), a slow upstream call
 	// included, so load never looks like a dead replica; a cancellation Temporal delivers in a heartbeat's answer
@@ -271,8 +292,8 @@ func (d *Dispatcher) dispatchModern(ctx context.Context, in lifecycle.DispatchIn
 
 // workItem loads the task's work item, consuming it on its first dispatch (D66). A later dispatch of the same
 // attempt (a resume) or of a new attempt (a retry, n > 1) reloads the item it owns; any other dispatch that finds
-// it consumed refuses it, since the dispatch that took it may have sent it (D101).
-func (d *Dispatcher) workItem(ctx context.Context, taskID uuid.UUID, in lifecycle.DispatchInput) (*store.MCPWork, error) {
+// it consumed refuses it, since the dispatch that took it may have sent it (D101). Its payload holds an MCP call.
+func (d *Dispatcher) workItem(ctx context.Context, taskID uuid.UUID, in lifecycle.DispatchInput) (*store.WorkItem, error) {
 	wid, err := uuid.Parse(in.WorkItemID)
 	if err != nil {
 		return nil, fmt.Errorf("work item id %q: %w", in.WorkItemID, store.ErrWorkItemNotFound)
@@ -292,7 +313,7 @@ func (d *Dispatcher) workItem(ctx context.Context, taskID uuid.UUID, in lifecycl
 	if wi.Payload.MCP == nil {
 		return nil, fmt.Errorf("mcprelay: work item %s holds no MCP call: %w", wid, store.ErrWorkItemNotFound)
 	}
-	return wi.Payload.MCP, nil
+	return wi, nil
 }
 
 // link is the attempt's upstream: the service's direct backend, or the attempt's tunnel session on this replica
@@ -472,11 +493,19 @@ func (d *Dispatcher) Abort(ctx context.Context, in lifecycle.AttemptRef) error {
 // workflow writes canceled whatever this answers. It is sent on the dispatch's own upstream session
 // (attempts.upstream_session) with the task's preamble, through the attempt's tunnel session on this replica
 // (tunnel_lost, opening no stream, when this replica does not hold it) or the direct backend. Its result crosses
-// Temporal history: an outcome, the upstream's code, never its text.
+// Temporal history: an outcome, the upstream's code and its task's state in a fixed vocabulary, never its text.
+//
+// Before anything is sent it marks the attempt's dispatch when it runs on this replica (forward_cancel runs on
+// kontra-ctl-<replica> of the replica dispatching, spec §14.2): from then on the dispatch writes no terminal event of
+// its own, so the upstream's reaction to the cancel (its task cancelled, an error ending its tasks/result) never
+// becomes the task's end before the workflow's canceled (§11.6).
 func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef) (lifecycle.ForwardCancelResult, error) {
 	taskID, err := ids.ParseTaskID(in.TaskID)
 	if err != nil {
 		return lifecycle.ForwardCancelResult{}, err
+	}
+	if flag, ok := d.cancels.Load(relay.Key{TaskID: a2a.TaskID(in.TaskID), N: in.N}); ok {
+		flag.(*atomic.Bool).Store(true)
 	}
 	log := d.logger().With(obs.Task(in.TaskID, in.N)...).With("component", "mcp-dispatch")
 	attempt, err := d.Log.GetAttempt(ctx, taskID, in.N)
@@ -539,12 +568,28 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 		log.Info("forward_cancel got no answer from the service", "error", err)
 		return lifecycle.ForwardCancelResult{}, fmt.Errorf("mcprelay: forward_cancel of task %s: the service could not be reached", in.TaskID)
 	}
-	status, _ := stringMember(m.Result, "status")
-	if status == "cancelled" {
-		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelCanceled, UpstreamState: status}, nil
+	return cancelAnswer(log, m.Result), nil
+}
+
+// cancelAnswer is forward_cancel's result for the upstream's answer to tasks/cancel (a Task): its outcome, and its
+// status only as one of MCP's five, carried as the A2A state ForwardCancelResult.UpstreamState names (store.State.A2A,
+// as relay's cancelAnswer carries a2a.TaskState). Any other value, of any length, is the upstream's text and stays
+// out of the result, which Temporal history keeps (spec §14: service content never enters it); so does a status
+// read from an answer strict decoding refuses.
+func cancelAnswer(log *slog.Logger, result json.RawMessage) lifecycle.ForwardCancelResult {
+	if err := mcpwire.CheckTask(result); err != nil {
+		log.Info("strict decoding refused the upstream's answer to tasks/cancel", "level", "result")
+		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}
 	}
-	if st, ok := store.StateFromMCP(status); ok && st.Terminal() {
-		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelNotCancelable, UpstreamState: status}, nil
+	status, _ := stringMember(result, "status")
+	st, ok := store.StateFromMCP(status)
+	switch {
+	case !ok:
+		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}
+	case st == store.StateCanceled:
+		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelCanceled, UpstreamState: string(st.A2A())}
+	case st.Terminal():
+		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelNotCancelable, UpstreamState: string(st.A2A())}
 	}
-	return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues, UpstreamState: status}, nil
+	return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues, UpstreamState: string(st.A2A())}
 }

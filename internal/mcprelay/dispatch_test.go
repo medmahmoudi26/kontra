@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/upstream"
@@ -223,5 +225,65 @@ func TestLinkExchanges(t *testing.T) {
 	body = "data: {\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"elicitation/create\",\"Method\":\"x\"}\n\n"
 	if _, err := k.request(ctx, "kontra.dispatch.3", "tasks/get", nil, nil); asExchange(err).class != classProtocol {
 		t.Fatalf("a refused event: %v", err)
+	}
+}
+
+// A gate-served event splits its message at every line break an SSE parser ends a line at (CRLF, CR, LF), so a
+// stored JSON message with a lone CR between its tokens reaches the client whole (WHATWG SSE; spec §11.7).
+func TestGateStreamEventLineBreaks(t *testing.T) {
+	for _, msg := range []string{
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[\r{\"type\":\"text\",\"text\":\"x\"}],\"isError\":false}}",
+		"{\"jsonrpc\":\"2.0\",\r\n\"id\":1,\n\"result\":{\r\r\"isError\":false\n\r}}",
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r",
+	} {
+		rec := httptest.NewRecorder()
+		if err := newGateStream(rec, "").event("k.t.4", []byte(msg)); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(rec.Body.String(), "\r") {
+			t.Errorf("a CR was written inside an event: %q", rec.Body.String())
+		}
+		ev, err := newSSEReader(strings.NewReader(rec.Body.String())).next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want any
+		if err := json.Unmarshal([]byte(ev.data), &got); err != nil {
+			t.Fatalf("the client reads %q from %q: %v", ev.data, msg, err)
+		}
+		_ = json.Unmarshal([]byte(msg), &want)
+		if g, _ := json.Marshal(got); string(g) != func() string { w, _ := json.Marshal(want); return string(w) }() {
+			t.Errorf("the client reads %s, the message was %q", g, msg)
+		}
+		if ev.lines[0] != "id: k.t.4" {
+			t.Errorf("the event's id: %q", ev.lines)
+		}
+	}
+}
+
+// forward_cancel's result keeps the upstream's tasks/cancel answer to an outcome and, only for one of MCP's five
+// statuses, its A2A state (spec §14: Temporal history keeps it; the upstream's text never enters it).
+func TestCancelAnswer(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	for _, c := range []struct {
+		result string
+		want   lifecycle.ForwardCancelResult
+	}{
+		{`{"taskId":"t","status":"cancelled"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelCanceled, UpstreamState: "TASK_STATE_CANCELED"}},
+		{`{"status":"completed"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelNotCancelable, UpstreamState: "TASK_STATE_COMPLETED"}},
+		{`{"status":"failed"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelNotCancelable, UpstreamState: "TASK_STATE_FAILED"}},
+		{`{"status":"working"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues, UpstreamState: "TASK_STATE_WORKING"}},
+		{`{"status":"input_required"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues, UpstreamState: "TASK_STATE_INPUT_REQUIRED"}},
+		{`{"status":"` + strings.Repeat("any text of the seller's ", 4096) + `"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
+		{`{"status":"canceled"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
+		{`{"status":7}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
+		{`{"Status":"cancelled"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
+		{`{}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
+		{`null`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
+	} {
+		got := cancelAnswer(log, json.RawMessage(c.result))
+		if got.Outcome != c.want.Outcome || got.UpstreamState != c.want.UpstreamState || got.UpstreamError != nil {
+			t.Errorf("%.60s: %+v, want %+v", c.result, got, c.want)
+		}
 	}
 }

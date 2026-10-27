@@ -18,15 +18,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
+	common "go.temporal.io/api/common/v1"
 	"go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/temporalproto"
 	tclient "go.temporal.io/sdk/client"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/hooks"
@@ -295,8 +298,40 @@ func (e *taskEnv) historyText(taskID string) string {
 			e.t.Fatal(err)
 		}
 		b.Write(js)
+		// The JSON carries each payload's data in base64: the payloads' bytes (activity inputs and results, signal
+		// and update arguments) are written out as well, so that a scan sees what history keeps.
+		payloadData(ev.ProtoReflect(), &b)
 	}
 	return b.String()
+}
+
+// payloadData writes the data of every temporal.api.common.v1.Payload inside m to b.
+func payloadData(m protoreflect.Message, b *strings.Builder) {
+	if p, ok := m.Interface().(*common.Payload); ok {
+		b.WriteByte('\n')
+		b.Write(p.GetData())
+		return
+	}
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		switch {
+		case fd.IsList():
+			if fd.Message() != nil {
+				for i, l := 0, v.List(); i < l.Len(); i++ {
+					payloadData(l.Get(i).Message(), b)
+				}
+			}
+		case fd.IsMap():
+			if fd.MapValue().Message() != nil {
+				v.Map().Range(func(_ protoreflect.MapKey, mv protoreflect.Value) bool {
+					payloadData(mv.Message(), b)
+					return true
+				})
+			}
+		case fd.Message() != nil:
+			payloadData(v.Message(), b)
+		}
+		return true
+	})
 }
 
 // elicitText and the answers are what must never cross Temporal history (spec §14: events never enter it).
@@ -627,6 +662,147 @@ func TestDurableTaskCancelIgnoredUpstream(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0].isError == nil || !*calls[0].isError {
 		t.Fatalf("calls rows of a cancelled task: %+v (one, is_error true, §11.8)", calls)
+	}
+}
+
+// clientCanceled checks a task the client cancelled (§11.6, §11.8 case 3, D57): tasks/get shows cancelled,
+// tasks/result is -32603 "task cancelled" with data sh.kontra/canceled client, the log's last row is the gate's
+// canceled (no result event of the upstream's), and the task has one calls row, is_error true.
+func clientCanceled(t *testing.T, e *taskEnv, c *taskClient, taskID string, id int) {
+	t.Helper()
+	if s := status(t, c.tasks("tasks/get", taskID, id)); s != "cancelled" {
+		t.Fatalf("tasks/get: %s", s)
+	}
+	res := c.tasks("tasks/result", taskID, id+1)
+	m := res.msg(t)
+	er, _ := m["error"].(map[string]any)
+	data, _ := er["data"].(map[string]any)
+	if er["code"] != float64(-32603) || er["message"] != "task cancelled" || data["sh.kontra/canceled"] != "client" {
+		t.Fatalf("tasks/result of a client-cancelled task: %s", res.body)
+	}
+	var kind, payload string
+	if err := e.pool.QueryRow(context.Background(), `select kind, payload::text from kontra.task_events where task_id = $1
+		order by seq desc limit 1`, taskID).Scan(&kind, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "status" || !strings.Contains(payload, `"kontra.canceled":"client"`) {
+		t.Fatalf("the task's last row is not the gate's canceled: %s %s", kind, payload)
+	}
+	if n := e.count(`select count(*) from kontra.calls where task_id = $1 and is_error`, taskID); n != 1 ||
+		e.count(`select count(*) from kontra.calls where task_id = $1`, taskID) != 1 {
+		t.Fatalf("calls rows of a cancelled task: %d with is_error (one, is_error true, §11.8)", n)
+	}
+}
+
+// tasks/cancel on a task waiting at input_required, whose upstream honours the cancel (D57, §11.6): the dispatch
+// holds the upstream's tasks/result, which the upstream ends with an error as it cancels its task. That reaction
+// is not the task's end: tasks/cancel returns cancelled, and the task ends canceled by the client.
+func TestDurableTaskCancelHonouredAtInputRequired(t *testing.T) {
+	e := newTaskEnv(t)
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{toolWith("research", "optional")}
+	up.TaskRun = func(task *mcptest.Task) {
+		task.Status("working", "x")
+		task.Ask("elicitation/create", map[string]any{"message": "which?", "requestedSchema": map[string]any{"type": "object"}}, 30*time.Second)
+	}
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	e.service("research", srv.URL, nil)
+	r := e.replica("a", replicaOpts{})
+	key, _ := e.apiKey("buyer")
+	c := newTaskClient(t, key, r.url+"/mcp/research")
+	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
+	eventually(t, 15*time.Second, "the input request is logged", func() bool {
+		return e.count(`select count(*) from kontra.task_events where task_id = $1 and kind = 'input_request'`, taskID) == 1 &&
+			status(t, c.tasks("tasks/get", taskID, 8)) == "input_required"
+	})
+	cr := c.tasks("tasks/cancel", taskID, 9)
+	if status(t, cr) != "cancelled" {
+		t.Fatalf("D57: tasks/cancel of a task at input_required answered %s", cr.body)
+	}
+	if up.Count("tasks/cancel") != 1 {
+		t.Fatalf("the upstream received %d tasks/cancel", up.Count("tasks/cancel"))
+	}
+	clientCanceled(t, e, c, taskID, 10)
+}
+
+// tasks/cancel on a working task whose upstream honours the cancel and shows its cancelled status before it answers
+// the cancel (D57, §11.6): the dispatch's next tasks/get sees it while forward_cancel still waits. The task ends
+// canceled by the client all the same: tasks/result carries sh.kontra/canceled (§11.8 case 3), never the
+// upstream's own cancellation.
+func TestDurableTaskCancelHonouredWorking(t *testing.T) {
+	e := newTaskEnv(t)
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{toolWith("research", "optional")}
+	up.CancelAnswerDelay = time.Second
+	up.TaskRun = func(task *mcptest.Task) { task.Status("working", "a long job") }
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	e.service("research", srv.URL, nil)
+	r := e.replica("a", replicaOpts{})
+	key, _ := e.apiKey("buyer")
+	c := newTaskClient(t, key, r.url+"/mcp/research")
+	for i := range 2 {
+		taskID := created(t, c.taskCall(100+i, "research", map[string]any{}))
+		eventually(t, 15*time.Second, "the dispatch has the upstream task", func() bool {
+			return e.count(`select count(*) from kontra.attempts where task_id = $1 and upstream_task_id is not null`, taskID) == 1 &&
+				status(t, c.tasks("tasks/get", taskID, 8)) == "working"
+		})
+		began := time.Now()
+		cr := c.tasks("tasks/cancel", taskID, 200+i)
+		if status(t, cr) != "cancelled" || time.Since(began) > 10*time.Second {
+			t.Fatalf("tasks/cancel answered after %v: %s", time.Since(began), cr.body)
+		}
+		clientCanceled(t, e, c, taskID, 300+10*i)
+		if n := e.count(`select count(*) from kontra.task_events where task_id = $1 and payload::text like '%the service cancelled the task%'`, taskID); n != 0 {
+			t.Fatalf("the upstream's own cancellation was logged")
+		}
+	}
+}
+
+// forward_cancel's result, which Temporal history keeps, carries the upstream's task state only in a fixed
+// vocabulary (spec §14: service content never enters history): an upstream that answers tasks/cancel with a status
+// of its own text leaves no byte of it there, and the task is cancelled all the same (D57).
+func TestForwardCancelKeepsUpstreamTextOutOfHistory(t *testing.T) {
+	e := newTaskEnv(t)
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{toolWith("research", "optional")}
+	up.TaskRun = func(task *mcptest.Task) { task.Status("working", "a long job") }
+	marker := "upstream-text-" + uuid.NewString() + strings.Repeat("x", 512)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var m struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if r.Method == http.MethodPost && json.Unmarshal(body, &m) == nil && m.Method == "tasks/cancel" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"status":%q}}`, m.ID, marker)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		up.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	e.service("research", srv.URL, nil)
+	r := e.replica("a", replicaOpts{})
+	key, _ := e.apiKey("buyer")
+	c := newTaskClient(t, key, r.url+"/mcp/research")
+	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
+	eventually(t, 15*time.Second, "the dispatch has the upstream task", func() bool {
+		return e.count(`select count(*) from kontra.attempts where task_id = $1 and upstream_task_id is not null`, taskID) == 1 &&
+			status(t, c.tasks("tasks/get", taskID, 8)) == "working"
+	})
+	if cr := c.tasks("tasks/cancel", taskID, 9); status(t, cr) != "cancelled" {
+		t.Fatalf("tasks/cancel: %s", cr.body)
+	}
+	clientCanceled(t, e, c, taskID, 10)
+	eventually(t, 15*time.Second, "forward_cancel's result is in the history", func() bool {
+		return strings.Contains(e.historyText(taskID), `"outcome":"continues"`)
+	})
+	if hist := e.historyText(taskID); strings.Contains(hist, "upstream-text-") {
+		t.Fatalf("the upstream's status text is in the task's workflow history")
 	}
 }
 
@@ -1209,5 +1385,180 @@ func TestDispatchReattachesDirect(t *testing.T) {
 	a, err := log.GetAttempt(ctx, id, 1)
 	if err != nil || a.Outcome != store.OutcomeCompleted || a.ReplicaID != "r-resume" {
 		t.Fatalf("the attempt: %+v %v", a, err)
+	}
+}
+
+// directTask creates, on the env's service, an MCP task with its work item (the client's tools/call of the tool,
+// id 7, a client that declared elicitation) and its first attempt on the direct backend, as the gate's create and
+// prepare do: what a Dispatcher's Dispatch needs.
+func directTask(t *testing.T, e *env, log *store.Log, tool string) (uuid.UUID, uuid.UUID, store.Owner) {
+	t.Helper()
+	ctx := context.Background()
+	svc, err := log.LoadService(ctx, e.team, "research")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.Must(uuid.NewV7())
+	owner := store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
+	nt, err := store.NewMCPTask(id, svc, owner, store.StateSubmitted, nil, "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.CreateTask(ctx, nil, nt); err != nil {
+		t.Fatal(err)
+	}
+	wid := uuid.Must(uuid.NewV7())
+	work := &store.MCPWork{Request: []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"` + tool + `"}}`), Tool: tool,
+		RequestID: json.RawMessage(`7`), Version: "2025-11-25", Session: strings.Repeat("1f", 32),
+		ClientCapabilities: json.RawMessage(`{"elicitation":{}}`)}
+	if err := log.InsertWorkItem(ctx, nil, store.WorkItem{ID: wid, TaskID: id, Kind: store.WorkExecute, Payload: store.WorkPayload{Owner: owner, MCP: work}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.BeginAttempt(ctx, store.Attempt{TaskID: id, N: 1, Backend: store.BackendDirect}); err != nil {
+		t.Fatal(err)
+	}
+	return id, wid, owner
+}
+
+// A re-attach (D42) does not write upstream again a client's answer the lost dispatch delivered: the delivery is
+// recorded under the fence (store.Log.MarkAnswerDelivered), and the client's one answer reaches the upstream once
+// (§11.5 step 5).
+func TestDispatchReattachDoesNotResendAnswers(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{toolWith("research", "optional")}
+	up.TaskRun = func(task *mcptest.Task) {
+		if _, ok := task.Ask("elicitation/create", map[string]any{"message": "which?"}, 30*time.Second); !ok {
+			task.Fail(&mcptest.RPCError{Code: -32603, Message: "no answer"})
+			return
+		}
+		time.Sleep(2 * time.Second)
+		task.Complete(json.RawMessage(`{"content":[{"type":"text","text":"finished"}],"isError":false}`))
+	}
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	e.service("research", srv.URL, nil)
+	log := store.NewLog(e.pool)
+	id, wid, owner := directTask(t, e, log, "research")
+	logs := &logBuf{}
+	d1 := &Dispatcher{ReplicaID: "r1", Log: log, Registry: relay.NewRegistry(), Services: e.svcs, minPoll: 50 * time.Millisecond,
+		Logger: slog.New(slog.NewTextHandler(logs, nil))}
+	ctx1, cancel1 := context.WithCancel(ctx)
+	defer cancel1()
+	done1 := make(chan lifecycle.DispatchResult, 1)
+	go func() {
+		res, _ := d1.Dispatch(ctx1, lifecycle.DispatchInput{TaskID: id.String(), N: 1, WorkItemID: wid.String()})
+		done1 <- res
+	}()
+	var seq int64
+	eventually(t, 15*time.Second, "the input request is logged", func() bool {
+		_ = e.pool.QueryRow(ctx, `select coalesce(max(seq), 0) from kontra.task_events where task_id = $1 and kind = 'input_request'`, id).Scan(&seq)
+		return seq > 0
+	})
+	resp := `{"jsonrpc":"2.0","id":"` + store.GateRequestID(id, seq) + `","result":{"action":"accept","content":{}}}`
+	if _, ok, err := log.AppendInputResponse(ctx, store.Scope{TenantID: e.team, Service: "research", BuyerID: owner.BuyerID}, id, seq, json.RawMessage(resp)); err != nil || !ok {
+		t.Fatalf("the answer: %v %v", ok, err)
+	}
+	eventually(t, 10*time.Second, "the first dispatch wrote the answer upstream", func() bool {
+		return up.Answers("1001") == 1 && strings.Contains(logs.String(), "an answer to an input request was written upstream")
+	})
+	cancel1() // the dispatch's context is lost (its replica died); the attempt is re-attached to
+	if res := <-done1; res.Outcome != lifecycle.DispatchContextLost {
+		t.Fatalf("the lost dispatch: %+v", res)
+	}
+	d2 := &Dispatcher{ReplicaID: "r2", Log: log, Registry: relay.NewRegistry(), Services: e.svcs, minPoll: 50 * time.Millisecond}
+	dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	res, err := d2.Dispatch(dctx, lifecycle.DispatchInput{TaskID: id.String(), N: 1, WorkItemID: wid.String(), Resume: true})
+	if err != nil || res.Outcome != lifecycle.DispatchTerminal {
+		t.Fatalf("the resume: %+v %v", res, err)
+	}
+	if row, err := log.Load(ctx, id); err != nil || row.State != store.StateCompleted {
+		t.Fatalf("the task: %v %v", row.State, err)
+	}
+	if n := up.Answers("1001"); n != 1 {
+		t.Fatalf("the client's one answer reached the upstream %d times", n)
+	}
+}
+
+// limits.task_bytes bounds the upstream's result too (spec §6.6: each logged event's whole encoding): a result
+// that would carry the task past it is not logged, and the task fails upstream_error (§11.8 case 2).
+func TestDispatchTaskBytesBoundTheResult(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{toolWith("research", "optional")}
+	big := strings.Repeat("r", 64<<10)
+	up.TaskRun = func(task *mcptest.Task) {
+		res, _ := json.Marshal(map[string]any{"content": []any{map[string]any{"type": "text", "text": big}}, "isError": false})
+		task.Complete(res)
+	}
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	e.service("research", srv.URL, nil)
+	log := store.NewLog(e.pool)
+	id, wid, _ := directTask(t, e, log, "research")
+	d := &Dispatcher{ReplicaID: "r1", Log: log, Registry: relay.NewRegistry(), Services: e.svcs, minPoll: 50 * time.Millisecond,
+		TaskBytes: 16 << 10}
+	dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	res, err := d.Dispatch(dctx, lifecycle.DispatchInput{TaskID: id.String(), N: 1, WorkItemID: wid.String()})
+	if err != nil || res.Outcome != lifecycle.DispatchTerminal {
+		t.Fatalf("the dispatch: %+v %v", res, err)
+	}
+	row, err := log.Load(ctx, id)
+	if err != nil || row.State != store.StateFailed || row.Snapshot.Metadata[store.MetaFailure] != string(store.ReasonUpstreamError) {
+		t.Fatalf("the task: %v %+v %v", row.State, row.Snapshot.Metadata, err)
+	}
+	var n, stored int
+	if err := e.pool.QueryRow(ctx, `select count(*) filter (where kind = 'result'), coalesce(sum(length(payload::text)), 0)
+		from kontra.task_events where task_id = $1`, id).Scan(&n, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 || stored > 16<<10 {
+		t.Fatalf("a result past limits.task_bytes was logged: %d result rows, %d bytes stored", n, stored)
+	}
+	if calls := e.calls("research"); len(calls) != 1 || calls[0].isError == nil || !*calls[0].isError {
+		t.Fatalf("calls rows: %+v", calls)
+	}
+}
+
+// After the first upstream task id, a response the node wrote itself other than full (here target_unreachable)
+// fails the task tunnel_lost at once, while the session is still held (spec §6.4): it is not made again for 30 s
+// as a poll that cannot reach the upstream is.
+func TestDurableTaskNodeAnswerAfterFirstID(t *testing.T) {
+	e := newTaskEnv(t)
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{toolWith("research", "optional")}
+	up.TaskRun = func(task *mcptest.Task) { task.Status("working", "a long job") }
+	var unreachable atomic.Bool
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if unreachable.Load() && r.Method == http.MethodPost {
+			w.Header().Set("Kontra-Node", "target_unreachable")
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		up.ServeHTTP(w, r)
+	})
+	e.service("research", "", nil)
+	r := e.replica("a", replicaOpts{})
+	e.node(r, h, "research")
+	key, _ := e.apiKey("buyer")
+	c := newTaskClient(t, key, r.url+"/mcp/research")
+	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
+	eventually(t, 15*time.Second, "the dispatch has the upstream task", func() bool {
+		return e.count(`select count(*) from kontra.attempts where task_id = $1 and upstream_task_id is not null`, taskID) == 1 &&
+			status(t, c.tasks("tasks/get", taskID, 8)) == "working"
+	})
+	unreachable.Store(true)
+	began := time.Now()
+	eventually(t, 15*time.Second, "the task failed", func() bool { return status(t, c.tasks("tasks/get", taskID, 9)) == "failed" })
+	// The replica's dispatcher waits failFor (5 s) before it gives up on a poll that cannot reach the upstream.
+	if took := time.Since(began); took > 3*time.Second {
+		t.Fatalf("the task failed %v after the node's own answers began: they were made again", took)
+	}
+	if g := c.tasks("tasks/get", taskID, 10); !strings.Contains(string(g.body), `"sh.kontra/failure":"tunnel_lost"`) {
+		t.Fatalf("tasks/get: %s", g.body)
 	}
 }

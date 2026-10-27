@@ -249,7 +249,7 @@ func (s *Server) serveTask(w http.ResponseWriter, hr *http.Request, req Request)
 			return true
 		}
 		s.mu.Lock()
-		ignore := s.IgnoreCancel
+		ignore, delay := s.IgnoreCancel, s.CancelAnswerDelay
 		s.mu.Unlock()
 		t.mu.Lock()
 		if terminal(t.status) {
@@ -262,6 +262,9 @@ func (s *Server) serveTask(w http.ResponseWriter, hr *http.Request, req Request)
 		}
 		t.mu.Unlock()
 		t.notify()
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 		res, _ := json.Marshal(t.object())
 		s.reply(w, req, Reply{Result: res}, "")
 		return true

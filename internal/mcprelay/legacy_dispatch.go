@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -372,18 +373,25 @@ type streamMsg struct {
 // legacyRun is one 2025-11-25 dispatch: it owns the attempt's upstream session and is the only writer of the
 // task's log while it runs (a client's answers aside, which it tails).
 type legacyRun struct {
-	d       *Dispatcher
-	log     *slog.Logger
-	key     relay.Key
-	taskID  uuid.UUID
-	n       int
-	fence   *store.Fence
-	row     *store.TaskRow
-	work    *store.MCPWork
-	attempt *store.Attempt
-	link    *mcpLink
-	sealed  bool
-	resume  bool // the attempt has its upstream task: re-attach to it (D42)
+	d        *Dispatcher
+	log      *slog.Logger
+	key      relay.Key
+	taskID   uuid.UUID
+	n        int
+	fence    *store.Fence
+	row      *store.TaskRow
+	workItem uuid.UUID
+	work     *store.MCPWork
+	answered []int64 // the input_response seqs an earlier dispatch of the attempt wrote upstream (D42)
+	attempt  *store.Attempt
+	link     *mcpLink
+	sealed   bool
+	resume   bool // the attempt has its upstream task: re-attach to it (D42)
+
+	// cancelling is set by forward_cancel on this replica (Dispatcher.ForwardCancel) before it sends tasks/cancel:
+	// the workflow writes the task's terminal event then (canceled, D57; failed: timeout, §6.5), so the run writes
+	// none of its own from that moment, whatever the upstream does about the cancel (holdForWorkflow).
+	cancelling *atomic.Bool
 
 	upTask   string // the upstream task id
 	interval time.Duration
@@ -393,7 +401,7 @@ type legacyRun struct {
 	}
 	logged     map[string]int64          // an upstream request id (mcpwire.IDKey) → the seq it was logged at
 	upstreamID map[int64]json.RawMessage // an input request's seq → the upstream's id for it
-	sent       map[int64]bool            // input_response seqs written upstream by this dispatch
+	sent       map[int64]bool            // input_response seqs written upstream (by this dispatch, or recorded by one before it)
 	bytes      int64
 	nextN      int
 	msgs       chan streamMsg
@@ -421,6 +429,9 @@ func (r *legacyRun) gateID() string { return r.taskID.String() }
 func (r *legacyRun) run(ctx context.Context) (res lifecycle.DispatchResult) {
 	r.msgs = make(chan streamMsg, 64)
 	r.logged, r.upstreamID, r.sent = map[string]int64{}, map[int64]json.RawMessage{}, map[int64]bool{}
+	for _, seq := range r.answered {
+		r.sent[seq] = true
+	}
 	r.interval = time.Second
 	defer func() {
 		if res.Outcome != "" && res.Outcome != lifecycle.DispatchContextLost {
@@ -633,6 +644,9 @@ func (r *legacyRun) loop(ctx context.Context) lifecycle.DispatchResult {
 		poll.Reset(0)
 	}
 	r.sendAnswers(ctx)
+	if r.stop != nil {
+		return *r.stop
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -687,6 +701,11 @@ func (r *legacyRun) poll(ctx context.Context) (lifecycle.DispatchResult, bool) {
 		return r.pollFailed(ctx, err)
 	}
 	r.failing = time.Time{}
+	if err := mcpwire.CheckTask(m.Result); err != nil {
+		// The members read here are checked here, not in every upstream message (mcpwire.CheckTask).
+		r.log.Warn("strict decoding refused the upstream's tasks/get answer", "level", "result")
+		return r.fail(ctx, store.ReasonUpstreamError, "")
+	}
 	status, _ := stringMember(m.Result, "status")
 	st, ok := store.StateFromMCP(status)
 	if !ok {
@@ -707,7 +726,10 @@ func (r *legacyRun) poll(ctx context.Context) (lifecycle.DispatchResult, bool) {
 	return lifecycle.DispatchResult{}, false
 }
 
-// pollFailed is the table for an exchange after the first upstream task id that failed (§6.4, §11.5 step 4).
+// pollFailed is the table for an exchange after the first upstream task id that failed (§6.4, §11.5 step 4): a
+// tunnel stream that could not be opened, and a response the node wrote itself other than full, fail the task
+// tunnel_lost at once (§6.4's rows for an upstream task id that exists), whether or not this replica still holds
+// the session; full, and what §6.4's GetTask rule names (unreachable, 408/429), are made again for 30 s first.
 func (r *legacyRun) pollFailed(ctx context.Context, err error) (lifecycle.DispatchResult, bool) {
 	if ctx.Err() != nil {
 		return lifecycle.DispatchResult{}, true
@@ -721,8 +743,8 @@ func (r *legacyRun) pollFailed(ctx context.Context, err error) (lifecycle.Dispat
 		return r.fail(ctx, store.ReasonUpstreamError, "")
 	case xe.class == classSealed:
 		return r.fail(ctx, store.ReasonSealedRejected, "")
-	case xe.class == classTunnelLost && !r.link.held():
-		r.log.Info("the attempt's tunnel session was lost after the first upstream task id")
+	case xe.class == classTunnelLost:
+		r.log.Info("the attempt's tunnel exchange was lost after the first upstream task id", "error", xe.Error(), "session_held", r.link.held())
 		return r.fail(ctx, store.ReasonTunnelLost, "")
 	}
 	now := time.Now()
@@ -733,7 +755,7 @@ func (r *legacyRun) pollFailed(ctx context.Context, err error) (lifecycle.Dispat
 		return lifecycle.DispatchResult{}, false
 	}
 	switch xe.class {
-	case classFull, classTunnelLost:
+	case classFull:
 		return r.fail(ctx, store.ReasonTunnelLost, "")
 	case classThrottled:
 		return r.fail(ctx, store.ReasonUpstreamError, "")
@@ -765,8 +787,9 @@ func (r *legacyRun) terminal(ctx context.Context, st store.State) (lifecycle.Dis
 	return r.finishResult(ctx, m, raw)
 }
 
-// cancelledUpstream ends the task canceled when its upstream task was cancelled (by a cancel the gate forwarded,
-// whose canceled the workflow writes first, or by the upstream itself): the task's calls row is an error (§11.8).
+// cancelledUpstream ends the task canceled when the upstream cancelled its task itself: the task's calls row is an
+// error (§11.8). After a cancel the gate forwarded, the run writes nothing of the kind: the workflow writes the
+// client's canceled (append's hold, D57).
 //
 // SPEC-CONFLICT (relay §11.8 case 3, §11.5 step 6): case 3's data names who cancelled ("client" | "declined" |
 // "quote_expired"), and step 6 fetches the upstream's tasks/result at any terminal status; an upstream that cancels
@@ -775,7 +798,7 @@ func (r *legacyRun) terminal(ctx context.Context, st store.State) (lifecycle.Dis
 // "cancelled is canceled"): the task ends canceled with no kontra.canceled, whose tasks/result is -32603 "task
 // cancelled" without data.
 func (r *legacyRun) cancelledUpstream(ctx context.Context) (lifecycle.DispatchResult, bool) {
-	err := r.append(ctx, func(row *store.TaskRow) (store.Write, error) {
+	err := r.append(ctx, gateWrite, func(row *store.TaskRow) (store.Write, error) {
 		w, err := store.MCPStatusWrite(row, store.StateCanceled, "the service cancelled the task", nil)
 		if err != nil {
 			return store.Write{}, err
@@ -805,7 +828,7 @@ func (r *legacyRun) finishResult(ctx context.Context, m *mcpwire.Message, raw []
 	if isErr {
 		state = store.StateFailed
 	}
-	err = r.append(ctx, func(row *store.TaskRow) (store.Write, error) {
+	err = r.append(ctx, upstreamWrite, func(row *store.TaskRow) (store.Write, error) {
 		w, err := store.MCPResultWrite(row, state, "result", res, nil)
 		if err != nil {
 			return store.Write{}, err
@@ -813,6 +836,10 @@ func (r *legacyRun) finishResult(ctx context.Context, m *mcpwire.Message, raw []
 		w.Call, err = r.d.Log.MCPCall(ctx, r.taskID, isErr, int64(len(res)))
 		return w, err
 	})
+	if errors.Is(err, errOverTaskBytes) {
+		r.log.Warn("the upstream's result would carry the task past limits.task_bytes; it is not logged")
+		return r.fail(ctx, store.ReasonUpstreamError, "")
+	}
 	return r.ended(err, "")
 }
 
@@ -831,7 +858,7 @@ func (r *legacyRun) finishError(ctx context.Context, xe *exchangeError) (lifecyc
 		}
 		raw = b
 	}
-	err := r.append(ctx, func(row *store.TaskRow) (store.Write, error) {
+	err := r.append(ctx, upstreamWrite, func(row *store.TaskRow) (store.Write, error) {
 		w, err := store.MCPResultWrite(row, store.StateFailed, "error", raw, map[string]any{store.MetaFailure: string(store.ReasonUpstreamError)})
 		if err != nil {
 			return store.Write{}, err
@@ -839,27 +866,32 @@ func (r *legacyRun) finishError(ctx context.Context, xe *exchangeError) (lifecyc
 		w.Call, err = r.d.Log.MCPCall(ctx, r.taskID, true, int64(len(raw)))
 		return w, err
 	})
+	if errors.Is(err, errOverTaskBytes) {
+		r.log.Warn("the upstream's error would carry the task past limits.task_bytes; it is not logged")
+		return r.fail(ctx, store.ReasonUpstreamError, "")
+	}
 	return r.ended(err, string(store.ReasonUpstreamError))
 }
 
-// fail logs `failed: <reason>` (§11.8 case 2) under the fence.
+// fail logs `failed: <reason>` (§11.8 case 2) under the fence: the gate's own few bytes, written even past
+// limits.task_bytes (the failure that ends a task that reached it).
 func (r *legacyRun) fail(ctx context.Context, reason store.FailureReason, text string) (lifecycle.DispatchResult, bool) {
-	err := r.append(ctx, func(row *store.TaskRow) (store.Write, error) {
+	err := r.append(ctx, gateWrite, func(row *store.TaskRow) (store.Write, error) {
 		return failWrite(ctx, r.d.Log, row, reason, text)
 	})
 	return r.ended(err, string(reason))
 }
 
 // ended is the dispatch's result after its terminal write: terminal when it committed, or when the task had ended
-// already (the workflow's cancel or timeout); a lost context when the fence refused it or the store failed (the
-// workflow follows the attempt again).
+// already (the workflow's cancel or timeout); a lost context when the fence refused it, the dispatch was stopped
+// while it waited for the workflow's terminal event, or the store failed (the workflow follows the attempt again).
 func (r *legacyRun) ended(err error, reason string) (lifecycle.DispatchResult, bool) {
 	switch {
 	case err == nil:
 		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchTerminal, Reason: reason}, true
 	case errors.Is(err, errTaskEnded):
 		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchTerminal}, true
-	case errors.Is(err, store.ErrFenced):
+	case errors.Is(err, store.ErrFenced), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return lifecycle.DispatchResult{}, true
 	}
 	r.log.Warn("the task's terminal event could not be written; the attempt is followed again", "error", err)
@@ -869,25 +901,82 @@ func (r *legacyRun) ended(err error, reason string) (lifecycle.DispatchResult, b
 // errOverTaskBytes is an event that would carry the task past limits.task_bytes (spec §6.6).
 var errOverTaskBytes = errors.New("mcprelay: the task's bytes would pass limits.task_bytes")
 
-// append writes build's event under the fence (appendFenced), counted against limits.task_bytes: an event that
-// would pass it is not written, and the task fails upstream_error (§6.6).
-func (r *legacyRun) append(ctx context.Context, build func(row *store.TaskRow) (store.Write, error)) error {
-	var n int
-	err := appendFenced(context.WithoutCancel(ctx), r.d.Log, r.fence, func(row *store.TaskRow) (store.Write, error) {
-		w, err := build(row)
-		if err != nil {
-			return store.Write{}, err
+// errCancelling is a terminal write of the run's own after forward_cancel marked it (legacyRun.cancelling).
+var errCancelling = errors.New("mcprelay: a cancel was forwarded; the workflow writes the task's end")
+
+// writeSource says what an event of the run carries: upstreamWrite, what the upstream sent (a status message, a
+// result, an error), counted against limits.task_bytes whatever the state it writes, a terminal one included
+// (§6.6: each logged event's whole encoding, as the A2A relay counts it); gateWrite, the gate's own few bytes
+// (failed: <reason>, the upstream's cancelled), never refused by it, since that failure is how a task that reached
+// the limit ends.
+type writeSource bool
+
+const (
+	upstreamWrite writeSource = false
+	gateWrite     writeSource = true
+)
+
+// append writes build's event under the fence (appendFenced). An upstream event that would carry the task past
+// limits.task_bytes is not written (errOverTaskBytes): its caller fails the task upstream_error (§6.6). Once a
+// forward_cancel marked the run, a terminal event of its own is not written either: the run waits for the
+// workflow's (holdForWorkflow), and writes its own only when none came.
+func (r *legacyRun) append(ctx context.Context, src writeSource, build func(row *store.TaskRow) (store.Write, error)) error {
+	held := false
+	for {
+		var n int
+		err := appendFenced(context.WithoutCancel(ctx), r.d.Log, r.fence, func(row *store.TaskRow) (store.Write, error) {
+			w, err := build(row)
+			if err != nil {
+				return store.Write{}, err
+			}
+			if w.State.Terminal() && !held && r.cancelling != nil && r.cancelling.Load() {
+				return store.Write{}, errCancelling
+			}
+			n = len(w.Payload)
+			if src == upstreamWrite && r.bytes+int64(n) > r.d.taskBytes() {
+				return store.Write{}, errOverTaskBytes
+			}
+			return w, nil
+		})
+		if errors.Is(err, errCancelling) {
+			if err := r.holdForWorkflow(ctx); err != nil {
+				return err
+			}
+			held = true
+			continue
 		}
-		n = len(w.Payload)
-		if r.bytes+int64(n) > r.d.taskBytes() && !w.State.Terminal() {
-			return store.Write{}, errOverTaskBytes
+		if err == nil {
+			r.bytes += int64(n)
 		}
-		return w, nil
-	})
-	if err == nil {
-		r.bytes += int64(n)
+		return err
 	}
-	return err
+}
+
+// holdForWorkflow waits, once forward_cancel marked the run, for the workflow's terminal event instead of writing
+// the run's own (spec §11.6, D57: the gate writes canceled whatever the upstream answered; the upstream's own
+// reaction to the cancel, its cancelled status or an error ending its tasks/result, is not the task's end). It is
+// errTaskEnded once the task is terminal, ctx's error when the dispatch is stopped first (the workflow cancels it
+// after its write), and nil when neither happened within cancelHold: the workflow wrote nothing, and the run writes
+// its own end after all.
+func (r *legacyRun) holdForWorkflow(ctx context.Context) error {
+	r.log.Info("a cancel was forwarded: the dispatch leaves the task's end to the workflow")
+	until := time.NewTimer(r.d.cancelHoldFor())
+	defer until.Stop()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if row, err := r.d.Log.Load(ctx, r.taskID); err == nil && row.State.Terminal() {
+			return errTaskEnded
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-until.C:
+			r.log.Warn("the workflow wrote no end within the hold after a forwarded cancel; the dispatch writes its own")
+			return nil
+		case <-tick.C:
+		}
+	}
 }
 
 // logStatus logs a status change of the upstream task as a status event (§11.5 step 4), in tasks.state's
@@ -896,7 +985,7 @@ func (r *legacyRun) logStatus(ctx context.Context, st store.State, text string) 
 	if st == r.last.state && text == r.last.text {
 		return lifecycle.DispatchResult{}, false
 	}
-	err := r.append(ctx, func(row *store.TaskRow) (store.Write, error) {
+	err := r.append(ctx, upstreamWrite, func(row *store.TaskRow) (store.Write, error) {
 		return store.MCPStatusWrite(row, st, text, nil)
 	})
 	switch {
@@ -1093,10 +1182,12 @@ func (r *legacyRun) onStream(ctx context.Context, sm streamMsg) (lifecycle.Dispa
 	return lifecycle.DispatchResult{}, false
 }
 
-// sendAnswers writes upstream every input_response the task has logged and this dispatch has not written (§11.5
-// step 5): the client's response as it arrived, its JSON-RPC id the upstream's original id and its related-task
-// key the upstream task id; a sealed envelope in it untouched (D175). An answer that could not be delivered is
-// tried again at the next wake.
+// sendAnswers writes upstream every input_response the task has logged and no dispatch of the attempt has written
+// (§11.5 step 5): the client's response as it arrived, its JSON-RPC id the upstream's original id and its
+// related-task key the upstream task id; a sealed envelope in it untouched (D175). An answer that could not be
+// delivered is tried again at the next wake; one the upstream took (or refused) is recorded under the fence on the
+// task's work item (store.Log.MarkAnswerDelivered), so that a re-attach (D42) does not write it again. A tunnel
+// stream that could not be opened, or a node's own answer other than full, fails the task tunnel_lost (§6.4).
 func (r *legacyRun) sendAnswers(ctx context.Context) {
 	resps, err := r.d.Log.InputResponses(ctx, r.taskID, 0)
 	if err != nil {
@@ -1132,15 +1223,29 @@ func (r *legacyRun) sendAnswers(ctx context.Context) {
 		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err = r.link.post(pctx, body)
 		cancel()
+		delivered := err == nil
 		if err != nil {
-			if xe := asExchange(err); xe.class == classUnreachable || xe.class == classFull || xe.class == classThrottled ||
-				(xe.class == classTunnelLost && r.link.held()) {
+			switch xe := asExchange(err); xe.class {
+			case classUnreachable, classFull, classThrottled:
 				continue
+			case classTunnelLost:
+				r.log.Info("the attempt's tunnel exchange was lost writing an answer upstream", "seq", a.Seq, "error", xe.Error())
+				res, _ := r.fail(ctx, store.ReasonTunnelLost, "")
+				r.stop = &res
+				return
 			}
 			r.log.Warn("an answer to an input request was refused by the upstream", "seq", a.Seq, "error", err)
-		} else {
-			r.log.Info("an answer to an input request was written upstream", "seq", a.Seq, "request_seq", a.RequestSeq)
 		}
 		r.sent[a.Seq] = true
+		if err := r.d.Log.MarkAnswerDelivered(context.WithoutCancel(ctx), r.fence, r.workItem, a.Seq); err != nil {
+			if errors.Is(err, store.ErrFenced) {
+				r.stop = &lifecycle.DispatchResult{}
+				return
+			}
+			r.log.Warn("an answer's delivery was not recorded; a re-attach may write it again", "seq", a.Seq, "error", err)
+		}
+		if delivered {
+			r.log.Info("an answer to an input request was written upstream", "seq", a.Seq, "request_seq", a.RequestSeq)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -432,6 +433,77 @@ func (l *Log) MCPWorkItem(ctx context.Context, taskID uuid.UUID) (*MCPWork, erro
 		return nil, fmt.Errorf("store: task %s's work item is not an MCP call: %w", taskID, ErrWorkItemNotFound)
 	}
 	return wi.Payload.MCP, nil
+}
+
+// markAnswerSQL writes a work item's payload under a dispatch's fence: only while attempt n is the task's latest,
+// open, and holds the dispatch id (the same check, and the same FOR SHARE, as appendSQL's and markDeliveredSQL's).
+const markAnswerSQL = `
+update kontra.work_items w set payload = $5::json
+ where w.id = $1 and w.task_id = $2
+   and exists (
+	select 1 from kontra.attempts a
+	 where a.task_id = w.task_id and a.n = $3 and a.ended_at is null and a.dispatch_id = $4
+	   and not exists (select 1 from kontra.attempts b where b.task_id = a.task_id and b.n > a.n)
+	   for share of a)`
+
+// MarkAnswerDelivered records, under the dispatch's fence f, that the MCP task's input_response at seq was written
+// upstream (spec §11.5 step 5): seq joins the work item's AnswersDelivered, which a later dispatch of the attempt
+// (a re-attach, D42) does not write upstream again. The dispatch records it once the upstream took the answer; as
+// for a follow-up (§6.4, D81), an answer the upstream took whose record was lost with its replica is written again
+// by the re-attach, the one case in which the upstream sees it twice.
+//
+// A seq recorded already is not an error. A fence that no longer holds is ErrFenced (and the fence records it); an
+// item that is missing or another task's is ErrWorkItemNotFound. Every other member of the payload keeps its value.
+func (l *Log) MarkAnswerDelivered(ctx context.Context, f *Fence, workItemID uuid.UUID, seq int64) error {
+	if f == nil {
+		return errors.New("store: an answer's delivery is recorded by its dispatch, under its fence")
+	}
+	ctx, cancel := l.writeCtx(ctx)
+	defer cancel()
+	err := l.inTx(ctx, func(tx pgx.Tx) error {
+		var raw []byte
+		err := tx.QueryRow(ctx, `select payload from kontra.work_items where id = $1 and task_id = $2 for update`,
+			workItemID, f.TaskID).Scan(&raw)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("store: work item %s: %w", workItemID, ErrWorkItemNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return fmt.Errorf("store: decode work item payload: %w", err)
+		}
+		var seqs []int64
+		if v, ok := payload[answersDeliveredKey]; ok {
+			if err := json.Unmarshal(v, &seqs); err != nil {
+				return fmt.Errorf("store: decode work item payload: %w", err)
+			}
+		}
+		if slices.Contains(seqs, seq) {
+			return nil
+		}
+		if payload[answersDeliveredKey], err = json.Marshal(append(seqs, seq)); err != nil {
+			return err
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, markAnswerSQL, workItemID, f.TaskID, f.N, f.DispatchID, b)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			f.markFenced()
+			return fmt.Errorf("store: task %s attempt %d: %w", f.TaskID, f.N, ErrFenced)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrFenced) && !errors.Is(err, ErrWorkItemNotFound) {
+		return fmt.Errorf("store: delivery of the answer at %d of task %s: %w", seq, f.TaskID, err)
+	}
+	return err
 }
 
 // SetUpstreamSession records the MCP session the dispatch opened on its attempt (attempts.upstream_session, spec

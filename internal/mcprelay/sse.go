@@ -41,8 +41,13 @@ func (s *gateStream) start() error {
 	return s.flush()
 }
 
-// event writes one event: its id and the message as data, one data line per line of the message (a stored
-// message keeps the bytes its writer sent, line breaks included).
+// lineBreaks are the line ends of an event stream (WHATWG SSE: CRLF, a lone CR, a lone LF).
+var lineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+
+// event writes one event: its id and the message as data, one data line per line of the message. A stored message
+// keeps the bytes its writer sent, line breaks included; a JSON message has them only as white space between
+// tokens (a string escapes them), so splitting it at every one an SSE parser ends a line at (a lone CR too) and the
+// client's joining the data lines with LF gives the same JSON value.
 func (s *gateStream) event(id string, msg []byte) error {
 	if err := s.start(); err != nil {
 		return err
@@ -51,9 +56,9 @@ func (s *gateStream) event(id string, msg []byte) error {
 	b.WriteString("id: ")
 	b.WriteString(id)
 	b.WriteByte('\n')
-	for _, line := range strings.Split(strings.ReplaceAll(string(msg), "\r\n", "\n"), "\n") {
+	for _, line := range strings.Split(lineBreaks.Replace(string(msg)), "\n") {
 		b.WriteString("data: ")
-		b.WriteString(strings.TrimSuffix(line, "\r"))
+		b.WriteString(line)
 		b.WriteByte('\n')
 	}
 	b.WriteByte('\n')

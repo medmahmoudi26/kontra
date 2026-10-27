@@ -43,15 +43,20 @@ const (
 // follow-up turn's own rows from the previous turn's without reading the log's payloads (TurnStatusLogged,
 // D81). It is kept in work_items.payload under a Kontra key and read in Go only (D49); 0 for an item stored
 // without it.
+//
+// AnswersDelivered are, for an MCP task's work item, the input_response seqs its dispatches wrote upstream
+// (MarkAnswerDelivered): a re-attach does not write them again (spec §11.5 step 5, D42). They are kept in the
+// payload under a Kontra key too, read in Go only (D49).
 type WorkItem struct {
-	ID          uuid.UUID
-	TaskID      uuid.UUID
-	Kind        WorkItemKind
-	Payload     WorkPayload
-	CreatedAt   time.Time
-	ConsumedAt  *time.Time
-	DeliveredAt *time.Time
-	TaskVersion int64
+	ID               uuid.UUID
+	TaskID           uuid.UUID
+	Kind             WorkItemKind
+	Payload          WorkPayload
+	CreatedAt        time.Time
+	ConsumedAt       *time.Time
+	DeliveredAt      *time.Time
+	TaskVersion      int64
+	AnswersDelivered []int64
 }
 
 // WorkPayload is the sanitized copy of a2a-go's workqueue.Payload: the request, and the call context with
@@ -116,12 +121,16 @@ func UnmarshalPayload(b []byte) (WorkPayload, error) {
 	return p, nil
 }
 
-// storedPayload is work_items.payload as stored: the payload, and the item's WorkItem.TaskVersion under a
-// key of Kontra's own (decoded in Go, never read in SQL, D49).
+// storedPayload is work_items.payload as stored: the payload, and the item's WorkItem.TaskVersion and
+// WorkItem.AnswersDelivered under keys of Kontra's own (decoded in Go, never read in SQL, D49).
 type storedPayload struct {
 	WorkPayload
-	TaskVersion int64 `json:"kontraTaskVersion,omitempty"`
+	TaskVersion      int64   `json:"kontraTaskVersion,omitempty"`
+	AnswersDelivered []int64 `json:"kontraAnswersDelivered,omitempty"`
 }
+
+// answersDeliveredKey is storedPayload.AnswersDelivered's key.
+const answersDeliveredKey = "kontraAnswersDelivered"
 
 // InsertWorkItem stores wi in tx (the same transaction that pre-creates a new task, or that reads a
 // follow-up's position), or on its own when tx is nil. CreatedAt, ConsumedAt and DeliveredAt are the
@@ -198,7 +207,7 @@ func (l *Log) LoadWorkItem(ctx context.Context, id, taskID uuid.UUID) (*WorkItem
 	if err := json.Unmarshal(payload, &sp); err != nil {
 		return nil, fmt.Errorf("store: decode work item payload: %w", err)
 	}
-	wi.Payload, wi.TaskVersion = sp.WorkPayload, sp.TaskVersion
+	wi.Payload, wi.TaskVersion, wi.AnswersDelivered = sp.WorkPayload, sp.TaskVersion, sp.AnswersDelivered
 	return &wi, nil
 }
 

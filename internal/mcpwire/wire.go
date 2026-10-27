@@ -193,14 +193,35 @@ var (
 		strictjson.Path{"result", "inputRequests", "*", "method"},
 		strictjson.Path{"result", "result", "isError"},
 		strictjson.Path{"error", "code"}, strictjson.Path{"error", "message"},
-		// The durable dispatch's reads of a 2025-11-25 upstream (M3 WP-06, §11.5): a CreateTaskResult's task, a
-		// tasks/get result (Result & Task), and the related-task key of a tasks/result answer, which it rewrites.
+		// The durable dispatch's reads of a 2025-11-25 upstream (M3 WP-06, §11.5): a CreateTaskResult's task, and the
+		// related-task key of a tasks/result answer, which it rewrites. The members of a Task it reads at result
+		// level (a tasks/get or tasks/cancel answer) are not here: every upstream message of every service would
+		// then refuse a lone variant of status or taskId in its result, which the gate reads only in the answers to
+		// its own task requests; CheckTask checks them there.
 		strictjson.Path{"result", "task", "taskId"}, strictjson.Path{"result", "task", "status"},
 		strictjson.Path{"result", "task", "statusMessage"}, strictjson.Path{"result", "task", "pollInterval"},
-		strictjson.Path{"result", "taskId"}, strictjson.Path{"result", "status"}, strictjson.Path{"result", "statusMessage"},
-		strictjson.Path{"result", "pollInterval"}, strictjson.Path{"result", "_meta", MetaRelatedTask},
+		strictjson.Path{"result", "_meta", MetaRelatedTask},
 	)
+	// taskReads are the members of a Task (MCP 2025-11-25's tasks/get result, "Result & Task", and tasks/cancel's)
+	// that the durable dispatch and forward_cancel read in the answers to their own requests (M3 WP-06, §11.5).
+	taskReads = []strictjson.Path{{"taskId"}, {"status"}, {"statusMessage"}, {"pollInterval"}}
 )
+
+// CheckTask checks result, the result of a message Parse accepted from an upstream that answers a tasks/get or a
+// tasks/cancel the gate sent, for a lone case variant of a Task member the gate reads there (taskId, status,
+// statusMessage, pollInterval): ErrAmbiguous, as Parse refuses one of the members it reads in every message
+// (D172; see clientReads). A pair of case variants at result level Parse has refused already. A result that is not
+// an object is the reader's to refuse, as for Parse's levels.
+func CheckTask(result json.RawMessage) error {
+	top, err := strictjson.Members(result)
+	if err != nil {
+		if errors.Is(err, strictjson.ErrNotObject) {
+			return nil
+		}
+		return wrapStrict(err)
+	}
+	return wrapStrict(strictjson.CheckReads(top, nil, taskReads))
+}
 
 // withLevels is reads plus each level of levels as a member read at its parent; a level ending in "*" (every
 // element of result.tools) names the member holding them (tools, read at result).

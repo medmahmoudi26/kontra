@@ -491,6 +491,41 @@ func TestParseLoneCaseVariants(t *testing.T) {
 	}
 }
 
+// The members of a Task the dispatch reads at result level (a tasks/get or tasks/cancel answer) are checked where it
+// reads them (CheckTask), not in every upstream message: a plain answer of any service with a lone case variant of
+// status, taskId, statusMessage or pollInterval in its result is relayed as §11 says unknown members are, while a
+// task answer with one is refused like a pair.
+func TestCheckTask(t *testing.T) {
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","id":1,"result":{"content":[],"Status":"ok"}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"contents":[],"TaskId":"x"}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"messages":[],"pollinterval":5}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"content":[],"StatusMessage":"m"}}`,
+	} {
+		if _, err := Parse([]byte(body), FromUpstream); err != nil {
+			t.Errorf("a plain upstream answer %s is refused: %v", body, err)
+		}
+	}
+	for _, result := range []string{
+		`{"taskId":"t","Status":"completed"}`, `{"TASKID":"t","status":"working"}`,
+		`{"taskId":"t","status":"working","statusmessage":"m"}`, `{"taskId":"t","status":"working","PollInterval":5}`,
+		"{\"taskId\":\"t\",\"\u017Ftatus\":\"completed\"}",
+	} {
+		if err := CheckTask(json.RawMessage(result)); !errors.Is(err, ErrAmbiguous) {
+			t.Errorf("CheckTask(%s) = %v, want ErrAmbiguous", result, err)
+		}
+	}
+	for _, result := range []string{`{"taskId":"t","status":"working","statusMessage":"m","pollInterval":5,"Other":1}`, `null`, `[]`} {
+		if err := CheckTask(json.RawMessage(result)); err != nil {
+			t.Errorf("CheckTask(%s) = %v, want nil", result, err)
+		}
+	}
+	// A pair is Parse's to refuse, at result level as at every level it decodes.
+	if _, err := Parse([]byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"working","STATUS":"completed"}}`), FromUpstream); !errors.Is(err, ErrAmbiguous) {
+		t.Errorf("a pair at result level: %v", err)
+	}
+}
+
 // TestReadsAreAtLevels: every member clientReads and upstreamReads name lies at the message object or at a level of
 // the spec's lists, and every level is read at its parent, so the lone-variant rule never widens the levels.
 func TestReadsAreAtLevels(t *testing.T) {

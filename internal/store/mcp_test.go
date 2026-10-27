@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -272,6 +273,56 @@ func TestMCPTerminalWrites(t *testing.T) {
 		if string(got) != string(proj) {
 			t.Errorf("%s: the fold differs from the projection", want)
 		}
+	}
+}
+
+// MarkAnswerDelivered records an answer's delivery on the task's work item under the dispatch's fence (spec §11.5
+// step 5, D42): LoadWorkItem returns the seqs, a seq recorded twice is kept once, every other member of the payload
+// is unchanged, and a fenced dispatch records nothing.
+func TestMarkAnswerDelivered(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	id, _ := e.mcpTask(StateSubmitted, "")
+	wid, err := e.log.FirstWorkItemID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := e.log.LoadWorkItem(ctx, wid, id)
+	if err != nil || len(before.AnswersDelivered) != 0 {
+		t.Fatalf("a new work item: %+v %v", before, err)
+	}
+	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendDirect}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := e.log.BeginDispatch(ctx, id, 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seq := range []int64{7, 9, 7} {
+		if err := e.log.MarkAnswerDelivered(ctx, f, wid, seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := e.log.LoadWorkItem(ctx, wid, id)
+	if err != nil || !slices.Equal(after.AnswersDelivered, []int64{7, 9}) {
+		t.Fatalf("the delivered answers: %+v %v", after, err)
+	}
+	if string(after.Payload.MCP.Request) != string(before.Payload.MCP.Request) || after.TaskVersion != before.TaskVersion ||
+		after.Payload.Owner.BuyerID != before.Payload.Owner.BuyerID || string(after.Payload.MCP.RequestID) != "7" {
+		t.Fatalf("the work item changed beyond its delivered answers:\n%+v\n%+v", before, after)
+	}
+	if err := e.log.MarkAnswerDelivered(ctx, f, uuid.Must(uuid.NewV7()), 11); !errors.Is(err, ErrWorkItemNotFound) {
+		t.Fatalf("an unknown work item: %v", err)
+	}
+	// A newer dispatch of the attempt fences the first: its record is refused, and nothing is written.
+	if _, err := e.log.BeginDispatch(ctx, id, 1, "r2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.MarkAnswerDelivered(ctx, f, wid, 11); !errors.Is(err, ErrFenced) || !f.Fenced() {
+		t.Fatalf("a fenced dispatch's record: %v %v", err, f.Fenced())
+	}
+	if wi, _ := e.log.LoadWorkItem(ctx, wid, id); !slices.Equal(wi.AnswersDelivered, []int64{7, 9}) {
+		t.Fatalf("a fenced record was written: %v", wi.AnswersDelivered)
 	}
 }
 

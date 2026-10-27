@@ -81,9 +81,12 @@ type Server struct {
 	// CreateTaskResult, whose work TaskRun does on a goroutine of its own.
 	TaskRun func(t *Task)
 	// TaskPollInterval is the pollInterval (ms) of its tasks (100 by default); IgnoreCancel answers tasks/cancel
-	// with the task as it is, which goes on.
-	TaskPollInterval int
-	IgnoreCancel     bool
+	// with the task as it is, which goes on. CancelAnswerDelay, when set, is how long tasks/cancel waits, its task
+	// already cancelled, before it answers: an upstream whose cancelled status (on tasks/get, or as the end of a
+	// pending tasks/result) reaches the gate before its answer to the cancel does.
+	TaskPollInterval  int
+	IgnoreCancel      bool
+	CancelAnswerDelay time.Duration
 	// Hold, when set, is called with each request before the double serves it (a test blocks in it to make the
 	// double slow, or hang, on a method).
 	Hold func(r Request)
