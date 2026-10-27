@@ -292,6 +292,11 @@ func (h *Handler) relayResponse(rq *request, resp *http.Response, o *relayOpts) 
 				// ext-sealed.md §6: the hosting node refused a sealed part of the call. The JSON-RPC error is relayed
 				// to the client, as the node wrote it (-32602 "sealed part rejected: <reason>", the reason only when
 				// it is one of §6's), the calls row says is_error, and the audit chain records the rejection.
+				// SPEC-CONFLICT (ext-sealed.md §6, tunnel.md §8.2, the M3 plan's "the JSON-RPC error is relayed"):
+				// §6's 400 is the node's answer to the gate, and nothing says which status the client gets; a
+				// Streamable HTTP client takes a 400 as a transport failure and may not read the body. The closest
+				// faithful behaviour: the error is relayed as a JSON-RPC error response with 200, the request's id
+				// and the session header, as the gate answers any other failed call.
 				reason := upstream.SealedRejectReason(resp.Header.Get(tunnel.HeaderSealedReject))
 				msg := "sealed part rejected"
 				if reason != "" {

@@ -22,9 +22,10 @@ import (
 // tools/call carries params.arguments = {} and params._meta["sh.kontra/sealed"] = {"v": 1, "envelope"}; the node
 // opens it, checks it and forwards the plaintext arguments. The job is the client's gate session (the preamble's
 // mcp_session, the session hash): its plain calls, and the tasks they create, whose upstream taskId is bound to it.
-// (§5 keys a job "by the gate task id; for plain MCP calls, by the session hash", while rule 4 holds one replyTo and
-// rk per session and the hiring node keeps one per-job key per MCP session, its plain calls and the tasks created in
-// it, §4: so a durable task is kept inside its session's job, with its gate task id and its input requests.)
+// SPEC-CONFLICT (ext-sealed.md §5 "Hosting node"): §5 keys a job "by the gate task id; for plain MCP calls, by the
+// session hash", while rule 4 holds one replyTo and rk per session and the hiring node keeps one per-job key per MCP
+// session, its plain calls and the tasks created in it (§4). The closest faithful behaviour: a durable task is kept
+// inside its session's job, with its gate task id and its input requests, so both keys find it.
 // The call's CallToolResult, and a bound task's tasks/result, are sealed into one kontra:sealed resource; a bound
 // task's statusMessage becomes "sealed" wherever the node reads one (a CreateTaskResult's task, tasks/get,
 // tasks/cancel, tasks/list, notifications/tasks/status); its upstream elicitation/create and
