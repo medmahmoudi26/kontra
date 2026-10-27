@@ -41,7 +41,9 @@ test-race:
 # ./cmd/kontra-gate as processes, a Temporal development server from $KONTRA_TEMPORAL_CLI (required: the
 # pinned CLI 1.9.1, Server 1.32.0) and a fresh database on $KONTRA_TEST_PG (a server) or, when it is unset,
 # a postgres:17-alpine container. One test at a time, never beside another integration run. The script
-# fails the run when any process or container the harness started outlives it. Extra arguments go to
-# `go test` (e.g. ARGS='-run TestRelayResume -v').
+# fails the run when any process or container the harness started outlives it. The M3 tests also need node and
+# npm (Node 22) for the stock MCP servers, installed from examples/mcp's locks: an install that fails fails the
+# test, unless KONTRA_E2E_OFFLINE=1 skips it (D189). Extra arguments go to `go test` (e.g.
+# ARGS='-run TestRelayResume -v').
 test-e2e:
 	GO="$(GO)" scripts/test_e2e.sh $(ARGS)
