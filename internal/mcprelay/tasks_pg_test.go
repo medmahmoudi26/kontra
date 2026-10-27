@@ -31,6 +31,7 @@ import (
 	tclient "go.temporal.io/sdk/client"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
@@ -39,6 +40,7 @@ import (
 	"kontra.sh/kontra/internal/relay"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/temporaltest"
+	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/tunnelgate"
 )
 
@@ -1560,5 +1562,76 @@ func TestDurableTaskNodeAnswerAfterFirstID(t *testing.T) {
 	}
 	if g := c.tasks("tasks/get", taskID, 10); !strings.Contains(string(g.body), `"sh.kontra/failure":"tunnel_lost"`) {
 		t.Fatalf("tasks/get: %s", g.body)
+	}
+}
+
+// A hosting node that refuses the client's answer to a sealed task's input request (ext-sealed.md §5 rule 4b, §6;
+// D175) is a sealed rejection like any other (M3 WP-10 pentest finding F-4): the audit chain records the node's
+// reason, the task fails sealed_rejected at once and is not retried, and the upstream never receives the answer.
+// Before the fix the dispatch logged the refusal as "refused by the upstream", marked the answer delivered and kept
+// the task at input_required, with no audit row, until its deadline.
+func TestDurableTaskSealedAnswerRefusedByTheNode(t *testing.T) {
+	e := newTaskEnv(t)
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{toolWith("research", "optional")}
+	const upEnvelope = `{"v":1,"envelope":"QUJDRA=="}`
+	up.TaskRun = func(task *mcptest.Task) {
+		msg := []byte(`{"jsonrpc":"2.0","id":4343,"method":"elicitation/create","params":{"_meta":{"io.modelcontextprotocol/related-task":{"taskId":"` +
+			task.ID + `"},"sh.kontra/sealed":` + upEnvelope + `}}}`)
+		if _, ok := task.AskRaw("4343", msg, 60*time.Second); !ok {
+			task.Fail(&mcptest.RPCError{Code: -32603, Message: "no answer"})
+			return
+		}
+		task.Complete(json.RawMessage(`{"content":[],"isError":false}`))
+	}
+	// The hosting node refuses every client response (the answer exchange) as rule 4b would: 400 sealed_rejected.
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		if r.Method == http.MethodPost && bytes.Contains(b, []byte(`"result"`)) && !bytes.Contains(b, []byte(`"method"`)) {
+			w.Header().Set(tunnel.HeaderNode, string(tunnel.NodeSealedRejected))
+			w.Header().Set(tunnel.HeaderSealedReject, "bad_header")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":4343,"error":{"code":-32602,"message":"sealed part rejected: bad_header"}}`)
+			return
+		}
+		up.ServeHTTP(w, r)
+	})
+	e.service("research", "", func(s *Service) { s.Sealed = true })
+	r := e.replica("a", replicaOpts{})
+	e.node(r, h, "research")
+	key, _ := e.apiKey("buyer")
+	c := newTaskClient(t, key, r.url+"/mcp/research")
+	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
+	res := c.stream(http.MethodPost, fmt.Sprintf(`{"jsonrpc":"2.0","id":9,"method":"tasks/result","params":{"taskId":%q}}`, taskID), nil)
+	ev := res.next(15 * time.Second)
+	gateID, _ := ev.msg(t)["id"].(string)
+	if rr := c.post(`{"jsonrpc":"2.0","id":"` + gateID + `","result":{"action":"accept","content":{"a":"plain"}}}`); rr.status != http.StatusAccepted {
+		t.Fatalf("the answer: %d", rr.status)
+	}
+	eventually(t, 15*time.Second, "the task failed", func() bool { return status(t, c.tasks("tasks/get", taskID, 10)) == "failed" })
+	if g := c.tasks("tasks/get", taskID, 11); !strings.Contains(string(g.body), `"sh.kontra/failure":"sealed_rejected"`) {
+		t.Fatalf("tasks/get: %s", g.body)
+	}
+	chain, err := audit.Verify(context.Background(), e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, a := range chain {
+		s := string(a.RowJCS)
+		if strings.Contains(s, `"event":"sealed.rejected"`) && strings.Contains(s, `"reason":"bad_header"`) && strings.Contains(s, taskID) {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("%d audit rows for the node's refusal of the answer, want 1", found)
+	}
+	if n := up.Answers("4343"); n != 0 {
+		t.Fatalf("the upstream received %d answers", n)
+	}
+	if n := e.count(`select count(*) from kontra.attempts where task_id = $1`, taskID); n != 1 {
+		t.Fatalf("%d attempts: a sealed rejection is never retried", n)
 	}
 }

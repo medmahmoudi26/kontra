@@ -1263,6 +1263,13 @@ func (r *legacyRun) sendAnswers(ctx context.Context) {
 				res, _ := r.fail(ctx, store.ReasonTunnelLost, "")
 				r.stop = &res
 				return
+			case classSealed:
+				// The hosting node refused the answer (ext-sealed.md §5 rule 4b): a sealed rejection like any other, audited
+				// and final (§6). The upstream never received it, and nothing else can answer the request: the client's one
+				// answer to its gate id was taken (relay.md §11.7). M3 WP-10 pentest finding F-4.
+				res, _ := r.sealedRejected(ctx, xe)
+				r.stop = &res
+				return
 			}
 			r.log.Warn("an answer to an input request was refused by the upstream", "seq", a.Seq, "error", err)
 		}
