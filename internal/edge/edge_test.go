@@ -433,6 +433,15 @@ func TestHSTSOnlyOnTLS(t *testing.T) {
 	if v := do(off, overTLS).Header().Get("Strict-Transport-Security"); v != "" {
 		t.Errorf("terminated_by_proxy (HSTS off) got %q", v)
 	}
+	// The closed default route's empty 404 is a response over TLS too (M3 WP-10 pentest finding F-2).
+	unknown := httptest.NewRequest("GET", "https://gate.example/admin", nil)
+	unknown.TLS = &tls.ConnectionState{}
+	if rec := do(on, unknown); rec.Code != 404 || rec.Header().Get("Strict-Transport-Security") != HSTS {
+		t.Errorf("closed route over TLS: %d, HSTS %q", rec.Code, rec.Header().Get("Strict-Transport-Security"))
+	}
+	if v := do(on, httptest.NewRequest("GET", "/admin", nil)).Header().Get("Strict-Transport-Security"); v != "" {
+		t.Errorf("closed route in plaintext got HSTS %q", v)
+	}
 }
 
 func TestJSONRPCErrorID(t *testing.T) {
