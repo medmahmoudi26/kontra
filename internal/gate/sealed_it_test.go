@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"iter"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
 	"kontra.sh/kontra/internal/auth"
@@ -23,8 +26,9 @@ import (
 )
 
 // Sealing through a real gate (spec/ext-sealed.md; sealed_no_plaintext's A2A case, sealed_unsealed_part): a stock
-// a2a-go client on a hiring node's 127.0.0.1 endpoint completes tasks, unary and streaming, to hello-exec hosted by
-// another node; the agent receives plaintext and the client reads plaintext, while Postgres (tasks, task_events)
+// a2a-go client on a hiring node's 127.0.0.1 endpoint completes tasks, unary and streaming, over JSON-RPC and
+// HTTP+JSON, to hello-exec hosted by another node, and answers an input-required question with a sealed follow-up
+// (§5 rule 3); the agent receives plaintext and the client reads plaintext, while Postgres (tasks, task_events)
 // and the bucket hold only envelopes. A 300 KiB part travels through the bucket as ciphertext both ways and opens on
 // the node once its whole age file is read. An unsealed part sent to the gate itself is refused InvalidRequest
 // before any task exists.
@@ -35,6 +39,12 @@ func TestSealedThroughTheGate(t *testing.T) {
 	services := `blobs: "` + bt.URL + `"
 services:
   vault:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+    sealed: true
+    task: { timeout: 10m, retries: 3 }
+  booth:
     kind: a2a
     backend: { tunnel: {} }
     allow: ["org:default"]
@@ -56,8 +66,13 @@ services:
 	if err != nil {
 		t.Fatal(err)
 	}
+	boothToken, err := enroll.NewStore(e.pool, enroll.Options{}).MintServiceToken(ctx, team, "booth", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	agent := &helloExec{}
-	host := startNode(t, t.TempDir(), "--gate", a.url, "--name", "host", "--serve", "a2a:vault="+serveHelloExec(t, agent), "--enroll", token)
+	host := startNode(t, t.TempDir(), "--gate", a.url, "--name", "host", "--serve", "a2a:vault="+serveHelloExec(t, agent),
+		"--serve", "a2a:booth="+serveAsker(t), "--enroll", token, "--enroll", boothToken)
 	host.local(t)
 	hostKey := host.keyID(t)
 	eventually(t, 20*time.Second, "the gate serves vault's card with the host's key as a recipient", func() bool {
@@ -130,6 +145,31 @@ services:
 	}
 	if got := agent.received(); got[len(got)-1][0].Text() != restMarker {
 		t.Fatalf("the agent received %q over HTTP+JSON", got[len(got)-1][0].Text())
+	}
+
+	// input-required and a follow-up (rule 3: the follow-up's header names the gate task, the gate gives the
+	// upstream's ids to the service).
+	bctx, bcancel := context.WithTimeout(ctx, 30*time.Second)
+	boothCard, err := agentcard.DefaultResolver.Resolve(bctx, local+"/agents/booth")
+	bcancel()
+	if err != nil {
+		t.Fatalf("resolve booth's local card: %v", err)
+	}
+	bc, err := a2aclient.NewFromCard(ctx, boothCard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { bc.Destroy() })
+	asked := sendMessage(t, bc, text("MARKER-ask"), false)
+	if asked.Status.State != a2a.TaskStateInputRequired || asked.Status.Message == nil ||
+		asked.Status.Message.Parts[0].Text() != "which one of MARKER-ask?" {
+		t.Fatalf("the question: %+v", asked.Status)
+	}
+	followUp := text("MARKER-answer")
+	followUp.TaskID, followUp.ContextID = asked.ID, asked.ContextID
+	done := sendMessage(t, bc, followUp, false)
+	if done.Status.State != a2a.TaskStateCompleted || done.Status.Message.Parts[0].Text() != "done: MARKER-answer" {
+		t.Fatalf("the follow-up: %+v", done.Status)
 	}
 
 	// A 300 KiB part: ciphertext through the bucket, both ways.
@@ -210,4 +250,42 @@ services:
 	if after := scalar[int](t, e.pool, `select count(*) from kontra.tasks`); after != before {
 		t.Fatalf("a refused unsealed message created %d tasks", after-before)
 	}
+}
+
+// askExec asks which one, then completes with the follow-up's text.
+type askExec struct{}
+
+func (askExec) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		text := ec.Message.Parts[0].Text()
+		if ec.StoredTask != nil {
+			yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("done: "+text))), nil)
+			return
+		}
+		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
+			return
+		}
+		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateInputRequired, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec,
+			a2a.NewTextPart("which one of "+text+"?"))), nil)
+	}
+}
+
+func (askExec) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCanceled, nil), nil)
+	}
+}
+
+// serveAsker serves askExec on 127.0.0.1 like serveHelloExec.
+func serveAsker(t *testing.T) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, agentCard)
+	})
+	mux.Handle("/rpc", a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(askExec{})))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
