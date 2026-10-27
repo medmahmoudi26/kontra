@@ -1,0 +1,140 @@
+# The team gate on one host (D43, D168): the gate built from this repository's Dockerfile, terminating TLS itself
+# from a provided certificate (no proxy in front, as on a VPS), temporalio/server 1.32.1 with its dynamic
+# configuration and two one-shot temporalio/admin-tools jobs (the schema, the kontra namespace), and Postgres 16.
+# Only the gate's public listener is published, and its metrics on loopback; Temporal and Postgres are reachable on
+# the compose network only (spec/relay.md §14.4).
+#
+#   # deploy/compose/kontra.yaml says what to edit and where the certificate and the signing key go.
+#   docker compose up -d --build --wait
+#   docker compose exec gate kontra-gate enroll -f /etc/kontra/kontra.yaml --api-key me     # an API key, once
+#   docker compose exec gate kontra-gate enroll -f /etc/kontra/kontra.yaml hello            # a node's token
+#   kontra connect --gate https://<public_url host> --enroll <token> --serve a2a:hello=http://127.0.0.1:9999
+#   docker compose down            # -v also drops the databases
+#
+# Settings, from the environment or an .env file beside this one:
+#   KONTRA_LISTEN_ADDR, KONTRA_PORT   where the public listener is published (default 0.0.0.0:8443)
+#   KONTRA_METRICS_PORT              the metrics listener, on 127.0.0.1 (default 9090)
+#   KONTRA_CONFIG                    the configuration file (default deploy/compose/kontra.yaml)
+#   KONTRA_TLS_DIR, KONTRA_SIGNING_DIR   the certificate's and the signing key's directories (default
+#                                    deploy/compose/tls and deploy/compose/signing), mounted read-only
+#   KONTRA_DB_PASSWORD, TEMPORAL_DB_PASSWORD, POSTGRES_PASSWORD   the database roles' passwords, read when the
+#                                    Postgres volume is first initialised (kontra's is also in kontra.yaml)
+#
+# The pentest (test/pentest, M3 WP-10) runs this file with compose.pentest.yaml under the project m3pentest.
+
+x-gate: &gate
+  image: kontra-gate:m3
+  build:
+    context: .
+    args: { VERSION: m3 }
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  volumes:
+    - ${KONTRA_CONFIG:-./deploy/compose/kontra.yaml}:/etc/kontra/kontra.yaml:ro
+    - ${KONTRA_TLS_DIR:-./deploy/compose/tls}:/etc/kontra/tls:ro
+    - ${KONTRA_SIGNING_DIR:-./deploy/compose/signing}:/etc/kontra/signing:ro
+
+x-temporal-env: &temporal-env
+  DB: postgres12
+  DB_PORT: "5432"
+  POSTGRES_SEEDS: postgres
+  POSTGRES_USER: temporal
+  POSTGRES_PWD: ${TEMPORAL_DB_PASSWORD:-temporal}
+
+services:
+  postgres:
+    image: postgres:16-alpine # D43: Temporal supports 13-16, Cloud runs 16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+      KONTRA_DB_PASSWORD: ${KONTRA_DB_PASSWORD:-kontra}
+      TEMPORAL_DB_PASSWORD: ${TEMPORAL_DB_PASSWORD:-temporal}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./deploy/compose/postgres-init.sh:/docker-entrypoint-initdb.d/kontra.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kontra"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    restart: unless-stopped
+
+  # One-shot: Temporal's two databases and their schemas, brought to the server's version (idempotent).
+  temporal-schema:
+    image: temporalio/admin-tools:1.32.1
+    environment:
+      <<: *temporal-env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        sql() { temporal-sql-tool --plugin postgres12 --ep postgres -p 5432 -u temporal --pw "$$POSTGRES_PWD" "$$@"; }
+        for db in temporal temporal_visibility; do
+          sql --db "$$db" create-database 2>/dev/null || true
+        done
+        sql --db temporal setup-schema -v 0.0 2>/dev/null || true
+        sql --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+        sql --db temporal_visibility setup-schema -v 0.0 2>/dev/null || true
+        sql --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  temporal:
+    image: temporalio/server:1.32.1
+    environment:
+      <<: *temporal-env
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig/kontra.yaml
+    volumes:
+      - ./deploy/compose/dynamicconfig.yaml:/etc/temporal/dynamicconfig/kontra.yaml:ro
+    depends_on:
+      temporal-schema: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  # One-shot: the gate's namespace (temporal.namespace, spec §14.1), once the frontend answers.
+  temporal-namespace:
+    image: temporalio/admin-tools:1.32.1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        n=0
+        until temporal operator cluster health --address temporal:7233 >/dev/null 2>&1; do
+          n=$$((n+1)); [ "$$n" -lt 180 ] || { echo "temporal did not answer"; exit 1; }; sleep 1
+        done
+        temporal operator namespace describe --namespace kontra --address temporal:7233 >/dev/null 2>&1 ||
+          temporal operator namespace create --namespace kontra --retention 72h --address temporal:7233
+    depends_on:
+      temporal: { condition: service_started }
+    restart: "no"
+
+  # One-shot: the gate's own schema (kontra-gate migrate, D28), before any replica serves.
+  gate-migrate:
+    <<: *gate
+    command: ["migrate", "-f", "/etc/kontra/kontra.yaml", "up"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  gate:
+    <<: *gate
+    command: ["serve", "-f", "/etc/kontra/kontra.yaml"]
+    ports:
+      - "${KONTRA_LISTEN_ADDR:-0.0.0.0}:${KONTRA_PORT:-8443}:8443"
+      - "127.0.0.1:${KONTRA_METRICS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/kontra-gate", "health", "--url", "https://127.0.0.1:8443/healthz"]
+      interval: 3s
+      timeout: 6s
+      retries: 60
+      start_period: 5s
+    depends_on:
+      gate-migrate: { condition: service_completed_successfully }
+      temporal-namespace: { condition: service_completed_successfully }
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres: {}

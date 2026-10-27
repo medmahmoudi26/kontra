@@ -1,5 +1,5 @@
 # `make check` is what CI runs and what runs before every PR.
-.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e
+.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e pentest-image pentest
 
 # The system Go may be older than the module's toolchain (go 1.26, a2a-go v2.7.0 needs it); pin the one
 # the module names so every go command, and gofmt, come from the same toolchain.
@@ -47,3 +47,24 @@ test-race:
 # ARGS='-run TestRelayResume -v').
 test-e2e:
 	GO="$(GO)" scripts/test_e2e.sh $(ARGS)
+
+# The pentest (M3 WP-10, D168, D186): PRD §12's list and M3's own surface against the compose team gate, built from
+# this repository under the compose project m3pentest. pentest-image builds kontra-gate:m3 once, with the docker
+# driver's builder (BUILDX_BUILDER=default: never another project's builder); `go test` never builds it. pentest runs
+# test/pentest with -timeout $(KONTRA_PENTEST_TIMEOUT) (default 90m, D186) and, whatever happens to go test, tears the
+# project and its network down in the trap. KONTRA_PENTEST_REPORT names the file the probe table is written to.
+KONTRA_PENTEST_TIMEOUT ?= 90m
+PENTEST_COMPOSE = docker compose -p m3pentest -f compose.yaml -f compose.pentest.yaml
+
+pentest-image:
+	BUILDX_BUILDER=default KONTRA_PENTEST_DIR=/nonexistent KONTRA_PENTEST_TEMPORAL_PORT=1 KONTRA_PENTEST_S3_ACCESS=x \
+	  KONTRA_PENTEST_S3_SECRET=x KONTRA_PEER_SECRET=x $(PENTEST_COMPOSE) build gate
+
+pentest:
+	@set -u; \
+	clean() { \
+	  BUILDX_BUILDER=default KONTRA_PENTEST_DIR=/nonexistent KONTRA_PENTEST_TEMPORAL_PORT=1 KONTRA_PENTEST_S3_ACCESS=x \
+	    KONTRA_PENTEST_S3_SECRET=x KONTRA_PEER_SECRET=x $(PENTEST_COMPOSE) down -v --remove-orphans --timeout 10 >/dev/null 2>&1; \
+	  docker network rm m3pentest_net m3pentest_other >/dev/null 2>&1; true; }; \
+	trap clean EXIT INT TERM; \
+	KONTRA_PENTEST=1 $(GO) test -tags pentest -p 1 -count=1 -timeout $(KONTRA_PENTEST_TIMEOUT) ./test/pentest -v

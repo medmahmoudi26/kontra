@@ -1,0 +1,44 @@
+# The compose team gate's configuration with a remote Lifecycle hook (spec/relay.md §13.3): deploy/compose/kontra.yaml
+# plus hooks.lifecycle. The five Lifecycle activities (OnDispatched, OnTerminal, ReviewWindow, OnReviewMessage,
+# OnReviewClosed) are scheduled by type name on task_queue, in the gate's Temporal namespace, where the operator's
+# own worker serves them; the gate registers no built-in for them. Until a worker polls the queue, every ended task's
+# OnTerminal waits (retried without end, by design).
+#
+# The pentest's target 7 runs the gate with this file (D169, D186): its test worker (test/pentest/lifecycleworker)
+# polls m3pentest-lifecycle through the overlay's published Temporal frontend and opens a 5 s review window.
+# Everything else is kontra.yaml's, and a test keeps the two in step: edit both.
+listen: ":8443"
+public_url: https://localhost:8443
+signing_key: file:/etc/kontra/signing/kontra.key
+tls: { cert: /etc/kontra/tls/tls.crt, key: /etc/kontra/tls/tls.key }
+postgres: postgres://kontra:kontra@postgres:5432/kontra
+temporal: { address: "temporal:7233", namespace: kontra }
+metrics: { listen: ":9090" }
+auth: { api_keys: true }
+
+hooks: { lifecycle: { task_queue: m3pentest-lifecycle } }
+
+services:
+  hello:
+    kind: a2a
+    backend: { tunnel: {} }          # hosted by the nodes enrolled for it
+    allow: ["org:default"]           # every API key of this gate's one tenant
+    task: { timeout: 10m, retries: 2 }
+  sealed:
+    kind: a2a
+    backend: { tunnel: {} }          # its enrolled nodes' keys are the card's recipients (ext-sealed.md §1)
+    allow: ["org:default"]
+    sealed: true                     # {required: true}: an unsealed part is refused before any task exists
+    task: { timeout: 10m, retries: 2 }
+  everything:
+    kind: mcp
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+    # get-env returns the server's whole environment; gzip-file-as-resource fetches URLs (D185).
+    tools: { deny: ["get-env", "gzip-file-as-resource"] }
+  fs:
+    kind: mcp
+    backend: { tunnel: {} }          # the node runs server-filesystem over stdio, one process per session
+    allow: ["org:default"]
+    # Read-only: the tools that write are denied (spec/relay.md §11.3); the node's --roots bound what it reads (D173).
+    tools: { deny: ["write_file", "edit_file", "create_directory", "move_file"] }

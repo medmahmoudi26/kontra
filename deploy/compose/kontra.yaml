@@ -1,0 +1,52 @@
+# The compose team gate's configuration (compose.yaml; D43, D168), mounted read-only at /etc/kontra/kontra.yaml.
+#
+# Before `docker compose up`:
+#   - set public_url to the URL your callers and nodes use: the served cards carry it, and a node's --gate must be
+#     this origin (spec/tunnel.md §4);
+#   - put the gate's TLS certificate chain and key in deploy/compose/tls/ (tls.crt, tls.key) and the card-signing
+#     key in deploy/compose/signing/kontra.key (one or more ECDSA P-256 keys in PEM, the first signs, D166), each
+#     owned by uid 65532, the image's nonroot user, mode 0400 or 0440:
+#       chown 65532:65532 deploy/compose/tls/tls.key deploy/compose/signing/kontra.key
+#   - keep the database password below in step with compose's KONTRA_DB_PASSWORD (Postgres is on the compose
+#     network only: no port of it is published).
+#
+# The gate terminates TLS itself, as on a VPS with no proxy in front (PRD §12). Nodes reach it at public_url; the
+# services below are hosted by the nodes enrolled for them (`docker compose exec gate kontra-gate enroll -f
+# /etc/kontra/kontra.yaml <service>`), each a repository example: examples/sellers/hello-exec (hello),
+# examples/sealing (sealed), examples/mcp/everything (everything) and examples/mcp/fs-stdio (fs).
+#
+# deploy/compose/kontra.lifecycle.yaml is this file with a remote Lifecycle hook (spec §13.3); the pentest runs its
+# target 7 with it (D169, D186). A test keeps the two in step.
+listen: ":8443"
+public_url: https://localhost:8443
+signing_key: file:/etc/kontra/signing/kontra.key
+tls: { cert: /etc/kontra/tls/tls.crt, key: /etc/kontra/tls/tls.key }
+postgres: postgres://kontra:kontra@postgres:5432/kontra
+temporal: { address: "temporal:7233", namespace: kontra }
+metrics: { listen: ":9090" }
+auth: { api_keys: true }
+
+services:
+  hello:
+    kind: a2a
+    backend: { tunnel: {} }          # hosted by the nodes enrolled for it
+    allow: ["org:default"]           # every API key of this gate's one tenant
+    task: { timeout: 10m, retries: 2 }
+  sealed:
+    kind: a2a
+    backend: { tunnel: {} }          # its enrolled nodes' keys are the card's recipients (ext-sealed.md §1)
+    allow: ["org:default"]
+    sealed: true                     # {required: true}: an unsealed part is refused before any task exists
+    task: { timeout: 10m, retries: 2 }
+  everything:
+    kind: mcp
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+    # get-env returns the server's whole environment; gzip-file-as-resource fetches URLs (D185).
+    tools: { deny: ["get-env", "gzip-file-as-resource"] }
+  fs:
+    kind: mcp
+    backend: { tunnel: {} }          # the node runs server-filesystem over stdio, one process per session
+    allow: ["org:default"]
+    # Read-only: the tools that write are denied (spec/relay.md §11.3); the node's --roots bound what it reads (D173).
+    tools: { deny: ["write_file", "edit_file", "create_directory", "move_file"] }

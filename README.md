@@ -93,7 +93,7 @@ same gate: `{ "mcpServers": { "fs": { "url": "http://localhost:7777/mcp/anon-7f3
 An MCP server over HTTP is `--serve mcp:name=http://localhost:8000`.
 
 A team gate is the same image on your own VPS: `docker compose up` with `compose.yaml`
-(lands in M4), then `kontra connect --gate https://gate.team.internal …`.
+(`deploy/compose/kontra.yaml` says what to edit), then `kontra connect --gate https://gate.team.internal …`.
 
 ## Layout (planned)
 

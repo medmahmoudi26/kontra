@@ -1,6 +1,6 @@
 # The contributor compose (note 2 §3): a Temporal and a Postgres beside a gate you run from source. It is
 # tooling for building Kontra, not a way to run a gate: the team-gate compose (the gate image,
-# temporalio/server and Postgres, D43) comes with M4.
+# temporalio/server and Postgres, D43, D168) is compose.yaml.
 #
 #   docker compose -f compose.dev.yaml up -d --wait
 #   go run ./cmd/kontra-gate migrate -f examples/sellers/hello-exec/kontra.yaml
