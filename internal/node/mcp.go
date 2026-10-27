@@ -19,6 +19,7 @@ import (
 
 	"kontra.sh/kontra/internal/mcproots"
 	"kontra.sh/kontra/internal/mcpwire"
+	"kontra.sh/kontra/internal/sealing"
 )
 
 // The URL MCP filter's bounds.
@@ -120,13 +121,18 @@ type mcpExchange struct {
 	reqID      json.RawMessage
 	// answer POSTs the node's roots/list answer to the target on session sid.
 	answer func(sid, version string, reply []byte)
+	// seal is the exchange's sealing (internal/sealing), after the roots filter; nil seals nothing. refused is the
+	// sealing's refusal of a message of the server's, which a JSON response answers as the node's own (§6).
+	seal    *sealing.MCPExchange
+	refused error
 }
 
 // request reads and filters a POST's body (other methods carry none). It answers the gate itself and returns false
 // for a body that fails strict decoding (400) or a message the node drops (202).
-func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logger, answer func(sid, version string, reply []byte)) (*mcpExchange, bool) {
+func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logger, answer func(sid, version string, reply []byte),
+	seal *sealing.MCPExchange) (*mcpExchange, bool) {
 	x := &mcpExchange{f: f, log: log, era: mcpwire.EraLegacy, httpMethod: r.Method, answer: answer,
-		sid: r.Header.Get(mcpwire.HeaderSessionID), version: r.Header.Get(mcpwire.HeaderProtocolVersion)}
+		sid: r.Header.Get(mcpwire.HeaderSessionID), version: r.Header.Get(mcpwire.HeaderProtocolVersion), seal: seal}
 	if r.Method != http.MethodPost {
 		return x, true
 	}
@@ -145,6 +151,12 @@ func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logge
 		var id json.RawMessage
 		if m != nil {
 			id = m.ID
+		}
+		if x.seal.Sealed(body) {
+			// On a sealed exchange the refusal is the sealing's: bad_header (plan corrections WP-08), and nothing of it
+			// reaches the server.
+			x.seal.RefuseMalformed(w, id)
+			return nil, false
 		}
 		switch {
 		case errors.Is(err, mcpwire.ErrParse):
@@ -173,6 +185,21 @@ func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logge
 		w.WriteHeader(http.StatusAccepted)
 		return nil, false
 	}
+	if x.seal != nil {
+		// Sealing after the roots filter (plan corrections WP-08): a sealed tools/call or answer is opened; a refusal is
+		// the node's own answer (ext-sealed.md §6), and nothing of the message reaches the server.
+		dm, err := mcpwire.Parse(d.Body, mcpwire.FromClient)
+		if err != nil {
+			mcpError(w, http.StatusBadRequest, m.ID, mcpwire.CodeInvalidRequest, "invalid request")
+			return nil, false
+		}
+		out, err := x.seal.FromClient(d.Body, dm)
+		if err != nil {
+			x.seal.Refuse(w, m.ID, err)
+			return nil, false
+		}
+		d.Body = out
+	}
 	r.Body = io.NopCloser(bytes.NewReader(d.Body))
 	r.ContentLength = int64(len(d.Body))
 	r.Header.Del("Content-Length")
@@ -182,6 +209,9 @@ func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logge
 
 // response filters the target's response (the ReverseProxy's ModifyResponse, after stripResponse).
 func (x *mcpExchange) response(res *http.Response) error {
+	if x.seal != nil && res.StatusCode/100 == 2 {
+		x.seal.Accepted() // the server accepted the message: a sealed call's job and pair, an answer's request
+	}
 	if x.httpMethod == http.MethodDelete {
 		if x.sid != "" && (res.StatusCode/100 == 2 || res.StatusCode == http.StatusNotFound) {
 			x.f.forget(x.sid)
@@ -217,6 +247,16 @@ func (x *mcpExchange) response(res *http.Response) error {
 			return nil
 		}
 		out, keep, ok := x.filter(sid, body)
+		if x.refused != nil {
+			status, hdr, b := sealing.RejectAnswer(x.reqID, x.refused)
+			res.StatusCode, res.Status = status, fmt.Sprintf("%d %s", status, http.StatusText(status))
+			res.Header, res.Trailer = hdr, nil
+			res.Body = io.NopCloser(bytes.NewReader(b))
+			res.ContentLength = int64(len(b))
+			res.Header.Set("Content-Length", strconv.Itoa(len(b)))
+			res.TransferEncoding = nil
+			return nil
+		}
 		if len(body) > maxMCPMessage || !ok || !keep {
 			x.refuse(res)
 			return nil
@@ -289,6 +329,15 @@ func (x *mcpExchange) filter(sid string, data []byte) (out []byte, keep, ok bool
 	case mcproots.Drop:
 		x.log.Debug("a roots/list on a 2026-07-28 exchange is dropped (D173)")
 		return nil, false, true
+	}
+	if x.seal != nil {
+		// Sealing after the roots filter: a message it refuses is not relayed, nor anything after it.
+		out, keep, err := x.seal.FromServer(d.Body)
+		if err != nil {
+			x.refused = err
+			return nil, false, false
+		}
+		return out, keep, true
 	}
 	return d.Body, true, true
 }

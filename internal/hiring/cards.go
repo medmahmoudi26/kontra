@@ -69,40 +69,9 @@ func JWKSURL(gate *url.URL) (string, error) {
 // gate's). The rewritten card leaves out signatures, which no longer cover it; every other member is kept as it
 // came. The card is read with exact keys.
 func RewriteCard(ctx context.Context, card []byte, gate *url.URL, local *url.URL, jwks *http.Client) ([]byte, error) {
-	if len(card) > maxCard {
-		return nil, fmt.Errorf("%w: a card over %d bytes", ErrCardNotVerified, maxCard)
-	}
-	jku, err := JWKSURL(gate)
+	m, _, err := VerifyCard(ctx, card, gate, jwks)
 	if err != nil {
 		return nil, err
-	}
-	m, err := strictjson.Members(card)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCardNotVerified, err)
-	}
-	sigs, err := signatures(m["signatures"])
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCardNotVerified, err)
-	}
-	if len(sigs) == 0 {
-		return nil, fmt.Errorf("%w: the card is not signed", ErrCardNotVerified)
-	}
-	verified := false
-	for attempt := 0; attempt < 2 && !verified; attempt++ {
-		keys, err := keySet(ctx, jwks, jku, attempt > 0)
-		if err != nil {
-			return nil, fmt.Errorf("%w: the key set at %s: %w", ErrCardNotVerified, jku, err)
-		}
-		for _, sig := range sigs {
-			h, err := jws.Verify(card, sig, keys)
-			if err == nil && h.JKU == jku {
-				verified = true
-				break
-			}
-		}
-	}
-	if !verified {
-		return nil, fmt.Errorf("%w with the key set at %s", ErrCardNotVerified, jku)
 	}
 	delete(m, "signatures")
 	if raw, ok := m["supportedInterfaces"]; ok {
@@ -113,6 +82,45 @@ func RewriteCard(ctx context.Context, card []byte, gate *url.URL, local *url.URL
 		m["supportedInterfaces"] = out
 	}
 	return encodeObject(m), nil
+}
+
+// VerifyCard verifies the gate's signature on a served card as RewriteCard does (jku = the dialed origin +
+// /.well-known/jwks.json, the key set fetched through jwks and cached) and returns the card's members, read with
+// exact keys, and the protected header of the signature that verified: what the hiring node's sealing reads of it
+// (the sealed extension's recipients, kontra.upstream for the pins, ext-sealed.md §7). A card none of whose
+// signatures verifies is ErrCardNotVerified.
+func VerifyCard(ctx context.Context, card []byte, gate *url.URL, jwks *http.Client) (map[string]json.RawMessage, *jws.Header, error) {
+	if len(card) > maxCard {
+		return nil, nil, fmt.Errorf("%w: a card over %d bytes", ErrCardNotVerified, maxCard)
+	}
+	jku, err := JWKSURL(gate)
+	if err != nil {
+		return nil, nil, err
+	}
+	m, err := strictjson.Members(card)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrCardNotVerified, err)
+	}
+	sigs, err := signatures(m["signatures"])
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrCardNotVerified, err)
+	}
+	if len(sigs) == 0 {
+		return nil, nil, fmt.Errorf("%w: the card is not signed", ErrCardNotVerified)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		keys, err := keySet(ctx, jwks, jku, attempt > 0)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: the key set at %s: %w", ErrCardNotVerified, jku, err)
+		}
+		for _, sig := range sigs {
+			h, err := jws.Verify(card, sig, keys)
+			if err == nil && h.JKU == jku {
+				return m, &h, nil
+			}
+		}
+	}
+	return nil, nil, fmt.Errorf("%w with the key set at %s", ErrCardNotVerified, jku)
 }
 
 // signatures decodes the card's signatures, each with exact keys.

@@ -734,6 +734,10 @@ func (n *Node) maintain(cur *session) bool {
 	if now.Sub(n.lastPrune) >= pruneEvery {
 		n.prune(now)
 	}
+	if now.Sub(n.lastSealSweep) >= sweepSealingEvery {
+		n.lastSealSweep = now
+		n.sweepSealing(now)
+	}
 	id, err := nodekey.Load(n.cfg.KeyPath)
 	if err != nil {
 		n.logger.Warn("the key file could not be read", "err", err)

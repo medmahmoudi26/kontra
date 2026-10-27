@@ -172,10 +172,29 @@ func (c *child) post(w http.ResponseWriter, r *http.Request, body []byte, m *mcp
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	f := filterOf(r.Context())
+	if f != nil {
+		// Sealing, after the roots filter (plan corrections WP-08): a sealed message is opened, a refused one answered
+		// here and never written to the child.
+		dm, err := mcpwire.Parse(d.Body, mcpwire.FromClient)
+		if err != nil {
+			writeRPCError(w, http.StatusBadRequest, m.ID, mcpwire.CodeInvalidRequest, "invalid request")
+			return
+		}
+		out, err := f.FromClient(d.Body, dm)
+		if err != nil {
+			f.Refuse(w, m.ID, err)
+			return
+		}
+		d.Body = out
+	}
 	if m.Method == "" || len(m.ID) == 0 {
 		if err := c.send(d.Body); err != nil {
 			c.refuseSend(w, m, err)
 			return
+		}
+		if f != nil {
+			f.Accepted()
 		}
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -193,6 +212,9 @@ func (c *child) post(w http.ResponseWriter, r *http.Request, body []byte, m *mcp
 	if err := c.send(d.Body); err != nil {
 		c.refuseSend(w, m, err)
 		return
+	}
+	if f != nil {
+		f.Accepted()
 	}
 	c.serveStream(w, r, st)
 }
@@ -260,13 +282,29 @@ func (c *child) serveStream(w http.ResponseWriter, r *http.Request, st *stream) 
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	_ = rc.Flush()
+	f := filterOf(r.Context())
 	var buf bytes.Buffer
 	for {
 		evs, done := st.take()
 		if len(evs) > 0 {
 			buf.Reset()
 			for _, ev := range evs {
-				fmt.Fprintf(&buf, "id: %s\nevent: message\ndata: %s\n\n", c.eventID(ev.n), ev.data)
+				data := ev.data
+				if f != nil {
+					// Sealing, after the roots filter: a message the node refuses ends the stream before it.
+					out, keep, err := f.FromServer(data)
+					if err != nil {
+						c.log.Warn("a message of the stdio server is refused by sealing: the stream ends before it")
+						_, _ = w.Write(buf.Bytes())
+						_ = rc.Flush()
+						return
+					}
+					if !keep {
+						continue
+					}
+					data = out
+				}
+				fmt.Fprintf(&buf, "id: %s\nevent: message\ndata: %s\n\n", c.eventID(ev.n), data)
 			}
 			if _, err := w.Write(buf.Bytes()); err != nil {
 				return

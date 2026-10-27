@@ -44,6 +44,8 @@ import (
 
 	"kontra.sh/kontra/internal/a2awire"
 	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/pins"
+	"kontra.sh/kontra/internal/sealing"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -99,6 +101,121 @@ type Server struct {
 	mu     sync.Mutex
 	listen string   // the bound address (Serve), else cfg.Listen
 	local  *url.URL // http://localhost:<port>
+	// seal is the sealing around the forwarding (internal/sealing, ext-sealed.md §5 "Hiring node"); nil seals nothing.
+	seal *sealing.Hiring
+}
+
+// jobKey carries a request's sealing job from Handler to modify.
+type jobKey struct{}
+
+// SetSealing puts the hiring node's sealing around the forwarding: a request to a sealed service is sealed before it
+// is forwarded (its pin checked first, ext-sealed.md §7), the answer opened before the local client sees it, and a
+// card served locally is recorded with its recipients and the pin checked. It is set before Serve.
+func (s *Server) SetSealing(h *sealing.Hiring) {
+	s.mu.Lock()
+	s.seal = h
+	s.mu.Unlock()
+}
+
+func (s *Server) sealing() *sealing.Hiring {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seal
+}
+
+// Card fetches an A2A service's served card through the tunnel and verifies the gate's signature (VerifyCard); when the
+// gate says it verified the seller's signature, the upstream card is fetched too and its hash checked, for the seller
+// keys the pins record (ext-sealed.md §7). svc is the service's path ({svc}).
+func (s *Server) Card(ctx context.Context, svc string) (*sealing.Card, error) {
+	body, err := s.get(ctx, svc+"/.well-known/agent-card.json")
+	if err != nil {
+		return nil, err
+	}
+	return s.verified(ctx, body)
+}
+
+// verified is a served card's sealing.Card: the gate's signature verified, and the seller's keys when it says it
+// verified them.
+func (s *Server) verified(ctx context.Context, body []byte) (*sealing.Card, error) {
+	_, hdr, err := VerifyCard(ctx, body, s.cfg.Gate, s.tunnel)
+	if err != nil {
+		return nil, err
+	}
+	c := &sealing.Card{Body: body}
+	if up := hdr.Upstream; up != nil && up.Verified {
+		u, err := url.Parse(up.URL)
+		if err != nil {
+			return nil, fmt.Errorf("%w: kontra.upstream.url", ErrCardNotVerified)
+		}
+		o, err := tunnel.CanonicalOrigin(u)
+		if g, gerr := tunnel.CanonicalOrigin(s.cfg.Gate); err != nil || gerr != nil || o != g {
+			return nil, fmt.Errorf("%w: kontra.upstream.url is not on the gate's origin", ErrCardNotVerified)
+		}
+		ub, err := s.get(ctx, u.EscapedPath())
+		if err != nil {
+			return nil, err
+		}
+		if c.SellerKeys, err = sealing.SellerKeyIDs(ub, up.SHA256); err != nil {
+			return nil, err
+		}
+		c.Signed = true
+	}
+	return c, nil
+}
+
+// get fetches path from the gate through the tunnel (200 only, at most maxCard bytes).
+func (s *Server) get(ctx context.Context, path string) ([]byte, error) {
+	u := url.URL{Scheme: s.cfg.Gate.Scheme, Host: s.cfg.Gate.Host, Path: path}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	res, err := s.tunnel.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("the gate answered HTTP %d for %s", res.StatusCode, clip(path))
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, maxCard+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxCard {
+		return nil, fmt.Errorf("an answer over %d bytes for %s", maxCard, clip(path))
+	}
+	return b, nil
+}
+
+// ServicePath is the {svc} prefix of a hiring path (spec/relay.md §2.1): /agents/{name} or /agents/{tenant}/{name}
+// with what follows it for HTTP+JSON (message:send, message:stream, tasks/…, .well-known/…), /mcp/{name} or
+// /mcp/{tenant}/{name}; "" for any other path. A second segment is the service's name, unless it is one of A2A's
+// HTTP+JSON routes (a multi-tenant gate's service named "tasks" is read as the single-tenant route).
+func ServicePath(p string) string {
+	for _, prefix := range []string{"/agents/", "/mcp/"} {
+		rest, ok := strings.CutPrefix(p, prefix)
+		if !ok || rest == "" {
+			continue
+		}
+		segs := strings.Split(rest, "/")
+		if prefix == "/mcp/" {
+			if len(segs) > 2 || segs[0] == "" {
+				return ""
+			}
+			return strings.TrimRight(p, "/")
+		}
+		if segs[0] == "" {
+			return ""
+		}
+		if len(segs) >= 2 && segs[1] != "" && !strings.Contains(segs[1], ":") && segs[1] != "tasks" &&
+			!strings.HasPrefix(segs[1], ".") && segs[1] != "extendedAgentCard" {
+			return prefix + segs[0] + "/" + segs[1]
+		}
+		return prefix + segs[0]
+	}
+	return ""
 }
 
 // New checks cfg (a non-loopback Listen without LocalToken is refused, as is an Origin that is not one) and
@@ -220,6 +337,23 @@ func (s *Server) Handler() http.Handler {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, "kontra connect forwards /agents/…, /mcp/…, /mcp and /.well-known/… only\n")
 			return
+		}
+		if seal := s.sealing(); seal != nil {
+			svc := ServicePath(r.URL.Path)
+			// A card read ({svc}/.well-known/…, or a GET on {svc} itself) carries no part: its card is verified and its
+			// pin checked when it is served (modify, CardSeen).
+			cardRead := isA2APath(r.URL.Path) && (isCardPath(r.URL.Path) ||
+				r.Method == http.MethodGet && strings.TrimRight(r.URL.Path, "/") == svc)
+			if svc != "" && !cardRead {
+				// ext-sealed.md §5: the pin is checked and the request sealed before anything is forwarded; a refusal
+				// is answered here and opens no stream.
+				r2, job, err := seal.Request(r.Context(), svc, r)
+				if err != nil {
+					s.sealRefused(w, r, err)
+					return
+				}
+				r = r2.WithContext(context.WithValue(r2.Context(), jobKey{}, job))
+			}
 		}
 		s.proxy.ServeHTTP(w, r)
 	})
@@ -356,6 +490,26 @@ func isMCPPath(p string) bool { return p == "/mcp" || strings.HasPrefix(p, "/mcp
 // isA2APath reports a path of the gate's A2A routes, the only answers whose parts are walked.
 func isA2APath(p string) bool { return strings.HasPrefix(p, "/agents/") }
 
+// isCardPath reports a path under a service that reads a card ({svc}/.well-known/…).
+func isCardPath(p string) bool { return strings.Contains(p, "/.well-known/") }
+
+// sealRefused answers a request the sealing refused locally (a pin change, no key for the task, a part that cannot be
+// sealed): the LocalError's status, else 502; the pins' refusal names the change and what accepts it (D164, D187).
+func (s *Server) sealRefused(w http.ResponseWriter, r *http.Request, err error) {
+	status := http.StatusBadGateway
+	var le *sealing.LocalError
+	if errors.As(err, &le) {
+		status = le.Status
+	}
+	msg := err.Error()
+	var ce *pins.ChangeError
+	if errors.As(err, &ce) {
+		msg = "kontra connect: " + ce.Detail(pins.Options{})
+	}
+	s.log.Warn("a request to a sealed service is refused here", "status", status, "path", clip(r.URL.Path), "reason", tunnel.Printable(msg))
+	refuse(w, r, status, tunnel.Printable(msg))
+}
+
 // refuse answers a local refusal: on an MCP path a JSON-RPC error without id (MCP's rule for an Origin it
 // refuses), else plain text. It opens no stream.
 func refuse(w http.ResponseWriter, r *http.Request, status int, msg string) {
@@ -419,6 +573,7 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 func (s *Server) modify(res *http.Response) error {
 	req := res.Request
 	ctx := req.Context()
+	job, _ := ctx.Value(jobKey{}).(*sealing.Job)
 	ct := res.Header.Get("Content-Type")
 	must, may := false, false
 	if req.Method == http.MethodGet && res.StatusCode/100 == 2 {
@@ -430,23 +585,28 @@ func (s *Server) modify(res *http.Response) error {
 	case cardRoute && a2awire.IsEventStream(ct):
 		return fmt.Errorf("%w: an event stream on a card route", ErrCardNotVerified)
 	case a2awire.IsEventStream(ct):
-		if !inline {
-			return nil
+		if inline {
+			pr, pw := io.Pipe()
+			body := res.Body
+			go func() {
+				err := s.inline.InlineSSE(ctx, body, pw, nil)
+				_ = body.Close()
+				_ = pw.CloseWithError(err)
+			}()
+			res.Body = pr
+			res.Header.Del("Content-Length")
+			res.ContentLength = -1
 		}
-		pr, pw := io.Pipe()
-		body := res.Body
-		go func() {
-			err := s.inline.InlineSSE(ctx, body, pw, nil)
-			_ = body.Close()
-			_ = pw.CloseWithError(err)
-		}()
-		res.Body = pr
-		res.Header.Del("Content-Length")
-		res.ContentLength = -1
+		if job != nil {
+			return s.openAnswer(ctx, job, res)
+		}
 		return nil
 	case cardRoute:
 		// Read whatever its Content-Type (above).
 	case !a2awire.IsJSON(ct) || !inline:
+		if job != nil {
+			return s.openAnswer(ctx, job, res)
+		}
 		return nil
 	}
 	b, err := io.ReadAll(io.LimitReader(res.Body, a2awire.MaxBody+1))
@@ -477,6 +637,16 @@ func (s *Server) modify(res *http.Response) error {
 			s.log.Error("a card whose gate signature does not verify is not served (spec/tunnel.md §9)", "path", clip(req.URL.Path), "err", err)
 			return err
 		}
+		if seal := s.sealing(); seal != nil {
+			// The card's sealing is recorded, and its pin checked, before it is served (ext-sealed.md §7, D187).
+			c, err := s.verified(ctx, b)
+			if err != nil {
+				return err
+			}
+			if _, err := seal.CardSeen(ServicePath(req.URL.Path), c); err != nil {
+				return fmt.Errorf("%w: %v", ErrCardNotVerified, err)
+			}
+		}
 		setBody(res, out)
 		res.Header.Del("ETag") // the hash of the gate's body, not of this one
 		return nil
@@ -485,6 +655,16 @@ func (s *Server) modify(res *http.Response) error {
 		body, err := s.inline.Inline(ctx, b)
 		if err != nil {
 			return err
+		}
+		if job != nil {
+			// A sealed answer is opened whole, once every blob it names was fetched (its age file authenticated).
+			nb, err := body.Bytes()
+			_ = body.Close()
+			if err != nil {
+				return err
+			}
+			setBody(res, nb)
+			return s.openAnswer(ctx, job, res)
 		}
 		pr, pw := io.Pipe()
 		go func() {
@@ -498,6 +678,23 @@ func (s *Server) modify(res *http.Response) error {
 		return nil
 	}
 	setBody(res, b)
+	if job != nil {
+		return s.openAnswer(ctx, job, res)
+	}
+	return nil
+}
+
+// openAnswer opens a sealed job's answer (internal/sealing) in place of the gate's.
+func (s *Server) openAnswer(ctx context.Context, job *sealing.Job, res *http.Response) error {
+	seal := s.sealing()
+	if seal == nil {
+		return nil
+	}
+	out, err := seal.Response(ctx, job, res)
+	if err != nil {
+		return err
+	}
+	*res = *out
 	return nil
 }
 

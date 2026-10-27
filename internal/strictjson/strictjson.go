@@ -15,7 +15,7 @@
 //     notifications), result, result._meta, each of result.tools and its _meta, result.capabilities and its
 //     experimental and extensions, the task objects the gate reads (result.task; result.inputRequests, each of
 //     its entries and their params and params._meta; result.result, result.error), error.
-//   - internal/a2ahttp's jsonrpcLevels, an A2A JSON-RPC request: params, params.metadata, params.configuration,
+//   - internal/a2awire.JSONRPCRequestLevels (internal/a2ahttp's jsonrpcLevels), an A2A JSON-RPC request: params, params.metadata, params.configuration,
 //     params.message, params.message.metadata, each of params.message.parts and each part's metadata.
 //
 // CheckReads also refuses a lone key equal under case folding to a member its reader reads at that level without

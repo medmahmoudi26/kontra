@@ -3,7 +3,8 @@
 //	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
 //	               [--listen 127.0.0.1:7777] … (M2, M3; spec/tunnel.md; internal/node, internal/hiring,
 //	               internal/stdiobridge)
-//	kontra seal --service <service URL> [file | -] (M3, spec/ext-sealed.md §5.1; internal/sealing)
+//	kontra seal --service <service URL> [--context <id>] [--task <id>] [file | -], kontra seal --open <part.json>
+//	(spec/ext-sealed.md §5.1; internal/sealing)
 //	kontra version
 //
 // The other subcommands come with their milestones (PRD §14, note 2 §4): login with the anonymous sessions on
@@ -33,8 +34,9 @@ const usage = `usage:
                  [--roots <name>=<dir> …] [--env <name> …] [--session-idle <duration>] [--max-sessions <n>]
                  [--key <path>] [--enroll <token>|@file|-] [--api-key <key>|@file|-] [--name <name>] [--rotate]
                  [--require-channel-binding] [--max-inflight <n>] [--listen <addr>] [--local-token <file>]
-                 [--allow-origin <origin> …] [--log json]
-  kontra seal --service <service URL> [--context <id>] [--task <id>] [file | -]
+                 [--allow-origin <origin> …] [--sealed-max-age <duration>] [--sealed-required <name> …]
+                 [--pin-recipients] [--accept-change <name> …] [--log json]
+  kontra seal --service <service URL> [--context <id>] [--task <id>] [--media-type <type>] [file | -]
   kontra seal --open <part.json>
   kontra version
 
@@ -65,8 +67,20 @@ through one outbound connection (spec/tunnel.md):
                              /mcp and /.well-known/… are forwarded with this node's principal
   --local-token FILE         a token every local request must carry (Authorization: Bearer); required off loopback
   --allow-origin ORIGIN      a browser Origin allowed to call --listen; repeatable (default none)
+  --sealed-max-age DURATION  how old a sealed request may be when it reaches a hosted service (default 25h; at least
+                             the gate's longest quote expiry plus task.timeout)
+  --sealed-required NAME     refuse an unsealed request to the hosted service NAME; repeatable
+  --pin-recipients           refuse any new recipient or seller key of a sealed service this node hires
+  --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME; repeatable
   --log json                 JSON logs on stderr (default text)
-Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only.
+Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only. Sealed services
+(spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, a hired job's key under ~/.kontra/jobs,
+and the pins in ~/.kontra/pins; recipient key ids and seller key thumbprints are printed on stderr on a first sight
+and on every change.
+
+kontra seal seals a file for a sealed service without a node (the escape hatch for scripting, ext-sealed.md §5.1):
+it prints one A2A Message JSON whose single part is the file sealed to the service's recipients; --open writes the
+plaintext of a reply's sealed parts.
 `
 
 // later is when each subcommand that is not built yet comes (PRD §14, note 2 §4). There is no console
@@ -139,7 +153,7 @@ func connect(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return err
 	}
 	cfg.Version = version.Get()
-	cfg.Out = stdout
+	cfg.Out, cfg.Err = stdout, stderr
 	format := obs.FormatText
 	if cfg.LogJSON {
 		format = obs.FormatJSON

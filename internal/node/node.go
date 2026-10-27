@@ -23,8 +23,15 @@
 // "/" goes to); `mcp:<name>=stdio:<cmd>` is bridged in-process (internal/stdiobridge): one child per MCP session,
 // at most --max-sessions per service (a durable task holds one too, D22), stopped after --session-idle, in a
 // scrubbed environment (PATH, HOME, LANG and the --env names). For every MCP service the node answers the server's
-// roots/list itself from --roots and never relays the client's roots (D173, internal/mcproots). Sealing and per-job
-// keys (§2.3) are M3 WP-08; anonymous sessions and `--public` (§6) M4. There is no local console (D164).
+// roots/list itself from --roots and never relays the client's roots (D173, internal/mcproots). Anonymous sessions
+// and `--public` (§6) are M4. There is no local console (D164).
+//
+// Sealing (spec/ext-sealed.md, M3 WP-08; internal/sealing): as a hosting node it opens the sealed parts the gate
+// forwards to a hosted service and seals what the service answers, keeping its durable job state under
+// ~/.kontra/hosted/<gate host>/ (--sealed-max-age, --sealed-required); as a hiring node it seals what local clients
+// send to a sealed service and opens what comes back, with a per-job key under ~/.kontra/jobs/<gate host>/ (§2.3),
+// after checking the service's pin in ~/.kontra/pins (--pin-recipients, --accept-change), whose recipient key ids
+// and seller key thumbprints it prints on stderr and in its log on a first sight and on every change (D187).
 //
 // The node holds no task state: after any close but `revoked` it redials with the same key, backing off from 1 s
 // to 60 s with full jitter, reset after a session that lived 60 s (§13).
@@ -61,6 +68,7 @@ import (
 	"kontra.sh/kontra/internal/hiring"
 	"kontra.sh/kontra/internal/mcproots"
 	"kontra.sh/kontra/internal/nodekey"
+	"kontra.sh/kontra/internal/sealing"
 	"kontra.sh/kontra/internal/stdiobridge"
 	"kontra.sh/kontra/internal/tunnel"
 )
@@ -87,8 +95,20 @@ type Config struct {
 	MaxSessions     int                        // --max-sessions, default stdiobridge.DefaultMaxSessions
 	CredentialsPath string                     // ~/.kontra/credentials (§2.4)
 	Version         string                     // for hello.agent and the User-Agent
+	// Sealing (spec/ext-sealed.md §5, §7): --sealed-max-age (hosting rule 1's max_age, default 25 h),
+	// --sealed-required <service> (the hosting node refuses an unsealed request to it), --pin-recipients and
+	// --accept-change <service> (the hiring node's pins).
+	SealedMaxAge   time.Duration
+	SealedRequired []string
+	PinRecipients  bool
+	AcceptChange   []string
+	// Home is the directory ~/.kontra is under (the job state, the per-job keys, the pins).
+	Home string
 	// Out receives the welcome's service URLs (the CLI's stdout); nil discards them.
 	Out io.Writer
+	// Err receives the pins' lines (D187: recipient key ids and seller key thumbprints on a first sight and on every
+	// change; the CLI's stderr); nil writes them to the log only.
+	Err io.Writer
 }
 
 // UsageError is a command line ParseArgs refused; it wraps flag.ErrHelp for -h.
@@ -119,6 +139,7 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	fs.SetOutput(io.Discard)
 	var (
 		serves, enrolls, origins, roots, envs []string
+		sealedRequired, acceptChange          []string
 		apiKey                                *string
 	)
 	gate := fs.String("gate", tunnel.DefaultGate, "")
@@ -136,6 +157,10 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	sessionIdle := fs.Duration("session-idle", stdiobridge.DefaultSessionIdle, "")
 	maxSessions := fs.Int("max-sessions", stdiobridge.DefaultMaxSessions, "")
 	fs.Func("allow-origin", "", func(v string) error { origins = append(origins, v); return nil })
+	sealedMaxAge := fs.Duration("sealed-max-age", sealing.DefaultMaxAge, "")
+	fs.Func("sealed-required", "", func(v string) error { sealedRequired = append(sealedRequired, v); return nil })
+	pinRecipients := fs.Bool("pin-recipients", false, "")
+	fs.Func("accept-change", "", func(v string) error { acceptChange = append(acceptChange, v); return nil })
 	fs.Func("enroll", "", func(v string) error { enrolls = append(enrolls, v); return nil })
 	fs.Func("api-key", "", func(v string) error {
 		if apiKey != nil {
@@ -201,6 +226,28 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 			cfg.Env = append(cfg.Env, e)
 		}
 	}
+	// Sealing (ext-sealed.md §5, §7).
+	if *sealedMaxAge <= 0 {
+		return Config{}, usage("--sealed-max-age %v: want a positive duration (default 25h)", *sealedMaxAge)
+	}
+	cfg.SealedMaxAge, cfg.PinRecipients = *sealedMaxAge, *pinRecipients
+	for _, name := range sealedRequired {
+		if !seen[name] {
+			return Config{}, usage("--sealed-required %s: no --serve serves %q", clipValue(name), clipValue(name))
+		}
+		if !slices.Contains(cfg.SealedRequired, name) {
+			cfg.SealedRequired = append(cfg.SealedRequired, name)
+		}
+	}
+	for _, name := range acceptChange {
+		if name == "" || strings.ContainsAny(name, " \t\n") {
+			return Config{}, usage("--accept-change %q: want a service name", clipValue(name))
+		}
+		if !slices.Contains(cfg.AcceptChange, name) {
+			cfg.AcceptChange = append(cfg.AcceptChange, name)
+		}
+	}
+	cfg.Home = home
 	if *sessionIdle <= 0 {
 		return Config{}, usage("--session-idle %v: want a positive duration, such as 1h (at least the gate's session_idle_s)", *sessionIdle)
 	}
@@ -355,9 +402,13 @@ type Node struct {
 	current    *session
 	currentCh  chan struct{}
 	hire       *hiring.Server
+	hosting    *sealing.Hosting // the hosting node's sealing (job state under ~/.kontra/hosted/<gate host>)
+	hiringSeal *sealing.Hiring  // the hiring node's sealing (per-job keys under ~/.kontra/jobs/<gate host>, pins)
 	lastPrune  time.Time
-	revoked    chan struct{} // closed when the gate revoked the active key
-	revokeOnce sync.Once
+	// lastSealSweep is when sealing's state was last swept (sweepSealing).
+	lastSealSweep time.Time
+	revoked       chan struct{} // closed when the gate revoked the active key
+	revokeOnce    sync.Once
 }
 
 // New loads (or creates) the identity key, refuses a group- or other-readable key file, resolves the
@@ -447,6 +498,9 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 	}
 	if n.hire, err = hiring.New(hiring.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: cfg.AllowOrigins, Gate: gate},
 		n, log); err != nil {
+		return nil, err
+	}
+	if err := n.setupSealing(gate, origin, log); err != nil {
 		return nil, err
 	}
 	now := n.now()

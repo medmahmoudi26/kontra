@@ -3,22 +3,14 @@ package a2ahttp
 import (
 	"errors"
 
+	"kontra.sh/kontra/internal/a2awire"
 	"kontra.sh/kontra/internal/strictjson"
 )
 
 // jsonrpcLevels are the levels of an A2A JSON-RPC request the gate reads itself or through a2a-go's second
-// decoding, below the request object (spec/relay.md §2.4, D172): params (tenant, the task id), params.metadata,
-// params.configuration, params.message, params.message.metadata, each of params.message.parts and each part's
-// metadata (the kontra. keys of spec §2.5).
-var jsonrpcLevels = []strictjson.Path{
-	{"params"},
-	{"params", "metadata"},
-	{"params", "configuration"},
-	{"params", "message"},
-	{"params", "message", "metadata"},
-	{"params", "message", "parts", "*"},
-	{"params", "message", "parts", "*", "metadata"},
-}
+// decoding (spec/relay.md §2.4, D172). They live with the nodes' part walker, internal/a2awire, which the hosting
+// node reads a request with at the same levels (plan corrections WP-08).
+var jsonrpcLevels = a2awire.JSONRPCRequestLevels
 
 // strictJSONRPC refuses a JSON-RPC body whose keys repeat, or differ only in case, at a level the gate reads
 // (InvalidRequestError, -32600, HTTP 400), so that ServeHTTP's own reads (rpcID, the method that routes a

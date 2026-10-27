@@ -23,6 +23,8 @@ import (
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/mcproots"
 	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/sealed"
+	"kontra.sh/kontra/internal/sealing"
 	"kontra.sh/kontra/internal/stdiobridge"
 	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/tunnel"
@@ -108,6 +110,9 @@ type Proxy struct {
 	// (its tunnel session's, release).
 	bridges map[string]*stdiobridge.Bridge
 	mcp     map[string]*mcpURL
+	// seal is the hosting node's sealing (internal/sealing, ext-sealed.md §5): it opens the sealed parts of what the
+	// gate forwards and seals what the service answers; nil seals nothing. Shared by forSession's proxies.
+	seal *sealing.Hosting
 
 	mu       sync.Mutex
 	served   map[string]bool
@@ -194,6 +199,7 @@ func (p *Proxy) forSession(served []string, logger *slog.Logger) *Proxy {
 		served:      map[string]bool{},
 		bridges:     p.bridges,
 		mcp:         p.mcp,
+		seal:        p.seal,
 	}
 	q.SetServed(served)
 	return q
@@ -385,7 +391,11 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 				return
 			}
 			sw := &statusWriter{ResponseWriter: w} // the bridge's own Kontra-Node answers (full, target_unreachable) are kept
-			b.ServeHTTP(sw, r.WithContext(stdiobridge.WithOwner(r.Context(), p)))
+			ctx := stdiobridge.WithOwner(r.Context(), p)
+			if p.seal != nil {
+				ctx = stdiobridge.WithFilter(ctx, p.seal.MCP(pre))
+			}
+			b.ServeHTTP(sw, r.WithContext(ctx))
 			log.Debug("tunnel exchange (stdio)", "method", r.Method, "status", sw.status, "duration_ms", time.Since(start).Milliseconds())
 			return
 		}
@@ -411,8 +421,35 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			defer done()
 		}
 		modify := stripResponse
+		if sv.Kind == tunnel.KindA2A && p.seal != nil {
+			// Sealing (ext-sealed.md §5): after the kontra-blob: parts were fetched, so a sealed part is opened once its
+			// whole age file is read; a refusal is the node's own answer (§6) and nothing reaches the service.
+			r2, sx, err := p.seal.Request(r.Context(), pre, r)
+			if err != nil {
+				reason, _ := sealed.ReasonOf(err)
+				log.Warn("tunnel exchange refused: a sealed request (ext-sealed.md §6)", "reason", string(reason))
+				sealing.WriteReject(w, sx.ID(), err)
+				return
+			}
+			r = r2
+			modify = func(res *http.Response) error {
+				if err := stripResponse(res); err != nil {
+					return err
+				}
+				out, err := p.seal.Response(r.Context(), sx, res)
+				if err != nil {
+					return err
+				}
+				*res = *out
+				return nil
+			}
+		}
 		if f := p.mcp[sv.Name]; sv.Kind == tunnel.KindMCP && f != nil {
-			x, ok := f.request(w, r, log, p.answerRoots(sv, out, log))
+			var sx *sealing.MCPExchange
+			if p.seal != nil {
+				sx = p.seal.MCP(pre)
+			}
+			x, ok := f.request(w, r, log, p.answerRoots(sv, out, log), sx)
 			if !ok {
 				return
 			}
