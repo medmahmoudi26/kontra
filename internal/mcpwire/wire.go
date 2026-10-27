@@ -162,6 +162,11 @@ var UpstreamLevels = []strictjson.Path{
 // audit's gaps[0] fix: "any key that equals a member it reads ... case-insensitively but not exactly") refuses it
 // too, with the same answer as a pair; §11.1 should say so. A reader that starts reading another member adds it
 // here, as a level is added to the spec first.
+//
+// The node's MCP filters (M3 WP-05) read: the client's capabilities.roots in an initialize and roots in its
+// per-request clientCapabilities (internal/mcproots replaces or removes them, D173), the progressToken of a client
+// request's _meta and of a server's notification (internal/stdiobridge routes progress to the request's POST
+// stream, spec/tunnel.md §10).
 var (
 	clientReads = withLevels(ClientLevels,
 		strictjson.Path{"jsonrpc"}, strictjson.Path{"id"}, strictjson.Path{"method"}, strictjson.Path{"error"},
@@ -169,11 +174,15 @@ var (
 		strictjson.Path{"params", "task"},
 		strictjson.Path{"params", "_meta", MetaProtocolVersion}, strictjson.Path{"params", "_meta", MetaClientInfo},
 		strictjson.Path{"params", "_meta", MetaRelatedTask},
+		strictjson.Path{"params", "_meta", "progressToken"},
+		strictjson.Path{"params", "capabilities", "roots"},
+		strictjson.Path{"params", "_meta", MetaClientCapabilities, "roots"},
 	)
 	upstreamReads = withLevels(UpstreamLevels,
 		strictjson.Path{"jsonrpc"}, strictjson.Path{"id"}, strictjson.Path{"method"},
 		strictjson.Path{"params", "name"}, strictjson.Path{"params", "uri"}, strictjson.Path{"params", "taskId"},
 		strictjson.Path{"params", "task"}, strictjson.Path{"params", "_meta", MetaRelatedTask},
+		strictjson.Path{"params", "progressToken"},
 		strictjson.Path{"result", "isError"}, strictjson.Path{"result", "protocolVersion"},
 		strictjson.Path{"result", "tools", "*", "name"}, strictjson.Path{"result", "tools", "*", "execution"},
 		strictjson.Path{"result", "capabilities", "tasks"},
@@ -338,6 +347,31 @@ func validID(v json.RawMessage) bool {
 		return json.Unmarshal(v, &n) == nil
 	}
 	return false
+}
+
+// IDKey is a JSON-RPC id (or a progress token: a string or a number) in a form two equal ids share, for a map: a
+// string by its value, a number by its value as a float64 (as JSON.parse reads it, so 1 and 1.0 are one id), ok
+// false for anything else (null, an object, an array, a boolean, nothing).
+func IDKey(id json.RawMessage) (string, bool) {
+	switch c := firstByte(id); {
+	case c == '"':
+		var s string
+		if json.Unmarshal(id, &s) != nil {
+			return "", false
+		}
+		return "s:" + s, true
+	case c == '-' || (c >= '0' && c <= '9'):
+		var n json.Number
+		if json.Unmarshal(id, &n) != nil {
+			return "", false
+		}
+		f, err := strconv.ParseFloat(n.String(), 64)
+		if err != nil {
+			return "", false
+		}
+		return "n:" + strconv.FormatFloat(f, 'g', -1, 64), true
+	}
+	return "", false
 }
 
 // parseError decodes an error object with exact keys: code an integer, message a string, data any value. A null

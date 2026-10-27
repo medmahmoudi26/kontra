@@ -618,3 +618,62 @@ func FuzzParseAgreesWithStructDecoding(f *testing.F) {
 		}
 	})
 }
+
+// IDKey: equal ids share a key (1 and 1.0 as JSON.parse reads them), a string and a number never do, and null or
+// an object has none (M3 WP-05: the node's filters key requests and progress tokens by it).
+func TestIDKey(t *testing.T) {
+	key := func(s string) string {
+		k, ok := IDKey(json.RawMessage(s))
+		if !ok {
+			return "<none>"
+		}
+		return k
+	}
+	for _, c := range [][2]string{{`1`, `1.0`}, {`1`, ` 1 `}, {`1e2`, `100`}, {`"a"`, `"a"`}, {`-0.5`, `-5e-1`}} {
+		if key(c[0]) != key(c[1]) || key(c[0]) == "<none>" {
+			t.Errorf("IDKey(%s) = %s, IDKey(%s) = %s: want one key", c[0], key(c[0]), c[1], key(c[1]))
+		}
+	}
+	for _, c := range [][2]string{{`1`, `"1"`}, {`"a"`, `"A"`}, {`1`, `2`}} {
+		if key(c[0]) == key(c[1]) {
+			t.Errorf("IDKey(%s) = IDKey(%s) = %s: want two keys", c[0], c[1], key(c[0]))
+		}
+	}
+	for _, s := range []string{`null`, `{}`, `[1]`, `true`, ``, `"unterminated`} {
+		if k, ok := IDKey(json.RawMessage(s)); ok {
+			t.Errorf("IDKey(%s) = %q, want none", s, k)
+		}
+	}
+}
+
+// The members the node's MCP filters read (M3 WP-05): a lone case variant of roots in an initialize's capabilities or
+// in a request's clientCapabilities, or of progressToken in a client's _meta or a server's progress notification,
+// is refused like a pair, since a peer decoding with encoding/json would take it for the member the node removed or
+// routed by.
+func TestNodeFilterReads(t *testing.T) {
+	for _, c := range []struct {
+		src  Source
+		body string
+	}{
+		{FromClient, `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"Roots":{}}}}`},
+		{FromClient, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","_meta":{"` + MetaClientCapabilities + `":{"ROOTS":{}}}}}`},
+		{FromClient, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"x","_meta":{"ProgressToken":"t"}}}`},
+		{FromUpstream, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"PROGRESSTOKEN":"t","progress":1}}`},
+	} {
+		if _, err := Parse([]byte(c.body), c.src); !errors.Is(err, ErrAmbiguous) {
+			t.Errorf("%s: %v, want ErrAmbiguous", c.body, err)
+		}
+	}
+	for _, c := range []struct {
+		src  Source
+		body string
+	}{
+		{FromClient, `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true}}}}`},
+		{FromClient, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"x","_meta":{"progressToken":"t"}}}`},
+		{FromUpstream, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t","progress":1}}`},
+	} {
+		if _, err := Parse([]byte(c.body), c.src); err != nil {
+			t.Errorf("%s: %v", c.body, err)
+		}
+	}
+}
