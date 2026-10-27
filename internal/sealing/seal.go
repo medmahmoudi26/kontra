@@ -36,9 +36,12 @@ import (
 
 // SealUsage is kontra seal's synopsis (spec/ext-sealed.md §5.1).
 const SealUsage = `usage:
-  kontra seal --service <service URL> [--context <id>] [--task <id>] [--media-type <type>] [file | -]
+  kontra seal --service <service URL> [--api-key <key>|@<file>] [--context <id>] [--task <id>] [--media-type <type>] [file | -]
   kontra seal --open <part.json>
 `
+
+// APIKeyEnv is the variable kontra seal reads its API key from when --api-key is not given.
+const APIKeyEnv = "KONTRA_API_KEY"
 
 // ErrUsage is a kontra seal command line that is not one of SealUsage's (the CLI exits 2).
 var ErrUsage = errors.New("usage")
@@ -69,11 +72,23 @@ const (
 // The file is sealed as one raw part (--media-type, default application/octet-stream; its name is not sent).
 // --open reads one sealed part (or a Message, a Task or an artifact holding sealed parts) and writes the plaintext
 // of each part a key of ~/.kontra/jobs opens, after checking dir res, the job key's id in kids and auth.
+//
+// SPEC-CONFLICT: §5.1 has kontra seal fetch the service's card with no word on a credential, but relay.md §2.1 answers
+// a card GET of a service that neither is listed nor admits anonymous with 404 when no credential admits the caller,
+// so kontra seal could seal for listed services only (and examples/sealing's flow, an allow: org:default service,
+// failed). It sends an API key, --api-key or $KONTRA_API_KEY, as Authorization: Bearer on its GETs to the service
+// URL's origin only (the card, the key set, the upstream card), as kontra connect sends its key to its gate only.
+//
+// SPEC-CONFLICT: §5.1 has kontra seal mint a per-job key and rk for every message it seals, --task included, but a
+// follow-up's header must carry the job's replyTo and rk (§5 rule 3: wrong_job otherwise), so a follow-up sealed
+// with a fresh key could never be accepted. --open binds a job to the gate task its replies name (renaming the job's
+// key and state to the task id, as the hiring node names its jobs), and --task <id> seals with that task's job key,
+// rk and contextId; a task with no job here is refused, saying to --open one of its replies first.
 func SealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	return sealCommand(ctx, args, stdin, stdout, stderr, os.Getenv("HOME"), http.DefaultClient, time.Now)
+	return sealCommand(ctx, args, stdin, stdout, stderr, os.Getenv("HOME"), os.Getenv(APIKeyEnv), http.DefaultClient, time.Now)
 }
 
-func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, home string,
+func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, home, envKey string,
 	client *http.Client, now func() time.Time) error {
 	fs := flag.NewFlagSet("kontra seal", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -82,8 +97,23 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	task := fs.String("task", "", "")
 	open := fs.String("open", "", "")
 	mediaType := fs.String("media-type", "application/octet-stream", "")
+	apiKey := fs.String("api-key", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err.Error())
+	}
+	key := envKey
+	if *apiKey != "" {
+		key = *apiKey
+		if path, ok := strings.CutPrefix(key, "@"); ok {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("--api-key: %w", err)
+			}
+			key = strings.TrimSpace(string(b))
+		}
+		if key == "" || strings.ContainsAny(key, " \t\r\n") {
+			return usageErr("--api-key: want the key, or @<file> holding it")
+		}
 	}
 	if home == "" {
 		h, err := os.UserHomeDir()
@@ -93,7 +123,7 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		home = h
 	}
 	if *open != "" {
-		if *service != "" || fs.NArg() > 0 {
+		if *service != "" || fs.NArg() > 0 || *apiKey != "" {
 			return usageErr("--open takes one part file and nothing else")
 		}
 		return openParts(*open, home, stdout)
@@ -130,13 +160,12 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	svcPath := strings.TrimRight(svcURL.EscapedPath(), "/")
 	cardURL := origin + svcPath + "/.well-known/agent-card.json"
-	cardBody, err := httpGet(ctx, client, cardURL)
+	get := func(ctx context.Context, u string) ([]byte, error) { return httpGet(ctx, client, u, origin, key) }
+	cardBody, err := get(ctx, cardURL)
 	if err != nil {
 		return fmt.Errorf("the service's card: %w", err)
 	}
-	card, err := VerifyCard(ctx, cardBody, origin, func(ctx context.Context, u string) ([]byte, error) {
-		return httpGet(ctx, client, u)
-	})
+	card, err := VerifyCard(ctx, cardBody, origin, get)
 	if err != nil {
 		return err
 	}
@@ -174,30 +203,55 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	if err != nil {
 		return err
 	}
-	var rb [12]byte
-	if _, err := io.ReadFull(randReader, rb[:]); err != nil {
-		return err
-	}
-	jobID := "seal-" + hex.EncodeToString(rb[:])
-	key, err := jobs.Mint(jobID, now())
-	if err != nil {
-		return err
-	}
-	rk, err := sealed.NewRK()
-	if err != nil {
-		return err
-	}
-	if *ctxID == "" {
-		*ctxID = uuid.NewString()
-	}
-	if err := writeJSON(jobs.Dir(), jobID+".json", &hireJob{ID: jobID, Service: name, RK: sealed.EncodeRK(rk),
-		ContextID: *ctxID, Created: now()}); err != nil {
-		return err
+	var (
+		jobID  string
+		jobKey *age.X25519Identity
+		rk     []byte
+	)
+	if *task != "" {
+		// A follow-up: the task's job key and rk (rule 3), bound by --open.
+		var st hireJob
+		jobID = *task
+		if jobKey, err = jobs.Load(jobID); err == nil {
+			err = readJSON(filepath.Join(jobs.Dir(), jobID+".json"), &st)
+		}
+		if err == nil && st.Service != name {
+			err = fmt.Errorf("its job is for %s", st.Service)
+		}
+		if err == nil {
+			rk, err = sealed.DecodeRK(st.RK)
+		}
+		if err != nil {
+			return fmt.Errorf("no job of task %s for %s under %s (%v): open one of the task's replies with kontra seal --open "+
+				"first, so that the follow-up is sealed with the task's job key (ext-sealed.md §5 rule 3)", *task, name, jobs.Dir(), err)
+		}
+		if *ctxID == "" {
+			*ctxID = st.ContextID
+		}
+	} else {
+		var rb [12]byte
+		if _, err := io.ReadFull(randReader, rb[:]); err != nil {
+			return err
+		}
+		jobID = "seal-" + hex.EncodeToString(rb[:])
+		if jobKey, err = jobs.Mint(jobID, now()); err != nil {
+			return err
+		}
+		if rk, err = sealed.NewRK(); err != nil {
+			return err
+		}
+		if *ctxID == "" {
+			*ctxID = uuid.NewString()
+		}
+		if err := writeJSON(jobs.Dir(), jobID+".json", &hireJob{ID: jobID, Service: name, RK: sealed.EncodeRK(rk),
+			ContextID: *ctxID, Created: now()}); err != nil {
+			return err
+		}
 	}
 	msgID := uuid.NewString()
 	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: now().Unix(), TaskID: *task, ContextID: *ctxID,
 		MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindRaw, MediaType: *mediaType, Kids: kids,
-		ReplyTo: key.Recipient().String(), RK: sealed.EncodeRK(rk)}
+		ReplyTo: jobKey.Recipient().String(), RK: sealed.EncodeRK(rk)}
 	ct, err := sealed.Seal(recipients, hd, data)
 	if err != nil {
 		return err
@@ -211,7 +265,7 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		"role":      "ROLE_USER",
 		"contextId": *ctxID,
 		"parts":     []json.RawMessage{part},
-		"metadata":  map[string]string{sealed.MetadataReplyTo: key.Recipient().String()},
+		"metadata":  map[string]string{sealed.MetadataReplyTo: jobKey.Recipient().String()},
 	}
 	if *task != "" {
 		msg["taskId"] = *task
@@ -222,7 +276,7 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	if err := enc.Encode(msg); err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "kontra seal: sealed to %s; the reply key is %s (job %s)\n", list(kids), tunnel.KeyID(key.Recipient().String()), jobID)
+	fmt.Fprintf(stderr, "kontra seal: sealed to %s; the reply key is %s (job %s)\n", list(kids), tunnel.KeyID(jobKey.Recipient().String()), jobID)
 	return nil
 }
 
@@ -361,7 +415,7 @@ func openParts(path, home string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ids, rks, err := allJobKeys(home)
+	ids, rks, where, err := allJobKeys(home)
 	if err != nil {
 		return err
 	}
@@ -391,6 +445,15 @@ func openParts(path, home string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		// A part none of the job keys is a recipient of is not a reply to one of this node's jobs: a Task's history
+		// holds the client's own sealed request, sealed to the hosting nodes. It is skipped; any other failure to
+		// open is an error.
+		if _, err := age.Decrypt(bytes.NewReader(sp.Ciphertext), ids...); err != nil {
+			var nomatch *age.NoIdentityMatchError
+			if errors.As(err, &nomatch) {
+				continue
+			}
+		}
 		hd, plain, err := sealed.Open(ids, sp.Ciphertext)
 		if err != nil {
 			return fmt.Errorf("a part does not open with this node's job keys: %w", err)
@@ -409,25 +472,67 @@ func openParts(path, home string, out io.Writer) error {
 			return err
 		}
 		opened++
+		// The reply names the gate task its job opened: the job is bound to it, so that --task seals a follow-up
+		// with this key and rk (SealCommand's SPEC-CONFLICT on §5.1).
+		if loc, ok := where[hd.Kids[0]]; ok && hd.TaskID != "" && loc.id != hd.TaskID {
+			if err := bindJob(loc.jobs, loc.id, hd.TaskID); err != nil {
+				return err
+			}
+			loc.id = hd.TaskID
+		}
 	}
 	if opened == 0 {
-		return fmt.Errorf("%s holds no sealed part", path)
+		return fmt.Errorf("%s holds no sealed part a job key here opens", path)
 	}
 	return nil
 }
 
-// allJobKeys loads every per-job key under ~/.kontra/jobs/*/ with its rk (the job's state file), by key id.
-func allJobKeys(home string) ([]age.Identity, map[string][]byte, error) {
+// jobLocation is where a per-job key is kept: its gate's directory and its job id.
+type jobLocation struct {
+	jobs *nodekey.JobKeys
+	id   string
+}
+
+// bindJob renames a kontra seal job (seal-…) to the gate task id its replies name: its key, then its state, whose
+// id it rewrites. A job already named for the task, or a task that already has another job here, is left as it is.
+func bindJob(jobs *nodekey.JobKeys, from, task string) error {
+	if !strings.HasPrefix(from, "seal-") {
+		return nil
+	}
+	if _, err := jobs.Load(task); err == nil {
+		return nil
+	}
+	var st hireJob
+	if err := readJSON(filepath.Join(jobs.Dir(), from+".json"), &st); err != nil {
+		return err
+	}
+	if err := jobs.Rename(from, task); err != nil {
+		return fmt.Errorf("bind job %s to task %s: %w", from, task, err)
+	}
+	st.ID = task
+	if err := writeJSON(jobs.Dir(), task+".json", &st); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(jobs.Dir(), from+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// allJobKeys loads every per-job key under ~/.kontra/jobs/*/ with its rk (the job's state file) and where it is
+// kept, by key id.
+func allJobKeys(home string) ([]age.Identity, map[string][]byte, map[string]*jobLocation, error) {
 	root := filepath.Join(home, nodekey.DirName, nodekey.JobsDirName)
 	gates, err := os.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var ids []age.Identity
 	rks := map[string][]byte{}
+	where := map[string]*jobLocation{}
 	for _, g := range gates {
 		if !g.IsDir() {
 			continue
@@ -458,18 +563,27 @@ func allJobKeys(home string) ([]age.Identity, map[string][]byte, error) {
 				continue
 			}
 			ids = append(ids, key)
-			rks[tunnel.KeyID(key.Recipient().String())] = rk
+			kid := tunnel.KeyID(key.Recipient().String())
+			rks[kid] = rk
+			where[kid] = &jobLocation{jobs: jobs, id: id}
 		}
 	}
-	return ids, rks, nil
+	return ids, rks, where, nil
 }
 
-func httpGet(ctx context.Context, client *http.Client, u string) ([]byte, error) {
+// httpGet GETs u, sending key as a bearer credential when it is set and u is on origin (the gate's, and nobody
+// else's, as kontra connect sends its key).
+func httpGet(ctx context.Context, client *http.Client, u, origin, key string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	if key != "" {
+		if o, err := tunnel.CanonicalOrigin(req.URL); err == nil && o == origin {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, err

@@ -383,7 +383,7 @@ func TestHostingRules(t *testing.T) {
 		{name: "wrong_task first message naming a task", want: sealed.RejectWrongTask, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
 			return send("m1", ctx, "up-9", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x")))
 		}},
-		{name: "wrong_task header task is not the preamble's", want: sealed.RejectWrongTask, pre: pre(task, ctx),
+		{name: "wrong_job header task is not the preamble's (a follow-up sent into another job)", want: sealed.RejectWrongJob, pre: pre(task, ctx),
 			setup: func(f *fixture, b buyer) { opened(f, b, "up-1") },
 			body: func(f *fixture, b buyer) []byte {
 				return send("m3", "upctx-1", "up-1", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "0193c0de-0000-7000-8000-0000000000aa", ctx, "m3", 0, 1), "x")))

@@ -645,9 +645,10 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 			return nil, reject(sealed.RejectWrongJob, "the gate task's job was opened with another replyTo")
 		}
 	} else {
-		// Rule 3: a follow-up of job T.
+		// Rule 3: a follow-up of job T. A header naming another task than the preamble's is a follow-up sent into
+		// another job: wrong_job, as rule 3 and sealed_replay say.
 		if h.TaskID != x.pre.Task {
-			return nil, reject(sealed.RejectWrongTask, "the header's taskId is not the preamble's task")
+			return nil, reject(sealed.RejectWrongJob, "the header's taskId is not the preamble's task")
 		}
 		if j == nil || j.ReplyTo != h.ReplyTo || j.RK != h.RK {
 			return nil, reject(sealed.RejectWrongJob, "no job of this replyTo and rk for the task")

@@ -3,7 +3,8 @@
 //	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
 //	               [--listen 127.0.0.1:7777] … (M2, M3; spec/tunnel.md; internal/node, internal/hiring,
 //	               internal/stdiobridge)
-//	kontra seal --service <service URL> [--context <id>] [--task <id>] [file | -], kontra seal --open <part.json>
+//	kontra seal --service <service URL> [--api-key <key>] [--context <id>] [--task <id>] [file | -],
+//	kontra seal --open <part.json>
 //	(spec/ext-sealed.md §5.1; internal/sealing)
 //	kontra version
 //
@@ -36,7 +37,8 @@ const usage = `usage:
                  [--require-channel-binding] [--max-inflight <n>] [--listen <addr>] [--local-token <file>]
                  [--allow-origin <origin> …] [--sealed-max-age <duration>] [--sealed-required <name> …]
                  [--pin-recipients] [--accept-change <name> …] [--log json]
-  kontra seal --service <service URL> [--context <id>] [--task <id>] [--media-type <type>] [file | -]
+  kontra seal --service <service URL> [--api-key <key>|@<file>] [--context <id>] [--task <id>]
+              [--media-type <type>] [file | -]
   kontra seal --open <part.json>
   kontra version
 
@@ -80,7 +82,9 @@ and on every change.
 
 kontra seal seals a file for a sealed service without a node (the escape hatch for scripting, ext-sealed.md §5.1):
 it prints one A2A Message JSON whose single part is the file sealed to the service's recipients; --open writes the
-plaintext of a reply's sealed parts.
+plaintext of a reply's sealed parts and binds its job to the task the reply names, so that --task <id> seals a
+follow-up of that task with its job's key. --api-key (default $KONTRA_API_KEY) is sent to the gate only, to read the
+card of a service that is not listed.
 `
 
 // later is when each subcommand that is not built yet comes (PRD §14, note 2 §4). There is no console
