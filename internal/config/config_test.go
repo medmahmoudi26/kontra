@@ -468,7 +468,7 @@ func TestLoadErrors(t *testing.T) {
 		{"tls-exporter without TLS", head + "tunnel: { channel_binding: tls-exporter }\n", "needs the gate to terminate TLS"},
 		{"remote admission hook (M5)", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT } }\n", "remote Admission hook is not built"},
 		{"admission over http to a public host", head + "hooks: { admission: { url: http://cp.example.com/admit, secret_env: ADMIT } }\n", "https:// unless the host is loopback"},
-		{"remote lifecycle hook (M5)", head + "hooks: { lifecycle: { task_queue: cloud-lifecycle } }\n", "remote Lifecycle hook is not built"},
+		{"remote lifecycle hook without a queue", head + "hooks: { lifecycle: {} }\n", "hooks.lifecycle.task_queue: required"},
 		{"oidc over http", head + "auth: { oidc: { issuer: http://login.example.com, audience: kontra } }\n", "auth.oidc.issuer"},
 		{"oidc without audience", head + "auth: { oidc: { issuer: https://login.example.com } }\n", "auth.oidc.audience: required"},
 		// peer: (spec §11.2, §17; D163, D179).
@@ -651,6 +651,28 @@ func TestRemoteAdmissionRefusedAsUnbuilt(t *testing.T) {
 	var ve *ValidationError
 	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "remote Admission hook is not built") {
 		t.Errorf("error = %v, want only the not-built refusal", err)
+	}
+}
+
+// The remote Lifecycle hook loads (D186, M3 WP-10): its queue is kept as written, the file gives no other
+// problem, and a remote Admission hook beside it is still refused as unbuilt (C3: hooks.admission stays M5's).
+func TestRemoteLifecycleAccepted(t *testing.T) {
+	c := parse(t, minimal+"hooks: { lifecycle: { task_queue: m3pentest-lifecycle } }\n")
+	if c.Hooks.Lifecycle == nil || c.Hooks.Lifecycle.TaskQueue != "m3pentest-lifecycle" {
+		t.Fatalf("hooks.lifecycle = %+v, want task_queue m3pentest-lifecycle", c.Hooks.Lifecycle)
+	}
+	if c.Hooks.Admission != nil {
+		t.Errorf("hooks.admission = %+v, want the built-in", c.Hooks.Admission)
+	}
+	for _, w := range c.Warnings {
+		if strings.Contains(w, "lifecycle") {
+			t.Errorf("a warning names the accepted hook: %q", w)
+		}
+	}
+	err := parseErr(t, minimal+"hooks: { lifecycle: { task_queue: q }, admission: { url: \"http://127.0.0.1:7000/admit\", secret_env: ADMIT } }\n")
+	var ve *ValidationError
+	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "remote Admission hook is not built") {
+		t.Errorf("error = %v, want only the Admission refusal", err)
 	}
 }
 

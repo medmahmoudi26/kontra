@@ -210,7 +210,8 @@ type AdmissionHook struct {
 	Operations []string `yaml:"operations"` // default [task]
 }
 
-// LifecycleHook is the remote Lifecycle (spec §13.3): the five activities by type name on that queue. M5.
+// LifecycleHook is the remote Lifecycle (spec §13.3): the five activities by type name on that queue. Accepted
+// since M3 (D186); the remote Admission hook stays refused until M5.
 type LifecycleHook struct {
 	TaskQueue string `yaml:"task_queue"`
 }

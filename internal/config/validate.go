@@ -482,11 +482,10 @@ func (c *Config) validateHooks(v *validator) {
 		// would deny, so the gate refuses to start rather than fail open.
 		v.add("hooks.admission: the remote Admission hook is not built in this release (M5); remove it to use the built-in")
 	}
-	if h := c.Hooks.Lifecycle; h != nil {
-		if h.TaskQueue == "" {
-			v.add("hooks.lifecycle.task_queue: required")
-		}
-		v.add("hooks.lifecycle: the remote Lifecycle hook is not built in this release (M5); remove it to use the built-in")
+	// The remote Lifecycle hook is accepted (D186): the five activities are scheduled by type name on the operator's
+	// queue (spec §13.3, lifecycle.WorkerConfig.RemoteHooks), and the built-in no-ops are then not registered.
+	if h := c.Hooks.Lifecycle; h != nil && h.TaskQueue == "" {
+		v.add("hooks.lifecycle.task_queue: required")
 	}
 }
 

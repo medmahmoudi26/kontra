@@ -158,7 +158,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["task_queue"],
-          "description": "The remote Lifecycle hook (spec §13.3). M5: refused at load until built.",
+          "description": "The remote Lifecycle hook (spec §13.3): the five activities are scheduled by type name on task_queue, and the built-in no-ops are not registered. Accepted since M3 (D186).",
           "properties": { "task_queue": { "type": "string", "minLength": 1 } }
         }
       }
