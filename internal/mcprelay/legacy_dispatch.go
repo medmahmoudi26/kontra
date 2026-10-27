@@ -18,6 +18,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/relay"
@@ -80,6 +81,7 @@ type exchangeError struct {
 	retryAfter time.Duration
 	rpc        *mcpwire.Error
 	raw        json.RawMessage // the JSON-RPC error object as the upstream wrote it (classRPC)
+	reject     string          // classSealed: the node's Kontra-Sealed-Reject, when one of ext-sealed.md §6's reasons
 }
 
 func (e *exchangeError) Error() string {
@@ -143,7 +145,8 @@ func (k *mcpLink) send(ctx context.Context, method string, body []byte) (*http.R
 			case tunnel.NodeFull:
 				return nil, &exchangeError{class: classFull, msg: "the node is full"}
 			case tunnel.NodeSealedRejected:
-				return nil, &exchangeError{class: classSealed, msg: "the hosting node refused a sealed part"}
+				return nil, &exchangeError{class: classSealed, msg: "the hosting node refused a sealed part",
+					reject: upstream.SealedRejectReason(resp.Header.Get(tunnel.HeaderSealedReject))}
 			}
 			return nil, &exchangeError{class: classTunnelLost, msg: "the node answered " + string(reason)}
 		}
@@ -629,9 +632,29 @@ func (r *legacyRun) beforeFirst(ctx context.Context, err error) (lifecycle.Dispa
 		return lifecycle.DispatchResult{Outcome: lifecycle.DispatchRetryable, Reason: string(store.ReasonUpstreamError),
 			RetryAfterSeconds: int64(xe.retryAfter / time.Second)}, true
 	case classSealed:
-		return r.fail(ctx, store.ReasonSealedRejected, "")
+		return r.sealedRejected(ctx, xe)
 	}
 	return r.fail(ctx, store.ReasonUpstreamError, "")
+}
+
+// sealedRejected is a hosting node's refusal of a sealed part of the task (ext-sealed.md §6, relay.md §6.4): an
+// audit row names the task, the attempt and the node's reason, and the task fails sealed_rejected, never retried.
+func (r *legacyRun) sealedRejected(ctx context.Context, xe *exchangeError) (lifecycle.DispatchResult, bool) {
+	f := audit.Fields{"task_id": r.taskID, "tenant_id": r.row.TenantID, "service": r.row.Service, "protocol": "mcp",
+		"attempt": r.n, "reason": xe.reject, "replica_id": r.d.ReplicaID}
+	if r.attempt != nil && r.attempt.TunnelSession != nil {
+		f["tunnel_session"] = r.attempt.TunnelSession.String()
+	}
+	if r.work != nil && r.work.Session != "" {
+		f["mcp_session"] = r.work.Session
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := audit.SealedRejected(actx, r.d.Log.DB(), f); err != nil {
+		r.log.Error("a sealed-part rejection was not written to the audit chain", "error", err)
+	}
+	r.log.Warn("the hosting node refused a sealed part: the task fails sealed_rejected (not retried)", "reason", xe.reject)
+	return r.fail(ctx, store.ReasonSealedRejected, "")
 }
 
 // loop follows the upstream task until it is terminal: tasks/get at the upstream's pollInterval, the messages of
@@ -749,7 +772,7 @@ func (r *legacyRun) pollFailed(ctx context.Context, err error) (lifecycle.Dispat
 		r.log.Warn("the upstream's answer to the dispatch failed", "error", xe.Error())
 		return r.fail(ctx, store.ReasonUpstreamError, "")
 	case xe.class == classSealed:
-		return r.fail(ctx, store.ReasonSealedRejected, "")
+		return r.sealedRejected(ctx, xe)
 	case xe.class == classTunnelLost:
 		r.log.Info("the attempt's tunnel exchange was lost after the first upstream task id", "error", xe.Error(), "session_held", r.link.held())
 		return r.fail(ctx, store.ReasonTunnelLost, "")

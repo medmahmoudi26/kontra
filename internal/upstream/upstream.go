@@ -170,6 +170,9 @@ type Exchange struct {
 	// header, so a direct service cannot pass its own answer off as a node's.
 	tunnelled bool
 	node      tunnel.NodeReason
+	// sealedReject is the Kontra-Sealed-Reject header of a node's sealed_rejected answer (ext-sealed.md §6), when
+	// it names one of §6's reasons; the gate records it in the rejection's audit row.
+	sealedReject string
 }
 
 type exchangeKey struct{}
@@ -201,7 +204,7 @@ func (e *Exchange) Reset() {
 		return
 	}
 	e.mu.Lock()
-	e.status, e.retryAfter, e.limit, e.broken, e.node = 0, 0, false, false, ""
+	e.status, e.retryAfter, e.limit, e.broken, e.node, e.sealedReject = 0, 0, false, false, "", ""
 	e.mu.Unlock()
 }
 
@@ -235,13 +238,42 @@ func (e *Exchange) markTunnelled() {
 	e.mu.Unlock()
 }
 
-func (e *Exchange) recordNode(n tunnel.NodeReason) {
+func (e *Exchange) recordNode(n tunnel.NodeReason, reject string) {
 	if e == nil {
 		return
 	}
 	e.mu.Lock()
 	e.node = n
+	e.sealedReject = ""
+	if n == tunnel.NodeSealedRejected {
+		e.sealedReject = SealedRejectReason(reject)
+	}
 	e.mu.Unlock()
+}
+
+// SealedReject is the reason a node's sealed_rejected answer named (Kontra-Sealed-Reject), "" when the last
+// response was not one or named no reason of ext-sealed.md §6.
+func (e *Exchange) SealedReject() string {
+	if e == nil {
+		return ""
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sealedReject
+}
+
+// sealedReasons are ext-sealed.md §6's reasons: a node's Kontra-Sealed-Reject is recorded only when it is one of
+// them (the node's text never reaches the log as it came).
+var sealedReasons = []string{"undecryptable", "bad_header", "wrong_task", "wrong_context", "wrong_message", "wrong_job",
+	"replayed", "not_a_recipient"}
+
+// SealedRejectReason is a Kontra-Sealed-Reject header value when it is one of ext-sealed.md §6's reasons, else "".
+func SealedRejectReason(v string) string {
+	v = strings.TrimSpace(v)
+	if slices.Contains(sealedReasons, v) {
+		return v
+	}
+	return ""
 }
 
 // LimitExceeded reports whether a body read under this exchange ran over a limit of §6.6.
@@ -332,7 +364,7 @@ func (t *limitTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	ex.record(resp.StatusCode, RetryAfter(resp.Header.Get("Retry-After"), time.Now()))
 	if t.tunnel {
-		ex.recordNode(tunnel.NodeReason(strings.TrimSpace(resp.Header.Get(tunnel.HeaderNode))))
+		ex.recordNode(tunnel.NodeReason(strings.TrimSpace(resp.Header.Get(tunnel.HeaderNode))), resp.Header.Get(tunnel.HeaderSealedReject))
 	}
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if mt == "text/event-stream" {
@@ -504,6 +536,20 @@ func ReadInfo(raw []byte) (Info, error) {
 		}
 	}
 	return info, nil
+}
+
+// ErrNot10 is a sealed service's upstream card that offers no A2A 1.0 interface (D165; ext-sealed.md §1): the
+// nodes seal and open the 1.0 JSON-RPC and HTTP+JSON shapes only, so the service is unavailable.
+var ErrNot10 = fmt.Errorf("%w: a sealed service needs an A2A 1.0 interface (JSONRPC or HTTP+JSON), and the card offers none (D165)", ErrBadCard)
+
+// Require10 refuses an Info whose interface is not A2A 1.x (ErrNot10). pickInterface ranks 1.x first, so an Info
+// of 0.x means the card offers no 1.x interface at all.
+func Require10(info Info) error {
+	v := string(info.ProtocolVersion)
+	if v == "1" || strings.HasPrefix(v, "1.") {
+		return nil
+	}
+	return ErrNot10
 }
 
 // pickInterface prefers protocol version 1 over 0, then JSONRPC over HTTP+JSON; gRPC is not spoken.

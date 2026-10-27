@@ -724,9 +724,9 @@ func (l *Log) load(ctx context.Context, q querier, taskID uuid.UUID, lock string
 func (l *Log) LoadService(ctx context.Context, tenantID uuid.UUID, name string) (ServiceRef, error) {
 	ref := ServiceRef{TenantID: tenantID, Name: name}
 	var timeoutS, retentionS int64
-	err := l.db.QueryRow(ctx, `select t.slug, s.kind, s.timeout_s, s.retries, s.retention_s
+	err := l.db.QueryRow(ctx, `select t.slug, s.kind, s.timeout_s, s.retries, s.retention_s, s.sealed
 		from kontra.services s join kontra.tenants t on t.id = s.tenant_id
-		where s.tenant_id = $1 and s.name = $2`, tenantID, name).Scan(&ref.Tenant, &ref.Kind, &timeoutS, &ref.Retries, &retentionS)
+		where s.tenant_id = $1 and s.name = $2`, tenantID, name).Scan(&ref.Tenant, &ref.Kind, &timeoutS, &ref.Retries, &retentionS, &ref.Sealed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ServiceRef{}, fmt.Errorf("store: service %s/%s does not exist", tenantID, name)
 	}
@@ -734,6 +734,7 @@ func (l *Log) LoadService(ctx context.Context, tenantID uuid.UUID, name string) 
 		return ServiceRef{}, fmt.Errorf("store: load service %s/%s: %w", tenantID, name, err)
 	}
 	ref.Timeout, ref.Retention = time.Duration(timeoutS)*time.Second, time.Duration(retentionS)*time.Second
+	ref.Sealed = SealedRef(ref.Sealed)
 	return ref, nil
 }
 

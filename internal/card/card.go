@@ -47,8 +47,12 @@ type Input struct {
 	OIDC          bool   // add an openIdConnect scheme (operator IdP)
 	// OIDCIssuer is the IdP's issuer URL; the scheme's openIdConnectUrl is its discovery document. OIDC
 	// principals are not built in M1, so this stays empty there.
-	OIDCIssuer     string
-	SealedURI      string            // https://kontra.sh/ext/sealed/v1 for a sealed service (M3), else ""
+	OIDCIssuer string
+	// Sealed is the sealed extension's entry for a sealed service (ext-sealed.md §1: uri
+	// https://kontra.sh/ext/sealed/v1, required false, params recipients, envelope and required), nil otherwise.
+	// It replaces a seller entry with the same URI, and a card whose upstream offers no A2A 1.0 interface is not
+	// installed (D165: the nodes seal and open the 1.0 shapes only), so the service is unavailable.
+	Sealed         json.RawMessage
 	CardExtensions []json.RawMessage // the operator's card_extensions annotation (spec §13.4)
 }
 
@@ -564,9 +568,15 @@ func Rewrite(in Input) ([]byte, error) {
 func extensions(caps object, in Input) (json.RawMessage, error) {
 	var gate []json.RawMessage
 	owned := map[string]bool{}
-	if in.SealedURI != "" {
-		gate = append(gate, mustJSON(map[string]string{"uri": in.SealedURI}))
-		owned[in.SealedURI] = true
+	if len(in.Sealed) > 0 {
+		var ext struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal(in.Sealed, &ext); err != nil || ext.URI == "" {
+			return nil, fmt.Errorf("card: the sealed extension entry is not an extension object with a uri")
+		}
+		gate = append(gate, in.Sealed)
+		owned[ext.URI] = true
 	}
 	for _, e := range in.CardExtensions {
 		var ext struct {

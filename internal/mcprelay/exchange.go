@@ -288,6 +288,24 @@ func (h *Handler) relayResponse(rq *request, resp *http.Response, o *relayOpts) 
 			case tunnel.NodeFull:
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusServiceUnavailable, o.reqID, mcpwire.CodeInternal, "the node is busy", nil)
+			case tunnel.NodeSealedRejected:
+				// ext-sealed.md §6: the hosting node refused a sealed part of the call. The JSON-RPC error is relayed
+				// to the client, as the node wrote it (-32602 "sealed part rejected: <reason>", the reason only when
+				// it is one of §6's), the calls row says is_error, and the audit chain records the rejection.
+				reason := upstream.SealedRejectReason(resp.Header.Get(tunnel.HeaderSealedReject))
+				msg := "sealed part rejected"
+				if reason != "" {
+					msg += ": " + reason
+				}
+				tool := ""
+				if o.meter != nil {
+					tool = o.meter.call.Tool
+				}
+				h.auditSealed(rq.ctx(), rq, tool, reason, "")
+				if o.sid != "" {
+					w.Header().Set(mcpwire.HeaderSessionID, o.sid)
+				}
+				writeError(w, http.StatusOK, o.reqID, mcpwire.CodeInvalidParams, msg, nil)
 			default:
 				writeError(w, http.StatusBadGateway, o.reqID, mcpwire.CodeInternal, msgUnreachable, nil)
 			}

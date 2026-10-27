@@ -380,6 +380,10 @@ func (r *Replica) assemble() error {
 		Tunnels: r.tunnels, Sessions: r.tunnels, TunnelCardRefresh: r.opts.tunnelCards,
 	})
 	r.listener.OnChannel(pg.ChannelServices, r.services.Notify)
+	// A sealed service's recipients are republished when its keys change (ext-sealed.md §1; tunnel.md §5, §12):
+	// an enrollment (kontra_tunnel 'enrolled:…'), a revocation and the end of a rotation's overlap (kontra_revoke).
+	r.listener.OnChannel(pg.ChannelTunnel, r.services.RecipientsChanged)
+	r.listener.OnChannel(pg.ChannelRevoke, r.services.RecipientsChanged)
 	r.listener.OnReconnect(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

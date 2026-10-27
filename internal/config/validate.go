@@ -578,14 +578,9 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 		v.add("%s.sealed: sealing needs backend tunnel: the recipients are the service's enrolled node keys and "+
 			"the hosting node unseals (ext-sealed.md §1); a direct backend has neither", at)
 	}
-	tunnelled := s.Backend.Tunnel != nil && n == 1
-	if s.Sealed.Mode != SealedOff && tunnelled {
-		// SPEC-CONFLICT (D91 amended for M2, M2 plan WP-04): D91 accepted sealed: on a tunnel service with a
-		// warning while tunnel backends were not served. This build serves them and does not seal (M3), so
-		// it would relay the service's parts in plaintext (fail open): refused, as on a direct backend.
-		v.add("%s.sealed: sealing is not built in this release (M3), and this build serves tunnel services: it "+
-			"would relay the service's parts in plaintext; remove sealed until sealing is built (ext-sealed.md §1)", at)
-	}
+	// sealed: on a tunnel service is served since M3 WP-08 (ext-sealed.md §1, §5), which lifts D144's refusal:
+	// the gate publishes the service's recipients, refuses unsealed parts to a required service and relays the
+	// envelopes, and the hosting node unseals. D91's refusal above stays for direct backends.
 	if !s.SellerKeys.IsZero() {
 		// Seller card signatures are verified (spec §3; M3 WP-02 lifts D90 and the seller_keys half of D144): an
 		// a2a service's card none of whose signatures its keys verify makes it unavailable.
@@ -771,10 +766,10 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 
 // unbuilt lists the keys this build accepts but does not act on yet. Each one fails closed when ignored
 // (nobody is admitted by it, nothing is served for it); keys that would fail open are refused by
-// Validate instead (the remote hooks, sealed on any backend). seller_keys on an MCP service, which has no card
+// Validate instead (the remote hooks, sealed on a direct backend). seller_keys on an MCP service, which has no card
 // (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
 // served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
-// M3 WP-04.
+// M3 WP-04; sealed: on tunnel services since M3 WP-08.
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }

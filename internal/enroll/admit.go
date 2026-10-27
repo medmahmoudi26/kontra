@@ -756,6 +756,19 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 			return nil, err
 		}
 	}
+	// A new binding adds a recipient to a sealed service (ext-sealed.md §1, D61): every replica re-reads the
+	// services it binds, which republishes their recipients (a service's first key included, which sends no
+	// 'enrolled:' notice to other nodes).
+	for _, row := range audited {
+		m, _ := row.(map[string]any)
+		name, _ := m["service"].(string)
+		if name == "" || slices.Contains(created, name) {
+			continue
+		}
+		if _, err := a.tx.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelServices), a.slug+"/"+name); err != nil {
+			return nil, err
+		}
+	}
 	// §5: the services' other nodes are told once the binding commits, by every replica (this one included)
 	// on its NOTIFY kontra_tunnel, whatever becomes of the new key's session afterwards.
 	for _, b := range enrolled {

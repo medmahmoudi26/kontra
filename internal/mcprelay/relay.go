@@ -59,11 +59,18 @@ type Service struct {
 	Disabled bool
 	// Direct is the backend of a direct mcp: {url} service (the SSRF-safe dialer pinned to the URL's host:port,
 	// D71), nil for a tunnel service. A direct backend is reached from any replica and never hops (§11.2).
-	Direct      upstream.Backend
-	Tools       Policy
-	Tasks       string // durable, passthrough or off (§11.5)
-	Sealed      bool   // sealed: set (spec/ext-sealed.md §1; served from M3 WP-08)
-	SessionIdle time.Duration
+	Direct upstream.Backend
+	Tools  Policy
+	Tasks  string // durable, passthrough or off (§11.5)
+	Sealed bool   // sealed: set (spec/ext-sealed.md §1)
+	// SealedRequired is sealed: true (required): a tools/call without _meta["sh.kontra/sealed"] is refused -32600
+	// before anything is forwarded or a task exists (ext-sealed.md §5 "Gate").
+	SealedRequired bool
+	// SealedCapability is the sealed extension's object (ext-sealed.md §1: uri, description, required false,
+	// params recipients, envelope and required), which a legacy initialize result carries under
+	// capabilities.experimental["sh.kontra/sealed"] (D27); nil for a service that is not sealed.
+	SealedCapability json.RawMessage
+	SessionIdle      time.Duration
 	// ToolMeta and InitializeMeta are services.annotations' tool_meta and initialize_meta (§13.4).
 	ToolMeta       map[string]map[string]json.RawMessage
 	InitializeMeta map[string]json.RawMessage

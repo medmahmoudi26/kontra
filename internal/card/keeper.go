@@ -303,6 +303,14 @@ func (k *Keeper) installOver(ctx context.Context, raw []byte, at time.Time, v ve
 	if err != nil {
 		return err
 	}
+	if len(k.in.Sealed) > 0 {
+		// D165 (ext-sealed.md §1): the nodes seal and open the A2A 1.0 shapes only, so a sealed service whose
+		// upstream card offers no 1.0 interface has no card: its card routes answer 503 and its tasks fail
+		// service_unavailable.
+		if err := upstream.Require10(info); err != nil {
+			return err
+		}
+	}
 	// SPEC-CONFLICT (spec §3 with D49): §3 keeps the upstream card verbatim and serves every seller member byte
 	// for byte, and signs the served card over its RFC 8785 JCS with the upstream card's JCS hash in the header;
 	// JCS is defined for valid Unicode only (I-JSON), so a card that is not valid UTF-8, or carries a lone

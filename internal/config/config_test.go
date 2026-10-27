@@ -229,9 +229,9 @@ func TestSealedShapes(t *testing.T) {
 	}
 }
 
-// Sealing is not built until M3 WP-08. A key this build would ignore on a service it serves fails open, so it is
-// refused: sealed on a direct backend (which can never be sealed: no node unseals for it) and sealed on a tunnel
-// service (served since M2: its parts would be relayed in plaintext). Seller card signatures are verified (M3
+// sealed: on a direct backend is refused (D91: no node unseals for it, so it would fail open). Sealing is built
+// since M3 WP-08, which lifts D144's refusal on tunnel services: sealed: true and {required: false} load on tunnel
+// a2a and mcp services, with seller_keys or without, and with no warning. Seller card signatures are verified (M3
 // WP-02 lifts D90 and the seller_keys half of D144): seller_keys loads on direct and tunnel a2a services, with no
 // warning, and on MCP services with a note (no card to verify).
 func TestFailOpenKeysRefused(t *testing.T) {
@@ -239,14 +239,31 @@ func TestFailOpenKeysRefused(t *testing.T) {
 		{"sealed on a direct a2a backend", minimal + "    sealed: true\n", "services.hello.sealed: sealing needs backend tunnel"},
 		{"optional sealing on a direct a2a backend", minimal + "    sealed: { required: false }\n", "sealing needs backend tunnel"},
 		{"sealed on a direct mcp backend", minimal + "  fs:\n    kind: mcp\n    backend: { mcp: { url: \"https://mcp.example.com\" } }\n    sealed: true\n", "services.fs.sealed: sealing needs backend tunnel"},
-		{"sealed on a tunnel service", tunnelled + "    sealed: true\n", "services.hello.sealed: sealing is not built in this release (M3), and this build serves tunnel services"},
-		{"optional sealing on a tunnel service", tunnelled + "    sealed: { required: false }\n", "services.hello.sealed: sealing is not built"},
-		{"sealed on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    sealed: true\n", "services.fs.sealed: sealing is not built"},
-		{"sealed with seller_keys on a tunnel service", tunnelled + "    sealed: true\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.sealed: sealing is not built"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := parseErr(t, tc.yaml); !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q\nwant it to contain %q", err, tc.want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, yaml, svc string
+		want            SealedMode
+	}{
+		{"sealed on a tunnel service", tunnelled + "    sealed: true\n", "hello", SealedRequired},
+		{"optional sealing on a tunnel service", tunnelled + "    sealed: { required: false }\n", "hello", SealedOptional},
+		{"sealed on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    sealed: true\n", "fs", SealedRequired},
+		{"sealed with seller_keys on a tunnel service", tunnelled + "    sealed: true\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello", SealedRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := parse(t, tc.yaml)
+			if got := c.Services[tc.svc].Sealed.Mode; got != tc.want {
+				t.Errorf("sealed loads as %q, want %q", got, tc.want)
+			}
+			for _, w := range c.Warnings {
+				if strings.Contains(w, "sealed") {
+					t.Errorf("a warning about sealed: %q", w)
+				}
 			}
 		})
 	}
@@ -847,11 +864,13 @@ func TestTunnelExamplesLoad(t *testing.T) {
 // without them.
 func TestTeamFixtureLoads(t *testing.T) {
 	const path = "../../spec/schema/examples/config.team.json"
-	_, err := Load(path)
-	var ve *ValidationError
-	if !errors.As(err, &ve) || len(ve.Problems) != 2 || !strings.HasPrefix(ve.Problems[0], "services.fs.sealed: sealing is not built") ||
-		!strings.HasPrefix(ve.Problems[1], "services.recon.sealed: sealing is not built") {
-		t.Fatalf("Load(%s) = %v, want the two sealed refusals only", path, err)
+	// Sealing is built (M3 WP-08 lifts D144): the team fixture, with its sealed tunnel services, loads as it is.
+	team, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%s) = %v", path, err)
+	}
+	if team.Services["recon"].Sealed.Mode != SealedRequired || team.Services["fs"].Sealed.Mode != SealedOptional {
+		t.Errorf("the fixture's sealed services load as %q and %q", team.Services["recon"].Sealed.Mode, team.Services["fs"].Sealed.Mode)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {

@@ -682,9 +682,10 @@ func TestCardColumnFollowsTheServedBody(t *testing.T) {
 }
 
 // A db-sourced row (Cloud, spec §13.5) gets the refusals the configuration has for the same service
-// (config/validate.go's SPEC-CONFLICT resolutions, D90 and D91, amended for M2): sealed on a direct backend
-// or a tunnel service, which this build would relay in plaintext. Such a row is left out (the unknown-service
-// answer, service_unavailable for its tasks) instead of served. seller_keys are verified since M3 WP-02, which
+// (config/validate.go's SPEC-CONFLICT resolution of D91): sealed on a direct backend, which no node unseals and the
+// gate would relay in plaintext. Such a row is left out (the unknown-service answer, service_unavailable for its
+// tasks) instead of served. Sealed tunnel rows are served since M3 WP-08, which lifts D144's refusal of them.
+// seller_keys are verified since M3 WP-02, which
 // lifts D90 and the seller_keys half of D144: rows with them are served on direct and tunnel services, unless
 // the keys cannot be read (no key the gate verifies with), which leaves the row out rather than serve its card
 // unverified.
@@ -731,9 +732,9 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	}
 	for name, served := range map[string]bool{
 		"plain": true, "sealed-direct": false, "optional-direct": false, "sealed-mcp": false,
-		"sealed-tunnel": false, "optional-tunnel": false, "plain-tunnel": true,
+		"sealed-tunnel": true, "optional-tunnel": true, "plain-tunnel": true,
 		"keys-direct": true, "keys-url-direct": true, "keys-empty": false, "keys-http-url": false, "keys-null": true,
-		"keys-tunnel": true, "keys-mcp-tunnel": true, "keys-sealed-tunnel": false,
+		"keys-tunnel": true, "keys-mcp-tunnel": true, "keys-sealed-tunnel": true,
 	} {
 		got, _ := s.Lookup(ctx, "acme", name)
 		if (got != nil) != served {

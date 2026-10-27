@@ -701,7 +701,7 @@ func (e *ValidationError) Error() string {
 // URL ports from 1 to 65535, kind-only keys, allow: entries that can match (D68), durations and seconds
 // that fit the integer columns of services, listen and metrics.listen on different ports, a signing_key
 // off loopback when A2A services are configured (D166), and no key this build would ignore by failing open
-// (sealed on any backend, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
+// (sealed on a direct backend, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
 // Defaults must have been applied (Parse and Load do).
 func (c *Config) Validate() error {
 	v := &validator{}

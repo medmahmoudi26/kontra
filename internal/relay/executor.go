@@ -28,6 +28,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/lifecycle"
@@ -422,6 +423,36 @@ func (r *run) fail(reason store.FailureReason, text string) {
 	r.emit(Failed(r.proj, string(reason), upstream.Cap(text)))
 }
 
+// sealedRejected is a hosting node's refusal of a sealed part (ext-sealed.md §6; spec §6.4's row): an audit row
+// names the task, the attempt and the node's reason, and the task fails sealed_rejected, never retried, before or
+// after the first upstream task id (the attempt's outcome is sealed_rejected, store.TerminalOutcome). An audit row
+// that cannot be written is logged; the failure is the task's all the same.
+func (r *run) sealedRejected(ctx context.Context, f upstream.Failure) {
+	reason := r.ex.SealedReject()
+	fields := audit.Fields{
+		"task_id": r.taskUUID, "tenant_id": r.d.svc.TenantID, "service": r.d.svc.Name, "protocol": string(store.ProtocolA2A),
+		"attempt": r.d.n, "reason": reason,
+	}
+	if r.attempt != nil {
+		if r.attempt.ReplicaID != "" {
+			fields["replica_id"] = r.attempt.ReplicaID
+		}
+		if r.attempt.TunnelSession != nil {
+			fields["tunnel_session"] = r.attempt.TunnelSession.String()
+		}
+		if r.attempt.KeyID != "" {
+			fields["key_id"] = r.attempt.KeyID
+		}
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := audit.SealedRejected(actx, r.e.log.DB(), fields); err != nil {
+		r.logger.Error("a sealed-part rejection was not written to the audit chain", "error", err)
+	}
+	r.logger.Warn("the hosting node refused a sealed part: the task fails sealed_rejected (not retried)", "reason", reason)
+	r.fail(store.ReasonSealedRejected, f.Message)
+}
+
 // retry ends the turn without a terminal event: the workflow starts a new attempt (§6.4).
 func (r *run) retry(reason store.FailureReason, wait time.Duration, cause error) {
 	r.d.running.SetOutcome(lifecycle.DispatchRetryable, reason)
@@ -470,7 +501,7 @@ func (r *run) upstreamFailed(ctx context.Context, err error) {
 		// The node never forwarded the message (a full answer proves it): send it again (nodeFull).
 		r.resendFull = r.nodeFull(ctx, f)
 	case upstream.ClassSealedRejected:
-		r.fail(store.ReasonSealedRejected, f.Message)
+		r.sealedRejected(ctx, f)
 	default:
 		if r.resent && !r.answered {
 			r.refusedResend(ctx, f)
@@ -825,7 +856,7 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 		r.fail(store.ReasonTunnelLost, f.Message)
 		return nil
 	case upstream.ClassSealedRejected:
-		r.fail(store.ReasonSealedRejected, f.Message)
+		r.sealedRejected(ctx, f)
 		return nil
 	case upstream.Limit:
 		r.fail(store.ReasonUpstreamError, f.Message)
@@ -1026,6 +1057,11 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 	}
 	if CheckReserved(gate) != nil {
 		r.fail(store.ReasonUpstreamError, "the service sent a url part in the gate's reserved kontra-blob: scheme")
+		return true
+	}
+	if CheckSealedForm(gate) != nil {
+		// ext-sealed.md §3: a part with the envelope media type is the raw form or nothing.
+		r.fail(store.ReasonUpstreamError, "the service sent a part with the sealed envelope media type in a form other than raw")
 		return true
 	}
 	gate = wirePrecision(gate)

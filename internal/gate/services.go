@@ -3,6 +3,7 @@ package gate
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,13 +26,16 @@ import (
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/relay"
+	"kontra.sh/kontra/internal/sealed"
 	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -546,12 +550,21 @@ type row struct {
 	tools       []byte // services.tools as text (mcp only), nil when NULL
 	tasksMode   string // services.tasks_mode (mcp only), "" when NULL
 	sessionIdle int    // services.session_idle_s
+	// recipients are a sealed service's recipients (ext-sealed.md §1, D61): the keys enrolled for it, neither
+	// revoked nor rotated, connected or not, as age1… strings in enrollment order; nil for a service that is not
+	// sealed.
+	recipients []string
 }
 
 const selectServices = `select s.tenant_id, t.slug, s.name, s.kind, s.backend::text, s.allow, s.listed,
 	s.disabled_at is not null, s.timeout_s, s.retries, s.retention_s, s.annotations::text, s.sealed,
 	case when s.seller_keys is null or s.seller_keys = 'null'::jsonb then null else s.seller_keys::text end,
-	s.upstream_card, s.card_fetched_at, s.tools::text, coalesce(s.tasks_mode, ''), s.session_idle_s
+	s.upstream_card, s.card_fetched_at, s.tools::text, coalesce(s.tasks_mode, ''), s.session_idle_s,
+	case when s.sealed <> 'off' then array(
+		select k.pubkey from kontra.key_services ks join kontra.tunnel_keys k on k.key_id = ks.key_id
+		 where ks.tenant_id = s.tenant_id and ks.service = s.name and ks.revoked_at is null
+		   and k.revoked_at is null and k.revoked_reason is distinct from 'rotated'
+		 order by ks.enrolled_at, k.key_id) end
   from kontra.services s join kontra.tenants t on t.id = s.tenant_id
  where t.deleted_at is null and (t.expires_at is null or t.expires_at > now())`
 
@@ -559,10 +572,28 @@ func scanRow(r pgx.CollectableRow) (row, error) {
 	var x row
 	var backend, annots string
 	var keys, tools *string
+	var pubkeys [][]byte
 	err := r.Scan(&x.tenantID, &x.tenant, &x.name, &x.kind, &backend, &x.allow, &x.listed, &x.disabled,
 		&x.timeoutS, &x.retries, &x.retentionS, &annots, &x.sealed, &keys, &x.upstream, &x.fetchedAt,
-		&tools, &x.tasksMode, &x.sessionIdle)
+		&tools, &x.tasksMode, &x.sessionIdle, &pubkeys)
+	if err != nil {
+		return x, err
+	}
 	x.backend, x.annotations = []byte(backend), []byte(annots)
+	if x.sealed != string(config.SealedOff) {
+		x.recipients = []string{}
+		for _, b := range pubkeys {
+			pub, err := ecdh.X25519().NewPublicKey(b)
+			if err != nil {
+				return x, fmt.Errorf("services: a recipient of %s/%s: %w", x.tenant, x.name, err)
+			}
+			rcpt, err := tunnel.FormatRecipient(pub)
+			if err != nil {
+				return x, err
+			}
+			x.recipients = append(x.recipients, rcpt)
+		}
+	}
 	if keys != nil {
 		x.sellerKeys = []byte(*keys)
 	}
@@ -728,7 +759,8 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 	}
 	e := &entry{
 		ref: store.ServiceRef{TenantID: x.tenantID, Tenant: x.tenant, Name: x.name, Kind: x.kind,
-			Timeout: time.Duration(x.timeoutS) * time.Second, Retries: x.retries, Retention: time.Duration(x.retentionS) * time.Second},
+			Timeout: time.Duration(x.timeoutS) * time.Second, Retries: x.retries, Retention: time.Duration(x.retentionS) * time.Second,
+			Sealed: store.SealedRef(x.sealed)},
 		allow: allow, allowRaw: slices.Clone(x.allow), listed: x.listed, disabled: x.disabled, backend: b,
 		backendJS: string(x.backend),
 	}
@@ -742,6 +774,11 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 		}
 		in := card.Input{PublicURL: s.publicURL, ServicePath: ServicePath(x.tenant, x.name, s.multi),
 			OnlyAnonymous: allow.OnlyAnonymous(), CardExtensions: exts}
+		if x.sealed != string(config.SealedOff) {
+			// ext-sealed.md §1: the recipients are part of the card, so a change of them (an enrollment, a
+			// revocation, a rotation) changes the keeper's key, and the card is rewritten and signed again.
+			in.Sealed = sealedEntry(x)
+		}
 		e.keeperKey = keeperKey(e.backendJS, in, x.sellerKeys)
 		if old != nil && old.keeper != nil && old.keeperKey == e.keeperKey {
 			e.keeper, e.stop, e.tunnel = old.keeper, old.stop, old.tunnel
@@ -778,7 +815,8 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 			return nil, err
 		}
 		e.mcp = m
-		e.mcpKey = string(x.tools) + "|" + x.tasksMode + "|" + x.sealed + "|" + string(x.annotations) + "|" + fmt.Sprint(x.sessionIdle)
+		e.mcpKey = string(x.tools) + "|" + x.tasksMode + "|" + x.sealed + "|" + string(x.annotations) + "|" + fmt.Sprint(x.sessionIdle) +
+			"|" + strings.Join(x.recipients, ",")
 	}
 	return e, nil
 }
@@ -790,6 +828,10 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 func (s *Services) mcpService(e *entry, x row, b backendSpec) (*mcprelay.Service, error) {
 	m := &mcprelay.Service{Ref: e.ref, Allow: e.allow, Disabled: x.disabled, Tasks: x.tasksMode,
 		Sealed: x.sealed != string(config.SealedOff), SessionIdle: time.Duration(x.sessionIdle) * time.Second}
+	if m.Sealed {
+		m.SealedRequired = x.sealed == string(config.SealedRequired)
+		m.SealedCapability = sealedEntry(x)
+	}
 	if m.Tasks == "" {
 		m.Tasks = config.TasksDurable
 	}
@@ -853,10 +895,10 @@ func (s *Services) MCPServiceByID(_ context.Context, tenantID uuid.UUID, name st
 // operator's control plane writes (source db, spec §13.5) cannot bypass them and fail open.
 //
 // SPEC-CONFLICT (the configuration's resolutions, config/validate.go; D90, D91): sealing needs backend tunnel (the
-// recipients are the service's enrolled node keys and the hosting node unseals, ext-sealed.md §1), and this
-// build, which does not seal, would relay a sealed direct service in plaintext. Such a row is left out rather
-// than served. M2 serves tunnel services, so the same holds for them (D91 as amended for M2, M2 plan WP-04): a
-// tunnel row with sealed would be relayed in plaintext. Sealing is M3 WP-08's.
+// recipients are the service's enrolled node keys and the hosting node unseals, ext-sealed.md §1), and a direct
+// backend has neither, so a sealed direct service would be relayed in plaintext. Such a row is left out rather
+// than served. A sealed tunnel row is served since M3 WP-08, which lifts D144's refusal: its card or initialize
+// result publishes the recipients (sealedEntry), and the gate refuses unsealed parts to a required one.
 //
 // Seller card signatures are verified since M3 WP-02, which lifts D90 and the seller_keys half of D144: a row
 // with seller_keys is served, its keeper verifying the card, unless the keys cannot be read (left out: a card
@@ -867,13 +909,66 @@ func (s *Services) refusable(x row, b backendSpec) error {
 	if b.direct() && x.sealed != string(config.SealedOff) {
 		return fmt.Errorf("sealed %q on a direct backend: sealing needs backend tunnel (ext-sealed.md §1), and this build would relay the service in plaintext", x.sealed)
 	}
-	if b.Kind == backendTunnel && x.sealed != string(config.SealedOff) {
-		return fmt.Errorf("sealed %q on a tunnel service: sealing is not built in this release (M3), and the service would be relayed in plaintext", x.sealed)
-	}
 	if x.kind == config.KindA2A && s.signer == nil && !s.loopback {
 		return errors.New("an a2a service on a gate without signing_key: its card would be served unsigned (D166); set signing_key")
 	}
 	return nil
+}
+
+// sealedDescription is the sealed extension entry's description (ext-sealed.md §1).
+const sealedDescription = "Parts are end-to-end sealed to the service's recipients; the gate relays ciphertext."
+
+// sealedEntry is a sealed service's extension object (ext-sealed.md §1): in the served card's
+// capabilities.extensions for A2A, under capabilities.experimental["sh.kontra/sealed"] of a legacy initialize result
+// for MCP (D27). Its recipients are the row's (the keys enrolled for the service, neither revoked nor rotated,
+// D61), params.required is sealed: required, and the entry itself is required: false, so a client that ignores it
+// can still call an optional service unsealed.
+func sealedEntry(x row) json.RawMessage {
+	recipients := x.recipients
+	if recipients == nil {
+		recipients = []string{}
+	}
+	b, err := json.Marshal(map[string]any{
+		"uri":         sealed.URI,
+		"description": sealedDescription,
+		"required":    false,
+		"params": map[string]any{
+			"recipients": recipients,
+			"envelope":   sealed.MediaType,
+			"required":   x.sealed == string(config.SealedRequired),
+		},
+	})
+	if err != nil {
+		panic(err) // strings and booleans only
+	}
+	return b
+}
+
+// RecipientsChanged applies a NOTIFY that may change a sealed service's recipients (ext-sealed.md §1, tunnel.md
+// §5, §12): kontra_tunnel's 'enrolled:<key_id>/<tenant_id>/<service>' re-reads that service; kontra_revoke's
+// 'key:<key_id>' and 'binding:<key_id>/<service>' (a revocation, the end of a rotation's overlap) re-read every
+// service, whose recipients the query reads again. A rotation and a first enrollment send NOTIFY kontra_services
+// for the service (enroll.Admit), which Notify applies. Other payloads are ignored. The periodic refresh repairs a
+// lost notification.
+func (s *Services) RecipientsChanged(payload string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var err error
+	switch {
+	case strings.HasPrefix(payload, "enrolled:"):
+		b, ok := enroll.ParseEnrolledPayload(payload)
+		if !ok {
+			return
+		}
+		err = s.reloadID(ctx, b.TenantID, b.Service)
+	case strings.HasPrefix(payload, "key:"), strings.HasPrefix(payload, "binding:"):
+		err = s.Reload(ctx)
+	default:
+		return
+	}
+	if err != nil {
+		s.logger.Warn("services: re-read after a recipients change failed", "notify", payload, "error", err)
+	}
 }
 
 func keeperKey(backendJS string, in card.Input, sellerKeys []byte) string {

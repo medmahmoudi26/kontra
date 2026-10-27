@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
@@ -169,7 +170,37 @@ func (h *Handler) initializeResult(rq *request, raw []byte, m *mcpwire.Message, 
 			return nil, err
 		}
 	}
+	if rq.svc.Sealed && len(rq.svc.SealedCapability) > 0 {
+		// ext-sealed.md §1 (D27): MCP 2025-11-25 has no capabilities.extensions, so the gate writes the sealed
+		// extension's object under capabilities.experimental["sh.kontra/sealed"], with the service's recipients. The
+		// scrub above removed any the upstream wrote (§2.5). Legacy sessions only (D162): a 2026-07-28 request never
+		// reaches a sealed service.
+		if res, err = setExperimental(res, mcpwire.MetaSealed, rq.svc.SealedCapability); err != nil {
+			return nil, err
+		}
+	}
 	return mcpwire.SetMember(raw, "result", res)
+}
+
+// setExperimental sets result.capabilities.experimental[key] = val, creating capabilities and experimental when they
+// are absent; a capabilities or experimental that is not an object is replaced.
+func setExperimental(result json.RawMessage, key string, val json.RawMessage) (json.RawMessage, error) {
+	caps, ok := mcpwire.Member(result, "capabilities")
+	if !ok || firstByte(caps) != '{' {
+		caps = json.RawMessage(`{}`)
+	}
+	exp, ok := mcpwire.Member(caps, "experimental")
+	if !ok || firstByte(exp) != '{' {
+		exp = json.RawMessage(`{}`)
+	}
+	exp, err := mcpwire.SetMember(exp, key, val)
+	if err != nil {
+		return nil, err
+	}
+	if caps, err = mcpwire.SetMember(caps, "experimental", exp); err != nil {
+		return nil, err
+	}
+	return mcpwire.SetMember(result, "capabilities", caps)
 }
 
 // rewriteCapabilities applies fn to result.capabilities when it is an object.
@@ -675,6 +706,13 @@ func (h *Handler) readAnswer(resp *http.Response, id json.RawMessage, tunnelled 
 // its meter, one calls row when the response completes.
 func (h *Handler) toolsCall(rq *request, t target) {
 	m := rq.msg
+	if rq.svc.SealedRequired && !sealedCall(m.Params) {
+		// ext-sealed.md §5 "Gate" (sealed_unsealed_part): a required service refuses a tools/call without the sealed
+		// envelope, InvalidRequest, before anything is forwarded or metered and before any task exists.
+		writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeInvalidRequest,
+			"this service is sealed: a tools/call must carry _meta[\""+mcpwire.MetaSealed+"\"] (ext-sealed.md §3)", nil)
+		return
+	}
 	name, ok := stringMember(m.Params, "name")
 	if !ok {
 		writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeInvalidParams, "Unknown tool: ", nil)
@@ -714,6 +752,41 @@ func (h *Handler) toolsCall(rq *request, t target) {
 			Principal: rq.p.ID, MCPSession: &hash},
 	}
 	h.forward(rq, t, meter)
+}
+
+// sealedCall reports whether a tools/call's params carry the sealed envelope exactly as ext-sealed.md §3 puts it:
+// params._meta["sh.kontra/sealed"] = {"v": 1, "envelope": "<base64>"} (mcpwire.SealedEnvelope), read with exact keys.
+func sealedCall(params json.RawMessage) bool {
+	meta, ok := mcpwire.Member(params, "_meta")
+	if !ok || firstByte(meta) != '{' {
+		return false
+	}
+	env, ok := mcpwire.Member(meta, mcpwire.MetaSealed)
+	return ok && mcpwire.SealedEnvelope(env)
+}
+
+// auditSealed records a hosting node's refusal of a sealed MCP call (ext-sealed.md §6) in the audit chain: the
+// service, the session (its hash), the tool and the node's reason, never the call's bytes.
+func (h *Handler) auditSealed(ctx context.Context, rq *request, tool, reason string, taskID string) {
+	if h.deps.Meter == nil || h.deps.Meter.pool == nil {
+		return
+	}
+	f := audit.Fields{"tenant_id": rq.svc.Ref.TenantID, "service": rq.svc.Ref.Name, "protocol": "mcp", "reason": reason,
+		"replica_id": h.deps.ReplicaID}
+	if rq.sess != nil {
+		f["mcp_session"] = rq.sess.HashHex()
+	}
+	if tool != "" {
+		f["tool"] = tool
+	}
+	if taskID != "" {
+		f["task_id"] = taskID
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := audit.SealedRejected(actx, h.deps.Meter.pool, f); err != nil {
+		h.log.Error("mcp: a sealed-part rejection was not written to the audit chain", "service", rq.svc.Ref.Name, "error", err)
+	}
 }
 
 // admit consults Admission for op when hooks.admission.operations lists it (§13.1): a refusal's error as it was

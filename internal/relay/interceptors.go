@@ -55,7 +55,9 @@ type ReviewMessenger interface {
 //     UnsupportedOperationError for the anonymous principal.
 //  3. Caller keys (spec §2.5): every kontra. key leaves message, part and request metadata, except the
 //     sealing keys and caller_metadata. A url part in the gate's reserved kontra-blob: scheme is
-//     InvalidRequest (D181). Without a bucket a part over 256 KiB is InvalidParams ("part too large: configure
+//     InvalidRequest (D181), and so is a part claiming the sealed envelope type in another form than raw
+//     (ext-sealed.md §3); a sealed: required service refuses an unsealed part with InvalidRequest
+//     (sealed_unsealed_part), and an optional one marks it metadata["kontra.sealed"] = false (§5). Without a bucket a part over 256 KiB is InvalidParams ("part too large: configure
 //     blobs", §10.4), and so is a contextId or messageId over 256 characters (§4), before any task row.
 //  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow in M1. The pre-minted task
 //     id and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
@@ -212,6 +214,14 @@ func (i *Interceptors) callerKeys(ctx context.Context, cc *a2asrv.CallContext, r
 		}
 		msg.Metadata = i.Rules.StripCaller(msg.Metadata)
 		msg.Parts = i.stripParts(msg.Parts)
+		// The sealed extension (ext-sealed.md §3, §5 "Gate"): a part claiming the envelope type in another form than
+		// raw is InvalidRequest; a sealed: required service refuses an unsealed part (sealed_unsealed_part), before
+		// any task row or stream; an optional one marks it kontra.sealed = false.
+		parts, err := sealedCallerParts(i.Svc.Sealed, msg.Parts)
+		if err != nil {
+			return ctx, nil, err
+		}
+		msg.Parts = parts
 		cp := *p
 		cp.Message = &msg
 		cp.Metadata = i.Rules.StripCaller(p.Metadata)
