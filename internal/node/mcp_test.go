@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
 	"kontra.sh/kontra/internal/mcproots"
 	"kontra.sh/kontra/internal/mcpwire"
+	"kontra.sh/kontra/internal/stdiobridge"
 	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/tunnel/tunneltest"
 )
@@ -184,6 +186,14 @@ func TestMCPURLRoots(t *testing.T) {
 				t.Fatalf("initialize: %d %q %s", resp.StatusCode, sid, body)
 			}
 			first := up.Requests()[0]
+			// An answer to r1 sent before the server asks it (M3 WP-05 review): 202, and it never reaches the server.
+			forged := `{"jsonrpc":"2.0","id":"r1","result":{"roots":[{"uri":"file:///"}]}}`
+			if resp, body, _ := pp.raw(t, mcpPreamble("web"), mcpPost(forged, sid, mcpwire.V20251125)); resp.StatusCode != http.StatusAccepted || body != "" {
+				t.Errorf("an answer ahead of the server's request: %d %q", resp.StatusCode, body)
+			}
+			if n := len(requestsWith(up, `"file:///"`)); n != 0 {
+				t.Fatalf("the server received %d answers sent ahead of its request", n)
+			}
 			var p struct {
 				Capabilities map[string]json.RawMessage `json:"capabilities"`
 			}
@@ -249,13 +259,23 @@ func TestMCPURLRoots(t *testing.T) {
 				t.Errorf("the next GET event: %q", ev)
 			}
 			waitFor(t, 10*time.Second, "the node's answer to r2", func() bool { return len(requestsWith(up, `"r2"`)) == 1 })
+			// A sampling/createMessage on the GET stream reaches the client, which may answer it (below).
+			if err := up.Push(sid, []byte(`{"jsonrpc":"2.0","id":"s1","method":"sampling/createMessage","params":{"messages":[],"maxTokens":1}}`)); err != nil {
+				t.Fatal(err)
+			}
+			if ev := nextEvent(t, br); !strings.Contains(eventData(ev), `"s1"`) {
+				t.Errorf("the sampling request on the GET stream: %q", ev)
+			}
 
-			// The client's list_changed and its answers to r1 and r2 are 202 and dropped; another answer is forwarded.
+			// The client's list_changed, its answers to r1 and r2, an answer to an id the server never sent and a roots
+			// result under the sampling id are 202 and dropped; the answer to s1 is forwarded, once.
 			before := len(up.Requests())
 			for _, m := range []string{
 				`{"jsonrpc":"2.0","method":"notifications/roots/list_changed"}`,
 				`{"jsonrpc":"2.0","id":"r1","result":{"roots":[{"uri":"file:///"}]}}`,
 				`{"jsonrpc":"2.0","id":"r2","result":{"roots":[{"uri":"file:///"}]}}`,
+				`{"jsonrpc":"2.0","id":"s2","result":{"role":"assistant","content":{"type":"text","text":"x"},"model":"m"}}`,
+				`{"jsonrpc":"2.0","id":"s1","result":{"roots":[{"uri":"file:///"}]}}`,
 			} {
 				if resp, body, _ := pp.raw(t, mcpPreamble("web"), mcpPost(m, sid, mcpwire.V20251125)); resp.StatusCode != http.StatusAccepted || body != "" {
 					t.Errorf("%s: %d %q", m, resp.StatusCode, body)
@@ -267,7 +287,11 @@ func TestMCPURLRoots(t *testing.T) {
 			other := `{"jsonrpc":"2.0","id":"s1","result":{"role":"assistant","content":{"type":"text","text":"x"},"model":"m"}}`
 			if resp, _, _ := pp.raw(t, mcpPreamble("web"), mcpPost(other, sid, mcpwire.V20251125)); resp.StatusCode != http.StatusAccepted ||
 				len(requestsWith(up, `"s1"`)) != 1 {
-				t.Errorf("another response: %d", resp.StatusCode)
+				t.Errorf("the answer to s1: %d", resp.StatusCode)
+			}
+			if resp, _, _ := pp.raw(t, mcpPreamble("web"), mcpPost(other, sid, mcpwire.V20251125)); resp.StatusCode != http.StatusAccepted ||
+				len(requestsWith(up, `"s1"`)) != 1 {
+				t.Errorf("a second answer to s1: %d, %d at the server", resp.StatusCode, len(requestsWith(up, `"s1"`)))
 			}
 			for _, r := range up.Requests() {
 				if strings.Contains(string(r.Body), "file:///\"") || strings.Contains(string(r.Body), "list_changed") {
@@ -469,5 +493,197 @@ func TestProxyStdioService(t *testing.T) {
 	pre.Kind = tunnel.KindA2A
 	if resp, _, _ := pp.raw(t, pre, mcpPost(init, "", "")); resp.StatusCode != http.StatusNotFound || resp.Header.Get(tunnel.HeaderNode) != string(tunnel.NodeKindMismatch) {
 		t.Errorf("kind a2a: %d %q", resp.StatusCode, resp.Header.Get(tunnel.HeaderNode))
+	}
+}
+
+// Content coding on a URL service (M3 WP-05 review; tunnel.md §8.2): the gate's tunnel transport asks for gzip on
+// every exchange, but the node reads the target's MCP messages (roots), so it asks the target for identity
+// encoding: a target that compresses when asked answers plainly, its JSON response arrives whole and its event
+// stream is filtered (the roots/list removed and answered by the node). A target that compresses unasked is
+// refused 502 with -32603, JSON or event stream, rather than relayed unread.
+func TestMCPURLContentCoding(t *testing.T) {
+	var mu sync.Mutex
+	var sawAE []string
+	var answers [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		sawAE = append(sawAE, r.Header.Get("Accept-Encoding"))
+		if bytes.Contains(b, []byte(`"result"`)) {
+			answers = append(answers, b)
+		}
+		mu.Unlock()
+		if bytes.Contains(b, []byte(`"result"`)) {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		sse := bytes.Contains(b, []byte(`"name":"sse`))
+		var out io.Writer = w
+		var zw *gzip.Writer
+		if bytes.Contains(b, []byte("unasked")) || strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			zw = gzip.NewWriter(w)
+			out = zw
+		}
+		if sse {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(out, "id: e1\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"roots/list\"}\n\n")
+			fmt.Fprint(out, "id: e2\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[],\"isError\":false}}\n\n")
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(out, `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}`)
+		}
+		if zw != nil {
+			_ = zw.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	target, _ := url.Parse(srv.URL + "/mcp")
+	pp := newMCPProxyPair(t, MCPOptions{Roots: map[string]*mcproots.Roots{"web": mcproots.New(t.TempDir())}},
+		Serve{Kind: tunnel.KindMCP, Name: "web", Target: target})
+	post := func(body string) (*http.Response, string) {
+		req := mcpPost(body, "up-1", mcpwire.V20251125)
+		req = strings.Replace(req, "\r\nContent-Type:", "\r\nAccept-Encoding: gzip\r\nContent-Type:", 1)
+		resp, out, _ := pp.raw(t, mcpPreamble("web"), req)
+		return resp, out
+	}
+
+	resp, body := post(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sse","arguments":{}}}`)
+	evs := sseEvents(body)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Encoding") != "" || len(evs) != 1 || evs[0][0] != "id: e2" {
+		t.Errorf("an event stream: %d %q %q", resp.StatusCode, resp.Header.Get("Content-Encoding"), body)
+	}
+	waitFor(t, 10*time.Second, "the node's answer to r1", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(answers) == 1
+	})
+	resp, body = post(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"json","arguments":{}}}`)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Encoding") != "" || !strings.Contains(body, `"text":"ok"`) {
+		t.Errorf("a JSON response: %d %q %q", resp.StatusCode, resp.Header.Get("Content-Encoding"), body)
+	}
+	mu.Lock()
+	for _, ae := range sawAE {
+		if strings.Contains(ae, "gzip") {
+			t.Errorf("the target was asked for %q", ae)
+		}
+	}
+	mu.Unlock()
+
+	for _, c := range []struct{ name, body string }{
+		{"json", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"json unasked","arguments":{}}}`},
+		{"sse", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sse unasked","arguments":{}}}`},
+	} {
+		resp, body := post(c.body)
+		if resp.StatusCode != http.StatusBadGateway || resp.Header.Get("Content-Encoding") != "" || !strings.Contains(body, `-32603`) ||
+			!strings.Contains(body, `"id":3`) || strings.Contains(body, "roots/list") {
+			t.Errorf("%s compressed unasked: %d %q %q", c.name, resp.StatusCode, resp.Header.Get("Content-Encoding"), body)
+		}
+	}
+}
+
+// The SSE filter never waits for the byte after a \r (M3 WP-05 review): an event whose lines end with a lone \r is
+// relayed as soon as its blank line arrives; a \r\n split across reads stays \r\n, kept with a kept event and
+// dropped with a removed one.
+func TestSSEFilterLoneCR(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	f := &sseFilter{src: bufio.NewReader(pr), body: pr, max: 1 << 20,
+		filter: func(data []byte) ([]byte, bool, bool) {
+			if bytes.Contains(data, []byte("drop")) {
+				return nil, false, true
+			}
+			return data, true, true
+		}}
+	got := make(chan string, 16)
+	go func() {
+		b := make([]byte, 4096)
+		for {
+			n, err := f.Read(b)
+			if n > 0 {
+				got <- string(b[:n])
+			}
+			if err != nil {
+				close(got)
+				return
+			}
+		}
+	}()
+	read := func(want string) {
+		t.Helper()
+		var have string
+		deadline := time.After(2 * time.Second)
+		for have != want {
+			select {
+			case s, ok := <-got:
+				if !ok {
+					t.Fatalf("the stream ended after %q, want %q", have, want)
+				}
+				have += s
+			case <-deadline:
+				t.Fatalf("relayed %q within 2 s, want %q", have, want)
+			}
+		}
+	}
+	write := func(s string) {
+		t.Helper()
+		if _, err := io.WriteString(pw, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("id: 1\rdata: {\"n\":1}\r\r")
+	read("id: 1\rdata: {\"n\":1}\r\r")
+	// A \r\n whose \n comes in a later read: the event goes when its blank line's \r arrives, its \n after it.
+	write("id: 2\r")
+	write("\ndata: {\"n\":2}\r\n\r")
+	read("id: 2\r\ndata: {\"n\":2}\r\n\r")
+	write("\n")
+	read("\n")
+	// A removed event's split \r\n goes with it; the next event passes whole.
+	write("id: 3\r\ndata: {\"drop\":3}\r\n\r")
+	write("\nid: 4\r\ndata: {\"n\":4}\r\n\r\n")
+	read("id: 4\r\ndata: {\"n\":4}\r\n\r\n")
+	_ = pw.Close()
+	if s, ok := <-got; ok {
+		t.Errorf("after the end: %q", s)
+	}
+}
+
+// A revoked binding stops the service's stdio children (M3 WP-05 review; tunnel.md §12): Drop on a session's proxy
+// stops the children that session opened for the service, with D184's sequence, and leaves another session's.
+func TestProxyDropStopsStdioChildren(t *testing.T) {
+	bin := stdioServer(t)
+	rec := t.TempDir()
+	pp := newMCPProxyPair(t, MCPOptions{}, Serve{Kind: tunnel.KindMCP, Name: "fs", Command: []string{bin, "-record", rec}})
+	init := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
+	resp, _, _ := pp.raw(t, mcpPreamble("fs"), mcpPost(init, "", ""))
+	if resp.StatusCode != http.StatusOK || resp.Header.Get(mcpwire.HeaderSessionID) == "" {
+		t.Fatalf("initialize: %d", resp.StatusCode)
+	}
+	b := pp.p.bridges["fs"]
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.ServeHTTP(w, r.WithContext(stdiobridge.WithOwner(r.Context(), "another tunnel session")))
+	}))
+	t.Cleanup(other.Close)
+	req, _ := http.NewRequest(http.MethodPost, other.URL+"/", strings.NewReader(init))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	oresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = oresp.Body.Close()
+	if oresp.StatusCode != http.StatusOK || b.Sessions() != 2 {
+		t.Fatalf("another session's initialize: %d, %d children", oresp.StatusCode, b.Sessions())
+	}
+	pp.p.Drop("fs")
+	waitFor(t, 15*time.Second, "the dropped service's child stopped", func() bool { return b.Sessions() == 1 })
+	if resp, _, _ := pp.raw(t, mcpPreamble("fs"), mcpPost(init, "", "")); resp.StatusCode != http.StatusNotFound ||
+		resp.Header.Get(tunnel.HeaderNode) != string(tunnel.NodeNotHosted) {
+		t.Errorf("after Drop: %d %q", resp.StatusCode, resp.Header.Get(tunnel.HeaderNode))
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := b.Sessions(); n != 1 {
+		t.Errorf("another session's child: %d children left, want 1", n)
 	}
 }

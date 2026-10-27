@@ -15,8 +15,11 @@
 //     list when there are none) and never relayed to the remote client: the stdio bridge writes the answer to the
 //     child's stdin; the proxy of a URL service removes the event from the response stream and POSTs the answer
 //     to the target on the same upstream session.
-//   - The client's notifications/roots/list_changed, and any client response whose id is that of a roots/list
-//     the node answered, are dropped with 202.
+//   - The client's notifications/roots/list_changed is dropped with 202, and so is every client response except one
+//     whose id is that of a server-to-client request the node relayed to the client on that session and has not
+//     seen answered; any result with a roots member is dropped whatever its id (Session.FromClient's
+//     SPEC-CONFLICT: §10's "whose id is that of a request it answered" let an answer sent ahead of the server's
+//     roots/list through).
 //   - On a 2026-07-28 exchange (URL services; the bridge is legacy only) roots is removed from the forwarded
 //     _meta["io.modelcontextprotocol/clientCapabilities"], every params.inputResponses entry that carries roots is
 //     removed, and every roots/list entry of an upstream inputRequests is removed. Configured roots are offered to
@@ -32,6 +35,7 @@ package mcproots
 
 import (
 	"bytes"
+	"container/list"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,7 +55,8 @@ const (
 	MethodRootsChanged = "notifications/roots/list_changed"
 )
 
-// maxAnswered bounds the ids of node-answered roots/list requests a session remembers (the oldest are forgotten).
+// maxAnswered bounds each set of ids a session remembers: the roots/list requests the node answered, and the
+// server-to-client requests it relayed and has not seen answered (the oldest are forgotten).
 const maxAnswered = 1024
 
 // Roots is one hosted service's configured roots.
@@ -162,18 +167,20 @@ type Decision struct {
 }
 
 // Session is the roots state of one MCP session (stdio child or upstream session): the ids of the roots/list
-// requests the node answered, so that a client response carrying one is dropped. It is safe for concurrent use.
+// requests the node answered, and those of the server-to-client requests it relayed to the client and has not seen
+// answered, so that only a client response answering one of the latter reaches the server. It is safe for
+// concurrent use.
 type Session struct {
 	roots *Roots
 
 	mu       sync.Mutex
-	answered map[string]struct{}
-	order    []string
+	answered idSet // roots/list requests the node answered
+	relayed  idSet // server requests relayed to the client, not answered yet
 }
 
 // NewSession starts the roots state of one session; r nil means no roots configured.
 func NewSession(r *Roots) *Session {
-	return &Session{roots: r, answered: map[string]struct{}{}}
+	return &Session{roots: r}
 }
 
 // Answered reports whether id is that of a roots/list the node answered on this session.
@@ -184,38 +191,101 @@ func (s *Session) Answered(id json.RawMessage) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok = s.answered[k]
-	return ok
+	return s.answered.has(k)
 }
 
 func (s *Session) remember(id json.RawMessage) {
+	if k, ok := mcpwire.IDKey(id); ok {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.answered.add(k)
+	}
+}
+
+// relay records id as that of a server-to-client request the node relays to the client.
+func (s *Session) relay(id json.RawMessage) {
+	if k, ok := mcpwire.IDKey(id); ok {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.relayed.add(k)
+	}
+}
+
+// takeRelayed reports whether id is that of a relayed request not answered yet, and forgets it: it is answered now.
+func (s *Session) takeRelayed(id json.RawMessage) bool {
 	k, ok := mcpwire.IDKey(id)
 	if !ok {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.answered[k]; ok {
+	return s.relayed.remove(k)
+}
+
+// idSet is a set of ids (mcpwire.IDKey) that forgets its oldest past maxAnswered.
+type idSet struct {
+	m     map[string]*list.Element
+	order list.List // the ids, oldest first
+}
+
+func (s *idSet) has(k string) bool {
+	_, ok := s.m[k]
+	return ok
+}
+
+func (s *idSet) add(k string) {
+	if s.m == nil {
+		s.m = map[string]*list.Element{}
+	}
+	if e, ok := s.m[k]; ok {
+		s.order.MoveToBack(e)
 		return
 	}
-	s.answered[k] = struct{}{}
-	s.order = append(s.order, k)
-	for len(s.order) > maxAnswered {
-		delete(s.answered, s.order[0])
-		s.order = s.order[1:]
+	s.m[k] = s.order.PushBack(k)
+	for s.order.Len() > maxAnswered {
+		e := s.order.Front()
+		s.order.Remove(e)
+		delete(s.m, e.Value.(string))
 	}
 }
+
+func (s *idSet) remove(k string) bool {
+	e, ok := s.m[k]
+	if ok {
+		s.order.Remove(e)
+		delete(s.m, k)
+	}
+	return ok
+}
+
+func (s *idSet) len() int { return len(s.m) }
 
 // FromClient filters one message from the remote client (what the gate forwards) before it reaches the server.
 // body is the message as received and m what mcpwire.Parse(body, FromClient) read from it without error; era is
 // the exchange's (an initialize is always legacy).
 //
 //   - notifications/roots/list_changed is dropped;
-//   - a response whose id is that of a roots/list the node answered on this session is dropped;
+//   - a response is forwarded only when its id is that of a server-to-client request the node relayed to the client
+//     on this session (FromServer) and has not seen answered, and its result has no roots member; every other
+//     response is dropped: one whose id is that of a roots/list the node answered, one sent before the server asked
+//     (or that the server never asked), a second answer, and any result with a roots member (a case variant too),
+//     whatever its id;
 //   - an initialize's params.capabilities.roots is replaced by the node's (Roots.Capability);
 //   - roots is removed from params._meta["io.modelcontextprotocol/clientCapabilities"], and every
 //     params.inputResponses entry whose value carries roots is removed (2026-07-28; harmless elsewhere);
 //   - everything else is forwarded as it came.
+//
+// SPEC-CONFLICT (spec/tunnel.md §10 with §15 and §16 stdio_roots; D173; M3 WP-05 review): §10 drops "any client
+// response whose id is that of a request it answered". That rule cannot keep a client's roots from the server: a
+// response that arrives before the node has seen the server's roots/list is not one, and is forwarded. Server ids
+// are predictable (the TypeScript SDK's first server-to-client request is id 0), so a client, or a gate forging
+// messages, that sends {"id":0,"result":{"roots":[{"uri":"file:///"}]}} right behind its notifications/initialized
+// has it in the child's stdin ahead of the node's answer, and server-filesystem@1.0.0 takes it (the review's probe:
+// 10 of 20 sessions sequentially, 20 of 20 racing; then a read outside --roots succeeded). The closest faithful
+// behaviour to §10's intent ("a client's roots never reach a hosted server", §15): forward a client response only
+// when it answers a request the node relayed and that is still outstanding, and drop any roots result. §10 should
+// say so. A 2026-07-28 exchange relays no server request (input requests travel inside results), so a client
+// response there is dropped too.
 func (s *Session) FromClient(era mcpwire.Era, body []byte, m *mcpwire.Message) (Decision, error) {
 	if m == nil {
 		return Decision{}, errors.New("mcproots: no message")
@@ -224,7 +294,7 @@ func (s *Session) FromClient(era mcpwire.Era, body []byte, m *mcpwire.Message) (
 	case m.Method == MethodRootsChanged:
 		return Decision{Action: Drop}, nil
 	case m.Method == "":
-		if s.Answered(m.ID) {
+		if rootsResult(m.Result) || s.Answered(m.ID) || !s.takeRelayed(m.ID) {
 			return Decision{Action: Drop}, nil
 		}
 		return Decision{Action: Forward, Body: body}, nil
@@ -260,6 +330,8 @@ func (s *Session) FromClient(era mcpwire.Era, body []byte, m *mcpwire.Message) (
 //
 //   - a roots/list request is answered by the node on a legacy session (Answer, its id remembered) and dropped on
 //     a 2026-07-28 exchange, which has no session to answer it on (a modern server sends no requests);
+//   - every other request is forwarded, its id recorded as relayed to the client, so that the client's answer to
+//     it reaches the server (FromClient);
 //   - every roots/list entry of a result's inputRequests (an InputRequiredResult, or a task's) is removed;
 //   - everything else is forwarded as it came.
 func (s *Session) FromServer(era mcpwire.Era, body []byte, m *mcpwire.Message) (Decision, error) {
@@ -281,7 +353,13 @@ func (s *Session) FromServer(era mcpwire.Era, body []byte, m *mcpwire.Message) (
 		}
 		return Decision{Action: Answer, Reply: reply}, nil
 	}
-	if m.Method != "" || len(m.Result) == 0 || firstByte(m.Result) != '{' {
+	if m.Method != "" {
+		if len(m.ID) > 0 {
+			s.relay(m.ID)
+		}
+		return Decision{Action: Forward, Body: body}, nil
+	}
+	if len(m.Result) == 0 || firstByte(m.Result) != '{' {
 		return Decision{Action: Forward, Body: body}, nil
 	}
 	result, err := stripInputRequests(m.Result)
@@ -296,6 +374,24 @@ func (s *Session) FromServer(era mcpwire.Era, body []byte, m *mcpwire.Message) (
 		return Decision{}, err
 	}
 	return Decision{Action: Forward, Body: out}, nil
+}
+
+// rootsResult reports whether a response's result is an object with a roots member (or a case variant of it): an
+// answer to roots/list, which the node never relays, whatever its id.
+func rootsResult(result json.RawMessage) bool {
+	if firstByte(result) != '{' {
+		return false
+	}
+	ms, err := members(result)
+	if err != nil {
+		return true // not an object the node can read: not forwarded either
+	}
+	for _, m := range ms {
+		if strings.EqualFold(m.key, "roots") {
+			return true
+		}
+	}
+	return false
 }
 
 // replaceCapability writes capabilities.roots = c into an initialize's params (removing every case variant first),

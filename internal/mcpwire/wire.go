@@ -164,9 +164,10 @@ var UpstreamLevels = []strictjson.Path{
 // here, as a level is added to the spec first.
 //
 // The node's MCP filters (M3 WP-05) read: the client's capabilities.roots in an initialize and roots in its
-// per-request clientCapabilities (internal/mcproots replaces or removes them, D173), the progressToken of a client
-// request's _meta and of a server's notification (internal/stdiobridge routes progress to the request's POST
-// stream, spec/tunnel.md §10).
+// per-request clientCapabilities (internal/mcproots replaces or removes them, D173), roots in a client response's
+// result (a roots answer, which internal/mcproots drops whatever its id), the progressToken of a client request's
+// _meta and of a server's notification (internal/stdiobridge routes progress to the request's POST stream,
+// spec/tunnel.md §10).
 var (
 	clientReads = withLevels(ClientLevels,
 		strictjson.Path{"jsonrpc"}, strictjson.Path{"id"}, strictjson.Path{"method"}, strictjson.Path{"error"},
@@ -177,6 +178,7 @@ var (
 		strictjson.Path{"params", "_meta", "progressToken"},
 		strictjson.Path{"params", "capabilities", "roots"},
 		strictjson.Path{"params", "_meta", MetaClientCapabilities, "roots"},
+		strictjson.Path{"result", "roots"},
 	)
 	upstreamReads = withLevels(UpstreamLevels,
 		strictjson.Path{"jsonrpc"}, strictjson.Path{"id"}, strictjson.Path{"method"},

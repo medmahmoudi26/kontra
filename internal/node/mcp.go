@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,15 +38,21 @@ const (
 // D172). The proxy forwards MCP exchanges unchanged except for roots:
 //
 //   - a POST body is read with exact keys (mcpwire.Parse): one that fails is 400 (-32700 or -32600, its id when it
-//     was read) and reaches nothing; then internal/mcproots: the client's notifications/roots/list_changed and its
-//     answer to a roots/list the node answered are 202 and dropped, an initialize declares the node's roots
-//     capability, and a 2026-07-28 request loses roots from its clientCapabilities and inputResponses;
+//     was read) and reaches nothing; then internal/mcproots: the client's notifications/roots/list_changed is 202
+//     and dropped, and so is every client response but the answer to a server request this filter relayed and has
+//     not seen answered (never a roots answer: mcproots.Session.FromClient's SPEC-CONFLICT); an initialize declares
+//     the node's roots capability, and a 2026-07-28 request loses roots from its clientCapabilities and
+//     inputResponses;
+//   - the target is asked for identity encoding (the gate's tunnel transport asks for gzip, and the node reads what
+//     the target answers); a JSON or event-stream response that comes coded anyway is 502 with -32603, never
+//     relayed unread;
 //   - the target's JSON responses and event streams (POST responses and the GET stream) are read message by message:
 //     a roots/list request is removed (the other events keep their id: and retry: lines as they came) and answered
 //     by the node itself, POSTed to the target on the exchange's Mcp-Session-Id and MCP-Protocol-Version (the fixed
-//     target; nothing else is dialed); a 2026-07-28 result loses every roots/list entry of its inputRequests; a
-//     message that fails strict decoding is not relayed (a JSON response becomes 502 with -32603, an event stream
-//     ends before that event), as at the gate (relay.md §11.1).
+//     target; nothing else is dialed); every other request's id is recorded as relayed, so that the client's answer
+//     reaches the target; a 2026-07-28 result loses every roots/list entry of its inputRequests; a message that
+//     fails strict decoding is not relayed (a JSON response becomes 502 with -32603, an event stream ends before
+//     that event), as at the gate (relay.md §11.1).
 //
 // It is shared by the sessions of a node (a client's MCP session is pinned to one tunnel session, but the node keeps
 // one filter per service, keyed by the upstream's session id).
@@ -67,10 +74,12 @@ func newMCPURL(name string, roots *mcproots.Roots, log *slog.Logger) *mcpURL {
 	return &mcpURL{name: name, roots: roots, log: log, sessions: map[string]*urlRoots{}}
 }
 
-// session is the roots state of the upstream session sid; with no session id (an initialize, a 2026-07-28
-// request), a fresh one that nothing remembers.
-func (f *mcpURL) session(sid string) *mcproots.Session {
-	if sid == "" {
+// session is the roots state of the upstream session sid. A 2026-07-28 exchange has none: a fresh state that nothing
+// remembers (it relays no server request and answers no roots/list). Legacy exchanges without a session id (an
+// initialize, a stateless server's) share the service's sessionless state, so that the answer to a request such a
+// server sent on a POST's stream reaches it.
+func (f *mcpURL) session(era mcpwire.Era, sid string) *mcproots.Session {
+	if era == mcpwire.EraModern {
 		return mcproots.NewSession(f.roots)
 	}
 	f.mu.Lock()
@@ -151,18 +160,15 @@ func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logge
 	if x.version == mcpwire.V20260728 && m.Method != mcpwire.MethodInitialize {
 		x.era = mcpwire.EraModern
 	}
-	sid := x.sid
-	if x.era == mcpwire.EraModern {
-		sid = "" // a modern request's Mcp-Session-Id means nothing (relay.md §11.12 rule 2)
-	}
-	d, err := f.session(sid).FromClient(x.era, body, m)
+	// A modern request's Mcp-Session-Id means nothing (relay.md §11.12 rule 2): session ignores it.
+	d, err := f.session(x.era, x.sid).FromClient(x.era, body, m)
 	if err != nil {
 		log.Info("an MCP message is refused", "err", err)
 		mcpError(w, http.StatusBadRequest, m.ID, mcpwire.CodeInvalidRequest, "invalid request")
 		return nil, false
 	}
 	if d.Action == mcproots.Drop {
-		log.Debug("a client message about roots is dropped: roots stay on the node (D173)", "method", m.Method)
+		log.Debug("a client message is dropped: roots stay on the node, and a response reaches the server only as the answer to a request the node relayed (D173)", "method", m.Method)
 		w.Header().Set("Content-Length", "0")
 		w.WriteHeader(http.StatusAccepted)
 		return nil, false
@@ -190,6 +196,15 @@ func (x *mcpExchange) response(res *http.Response) error {
 		sid = ""
 	}
 	mt, _, _ := mime.ParseMediaType(res.Header.Get("Content-Type"))
+	if (mt == "application/json" || mt == "text/event-stream") && !identityCoded(res.Header) {
+		// The node asked for identity (exchange's Rewrite): a coded body is one it cannot read for roots, so it is
+		// not relayed unread.
+		x.log.Warn("an MCP response is not relayed: the server sent it with a content coding the node did not ask for",
+			"content_encoding", clipHeader(strings.Join(res.Header.Values("Content-Encoding"), ", ")))
+		_ = res.Body.Close()
+		x.refuse(res)
+		return nil
+	}
 	switch mt {
 	case "application/json":
 		body, err := io.ReadAll(io.LimitReader(res.Body, maxMCPMessage+1))
@@ -219,8 +234,27 @@ func (x *mcpExchange) response(res *http.Response) error {
 	return nil
 }
 
-// refuse replaces a JSON response the node does not relay with 502 and -32603 "upstream error", as the gate answers
-// an upstream message that fails strict decoding (relay.md §11.1).
+// identityCoded reports whether a response's Content-Encoding is absent or identity only.
+func identityCoded(h http.Header) bool {
+	for _, v := range h.Values("Content-Encoding") {
+		for _, c := range strings.Split(v, ",") {
+			if c = strings.TrimSpace(c); c != "" && !strings.EqualFold(c, "identity") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func clipHeader(s string) string {
+	if len(s) > 64 {
+		return strings.ToValidUTF8(s[:64], "") + "…"
+	}
+	return s
+}
+
+// refuse replaces a response the node does not relay with 502 and -32603 "upstream error", as the gate answers an
+// upstream message that fails strict decoding (relay.md §11.1).
 func (x *mcpExchange) refuse(res *http.Response) {
 	b, err := mcpwire.ErrorBody(x.reqID, mcpwire.CodeInternal, "upstream error", nil)
 	if err != nil {
@@ -242,7 +276,7 @@ func (x *mcpExchange) filter(sid string, data []byte) (out []byte, keep, ok bool
 		x.log.Warn("a message from the MCP server is not relayed: it is not one JSON-RPC message with exact keys (D172)", "err", err)
 		return nil, false, false
 	}
-	d, err := x.f.session(sid).FromServer(x.era, data, m)
+	d, err := x.f.session(x.era, sid).FromServer(x.era, data, m)
 	if err != nil {
 		x.log.Warn("a message from the MCP server is not relayed", "err", err)
 		return nil, false, false
@@ -316,6 +350,11 @@ var errEventTooLarge = errors.New("node: an SSE event over the MCP filter's boun
 // lines replaced by one when the filter rewrote it, or not at all when the filter removed it; the stream ends before
 // an event the filter refuses, and before an event left unterminated at the end (as a client drops it). Lines end
 // with \n, \r\n or \r, as the gate reads them (internal/mcprelay's sseReader), so no line can hide from the filter.
+//
+// A \r ends its line at once: the filter never waits for the byte after it (a server whose lines end with a lone \r
+// would otherwise have each event held until it writes again, minutes on a GET stream). A \n that turns out to
+// follow it is the rest of that line end, \r\n, and goes where the \r went: with its line, or with the event the
+// filter removed. The bytes relayed are those that came, in order.
 type sseFilter struct {
 	src    *bufio.Reader
 	body   io.Closer
@@ -324,6 +363,9 @@ type sseFilter struct {
 
 	out []byte
 	err error
+	// cr is set when the last line read ended with a \r whose next byte was not read yet; crKept says whether that
+	// \r ended an event (or a blank line) that was relayed, when the event is already done with.
+	cr, crKept bool
 }
 
 func (s *sseFilter) Read(p []byte) (int, error) {
@@ -349,7 +391,7 @@ func (s *sseFilter) next() {
 		size    int
 	)
 	for {
-		line, end, err := s.line()
+		line, end, lf, err := s.line()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				err = io.EOF // an unterminated last event is dropped
@@ -361,9 +403,21 @@ func (s *sseFilter) next() {
 			s.err = errEventTooLarge
 			return
 		}
+		if lf {
+			// The \n of a \r\n whose \r ended the line before.
+			switch {
+			case len(raw) > 0:
+				raw[len(raw)-1] = append(raw[len(raw)-1], '\n')
+			case s.crKept:
+				s.out = append(s.out, '\n')
+				return
+			}
+			continue
+		}
 		if len(line) == 0 {
 			if len(raw) == 0 {
 				s.out = append(s.out, end...) // a blank line between events
+				s.crKept = true
 				return
 			}
 			raw = append(raw, end)
@@ -377,6 +431,7 @@ func (s *sseFilter) next() {
 		}
 	}
 	msg := bytes.Join(data, []byte("\n"))
+	s.crKept = true
 	if !hasData || len(bytes.TrimSpace(msg)) == 0 {
 		s.out = bytes.Join(raw, nil)
 		return
@@ -387,6 +442,7 @@ func (s *sseFilter) next() {
 		s.err = io.EOF // the stream ends before this event
 		return
 	case !keep:
+		s.crKept = false
 		return // removed whole, its id: and retry: with it
 	case bytes.Equal(out, msg):
 		s.out = bytes.Join(raw, nil)
@@ -413,26 +469,43 @@ func (s *sseFilter) next() {
 	}
 }
 
-// line reads one line and its end: \n, \r\n or \r.
-func (s *sseFilter) line() (line, end []byte, err error) {
+// line reads one line and its end: \n, \r\n or \r. After a \r it looks at the next byte only when it is already
+// buffered, and never waits for it: a \r with nothing behind it yet ends the line as \r, and a \n read first by
+// the next call is returned alone with lf set (the rest of that \r\n).
+func (s *sseFilter) line() (line, end []byte, lf bool, err error) {
+	if s.cr {
+		s.cr = false
+		c, err := s.src.ReadByte()
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if c == '\n' {
+			return nil, []byte("\n"), true, nil
+		}
+		_ = s.src.UnreadByte()
+	}
 	for {
 		c, err := s.src.ReadByte()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		switch c {
 		case '\n':
-			return line, []byte("\n"), nil
+			return line, []byte("\n"), false, nil
 		case '\r':
+			if s.src.Buffered() == 0 {
+				s.cr = true
+				return line, []byte("\r"), false, nil
+			}
 			if b, err := s.src.Peek(1); err == nil && b[0] == '\n' {
 				_, _ = s.src.ReadByte()
-				return line, []byte("\r\n"), nil
+				return line, []byte("\r\n"), false, nil
 			}
-			return line, []byte("\r"), nil
+			return line, []byte("\r"), false, nil
 		}
 		line = append(line, c)
 		if len(line) > s.max {
-			return nil, nil, errEventTooLarge
+			return nil, nil, false, errEventTooLarge
 		}
 	}
 }

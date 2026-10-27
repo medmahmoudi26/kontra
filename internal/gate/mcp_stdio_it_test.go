@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,4 +199,75 @@ func TestMCPStdioFilesystemThroughTheGate(t *testing.T) {
 	if logs := rn.logs.String(); !strings.Contains(logs, "stdio MCP session open") || bytes.Contains([]byte(logs), []byte("AGE-SECRET-KEY")) {
 		t.Errorf("the node's log: %s", lastLines([]byte(logs), 20))
 	}
+
+	// Roots answered ahead (M3 WP-05 review, D173): a client that sends its own answer to the server's first request
+	// id (0: the TypeScript SDK numbers from it) again and again, racing its notifications/initialized so that an
+	// answer sits in the child's stdin right behind it, never has its roots reach the server: every copy is 202, and
+	// list_allowed_directories names only <dirA> in each of three sessions.
+	forged := `{"jsonrpc":"2.0","id":0,"result":{"roots":[{"uri":"file:///"}]}}`
+	for i := 0; i < 3; i++ {
+		st, h, body := mcpPost(t, endpoint, key, "", init)
+		sid := h.Get("Mcp-Session-Id")
+		if st != 200 || sid == "" {
+			t.Fatalf("session %d: initialize: %d %s", i, st, body)
+		}
+		var wg sync.WaitGroup
+		statuses := make(chan string, 32)
+		send := func(msg string) {
+			defer wg.Done()
+			statuses <- rawPost(endpoint, key, sid, msg)
+		}
+		wg.Add(1)
+		go send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+		for k := 0; k < 20; k++ {
+			wg.Add(1)
+			go send(forged)
+			time.Sleep(time.Duration(200+50*k) * time.Microsecond)
+		}
+		wg.Wait()
+		close(statuses)
+		for s := range statuses {
+			if s != "202" {
+				t.Errorf("session %d: a racing POST: %s", i, s)
+			}
+		}
+		st, _, body = mcpPost(t, endpoint, key, sid, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_allowed_directories","arguments":{}}}`)
+		text, isErr := toolText(t, body)
+		if st != 200 || isErr || !strings.Contains(text, dirA) || strings.Contains(text, "\n/\n") || strings.HasSuffix(text, "\n/") {
+			t.Errorf("session %d: list_allowed_directories after the forged answers: %d %q", i, st, text)
+		}
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+			"params": map[string]any{"name": "read_text_file", "arguments": map[string]any{"path": filepath.Join(dirB, "secret.txt")}}})
+		st, _, body = mcpPost(t, endpoint, key, sid, string(b))
+		if text, isErr := toolText(t, body); st != 200 || !isErr || strings.Contains(text, "not served") {
+			t.Errorf("session %d: a file of dir B: %d %q %v", i, st, text, isErr)
+		}
+		req, _ := http.NewRequest(http.MethodDelete, endpoint, nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Mcp-Session-Id", sid)
+		req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}
+}
+
+// rawPost is mcpPost for a goroutine: the status, or the error, as a string.
+func rawPost(endpoint, key, sid, body string) string {
+	req, _ := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Session-Id", sid)
+	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err.Error()
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusAccepted {
+		return resp.Status + " " + string(b)
+	}
+	return "202"
 }

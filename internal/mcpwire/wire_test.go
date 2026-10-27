@@ -646,8 +646,8 @@ func TestIDKey(t *testing.T) {
 	}
 }
 
-// The members the node's MCP filters read (M3 WP-05): a lone case variant of roots in an initialize's capabilities or
-// in a request's clientCapabilities, or of progressToken in a client's _meta or a server's progress notification,
+// The members the node's MCP filters read (M3 WP-05): a lone case variant of roots in an initialize's capabilities,
+// in a request's clientCapabilities or in a client response's result, or of progressToken in a client's _meta or a server's progress notification,
 // is refused like a pair, since a peer decoding with encoding/json would take it for the member the node removed or
 // routed by.
 func TestNodeFilterReads(t *testing.T) {
@@ -659,6 +659,7 @@ func TestNodeFilterReads(t *testing.T) {
 		{FromClient, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","_meta":{"` + MetaClientCapabilities + `":{"ROOTS":{}}}}}`},
 		{FromClient, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"x","_meta":{"ProgressToken":"t"}}}`},
 		{FromUpstream, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"PROGRESSTOKEN":"t","progress":1}}`},
+		{FromClient, `{"jsonrpc":"2.0","id":"s1","result":{"Roots":[{"uri":"file:///"}]}}`},
 	} {
 		if _, err := Parse([]byte(c.body), c.src); !errors.Is(err, ErrAmbiguous) {
 			t.Errorf("%s: %v, want ErrAmbiguous", c.body, err)
@@ -671,6 +672,7 @@ func TestNodeFilterReads(t *testing.T) {
 		{FromClient, `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true}}}}`},
 		{FromClient, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"x","_meta":{"progressToken":"t"}}}`},
 		{FromUpstream, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t","progress":1}}`},
+		{FromClient, `{"jsonrpc":"2.0","id":"s1","result":{"roots":[{"uri":"file:///"}]}}`},
 	} {
 		if _, err := Parse([]byte(c.body), c.src); err != nil {
 			t.Errorf("%s: %v", c.body, err)

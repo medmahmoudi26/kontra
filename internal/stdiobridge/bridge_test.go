@@ -921,3 +921,87 @@ func TestDuplicateIDAndStdinBusy(t *testing.T) {
 		t.Errorf("invalid JSON taken for a busy child")
 	}
 }
+
+// Roots answered ahead (M3 WP-05 review, D173): a client, or a gate forging messages, that answers the server's
+// roots/list before the server asks (its ids are predictable) never reaches the child, whatever the order: the node
+// forwards a client response only when it answers a request the node relayed to the client. An answer to an id the
+// server never sent is dropped too; the answer to a relayed sampling/createMessage still reaches the child, and a
+// result with a roots member does not, even under that id.
+func TestRootsAnswerAhead(t *testing.T) {
+	dirA := t.TempDir()
+	f := newFixture(t, func(c *Config) { c.Roots = mcproots.New(dirA) }, "-sample-on-init")
+	r := f.post("", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25",`+
+		`"capabilities":{"roots":{"listChanged":true},"sampling":{}},"clientInfo":{"name":"test","version":"1"}}}`)
+	sid := r.header.Get(mcpwire.HeaderSessionID)
+	if r.status != http.StatusOK || sid == "" {
+		t.Fatalf("initialize: %d %s", r.status, r.body)
+	}
+	pid := f.onlyStart().PID
+	// Before notifications/initialized: the child has asked nothing yet.
+	for _, forged := range []string{
+		`{"jsonrpc":"2.0","id":"roots-1","result":{"roots":[{"uri":"file:///"}]}}`,
+		`{"jsonrpc":"2.0","id":0,"result":{"roots":[{"uri":"file:///"}]}}`,
+		`{"jsonrpc":"2.0","id":"never-asked","result":{}}`,
+	} {
+		if r := f.post(sid, forged); r.status != http.StatusAccepted || r.body != "" {
+			t.Errorf("%s: %d %q", forged, r.status, r.body)
+		}
+	}
+	if r := f.post(sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`); r.status != http.StatusAccepted {
+		t.Fatalf("notifications/initialized: %d", r.status)
+	}
+	if b := f.record("roots", pid); strings.Contains(string(b), `"file:///"`) || !strings.Contains(string(b), "file://"+dirA) {
+		t.Errorf("the child's roots: %s", b)
+	}
+	g := f.get(sid, "")
+	if ev := g.next(5 * time.Second); !strings.Contains(ev.data, `"id":"sample-1"`) {
+		t.Fatalf("the GET's first event: %s", ev.data)
+	}
+	if r := f.post(sid, `{"jsonrpc":"2.0","id":"sample-1","result":{"roots":[{"uri":"file:///"}]}}`); r.status != http.StatusAccepted {
+		t.Errorf("a roots result under the sampling id: %d", r.status)
+	}
+	if r := f.post(sid, `{"jsonrpc":"2.0","id":"sample-1","result":{"role":"assistant","content":{"type":"text","text":"sampled"},"model":"m"}}`); r.status != http.StatusAccepted {
+		t.Fatalf("the sampling answer: %d", r.status)
+	}
+	if b := f.record("sample", pid); !strings.Contains(string(b), "sampled") {
+		t.Errorf("the child's sampling answer: %s", b)
+	}
+	if text(t, f.call(sid, 9, "echo", `{"text":"sync"}`)) != "sync" {
+		t.Fatal("echo")
+	}
+	for _, line := range f.received(pid) {
+		if strings.Contains(line, `"file:///"`) || strings.Contains(line, "never-asked") || strings.Contains(line, `"id":0,"result"`) {
+			t.Errorf("the child received %s", line)
+		}
+	}
+}
+
+// Resumability (MCP 2025-11-25: "The server MUST NOT replay messages that would have been delivered on a different
+// stream"): a GET whose Last-Event-ID names a POST stream's event replays none of the GET stream's messages, which
+// were delivered on the open GET; a GET event's id still replays what follows it.
+func TestReplayOnlyTheGETStream(t *testing.T) {
+	f := newFixture(t, nil)
+	sid := f.initialize(`{}`)
+	g := f.get(sid, "")
+	r := f.call(sid, 2, "progress", `{"n":1}`, `{"progressToken":"tok"}`)
+	if len(r.events) != 2 {
+		t.Fatalf("progress: %v", r.events)
+	}
+	postID := r.events[0].id
+	f.call(sid, 3, "notify", `{"n":2}`)
+	e1, e2 := g.next(5*time.Second), g.next(5*time.Second)
+	if !strings.Contains(e1.data, "note 1") || !strings.Contains(e2.data, "note 2") {
+		t.Fatalf("the GET stream: %s %s", e1.data, e2.data)
+	}
+	g2 := f.get(sid, postID)
+	g2.none(300 * time.Millisecond)
+	f.call(sid, 4, "notify", `{"n":1}`)
+	if ev := g2.next(5 * time.Second); !strings.Contains(ev.data, "note 1") || ev.id == e1.id {
+		t.Errorf("the next GET event: %s %s", ev.id, ev.data)
+	}
+	g2.close()
+	g3 := f.get(sid, e1.id)
+	if ev := g3.next(5 * time.Second); ev.id != e2.id {
+		t.Errorf("replay after the GET event %s: %s, want %s", e1.id, ev.id, e2.id)
+	}
+}

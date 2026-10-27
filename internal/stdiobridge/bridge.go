@@ -11,10 +11,13 @@
 //     progressToken to that request's POST stream; one carrying the related-task key to that task's open
 //     tasks/result POST; everything else, other server-to-client requests included, to the session's GET
 //     stream, queued while none is open (256 messages or 1 MiB, oldest dropped and logged) and flushed in order
-//     when one opens, with event ids <child start>-<n> that a GET's Last-Event-ID replays after.
+//     when one opens, with event ids <child start>-<n> that a GET's Last-Event-ID replays after when it names an
+//     event of the GET stream (a POST stream's id replays nothing: the bridge does not resume POST streams).
 //   - Roots never leave the node (D173, internal/mcproots): the child's roots/list is answered by the bridge
 //     from Config.Roots, the client's roots capability is replaced by the node's, and the client's
-//     notifications/roots/list_changed is dropped (stdio_roots). Messages are read with exact keys (D172).
+//     notifications/roots/list_changed is dropped, as is every client response but the answer to a request the
+//     bridge routed to the client (never one carrying roots) (stdio_roots). Messages are read with exact keys
+//     (D172).
 //   - Each child runs in its own process group (Setpgid). DELETE closes the child's stdin, sends the group
 //     SIGTERM after TerminateAfter and SIGKILL KillAfter later, so an npx launcher leaves no node behind (D184);
 //     a child idle for --session-idle (default 1 h, at least the gate's session_idle_s) is stopped the same way

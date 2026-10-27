@@ -85,7 +85,8 @@ func TestListResultAndCapability(t *testing.T) {
 }
 
 // From the client (spec/tunnel.md §10): the initialize's roots capability is the node's; list_changed and the
-// answer to a node-answered roots/list are dropped; the modern _meta and inputResponses lose roots.
+// answer to a node-answered roots/list are dropped, the answer to a relayed request forwarded; the modern _meta and
+// inputResponses lose roots.
 func TestFromClient(t *testing.T) {
 	init := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25",` +
 		`"capabilities":{"sampling":{},"roots":{"listChanged":true}},"clientInfo":{"name":"c","version":"1"}}}`
@@ -140,9 +141,13 @@ func TestFromClient(t *testing.T) {
 			t.Errorf("%s: %v, want drop", ans, d.Action)
 		}
 	}
+	sample := `{"jsonrpc":"2.0","id":"s1","method":"sampling/createMessage","params":{"messages":[],"maxTokens":1}}`
+	if d, _ := s.FromServer(mcpwire.EraLegacy, []byte(sample), parse(t, mcpwire.FromUpstream, sample)); d.Action != Forward {
+		t.Fatalf("sampling/createMessage: %v", d.Action)
+	}
 	other := `{"jsonrpc":"2.0","id":"s1","result":{"model":"m","role":"assistant","content":{"type":"text","text":"x"}}}`
 	if d, _ := s.FromClient(mcpwire.EraLegacy, []byte(other), parse(t, mcpwire.FromClient, other)); d.Action != Forward || string(d.Body) != other {
-		t.Errorf("another response: %v %s", d.Action, d.Body)
+		t.Errorf("the answer to a relayed request: %v %s", d.Action, d.Body)
 	}
 	call := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{"roots":"kept"}}}`
 	if d, _ := s.FromClient(mcpwire.EraLegacy, []byte(call), parse(t, mcpwire.FromClient, call)); d.Action != Forward || string(d.Body) != call {
@@ -207,9 +212,106 @@ func TestAnsweredIsBounded(t *testing.T) {
 	for i := 0; i < maxAnswered+10; i++ {
 		s.remember(json.RawMessage(itoa(i)))
 	}
-	if s.Answered(json.RawMessage("5")) || !s.Answered(json.RawMessage("10")) || !s.Answered(json.RawMessage(itoa(maxAnswered+9))) || len(s.answered) != maxAnswered {
-		t.Errorf("answered: %d ids", len(s.answered))
+	if s.Answered(json.RawMessage("5")) || !s.Answered(json.RawMessage("10")) || !s.Answered(json.RawMessage(itoa(maxAnswered+9))) || s.answered.len() != maxAnswered {
+		t.Errorf("answered: %d ids", s.answered.len())
 	}
 }
 
 func itoa(i int) string { b, _ := json.Marshal(i); return string(b) }
+
+// A client response reaches the server only when it answers a server-to-client request the node relayed to the
+// client on this session and has not seen answered (M3 WP-05 review; SPEC-CONFLICT in FromClient): an answer sent
+// before the server asks (server ids are predictable: the TypeScript SDK's first is 0) is dropped, as is one to an
+// id the server never sent, a second answer, and any result with a roots member, whatever its id.
+func TestFromClientResponses(t *testing.T) {
+	s := NewSession(New("/srv/a"))
+	from := func(body string) Decision {
+		t.Helper()
+		d, err := s.FromClient(mcpwire.EraLegacy, []byte(body), parse(t, mcpwire.FromClient, body))
+		if err != nil {
+			t.Fatalf("FromClient(%s): %v", body, err)
+		}
+		return d
+	}
+	server := func(body string) Decision {
+		t.Helper()
+		d, err := s.FromServer(mcpwire.EraLegacy, []byte(body), parse(t, mcpwire.FromUpstream, body))
+		if err != nil {
+			t.Fatalf("FromServer(%s): %v", body, err)
+		}
+		return d
+	}
+	// The forged answer arrives before the server's roots/list 0: dropped, and still dropped once the node answered.
+	forged := `{"jsonrpc":"2.0","id":0,"result":{"roots":[{"uri":"file:///"}]}}`
+	if d := from(forged); d.Action != Drop {
+		t.Errorf("an answer ahead of the server's request: %v, want drop", d.Action)
+	}
+	if d := server(`{"jsonrpc":"2.0","id":0,"method":"roots/list"}`); d.Action != Answer {
+		t.Fatalf("roots/list: %v", d.Action)
+	}
+	if d := from(forged); d.Action != Drop {
+		t.Errorf("an answer to the node-answered id: %v, want drop", d.Action)
+	}
+	// Answers to ids the server never sent, of any shape, are dropped.
+	for _, ans := range []string{
+		`{"jsonrpc":"2.0","id":1,"result":{}}`,
+		`{"jsonrpc":"2.0","id":"s1","result":{"model":"m","role":"assistant","content":{"type":"text","text":"x"}}}`,
+		`{"jsonrpc":"2.0","id":"s1","error":{"code":-1,"message":"no"}}`,
+	} {
+		if d := from(ans); d.Action != Drop {
+			t.Errorf("%s answers nothing the node relayed: %v, want drop", ans, d.Action)
+		}
+	}
+	// The server asks sampling/createMessage s1 and ping 2; the node relays them.
+	for _, req := range []string{
+		`{"jsonrpc":"2.0","id":"s1","method":"sampling/createMessage","params":{"messages":[],"maxTokens":1}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"ping"}`,
+	} {
+		if d := server(req); d.Action != Forward || string(d.Body) != req {
+			t.Fatalf("%s: %v", req, d.Action)
+		}
+	}
+	// A result with a roots member answering s1 is dropped (and s1 stays open); the real answer is forwarded once.
+	for _, ans := range []string{
+		`{"jsonrpc":"2.0","id":"s1","result":{"roots":[{"uri":"file:///"}]}}`,
+		`{"jsonrpc":"2.0","id":"s1","result":{"model":"m","role":"assistant","content":{"type":"text","text":"x"},"roots":[]}}`,
+	} {
+		if d := from(ans); d.Action != Drop {
+			t.Errorf("%s: %v, want drop", ans, d.Action)
+		}
+	}
+	ok := `{"jsonrpc":"2.0","id":"s1","result":{"model":"m","role":"assistant","content":{"type":"text","text":"x"}}}`
+	if d := from(ok); d.Action != Forward || string(d.Body) != ok {
+		t.Errorf("the answer to s1: %v %s", d.Action, d.Body)
+	}
+	if d := from(ok); d.Action != Drop {
+		t.Errorf("a second answer to s1: %v, want drop", d.Action)
+	}
+	// An error answering ping 2, the id written 2.0: forwarded.
+	if d := from(`{"jsonrpc":"2.0","id":2.0,"error":{"code":-32601,"message":"no"}}`); d.Action != Forward {
+		t.Errorf("an error answering ping 2: %v", d.Action)
+	}
+	// A case variant of roots is a roots answer too (a decoder matching names case-insensitively reads it).
+	if d := server(`{"jsonrpc":"2.0","id":3,"method":"ping"}`); d.Action != Forward {
+		t.Fatal("ping 3")
+	}
+	if ms, err := members([]byte(`{"ROOTS":[]}`)); err != nil || !rootsResult(json.RawMessage(`{"ROOTS":[]}`)) || len(ms) != 1 {
+		t.Errorf("a ROOTS member is not a roots answer")
+	}
+	// A 2026-07-28 exchange relays no server request: a response there answers nothing and is dropped.
+	if d, _ := NewSession(nil).FromClient(mcpwire.EraModern, []byte(ok), parse(t, mcpwire.FromClient, ok)); d.Action != Drop {
+		t.Errorf("a response on a modern exchange: %v", d.Action)
+	}
+}
+
+// A session forgets the oldest relayed ids past its bound, never the newest.
+func TestRelayedIsBounded(t *testing.T) {
+	s := NewSession(nil)
+	for i := 0; i < maxAnswered+10; i++ {
+		s.relay(json.RawMessage(itoa(i)))
+	}
+	if s.takeRelayed(json.RawMessage("5")) || !s.takeRelayed(json.RawMessage("10")) || !s.takeRelayed(json.RawMessage(itoa(maxAnswered+9))) ||
+		s.takeRelayed(json.RawMessage("10")) {
+		t.Errorf("relayed: the bound or the take is wrong")
+	}
+}

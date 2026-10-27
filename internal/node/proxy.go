@@ -252,11 +252,17 @@ func (p *Proxy) SetServed(names []string) {
 	}
 }
 
-// Drop removes one service from the served set (a binding the gate revoked, §12).
+// Drop removes one service from the served set (a binding the gate revoked, §12), and stops the stdio children of
+// the MCP sessions opened for it through p, with D184's sequence: the gate closed those sessions as revoked, and
+// nothing could reach the children again, which would otherwise hold their processes and --max-sessions places
+// until --session-idle. Another session's children are its own (a rotated key's revocation stops one session, D129).
 func (p *Proxy) Drop(name string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	delete(p.served, name)
+	p.mu.Unlock()
+	if b := p.bridges[name]; b != nil {
+		b.CloseOwner(p)
+	}
 }
 
 // Served is the served set, for a log line.
@@ -432,6 +438,12 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 					if strings.HasPrefix(k, "X-Forwarded-") {
 						delete(h, k)
 					}
+				}
+				if sv.Kind == tunnel.KindMCP {
+					// The node reads an MCP service's answers before the gate does (roots, mcp.go), so it asks for
+					// identity encoding: the gate's tunnel transport asks for gzip on every exchange, and a target
+					// that honours it would send the node bytes it cannot read.
+					h.Set("Accept-Encoding", "identity")
 				}
 			},
 			Transport:      p.transports[sv.Name],

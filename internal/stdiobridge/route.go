@@ -2,11 +2,13 @@ package stdiobridge
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 
 	"kontra.sh/kontra/internal/mcproots"
@@ -166,7 +168,7 @@ func (c *child) post(w http.ResponseWriter, r *http.Request, body []byte, m *mcp
 		return
 	}
 	if d.Action == mcproots.Drop {
-		c.log.Debug("a client message about roots is dropped: roots stay on the node (D173)", "method", m.Method)
+		c.log.Debug("a client message is dropped: roots stay on the node, and a response reaches the server only as the answer to a request the node relayed (D173)", "method", m.Method)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -204,9 +206,15 @@ func (c *child) refuseSend(w http.ResponseWriter, m *mcpwire.Message, err error)
 	sessionNotFound(w, m.ID)
 }
 
-// serveGET opens the session's GET stream: the queue first, from Last-Event-ID when it names an event of this child
-// (never past the first message no GET has had), else from the first message no GET has had; then what is routed to
-// it, until the client goes, the session ends or another GET takes its place.
+// serveGET opens the session's GET stream: the queue first, from Last-Event-ID when it names an event of the GET
+// stream the queue still holds (never past the first message no GET has had), else from the first message no GET has
+// had; then what is routed to it, until the client goes, the session ends or another GET takes its place.
+//
+// POST streams and the GET stream number their events from one counter, so a Last-Event-ID can name a POST stream's
+// event: a client resuming a lost POST stream sends it on a GET (MCP 2025-11-25 resumability). The bridge does not
+// resume POST streams, and "the server MUST NOT replay messages that would have been delivered on a different
+// stream", so such an id replays nothing already handed to a GET; nor does one the queue no longer holds, whose
+// stream the bridge cannot tell.
 func (c *child) serveGET(w http.ResponseWriter, r *http.Request) {
 	if !c.begin() {
 		sessionNotFound(w, nil)
@@ -224,7 +232,7 @@ func (c *child) serveGET(w http.ResponseWriter, r *http.Request) {
 		c.get.end()
 	}
 	after := c.delivered
-	if k, ok := c.parseEventID(r.Header.Get(mcpwire.HeaderLastEventID)); ok && k < after {
+	if k, ok := c.parseEventID(r.Header.Get(mcpwire.HeaderLastEventID)); ok && k < after && c.queued(k) {
 		after = k
 	}
 	for _, ev := range c.queue {
@@ -362,6 +370,12 @@ func (c *child) pushTo(st *stream, ev event) {
 	if !st.push(ev, false) {
 		c.log.Warn("a POST stream the gate does not read was ended")
 	}
+}
+
+// queued reports whether event n is a GET-stream event the queue still holds. c.mu is held.
+func (c *child) queued(n uint64) bool {
+	_, found := slices.BinarySearchFunc(c.queue, n, func(ev event, n uint64) int { return cmp.Compare(ev.n, n) })
+	return found
 }
 
 // enqueueGET queues ev for the GET stream (QueueMessages or QueueBytes, the oldest dropped; an undelivered one is
