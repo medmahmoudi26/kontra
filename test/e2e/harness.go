@@ -227,6 +227,7 @@ type Harness struct {
 
 	run         string
 	opts        Options
+	ext         *External // the gate Attach attached to; nil for one Start started
 	bin         string
 	cli         string
 	configPath  string
@@ -538,7 +539,11 @@ const (
 )
 
 func (h *Harness) env() []string {
-	return append(os.Environ(), RunEnv+"="+h.run, "KONTRA_E2E_HOSTS="+PrivateHost+"="+PrivateAddr)
+	base := os.Environ()
+	if h.ext != nil && h.ext.Env != nil {
+		base = slices.Clone(h.ext.Env)
+	}
+	return append(base, RunEnv+"="+h.run, "KONTRA_E2E_HOSTS="+PrivateHost+"="+PrivateAddr)
 }
 
 // gateEnv is a replica's environment: env, and the secrets only the gate reads (the bucket's credentials and the
@@ -561,6 +566,9 @@ func (h *Harness) Run() string { return h.run }
 func (h *Harness) gateCommand(ctx context.Context, args ...string) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	if h.ext != nil {
+		return h.ext.Gate(cctx, args...)
+	}
 	cmd := exec.CommandContext(cctx, h.bin, args...)
 	cmd.Env = h.gateEnv()
 	cmd.SysProcAttr = procAttr()
@@ -569,21 +577,34 @@ func (h *Harness) gateCommand(ctx context.Context, args ...string) ([]byte, erro
 
 // enroll mints an API key with `kontra-gate enroll --api-key <name>`: a new key, and with it a new buyer.
 func (h *Harness) enroll(ctx context.Context, name string) (string, error) {
+	out, err := h.gateStdout(ctx, "enroll", "-f", h.configPath, "--api-key", name)
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(key, "kk_") {
+		return "", fmt.Errorf("e2e: enroll printed %q, not a key", key)
+	}
+	return key, nil
+}
+
+// gateStdout runs a short kontra-gate command and returns its stdout; its stderr is in the error. An attached
+// harness runs it where the gate runs (External.Gate).
+func (h *Harness) gateStdout(ctx context.Context, args ...string) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, h.bin, "enroll", "-f", h.configPath, "--api-key", name)
+	if h.ext != nil {
+		return h.ext.Gate(cctx, args...)
+	}
+	cmd := exec.CommandContext(cctx, h.bin, args...)
 	cmd.Env = h.gateEnv()
 	cmd.SysProcAttr = procAttr()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("e2e: kontra-gate enroll --api-key %s: %v\n%s", name, err, stderr.String())
+		return nil, fmt.Errorf("e2e: kontra-gate %s: %v\n%s", strings.Join(args, " "), err, stderr.String())
 	}
-	key := strings.TrimSpace(stdout.String())
-	if !strings.HasPrefix(key, "kk_") {
-		return "", fmt.Errorf("e2e: enroll printed %q, not a key", key)
-	}
-	return key, nil
+	return stdout.Bytes(), nil
 }
 
 // writeConfig writes the one kontra.yaml both replicas share; each gets its own listeners by flag, so

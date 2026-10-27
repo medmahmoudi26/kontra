@@ -178,7 +178,8 @@ func (h *Harness) startEverything(t testingTB, name, src, pkg string) *StockServ
 	if err != nil {
 		t.Fatalf("node: %v", err)
 	}
-	preload, err := filepath.Abs(filepath.Join("testdata", "loopback.cjs"))
+	// From the repository's root, so that a harness attached from another package (test/pentest) finds it too.
+	preload, err := filepath.Abs(filepath.Join(repoRoot, "test", "e2e", "testdata", "loopback.cjs"))
 	if err != nil {
 		t.Fatalf("%v", err)
 	}

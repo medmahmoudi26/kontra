@@ -713,17 +713,11 @@ func (n *Node) logLines(from int64, substrs []string) []string {
 // EnrollToken mints a service token with `kontra-gate enroll -f kontra.yaml <service>` (spec/tunnel.md §5).
 // The gate must have loaded its services: (Start has).
 func (h *Harness) EnrollToken(ctx context.Context, service string) (string, error) {
-	cctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, h.bin, "enroll", "-f", h.configPath, service)
-	cmd.Env = h.gateEnv()
-	cmd.SysProcAttr = procAttr()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("e2e: kontra-gate enroll %s: %v\n%s", service, err, stderr.String())
+	out, err := h.gateStdout(ctx, "enroll", "-f", h.configPath, service)
+	if err != nil {
+		return "", err
 	}
-	token := strings.TrimSpace(stdout.String())
+	token := strings.TrimSpace(string(out))
 	if !strings.HasPrefix(token, "ket_") {
 		return "", fmt.Errorf("e2e: enroll %s printed %q, not a token", service, token)
 	}
