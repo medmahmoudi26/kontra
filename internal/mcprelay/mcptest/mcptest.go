@@ -76,10 +76,24 @@ type Server struct {
 	// know (a JSON-RPC error -32601 by default).
 	OnCall    func(r Request) Reply
 	OnRequest func(r Request) Reply
+	// TaskRun, when set, makes the double a 2025-11-25 task receiver (tasks.go): its initialize declares tasks
+	// {list, cancel, requests.tools.call}, and a tools/call with params.task creates a task, answered with a
+	// CreateTaskResult, whose work TaskRun does on a goroutine of its own.
+	TaskRun func(t *Task)
+	// TaskPollInterval is the pollInterval (ms) of its tasks (100 by default); IgnoreCancel answers tasks/cancel
+	// with the task as it is, which goes on.
+	TaskPollInterval int
+	IgnoreCancel     bool
+	// Hold, when set, is called with each request before the double serves it (a test blocks in it to make the
+	// double slow, or hang, on a method).
+	Hold func(r Request)
 
 	requests []Request
 	sessions map[string]*session
 	nextEv   int
+	tasks    map[string]*Task
+	nextTask int
+	nextReq  int
 }
 
 type session struct {
@@ -88,7 +102,7 @@ type session struct {
 }
 
 // New returns a double with no tools.
-func New() *Server { return &Server{sessions: map[string]*session{}} }
+func New() *Server { return &Server{sessions: map[string]*session{}, tasks: map[string]*Task{}} }
 
 // Lock and Unlock guard the fields while the double serves.
 func (s *Server) Lock()   { s.mu.Lock() }
@@ -185,8 +199,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.requests = append(s.requests, req)
-	status, www := s.Status, s.WWWAuthenticate
+	status, www, hold := s.Status, s.WWWAuthenticate, s.Hold
 	s.mu.Unlock()
+	if hold != nil {
+		hold(req)
+	}
 	if status != 0 {
 		if www != "" {
 			w.Header().Set("WWW-Authenticate", www)
@@ -225,7 +242,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(msg.ID) == 0 || msg.Method == "" {
+		if msg.Method == "" && len(msg.ID) > 0 {
+			s.answer(req.SessionID, msg.ID, body) // a response to one of the double's own requests (a task's)
+		}
 		w.WriteHeader(http.StatusAccepted) // a notification or a response
+		return
+	}
+	s.mu.Lock()
+	tasks := s.TaskRun != nil
+	s.mu.Unlock()
+	if tasks && s.serveTask(w, r, req) {
 		return
 	}
 	var rep Reply
@@ -276,13 +302,16 @@ func (s *Server) initialize(w http.ResponseWriter, req Request) {
 	id := "up-" + hex.EncodeToString(b)
 	s.mu.Lock()
 	s.sessions[id] = &session{push: make(chan []byte, 64)}
-	v, caps, meta := s.Negotiate, s.Capabilities, s.InitMeta
+	v, caps, meta, tasks := s.Negotiate, s.Capabilities, s.InitMeta, s.TaskRun != nil
 	s.mu.Unlock()
 	if v == "" {
 		v = Version
 	}
 	if len(caps) == 0 {
 		caps = json.RawMessage(`{"tools":{"listChanged":true}}`)
+		if tasks {
+			caps = json.RawMessage(`{"tools":{"listChanged":true},"tasks":{"list":{},"cancel":{},"requests":{"tools":{"call":{}}}}}`)
+		}
 	}
 	res := map[string]any{"protocolVersion": v, "capabilities": caps,
 		"serverInfo": map[string]any{"name": "mcptest", "version": "1.0.0"}}

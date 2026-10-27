@@ -179,6 +179,8 @@ var (
 		strictjson.Path{"params", "capabilities", "roots"},
 		strictjson.Path{"params", "_meta", MetaClientCapabilities, "roots"},
 		strictjson.Path{"result", "roots"},
+		// A client's answer to a gate request id: the related-task key the gate rewrites back (M3 WP-06, §11.6).
+		strictjson.Path{"result", "_meta", MetaRelatedTask},
 	)
 	upstreamReads = withLevels(UpstreamLevels,
 		strictjson.Path{"jsonrpc"}, strictjson.Path{"id"}, strictjson.Path{"method"},
@@ -191,6 +193,12 @@ var (
 		strictjson.Path{"result", "inputRequests", "*", "method"},
 		strictjson.Path{"result", "result", "isError"},
 		strictjson.Path{"error", "code"}, strictjson.Path{"error", "message"},
+		// The durable dispatch's reads of a 2025-11-25 upstream (M3 WP-06, §11.5): a CreateTaskResult's task, a
+		// tasks/get result (Result & Task), and the related-task key of a tasks/result answer, which it rewrites.
+		strictjson.Path{"result", "task", "taskId"}, strictjson.Path{"result", "task", "status"},
+		strictjson.Path{"result", "task", "statusMessage"}, strictjson.Path{"result", "task", "pollInterval"},
+		strictjson.Path{"result", "taskId"}, strictjson.Path{"result", "status"}, strictjson.Path{"result", "statusMessage"},
+		strictjson.Path{"result", "pollInterval"}, strictjson.Path{"result", "_meta", MetaRelatedTask},
 	)
 )
 

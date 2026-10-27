@@ -411,9 +411,15 @@ func (r *Replica) assemble() error {
 		Executor: executor,
 	})
 	r.handlers = handlers
+	// Gate-owned MCP tasks (spec §11.5; M3 WP-06) are dispatched by the MCP relay's dispatcher, which relay's hands
+	// them to and which registers its dispatches in the same registry, so abort reaches them.
+	mcpDispatch := &mcprelay.Dispatcher{
+		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Services: r.services, Tunnels: r.tunnels,
+		Waker: r.listener, Signals: r.lifecycle, TaskBytes: cfg.Limits.TaskBytes.Int64(), Logger: log,
+	}
 	r.dispatch = &countingDispatch{DispatchActivities: &relay.Dispatcher{
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Handlers: handlers, Backends: r.services,
-		Signals: r.lifecycle, Logger: log,
+		Signals: r.lifecycle, Logger: log, MCP: mcpDispatch,
 	}}
 	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log, Render: r.render})
 	// prepare places a tunnel service's attempts on the sessions of every replica (spec §6.1); the
@@ -445,7 +451,7 @@ func (r *Replica) assemble() error {
 	}).Register(routes)
 	// /mcp/{svc} (spec §11; M3 WP-04): plain MCP requests, sessions pinned to a tunnel session or a direct backend,
 	// and the peer hop to the replica holding a tunnel session (§11.2). The gate's own /mcp is M4's (D170).
-	if err := r.assembleMCP(routes, authn); err != nil {
+	if err := r.assembleMCP(routes, authn, snapshot, rules); err != nil {
 		return err
 	}
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))
@@ -501,7 +507,7 @@ func (r *Replica) assemble() error {
 
 // assembleMCP builds the MCP relay over the replica's registry, sessions and tunnels, mounts its routes, and the
 // peer listener's handler when peer.listen is set.
-func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator) error {
+func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, snapshot lifecycle.HooksSnapshot, rules hooks.KeyRules) error {
 	cfg := r.cfg
 	signer, peerClient, err := peerSetup(cfg)
 	if err != nil {
@@ -523,6 +529,13 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator) er
 	}
 	if peerClient != nil {
 		deps.Peer = peerClient
+	}
+	// Gate-owned MCP tasks (spec §11.5–§11.8; M3 WP-06): tasks/* served from Postgres on any replica, LISTEN for
+	// tasks/result, the lifecycle client for the start, kontra.cancel and kontra.input_response.
+	if deps.Tasks, err = mcprelay.NewTasks(mcprelay.TasksConfig{
+		Log: r.storeLog, Waker: r.listener, Lifecycle: r.lifecycle, Hooks: snapshot, Rules: rules, Logger: r.log,
+	}); err != nil {
+		return err
 	}
 	h, err := mcprelay.NewHandler(deps)
 	if err != nil {

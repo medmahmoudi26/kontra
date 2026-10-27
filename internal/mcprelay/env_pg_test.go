@@ -155,6 +155,8 @@ type replica struct {
 	peerURL  string // the peer listener's base URL, "" without one
 	logs     *logBuf
 	admitted *fakeAdmission
+	// dispatcher is the replica's MCP dispatcher when it runs gate-owned tasks (tasks_pg_test.go).
+	dispatcher *Dispatcher
 }
 
 type replicaOpts struct {
@@ -166,6 +168,9 @@ type replicaOpts struct {
 	admission    *fakeAdmission
 	ops          []hooks.Operation
 	drainTimeout time.Duration // the tools cache's bound on one drain (DrainTimeout when 0)
+	// withDeps, when set, completes the handler's deps before it is built (tasks_pg_test.go: gate-owned tasks and
+	// the replica's Temporal workers), with the replica's LISTEN connection and logger.
+	withDeps func(r *replica, deps *Deps, l *pg.Listener, logger *slog.Logger)
 }
 
 // replica starts one replica over the env's database.
@@ -208,6 +213,9 @@ func (e *env) replica(name string, o replicaOpts) *replica {
 	if o.peer {
 		signer, _ = peer.NewSigner(peerSecret)
 		deps.Peer, _ = peer.NewClient(signer)
+	}
+	if o.withDeps != nil {
+		o.withDeps(r, &deps, l, logger)
 	}
 	h, err := NewHandler(deps)
 	if err != nil {

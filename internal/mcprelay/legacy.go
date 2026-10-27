@@ -138,9 +138,28 @@ func (h *Handler) initializeResult(rq *request, raw []byte, m *mcpwire.Message, 
 	if err != nil {
 		return nil, err
 	}
-	if !h.tasksAdvertised(rq.svc, version) {
+	switch {
+	case !h.tasksAdvertised(rq.svc, version):
 		if res, err = rewriteCapabilities(res, func(caps json.RawMessage) (json.RawMessage, error) {
 			return mcpwire.DeleteMember(caps, "tasks")
+		}); err != nil {
+			return nil, err
+		}
+	case rq.svc.Tasks == config.TasksDurable:
+		// §11.5: a durable service's tasks are the gate's: as the upstream declares them, plus list and cancel,
+		// which the gate serves itself (tasks/list, tasks/cancel, §11.6). An upstream that declares no tasks gets
+		// none advertised.
+		if res, err = rewriteCapabilities(res, func(caps json.RawMessage) (json.RawMessage, error) {
+			tasks, ok := mcpwire.Member(caps, "tasks")
+			if !ok || firstByte(tasks) != '{' {
+				return caps, nil
+			}
+			for _, k := range []string{"list", "cancel"} {
+				if tasks, err = mcpwire.SetMember(tasks, k, json.RawMessage(`{}`)); err != nil {
+					return nil, err
+				}
+			}
+			return mcpwire.SetMember(caps, "tasks", tasks)
 		}); err != nil {
 			return nil, err
 		}
@@ -232,21 +251,35 @@ func (h *Handler) pinned(rq *request) {
 		}
 	}
 
-	if rq.r.Method == http.MethodGet && strings.HasPrefix(rq.r.Header.Get(mcpwire.HeaderLastEventID), "k.") {
-		// §11.7: a gate-written stream, served from task_events by any replica and never forwarded. Gate-owned
-		// tasks are M3 WP-06's; until then no such stream exists to resume. §11.7 names every Last-Event-ID that
-		// starts with "k.", not only the gate's own form k.<taskId>.<seq>, so an upstream whose SSE event ids start
-		// with "k." cannot be resumed through the gate (left to the spec's owner).
-		writeEmpty(rq.w, http.StatusBadRequest)
+	if last := rq.r.Header.Get(mcpwire.HeaderLastEventID); rq.r.Method == http.MethodGet && strings.HasPrefix(last, "k.") {
+		// §11.7: a gate-written stream, served from task_events by any replica and never forwarded, for the
+		// task's principal only. §11.7 names every Last-Event-ID that starts with "k.", not only the gate's own form
+		// k.<taskId>.<seq>, so an upstream whose SSE event ids start with "k." cannot be resumed through the gate
+		// (left to the spec's owner): one the gate did not mint is 404.
+		if h.deps.Tasks == nil {
+			writeEmpty(rq.w, http.StatusNotFound)
+			return
+		}
+		h.deps.Tasks.Resume(rq.ctx(), rq.w, rq.sid, h.caller(rq), last)
 		return
 	}
 	if m := rq.msg; m != nil && m.Method == "" && isGateRequestID(m.ID) {
-		// §11.7: a client response to a gate-minted request id is the gate's; without gate-owned tasks (M3 WP-06)
-		// every such id is unknown: 202 and dropped.
+		// §11.7: a client response to a gate-minted request id is the gate's: logged once as an input_response
+		// when it answers an input request of a task of the caller's buyer, else dropped; 202 either way.
+		if h.deps.Tasks != nil {
+			h.deps.Tasks.Respond(rq.ctx(), h.caller(rq), m, rq.body, h.sealed(rq))
+		}
 		writeEmpty(rq.w, http.StatusAccepted)
 		return
 	}
 
+	if m := rq.msg; m != nil && strings.HasPrefix(m.Method, "tasks/") && rq.svc.Tasks == config.TasksDurable &&
+		h.tasksAdvertised(rq.svc, sess.ProtocolVersion) {
+		// §11.6: a durable service's tasks are the gate's, served from Postgres on any replica and never forwarded,
+		// so they need no exchange on the session's tunnel: a task outlives the tunnel its dispatch used.
+		h.serveTask(rq)
+		return
+	}
 	t, err := h.pinnedTarget(rq)
 	if err != nil {
 		h.upstreamFailed(rq, err)
@@ -267,7 +300,7 @@ func (h *Handler) pinned(rq *request) {
 		h.toolsCall(rq, t)
 	default:
 		if strings.HasPrefix(m.Method, "tasks/") && !h.tasksAdvertised(rq.svc, sess.ProtocolVersion) {
-			// §11.5: a service that advertises no tasks has none to serve (off; durable until M3 WP-06; 2025-06-18).
+			// §11.5: a service that advertises no tasks has none to serve (off; 2025-06-18; a gate without them).
 			writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeMethodNotFound, "Method not found", nil)
 			return
 		}
@@ -278,8 +311,8 @@ func (h *Handler) pinned(rq *request) {
 // isGateRequestID reports whether a JSON-RPC id is a gate-minted request id (§11.7): exactly the string
 // k.<taskId>.<seq>, a gate task id as the gate writes it (a UUID, lowercase and hyphenated) and a decimal sequence
 // number without sign or leading zero. An upstream's own id that merely starts with "k." is not one: its client's
-// answer is forwarded like every other response (§11.2: upstream ids pass unchanged). M3 WP-06 mints the ids in this
-// form, and then also requires a task of the caller's buyer.
+// answer is forwarded like every other response (§11.2: upstream ids pass unchanged). Tasks.Respond then also
+// requires an input request of a task of the caller's buyer.
 func isGateRequestID(id json.RawMessage) bool {
 	id = bytes.TrimSpace(id)
 	if len(id) == 0 || id[0] != '"' {
@@ -641,7 +674,7 @@ func (h *Handler) toolsCall(rq *request, t target) {
 		writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeInvalidParams, "Unknown tool: ", nil)
 		return
 	}
-	_, known, err := h.deps.Tools.Tool(rq.ctx(), h.toolsKey(rq), mcpwire.EraLegacy, rq.svc.Tools, name, h.pager(rq, t))
+	tool, known, err := h.deps.Tools.Tool(rq.ctx(), h.toolsKey(rq), mcpwire.EraLegacy, rq.svc.Tools, name, h.pager(rq, t))
 	if err != nil {
 		h.toolsFailed(rq, err)
 		return
@@ -653,10 +686,13 @@ func (h *Handler) toolsCall(rq *request, t target) {
 	_, task := mcpwire.Member(m.Params, "task")
 	op := hooks.OpCall
 	if task {
-		if !h.tasksAdvertised(rq.svc, rq.sess.ProtocolVersion) || rq.svc.Tasks != config.TasksPassthrough {
-			// §11.5: off answers -32601; durable gate-owned tasks are M3 WP-06's (until then the service advertises
-			// none, as off does); a 2025-06-18 session has no tasks.
+		if !h.tasksAdvertised(rq.svc, rq.sess.ProtocolVersion) {
+			// §11.5: off answers -32601, and a 2025-06-18 session has no tasks.
 			writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeMethodNotFound, "tasks are not supported on this service", nil)
+			return
+		}
+		if rq.svc.Tasks == config.TasksDurable {
+			h.durableCall(rq, name, tool)
 			return
 		}
 		op = hooks.OpTask

@@ -107,15 +107,10 @@ type Deps struct {
 	Peer           *peer.Client // nil without peer.listen: only this replica's sessions are candidates
 	AllowedOrigins []string     // mcp.allowed_origins (§11.1)
 	Log            *slog.Logger
-	// Tasks serves gate-owned MCP tasks (M3 WP-06); nil until it is built, and a durable service then advertises
-	// no tasks (as tasks: off does) and answers a task-augmented call and tasks/* -32601.
-	Tasks TaskServer
+	// Tasks serves gate-owned MCP tasks (§11.5–§11.8); nil, a durable service advertises no tasks (as tasks: off
+	// does) and answers a task-augmented call and tasks/* -32601.
+	Tasks *Tasks
 	now   func() time.Time
-}
-
-// TaskServer is the gate-owned task side of a durable service (M3 WP-06's Tasks).
-type TaskServer interface {
-	Serve(ctx context.Context, era mcpwire.Era, buyer uuid.UUID, m *mcpwire.Message) (json.RawMessage, *mcpwire.Error, error)
 }
 
 // Handler serves POST, GET and DELETE on /mcp/{name} (and /mcp/{tenant}/{name} on a multi-tenant gate) after

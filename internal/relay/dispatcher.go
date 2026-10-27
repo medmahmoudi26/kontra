@@ -41,7 +41,20 @@ type Dispatcher struct {
 	// PreambleTimeout bounds the reads the dispatch makes before a2a-go's handler runs; 10 s when zero.
 	PreambleTimeout time.Duration
 	Logger          *slog.Logger
+	// MCP dispatches the tasks whose protocol is mcp (spec §11.5; internal/mcprelay's Dispatcher, M3 WP-06):
+	// dispatch and forward_cancel of such a task are handed to it; abort reaches its dispatches through the same
+	// Registry. Nil: an MCP task's dispatch is an error (a gate that serves no MCP tasks has none).
+	MCP MCPDispatcher
 }
+
+// MCPDispatcher is the MCP half of the dispatch activities (internal/mcprelay's Dispatcher).
+type MCPDispatcher interface {
+	Dispatch(ctx context.Context, in lifecycle.DispatchInput) (lifecycle.DispatchResult, error)
+	ForwardCancel(ctx context.Context, in lifecycle.AttemptRef) (lifecycle.ForwardCancelResult, error)
+}
+
+// errNoMCP is an MCP task on a replica built without the MCP dispatcher.
+var errNoMCP = errors.New("relay: this replica dispatches no MCP tasks")
 
 // DefaultPreambleTimeout is Dispatcher.PreambleTimeout's default: well under the dispatch's 30 s
 // heartbeat timeout (spec §14.2), so a slow or saturated Postgres makes the dispatch fail before Temporal
@@ -119,6 +132,13 @@ func (d *Dispatcher) dispatch(ctx, pctx context.Context, log *slog.Logger, taskU
 	row, err := d.Log.Load(pctx, taskUUID)
 	if err != nil {
 		return lifecycle.DispatchResult{}, err
+	}
+	if row.Protocol == store.ProtocolMCP {
+		// A gate-owned MCP task (spec §11.5): its dispatch speaks MCP, not a2a-go.
+		if d.MCP == nil {
+			return lifecycle.DispatchResult{}, errNoMCP
+		}
+		return d.MCP.Dispatch(ctx, in)
 	}
 	if row.State.Terminal() {
 		// The task ended before this dispatch (an earlier dispatch logged the terminal event and died before
@@ -442,6 +462,12 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 	row, err := d.Log.Load(ctx, taskUUID)
 	if err != nil {
 		return lifecycle.ForwardCancelResult{}, err
+	}
+	if row.Protocol == store.ProtocolMCP {
+		if d.MCP == nil {
+			return lifecycle.ForwardCancelResult{}, errNoMCP
+		}
+		return d.MCP.ForwardCancel(ctx, in)
 	}
 	svc, err := d.Log.LoadService(ctx, row.TenantID, row.Service)
 	if err != nil {
