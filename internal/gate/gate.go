@@ -240,19 +240,23 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 		return nil, err
 	}
 	r = &Replica{cfg: cfg, id: id, log: log.With("replica", id), opts: o}
+	// The cleanup holds the replica itself: every error return below sets the named result r to nil before the
+	// deferred function runs, so reading r there dereferenced nil and turned a start failure (Temporal unreachable,
+	// a bad signing key, a bucket it cannot use) into a panic (M3 WP-10 pentest, finding F-1).
+	built := r
 	defer func() {
 		if err != nil {
 			// Release what New bound or opened: the listeners (closed unserved), the client and the pool.
-			if r.server != nil {
-				_ = r.server.Shutdown(context.WithoutCancel(ctx))
+			if built.server != nil {
+				_ = built.server.Shutdown(context.WithoutCancel(ctx))
 			}
-			if r.metrics != nil {
-				_ = r.metrics.Shutdown(context.WithoutCancel(ctx))
+			if built.metrics != nil {
+				_ = built.metrics.Shutdown(context.WithoutCancel(ctx))
 			}
-			if r.peerLn != nil {
-				_ = r.peerLn.Close()
+			if built.peerLn != nil {
+				_ = built.peerLn.Close()
 			}
-			r.close()
+			built.close()
 		}
 	}()
 
