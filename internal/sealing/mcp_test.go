@@ -387,3 +387,42 @@ func TestHostingMCPRequired(t *testing.T) {
 		t.Fatalf("arguments beside the envelope: %q", r)
 	}
 }
+
+// Finding: a sealed task's statusMessage reached other sessions in plaintext: FromServer passed every message of an
+// exchange whose session has no job, and sealed tasks/list entries of the exchange's own job only, so an upstream that
+// does not scope tasks/list per session listed another session's sealed task with its statusMessage, and its
+// notifications/tasks/status came on another session's stream. Every sealed task's statusMessage is "sealed" now
+// wherever the node reads one, and another session's status notification is dropped.
+func TestHostingMCPStatusOnOtherSessions(t *testing.T) {
+	d := newDurable(t) // binds upstream task up-t to the job of session client-session
+	list := `{"jsonrpc":"2.0","id":9,"result":{"tasks":[{"taskId":"up-t","status":"working","statusMessage":"looking for SECRET flights"},` +
+		`{"taskId":"plain","status":"working","statusMessage":"an unsealed task's message"}]}}`
+	for _, session := range []string{sessionHash("another-session"), d.session, ""} {
+		x := d.f.h.MCP(mcpPre(session, "9", ""))
+		if _, r := fromClient(t, x, []byte(`{"jsonrpc":"2.0","id":9,"method":"tasks/list","params":{}}`)); r != "" {
+			t.Fatalf("tasks/list on session %q: %s", session, r)
+		}
+		got := fromServer(t, x, list)
+		if strings.Contains(got, "SECRET") || !strings.Contains(got, `"statusMessage":"sealed"`) || !strings.Contains(got, "an unsealed task's message") {
+			t.Errorf("tasks/list on session %q: %s", session, got)
+		}
+	}
+	// A status notification of the sealed task on another session's stream is dropped; on its own session it is sealed.
+	note := `{"jsonrpc":"2.0","method":"notifications/tasks/status","params":{"taskId":"up-t","status":"working","statusMessage":"SECRET progress"}}`
+	x := d.f.h.MCP(mcpPre(sessionHash("another-session"), "", ""))
+	if out, keep, err := x.FromServer([]byte(note)); err != nil || keep {
+		t.Errorf("another session's status notification: %v %v %s", err, keep, out)
+	}
+	x = d.f.h.MCP(mcpPre(d.session, "", ""))
+	if out, keep, err := x.FromServer([]byte(note)); err != nil || !keep || strings.Contains(string(out), "SECRET") || !strings.Contains(string(out), `"statusMessage":"sealed"`) {
+		t.Errorf("the session's own status notification: %v %v %s", err, keep, out)
+	}
+	// A tasks/get answer naming the sealed task on an exchange with no job.
+	x = d.f.h.MCP(mcpPre("", "4", ""))
+	if _, r := fromClient(t, x, []byte(`{"jsonrpc":"2.0","id":4,"method":"tasks/get","params":{"taskId":"other"}}`)); r != "" {
+		t.Fatal(r)
+	}
+	if got := fromServer(t, x, `{"jsonrpc":"2.0","id":4,"result":{"taskId":"up-t","status":"working","statusMessage":"SECRET"}}`); strings.Contains(got, "SECRET") {
+		t.Errorf("tasks/get naming a sealed task on an exchange with no job: %s", got)
+	}
+}

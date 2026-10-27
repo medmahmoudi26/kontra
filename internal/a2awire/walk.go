@@ -62,7 +62,61 @@ const (
 	KindStatusUpdate                   // a StreamResponse's statusUpdate
 	KindArtifactUpdate                 // a StreamResponse's artifactUpdate
 	KindMessage                        // a request's or an answer's message
+	KindRequest                        // a send request's params (JSON-RPC) or body (HTTP+JSON), before its message
 )
+
+// Binding is the A2A binding a body is read as. A node knows it from the request (its route, or a JSON-RPC body on
+// the JSON-RPC endpoint), and reads every answer to that request in the same binding: a2a-go's JSON-RPC client reads
+// a response's result, its HTTP+JSON client the whole body, so a body that carries both shapes would be read one way
+// by the node and another by the client.
+type Binding int
+
+// Bindings.
+const (
+	// BindingAny reads a body as JSON-RPC when it has a "jsonrpc" member, else as HTTP+JSON.
+	BindingAny Binding = iota
+	// BindingJSONRPC refuses (ErrShape) a body without a "jsonrpc" member.
+	BindingJSONRPC
+	// BindingHTTP refuses (ErrShape) a body with a "jsonrpc" member.
+	BindingHTTP
+)
+
+// The members the walk reads at each level (D172; spec/ext-sealed.md §5, "Hosting node"): a lone key equal to one of
+// them under case folding without being it ({"Artifacts": …} where the walk reads artifacts) is refused, a
+// *strictjson.KeyError whose Of names the member. encoding/json, which a2a-go, the gate and most clients decode A2A
+// bodies with, matches member names without regard to case, so such a key is the member to every other reader of
+// the body and absent to the walk: a part under it would be neither sealed nor opened. Metadata levels are maps
+// (exact keys to every reader) and are read for pairs only.
+var (
+	readsRPCRequest  = reads("jsonrpc", "method", "params", "id")
+	readsRPCResponse = reads("jsonrpc", "id", "result", "error")
+	// readsRequest: a send request's params or HTTP+JSON body ("jsonrpc" too: an HTTP+JSON body with a case variant
+	// of it is a JSON-RPC request to a lenient reader).
+	readsRequest       = reads("jsonrpc", "message", "metadata", "configuration")
+	readsConfiguration = reads("taskPushNotificationConfig")
+	// readsAnswer: a JSON-RPC result or an HTTP+JSON answer, which may be a StreamResponse, a Task or a list.
+	readsAnswer         = reads("jsonrpc", "message", "task", "statusUpdate", "artifactUpdate", "tasks", "id", "contextId", "status", "history", "artifacts", "metadata")
+	readsTask           = reads("id", "contextId", "status", "history", "artifacts", "metadata")
+	readsStatus         = reads("state", "message")
+	readsStatusUpdate   = reads("taskId", "contextId", "status", "metadata")
+	readsArtifactUpdate = reads("taskId", "contextId", "artifact", "append", "lastChunk", "metadata")
+	readsMessage        = reads("messageId", "role", "taskId", "contextId", "parts", "metadata")
+	readsArtifact       = reads("artifactId", "parts", "metadata")
+	readsPart           = reads("text", "raw", "url", "data", "mediaType", "filename", "metadata")
+)
+
+func reads(names ...string) []strictjson.Path {
+	out := make([]strictjson.Path, len(names))
+	for i, n := range names {
+		out[i] = strictjson.Path{n}
+	}
+	return out
+}
+
+// lone refuses a lone case variant of a member read at the level m.
+func lone(m map[string]json.RawMessage, r []strictjson.Path) error {
+	return strictjson.CheckReads(m, nil, r)
+}
 
 // Container is one message or artifact with its parts, read with exact keys. A visitor may replace its parts or set
 // its members; the walk then re-encodes it and every level above it.
@@ -115,9 +169,13 @@ func String(m map[string]json.RawMessage, name string) (string, bool) {
 // levels the package doc names, calling Object for each Task, status update, artifact update and request or answer
 // message it reads, before the containers inside it, and Container for each message and artifact. Either may be nil.
 // An error from one stops the walk and is returned as it is.
+//
+// Every level is read with exact keys, and a lone case variant of a member the walk reads there is refused (a
+// *strictjson.KeyError), as is a body of the other binding than Binding (ErrShape).
 type Walker struct {
 	Object    func(kind Kind, m map[string]json.RawMessage) error
 	Container func(c *Container) error
+	Binding   Binding
 }
 
 // WalkRequest walks a send request (a JSON-RPC SendMessage or SendStreamingMessage, or an HTTP+JSON
@@ -143,13 +201,31 @@ func (w Walker) walk(body []byte, request bool) (out []byte, changed bool, err e
 	ww := &walk{w: w}
 	_, jsonrpc := top["jsonrpc"]
 	switch {
+	case w.Binding == BindingJSONRPC && !jsonrpc:
+		return nil, false, fmt.Errorf("%w: a body without jsonrpc to a JSON-RPC request", ErrShape)
+	case w.Binding == BindingHTTP && jsonrpc:
+		return nil, false, fmt.Errorf("%w: a JSON-RPC body to an HTTP+JSON request", ErrShape)
+	}
+	switch {
 	case jsonrpc && request:
-		changed, err = ww.member(top, "params", ww.request)
+		if err := lone(top, readsRPCRequest); err != nil {
+			return nil, false, err
+		}
+		changed, err = ww.member(top, "params", readsRequest, ww.request)
 	case jsonrpc:
-		changed, err = ww.member(top, "result", ww.answer)
+		if err := lone(top, readsRPCResponse); err != nil {
+			return nil, false, err
+		}
+		changed, err = ww.member(top, "result", readsAnswer, ww.answer)
 	case request:
+		if err := lone(top, readsRequest); err != nil {
+			return nil, false, err
+		}
 		changed, err = ww.request(top)
 	default:
+		if err := lone(top, readsAnswer); err != nil {
+			return nil, false, err
+		}
 		changed, err = ww.answer(top)
 	}
 	if err != nil || !changed {
@@ -163,6 +239,7 @@ type walk struct {
 }
 
 // request is a send request's params (JSON-RPC) or body (HTTP+JSON): its message.
+// Its level's lone variants were checked by the caller.
 func (ww *walk) request(m map[string]json.RawMessage) (bool, error) {
 	if raw, ok := m["metadata"]; ok && !isNull(raw) {
 		if _, err := strictjson.Members(raw); err != nil {
@@ -170,11 +247,18 @@ func (ww *walk) request(m map[string]json.RawMessage) (bool, error) {
 		}
 	}
 	if raw, ok := m["configuration"]; ok && !isNull(raw) {
-		if _, err := strictjson.Members(raw); err != nil {
+		c, err := strictjson.Members(raw)
+		if err != nil {
 			return false, levelErr(err, "configuration")
 		}
+		if err := lone(c, readsConfiguration); err != nil {
+			return false, err
+		}
 	}
-	return ww.member(m, "message", func(msg map[string]json.RawMessage) (bool, error) {
+	if err := ww.object(KindRequest, m); err != nil {
+		return false, err
+	}
+	return ww.member(m, "message", readsMessage, func(msg map[string]json.RawMessage) (bool, error) {
 		if err := ww.object(KindMessage, msg); err != nil {
 			return false, err
 		}
@@ -190,7 +274,7 @@ func (ww *walk) answer(m map[string]json.RawMessage) (bool, error) {
 		changed = changed || c
 		return err
 	}
-	if err := add(ww.member(m, "message", func(msg map[string]json.RawMessage) (bool, error) {
+	if err := add(ww.member(m, "message", readsMessage, func(msg map[string]json.RawMessage) (bool, error) {
 		if err := ww.object(KindMessage, msg); err != nil {
 			return false, err
 		}
@@ -198,10 +282,10 @@ func (ww *walk) answer(m map[string]json.RawMessage) (bool, error) {
 	})); err != nil {
 		return false, err
 	}
-	if err := add(ww.member(m, "task", ww.task)); err != nil {
+	if err := add(ww.member(m, "task", readsTask, ww.task)); err != nil {
 		return false, err
 	}
-	if err := add(ww.member(m, "statusUpdate", func(u map[string]json.RawMessage) (bool, error) {
+	if err := add(ww.member(m, "statusUpdate", readsStatusUpdate, func(u map[string]json.RawMessage) (bool, error) {
 		if err := ww.object(KindStatusUpdate, u); err != nil {
 			return false, err
 		}
@@ -209,17 +293,17 @@ func (ww *walk) answer(m map[string]json.RawMessage) (bool, error) {
 	})); err != nil {
 		return false, err
 	}
-	if err := add(ww.member(m, "artifactUpdate", func(u map[string]json.RawMessage) (bool, error) {
+	if err := add(ww.member(m, "artifactUpdate", readsArtifactUpdate, func(u map[string]json.RawMessage) (bool, error) {
 		if err := ww.object(KindArtifactUpdate, u); err != nil {
 			return false, err
 		}
-		return ww.member(u, "artifact", func(a map[string]json.RawMessage) (bool, error) {
+		return ww.member(u, "artifact", readsArtifact, func(a map[string]json.RawMessage) (bool, error) {
 			return ww.container(WhereArtifactUpdate, a, u, KindArtifactUpdate)
 		})
 	})); err != nil {
 		return false, err
 	}
-	if err := add(ww.array(m, "tasks", ww.task)); err != nil {
+	if err := add(ww.array(m, "tasks", readsTask, ww.task)); err != nil {
 		return false, err
 	}
 	if isTask(m) {
@@ -235,7 +319,7 @@ func (ww *walk) task(t map[string]json.RawMessage) (bool, error) {
 	if err := ww.object(KindTask, t); err != nil {
 		return false, err
 	}
-	a, err := ww.array(t, "history", func(h map[string]json.RawMessage) (bool, error) {
+	a, err := ww.array(t, "history", readsMessage, func(h map[string]json.RawMessage) (bool, error) {
 		return ww.container(WhereHistory, h, t, KindTask)
 	})
 	if err != nil {
@@ -245,7 +329,7 @@ func (ww *walk) task(t map[string]json.RawMessage) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	c, err := ww.array(t, "artifacts", func(art map[string]json.RawMessage) (bool, error) {
+	c, err := ww.array(t, "artifacts", readsArtifact, func(art map[string]json.RawMessage) (bool, error) {
 		return ww.container(WhereArtifact, art, t, KindTask)
 	})
 	if err != nil {
@@ -256,8 +340,8 @@ func (ww *walk) task(t map[string]json.RawMessage) (bool, error) {
 
 // status reads owner's status.message.
 func (ww *walk) status(owner map[string]json.RawMessage, kind Kind) (bool, error) {
-	return ww.member(owner, "status", func(st map[string]json.RawMessage) (bool, error) {
-		return ww.member(st, "message", func(msg map[string]json.RawMessage) (bool, error) {
+	return ww.member(owner, "status", readsStatus, func(st map[string]json.RawMessage) (bool, error) {
+		return ww.member(st, "message", readsMessage, func(msg map[string]json.RawMessage) (bool, error) {
 			return ww.container(WhereStatus, msg, owner, kind)
 		})
 	})
@@ -297,6 +381,9 @@ func (ww *walk) container(where Where, m, owner map[string]json.RawMessage, owne
 				}
 				return false, err
 			}
+			if err := lone(p, readsPart); err != nil {
+				return false, err
+			}
 			if md, ok := p["metadata"]; ok && !isNull(md) {
 				if _, err := strictjson.Members(md); err != nil {
 					return false, levelErr(err, "a part's metadata")
@@ -330,12 +417,25 @@ func (ww *walk) container(where Where, m, owner map[string]json.RawMessage, owne
 	return true, nil
 }
 
-func (ww *walk) member(m map[string]json.RawMessage, name string, fn func(map[string]json.RawMessage) (bool, error)) (bool, error) {
-	return (&walker{}).member(m, name, fn)
+// member reads m[name] as an object (absent and null skipped), refusing a lone case variant of a member r names
+// there before fn reads it, and rewrites it when fn changed it.
+func (ww *walk) member(m map[string]json.RawMessage, name string, r []strictjson.Path, fn func(map[string]json.RawMessage) (bool, error)) (bool, error) {
+	return (&walker{}).member(m, name, func(sub map[string]json.RawMessage) (bool, error) {
+		if err := lone(sub, r); err != nil {
+			return false, err
+		}
+		return fn(sub)
+	})
 }
 
-func (ww *walk) array(m map[string]json.RawMessage, name string, fn func(map[string]json.RawMessage) (bool, error)) (bool, error) {
-	return (&walker{}).array(m, name, fn)
+// array is member for an array of objects.
+func (ww *walk) array(m map[string]json.RawMessage, name string, r []strictjson.Path, fn func(map[string]json.RawMessage) (bool, error)) (bool, error) {
+	return (&walker{}).array(m, name, func(sub map[string]json.RawMessage) (bool, error) {
+		if err := lone(sub, r); err != nil {
+			return false, err
+		}
+		return fn(sub)
+	})
 }
 
 // levelErr is a metadata level that is not an object, or is ambiguous.

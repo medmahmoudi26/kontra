@@ -21,8 +21,9 @@
 // CheckReads also refuses a lone key equal under case folding to a member its reader reads at that level without
 // being it ({"METHOD": ...} where the reader reads method): a decoder matching names case-insensitively takes it
 // for the member, an exact one finds the member absent. internal/mcpwire names those members (its clientReads and
-// upstreamReads). Input that is not JSON at all is ErrSyntax, which a JSON-RPC reader answers -32700 rather than
-// -32600; every error quotes the sender's keys bounded and escaped (Quote).
+// upstreamReads), and internal/a2awire's sealing walker the A2A members it reads at each level. Input that is not
+// JSON at all is ErrSyntax, which a JSON-RPC reader answers -32700 rather than -32600; every error quotes the
+// sender's keys bounded and escaped (Quote).
 //
 // The hosting node (internal/sealing) and the node's MCP filters (internal/mcproots, internal/stdiobridge) use
 // it too, since a gate is not trusted to have checked what it forwards.

@@ -126,10 +126,13 @@ type serviceInfo struct {
 // key was deleted at the task's end): the node cannot open its answers.
 var ErrNoKey = errors.New("sealing: this node holds no per-job key for the task")
 
-// LocalError is a refusal the hiring node answers its local client itself, with no stream opened.
+// LocalError is a refusal the hiring node answers its local client itself, with no stream opened. Body, when set,
+// is the JSON body to answer with exactly (an MCP answer the client must read as it is, such as relay.md §11.12
+// rule 3's legacy 400); otherwise the hiring server writes its own refusal with Err's text.
 type LocalError struct {
 	Status int
 	Err    error
+	Body   []byte
 }
 
 func (e *LocalError) Error() string { return e.Err.Error() }
@@ -151,11 +154,13 @@ type Job struct {
 	jsonrpc bool
 	rpcID   json.RawMessage
 	opKind  opKind
+	stream  bool // a request whose answer a client reads as an event stream
 	list    bool
 	job     *hireJob // the job of a send or a task request; nil for a list
 	newTask bool
 
 	// MCP
+	get       bool   // a GET stream
 	session   string // the gate's Mcp-Session-Id hash
 	sid       string // the gate's Mcp-Session-Id
 	reqMethod string
@@ -597,15 +602,20 @@ func (h *Hiring) Request(ctx context.Context, service string, req *http.Request)
 		body = b
 	}
 	j := &Job{h: h, service: service, info: si}
+	if !si.sealed {
+		restore(req, body) // nothing of it is the node's to read
+		return req, j, nil
+	}
 	x := &Exchange{}
 	o, err := x.classify(req, body)
 	if err != nil {
 		return nil, nil, local(http.StatusBadRequest, "kontra connect: %s", reasonText(err))
 	}
-	j.jsonrpc, j.rpcID, j.opKind = x.jsonrpc, x.rpcID, o.kind
-	if !si.sealed {
-		restore(req, body)
-		return req, j, nil
+	j.jsonrpc, j.rpcID, j.opKind, j.stream = x.jsonrpc, x.rpcID, o.kind, o.stream
+	if x.jsonrpc && !o.known || o.unreadable {
+		// A request the node cannot read as one of A2A 1.0's (an A2A 0.3 message/send, a body that is not one JSON
+		// object) would reach the gate unsealed: nothing is sent in plaintext to a service known to be sealed.
+		return nil, nil, local(http.StatusBadRequest, "kontra connect: a request to a sealed service that is not one of A2A 1.0's (it cannot be sealed)")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -616,8 +626,13 @@ func (h *Hiring) Request(ctx context.Context, service string, req *http.Request)
 			return nil, nil, err
 		}
 		body = out
-	case o.taskID != "":
-		hj, err := h.loadJob(o.taskID)
+	case len(o.taskIDs) > 0:
+		// The task the route names (the last "/tasks/" segment's, as a router without a tenant reads it).
+		id := o.taskIDs[0]
+		if !x.jsonrpc {
+			id = lastRouteTask(o.taskIDs)
+		}
+		hj, err := h.loadJob(id)
 		if err != nil {
 			return nil, nil, local(http.StatusInternalServerError, "kontra connect: the job's key: %v", err)
 		}
@@ -627,6 +642,12 @@ func (h *Hiring) Request(ctx context.Context, service string, req *http.Request)
 	}
 	restore(req, body)
 	return req, j, nil
+}
+
+// lastRouteTask is the task id of a route's last "/tasks/{id}[:action]" segment (tasksRoute lists each segment's
+// candidates in order, the one without its action last).
+func lastRouteTask(ids []string) string {
+	return ids[len(ids)-1]
 }
 
 func restore(req *http.Request, body []byte) {
@@ -648,7 +669,11 @@ func (h *Hiring) sealSend(j *Job, body []byte) ([]byte, error) {
 		return nil, local(http.StatusBadGateway, "kontra connect: the sealed service has no recipient (no node is enrolled for it)")
 	}
 	var lerr error
-	w := a2awire.Walker{Container: func(c *a2awire.Container) error {
+	binding := a2awire.BindingHTTP
+	if j.jsonrpc {
+		binding = a2awire.BindingJSONRPC
+	}
+	w := a2awire.Walker{Binding: binding, Container: func(c *a2awire.Container) error {
 		if c.Where != a2awire.WhereRequest {
 			return nil
 		}
@@ -755,6 +780,13 @@ func ctHash(ct []byte) string {
 
 // Response opens the gate's answer for job (unary or SSE), inlining kontra-blob: parts fetched on blob streams.
 // (The hiring server inlines them first; a part is opened once its whole age file is read.)
+//
+// For a sealed service every 2xx answer is opened, whatever it is labelled, as the local client reads it (a2a-go
+// v2.7.0 a2aclient: a unary request's answer is decoded as JSON whatever its Content-Type; a streaming request's is
+// read as SSE unless it is labelled JSON, an absent or unparsable Content-Type included, and always over
+// HTTP+JSON): a gate cannot slip unsealed content past rule 4a by labelling it otherwise. An answer the node cannot
+// read at all (not JSON, over the node's bound, not an A2A 1.0 answer with exact keys) is replaced by the local
+// client's failure (sealed_rejected); a non-2xx answer is an error no client reads as one, and passes.
 func (h *Hiring) Response(ctx context.Context, job *Job, resp *http.Response) (*http.Response, error) {
 	if job == nil {
 		return resp, nil
@@ -762,12 +794,11 @@ func (h *Hiring) Response(ctx context.Context, job *Job, resp *http.Response) (*
 	if job.mcp {
 		return h.mcpResponse(ctx, job, resp)
 	}
-	if !job.info.sealed {
+	if !job.info.sealed || resp.StatusCode/100 != 2 {
 		return resp, nil
 	}
 	ct := resp.Header.Get("Content-Type")
-	switch {
-	case a2awire.IsEventStream(ct):
+	if job.stream && !a2awire.IsJSON(ct) {
 		body := resp.Body
 		pr, pw := io.Pipe()
 		go func() {
@@ -777,19 +808,27 @@ func (h *Hiring) Response(ctx context.Context, job *Job, resp *http.Response) (*
 					return nil, err
 				}
 				if f != nil {
-					// The event without its refused parts, then the failed status, and the stream ends.
+					// The event without its refused parts (none when the whole event was refused), then the failed
+					// status, and the stream ends.
+					if out == nil {
+						return [][]byte{failedEvent(job, h.failureOf(job, f))}, errStopAfter
+					}
 					return [][]byte{out, failedEvent(job, f)}, errStopAfter
 				}
 				return [][]byte{out}, nil
 			})
 			_ = body.Close()
+			if errors.Is(err, errEventTooLarge) {
+				// An event over the node's bound: the failed status, and the stream ends.
+				f := h.failureOf(job, &failure{reason: sealed.RejectBadHeader})
+				_, err = pw.Write([]byte("data: " + string(failedEvent(job, f)) + "\n\n"))
+			}
 			_ = pw.CloseWithError(err)
 		}()
 		resp.Body = pr
 		resp.ContentLength = -1
 		resp.Header.Del("Content-Length")
-		return resp, nil
-	case resp.StatusCode/100 != 2 || !a2awire.IsJSON(ct):
+		resp.Header.Set("Content-Type", "text/event-stream")
 		return resp, nil
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
@@ -797,7 +836,11 @@ func (h *Hiring) Response(ctx context.Context, job *Job, resp *http.Response) (*
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > maxBody || len(bytes.TrimSpace(b)) == 0 {
+	if len(b) > maxBody {
+		h.log.Warn("sealing: an answer over the node's bound is refused (rule 4)", "service", job.info.name)
+		return h.refuseAnswer(job, resp, &failure{reason: sealed.RejectBadHeader}), nil
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
 		setBody(resp, b)
 		return resp, nil
 	}
@@ -805,13 +848,74 @@ func (h *Hiring) Response(ctx context.Context, job *Job, resp *http.Response) (*
 	if err != nil {
 		return nil, err
 	}
+	if f != nil && out == nil {
+		return h.refuseAnswer(job, resp, f), nil
+	}
 	if f != nil {
 		if out, err = failTask(job, out, f); err != nil {
 			return nil, err
 		}
 	}
+	if !a2awire.IsJSON(ct) {
+		resp.Header.Set("Content-Type", "application/json") // what it was read as
+	}
 	setBody(resp, out)
 	return resp, nil
+}
+
+// failureOf completes a failure with the job's task when the answer named none.
+func (h *Hiring) failureOf(job *Job, f *failure) *failure {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if f.taskID == "" && job.job != nil && !provisional(job.job.ID) {
+		f.taskID, f.context = job.job.ID, job.job.ContextID
+	}
+	return f
+}
+
+// refuseAnswer replaces a 2xx answer the node cannot open at all with the local client's failure (rule 4): the job's
+// task with the failed status (kontra.failure sealed_rejected) in the shape the request answers, when the node
+// knows the task; otherwise a JSON-RPC error (JSON-RPC) or a 502 (HTTP+JSON). Nothing of the gate's answer is kept.
+func (h *Hiring) refuseAnswer(job *Job, resp *http.Response, f *failure) *http.Response {
+	f = h.failureOf(job, f)
+	status, ct := http.StatusOK, "application/json"
+	var body []byte
+	switch {
+	case f.taskID != "" && (job.opKind == opSend || job.opKind == opOther && !job.list):
+		task := map[string]json.RawMessage{"id": a2awire.Quote(f.taskID), "status": failedStatus(f)}
+		if f.context != "" {
+			task["contextId"] = a2awire.Quote(f.context)
+		}
+		res := a2awire.Encode(task)
+		if job.opKind == opSend {
+			res = a2awire.Encode(map[string]json.RawMessage{"task": res})
+		}
+		body = res
+		if job.jsonrpc {
+			body = a2awire.Encode(map[string]json.RawMessage{"jsonrpc": a2awire.Quote("2.0"), "id": rpcIDOf(job), "result": res})
+		}
+	case job.jsonrpc:
+		body, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": rpcIDOf(job), "error": map[string]any{
+			"code": -32603, "message": "sealed part rejected: " + string(f.reason),
+			"data": map[string]any{"kontra.failure": "sealed_rejected"}}})
+	default:
+		// google.rpc.Status, as the HTTP+JSON binding answers an error.
+		status = http.StatusBadGateway
+		body, _ = json.Marshal(map[string]any{"error": map[string]any{"code": status, "status": "INTERNAL",
+			"message": "sealed part rejected: " + string(f.reason) + " (kontra.failure sealed_rejected)"}})
+	}
+	resp.StatusCode, resp.Status = status, fmt.Sprintf("%d %s", status, http.StatusText(status))
+	resp.Header = http.Header{"Content-Type": {ct}}
+	resp.Trailer = nil
+	setBody(resp, body)
+	return resp
+}
+
+func rpcIDOf(job *Job) json.RawMessage {
+	if len(bytes.TrimSpace(job.rpcID)) == 0 {
+		return json.RawMessage("null")
+	}
+	return job.rpcID
 }
 
 // failure is the first sealed part an answer's walk refused.
@@ -821,7 +925,8 @@ type failure struct {
 }
 
 // openA2A opens the sealed parts of one answer body (rule 4, 4a, 5): it returns the body with plaintext parts and
-// the refused ones dropped, and the first refusal.
+// the refused ones dropped, and the first refusal; or, for a body that is not one A2A 1.0 answer with exact keys,
+// no body and the refusal (nothing of it may reach the local client).
 func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -838,7 +943,12 @@ func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 			fail = &failure{reason: r, taskID: curTask, context: curCtx}
 		}
 	}
+	binding := a2awire.BindingHTTP
+	if job.jsonrpc {
+		binding = a2awire.BindingJSONRPC
+	}
 	w := a2awire.Walker{
+		Binding: binding,
 		Object: func(kind a2awire.Kind, m map[string]json.RawMessage) error {
 			key := "taskId"
 			if kind == a2awire.KindTask {
@@ -891,7 +1001,14 @@ func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 	}
 	out, _, err := w.WalkReply(b)
 	if err != nil {
-		return nil, nil, fmt.Errorf("sealing: an answer that is not an A2A 1.0 answer with exact keys: %w", err)
+		if _, ok := sealed.ReasonOf(err); !ok && !isWalkError(err) {
+			return nil, nil, err
+		}
+		// Not an A2A 1.0 answer with exact keys (D172): a level with a repeated key, or a lone case variant of a member
+		// the walk reads, which the local client's decoder would take for the member (a gate's "Artifacts" past rule
+		// 4a), or not JSON at all. Nothing of it reaches the local client, and the job is not ended by it.
+		h.log.Warn("sealing: an answer that is not an A2A 1.0 answer with exact keys is refused (rule 4)")
+		return nil, &failure{reason: sealed.RejectBadHeader, taskID: curTask, context: curCtx}, nil
 	}
 	for id, until := range terminal {
 		if j := h.jobs[id]; j != nil {
@@ -904,6 +1021,13 @@ func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 		}
 	}
 	return out, fail, nil
+}
+
+// isWalkError reports an error of the walk itself (a body that is not one A2A 1.0 answer with exact keys), rather
+// than of the job's state.
+func isWalkError(err error) bool {
+	var ke *strictjson.KeyError
+	return errors.As(err, &ke) || errors.Is(err, strictjson.ErrNotObject) || errors.Is(err, a2awire.ErrShape)
 }
 
 // openContainer opens one message's or artifact's parts with the job's key (rule 4), keeping the gate's own terminal
@@ -1322,6 +1446,7 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		h.mu.Lock()
 		j.info = h.services[j.sid]
 		h.mu.Unlock()
+		j.get = req.Method == http.MethodGet
 		return req, j, nil
 	}
 	b, err := io.ReadAll(io.LimitReader(req.Body, maxBody+1))
@@ -1331,6 +1456,20 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 	}
 	m, err := mcpwire.Parse(b, mcpwire.FromClient)
 	if err != nil {
+		if h.sealedTarget(service, j.sid) {
+			// To a service known to be sealed nothing goes that the node cannot read: it may hold arguments in
+			// plaintext under a key the gate reads otherwise (D172).
+			var id json.RawMessage
+			if m != nil {
+				id = m.ID
+			}
+			const msg = "kontra connect: not one JSON-RPC message with exact keys, to a sealed service (D172)"
+			body, berr := mcpwire.ErrorBody(id, mcpwire.CodeInvalidRequest, msg, nil)
+			if berr != nil {
+				body, _ = mcpwire.ErrorBody(nil, mcpwire.CodeInvalidRequest, msg, nil)
+			}
+			return nil, nil, &LocalError{Status: http.StatusBadRequest, Body: body, Err: errors.New(msg)}
+		}
 		// The gate answers it (-32600 or -32700): nothing of it is sealed.
 		restore(req, b)
 		return req, nil, nil
@@ -1340,6 +1479,13 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		j.init = true
 		restore(req, b)
 		return req, j, nil
+	}
+	if j.sid == "" && h.sealedTarget(service, "") {
+		// A request without a session (a 2026-07-28 client's first request, D162) to a service pinned sealed is
+		// answered here as a legacy server answers it (relay.md §11.12 rule 3), so that the client falls back to
+		// initialize: nothing of it, Mcp-Param-* headers included, reaches the gate in plaintext (ext-sealed.md §2).
+		return nil, nil, &LocalError{Status: http.StatusBadRequest, Body: mcpwire.LegacyNoSessionBody,
+			Err: errors.New("kontra connect: a request without a session to a sealed MCP service: initialize first")}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1381,6 +1527,22 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 	}
 	restore(req, b)
 	return req, j, nil
+}
+
+// sealedTarget reports an MCP request the node must read before anything of it is sent: on a session the node saw
+// initialized sealed, or, without a session (or on one it does not know), to a service whose pin says sealed (an
+// unreadable pin counts as sealed: nothing is sent in plaintext to a service that may be).
+func (h *Hiring) sealedTarget(service, sid string) bool {
+	if sid != "" {
+		h.mu.Lock()
+		si := h.services[sid]
+		h.mu.Unlock()
+		if si != nil {
+			return si.sealed
+		}
+	}
+	pin, known, err := h.cfg.Pins.Get(h.cfg.Gate, pinName(service))
+	return err != nil || known && pin.Sealed
 }
 
 // sessionJob is the per-job key of an MCP session (its plain calls and the tasks created in it); h.mu is held.
@@ -1528,6 +1690,11 @@ func (h *Hiring) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, error
 }
 
 // mcpResponse opens the gate's MCP answer (JSON or SSE), message by message.
+//
+// On a sealed session nothing reaches the local client unread: a 2xx answer that is neither JSON nor an event stream
+// (a GET stream's is read as one whatever it is labelled, as clients read it), a body over the node's bound and a
+// message that is not one JSON-RPC message with exact keys (D172) are refused like an unsealed result (rule 4a): a
+// JSON answer becomes the node's sealed_rejected error, and an event stream ends before the event.
 func (h *Hiring) mcpResponse(_ context.Context, j *Job, resp *http.Response) (*http.Response, error) {
 	if j.delete {
 		if resp.StatusCode/100 == 2 || resp.StatusCode == http.StatusNotFound {
@@ -1545,14 +1712,23 @@ func (h *Hiring) mcpResponse(_ context.Context, j *Job, resp *http.Response) (*h
 	if !j.init && (j.info == nil || !j.info.sealed) {
 		return resp, nil
 	}
+	sealedSession := !j.init
+	ok := resp.StatusCode/100 == 2
 	ct := resp.Header.Get("Content-Type")
 	switch {
-	case a2awire.IsEventStream(ct):
+	case a2awire.IsEventStream(ct), sealedSession && ok && j.get && !a2awire.IsJSON(ct):
+		if !a2awire.IsEventStream(ct) {
+			resp.Header.Set("Content-Type", "text/event-stream") // what it was read as
+		}
 		body := resp.Body
 		pr, pw := io.Pipe()
 		go func() {
 			err := sseTransform(body, pw, func(data []byte) ([]byte, error) { return h.mcpMessage(j, data) })
 			_ = body.Close()
+			if errors.Is(err, errUnreadable) {
+				h.log.Warn("sealing: an event of a sealed session that is not one JSON-RPC message with exact keys: the stream ends before it (rule 4)")
+				err = nil // the stream ends cleanly before the event: nothing of it is relayed
+			}
 			_ = pw.CloseWithError(err)
 		}()
 		resp.Body = pr
@@ -1560,23 +1736,47 @@ func (h *Hiring) mcpResponse(_ context.Context, j *Job, resp *http.Response) (*h
 		resp.Header.Del("Content-Length")
 		return resp, nil
 	case !a2awire.IsJSON(ct):
-		return resp, nil
+		if !sealedSession || !ok {
+			return resp, nil
+		}
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 1))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		if len(b) == 0 {
+			setBody(resp, nil) // a 202 without a body
+			return resp, nil
+		}
+		h.log.Warn("sealing: an answer of a sealed session that is neither JSON nor an event stream is refused (rule 4)")
+		return h.mcpFailResponse(j, resp), nil
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	_ = resp.Body.Close()
 	if err != nil {
 		return nil, err
 	}
-	if len(bytes.TrimSpace(b)) == 0 || len(b) > maxBody {
+	if len(b) > maxBody {
+		if sealedSession && ok {
+			h.log.Warn("sealing: an answer of a sealed session over the node's bound is refused (rule 4)")
+			return h.mcpFailResponse(j, resp), nil
+		}
+		return nil, errors.New("sealing: an MCP answer over the node's bound")
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
 		setBody(resp, b)
 		return resp, nil
 	}
 	out, err := h.mcpMessage(j, b)
-	if err != nil {
-		var le *LocalError
-		if errors.As(err, &le) {
-			return nil, err
+	if errors.Is(err, errUnreadable) {
+		if !ok {
+			setBody(resp, b) // an error status: no client reads it as a message
+			return resp, nil
 		}
+		h.log.Warn("sealing: an answer of a sealed session that is not one JSON-RPC message with exact keys is refused (rule 4)")
+		return h.mcpFailResponse(j, resp), nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	if out == nil {
@@ -1586,11 +1786,32 @@ func (h *Hiring) mcpResponse(_ context.Context, j *Job, resp *http.Response) (*h
 	return resp, nil
 }
 
-// mcpMessage opens one message of the gate's for the local client; nil drops it.
+// mcpFailResponse replaces a sealed session's answer with mcpFail's error for the request's id.
+func (h *Hiring) mcpFailResponse(j *Job, resp *http.Response) *http.Response {
+	b, err := h.mcpFail(&mcpwire.Message{ID: j.reqID})
+	if err != nil {
+		b, _ = h.mcpFail(&mcpwire.Message{})
+	}
+	resp.StatusCode, resp.Status = http.StatusOK, "200 OK"
+	resp.Header = http.Header{"Content-Type": {"application/json"}}
+	resp.Trailer = nil
+	setBody(resp, b)
+	return resp
+}
+
+// errUnreadable is a message of the gate's on a sealed session that is not one JSON-RPC message with exact keys.
+var errUnreadable = errors.New("sealing: a message of a sealed session that is not one JSON-RPC message with exact keys")
+
+// mcpMessage opens one message of the gate's for the local client; nil drops it. On a sealed session a message that
+// is not one JSON-RPC message with exact keys is errUnreadable: the client's parser would read members the node
+// did not (D172).
 func (h *Hiring) mcpMessage(j *Job, data []byte) ([]byte, error) {
 	m, err := mcpwire.Parse(data, mcpwire.FromUpstream)
 	if err != nil {
-		return data, nil // not the node's to read: the client's own parser decides
+		if j.init {
+			return data, nil // the session's sealing is not known yet: not the node's to read
+		}
+		return nil, errUnreadable
 	}
 	if j.init {
 		return h.initResult(j, data, m)

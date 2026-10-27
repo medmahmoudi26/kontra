@@ -15,7 +15,9 @@
 // speaks 0.3 to a tunnel service whose card offers only 0.3, and a large part reaches it so (Inliner).
 //
 // Every level read is decoded with exact keys (internal/strictjson, D172): a repeated key, or two equal under
-// case folding, is refused, since the gate is not trusted to have checked what it forwards. A body is re-encoded
+// case folding, is refused, since the gate is not trusted to have checked what it forwards. The sealing walker
+// (Walker) also refuses a lone case variant of a member it reads at a level ({"Artifacts": …}), which encoding/json
+// readers take for the member, and reads an answer in its request's binding (Binding). A body is re-encoded
 // from what was parsed, only along the levels that changed, never patched in place: the members of a changed
 // level are written in key order, every other value as it came.
 //

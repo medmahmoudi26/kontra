@@ -188,8 +188,14 @@ func (c *child) post(w http.ResponseWriter, r *http.Request, body []byte, m *mcp
 		}
 		d.Body = out
 	}
+	release := func() {
+		if f != nil {
+			f.Release() // not written to the child: nothing of it is recorded
+		}
+	}
 	if m.Method == "" || len(m.ID) == 0 {
 		if err := c.send(d.Body); err != nil {
+			release()
 			c.refuseSend(w, m, err)
 			return
 		}
@@ -202,14 +208,17 @@ func (c *child) post(w http.ResponseWriter, r *http.Request, body []byte, m *mcp
 	st, err := c.register(m)
 	switch {
 	case errors.Is(err, errGone):
+		release()
 		sessionNotFound(w, m.ID)
 		return
 	case err != nil:
+		release()
 		writeRPCError(w, http.StatusBadRequest, m.ID, mcpwire.CodeInvalidRequest, "Invalid Request: a request with this id is in flight")
 		return
 	}
 	defer c.unregister(m, st)
 	if err := c.send(d.Body); err != nil {
+		release()
 		c.refuseSend(w, m, err)
 		return
 	}

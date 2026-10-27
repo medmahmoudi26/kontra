@@ -114,6 +114,8 @@ type fakeGate struct {
 	task    string
 	ctx     string
 	service func(msgBody []byte) string // the echo service's answer body for a forwarded request
+	// label, when set, is the Content-Type the gate delivers the answer with ("" none).
+	label *string
 }
 
 func newFakeGate(t *testing.T) *fakeGate {
@@ -192,6 +194,12 @@ func (g *fakeGate) do(path string, body []byte, sse bool) (*http.Response, strin
 	resp := &http.Response{StatusCode: sealedResp.StatusCode, Header: sealedResp.Header.Clone(), Request: req,
 		Body: io.NopCloser(strings.NewReader(gateBody))}
 	resp.Header.Del("Content-Length")
+	if g.label != nil {
+		resp.Header.Del("Content-Type")
+		if *g.label != "" {
+			resp.Header.Set("Content-Type", *g.label)
+		}
+	}
 	out, err := g.hr.h.Response(context.Background(), job, resp)
 	if err != nil {
 		t.Fatalf("hiring Response: %v", err)

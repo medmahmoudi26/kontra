@@ -64,12 +64,18 @@ type HostingConfig struct {
 // upstream task and context ids, the (messageId, part) pairs forwarded, and per gate task the MCP input requests
 // it sealed and has not seen answered (InputRequest); per service every replyTo that opened a job, the upstream
 // context id recorded per gate context, and for MCP every (session, messageId) forwarded. A job is opened, and
-// its pairs recorded, only once the service has accepted the request.
+// its pairs recorded, only once the service has accepted the request; until then what a request will record is
+// held in flight (Hosting.flight), so that a second copy sent while the first is in flight is replayed too, and
+// released with nothing recorded when the node answers the request itself or the service refuses it.
 //
 // Bodies are read with exact keys (internal/mcpwire.Parse, internal/strictjson; D172): one with a repeated or
-// case-variant key at a level the node reads, a service's reply included, is refused bad_header, since the gate
-// is not trusted to have checked a request; bodies are sealed and opened by re-encoding what was parsed, never
-// patched in place.
+// case-variant key at a level the node reads, a lone case variant of a member it reads there included (which
+// encoding/json, the gate's and the service's decoder, takes for the member), a service's reply included, is
+// refused bad_header, since the gate is not trusted to have checked a request; bodies are sealed and opened by
+// re-encoding what was parsed, never patched in place. A request is read by its route first (an HTTP+JSON send is
+// one whatever members its body has), and a reply in its request's binding; on a sealed job, or a service with
+// sealed jobs, every 2xx reply is read as the gate's client reads it whatever its Content-Type, so none passes
+// unread (Response).
 //
 // MCP input requests (D175): an upstream elicitation/create or sampling/createMessage of a sealed task is sealed
 // with messageId = the upstream server's own JSON-RPC id for it (as a string), and session and tool of the call
@@ -92,7 +98,11 @@ type HostingConfig struct {
 // the exchange is that job's (its preamble names the job's gate task, or for MCP its session): a request naming
 // another job's upstream task id is wrong_task, one naming another gate context's upstream context wrong_context,
 // and a service reply naming a sealed job's upstream task on an exchange of another job, or of none, is refused
-// before anything of it is forwarded (§6's reasons).
+// before anything of it is forwarded (§6's reasons). For the same reason a service with sealed jobs (or started with
+// --sealed-required) gets nothing the node cannot read: a push config, inline or by method or route, is refused
+// bad_header (it would have the service post a sealed task's plaintext to a URL the gate chose; the gate never sends
+// one upstream, relay.md §10.1), as are a JSON-RPC request that is none of A2A 1.0's methods and a body that is not
+// one JSON object; and a sealed job's MCP tasks keep their statusMessage sealed on every session's exchanges.
 type Hosting struct {
 	cfg HostingConfig
 	log *slog.Logger
@@ -101,6 +111,18 @@ type Hosting struct {
 	mu       sync.Mutex
 	services map[string]*serviceState // loaded service.json, written through
 	jobs     map[string]*jobState     // loaded job files by "<service>/<job>", written through
+	// flight holds what a request the service has not accepted yet will record once it does (rule 2's replyTo, rule
+	// 5's pairs and MCP (session, messageId), rule 4b's answered input request), by flightKey, with its gate task for a
+	// replyTo: a second copy in flight is refused as a replay of the first, as it would be once the first is recorded.
+	// An exchange releases its keys when the service accepts it (they are then recorded) or the node answers it
+	// itself (nothing is recorded: the gate's retry is not a replay).
+	flight map[string]flightRef
+}
+
+// flightRef is one in-flight key: the gate task that holds it and how many exchanges do.
+type flightRef struct {
+	owner string
+	n     int
 }
 
 // NewHosting opens the job state directory.
@@ -124,7 +146,44 @@ func NewHosting(cfg HostingConfig, log *slog.Logger) (*Hosting, error) {
 		return nil, err
 	}
 	return &Hosting{cfg: cfg, log: log.With("component", "sealing-hosting"), st: &fileStore{dir: cfg.Dir},
-		services: map[string]*serviceState{}, jobs: map[string]*jobState{}}, nil
+		services: map[string]*serviceState{}, jobs: map[string]*jobState{}, flight: map[string]flightRef{}}, nil
+}
+
+// flightKey is the in-flight key of what a request records: kind "r" a replyTo, "p" a job's (messageId, part) pair,
+// "m" an MCP (session, messageId), "a" an MCP input request's answer.
+func flightKey(kind, service string, parts ...string) string {
+	return kind + "\x00" + service + "\x00" + strings.Join(parts, "\x00")
+}
+
+// reserve records keys in flight for owner; h.mu is held.
+func (h *Hosting) reserve(owner string, keys ...string) {
+	for _, k := range keys {
+		r := h.flight[k]
+		r.owner = owner
+		r.n++
+		h.flight[k] = r
+	}
+}
+
+// unreserve drops one hold of each key; h.mu is held.
+func (h *Hosting) unreserve(keys []string) {
+	for _, k := range keys {
+		r, ok := h.flight[k]
+		if !ok {
+			continue
+		}
+		if r.n--; r.n <= 0 {
+			delete(h.flight, k)
+			continue
+		}
+		h.flight[k] = r
+	}
+}
+
+// inFlight returns the gate task holding key, ok false when no exchange does; h.mu is held.
+func (h *Hosting) inFlight(key string) (string, bool) {
+	r, ok := h.flight[key]
+	return r.owner, ok
 }
 
 // InputRequest is an MCP input request this node sealed for a gate task and has not seen answered.
@@ -143,12 +202,35 @@ type Exchange struct {
 	jsonrpc bool
 	rpcID   json.RawMessage
 
+	// stream is a request whose answer a client reads as an event stream (SendStreamingMessage, SubscribeToTask;
+	// message:stream, :subscribe).
+	stream bool
+
 	// job is the sealed job whose replies are sealed (nil: an unsealed exchange, whose replies pass unless they
 	// name a sealed job's upstream task).
 	job *jobState
-	// commit is what the service's acceptance records (rule 2's new job, rule 5's pairs).
-	commit func() error
-	done   bool
+	// commit is what the service's acceptance records (rule 2's new job, rule 5's pairs); reserved are its in-flight
+	// keys (Hosting.flight) until then.
+	commit   func() error
+	reserved []string
+	done     bool
+}
+
+// Release drops what the exchange holds in flight without recording it: the node answered the request itself (the
+// service did not answer, or answered it with an error), so the gate's retry of it is not a replay (spec §5). After
+// the service accepted the request (Response with a 2xx) it does nothing. The proxy calls it when it answers an
+// exchange itself; Request also arranges it for when the request's context ends.
+func (x *Exchange) Release() {
+	if x == nil {
+		return
+	}
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	x.h.unreserve(x.reserved)
+	x.reserved = nil
+	if !x.done {
+		x.commit = nil
+	}
 }
 
 // Request checks and unseals one request the gate forwards to a sealed service (§5 rules 1–5) with the
@@ -174,23 +256,40 @@ func (h *Hosting) Request(ctx context.Context, pre tunnel.Preamble, req *http.Re
 	if err != nil {
 		return nil, x, err
 	}
+	x.stream = op.stream
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	svc, err := h.service(x.service)
 	if err != nil {
 		return nil, x, err
 	}
+	// A service with sealed state (or --sealed-required) gets only what the node can read: a body it cannot read as
+	// one JSON object, a JSON-RPC request that is none of A2A 1.0's methods, and a push config are refused. The
+	// gate never sends the upstream a push config (spec/relay.md §10.1: the gate is the agent's only client), and
+	// one would have the service post a sealed task's plaintext to a URL the gate chose, outside the node.
+	guarded := h.guarded(x.service, svc)
+	switch {
+	case guarded && op.unreadable:
+		return nil, x, reject(sealed.RejectBadHeader, "a body that is not one JSON object, to a service with sealed jobs")
+	case guarded && x.jsonrpc && !op.known:
+		return nil, x, reject(sealed.RejectBadHeader, "a JSON-RPC request that is none of A2A 1.0's methods, to a service with sealed jobs")
+	case guarded && op.kind == opPush:
+		return nil, x, reject(sealed.RejectBadHeader, "a push config, to a service with sealed jobs (the upstream's own push configs are never used)")
+	}
 	switch op.kind {
 	case opSend:
-		out, err := x.send(svc, body)
+		out, err := x.send(svc, body, guarded)
 		if err != nil {
 			return nil, x, err
 		}
 		body = out
 	default:
-		if err := x.other(svc, op.taskID); err != nil {
+		if err := x.other(svc, op.taskIDs); err != nil {
 			return nil, x, err
 		}
+	}
+	if len(x.reserved) > 0 {
+		context.AfterFunc(ctx, x.Release) // a request whose exchange ends unanswered records nothing
 	}
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
@@ -206,83 +305,196 @@ func (h *Hosting) Request(ctx context.Context, pre tunnel.Preamble, req *http.Re
 type opKind int
 
 const (
-	opOther opKind = iota // GetTask, CancelTask, SubscribeToTask, ListTasks, push configs, a card
+	opOther opKind = iota // GetTask, CancelTask, SubscribeToTask, ListTasks, a card
 	opSend                // SendMessage, SendStreamingMessage
+	opPush                // Create/Get/List/DeleteTaskPushNotificationConfig, /tasks/{id}/pushNotificationConfigs
 )
 
 type op struct {
-	kind   opKind
-	taskID string // the upstream task id the request names, if any
+	kind opKind
+	// stream is a request whose answer a client reads as an event stream.
+	stream bool
+	// known is a JSON-RPC request with one of A2A 1.0's methods (every HTTP+JSON request is read by its route).
+	known bool
+	// unreadable is a request with a body that is not one JSON object (an HTTP+JSON request other than a send).
+	unreadable bool
+	// taskIDs are the upstream task ids the request names (a route may name more than one candidate).
+	taskIDs []string
 }
 
-// classify reads which A2A operation the request is, with exact keys at the request levels (JSON-RPC: the request
-// object; HTTP+JSON: its route).
+// The members of a JSON-RPC request the node reads (D172): a lone case variant of one is refused, since a2a-go's
+// handler decodes the request with encoding/json, which takes it for the member.
+var rpcRequestReads = []strictjson.Path{{"jsonrpc"}, {"method"}, {"params"}, {"id"},
+	{"params", "id"}, {"params", "taskId"}, {"params", "message"}, {"params", "metadata"}, {"params", "configuration"}}
+
+// a2aMethods are A2A 1.0's JSON-RPC methods (a2a-go v2.7.0 internal/jsonrpc), each with the params member that
+// names its task ("" none) and whether its answer is an event stream.
+var a2aMethods = map[string]struct {
+	kind   opKind
+	task   string
+	stream bool
+}{
+	"SendMessage":                      {kind: opSend},
+	"SendStreamingMessage":             {kind: opSend, stream: true},
+	"GetTask":                          {task: "id"},
+	"CancelTask":                       {task: "id"},
+	"SubscribeToTask":                  {task: "id", stream: true},
+	"ListTasks":                        {},
+	"GetExtendedAgentCard":             {},
+	"CreateTaskPushNotificationConfig": {kind: opPush, task: "taskId"},
+	"GetTaskPushNotificationConfig":    {kind: opPush, task: "taskId"},
+	"ListTaskPushNotificationConfigs":  {kind: opPush, task: "taskId"},
+	"DeleteTaskPushNotificationConfig": {kind: opPush, task: "taskId"},
+}
+
+// classify reads which A2A operation the request is. The route comes first: a body on .../message:send or
+// .../message:stream is an HTTP+JSON send, read at HTTP+JSON's levels, whatever members it has (a "jsonrpc" member
+// there is refused: a2a-go's HTTP+JSON handler ignores it, so the node and the service would read the body
+// differently). Any other body that is one JSON object with an exact "jsonrpc" member is a JSON-RPC request; every
+// level is read with exact keys, and a body that repeats a key, or holds a lone case variant of a member the node
+// reads, is refused bad_header (D172), whatever the route.
 func (x *Exchange) classify(req *http.Request, body []byte) (op, error) {
+	p := req.URL.Path
+	var top map[string]json.RawMessage
+	unreadable := false
 	if len(bytes.TrimSpace(body)) > 0 {
-		top, err := strictjson.Members(body)
-		if err == nil {
-			if _, ok := top["jsonrpc"]; ok {
-				x.jsonrpc = true
-				x.rpcID = top["id"]
-				if err := strictjson.CheckMembers(top, a2awire.JSONRPCRequestLevels...); err != nil {
-					return op{}, reject(sealed.RejectBadHeader, "a JSON-RPC request that is not one with exact keys: "+err.Error())
-				}
-				method, _ := a2awire.String(top, "method")
-				switch method {
-				case "SendMessage", "SendStreamingMessage":
-					return op{kind: opSend}, nil
-				}
-				var id string
-				if params, err := strictjson.Members(top["params"]); err == nil {
-					id, _ = a2awire.String(params, "id")
-					if id == "" {
-						id, _ = a2awire.String(params, "taskId")
-					}
-				}
-				return op{taskID: id}, nil
-			}
+		m, err := strictjson.Members(body)
+		var ke *strictjson.KeyError
+		switch {
+		case errors.As(err, &ke):
+			return op{}, reject(sealed.RejectBadHeader, "a body with a repeated or case-variant key: "+err.Error())
+		case err != nil:
+			unreadable = true
+		default:
+			top = m
 		}
 	}
-	p := req.URL.Path
-	switch {
-	case strings.HasSuffix(p, "/message:send"), strings.HasSuffix(p, "/message:stream"):
-		if len(bytes.TrimSpace(body)) == 0 {
-			return op{}, reject(sealed.RejectBadHeader, "a send request without a body")
+	if send, stream := sendRoute(p); send {
+		if top == nil {
+			return op{}, reject(sealed.RejectBadHeader, "a send request that is not one JSON object")
 		}
-		top, err := strictjson.Members(body)
-		if err != nil {
-			return op{}, reject(sealed.RejectBadHeader, "a send request that is not one JSON object with exact keys: "+err.Error())
+		for k := range top {
+			if strings.EqualFold(k, "jsonrpc") {
+				return op{}, reject(sealed.RejectBadHeader, "an HTTP+JSON send request with a jsonrpc member")
+			}
 		}
 		if err := strictjson.CheckMembers(top, a2awire.HTTPJSONRequestLevels...); err != nil {
 			return op{}, reject(sealed.RejectBadHeader, "a send request that is not one with exact keys: "+err.Error())
 		}
-		return op{kind: opSend}, nil
+		return op{kind: opSend, stream: stream, known: true}, nil
 	}
-	if i := strings.LastIndex(p, "/tasks/"); i >= 0 {
-		rest := p[i+len("/tasks/"):]
-		id, _, _ := strings.Cut(rest, ":")
-		id, _, _ = strings.Cut(id, "/")
-		return op{taskID: id}, nil
+	if top != nil {
+		if _, ok := top["jsonrpc"]; ok {
+			x.jsonrpc = true
+			x.rpcID = top["id"]
+			if err := strictjson.CheckReads(top, a2awire.JSONRPCRequestLevels, rpcRequestReads); err != nil {
+				return op{}, reject(sealed.RejectBadHeader, "a JSON-RPC request that is not one with exact keys: "+err.Error())
+			}
+			method, _ := a2awire.String(top, "method")
+			m, ok := a2aMethods[method]
+			if !ok {
+				return op{}, nil
+			}
+			o := op{kind: m.kind, stream: m.stream, known: true}
+			if m.task != "" {
+				if params, err := strictjson.Members(top["params"]); err == nil {
+					if id, _ := a2awire.String(params, m.task); id != "" {
+						o.taskIDs = []string{id}
+					}
+				}
+			}
+			return o, nil
+		}
+		if err := strictjson.CheckReads(top, nil, rpcRequestReads[:4]); err != nil {
+			return op{}, reject(sealed.RejectBadHeader, "a body with a case variant of a JSON-RPC member: "+err.Error())
+		}
 	}
-	return op{}, nil
+	o := op{unreadable: unreadable}
+	o.taskIDs, o.stream, o.kind = tasksRoute(p)
+	return o, nil
+}
+
+// sendRoute reports an HTTP+JSON send route (.../message:send, .../message:stream), and whether it streams. Routes
+// are matched without regard to case: a service's router may.
+func sendRoute(p string) (send, stream bool) {
+	lp := strings.ToLower(p)
+	switch {
+	case strings.HasSuffix(lp, "/message:send"):
+		return true, false
+	case strings.HasSuffix(lp, "/message:stream"):
+		return true, true
+	}
+	return false, false
+}
+
+// tasksRoute reads an HTTP+JSON route under .../tasks/{id}: every task id a "/tasks/" segment of the path may name (a
+// tenant prefix can hold one too; with and without a trailing ":action"), whether it subscribes, and whether it is a
+// push config route (.../tasks/{id}/pushNotificationConfigs...).
+func tasksRoute(p string) (ids []string, stream bool, kind opKind) {
+	lp := strings.ToLower(p)
+	for i := 0; ; {
+		j := strings.Index(lp[i:], "/tasks/")
+		if j < 0 {
+			break
+		}
+		start := i + j + len("/tasks/")
+		seg, tail, _ := strings.Cut(p[start:], "/")
+		if seg != "" {
+			ids = append(ids, seg)
+			if k := strings.LastIndex(seg, ":"); k > 0 {
+				ids = append(ids, seg[:k])
+				if strings.EqualFold(seg[k+1:], "subscribe") {
+					stream = true
+				}
+			}
+		}
+		if next, _, _ := strings.Cut(tail, "/"); strings.EqualFold(next, "pushNotificationConfigs") {
+			kind = opPush
+		}
+		i = start - 1 // the segment's own slash may begin the next "/tasks/"
+	}
+	return ids, stream, kind
+}
+
+// guarded reports a service the node holds sealed state for (or one started with --sealed-required); h.mu is held.
+func (h *Hosting) guarded(service string, svc *serviceState) bool {
+	if h.Required(service) || len(svc.ReplyTo) > 0 || len(svc.Tasks) > 0 || len(svc.UpstreamContexts) > 0 {
+		return true
+	}
+	prefix := flightKey("r", service)
+	for k := range h.flight {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // other checks a request that carries no message: on a sealed job's exchange it may name only the job's upstream
 // task (wrong_task); on any other exchange it may not name a sealed job's (wrong_task).
-func (x *Exchange) other(svc *serviceState, taskID string) error {
+func (x *Exchange) other(svc *serviceState, taskIDs []string) error {
 	j, err := x.h.jobFor(x.service, x.pre.Task)
 	if err != nil {
 		return err
 	}
 	if j != nil {
 		x.job = j
-		if taskID != "" && j.UpstreamTask != "" && taskID != j.UpstreamTask {
-			return reject(sealed.RejectWrongTask, "the request names another upstream task than the job's")
+		if len(taskIDs) > 0 && j.UpstreamTask != "" {
+			if !slices.Contains(taskIDs, j.UpstreamTask) {
+				return reject(sealed.RejectWrongTask, "the request names another upstream task than the job's")
+			}
+			for _, id := range taskIDs {
+				if owner, ok := svc.Tasks[id]; ok && owner != j.ID {
+					return reject(sealed.RejectWrongTask, "the request names another sealed job's upstream task")
+				}
+			}
 		}
 		return nil
 	}
-	if owner, ok := svc.Tasks[taskID]; ok && taskID != "" && owner != x.pre.Task {
-		return reject(sealed.RejectWrongTask, "the request names a sealed job's upstream task on another task's exchange")
+	for _, id := range taskIDs {
+		if owner, ok := svc.Tasks[id]; ok && owner != x.pre.Task {
+			return reject(sealed.RejectWrongTask, "the request names a sealed job's upstream task on another task's exchange")
+		}
 	}
 	return nil
 }
@@ -295,16 +507,34 @@ type opened struct {
 	part  a2awire.Part
 }
 
-// send checks and unseals a send request's message (rules 1–5) and returns the body to forward.
-func (x *Exchange) send(svc *serviceState, body []byte) ([]byte, error) {
+// send checks and unseals a send request's message (rules 1–5) and returns the body to forward. guarded is a
+// service with sealed state: an inline push config is refused there, as on any sealed request.
+func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, error) {
 	var (
 		msg      map[string]json.RawMessage
 		sealedP  []opened
 		unsealed int
 		visitErr error
+		push     bool // configuration.taskPushNotificationConfig
 	)
 	ids := x.h.cfg.Identities()
-	w := a2awire.Walker{Container: func(c *a2awire.Container) error {
+	binding := a2awire.BindingHTTP
+	if x.jsonrpc {
+		binding = a2awire.BindingJSONRPC
+	}
+	w := a2awire.Walker{Binding: binding, Object: func(kind a2awire.Kind, m map[string]json.RawMessage) error {
+		if kind != a2awire.KindRequest {
+			return nil
+		}
+		if raw, ok := m["configuration"]; ok {
+			if c, err := strictjson.Members(raw); err == nil {
+				if v, ok := c["taskPushNotificationConfig"]; ok && !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+					push = true
+				}
+			}
+		}
+		return nil
+	}, Container: func(c *a2awire.Container) error {
 		if c.Where != a2awire.WhereRequest {
 			return nil
 		}
@@ -359,6 +589,11 @@ func (x *Exchange) send(svc *serviceState, body []byte) ([]byte, error) {
 	msgTask, _ := a2awire.String(msg, "taskId")
 	msgCtx, _ := a2awire.String(msg, "contextId")
 	msgID, _ := a2awire.String(msg, "messageId")
+	if push && (guarded || len(sealedP) > 0) {
+		// The service would post the task, its plaintext parts included, to a URL the gate chose (spec/relay.md
+		// §10.1: the gate never sends the upstream a push config).
+		return nil, reject(sealed.RejectBadHeader, "an inline push config, to a service with sealed jobs")
+	}
 	if len(sealedP) == 0 {
 		return out, x.unsealedSend(svc, msgTask, msgCtx, unsealed)
 	}
@@ -403,6 +638,9 @@ func (x *Exchange) send(svc *serviceState, body []byte) ([]byte, error) {
 		if e, ok := svc.ReplyTo[h.ReplyTo]; ok && e.Job != x.pre.Task {
 			return nil, reject(sealed.RejectReplayed, "the replyTo opened a job for another gate task")
 		}
+		if owner, ok := x.h.inFlight(flightKey("r", x.service, h.ReplyTo)); ok && owner != x.pre.Task {
+			return nil, reject(sealed.RejectReplayed, "the replyTo is opening a job for another gate task")
+		}
 		if j != nil && (j.ReplyTo != h.ReplyTo || j.RK != h.RK) {
 			return nil, reject(sealed.RejectWrongJob, "the gate task's job was opened with another replyTo")
 		}
@@ -424,19 +662,28 @@ func (x *Exchange) send(svc *serviceState, body []byte) ([]byte, error) {
 			return nil, reject(sealed.RejectWrongContext, "the header's contextId is not the job's gate context")
 		}
 	}
-	if j != nil {
-		// Rule 5.
-		for _, pk := range pairs {
-			if slices.Contains(j.Pairs, pk) {
-				return nil, reject(sealed.RejectReplayed, "a (messageId, part) pair the job forwarded before")
-			}
+	// Rule 5, for the pairs the job forwarded and for those a request of the job's has in flight.
+	flight := make([]string, 0, len(pairs)+1)
+	for _, pk := range pairs {
+		if j != nil && slices.Contains(j.Pairs, pk) {
+			return nil, reject(sealed.RejectReplayed, "a (messageId, part) pair the job forwarded before")
 		}
+		k := flightKey("p", x.service, x.pre.Task, pk)
+		if _, ok := x.h.inFlight(k); ok {
+			return nil, reject(sealed.RejectReplayed, "a (messageId, part) pair the job is forwarding")
+		}
+		flight = append(flight, k)
 	}
 	if j == nil {
 		j = &jobState{ID: x.pre.Task, ReplyTo: h.ReplyTo, RK: h.RK, Created: now, GateContext: x.pre.Context,
 			Artifacts: map[string]*artifactState{}, Tasks: map[string]*mcpTask{}}
 	}
 	x.job = j
+	if h.TaskID == "" {
+		flight = append(flight, flightKey("r", x.service, h.ReplyTo))
+	}
+	x.h.reserve(x.pre.Task, flight...)
+	x.reserved = flight
 	service, job := x.service, j
 	x.commit = func() error {
 		at := x.h.cfg.Now()
@@ -454,7 +701,7 @@ func (x *Exchange) send(svc *serviceState, body []byte) ([]byte, error) {
 // unsealedSend is a send request with no sealed part: refused bad_header under --sealed-required; on a sealed job's
 // exchange its replies are sealed all the same; it may not name another job's upstream task or another gate context's
 // upstream context.
-func (x *Exchange) unsealedSend(svc *serviceState, msgTask, msgCtx string, parts int) error {
+func (x *Exchange) unsealedSend(svc *serviceState, msgTask, msgCtx string, _ int) error {
 	if slices.Contains(x.h.cfg.Required, x.service) {
 		return reject(sealed.RejectBadHeader, "an unsealed request to a service started with --sealed-required")
 	}
@@ -528,15 +775,29 @@ func (x *Exchange) ID() json.RawMessage {
 // Response seals every part of the service's answer to the job's replyTo, with the reply header and auth,
 // reusing the ciphertext of a part already sealed with the same header and body (so polling sees identical
 // bytes); for an exchange whose request was not sealed it passes the answer unchanged. It also commits the job
-// once the service has accepted the request.
+// once the service has accepted the request (a 2xx), and releases what the request held in flight otherwise.
+//
+// On a sealed job's exchange, or one of a service with sealed jobs, every 2xx answer is read as the gate's client
+// reads it, whatever it is labelled (a2a-go v2.7.0 a2aclient: a unary request's answer is decoded as JSON whatever
+// its Content-Type; a stream's is read as SSE): a stream's text/event-stream answer event by event, any other as
+// one JSON body, sealed, or refused bad_header when it is not one A2A 1.0 answer with exact keys (a body that is not
+// JSON included). Only a stream's answer labelled text/event-stream is read as SSE, so no 2xx body reaches the gate
+// unread.
 func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response) (*http.Response, error) {
 	if x == nil {
 		return resp, nil
 	}
-	if resp.StatusCode/100 == 2 && x.commit != nil && !x.done {
-		x.done = true
+	if resp.StatusCode/100 != 2 {
+		x.Release() // the service did not accept the request: nothing is recorded
+	} else {
 		h.mu.Lock()
-		err := x.commit()
+		var err error
+		if x.commit != nil && !x.done {
+			x.done = true
+			err = x.commit()
+		}
+		h.unreserve(x.reserved)
+		x.reserved = nil
 		h.mu.Unlock()
 		if err != nil {
 			// The service has the request; its replies are sealed all the same (x.job), and the job's file is
@@ -546,7 +807,7 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 	}
 	h.mu.Lock()
 	svc, err := h.service(x.service)
-	guard := len(svc.Tasks) > 0 || len(svc.UpstreamContexts) > 0
+	guard := err == nil && (len(svc.Tasks) > 0 || len(svc.UpstreamContexts) > 0)
 	h.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -556,7 +817,7 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 	}
 	ct := resp.Header.Get("Content-Type")
 	switch {
-	case a2awire.IsEventStream(ct):
+	case x.stream && a2awire.IsEventStream(ct):
 		body := resp.Body
 		pr, pw := io.Pipe()
 		go func() {
@@ -573,8 +834,8 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 		resp.ContentLength = -1
 		resp.Header.Del("Content-Length")
 		return resp, nil
-	case resp.StatusCode/100 != 2 || !a2awire.IsJSON(ct) && ct != "":
-		return resp, nil
+	case resp.StatusCode/100 != 2:
+		return resp, nil // an error: no client reads it as an answer
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	_ = resp.Body.Close()
@@ -592,6 +853,9 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 	if err != nil {
 		h.log.Warn("sealing: a service reply is refused", "service", x.service, "reason", reasonText(err))
 		return refuseResponse(resp, x, err), nil
+	}
+	if !a2awire.IsJSON(ct) {
+		resp.Header.Set("Content-Type", "application/json") // what it was read as
 	}
 	setBody(resp, out)
 	return resp, nil
@@ -614,7 +878,12 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 		}
 	}
 	changedIndex := false
+	binding := a2awire.BindingHTTP
+	if x.jsonrpc {
+		binding = a2awire.BindingJSONRPC
+	}
 	w := a2awire.Walker{
+		Binding: binding,
 		Object: func(kind a2awire.Kind, m map[string]json.RawMessage) error {
 			taskKey, ctxKey := "taskId", "contextId"
 			if kind == a2awire.KindTask {

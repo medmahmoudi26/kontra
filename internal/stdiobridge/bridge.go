@@ -169,12 +169,14 @@ func New(cfg Config, log *slog.Logger) (*Bridge, error) {
 // Filter is what the hosting node's sealing does around a session's messages (internal/sealing.MCPExchange,
 // spec/ext-sealed.md §5; M3 WP-08), carried by the request's context (WithFilter): FromClient sees a client message
 // after the roots filter and returns what to send (a refusal is answered with Refuse and nothing is sent), Accepted
-// is called once the message was written to the child, and FromServer sees each message routed to the request's
-// stream after the roots filter (keep false drops it; an error ends the stream before it).
+// is called once the message was written to the child, Release when a message FromClient passed is not written to
+// it after all (the bridge answers it itself), and FromServer sees each message routed to the request's stream
+// after the roots filter (keep false drops it; an error ends the stream before it).
 type Filter interface {
 	FromClient(body []byte, m *mcpwire.Message) ([]byte, error)
 	Refuse(w http.ResponseWriter, id json.RawMessage, err error)
 	Accepted()
+	Release()
 	FromServer(data []byte) (out []byte, keep bool, err error)
 	// Sealed reports whether a message that failed strict decoding is the sealing's to refuse, and RefuseMalformed
 	// answers it so (bad_header).

@@ -500,6 +500,17 @@ func (s *Server) sealRefused(w http.ResponseWriter, r *http.Request, err error) 
 	var le *sealing.LocalError
 	if errors.As(err, &le) {
 		status = le.Status
+		if le.Body != nil {
+			// An answer the client reads as it is (relay.md §11.12 rule 3's legacy 400, a JSON-RPC error with its id).
+			s.log.Info("a request to a sealed service is answered here", "status", status, "path", clip(r.URL.Path), "reason", tunnel.Printable(err.Error()))
+			h := w.Header()
+			h.Set("Content-Type", "application/json")
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("Content-Length", strconv.Itoa(len(le.Body)))
+			w.WriteHeader(status)
+			_, _ = w.Write(le.Body)
+			return
+		}
 	}
 	msg := err.Error()
 	var ce *pins.ChangeError
@@ -617,11 +628,15 @@ func (s *Server) modify(res *http.Response) error {
 		if cardRoute {
 			return fmt.Errorf("%w: an answer over %d bytes on a card route", ErrCardNotVerified, a2awire.MaxBody)
 		}
-		// Too long to read whole: passed as it came.
+		// Too long to read whole: passed as it came, unless it is a sealed job's, which the sealing refuses (it never
+		// passes an answer it has not opened, ext-sealed.md §5 rule 4a).
 		res.Body = struct {
 			io.Reader
 			io.Closer
 		}{io.MultiReader(bytes.NewReader(b), res.Body), res.Body}
+		if job != nil {
+			return s.openAnswer(ctx, job, res)
+		}
 		return nil
 	}
 	_ = res.Body.Close()

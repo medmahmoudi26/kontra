@@ -190,8 +190,13 @@ var errEventTooLarge = errors.New("sealing: an SSE event over the node's bound")
 // sseTransform copies an SSE stream from r to w event by event: an event with data has its data (the data lines
 // joined) replaced by fn's result, written as one data line, every other field kept in its place; an event without
 // data, and comments, pass as they came. fn returning nil drops the event whole. An error from fn ends the stream
-// before that event, as does an event over maxEvent; a last event left unterminated is dropped. Each event is
-// flushed when w is an http.Flusher (text/event-stream is flushed per event, spec/tunnel.md §8.2).
+// before that event, as does an event over maxEvent; a last event left unterminated is dropped (as WHATWG's parser
+// does). Each event is flushed when w is an http.Flusher (text/event-stream is flushed per event, spec/tunnel.md
+// §8.2).
+//
+// Lines are split as WHATWG's parser splits them (CRLF, LF or a lone CR; a UTF-8 BOM at the start dropped) and
+// written with LF: what passes unread (a comment, an event or id field) is then no data line to any reader, a
+// client splitting on LF only (a2a-go) included.
 func sseTransform(r io.Reader, w io.Writer, fn func(data []byte) ([]byte, error)) error {
 	return sseTransformMulti(r, w, func(data []byte) ([][]byte, error) {
 		out, err := fn(data)
@@ -205,7 +210,7 @@ func sseTransform(r io.Reader, w io.Writer, fn func(data []byte) ([]byte, error)
 // sseTransformMulti is sseTransform whose fn may answer an event with several: the first takes the event's place,
 // the others follow it as events of their own (data only).
 func sseTransformMulti(r io.Reader, w io.Writer, fn func(data []byte) ([][]byte, error)) error {
-	br := bufio.NewReaderSize(r, 64<<10)
+	lr := &sseLines{br: bufio.NewReaderSize(r, 64<<10), start: true}
 	var (
 		lines [][]byte
 		size  int
@@ -216,48 +221,97 @@ func sseTransformMulti(r io.Reader, w io.Writer, fn func(data []byte) ([][]byte,
 		}
 	}
 	for {
-		line, err := readLine(br, maxEvent-size)
+		line, err := lr.next(maxEvent - size)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
+		if errors.Is(err, io.EOF) {
+			return nil // a last line or event without its blank line is dropped
+		}
 		if len(line) > 0 {
 			lines = append(lines, line)
-			size += len(line)
-			if isBlank(line) {
-				if werr := writeEvent(w, lines, fn); werr != nil {
-					if errors.Is(werr, errStopAfter) {
-						flush()
-						return nil
-					}
-					return werr
-				}
-				flush()
-				lines, size = nil, 0
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-	}
-}
-
-func readLine(br *bufio.Reader, max int) ([]byte, error) {
-	var line []byte
-	for {
-		frag, err := br.ReadSlice('\n')
-		if len(line)+len(frag) > max {
-			return nil, errEventTooLarge
-		}
-		line = append(line, frag...)
-		if errors.Is(err, bufio.ErrBufferFull) {
+			size += len(line) + 1
 			continue
 		}
-		return line, err
+		if len(lines) == 0 {
+			// A blank line with no event before it: nothing to dispatch.
+			if _, werr := w.Write([]byte("\n")); werr != nil {
+				return werr
+			}
+			continue
+		}
+		if werr := writeEvent(w, lines, fn); werr != nil {
+			if errors.Is(werr, errStopAfter) {
+				flush()
+				return nil
+			}
+			return werr
+		}
+		flush()
+		lines, size = nil, 0
 	}
 }
 
-func isBlank(line []byte) bool { return len(bytes.TrimRight(line, "\r\n")) == 0 }
+// sseLines reads the lines of an SSE stream as WHATWG's parser does (§9.2.6 "Interpreting an event stream"): a line
+// ends at CRLF, LF or a lone CR, and a UTF-8 BOM at the start of the stream is dropped. It peeks only at bytes the
+// reader holds, or at the next one when it needs one, so an event is never held back waiting for more.
+type sseLines struct {
+	br      *bufio.Reader
+	start   bool // nothing read yet
+	afterCR bool // the last line ended with CR: an LF first is the rest of its CRLF
+}
 
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// next returns the next line without its terminator, at most max bytes long (errEventTooLarge beyond), or io.EOF at
+// the end of the stream (a last line without its terminator is dropped with it).
+func (l *sseLines) next(max int) ([]byte, error) {
+	if l.start {
+		l.start = false
+		if b, err := l.br.Peek(1); err == nil && b[0] == utf8BOM[0] {
+			if b, err := l.br.Peek(3); err == nil && bytes.Equal(b, utf8BOM) {
+				_, _ = l.br.Discard(3)
+			}
+		}
+	}
+	if l.afterCR {
+		l.afterCR = false
+		if b, err := l.br.Peek(1); err == nil && b[0] == '\n' {
+			_, _ = l.br.Discard(1)
+		}
+	}
+	var line []byte
+	for {
+		n := l.br.Buffered()
+		if n == 0 {
+			n = 1
+		}
+		buf, err := l.br.Peek(n)
+		if len(buf) == 0 {
+			if err == nil {
+				err = io.EOF
+			}
+			return nil, err
+		}
+		i := bytes.IndexAny(buf, "\r\n")
+		if i < 0 {
+			i = len(buf)
+		}
+		if len(line)+i > max {
+			return nil, errEventTooLarge
+		}
+		line = append(line, buf[:i]...)
+		if i == len(buf) {
+			_, _ = l.br.Discard(i)
+			continue
+		}
+		l.afterCR = buf[i] == '\r'
+		_, _ = l.br.Discard(i + 1)
+		return line, nil
+	}
+}
+
+// writeEvent writes one event (its lines, without terminators) with fn's data, and the blank line that ends it.
 func writeEvent(w io.Writer, lines [][]byte, fn func([]byte) ([][]byte, error)) error {
 	var data [][]byte
 	first := -1
@@ -271,12 +325,17 @@ func writeEvent(w io.Writer, lines [][]byte, fn func([]byte) ([][]byte, error)) 
 	}
 	joined := bytes.Join(data, []byte("\n"))
 	if first < 0 || len(bytes.TrimSpace(joined)) == 0 {
+		var b bytes.Buffer
 		for _, l := range lines {
-			if _, err := w.Write(l); err != nil {
-				return err
+			if _, ok := dataValue(l); ok {
+				continue // an empty data line: nothing to read, and nothing to pass unread
 			}
+			b.Write(l)
+			b.WriteByte('\n')
 		}
-		return nil
+		b.WriteByte('\n')
+		_, err := w.Write(b.Bytes())
+		return err
 	}
 	outs, err := fn(joined)
 	stop := errors.Is(err, errStopAfter)
@@ -308,7 +367,9 @@ func writeEvent(w io.Writer, lines [][]byte, fn func([]byte) ([][]byte, error)) 
 				continue
 			}
 			b.Write(l)
+			b.WriteByte('\n')
 		}
+		b.WriteByte('\n')
 	}
 	if _, werr := w.Write(b.Bytes()); werr != nil {
 		return werr
@@ -322,10 +383,10 @@ func writeEvent(w io.Writer, lines [][]byte, fn func([]byte) ([][]byte, error)) 
 // errStopAfter, from an sseTransformMulti fn, writes what it returned and ends the stream there.
 var errStopAfter = errors.New("sealing: the stream ends after this event")
 
-// dataValue is a data line's value: after "data:" and one optional space, without the line end.
+// dataValue is a data line's value: after "data:" and one optional space (a line is "data" alone or starts with
+// "data:", WHATWG's field name).
 func dataValue(line []byte) ([]byte, bool) {
-	l := bytes.TrimRight(line, "\r\n")
-	v, ok := bytes.CutPrefix(l, []byte("data"))
+	v, ok := bytes.CutPrefix(line, []byte("data"))
 	if !ok {
 		return nil, false
 	}

@@ -393,7 +393,9 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			sw := &statusWriter{ResponseWriter: w} // the bridge's own Kontra-Node answers (full, target_unreachable) are kept
 			ctx := stdiobridge.WithOwner(r.Context(), p)
 			if p.seal != nil {
-				ctx = stdiobridge.WithFilter(ctx, p.seal.MCP(pre))
+				sx := p.seal.MCP(pre)
+				defer sx.Release() // what a message the child never got holds in flight (ext-sealed.md §5)
+				ctx = stdiobridge.WithFilter(ctx, sx)
 			}
 			b.ServeHTTP(sw, r.WithContext(ctx))
 			log.Debug("tunnel exchange (stdio)", "method", r.Method, "status", sw.status, "duration_ms", time.Since(start).Milliseconds())
@@ -421,6 +423,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			defer done()
 		}
 		modify := stripResponse
+		release := func() {} // what the exchange holds in flight, dropped when the node answers it itself
 		if sv.Kind == tunnel.KindA2A && p.seal != nil {
 			// Sealing (ext-sealed.md §5): after the kontra-blob: parts were fetched, so a sealed part is opened once its
 			// whole age file is read; a refusal is the node's own answer (§6) and nothing reaches the service.
@@ -432,6 +435,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 				return
 			}
 			r = r2
+			release = sx.Release
 			modify = func(res *http.Response) error {
 				if err := stripResponse(res); err != nil {
 					return err
@@ -448,6 +452,8 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			var sx *sealing.MCPExchange
 			if p.seal != nil {
 				sx = p.seal.MCP(pre)
+				defer sx.Release()
+				release = sx.Release
 			}
 			x, ok := f.request(w, r, log, p.answerRoots(sv, out, log), sx)
 			if !ok {
@@ -486,6 +492,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			Transport:      p.transports[sv.Name],
 			ModifyResponse: modify,
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+				release() // the node answers: nothing the request holds in flight is recorded (ext-sealed.md §5)
 				if sw, ok := w.(*stripWriter); ok {
 					w = sw.ResponseWriter // the node's own answer keeps its Kontra-Node header
 				}

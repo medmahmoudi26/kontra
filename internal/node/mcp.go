@@ -209,8 +209,11 @@ func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logge
 
 // response filters the target's response (the ReverseProxy's ModifyResponse, after stripResponse).
 func (x *mcpExchange) response(res *http.Response) error {
-	if x.seal != nil && res.StatusCode/100 == 2 {
+	switch {
+	case x.seal != nil && res.StatusCode/100 == 2:
 		x.seal.Accepted() // the server accepted the message: a sealed call's job and pair, an answer's request
+	case x.seal != nil:
+		x.seal.Release() // the server refused it: nothing is recorded, and the gate's retry is no replay
 	}
 	if x.httpMethod == http.MethodDelete {
 		if x.sid != "" && (res.StatusCode/100 == 2 || res.StatusCode == http.StatusNotFound) {
