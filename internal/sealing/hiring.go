@@ -731,7 +731,8 @@ func (h *Hiring) sealSend(j *Job, body []byte) ([]byte, error) {
 		return nil, lerr
 	}
 	if err != nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: not an A2A 1.0 send request with exact keys: %v", err)
+		// The error is not quoted: it may hold a byte of the client's plaintext (a JSON syntax error).
+		return nil, local(http.StatusBadRequest, "kontra connect: not an A2A 1.0 send request with exact keys (D172)")
 	}
 	if j.job == nil {
 		return nil, local(http.StatusBadRequest, "kontra connect: a send request without a message")

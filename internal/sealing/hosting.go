@@ -351,7 +351,7 @@ func (x *Exchange) send(svc *serviceState, body []byte) ([]byte, error) {
 		if _, ok := sealed.ReasonOf(err); ok {
 			return nil, err
 		}
-		return nil, reject(sealed.RejectBadHeader, "a send request that is not an A2A 1.0 request with exact keys: "+err.Error())
+		return nil, reject(sealed.RejectBadHeader, "a send request that is not an A2A 1.0 request with exact keys (D172)")
 	}
 	if msg == nil {
 		return nil, reject(sealed.RejectBadHeader, "a send request without a message")
@@ -672,7 +672,9 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 		if _, ok := sealed.ReasonOf(err); ok {
 			return nil, err
 		}
-		return nil, reject(sealed.RejectBadHeader, "a reply that is not an A2A 1.0 answer with exact keys: "+err.Error())
+		// The error is not quoted: a service's reply is plaintext, and a JSON error may hold a byte of it (the node
+		// never logs a plaintext part, sealed_no_plaintext).
+		return nil, reject(sealed.RejectBadHeader, "a reply that is not an A2A 1.0 answer with exact keys (D172)")
 	}
 	if j != nil {
 		j.LastSeen = h.cfg.Now()

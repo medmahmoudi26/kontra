@@ -40,6 +40,17 @@ const SealUsage = `usage:
   kontra seal --open <part.json>
 `
 
+// ErrUsage is a kontra seal command line that is not one of SealUsage's (the CLI exits 2).
+var ErrUsage = errors.New("usage")
+
+// usageErr is a usage error with the synopsis.
+func usageErr(why string) error {
+	if why != "" {
+		return fmt.Errorf("%w: %s\n%s", ErrUsage, why, SealUsage)
+	}
+	return fmt.Errorf("%w\n%s", ErrUsage, SealUsage)
+}
+
 // maxCardBytes bounds a card, a key set or an input file kontra seal reads.
 const (
 	maxCardBytes = 1 << 20
@@ -72,7 +83,7 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	open := fs.String("open", "", "")
 	mediaType := fs.String("media-type", "application/octet-stream", "")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%v\n%s", err, SealUsage)
+		return usageErr(err.Error())
 	}
 	if home == "" {
 		h, err := os.UserHomeDir()
@@ -83,12 +94,19 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	if *open != "" {
 		if *service != "" || fs.NArg() > 0 {
-			return errors.New("--open takes one part file and nothing else\n" + SealUsage)
+			return usageErr("--open takes one part file and nothing else")
 		}
 		return openParts(*open, home, stdout)
 	}
 	if *service == "" || fs.NArg() > 1 {
-		return errors.New(SealUsage)
+		return usageErr("")
+	}
+	svcURL, err := url.Parse(*service)
+	if err != nil || (svcURL.Scheme != "https" && svcURL.Scheme != "http") || svcURL.Host == "" {
+		return usageErr(fmt.Sprintf("--service %q: want the service's URL, https://<gate>/agents/<name>", *service))
+	}
+	if svcURL.Scheme == "http" && !loopbackHost(svcURL.Hostname()) {
+		return usageErr("--service: https:// except on localhost")
 	}
 	in := stdin
 	if fs.NArg() == 1 && fs.Arg(0) != "-" {
@@ -105,13 +123,6 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	if len(data) > maxSealInput {
 		return fmt.Errorf("the input is over %d bytes", maxSealInput)
-	}
-	svcURL, err := url.Parse(*service)
-	if err != nil || (svcURL.Scheme != "https" && svcURL.Scheme != "http") || svcURL.Host == "" {
-		return fmt.Errorf("--service %q: want the service's URL, https://<gate>/agents/<name>", *service)
-	}
-	if svcURL.Scheme == "http" && !loopbackHost(svcURL.Hostname()) {
-		return errors.New("--service: https:// except on localhost")
 	}
 	origin, err := tunnel.CanonicalOrigin(svcURL)
 	if err != nil {

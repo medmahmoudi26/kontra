@@ -34,7 +34,11 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"version"}, 0, "kontra", ""},
 		{nil, 2, "", "usage:"},
 		{[]string{"nope"}, 2, "", "usage:"},
-		{[]string{"seal"}, 1, "", "kontra seal: sealing.SealCommand: not implemented (M3 WP-08)"},
+		{[]string{"seal"}, 2, "", "kontra seal --service <service URL>"},
+		{[]string{"seal", "--service", "http://gate.example/agents/x", "-"}, 2, "", "https:// except on localhost"},
+		{[]string{"seal", "--open", "/nonexistent/part.json"}, 1, "", "kontra seal: open /nonexistent/part.json"},
+		{[]string{"connect", "-h"}, 0, "--sealed-max-age DURATION", ""},
+		{[]string{"connect", "-h"}, 0, "--accept-change NAME", ""},
 		{[]string{"console"}, 2, "", "usage:"}, // no local console (D164)
 		{[]string{"login"}, 1, "", "kontra login: not until M4"},
 		{[]string{"publish"}, 1, "", "kontra publish: not until M5"},

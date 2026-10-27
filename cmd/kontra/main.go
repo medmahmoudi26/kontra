@@ -127,7 +127,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	case "seal":
 		if err := sealing.SealCommand(ctx, args[1:], os.Stdin, stdout, stderr); err != nil {
-			fmt.Fprintln(stderr, "kontra seal:", err)
+			fmt.Fprintln(stderr, "kontra seal:", tunnel.Printable(err.Error()))
+			if errors.Is(err, sealing.ErrUsage) {
+				return 2
+			}
 			return 1
 		}
 		return 0
