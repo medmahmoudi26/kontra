@@ -112,6 +112,7 @@ func TestSealedMCPThroughTheGate(t *testing.T) {
 	eventually(t, 20*time.Second, "an initialize through the hiring node with the sealed capability", func() bool {
 		resp, body = localMCP(t, endpoint, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25",`+
 			`"capabilities":{"elicitation":{}},"clientInfo":{"name":"c","version":"1"}}}`)
+		body = lastData(t, resp, body)
 		return resp.StatusCode == 200 && strings.Contains(body, mcpwire.MetaSealed)
 	})
 	sid := resp.Header.Get(mcpwire.HeaderSessionID)

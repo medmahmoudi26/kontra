@@ -117,6 +117,21 @@ services:
 		t.Fatalf("a sealed stream ended %s with %q", final, texts)
 	}
 
+	// The HTTP+JSON binding: the same through the hiring node's /message:send.
+	rc, err := a2aclient.NewFromCard(ctx, card, a2aclient.WithConfig(a2aclient.Config{
+		PreferredTransports: []a2a.TransportProtocol{a2a.TransportProtocolHTTPJSON}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rc.Destroy() })
+	restMarker := "MARKER-rest-" + uuid.NewString()[:8]
+	if rt := sendMessage(t, rc, text(restMarker), false); rt.Status.State != a2a.TaskStateCompleted || rt.Status.Message.Parts[0].Text() != "Hello World" {
+		t.Fatalf("a sealed task over HTTP+JSON: %+v", rt.Status)
+	}
+	if got := agent.received(); got[len(got)-1][0].Text() != restMarker {
+		t.Fatalf("the agent received %q over HTTP+JSON", got[len(got)-1][0].Text())
+	}
+
 	// A 300 KiB part: ciphertext through the bucket, both ways.
 	big := bytes.Repeat([]byte("MARKER-big-"), 300<<10/11)
 	bigTask := sendMessage(t, c, a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.Raw(big), MediaType: "application/octet-stream"}), false)
