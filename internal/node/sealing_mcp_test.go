@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -139,6 +140,84 @@ func TestMCPURLSealing(t *testing.T) {
 	}
 	if len(up.Requests()) != before {
 		t.Fatal("the server saw a refused call")
+	}
+}
+
+// A hosted stdio MCP service with sealing (ext-sealed.md §5; tunnel.md §10): the bridge's filter opens a sealed
+// tools/call before the child reads it, so the child gets the plaintext arguments, and the child's answer goes back
+// sealed to the job's replyTo; the same call again is the node's own refusal (replayed); a sealed call whose params
+// carry "name" and "NAME" is refused bad_header and the child reads nothing of it (D172).
+func TestMCPStdioSealing(t *testing.T) {
+	bin := stdioServer(t)
+	rec := t.TempDir()
+	pp := newMCPProxyPair(t, MCPOptions{}, Serve{Kind: tunnel.KindMCP, Name: "fs", Command: []string{bin, "-record", rec}})
+	hosting, node := hostingFor(t)
+	pp.p.seal = hosting
+	received := func() string {
+		files, _ := filepath.Glob(filepath.Join(rec, "received-*.jsonl"))
+		var all []byte
+		for _, f := range files {
+			b, _ := os.ReadFile(f)
+			all = append(all, b...)
+		}
+		return string(all)
+	}
+
+	init := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
+	resp, _, _ := pp.raw(t, mcpPreamble("fs"), mcpPost(init, "", ""))
+	sid := resp.Header.Get(mcpwire.HeaderSessionID)
+	if resp.StatusCode != http.StatusOK || sid == "" {
+		t.Fatalf("initialize: %d", resp.StatusCode)
+	}
+	sum := sha256.Sum256([]byte("the gate's stdio session"))
+	session := hex.EncodeToString(sum[:])
+
+	call, job, rk := sealedCall(t, node, session, "echo", "1", `{"text":"MARKER-stdio"}`)
+	resp, body, _ := pp.raw(t, mcpSealedPreamble("fs", session, "1"), mcpPost(call, sid, mcpwire.V20251125))
+	if resp.StatusCode != http.StatusOK || strings.Contains(body, "MARKER") {
+		t.Fatalf("a sealed call: %d %s", resp.StatusCode, body)
+	}
+	if got := received(); !strings.Contains(got, `"arguments":{"text":"MARKER-stdio"}`) || strings.Contains(got, sealed.ResourceURI) ||
+		strings.Contains(got, mcpwire.MetaSealed) {
+		t.Fatalf("the child read %s", got)
+	}
+	data := body
+	if evs := sseEvents(body); len(evs) > 0 {
+		data = eventData(evs[len(evs)-1])
+	}
+	m, err := mcpwire.Parse([]byte(data), mcpwire.FromUpstream)
+	if err != nil {
+		t.Fatalf("%s: %v", data, err)
+	}
+	ct, ok, err := sealed.ParseMCPResult(m.Result)
+	if !ok || err != nil {
+		t.Fatalf("the result is not sealed: %s", data)
+	}
+	hd, plain, err := sealed.Open([]age.Identity{job}, ct)
+	if err != nil || sealed.VerifyAuth(rk, hd, plain) != nil || !strings.Contains(string(plain), "MARKER-stdio") ||
+		hd.Dir != sealed.DirReply || hd.Session != session || hd.Tool != "echo" || hd.MessageID != "1" {
+		t.Fatalf("the sealed result: %v %+v %s", err, hd, plain)
+	}
+
+	// The same call again: replayed, answered by the node.
+	resp, _, _ = pp.raw(t, mcpSealedPreamble("fs", session, "1"), mcpPost(call, sid, mcpwire.V20251125))
+	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderNode) != "sealed_rejected" ||
+		resp.Header.Get(tunnel.HeaderSealedReject) != "replayed" {
+		t.Fatalf("a replayed call: %d %v", resp.StatusCode, resp.Header)
+	}
+	if n := strings.Count(received(), "MARKER-stdio"); n != 1 {
+		t.Fatalf("the child read the call %d times", n)
+	}
+
+	// "name" and "NAME": bad_header, the child reads nothing of it.
+	twin, _, _ := sealedCall(t, node, session, "echo", "2", `{"text":"MARKER-twin"}`)
+	twin = strings.Replace(twin, `"name":"echo"`, `"name":"echo","NAME":"pid"`, 1)
+	resp, _, _ = pp.raw(t, mcpSealedPreamble("fs", session, "2"), mcpPost(twin, sid, mcpwire.V20251125))
+	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderSealedReject) != "bad_header" {
+		t.Fatalf("name and NAME: %d %v", resp.StatusCode, resp.Header)
+	}
+	if got := received(); strings.Contains(got, "NAME") || strings.Contains(got, "MARKER-twin") {
+		t.Fatalf("the child read a refused call: %s", got)
 	}
 }
 
