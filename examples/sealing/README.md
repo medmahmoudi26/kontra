@@ -73,20 +73,24 @@ the gate sees no envelope, and a required sealed service refuses its calls. Seal
 The escape hatch for scripting (§5.1, PRD §8), not the path:
 
 ```sh
-export KONTRA_API_KEY=kk_…           # the card of a service that is not listed is read with a key the gate admits
-./kontra seal --service http://localhost:8080/agents/hello note.txt > message.json
+# The card of a service that is not listed is read with a key the gate admits: --api-key, sent to this gate only.
+./kontra seal --service http://localhost:8080/agents/hello --api-key "$KONTRA_API_KEY" note.txt > message.json
 #  -> one A2A Message (role user, a fresh messageId, a contextId) whose one part is note.txt sealed to the
 #     service's recipients, with metadata["kontra.sealed.replyTo"] = a per-job key kept in ~/.kontra/jobs/<gate>/
 curl -s http://localhost:8080/agents/hello -H "Authorization: Bearer $KONTRA_API_KEY" -H 'A2A-Version: 1.0' \
   -H 'Content-Type: application/json' \
   -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"SendMessage\",\"params\":{\"message\":$(cat message.json)}}" > answer.json
-./kontra seal --open answer.json        # the plaintext of every reply part a key of ~/.kontra/jobs opens
+./kontra seal --open answer.json        # the plaintext of every reply part; one no key of ~/.kontra/jobs opens is an error,
+                                        # except your own sealed message in the Task's history, which is left out
 # A follow-up of the task the answer names: --open bound the job to it, so it is sealed with the same key and rk.
-./kontra seal --service http://localhost:8080/agents/hello --task <taskId> reply.txt > follow-up.json
+./kontra seal --service http://localhost:8080/agents/hello --api-key "$KONTRA_API_KEY" --task <taskId> reply.txt > follow-up.json
 ```
 
 `kontra seal` verifies the gate's signature on the card (with the key set at `<gate>/.well-known/jwks.json`) and
-checks the pin, as `kontra connect` does; a card that does not verify is refused.
+checks the pin, as `kontra connect` does; a card that does not verify is refused. It never reads an API key from the
+environment: `--api-key` (or `--api-key @<file>`) names the key for the gate `--service` names, and it is sent only on
+that service's card and upstream card, after the card answered `404` without it (a listed service's cards are
+public), never on the key set. A key exported for one gate therefore never reaches another gate you seal for.
 
 ## Sealing in-process
 

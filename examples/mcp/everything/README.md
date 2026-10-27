@@ -11,8 +11,8 @@ and everything it depends on.
 that are dangerous on a shared machine: `get-env` returns its whole environment, and `gzip-file-as-resource`
 fetches any URL while `GZIP_ALLOWED_DOMAINS` is empty. `run.sh` therefore starts it
 
-- bound to `127.0.0.1` (`loopback.cjs`, preloaded with `NODE_OPTIONS=--require=…`, makes a port-only `listen()` bind
-  loopback),
+- bound to `127.0.0.1` (`loopback.cjs`, preloaded with `NODE_OPTIONS=--require=…`, makes every `listen()` that names
+  no host, which Node binds on every interface, bind loopback),
 - with a minimal environment (`PATH`, `HOME`, `LANG`, `PORT`), so `get-env` has nothing to give away,
 - with `GZIP_ALLOWED_DOMAINS=example.invalid`, a name that matches nothing,
 

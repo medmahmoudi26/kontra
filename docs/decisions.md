@@ -2231,9 +2231,12 @@ bucket on `127.0.0.1` whose credentials only the replicas get, gives each replic
 (`--peer-listen`, `KONTRA_PEER_SECRET`), logs the replicas at debug level (`kontra-gate serve --log-level`, added
 for this), installs `server-everything@1.0.0` and `server-filesystem@1.0.0` once per run from the example locks
 (an install that fails fails the test, unless `KONTRA_E2E_OFFLINE=1` skips it), and keeps D185: every server on
-`127.0.0.1` (asserted through `ss -Hltnp` at the end of every test), the npm servers with a minimal environment,
-stdio children given the run's markers with `--env`, and `scripts/test_e2e.sh` also killing every process in the
-group of a leftover and every process whose command line names the run's directory. The modern-era tests use the
+`127.0.0.1` (asserted through `ss -Hltnp` at the end of every test; the preload binds `127.0.0.1` for every `listen`
+Node would bind on every interface, a backlog, no port, an empty or null host and an options object included, not
+only a port-only one), the npm servers and the harness's own `npm ci` with a minimal environment and the run's
+markers, stdio children given the run's markers with `--env`, and `scripts/test_e2e.sh` also killing every process
+in the group of a leftover and every process whose command line names the run's directory or whose working
+directory is under it. The modern-era tests use the
 in-repository dual-era double; `server-everything@2.0.0` runs from a pinned lock (`test/e2e/testdata/everything-2`)
 and is skipped, saying why, without Node 24 (this host has Node 22). The residuals of ext-sealed.md §7 (a replay to
 another hosting node within `max_age`) and of relay.md §11.12 (a client that caches the era per origin) are
@@ -2292,13 +2295,16 @@ behaviour was built, and the owner may amend the spec or decide otherwise:
   a first sight of an artifact may start at any chunk (`sealing` hiring.go); the hosting node lets no exchange reach
   a sealed job's upstream task unless it is that job's (`hosting.go`); a durable MCP task is kept in its session's
   job, and its input requests carry the gate task id (`sealing` mcp.go).
-- `kontra seal` (§5.1, M3 WP-09): it sends an API key (`--api-key`, or `$KONTRA_API_KEY`) to the gate's origin
-  only, since the card of a service that is neither listed nor open to anonymous is otherwise the unknown-service
-  `404` (relay.md §2.1); and `--open` binds a job to the task its reply names, so that `--task` seals a follow-up
-  with that job's key and `rk`, which rule 3 requires. §5.1 should say both.
+- `kontra seal` (§5.1, M3 WP-09): it sends an API key, since the card of a service that is neither listed nor open
+  to anonymous is otherwise the unknown-service `404` (relay.md §2.1); only one given with `--api-key` (or `@file`),
+  never one read from the environment, which is tied to no gate (the gate a `--service` names is untrusted, §7), and
+  only on the service's card once it was `404` without it, then on its upstream card, never on the key set
+  (`sealing` seal.go). And `--open` binds a job to the task its reply names, so that `--task` seals a follow-up with
+  that job's key and `rk`, which rule 3 requires. §5.1 should say both.
 
 Three defects the gate tests exposed were fixed where they were, each with a regression test: a follow-up whose
 header names another task than the preamble's is `wrong_job` (rule 3), not `wrong_task` (`sealing` hosting.go);
-`kontra seal --open` skips the parts no job key opens (a Task's history); and the replica holding a tunnel flushes
+`kontra seal --open` leaves out the client's own sealed message in a Task's history (only it: any other part no
+job key opens is still an error); and the replica holding a tunnel flushes
 an exchange's headers before its body, so an idle event stream answers through the peer hop (`mcprelay`
 `RunExchange`, `TestPeerHopIdleGET`).

@@ -83,8 +83,9 @@ and on every change.
 kontra seal seals a file for a sealed service without a node (the escape hatch for scripting, ext-sealed.md §5.1):
 it prints one A2A Message JSON whose single part is the file sealed to the service's recipients; --open writes the
 plaintext of a reply's sealed parts and binds its job to the task the reply names, so that --task <id> seals a
-follow-up of that task with its job's key. --api-key (default $KONTRA_API_KEY) is sent to the gate only, to read the
-card of a service that is not listed.
+follow-up of that task with its job's key. --api-key KEY|@FILE (never read from the environment) is sent to the
+--service's gate only, to read the card of a service that is not listed: on the service's card and upstream card once
+the card answered 404 without it, never on the gate's key set.
 `
 
 // later is when each subcommand that is not built yet comes (PRD §14, note 2 §4). There is no console

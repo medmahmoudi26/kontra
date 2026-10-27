@@ -19,7 +19,9 @@ import (
 //
 //   - The client's replica killed (variant A): server-everything@1.0.0's simulate-research-query behind a node
 //     whose tunnel is on replica B, the client on A. A is SIGKILLed right after the CreateTaskResult; tasks/result
-//     on B, on the same session, returns the upstream's result with related-task set to the gate's id.
+//     on B, on the same session (a 404 fails the test: A held only the client's connection), returns the upstream's
+//     result with related-task set to the gate's id; once B has reaped A, the session's row is still open and held
+//     by B, and the session answers tasks/get on B (relay.md §11.2, D179).
 //   - The tunnel's replica killed (variant B): the same call (ambiguous, so the upstream waits), B SIGKILLed once
 //     the attempt has its first upstream task id; tasks/result on A returns §11.8's failed form, -32603 with
 //     sh.kontra/failure tunnel_lost, and tasks/get shows failed.
@@ -74,7 +76,7 @@ func testResumeLegacy(t *testing.T, killTunnel bool) {
 	killedAt := time.Now()
 	t.Logf("task %s: replica %s (%s) killed; tasks/result on %s", taskID, killed.Name, killed.ReplicaID, asked.Name)
 
-	answer := tasksResultOn(t, ctx, h, mc, asked, taskID, killedAt)
+	answer := tasksResultOn(t, ctx, h, mc, asked, taskID, killedAt, killTunnel)
 	if took := time.Since(killedAt); took > 90*time.Second {
 		t.Fatalf("tasks/result answered %v after the kill, want within 90 s", took)
 	}
@@ -96,6 +98,20 @@ func testResumeLegacy(t *testing.T, killTunnel bool) {
 		if row == nil || row.IsError == nil || *row.IsError {
 			t.Fatalf("variant A's calls row: %+v", row)
 		}
+		// A held only the client's connection: B reaping it closes no session whose tunnel B holds.
+		eventually(t, 2*ReapAfter, "B reaped A's gate_replicas row", func() bool {
+			return scalar[int](t, h, `select count(*) from kontra.gate_replicas where replica_id = $1`, killed.ReplicaID) == 0
+		})
+		if s := sessionRow(t, h, mc.SID); s.closed || s.replica != asked.ReplicaID {
+			t.Fatalf("variant A: once A was reaped, the session's row is %+v, want open and held by %s", s, asked.Name)
+		}
+		get, err := mc.At(asked.URL+"/mcp/everything").Request(ctx, 9, "tasks/get", map[string]any{"taskId": taskID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if get.Status != http.StatusOK || get.Result()["status"] != "completed" {
+			t.Fatalf("variant A: tasks/get on %s with the same session after A was reaped: %d %s", asked.Name, get.Status, get.Text())
+		}
 	} else {
 		e, _ := answer["error"].(map[string]any)
 		data, _ := e["data"].(map[string]any)
@@ -115,10 +131,11 @@ func testResumeLegacy(t *testing.T, killTunnel bool) {
 	})
 }
 
-// tasksResultOn asks tasks/result on g with the client's session; when g answers that session 404 (its row was
-// closed with the tunnel of the killed replica, §11.2), the client initializes again on g, as a client does, and asks
-// with the new session (the task is the buyer's, §11.6). It returns the answer.
-func tasksResultOn(t *testing.T, ctx context.Context, h *Harness, mc *MCPClient, g *Gate, taskID string, since time.Time) map[string]any {
+// tasksResultOn asks tasks/result on g with the client's session and returns the answer. With reinit, when g answers
+// that session 404 (its row was closed with the tunnel of the killed replica, §11.2), the client initializes again on
+// g, as a client does, and asks with the new session (the task is the buyer's, §11.6); without it, a 404 fails the
+// test (the killed replica held only the client's connection, so the session must outlive it).
+func tasksResultOn(t *testing.T, ctx context.Context, h *Harness, mc *MCPClient, g *Gate, taskID string, since time.Time, reinit bool) map[string]any {
 	t.Helper()
 	c := mc.At(g.URL + "/mcp/everything")
 	for time.Since(since) < 90*time.Second {
@@ -129,6 +146,9 @@ func tasksResultOn(t *testing.T, ctx context.Context, h *Harness, mc *MCPClient,
 			t.Fatalf("tasks/result on %s: %v", g.Name, err)
 		}
 		if r.Status == http.StatusNotFound {
+			if !reinit {
+				t.Fatalf("tasks/result on %s: the session is gone (%s), though the killed replica held only the client's connection", g.Name, r.Text())
+			}
 			t.Logf("tasks/result on %s: the session is closed (%s); initialize again", g.Name, r.Text())
 			fresh := NewMCPClient(g.URL+"/mcp/everything", h.APIKey)
 			for time.Since(since) < 90*time.Second {

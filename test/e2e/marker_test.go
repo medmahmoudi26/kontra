@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,4 +72,19 @@ func TestLoopbackPreloadIsTheExamples(t *testing.T) {
 	if !bytes.Equal(a, b) {
 		t.Error("test/e2e/testdata/loopback.cjs differs from examples/mcp/everything/loopback.cjs")
 	}
+}
+
+// The preload binds 127.0.0.1 for every TCP listen Node would bind on every interface, whatever its form (a backlog,
+// no port, a null or empty host, an options object), and leaves a named host, a path and a handle alone (D185).
+// testdata/loopback_check.cjs records what the preload passes to the real listen, which it never calls.
+func TestLoopbackPreloadBindsLoopback(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH")
+	}
+	out, err := exec.Command(node, filepath.Join("testdata", "loopback_check.cjs"), filepath.Join("testdata", "loopback.cjs")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("the preload leaves a listen on every interface (%v):\n%s", err, out)
+	}
+	t.Logf("%s", bytes.TrimSpace(out))
 }

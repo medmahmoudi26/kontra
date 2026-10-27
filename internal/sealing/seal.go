@@ -40,9 +40,6 @@ const SealUsage = `usage:
   kontra seal --open <part.json>
 `
 
-// APIKeyEnv is the variable kontra seal reads its API key from when --api-key is not given.
-const APIKeyEnv = "KONTRA_API_KEY"
-
 // ErrUsage is a kontra seal command line that is not one of SealUsage's (the CLI exits 2).
 var ErrUsage = errors.New("usage")
 
@@ -76,8 +73,12 @@ const (
 // SPEC-CONFLICT: §5.1 has kontra seal fetch the service's card with no word on a credential, but relay.md §2.1 answers
 // a card GET of a service that neither is listed nor admits anonymous with 404 when no credential admits the caller,
 // so kontra seal could seal for listed services only (and examples/sealing's flow, an allow: org:default service,
-// failed). It sends an API key, --api-key or $KONTRA_API_KEY, as Authorization: Bearer on its GETs to the service
-// URL's origin only (the card, the key set, the upstream card), as kontra connect sends its key to its gate only.
+// failed). It sends an API key given explicitly with --api-key (or @file), never one read from the environment: a
+// variable such as $KONTRA_API_KEY is tied to no gate, and the gate a --service names is not trusted (§7), so a key
+// exported for one gate would reach every other one sealed for. As kontra connect sends a key only to the --gate it
+// was given with, the key goes only to the --service's origin, and only where §2.1 needs a credential: the service's
+// card, after an unauthenticated GET of it was 404, and then its upstream card; never the gate's key set
+// (/.well-known/jwks.json is public), and never to a listed service, whose cards are public.
 //
 // SPEC-CONFLICT: §5.1 has kontra seal mint a per-job key and rk for every message it seals, --task included, but a
 // follow-up's header must carry the job's replyTo and rk (§5 rule 3: wrong_job otherwise), so a follow-up sealed
@@ -85,10 +86,10 @@ const (
 // key and state to the task id, as the hiring node names its jobs), and --task <id> seals with that task's job key,
 // rk and contextId; a task with no job here is refused, saying to --open one of its replies first.
 func SealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	return sealCommand(ctx, args, stdin, stdout, stderr, os.Getenv("HOME"), os.Getenv(APIKeyEnv), http.DefaultClient, time.Now)
+	return sealCommand(ctx, args, stdin, stdout, stderr, os.Getenv("HOME"), http.DefaultClient, time.Now)
 }
 
-func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, home, envKey string,
+func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, home string,
 	client *http.Client, now func() time.Time) error {
 	fs := flag.NewFlagSet("kontra seal", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -101,7 +102,7 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err.Error())
 	}
-	key := envKey
+	var key string // only --api-key's: never the environment's (SealCommand's SPEC-CONFLICT)
 	if *apiKey != "" {
 		key = *apiKey
 		if path, ok := strings.CutPrefix(key, "@"); ok {
@@ -160,7 +161,7 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	svcPath := strings.TrimRight(svcURL.EscapedPath(), "/")
 	cardURL := origin + svcPath + "/.well-known/agent-card.json"
-	get := func(ctx context.Context, u string) ([]byte, error) { return httpGet(ctx, client, u, origin, key) }
+	get := keyedGet(client, key, origin+svcPath+"/.well-known/agent-card.json", origin+svcPath+"/.well-known/agent-card.upstream.json")
 	cardBody, err := get(ctx, cardURL)
 	if err != nil {
 		return fmt.Errorf("the service's card: %w", err)
@@ -409,7 +410,8 @@ func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 
 // openParts is kontra seal --open: every sealed part of the file that a per-job key under ~/.kontra/jobs opens is
 // checked (dir res, the key's id in kids, auth with the job's rk) and its plaintext written to out: text, url and
-// data as they are, raw as its bytes, one after another.
+// data as they are, raw as its bytes, one after another. A sealed part none of the job keys opens is an error, except
+// in the client's own message in a Task's history (a ROLE_USER entry), which is left out.
 func openParts(path, home string, out io.Writer) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -422,13 +424,18 @@ func openParts(path, home string, out io.Writer) error {
 	if len(ids) == 0 {
 		return errors.New("no per-job key under ~/.kontra/jobs")
 	}
-	var parts []json.RawMessage
+	type found struct {
+		part json.RawMessage
+		own  bool // in the client's own message in a Task's history
+	}
+	var parts []found
 	if _, ok, _ := sealed.ParsePart(b); ok {
-		parts = append(parts, b)
+		parts = append(parts, found{part: b})
 	} else {
 		w := a2awire.Walker{Container: func(c *a2awire.Container) error {
+			role, _ := a2awire.String(c.Members, "role")
 			for _, p := range c.Parts {
-				parts = append(parts, a2awire.Encode(p))
+				parts = append(parts, found{part: a2awire.Encode(p), own: role == "ROLE_USER" && c.Where == a2awire.WhereHistory})
 			}
 			return nil
 		}}
@@ -437,21 +444,23 @@ func openParts(path, home string, out io.Writer) error {
 		}
 	}
 	opened := 0
-	for _, p := range parts {
-		sp, ok, err := sealed.ParsePart(p)
+	for _, f := range parts {
+		sp, ok, err := sealed.ParsePart(f.part)
 		if !ok {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		// A part none of the job keys is a recipient of is not a reply to one of this node's jobs: a Task's history
-		// holds the client's own sealed request, sealed to the hosting nodes. It is skipped; any other failure to
-		// open is an error.
-		if _, err := age.Decrypt(bytes.NewReader(sp.Ciphertext), ids...); err != nil {
-			var nomatch *age.NoIdentityMatchError
-			if errors.As(err, &nomatch) {
-				continue
+		// A Task's history holds the client's own sealed message as the gate stored it, sealed dir req to the hosting
+		// nodes, which none of the job keys is a recipient of: it is left out, as the hiring node leaves it out
+		// (hiring.go). Anywhere else, a part that does not open is an error.
+		if f.own {
+			if _, err := age.Decrypt(bytes.NewReader(sp.Ciphertext), ids...); err != nil {
+				var nomatch *age.NoIdentityMatchError
+				if errors.As(err, &nomatch) {
+					continue
+				}
 			}
 		}
 		hd, plain, err := sealed.Open(ids, sp.Ciphertext)
@@ -571,18 +580,58 @@ func allJobKeys(home string) ([]age.Identity, map[string][]byte, map[string]*job
 	return ids, rks, where, nil
 }
 
-// httpGet GETs u, sending key as a bearer credential when it is set and u is on origin (the gate's, and nobody
-// else's, as kontra connect sends its key).
-func httpGet(ctx context.Context, client *http.Client, u, origin, key string) ([]byte, error) {
+// keyedGet is kontra seal's GET (SealCommand's SPEC-CONFLICT on a credential): key, --api-key's or "", goes as a
+// bearer credential only to the URLs of keyed (the service's card and upstream card, on the --service's origin,
+// compared in canonical form), and only once a GET of one of them without it was 404, the unknown-service answer of
+// relay.md §2.1 to a caller no credential admits; the later GETs of keyed send it at once. Any other URL (the gate's
+// key set) never gets it.
+func keyedGet(client *http.Client, key string, keyed ...string) func(ctx context.Context, u string) ([]byte, error) {
+	needed := false
+	return func(ctx context.Context, u string) ([]byte, error) {
+		mayKey := key != "" && slices.Contains(keyed, canonicalURL(u))
+		if mayKey && needed {
+			return httpGet(ctx, client, u, key)
+		}
+		b, err := httpGet(ctx, client, u, "")
+		var se *statusError
+		if !mayKey || !errors.As(err, &se) || se.code != http.StatusNotFound {
+			return b, err
+		}
+		needed = true
+		return httpGet(ctx, client, u, key)
+	}
+}
+
+// canonicalURL is u as its canonical origin and escaped path, "" when it has none or carries a query or a fragment.
+func canonicalURL(u string) string {
+	pu, err := url.Parse(u)
+	if err != nil || pu.RawQuery != "" || pu.ForceQuery || pu.Fragment != "" {
+		return ""
+	}
+	o, err := tunnel.CanonicalOrigin(pu)
+	if err != nil {
+		return ""
+	}
+	return o + pu.EscapedPath()
+}
+
+// statusError is a GET answered with a status other than 200.
+type statusError struct {
+	url  string
+	code int
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("%s answered HTTP %d", e.url, e.code) }
+
+// httpGet GETs u, sending key as a bearer credential when it is set (keyedGet decides where it may go).
+func httpGet(ctx context.Context, client *http.Client, u, key string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	if key != "" {
-		if o, err := tunnel.CanonicalOrigin(req.URL); err == nil && o == origin {
-			req.Header.Set("Authorization", "Bearer "+key)
-		}
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	res, err := client.Do(req)
 	if err != nil {
@@ -590,7 +639,7 @@ func httpGet(ctx context.Context, client *http.Client, u, origin, key string) ([
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s answered HTTP %d", u, res.StatusCode)
+		return nil, &statusError{url: u, code: res.StatusCode}
 	}
 	b, err := io.ReadAll(io.LimitReader(res.Body, maxCardBytes+1))
 	if err != nil {

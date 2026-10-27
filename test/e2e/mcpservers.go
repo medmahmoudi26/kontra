@@ -25,8 +25,9 @@ import (
 // test process on 127.0.0.1.
 //
 // D185: every server the harness starts listens on 127.0.0.1 only. server-everything@1.0.0 calls app.listen(port),
-// which binds every interface, so it runs with NODE_OPTIONS=--require=testdata/loopback.cjs, a preload that makes a
-// port-only listen bind 127.0.0.1; CheckLoopback asserts the result. The npm servers get a minimal environment: PATH,
+// which binds every interface, so it runs with NODE_OPTIONS=--require=testdata/loopback.cjs, a preload that makes
+// every listen naming no host (a port alone, a backlog, no port at all, an empty host) bind 127.0.0.1
+// (TestLoopbackPreloadBindsLoopback); CheckLoopback asserts the result. The npm servers get a minimal environment: PATH,
 // HOME (a directory of the run's), LANG, NODE_OPTIONS, the run's marker variables and GZIP_ALLOWED_DOMAINS set to a
 // name that matches nothing; never KONTRA_TEST_PG, AWS_* or KONTRA_PEER_SECRET. The services deny get-env and
 // gzip-file-as-resource (EverythingDeny) unless a test needs them, and none does in M3.
@@ -48,8 +49,9 @@ var (
 
 // npmInstall installs the package-lock of src (a directory relative to the repository's root: examples/mcp/<name>,
 // or test/e2e/testdata/<name>) once per test binary, under TempRoot, and returns the directory. npm runs with a
-// minimal environment of its own; its download cache is kept between runs in the user's cache directory, so a second
-// run needs no network.
+// minimal environment of its own and the run's marker variables (markerEnv), so that scripts/test_e2e.sh finds an
+// install that outlived a test binary which died during it; its download cache is kept between runs in the user's
+// cache directory, so a second run needs no network.
 func npmInstall(src string) (string, error) {
 	npmMu.Lock()
 	defer npmMu.Unlock()
@@ -89,8 +91,8 @@ func npmInstall(src string) (string, error) {
 		defer cancel()
 		cmd := exec.CommandContext(ctx, npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline")
 		cmd.Dir = dir
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "npm_config_cache=" + cache,
-			"npm_config_update_notifier=false"}
+		cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "npm_config_cache=" + cache,
+			"npm_config_update_notifier=false"}, markerEnv("npm-ci-"+randomHex(4))...)
 		cmd.SysProcAttr = procAttr()
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("npm ci (%s): %v\n%s", src, err, lastLines(out, 8))
@@ -238,12 +240,19 @@ func (h *Harness) startEverything(t testingTB, name, src, pkg string) *StockServ
 // stockEnv is a stock server's whole environment (D185): PATH, HOME, LANG, the run's markers, GZIP_ALLOWED_DOMAINS,
 // and extra.
 func (h *Harness) stockEnv(home string, extra ...string) []string {
-	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "LANG=C.UTF-8", RunEnv + "=" + h.run,
-		"GZIP_ALLOWED_DOMAINS=example.invalid"}
+	env := append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "LANG=C.UTF-8", "GZIP_ALLOWED_DOMAINS=example.invalid"},
+		markerEnv(h.run)...)
+	return append(env, extra...)
+}
+
+// markerEnv are the marker variables scripts/test_e2e.sh finds a leftover by: RunEnv=run, and SessionEnv when the
+// script set it.
+func markerEnv(run string) []string {
+	env := []string{RunEnv + "=" + run}
 	if s := os.Getenv(SessionEnv); s != "" {
 		env = append(env, SessionEnv+"="+s)
 	}
-	return append(env, extra...)
+	return env
 }
 
 // Stop kills the server's process group and waits for it.

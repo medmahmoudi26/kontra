@@ -36,8 +36,10 @@ import (
 //     and on another session wrong_message: each a JSON-RPC error carrying the reason;
 //   - each rejection has its audit row, the A2A ones an attempt whose outcome is sealed_rejected and no second
 //     attempt; the seller and the MCP upstream received none of the refused requests;
-//   - the gate's own retry: with the seller unreachable the node answers 502 target_unreachable, and the gate's next
-//     attempt, once it is back, is accepted and completes (a request the node answered itself opens no job).
+//   - the gate's own retry: with the seller unreachable the node answers 502 target_unreachable, which ends attempt 1
+//     tunnel_lost (relay.md §6.4's row for a response the node wrote itself; the gate's log shows the node's reason
+//     for that attempt), and the gate's next attempt, once it is back, is accepted and completes (a request the node
+//     answered itself opens no job).
 //
 // The residual of §7 (a replay delivered within max_age to another hosting node of the service, which has not seen
 // its replyTo) is logged, not asserted as a pass.
@@ -224,8 +226,13 @@ func TestSealedReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(atts) < 2 || atts[0].Outcome == "sealed_rejected" || atts[len(atts)-1].Outcome != "completed" {
-		t.Fatalf("the retried task's attempts: %+v", atts)
+	if len(atts) < 2 || atts[0].Outcome != "tunnel_lost" || atts[len(atts)-1].Outcome != "completed" {
+		t.Fatalf("the retried task's attempts: %+v, want attempt 1 tunnel_lost and the last completed", atts)
+	}
+	// Attempt 1 ended on the hosting node's own 502 Kontra-Node: target_unreachable, not on a lost tunnel or any other
+	// failure §6.4 also retries: the dispatch logged the node's reason for that task and attempt.
+	if upstreamFailures(t, h, t4, 1, "(Kontra-Node: target_unreachable)") == 0 {
+		t.Fatalf("no replica logged attempt 1 of %s failing on the node's 502 Kontra-Node: target_unreachable", t4)
 	}
 	t.Logf("the gate's retry: attempt 1 %s, attempt %d %s", atts[0].Outcome, len(atts), atts[len(atts)-1].Outcome)
 	t.Logf("ext-sealed.md §7's residual, not tested as a pass: a first message replayed within max_age to another " +
@@ -233,8 +240,32 @@ func TestSealedReplay(t *testing.T) {
 		"to the original buyer's key")
 }
 
-// kontraSeal runs the kontra binary's `seal` with HOME home, the harness's buyer A key in KONTRA_API_KEY and
-// --service the Front's vault URL (unless args name --open), and returns its stdout.
+// upstreamFailures counts the records of both replicas' logs where the dispatch of the task's attempt n logged a
+// failed upstream call whose error holds reason (relay executor.go's "upstream call failed").
+func upstreamFailures(t *testing.T, h *Harness, task a2a.TaskID, n int, reason string) int {
+	t.Helper()
+	count := 0
+	for _, g := range h.Gates {
+		for _, line := range strings.Split(readFile(g.LogPath), "\n") {
+			var rec struct {
+				Msg     string `json:"msg"`
+				TaskID  string `json:"task_id"`
+				Attempt int    `json:"attempt"`
+				Error   string `json:"error"`
+			}
+			if json.Unmarshal([]byte(line), &rec) != nil {
+				continue
+			}
+			if rec.Msg == "upstream call failed" && rec.TaskID == string(task) && rec.Attempt == n && strings.Contains(rec.Error, reason) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// kontraSeal runs the kontra binary's `seal` with HOME home and, unless args name --open, --service the Front's vault
+// URL and --api-key the harness's buyer A key (kontra seal reads no key from the environment), and returns its stdout.
 func kontraSeal(t *testing.T, h *Harness, home string, args ...string) []byte {
 	t.Helper()
 	bin, err := nodeBinary()
@@ -243,11 +274,11 @@ func kontraSeal(t *testing.T, h *Harness, home string, args ...string) []byte {
 	}
 	full := []string{"seal"}
 	if len(args) == 0 || args[0] != "--open" {
-		full = append(full, "--service", h.Front.URL+"/agents/vault")
+		full = append(full, "--service", h.Front.URL+"/agents/vault", "--api-key", h.APIKey)
 	}
 	full = append(full, args...)
 	cmd := exec.Command(bin, full...)
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "KONTRA_API_KEY=" + h.APIKey, RunEnv + "=" + h.Run()}
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, RunEnv + "=" + h.Run()}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

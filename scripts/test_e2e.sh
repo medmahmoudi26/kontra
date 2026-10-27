@@ -15,8 +15,9 @@
 # removes what it finds (a test binary that died, a go test -timeout panic or a crash, cannot clean up), and
 # fails the run if there was anything. M3 (D184, D185): the stock MCP servers the harness starts (npm, under
 # $TMPDIR/kontra-e2e-<session>) and the nodes' stdio children carry the run's marker variables too (a node passes them
-# with --env), and every process in the process group of a leftover is one as well (a stdio child runs in a group
-# of its own, which its own children share), as is any process whose command line names the run's directory.
+# with --env), as does the harness's own `npm ci`, and every process in the process group of a leftover is one as
+# well (a stdio child runs in a group of its own, which its own children share), as is any process whose command
+# line names the run's directory or whose working directory is under it (an npm install the harness started there).
 # Extra arguments go to `go test` (e.g. -run TestRelayResume -v).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -59,8 +60,9 @@ for environ in /proc/[0-9]*/environ; do
   env="$({ tr '\0' '\n' <"$environ"; } 2>/dev/null || true)" # a process may end while the loop runs
   exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
   cmd="$({ tr '\0' ' ' <"/proc/$pid/cmdline"; } 2>/dev/null || true)"
+  cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
   if { grep -q '^KONTRA_E2E_RUN=' <<<"$env" && grep -qx "KONTRA_E2E_SESSION=$KONTRA_E2E_SESSION" <<<"$env"; } ||
-    [[ "$exe" == "$dir/"* ]] || [[ "$cmd" == *"$dir/"* ]]; then
+    [[ "$exe" == "$dir/"* ]] || [[ "$cmd" == *"$dir/"* ]] || [[ "$cwd" == "$dir" || "$cwd" == "$dir/"* ]]; then
     found[$pid]=1
     g="$(pgid "$pid")"
     # A leftover that leads its own group (every process the harness starts, and every stdio child, D184) names

@@ -3,6 +3,9 @@ package sealing
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,13 +14,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"filippo.io/age"
 
 	"kontra.sh/kontra/internal/a2awire"
+	"kontra.sh/kontra/internal/jcs"
 	"kontra.sh/kontra/internal/jws"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/sealed"
@@ -27,9 +33,10 @@ import (
 
 // sealGate serves a signed card of a sealed service and the gate's key set, as a gate does (spec/relay.md §3).
 type sealGate struct {
-	srv  *httptest.Server
-	keys *jws.KeySet
-	card []byte // served at /agents/echo/.well-known/agent-card.json
+	srv      *httptest.Server
+	keys     *jws.KeySet
+	card     []byte // served at /agents/echo/.well-known/agent-card.json
+	upstream []byte // served at /agents/echo/.well-known/agent-card.upstream.json when set
 }
 
 func newSealGate(t *testing.T, node *age.X25519Identity) *sealGate {
@@ -49,6 +56,14 @@ func newSealGate(t *testing.T, node *age.X25519Identity) *sealGate {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(g.card)
 	})
+	mux.HandleFunc("GET /agents/echo/.well-known/agent-card.upstream.json", func(w http.ResponseWriter, r *http.Request) {
+		if g.upstream == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(g.upstream)
+	})
 	g.srv = httptest.NewServer(mux)
 	t.Cleanup(g.srv.Close)
 	g.card = g.sign(t, cardWith(extensionFor(true, node.Recipient())))
@@ -58,7 +73,28 @@ func newSealGate(t *testing.T, node *age.X25519Identity) *sealGate {
 // sign adds the gate's signature (jku = the server's origin) to card.
 func (g *sealGate) sign(t *testing.T, card []byte) []byte {
 	t.Helper()
-	sig, err := g.keys.Sign(card, g.srv.URL+jws.JWKSPath, &jws.Upstream{SHA256: strings.Repeat("0", 64), URL: g.srv.URL + "/agents/echo/.well-known/agent-card.upstream.json"})
+	return g.signWith(t, card, &jws.Upstream{SHA256: strings.Repeat("0", 64), URL: g.srv.URL + "/agents/echo/.well-known/agent-card.upstream.json"})
+}
+
+// verifiedUpstream serves an upstream card signed by the seller (key id seller-1) and re-signs the served card
+// saying the gate verified that signature, so that kontra seal reads the upstream card too (ext-sealed.md §7).
+func (g *sealGate) verifiedUpstream(t *testing.T, node *age.X25519Identity) {
+	t.Helper()
+	prot := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"seller-1"}`))
+	g.upstream = []byte(`{"name":"echo","signatures":[{"protected":"` + prot + `","signature":"c2ln"}]}`)
+	c, err := jcs.Transform(g.upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(c)
+	g.card = g.signWith(t, cardWith(extensionFor(true, node.Recipient())), &jws.Upstream{SHA256: hex.EncodeToString(sum[:]),
+		URL: g.srv.URL + "/agents/echo/.well-known/agent-card.upstream.json", Verified: true})
+}
+
+// signWith adds the gate's signature (jku = the server's origin), binding the upstream card up, to card.
+func (g *sealGate) signWith(t *testing.T, card []byte, up *jws.Upstream) []byte {
+	t.Helper()
+	sig, err := g.keys.Sign(card, g.srv.URL+jws.JWKSPath, up)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +107,7 @@ func (g *sealGate) sign(t *testing.T, card []byte) []byte {
 func runSeal(t *testing.T, home string, stdin string, args ...string) (string, string, error) {
 	t.Helper()
 	var out, errb bytes.Buffer
-	err := sealCommand(context.Background(), args, strings.NewReader(stdin), &out, &errb, home, "", http.DefaultClient, time.Now)
+	err := sealCommand(context.Background(), args, strings.NewReader(stdin), &out, &errb, home, http.DefaultClient, time.Now)
 	return out.String(), errb.String(), err
 }
 
@@ -170,9 +206,10 @@ func TestSealCommand(t *testing.T) {
 }
 
 // The card of a service that is not listed is served only to a caller its allow: admits (relay.md §2.1): kontra seal
-// sends its API key, --api-key (or @file) or $KONTRA_API_KEY, to the gate's origin, and without one is refused. A
-// follow-up (--task) is sealed with the task's job key, rk and contextId, which --open bound to the task its reply
-// names (ext-sealed.md §5 rule 3); a task with no job is refused (SealCommand's SPEC-CONFLICTs).
+// sends the API key --api-key (or @file) gives on the card's GET once the card was 404 without it, and without one is
+// refused (TestSealKeyGoesToItsGateOnly has where else it goes). A follow-up (--task) is sealed with the task's job
+// key, rk and contextId, which --open bound to the task its reply names (ext-sealed.md §5 rule 3); a task with no job
+// is refused (SealCommand's SPEC-CONFLICTs). --open leaves out only the client's own message in a Task's history.
 func TestSealAPIKeyAndFollowUp(t *testing.T) {
 	node, _ := age.GenerateX25519Identity()
 	g := newSealGate(t, node)
@@ -200,18 +237,9 @@ func TestSealAPIKeyAndFollowUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("with --api-key @file: %v (%s)", err, stderr)
 	}
-	if len(seen) == 0 {
-		t.Fatal("no GET reached the gate")
-	}
-	for _, s := range seen {
-		if !strings.HasSuffix(s, "Bearer kk_test") {
-			t.Errorf("a GET to the gate's origin without the key: %q", s)
-		}
-	}
-	var out2 bytes.Buffer
-	if err := sealCommand(context.Background(), []string{"--service", svc, "-"}, strings.NewReader("env"), &out2, io.Discard, t.TempDir(),
-		"kk_test", http.DefaultClient, time.Now); err != nil {
-		t.Fatalf("with $KONTRA_API_KEY: %v", err)
+	if want := []string{"/agents/echo/.well-known/agent-card.json ", "/agents/echo/.well-known/agent-card.json Bearer kk_test",
+		"/.well-known/jwks.json "}; !slices.Equal(seen, want) {
+		t.Errorf("the GETs with --api-key: %q, want %q", seen, want)
 	}
 	if _, _, err := runSeal(t, home, "x", "--service", svc, "--api-key", "a b", "-"); !errors.Is(err, ErrUsage) {
 		t.Fatalf("--api-key with a space: %v", err)
@@ -267,10 +295,33 @@ func TestSealAPIKeyAndFollowUp(t *testing.T) {
 	if opened, _, err := runSeal(t, home, "", "--open", tf); err != nil || opened != "the reply" {
 		t.Fatalf("--open of a Task with the client's own sealed message in its history: %q %v", opened, err)
 	}
-	// A part no job key here opens, alone, opens nothing.
+	// Only that message is left out: a reply part no job key here opens is an error wherever else it sits, here an
+	// artifact sealed to another key beside a status message that opens, and an agent message in history.
+	other, _ := age.GenerateX25519Identity()
+	oh := sealed.Header{V: 1, Dir: sealed.DirReply, TaskID: "task-1", ContextID: "ctx-1", ArtifactID: "a1", Chunk: new(int), Part: 0,
+		Parts: 1, Kind: sealed.KindText, Kids: []string{tunnel.KeyID(other.Recipient().String())}}
+	oh.Auth, _ = sealed.Auth(make([]byte, 32), oh, []byte("not yours"))
+	oct, err := sealed.Seal([]age.Recipient{other.Recipient()}, oh, []byte("not yours"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, _ := sealed.MarshalPart(sealed.Part{Ciphertext: oct, Original: "text"})
+	for what, body := range map[string]string{
+		"an artifact": `{"id":"task-1","contextId":"ctx-1","status":{"state":"TASK_STATE_COMPLETED","message":{"messageId":"r1",` +
+			`"role":"ROLE_AGENT","parts":[` + string(part) + `]}},"artifacts":[{"artifactId":"a1","parts":[` + string(foreign) + `]}]}`,
+		"an agent message in history": `{"id":"task-1","contextId":"ctx-1","status":{"state":"TASK_STATE_COMPLETED","message":{"messageId":"r1",` +
+			`"role":"ROLE_AGENT","parts":[` + string(part) + `]}},"history":[{"messageId":"r0","role":"ROLE_AGENT","parts":[` + string(foreign) + `]}]}`,
+	} {
+		ff := filepath.Join(t.TempDir(), "foreign.json")
+		_ = os.WriteFile(ff, []byte(body), 0o600)
+		if opened, _, err := runSeal(t, home, "", "--open", ff); err == nil {
+			t.Fatalf("--open of a Task whose %s holds a part sealed to another key: %q, want an error", what, opened)
+		}
+	}
+	// A part no job key here opens, alone (not in a history), is an error.
 	hf := filepath.Join(t.TempDir(), "request.json")
 	_ = os.WriteFile(hf, first.Parts[0], 0o600)
-	if _, _, err := runSeal(t, home, "", "--open", hf); err == nil || !strings.Contains(err.Error(), "no sealed part") {
+	if _, _, err := runSeal(t, home, "", "--open", hf); err == nil || !strings.Contains(err.Error(), "does not open") {
 		t.Fatalf("--open of the request's own part: %v", err)
 	}
 	if opened, _, err := runSeal(t, home, "", "--open", pf); err != nil || opened != "the reply" {
@@ -299,5 +350,84 @@ func TestSealAPIKeyAndFollowUp(t *testing.T) {
 	if string(body) != "second" || fh.TaskID != "task-1" || fh.ReplyTo != hd.ReplyTo || fh.RK != hd.RK || fh.ContextID != "ctx-1" ||
 		follow.TaskID != "task-1" || follow.ContextID != "ctx-1" || follow.Metadata[sealed.MetadataReplyTo] != hd.ReplyTo {
 		t.Fatalf("the follow-up's header %+v, message %+v", fh, follow)
+	}
+}
+
+// kontra seal sends an API key only when --api-key gives one: $KONTRA_API_KEY is tied to no gate, so a key exported
+// for one gate never reaches another that a --service names (ext-sealed.md §7 treats the gate as untrusted). It sends
+// the key only where relay.md §2.1 needs a credential, the service's card and upstream card once an unauthenticated
+// card GET was the unknown-service 404, never the gate's key set, and never to a listed service.
+func TestSealKeyGoesToItsGateOnly(t *testing.T) {
+	node, _ := age.GenerateX25519Identity()
+	g := newSealGate(t, node)
+	g.verifiedUpstream(t, node)
+	var (
+		mu     sync.Mutex
+		seen   []string
+		listed = true
+	)
+	inner := g.srv.Config.Handler
+	g.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.Path+" "+r.Header.Get("Authorization"))
+		open := listed
+		mu.Unlock()
+		if !open && strings.HasPrefix(r.URL.Path, "/agents/") && r.Header.Get("Authorization") != "Bearer kk_test" {
+			http.NotFound(w, r) // the unknown-service answer of relay §2.1
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+	reset := func(l bool) {
+		mu.Lock()
+		seen, listed = nil, l
+		mu.Unlock()
+	}
+	got := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
+	}
+	svc := g.srv.URL + "/agents/echo"
+	const card, jwks, upstream = "/agents/echo/.well-known/agent-card.json", "/.well-known/jwks.json", "/agents/echo/.well-known/agent-card.upstream.json"
+
+	// A key exported for the user's own gate, and --service naming another: nothing is sent with it.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("KONTRA_API_KEY", "kk_my_own_gate_key")
+	reset(true)
+	var out bytes.Buffer
+	if err := SealCommand(context.Background(), []string{"--service", svc, "-"}, strings.NewReader("x"), &out, io.Discard); err != nil {
+		t.Fatalf("a listed service, $KONTRA_API_KEY set: %v", err)
+	}
+	if want := []string{card + " ", jwks + " ", upstream + " "}; !slices.Equal(got(), want) {
+		t.Fatalf("a listed service, $KONTRA_API_KEY set: the gate saw %q, want %q", got(), want)
+	}
+	reset(false)
+	if err := SealCommand(context.Background(), []string{"--service", svc, "-"}, strings.NewReader("x"), io.Discard, io.Discard); err == nil ||
+		!strings.Contains(err.Error(), "404") {
+		t.Fatalf("a service that is not listed, only $KONTRA_API_KEY set: %v", err)
+	}
+	for _, s := range got() {
+		if strings.Contains(s, "Bearer") {
+			t.Fatalf("$KONTRA_API_KEY was sent: %q", got())
+		}
+	}
+
+	// --api-key to a listed service: its cards are public, so the key is not sent.
+	reset(true)
+	if _, stderr, err := runSeal(t, t.TempDir(), "x", "--service", svc, "--api-key", "kk_test", "-"); err != nil {
+		t.Fatalf("a listed service with --api-key: %v (%s)", err, stderr)
+	}
+	if want := []string{card + " ", jwks + " ", upstream + " "}; !slices.Equal(got(), want) {
+		t.Fatalf("a listed service with --api-key: the gate saw %q, want %q", got(), want)
+	}
+	// --api-key to a service that is not listed: the card once without, then with it; the upstream card with it; the
+	// key set never.
+	reset(false)
+	if _, stderr, err := runSeal(t, t.TempDir(), "x", "--service", svc, "--api-key", "kk_test", "-"); err != nil {
+		t.Fatalf("a service that is not listed, with --api-key: %v (%s)", err, stderr)
+	}
+	if want := []string{card + " ", card + " Bearer kk_test", jwks + " ", upstream + " Bearer kk_test"}; !slices.Equal(got(), want) {
+		t.Fatalf("a service that is not listed, with --api-key: the gate saw %q, want %q", got(), want)
 	}
 }
