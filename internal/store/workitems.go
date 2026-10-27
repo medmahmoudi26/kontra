@@ -78,13 +78,19 @@ type WorkPayload struct {
 // Request is kept as bytes (base64 in the payload's JSON), so the call reaches the upstream as the client wrote it
 // except for params.task: a json.RawMessage would be compacted and HTML-escaped by encoding/json.
 type MCPWork struct {
-	Request            []byte          `json:"request"`
-	Tool               string          `json:"tool"`
-	RequestID          json.RawMessage `json:"requestId"`
-	Session            string          `json:"session,omitempty"` // lowercase hex SHA-256 of the creating Mcp-Session-Id
-	Version            string          `json:"version"`           // the creating request's protocol version
+	Request   []byte          `json:"request"`
+	Tool      string          `json:"tool"`
+	RequestID json.RawMessage `json:"requestId"`
+	// Session is the lowercase hex SHA-256 of the creating Mcp-Session-Id; for a task a 2026-07-28 request created, its
+	// virtual session's (D160), named by the task's calls row only and never by a preamble (D180).
+	Session            string          `json:"session,omitempty"`
+	Version            string          `json:"version"` // the creating request's protocol version
 	ClientCapabilities json.RawMessage `json:"clientCapabilities,omitempty"`
 	Sealed             bool            `json:"sealed,omitempty"` // the service's sealed flag when the task was created (D174)
+	// Headers are a 2026-07-28 call's Mcp-Param-* headers as the client sent them (spec §11.12; M3 WP-07): an
+	// upstream requires them beside the arguments they mirror, so the modern dispatch sends them with every tools/call
+	// it makes. Like Request, they never enter Temporal history.
+	Headers map[string][]string `json:"headers,omitempty"`
 }
 
 // MarshalPayload encodes the payload for work_items.payload (json, not jsonb, D49).

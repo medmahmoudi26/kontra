@@ -94,6 +94,7 @@ type Registry struct {
 	drained   bool // Drain ran: a session added later is told at once
 	closing   bool // CloseAll ran: Add refuses
 	onConnect []func(ctx context.Context, tenantID uuid.UUID, service string)
+	onMCP     []func(tenantID uuid.UUID, service string)
 
 	async sync.WaitGroup // control messages and revocation writes in flight
 }
@@ -236,7 +237,40 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 	if drained {
 		r.tellDrain(s)
 	}
+	r.mcpChanged(s)
 	return nil
+}
+
+// OnMCPChange registers fn to run, once per MCP service of the session, when a session serving MCP services becomes a
+// candidate (Add) and when it is removed: the MCP relay drops what it learned of those services' upstreams (their
+// era, relay.md §11.12, D177), since another node may answer next. fn must not block.
+func (r *Registry) OnMCPChange(fn func(tenantID uuid.UUID, service string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onMCP = append(r.onMCP, fn)
+}
+
+// mcpChanged runs the OnMCPChange callbacks for each MCP service s serves.
+func (r *Registry) mcpChanged(s *Session) {
+	r.mu.Lock()
+	fns := slices.Clone(r.onMCP)
+	r.mu.Unlock()
+	if len(fns) == 0 {
+		return
+	}
+	s.mu.Lock()
+	var names []string
+	for name, kind := range s.served {
+		if kind == tunnel.KindMCP {
+			names = append(names, name)
+		}
+	}
+	s.mu.Unlock()
+	for _, name := range names {
+		for _, fn := range fns {
+			fn(s.TenantID, name)
+		}
+	}
 }
 
 // insert is Add's transaction; it returns the superseded sessions of this replica.
@@ -483,6 +517,7 @@ func (r *Registry) remove(s *Session, reason string, logged bool) error {
 	// statement ran first, Revoked), tunnel_lost otherwise. Only a session that hosted an MCP service can have any.
 	if s.hostedMCP() {
 		r.closeMCP(s.ID, "", s.closeReason())
+		r.mcpChanged(s)
 	}
 	if !del {
 		return nil

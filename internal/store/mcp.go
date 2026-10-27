@@ -530,13 +530,17 @@ func (l *Log) SetUpstreamSession(ctx context.Context, f *Fence, sid string) erro
 
 // InputRequest is one input_request event of an MCP task (spec §11.5 step 5): its seq, the request as clients see
 // it (JSON-RPC id the gate id, related-task key the gate task id), its method, and the upstream's own id (never
-// shown to a client).
+// shown to a client). Upstream is the event's whole upstream object: {"id"} for a 2025-11-25 request; for a
+// 2026-07-28 one (§11.12, D159) the upstream's inputRequests key and what the modern dispatch needs to answer it
+// (M3 WP-07: {"key", "taskId"} for an upstream task's request, {"key", "round", "requestState"?} for one of a
+// multi round-trip request's InputRequiredResult).
 type InputRequest struct {
 	Seq        int64
 	GateID     string
 	Method     string
 	Request    json.RawMessage
 	UpstreamID json.RawMessage
+	Upstream   json.RawMessage
 }
 
 // InputResponse is one input_response event: its seq, the input request's seq it answers, and the client's
@@ -556,6 +560,17 @@ func (l *Log) AppendInputRequest(ctx context.Context, f *Fence, taskID uuid.UUID
 	build func(gateID string) (json.RawMessage, error)) (int64, error) {
 	var up rawObject
 	up.raw("id", upstreamID)
+	return l.AppendInputRequestUpstream(ctx, f, taskID, up.bytes(), build)
+}
+
+// AppendInputRequestUpstream is AppendInputRequest with the event's upstream object given whole (a JSON object, kept
+// in the event and never shown): a 2026-07-28 input request is named upstream by its inputRequests key, not by a
+// JSON-RPC id (spec §11.12, D159; M3 WP-07).
+func (l *Log) AppendInputRequestUpstream(ctx context.Context, f *Fence, taskID uuid.UUID, upstream json.RawMessage,
+	build func(gateID string) (json.RawMessage, error)) (int64, error) {
+	if t := bytes.TrimSpace(upstream); len(t) == 0 || t[0] != '{' || !json.Valid(t) {
+		return 0, errors.New("store: an input request's upstream is a JSON object")
+	}
 	var last error
 	for range conflictRetries {
 		row, err := l.Load(ctx, taskID)
@@ -572,7 +587,7 @@ func (l *Log) AppendInputRequest(ctx context.Context, f *Fence, taskID uuid.UUID
 		}
 		var o rawObject
 		o.raw("inputRequest", req)
-		o.raw("upstream", up.bytes())
+		o.raw("upstream", upstream)
 		a, err := l.Append(ctx, nil, Write{
 			TaskID: taskID, PrevVersion: row.Version, Kind: KindInputRequest, Snapshot: row.Snapshot,
 			Payload: o.bytes(), Fence: f,
@@ -672,7 +687,7 @@ func (l *Log) InputRequests(ctx context.Context, taskID uuid.UUID, after int64) 
 		}
 		_ = json.Unmarshal(p.InputRequest, &req)
 		_ = json.Unmarshal(p.Upstream, &up)
-		x.GateID, x.Method, x.Request, x.UpstreamID = req.ID, req.Method, p.InputRequest, up.ID
+		x.GateID, x.Method, x.Request, x.UpstreamID, x.Upstream = req.ID, req.Method, p.InputRequest, up.ID, p.Upstream
 		return x, nil
 	})
 }

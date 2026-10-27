@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -277,4 +278,54 @@ func TestSupersedeIsNotHeldByMCPRows(t *testing.T) {
 		}
 		return reason != nil && *reason == "tunnel_lost"
 	})
+}
+
+// OnMCPChange runs once per MCP service of a session when the session becomes a candidate and again when it is
+// removed (the MCP relay drops the services' eras then, relay.md §11.12, D177).
+func TestOnMCPChange(t *testing.T) {
+	e := newTunnelEnv(t)
+	ctx := context.Background()
+	for _, s := range []string{"fs", "web"} {
+		if _, err := e.pool.Exec(ctx, `insert into kontra.services (tenant_id, name, kind, backend, source)
+			values ($1, $2, 'mcp', '{"tunnel": {}}'::jsonb, 'config')`, e.team, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := e.replica("a", replicaOpts{})
+	var mu sync.Mutex
+	seen := map[string]int{}
+	r.reg.OnMCPChange(func(tenantID uuid.UUID, service string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if tenantID == e.team {
+			seen[service]++
+		}
+	})
+	count := func(s string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen[s]
+	}
+	id := newIdentity(t)
+	h := &tunnel.Hello{Name: "n", Agent: "kontra/test", Services: []tunnel.Service{{Kind: tunnel.KindMCP, Name: "fs"}, {Kind: tunnel.KindMCP, Name: "web"}}}
+	for _, s := range []string{"fs", "web"} {
+		tok, err := e.store.MintServiceToken(ctx, e.team, s, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.Enroll = append(h.Enroll, tok)
+	}
+	n, err := r.startNode(t, id, h, newAgent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s *Session
+	eventually(t, 10*time.Second, "the session registered", func() bool {
+		var ok bool
+		s, ok = r.reg.Get(n.session)
+		return ok
+	})
+	eventually(t, 5*time.Second, "the hooks ran for the connection", func() bool { return count("fs") == 1 && count("web") == 1 })
+	_ = s.Close("test")
+	eventually(t, 5*time.Second, "the hooks ran for the close", func() bool { return count("fs") == 2 && count("web") == 2 })
 }
