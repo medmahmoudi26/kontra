@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"kontra.sh/kontra/internal/migrate"
@@ -190,5 +193,42 @@ func TestMigrateCommand(t *testing.T) {
 	}
 	if err := m.Check(context.Background()); err != nil {
 		t.Errorf("Check after down and up: %v", err)
+	}
+}
+
+// health succeeds only on a 200 from /healthz; a loopback listener's certificate is not verified (the compose
+// healthcheck probes the container's own listener, whose certificate names public_url's host).
+func TestHealth(t *testing.T) {
+	var code atomic.Int32
+	code.Store(http.StatusOK)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(int(code.Load()))
+	}))
+	defer srv.Close()
+	out, err := runCmd(t, "health", "--url", srv.URL+"/healthz")
+	if err != nil || strings.TrimSpace(out) != "ok" {
+		t.Fatalf("health on a 200 = %q, %v", out, err)
+	}
+	code.Store(http.StatusServiceUnavailable)
+	if _, err := runCmd(t, "health", "--url", srv.URL+"/healthz"); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("health on a 503 = %v, want an error naming it", err)
+	}
+	if _, err := runCmd(t, "health", "--url", "http://127.0.0.1:1/healthz"); err == nil {
+		t.Fatal("health with nothing listening succeeded")
+	}
+	for _, args := range [][]string{{"health", "--url", "ftp://127.0.0.1/healthz"}, {"health", "extra"}, {"health", "--nope"}} {
+		var u usageError
+		if _, err := runCmd(t, args...); !errors.As(err, &u) {
+			t.Errorf("run %q = %v, want a usage error", args, err)
+		}
+	}
+	// A host that is not loopback is verified: httptest's certificate is for 127.0.0.1 and example.com, issued by
+	// a CA no system pool holds.
+	if loopbackHost("gate.example.com") || !loopbackHost("127.0.0.1") || !loopbackHost("::1") || !loopbackHost("localhost") {
+		t.Error("loopbackHost misclassifies a host")
 	}
 }

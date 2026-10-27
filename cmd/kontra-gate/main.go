@@ -5,6 +5,7 @@
 //	kontra-gate enroll -f kontra.yaml --api-key <name> [--scope hire] [--prefix <p>]   (M1)
 //	kontra-gate enroll -f kontra.yaml <service>                                       (M2)
 //	kontra-gate enroll -f kontra.yaml --revoke <key_id> [--service <name>]            (M2)
+//	kontra-gate health [--url https://127.0.0.1:8443/healthz]                        (M3, the compose healthcheck)
 //	kontra-gate version
 package main
 
@@ -45,6 +46,7 @@ const usage = `usage:
   kontra-gate enroll -f kontra.yaml --api-key <name> [--scope <scope>]... [--prefix <p>]
   kontra-gate enroll -f kontra.yaml <service>
   kontra-gate enroll -f kontra.yaml --revoke <key_id> [--service <name>]
+  kontra-gate health [--url <url of /healthz>]
   kontra-gate version
 `
 
@@ -79,6 +81,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 		defer stop()
 		return enroll(ctx, args[1:], stdout, stderr)
+	case "health":
+		return health(context.Background(), args[1:], stdout)
 	case "version":
 		fmt.Fprintln(stdout, version.String("kontra-gate"))
 		return nil
