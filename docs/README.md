@@ -35,6 +35,14 @@ spec wins once the owner has signed it, and the difference is a numbered entry i
 | §14 Milestones | — | M4 → anonymous sessions + team-gate compose |
 | §15 Acceptance | README demo gains a stdio MCP server through the gate | Demo loses its gate terminal; add "team gate from compose on a clean VPS" |
 
+## The compose team gate and the M3 pentest
+
+A team gate on one host is [`../compose.yaml`](../compose.yaml) (D43, D168): the gate built from the repository's
+`Dockerfile`, terminating TLS itself, `temporalio/server` 1.32.1 with its two `admin-tools` jobs, and Postgres 16, with
+no Temporal or Postgres port published. [`../deploy/compose/kontra.yaml`](../deploy/compose/kontra.yaml) is its
+configuration and says what to edit. PRD §12's pentest list and M3's own surface were run against it on 27 Oct
+(`make pentest`, D186): [`pentest-m3.md`](pentest-m3.md) records every probe, the findings and their fixes.
+
 ## Hiring from another agent (decided 25 Oct)
 
 The gate serves its own MCP endpoint, `https://gateway.kontra.sh/mcp`, as a first-party remote MCP

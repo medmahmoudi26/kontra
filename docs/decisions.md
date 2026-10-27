@@ -2308,3 +2308,32 @@ header names another task than the preamble's is `wrong_job` (rule 3), not `wron
 job key opens is still an error); and the replica holding a tunnel flushes
 an exchange's headers before its body, so an idle event stream answers through the peer hop (`mcprelay`
 `RunExchange`, `TestPeerHopIdleGET`).
+
+### D190. The M3 pentest's findings, and how its harness departs from D186
+
+The PRD §12 list and M3's own surface ran against the compose team gate on this host, as D168, D169 and D186 say
+([`pentest-m3.md`](pentest-m3.md) records every probe). **Four findings, fixed** with a regression test each:
+
+- F-1: a start that failed after `gate.New` had built the replica panicked (its deferred cleanup read the named
+  result every error return had set to nil). The cleanup holds the replica it built.
+- F-2: the closed default route's empty `404` carried no HSTS. HSTS is set before the route is matched.
+- F-3: the bucket check at start had no bound (minio-go's retries held an unreachable bucket's gate for minutes,
+  never healthy). `blob.Open` gives up after 30 s.
+- F-4: a hosting node's refusal of an answer to a sealed MCP input request (ext-sealed.md §5 rule 4b) was treated as
+  an upstream's refusal: no audit row, and the task waited at `input_required` until its deadline. ext-sealed.md §6
+  already says what the gate does with a node's refusal: an audit row, the task's failure, no retry. The durable
+  dispatch now does it for an answer as for any other sealed part. No spec text changes.
+
+**The harness's departures from D186.** The bucket's endpoint is its own address on the run's network, not the
+network's gateway address with a published port: this host's firewall drops what a container sends to the host's own
+addresses, so the gate's container could not reach a port published there, while the bucket's network address is
+reachable from the gate and from the host alike, and nothing of the bucket is published. Images are built with the
+docker driver's builder only (`BUILDX_BUILDER=default`), never with another project's buildx builder. The trap of
+`make pentest` also removes the run's directory.
+
+**What the run could not exercise on this host**, each covered elsewhere and named in the record: the push redirect leg
+(it needs a globally reachable webhook, and D185 keeps every server on loopback), an oversized blob announcement to a
+node (the e2e FakeGate serves no node-opened blob stream), and a node's own `replayed` refusal of an answer the gate
+sent twice (the gate takes one answer per gate request id, relay.md §11.7). The dual-era client run D177 asks to record
+before M4 was Claude Code 2.1.281's `claude mcp list` against a modern and a legacy-only service on the gate's one
+origin: both connected, the modern one in the modern era.
