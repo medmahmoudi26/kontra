@@ -1,6 +1,6 @@
 // Command kontra-gate is the gate server: serve, migrate, enroll (note 2 §4, PRD §11).
 //
-//	kontra-gate serve -f kontra.yaml [--listen addr] [--metrics-listen addr] [--peer-listen addr]
+//	kontra-gate serve -f kontra.yaml [--listen addr] [--metrics-listen addr] [--peer-listen addr] [--log-level level]
 //	kontra-gate migrate [-f kontra.yaml | --postgres URL] [up|down|status]
 //	kontra-gate enroll -f kontra.yaml --api-key <name> [--scope hire] [--prefix <p>]   (M1)
 //	kontra-gate enroll -f kontra.yaml <service>                                       (M2)
@@ -40,6 +40,7 @@ import (
 
 const usage = `usage:
   kontra-gate serve -f kontra.yaml [--listen <addr>] [--metrics-listen <addr>] [--peer-listen <addr>]
+                    [--log-level debug|info|warn|error]
   kontra-gate migrate [-f kontra.yaml | --postgres <url>] [up|down|status]
   kontra-gate enroll -f kontra.yaml --api-key <name> [--scope <scope>]... [--prefix <p>]
   kontra-gate enroll -f kontra.yaml <service>
@@ -88,40 +89,74 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return usageError{"unknown command " + args[0]}
 }
 
-// serveConfig parses serve's flags and loads the configuration with the per-replica overrides, so two
-// replicas on one host can share one kontra.yaml.
-func serveConfig(args []string) (*config.Config, error) {
+// serveArgs are serve's flags: the configuration file, the per-replica overrides, and the log level.
+type serveArgs struct {
+	file  string
+	opts  []config.Option
+	level slog.Level
+}
+
+// parseServe parses serve's flags. --log-level sets the lowest level the replica logs (info by default); debug
+// adds the lines a test reads, such as the e2e harness's marker scans of both replicas' logs (D171).
+func parseServe(args []string) (serveArgs, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	file := fs.String("f", "kontra.yaml", "configuration file")
 	listen := fs.String("listen", "", "public listener for this replica, overriding listen:")
 	metricsListen := fs.String("metrics-listen", "", "metrics listener for this replica, overriding metrics.listen:")
 	peerListen := fs.String("peer-listen", "", "peer listener for this replica, overriding peer.listen: (spec §11.2)")
+	logLevel := fs.String("log-level", "info", "the lowest level logged: debug, info, warn or error")
 	if err := fs.Parse(args); err != nil {
-		return nil, usageError{"serve: " + err.Error()}
+		return serveArgs{}, usageError{"serve: " + err.Error()}
 	}
 	if fs.NArg() > 0 {
-		return nil, usageError{"serve: unexpected argument " + fs.Arg(0)}
+		return serveArgs{}, usageError{"serve: unexpected argument " + fs.Arg(0)}
 	}
-	var opts []config.Option
+	a := serveArgs{file: *file}
+	switch *logLevel {
+	case "debug":
+		a.level = slog.LevelDebug
+	case "info":
+		a.level = slog.LevelInfo
+	case "warn":
+		a.level = slog.LevelWarn
+	case "error":
+		a.level = slog.LevelError
+	default:
+		return serveArgs{}, usageError{fmt.Sprintf("serve: --log-level %q: want debug, info, warn or error", *logLevel)}
+	}
 	if *listen != "" {
-		opts = append(opts, config.WithListen(*listen))
+		a.opts = append(a.opts, config.WithListen(*listen))
 	}
 	if *metricsListen != "" {
-		opts = append(opts, config.WithMetricsListen(*metricsListen))
+		a.opts = append(a.opts, config.WithMetricsListen(*metricsListen))
 	}
 	if *peerListen != "" {
-		opts = append(opts, config.WithPeerListen(*peerListen))
+		a.opts = append(a.opts, config.WithPeerListen(*peerListen))
 	}
-	return config.Load(*file, opts...)
+	return a, nil
+}
+
+// serveConfig parses serve's flags and loads the configuration with the per-replica overrides, so two
+// replicas on one host can share one kontra.yaml.
+func serveConfig(args []string) (*config.Config, error) {
+	a, err := parseServe(args)
+	if err != nil {
+		return nil, err
+	}
+	return config.Load(a.file, a.opts...)
 }
 
 func serve(args []string, stderr io.Writer) error {
+	a, err := parseServe(args)
+	if err != nil {
+		return err
+	}
 	cfg, err := serveConfig(args)
 	if err != nil {
 		return err
 	}
-	log, err := obs.NewLogger(stderr, obs.FormatJSON, slog.LevelInfo)
+	log, err := obs.NewLogger(stderr, obs.FormatJSON, a.level)
 	if err != nil {
 		return err
 	}

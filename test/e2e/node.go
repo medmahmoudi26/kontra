@@ -283,12 +283,18 @@ func nodeBinary() (string, error) {
 type NodeOptions struct {
 	Name   string            // --name, and the HOME directory's name under the run's (default node-<n>)
 	Serves map[string]string // service name → target URL (--serve a2a:<name>=<url>)
-	Enroll []string          // service tokens from Harness.EnrollToken (--enroll, each)
-	Rotate bool              // --rotate
-	Home   string            // HOME: another node's to share its ~/.kontra (default a fresh directory)
-	Key    string            // --key: an identity key file (default ~/.kontra/identity.key)
-	Gate   string            // --gate (default the Front's URL)
-	Args   []string          // extra flags
+	// MCP are the MCP services it hosts (M3): service name → an endpoint URL, or "stdio:<command line>" (--serve
+	// mcp:<name>=<target>). A node with a stdio service passes the run's marker variables on to its children
+	// (--env KONTRA_E2E_RUN --env KONTRA_E2E_SESSION, D185), so the leak check finds one that outlives the run.
+	MCP    map[string]string
+	Roots  []string // --roots <name>=<dir>, each (spec/tunnel.md §10, D173)
+	APIKey string   // --api-key: whom the node hires as (spec/tunnel.md §9)
+	Enroll []string // service tokens from Harness.EnrollToken (--enroll, each)
+	Rotate bool     // --rotate
+	Home   string   // HOME: another node's to share its ~/.kontra (default a fresh directory)
+	Key    string   // --key: an identity key file (default ~/.kontra/identity.key)
+	Gate   string   // --gate (default the Front's URL)
+	Args   []string // extra flags
 }
 
 // Node is one `kontra connect` subprocess. Its stdout (the welcome lines) goes to OutPath and its JSON log
@@ -366,6 +372,20 @@ func (n *Node) args() []string {
 	args := []string{"connect", "--gate", n.opts.Gate, "--name", n.Name, "--log", "json"}
 	for _, name := range slices.Sorted(mapKeys(n.opts.Serves)) {
 		args = append(args, "--serve", "a2a:"+name+"="+n.opts.Serves[name])
+	}
+	stdio := false
+	for _, name := range slices.Sorted(mapKeys(n.opts.MCP)) {
+		args = append(args, "--serve", "mcp:"+name+"="+n.opts.MCP[name])
+		stdio = stdio || strings.HasPrefix(n.opts.MCP[name], "stdio:")
+	}
+	for _, r := range n.opts.Roots {
+		args = append(args, "--roots", r)
+	}
+	if stdio {
+		args = append(args, "--env", RunEnv, "--env", SessionEnv)
+	}
+	if n.opts.APIKey != "" {
+		args = append(args, "--api-key", n.opts.APIKey)
 	}
 	for _, t := range n.opts.Enroll {
 		args = append(args, "--enroll", t)
@@ -476,6 +496,32 @@ func (n *Node) Session() string {
 		return ""
 	}
 	return ws[len(ws)-1].Session
+}
+
+// hiringAtRE is the line `kontra connect` prints on stdout when its hiring endpoint listens (internal/node run.go).
+var hiringAtRE = regexp.MustCompile(`kontra connect: hiring at http://localhost:(\d+) `)
+
+// Local waits for the current launch's hiring endpoint (spec/tunnel.md §9) and returns its base URL,
+// http://127.0.0.1:<port>.
+func (n *Node) Local(within time.Duration) (string, error) {
+	n.mu.Lock()
+	seen := len(n.seen)
+	n.mu.Unlock()
+	deadline := time.Now().Add(within)
+	for {
+		b, _ := os.ReadFile(n.OutPath)
+		// The current launch's line is the last one; a relaunch binds another port.
+		if m := hiringAtRE.FindAllSubmatch(b, -1); len(m) > 0 && len(n.Welcomes()) > seen {
+			return "http://127.0.0.1:" + string(m[len(m)-1][1]), nil
+		}
+		if n.Exited() {
+			return "", fmt.Errorf("e2e: node %s exited before its hiring endpoint was up:\n%s", n.Name, tail(n.LogPath, 30))
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("e2e: node %s printed no hiring endpoint and welcome within %v:\n%s", n.Name, within, tail(n.LogPath, 30))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Pid is the node process's id (the current launch).
@@ -670,7 +716,7 @@ func (h *Harness) EnrollToken(ctx context.Context, service string) (string, erro
 	cctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, h.bin, "enroll", "-f", h.configPath, service)
-	cmd.Env = h.env()
+	cmd.Env = h.gateEnv()
 	cmd.SysProcAttr = procAttr()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

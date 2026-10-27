@@ -42,15 +42,23 @@ func tunnelForbidden(h *Harness, extra ...string) []string {
 func startNode(t *testing.T, ctx context.Context, h *Harness, name string, serves map[string]string, more ...func(*NodeOptions)) (*Node, string) {
 	t.Helper()
 	o := NodeOptions{Name: name, Serves: serves}
-	for _, svc := range slices.Sorted(mapKeys(serves)) {
+	for _, f := range more {
+		f(&o)
+	}
+	// One token per service it hosts, A2A and MCP (Options set by more included).
+	for _, svc := range slices.Sorted(mapKeys(o.Serves)) {
 		tok, err := h.EnrollToken(ctx, svc)
 		if err != nil {
 			t.Fatal(err)
 		}
 		o.Enroll = append(o.Enroll, tok)
 	}
-	for _, f := range more {
-		f(&o)
+	for _, svc := range slices.Sorted(mapKeys(o.MCP)) {
+		tok, err := h.EnrollToken(ctx, svc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.Enroll = append(o.Enroll, tok)
 	}
 	n, err := h.StartNode(ctx, o)
 	if err != nil {

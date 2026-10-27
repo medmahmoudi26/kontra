@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -88,6 +89,33 @@ func TestServeConfigOverrides(t *testing.T) {
 	cfg, err = serveConfig([]string{"-f", path, "--peer-listen", "127.0.0.1:18444"})
 	if err != nil || cfg.Peer.Listen != "127.0.0.1:18444" || cfg.Peer.SecretEnv != "KONTRA_PEER_SECRET" {
 		t.Errorf("--peer-listen: %+v %v", cfg, err)
+	}
+}
+
+// --log-level sets the replica's lowest logged level (info by default); anything but the four names is a usage error.
+func TestServeLogLevel(t *testing.T) {
+	file := "../../examples/sellers/hello-exec/kontra.yaml"
+	for flag, want := range map[string]slog.Level{"": slog.LevelInfo, "debug": slog.LevelDebug, "info": slog.LevelInfo,
+		"warn": slog.LevelWarn, "error": slog.LevelError} {
+		args := []string{"-f", file}
+		if flag != "" {
+			args = append(args, "--log-level", flag)
+		}
+		a, err := parseServe(args)
+		if err != nil || a.level != want || a.file != file {
+			t.Errorf("--log-level %q: level %v file %q err %v, want %v", flag, a.level, a.file, err, want)
+		}
+	}
+	for _, bad := range []string{"DEBUG", "trace", "debug+1", ""} {
+		_, err := parseServe([]string{"-f", file, "--log-level", bad})
+		var u usageError
+		if !errors.As(err, &u) {
+			t.Errorf("--log-level %q = %v, want a usage error", bad, err)
+		}
+	}
+	// The level never reaches the configuration: serveConfig (and so a SIGHUP reload) loads the same file.
+	if cfg, err := serveConfig([]string{"-f", file, "--log-level", "debug"}); err != nil || cfg.Listen != "127.0.0.1:8080" {
+		t.Errorf("serveConfig with --log-level: %v", err)
 	}
 }
 
