@@ -858,6 +858,24 @@ func TestTunnelExamplesLoad(t *testing.T) {
 	}
 }
 
+// The sealed variants of the tunnel examples (M3, examples/sealing/README.md) load as the plain ones do, with
+// sealed: required and no warning.
+func TestSealedExamplesLoad(t *testing.T) {
+	for path, name := range map[string]string{
+		"../../examples/sellers/hello-exec/kontra-sealed.yaml": "hello",
+		"../../examples/sellers/booking/kontra-sealed.yaml":    "booking",
+	} {
+		c, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		s := c.Services[name]
+		if len(c.Services) != 1 || s.Kind != KindA2A || s.Backend.Tunnel == nil || s.Sealed.Mode != SealedRequired || len(c.Warnings) != 0 {
+			t.Errorf("%s: services.%s = %+v, warnings %q", path, name, s, c.Warnings)
+		}
+	}
+}
+
 // The schema's fixture is also a configuration the gate loads, with the values it says, but for sealing:
 // its two tunnel services set sealed, which this build refuses until M3 (M2 serves tunnel services and
 // does not seal; D91 as amended for M2). The fixture is refused for exactly those two keys, and loads

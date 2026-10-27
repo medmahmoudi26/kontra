@@ -29,8 +29,12 @@ to leak (D185).
 | `sellers/claude-cli` | A `summarize` agent that runs the `claude` CLI as a subprocess, served as A2A | M4 |
 | `mcp/fs-stdio` | `@modelcontextprotocol/server-filesystem@1.0.0` over stdio, bridged by `kontra connect` with its allowed directory on the command line and `--roots`; the write tools denied at the gate (`kontra.yaml`) | M3: built |
 | `mcp/everything` | `@modelcontextprotocol/server-everything@1.0.0 streamableHttp`, run on loopback with a minimal environment (`run.sh`) and hosted through `kontra connect`: an upstream with 2025-11-25 tasks, for `mcp_task_resume`; `get-env` and `gzip-file-as-resource` denied at the gate | M3: built |
+| `sealing` | End-to-end sealing between two `kontra connect` (`sellers/hello-exec/kontra-sealed.yaml`, `sellers/booking/kontra-sealed.yaml`), `kontra seal` and `--open`, and the age calls (Go `filippo.io/age`, Python `pyrage`) for sealing in-process ([`spec/ext-sealed.md`](../spec/ext-sealed.md)) | M3: built |
 | `front/caddy` | Caddy in front of a gate, for `tck_behind_caddy` | M4 |
 | `front/agentgateway` | agentgateway as an optional front proxy | M4 |
 | `front/ingress` | Kubernetes ingress (ingress-nginx) with the WebSocket timeouts the tunnel needs | M4 |
+
+Since M3 a tunnel service may be sealed (`sealed: true`): the nodes seal and open every part end to end, and the gate
+relays ciphertext ([`sealing/README.md`](sealing/README.md)).
 
 Pins are exact (no `^`, no `latest`): the npm MCP servers moved to semver and `latest` now needs Node 24.
