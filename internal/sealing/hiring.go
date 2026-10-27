@@ -912,6 +912,7 @@ func (h *Hiring) openContainer(j *hireJob, task string, c *a2awire.Container) ([
 		reason sealed.Reject
 	)
 	fail := func(r sealed.Reject) {
+		h.log.Debug("sealing: a part is refused", "reason", string(r), "where", int(c.Where), "role", role)
 		if reason == "" {
 			reason = r
 		}
@@ -1163,7 +1164,14 @@ func gateText(c *a2awire.Container, p a2awire.Part) bool {
 	}
 	switch text {
 	case "the task completed", "the task failed", "the task was canceled", "the task was rejected":
-		return true
+		return true // store.TerminalStatus's own texts
+	}
+	// relay.Translate's message for an upstream terminal status that came without one (spec/relay.md §6.3).
+	if st, ok := strings.CutPrefix(text, "the service ended the task: "); ok {
+		switch st {
+		case "completed", "failed", "canceled", "rejected":
+			return true
+		}
 	}
 	return false
 }

@@ -361,6 +361,8 @@ func TestHiringRule4a(t *testing.T) {
 		{"the gate's terminal failure text", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_FAILED",` +
 			`"message":{"messageId":"g1","role":"ROLE_AGENT","taskId":"@T@","contextId":"@C@","parts":[{"text":"the connection to the service was lost"}],` +
 			`"metadata":{"kontra.failure":"tunnel_lost"}}},"metadata":{"kontra.failure":"tunnel_lost"}}}}`, "the connection to the service was lost", false},
+		{"the gate's text for an upstream end without a message", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_COMPLETED",` +
+			`"message":{"messageId":"g2","role":"ROLE_AGENT","parts":[{"text":"the service ended the task: completed"}]}}}}}`, "the service ended the task: completed", false},
 		{"an unsealed artifact", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_COMPLETED"},` +
 			`"artifacts":[{"artifactId":"a","parts":[{"text":"gate's forgery"}]}]}}}`, "", true},
 		{"an unsealed status text that is not the gate's", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_COMPLETED",` +

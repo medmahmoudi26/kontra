@@ -1,0 +1,198 @@
+package gate
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	"github.com/google/uuid"
+
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/blob/blobtest"
+	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/sealed"
+	"kontra.sh/kontra/internal/tenant"
+)
+
+// Sealing through a real gate (spec/ext-sealed.md; sealed_no_plaintext's A2A case, sealed_unsealed_part): a stock
+// a2a-go client on a hiring node's 127.0.0.1 endpoint completes tasks, unary and streaming, to hello-exec hosted by
+// another node; the agent receives plaintext and the client reads plaintext, while Postgres (tasks, task_events)
+// and the bucket hold only envelopes. A 300 KiB part travels through the bucket as ciphertext both ways and opens on
+// the node once its whole age file is read. An unsealed part sent to the gate itself is refused InvalidRequest
+// before any task exists.
+func TestSealedThroughTheGate(t *testing.T) {
+	e := newGateEnv(t)
+	ctx := context.Background()
+	bt := blobtest.New(t, "sealed")
+	services := `blobs: "` + bt.URL + `"
+services:
+  vault:
+    kind: a2a
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+    sealed: true
+    task: { timeout: 10m, retries: 3 }
+`
+	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), fastTiming)
+	team, err := tenant.EnsureTeam(ctx, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := auth.NewAPIKeys(e.pool, nil)
+	defer keys.Wait()
+	buyer, err := keys.Mint(ctx, auth.MintRequest{TenantID: team, Name: "buyer", Actor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := enroll.NewStore(e.pool, enroll.Options{}).MintServiceToken(ctx, team, "vault", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &helloExec{}
+	host := startNode(t, t.TempDir(), "--gate", a.url, "--name", "host", "--serve", "a2a:vault="+serveHelloExec(t, agent), "--enroll", token)
+	host.local(t)
+	hostKey := host.keyID(t)
+	eventually(t, 20*time.Second, "the gate serves vault's card with the host's key as a recipient", func() bool {
+		status, body := cardRoute(t, a.url, buyer.Secret, "vault")
+		return status == http.StatusOK && strings.Contains(body, sealed.URI) && strings.Contains(body, "age1")
+	})
+	hirer := startNode(t, t.TempDir(), "--gate", a.url, "--name", "hirer", "--api-key", buyer.Secret)
+	local := hirer.local(t)
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	card, err := agentcard.DefaultResolver.Resolve(rctx, local+"/agents/vault")
+	cancel()
+	if err != nil {
+		t.Fatalf("resolve the local card: %v", err)
+	}
+	c, err := a2aclient.NewFromCard(ctx, card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Destroy() })
+	if !strings.Contains(hirer.logs.String(), "first seen") || !strings.Contains(hirer.logs.String(), hostKey) {
+		t.Errorf("the hiring node did not print the pin's first sight with the host's key id %s", hostKey)
+	}
+
+	marker := "MARKER-" + uuid.NewString()[:8]
+	hi := sendMessage(t, c, text(marker), false)
+	if hi.Status.State != a2a.TaskStateCompleted || hi.Status.Message == nil || hi.Status.Message.Parts[0].Text() != "Hello World" {
+		t.Fatalf("a sealed task: %+v", hi.Status)
+	}
+	if got := agent.received(); got[len(got)-1][0].Text() != marker {
+		t.Fatalf("the agent received %q", got[len(got)-1][0].Text())
+	}
+
+	// Streaming.
+	sctx, scancel := context.WithTimeout(ctx, 60*time.Second)
+	streamMarker := "MARKER-stream-" + uuid.NewString()[:8]
+	var final a2a.TaskState
+	var texts []string
+	for ev, err := range c.SendStreamingMessage(sctx, &a2a.SendMessageRequest{Message: text(streamMarker)}) {
+		if err != nil {
+			scancel()
+			t.Fatalf("the stream: %v", err)
+		}
+		switch v := ev.(type) {
+		case *a2a.TaskStatusUpdateEvent:
+			final = v.Status.State
+			if v.Status.Message != nil {
+				for _, p := range v.Status.Message.Parts {
+					texts = append(texts, p.Text())
+				}
+			}
+		case *a2a.Task:
+			final = v.Status.State
+		}
+	}
+	scancel()
+	if final != a2a.TaskStateCompleted || !strings.Contains(strings.Join(texts, " "), "Hello World") {
+		t.Fatalf("a sealed stream ended %s with %q", final, texts)
+	}
+
+	// A 300 KiB part: ciphertext through the bucket, both ways.
+	big := bytes.Repeat([]byte("MARKER-big-"), 300<<10/11)
+	bigTask := sendMessage(t, c, a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.Raw(big), MediaType: "application/octet-stream"}), false)
+	if bigTask.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("the big part's task: %+v", bigTask.Status)
+	}
+	got := agent.received()
+	if p := got[len(got)-1][0]; !bytes.Equal(p.Raw(), big) {
+		t.Fatalf("the agent received %d raw bytes, want the 300 KiB part", len(p.Raw()))
+	}
+	if len(bigTask.Artifacts) != 1 || !bytes.Equal(bigTask.Artifacts[0].Parts[0].Raw(), big) {
+		t.Fatalf("the hiring client received %+v, want the agent's 300 KiB artifact", bigTask.Artifacts)
+	}
+	rows, err := e.pool.Query(ctx, `select ref, tenant_id, task_id from kontra.blobs`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var objs []blob.Key
+	for rows.Next() {
+		var k blob.Key
+		var ref string
+		if err := rows.Scan(&ref, &k.Tenant, &k.Task); err != nil {
+			t.Fatal(err)
+		}
+		k.Ref = blob.Ref(ref)
+		objs = append(objs, k)
+	}
+	if len(objs) < 2 {
+		t.Fatalf("%d objects in the bucket, want the two 300 KiB parts", len(objs))
+	}
+	for _, k := range objs {
+		r, _, err := bt.Store.Open(ctx, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(r)
+		r.Close()
+		if bytes.Contains(b, []byte("MARKER")) || !bytes.HasPrefix(b, []byte("age-encryption.org/v1")) {
+			t.Fatalf("a bucket object is not an age file (%d bytes)", len(b))
+		}
+	}
+
+	// Postgres holds envelopes only.
+	for _, q := range []string{`select coalesce(string_agg(x::text, ' '), '') from kontra.task_events x`,
+		`select coalesce(string_agg(x::text, ' '), '') from kontra.tasks x`} {
+		dump := scalar[string](t, e.pool, q)
+		if strings.Contains(dump, "MARKER") || strings.Contains(dump, "Hello World") {
+			t.Fatalf("plaintext in Postgres: %s", q)
+		}
+		if !strings.Contains(dump, sealed.MediaType) {
+			t.Fatalf("no envelope in Postgres: %s", q)
+		}
+	}
+	for _, l := range []string{host.logs.String(), hirer.logs.String()} {
+		if strings.Contains(l, "MARKER") {
+			t.Fatal("a plaintext part reached a log")
+		}
+	}
+
+	// An unsealed part straight to the gate: InvalidRequest, no task.
+	before := scalar[int](t, e.pool, `select count(*) from kontra.tasks`)
+	req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/vault", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"`+uuid.NewString()+`","role":"ROLE_USER","parts":[{"text":"plain"}]}}}`))
+	req.Header.Set("Authorization", "Bearer "+buyer.Secret)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("A2A-Version", "1.0")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), "-32600") {
+		t.Fatalf("an unsealed part to a sealed service: %d %s", resp.StatusCode, b)
+	}
+	if after := scalar[int](t, e.pool, `select count(*) from kontra.tasks`); after != before {
+		t.Fatalf("a refused unsealed message created %d tasks", after-before)
+	}
+}
