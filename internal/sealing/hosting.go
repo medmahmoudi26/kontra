@@ -84,13 +84,15 @@ type HostingConfig struct {
 // to the service, so a gate cannot answer the service's question in plaintext for the buyer (spec §5, "Answers
 // must be sealed").
 //
-// Beyond the rules of §5, which bind the sealed parts of a request, the node never lets an exchange reach a sealed
-// job's upstream task or context unless the exchange is that job's (its preamble names the job's gate task, or for
-// MCP its session): a request naming another job's upstream task id is wrong_task, one naming another gate
-// context's upstream context is wrong_context, and a service reply naming a sealed job's upstream task on an
-// exchange of another job, or of none, is refused before anything of it is forwarded. Otherwise a gate could ask
-// for a sealed task's content on an exchange whose replies it can read (GetTask on a job of its own, or on an
-// unsealed exchange).
+// SPEC-CONFLICT (ext-sealed.md §5, rules 1–5): the rules bind the sealed parts of a request, and say nothing of an
+// exchange without one (a GetTask, a CancelTask, a SubscribeToTask, an unsealed message) that names a sealed job's
+// upstream task: its replies would be sealed to the replyTo of whatever job the preamble names, or not at all, so a
+// gate could read a sealed task's content by asking for it on an exchange of a job of its own, or of none. The
+// closest faithful behaviour: the node never lets an exchange reach a sealed job's upstream task or context unless
+// the exchange is that job's (its preamble names the job's gate task, or for MCP its session): a request naming
+// another job's upstream task id is wrong_task, one naming another gate context's upstream context wrong_context,
+// and a service reply naming a sealed job's upstream task on an exchange of another job, or of none, is refused
+// before anything of it is forwarded (§6's reasons).
 type Hosting struct {
 	cfg HostingConfig
 	log *slog.Logger

@@ -204,10 +204,12 @@ type hireArtifact struct {
 // 1). A refused change is a *LocalError wrapping the *pins.ChangeError. Concurrent requests for one service share one
 // read of its card.
 //
-// A card that cannot be read or verified leaves the service's sealing unknown: when its pin says it is sealed, the
-// request is refused (502: nothing is sent in plaintext to a service known to be sealed); with no pin, or an unsealed
-// one, it goes as it came, which is what a first sight of the service would record anyway (trust on first use, §7),
-// and that unknown is kept for noCardTTL only.
+// SPEC-CONFLICT (ext-sealed.md §5 "Hiring node", rule 1, and §7): the node seals for a service "whose verified card
+// carries the extension" and checks the pin first, but nothing says what a request does when the card cannot be read
+// at all (the gate unreachable for it, a 503 card route, a card that does not verify). The closest faithful
+// behaviour: when the service's pin says it is sealed, the request is refused (502: nothing is sent in plaintext to a
+// service known to be sealed); with no pin, or an unsealed one, it goes as it came, which is what a first sight of
+// the service would record anyway (trust on first use, §7); that unknown is kept for noCardTTL only.
 func (h *Hiring) info(ctx context.Context, svc string) (*serviceInfo, error) {
 	for {
 		h.mu.Lock()
@@ -959,8 +961,11 @@ func (h *Hiring) openContainer(j *hireJob, task string, c *a2awire.Container) ([
 			continue
 		}
 		if role == "ROLE_USER" && c.Where == a2awire.WhereHistory {
-			// The client's own message, sealed to the recipients: restored from what this node sealed, if it still
-			// has it; otherwise left out (it is the client's own content).
+			// SPEC-CONFLICT (ext-sealed.md §5 rule 4: every sealed part the node receives for the job is opened with
+			// dir res): a Task's history holds the client's own message as the gate stored it, sealed dir req to the
+			// service's recipients, which the per-job key cannot open. The closest faithful behaviour: such a part is
+			// restored from what this node sealed for the job (its plaintext, kept in memory), and otherwise left out
+			// of what the local client gets (it is the client's own content), never refused.
 			if orig, ok := j.sent[ctHash(sp.Ciphertext)]; ok {
 				out = append(out, orig)
 			}
@@ -1058,8 +1063,13 @@ type chunkPart struct {
 
 // checkChunks is rule 4's artifact check: the parts of each chunk are exactly 0..parts-1 in order, a chunk opened
 // before must come again byte for byte (the hosting node reuses ciphertext), a new one must be the next, and an
-// update is one chunk. A first sight of an artifact in a Task may start at any chunk (an append: false replaced the
-// chunks before it, which a client that only polls never saw). h.mu is held.
+// update is one chunk. h.mu is held.
+//
+// SPEC-CONFLICT (ext-sealed.md §5 rule 4: "chunks arrive in order"; §3: chunk counts the updates the hosting node
+// sealed for the artifactId): a Task's artifact holds the chunks the gate merged, and after an append: false only the
+// chunks since; a hiring node that sees the artifact first in a snapshot (a client that polls) cannot tell that from
+// a gate that dropped the first chunks. The closest faithful behaviour: a first sight of an artifact in a Task may
+// start at any chunk, its chunks then consecutive; from then on every chunk is in order or a byte-identical repeat.
 func (h *Hiring) checkChunks(j *hireJob, aid string, c *a2awire.Container, ps []chunkPart) sealed.Reject {
 	st := j.Artifacts[aid]
 	first := st == nil
@@ -1306,6 +1316,11 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		return req, j, nil
 	}
 	if req.Method != http.MethodPost {
+		// A GET stream: the input requests of a sealed session's tasks may come on it (a passthrough task's), opened
+		// like those of a tasks/result stream.
+		h.mu.Lock()
+		j.info = h.services[j.sid]
+		h.mu.Unlock()
 		return req, j, nil
 	}
 	b, err := io.ReadAll(io.LimitReader(req.Body, maxBody+1))

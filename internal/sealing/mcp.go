@@ -22,6 +22,9 @@ import (
 // tools/call carries params.arguments = {} and params._meta["sh.kontra/sealed"] = {"v": 1, "envelope"}; the node
 // opens it, checks it and forwards the plaintext arguments. The job is the client's gate session (the preamble's
 // mcp_session, the session hash): its plain calls, and the tasks they create, whose upstream taskId is bound to it.
+// (§5 keys a job "by the gate task id; for plain MCP calls, by the session hash", while rule 4 holds one replyTo and
+// rk per session and the hiring node keeps one per-job key per MCP session, its plain calls and the tasks created in
+// it, §4: so a durable task is kept inside its session's job, with its gate task id and its input requests.)
 // The call's CallToolResult, and a bound task's tasks/result, are sealed into one kontra:sealed resource; a bound
 // task's statusMessage becomes "sealed" wherever the node reads one (a CreateTaskResult's task, tasks/get,
 // tasks/cancel, tasks/list, notifications/tasks/status); its upstream elicitation/create and
@@ -590,6 +593,11 @@ func (x *MCPExchange) sealInput(job *jobState, up string, t *mcpTask, m *mcpwire
 		return nil, reject(sealed.RejectBadHeader, "an input request with no canonical form")
 	}
 	msgID := mcpID(m.ID)
+	// SPEC-CONFLICT (ext-sealed.md §3's table): the MCP reply column names taskId only "for a durable task's
+	// result", and an input request is "sealed like a reply" with session, tool and messageId. The closest faithful
+	// header: a durable task's input request carries its gate task id too (as its result does), so that the hiring
+	// node can tell an input request replayed from another task of the same session and tool (rule 4, which it then
+	// checks); a passthrough task has no gate task id and carries none.
 	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, TaskID: t.Gate, Session: job.Session, Tool: t.Tool,
 		MessageID: msgID, Part: 0, Parts: 1}
 	ct, err := x.h.sealFor(x.service, job, hd, plainOf{kind: sealed.KindData, body: body})
