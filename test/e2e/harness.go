@@ -47,6 +47,15 @@
 // exports its TaskLifecycle history and replays it against the current workflow; with
 // KONTRA_RECORD_HISTORIES=1 it also writes it to internal/lifecycle/testdata/histories, never over an
 // existing file.
+//
+// M3's (D171, D172, D189; m3_test.go lists them): the six gate tests sealed_no_plaintext, sealed_replay,
+// sealed_unsealed_part, mcp_session_cross_node, mcp_tool_denied and mcp_task_resume, and card_passthrough,
+// mcp_batch_refused, mcp_meta_spoof, mcp_session_revoked, mcp_case_smuggling, a2a_case_smuggling, stdio_roots,
+// local_rebinding and the hiring row, mcp_modern_task, mcp_era_fallback, mcp_peer_hop and a sealed part through the
+// bucket. For them both replicas share one signing_key (D166), log at debug level, and get a peer listener and a
+// gofakes3 bucket when a test asks (Options.Peer, Options.Blobs); nodes host MCP services and hire; the stock npm
+// servers and every other server the harness starts listen on 127.0.0.1 only, which each test asserts at its end
+// (D185, CheckLoopback).
 package e2e
 
 import (
