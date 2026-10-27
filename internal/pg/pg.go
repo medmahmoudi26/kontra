@@ -35,7 +35,8 @@ const (
 	// ChannelTunnel is gate-internal, between replicas (not tunnel wire protocol): "session:<session_id>"
 	// after a handshake superseded a session another replica holds, "enrolled:<key_id>/<tenant_id>/<service>"
 	// after a key was enrolled for a service that already had one (spec/tunnel.md §11, §5; the M2 plan's
-	// confirmed spec conflict, internal/tunnelgate).
+	// confirmed spec conflict, internal/tunnelgate), "mcp:<tenant_id>/<service>/<replica_id>" after a node of an
+	// MCP service connected to or disconnected from that replica (the service's era, spec/relay.md §11.12, D177).
 	ChannelTunnel Channel = "kontra_tunnel"
 )
 

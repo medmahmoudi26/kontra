@@ -35,7 +35,9 @@ import (
 //     upstream_task_id), so the call is never sent afresh after it: a tunnel lost later fails the task tunnel_lost.
 //
 // The attempt's upstream_session column, which names a 2025-11-25 dispatch's own session, holds a modern dispatch's
-// upstream task id (there is no session): a re-attach (D42) polls it again, and forward_cancel cancels it.
+// upstream task id (there is no session): a re-attach (D42) polls it again, and forward_cancel cancels it. A
+// CreateTaskResult that is the attempt's first upstream id is recorded with it in one statement
+// (store.Log.SetFirstUpstreamTask), so an attempt whose first id has no upstream_session is a multi round-trip call's.
 
 // maxRounds bounds the multi round-trip rounds of one call: an upstream that asks for ever fails the task
 // upstream_error.
@@ -85,8 +87,19 @@ func (r *modernRun) run(ctx context.Context) lifecycle.DispatchResult {
 	case r.attempt.UpstreamSession != "":
 		r.upTask = r.attempt.UpstreamSession
 		r.log.Info("re-attaching to the upstream task (2026-07-28)")
-	case r.firstID:
+	case r.firstID && r.round > 0:
 		r.log.Info("re-attaching to a multi round-trip call (2026-07-28)", "round", r.round)
+	case r.firstID:
+		// SPEC-CONFLICT (relay §6.4 and D42, a lost dispatch of a direct backend re-attaches; §11.12 and D178, the
+		// first InputRequiredResult is the first upstream id and the call is never sent afresh after it): a dispatch
+		// lost after it recorded a multi round-trip call's first id and before it logged that round's input requests
+		// (or after a round that listed none, only a requestState the log does not keep) leaves nothing to re-attach
+		// to: no upstream task, and no round whose answers would send the call again. Neither rule says what then.
+		// The closest faithful behaviour: the call is not sent afresh, and the task fails upstream_error at once
+		// rather than wait for its deadline.
+		r.log.Warn("re-attaching to a multi round-trip call whose round was never logged; the call is not sent again")
+		res, _ := r.fail(ctx, store.ReasonUpstreamError, "")
+		return res
 	default:
 		if res, done := r.call(ctx, nil); done {
 			return res
@@ -221,13 +234,20 @@ func (r *modernRun) call(ctx context.Context, answers json.RawMessage) (lifecycl
 	return r.finishModernResult(ctx, m.Result)
 }
 
-// recordFirst records the attempt's first upstream id (a CreateTaskResult's taskId, or the first InputRequiredResult's
-// first key) under the fence and signals kontra.dispatched (§4, §14.1, D178).
-func (r *modernRun) recordFirst(ctx context.Context, id string) bool {
+// recordFirst records the attempt's first upstream id (a CreateTaskResult's taskId, with upTask the upstream task the
+// attempt follows in the same statement; or the first InputRequiredResult's first key, upTask empty) under the fence
+// and signals kontra.dispatched (§4, §14.1, D178).
+func (r *modernRun) recordFirst(ctx context.Context, id, upTask string) bool {
 	if r.firstID {
 		return true
 	}
-	if err := r.d.Log.SetFirstUpstreamID(ctx, r.fence, id, ""); err != nil {
+	var err error
+	if upTask != "" {
+		err = r.d.Log.SetFirstUpstreamTask(ctx, r.fence, id, upTask)
+	} else {
+		err = r.d.Log.SetFirstUpstreamID(ctx, r.fence, id, "")
+	}
+	if err != nil {
 		r.log.Warn("the first upstream id was not recorded", "error", err)
 		return false
 	}
@@ -250,10 +270,12 @@ func (r *modernRun) created(ctx context.Context, result json.RawMessage) (lifecy
 		r.log.Warn("the upstream's CreateTaskResult names no task or no status it defines")
 		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
-	if !r.recordFirst(ctx, up) {
-		return lifecycle.DispatchResult{}, true
-	}
-	if err := r.d.Log.SetUpstreamSession(ctx, r.fence, up); err != nil {
+	if r.firstID {
+		// After a multi round-trip call's rounds: the attempt has its first id, and now follows this task.
+		if err := r.d.Log.SetUpstreamSession(ctx, r.fence, up); err != nil {
+			return lifecycle.DispatchResult{}, true
+		}
+	} else if !r.recordFirst(ctx, up, up) {
 		return lifecycle.DispatchResult{}, true
 	}
 	r.upTask, r.round, r.roundSeqs, r.state = up, 0, map[int64]string{}, nil
@@ -308,7 +330,7 @@ func (r *modernRun) inputRound(ctx context.Context, result json.RawMessage) (lif
 	if len(keys) > 0 {
 		first = keys[0]
 	}
-	if !r.recordFirst(ctx, first) {
+	if !r.recordFirst(ctx, first, "") {
 		return lifecycle.DispatchResult{}, true
 	}
 	round := r.round + 1

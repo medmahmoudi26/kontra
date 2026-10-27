@@ -308,4 +308,32 @@ func TestClassify(t *testing.T) {
 			t.Errorf("%s 2026-07-28: %+v", method, ref)
 		}
 	}
+	// A repeated MCP-Protocol-Version is read once, as its combined value (RFC 9110 §5.3), which is no version: rule 4
+	// for a POST (initialize aside, rule 1), §11.1's -32022 for GET and DELETE on a session, 405 without one (D172).
+	repeated := func(method, sid string, vs ...string) *http.Request {
+		r := req(method, "", sid)
+		for _, v := range vs {
+			r.Header.Add(HeaderProtocolVersion, v)
+		}
+		return r
+	}
+	for _, vs := range [][]string{{V20260728, V20251125}, {V20251125, V20260728}, {V20260728, V20260728}, {V20251125, V20251125}} {
+		for _, sid := range []string{"", "s"} {
+			_, ref = Classify(repeated("POST", sid, vs...), msg("tools/call"))
+			e.ID, e.Error.Code, e.Error.Data.Requested, e.Error.Data.Supported = nil, 0, "", nil
+			if ref == nil || ref.Status != 400 || json.Unmarshal(ref.Body, &e) != nil || e.Error.Code != CodeUnsupportedVersion ||
+				e.Error.Data.Requested != strings.Join(vs, ", ") || string(e.ID) != "7" {
+				t.Errorf("POST with MCP-Protocol-Version %q, session %q: %+v", vs, sid, ref)
+			}
+		}
+		if era, ref := Classify(repeated("POST", "", vs...), msg("initialize")); ref != nil || era != EraLegacy {
+			t.Errorf("initialize with MCP-Protocol-Version %q: %v %+v", vs, era, ref)
+		}
+		if _, ref = Classify(repeated("GET", "s", vs...), nil); ref == nil || ref.Status != 400 {
+			t.Errorf("GET on a session with MCP-Protocol-Version %q: %+v", vs, ref)
+		}
+		if _, ref = Classify(repeated("GET", "", vs...), nil); ref == nil || ref.Status != 405 {
+			t.Errorf("GET without a session with MCP-Protocol-Version %q: %+v", vs, ref)
+		}
+	}
 }

@@ -30,8 +30,10 @@ import (
 //   - the answer to a client's request never sets it: a 400, 404 or 405 that an upstream returns to a client's modern
 //     request is relayed to that client and changes nothing for other principals.
 //
-// What it learned is kept RefreshTools, and dropped when a node of the service connects or disconnects on this
-// replica (DropEra, the tunnel registry's hook) or the service's row changes (Forget).
+// What it learned is kept RefreshTools, and dropped when a node of the service connects or disconnects on any replica
+// (DropEra: the tunnel registry's hook, which the replica holding the node runs and tells every other one by NOTIFY
+// kontra_tunnel, since through the peer hop each replica uses the nodes another one holds), when the replica's LISTEN
+// connection comes back (DropEras: a notice may have been lost) or when the service's row changes (Forget).
 
 // ProbeTimeout bounds the gate's own server/discover (an answer that does not come within it leaves the era
 // unknown).
@@ -153,11 +155,31 @@ func (c *ToolsCache) Capabilities(key ToolsKey) (json.RawMessage, bool) {
 	return st.caps, true
 }
 
-// DropEra forgets what the gate learned of a service's upstream (a node of it connected or disconnected on this
+// DropEra forgets what the gate learned of a service's upstream (a node of it connected or disconnected on any
 // replica, D177); a probe in flight installs nothing.
 func (c *ToolsCache) DropEra(key ToolsKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.dropEra(key)
+}
+
+// DropEras forgets every service's era (the replica's LISTEN connection came back: a node's change may have gone
+// unannounced while it was down).
+func (c *ToolsCache) DropEras() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key := range c.eras {
+		c.dropEra(key)
+	}
+	for key := range c.retryAt {
+		c.dropEra(key)
+	}
+	for key := range c.probes {
+		c.dropEra(key)
+	}
+}
+
+func (c *ToolsCache) dropEra(key ToolsKey) {
 	delete(c.eras, key)
 	delete(c.retryAt, key)
 	c.eraGen[key]++

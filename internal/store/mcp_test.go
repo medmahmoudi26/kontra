@@ -326,6 +326,74 @@ func TestMarkAnswerDelivered(t *testing.T) {
 	}
 }
 
+// SetFirstUpstreamTask records a 2026-07-28 dispatch's first upstream id and the upstream task it follows in one
+// statement (M3 review of WP-07): both or neither; the same id again is a no-op (writing a session the attempt lacks),
+// another id is ErrUpstreamIDMismatch, a fenced dispatch writes nothing.
+func TestSetFirstUpstreamTask(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	id, _ := e.mcpTask(StateSubmitted, "")
+	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendDirect}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := e.log.BeginDispatch(ctx, id, 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamTask(ctx, f, "up-1", ""); err == nil {
+		t.Fatal("an empty upstream session was accepted")
+	}
+	if err := e.log.SetFirstUpstreamTask(ctx, f, "up-1", "up-1"); err != nil {
+		t.Fatal(err)
+	}
+	a, err := e.log.GetAttempt(ctx, id, 1)
+	if err != nil || a.UpstreamTaskID != "up-1" || a.UpstreamSession != "up-1" || a.FirstUpstreamIDAt == nil || a.UpstreamContextID != "" {
+		t.Fatalf("the attempt: %+v %v", a, err)
+	}
+	if err := e.log.SetFirstUpstreamTask(ctx, f, "up-1", "up-1"); err != nil {
+		t.Errorf("the same id again: %v", err)
+	}
+	if err := e.log.SetFirstUpstreamTask(ctx, f, "up-2", "up-2"); !errors.Is(err, ErrUpstreamIDMismatch) {
+		t.Errorf("another id: %v", err)
+	}
+	// A first id recorded without its session (SetFirstUpstreamID): the same id with a session writes it.
+	id2, _ := e.mcpTask(StateSubmitted, "")
+	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id2, N: 1, Backend: BackendDirect}); err != nil {
+		t.Fatal(err)
+	}
+	f2, err := e.log.BeginDispatch(ctx, id2, 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamID(ctx, f2, "up-3", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamTask(ctx, f2, "up-3", "up-3"); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := e.log.GetAttempt(ctx, id2, 1); a.UpstreamSession != "up-3" {
+		t.Fatalf("the session was not written: %+v", a)
+	}
+	// A fenced dispatch writes neither.
+	id3, _ := e.mcpTask(StateSubmitted, "")
+	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id3, N: 1, Backend: BackendDirect}); err != nil {
+		t.Fatal(err)
+	}
+	f3, err := e.log.BeginDispatch(ctx, id3, 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.log.BeginDispatch(ctx, id3, 1, "r2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.log.SetFirstUpstreamTask(ctx, f3, "up-4", "up-4"); !errors.Is(err, ErrFenced) || !f3.Fenced() {
+		t.Fatalf("a fenced dispatch: %v", err)
+	}
+	if a, _ := e.log.GetAttempt(ctx, id3, 1); a.UpstreamTaskID != "" || a.UpstreamSession != "" || a.FirstUpstreamIDAt != nil {
+		t.Fatalf("a fenced dispatch wrote %+v", a)
+	}
+}
+
 // ListMCP lists the buyer's own MCP tasks of the service, newest first, with gate-minted cursors.
 func TestListMCP(t *testing.T) {
 	e := newEnv(t)

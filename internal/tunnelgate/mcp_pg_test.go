@@ -281,7 +281,9 @@ func TestSupersedeIsNotHeldByMCPRows(t *testing.T) {
 }
 
 // OnMCPChange runs once per MCP service of a session when the session becomes a candidate and again when it is
-// removed (the MCP relay drops the services' eras then, relay.md §11.12, D177).
+// removed (the MCP relay drops the services' eras then, relay.md §11.12, D177), on the replica holding it and, by
+// NOTIFY kontra_tunnel, on every other one (through the peer hop each uses the nodes another holds); the holder does
+// not run them a second time for its own notice.
 func TestOnMCPChange(t *testing.T) {
 	e := newTunnelEnv(t)
 	ctx := context.Background()
@@ -292,6 +294,7 @@ func TestOnMCPChange(t *testing.T) {
 		}
 	}
 	r := e.replica("a", replicaOpts{})
+	other := e.replica("b", replicaOpts{})
 	var mu sync.Mutex
 	seen := map[string]int{}
 	r.reg.OnMCPChange(func(tenantID uuid.UUID, service string) {
@@ -299,6 +302,13 @@ func TestOnMCPChange(t *testing.T) {
 		defer mu.Unlock()
 		if tenantID == e.team {
 			seen[service]++
+		}
+	})
+	other.reg.OnMCPChange(func(tenantID uuid.UUID, service string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if tenantID == e.team {
+			seen["b:"+service]++
 		}
 	})
 	count := func(s string) int {
@@ -326,6 +336,12 @@ func TestOnMCPChange(t *testing.T) {
 		return ok
 	})
 	eventually(t, 5*time.Second, "the hooks ran for the connection", func() bool { return count("fs") == 1 && count("web") == 1 })
+	eventually(t, 5*time.Second, "the other replica's hooks ran for the connection", func() bool { return count("b:fs") == 1 && count("b:web") == 1 })
 	_ = s.Close("test")
 	eventually(t, 5*time.Second, "the hooks ran for the close", func() bool { return count("fs") == 2 && count("web") == 2 })
+	eventually(t, 5*time.Second, "the other replica's hooks ran for the close", func() bool { return count("b:fs") == 2 && count("b:web") == 2 })
+	time.Sleep(300 * time.Millisecond) // the holder's own notices have come back by now
+	if a, b, c, d := count("fs"), count("web"), count("b:fs"), count("b:web"); a != 2 || b != 2 || c != 2 || d != 2 {
+		t.Fatalf("hooks ran fs %d, web %d on the holder and fs %d, web %d on the other replica", a, b, c, d)
+	}
 }

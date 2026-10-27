@@ -113,6 +113,18 @@ func TestCheckModern(t *testing.T) {
 	if ref := CheckModern(h, modernMsg(t, call(`"echo"`, okMeta))); ref == nil || ref.Status != 400 {
 		t.Errorf("two Mcp-Name headers: %+v", ref)
 	}
+	// So are two MCP-Protocol-Version headers (D172: one reading), whichever comes first and even when both match.
+	for _, second := range []string{V20251125, V20260728} {
+		h := modernHeader("tools/call", "echo")
+		h.Add(HeaderProtocolVersion, second)
+		ref := CheckModern(h, modernMsg(t, call(`"echo"`, okMeta)))
+		var e struct {
+			Error Error `json:"error"`
+		}
+		if ref == nil || ref.Status != 400 || json.Unmarshal(ref.Body, &e) != nil || e.Error.Code != CodeHeaderMismatch {
+			t.Errorf("MCP-Protocol-Version 2026-07-28 and %s: %+v", second, ref)
+		}
+	}
 }
 
 // The Base64 sentinel (2026-07-28 Streamable HTTP, "Value Encoding"): the spec's examples, and what is malformed.

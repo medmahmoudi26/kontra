@@ -91,7 +91,8 @@ func NameSource(method string) (string, bool) {
 //   - params._meta's io.modelcontextprotocol/protocolVersion (a string) and io.modelcontextprotocol/clientCapabilities
 //     (an object) must be present: 400 with -32602 otherwise ("Per-request protocol fields");
 //   - a protocolVersion other than MCP-Protocol-Version is 400 with -32020 HeaderMismatch ("Protocol Version
-//     Header");
+//     Header"), as is an MCP-Protocol-Version sent more than once (Classify refuses that first; D172: the gate and the
+//     upstream read one value);
 //   - Mcp-Method must be present once and equal method, and for a method NameSource names, Mcp-Name must be present
 //     once and equal that member after DecodeHeaderValue: a missing, repeated, malformed or different one is 400 with
 //     -32020, before policy (§11.3: policy reads the body only). A body without that member is 400 with -32602.
@@ -115,7 +116,7 @@ func CheckModern(h http.Header, m *Message) *Refusal {
 		return refuse(http.StatusBadRequest, m.ID, CodeInvalidParams, "Missing required _meta field: "+MetaClientCapabilities, nil)
 	}
 	pv, _ := stringOf(meta, MetaProtocolVersion)
-	if pv != h.Get(HeaderProtocolVersion) {
+	if vals := h.Values(HeaderProtocolVersion); len(vals) != 1 || pv != vals[0] {
 		return refuse(http.StatusBadRequest, m.ID, CodeHeaderMismatch,
 			"Header mismatch: MCP-Protocol-Version does not match _meta's protocolVersion", nil)
 	}

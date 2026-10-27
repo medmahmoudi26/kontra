@@ -721,6 +721,11 @@ func (h *Handler) toolsCall(rq *request, t target) {
 // "priced tasks need tasks: durable"; a hook that fails or answers nothing usable is 503 with -32603 "admission
 // unavailable" (it fails closed).
 func (h *Handler) admit(rq *request, op hooks.Operation, tool string) *mcpwire.Refusal {
+	return h.admitCtx(rq.ctx(), rq, op, tool)
+}
+
+// admitCtx is admit with the decision asked on ctx (a shared decision runs on a context of its own, virtualAdmit).
+func (h *Handler) admitCtx(ctx context.Context, rq *request, op hooks.Operation, tool string) *mcpwire.Refusal {
 	if !slices.Contains(h.deps.AdmissionOps, op) {
 		return nil
 	}
@@ -742,7 +747,7 @@ func (h *Handler) admit(rq *request, op hooks.Operation, tool string) *mcpwire.R
 		}
 		ar.TaskID = id.String()
 	}
-	d, err := h.deps.Admission.Admit(rq.ctx(), ar)
+	d, err := h.deps.Admission.Admit(ctx, ar)
 	if err != nil {
 		h.log.Warn("mcp: admission failed; refused (it fails closed)", "service", ref.Name, "operation", op, "error", err)
 		return refusal(http.StatusServiceUnavailable, rq.msg.ID, mcpwire.CodeInternal, "admission unavailable")

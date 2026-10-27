@@ -56,6 +56,7 @@ type Session struct {
 	why        string            // why it closed, for the streams refused after
 	registered bool              // its tunnels row is in (Add committed)
 	rowGone    bool              // its tunnels row was deleted by this replica
+	mcpGone    bool              // its removal ran the OnMCPChange hooks (once: a session is removed more than once)
 	toldDrain  bool
 	exchanges  map[*exchange]struct{}
 	// Gate-opened streams the gate has closed and the node has not (exchange.linger), and the watch that

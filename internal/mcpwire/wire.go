@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 
 	"kontra.sh/kontra/internal/strictjson"
 )
@@ -499,13 +500,17 @@ var LegacyNoSessionBody = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32
 // stream and no session to delete: such a GET or DELETE is one without a session, 405 (rule 5), as a 2026-07-28
 // server answers a GET.
 //
+// MCP-Protocol-Version is read once, as its field value: a header sent more than once is its lines' values joined
+// with ", " (RFC 9110 §5.3), which names no version, so such a request is rule 4's -32022 (and a GET or DELETE
+// without a session 405), never classified by one of its lines while the upstream reads another (D172: one reading).
+//
 // Built by M3 WP-04, which serves the legacy era and needs rules 1, 3, 4 and 5; WP-07 serves what rule 2 sends
 // it.
 func Classify(r *http.Request, m *Message) (Era, *Refusal) {
 	sid := r.Header.Get(HeaderSessionID)
 	if r.Method != http.MethodPost {
 		// Rule 5: GET and DELETE are legacy only.
-		switch v := r.Header.Get(HeaderProtocolVersion); v {
+		switch v := fieldValue(r.Header, HeaderProtocolVersion); v {
 		case V20251125, V20250618, "":
 			if sid == "" {
 				return 0, &Refusal{Status: http.StatusMethodNotAllowed}
@@ -523,7 +528,7 @@ func Classify(r *http.Request, m *Message) (Era, *Refusal) {
 	if m != nil && m.Method == MethodInitialize {
 		return EraLegacy, nil // rule 1, whatever the headers say
 	}
-	switch v := r.Header.Get(HeaderProtocolVersion); v {
+	switch v := fieldValue(r.Header, HeaderProtocolVersion); v {
 	case V20260728:
 		return EraModern, nil // rule 2: its Mcp-Session-Id and Last-Event-ID are never read
 	case V20251125, V20250618, "":
@@ -538,6 +543,12 @@ func Classify(r *http.Request, m *Message) (Era, *Refusal) {
 		}
 		return 0, unsupportedVersion(id, v) // rule 4
 	}
+}
+
+// fieldValue is the field value of the header key: its lines' values joined with ", " (RFC 9110 §5.3), "" when it
+// is absent.
+func fieldValue(h http.Header, key string) string {
+	return strings.Join(h.Values(key), ", ")
 }
 
 // unsupportedVersion is rule 4's refusal of MCP-Protocol-Version v: 400 with -32022 naming the supported versions

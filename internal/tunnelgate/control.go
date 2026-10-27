@@ -8,18 +8,48 @@ import (
 
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// sessionPrefix starts NOTIFY kontra_tunnel's (pg.ChannelTunnel) payload for a superseded session; the
-// enrollment's is enroll.EnrolledPayload. Both are gate-internal: see Registry.
-const sessionPrefix = "session:"
+// sessionPrefix starts NOTIFY kontra_tunnel's (pg.ChannelTunnel) payload for a superseded session, mcpPrefix
+// its payload for a change in the nodes serving an MCP service; the enrollment's is enroll.EnrolledPayload. All
+// are gate-internal: see Registry.
+const (
+	sessionPrefix = "session:"
+	mcpPrefix     = "mcp:"
+)
 
 // SessionPayload is NOTIFY kontra_tunnel's payload for a superseded session, "session:<session_id>": the
 // replica holding it closes it (its row is already deleted).
 func SessionPayload(id uuid.UUID) string { return sessionPrefix + id.String() }
+
+// MCPChangedPayload is NOTIFY kontra_tunnel's payload for a session serving an MCP service that became a candidate
+// on replica, or was removed there: "mcp:<tenant_id>/<service>/<replica_id>". Every other replica runs its
+// OnMCPChange callbacks for the service (the MCP relay drops the service's era, relay.md §11.12, D177: through the
+// peer hop every replica uses the nodes another one holds); the sending replica ran them already.
+func MCPChangedPayload(tenantID uuid.UUID, service, replica string) string {
+	return mcpPrefix + tenantID.String() + "/" + service + "/" + replica
+}
+
+// parseMCPChanged reads an MCPChangedPayload; ok is false for anything else, a malformed one included.
+func parseMCPChanged(payload string) (tenantID uuid.UUID, service, replica string, ok bool) {
+	rest, ok := strings.CutPrefix(payload, mcpPrefix)
+	if !ok {
+		return uuid.Nil, "", "", false
+	}
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) != 3 || !config.NameRE.MatchString(parts[1]) || parts[2] == "" {
+		return uuid.Nil, "", "", false
+	}
+	tid, err := uuid.Parse(parts[0])
+	if err != nil {
+		return uuid.Nil, "", "", false
+	}
+	return tid, parts[1], parts[2], true
+}
 
 // Revoked applies one revocation (enroll.Revocations.Subscribe), §12. It runs on the goroutine that learned
 // the revocation and does not wait on the network or the database: what does is done on goroutines of its
@@ -152,8 +182,10 @@ func (r *Registry) Enrolled(b enroll.Binding) {
 // the replica whose handshake superseded a session held here, closes it (its row is gone already);
 // 'enrolled:<key_id>/<tenant_id>/<service>' (enroll.EnrolledPayload), sent by the admission that committed
 // the binding, is told to this replica's sessions hosting the service (§5), on every replica, the admitting
-// one included. Anything else is ignored. It never waits on the database (pg.Listener runs every channel's
-// callbacks on one goroutine).
+// one included; 'mcp:<tenant_id>/<service>/<replica_id>' (MCPChangedPayload), sent by a replica where a node of
+// the MCP service connected or disconnected, runs the OnMCPChange callbacks here, unless this replica sent it (it
+// ran them when the change happened). Anything else is ignored. It never waits on the database (pg.Listener runs
+// every channel's callbacks on one goroutine).
 //
 // SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): see Registry; this channel is not tunnel wire
 // protocol.
@@ -169,6 +201,10 @@ func (r *Registry) Notify(payload string) {
 			s.rowGone = true // the superseding transaction deleted it
 			s.mu.Unlock()
 			r.goAsync(func() { _ = s.Close("superseded by a newer session of its key on another replica (§11)") })
+		}
+	case strings.HasPrefix(payload, mcpPrefix):
+		if tenantID, service, from, ok := parseMCPChanged(payload); ok && from != r.cfg.ReplicaID {
+			r.runMCP(tenantID, []string{service})
 		}
 	default:
 		if b, ok := enroll.ParseEnrolledPayload(payload); ok {

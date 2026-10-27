@@ -38,6 +38,10 @@ const modernInlineWait = 2 * time.Second
 // virtual session is not open yet (the requests in flight before the first answer opens it).
 const admitHold = time.Minute
 
+// admitFlightTimeout bounds one shared Admission session decision, which runs on a context of its own (the request
+// that started it may leave); the hook's own timeout (hooks.admission.timeout, 5 s by default) ends it first.
+const admitFlightTimeout = 30 * time.Second
+
 // legacyRefusal is §11.12 rule 3's answer, given at the gate to a modern request for a sealed service (D162) or one
 // whose upstream is legacy-only (D177): what a legacy server answers, so a dual-era client falls back to initialize.
 var legacyRefusal = &mcpwire.Refusal{Status: http.StatusBadRequest, Body: mcpwire.LegacyNoSessionBody}
@@ -46,7 +50,8 @@ var legacyRefusal = &mcpwire.Refusal{Status: http.StatusBadRequest, Body: mcpwir
 // classification. A sealed service (never probed, D162) and one the gate knows to be legacy-only (D177) answer every
 // modern request with rule 3's 400, as a legacy server does, whatever it carries; then CheckModern's refusals (a
 // response 400, a notification 202, the _meta and header checks); the tasks extension's client side, from Postgres
-// on any replica, before anything that needs the upstream; subscriptions/listen's -32021; then the service's era
+// on any replica, before anything that needs the upstream (touching the principal's virtual session, a request like
+// any other); subscriptions/listen's -32021; then the service's era
 // (the gate's own probe when it is not known; a legacy-only one's 400 at the gate), Admission session for a
 // principal with no open virtual session (D160, D177), and the method.
 func (h *Handler) modern(rq *request) {
@@ -69,6 +74,7 @@ func (h *Handler) modern(rq *request) {
 		writeError(rq.w, http.StatusNotFound, m.ID, mcpwire.CodeMethodNotFound, "Method not found", nil)
 		return
 	case "tasks/get", "tasks/update", "tasks/cancel":
+		h.touchVirtual(rq)
 		h.modernTaskRequest(rq)
 		return
 	case mcpwire.MethodListen:
@@ -110,18 +116,45 @@ type vkey struct {
 	principal string
 }
 
-// vflight is one Admission session decision for a vkey on this replica (a singleflight): the first request asks,
-// the others in flight wait for its answer, and an allow is reused for admitHold while no virtual session is open.
+// vflight is one Admission session decision for a vkey on this replica (a singleflight): the first request starts
+// it, every request of the principal in flight (the first included) waits for its answer, and an allow is reused for
+// admitHold while no virtual session is open. ref and at are set before done closes.
 type vflight struct {
 	done chan struct{}
 	ref  *mcpwire.Refusal // nil: allowed
 	at   time.Time
 }
 
+// reusable reports whether f answers a request at now: in flight, or an allow younger than admitHold.
+func (f *vflight) reusable(now time.Time) bool {
+	select {
+	case <-f.done:
+		return f.ref == nil && now.Sub(f.at) < admitHold
+	default:
+		return true
+	}
+}
+
 // virtuals are the replica's Admission session flights.
 type virtuals struct {
 	mu      sync.Mutex
 	flights map[vkey]*vflight
+	swept   time.Time // the last sweep
+}
+
+// sweep drops the flights that answer nobody any more (refused, or allowed longer than admitHold ago: a principal
+// whose requests never got a modern answer, so that openVirtual never dropped its flight), at most once per
+// admitHold; v.mu is held.
+func (v *virtuals) sweep(now time.Time) {
+	if now.Sub(v.swept) < admitHold {
+		return
+	}
+	v.swept = now
+	for k, f := range v.flights {
+		if !f.reusable(now) {
+			delete(v.flights, k)
+		}
+	}
 }
 
 // virtualAdmit is what a modern request needs before it is forwarded (§11.12 "per_session", D177): the principal's
@@ -129,6 +162,10 @@ type virtuals struct {
 // decision when hooks.admission.operations lists session (none consults the built-in, which allows), one call per
 // principal and service at a time on this replica. A refusal is the request's answer; the virtual session itself is
 // opened once the upstream answered with a modern result (openVirtual).
+//
+// The shared decision runs on a context of its own, bounded by admitFlightTimeout (as the era probe does): the
+// request that started it leaving does not end it, so no other request of the principal is refused for it. A request
+// whose own client leaves while it waits stops waiting.
 func (h *Handler) virtualAdmit(rq *request) *mcpwire.Refusal {
 	s, err := h.deps.Sessions.OpenVirtual(rq.ctx(), rq.svc.Ref.TenantID, rq.svc.Ref.Name, rq.p.ID, h.deps.now())
 	switch {
@@ -142,35 +179,17 @@ func (h *Handler) virtualAdmit(rq *request) *mcpwire.Refusal {
 		return nil
 	}
 	k := vkey{rq.svc.Ref.TenantID, rq.svc.Ref.Name, rq.p.ID}
+	now := h.deps.now()
 	h.virtuals.mu.Lock()
 	if h.virtuals.flights == nil {
 		h.virtuals.flights = map[vkey]*vflight{}
 	}
 	f := h.virtuals.flights[k]
-	reuse := false
-	if f != nil {
-		select {
-		case <-f.done:
-			reuse = f.ref == nil && h.deps.now().Sub(f.at) < admitHold
-		default:
-			reuse = true // in flight
-		}
-	}
-	if !reuse {
+	if f == nil || !f.reusable(now) {
+		h.virtuals.sweep(now)
 		f = &vflight{done: make(chan struct{})}
 		h.virtuals.flights[k] = f
-		h.virtuals.mu.Unlock()
-		f.ref = h.admit(rq, hooks.OpSession, "")
-		f.at = h.deps.now()
-		close(f.done)
-		if f.ref != nil {
-			h.virtuals.mu.Lock()
-			if h.virtuals.flights[k] == f {
-				delete(h.virtuals.flights, k)
-			}
-			h.virtuals.mu.Unlock()
-		}
-		return f.ref
+		go h.decideSession(context.WithoutCancel(rq.ctx()), rq, k, f)
 	}
 	h.virtuals.mu.Unlock()
 	select {
@@ -179,6 +198,34 @@ func (h *Handler) virtualAdmit(rq *request) *mcpwire.Refusal {
 		return refusal(http.StatusServiceUnavailable, rq.msg.ID, mcpwire.CodeInternal, "admission unavailable")
 	}
 	return withID(f.ref, rq.msg.ID)
+}
+
+// decideSession is flight f's Admission session decision for the request that started it, on detached (its context
+// without its cancellation) bounded by admitFlightTimeout; a refusal leaves the flights at once (the next request
+// asks again).
+func (h *Handler) decideSession(detached context.Context, rq *request, k vkey, f *vflight) {
+	ctx, cancel := context.WithTimeout(detached, admitFlightTimeout)
+	defer cancel()
+	ref := h.admitCtx(ctx, rq, hooks.OpSession, "")
+	h.virtuals.mu.Lock()
+	f.ref, f.at = ref, h.deps.now()
+	if ref != nil && h.virtuals.flights[k] == f {
+		delete(h.virtuals.flights, k)
+	}
+	h.virtuals.mu.Unlock()
+	close(f.done)
+}
+
+// touchVirtual is what a request served without virtualAdmit (tasks/get, tasks/update, tasks/cancel: from Postgres,
+// whatever the upstream) does to the principal's virtual session: it is a request, so the session's last_seen_at is
+// written (at most once a minute), and a client polling its gate-owned task keeps its session from closing idle
+// (§11.12 "per_session": closed idle after session_idle_s without a request). A principal with none opens none here;
+// a session that cannot be read is logged and the request served all the same.
+func (h *Handler) touchVirtual(rq *request) {
+	_, err := h.deps.Sessions.OpenVirtual(rq.ctx(), rq.svc.Ref.TenantID, rq.svc.Ref.Name, rq.p.ID, h.deps.now())
+	if err != nil && !errors.Is(err, ErrNoSession) && rq.ctx().Err() == nil {
+		h.log.Warn("mcp: a virtual session was not touched", "service", rq.svc.Ref.Name, "error", err)
+	}
 }
 
 // withID is a shared refusal answering another request: its JSON-RPC id replaced.
@@ -231,7 +278,8 @@ func (h *Handler) openVirtual(rq *request) {
 // modernHeaders are the client request headers forwarded with a modern request (§11.12): Accept, Content-Type,
 // MCP-Protocol-Version, Mcp-Method, Mcp-Name for a method whose name CheckModern checked, and every Mcp-Param-* (the
 // upstream checks them against the arguments it declared them for). Never Mcp-Session-Id, Last-Event-ID or
-// Authorization.
+// Authorization. MCP-Protocol-Version, Mcp-Method and Mcp-Name are forwarded as the one value Classify and
+// CheckModern read (each was refused when sent more than once), so the upstream reads what the gate checked (D172).
 //
 // SPEC-CONFLICT (relay §11.12: "The gate forwards MCP-Protocol-Version, Mcp-Method, Mcp-Name and the Mcp-Param-*
 // headers"): 2026-07-28 defines Mcp-Name for tools/call, prompts/get and resources/read (and the tasks extension for
@@ -240,13 +288,15 @@ func (h *Handler) openVirtual(rq *request) {
 // HTTP, "Server Validation"). The closest faithful behaviour: an Mcp-Name on such a method is not forwarded.
 func modernHeaders(r *http.Request, m *mcpwire.Message) http.Header {
 	h := http.Header{}
-	for _, k := range []string{"Accept", "Content-Type", mcpwire.HeaderProtocolVersion, mcpwire.HeaderMethod} {
+	for _, k := range []string{"Accept", "Content-Type"} {
 		if v := r.Header.Values(k); len(v) > 0 {
 			h[http.CanonicalHeaderKey(k)] = append([]string(nil), v...)
 		}
 	}
+	h.Set(mcpwire.HeaderProtocolVersion, mcpwire.V20260728) // rule 2: the request's one MCP-Protocol-Version
+	h.Set(mcpwire.HeaderMethod, m.Method)                   // CheckModern: its one Mcp-Method, equal to method
 	if _, ok := mcpwire.NameSource(m.Method); ok {
-		h[http.CanonicalHeaderKey(mcpwire.HeaderName)] = append([]string(nil), r.Header.Values(mcpwire.HeaderName)...)
+		h.Set(mcpwire.HeaderName, r.Header.Get(mcpwire.HeaderName)) // CheckModern: its one Mcp-Name, as the client encoded it
 	}
 	for k, v := range paramHeaders(r.Header) {
 		h[k] = v

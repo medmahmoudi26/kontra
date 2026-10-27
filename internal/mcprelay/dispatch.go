@@ -529,6 +529,8 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 	if modern && attempt.UpstreamSession == "" {
 		// A multi round-trip call's first InputRequiredResult is the attempt's first upstream id (D178), but the
 		// upstream keeps no task for it: there is nothing to cancel upstream, and the workflow writes canceled (D57).
+		// (A CreateTaskResult that is the first id is recorded with upstream_session in one statement, so a first id
+		// without one is never an upstream task's.)
 		log.Info("forward_cancel: the attempt has no upstream task (a multi round-trip call); nothing is sent")
 		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelUnsupported}, nil
 	}

@@ -227,6 +227,27 @@ func TestNotifyPayloads(t *testing.T) {
 		t.Fatalf("Allows after a supersede: %v", err)
 	}
 	eventually(t, 5*time.Second, "the registry forgets the superseded session", func() bool { return r.Count() == 0 })
+
+	// A change in an MCP service's nodes on another replica (MCPChangedPayload) runs the OnMCPChange hooks here, each
+	// time it arrives; this replica's own, and anything malformed, runs nothing.
+	var changes []string
+	r.OnMCPChange(func(tenantID uuid.UUID, service string) { changes = append(changes, tenantID.String()+"/"+service) })
+	if got := MCPChangedPayload(testTenantID, "fs", "r-other"); got != "mcp:"+testTenantID.String()+"/fs/r-other" {
+		t.Fatalf("MCPChangedPayload = %s", got)
+	}
+	for _, p := range []string{"mcp:", "mcp:x/fs/r-other", "mcp:" + testTenantID.String() + "/fs", "mcp:" + testTenantID.String() + "/fs/",
+		"mcp:" + testTenantID.String() + "/Fs/r-other", "mcp:" + testTenantID.String() + "//r-other", MCPChangedPayload(testTenantID, "fs", "r-test")} {
+		r.Notify(p)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("hooks ran for %q", changes)
+	}
+	for range 2 {
+		r.Notify(MCPChangedPayload(testTenantID, "fs", "r-other"))
+	}
+	if want := testTenantID.String() + "/fs"; len(changes) != 2 || changes[0] != want || changes[1] != want {
+		t.Fatalf("hooks ran for %q", changes)
+	}
 }
 
 // Revoked: a binding drops the service and tells the node {"t":"revoked","service"}; a key closes its

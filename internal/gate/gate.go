@@ -516,12 +516,17 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 		return err
 	}
 	r.tools = mcprelay.NewToolsCache()
-	// A node of an MCP service connecting or disconnecting on this replica drops the service's era (§11.12, D177).
+	// A node of an MCP service connecting or disconnecting on any replica drops the service's era (§11.12, D177): the
+	// registry runs the hook for its own sessions and for the other replicas' (NOTIFY kontra_tunnel 'mcp:…'); a LISTEN
+	// reconnect, which may have lost such a notice, drops every era.
 	if r.tunnels != nil {
 		tools := r.tools
 		r.tunnels.OnMCPChange(func(tenantID uuid.UUID, service string) {
 			tools.DropEra(mcprelay.ToolsKey{TenantID: tenantID, Service: service})
 		})
+	}
+	if r.listener != nil {
+		r.listener.OnReconnect(r.tools.DropEras)
 	}
 	var ops []hooks.Operation
 	if a := cfg.Hooks.Admission; a != nil {

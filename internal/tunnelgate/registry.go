@@ -80,9 +80,11 @@ type RegistryConfig struct {
 // SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): tunnel.md names no way for one replica to act
 // on a session another replica holds (a supersede, an "enrolled" notice): kontra_revoke's payloads cover keys,
 // bindings and API keys only. The closest faithful behaviour is a gate-internal NOTIFY channel between
-// replicas, pg.ChannelTunnel ('session:<id>', 'enrolled:<key_id>/<tenant_id>/<service>'): Postgres between
-// replicas, not tunnel wire protocol, and no migration. Without it a superseded session on another replica
-// would serve sticky follow-ups until that replica's 60 s row check; the row check stays as the fallback.
+// replicas, pg.ChannelTunnel ('session:<id>', 'enrolled:<key_id>/<tenant_id>/<service>', and since M3
+// 'mcp:<tenant_id>/<service>/<replica_id>', a node of an MCP service connecting or disconnecting, which drops the
+// service's era on every replica, relay.md §11.12, D177): Postgres between replicas, not tunnel wire protocol, and no
+// migration. Without it a superseded session on another replica would serve sticky follow-ups until that replica's
+// 60 s row check; the row check stays as the fallback.
 type Registry struct {
 	cfg   RegistryConfig
 	log   *slog.Logger
@@ -242,22 +244,21 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 }
 
 // OnMCPChange registers fn to run, once per MCP service of the session, when a session serving MCP services becomes a
-// candidate (Add) and when it is removed: the MCP relay drops what it learned of those services' upstreams (their
-// era, relay.md §11.12, D177), since another node may answer next. fn must not block.
+// candidate (Add) and when it is removed, on this replica and on every other one (NOTIFY kontra_tunnel
+// MCPChangedPayload): the MCP relay drops what it learned of those services' upstreams (their era, relay.md §11.12,
+// D177), since another node may answer next, and through the peer hop every replica uses the nodes another one holds.
+// fn must not block.
 func (r *Registry) OnMCPChange(fn func(tenantID uuid.UUID, service string)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onMCP = append(r.onMCP, fn)
 }
 
-// mcpChanged runs the OnMCPChange callbacks for each MCP service s serves.
+// mcpChanged runs the OnMCPChange callbacks for each MCP service s serves, then tells the other replicas (NOTIFY
+// kontra_tunnel 'mcp:…', which this replica's Notify does not apply a second time). A NOTIFY that is not sent, or
+// lost with a replica's LISTEN connection, leaves that replica's era stale for at most its period (RefreshTools);
+// the gate drops every era on a LISTEN reconnect.
 func (r *Registry) mcpChanged(s *Session) {
-	r.mu.Lock()
-	fns := slices.Clone(r.onMCP)
-	r.mu.Unlock()
-	if len(fns) == 0 {
-		return
-	}
 	s.mu.Lock()
 	var names []string
 	for name, kind := range s.served {
@@ -266,9 +267,33 @@ func (r *Registry) mcpChanged(s *Session) {
 		}
 	}
 	s.mu.Unlock()
+	if len(names) == 0 {
+		return
+	}
+	r.runMCP(s.TenantID, names)
+	if r.cfg.DB == nil {
+		return
+	}
+	payloads := make([]string, 0, len(names))
 	for _, name := range names {
+		payloads = append(payloads, MCPChangedPayload(s.TenantID, name, r.cfg.ReplicaID))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	if _, err := r.cfg.DB.Exec(ctx, `select pg_notify($1, p) from unnest($2::text[]) as p`, string(pg.ChannelTunnel), payloads); err != nil {
+		r.log.Warn("the other replicas were not told of a change in an MCP service's nodes; their eras stay until they expire",
+			obs.KeyTunnelSession, s.ID, "error", err)
+	}
+}
+
+// runMCP runs the OnMCPChange callbacks for each of the tenant's services.
+func (r *Registry) runMCP(tenantID uuid.UUID, services []string) {
+	r.mu.Lock()
+	fns := slices.Clone(r.onMCP)
+	r.mu.Unlock()
+	for _, name := range services {
 		for _, fn := range fns {
-			fn(s.TenantID, name)
+			fn(tenantID, name)
 		}
 	}
 }
@@ -509,14 +534,19 @@ func (r *Registry) remove(s *Session, reason string, logged bool) error {
 	s.mu.Lock()
 	del := !s.rowGone
 	s.rowGone = true
+	changed := s.hostsMCP && !s.mcpGone
+	s.mcpGone = s.mcpGone || s.hostsMCP
 	s.mu.Unlock()
 	if logged {
 		r.log.Info("tunnel session closed", obs.KeyTunnelSession, s.ID, "key_id", s.KeyID, "reason", reason)
 	}
 	// The MCP sessions pinned to it die with it (relay.md §11.2): revoked when a revocation closed it (its own
 	// statement ran first, Revoked), tunnel_lost otherwise. Only a session that hosted an MCP service can have any.
+	// The OnMCPChange hooks run for its first removal only (a close and the multiplexer's end both remove it).
 	if s.hostedMCP() {
 		r.closeMCP(s.ID, "", s.closeReason())
+	}
+	if changed {
 		r.mcpChanged(s)
 	}
 	if !del {

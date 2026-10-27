@@ -904,11 +904,24 @@ func createTaskResultModern(row *store.TaskRow, pol store.ServiceRef) (json.RawM
 // client's input, which it cannot get before the client learns its id) is answered with its CreateTaskResult. A
 // client that closes its response stream before either answer is written has cancelled the request (2026-07-28
 // Streamable HTTP, "Cancellation") and never learned the task's id: the task is sent kontra.cancel, not awaited.
+// That is checked right before each answer is written (a quoted task's too), and whenever a read fails, so a client
+// that left during Admission, the task's creation, the wait or the reads after it is never written a refusal in
+// place of the cancel; a task that is terminal already has nothing to cancel.
 func (t *Tasks) AnswerCall(ctx context.Context, w http.ResponseWriter, svc store.ServiceRef, id uuid.UUID, reqID json.RawMessage) {
+	var row *store.TaskRow
+	left := func(why string) bool {
+		if ctx.Err() == nil {
+			return false
+		}
+		if row == nil || !row.State.Terminal() {
+			t.cancelDetached(id, why)
+		}
+		return true
+	}
 	row, err := t.log.Load(ctx, id)
 	if err != nil {
-		if ctx.Err() != nil {
-			t.cancelDetached(id, "the client left before the task was answered")
+		row = nil
+		if left("the client left before the task was answered") {
 			return
 		}
 		t.logger.Warn("a modern task could not be read after its creation", "task_id", id, "error", err)
@@ -936,13 +949,16 @@ func (t *Tasks) AnswerCall(ctx context.Context, w http.ResponseWriter, svc store
 				row = r
 			}
 		}
-		if ctx.Err() != nil {
-			t.cancelDetached(id, "the client closed its stream before the task was answered (D178)")
-			return
-		}
+	}
+	const closed = "the client closed its stream before the task was answered (D178)"
+	if left(closed) {
+		return
 	}
 	pol, err := t.policy(ctx, svc)
 	if err != nil {
+		if left(closed) {
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, reqID, mcpwire.CodeInternal, "the gate could not serve the request", nil)
 		return
 	}
@@ -951,17 +967,26 @@ func (t *Tasks) AnswerCall(ctx context.Context, w http.ResponseWriter, svc store
 		if err == nil && ok {
 			b, err := modernOutcome(row, o, reqID)
 			if err == nil {
+				if left(closed) {
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(b)
 				return
 			}
 		}
+		if left(closed) {
+			return
+		}
 		t.logger.Warn("a modern task's outcome could not be read; it is answered as a task", "task_id", id, "error", err)
 	}
 	res, err := createTaskResultModern(row, pol)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, reqID, mcpwire.CodeInternal, "the gate could not serve the request", nil)
+		return
+	}
+	if left(closed) {
 		return
 	}
 	writeResult(w, "", reqID, res)

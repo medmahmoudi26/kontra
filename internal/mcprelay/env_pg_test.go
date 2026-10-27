@@ -175,6 +175,8 @@ type replicaOpts struct {
 	// withDeps, when set, completes the handler's deps before it is built (tasks_pg_test.go: gate-owned tasks and
 	// the replica's Temporal workers), with the replica's LISTEN connection and logger.
 	withDeps func(r *replica, deps *Deps, l *pg.Listener, logger *slog.Logger)
+	// now, when set, is the handler's clock.
+	now func() time.Time
 }
 
 // replica starts one replica over the env's database.
@@ -221,6 +223,9 @@ func (e *env) replica(name string, o replicaOpts) *replica {
 	}
 	if o.admission != nil {
 		deps.Admission = o.admission
+	}
+	if o.now != nil {
+		deps.now = o.now
 	}
 	var signer *peer.Signer
 	if o.peer {
