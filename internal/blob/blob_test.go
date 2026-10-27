@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
@@ -290,5 +293,57 @@ func TestPending(t *testing.T) {
 	}
 	if blob.PendingRows(context.Background(), task, []byte(a.URL())) != nil {
 		t.Fatal("rows pending on a context without a set")
+	}
+}
+
+// A bucket that accepts connections and never answers makes Open fail within OpenTimeout, rather than hold the gate's
+// start through minio-go's retries (M3 WP-10 pentest finding F-3).
+func TestOpenGivesUpOnASilentBucket(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	var held []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c) // read nothing, answer nothing
+			mu.Unlock()
+		}
+	}()
+	defer func() {
+		mu.Lock()
+		for _, c := range held {
+			c.Close()
+		}
+		mu.Unlock()
+	}()
+	t.Setenv(blob.EnvAccessKey, "kontra-test")
+	t.Setenv(blob.EnvSecretKey, "kontra-test-secret")
+	old := blob.OpenTimeout
+	blob.OpenTimeout = 2 * time.Second
+	defer func() { blob.OpenTimeout = old }()
+	done := make(chan error, 1)
+	began := time.Now()
+	go func() {
+		_, err := blob.Open(context.Background(), blob.Config{Bucket: "silent", Endpoint: "http://" + l.Addr().String(), Region: "us-east-1"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Open of a bucket that never answers succeeded")
+		}
+		if took := time.Since(began); took > 10*time.Second {
+			t.Fatalf("Open gave up after %v, want about OpenTimeout", took)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Open of a bucket that never answers did not return within 20 s")
 	}
 }

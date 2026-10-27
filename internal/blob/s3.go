@@ -85,8 +85,15 @@ func open(ctx context.Context, cfg Config, access, secret string) (Store, error)
 	return s, nil
 }
 
+// OpenTimeout bounds Open's check of the bucket. minio-go retries a request that gets no answer (ten times, each
+// waiting for a dial or for response headers), so a bucket the gate cannot reach held the gate's start for minutes,
+// never healthy and with nothing logged (M3 WP-10 pentest finding F-3); past this bound the gate refuses to start.
+var OpenTimeout = 30 * time.Second
+
 // check is Open's test: the bucket exists, and an object can be written and removed under the prefix.
 func (s *s3Store) check(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, OpenTimeout)
+	defer cancel()
 	ok, err := s.c.BucketExists(ctx, s.bucket)
 	if err != nil {
 		return fmt.Errorf("blob: bucket %s: %w", s.bucket, err)
