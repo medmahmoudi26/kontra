@@ -974,3 +974,30 @@ func TestSchemaInStep(t *testing.T) {
 	}
 	walk("config", reflect.TypeFor[Config](), schema)
 }
+
+// The MCP examples' gates (M3 WP-05) load as their READMEs describe: one MCP tunnel service each, the dangerous
+// tools denied (D185 for server-everything; the write tools for server-filesystem), with no warning.
+func TestMCPExamplesLoad(t *testing.T) {
+	for path, want := range map[string]struct {
+		name string
+		deny []string
+	}{
+		"../../examples/mcp/fs-stdio/kontra.yaml":   {"fs", []string{"write_file", "edit_file", "create_directory", "move_file"}},
+		"../../examples/mcp/everything/kontra.yaml": {"everything", []string{"get-env", "gzip-file-as-resource"}},
+	} {
+		c, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		s, ok := c.Services[want.name]
+		if len(c.Services) != 1 || !ok || s.Kind != KindMCP || s.Backend.Tunnel == nil || s.Backend.Direct() != nil {
+			t.Fatalf("%s: services %v, want the MCP tunnel service %s", path, slices.Sorted(maps.Keys(c.Services)), want.name)
+		}
+		if s.Tools == nil || !slices.Equal(s.Tools.Deny, want.deny) || !slices.Equal(s.Allow, []string{"org:default"}) {
+			t.Errorf("%s: services.%s = %+v (tools %+v)", path, want.name, s, s.Tools)
+		}
+		if c.PublicURL != "http://localhost:8080" || !c.Auth.APIKeys || len(c.Warnings) != 0 {
+			t.Errorf("%s: public_url %q auth %+v warnings %q", path, c.PublicURL, c.Auth, c.Warnings)
+		}
+	}
+}

@@ -1,0 +1,8 @@
+{
+  "name": "kontra-example-mcp-fs-stdio",
+  "private": true,
+  "description": "server-filesystem@1.0.0 over stdio, bridged by kontra connect (examples/mcp/fs-stdio/README.md)",
+  "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "1.0.0"
+  }
+}
