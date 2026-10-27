@@ -25,7 +25,6 @@ import (
 	"strconv"
 
 	"kontra.sh/kontra/internal/strictjson"
-	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Protocol revisions (spec/relay.md §0, §11.1, §11.12; D65).
@@ -181,6 +180,11 @@ var (
 		strictjson.Path{"result", "roots"},
 		// A client's answer to a gate request id: the related-task key the gate rewrites back (M3 WP-06, §11.6).
 		strictjson.Path{"result", "_meta", MetaRelatedTask},
+		// A 2026-07-28 request (M3 WP-07, §11.12): the tasks extension in its per-request capabilities, which
+		// decides a gate-owned task (D159) and which the gate removes from what it forwards; the notifications a
+		// subscriptions/listen asks for, whose taskIds the gate removes (D176).
+		strictjson.Path{"params", "_meta", MetaClientCapabilities, "extensions", ExtTasks},
+		strictjson.Path{"params", "notifications"},
 	)
 	upstreamReads = withLevels(UpstreamLevels,
 		strictjson.Path{"jsonrpc"}, strictjson.Path{"id"}, strictjson.Path{"method"},
@@ -201,6 +205,11 @@ var (
 		strictjson.Path{"result", "task", "taskId"}, strictjson.Path{"result", "task", "status"},
 		strictjson.Path{"result", "task", "statusMessage"}, strictjson.Path{"result", "task", "pollInterval"},
 		strictjson.Path{"result", "_meta", MetaRelatedTask},
+		// What the relay reads of a 2026-07-28 answer (M3 WP-07, §11.12): resultType (an InputRequiredResult answering
+		// a plain call is metered as no outcome), a server/discover result's supportedVersions and its tasks extension
+		// (the service's era and gate-owned tasks, D159, D177), and the ttlMs of a tools/list (capped at 600000).
+		strictjson.Path{"result", "resultType"}, strictjson.Path{"result", "supportedVersions"},
+		strictjson.Path{"result", "ttlMs"}, strictjson.Path{"result", "capabilities", "extensions", ExtTasks},
 	)
 	// taskReads are the members of a Task (MCP 2025-11-25's tasks/get result, "Result & Task", and tasks/cancel's)
 	// that the durable dispatch and forward_cancel read in the answers to their own requests (M3 WP-06, §11.5).
@@ -540,14 +549,6 @@ func unsupportedVersion(id json.RawMessage, v string) *Refusal {
 		b, _ = ErrorBody(nil, CodeUnsupportedVersion, "Unsupported protocol version", data)
 	}
 	return &Refusal{Status: http.StatusBadRequest, Body: b}
-}
-
-// CheckModern applies §11.12's checks to a modern request: _meta's protocolVersion and clientCapabilities
-// present (400, -32602); protocolVersion equal to MCP-Protocol-Version (400, -32020 HeaderMismatch, D176);
-// Mcp-Method equal to method and Mcp-Name equal to params.name, params.uri or params.taskId after Base64
-// decoding (400, -32020). A response from a modern client is 400 with -32600.
-func CheckModern(h http.Header, m *Message) *Refusal {
-	return &Refusal{Status: http.StatusNotImplemented, Body: []byte(unimpl.Error("mcpwire.CheckModern", "M3 WP-07").Error())}
 }
 
 // SealedEnvelope reports whether v, the value of _meta["sh.kontra/sealed"], is exactly {"v": 1, "envelope":
