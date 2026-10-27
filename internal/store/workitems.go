@@ -55,11 +55,31 @@ type WorkItem struct {
 }
 
 // WorkPayload is the sanitized copy of a2a-go's workqueue.Payload: the request, and the call context with
-// every service parameter removed except A2A-Version and A2A-Extensions (no Authorization, no cookies).
+// every service parameter removed except A2A-Version and A2A-Extensions (no Authorization, no cookies). An MCP
+// task's work item holds MCP instead of an A2A request (spec/relay.md §11.5 step 2).
 type WorkPayload struct {
 	Request     *a2a.SendMessageRequest `json:"request"`
 	CallContext map[string]any          `json:"callContext"`
 	Owner       Owner                   `json:"owner"`
+	MCP         *MCPWork                `json:"mcp,omitempty"`
+}
+
+// MCPWork is what a gate-owned MCP task's work item stores (spec/relay.md §11.5 step 2, §11.12 step 3): the
+// tools/call as the client sent it (after §2.5's scrub), never in Temporal history; the creating client
+// session's hash and the call's JSON-RPC id, which every exchange of the dispatch carries in its preamble
+// (tunnel.md §8.1) and which the upstream tools/call reuses; the capabilities the client declared, whose
+// elicitation and sampling the dispatch's own initialize declares (D22); and the era of the request.
+//
+// Request is kept as bytes (base64 in the payload's JSON), so the call reaches the upstream as the client wrote it
+// except for params.task: a json.RawMessage would be compacted and HTML-escaped by encoding/json.
+type MCPWork struct {
+	Request            []byte          `json:"request"`
+	Tool               string          `json:"tool"`
+	RequestID          json.RawMessage `json:"requestId"`
+	Session            string          `json:"session,omitempty"` // lowercase hex SHA-256 of the creating Mcp-Session-Id
+	Version            string          `json:"version"`           // the creating request's protocol version
+	ClientCapabilities json.RawMessage `json:"clientCapabilities,omitempty"`
+	Sealed             bool            `json:"sealed,omitempty"` // the service's sealed flag when the task was created (D174)
 }
 
 // MarshalPayload encodes the payload for work_items.payload (json, not jsonb, D49).
@@ -75,6 +95,12 @@ func MarshalPayload(p WorkPayload) (json.RawMessage, error) {
 }
 
 func (p WorkPayload) check() error {
+	if p.MCP != nil {
+		if len(p.MCP.Request) == 0 || p.MCP.Tool == "" || len(p.MCP.RequestID) == 0 {
+			return errors.New("store: an MCP work item needs its tools/call, its tool and its JSON-RPC id")
+		}
+		return nil
+	}
 	if p.Request == nil || p.Request.Message == nil {
 		return errors.New("store: a work item needs the request and its message")
 	}

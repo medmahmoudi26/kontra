@@ -2,14 +2,12 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/a2aproject/a2a-go/v2/a2aevent"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -213,19 +211,12 @@ func (l *Log) FailOrphan(ctx context.Context, taskID uuid.UUID) (bool, error) {
 		if row.State != StateSubmitted && row.State != StateQuoted {
 			return nil
 		}
-		ev := FailedStatus(row.Snapshot, ReasonLifecycleUnavailable, "")
-		next, err := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
+		// An MCP task's failure is its MCP status row with its calls row (spec §11.8 case 2).
+		wr, err := l.terminalWrite(ctx, tx, row, TerminalWrite{TaskID: taskID, State: StateFailed, Reason: ReasonLifecycleUnavailable})
 		if err != nil {
 			return fmt.Errorf("store: fail orphan %s: %w", taskID, err)
 		}
-		payload, err := json.Marshal(a2a.StreamResponse{Event: ev})
-		if err != nil {
-			return err
-		}
-		if _, err := l.Append(ctx, tx, Write{
-			TaskID: taskID, PrevVersion: row.Version, Kind: KindStatus, State: StateFailed,
-			StatusAt: StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
-		}); err != nil {
+		if _, err := l.Append(ctx, tx, wr); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `update kontra.push_configs set failed_at = now()

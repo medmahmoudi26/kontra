@@ -231,7 +231,25 @@ type Write struct {
 	// in the same statement, if the write commits and the item has none yet (spec §6.4, D81). Unset, Append
 	// takes the delivery the Fence has armed (Fence.ArmDelivery), if any.
 	Deliver uuid.UUID
+	// Call, when set, is the calls row of a gate-owned MCP task (spec §11.5 step 6, §11.8), written in the same
+	// statement as the terminal event, so exactly when it commits: the terminal rule lets one terminal event per
+	// task commit, so a task has one row whoever ends it (the dispatch, write_terminal, the orphan sweep).
+	Call *Call
 }
+
+// Call is the calls row of a gate-owned MCP task (spec/relay.md §11.4, §11.5 step 6, §11.8): the tool, the
+// creating session's hash, the byte counts and the outcome. Its tenant, service, buyer and principal are the
+// task row's and its duration runs from the task's creation to the terminal event, all read in the statement.
+type Call struct {
+	Tool       string
+	MCPSession []byte // the creating session's hash; nil for a modern request (D160's virtual session is WP-07's)
+	BytesIn    int64
+	BytesOut   int64
+	IsError    bool
+}
+
+// MaxCallTool is the longest tool name a calls row holds (0001: 1 to 128 characters).
+const MaxCallTool = 128
 
 func (w *Write) validate() error {
 	if w.PrevVersion < 1 {
@@ -334,6 +352,37 @@ func appendBlobs(stmt string, args []any, rows []blob.Row) (string, []any) {
 	return stmt[:i] + cte + stmt[i:], append(args, refs, tenants, sizes)
 }
 
+// callsCTE writes the calls row of an MCP task's terminal event (Write.Call) in the event's own statement; it
+// writes nothing when the UPDATE was refused. Its parameters are numbered from $%d: the row's id, the tool, the
+// session hash, bytes in, bytes out and is_error.
+const callsCTE = `), c as (
+	insert into kontra.calls (id, tenant_id, service, tool, buyer_id, principal, mcp_session, task_id, bytes_in,
+		bytes_out, duration_ms, is_error)
+	select $%[1]d::uuid, t.tenant_id, t.service, $%[2]d::text, t.buyer_id, t.principal, $%[3]d::bytea, u.id,
+		$%[4]d::bigint, $%[5]d::bigint,
+		least(greatest((extract(epoch from (now() - t.created_at)) * 1000)::bigint, 0), 2147483647)::integer, $%[6]d::bool
+	  from u join kontra.tasks t on t.id = u.id
+	returning id`
+
+// appendCall adds callsCTE to an append statement, before its final select.
+func appendCall(stmt string, args []any, c *Call) (string, []any, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return "", nil, err
+	}
+	tool := c.Tool
+	if r := []rune(tool); len(r) > MaxCallTool {
+		tool = string(r[:MaxCallTool])
+	}
+	if tool == "" {
+		tool = "unknown"
+	}
+	n := len(args) + 1
+	cte := fmt.Sprintf(callsCTE, n, n+1, n+2, n+3, n+4, n+5)
+	i := strings.LastIndex(stmt, ")\nselect ")
+	return stmt[:i] + cte + stmt[i:], append(args, id, tool, c.MCPSession, max(c.BytesIn, 0), max(c.BytesOut, 0), c.IsError), nil
+}
+
 // appendDeliverSQL is appendSQL for a write that also records a follow-up's delivery (D81), in the same
 // statement: delivered_at of work item $17 is set from the tasks row the UPDATE wrote, so a refused (fenced,
 // stale, terminal) write sets nothing. Only a write carrying a delivery pays for the extra UPDATE.
@@ -423,6 +472,14 @@ func (l *Log) Append(ctx context.Context, tx pgx.Tx, w Write) (Appended, error) 
 	if rows := blob.PendingRows(ctx, w.TaskID, w.Payload); len(rows) > 0 {
 		stmt, args = appendBlobs(stmt, args, rows)
 	}
+	if w.Call != nil {
+		if !w.State.Terminal() {
+			return Appended{}, errors.New("store: a calls row is written with a terminal event only")
+		}
+		if stmt, args, err = appendCall(stmt, args, w.Call); err != nil {
+			return Appended{}, err
+		}
+	}
 
 	ctx, cancel := l.writeCtx(ctx)
 	defer cancel()
@@ -479,6 +536,9 @@ type NewTask struct {
 	FirstMessageID string   // empty: no resend key
 	FirstRequest   [32]byte // SHA-256 of the request, for resend detection (spec §15, RequestHash)
 	QuoteExpiresAt *time.Time
+	// Payload is the `task` row's payload when it is not the A2A StreamResponse of Snapshot: an MCP task's
+	// (spec §11.9, NewMCPTask).
+	Payload json.RawMessage
 }
 
 func (t *NewTask) validate() error {
@@ -571,9 +631,14 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 	if err != nil {
 		return Appended{}, fmt.Errorf("store: encode snapshot: %w", err)
 	}
-	payload, err := json.Marshal(a2a.StreamResponse{Event: t.Snapshot})
-	if err != nil {
-		return Appended{}, fmt.Errorf("store: encode the task row: %w", err)
+	payload := []byte(t.Payload)
+	switch {
+	case t.Protocol == ProtocolMCP && len(payload) == 0:
+		return Appended{}, errors.New("store: an MCP task's task row needs its MCP payload (NewMCPTask)")
+	case len(payload) == 0:
+		if payload, err = json.Marshal(a2a.StreamResponse{Event: t.Snapshot}); err != nil {
+			return Appended{}, fmt.Errorf("store: encode the task row: %w", err)
+		}
 	}
 	var firstMsg, firstReq any
 	if t.FirstMessageID != "" {

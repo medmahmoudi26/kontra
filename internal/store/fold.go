@@ -25,7 +25,12 @@ import (
 //
 // The writers of this package build every projection with the same functions, so the fold of rows 1..K
 // equals the projection after the K-th write. A Folder owns what it decodes; Snapshot returns a copy.
+//
+// With MCP set it folds an MCP task's rows instead (spec §11.9; foldMCP): the projection its writers build
+// (NewMCPTask, MCPStatusWrite, MCPResultWrite, ApplyPatch) is the fold of its rows too.
 type Folder struct {
+	MCP bool
+
 	task *a2a.Task
 	seq  int64
 }
@@ -62,7 +67,11 @@ func (f *Folder) Apply(ev Event) error {
 	if len(ev.Payload) == 0 {
 		return fmt.Errorf("store: fold of task %s: row %d has no inline payload", ev.TaskID, ev.Seq)
 	}
-	next, err := foldRow(f.task, ev)
+	fold := foldRow
+	if f.MCP {
+		fold = foldMCP
+	}
+	next, err := fold(f.task, ev)
 	if err != nil {
 		return fmt.Errorf("store: fold of task %s at seq %d (%s): %w", ev.TaskID, ev.Seq, ev.Kind, err)
 	}
@@ -79,7 +88,7 @@ func foldRow(task *a2a.Task, ev Event) (*a2a.Task, error) {
 		if err != nil {
 			return nil, err
 		}
-		return mergeMetadata(task, patch), nil
+		return mergeMetadata(task, patch.Metadata), nil
 	}
 	if !ev.Kind.Carried() && ev.Kind != KindMessage {
 		return nil, fmt.Errorf("%s rows are MCP's, not an A2A task's", ev.Kind)
@@ -124,20 +133,21 @@ func appendHistory(task *a2a.Task, msg *a2a.Message) *a2a.Task {
 	return &next
 }
 
-// metadataRow is the payload of a metadata row.
+// metadataRow is the payload of a metadata row: the patch, and for an MCP task the operator's mcpMeta (§13.3).
 type metadataRow struct {
 	Metadata map[string]any `json:"metadata"`
+	MCPMeta  map[string]any `json:"mcpMeta,omitempty"`
 }
 
-func decodeMetadataRow(b []byte) (map[string]any, error) {
+func decodeMetadataRow(b []byte) (metadataRow, error) {
 	var r metadataRow
 	if err := json.Unmarshal(b, &r); err != nil {
-		return nil, err
+		return metadataRow{}, err
 	}
 	if r.Metadata == nil {
-		return nil, errors.New(`a metadata row without "metadata"`)
+		return metadataRow{}, errors.New(`a metadata row without "metadata"`)
 	}
-	return r.Metadata, nil
+	return r, nil
 }
 
 // SnapshotAt folds rows 1..seq into the task as it was after seq (spec §9; see Folder). It is an error
