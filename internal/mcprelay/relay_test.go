@@ -336,11 +336,17 @@ func TestLegacyRules(t *testing.T) {
 	if rep.status != 400 || rep.errCode(t) != -32022 {
 		t.Errorf("2025-03-26: %d %s", rep.status, rep.body)
 	}
-	// A 2026-07-28 request is answered as a legacy-only server answers it until M3 WP-07 serves the modern era.
-	rep = c.do(http.MethodPost, r.url+"/mcp/direct", `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`, map[string]string{"MCP-Protocol-Version": "2026-07-28"})
+	// A 2026-07-28 request to this legacy-only upstream is answered as a legacy-only server answers it (§11.12 rule 3,
+	// D177): the gate learns the era from its own server/discover, and forwards no modern request of a client.
+	rep = c.do(http.MethodPost, r.url+"/mcp/direct", `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{`+modernMeta(false)+`}}`,
+		map[string]string{"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"})
 	if rep.status != 400 || rep.errCode(t) != -32000 {
 		t.Errorf("modern: %d %s", rep.status, rep.body)
 	}
+	if n := up.Count("server/discover"); n != 1 {
+		t.Errorf("the gate's own server/discover: %d", n)
+	}
+	seen++
 	// §11.1 holds for GET and DELETE on a session too: another version is 400 with -32022 (id null); 2026-07-28 has
 	// no GET stream and no session (§11.12 rules 2 and 5), 405. Neither reaches the upstream, and the session stays.
 	c.hc.Timeout = 5 * time.Second // a GET that is forwarded opens the upstream's stream, which does not end

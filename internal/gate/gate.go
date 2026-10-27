@@ -22,6 +22,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
@@ -372,7 +373,8 @@ func (r *Replica) assemble() error {
 			// The MCP tools cache follows the row as the cards do (§11.3): a changed or removed service is drained
 			// again at its next tools/list.
 			if r.tools != nil {
-				r.tools.Invalidate(mcprelay.ToolsKey{TenantID: ref.TenantID, Service: ref.Name})
+				// And what the gate learned of its upstream's era (§11.12, D177): another backend may answer next.
+				r.tools.Forget(mcprelay.ToolsKey{TenantID: ref.TenantID, Service: ref.Name})
 			}
 		},
 		Tunnels: r.tunnels, Sessions: r.tunnels, TunnelCardRefresh: r.opts.tunnelCards,
@@ -514,6 +516,13 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 		return err
 	}
 	r.tools = mcprelay.NewToolsCache()
+	// A node of an MCP service connecting or disconnecting on this replica drops the service's era (§11.12, D177).
+	if r.tunnels != nil {
+		tools := r.tools
+		r.tunnels.OnMCPChange(func(tenantID uuid.UUID, service string) {
+			tools.DropEra(mcprelay.ToolsKey{TenantID: tenantID, Service: service})
+		})
+	}
 	var ops []hooks.Operation
 	if a := cfg.Hooks.Admission; a != nil {
 		// The remote Admission hook is refused at load until M5 (C3); its operations are read for when it is not.

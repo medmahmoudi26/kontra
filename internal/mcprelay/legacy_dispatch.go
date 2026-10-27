@@ -43,6 +43,10 @@ type mcpLink struct {
 	mcp       upstream.MCPExchange
 	version   string // MCP-Protocol-Version once the session is initialized
 	sid       string // the upstream's Mcp-Session-Id
+	// modern is a 2026-07-28 dispatch's link (§11.12): every request carries MCP-Protocol-Version and the Mcp-Method
+	// and Mcp-Name its body names, and a tools/call the client's Mcp-Param-* headers (params).
+	modern bool
+	params http.Header
 }
 
 // held reports whether a tunnel link's session is still on this replica and serving the service (§6.1's check):
@@ -118,6 +122,9 @@ func (k *mcpLink) send(ctx context.Context, method string, body []byte) (*http.R
 		if k.version != "" {
 			req.Header.Set(mcpwire.HeaderProtocolVersion, k.version)
 		}
+	}
+	if k.modern {
+		k.modernHeaders(req.Header, body)
 	}
 	resp, err := k.backend.HTTPClient().Do(req)
 	if err != nil {

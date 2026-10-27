@@ -14,7 +14,6 @@ import (
 
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/strictjson"
-	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Policy is a service's tools: {allow: [glob…], deny: [glob…]} (spec/relay.md §11.3): globs use * only, deny
@@ -134,8 +133,7 @@ type ToolView struct {
 // -32020, -32021 or -32022; any other outcome leaves the era unknown. The answer to a client's request never sets
 // the era: a client's 400, 404 or 405 is relayed to that client and changes nothing for other principals. The era is
 // kept RefreshTools and dropped when a node of the service connects or disconnects. While a service is legacy-only,
-// modern requests to it are answered with §11.12 rule 3's 400 without being forwarded. (The era and the modern
-// list: M3 WP-07.)
+// modern requests to it are answered with §11.12 rule 3's 400 without being forwarded. (era.go; M3 WP-07)
 type ToolsCache struct {
 	mu        sync.Mutex
 	byService map[cacheKey]*tools
@@ -143,6 +141,13 @@ type ToolsCache struct {
 	now       func() time.Time
 	// drainTimeout bounds one drain, every page included (DrainTimeout).
 	drainTimeout time.Duration
+
+	// The services' eras (era.go, D177).
+	eras         map[ToolsKey]eraState
+	probes       map[ToolsKey]chan struct{} // the gate's own server/discover in flight, closed when it ends
+	retryAt      map[ToolsKey]time.Time     // after an inconclusive probe, none is sent again before this
+	eraGen       map[ToolsKey]uint64        // bumped by DropEra: a probe begun before it installs nothing
+	probeTimeout time.Duration              // bounds one probe (ProbeTimeout)
 }
 
 type cacheKey struct {
@@ -153,6 +158,7 @@ type cacheKey struct {
 type tools struct {
 	list    []json.RawMessage
 	names   []string // list[i]'s name
+	ttlMs   int64    // the least ttlMs of the upstream's pages (2026-07-28), -1 when none carried one
 	fetched time.Time
 	filling chan struct{} // closed when the drain in flight ends
 }
@@ -162,7 +168,9 @@ const RefreshTools = 10 * time.Minute
 
 // NewToolsCache returns an empty cache.
 func NewToolsCache() *ToolsCache {
-	return &ToolsCache{byService: map[cacheKey]*tools{}, gen: map[ToolsKey]uint64{}, now: time.Now, drainTimeout: DrainTimeout}
+	return &ToolsCache{byService: map[cacheKey]*tools{}, gen: map[ToolsKey]uint64{}, now: time.Now, drainTimeout: DrainTimeout,
+		eras: map[ToolsKey]eraState{}, probes: map[ToolsKey]chan struct{}{}, retryAt: map[ToolsKey]time.Time{},
+		eraGen: map[ToolsKey]uint64{}, probeTimeout: ProbeTimeout}
 }
 
 // List returns the service's tools for era as v shows them, draining the upstream through fetch when the cache
@@ -172,6 +180,29 @@ func (c *ToolsCache) List(ctx context.Context, key ToolsKey, era mcpwire.Era, v 
 	if err != nil {
 		return nil, err
 	}
+	return t.show(v)
+}
+
+// ListModern is List for the 2026-07-28 list (§11.12), with the ttlMs a client gets: the upstream's (the least of
+// its pages'), at most RefreshTools, and 0 when no page carried one (a list the client should not keep).
+func (c *ToolsCache) ListModern(ctx context.Context, key ToolsKey, v ToolView, fetch Pager) ([]json.RawMessage, int64, error) {
+	t, err := c.get(ctx, key, mcpwire.EraModern, fetch)
+	if err != nil {
+		return nil, 0, err
+	}
+	list, err := t.show(v)
+	ttl := t.ttlMs
+	switch {
+	case ttl < 0:
+		ttl = 0
+	case ttl > RefreshTools.Milliseconds():
+		ttl = RefreshTools.Milliseconds()
+	}
+	return list, ttl, err
+}
+
+// show is the list as v shows it.
+func (t *tools) show(v ToolView) ([]json.RawMessage, error) {
 	out := make([]json.RawMessage, 0, len(t.list))
 	for i, raw := range t.list {
 		ok, err := v.Policy.Allows(t.names[i])
@@ -221,11 +252,6 @@ func (c *ToolsCache) Invalidate(key ToolsKey) {
 	}
 }
 
-// Era returns the service's upstream era as last learned, ok false when it is not known (D177).
-func (c *ToolsCache) Era(ctx context.Context, service string) (era mcpwire.Era, ok bool, err error) {
-	return 0, false, unimpl.Error("mcprelay.ToolsCache.Era", "M3 WP-07")
-}
-
 // get returns a fresh list, draining it (or waiting for the drain in flight).
 func (c *ToolsCache) get(ctx context.Context, key ToolsKey, era mcpwire.Era, fetch Pager) (*tools, error) {
 	k := cacheKey{key, era}
@@ -262,7 +288,7 @@ func (c *ToolsCache) get(ctx context.Context, key ToolsKey, era mcpwire.Era, fet
 			if d.err != nil || c.gen[key] != gen {
 				delete(c.byService, k)
 			} else {
-				c.byService[k] = &tools{list: d.list, names: d.names, fetched: c.now()}
+				c.byService[k] = &tools{list: d.list, names: d.names, ttlMs: d.ttlMs, fetched: c.now()}
 			}
 			close(ch)
 			c.mu.Unlock()
@@ -273,7 +299,7 @@ func (c *ToolsCache) get(ctx context.Context, key ToolsKey, era mcpwire.Era, fet
 			if d.err != nil {
 				return nil, d.err
 			}
-			return &tools{list: d.list, names: d.names, fetched: c.now()}, nil
+			return &tools{list: d.list, names: d.names, ttlMs: d.ttlMs, fetched: c.now()}, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -284,6 +310,7 @@ func (c *ToolsCache) get(ctx context.Context, key ToolsKey, era mcpwire.Era, fet
 type drained struct {
 	list  []json.RawMessage
 	names []string
+	ttlMs int64
 	err   error
 }
 
@@ -298,49 +325,57 @@ func (c *ToolsCache) drain(ctx context.Context, fetch Pager) *drained {
 	}
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bound)
 	defer cancel()
-	list, names, err := drain(dctx, fetch)
+	list, names, ttl, err := drain(dctx, fetch)
 	if err != nil && errors.Is(dctx.Err(), context.DeadlineExceeded) {
 		// Whatever the page in flight failed with, the cause is the bound; the error names nothing of the session,
 		// so the request that started the drain closes no row for it.
 		err = fmt.Errorf("%w: no complete tools/list within %v", ErrToolsLimit, bound)
 	}
-	return &drained{list: list, names: names, err: err}
+	return &drained{list: list, names: names, ttlMs: ttl, err: err}
 }
 
 // drain follows every page of the upstream's tools/list within MaxToolPages and MaxToolBytes, removes Kontra's
 // keys from each tool's _meta, and drops entries that are not objects with a string name (the policy could not be
-// applied to them) and repeated names (the first stands).
-func drain(ctx context.Context, fetch Pager) ([]json.RawMessage, []string, error) {
+// applied to them) and repeated names (the first stands). It also returns the least ttlMs of the pages (a
+// 2026-07-28 list, §11.12), -1 when none carried a non-negative integer one.
+func drain(ctx context.Context, fetch Pager) ([]json.RawMessage, []string, int64, error) {
 	var (
 		list  []json.RawMessage
 		names []string
 		total int
 		seen  = map[string]bool{}
 		cur   string
+		ttl   = int64(-1)
 	)
 	for page := 0; ; page++ {
 		if page == MaxToolPages {
-			return nil, nil, fmt.Errorf("%w: more than %d pages", ErrToolsLimit, MaxToolPages)
+			return nil, nil, 0, fmt.Errorf("%w: more than %d pages", ErrToolsLimit, MaxToolPages)
 		}
 		res, err := fetch(ctx, cur)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if total += len(res); total > MaxToolBytes {
-			return nil, nil, fmt.Errorf("%w: more than %d bytes", ErrToolsLimit, MaxToolBytes)
+			return nil, nil, 0, fmt.Errorf("%w: more than %d bytes", ErrToolsLimit, MaxToolBytes)
 		}
 		res, err = mcpwire.ScrubResult(mcpwire.FromUpstream, mcpwire.MethodToolsList, res, false)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		m, err := strictjson.Members(res)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %w", ErrToolsLimit, err)
+			return nil, nil, 0, fmt.Errorf("%w: %w", ErrToolsLimit, err)
+		}
+		if raw, ok := m["ttlMs"]; ok {
+			var n int64
+			if json.Unmarshal(raw, &n) == nil && n >= 0 && (ttl < 0 || n < ttl) {
+				ttl = n
+			}
 		}
 		var page []json.RawMessage
 		if raw, ok := m["tools"]; ok {
 			if err := json.Unmarshal(raw, &page); err != nil {
-				return nil, nil, fmt.Errorf("%w: tools is not an array", ErrToolsLimit)
+				return nil, nil, 0, fmt.Errorf("%w: tools is not an array", ErrToolsLimit)
 			}
 		}
 		for _, tool := range page {
@@ -354,14 +389,14 @@ func drain(ctx context.Context, fetch Pager) ([]json.RawMessage, []string, error
 		}
 		next, ok := m["nextCursor"]
 		if !ok || bytes.Equal(bytes.TrimSpace(next), []byte("null")) {
-			return list, names, nil
+			return list, names, ttl, nil
 		}
 		var s string
 		if err := json.Unmarshal(next, &s); err != nil {
-			return nil, nil, fmt.Errorf("%w: nextCursor is not a string", ErrToolsLimit)
+			return nil, nil, 0, fmt.Errorf("%w: nextCursor is not a string", ErrToolsLimit)
 		}
 		if s == "" {
-			return list, names, nil
+			return list, names, ttl, nil
 		}
 		cur = s
 	}

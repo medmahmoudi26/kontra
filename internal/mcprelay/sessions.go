@@ -16,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/mcpwire"
-	"kontra.sh/kontra/internal/unimpl"
 )
 
 // CloseReason is mcp_sessions.close_reason (spec/relay.md §11.2).
@@ -241,12 +240,57 @@ func (s *Sessions) PeerAddr(ctx context.Context, replicaID string) (addr string,
 	return addr, live, nil
 }
 
-// Virtual returns the open virtual session of a principal at a service (D160, D177). The caller runs
-// Admission's session decision before forwarding a principal's first modern request, and calls Virtual once the
-// upstream has answered it with a modern result, so a probe that ends in the legacy 400 opens nothing. One open
-// row per (tenant, service, principal) is enforced by migration 0002's partial unique index (protocol_version
-// 2026-07-28, closed_at null): the insert is on conflict do nothing, then the row is read, so two first requests
-// in flight at once share one session.
-func (s *Sessions) Virtual(ctx context.Context, tenant uuid.UUID, service, principal string, open func(context.Context) error) (*Session, error) {
-	return nil, unimpl.Error("mcprelay.Sessions.Virtual", "M3 WP-07")
+// Virtual opens, or returns the open, virtual session of a principal at a service (D160, D177): an mcp_sessions row
+// with protocol_version 2026-07-28, a client_sid_hash over a random id the gate never sends, and no upstream, tunnel
+// or replica ids (it pins nothing; any replica's idle sweep closes it). The caller runs Admission's session decision
+// before forwarding a principal's first modern request, and calls Virtual once the upstream has answered it with a
+// modern result, so a probe that ends in the legacy 400 opens nothing. One open row per (tenant, service,
+// principal) is enforced by migration 0002's partial unique index (mcp_sessions_virtual: protocol_version
+// 2026-07-28, closed_at null, nulls not distinct): the insert is on conflict do nothing, then the open row is read,
+// so two first requests in flight at once, on one replica or two, share one session. row gives the tenant,
+// service, buyer, principal, via and the client's capabilities; its other fields are ignored.
+func (s *Sessions) Virtual(ctx context.Context, row Session) (*Session, error) {
+	_, h, err := MintID()
+	if err != nil {
+		return nil, err
+	}
+	caps := row.ClientCaps
+	if len(caps) == 0 || !json.Valid(caps) {
+		caps = []byte("{}")
+	}
+	for range 3 {
+		if _, err := s.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal,
+				via, protocol_version, client_capabilities)
+			values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+			on conflict (tenant_id, service, principal) where protocol_version = '2026-07-28' and closed_at is null do nothing`,
+			h[:], row.TenantID, row.Service, row.BuyerID, row.Principal, row.Via, mcpwire.V20260728, string(caps)); err != nil {
+			return nil, fmt.Errorf("mcprelay: open a virtual session: %w", err)
+		}
+		x, err := s.OpenVirtual(ctx, row.TenantID, row.Service, row.Principal, time.Time{})
+		if !errors.Is(err, ErrNoSession) {
+			return x, err
+		}
+		// The winner's row was closed (idle) between the conflict and the read: insert again.
+	}
+	return nil, fmt.Errorf("mcprelay: open a virtual session: %w", ErrNoSession)
+}
+
+// OpenVirtual returns the open virtual session of a principal at a service (D160), ErrNoSession when there is none,
+// and writes its last_seen_at when now is at least IdleWrite past it (a zero now writes nothing).
+func (s *Sessions) OpenVirtual(ctx context.Context, tenant uuid.UUID, service, principal string, now time.Time) (*Session, error) {
+	x, err := scanSession(s.pool.QueryRow(ctx, `select `+sessionColumns+` from kontra.mcp_sessions
+		 where tenant_id = $1 and service = $2 and principal = $3 and protocol_version = $4 and closed_at is null`,
+		tenant, service, principal, mcpwire.V20260728))
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, ErrNoSession
+	case err != nil:
+		return nil, fmt.Errorf("mcprelay: read a virtual session: %w", err)
+	}
+	if !now.IsZero() && now.Sub(x.LastSeenAt) >= IdleWrite {
+		if err := s.Touch(ctx, x.Hash, now); err != nil {
+			return nil, err
+		}
+	}
+	return x, nil
 }

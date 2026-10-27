@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -157,6 +158,8 @@ type replica struct {
 	admitted *fakeAdmission
 	// dispatcher is the replica's MCP dispatcher when it runs gate-owned tasks (tasks_pg_test.go).
 	dispatcher *Dispatcher
+	tools      *ToolsCache
+	eraDrops   atomic.Int64 // the registry's MCP change hooks that ran (a node connected or disconnected)
 }
 
 type replicaOpts struct {
@@ -168,6 +171,7 @@ type replicaOpts struct {
 	admission    *fakeAdmission
 	ops          []hooks.Operation
 	drainTimeout time.Duration // the tools cache's bound on one drain (DrainTimeout when 0)
+	probeTimeout time.Duration // the bound on the gate's own server/discover (ProbeTimeout when 0)
 	// withDeps, when set, completes the handler's deps before it is built (tasks_pg_test.go: gate-owned tasks and
 	// the replica's Temporal workers), with the replica's LISTEN connection and logger.
 	withDeps func(r *replica, deps *Deps, l *pg.Listener, logger *slog.Logger)
@@ -201,6 +205,15 @@ func (e *env) replica(name string, o replicaOpts) *replica {
 	if o.drainTimeout > 0 {
 		tools.drainTimeout = o.drainTimeout
 	}
+	if o.probeTimeout > 0 {
+		tools.probeTimeout = o.probeTimeout
+	}
+	// As internal/gate wires it: a node of an MCP service connecting or disconnecting drops its era (D177).
+	r.reg.OnMCPChange(func(tenantID uuid.UUID, service string) {
+		tools.DropEra(ToolsKey{TenantID: tenantID, Service: service})
+		r.eraDrops.Add(1)
+	})
+	r.tools = tools
 	deps := Deps{
 		ReplicaID: r.id, Services: e.svcs, Auth: auth.NewAuthenticator(e.keys), Sessions: NewSessions(e.pool),
 		Tools: tools, Meter: NewMeter(e.pool), Tunnels: r.reg, Picker: tunnelgate.NewPicker(e.pool),

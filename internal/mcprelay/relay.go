@@ -117,8 +117,9 @@ type Deps struct {
 // the edge and the credential check. An unknown service, one of the other kind, a disabled one, or one whose
 // allow: does not admit the principal is the route's 404 (spec §2.1, D50).
 type Handler struct {
-	deps Deps
-	log  *slog.Logger
+	deps     Deps
+	log      *slog.Logger
+	virtuals virtuals // Admission session flights of modern principals (modern.go)
 }
 
 // NewHandler checks deps.
@@ -168,6 +169,7 @@ type request struct {
 	start time.Time
 	sess  *Session // the pinned session
 	sid   string   // the client's gate Mcp-Session-Id
+	vsess *Session // a modern request's virtual session (D160), once open
 }
 
 func (rq *request) ctx() context.Context { return rq.r.Context() }
@@ -265,13 +267,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.pinned(rq)
-}
-
-// modern answers a 2026-07-28 request. M3 WP-07 serves them (§11.12); until then the gate answers as a legacy-only
-// server does, rule 3's 400 with the -32000 body, so a dual-era client falls back to initialize, never forwarding
-// the request (a legacy upstream would spend a server on it, D177).
-func (h *Handler) modern(rq *request) {
-	writeRefusal(rq.w, &mcpwire.Refusal{Status: http.StatusBadRequest, Body: mcpwire.LegacyNoSessionBody})
 }
 
 // lookup is the route's service: /mcp/{name}, or /mcp/{tenant}/{name} on a multi-tenant gate.

@@ -4,7 +4,7 @@
 // carries what a test pushes, and records every request it receives, so a test can show what the upstream saw and
 // what it never saw. FakeNode serves it on the node's side of a tunnel session (spec/tunnel.md §8).
 //
-// M3 WP-04 builds it; M3 WP-07 extends it to dual era (server/discover, the tasks extension, MRTR).
+// M3 WP-04 builds it; M3 WP-07 extends it to dual era (modern.go: server/discover, the tasks extension, MRTR).
 package mcptest
 
 import (
@@ -44,6 +44,8 @@ type Reply struct {
 	Events []string
 	SSE    bool
 	Status int
+	// Hang, for OnModern only, holds the request that long (or until the client goes) and answers nothing.
+	Hang time.Duration
 }
 
 // RPCError is a JSON-RPC error object.
@@ -91,12 +93,29 @@ type Server struct {
 	// double slow, or hang, on a method).
 	Hold func(r Request)
 
-	requests []Request
-	sessions map[string]*session
-	nextEv   int
-	tasks    map[string]*Task
-	nextTask int
-	nextReq  int
+	// Modern makes the double dual-era (modern.go): it serves 2026-07-28 requests beside 2025-11-25 sessions.
+	Modern bool
+	// OnModern, when set, answers a modern request before anything else when it returns a reply (nil: served as
+	// usual); a test scripts a 404, a modern error or a hang with it.
+	OnModern func(r Request) *Reply
+	// ModernTaskRun makes the double a tasks extension receiver: server/discover declares
+	// io.modelcontextprotocol/tasks, and a tools/call that declares it creates a task whose work this does.
+	ModernTaskRun func(t *Task)
+	// ModernTTL is the ttlMs of its modern tools/list (900000 by default, over the gate's cap); DiscoverVersions its
+	// server/discover's supportedVersions; ModernCapabilities replaces its server/discover's capabilities.
+	ModernTTL          int64
+	DiscoverVersions   []string
+	ModernCapabilities json.RawMessage
+
+	requests    []Request
+	mismatches  int
+	hangsCut    int
+	modernTasks map[string]*Task
+	sessions    map[string]*session
+	nextEv      int
+	tasks       map[string]*Task
+	nextTask    int
+	nextReq     int
 }
 
 type session struct {
@@ -105,7 +124,9 @@ type session struct {
 }
 
 // New returns a double with no tools.
-func New() *Server { return &Server{sessions: map[string]*session{}, tasks: map[string]*Task{}} }
+func New() *Server {
+	return &Server{sessions: map[string]*session{}, tasks: map[string]*Task{}, modernTasks: map[string]*Task{}}
+}
 
 // Lock and Unlock guard the fields while the double serves.
 func (s *Server) Lock()   { s.mu.Lock() }
@@ -215,6 +236,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		return
 	}
+	if s.modernRequest(r, msg.Method) {
+		s.serveModern(w, r, req)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.get(w, r, req)
@@ -236,6 +261,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg.Method == "initialize" {
 		s.initialize(w, req)
+		return
+	}
+	if req.SessionID == "" {
+		// What the TypeScript SDK's legacy transport answers a POST without a session (and so a 2026-07-28 request).
+		writeJSON(w, http.StatusBadRequest, []byte(legacyNoSession))
 		return
 	}
 	if !s.known(req.SessionID) {

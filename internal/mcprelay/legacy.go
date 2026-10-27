@@ -203,20 +203,26 @@ func (h *Handler) tasksAdvertised(svc *Service, version string) bool {
 // choose is the target of a new session (§6.1, §11.2): the direct backend; else a tunnel session, this replica's
 // first, another replica's through its peer listener when this one runs one. No candidate is 503.
 func (h *Handler) choose(rq *request, avoid []uuid.UUID) (target, *mcpwire.Refusal) {
+	return h.chooseIn(rq.ctx(), rq, rq.id(), avoid)
+}
+
+// chooseIn is choose within ctx, its refusals carrying id: a modern request's target (§11.12) and the gate's own
+// server/discover's (D177) are chosen as for an initialize, the latter on a context of its own.
+func (h *Handler) chooseIn(ctx context.Context, rq *request, id json.RawMessage, avoid []uuid.UUID) (target, *mcpwire.Refusal) {
 	if rq.svc.Direct != nil {
 		return target{direct: rq.svc.Direct}, nil
 	}
 	if h.deps.Picker == nil || h.deps.Tunnels == nil {
-		return target{}, refusal(http.StatusServiceUnavailable, rq.msg.ID, mcpwire.CodeInternal, "no node serves the service")
+		return target{}, refusal(http.StatusServiceUnavailable, id, mcpwire.CodeInternal, "no node serves the service")
 	}
 	for range maxPicks {
-		pick, err := h.deps.Picker.PickMCP(rq.ctx(), rq.svc.Ref.TenantID, rq.svc.Ref.Name, h.deps.ReplicaID, h.deps.Peer != nil, avoid...)
+		pick, err := h.deps.Picker.PickMCP(ctx, rq.svc.Ref.TenantID, rq.svc.Ref.Name, h.deps.ReplicaID, h.deps.Peer != nil, avoid...)
 		switch {
 		case errors.Is(err, lifecycle.ErrNoSession):
-			return target{}, refusal(http.StatusServiceUnavailable, rq.msg.ID, mcpwire.CodeInternal, "no node serves the service")
+			return target{}, refusal(http.StatusServiceUnavailable, id, mcpwire.CodeInternal, "no node serves the service")
 		case err != nil:
 			h.log.Warn("mcp: the session choice failed", "service", rq.svc.Ref.Name, "error", err)
-			return target{}, refusal(http.StatusServiceUnavailable, rq.msg.ID, mcpwire.CodeInternal, "the gate could not serve the request")
+			return target{}, refusal(http.StatusServiceUnavailable, id, mcpwire.CodeInternal, "the gate could not serve the request")
 		}
 		if pick.Replica != h.deps.ReplicaID {
 			return target{peerAddr: pick.PeerAddr, session: pick.Session, replica: pick.Replica}, nil
@@ -228,7 +234,7 @@ func (h *Handler) choose(rq *request, avoid []uuid.UUID) (target, *mcpwire.Refus
 		}
 		return target{tunnel: be, session: pick.Session, replica: pick.Replica}, nil
 	}
-	return target{}, refusal(http.StatusServiceUnavailable, rq.msg.ID, mcpwire.CodeInternal, "no node serves the service")
+	return target{}, refusal(http.StatusServiceUnavailable, id, mcpwire.CodeInternal, "no node serves the service")
 }
 
 // pinned serves a request on a pinned session (§11.2): the session looked up for this service and principal (404

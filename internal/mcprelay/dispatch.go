@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,7 +22,6 @@ import (
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/relay"
 	"kontra.sh/kontra/internal/store"
-	"kontra.sh/kontra/internal/unimpl"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -209,9 +209,6 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	if svc == nil || svc.Disabled {
 		return d.failTask(ctx, log, fence, store.ReasonServiceUnavailable, "")
 	}
-	if work.Version == mcpwire.V20260728 {
-		return d.dispatchModern(ctx, in, work)
-	}
 	link, err := d.link(svc, attempt, row, work)
 	switch {
 	case errors.Is(err, upstream.ErrTunnelLost) && attempt.FirstUpstreamIDAt != nil:
@@ -251,7 +248,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in lifecycle.DispatchInput) (
 	// included, so load never looks like a dead replica; a cancellation Temporal delivers in a heartbeat's answer
 	// ends the run's context.
 	stopBeat := beat(dctx, hb)
-	res := r.run(dctx)
+	var res lifecycle.DispatchResult
+	if link.modern {
+		res = (&modernRun{legacyRun: r}).run(dctx)
+	} else {
+		res = r.run(dctx)
+	}
 	stopBeat()
 	cause := context.Cause(dctx)
 	running.Done()
@@ -285,11 +287,6 @@ func beat(ctx context.Context, hb workqueue.Heartbeater) (stop func()) {
 	}
 }
 
-// dispatchModern is the dispatch of a task a 2026-07-28 request created (§11.12, D159, D178): M3 WP-07's.
-func (d *Dispatcher) dispatchModern(ctx context.Context, in lifecycle.DispatchInput, work *store.MCPWork) (lifecycle.DispatchResult, error) {
-	return lifecycle.DispatchResult{}, unimpl.Error("mcprelay.Dispatcher.dispatchModern", "M3 WP-07")
-}
-
 // workItem loads the task's work item, consuming it on its first dispatch (D66). A later dispatch of the same
 // attempt (a resume) or of a new attempt (a retry, n > 1) reloads the item it owns; any other dispatch that finds
 // it consumed refuses it, since the dispatch that took it may have sent it (D101). Its payload holds an MCP call.
@@ -318,13 +315,18 @@ func (d *Dispatcher) workItem(ctx context.Context, taskID uuid.UUID, in lifecycl
 
 // link is the attempt's upstream: the service's direct backend, or the attempt's tunnel session on this replica
 // after §6.1's check (an error wrapping upstream.ErrTunnelLost when this replica does not hold it or it no longer
-// serves the service), with the preamble's task and MCP fields (tunnel.md §8.1).
+// serves the service), with the preamble's task and MCP fields (tunnel.md §8.1). A task a 2026-07-28 request created
+// is dispatched statelessly (§11.12): no upstream session, every request with MCP-Protocol-Version 2026-07-28,
+// Mcp-Method and Mcp-Name, and no mcp_session or mcp_request_id in its preambles (D180).
 func (d *Dispatcher) link(svc *Service, attempt *store.Attempt, row *store.TaskRow, work *store.MCPWork) (*mcpLink, error) {
 	k := &mcpLink{
 		task:    upstream.ExchangeTask{TaskID: row.ID.String(), ContextID: row.ContextID},
 		mcp:     upstream.MCPExchange{Session: work.Session, RequestID: idString(work.RequestID)},
 		version: work.Version,
 		sid:     attempt.UpstreamSession,
+	}
+	if work.Version == mcpwire.V20260728 {
+		k.modern, k.mcp, k.sid, k.params = true, upstream.MCPExchange{}, "", http.Header(work.Headers)
 	}
 	switch attempt.Backend {
 	case store.BackendDirect:
@@ -523,8 +525,12 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 	if err != nil {
 		return lifecycle.ForwardCancelResult{}, err
 	}
-	if work.Version == mcpwire.V20260728 {
-		return lifecycle.ForwardCancelResult{}, unimpl.Error("mcprelay.Dispatcher.ForwardCancel (2026-07-28)", "M3 WP-07")
+	modern := work.Version == mcpwire.V20260728
+	if modern && attempt.UpstreamSession == "" {
+		// A multi round-trip call's first InputRequiredResult is the attempt's first upstream id (D178), but the
+		// upstream keeps no task for it: there is nothing to cancel upstream, and the workflow writes canceled (D57).
+		log.Info("forward_cancel: the attempt has no upstream task (a multi round-trip call); nothing is sent")
+		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelUnsupported}, nil
 	}
 	svc, err := d.Services.MCPServiceByID(ctx, row.TenantID, row.Service)
 	if err != nil {
@@ -555,6 +561,14 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 	cctx, cancel := context.WithTimeout(ctx, d.forwardCancelWait())
 	defer cancel()
 	params, _ := jsonObject("taskId", attempt.UpstreamTaskID)
+	if modern {
+		// The extension's tasks/cancel (§11.12): the upstream task the attempt polls, with the stored client _meta;
+		// its answer is an acknowledgement only, and the task may still end otherwise (ext-tasks, "Task
+		// Cancellation"), which changes nothing: the workflow writes canceled (D57).
+		if params, err = modernParams(work, map[string]any{"taskId": attempt.UpstreamSession}); err != nil {
+			return lifecycle.ForwardCancelResult{}, err
+		}
+	}
 	m, err := link.request(cctx, "kontra-cancel-"+uuid.NewString(), "tasks/cancel", params, nil)
 	if err != nil {
 		var xe *exchangeError
@@ -567,6 +581,10 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 		}
 		log.Info("forward_cancel got no answer from the service", "error", err)
 		return lifecycle.ForwardCancelResult{}, fmt.Errorf("mcprelay: forward_cancel of task %s: the service could not be reached", in.TaskID)
+	}
+	if modern {
+		log.Info("the upstream acknowledged the cancel")
+		return lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}, nil
 	}
 	return cancelAnswer(log, m.Result), nil
 }

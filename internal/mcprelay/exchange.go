@@ -237,6 +237,9 @@ type relayOpts struct {
 	meter  *callMeter
 	tools  ToolsKey
 	hold   bool // initialize: the headers wait for onResponse
+	// status is the upstream's HTTP status, set when the response is relayed (relayResponse), for onResponse: a
+	// 2026-07-28 request's virtual session opens on a 2xx answer only (§11.12, D177).
+	status int
 	// answered is set once the upstream's response to the client's request was relayed: JSON-RPC answers a request
 	// once, and a client takes the first response for an id, so the relay ends the stream before another.
 	answered bool
@@ -270,6 +273,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 func (h *Handler) relayResponse(rq *request, resp *http.Response, o *relayOpts) int64 {
 	defer resp.Body.Close()
 	w := rq.w
+	o.status = resp.StatusCode
 	if o.tunnel {
 		if reason := tunnel.NodeReason(strings.TrimSpace(resp.Header.Get(tunnel.HeaderNode))); reason != "" {
 			o.meter.fail()

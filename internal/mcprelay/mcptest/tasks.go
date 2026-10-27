@@ -29,6 +29,8 @@ type Task struct {
 	rpcErr  *RPCError
 	queue   [][]byte
 	waiting map[string]chan []byte
+	modern  bool                       // a tasks extension task (modern.go): its requests are inputs, by key
+	inputs  map[string]json.RawMessage // a modern task's outstanding inputRequests
 	changed chan struct{}
 	created time.Time
 	updated time.Time
@@ -91,7 +93,8 @@ func (t *Task) Complete(result json.RawMessage) {
 		var r struct {
 			IsError bool `json:"isError"`
 		}
-		if json.Unmarshal(result, &r) == nil && r.IsError {
+		// The extension forbids failed for a CallToolResult with isError (ext-tasks, "Task Status").
+		if json.Unmarshal(result, &r) == nil && r.IsError && !t.modern {
 			t.status = "failed"
 		}
 	}

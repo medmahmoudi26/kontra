@@ -105,6 +105,8 @@ type CreateTask struct {
 	ClientCapabilities json.RawMessage
 	Sealed             bool           // the service's sealed flag (D174)
 	Decision           hooks.Decision // Admission's: allow, or quote with its terms; its metadata and mcpMeta
+	// Headers are a modern call's Mcp-Param-* headers, which the modern dispatch sends with its tools/call (§11.12).
+	Headers map[string][]string
 }
 
 // errAdmission is an Admission decision a task cannot be created with (an unparsable quote, keys outside §13.2):
@@ -154,7 +156,7 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 		return uuid.Nil, err
 	}
 	work := &store.MCPWork{Request: bytes.Clone(req.Request), Tool: req.Tool, RequestID: req.RequestID, Version: req.Version,
-		ClientCapabilities: req.ClientCapabilities, Sealed: req.Sealed}
+		ClientCapabilities: req.ClientCapabilities, Sealed: req.Sealed, Headers: req.Headers}
 	if req.MCPSession != nil {
 		work.Session = hex.EncodeToString(req.MCPSession[:])
 	}
@@ -857,4 +859,300 @@ func taskSupported(tool json.RawMessage) bool {
 		return false
 	}
 	return s == "optional" || s == "required"
+}
+
+// --- the client side of a gate-owned task for 2026-07-28 readers (§11.12, D159, D178; M3 WP-07) ---
+
+// modernStatus is a state as the tasks extension's Task.status shows it: as MCPStatus (quoted, submitted and working
+// are working; input-required is input_required; canceled is cancelled).
+func modernStatus(s store.State) string { return s.MCPStatus() }
+
+// modernTask is a Task as the extension shows it (ext-tasks v0.2.2, "Tasks"): taskId, status, statusMessage,
+// createdAt, lastUpdatedAt, ttlMs (§11.6's ttl) and pollIntervalMs 1000, with the task's _meta (the operator's
+// mcpMeta; a quoted task's approve URL is its statusMessage and sh.kontra/approve-url, D21).
+func modernTask(row *store.TaskRow, pol store.ServiceRef, status string) map[string]any {
+	o := map[string]any{"taskId": row.ID.String(), "status": status, "createdAt": mcpTime(row.CreatedAt),
+		"lastUpdatedAt": mcpTime(row.StatusAt), "ttlMs": ttlOf(row, pol), "pollIntervalMs": store.MCPPollInterval}
+	if text := store.MCPStatusText(row.Snapshot); text != "" {
+		o["statusMessage"] = text
+	}
+	return o
+}
+
+// encodeTask is o with resultType and the task's _meta.
+func encodeTask(o map[string]any, resultType string, meta map[string]json.RawMessage) (json.RawMessage, error) {
+	o["resultType"] = resultType
+	b, err := json.Marshal(o)
+	if err != nil {
+		return nil, err
+	}
+	return mcpwire.MergeMeta(b, meta)
+}
+
+// createTaskResultModern is the answer to a modern tools/call that became a task the gate did not see end within the
+// inline wait (§11.12 step 4): {resultType: "task", taskId, status, statusMessage?, createdAt, lastUpdatedAt, ttlMs,
+// pollIntervalMs: 1000, _meta}.
+func createTaskResultModern(row *store.TaskRow, pol store.ServiceRef) (json.RawMessage, error) {
+	return encodeTask(modernTask(row, pol, modernStatus(row.State)), "task", taskMeta(row))
+}
+
+// AnswerCall answers the modern tools/call that created task id (§11.12 step 4, D159, D178), once its row is
+// committed: a quoted task at once with its CreateTaskResult (working, the approve URL in statusMessage and
+// _meta["sh.kontra/approve-url"]); otherwise, after waiting on LISTEN up to modernInlineWait for the task to end, its
+// outcome in line (the stored CallToolResult with resultType "complete", the stored JSON-RPC error, or §11.8's forms
+// of a failure or a cancel), and the client never sees a task; a task that did not end (or that waits for the
+// client's input, which it cannot get before the client learns its id) is answered with its CreateTaskResult. A
+// client that closes its response stream before either answer is written has cancelled the request (2026-07-28
+// Streamable HTTP, "Cancellation") and never learned the task's id: the task is sent kontra.cancel, not awaited.
+func (t *Tasks) AnswerCall(ctx context.Context, w http.ResponseWriter, svc store.ServiceRef, id uuid.UUID, reqID json.RawMessage) {
+	row, err := t.log.Load(ctx, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			t.cancelDetached(id, "the client left before the task was answered")
+			return
+		}
+		t.logger.Warn("a modern task could not be read after its creation", "task_id", id, "error", err)
+		writeError(w, http.StatusServiceUnavailable, reqID, mcpwire.CodeInternal, "the gate could not serve the request", nil)
+		return
+	}
+	if row.State != store.StateQuoted {
+		wake, stop := t.waker.WaitTask(ctx, id)
+		defer stop()
+		until := time.NewTimer(modernInlineWait)
+		defer until.Stop()
+		reread := time.NewTicker(250 * time.Millisecond)
+		defer reread.Stop()
+	wait:
+		for !row.State.Terminal() && row.State != store.StateInputRequired {
+			select {
+			case <-ctx.Done():
+				break wait
+			case <-until.C:
+				break wait
+			case <-wake:
+			case <-reread.C:
+			}
+			if r, err := t.log.Load(ctx, id); err == nil {
+				row = r
+			}
+		}
+		if ctx.Err() != nil {
+			t.cancelDetached(id, "the client closed its stream before the task was answered (D178)")
+			return
+		}
+	}
+	pol, err := t.policy(ctx, svc)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, reqID, mcpwire.CodeInternal, "the gate could not serve the request", nil)
+		return
+	}
+	if row.State.Terminal() {
+		o, ok, err := t.log.MCPTerminal(ctx, id)
+		if err == nil && ok {
+			b, err := modernOutcome(row, o, reqID)
+			if err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(b)
+				return
+			}
+		}
+		t.logger.Warn("a modern task's outcome could not be read; it is answered as a task", "task_id", id, "error", err)
+	}
+	res, err := createTaskResultModern(row, pol)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, reqID, mcpwire.CodeInternal, "the gate could not serve the request", nil)
+		return
+	}
+	writeResult(w, "", reqID, res)
+}
+
+// cancelDetached sends a task kontra.cancel without waiting for it (D57: the workflow writes canceled within 10 s).
+func (t *Tasks) cancelDetached(id uuid.UUID, why string) {
+	t.logger.Info("a modern task is cancelled", "task_id", id, "why", why)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), lifecycle.AcceptWait+time.Second)
+		defer cancel()
+		if _, _, err := t.lc.Cancel(ctx, a2a.TaskID(id.String())); err != nil && !errors.Is(err, a2a.ErrTaskNotCancelable) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			t.logger.Warn("kontra.cancel was not accepted", "task_id", id, "error", err)
+		}
+	}()
+}
+
+// modernOutcome is a terminal task's answer to a modern reader of its outcome in line (§11.12 step 4): the stored
+// CallToolResult with resultType "complete", whatever its isError, or the stored JSON-RPC error, verbatim; a
+// failure the gate wrote and a cancel in §11.8's forms (cases 2 and 3).
+func modernOutcome(row *store.TaskRow, o store.MCPOutcome, reqID json.RawMessage) ([]byte, error) {
+	if o.Kind == store.KindResult && len(o.Error) == 0 && len(o.Result) > 0 {
+		res, err := mcpwire.SetMember(o.Result, "resultType", json.RawMessage(`"complete"`))
+		if err != nil {
+			return nil, err
+		}
+		return messageBytes(reqID, "result", res)
+	}
+	return outcomeMessage(row, o, reqID)
+}
+
+// ServeModern answers a modern tasks/get, tasks/update or tasks/cancel (§11.12, "The client side") for the caller,
+// from Postgres on any replica: the result, or the JSON-RPC error to answer with (-32602 for a task that is unknown,
+// of another buyer, or not an MCP task of this service); an error is the gate's own failure. The handler has checked
+// that the request declares the tasks extension.
+func (t *Tasks) ServeModern(ctx context.Context, who Caller, m *mcpwire.Message) (json.RawMessage, *mcpwire.Error, error) {
+	row, err := t.load(ctx, who, m.Params)
+	if err != nil || row == nil {
+		return nil, errTaskNotFound, err
+	}
+	switch m.Method {
+	case "tasks/get":
+		res, err := t.detailedTask(ctx, row, who.Service)
+		return res, nil, err
+	case "tasks/update":
+		return t.update(ctx, who, row, m.Params)
+	case "tasks/cancel":
+		if !row.State.Terminal() {
+			t.cancelDetached(row.ID, "tasks/cancel")
+		}
+		return json.RawMessage(`{"resultType":"complete"}`), nil, nil
+	}
+	return nil, &mcpwire.Error{Code: mcpwire.CodeMethodNotFound, Message: "Method not found"}, nil
+}
+
+// detailedTask is tasks/get's DetailedTask (§11.12's table): resultType "complete" and the task; quoted, submitted
+// and working are working; input-required is input_required with inputRequests, every input request no answer was
+// logged for, keyed by its gate id ({method, params} of the request as logged); a terminal task is presented by its
+// terminal event, not its gate state: a stored CallToolResult, whatever its isError, is completed with result; a
+// stored JSON-RPC error or a failure the gate wrote is failed with error in §11.8's forms (sh.kontra/failure also in
+// _meta); canceled is cancelled.
+func (t *Tasks) detailedTask(ctx context.Context, row *store.TaskRow, svc store.ServiceRef) (json.RawMessage, error) {
+	pol, err := t.policy(ctx, svc)
+	if err != nil {
+		return nil, err
+	}
+	meta := taskMeta(row)
+	switch {
+	case row.State == store.StateInputRequired:
+		o := modernTask(row, pol, "input_required")
+		pending, err := t.log.PendingInputRequests(ctx, row.ID)
+		if err != nil {
+			return nil, err
+		}
+		reqs := map[string]json.RawMessage{}
+		for _, r := range pending {
+			entry, err := inputRequestEntry(r.Request)
+			if err != nil {
+				return nil, err
+			}
+			reqs[r.GateID] = entry
+		}
+		o["inputRequests"] = reqs
+		return encodeTask(o, "complete", meta)
+	case !row.State.Terminal():
+		return encodeTask(modernTask(row, pol, "working"), "complete", meta)
+	}
+	out, ok, err := t.log.MCPTerminal(ctx, row.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("mcprelay: task %s is %s without its terminal row", row.ID, row.State)
+	}
+	switch {
+	case out.Kind == store.KindResult && len(out.Error) == 0 && len(out.Result) > 0:
+		o := modernTask(row, pol, "completed")
+		o["result"] = out.Result
+		delete(meta, mcpwire.KontraPrefix+"failure")
+		return encodeTask(o, "complete", meta)
+	case out.Kind == store.KindResult && len(out.Error) > 0:
+		o := modernTask(row, pol, "failed")
+		o["error"] = out.Error
+		b, _ := json.Marshal(string(store.ReasonUpstreamError))
+		meta[mcpwire.KontraPrefix+"failure"] = b
+		return encodeTask(o, "complete", meta)
+	case row.State == store.StateCanceled:
+		return encodeTask(modernTask(row, pol, "cancelled"), "complete", meta)
+	}
+	// A failure the gate wrote (§11.8 case 2), or a rejected task: failed, with the error tasks/result would carry.
+	msg, err := outcomeMessage(row, out, json.RawMessage("null"))
+	if err != nil {
+		return nil, err
+	}
+	e, _ := mcpwire.Member(msg, "error")
+	o := modernTask(row, pol, "failed")
+	o["error"] = e
+	if _, ok := meta[mcpwire.KontraPrefix+"failure"]; !ok {
+		md := map[string]any{}
+		if row.Snapshot != nil {
+			md = row.Snapshot.Metadata
+		}
+		reason, _ := md[store.MetaFailure].(string)
+		if reason == "" {
+			reason = string(store.ReasonUpstreamError)
+		}
+		b, _ := json.Marshal(reason)
+		meta[mcpwire.KontraPrefix+"failure"] = b
+	}
+	return encodeTask(o, "complete", meta)
+}
+
+// inputRequestEntry is a logged input request (a JSON-RPC request under its gate id) as an inputRequests entry:
+// {method, params}.
+func inputRequestEntry(req json.RawMessage) (json.RawMessage, error) {
+	method, _ := mcpwire.Member(req, "method")
+	if len(method) == 0 {
+		return nil, errors.New("mcprelay: a logged input request without its method")
+	}
+	o := []byte(`{"method":` + string(method))
+	if p, ok := mcpwire.Member(req, "params"); ok {
+		o = append(append(o, `,"params":`...), p...)
+	}
+	return append(o, '}'), nil
+}
+
+// update is tasks/update (§11.12): each key of params.inputResponses that names an input request of the task (its
+// gate id) with no answer yet is logged once as an input_response event, as the JSON-RPC response a legacy client
+// would have sent (so either era's dispatch reads it), under §11.5 step 5's rule (one per request, under the task's
+// version), and kontra.input_response {seq} is signalled; other keys are ignored. Its result is empty, resultType
+// "complete". inputResponses that is not an object is -32602.
+func (t *Tasks) update(ctx context.Context, who Caller, row *store.TaskRow, params json.RawMessage) (json.RawMessage, *mcpwire.Error, error) {
+	ack := json.RawMessage(`{"resultType":"complete"}`)
+	resp, ok := mcpwire.Member(params, "inputResponses")
+	if !ok || firstByte(resp) != '{' {
+		return nil, &mcpwire.Error{Code: mcpwire.CodeInvalidParams, Message: "Invalid params: inputResponses is not an object"}, nil
+	}
+	if row.State.Terminal() {
+		return ack, nil, nil
+	}
+	answers, err := strictjson.Members(resp)
+	if err != nil {
+		return nil, &mcpwire.Error{Code: mcpwire.CodeInvalidParams, Message: "Invalid params: inputResponses"}, nil
+	}
+	for _, key := range mcpwire.Keys(resp) {
+		taskID, seq, ok := store.ParseGateRequestID(key)
+		if !ok || taskID != row.ID {
+			continue
+		}
+		value := answers[key]
+		scrubbed, err := mcpwire.ScrubResult(mcpwire.FromClient, "", value, false)
+		if err != nil {
+			continue
+		}
+		idb, _ := json.Marshal(key)
+		msg, _ := messageBytes(idb, "result", scrubbed)
+		at, logged, err := t.log.AppendInputResponse(ctx, who.scope(), row.ID, seq, msg)
+		if err != nil {
+			if errors.Is(err, a2a.ErrTaskNotFound) {
+				return nil, errTaskNotFound, nil
+			}
+			return nil, nil, err
+		}
+		if !logged {
+			t.logger.Info("an answer to an input request was dropped: already answered or not outstanding", "task_id", row.ID, "request_seq", seq)
+			continue
+		}
+		if err := t.lc.SignalInputResponse(context.WithoutCancel(ctx), a2a.TaskID(row.ID.String()), at); err != nil {
+			t.logger.Warn("kontra.input_response was not signalled", "task_id", row.ID, "error", err)
+		}
+	}
+	return ack, nil, nil
 }
