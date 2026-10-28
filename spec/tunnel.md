@@ -461,10 +461,10 @@ target like any other.
   answers `404`; a crashed child's session answers `404`, and its group is stopped the same way. At most 8
   children per service (`--max-sessions`), counting a stopping child until its group is gone. Every principal of
   the service, and every durable task's own session, shares these children, so a full bridge makes room (D213): an
-  `initialize` beyond `--max-sessions` stops the longest-idle child, when it has had no exchange (none open, an open
-  `GET` stream counting) for at least 5 minutes, and waits for its group to be gone; it also waits for a child that is
-  stopping already (the gate closed a principal's longest-idle session for that principal's new one, with a
-  `DELETE`, [`relay.md`](relay.md) §11.2). With no such child it is `503` with `Kontra-Node: full`.
+  `initialize` beyond `--max-sessions` waits for a child that is stopping already (the gate closed a principal's
+  longest-idle session for that principal's new one, with a `DELETE`, [`relay.md`](relay.md) §11.2), and otherwise
+  stops the longest-idle child, when it has had no exchange (none open, an open `GET` stream counting) for at least 5
+  minutes, and waits for its group to be gone. With no such child it is `503` with `Kontra-Node: full`.
 - The bridge is an in-process handler on tunnel streams; it listens on no port.
 - **Legacy only in v4.0.** The bridge speaks 2025-11-25 and 2025-06-18. A request without a session id that is not
   `initialize` (a 2026-07-28 request among them) is answered `400` with the legacy body of

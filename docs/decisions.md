@@ -2673,20 +2673,20 @@ every response on a 2026-07-28 exchange, which relays no server request; each dr
 
 [`tunnel.md`](../spec/tunnel.md) §10 caps a stdio service at 8 children (`--max-sessions`), `503` `full` beyond, and
 [`relay.md`](../spec/relay.md) §11.2 caps no principal. Every principal admitted to the service, and every durable
-task's own upstream session (D22), shares those children, so one principal holding eight idle sessions has every
-other `initialize` answered `full` until `--session-idle` (1 h) and the gate's `session_idle_s` pass (M3 review
+task's own upstream session (D22), shares those children, so one principal holding eight idle sessions has every other
+`initialize` answered `full` until `--session-idle` (1 h) and the gate's `session_idle_s` pass (M3 review
 security-10). The bridge sees tunnel sessions, never principals. Decision: the reviewer's proposal, both halves. The
-gate caps the open MCP sessions of one principal on one service (`services.<name>.max_sessions_per_principal`,
-default 2), an `initialize` beyond the cap closing that principal's longest-idle session with an upstream `DELETE`;
-and a bridge that is full stops its longest-idle child, when that child has been idle for at least 5 minutes, rather
-than answer `full`. Both are built (D225). At the gate (`services.max_sessions_per_principal`, in 0002, 1 to 10000):
-the eviction runs once an upstream is chosen, before the upstream `initialize` (a refused `initialize` closes
-nothing), closing with reason `idle` the principal's sessions beyond the cap other than the new one, the oldest
-`last_seen_at` first, each with a `DELETE` on its pinned target made before the `initialize` goes; it runs again once
-the new row is written, for concurrent `initialize`s; 2026-07-28 virtual sessions are not counted. On the node: an
-open `GET` stream counts as an exchange, so its session is never idle; a stopping child still counts against
-`--max-sessions` until its group is gone, and an `initialize` that finds one waits for it (the gate's `DELETE`
-reaches the bridge first) rather than answer `full` ([`relay.md`](../spec/relay.md) §11.2, §17;
+gate caps the open MCP sessions of one principal on one service (`services.<name>.max_sessions_per_principal`, default
+2), an `initialize` beyond the cap closing that principal's longest-idle session with an upstream `DELETE`; and a
+bridge that is full stops its longest-idle child, when that child has been idle for at least 5 minutes, rather than
+answer `full`. Both are built (D225). At the gate (`services.max_sessions_per_principal`, in 0002, 1 to 10000): the
+eviction runs once an upstream is chosen, before the upstream `initialize` (a refused `initialize` closes nothing),
+closing with reason `idle` the principal's sessions beyond the cap other than the new one, the oldest `last_seen_at`
+first, each with a `DELETE` on its pinned target made before the `initialize` goes; it runs again once the new row is
+written, for concurrent `initialize`s; 2026-07-28 virtual sessions are not counted. On the node: an open `GET` stream
+counts as an exchange, so its session is never idle; a stopping child still counts against `--max-sessions` until its
+group is gone, and an `initialize` that finds one waits for it (the gate's `DELETE` reaches the bridge first),
+stopping no other child meanwhile, rather than answer `full` ([`relay.md`](../spec/relay.md) §11.2, §17;
 [`tunnel.md`](../spec/tunnel.md) §10; `mcprelay` exchange.go `evict`, sessions.go `Evict`; `stdiobridge` bridge.go
 `reserve`; `TestSessionsPerPrincipal`, `TestFullBridgeStopsItsLongestIdleChild`,
 `TestSessionsPerPrincipalThroughTheGate`).
