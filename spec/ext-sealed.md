@@ -84,7 +84,7 @@ it parsed and compares bytes: a header that is not canonical, has a duplicate ke
 |---|---|---|---|---|
 | `v` | `1` | `1` | `1` | `1` |
 | `dir` | `"req"` | `"res"` | `"req"` | `"res"` |
-| `service` | the hired service as the gate's URL path names it ([`relay.md`](relay.md) §1's `{svc}` without `/agents/` or `/mcp/`): `"<name>"`, or `"<tenant>/<name>"` on a multi-tenant gate (D221) | same | same | same |
+| `service` | the hired service as the gate's URL path names it ([`relay.md`](relay.md) §2.1's `{svc}` without `/agents/` or `/mcp/`): `"<name>"`, or `"<tenant>/<name>"` on a multi-tenant gate (D221) | same | same | same |
 | `iat` | Unix seconds when sealed | — | Unix seconds when sealed | — |
 | `taskId` | the gate task id when known (a follow-up turn); absent on a new task's first message | the gate task id | for an answer to an input request, that request's `taskId` (absent when it had none); absent on a `tools/call` (D218) | the gate task id, for a durable task's result and its input requests; absent for a plain call's input requests (D218, D219) |
 | `contextId` | the message's `contextId` (always set: the hiring node mints one for a new sealed task) | the task's context id | — | — |

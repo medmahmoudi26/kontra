@@ -135,7 +135,7 @@ type Hosting struct {
 	paths atomic.Pointer[map[string]string]
 }
 
-// SetServicePaths records how the gate's URL paths name the hosted services (spec/relay.md §1: "<name>" on a
+// SetServicePaths records how the gate's URL paths name the hosted services (spec/relay.md §2.1: "<name>" on a
 // single-tenant gate, "<tenant>/<name>" on a multi-tenant one), read by the node from its welcome: a sealed header's
 // service must be the path of the service the preamble names (D221). A service it does not name is "<name>".
 func (h *Hosting) SetServicePaths(paths map[string]string) {
