@@ -2835,7 +2835,13 @@ hour) and its tasks are done; a client of a gate that keeps sessions longer than
 node answers `404` for a session it no longer knows). Decision: the reviewer's first proposal: the gate states the
 service's `session_idle_s` in the `initialize` result's `_meta["sh.kontra/session_idle_s"]`, and the hiring node
 keeps an idle session's key that long; a flag on `kontra connect`, the other option, would have to match every
-gate's setting. Not built in M3 (D225) ([`tunnel.md`](../spec/tunnel.md) §2.3; `sealing` hiring.go `sweepJobs`).
+gate's setting. Built (D225): the gate writes the service's `session_idle_s` as a JSON integer into every legacy
+`initialize` result's `_meta`, after the operator's `initialize_meta` and in place of any upstream's; the hiring node
+keeps it with the session's job and deletes the key once the session has been idle that long and its tasks are done.
+A value it does not take (not a whole number of seconds from 1 to 30 days, the node's own bound on a key a gate
+asks it to keep), or none, counts as a day, as before ([`relay.md`](../spec/relay.md) §2.5, §11.2;
+[`tunnel.md`](../spec/tunnel.md) §2.3; `mcprelay` legacy.go `initializeResult`; `sealing` hiring.go `sessionIdleOf`,
+`sweepJobs`; `TestSessionKeyKeptForTheGatesSessionIdle`, `TestIdleSweep`, `TestSealedMCPThroughTheGate`).
 
 ### D225. What the M3 decisions leave to build — **decided under the owner's standing instruction, 28 Oct** (adds to D170)
 

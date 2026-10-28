@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +106,8 @@ func TestSealedMCPThroughTheGate(t *testing.T) {
 	host := startNode(t, t.TempDir(), "--gate", a.url, "--name", "host", "--serve", "mcp:web="+srv+"/mcp", "--enroll", token)
 	host.local(t)
 	key := e.mintKey("buyer")
-	hirer := startNode(t, t.TempDir(), "--gate", a.url, "--name", "hirer", "--api-key", key)
+	hirerHome := t.TempDir()
+	hirer := startNode(t, hirerHome, "--gate", a.url, "--name", "hirer", "--api-key", key)
 	endpoint := hirer.local(t) + "/mcp/web"
 
 	var resp *http.Response
@@ -116,6 +119,10 @@ func TestSealedMCPThroughTheGate(t *testing.T) {
 		return resp.StatusCode == 200 && strings.Contains(body, mcpwire.MetaSealed)
 	})
 	sid := resp.Header.Get(mcpwire.HeaderSessionID)
+	// The gate states the service's session_idle_s (D224), and the hiring node passes the result on as it came.
+	if !strings.Contains(body, `"sh.kontra/session_idle_s":3600`) {
+		t.Fatalf("the initialize result does not state session_idle_s: %s", body)
+	}
 	localMCP(t, endpoint, sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 
 	// A plain call.
@@ -125,6 +132,14 @@ func TestSealedMCPThroughTheGate(t *testing.T) {
 	}
 	if up.Calls("echo") != 1 {
 		t.Fatal("the server did not get the call")
+	}
+	// The session's per-job key is kept for the session_idle_s the gate stated (D224).
+	jobs, _ := filepath.Glob(filepath.Join(hirerHome, ".kontra", "jobs", "*", "mcp-*.json"))
+	if len(jobs) != 1 {
+		t.Fatalf("the hiring node's session jobs: %v", jobs)
+	}
+	if b, err := os.ReadFile(jobs[0]); err != nil || !bytes.Contains(b, []byte(`"idle_s":3600`)) {
+		t.Fatalf("the session job does not keep the gate's session_idle_s: %s %v", b, err)
 	}
 	for _, r := range up.Requests() {
 		if r.Method == "tools/call" && !bytes.Contains(r.Body, []byte("MARKER-echo")) {

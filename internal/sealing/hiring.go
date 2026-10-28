@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -128,6 +129,8 @@ type serviceInfo struct {
 	at         time.Time
 	unknown    bool   // the card could not be read: not known to be sealed (noCardTTL)
 	session    string // an MCP session's (its hash): the entry goes with the session's job
+	// idle is the session_idle_s the gate stated in an MCP session's initialize result (D224), 0 when it stated none.
+	idle time.Duration
 }
 
 // ErrNoKey is a request for a sealed task whose per-job key this node does not hold (another node hired it, or the
@@ -189,6 +192,9 @@ type hireJob struct {
 	Created   time.Time `json:"created"`
 	DeleteAt  time.Time `json:"delete_at,omitempty"` // the key goes then (terminal + kontra.keyRetainUntil)
 	Closed    bool      `json:"closed,omitempty"`    // an MCP session the client closed
+	// IdleS is an MCP session's idle bound, the session_idle_s its gate stated at initialize (D224): its key goes once
+	// the session has had no exchange that long and its tasks are done. 0: sessionJobIdle.
+	IdleS int64 `json:"idle_s,omitempty"`
 	// Tasks are an MCP session's tasks (by gate task id): tool and messageId of the call that created each.
 	Tasks map[string]*hireTask `json:"tasks,omitempty"`
 	// Inputs are the MCP input requests opened, by the gate request id that carried each: what the local client's
@@ -648,8 +654,9 @@ func (h *Hiring) dropJob(j *hireJob) {
 }
 
 // Sweep deletes the keys whose retention (kontra.keyRetainUntil) has passed, the provisional keys of first messages
-// that never got a gate task (provisionalMaxAge), and the keys of MCP sessions idle past sessionJobIdle whose tasks
-// are done (the gate closes an idle session on its own, relay.md §11.2, and a client may leave without DELETE).
+// that never got a gate task (provisionalMaxAge), and the keys of MCP sessions whose tasks are done and that have
+// been idle for the session_idle_s their gate stated, or sessionJobIdle (the gate closes an idle session on its own,
+// relay.md §11.2, and a client may leave without DELETE; D224).
 func (h *Hiring) Sweep() { h.sweepJobs() }
 
 // Bounds of the hiring side's job keys and caches.
@@ -657,11 +664,42 @@ const (
 	// provisionalMaxAge is how long a new task's provisional key is kept without a gate task id: a first message
 	// whose exchange the hiring server saw end releases it at once (Job.Release); this is the backstop.
 	provisionalMaxAge = DefaultMaxAge
-	// sessionJobIdle is how long an MCP session's key is kept with no exchange once its tasks are done: past the
-	// gate's default session_idle_s (an hour), so that only sessions the gate has closed lose theirs; a session the
-	// gate keeps longer is initialized again (the node answers 404 for a session it no longer knows; D224).
+	// sessionJobIdle is how long an MCP session's key is kept with no exchange once its tasks are done when its gate
+	// stated no session_idle_s in the initialize result (D224): past the gate's default session_idle_s (an hour), so
+	// that only sessions the gate has closed lose theirs; a session the gate keeps longer is initialized again (the
+	// node answers 404 for a session it no longer knows).
 	sessionJobIdle = 24 * time.Hour
+	// maxSessionIdle bounds the session_idle_s a gate states (D224): a key is the node's to delete, and a gate cannot
+	// have the node keep an abandoned session's key for longer than this.
+	maxSessionIdle = 30 * 24 * time.Hour
 )
+
+// idleBound is how long a session job is kept with no exchange once its tasks are done: the session_idle_s its gate
+// stated (D224), or sessionJobIdle.
+func (j *hireJob) idleBound() time.Duration {
+	if j.IdleS > 0 {
+		return time.Duration(j.IdleS) * time.Second
+	}
+	return sessionJobIdle
+}
+
+// sessionIdleOf reads _meta["sh.kontra/session_idle_s"] of an initialize result (D224): a positive whole number of
+// seconds, at most maxSessionIdle; 0 when the gate stated none, or stated one the node does not take.
+func sessionIdleOf(result json.RawMessage) time.Duration {
+	meta, ok := mcpwire.Member(result, "_meta")
+	if !ok {
+		return 0
+	}
+	raw, ok := mcpwire.Member(meta, mcpwire.MetaSessionIdle)
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(string(bytes.TrimSpace(raw)), 10, 64)
+	if err != nil || n <= 0 || n > int64(maxSessionIdle/time.Second) {
+		return 0
+	}
+	return time.Duration(n) * time.Second
+}
 
 func (h *Hiring) sweepJobs() {
 	ents, err := os.ReadDir(h.cfg.Jobs.Dir())
@@ -679,7 +717,7 @@ func (h *Hiring) sweepJobs() {
 		if lj := h.jobs[id]; lj != nil {
 			switch {
 			case strings.HasPrefix(id, "mcp-"):
-				if now.Sub(lj.seen) >= sessionJobIdle && lj.tasksDone() {
+				if now.Sub(lj.seen) >= lj.idleBound() && lj.tasksDone() {
 					h.endSession(lj)
 				}
 			case !lj.DeleteAt.IsZero() && !now.Before(lj.DeleteAt), provisional(id) && now.Sub(lj.Created) >= provisionalMaxAge:
@@ -701,7 +739,7 @@ func (h *Hiring) sweepJobs() {
 			h.dropJob(&j)
 		case strings.HasPrefix(id, "mcp-") && j.tasksDone():
 			// A session job not loaded: no exchange of it since this node started (its sessions are 404 here).
-			if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) >= sessionJobIdle {
+			if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) >= j.idleBound() {
 				h.dropJob(&j)
 			}
 		}
@@ -1754,6 +1792,9 @@ func (h *Hiring) sessionJob(j *Job) (*hireJob, error) {
 		return nil, err
 	}
 	hj.Session = j.session
+	if j.info != nil && j.info.idle > 0 {
+		hj.IdleS = int64(j.info.idle / time.Second) // the gate's session_idle_s (D224)
+	}
 	return hj, h.saveJob(hj)
 }
 
@@ -2097,6 +2138,7 @@ func (h *Hiring) initResult(j *Job, data []byte, m *mcpwire.Message) ([]byte, er
 		return b, nil
 	}
 	si.session = j.session
+	si.idle = sessionIdleOf(m.Result)
 	h.mu.Lock()
 	h.services[j.sid] = si
 	h.mu.Unlock()

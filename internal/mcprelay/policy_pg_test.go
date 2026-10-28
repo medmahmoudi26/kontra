@@ -375,7 +375,7 @@ func openGET(t *testing.T, c *client, url string, up *mcptest.Server, hdr map[st
 // service without sealed, and on a sealed service only an exact {v, envelope} passes.
 func TestMetaSpoof(t *testing.T) {
 	const env = `{"v":1,"envelope":"AAEC"}`
-	spoof := `{"sh.kontra/price":"9 USD","sh.kontra/escrow":{"held":true},"sh.kontra/approve-url":"https://evil.example/approve"}`
+	spoof := `{"sh.kontra/price":"9 USD","sh.kontra/escrow":{"held":true},"sh.kontra/approve-url":"https://evil.example/approve","sh.kontra/session_idle_s":1}`
 	for _, sealed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("sealed=%v", sealed), func(t *testing.T) {
 			e := newEnv(t)
@@ -396,7 +396,9 @@ func TestMetaSpoof(t *testing.T) {
 			key, _ := e.apiKey("buyer")
 			c := newClient(t, key)
 			rep := c.initialize(r.url + "/mcp/fs")
-			if strings.Contains(string(rep.body), "sh.kontra/") {
+			// The one Kontra key of an initialize result is the gate's own statement of session_idle_s (D224), never
+			// the upstream's.
+			if b := strings.Replace(string(rep.body), `"_meta":{"sh.kontra/session_idle_s":3600}`, "", 1); strings.Contains(b, "sh.kontra/") {
 				t.Errorf("initialize: %s", rep.body)
 			}
 			rep = c.do(http.MethodPost, r.url+"/mcp/fs", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, nil)
@@ -770,7 +772,11 @@ func TestIdleSweep(t *testing.T) {
 	r := e.replica("a", replicaOpts{})
 	key, _ := e.apiKey("buyer")
 	c := newClient(t, key)
-	c.initialize(r.url + "/mcp/fs")
+	// The initialize result states the service's session_idle_s (D224): a hiring node keeps a sealed session's key
+	// that long.
+	if rep := c.initialize(r.url + "/mcp/fs"); !strings.Contains(string(rep.body), `"_meta":{"sh.kontra/session_idle_s":3600}`) {
+		t.Errorf("the initialize result does not state session_idle_s: %s", rep.body)
+	}
 	h := HashID(c.sid)
 	var seen1, seen2 time.Time
 	_ = e.pool.QueryRow(context.Background(), `select last_seen_at from kontra.mcp_sessions where client_sid_hash = $1`, h[:]).Scan(&seen1)

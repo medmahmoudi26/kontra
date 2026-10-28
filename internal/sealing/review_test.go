@@ -980,3 +980,71 @@ func openMCPResult(t *testing.T, b buyer, res string) (sealed.Header, string) {
 	}
 	return openMCP(t, b, ct)
 }
+
+// D224: the gate states the service's session_idle_s in the initialize result's _meta["sh.kontra/session_idle_s"],
+// and the hiring node keeps an idle session's key that long (not its own day): a shorter one deletes it sooner, a
+// longer one keeps it past the day. A value the node does not take (not a positive whole number, or over
+// maxSessionIdle) leaves the day.
+func TestSessionKeyKeptForTheGatesSessionIdle(t *testing.T) {
+	session := func(t *testing.T, meta string) (*hirer, string) {
+		t.Helper()
+		f := newFixture(t)
+		hr := newHirer(t, f, pins.Options{})
+		sid := "gate-session-idle"
+		_, initJob := mcpLocal(t, hr, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`)
+		mcpAnswer(t, hr, initJob, `{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"experimental":{"sh.kontra/sealed":`+
+			string(extensionFor(true, f.node.Recipient()))+`}},"serverInfo":{"name":"s","version":"1"}`+meta+`}}`, false, http.Header{mcpwire.HeaderSessionID: {sid}})
+		mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"m":"x"}}}`)
+		return hr, sid
+	}
+	keys := func(hr *hirer) int {
+		ents, _ := os.ReadDir(hr.h.cfg.Jobs.Dir())
+		return len(ents)
+	}
+
+	// The gate keeps sessions 10 minutes: the key goes once the session was idle that long.
+	hr, _ := session(t, `,"_meta":{"sh.kontra/session_idle_s":600}`)
+	hr.now = hr.now.Add(9 * time.Minute)
+	hr.h.Sweep()
+	if keys(hr) == 0 {
+		t.Fatal("a session idle for less than the gate's session_idle_s lost its key")
+	}
+	hr.now = hr.now.Add(2 * time.Minute)
+	hr.h.Sweep()
+	if n := keys(hr); n > 0 {
+		t.Fatalf("a session idle past the gate's session_idle_s keeps its key: %d files", n)
+	}
+
+	// The gate keeps sessions 3 days: the key outlives the node's day, and the bound is kept in the job's file.
+	hr, _ = session(t, `,"_meta":{"sh.kontra/session_idle_s":259200}`)
+	hr.now = hr.now.Add(2 * sessionJobIdle)
+	hr.h.Sweep()
+	if keys(hr) == 0 {
+		t.Fatal("a session the gate keeps three days lost its key after two")
+	}
+	var st hireJob
+	if err := readJSON(filepath.Join(hr.h.cfg.Jobs.Dir(), "mcp-"+sessionHash("gate-session-idle")+".json"), &st); err != nil || st.IdleS != 259200 {
+		t.Fatalf("the job's idle bound is not kept with it: %+v %v", st, err)
+	}
+	hr.now = hr.now.Add(sessionJobIdle + time.Minute)
+	hr.h.Sweep()
+	if n := keys(hr); n > 0 {
+		t.Fatalf("a session idle past the gate's session_idle_s keeps its key: %d files", n)
+	}
+
+	// Values the node does not take: the day.
+	for _, meta := range []string{`,"_meta":{"sh.kontra/session_idle_s":0}`, `,"_meta":{"sh.kontra/session_idle_s":"600"}`,
+		`,"_meta":{"sh.kontra/session_idle_s":60.5}`, `,"_meta":{"sh.kontra/session_idle_s":31536000}`, ``} {
+		hr, _ := session(t, meta)
+		hr.now = hr.now.Add(sessionJobIdle - time.Minute)
+		hr.h.Sweep()
+		if keys(hr) == 0 {
+			t.Fatalf("%s: the key went before the day", meta)
+		}
+		hr.now = hr.now.Add(2 * time.Minute)
+		hr.h.Sweep()
+		if n := keys(hr); n > 0 {
+			t.Fatalf("%s: the key outlives the day: %d files", meta, n)
+		}
+	}
+}

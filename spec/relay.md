@@ -217,8 +217,9 @@ the operator may assert: approve URLs, escrow state, failure reasons, prices, se
   node checks the answer, [`ext-sealed.md`](ext-sealed.md) §5 rule 4b, D200), and there only when its value is
   exactly `{"v": 1, "envelope": "<base64>"}`. Every other `sh.kontra/` key in those objects, and
   `sh.kontra/sealed` anywhere else or on any other service, is removed as above.
-- Then it writes its own (sealed capability, approve URL, failure reason) and the operator's (§13.4). An
-  operator key replaces a same-named key; it is never merged with it.
+- Then it writes its own (sealed capability, approve URL, failure reason, an `initialize` result's
+  `sh.kontra/session_idle_s`, §11.2) and the operator's (§13.4). An operator key replaces a same-named key; it is
+  never merged with it, except `sh.kontra/session_idle_s`, which is the gate's and replaces the operator's (D224).
 
 The gate itself names no escrow key: the escrow keys belong to the operator and its extension spec (D51).
 
@@ -893,9 +894,10 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
 - **`DELETE`** with the session id is forwarded upstream and closes the row; when the upstream's tunnel is gone
   the gate still closes the row and answers `200` (D196). A session idle for the service's
   `session_idle_s` (default 3600) is closed by the gate (`idle`; upstream `DELETE` best effort).
-  `last_seen_at` is written at most once a minute. A hiring node keeps a sealed session's key a day idle
-  ([`tunnel.md`](tunnel.md) §2.3, D224): with a `session_idle_s` over a day, a sealed session's client initializes
-  again after a day idle.
+  `last_seen_at` is written at most once a minute. The `initialize` result states that bound: the gate sets
+  `_meta["sh.kontra/session_idle_s"]` to the service's `session_idle_s` (a JSON integer of seconds), after the
+  operator's `initialize_meta` and in place of any upstream's (§2.5), and a hiring node keeps a sealed session's key
+  that long idle ([`tunnel.md`](tunnel.md) §2.3, D224).
 - **No cap per principal (yet).** The gate caps no principal's sessions of a service, and a stdio service's
   children (`--max-sessions`, [`tunnel.md`](tunnel.md) §10) are shared by every principal admitted to it and every
   durable task's own upstream session: one principal holding the children idle has every other `initialize`

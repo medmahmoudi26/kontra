@@ -74,10 +74,12 @@ are sealed to ([`ext-sealed.md`](ext-sealed.md)). It is deleted when the job is 
 metadata carries the operator's `kontra.keyRetainUntil` (a review window, [`relay.md`](relay.md) §13.3), that
 time has passed; an MCP session's key when the session closes and every task created in it is done. The node
 learns that the gate closed a session from a `404` for it, and deletes the key of a session that has had no
-exchange for a day once its tasks are done (the gate closes an idle session on its own, [`relay.md`](relay.md)
-§11.2; D224). A gate whose `session_idle_s` exceeds a day therefore keeps a sealed session the node no longer
-knows: the node answers `404` for it, on a `GET` as on a `POST`, without forwarding anything, and the client
-initializes again (D224). The same holds for every sealed session after the node restarts.
+exchange for the service's `session_idle_s` once its tasks are done: the gate closes an idle session on its own, and
+states that bound in the `initialize` result's `_meta["sh.kontra/session_idle_s"]` ([`relay.md`](relay.md) §11.2,
+D224). The node keeps it with the job; a value that is not a whole number of seconds from 1 to 30 days, or none,
+counts as a day. A session the node no longer knows (a gate that keeps sessions longer than 30 days, every sealed
+session after the node restarts) is answered `404` by the node, on a `GET` as on a `POST`, without forwarding
+anything, and the client initializes again.
 
 ### 2.4 Credentials
 

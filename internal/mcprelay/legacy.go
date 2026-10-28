@@ -133,7 +133,8 @@ func (h *Handler) initialize(rq *request) {
 	h.relayResponse(rq, resp, o)
 }
 
-// initializeResult rewrites the InitializeResult the client gets (§11.2, §11.5, §2.5, §13.4).
+// initializeResult rewrites the InitializeResult the client gets (§11.2, §11.5, §2.5, §13.4): its _meta also states
+// the service's session_idle_s (D224).
 func (h *Handler) initializeResult(rq *request, raw []byte, m *mcpwire.Message, version string) ([]byte, error) {
 	res, err := mcpwire.ScrubResult(mcpwire.FromUpstream, mcpwire.MethodInitialize, m.Result, false)
 	if err != nil {
@@ -167,6 +168,15 @@ func (h *Handler) initializeResult(rq *request, raw []byte, m *mcpwire.Message, 
 	}
 	if len(rq.svc.InitializeMeta) > 0 {
 		if res, err = mcpwire.MergeMeta(res, rq.svc.InitializeMeta); err != nil {
+			return nil, err
+		}
+	}
+	if idle := int64(rq.svc.SessionIdle / time.Second); idle > 0 {
+		// §11.2 (D224): the gate states the service's session_idle_s, which closes the session idle, so that a hiring
+		// node keeps a sealed session's key as long as the gate keeps the session, and no longer. It is merged after the
+		// operator's initialize_meta: the value is the gate's, never an annotation's.
+		if res, err = mcpwire.MergeMeta(res, map[string]json.RawMessage{
+			mcpwire.MetaSessionIdle: json.RawMessage(strconv.FormatInt(idle, 10))}); err != nil {
 			return nil, err
 		}
 	}

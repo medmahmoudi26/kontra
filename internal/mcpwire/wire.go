@@ -71,6 +71,10 @@ const (
 	ExtTasks               = "io.modelcontextprotocol/tasks"
 	// KontraPrefix is the prefix of Kontra's own _meta keys (D27), which only the gate or the operator writes.
 	KontraPrefix = "sh.kontra/"
+	// MetaSessionIdle is the initialize result's _meta key in which the gate states the service's session_idle_s,
+	// the seconds an idle session is kept (spec/relay.md §11.2, D224): a hiring node keeps a sealed session's key
+	// that long.
+	MetaSessionIdle = KontraPrefix + "session_idle_s"
 )
 
 // ErrBatch is a POST body that is one JSON value but not an object: an array or a scalar (§11.1). From a client it
