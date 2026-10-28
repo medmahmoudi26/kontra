@@ -225,6 +225,34 @@ func (s *Sessions) SweepIdle(ctx context.Context, replicaID string, now time.Tim
 	return out, rows.Err()
 }
 
+// Evict closes the open legacy sessions of a principal on a service beyond the keep most recently used ones other
+// than except (§11.2, D213: max_sessions_per_principal), the longest idle first, with reason idle, and returns them
+// so the caller can send each upstream a DELETE. One statement closes each once, whichever initialize runs it. A
+// virtual session (D160) is never counted: it pins no upstream session.
+func (s *Sessions) Evict(ctx context.Context, tenant uuid.UUID, service, principal string, keep int, except [32]byte) ([]Session, error) {
+	rows, err := s.pool.Query(ctx, `update kontra.mcp_sessions m set closed_at = now(), close_reason = 'idle'
+		 where m.closed_at is null and m.client_sid_hash in (
+		       select client_sid_hash from kontra.mcp_sessions
+		        where tenant_id = $1 and service = $2 and principal = $3 and closed_at is null
+		          and protocol_version <> $6 and client_sid_hash <> $5
+		        order by last_seen_at desc, created_at desc
+		       offset $4)
+		returning `+sweptColumns, tenant, service, principal, max(keep, 0), except[:], mcpwire.V20260728)
+	if err != nil {
+		return nil, fmt.Errorf("mcprelay: evict sessions: %w", err)
+	}
+	defer rows.Close()
+	var out []Session
+	for rows.Next() {
+		x, err := scanSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("mcprelay: evict sessions: %w", err)
+		}
+		out = append(out, *x)
+	}
+	return out, rows.Err()
+}
+
 // PeerAddr is the peer listener address a replica advertises (gate_replicas.peer_addr), and whether the replica
 // is live (seen within the last 30 s, spec/tunnel.md §11). A draining replica is live: it serves the streams of
 // its sessions until its drain ends. "" when it advertises none.

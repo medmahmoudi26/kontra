@@ -1,7 +1,8 @@
 -- Kontra gate schema, revision 0002 (M3).
 --
 -- The claim-check bucket's refs (spec/relay.md §10.4, D167, D181), the peer hop's address of each replica
--- (relay §11.2, D163, D179) and one open virtual MCP session per principal and service (relay §11.12, D177).
+-- (relay §11.2, D163, D179), one open virtual MCP session per principal and service (relay §11.12, D177) and the cap
+-- of MCP sessions per principal and service (relay §11.2, D213).
 -- Every M3 schema change is in this one file, frozen when M3 merges. Section references are to
 -- spec/relay.md (R) and spec/tunnel.md (T).
 
@@ -29,8 +30,16 @@ alter table gate_replicas add column peer_addr text;
 create unique index mcp_sessions_virtual on mcp_sessions (tenant_id, service, principal) nulls not distinct
     where protocol_version = '2026-07-28' and closed_at is null;
 
+-- D213: the open MCP sessions one principal may hold on a service (R §11.2, max_sessions_per_principal); an
+-- initialize beyond it closes the principal's longest-idle session. The index finds a principal's open sessions.
+alter table services add column max_sessions_per_principal integer not null default 2
+    check (max_sessions_per_principal between 1 and 10000);
+create index mcp_sessions_principal on mcp_sessions (tenant_id, service, principal, last_seen_at) where closed_at is null;
+
 -- +goose Down
 set local search_path to kontra;
+drop index mcp_sessions_principal;
+alter table services drop column max_sessions_per_principal;
 drop index mcp_sessions_virtual;
 alter table gate_replicas drop column peer_addr;
 drop table blobs;

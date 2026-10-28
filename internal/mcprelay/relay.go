@@ -71,6 +71,9 @@ type Service struct {
 	// capabilities.experimental["sh.kontra/sealed"] (D27); nil for a service that is not sealed.
 	SealedCapability json.RawMessage
 	SessionIdle      time.Duration
+	// MaxSessionsPerPrincipal is max_sessions_per_principal (§11.2, D213): the open legacy sessions one principal may
+	// hold on the service; an initialize beyond it closes the principal's longest-idle session. 0: no cap.
+	MaxSessionsPerPrincipal int
 	// ToolMeta and InitializeMeta are services.annotations' tool_meta and initialize_meta (§13.4).
 	ToolMeta       map[string]map[string]json.RawMessage
 	InitializeMeta map[string]json.RawMessage

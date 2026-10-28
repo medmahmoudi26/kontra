@@ -32,6 +32,11 @@ const (
 	DefaultDrainTimeout   = 10 * time.Minute
 	DefaultAdmissionWait  = 5 * time.Second
 	DefaultTasksMode      = TasksDurable
+
+	// DefaultMaxSessionsPerPrincipal is services.<name>.max_sessions_per_principal's default (spec §11.2, D213), and
+	// MaxSessionsPerPrincipal its bound (services.max_sessions_per_principal CHECK in 0002).
+	DefaultMaxSessionsPerPrincipal = 2
+	MaxSessionsPerPrincipal        = 10000
 )
 
 // Defaults returns a configuration holding every default that does not depend on another key. Parse

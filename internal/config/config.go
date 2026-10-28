@@ -244,6 +244,19 @@ type Service struct {
 	Task        TaskPolicy `yaml:"task"`
 	Listed      bool       `yaml:"listed"`
 	Annotations JSON       `yaml:"annotations"` // a JSON object (§13.4), never interpreted; default {}
+
+	// MaxSessionsPerPrincipal caps the open MCP sessions one principal holds on the service (mcp only, spec §11.2,
+	// D213): an initialize beyond it closes the principal's longest-idle session. nil is
+	// DefaultMaxSessionsPerPrincipal.
+	MaxSessionsPerPrincipal *int `yaml:"max_sessions_per_principal"`
+}
+
+// SessionsPerPrincipal is max_sessions_per_principal, its default when unset.
+func (s Service) SessionsPerPrincipal() int {
+	if s.MaxSessionsPerPrincipal == nil {
+		return DefaultMaxSessionsPerPrincipal
+	}
+	return *s.MaxSessionsPerPrincipal
 }
 
 // Kinds of service.

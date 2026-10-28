@@ -39,7 +39,8 @@ const maxPicks = 3
 // InitializeResult that negotiated 2025-11-25 or 2025-06-18, the mcp_sessions row and the client's answer: the
 // result scrubbed (§2.5), its capabilities.tasks per §11.5, the operator's initialize_meta merged into _meta
 // (§13.4), and the gate's Mcp-Session-Id. Another negotiated version is -32602 naming the supported ones, and the
-// upstream session gets a best-effort DELETE.
+// upstream session gets a best-effort DELETE. Before the upstream initialize, and again once the row is written, the
+// principal's sessions beyond max_sessions_per_principal are closed, the longest idle first (D213, evict).
 func (h *Handler) initialize(rq *request) {
 	if ref := h.admit(rq, hooks.OpSession, ""); ref != nil {
 		writeRefusal(rq.w, ref)
@@ -68,6 +69,12 @@ func (h *Handler) initialize(rq *request) {
 		if ref != nil {
 			writeRefusal(rq.w, ref)
 			return
+		}
+		if attempt == 0 {
+			// D213: a principal holds at most max_sessions_per_principal sessions of the service; the new one's room is
+			// made before the upstream initialize, which an upstream with a bounded number of sessions (a stdio
+			// service's children) would otherwise refuse full, and only once there is an upstream to initialize.
+			h.evict(rq, hash)
 		}
 		resp, err = h.send(rq.ctx(), t, rq, http.MethodPost, body, hdr, "", x)
 		var g *goneError
@@ -128,6 +135,8 @@ func (h *Handler) initialize(rq *request) {
 		}
 		h.log.Info("mcp session opened", "service", rq.svc.Ref.Name, "principal", rq.p.ID, "protocol_version", version,
 			"backend", backendName(t), "holder", t.replica)
+		// Concurrent initializes of one principal each made room for one: the cap holds once each is open.
+		h.evict(rq, hash)
 		return out, nil
 	}
 	h.relayResponse(rq, resp, o)

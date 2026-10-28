@@ -898,12 +898,15 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   `_meta["sh.kontra/session_idle_s"]` to the service's `session_idle_s` (a JSON integer of seconds), after the
   operator's `initialize_meta` and in place of any upstream's (§2.5), and a hiring node keeps a sealed session's key
   that long idle ([`tunnel.md`](tunnel.md) §2.3, D224).
-- **No cap per principal (yet).** The gate caps no principal's sessions of a service, and a stdio service's
-  children (`--max-sessions`, [`tunnel.md`](tunnel.md) §10) are shared by every principal admitted to it and every
-  durable task's own upstream session: one principal holding the children idle has every other `initialize`
-  answered `full` until they idle out. D213 decides a cap per principal and service
-  (`max_sessions_per_principal`) and the bridge's eviction of a long-idle child; until they are built, this is the
-  residual.
+- **A cap per principal (D213).** A principal holds at most `services.<name>.max_sessions_per_principal` (default
+  2) open sessions of a service, 2026-07-28 virtual sessions not counted. An `initialize` beyond it closes that
+  principal's longest-idle sessions (`idle`, the oldest `last_seen_at` first), never another principal's, with an
+  upstream `DELETE` the gate makes on each session's pinned target (the peer hop for a tunnel another replica holds)
+  before it forwards the `initialize`, once it has chosen an upstream: a stdio service's children
+  (`--max-sessions`, [`tunnel.md`](tunnel.md) §10) are shared by every principal admitted to it, and the closed
+  session's child is what the new one gets. The cap is checked again once the new row is written, so concurrent
+  `initialize`s of one principal leave at most the cap open. A closed session answers `404`. A full stdio bridge
+  also stops its own longest-idle child, idle for at least 5 minutes, for a principal that holds no session there.
 - **The peer hop (D163).** Only the replica holding a tunnel session can open a stream on it
   ([`tunnel.md`](tunnel.md) §11), and a plain MCP request has no Temporal activity to carry it there. A request
   for a tunnel session held by another replica (a pinned session's later request, or a session chosen for an
@@ -1697,6 +1700,7 @@ task id) and `cancel_forwarded`, `input_required_sticky` and `key_scope`, with [
 | `services.<name>.sealed` | `false`; `true` or `{required: bool}` (`required` defaults to `true`); tunnel backends only (D91) | [`ext-sealed.md`](ext-sealed.md) §1 |
 | `services.<name>.seller_keys` | none (seller signatures not verified) | §3 |
 | `services.<name>.session_idle_s` | `3600` | §11.2 |
+| `services.<name>.max_sessions_per_principal` | `2` (mcp only; 1 to 10000) | §11.2 |
 | `services.<name>.task.timeout`, `.retries`, `.retention` | `1h`, `2`, `7d` | §5.4, §6.4, §6.5 |
 | `services.<name>.listed` | `false` | §12.2 |
 | `tenancy` | `single` | §2.1 |

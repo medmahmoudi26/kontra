@@ -633,6 +633,58 @@ func TestSessionEnd(t *testing.T) {
 	}
 }
 
+// D213: a full bridge stops its longest-idle child, one with no exchange for at least EvictIdle, for a new session
+// rather than answer full, and waits for its group to be gone so that the count never exceeds --max-sessions; a child
+// with an exchange open (a GET stream) or idle for less is never stopped, and with none to stop the initialize is 503
+// full. A child the gate's DELETE is stopping already (a principal's longest-idle session closed for its new one,
+// relay.md §11.2) is waited for rather than answered full.
+func TestFullBridgeStopsItsLongestIdleChild(t *testing.T) {
+	old := EvictIdle
+	EvictIdle = 400 * time.Millisecond
+	t.Cleanup(func() { EvictIdle = old })
+	f := newFixture(t, func(c *Config) { c.MaxSessions = 3 })
+	init := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
+	s1 := f.initialize(`{}`)
+	s2 := f.initialize(`{}`)
+	s3 := f.initialize(`{}`)
+	f.get(s3, "") // s3 has an exchange open: never idle
+	// Every child idle for less than EvictIdle: full, and nothing is stopped.
+	if r := f.post("", init); r.status != http.StatusServiceUnavailable || r.header.Get(tunnel.HeaderNode) != string(tunnel.NodeFull) {
+		t.Fatalf("an initialize with no child idle long enough: %d %q %s", r.status, r.header.Get(tunnel.HeaderNode), r.body)
+	}
+	time.Sleep(EvictIdle / 2)
+	f.call(s1, 1, "echo", `{"text":"keep s1 busy"}`) // s2 is now the longest idle
+	time.Sleep(EvictIdle)
+	s4 := f.initialize(`{}`)
+	if r := f.call(s2, 2, "echo", `{"text":"x"}`); r.status != http.StatusNotFound {
+		t.Fatalf("the longest-idle session after it was stopped: %d %s", r.status, r.body)
+	}
+	for _, sid := range []string{s1, s3, s4} {
+		if r := f.call(sid, 3, "echo", `{"text":"still here"}`); r.status != http.StatusOK || !strings.Contains(text(t, r), "still here") {
+			t.Fatalf("session %s after the eviction: %d %s", sid[:6], r.status, r.body)
+		}
+	}
+	if n := f.b.Sessions(); n != 3 {
+		t.Fatalf("%d children counted, want --max-sessions (3)", n)
+	}
+	if !strings.Contains(f.logs.String(), "its longest-idle child is stopped for a new session") {
+		t.Error("the eviction is not logged")
+	}
+
+	// A DELETE stops a child (the gate closing a principal's longest-idle session): an initialize right behind it waits
+	// for its group rather than answer full, though no child is idle long enough.
+	if r := f.do(http.MethodDelete, s1, mcpwire.V20251125, ""); r.status != http.StatusOK {
+		t.Fatalf("DELETE: %d", r.status)
+	}
+	s5 := f.initialize(`{}`)
+	if r := f.call(s5, 4, "echo", `{"text":"after a DELETE"}`); r.status != http.StatusOK {
+		t.Fatalf("the session opened behind a DELETE: %d %s", r.status, r.body)
+	}
+	if n := f.b.Sessions(); n > 3 {
+		t.Fatalf("%d children counted, over --max-sessions (3)", n)
+	}
+}
+
 // D184: a child that ignores SIGTERM, keeps running when its stdin closes and has a grandchild that ignores SIGTERM
 // too (an npx launcher's node) leaves no process of its group 10 s after DELETE, after idle, after its own crash
 // and after Close.

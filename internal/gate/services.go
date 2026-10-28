@@ -302,13 +302,14 @@ type desired struct {
 	sellerKeys  any // jsonb text or nil
 	sessionIdle int
 	listed      bool
+	maxSessions int // max_sessions_per_principal (D213)
 }
 
 func desiredOf(s config.Service) (desired, error) {
 	d := desired{
 		kind: s.Kind, allow: slices.Clone(s.Allow), sealed: string(s.Sealed.Mode), retries: s.Task.RetryCount(),
 		timeoutS: int64(s.Task.Timeout.D() / time.Second), retentionS: int64(s.Task.Retention.D() / time.Second),
-		annotations: "{}", sessionIdle: int(s.SessionIdle), listed: s.Listed,
+		annotations: "{}", sessionIdle: int(s.SessionIdle), listed: s.Listed, maxSessions: s.SessionsPerPrincipal(),
 	}
 	if d.allow == nil {
 		d.allow = []string{}
@@ -364,26 +365,26 @@ func nonNil(s []string) []string {
 // The columns Sync compares, in the order of diffSQL's flags; jsonb columns compare as jsonb (semantic
 // equality), so a reformatted file is no change.
 var syncFields = []string{"kind", "backend", "allow", "tools", "tasks", "sealed", "retries", "timeout", "retention",
-	"annotations", "seller_keys", "session_idle_s", "listed"}
+	"annotations", "seller_keys", "session_idle_s", "listed", "max_sessions_per_principal"}
 
 const diffSQL = `select source, disabled_at is not null,
 	kind is distinct from $3, backend is distinct from $4::jsonb, allow is distinct from $5::text[],
 	tools is distinct from $6::jsonb, tasks_mode is distinct from $7::text, sealed is distinct from $8,
 	retries is distinct from $9, timeout_s is distinct from $10, retention_s is distinct from $11,
 	annotations is distinct from $12::jsonb, seller_keys is distinct from $13::jsonb,
-	session_idle_s is distinct from $14, listed is distinct from $15
+	session_idle_s is distinct from $14, listed is distinct from $15, max_sessions_per_principal is distinct from $16
   from kontra.services where tenant_id = $1 and name = $2 for update`
 
 // upsertSQL writes a config service. A changed backend drops the stored cards: they are another seller's.
 const upsertSQL = `insert into kontra.services (tenant_id, name, kind, backend, allow, tools, tasks_mode, sealed,
-	retries, timeout_s, retention_s, annotations, seller_keys, session_idle_s, listed, source)
-values ($1, $2, $3, $4::jsonb, $5::text[], $6::jsonb, $7::text, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, 'config')
+	retries, timeout_s, retention_s, annotations, seller_keys, session_idle_s, listed, max_sessions_per_principal, source)
+values ($1, $2, $3, $4::jsonb, $5::text[], $6::jsonb, $7::text, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, 'config')
 on conflict (tenant_id, name) do update set
 	kind = excluded.kind, backend = excluded.backend, allow = excluded.allow, tools = excluded.tools,
 	tasks_mode = excluded.tasks_mode, sealed = excluded.sealed, retries = excluded.retries,
 	timeout_s = excluded.timeout_s, retention_s = excluded.retention_s, annotations = excluded.annotations,
 	seller_keys = excluded.seller_keys, session_idle_s = excluded.session_idle_s, listed = excluded.listed,
-	source = 'config', disabled_at = null, updated_at = now(),
+	max_sessions_per_principal = excluded.max_sessions_per_principal, source = 'config', disabled_at = null, updated_at = now(),
 	upstream_card   = case when services.backend is distinct from excluded.backend then null else services.upstream_card end,
 	card            = case when services.backend is distinct from excluded.backend then null else services.card end,
 	card_hash       = case when services.backend is distinct from excluded.backend then null else services.card_hash end,
@@ -470,7 +471,7 @@ func (s *Services) syncOne(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, n
 		return false, fmt.Errorf("gate: services.%s: %w", name, err)
 	}
 	args := []any{tenantID, name, d.kind, d.backend, d.allow, d.tools, d.tasksMode, d.sealed, d.retries,
-		d.timeoutS, d.retentionS, d.annotations, d.sellerKeys, d.sessionIdle, d.listed}
+		d.timeoutS, d.retentionS, d.annotations, d.sellerKeys, d.sessionIdle, d.listed, d.maxSessions}
 	var (
 		source   string
 		disabled bool
@@ -550,6 +551,7 @@ type row struct {
 	tools       []byte // services.tools as text (mcp only), nil when NULL
 	tasksMode   string // services.tasks_mode (mcp only), "" when NULL
 	sessionIdle int    // services.session_idle_s
+	maxSessions int    // services.max_sessions_per_principal (D213)
 	// recipients are a sealed service's recipients (ext-sealed.md §1, D61): the keys enrolled for it, neither
 	// revoked nor rotated, connected or not, as age1… strings in enrollment order; nil for a service that is not
 	// sealed.
@@ -560,6 +562,7 @@ const selectServices = `select s.tenant_id, t.slug, s.name, s.kind, s.backend::t
 	s.disabled_at is not null, s.timeout_s, s.retries, s.retention_s, s.annotations::text, s.sealed,
 	case when s.seller_keys is null or s.seller_keys = 'null'::jsonb then null else s.seller_keys::text end,
 	s.upstream_card, s.card_fetched_at, s.tools::text, coalesce(s.tasks_mode, ''), s.session_idle_s,
+	s.max_sessions_per_principal,
 	case when s.sealed <> 'off' then array(
 		select k.pubkey from kontra.key_services ks join kontra.tunnel_keys k on k.key_id = ks.key_id
 		 where ks.tenant_id = s.tenant_id and ks.service = s.name and ks.revoked_at is null
@@ -575,7 +578,7 @@ func scanRow(r pgx.CollectableRow) (row, error) {
 	var pubkeys [][]byte
 	err := r.Scan(&x.tenantID, &x.tenant, &x.name, &x.kind, &backend, &x.allow, &x.listed, &x.disabled,
 		&x.timeoutS, &x.retries, &x.retentionS, &annots, &x.sealed, &keys, &x.upstream, &x.fetchedAt,
-		&tools, &x.tasksMode, &x.sessionIdle, &pubkeys)
+		&tools, &x.tasksMode, &x.sessionIdle, &x.maxSessions, &pubkeys)
 	if err != nil {
 		return x, err
 	}
@@ -816,18 +819,19 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 		}
 		e.mcp = m
 		e.mcpKey = string(x.tools) + "|" + x.tasksMode + "|" + x.sealed + "|" + string(x.annotations) + "|" + fmt.Sprint(x.sessionIdle) +
-			"|" + strings.Join(x.recipients, ",")
+			"|" + fmt.Sprint(x.maxSessions) + "|" + strings.Join(x.recipients, ",")
 	}
 	return e, nil
 }
 
 // mcpService is a kind: mcp row as the MCP relay serves it (spec §11): its policy (services.tools), its tasks:
-// mode, its sealed flag, its session_idle_s, its tool_meta and initialize_meta annotations (§13.4), and for a
+// mode, its sealed flag, its session_idle_s and max_sessions_per_principal, its tool_meta and initialize_meta annotations (§13.4), and for a
 // direct mcp: {url} backend the SSRF-safe backend pinned to that URL's host:port (D71), which is the endpoint
 // itself. A value that cannot be read leaves the row out (its policy must never be applied half).
 func (s *Services) mcpService(e *entry, x row, b backendSpec) (*mcprelay.Service, error) {
 	m := &mcprelay.Service{Ref: e.ref, Allow: e.allow, Disabled: x.disabled, Tasks: x.tasksMode,
-		Sealed: x.sealed != string(config.SealedOff), SessionIdle: time.Duration(x.sessionIdle) * time.Second}
+		Sealed: x.sealed != string(config.SealedOff), SessionIdle: time.Duration(x.sessionIdle) * time.Second,
+		MaxSessionsPerPrincipal: x.maxSessions}
 	if m.Sealed {
 		m.SealedRequired = x.sealed == string(config.SealedRequired)
 		m.SealedCapability = sealedEntry(x)

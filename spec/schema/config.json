@@ -251,6 +251,7 @@
           "description": "An inline JWKS or {url}; seller card signatures are verified against it (spec §3)."
         },
         "session_idle_s": { "type": "integer", "minimum": 1, "maximum": 2147483647, "default": 3600 },
+        "max_sessions_per_principal": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2, "description": "mcp only: the open MCP sessions one principal may hold on the service; an initialize beyond it closes that principal's longest-idle session, with an upstream DELETE (spec §11.2, D213)." },
         "task": {
           "type": "object",
           "additionalProperties": false,
@@ -266,7 +267,7 @@
       "allOf": [
         {
           "if": { "properties": { "kind": { "const": "a2a" } }, "required": ["kind"] },
-          "then": { "not": { "anyOf": [ { "required": ["tools"] }, { "required": ["tasks"] } ] }, "properties": { "backend": { "not": { "required": ["mcp"] } } } }
+          "then": { "not": { "anyOf": [ { "required": ["tools"] }, { "required": ["tasks"] }, { "required": ["max_sessions_per_principal"] } ] }, "properties": { "backend": { "not": { "required": ["mcp"] } } } }
         },
         {
           "if": { "properties": { "kind": { "const": "mcp" } }, "required": ["kind"] },

@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -757,21 +758,63 @@ func (h *Handler) SweepIdle(ctx context.Context) (int, error) {
 // deleteUpstream sends a best-effort DELETE for an upstream session the gate closed (idle, a refused negotiation),
 // within 10 s, on its own goroutine.
 func (h *Handler) deleteUpstream(ctx context.Context, t target, s Session) {
-	go func() {
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		rq := &request{r: (&http.Request{}).WithContext(ctx), svc: &Service{}, sess: &s}
-		rq.svc.Ref.TenantID, rq.svc.Ref.Name = s.TenantID, s.Service
-		hdr := http.Header{}
-		if s.ProtocolVersion != "" {
-			hdr.Set(mcpwire.HeaderProtocolVersion, s.ProtocolVersion)
+	go h.deleteUpstreamNow(ctx, t, s)
+}
+
+// deleteUpstreamNow is deleteUpstream's DELETE, made before it returns (within 10 s).
+func (h *Handler) deleteUpstreamNow(ctx context.Context, t target, s Session) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rq := &request{r: (&http.Request{}).WithContext(ctx), svc: &Service{}, sess: &s}
+	rq.svc.Ref.TenantID, rq.svc.Ref.Name = s.TenantID, s.Service
+	hdr := http.Header{}
+	if s.ProtocolVersion != "" {
+		hdr.Set(mcpwire.HeaderProtocolVersion, s.ProtocolVersion)
+	}
+	resp, err := h.send(ctx, t, rq, http.MethodDelete, nil, hdr, s.UpstreamSID, upstream.MCPExchange{Session: s.HashHex()})
+	if err != nil {
+		h.log.Debug("mcp: the upstream DELETE of a closed session failed", "service", s.Service, "error", err)
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
+}
+
+// evict makes room for the principal's new session of the service (§11.2, D213): its open legacy sessions beyond
+// max_sessions_per_principal, counting the new one (except, the hash it is opened under), are closed idle, the
+// longest idle first, and each upstream session gets a DELETE on its pinned target (this replica's tunnel session,
+// the direct backend, or the holder's peer listener), made before evict returns, so that an upstream with a bounded
+// number of sessions (the stdio bridge's --max-sessions children) has the room before the new initialize reaches
+// it. A session whose target is gone is closed all the same: its upstream session dies with its tunnel.
+func (h *Handler) evict(rq *request, except [32]byte) {
+	limit := rq.svc.MaxSessionsPerPrincipal
+	if limit <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(rq.ctx()), 10*time.Second)
+	defer cancel()
+	rows, err := h.deps.Sessions.Evict(ctx, rq.svc.Ref.TenantID, rq.svc.Ref.Name, rq.p.ID, limit-1, except)
+	if err != nil {
+		h.log.Warn("mcp: a principal's sessions over max_sessions_per_principal were not closed", "service", rq.svc.Ref.Name, "error", err)
+		return
+	}
+	var wg sync.WaitGroup
+	for _, s := range rows {
+		h.log.Info("mcp: a principal's longest-idle session is closed for its new one (max_sessions_per_principal)",
+			"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", limit, "holder", s.ReplicaID)
+		if s.UpstreamSID == "" {
+			continue
 		}
-		resp, err := h.send(ctx, t, rq, http.MethodDelete, nil, hdr, s.UpstreamSID, upstream.MCPExchange{Session: s.HashHex()})
+		erq := &request{r: (&http.Request{}).WithContext(ctx), svc: rq.svc, sess: &s}
+		t, err := h.pinnedTarget(erq)
 		if err != nil {
-			h.log.Debug("mcp: the upstream DELETE of a closed session failed", "service", s.Service, "error", err)
-			return
+			continue
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-		_ = resp.Body.Close()
-	}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.deleteUpstreamNow(ctx, t, s)
+		}()
+	}
+	wg.Wait()
 }
