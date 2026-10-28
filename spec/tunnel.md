@@ -1,8 +1,9 @@
 # Tunnel
 
 Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning). Revision 4 brings the text in line
-with the M2 code (D123–D157), decided under the owner's standing instruction on 26 Oct. Normative. RFC 2119
-key words.
+with the M2 code (D123–D157), decided under the owner's standing instruction on 26 Oct. Revision 5 (28 Oct, M4
+planning) settles anonymous sessions and `kontra login` (§6, DM4-10, DM4-11; renumbered into the D sequence once M3
+has merged). Normative. RFC 2119 key words.
 
 The tunnel is how a node (`kontra connect`) and a gate (`kontra-gate`) talk: one outbound connection from the
 node, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the node sends
@@ -129,9 +130,9 @@ closes the connection.
 | `name` | The node's name, shown in the operator's view of nodes: `--name`, default the hostname; 1–64 characters. |
 | `services` | What the node wants to host on this connection: `kind` and `name` (the name alone; the tenant comes from the key). May be empty (a node that only hires). |
 | `enroll` | Optional. Enrollment tokens (§5). |
-| `auth` | Optional. An API key: the principal for hiring (§9), and with an `enroll:` scope also the authority to enroll (§5). |
+| `auth` | Optional. An API key: the principal for hiring (§9), and with an `enroll:` scope also the authority to enroll (§5) and to convert an anonymous key (§6.3). |
 | `rotate_from` | Optional. The key this one replaces (§12). |
-| `public` | Optional, anonymous sessions only: services that accept unauthenticated callers (§6.1). |
+| `public` | Optional, anonymous sessions only: services that accept unauthenticated callers (§6.1). Each must be one of `services` (else `service_denied`); on any other session it is ignored. |
 | `agent` | CLI version and platform, shown in the operator's view of nodes. |
 
 **M2, gate → node (`challenge`):**
@@ -250,39 +251,90 @@ the proof. A service the gate creates during a handshake gets `allow: [org:<its 
 
 ## 6. Anonymous sessions (Cloud)
 
-A gate with `tunnel.anonymous: true` (Cloud's public gate; never a default) accepts a `hello` with neither
-`enroll` nor `auth` (note 2 §2).
+A gate with `tunnel.anonymous` set (Cloud's public gate; never a default) accepts a `hello` with neither `enroll`
+nor `auth` whose key is unknown at the gate or belongs to an anonymous tenant (note 2 §2). The setting needs
+`tenancy: multi`, since an anonymous service's URL names its tenant ([`relay.md`](relay.md) §2.1, §17), and is
+either `true` or an object of §6.2's limits (DM4-10). A hello with neither from a key of any other tenant is
+admitted as §5 says, for its existing bindings.
 
 ### 6.1 What happens
 
-- The gate creates a tenant `anon-<16 lowercase hex>` (8 random bytes) with `kind = anonymous` and `expires_at
-  = now + 2 h`, enrolls the key for the declared services under it, and answers `welcome` with
-  `anonymous.expires_at`. The services are at `{public_url}/agents/anon-…/<name>` and `/mcp/anon-…/<name>`, with
-  `allow: [org:anon-…]` (the session's own node), plus `anonymous` for those listed in M1's `public`
-  (`kontra connect --public <name>`): a shareable, ngrok-style URL anyone may call, within the limits below.
-- The same key reconnecting before expiry gets the same tenant back (the gate looks the key up first).
-- At expiry the gate closes the session (`revoked`), refuses further requests to the tenant's services (`404`),
-  and deletes the tenant's services, keys, tasks and calls 24 h later. The tenant row stays as a tombstone
-  (`tenants.deleted_at`), so a slug is never reused.
-- `kontra login` turns the anonymous tenant into the person's account (Cloud's flow); the services keep their
-  names under the account's slug and stop expiring.
+- The gate creates a tenant `anon-<16 lowercase hex>` (8 random bytes) with `kind = anonymous`, `expires_at
+  = now + ttl` and `created_from` = the client's network, enrolls the key for the declared services under it, and
+  answers `welcome` with `anonymous.expires_at`. The services are at `{public_url}/agents/anon-…/<name>` and
+  `/mcp/anon-…/<name>`, with `allow: [org:anon-…]` (the session's own node), plus `anonymous` for those listed in
+  M1's `public` (`kontra connect --public <name>`): a shareable, ngrok-style URL anyone may call, within the limits
+  below. They are never `listed`.
+- The same key reconnecting before expiry gets the same tenant back (the gate looks the key up first). The
+  services it declares then are created or bound within the services limit, a service it no longer declares is
+  left out of `welcome` and keeps its row until the tenant ends, and `public` is applied anew.
+- Ten minutes before `expires_at` the gate sends `{"t": "expiring", "at"}` on the control stream (§13). At
+  `expires_at` it revokes the key's bindings to the tenant's services and disables them (every route answers `404`;
+  tasks in flight fail `service_unavailable` at their next dispatch, [`relay.md`](relay.md) §13.5), sends `{"t":
+  "revoked"}` and closes the session; the node exits saying that the anonymous session expired. The key itself is
+  not revoked: its next hello opens a new anonymous tenant with a new slug (DM4-10).
+- `purge_after` (24 h) after expiry the gate deletes the tenant's services, enrollments, tasks, calls, MCP sessions
+  and bucket objects. The tenant row stays as a tombstone (`tenants.deleted_at`, with `created_from`), so a slug is
+  never reused.
+- `kontra login` turns the anonymous tenant into the person's account (§6.3); the services keep their names
+  under the account's slug and stop expiring.
 
 ### 6.2 Limits (`anon_limits`)
 
-| Limit | Default |
-|---|---|
-| Session TTL | 2 h |
-| Anonymous tenants per network (IPv4 /24, IPv6 /48) at once | 3 |
-| Services per anonymous session | 4 |
-| Concurrent tasks per anonymous tenant, as host and as hirer | 4 each |
-| Node-opened (hiring) streams in flight per session | 8 |
-| Parts stored per anonymous tenant | 64 MiB ([`relay.md`](relay.md) §6.6) |
-| Body and rate limits | the gate's standard limits ([`relay.md`](relay.md) §2.2) |
-| Listings | none: anonymous services are never `listed` and never in `search` |
-| Sealing | allowed; recipients are published only on the session's own services' cards |
+| Limit | Default | `tunnel.anonymous` key |
+|---|---|---|
+| Session TTL | 2 h | `ttl` |
+| Anonymous tenants per network (IPv4 /24, IPv6 /48) at once | 3 | `tenants_per_network` |
+| Services per anonymous session | 4 | `services` |
+| Concurrent tasks per anonymous tenant, as host and as hirer | 4 each | `tasks` |
+| Node-opened (hiring) streams in flight per session | 8 | `hiring_streams` |
+| Parts stored per anonymous tenant | 64 MiB ([`relay.md`](relay.md) §6.6) | `parts_bytes` |
+| Purge after expiry | 24 h | `purge_after` |
+| Body and rate limits | the gate's standard limits ([`relay.md`](relay.md) §2.2) | |
+| Listings | none: anonymous services are never `listed` and never in `search` | |
+| Sealing | allowed; recipients are published only on the session's own services' cards | |
 
 Exceeding a creation limit is `rate_limited` in M4 (the node backs off); exceeding a runtime limit is the
-relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never the address.
+relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never the address. How they count
+(DM4-10):
+
+- A network's tenants are the anonymous tenants created from it that have neither expired nor been converted; the
+  client's address is the edge's ([`relay.md`](relay.md) §2.2).
+- A session's services are those its hello declares: a 5th is `service_denied`, and nothing is enrolled.
+- Tasks as host are the non-terminal tasks of the tenant's services, whoever called them; as hirer, the non-terminal
+  tasks whose principal is a key of the tenant. Both are counted under a per-tenant lock when a task is created. Over
+  the cap, A2A answers `429` as [`relay.md`](relay.md) §2.2 says (on JSON-RPC, `-32600` `rate limited`), a
+  task-augmented MCP call `429` with `-32600`, and `hire` a `CallToolResult` with `isError`. A plain MCP call is not
+  a task: the hiring-stream cap and the edge bound it.
+
+### 6.3 `kontra login` (DM4-11)
+
+`kontra login [--gate URL] [--no-browser]` gets an API key for a gate from its operator's sign-in and keeps it as
+that origin's API key in `~/.kontra/credentials` (§2.4), which `kontra connect` then sends as `auth`:
+
+1. It reads `{gate}/.well-known/oauth-protected-resource/mcp` ([`relay.md`](relay.md) §12.1). A gate that serves
+   none has no sign-in: `kontra login` says to ask its operator for an API key (`--api-key`) and exits 1.
+2. It reads the RFC 8414 metadata of the document's first `authorization_servers` entry, which must offer the
+   `authorization_code` grant with PKCE `S256` and a `registration_endpoint`. Once per gate origin it registers
+   (RFC 7591: `client_name` `kontra CLI`, `redirect_uris` `["http://127.0.0.1/callback"]`,
+   `token_endpoint_auth_method` `none`, `grant_types` `["authorization_code"]`) and keeps the `client_id` with the
+   credential.
+3. It runs the authorization code flow with PKCE (RFC 7636, `S256`), `state`, and a loopback redirect (RFC 8252
+   §7.3: `http://127.0.0.1:<ephemeral port>/callback`, listening on that port only until a code arrives or 10
+   minutes pass), with `resource` = the gate's origin (RFC 8707). The URL is opened in the browser, or printed with
+   `--no-browser`.
+4. The token response's `access_token` must be an API key of the gate (`kk_…`); anything else is refused and not
+   stored. The authorization server is the operator's (Cloud's control plane): it issues the key for the person's
+   account, with the scopes `hire` and `enroll:*`.
+
+**Conversion.** A hello whose key belongs to a live anonymous tenant and whose `auth` is an API key of an `account`
+tenant with the `enroll:*` scope (`tunnel.enroll_with_api_key`) converts the key, in the admission's transaction:
+the declared services are created in the account where they do not exist, under the same names, with `allow:
+[org:<account>]` (an existing one of another kind is `kind_mismatch`, and nothing moves); the key moves to the
+account with bindings to them; and the anonymous tenant expires at once (§6.1). `welcome` names the account's URLs and
+has no `anonymous`. The anonymous URLs answer `404` and their tasks in flight fail `service_unavailable`: a converted
+service is a new service at a new URL. An `audit` row records the conversion. A running `kontra connect` converts at
+its next handshake; `kontra login` tells the person to restart it.
 
 ## 7. After `welcome`
 
@@ -572,6 +624,8 @@ A stream is in flight until both its halves have ended, on either side (D137, D1
 
 M2 runs `tunnel_kill`, `sidecar_not_a_proxy` and `key_scope`, with [`relay.md`](relay.md) §16's tunnel tests;
 `anon_limits`, `local_rebinding` and `stdio_roots` come with M3 and M4 (D154).
+M4 runs `anon_limits`, `anon_lifecycle` and `login_converts` (DM4-15), with `tunnel.anonymous`'s limits compressed
+where a row waits on a clock.
 
 | Test | Expected |
 |---|---|
@@ -579,6 +633,8 @@ M2 runs `tunnel_kill`, `sidecar_not_a_proxy` and `key_scope`, with [`relay.md`](
 | `sidecar_not_a_proxy` | §8.2–§8.3: a foreign `Host`, an absolute URL, a `..` or encoded path outside the base (M2: the root base, D123), `CONNECT`, `Upgrade`, and a `url` part pointing at a private address all reach only the configured target or are refused, and the node dials nothing else |
 | `key_scope` | §5, §8.1; [`relay.md`](relay.md) §6.1 |
 | `replica_kill` | §11; [`relay.md`](relay.md) §14.2 |
-| `anon_limits` | §6.2: a 4th anonymous tenant from one /24 is `rate_limited`; a 5th declared service is `service_denied`; a 5th concurrent task is `429`; the services are absent from `search`; at `expires_at` the session closes `revoked` and the URLs answer `404` |
+| `anon_limits` | §6.2: a 4th anonymous tenant from one /24 is `rate_limited`, and a 4th from one IPv6 /48; a 5th declared service is `service_denied`, with nothing enrolled; a 5th concurrent task is `429`, as host and as hirer; a 9th hiring stream is `429`; parts over the tenant's total are refused; the services are absent from `search`; at `expires_at` the session closes `revoked` and the URLs answer `404` |
+| `anon_lifecycle` | §6.1: the same key before expiry gets its tenant back; a `--public` service answers a caller without a credential and a service not public answers `404` to it and to another node; `expiring` arrives before the end; at the end tasks in flight fail `service_unavailable`, the node exits saying so, and the key's next hello opens a new tenant with a new slug; after `purge_after` the tenant's services, enrollments, tasks, calls and bucket objects are gone, its row is a tombstone with `created_from` a CIDR, and no table holds the client's address |
+| `login_converts` | §6.3, against an in-repository authorization server: `kontra login --no-browser` registers once, sends PKCE `S256` and `resource` = the gate's origin, accepts the code on its loopback port only, stores the `kk_` key for that origin only (0600), and refuses an access token that is not an API key; `kontra connect` with it converts the tenant: `welcome` has no `anonymous` and names the account's URLs, the services stop expiring, the anonymous URLs answer `404`, and an `audit` row records it; a gate without `auth.mcp_oauth` makes `kontra login` exit 1 naming `--api-key` |
 | `local_rebinding` | §9: `Host: evil.example:7777` or `Origin: http://evil.example:7777` on `/mcp/…`, `/agents/…` and `/.well-known/…` gets `403` and opens no stream |
 | `stdio_roots` | §10: `server-filesystem@1.0.0` over stdio, started with one directory and served with `--roots` naming another; a client that declares roots of `file:///` gets its first `tools/call` answered in under 2 s and never receives `roots/list`; the server's `list_allowed_directories` names only the node's configured root, and a read of `~/.kontra/identity.key` is refused (D173) |

@@ -104,6 +104,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["issuer"],
+          "description": "The authorization server /mcp and /mcp/{svc} are a resource server for (spec §12.1; built in M4, DM4-9).",
           "properties": { "issuer": { "$ref": "#/$defs/httpsURL" } }
         },
         "anonymous": { "type": "object", "additionalProperties": false, "description": "Reserved; per service, anonymous is an allow: entry." }
@@ -146,7 +147,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["url", "secret_env"],
-          "description": "The remote Admission hook (spec §13.1). M5: refused at load until built.",
+          "description": "The remote Admission hook (spec §13.1). Built in M4 (DM4-8); refused at load before it.",
           "properties": {
             "url": { "type": "string", "pattern": "^https?://" },
             "secret_env": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
@@ -169,7 +170,26 @@
       "additionalProperties": false,
       "properties": {
         "channel_binding": { "enum": ["tls-exporter", "none"], "description": "Default: tls-exporter when the gate terminates TLS, else none." },
-        "anonymous": { "type": "boolean", "default": false },
+        "anonymous": {
+          "description": "Anonymous sessions (tunnel.md §6, DM4-10): true for the §6.2 defaults, or those limits. Needs tenancy: multi.",
+          "default": false,
+          "oneOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ttl": { "$ref": "#/$defs/duration", "default": "2h" },
+                "tenants_per_network": { "type": "integer", "minimum": 1, "default": 3 },
+                "services": { "type": "integer", "minimum": 1, "default": 4 },
+                "tasks": { "type": "integer", "minimum": 1, "default": 4 },
+                "hiring_streams": { "type": "integer", "minimum": 1, "maximum": 32, "default": 8 },
+                "parts_bytes": { "$ref": "#/$defs/byteSize", "default": "64MiB" },
+                "purge_after": { "$ref": "#/$defs/duration", "default": "24h" }
+              }
+            }
+          ]
+        },
         "enroll_with_api_key": { "type": "boolean", "default": false }
       }
     },
