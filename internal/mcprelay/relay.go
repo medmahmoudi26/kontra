@@ -117,7 +117,10 @@ type Deps struct {
 	// Tasks serves gate-owned MCP tasks (§11.5–§11.8); nil, a durable service advertises no tasks (as tasks: off
 	// does) and answers a task-augmented call and tasks/* -32601.
 	Tasks *Tasks
-	now   func() time.Time
+	// ToolsChanged, when set, tells the other replicas that a service's tools changed (an upstream's
+	// notifications/tools/list_changed this replica relayed; toolsnotify.go). Tools is invalidated here first.
+	ToolsChanged func(ToolsKey)
+	now          func() time.Time
 }
 
 // Handler serves POST, GET and DELETE on /mcp/{name} (and /mcp/{tenant}/{name} on a multi-tenant gate) after

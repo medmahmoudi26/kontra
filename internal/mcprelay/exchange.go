@@ -440,6 +440,9 @@ func (h *Handler) process(o *relayOpts, m *mcpwire.Message, raw []byte) ([]byte,
 	}
 	if m.Method == "notifications/tools/list_changed" {
 		h.deps.Tools.Invalidate(o.tools)
+		if h.deps.ToolsChanged != nil {
+			h.deps.ToolsChanged(o.tools)
+		}
 	}
 	reqMethod := ""
 	if isResp {

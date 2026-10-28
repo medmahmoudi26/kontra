@@ -70,6 +70,9 @@ type Dispatcher struct {
 	// TaskBytes is limits.task_bytes (spec §6.6): what a task's events and objects may hold; 256 MiB when 0.
 	TaskBytes int64
 	Logger    *slog.Logger
+	// ToolsChanged, when set, is told of an upstream's notifications/tools/list_changed on a dispatch's own session:
+	// the service's drained lists are dropped on every replica (§11.3, toolsnotify.go).
+	ToolsChanged func(ToolsKey)
 
 	// Timings, replaceable in tests.
 	minPoll, maxPoll time.Duration // the bounds of the upstream's pollInterval (§11.5 step 4: 0.5–30 s)

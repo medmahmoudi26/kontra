@@ -36,7 +36,8 @@ const (
 	// after a handshake superseded a session another replica holds, "enrolled:<key_id>/<tenant_id>/<service>"
 	// after a key was enrolled for a service that already had one (spec/tunnel.md §11, §5; the M2 plan's
 	// confirmed spec conflict, internal/tunnelgate), "mcp:<tenant_id>/<service>/<replica_id>" after a node of an
-	// MCP service connected to or disconnected from that replica (the service's era, spec/relay.md §11.12, D177).
+	// MCP service connected to or disconnected from that replica (the service's era, spec/relay.md §11.12, D177),
+	// "tools:<tenant_id>/<service>" after an upstream's notifications/tools/list_changed (its drained lists, §11.3).
 	ChannelTunnel Channel = "kontra_tunnel"
 )
 

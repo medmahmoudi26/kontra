@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"kontra.sh/kontra/internal/mcpwire"
+	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -139,5 +142,63 @@ func TestReviewCutStreamOnLostTunnel(t *testing.T) {
 		if xe.class != want {
 			t.Errorf("held %v: class %d (%s), want %d", held, xe.class, xe.msg, want)
 		}
+	}
+}
+
+// Finding mcp-spec-5: an upstream's notifications/tools/list_changed invalidated the drained list on the replica that
+// relayed it only (another kept refusing a new tool "Unknown tool" for up to 10 minutes), and one on a durable
+// dispatch's own session invalidated nothing. Both now drop the list here and tell every replica (a coalesced NOTIFY
+// kontra_tunnel 'tools:<tenant_id>/<service>', which each replica applies to its cache).
+func TestReviewToolsListChangedReachesEveryReplica(t *testing.T) {
+	key := ToolsKey{TenantID: uuid.Must(uuid.NewV7()), Service: "fs"}
+	if k, ok := ParseToolsChanged(ToolsChangedPayload(key)); !ok || k != key {
+		t.Fatalf("payload round trip: %v %v", k, ok)
+	}
+	for _, p := range []string{"mcp:" + key.TenantID.String() + "/fs/r1", "tools:x/fs", "tools:" + key.TenantID.String() + "/", "session:1"} {
+		if _, ok := ParseToolsChanged(p); ok {
+			t.Errorf("%q parsed as a tools payload", p)
+		}
+	}
+
+	// The relay: a list_changed it relays calls the hook with the service's key.
+	var told []ToolsKey
+	h := &Handler{log: slog.New(slog.DiscardHandler), deps: Deps{Tools: NewToolsCache(), ToolsChanged: func(k ToolsKey) { told = append(told, k) }}}
+	raw := []byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`)
+	m, err := mcpwire.Parse(raw, mcpwire.FromUpstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ref := h.process(&relayOpts{tools: key}, m, raw); ref != nil || len(told) != 1 || told[0] != key {
+		t.Fatalf("the relay told %v (refusal %+v)", told, ref)
+	}
+
+	// A durable dispatch's own session.
+	told = nil
+	r := &legacyRun{d: &Dispatcher{ToolsChanged: func(k ToolsKey) { told = append(told, k) }},
+		row: &store.TaskRow{TenantID: key.TenantID, Service: "fs"}}
+	r.onMessage(context.Background())(m, raw)
+	if len(told) != 1 || told[0] != key {
+		t.Fatalf("a dispatch told %v", told)
+	}
+
+	// The notifier: repeated notices within the window are one NOTIFY, sent at its end; a later one is another.
+	var mu sync.Mutex
+	var sent []string
+	n := &ToolsNotifier{after: 50 * time.Millisecond, Notify: func(_ context.Context, p string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, p)
+		return nil
+	}}
+	for i := 0; i < 5; i++ {
+		n.Changed(key)
+	}
+	time.Sleep(200 * time.Millisecond)
+	n.Changed(key)
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 2 || sent[0] != ToolsChangedPayload(key) {
+		t.Fatalf("NOTIFYs sent: %q, want two", sent)
 	}
 }

@@ -187,12 +187,14 @@ type Replica struct {
 	// The MCP relay (spec §11; M3 WP-04): its handler, the sessions it pins, the tools cache, and the peer hop
 	// (§11.2, D163): the peer listener's server and listener, and the address this replica advertises (empty
 	// without peer.listen; gate_replicas.peer_addr). peerWarned is the multi-replica warning's (D179).
-	mcp        *mcprelay.Handler
-	tools      *mcprelay.ToolsCache
-	peerSrv    *http.Server
-	peerLn     net.Listener
-	peerAddr   string
-	peerWarned atomic.Bool
+	mcp   *mcprelay.Handler
+	tools *mcprelay.ToolsCache
+	// toolsNotify tells the other replicas of an upstream's tools/list_changed (NOTIFY kontra_tunnel 'tools:…', §11.3).
+	toolsNotify *mcprelay.ToolsNotifier
+	peerSrv     *http.Server
+	peerLn      net.Listener
+	peerAddr    string
+	peerWarned  atomic.Bool
 
 	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
@@ -426,6 +428,13 @@ func (r *Replica) assemble() error {
 	mcpDispatch := &mcprelay.Dispatcher{
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Services: r.services, Tunnels: r.tunnels,
 		Waker: r.listener, Signals: r.lifecycle, TaskBytes: cfg.Limits.TaskBytes.Int64(), Logger: log,
+		// A durable dispatch's upstream told list_changed: the service's lists go here and on every replica (§11.3).
+		ToolsChanged: func(k mcprelay.ToolsKey) {
+			if r.tools != nil {
+				r.tools.Invalidate(k)
+			}
+			r.toolsNotify.Changed(k)
+		},
 	}
 	r.dispatch = &countingDispatch{DispatchActivities: &relay.Dispatcher{
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Handlers: handlers, Backends: r.services,
@@ -536,6 +545,20 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 	if r.listener != nil {
 		r.listener.OnReconnect(r.tools.DropEras)
 	}
+	// An upstream's tools/list_changed seen on any replica drops the service's drained lists on every one (§11.3):
+	// the replica that relayed it sends NOTIFY kontra_tunnel 'tools:<tenant_id>/<service>' (coalesced per service).
+	r.toolsNotify = &mcprelay.ToolsNotifier{Log: r.log, Notify: func(ctx context.Context, payload string) error {
+		_, err := r.pool.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelTunnel), payload)
+		return err
+	}}
+	if r.listener != nil {
+		tools := r.tools
+		r.listener.OnChannel(pg.ChannelTunnel, func(payload string) {
+			if k, ok := mcprelay.ParseToolsChanged(payload); ok {
+				tools.Invalidate(k)
+			}
+		})
+	}
 	var ops []hooks.Operation
 	if a := cfg.Hooks.Admission; a != nil {
 		// The remote Admission hook is refused at load until M5 (C3); its operations are read for when it is not.
@@ -547,7 +570,7 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 		ReplicaID: r.id, Services: r.services, Auth: authn, Multi: cfg.Tenancy == config.TenancyMulti,
 		Sessions: mcprelay.NewSessions(r.pool), Tools: r.tools, Meter: mcprelay.NewMeter(r.pool),
 		Admission: hooks.BuiltinAdmission{}, AdmissionOps: ops, Tunnels: r.tunnels, Picker: tunnelgate.NewPicker(r.pool),
-		AllowedOrigins: cfg.MCP.AllowedOrigins, Log: r.log,
+		AllowedOrigins: cfg.MCP.AllowedOrigins, Log: r.log, ToolsChanged: r.toolsNotify.Changed,
 	}
 	if peerClient != nil {
 		deps.Peer = peerClient

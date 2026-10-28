@@ -1067,6 +1067,10 @@ func (r *legacyRun) logStatus(ctx context.Context, st store.State, text string) 
 // dropped. A write the fence or the task's end refuses stops the dispatch.
 func (r *legacyRun) onMessage(ctx context.Context) func(*mcpwire.Message, []byte) {
 	return func(m *mcpwire.Message, raw []byte) {
+		if m.Method == "notifications/tools/list_changed" && len(m.ID) == 0 && r.d.ToolsChanged != nil && r.row != nil {
+			// The service's tools changed: its drained lists go on every replica (§11.3), as for a relayed one.
+			r.d.ToolsChanged(ToolsKey{TenantID: r.row.TenantID, Service: r.row.Service})
+		}
 		if m.Method == "" || len(m.ID) == 0 {
 			return
 		}
