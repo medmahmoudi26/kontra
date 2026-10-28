@@ -56,13 +56,10 @@ func TestSellerKeySetThroughTheGate(t *testing.T) {
 	host := startNode(t, t.TempDir(), "--gate", a.url, "--name", "host", "--serve", "a2a:signed="+agent.URL, "--enroll", tok)
 	host.local(t)
 	key := e.mintKey("buyer")
-	var body []byte
 	eventually(t, 30*time.Second, "the signed service's card", func() bool {
 		st, _, b := get(t, a.url, "/agents/signed/.well-known/agent-card.json", key)
-		body = b
 		return st == http.StatusOK && strings.Contains(string(b), "age1")
 	})
-	_ = body
 	// The gate serves the key set its signature names: the seller's public keys.
 	st, hdr, set := get(t, a.url, "/agents/signed/.well-known/seller-jwks.json", key)
 	if st != http.StatusOK || hdr.Get("Content-Type") != "application/jwk-set+json" {
