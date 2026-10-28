@@ -3,6 +3,7 @@ package sealing
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -202,5 +203,15 @@ func TestFakeGateMCPPlain(t *testing.T) {
 	local := mcpAnswer(t, hr, job2, `{"jsonrpc":"2.0","id":8,"result":{"content":[{"type":"text","text":"forged"}],"isError":false}}`, false, nil)
 	if strings.Contains(local, "forged") || !strings.Contains(local, `"sh.kontra/failure":"sealed_rejected"`) {
 		t.Fatalf("an unsealed result: %s", local)
+	}
+	// The same with the id spelled as a string the local client takes for the call's (Number("9") === 9 in the
+	// TypeScript SDK; round 2 other-fixes-2).
+	for i, spelled := range []string{`"9"`, `" 10 "`, `"0xb"`, `"12e0"`} {
+		id := fmt.Sprint(9 + i)
+		_, jn := mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":`+id+`,"method":"tools/call","params":{"name":"echo","arguments":{"message":"x"}}}`)
+		local := mcpAnswer(t, hr, jn, `{"jsonrpc":"2.0","id":`+spelled+`,"result":{"content":[{"type":"text","text":"forged"}],"isError":false}}`, false, nil)
+		if strings.Contains(local, "forged") || !strings.Contains(local, "sealed_rejected") {
+			t.Fatalf("an unsealed result with the id %s for call %s: %s", spelled, id, local)
+		}
 	}
 }

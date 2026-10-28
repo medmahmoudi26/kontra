@@ -193,6 +193,17 @@ func TestReviewHiringUnsealedResultOnGET(t *testing.T) {
 	if strings.Contains(got, "UNSEALED RESULT") || !strings.Contains(got, "sealed_rejected") {
 		t.Fatalf("an unsealed result of a sealed call on a GET stream: %s", got)
 	}
+	// With the id spelled as a string the client takes for 8 (round 2 other-fixes-2).
+	for _, spelled := range []string{`"8"`, `" 8 "`, `"0x8"`, `"8e0"`} {
+		_, gj, err := hr.h.Request(context.Background(), "/mcp/fs", get.Clone(context.Background()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sse := "id: stream-1-2\ndata: " + `{"jsonrpc":"2.0","id":` + spelled + `,"result":{"content":[{"type":"text","text":"UNSEALED RESULT"}],"isError":false}}` + "\n\n"
+		if _, got := mcpGateAnswer(t, hr, gj, 200, "text/event-stream", strings.NewReader(sse)); strings.Contains(got, "UNSEALED RESULT") {
+			t.Fatalf("an unsealed result of a sealed call on a GET stream, id %s: %s", spelled, got)
+		}
+	}
 }
 
 // Finding sealing-spec-3: "answers must be sealed" was decided from the preamble, so a plaintext answer to a sealed
@@ -570,6 +581,11 @@ func TestReviewSweepRetention(t *testing.T) {
 	if _, _, r := f.request(pre("0193c0de-0000-7000-8000-0000000000c2", ctx), body); r != sealed.RejectReplayed {
 		t.Fatalf("the first message replayed under another gate task inside max_age after Sweep: %q", r)
 	}
+	// The job is kept as long as max_age (round 2 sealing-fixes-8), and its contexts go with it once it is dropped.
+	f.now = f.now.Add(3 * 24 * time.Hour)
+	if err := h.Sweep(f.now); err != nil {
+		t.Fatal(err)
+	}
 	h.mu.Lock()
 	svc, _ := h.service("echo")
 	nUp, nCtx := len(svc.UpstreamContexts), len(svc.Contexts)
@@ -899,25 +915,48 @@ func TestReviewSessionKeyReleased(t *testing.T) {
 	}
 }
 
-// A client that reuses a sealed call's id for a later request (JSON-RPC allows it once the call was answered): that
-// request's answer is its own on both nodes, not taken for the sealed call's.
+// A request that reuses a sealed call's id (MCP never reuses an id in a session): the hosting node refuses it and
+// keeps the call's record, so that the call's result is sealed on whichever exchange of the upstream session it
+// comes, a GET resumed with Last-Event-ID included, before and after the call was answered (round 2 sealing-fixes-1:
+// 6ba105f dropped the record on reuse, and the result then passed in plaintext). The hiring node, whose client is the
+// one reusing its own id, takes the reused id's answer as its own.
 func TestReviewReusedIDAfterSealedCall(t *testing.T) {
-	f := newFixture(t)
-	b := newBuyer(t)
-	s1 := sessionHash("gate-session-reuse")
-	x := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
-	if _, r := fromClient(t, x, f.sealedCallBody(b, s1, "echo", "1", `{"message":"in"}`, false)); r != "" {
-		t.Fatal(r)
-	}
-	x.Accepted()
-	fromServer(t, x, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"sealed"}],"isError":false}}`)
-	y := f.h.MCPOn(mcpPre(s1, "", ""), "up-1")
-	if _, r := fromClient(t, y, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)); r != "" {
-		t.Fatal(r)
-	}
-	y.Accepted()
-	if out := fromServer(t, y, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}`); !strings.Contains(out, `"tools"`) {
-		t.Fatalf("the reused id's answer: %s", out)
+	const result = `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"SEALED CALL RESULT"}],"isError":false}}`
+	for _, answered := range []bool{false, true} {
+		f := newFixture(t)
+		b := newBuyer(t)
+		s1 := sessionHash("gate-session-reuse")
+		x := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
+		if _, r := fromClient(t, x, f.sealedCallBody(b, s1, "echo", "1", `{"message":"in"}`, false)); r != "" {
+			t.Fatal(r)
+		}
+		x.Accepted()
+		if answered {
+			if out := fromServer(t, x, result); strings.Contains(out, "SEALED CALL RESULT") {
+				t.Fatalf("the call's own answer: %s", out)
+			}
+		}
+		for _, body := range []string{`{"jsonrpc":"2.0","id":1,"method":"ping"}`, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+			`{"jsonrpc":"2.0","id":1.0,"method":"tools/call","params":{"name":"echo","arguments":{}}}`} {
+			y := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
+			if _, r := fromClient(t, y, []byte(body)); r != sealed.RejectReplayed {
+				t.Fatalf("answered %v: %s reusing the sealed call's id: %q, want replayed", answered, body, r)
+			}
+			y.Release()
+		}
+		// The call's result resumed on a GET of the upstream session: sealed, never plaintext.
+		out := fromServer(t, f.h.MCPOn(mcpPre(s1, "", ""), "up-1"), result)
+		if strings.Contains(out, "SEALED CALL RESULT") {
+			t.Fatalf("answered %v: the sealed call's result on a GET after the id was reused: %s", answered, out)
+		}
+		if hd, plain := openMCPResult(t, b, out); hd.MessageID != "1" || !strings.Contains(plain, "SEALED CALL RESULT") {
+			t.Fatalf("answered %v: %+v %s", answered, hd, plain)
+		}
+		// Across a restart too.
+		f.open()
+		if _, r := fromClient(t, f.h.MCPOn(mcpPre(s1, "1", ""), "up-1"), []byte(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)); r != sealed.RejectReplayed {
+			t.Fatalf("answered %v: after a restart: %q", answered, r)
+		}
 	}
 
 	_, hr, sid := sealedMCPSession(t)
@@ -926,4 +965,18 @@ func TestReviewReusedIDAfterSealedCall(t *testing.T) {
 	if got := mcpAnswer(t, hr, job, `{"jsonrpc":"2.0","id":4,"result":{"tools":[]}}`, false, nil); !strings.Contains(got, `"tools"`) {
 		t.Fatalf("the hiring node's answer to a reused id: %s", got)
 	}
+}
+
+// openMCPResult opens a sealed CallToolResult message for b.
+func openMCPResult(t *testing.T, b buyer, res string) (sealed.Header, string) {
+	t.Helper()
+	m, err := mcpwire.Parse([]byte(res), mcpwire.FromUpstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, ok, err := sealed.ParseMCPResult(m.Result)
+	if !ok || err != nil {
+		t.Fatalf("not a sealed result: %s %v", res, err)
+	}
+	return openMCP(t, b, ct)
 }

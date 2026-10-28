@@ -101,22 +101,21 @@ func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	if m.Method != "" && len(m.ID) > 0 && job != nil {
-		// A request that reuses the id of a sealed request the job answered: that request's record goes, so that this
-		// one's answer is not taken for it (a sealed call's record is made again below when this is one).
-		key := respKey(x.upstreamSID, m.ID)
-		if job.Calls[key] != nil {
-			delete(job.Calls, key)
-			if e, ok := svc.Responses[key]; ok && e.Job == job.ID {
-				svc.del(setResponses, key)
-				if err := h.st.saveService(x.service, svc); err != nil {
-					return nil, err
-				}
-			}
-			if err := h.saveJob(x.service, job); err != nil {
-				return nil, err
-			}
+	if owner, ok := x.sessionOwner(svc); ok && owner != x.jobID {
+		// The upstream session the node forwards on is the request's Mcp-Session-Id, which the gate chooses as it does
+		// the preamble: a message on the upstream session a sealed job's calls set up (a login, an opened document) is
+		// that job's only (D217, D226). Another session's, or one with no session, would have its answer reach the gate
+		// in plaintext, or sealed to the gate's own key.
+		if m.Method == mcpwire.MethodToolsCall && hasSealedMeta(m.Params) {
+			return nil, reject(sealed.RejectWrongJob, "a sealed tools/call on the upstream session of another session's sealed job")
 		}
+		return nil, reject(sealed.RejectBadHeader, "a message on the upstream session of another session's sealed job")
+	}
+	if m.Method != "" && len(m.ID) > 0 && x.recorded(svc, job, m.ID) {
+		// A request that reuses the id of a sealed request the node recorded on the session: MCP never reuses a request
+		// id in a session, and the record stays the sealed request's, so that its answer, on whichever exchange of the
+		// session it comes (a resumed GET included), is sealed or refused, never relayed as this request's (D226).
+		return nil, reject(sealed.RejectReplayed, "a request that reuses the JSON-RPC id of a sealed request on the session")
 	}
 	switch {
 	case m.Method == mcpwire.MethodToolsCall:
@@ -141,6 +140,43 @@ func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error
 		}
 	}
 	return body, nil
+}
+
+// sessionOwner is the sealed job that holds the exchange's upstream session: the session's index entry, or the job a
+// sealed call in flight on it is opening it for; ok false on an exchange with no upstream session, or on one no
+// sealed job holds. h.mu is held.
+func (x *MCPExchange) sessionOwner(svc *serviceState) (string, bool) {
+	if x.upstreamSID == "" {
+		return "", false
+	}
+	if j, ok := svc.Sessions[x.upstreamSID]; ok {
+		return j, true
+	}
+	return x.h.inFlight(flightKey("s", x.service, x.upstreamSID))
+}
+
+// recorded reports a request id the node recorded a sealed request under on the exchange's upstream session (the
+// job's record, or, on an upstream session, the service's index of it). h.mu is held.
+func (x *MCPExchange) recorded(svc *serviceState, job *jobState, id json.RawMessage) bool {
+	key := respKey(x.upstreamSID, id)
+	if job != nil && job.Calls[key] != nil {
+		return true
+	}
+	if x.upstreamSID == "" {
+		return false
+	}
+	_, ok := svc.Responses[key]
+	return ok
+}
+
+// hasSealedMeta reports params with a _meta["sh.kontra/sealed"] (exact keys).
+func hasSealedMeta(params json.RawMessage) bool {
+	meta, ok := mcpwire.Member(params, "_meta")
+	if !ok {
+		return false
+	}
+	_, ok = mcpwire.Member(meta, mcpwire.MetaSealed)
+	return ok
 }
 
 // record arranges for the exchange's commit to record a sealed request of the session's job under key (the upstream
@@ -258,6 +294,13 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 		x.h.reserve(bind, jobKey)
 		x.reserved = append(x.reserved, jobKey)
 	}
+	sid := x.upstreamSID
+	if _, indexed := svc.Sessions[sid]; sid != "" && !indexed {
+		// The upstream session is the job's from the node's checks on (D226), as its binding is.
+		sk := flightKey("s", x.service, sid)
+		x.h.reserve(x.jobID, sk)
+		x.reserved = append(x.reserved, sk)
+	}
 	service, jobID, gate := x.service, x.jobID, x.pre.Task
 	x.commit = append(x.commit, func() error {
 		now := x.h.cfg.Now()
@@ -274,6 +317,9 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 		}
 		j.LastSeen = now
 		svc.put(setMCPCalls, callKey, now)
+		if sid != "" && svc.Sessions[sid] != j.ID {
+			svc.put(setSessions, sid, j.ID)
+		}
 		if err := x.h.saveJob(service, j); err != nil {
 			return err
 		}
@@ -308,33 +354,39 @@ func (x *MCPExchange) answer(svc *serviceState, job *jobState, body []byte, m *m
 			return nil, err
 		}
 	}
-	rkey := respKey(x.upstreamSID, m.ID)
 	var (
 		ij    *jobState
 		in    *InputRequest
 		ikey  string
 		known bool // the id names an input request this node sealed
 	)
-	switch {
-	case x.upstreamSID != "":
-		if e, ok := svc.Inputs[rkey]; ok {
-			known = true
-			j, err := x.h.jobFor(x.service, e.Job)
-			if err != nil {
-				return nil, err
+	// Every id the server would take the response for is looked up ("8" answers the server's request 8 for the
+	// TypeScript SDK, mcpwire.AnswerKeys): a response the server reads as the answer to a sealed input request is
+	// that request's answer here too.
+	for _, rkey := range answerKeys(x.upstreamSID, m.ID) {
+		switch {
+		case x.upstreamSID != "":
+			if e, ok := svc.Inputs[rkey]; ok && !known {
+				known = true
+				j, err := x.h.jobFor(x.service, e.Job)
+				if err != nil {
+					return nil, err
+				}
+				if j != nil {
+					ij, in, ikey = j, j.Inputs[e.Key], e.Key
+				}
 			}
-			if j != nil {
-				ij, in, ikey = j, j.Inputs[e.Key], e.Key
+		case job != nil:
+			if in == nil {
+				ikey = rkey + "\x00" + x.pre.Task
+				if in = job.Inputs[ikey]; in != nil {
+					ij, known = job, true
+				}
 			}
-		}
-	case job != nil:
-		ikey = rkey + "\x00" + x.pre.Task
-		if in = job.Inputs[ikey]; in != nil {
-			ij, known = job, true
-		}
-		for k := range job.Inputs {
-			if strings.HasPrefix(k, rkey+"\x00") {
-				known = true // an input request of another task with this id: an unsealed answer is refused all the same
+			for k := range job.Inputs {
+				if strings.HasPrefix(k, rkey+"\x00") {
+					known = true // an input request of another task with this id: an unsealed answer is refused all the same
+				}
 			}
 		}
 	}
@@ -547,19 +599,35 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 			return nil, false, reject(sealed.RejectWrongTask, "a server message names a sealed task of another session")
 		}
 	}
-	isResp := m.Method == "" && len(m.ID) > 0 && bytes.Equal(bytes.TrimSpace(m.ID), bytes.TrimSpace(x.reqID))
+	if owner, ok := x.sessionOwner(svc); ok && owner != x.jobID {
+		// A message of a sealed job's upstream session on an exchange of another session, or of none (a GET the gate
+		// opened with the job's Mcp-Session-Id under another preamble): none of it is relayed (D217, D226).
+		return nil, false, reject(sealed.RejectWrongJob, "a message of another session's sealed job's upstream session")
+	}
+	// Whether a response answers the exchange's request, and which recorded request it answers, as a client matches
+	// ids (mcpwire.SameID, AnswerKeys): a response the client would take for a sealed request's answer is sealed or
+	// refused as that answer, never relayed as another's.
+	isResp := m.Method == "" && len(m.ID) > 0 && mcpwire.SameID(m.ID, x.reqID)
 	if m.Method == "" && len(m.ID) > 0 {
-		key := respKey(x.upstreamSID, m.ID)
-		owner := ""
-		if x.upstreamSID != "" {
-			owner = svc.Responses[key].Job
+		keys := answerKeys(x.upstreamSID, m.ID)
+		key, owner := keys[0], ""
+		var req *sealedRequest
+		for _, k := range keys {
+			o := ""
+			if x.upstreamSID != "" {
+				o = svc.Responses[k].Job
+			}
+			var r *sealedRequest
+			if job != nil {
+				r = job.Calls[k]
+			}
+			if o != "" || r != nil {
+				key, owner, req = k, o, r
+				break
+			}
 		}
 		if owner != "" && owner != x.jobID {
 			return nil, false, reject(sealed.RejectWrongMessage, "the answer to another session's sealed request")
-		}
-		var req *sealedRequest
-		if job != nil {
-			req = job.Calls[key]
 		}
 		switch {
 		case req != nil:
@@ -572,6 +640,11 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 			req = &sealedRequest{Kind: reqResult, Tool: t.Tool, MessageID: t.MessageID, Task: x.taskOf, Gate: t.Gate}
 		case owner != "":
 			// The job's sealed request, which the job no longer holds (older than --sealed-max-age): not relayed.
+			return nil, false, nil
+		case !isResp && job != nil:
+			// On a sealed job's exchange, a response to no request of the exchange and to none the node holds a record
+			// of: a sealed request's answer replayed after its record was pruned (Sweep, D226) looks the same as a
+			// resumed answer to an unsealed one, and is not relayed.
 			return nil, false, nil
 		}
 		if req != nil {
@@ -685,6 +758,12 @@ func (x *MCPExchange) sealAnswer(svc *serviceState, job *jobState, req *sealedRe
 		out, err := mcpwire.SetMember(data, "error", a2awire.Encode(e))
 		if err != nil {
 			return nil, false, reject(sealed.RejectBadHeader, err.Error())
+		}
+		if r := job.callOf(key); r != nil && !r.Answered {
+			r.Answered = true
+			if err := h.saveJob(x.service, job); err != nil {
+				return nil, false, err
+			}
 		}
 		return compactLine(out)
 	}

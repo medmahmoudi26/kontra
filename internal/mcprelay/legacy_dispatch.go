@@ -3,6 +3,8 @@ package mcprelay
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -439,6 +441,7 @@ type legacyRun struct {
 	sent       map[int64]bool            // input_response seqs written upstream (by this dispatch, or recorded by one before it)
 	bytes      int64
 	nextN      int
+	idTag      string // the run's own prefix of its ids (id)
 	msgs       chan streamMsg
 	resultOpen bool
 	failing    time.Time // when the polls started failing to reach the upstream
@@ -446,11 +449,19 @@ type legacyRun struct {
 }
 
 // id is a JSON-RPC id of the dispatch's own: a string in a space of its own, never the client's id, which the
-// tools/call reuses (§11.5 step 3).
+// tools/call reuses (§11.5 step 3), and never one an earlier dispatch of the attempt used: a re-attach (D42) works on
+// the same upstream session, where an MCP request id is never reused, and a sealed service's hosting node refuses a
+// request that reuses the id of a sealed one it recorded (spec/ext-sealed.md §5, D226). Each run draws a tag of its
+// own for its ids.
 func (r *legacyRun) id() string {
+	if r.idTag == "" {
+		var b [6]byte
+		_, _ = rand.Read(b[:])
+		r.idTag = hex.EncodeToString(b[:])
+	}
 	for {
 		r.nextN++
-		s := "kontra.dispatch." + strconv.Itoa(r.nextN)
+		s := "kontra.dispatch." + r.idTag + "." + strconv.Itoa(r.nextN)
 		if !sameID(json.RawMessage(strconv.Quote(s)), r.work.RequestID) {
 			return s
 		}

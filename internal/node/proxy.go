@@ -425,6 +425,9 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		}
 		modify := stripResponse
 		release := func() {} // what the exchange holds in flight, dropped when the node answers it itself
+		// end is the exchange's end when the gate's context ended before the service answered: a sealed A2A request the
+		// node had handed whole to the service is recorded then, as an accepted one (ext-sealed.md §5, D227).
+		end := func() { release() }
 		if sv.Kind == tunnel.KindA2A && p.seal != nil {
 			// Sealing (ext-sealed.md §5): after the kontra-blob: parts were fetched, so a sealed part is opened once its
 			// whole age file is read; a refusal is the node's own answer (§6) and nothing reaches the service.
@@ -437,6 +440,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			}
 			r = r2
 			release = sx.Release
+			end = sx.End
 			modify = func(res *http.Response) error {
 				if err := stripResponse(res); err != nil {
 					return err
@@ -493,7 +497,11 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			Transport:      p.transports[sv.Name],
 			ModifyResponse: modify,
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-				release() // the node answers: nothing the request holds in flight is recorded (ext-sealed.md §5)
+				if r.Context().Err() != nil {
+					end() // the gate went: a request the service had whole is recorded (D227)
+				} else {
+					release() // the node answers: nothing the request holds in flight is recorded (ext-sealed.md §5)
+				}
 				if sw, ok := w.(*stripWriter); ok {
 					w = sw.ResponseWriter // the node's own answer keeps its Kontra-Node header
 				}

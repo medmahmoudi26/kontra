@@ -579,16 +579,20 @@ func (j *hireJob) track(id json.RawMessage, c *hireCall) {
 	j.calls[k] = c
 }
 
-// call is the session's request whose answer m is, nil when m answers none the node tracks.
+// call is the session's request whose answer m is, nil when m answers none the node tracks. A response answers a
+// tracked request when the local client would take it for that request's answer (mcpwire.AnswerKeys: "8" answers
+// request 8 for the TypeScript SDK), so that a gate cannot pass its own plaintext result as a sealed call's by
+// spelling the id otherwise (rule 4a; round 2 other-fixes-2).
 func (j *hireJob) call(m *mcpwire.Message) *hireCall {
 	if j == nil || m.Method != "" || len(m.ID) == 0 {
 		return nil
 	}
-	k, ok := mcpwire.IDKey(m.ID)
-	if !ok {
-		return nil
+	for _, k := range mcpwire.AnswerKeys(m.ID) {
+		if c := j.calls[k]; c != nil {
+			return c
+		}
 	}
-	return j.calls[k]
+	return nil
 }
 
 func (h *Hiring) saveJob(j *hireJob) error {
@@ -1615,6 +1619,14 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		h.mu.Lock()
 		j.info = h.services[j.sid]
 		h.mu.Unlock()
+		if j.info == nil && j.sid != "" && h.sealedTarget(service, "") {
+			// A session this node does not know (it restarted, or dropped the session's key, D224) to a service whose
+			// pin says sealed (or cannot be read): what comes on its stream would reach the client unread, a result
+			// for a sealed call it still waits for included, so it is answered here as a POST is: 404, and the client
+			// initializes again (round 2 sealing-fixes-4).
+			return nil, nil, &LocalError{Status: http.StatusNotFound,
+				Err: errors.New("kontra connect: an MCP session this node does not know: initialize again")}
+		}
 		j.get = req.Method == http.MethodGet
 		return req, j, nil
 	}
@@ -2002,7 +2014,7 @@ func (h *Hiring) mcpMessage(j *Job, data []byte) ([]byte, error) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	isResp := m.Method == "" && len(m.ID) > 0 && bytes.Equal(bytes.TrimSpace(m.ID), bytes.TrimSpace(j.reqID))
+	isResp := m.Method == "" && len(m.ID) > 0 && mcpwire.SameID(m.ID, j.reqID)
 	hj, err := h.loadJob("mcp-" + j.session)
 	if err != nil {
 		return nil, err

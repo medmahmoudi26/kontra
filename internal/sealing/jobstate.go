@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -62,6 +63,10 @@ type serviceState struct {
 	// (respKey): an answer to one must be sealed and pass rule 4b against that job and task, whatever the preamble of
 	// the exchange that carries it says (D175, "answers must be sealed").
 	Inputs map[string]indexEntry `json:"inputs,omitempty"`
+	// Sessions indexes the upstream sessions (the MCP server's Mcp-Session-Id) the sealed calls of a job went on, to
+	// that job: only an exchange of that job (its preamble's mcp_session) reaches one (D217, D226), since the
+	// upstream session the node forwards on is the request's header, which the gate chooses as it does the preamble.
+	Sessions map[string]string `json:"sessions,omitempty"`
 
 	// pending are the changes not yet appended to service.log (saveService appends them).
 	pending []svcOp
@@ -94,6 +99,7 @@ const (
 	setUpstreamContexts = "upstream_contexts"
 	setResponses        = "responses"
 	setInputs           = "inputs"
+	setSessions         = "sessions"
 )
 
 // svcOp is one line of service.log: a member of a set put (V) or deleted (Del).
@@ -139,6 +145,8 @@ func (st *serviceState) apply(op svcOp) error {
 		return applyOp(st.Responses, op)
 	case setInputs:
 		return applyOp(st.Inputs, op)
+	case setSessions:
+		return applyOp(st.Sessions, op)
 	}
 	return fmt.Errorf("sealing: service.log names an unknown set %q", op.Set)
 }
@@ -166,6 +174,21 @@ func respKey(upstreamSID string, id json.RawMessage) string {
 	return upstreamSID + "\x00" + k
 }
 
+// answerKeys are the respKeys of every request a message whose id is id answers as a client matches it
+// (mcpwire.AnswerKeys: "8" answers request 8 for the TypeScript SDK), its own first: a response is sealed, opened or
+// refused as the answer to any of them, never relayed as another's.
+func answerKeys(upstreamSID string, id json.RawMessage) []string {
+	ks := mcpwire.AnswerKeys(id)
+	if len(ks) == 0 {
+		return []string{respKey(upstreamSID, id)}
+	}
+	out := make([]string, len(ks))
+	for i, k := range ks {
+		out[i] = upstreamSID + "\x00" + k
+	}
+	return out
+}
+
 // jobState is one job's file.
 type jobState struct {
 	V        int       `json:"v"`
@@ -188,6 +211,14 @@ type jobState struct {
 	Tasks   map[string]*mcpTask       `json:"tasks,omitempty"`
 	Calls   map[string]*sealedRequest `json:"calls,omitempty"`
 	Inputs  map[string]*InputRequest  `json:"inputs,omitempty"`
+}
+
+// callOf is the job's record under key, nil for a nil job or none.
+func (j *jobState) callOf(key string) *sealedRequest {
+	if j == nil {
+		return nil
+	}
+	return j.Calls[key]
 }
 
 // init makes the job's maps.
@@ -288,7 +319,9 @@ func (s *fileStore) loadService(service string) (*serviceState, error) {
 		return nil, err
 	}
 	st.init()
-	// The changes after the snapshot, in order; a last line a crash cut short is no change (it was never synced).
+	// The changes after the snapshot, in order. A last line a crash or a failed write cut short (no newline, or not one
+	// change) is no change, and is cut off the file here, synced: the next change appended after it would otherwise
+	// share its line, and be lost with every change after it at the next start (round 2 sealing-fixes-7).
 	p := filepath.Join(dir, "service.log")
 	if err := checkPrivate(p); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -296,22 +329,36 @@ func (s *fileStore) loadService(service string) (*serviceState, error) {
 		}
 		return nil, err
 	}
-	f, err := os.Open(p)
+	f, err := os.OpenFile(p, os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("sealing: %w", err)
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64<<10), 4<<20)
-	for sc.Scan() {
+	rd := bufio.NewReaderSize(f, 64<<10)
+	var good int64 // the offset after the last whole change
+	for {
+		line, err := rd.ReadBytes('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("sealing: %s: %w", p, err)
+		}
+		if len(line) == 0 {
+			break
+		}
 		var op svcOp
-		if json.Unmarshal(sc.Bytes(), &op) != nil {
+		if line[len(line)-1] != '\n' || json.Unmarshal(line, &op) != nil {
+			if err := f.Truncate(good); err != nil {
+				return nil, fmt.Errorf("sealing: %s: cutting a torn change: %w", p, err)
+			}
+			if err := f.Sync(); err != nil {
+				return nil, fmt.Errorf("sealing: %s: %w", p, err)
+			}
 			break
 		}
 		if err := st.apply(op); err != nil {
 			return nil, fmt.Errorf("sealing: %s: %w", p, err)
 		}
 		st.logged++
+		good += int64(len(line))
 	}
 	return st, nil
 }
@@ -338,6 +385,9 @@ func (st *serviceState) init() {
 	}
 	if st.Inputs == nil {
 		st.Inputs = map[string]indexEntry{}
+	}
+	if st.Sessions == nil {
+		st.Sessions = map[string]string{}
 	}
 }
 
@@ -626,9 +676,19 @@ func appendFile(dir, name string, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("sealing: %w", err)
 	}
-	_, err = f.Write(data)
+	var size int64
+	if fi, err := f.Stat(); err == nil {
+		size = fi.Size()
+	}
+	_, err = appendWrite(f, data)
 	if err == nil {
 		err = f.Sync()
+	}
+	if err != nil {
+		// A write cut short (ENOSPC, say) leaves no part of it behind: the next append starts on a line of its own.
+		if terr := f.Truncate(size); terr == nil {
+			_ = f.Sync()
+		}
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -641,6 +701,9 @@ func appendFile(dir, name string, data []byte) error {
 	}
 	return nil
 }
+
+// appendWrite writes an append (tests replace it, to cut one short).
+var appendWrite = func(f *os.File, data []byte) (int, error) { return f.Write(data) }
 
 // syncDirHook, when set (tests), sees every directory syncDir syncs.
 var syncDirHook func(dir string)

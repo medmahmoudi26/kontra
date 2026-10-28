@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"filippo.io/age"
@@ -118,6 +119,12 @@ type Hosting struct {
 	// when the service accepts it (they are then recorded) or the node answers it itself (nothing is recorded: the
 	// gate's retry is not a replay).
 	flight map[string]flightRef
+	// opening counts, per service, the exchanges opening a sealed job whose upstream task the node has not read yet
+	// (a first message in flight, or accepted and not answered): while one is, a reply on an exchange of no sealed job
+	// that names an upstream task or context the node has not indexed may be that job's, and waits (holdReply, D227).
+	// openingDone is closed, and replaced, whenever one ends.
+	opening     map[string]int
+	openingDone chan struct{}
 }
 
 // flightRef is one in-flight key: who holds it (for "r" the service and gate task, for "j" the replyTo and rk the
@@ -148,7 +155,8 @@ func NewHosting(cfg HostingConfig, log *slog.Logger) (*Hosting, error) {
 		return nil, err
 	}
 	return &Hosting{cfg: cfg, log: log.With("component", "sealing-hosting"), st: &fileStore{dir: cfg.Dir},
-		services: map[string]*serviceState{}, jobs: map[string]*jobState{}, flight: map[string]flightRef{}}, nil
+		services: map[string]*serviceState{}, jobs: map[string]*jobState{}, flight: map[string]flightRef{},
+		opening: map[string]int{}, openingDone: make(chan struct{})}, nil
 }
 
 // flightKey is the in-flight key of what a request records: kind "r" a replyTo (node-wide: service ""), "p" a job's
@@ -215,6 +223,41 @@ type Exchange struct {
 	commit   func() error
 	reserved []string
 	done     bool
+	// opening is an exchange counted in Hosting.opening (it opens a job whose upstream task is not known yet).
+	opening bool
+	// handed is set once the forwarded body was read whole (by the transport, to the service): a request whose
+	// exchange then ends without an answer was the service's to act on, and is recorded (End).
+	handed atomic.Bool
+}
+
+// handedBody is a forwarded request body that marks its exchange handed once it was read whole.
+type handedBody struct {
+	r *bytes.Reader
+	x *Exchange
+}
+
+func (b *handedBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if b.r.Len() == 0 {
+		b.x.handed.Store(true)
+	}
+	return n, err
+}
+
+func (b *handedBody) Close() error { return nil }
+
+// endOpening drops the exchange from Hosting.opening; h.mu is held.
+func (x *Exchange) endOpening() {
+	if !x.opening {
+		return
+	}
+	x.opening = false
+	h := x.h
+	if h.opening[x.service]--; h.opening[x.service] <= 0 {
+		delete(h.opening, x.service)
+	}
+	close(h.openingDone)
+	h.openingDone = make(chan struct{})
 }
 
 // Release drops what the exchange holds in flight without recording it: the node answered the request itself (the
@@ -232,6 +275,33 @@ func (x *Exchange) Release() {
 	if !x.done {
 		x.commit = nil
 	}
+	x.endOpening()
+}
+
+// End is the exchange's end without an answer of the node's: the request's context ended (the gate ended the tunnel
+// stream, or the tunnel went) before the service answered. A request the node had handed to the service whole is
+// the service's to act on, so it is recorded as an accepted one is (its job, replyTo and pairs: the gate's retry is
+// then a replay, and the gate cannot open the gate task with a binding of its own); one never handed records nothing,
+// as Release (D227). After Response or Release it does nothing more.
+func (x *Exchange) End() {
+	if x == nil {
+		return
+	}
+	if !x.handed.Load() {
+		x.Release()
+		return
+	}
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	if x.commit != nil && !x.done {
+		x.done = true
+		if err := x.commit(); err != nil {
+			x.h.log.Error("sealing: the job's state was not written", "service", x.service, "err", err)
+		}
+	}
+	x.h.unreserve(x.reserved)
+	x.reserved = nil
+	x.endOpening()
 }
 
 // Request checks and unseals one request the gate forwards to a sealed service (§5 rules 1–5) with the
@@ -276,6 +346,10 @@ func (h *Hosting) Request(ctx context.Context, pre tunnel.Preamble, req *http.Re
 		return nil, x, reject(sealed.RejectBadHeader, "a JSON-RPC request that is none of A2A 1.0's methods, to a service with sealed jobs")
 	case guarded && op.kind == opPush:
 		return nil, x, reject(sealed.RejectBadHeader, "a push config, to a service with sealed jobs (the upstream's own push configs are never used)")
+	case guarded && op.list:
+		// The gate never lists the upstream's tasks (it holds them, relay.md §6): a list would hand it every task of the
+		// service, a sealed job's that the node has not indexed yet included (D227).
+		return nil, x, reject(sealed.RejectBadHeader, "a task list, to a service with sealed jobs")
 	}
 	switch op.kind {
 	case opSend:
@@ -289,10 +363,10 @@ func (h *Hosting) Request(ctx context.Context, pre tunnel.Preamble, req *http.Re
 			return nil, x, err
 		}
 	}
-	if len(x.reserved) > 0 {
-		context.AfterFunc(ctx, x.Release) // a request whose exchange ends unanswered records nothing
+	if len(x.reserved) > 0 || x.opening {
+		context.AfterFunc(ctx, x.End) // a request whose exchange ends unanswered: recorded once it was handed (End)
 	}
-	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.Body = &handedBody{r: bytes.NewReader(body), x: x}
 	req.ContentLength = int64(len(body))
 	req.Header.Del("Content-Length")
 	req.TransferEncoding = nil
@@ -321,6 +395,8 @@ type op struct {
 	unreadable bool
 	// taskIDs are the upstream task ids the request names (a route may name more than one candidate).
 	taskIDs []string
+	// list is a ListTasks (JSON-RPC, or HTTP+JSON's GET .../tasks).
+	list bool
 }
 
 // The members of a JSON-RPC request the node reads (D172): a lone case variant of one is refused, since a2a-go's
@@ -396,7 +472,7 @@ func (x *Exchange) classify(req *http.Request, body []byte) (op, error) {
 			if !ok {
 				return op{}, nil
 			}
-			o := op{kind: m.kind, stream: m.stream, known: true}
+			o := op{kind: m.kind, stream: m.stream, known: true, list: method == "ListTasks"}
 			if m.task != "" {
 				if params, err := strictjson.Members(top["params"]); err == nil {
 					if id, _ := a2awire.String(params, m.task); id != "" {
@@ -412,6 +488,9 @@ func (x *Exchange) classify(req *http.Request, body []byte) (op, error) {
 	}
 	o := op{unreadable: unreadable}
 	o.taskIDs, o.stream, o.kind = tasksRoute(p)
+	if lp := strings.ToLower(strings.TrimRight(p, "/")); lp == "/tasks" || strings.HasSuffix(lp, "/tasks") {
+		o.list = true
+	}
 	return o, nil
 }
 
@@ -477,6 +556,14 @@ func (x *Exchange) other(svc *serviceState, taskIDs []string) error {
 	j, err := x.h.jobFor(x.service, x.pre.Task)
 	if err != nil {
 		return err
+	}
+	if j == nil {
+		if _, opening := x.h.inFlight(flightKey("j", x.service, x.pre.Task)); opening {
+			// The gate task's first sealed message is with the service, unanswered: its job's upstream task is not known,
+			// so a request of the task could reach it unsealed. The gate asks for a task only once it has its first
+			// upstream id (relay.md §6.3), which comes with the answer (D227).
+			return reject(sealed.RejectWrongTask, "a request of a gate task whose first sealed message the service has not answered")
+		}
 	}
 	if j != nil {
 		x.job, x.bind = j, bindOf(j.ReplyTo, j.RK)
@@ -704,6 +791,10 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 		x.h.reserve(bindOf(h.ReplyTo, h.RK), jk)
 		x.reserved = append(x.reserved, jk)
 	}
+	if j.UpstreamTask == "" && !x.opening {
+		x.opening = true
+		x.h.opening[x.service]++
+	}
 	x.job, x.bind = j, bindOf(h.ReplyTo, h.RK)
 	service, job := x.service, j
 	x.commit = func() error {
@@ -807,8 +898,11 @@ func (x *Exchange) unsealedSend(svc *serviceState, msgTask, msgCtx string, _ int
 	if owner, ok := svc.Tasks[msgTask]; ok && msgTask != "" && owner != x.pre.Task {
 		return reject(sealed.RejectWrongTask, "the message names a sealed job's upstream task")
 	}
-	if gc, ok := svc.UpstreamContexts[msgCtx]; ok && msgCtx != "" && gc != x.pre.Context {
-		return reject(sealed.RejectWrongContext, "the message names a sealed job's upstream context")
+	if _, ok := svc.UpstreamContexts[msgCtx]; ok && msgCtx != "" {
+		// An unsealed message into a sealed job's upstream context, under any gate task, the job's own gate context
+		// included: the hiring node seals every message to a sealed service, and an agent that keeps a conversation per
+		// context would answer it from the buyer's sealed conversation, unsealed (round 2 sealing-fixes-6).
+		return reject(sealed.RejectBadHeader, "an unsealed message into a sealed job's upstream context")
 	}
 	return nil
 }
@@ -895,21 +989,35 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 	}
 	h.mu.Lock()
 	svc, err := h.service(x.service)
-	guard := err == nil && (len(svc.Tasks) > 0 || len(svc.UpstreamContexts) > 0)
+	// A job being opened counts (D227): until its first reply is read, its upstream task is not indexed, and a reply on
+	// another exchange that names it must be read to be held.
+	guard := err == nil && h.guarded(x.service, svc)
 	h.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
+	streaming := false
+	defer func() {
+		if !streaming {
+			h.mu.Lock()
+			x.endOpening() // the job's first reply is read (or there was none to read)
+			h.mu.Unlock()
+		}
+	}()
 	if x.job == nil && !guard {
 		return resp, nil // nothing sealed on this service: the answer passes as it came
 	}
 	ct := resp.Header.Get("Content-Type")
 	switch {
 	case x.stream && a2awire.IsEventStream(ct):
+		streaming = true
 		body := resp.Body
 		pr, pw := io.Pipe()
 		go func() {
-			err := sseTransform(body, pw, func(data []byte) ([]byte, error) { return x.reply(data) })
+			err := sseTransform(body, pw, func(data []byte) ([]byte, error) { return x.replyHeld(ctx, data) })
+			h.mu.Lock()
+			x.endOpening()
+			h.mu.Unlock()
 			_ = body.Close()
 			if err != nil {
 				h.log.Warn("sealing: a service event stream ends before an event the node refused", "service", x.service,
@@ -940,7 +1048,7 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 		setBody(resp, b)
 		return resp, nil
 	}
-	out, err := x.reply(b)
+	out, err := x.replyHeld(ctx, b)
 	if err != nil {
 		h.log.Warn("sealing: a service reply is refused", "service", x.service, "reason", reasonText(err))
 		return refuseResponse(resp, x, err), nil
@@ -1068,6 +1176,42 @@ func jobDigest(j *jobState) string {
 	return string(b)
 }
 
+// replyHold bounds how long a reply waits for the sealed jobs of its service being opened (replyHeld).
+var replyHold = 30 * time.Second
+
+// errHold is reply's answer for a reply that must wait for a sealed job of its service being opened (replyHeld).
+var errHold = errors.New("sealing: a reply waits for a sealed job being opened")
+
+// replyHeld is reply, waiting while it is held: a reply on an exchange of no sealed job that names an upstream task or
+// context the node has not indexed, while a sealed job of the service is being opened, may name that job's, which
+// the node learns from the job's own first reply. It waits for every such opening to end (the job's first reply
+// read, its exchange answered by the node or ended), for at most replyHold, and is then read again: a reply that
+// names the job's task is refused then, any other passes. A reply still held after replyHold, or whose request's
+// context ends, is refused wrong_task (D227).
+func (x *Exchange) replyHeld(ctx context.Context, b []byte) ([]byte, error) {
+	deadline := time.NewTimer(replyHold)
+	defer deadline.Stop()
+	for {
+		out, err := x.reply(b)
+		if !errors.Is(err, errHold) {
+			return out, err
+		}
+		x.h.mu.Lock()
+		n, ch := x.h.opening[x.service], x.h.openingDone
+		x.h.mu.Unlock()
+		if n == 0 {
+			continue
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, reject(sealed.RejectWrongTask, "a reply held for a sealed job being opened: the exchange ended")
+		case <-deadline.C:
+			return nil, reject(sealed.RejectWrongTask, "a reply naming a task the node has not indexed, while a sealed job of the service is being opened")
+		}
+	}
+}
+
 // reply checks and seals one reply body (a JSON response, or one SSE event's data).
 func (x *Exchange) reply(b []byte) ([]byte, error) {
 	h := x.h
@@ -1111,12 +1255,18 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 			task, _ := a2awire.String(m, taskKey)
 			cctx, _ := a2awire.String(m, ctxKey)
 			if j == nil {
-				// An unsealed exchange may not carry a sealed job's task or context.
-				if owner, ok := svc.Tasks[task]; ok && task != "" && owner != x.pre.Task {
+				// An unsealed exchange may not carry a sealed job's task or context (a sealed job's own gate context
+				// included: round 2 sealing-fixes-6).
+				owner, taskIndexed := svc.Tasks[task]
+				if taskIndexed && task != "" && owner != x.pre.Task {
 					return reject(sealed.RejectWrongTask, "a reply names a sealed job's upstream task on another exchange")
 				}
-				if gc, ok := svc.UpstreamContexts[cctx]; ok && cctx != "" && gc != x.pre.Context {
+				_, ctxIndexed := svc.UpstreamContexts[cctx]
+				if ctxIndexed && cctx != "" {
 					return reject(sealed.RejectWrongContext, "a reply names a sealed job's upstream context on another exchange")
+				}
+				if h.opening[x.service] > 0 && (task != "" && !taskIndexed || cctx != "" && !ctxIndexed) {
+					return errHold // it may name the task of a sealed job being opened (replyHeld, D227)
 				}
 				return nil
 			}
@@ -1156,6 +1306,9 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 		w.Container = func(c *a2awire.Container) error { return x.sealContainer(j, c) }
 	}
 	out, changed, err := w.WalkReply(b)
+	if errors.Is(err, errHold) {
+		return nil, err
+	}
 	if err != nil {
 		if _, ok := sealed.ReasonOf(err); ok {
 			return nil, err
@@ -1176,6 +1329,9 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 		if err := h.st.saveService(x.service, svc); err != nil {
 			return nil, err
 		}
+	}
+	if j != nil && j.UpstreamTask != "" {
+		x.endOpening() // the job's upstream task is indexed: a reply held for it is read again
 	}
 	if !changed {
 		return b, nil
@@ -1403,6 +1559,10 @@ func (h *Hosting) Sweep(now time.Time) error {
 	}
 	var errs []error
 	keepFor := h.cfg.MaxAge + sealed.MaxClockSkew*time.Second
+	// A job outlives every request of it that rule 1 still lets through: its pairs (rule 5) and binding must be there
+	// as long as its first message could be resent under its own gate task (the replyTo stays MaxAge; round 2
+	// sealing-fixes-8).
+	retain := max(JobRetention, keepFor)
 	for _, name := range services {
 		svc, err := h.service(name)
 		if err != nil {
@@ -1428,22 +1588,36 @@ func (h *Hosting) Sweep(now time.Time) error {
 			if last.IsZero() {
 				last = j.Created
 			}
-			if now.Sub(last) < JobRetention {
+			if now.Sub(last) < retain {
 				liveCtx[j.GateContext], liveUp[j.UpstreamContext] = true, true
 				// A sealed MCP request or input request older than MaxAge is no longer answerable (rule 4b's age; a
-				// result that late is a replay of one already sealed): it leaves the job, and its index entry stays with
-				// the job, so that an answer to it is still the job's, and refused (FromServer, answer).
+				// result that late is a replay of one already sealed): it leaves the job. An answered one's index entry
+				// goes with it, so that the indexes do not grow with a long-lived session (round 2 sealing-fixes-9): a
+				// late answer to it on the job's session is dropped there all the same, since an exchange of a sealed
+				// job relays no response that answers neither its own request nor one the node holds (FromServer), and
+				// no other exchange reaches the session (D226). An unanswered one's entry stays with the job, so that an
+				// answer to it is still the job's, and refused.
 				pruned := false
 				for ck, c := range j.Calls {
 					if now.Sub(c.At) > keepFor {
 						delete(j.Calls, ck)
 						pruned = true
+						if e, ok := svc.Responses[ck]; ok && e.Job == j.ID && c.Answered {
+							svc.del(setResponses, ck)
+						}
 					}
 				}
 				for ik, in := range j.Inputs {
 					if now.Sub(in.SealedAt) > keepFor {
 						delete(j.Inputs, ik)
 						pruned = true
+						if in.Answered {
+							for k, e := range svc.Inputs {
+								if e.Job == j.ID && e.Key == ik {
+									svc.del(setInputs, k)
+								}
+							}
+						}
 					}
 				}
 				if pruned {
@@ -1496,6 +1670,11 @@ func (h *Hosting) Sweep(now time.Time) error {
 		for k, v := range svc.Inputs {
 			if gone[v.Job] {
 				svc.del(setInputs, k)
+			}
+		}
+		for k, v := range svc.Sessions {
+			if gone[v] {
+				svc.del(setSessions, k)
 			}
 		}
 		if err := h.st.compactService(name, svc); err != nil {
