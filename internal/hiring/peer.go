@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -13,6 +14,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 )
 
 // Other local users (spec/tunnel.md §9). The Host and Origin checks stop a browser; they do not stop another account
@@ -211,4 +214,100 @@ func procAddr(s string) (netip.AddrPort, error) {
 	}
 	ip, _ := netip.AddrFromSlice(b)
 	return netip.AddrPortFrom(ip.Unmap(), uint16(port)), nil
+}
+
+// Listen binds --listen. On a loopback address it binds the port on both loopback families, 127.0.0.1 and [::1]
+// (D262): the node sends its clients to localhost (served cards, the README), which a stock Linux resolves to ::1
+// first, so a port the node left free on one family is one another local user could bind and serve the node's
+// clients from, reading their plaintext. A port another process holds on either family stops the start; a family the
+// machine does not have (no IPv6) is one no one else can bind either. On --listen port 0 the kernel's free port on the
+// first family is tried on the second, a few times.
+func Listen(addr string) (net.Listener, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if !loopbackHost(host) {
+		return net.Listen("tcp", addr)
+	}
+	first, second := host, "::1"
+	if strings.EqualFold(host, "localhost") {
+		first = "127.0.0.1"
+	} else if a, err := netip.ParseAddr(host); err == nil && a.Is6() && !a.Is4In6() {
+		second = "127.0.0.1"
+	}
+	for attempt := 0; ; attempt++ {
+		ln, err := net.Listen("tcp", net.JoinHostPort(first, port))
+		if err != nil {
+			return nil, err
+		}
+		_, p, _ := net.SplitHostPort(ln.Addr().String())
+		ln2, err := net.Listen("tcp", net.JoinHostPort(second, p))
+		switch {
+		case err == nil:
+			return newDualListener(ln, ln2), nil
+		case errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT):
+			return ln, nil // the machine has no such loopback
+		}
+		_ = ln.Close()
+		if port == "0" && attempt < 8 {
+			continue
+		}
+		return nil, fmt.Errorf("%s is taken on the other loopback family (%s): another process could serve this node's "+
+			"local clients on localhost (spec/tunnel.md §9, D262): %w", addr, net.JoinHostPort(second, p), err)
+	}
+}
+
+// dualListener accepts on two listeners: Addr is the first's.
+type dualListener struct {
+	net.Listener
+	other net.Listener
+	ch    chan accepted
+	done  chan struct{}
+	once  sync.Once
+}
+
+type accepted struct {
+	c   net.Conn
+	err error
+}
+
+func newDualListener(a, b net.Listener) *dualListener {
+	l := &dualListener{Listener: a, other: b, ch: make(chan accepted), done: make(chan struct{})}
+	go l.loop(a)
+	go l.loop(b)
+	return l
+}
+
+func (l *dualListener) loop(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		select {
+		case l.ch <- accepted{c, err}:
+		case <-l.done:
+			if c != nil {
+				_ = c.Close()
+			}
+			return
+		}
+		if errors.Is(err, net.ErrClosed) {
+			return
+		}
+	}
+}
+
+// Accept returns the next connection of either listener.
+func (l *dualListener) Accept() (net.Conn, error) {
+	select {
+	case a := <-l.ch:
+		return a.c, a.err
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+// Close closes both listeners.
+func (l *dualListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return errors.Join(l.Listener.Close(), l.other.Close())
 }

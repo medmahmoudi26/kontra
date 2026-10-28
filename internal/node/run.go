@@ -73,7 +73,7 @@ func (n *Node) Run(ctx context.Context) error {
 		fmt.Fprintln(n.out, "kontra connect: hiring is off (--listen off): this node only hosts")
 		n.logger.Info("hiring: off (--listen off)")
 	} else {
-		ln, err := net.Listen("tcp", n.cfg.Listen)
+		ln, err := hiring.Listen(n.cfg.Listen) // a loopback --listen on both loopback families (D262)
 		if err != nil {
 			return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>, "+
 				"or --listen off for a node that only hosts)", n.cfg.Listen, err)

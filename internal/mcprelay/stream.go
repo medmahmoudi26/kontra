@@ -115,6 +115,19 @@ func (s *sseReader) line(ev *event) (string, error) {
 	}
 }
 
+// dropID removes the event's id field lines ("id" and "id:…"): a client then has no event id to resume the stream
+// with (D265).
+func (e *event) dropID() {
+	kept := e.lines[:0]
+	for _, l := range e.lines {
+		if l == "id" || strings.HasPrefix(l, "id:") {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	e.lines = kept
+}
+
 // encode writes the event back, its data replaced by data when replace is set: the other lines (id, event, retry,
 // comments) as they came, in order, and the data where its first line was, one data line per line of data.
 func (e *event) encode(replace bool, data string) []byte {

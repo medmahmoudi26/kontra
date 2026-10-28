@@ -139,7 +139,16 @@ type serviceInfo struct {
 	idle time.Duration
 	// used is when an MCP session's entry was last used: Sweep drops an entry with no job idle past its bound (D242).
 	used time.Time
+	// path is the service path an MCP session was initialized for: a request for another path on it is refused (D260).
+	path string
+	// relayed are the gate request ids of the server requests relayed unopened on a sealed MCP session (ping,
+	// roots/list): the local client's response to any other id that is no opened input request is refused (D260).
+	relayed map[string]bool
 }
+
+// maxRelayed bounds a sealed session's relayed ids: past it one goes for each new one, so a server that leaves that
+// many of its requests unanswered may find a later answer refused.
+const maxRelayed = 1024
 
 // ErrNoKey is a request for a sealed task whose per-job key this node does not hold (another node hired it, or the
 // key was deleted at the task's end): the node cannot open its answers.
@@ -187,6 +196,7 @@ type Job struct {
 	taskOf    string // the gate task a tasks/* request names
 	call      *sealedCall
 	init      bool
+	initDone  bool // the initialize exchange's result was read: the rest of the exchange is the session's (D263)
 	delete    bool
 	counted   bool // counted in Hiring.open until Done
 }
@@ -859,6 +869,9 @@ func (j *Job) Release() {
 	}
 }
 
+// Initialize reports an MCP initialize's exchange: the only one whose answer may name the session (D260).
+func (j *Job) Initialize() bool { return j != nil && j.mcp && j.init }
+
 // --- requests ---
 
 // Request seals a local client's request to a sealed service (the card's or initialize's recipients), or
@@ -976,6 +989,12 @@ func (h *Hiring) sealSend(j *Job, body []byte) ([]byte, error) {
 			}
 			if job == nil {
 				lerr = &LocalError{Status: http.StatusBadRequest, Err: fmt.Errorf("kontra connect: %w (task %s)", ErrNoKey, taskID)}
+				return lerr
+			}
+			if job.Service != j.service {
+				// A follow-up of a task another service's job holds: sealed to this service's recipients it would carry
+				// that job's replyTo and rk to this service (D259).
+				lerr = local(http.StatusBadRequest, "kontra connect: a follow-up of a task of another service (%s)", job.Service)
 				return lerr
 			}
 			if ctxID == "" {
@@ -1275,6 +1294,15 @@ func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 			return nil
 		},
 		Container: func(c *a2awire.Container) error {
+			if c.Where == a2awire.WhereArtifact || c.Where == a2awire.WhereArtifactUpdate {
+				// The hosting node drops an artifact's name and description on a sealed job (D220): any here are the
+				// gate's own words, which the local client would take for the service's (D264).
+				for k := range c.Members {
+					if strings.EqualFold(k, "name") || strings.EqualFold(k, "description") {
+						c.Set(k, nil)
+					}
+				}
+			}
 			if len(c.Parts) == 0 {
 				return nil
 			}
@@ -1738,6 +1766,11 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		// like those of a tasks/result stream.
 		h.mu.Lock()
 		j.info = h.sessions[j.sid]
+		if j.info != nil && h.otherService(j.info, service) {
+			h.mu.Unlock()
+			return nil, nil, &LocalError{Status: http.StatusNotFound,
+				Err: errors.New("kontra connect: an MCP session of another service, or an unsealed one of a sealed service: initialize again")}
+		}
 		if j.info != nil {
 			j.info.used = h.cfg.Now()
 			j.count() // the session's job stays while its GET is open (D241)
@@ -1804,6 +1837,12 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		restore(req, b)
 		return req, nil, nil
 	}
+	if h.otherService(si, service) {
+		// The gate chooses the session id a client uses (a stock client adopts the one an answer names): a session is
+		// the service's it was initialized for, and an unsealed one is never used for a service pinned sealed (D260).
+		return nil, nil, &LocalError{Status: http.StatusNotFound,
+			Err: errors.New("kontra connect: an MCP session of another service, or an unsealed one of a sealed service: initialize again")}
+	}
 	j.info = si
 	si.used = h.cfg.Now()
 	if !si.sealed {
@@ -1853,6 +1892,19 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 	j.count() // the session's job stays while the exchange is open (D241)
 	restore(req, b)
 	return req, j, nil
+}
+
+// otherService reports a session entry that is not the service's: initialized for another service path, or unsealed
+// while the service's pin says sealed (or cannot be read) (D260). h.mu is held.
+func (h *Hiring) otherService(si *serviceInfo, service string) bool {
+	if si.path != service {
+		return true
+	}
+	if si.sealed {
+		return false
+	}
+	pin, known, err := h.cfg.Pins.Get(h.cfg.Gate, pinName(service))
+	return err != nil || known && pin.Sealed
 }
 
 // sealedTarget reports an MCP request the node must read before anything of it is sent: on a session the node saw
@@ -1963,21 +2015,31 @@ func setEnvelope(obj map[string]json.RawMessage, ct []byte) error {
 // input request's session, tool and messageId, the job's replyTo and rk; result = {"_meta": {<related-task>,
 // "sh.kontra/sealed"}}.
 func (h *Hiring) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, error) {
-	if j.session == "" {
-		return b, nil
-	}
-	hj, err := h.loadJob("mcp-" + j.session)
-	if err != nil || hj == nil {
-		return b, nil
-	}
 	gid := mcpID(m.ID)
-	in := hj.Inputs[gid]
+	var hj *hireJob
+	if j.session != "" {
+		var err error
+		if hj, err = h.loadJob("mcp-" + j.session); err != nil {
+			return nil, local(http.StatusInternalServerError, "kontra connect: the session's job: %v", err)
+		}
+	}
+	var in *hireInput
+	if hj != nil {
+		in = hj.Inputs[gid]
+	}
 	if in == nil {
-		if hj.Answered[gid] {
+		if hj != nil && hj.Answered[gid] {
 			// The answer to an input request the client answered already: the request was answered once (D243).
 			return nil, local(http.StatusBadRequest, "kontra connect: a second answer to a sealed input request")
 		}
-		return b, nil // not an answer to a sealed input request
+		if j.info == nil || !j.info.relayed[gid] {
+			// A response to no request the node relayed on this session: an answer to a sealed input request of another
+			// session (a client moved onto this one), or to a request the gate wrote itself, which the node never relays
+			// on a sealed session (D260).
+			return nil, local(http.StatusBadRequest, "kontra connect: a response to no request relayed on this sealed session")
+		}
+		delete(j.info.relayed, gid)
+		return b, nil // the answer to a request the node relayed unopened (ping, roots/list)
 	}
 	answered := func() error {
 		delete(hj.Inputs, gid)
@@ -2003,6 +2065,14 @@ func (h *Hiring) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, error
 	res, err := strictjson.Members(m.Result)
 	if err != nil {
 		return nil, local(http.StatusBadRequest, "kontra connect: an answer that is not one object with exact keys")
+	}
+	for k := range res {
+		if strings.EqualFold(k, "task") {
+			// A CreateTaskResult: the answer would come later as the client's answer to the server's tasks/result, which
+			// the node never relays on a sealed session; the node opens input requests without their task, so a stock
+			// client answers at once (D261).
+			return nil, local(http.StatusBadRequest, "kontra connect: a task as the answer to a sealed input request")
+		}
 	}
 	var related json.RawMessage
 	if raw, ok := res["_meta"]; ok {
@@ -2169,14 +2239,35 @@ var errUnreadable = errors.New("sealing: a message of a sealed session that is n
 // did not (D172).
 func (h *Hiring) mcpMessage(j *Job, data []byte) ([]byte, error) {
 	m, err := mcpwire.Parse(data, mcpwire.FromUpstream)
-	if err != nil {
-		if j.init {
+	if j.init && !j.initDone {
+		if err != nil {
 			return data, nil // the session's sealing is not known yet: not the node's to read
 		}
-		return nil, errUnreadable
+		if m.Method != "" && len(m.ID) > 0 {
+			// A request before the initialize result: a server sends none (MCP: no request but a ping even before the
+			// client's notifications/initialized), and no session is known that the client's answer would be checked on
+			// (D263).
+			h.log.Warn("sealing: a server request before the initialize result is dropped (D263)")
+			return nil, nil
+		}
+		if m.Method != "" || !mcpwire.SameID(m.ID, j.reqID) {
+			return data, nil
+		}
+		out, err := h.initResult(j, data, m)
+		j.initDone = true
+		h.mu.Lock()
+		if si := h.sessions[j.sid]; err == nil && si != nil && si.sealed && si.session == j.session {
+			// The rest of the exchange is the sealed session's, read as any of its exchanges is (D263).
+			j.info = si
+		}
+		h.mu.Unlock()
+		return out, err
 	}
-	if j.init {
-		return h.initResult(j, data, m)
+	if j.init && (j.info == nil || !j.info.sealed) {
+		return data, nil // the rest of an unsealed session's initialize exchange
+	}
+	if err != nil {
+		return nil, errUnreadable
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -2201,8 +2292,111 @@ func (h *Hiring) mcpMessage(j *Job, data []byte) ([]byte, error) {
 		return h.mcpFail(m) // a sealed call of a session with no job: nothing opens its result
 	case m.Method == mcpwire.MethodElicit || m.Method == mcpwire.MethodSample:
 		return h.openInput(j, hj, data, m)
+	case m.Method != "" && len(m.ID) > 0:
+		if m.Method != "ping" && m.Method != "roots/list" {
+			// Any other server request (tasks/result, tasks/get of a client task, a method of no version's): its answer
+			// could carry what the client answered a sealed input request, which goes sealed or not at all (D261).
+			h.log.Warn("sealing: a server request of a sealed session that is no ping, roots/list or input request is dropped (D261)",
+				"method", m.Method)
+			return nil, nil
+		}
+		if si := j.info; si != nil {
+			if len(si.relayed) >= maxRelayed {
+				for k := range si.relayed {
+					delete(si.relayed, k)
+					break
+				}
+			}
+			if si.relayed == nil {
+				si.relayed = map[string]bool{}
+			}
+			si.relayed[mcpID(m.ID)] = true
+		}
+	}
+	return sealStatusMessages(j, data, m)
+}
+
+// sealStatusMessages is a message of a sealed session with every task statusMessage it carries "sealed": the hosting
+// node writes "sealed" in place of a sealed task's (§2), and every task of a sealed session is a sealed call's, so
+// any other text is the gate's own, which the local client would take for the service's (D264). The member is read
+// in any case (a lenient client takes a case variant for it): a task's tasks/get, tasks/cancel or tasks/list answer,
+// and its notifications/tasks/status. h.mu is held.
+func sealStatusMessages(j *Job, data []byte, m *mcpwire.Message) ([]byte, error) {
+	switch {
+	case m.Method == "notifications/tasks/status" && m.Params != nil:
+		p, changed, err := sealedStatus(m.Params)
+		if err != nil || !changed {
+			return dataOr(data, err)
+		}
+		return mcpwire.SetMember(data, "params", p)
+	case m.Method == "" && m.Result != nil && mcpwire.SameID(m.ID, j.reqID) && (j.reqMethod == "tasks/get" || j.reqMethod == "tasks/cancel"):
+		r, changed, err := sealedStatus(m.Result)
+		if err != nil || !changed {
+			return dataOr(data, err)
+		}
+		return mcpwire.SetMember(data, "result", r)
+	case m.Method == "" && m.Result != nil && mcpwire.SameID(m.ID, j.reqID) && j.reqMethod == "tasks/list":
+		res, err := strictjson.Members(m.Result)
+		if err != nil {
+			return nil, errUnreadable
+		}
+		raw, ok := res["tasks"]
+		var elems []json.RawMessage
+		if !ok || firstByte(raw) != '[' || json.Unmarshal(raw, &elems) != nil {
+			return data, nil
+		}
+		some := false
+		for i, e := range elems {
+			ne, changed, err := sealedStatus(e)
+			if err != nil {
+				return nil, errUnreadable
+			}
+			if changed {
+				elems[i], some = ne, true
+			}
+		}
+		if !some {
+			return data, nil
+		}
+		res["tasks"] = a2awire.EncodeArray(elems)
+		return mcpwire.SetMember(data, "result", a2awire.Encode(res))
 	}
 	return data, nil
+}
+
+// dataOr is data, or nothing and errUnreadable when err is set.
+func dataOr(data []byte, err error) ([]byte, error) {
+	if err != nil {
+		return nil, errUnreadable
+	}
+	return data, nil
+}
+
+// sealedStatus is a task object with every member named statusMessage in any case replaced by one statusMessage
+// "sealed"; changed false when it had none, or only "sealed".
+func sealedStatus(obj json.RawMessage) (json.RawMessage, bool, error) {
+	if firstByte(obj) != '{' {
+		return obj, false, nil
+	}
+	m, err := strictjson.Members(obj)
+	if err != nil {
+		return nil, false, err
+	}
+	found := false
+	for k, v := range m {
+		if strings.EqualFold(k, "statusMessage") {
+			if k == "statusMessage" && string(bytes.TrimSpace(v)) == `"sealed"` {
+				continue
+			}
+			delete(m, k)
+			found = true
+		}
+	}
+	if !found {
+		return obj, false, nil
+	}
+	m["statusMessage"] = a2awire.Quote("sealed")
+	return a2awire.Encode(m), true, nil
 }
 
 // openAnswer opens the answer to a request of the session the node tracks (rule 4): a sealed call's result, or its
@@ -2237,6 +2431,14 @@ func (h *Hiring) openAnswer(j *Job, hj *hireJob, c *hireCall, data []byte, m *mc
 				}
 			}
 			c.done = true
+			nt, changed, err := sealedStatus(task)
+			if err != nil {
+				return h.mcpFail(m)
+			}
+			if changed {
+				res["task"] = nt // the gate's own words are not the task's (D264)
+				return mcpwire.SetMember(data, "result", a2awire.Encode(res))
+			}
 			return data, nil
 		}
 		c.done = true
@@ -2304,6 +2506,7 @@ func (h *Hiring) initResult(j *Job, data []byte, m *mcpwire.Message) ([]byte, er
 		return b, nil
 	}
 	si.session = j.session
+	si.path = j.service
 	si.idle = sessionIdleOf(m.Result)
 	si.used = h.cfg.Now()
 	h.mu.Lock()
@@ -2445,6 +2648,14 @@ func (h *Hiring) openInput(j *Job, hj *hireJob, data []byte, m *mcpwire.Message)
 	np, err := strictjson.Members(plain)
 	if err != nil {
 		return nil, nil
+	}
+	for k := range np {
+		if strings.EqualFold(k, "task") {
+			// A task-augmented input request (MCP 2025-11-25): the client would answer it with a task and send its real
+			// answer as the answer to the server's tasks/result, which the node never relays on a sealed session. Opened
+			// without its task, a stock client answers it at once, and the answer goes sealed (D261).
+			delete(np, k)
+		}
 	}
 	delete(meta, mcpwire.MetaSealed)
 	if len(meta) > 0 {

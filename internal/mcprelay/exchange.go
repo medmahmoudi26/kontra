@@ -402,6 +402,11 @@ func (h *Handler) relayJSON(rq *request, resp *http.Response, o *relayOpts) int6
 	if o.hold && (m.Method != "" || !sameID(m.ID, o.reqID)) {
 		o.sid = "" // not the answer to the initialize: no session is opened, and the client gets no id
 	}
+	if rq.r.Method == http.MethodGet && m.Method == "" && len(m.ID) > 0 {
+		h.log.Warn("mcp: an upstream answered a GET with a response; it is not relayed (D265)", "service", rq.svc.Ref.Name)
+		writeError(w, http.StatusBadGateway, nil, mcpwire.CodeInternal, msgUpstreamError, nil)
+		return 0
+	}
 	out, ref := h.process(o, m, b)
 	if ref != nil {
 		writeRefusal(w, ref)
@@ -473,6 +478,13 @@ const keepAliveEvery = 15 * time.Second
 // never sees, nor carry Kontra's keys past the scrub in it. A second response to the client's request ends the
 // stream before it, as a refused message does, and the call stays metered as its first response says (a client takes
 // the first response for an id, and reports a later one as unknown).
+//
+// A POST's stream is relayed without its event ids, so that no client resumes it with a GET: the calls row is written
+// from what the POST's stream carried, and a response the client read on a GET instead would be one the gate never
+// metered (a buyer that drops every call's stream after its first event and resumes would have every successful call
+// metered an error, D196). A GET's stream carries no response for the same reason (MCP: a server sends none there
+// unless the client resumes a POST's stream, which the gate does not offer): the stream ends before one, so that a
+// seller cannot have the client take a response on it while the POST's stream is metered another (D265).
 func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64 {
 	type item struct {
 		ev  *event
@@ -551,6 +563,9 @@ func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64
 				continue
 			}
 			tick.Reset(keepAliveEvery)
+			if rq.r.Method == http.MethodPost {
+				ev.dropID() // a POST's stream is not resumable through the gate (D265)
+			}
 			b := ev.encode(false, "")
 			isResp := false
 			if ev.hasData && strings.TrimSpace(ev.data) != "" {
@@ -559,6 +574,11 @@ func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64
 					h.log.Warn("mcp: an upstream event was not relayed: strict decoding refused it; the stream ends",
 						"service", rq.svc.Ref.Name, "level", strictLevel(err))
 					return refuse()
+				}
+				if rq.r.Method == http.MethodGet && m.Method == "" && len(m.ID) > 0 {
+					h.log.Warn("mcp: an upstream sent a response on a GET stream; the stream ends before it (D265)",
+						"service", rq.svc.Ref.Name)
+					return cw.n
 				}
 				isResp = m.Method == "" && sameID(m.ID, o.reqID)
 				if isResp && o.answered {

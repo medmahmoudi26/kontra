@@ -393,12 +393,16 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			}
 			sw := &statusWriter{ResponseWriter: w} // the bridge's own Kontra-Node answers (full, target_unreachable) are kept
 			ctx := stdiobridge.WithOwner(r.Context(), p)
+			var sx *sealing.MCPExchange
 			if p.seal != nil {
-				sx := p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
+				sx = p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
 				defer sx.Release() // what a message the child never got holds in flight (ext-sealed.md §5)
 				ctx = stdiobridge.WithFilter(ctx, sx)
 			}
 			b.ServeHTTP(sw, r.WithContext(ctx))
+			if r.Method == http.MethodDelete && (sw.status/100 == 2 || sw.status == http.StatusNotFound) {
+				sx.SessionGone() // the child's session ended: a sealed job's hold on it goes (D255)
+			}
 			log.Debug("tunnel exchange (stdio)", "method", r.Method, "status", sw.status, "duration_ms", time.Since(start).Milliseconds())
 			return
 		}

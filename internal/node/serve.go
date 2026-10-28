@@ -251,14 +251,19 @@ func upstreamGroups(serves []Serve) map[string]string {
 	return out
 }
 
-// upstreamOrigin is a target's origin as upstreamGroups compares it: scheme, host (every loopback name as one) and
-// port (the scheme's default when none is written).
+// upstreamOrigin is a target's origin as upstreamGroups compares it: scheme, host (a name without its trailing dot,
+// and every name of the local host as one) and port (the scheme's default when none is written).
+//
+// The local host's names are localhost (and a name under it, RFC 6761), a loopback address, and an unspecified one
+// (0.0.0.0, ::), which is what a server prints as its listen address and which Linux dials as the local host: two
+// targets that reach one server by two of them are one upstream (D236, D257).
 func upstreamOrigin(u *url.URL) string {
-	host, port := strings.ToLower(u.Hostname()), u.Port()
+	host, port := strings.TrimRight(strings.ToLower(u.Hostname()), "."), u.Port()
 	if port == "" {
 		port = map[string]string{"http": "80", "https": "443"}[strings.ToLower(u.Scheme)]
 	}
-	if a, err := netip.ParseAddr(host); host == "localhost" || err == nil && a.Unmap().IsLoopback() {
+	a, err := netip.ParseAddr(host)
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || err == nil && (a.Unmap().IsLoopback() || a.Unmap().IsUnspecified()) {
 		host = "loopback"
 	}
 	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(host, port)

@@ -44,6 +44,7 @@ import (
 
 	"kontra.sh/kontra/internal/a2awire"
 	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/pins"
 	"kontra.sh/kontra/internal/sealing"
 	"kontra.sh/kontra/internal/tunnel"
@@ -600,6 +601,11 @@ func refuse(w http.ResponseWriter, r *http.Request, status int, msg string) {
 // errNoSession is the forwarding's error while the node has no session to open a stream on.
 var errNoSession = errors.New("hiring: no tunnel session to forward on")
 
+// errRedirect is a 3xx answer of the gate's: never relayed (D258). The gate has no hiring route that redirects, and a
+// stock client follows a 307 or 308 with its own plaintext body to whatever Location names (a2a-go's http.Client,
+// the Python MCP SDK's follow_redirects): the gate's origin, or another local path the node does not seal.
+var errRedirect = errors.New("hiring: the gate answered with a redirect, which the node never relays")
+
 // proxyError answers a forwarding that failed: 429 while the session has the gate's cap of node-opened streams in
 // flight, 503 while there is no session, 502 otherwise (a card that does not verify included).
 func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
@@ -615,6 +621,11 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 		status, msg = http.StatusServiceUnavailable, "kontra connect: no tunnel session to the gate right now; try again"
 	case errors.Is(err, ErrCardNotVerified):
 		msg = "kontra connect: the gate's card signature does not verify; the card is not served"
+	case errors.Is(err, errRedirect):
+		// The node's own 502, an A2A or MCP error body, with no Location (D258).
+		s.log.Warn("the gate answered with a redirect: refused (D258)", "path", clip(r.URL.Path))
+		refuse(w, r, http.StatusBadGateway, "kontra connect: the gate answered with a redirect, which kontra connect never follows or relays")
+		return
 	case r.Context().Err() != nil:
 		s.log.Debug("local client left before the answer", "err", err)
 		return
@@ -626,7 +637,8 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // modify is the ReverseProxy's ModifyResponse: a card is verified and rewritten (relay.md §3, tunnel.md §9), and
-// the kontra-blob: parts of an A2A answer are inlined (relay.md §10.4), JSON and SSE.
+// the kontra-blob: parts of an A2A answer are inlined (relay.md §10.4), JSON and SSE. A 3xx is never relayed, on any
+// path: the client gets the node's 502 instead, with no Location (D258).
 //
 // Cards. Every GET answer in 2xx on a card route is read whatever its Content-Type: a2a-go's resolver decodes
 // any body with encoding/json, which ignores the Content-Type and matches member names without regard to case.
@@ -641,7 +653,16 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 func (s *Server) modify(res *http.Response) error {
 	req := res.Request
 	ctx := req.Context()
+	if res.StatusCode/100 == 3 {
+		return errRedirect // whatever the path and the sealing (D258)
+	}
 	job, _ := ctx.Value(jobKey{}).(*sealing.Job)
+	if isMCPPath(req.URL.Path) && (job != nil && !job.Initialize() || job == nil && req.Header.Get(mcpwire.HeaderSessionID) != "") {
+		// An MCP session is named by its initialize answer only (a request that carries a session id is none): a stock
+		// client (the TypeScript SDK) takes the Mcp-Session-Id of any answer for its session, and the gate would move
+		// it onto another session (D260).
+		res.Header.Del(mcpwire.HeaderSessionID)
+	}
 	ct := res.Header.Get("Content-Type")
 	must, may := false, false
 	if req.Method == http.MethodGet && res.StatusCode/100 == 2 {

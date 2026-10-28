@@ -401,8 +401,13 @@ and `503` with `Kontra-Node: full`, which the gate retries, when it may succeed 
 
 The node serves `127.0.0.1:7777` (`--listen`) to local clients, a node that only hosts too, unless `--listen off`
 turns the hiring endpoint off: such a node binds no local port and hires for no one, and `--local-token` and
-`--allow-origin`, which guard `--listen`, are refused beside it, as is `--listen off` without a `--serve` (D208). It
-forwards each request on a stream it opens (D34), with the preamble `{"v": 1, "op": "http"}`, followed by the
+`--allow-origin`, which guard `--listen`, are refused beside it, as is `--listen off` without a `--serve` (D208). A
+loopback `--listen` binds the port on both loopback families, `127.0.0.1` and `[::1]`: the node sends its clients to
+`localhost` (the cards it serves, its documentation), which a stock Linux resolves to `::1` first, so a port it left
+free on either family would be one another local user could bind and serve its clients from. A port another process
+holds on either family stops the start; a family the machine does not have (no IPv6) is one no one else can bind
+either (D262). Before the node binds (at its start, or a restart), another user can bind the port: on a machine
+shared with other users, `--local-token` is the remedy. It forwards each request on a stream it opens (D34), with the preamble `{"v": 1, "op": "http"}`, followed by the
 request with its path unchanged: `/agents/…`, `/mcp/…`, `/mcp`, `/.well-known/…`. Anything else is refused by the
 node with `404`.
 
@@ -441,7 +446,23 @@ differences:
   service's, would have its messages go unsealed), after verifying the gate's card signature with a `jku` equal to
   `{the origin it dialed}/.well-known/jwks.json` ([`relay.md`](relay.md) §3). A card whose gate signature does not
   verify is not served locally. A request other than a `GET` (or `HEAD`) to `/.well-known/…`, or to an `/agents/…`
-  path that names no service, is refused `404` here: the gate has no such route (D247).
+  path that names no service, is refused `404` here: the gate has no such route (D247). A client builds its endpoint
+  from more than the `url`, so a served interface keeps `url`, `protocolBinding` and `protocolVersion` only (an A2A
+  client joins an interface's `tenant` into the path), the 0.3 members a compatibility parser reads an endpoint from
+  (`url`, `preferredTransport`, `additionalInterfaces` at the top) are left out, and a card with a lone case variant
+  of a member a client reads there (`supportedInterfaces`, an interface's `url`, `protocolBinding`,
+  `protocolVersion` or `tenant`) is not served (D259).
+
+**The node reads the gate's answers before a local client does**, whatever the service's sealing:
+
+- Redirects: the node never relays a `3xx` of the gate's, on any path: the client gets the node's own `502` (an A2A
+  or MCP error body) and no `Location`. The gate has no hiring route that redirects, and a stock client follows a
+  `307` or `308` with its own request body to whatever `Location` names, the gate's origin or a local path the node
+  does not seal (D258).
+- MCP sessions: an answer names the session only on an `initialize` (the node removes `Mcp-Session-Id` from every
+  other answer, since a stock client takes the header of any answer for its session), and a session id is used for
+  the service it was initialized for only: a request on it to another path, or on an unsealed session to a service
+  whose pin says sealed, is `404`, and the client initializes again (D260).
 
 Sealing and unsealing for hired jobs happen in the node, around this forwarding ([`ext-sealed.md`](ext-sealed.md)).
 
@@ -474,8 +495,8 @@ target like any other.
   children per service (`--max-sessions`), counting a stopping child until its group is gone. Every principal of
   the service, and every durable task's own session, shares these children, so a full bridge makes room (D213): an
   `initialize` beyond `--max-sessions` waits for a child that is stopping already (the gate closed one of a
-  principal's sessions idle for 5 minutes for that principal's new one, with a `DELETE`, [`relay.md`](relay.md)
-  §11.2), and otherwise stops the longest-idle child, when it has had no exchange (none open, an open `GET` stream
+  principal's sessions idle for 2 minutes for that principal's new one, with a `DELETE`, [`relay.md`](relay.md)
+  §11.2, D249), and otherwise stops the longest-idle child, when it has had no exchange (none open, an open `GET` stream
   counting) for at least 5 minutes, and waits for its group to be gone. With no such child it is `503` with
   `Kontra-Node: full`.
 - The bridge is an in-process handler on tunnel streams; it listens on no port.

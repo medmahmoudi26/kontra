@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -71,7 +72,14 @@ func JWKSURL(gate *url.URL) (string, error) {
 //
 // Every interface url becomes the {svc} the card was read for, on the local base (http://localhost:<port>{svc}),
 // whatever path the gate's names: the hiring node seals by path, so a gate that pointed a client at another path
-// ({svc}/.well-known/x, /agents//x, /mcp, another service's) would have its messages go unsealed (D247).
+// ({svc}/.well-known/x, /agents//x, /mcp, another service's) would have its messages go unsealed (D247). A client
+// builds its endpoint from more than the url, so the served card holds nothing else it would build one from (D259):
+// each interface keeps url, protocolBinding and protocolVersion only (a2a-go's REST client joins an interface's tenant
+// into the path, which then names another service, D214's unsealed unknown); the 0.3 members a compatibility parser
+// reads an endpoint from (url, preferredTransport, additionalInterfaces at the top) are left out; and a card with a
+// lone case variant of a member a client reads there (supportedInterfaces, an interface's url, protocolBinding,
+// protocolVersion or tenant) is not served, since a2a-go decodes a card with encoding/json, which matches member
+// names whatever their case, and would read the gate's own URL in it.
 func RewriteCard(ctx context.Context, card []byte, gate *url.URL, local *url.URL, svc string, jwks *http.Client) ([]byte, error) {
 	if svc == "" {
 		return nil, fmt.Errorf("%w: a card read for no service", ErrCardNotVerified)
@@ -80,7 +88,17 @@ func RewriteCard(ctx context.Context, card []byte, gate *url.URL, local *url.URL
 	if err != nil {
 		return nil, err
 	}
+	if err := strictjson.CheckReads(m, []strictjson.Path{{"supportedInterfaces", "*"}}, cardReads); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCardNotVerified, err)
+	}
 	delete(m, "signatures")
+	for k := range m {
+		for _, v0 := range []string{"url", "preferredTransport", "additionalInterfaces"} {
+			if strings.EqualFold(k, v0) {
+				delete(m, k)
+			}
+		}
+	}
 	if raw, ok := m["supportedInterfaces"]; ok {
 		out, err := rewriteInterfaces(raw, local, svc)
 		if err != nil {
@@ -209,7 +227,16 @@ func forgetKeySets(client *http.Client) {
 	}
 }
 
-// rewriteInterfaces moves every interface url to local's scheme and host and the service's path svc (D247).
+// cardReads are the members a client reads an endpoint from (D259): a lone case variant of one is refused.
+var cardReads = []strictjson.Path{{"supportedInterfaces"}, {"supportedInterfaces", "*", "url"},
+	{"supportedInterfaces", "*", "protocolBinding"}, {"supportedInterfaces", "*", "protocolVersion"},
+	{"supportedInterfaces", "*", "tenant"}}
+
+// interfaceMembers are the members a served interface keeps (D259).
+var interfaceMembers = []string{"url", "protocolBinding", "protocolVersion"}
+
+// rewriteInterfaces moves every interface url to local's scheme and host and the service's path svc (D247), and
+// keeps only interfaceMembers (D259).
 func rewriteInterfaces(raw json.RawMessage, local *url.URL, svc string) (json.RawMessage, error) {
 	var elems []json.RawMessage
 	if err := json.Unmarshal(raw, &elems); err != nil {
@@ -230,6 +257,11 @@ func rewriteInterfaces(raw json.RawMessage, local *url.URL, svc string) (json.Ra
 			}
 			nu := url.URL{Scheme: local.Scheme, Host: local.Host, Path: svc}
 			m["url"] = jsonString(nu.String())
+		}
+		for k := range m {
+			if !slices.Contains(interfaceMembers, k) {
+				delete(m, k)
+			}
 		}
 		elems[i] = encodeObject(m)
 	}

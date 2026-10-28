@@ -885,8 +885,9 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   result's `_meta` (§13.4).
 - **Every later request** carrying `Mcp-Session-Id` is routed to the same tunnel session after the enrollment
   check of §6.1, with the upstream's id substituted. Requests and responses pass unchanged otherwise: JSON-RPC
-  ids, SSE event ids and `retry:` fields are the upstream's (they are scoped to the upstream session). A
-  client's `GET` stream and its `Last-Event-ID` resume go to the same pinned session, except gate-written
+  ids, SSE event ids and `retry:` fields are the upstream's (they are scoped to the upstream session), except that
+  a `POST`'s event stream reaches the client without its event ids, and a `GET`'s carries no response (§11.4,
+  D265). A client's `GET` stream and its `Last-Event-ID` resume go to the same pinned session, except gate-written
   streams (§11.7).
 - **404.** A client id that is unknown, closed, bound to another principal, or presented on another service's
   path is `404` (`mcp_session_cross_node`). A pinned tunnel session that is gone, or whose key or binding was
@@ -988,7 +989,14 @@ never parses `arguments`, `content` or `structuredContent`, which may be sealed
 
 A call whose exchange was answered but whose JSON-RPC response never arrived (a cut stream, a refused event, a
 client that left) is metered `is_error` true; a call that got no answer at all (a §6.1 refusal, an unreachable
-upstream or peer, a client that left first) has no row (D196). A hosting node's refusal of a sealed call
+upstream or peer, a client that left first) has no row (D196). The row is what the client reads, so the call's stream
+is its only one (D265): the gate relays a `POST`'s event stream without the upstream's event ids, so that no client
+resumes it with a `GET` (a stock client resumes any cut `POST` stream that carried one, and would read on the `GET`
+a response the row never saw: a buyer that dropped every call's stream after its first event would have every
+successful call metered an error), and a `GET`'s stream ends before a response, which MCP has a server send there
+only on such a resume (a seller cannot have the client take one there while the `POST`'s stream is metered
+another). A plain call whose stream is cut fails for the client as it is metered; gate-written streams keep their
+`k.` ids (§11.7). A hosting node's refusal of a sealed call
 ([`ext-sealed.md`](ext-sealed.md) §6) reaches the client as a JSON-RPC error with HTTP `200` (`-32602`, `sealed
 part rejected: <reason>`, the request's id), metered `is_error` true and audited (D202).
 

@@ -54,9 +54,13 @@ drops them, so they are not relayed at all (D220).
 response carries it (the `tools/call` response, or the `tasks/result` of a task the sealed call created); the
 `params` of the upstream's `elicitation/create` and `sampling/createMessage` requests made for the sealed call or
 for a task it created, and the client's results to them (D219), on whichever exchange of the session they come: one
-on a sealed session that the hosting node cannot tell the call or task of is not relayed at all (D232); and the
-`statusMessage` of a task the sealed call created (which the hosting node replaces with `"sealed"`). Not sealed: the tool name, `isError`, `_meta` outside
-`sh.kontra/sealed`, `tools/list`, task states, and every other method (`resources/*`, `prompts/*`, notifications).
+on a sealed session that the hosting node cannot tell the call or task of is not relayed at all (D232), and a
+task-augmented one is opened for the client without its task, so that the client's result is its answer, not a task
+of its own (D261); and the `statusMessage` of a task the sealed call created (which the hosting node replaces with
+`"sealed"`, and the hiring node hands its client as `"sealed"` whatever came, D264). On a sealed session the gate
+reaches only the tasks the hosting node bound to the job (D252). Not sealed: the tool name, `isError`, `_meta` outside
+`sh.kontra/sealed`, `tools/list`, task states, and every other method (`resources/*`, `prompts/*`, `completion/*`,
+`logging/*`, notifications), which the gate can send on a sealed session itself (§7, D256).
 Sealing applies only when **both ends run `kontra connect`**: a stock MCP client talking straight to the gate sees
 no envelope (note 1 §6). So the gate holds no plaintext of a sealed MCP call, plain or durable (D62). Envelope v1
 binds an MCP call to a 2025-11-25 session (§3, `session`), so a sealed MCP service is served to 2025-11-25 and
@@ -171,18 +175,22 @@ The gate holds no private key and never sees `rk`.
 
 ## 5. Rules for each party
 
-**Hiring node** (on `localhost:7777`, for a service whose verified card — or, for MCP, whose `initialize` result —
-carries the extension):
+**Hiring node** (on `localhost:7777`, both loopback families bound, [`tunnel.md`](tunnel.md) §9, D262; for a service
+whose verified card — or, for MCP, whose `initialize` result — carries the extension):
 
 1. Checks the service's pin (§7) before sealing anything. When it cannot read the service's card at all (the
    gate unreachable, a `503` card route, a card that does not verify), a service its pin says is sealed gets
    nothing: the request is refused `502`; with no pin, or an unsealed one, the request goes as it came (trust on
    first use, §7), and that unknown is kept 5 s only (D214). It seals by path, so the card it serves locally names
-   the service's own path in every interface, and a request other than a `GET` to a path that names no service is
-   refused here ([`tunnel.md`](tunnel.md) §9, D247).
+   the service's own path in every interface, and nothing else a client builds an endpoint from (no interface
+   `tenant`, no 0.3 `url`, `preferredTransport` or `additionalInterfaces`; a card with a lone case variant of a member
+   a client reads there is not served, D259), and a request other than a `GET` to a path that names no service is
+   refused here ([`tunnel.md`](tunnel.md) §9, D247). It never relays a `3xx` of the gate's: a stock client would
+   follow it with its plaintext body (D258).
 2. Mints a per-job key and `rk`, and a `contextId` when the client gave none.
 3. Seals every part of the outgoing message (MCP: `arguments`) to all `recipients`, with the request header of §3,
-   whose `service` is the service it hires, as the request's path names it (D221).
+   whose `service` is the service it hires, as the request's path names it (D221). A follow-up of a task whose job
+   another service holds is refused here: it would carry that job's `replyTo` and `rk` to this service (D259).
 4. Opens every sealed part it receives for the job: checks `dir: "res"`, the `service` it hired (D221), the ids
    (`taskId`/`contextId`, or MCP `session`/`tool`/`messageId`), its own key id in `kids`, `auth`, that each message's
    parts are exactly `0..parts-1` once, and, per `artifactId`, that each `(chunk, part)` arrives at most once except
@@ -200,7 +208,11 @@ carries the extension):
    the local client's answer to that id with that `messageId` (§3): a second input request on a gate id it holds
    unanswered is dropped, and a second answer to one is refused here (D243). It opens the input requests of a sealed
    plain call as well, on the call's own stream or, without a related task, on another of the session's when one of
-   its sealed calls is unanswered (D232), and drops any other input request on a sealed session (D219). A client's
+   its sealed calls is unanswered (D232), and drops any other input request on a sealed session (D219). It opens a
+   task-augmented input request without its task, so that a stock client answers it at once and the answer goes
+   sealed, and refuses a task as the answer to one; on a sealed session it relays no other server request than those,
+   `ping` and `roots/list` (a server's `tasks/result` to the client would carry the answer unsealed, D261), and sends
+   a response of the local client only as the answer to a request it relayed on that session, once (D260). A client's
    error answer goes with its code and fixed text in place of its message and data (D246).
 4a. In a job whose request was sealed, it refuses every unsealed part of a message, artifact or result, except the
    single text part of a terminal status message the gate wrote (it carries `metadata["kontra.failure"]`, or names
@@ -209,14 +221,21 @@ carries the extension):
    receives `kontra.failure: sealed_rejected`. An MCP `CreateTaskResult` is taken only for a sealed call that asked
    for a task, and only with nothing beside `task` and `_meta` (a stock client ignores `task` and reads `content` as
    the tool's result, D244). On a sealed session a result that answers no request the node tracks is refused on a
-   `GET` stream, and on any stream once the node no longer holds the session (D241).
+   `GET` stream, and on any stream once the node no longer holds the session (D241). What only the gate can have
+   written in a sealed job is never handed as the service's: on a sealed session every task's `statusMessage` is
+   `"sealed"` (the hosting node writes no other, D264), and an artifact's `name` and `description`, which the hosting
+   node drops (D220), are dropped (D264).
 4c. MCP sessions. The gate chooses a session's id, so the node keeps its sessions apart from its A2A services, and
    refuses an `initialize` result whose `Mcp-Session-Id` is not MCP's visible-ASCII form, starts with `/`, or names
    a session it already holds (a second local client put into one sealed session would share its job and its
    requests' ids; D240, D245). A request that reuses the id of a sealed request of the session is refused here, as
    the hosting node refuses it (D226), and the sealed request's record stays (D245). A session's key, and the
    records of its sealed requests, stay while one of its exchanges is open, whatever the sweep or a `404` on
-   another exchange says (D241).
+   another exchange says (D241). Only an `initialize` answer names the session: the node removes `Mcp-Session-Id`
+   from every other answer (a stock client takes the header of any answer for its session), and a session is used
+   for the service it was initialized for only, never an unsealed one for a service pinned sealed (`404`, D260). On
+   the `initialize` exchange, what follows a result that declares sealing is read as any exchange of the session is,
+   and a server request before the result is dropped (D263).
 5. Hands the local client plaintext parts with their original `mediaType`.
 
 **Gate:**
@@ -292,7 +311,10 @@ A job is opened, and its `replyTo` and pairs recorded, **only once the service h
 request the node answered itself (a node-written `502`, say) opens and records nothing, so the gate's retry of it
 is not a replay. A request the node handed whole to the service, whose exchange the gate ended before the service
 answered, is the service's to act on, and is recorded as an accepted one (D227), an MCP message included (a URL
-server that answers JSON sends its headers only with its result, D233).
+server that answers JSON sends its headers only with its result, D233). What a request records is written down,
+synced, before the request is handed, and removed when the node answers it itself: a node that stops while a request
+is with the service (a crash, a kill, a reboot) records it as accepted when it starts again, since the service may
+have had it (D254).
 
 **Only a job's own exchanges reach its task (D217).** An exchange reaches a sealed job's upstream task or context
 only if it is that job's: its preamble names the job's gate task, or for MCP its session. A request naming another
@@ -311,7 +333,12 @@ into the message's context): one naming another sealed job's upstream task is `w
 sealed jobs an unsealed message with any reference is `bad_header` (D237). The node reads the route the service
 gets: the path as it forwards it, cleaned of `.`, `..` and `//`, so that a dot segment hides neither a task list
 nor a push config route (D235). Two services of one node that reach one upstream ([`tunnel.md`](tunnel.md) §8.2)
-keep their sealed state as one: an exchange of either is guarded by the sealed jobs of both (D236). A 2026-07-28
+keep their sealed state as one: an exchange of either is guarded by the sealed jobs of both (D236), the local host by
+any of its names (`localhost`, a loopback address, `0.0.0.0` and `::`, a name with its trailing dot, D257). MCP keeps
+the task list rule too (D252): on an MCP service with sealed state a `tasks/list` is `bad_header` on an exchange of no
+sealed job, and on a sealed session it lists the job's own tasks only; a `tasks/*` request on a sealed session that
+names a task the node has not bound to the job (one whose `CreateTaskResult` it never read, the gate having ended the
+call's exchange first) is `wrong_task`, and a status notification of one is not relayed there. A 2026-07-28
 request to an MCP service with sealed state, or started with `--sealed-required`, and any sealed `tools/call` sent
 as one, is `bad_header`, whatever the gate checked (D162's other half, D234).
 
@@ -322,13 +349,20 @@ task or context the node has not indexed, while a sealed job of the service is b
 (at most 30 s; `wrong_task` after) and is read again: refused when it names the job's task, relayed otherwise. A
 first message whose exchange ended before its reply, recorded as above, leaves its upstream task unindexed: the
 gate cannot list it, but could read it on another exchange by an id it already knows (a service whose task ids
-can be guessed); this is the residual.
+can be guessed); this is the residual. A sealed MCP call's task whose `CreateTaskResult` the node never read is the
+same: no sealed session reaches it and the gate cannot list it, but an upstream that does not bind tasks to the
+session could hand it to another session by an id the gate knows (D252).
 
 **MCP: a sealed job holds its upstream session (D226).** The upstream session the node forwards on is the request's
 `Mcp-Session-Id`, which the gate chooses as it does the preamble. The upstream session a sealed `tools/call` of a
 job went on (a plain call's session, a durable task's own) is that job's from the node's checks on: any message on
 it from an exchange whose preamble names another session, or none, is refused (`wrong_job` for a sealed
-`tools/call`, `bad_header` otherwise), and nothing the server sends on it reaches such an exchange. A request that
+`tools/call`, `bad_header` otherwise), and nothing the server sends on it reaches such an exchange. It stays so after
+the job is swept, an unsealed `tools/call` on it being refused under the job's own preamble too, until a `DELETE` of
+it is answered `2xx` or `404`: the server keeps what the job's calls set up there until the session ends, which no
+clock of the node's bounds (D255). A server that mints no `Mcp-Session-Id` is one upstream session for the input
+requests the node seals: its request ids are one id space, so an answer to a sealed one is checked by rule 4b
+whatever the preamble of the exchange that carries it names (D253). A request that
 reuses the JSON-RPC id of a sealed request the node recorded on the session is `replayed` (MCP never reuses an id
 in a session); the record stays, so that the sealed request's answer is sealed or refused on whichever exchange of
 the session it comes, a `GET` resumed with `Last-Event-ID` included. Which request a response answers is read as
@@ -401,10 +435,11 @@ adds a recipient is announced to the service's other nodes ([`tunnel.md`](tunnel
 | A gate replaying, reordering, dropping or duplicating sealed parts within a task | **Yes**: `messageId`/`artifactId`, `part`/`parts`, `chunk`, `iat` and the persisted job state |
 | A gate replaying a first message to **another** hosting node of the same service within `max_age` | **No**: that node has not seen the `replyTo`. The service re-executes the request; the reply still goes to the original buyer's key |
 | A gate forging a reply | **Yes** for service content: it does not know `rk`. The gate can still write its own failure text, which the hiring node marks unsealed (§5, rule 4a) |
-| A gate answering a sealed task's input request itself: in plaintext, with an answer replayed, or for a request never sealed or sealed more than `max_age` ago | **Yes**: the hosting node forwards only a sealed answer that passes rule 4b; an unsealed one is refused `bad_header`, and the service never sees it (§5, D175) |
+| A gate answering a sealed task's input request itself: in plaintext, with an answer replayed, or for a request never sealed or sealed more than `max_age` ago | **Yes**: the hosting node forwards only a sealed answer that passes rule 4b, on whichever exchange it comes (a server that mints no session id included, D253); an unsealed one is refused `bad_header`, and the service never sees it (§5, D175) |
 | A gate delivering a buyer's sealed request to **another service** of the same node than the one hired | **Yes**: the header names the hired service, which the hosting node checks against the preamble's (`wrong_job`, §5 rule 1) and the hiring node against the service it hired (rule 4), and the replay sets are node-wide besides (rules 2 and 5) (D221) |
 | A gate forging a request of its own | Not prevented (age does not authenticate senders), but it gains nothing it could not get as a buyer: the reply goes to its own key, and it cannot continue another buyer's job (`wrong_job`), with one residual: the row below |
 | A gate's own sealed first message, under a new gate task, into a buyer's gate context with that context's recorded upstream `contextId` | **No**: the hosting node cannot tell it from the buyer's own next task in the context (each task has a fresh per-job key, and nothing in the header binds a context to its first job), and an agent that keeps a conversation per context answers it from the buyer's sealed conversation, sealed to the gate's key. An unsealed one is refused (D227). A service that keeps no conversation per context is not exposed (D251) |
+| A gate's own unsealed requests other than `tools/call` on a sealed session (its preamble and `Mcp-Session-Id` are the gate's to choose): `resources/read`, `prompts/get`, `completion/complete`, `logging/setLevel` | **No**: §2 leaves them unsealed, so the server answers the gate from the session a sealed call set up (a document a sealed call opened, exposed as a resource), and a raised log level brings more of a sealed call's unsealed `notifications/message`. A `tools/call` there is refused unsealed (D217, D226), and a service that keeps no state per session is not exposed (D256) |
 | A gate declining a sealed input request (an error answer of its own) | Not prevented: an error carries no answer, so it denies the buyer's input request as dropping the request would, and never answers it (D246) |
 | A gate that **substitutes recipients**, drops the extension, or strips the seller's signature | **Only with pins**: the buyer learns recipients from what the gate serves. Pins refuse a downgrade always (a card whose seller signatures verify nothing is unsigned, D228), and a new recipient, or a new or removed seller key, when `--pin-recipients` is set. `kontra connect` prints the recipient key ids and the seller key thumbprints on stderr and in its log when it first sees a service and on every change, for out-of-band comparison (D164, D187). A seller signature that names its key by `kid` only is verified with the key set the gate names and pinned by that key's thumbprint; with no set named it is pinned unverified, and a forged one naming the pinned `kid` is not detected (D223) |
 | An MCP task's input requests, answers and status messages | **Yes**, for a task a sealed call created, and the input requests and answers of a sealed plain call (§2, D219) |

@@ -280,6 +280,11 @@ func NewHosting(cfg HostingConfig, log *slog.Logger) (*Hosting, error) {
 		hs := h.lock(name)
 		if _, err := h.service(name); err != nil {
 			h.log.Warn("sealing: a hosted service's state could not be read", "service", name, "err", err)
+		} else if err := h.recoverPending(name); err != nil {
+			// A request the service may have had, whose records the node could not apply: the node does not start
+			// without them (its sealed jobs' bindings and replay sets would not hold, D254).
+			hs.mu.Unlock()
+			return nil, fmt.Errorf("sealing: the requests %s had in flight when the node stopped: %w", name, err)
 		}
 		hs.mu.Unlock()
 	}
@@ -418,9 +423,11 @@ type Exchange struct {
 	// another exchange recorded since (reply refuses a job bound otherwise, wrong_job).
 	job  *jobState
 	bind string
-	// commit is what the service's acceptance records (rule 2's new job, rule 5's pairs); reserved are its in-flight
-	// keys (hostedService.flight, Hosting.nflight) until then.
-	commit   func() error
+	// ops are what the service's acceptance records (rule 2's new job, rule 5's pairs), written to the pending file
+	// named pending before the request is handed (D254); reserved are their in-flight keys (hostedService.flight,
+	// Hosting.nflight) until then.
+	ops      []commitOp
+	pending  string
 	reserved []string
 	done     bool
 	// opening is an exchange counted in Hosting.opening (it opens a job whose upstream task is not known yet).
@@ -473,7 +480,9 @@ func (x *Exchange) Release() {
 	x.h.unreserve(x.reserved)
 	x.reserved = nil
 	if !x.done {
-		x.commit = nil
+		x.ops = nil
+		x.h.removePending(x.service, x.pending)
+		x.pending = ""
 	}
 	x.endOpening()
 }
@@ -493,15 +502,32 @@ func (x *Exchange) End() {
 	}
 	hs := x.h.lock(x.service)
 	defer hs.mu.Unlock()
-	if x.commit != nil && !x.done {
-		x.done = true
-		if err := x.commit(); err != nil {
-			x.h.log.Error("sealing: the job's state was not written", "service", x.service, "err", err)
-		}
+	if err := x.commitLocked(); err != nil {
+		x.h.log.Error("sealing: the job's state was not written", "service", x.service, "err", err)
 	}
 	x.h.unreserve(x.reserved)
 	x.reserved = nil
 	x.endOpening()
+}
+
+// commitLocked records what the service's acceptance of the request commits, once, and removes its pending file; the
+// job it recorded is the exchange's from then on (another exchange may have recorded it meanwhile with the same
+// binding: the gate's retry of the first message). The service's lock is held.
+func (x *Exchange) commitLocked() error {
+	if x.done || len(x.ops) == 0 {
+		return nil
+	}
+	x.done = true
+	svc, err := x.h.service(x.service)
+	if err == nil {
+		var j *jobState
+		if j, err = x.h.applyOps(x.service, svc, x.ops); j != nil && err == nil {
+			x.job = j
+		}
+	}
+	x.h.removePending(x.service, x.pending)
+	x.pending = ""
+	return err
 }
 
 // Request checks and unseals one request the gate forwards to a sealed service (§5 rules 1–5) with the
@@ -560,6 +586,15 @@ func (h *Hosting) Request(ctx context.Context, pre tunnel.Preamble, req *http.Re
 		body = out
 	default:
 		if err := x.other(svc, op.taskIDs); err != nil {
+			return nil, x, err
+		}
+	}
+	if len(x.ops) > 0 {
+		// What the request records is on disk before the request is handed (D254).
+		if x.pending, err = h.writePending(x.service, x.ops); err != nil {
+			x.h.unreserve(x.reserved)
+			x.reserved, x.ops = nil, nil
+			x.endOpening()
 			return nil, x, err
 		}
 	}
@@ -1036,31 +1071,9 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 		x.h.svc(x.service).opening++
 	}
 	x.job, x.bind = j, bindOf(h.ReplyTo, h.RK)
-	service, job := x.service, j
-	x.commit = func() error {
-		at := x.h.cfg.Now()
-		// The job recorded meanwhile, if any: the same binding (the gate's retry of the first message) is that job, and
-		// another is never overwritten.
-		cur, err := x.h.jobFor(service, job.ID)
-		if err != nil {
-			return err
-		}
-		if cur != nil && cur != job {
-			if bindOf(cur.ReplyTo, cur.RK) != bindOf(job.ReplyTo, job.RK) {
-				return fmt.Errorf("sealing: job %s is bound to another replyTo: this request opens nothing", job.ID)
-			}
-			job = cur
-			x.job = cur
-		}
-		job.Pairs = append(job.Pairs, pairs...)
-		job.LastSeen = at
-		svc.put(setReplyTo, h.ReplyTo, replyEntry{Job: job.ID, At: at})
-		x.h.indexNode(setReplyTo, h.ReplyTo, service, true)
-		if err := x.h.saveJob(service, job); err != nil {
-			return err
-		}
-		return x.h.st.saveService(service, svc)
-	}
+	// The job recorded meanwhile, if any, is the one the acceptance records into: the same binding (the gate's retry of
+	// the first message) is that job, and another is never overwritten (applyOp).
+	x.ops = []commitOp{{Kind: opA2ASend, Job: j.ID, ReplyTo: h.ReplyTo, RK: h.RK, Context: j.GateContext, Pairs: pairs}}
 	return out, nil
 }
 
@@ -1204,11 +1217,7 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 		x.Release() // the service did not accept the request: nothing is recorded
 	} else {
 		hs := h.lock(x.service)
-		var err error
-		if x.commit != nil && !x.done {
-			x.done = true
-			err = x.commit()
-		}
+		err := x.commitLocked()
 		h.unreserve(x.reserved)
 		x.reserved = nil
 		hs.mu.Unlock()
@@ -1922,7 +1931,11 @@ func (h *Hosting) sweepService(name string, hs *hostedService, now time.Time) []
 	}
 	for k, v := range svc.Sessions {
 		if gone[v] {
+			// The upstream session holds what the job's sealed calls set up (a login, an opened document) for as long as
+			// the server keeps it, which no clock of the node's bounds: it stays the job's until a DELETE of it is
+			// answered (SessionGone, D255).
 			svc.del(setSessions, k)
+			svc.put(setHeld, k, v)
 		}
 	}
 	if err := h.st.compactService(name, svc); err != nil {

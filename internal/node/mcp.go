@@ -221,6 +221,7 @@ func (x *mcpExchange) response(res *http.Response) error {
 	if x.httpMethod == http.MethodDelete {
 		if x.sid != "" && (res.StatusCode/100 == 2 || res.StatusCode == http.StatusNotFound) {
 			x.f.forget(x.sid)
+			x.seal.SessionGone() // the server ended the session: a sealed job's hold on it goes (D255)
 		}
 		return nil
 	}

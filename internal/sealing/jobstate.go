@@ -36,6 +36,8 @@ import (
 //     answer and the input requests sealed.
 //   - jobs/<job>.ct/<sha256>: a ciphertext the node sealed for the job, by the hash of its header (without auth) and
 //     body, reused for the same header and body (so polling sees identical bytes).
+//   - pending/<id>.json: what a request in flight records once the service accepts it, written before the request is
+//     handed and applied as accepted when the node starts with it still there (pending.go, D254).
 //
 // A file is written whole to a temporary file in its directory, synced, renamed into place, and the directory synced
 // (a rename the crash lost would forget a replyTo or a (session, messageId), and a replay of it would pass).
@@ -67,6 +69,10 @@ type serviceState struct {
 	// that job: only an exchange of that job (its preamble's mcp_session) reaches one (D217, D226), since the
 	// upstream session the node forwards on is the request's header, which the gate chooses as it does the preamble.
 	Sessions map[string]string `json:"sessions,omitempty"`
+	// Held are the upstream sessions of sealed jobs that were swept, to the job each was: the server keeps what the
+	// job's sealed calls set up there until the session ends, so they stay as guarded as Sessions until a DELETE of
+	// one is answered (D255).
+	Held map[string]string `json:"held,omitempty"`
 
 	// pending are the changes not yet appended to service.log (saveService appends them).
 	pending []svcOp
@@ -103,6 +109,7 @@ const (
 	setResponses        = "responses"
 	setInputs           = "inputs"
 	setSessions         = "sessions"
+	setHeld             = "held"
 )
 
 // svcOp is one line of service.log: a member of a set put (V) or deleted (Del).
@@ -150,6 +157,8 @@ func (st *serviceState) apply(op svcOp) error {
 		return applyOp(st.Inputs, op)
 	case setSessions:
 		return applyOp(st.Sessions, op)
+	case setHeld:
+		return applyOp(st.Held, op)
 	}
 	return fmt.Errorf("sealing: service.log names an unknown set %q", op.Set)
 }
@@ -391,6 +400,9 @@ func (st *serviceState) init() {
 	}
 	if st.Sessions == nil {
 		st.Sessions = map[string]string{}
+	}
+	if st.Held == nil {
+		st.Held = map[string]string{}
 	}
 }
 
