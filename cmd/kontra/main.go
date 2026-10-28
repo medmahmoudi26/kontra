@@ -37,7 +37,7 @@ const usage = `usage:
                  [--key <path>] [--enroll <token>|@file|-] [--api-key <key>|@file|-] [--name <name>] [--rotate]
                  [--require-channel-binding] [--max-inflight <n>] [--listen <addr>] [--local-token <file>]
                  [--allow-origin <origin> …] [--sealed-max-age <duration>] [--sealed-required <name> …]
-                 [--pin-recipients] [--accept-change <name> …] [--log json]
+                 [--pin-recipients] [--accept-change <name> …] [--public <name> …] [--log json]
   kontra seal --service <service URL> [--api-key <key>|@<file>] [--context <id>] [--task <id>]
               [--media-type <type>] [file | -]
   kontra seal --open <part.json>
@@ -76,8 +76,12 @@ through one outbound connection (spec/tunnel.md):
   --sealed-required NAME     refuse an unsealed request to the hosted service NAME; repeatable
   --pin-recipients           refuse any new recipient or seller key of a sealed service this node hires
   --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME; repeatable
+  --public NAME              on an anonymous session, let anyone call the hosted service NAME (no credential); repeatable
   --log json                 JSON logs on stderr (default text)
-Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only. Sealed services
+Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only. A node that holds none for
+the gate and is given neither --enroll nor --api-key asks for an anonymous session, which a gate that opens them
+(Cloud's public gate) gives under an anon-<…> tenant for a limited time (spec/tunnel.md §6): kontra connect prints its
+URLs and when it ends, and exits 1 saying the anonymous session expired when it does. Sealed services
 (spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, a hired job's key under ~/.kontra/jobs,
 and the pins in ~/.kontra/pins; recipient key ids and seller key thumbprints are printed on stderr on a first sight
 and on every change.

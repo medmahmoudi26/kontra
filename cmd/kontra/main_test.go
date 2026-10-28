@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
 
 	"kontra.sh/kontra/internal/enroll"
@@ -46,6 +47,8 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"connect", "-h"}, 0, "--listen ADDR", ""},
 		{[]string{"connect", "-h"}, 0, "mcp:NAME=stdio:CMD", ""},
 		{[]string{"connect", "-h"}, 0, "--roots NAME=DIR", ""},
+		{[]string{"connect", "-h"}, 0, "--public NAME", ""},                        // spec/tunnel.md §6.1 (M4 WP-03)
+		{[]string{"connect", "-h"}, 0, "exits 1 saying the anonymous session", ""}, // §6.1
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := run(ctx, c.args, &stdout, &stderr); code != c.code ||
@@ -140,6 +143,7 @@ func TestConnectRefusesFlags(t *testing.T) {
 		{[]string{"--listen", "127.0.0.1"}, "host:port"},
 		{[]string{"--local-token", "/nonexistent/token-file"}, "--local-token"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--bogus"}, "bogus"},
+		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--public", "other"}, "--public other: no --serve serves"},
 	} {
 		var stdout, stderr bytes.Buffer
 		code := run(context.Background(), append([]string{"connect"}, c.args...), &stdout, &stderr)
@@ -244,5 +248,79 @@ func TestConnectPrintsNoGateEscapes(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), `denied\x1b]52;c;cm0gLXJmIH4K\a\x1b[2J\u202etxt.exe`) {
 		t.Fatalf("the refusal's message is not shown escaped:\n%s", stderr.String())
+	}
+}
+
+// admitAnonymous admits every hello as an anonymous session that ends at end (spec/tunnel.md §6.1), and records
+// whether the hello asked for one.
+type admitAnonymous struct {
+	end   time.Time
+	asked chan bool
+}
+
+func (a admitAnonymous) Admit(_ context.Context, req enroll.Request) (*enroll.Decision, error) {
+	a.asked <- req.Hello.Anonymous
+	d := &enroll.Decision{
+		Key:           enroll.Key{KeyID: req.Hello.KID, TenantID: uuid.Must(uuid.NewV7()), Tenant: "anon-0123456789abcdef", PubKey: req.PubKey},
+		HirePrincipal: "node:" + req.Hello.KID,
+		Anonymous:     &enroll.Anonymous{ExpiresAt: a.end},
+	}
+	for _, s := range req.Hello.Services {
+		d.Served = append(d.Served, tunnel.WelcomeService{Kind: s.Kind, Name: s.Name, URL: "https://gate.example/agents/anon-0123456789abcdef/" + s.Name})
+	}
+	return d, nil
+}
+
+type acceptSink struct{}
+
+func (acceptSink) Add(context.Context, *tunnelgate.Session, *yamux.Session, []tunnel.WelcomeService) error {
+	return nil
+}
+
+// An anonymous session's end makes kontra connect exit 1 with a message naming the end (spec/tunnel.md §6.1, M4 WP-03):
+// it printed the anonymous URL and the end, the gate's {"t": "expiring"} and then {"t": "revoked"} at the end.
+func TestConnectExitsWhenTheAnonymousSessionExpires(t *testing.T) {
+	isolate(t)
+	end := time.Now().Add(3 * time.Second).UTC().Truncate(time.Second).Add(time.Second)
+	adm := admitAnonymous{end: end, asked: make(chan bool, 4)}
+	var h http.Handler
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r) }))
+	defer srv.Close()
+	gate, err := tunnelgate.NewHandler(tunnelgate.HandlerConfig{
+		PublicURL: srv.URL, ChannelBinding: tunnel.CBNone, ReplicaID: "r", Admitter: adm, Registry: acceptSink{},
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = gate
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	code := run(ctx, []string{"connect", "--gate", srv.URL, "--listen", "127.0.0.1:0", "--serve", "a2a:hello=http://127.0.0.1:9",
+		"--public", "hello"}, &stdout, &stderr)
+	if ctx.Err() != nil {
+		t.Fatal("kontra connect did not stop at the anonymous session's end")
+	}
+	stamp := end.Format(time.RFC3339)
+	if code != 1 || !strings.Contains(stderr.String(), "kontra connect: the anonymous session expired at "+stamp) {
+		t.Fatalf("connect = %d, stderr %q", code, stderr.String())
+	}
+	for _, want := range []string{
+		"https://gate.example/agents/anon-0123456789abcdef/hello  (public: anyone may call it)",
+		"anonymous session: it ends at " + stamp,
+		"kontra connect: the anonymous session ends at " + stamp,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout lacks %q:\n%s", want, stdout.String())
+		}
+	}
+	if asked := <-adm.asked; !asked {
+		t.Error("the hello did not ask for an anonymous session")
+	}
+	select {
+	case <-adm.asked:
+		t.Error("kontra connect redialed after the end")
+	default:
 	}
 }

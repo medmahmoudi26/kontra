@@ -23,8 +23,14 @@
 // "/" goes to); `mcp:<name>=stdio:<cmd>` is bridged in-process (internal/stdiobridge): one child per MCP session,
 // at most --max-sessions per service (a durable task holds one too, D22), stopped after --session-idle, in a
 // scrubbed environment (PATH, HOME, LANG and the --env names). For every MCP service the node answers the server's
-// roots/list itself from --roots and never relays the client's roots (D173, internal/mcproots). Anonymous sessions
-// and `--public` (§6) are M4. There is no local console (D164).
+// roots/list itself from --roots and never relays the client's roots (D173, internal/mcproots). There is no local
+// console (D164).
+//
+// Anonymous sessions (§6, M4 WP-03; DM4-18): a node that holds no API key and no pending or consumed enrollment token
+// for the gate, and was given neither --enroll nor --api-key, asks for one (hello.anonymous; a probe never does). A
+// gate that opens them (Cloud's public gate) welcomes it under a tenant anon-<16 hex> with welcome.anonymous's end;
+// --public NAME (repeatable) makes the hosted service NAME callable by anyone (hello.public). The node prints the
+// anonymous URLs and the end, and exits 1 saying the anonymous session expired when the gate ends it.
 //
 // Sealing (spec/ext-sealed.md, M3 WP-08; internal/sealing): as a hosting node it opens the sealed parts the gate
 // forwards to a hosted service and seals what the service answers, keeping its durable job state under
@@ -102,6 +108,9 @@ type Config struct {
 	SealedRequired []string
 	PinRecipients  bool
 	AcceptChange   []string
+	// Public are the --public names (repeatable, each a --serve service): on an anonymous session, the services that
+	// accept unauthenticated callers (hello.public, spec/tunnel.md §6.1); ignored by any other session.
+	Public []string
 	// Home is the directory ~/.kontra is under (the job state, the per-job keys, the pins).
 	Home string
 	// Out receives the welcome's service URLs (the CLI's stdout); nil discards them.
@@ -139,7 +148,7 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	fs.SetOutput(io.Discard)
 	var (
 		serves, enrolls, origins, roots, envs []string
-		sealedRequired, acceptChange          []string
+		sealedRequired, acceptChange, public  []string
 		apiKey                                *string
 	)
 	gate := fs.String("gate", tunnel.DefaultGate, "")
@@ -162,6 +171,7 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	pinRecipients := fs.Bool("pin-recipients", false, "")
 	fs.Func("accept-change", "", func(v string) error { acceptChange = append(acceptChange, v); return nil })
 	fs.Func("enroll", "", func(v string) error { enrolls = append(enrolls, v); return nil })
+	fs.Func("public", "", func(v string) error { public = append(public, v); return nil })
 	fs.Func("api-key", "", func(v string) error {
 		if apiKey != nil {
 			return errors.New("given twice")
@@ -237,6 +247,16 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 		}
 		if !slices.Contains(cfg.SealedRequired, name) {
 			cfg.SealedRequired = append(cfg.SealedRequired, name)
+		}
+	}
+	// Anonymous sessions (§6.1): --public names a hosted service.
+	for _, name := range public {
+		if !seen[name] {
+			return Config{}, usage("--public %s: no --serve serves %q (--public makes a hosted service of an anonymous session callable by anyone)",
+				clipValue(name), clipValue(name))
+		}
+		if !slices.Contains(cfg.Public, name) {
+			cfg.Public = append(cfg.Public, name)
 		}
 	}
 	for _, name := range acceptChange {
@@ -407,8 +427,9 @@ type Node struct {
 	lastPrune  time.Time
 	// lastSealSweep is when sealing's state was last swept (sweepSealing).
 	lastSealSweep time.Time
-	revoked       chan struct{} // closed when the gate revoked the active key
+	revoked       chan struct{} // closed when the gate revoked the active key, or ended its anonymous session
 	revokeOnce    sync.Once
+	stopErr       error // what Run returns once revoked is closed: ErrRevoked, or an *AnonymousExpiredError
 }
 
 // New loads (or creates) the identity key, refuses a group- or other-readable key file, resolves the
@@ -451,6 +472,11 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 	for name := range cfg.Roots {
 		if !slices.ContainsFunc(cfg.Serves, func(s Serve) bool { return s.Name == name && s.Kind == tunnel.KindMCP }) {
 			return nil, fmt.Errorf("--roots %s=…: no --serve mcp:%s=… serves it", clipValue(name), clipValue(name))
+		}
+	}
+	for _, name := range cfg.Public {
+		if !seen[name] {
+			return nil, fmt.Errorf("--public %s: no --serve serves it", clipValue(name))
 		}
 	}
 	if err := checkName(cfg.Name); err != nil {

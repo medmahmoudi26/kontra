@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -49,6 +50,8 @@ type session struct {
 	auth string
 	// slots bounds the node-opened streams in flight on the session to the gate's cap (§14; session.open).
 	slots chan struct{}
+	// anonEnd is an anonymous session's welcome.anonymous.expires_at (§6.1); zero for any other session.
+	anonEnd time.Time
 
 	retired  atomic.Bool // drained or replaced: serves on, never redialed
 	replaced atomic.Bool // its key, rotated since, was revoked: Run dials the active key's session at once
@@ -93,7 +96,7 @@ func (s *session) accept() {
 //   - auth_revoked: the gate answers the session's hiring requests 401 from now on, and hosting goes on (§12,
 //     §13). The revoked API key is dropped from the credentials and from every later hello (Node.authRevoked),
 //     since the next handshake would otherwise be refused auth_invalid, which §4 makes final.
-//   - enrolled and expiring are logged (anonymous sessions are M4).
+//   - enrolled is logged; expiring (an anonymous session's end, §6.1, §13) is logged and printed.
 func (s *session) readControl(stream net.Conn, br *bufio.Reader) {
 	if !s.control.CompareAndSwap(false, true) {
 		s.log.Warn("a second control stream on one session is refused")
@@ -124,7 +127,11 @@ func (s *session) readControl(stream net.Conn, br *bufio.Reader) {
 		case tunnel.CtlEnrolled:
 			s.log.Info("another key was enrolled for a service this node hosts (§5)", "service", c.Service, "enrolled_key_id", c.Key)
 		case tunnel.CtlExpiring:
-			s.log.Info("the gate says this session expires", "at", c.At)
+			s.log.Warn("the gate says this anonymous session ends soon", "at", c.At)
+			if c.At != nil {
+				fmt.Fprintf(s.n.out, "kontra connect: the anonymous session ends at %s (in %s)\n",
+					c.At.UTC().Format(time.RFC3339), time.Until(*c.At).Round(time.Second))
+			}
 		default:
 			s.log.Debug("an unknown control message is ignored", "t", c.T)
 		}
