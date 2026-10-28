@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,7 @@ type Front struct {
 	count map[string]int        // connections forwarded, by replica name
 	lose  int                   // the next connections whose welcome is lost (LoseWelcome)
 	lost  []string              // the session ids of the welcomes lost, in order
+	src   netip.Addr            // the PROXY v2 source of the next connections (SetSource, proxyproto.go); zero: none
 }
 
 // NewFront listens on a loopback port; until Route, it refuses every connection.
@@ -128,6 +130,13 @@ func (f *Front) forward(c net.Conn, g *Gate, lose bool) {
 	if err != nil {
 		c.Close()
 		return
+	}
+	if hdr := f.proxyHeader(c, u); hdr != nil {
+		if _, err := u.Write(hdr); err != nil {
+			c.Close()
+			u.Close()
+			return
+		}
 	}
 	f.mu.Lock()
 	f.conns[c], f.conns[u] = struct{}{}, struct{}{}
