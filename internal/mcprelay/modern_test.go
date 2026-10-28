@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -713,40 +714,33 @@ func TestModernServerEverything(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	node := os.Getenv("KONTRA_NODE24")
-	if node == "" {
-		node = "node"
-	}
-	out, err := exec.Command(node, "--version").Output()
-	major := 0
-	if err == nil {
-		v := strings.TrimPrefix(strings.TrimSpace(string(out)), "v")
-		major, _ = strconv.Atoi(strings.SplitN(v, ".", 2)[0])
-	}
-	if major < 24 {
-		t.Skipf("server-everything@2.0.0 needs Node 24 (D171); %s reports %q, so the modern era is tested against the "+
-			"dual-era double (mcptest) only", node, strings.TrimSpace(string(out)))
-	}
-	nodePath, err := exec.LookPath(node)
-	if err != nil {
-		t.Skipf("server-everything@2.0.0: %v", err)
-	}
+	nodePath := node24(t, "server-everything@2.0.0 (the modern era is tested against the dual-era double, mcptest, only)")
 	npm := filepath.Join(filepath.Dir(nodePath), "npm")
 	if _, err := os.Stat(npm); err != nil {
 		if npm, err = exec.LookPath("npm"); err != nil {
-			t.Skip("server-everything@2.0.0: npm is not installed beside node")
+			npmFailed(t, "server-everything@2.0.0", errors.New("npm is not installed beside node"), nil)
 		}
 	}
+	// From test/e2e/testdata/everything-2's lock (npm ci), as the e2e test installs it: the transitive dependencies are
+	// the lock's, never what the registry resolves today.
 	dir := t.TempDir()
+	for _, f := range []string{"package.json", "package-lock.json"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "test", "e2e", "testdata", "everything-2", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, f), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	env := []string{"PATH=" + filepath.Dir(nodePath) + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + dir,
 		"npm_config_cache=" + filepath.Join(dir, ".npm"), "npm_config_update_notifier=false"}
 	ictx, icancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer icancel()
-	install := exec.CommandContext(ictx, npm, "install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-save",
-		"@modelcontextprotocol/server-everything@2.0.0")
+	install := exec.CommandContext(ictx, npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund")
 	install.Dir, install.Env = dir, env
 	if b, err := install.CombinedOutput(); err != nil {
-		t.Skipf("server-everything@2.0.0: npm cannot install the pinned package here: %v\n%s", err, b)
+		npmFailed(t, "server-everything@2.0.0", err, b)
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -49,7 +49,7 @@ func installFilesystemServer(t *testing.T) (nodeBin, entry string) {
 	// npm runs with a minimal environment of its own: nothing of the test's (KONTRA_TEST_PG among it) reaches it.
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "npm_config_cache=" + filepath.Join(dir, ".npm"), "npm_config_update_notifier=false"}
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("stdio_roots with server-filesystem@1.0.0: npm cannot install the pinned package here: %v\n%s", err, lastLines(out, 5))
+		npmFailed(t, "stdio_roots with server-filesystem@1.0.0", err, []byte(lastLines(out, 5)))
 	}
 	entry = filepath.Join(dir, "node_modules", "@modelcontextprotocol", "server-filesystem", "dist", "index.js")
 	if _, err := os.Stat(entry); err != nil {
