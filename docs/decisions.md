@@ -2668,33 +2668,52 @@ The first measured runs of the pinned TCK through the gate (`make tck`, four var
 gate defect and corrected the predicted expected failures. Like the entries above they are **decided under the
 owner's standing instruction, 28 Oct**, and are renumbered into the D sequence when M3 has merged.
 
-### DM4-23. A blocking resend of a task at `input-required` is answered at once — **decided under the owner's standing instruction, 28 Oct** (completes D108)
+### DM4-23. A blocking resend of a task at `input-required` or `quoted` is answered at once — **decided under the owner's standing instruction, 28 Oct** (completes D108)
 
 D108 closes the stream of a resend whose task already ended a turn; nothing said the same of a blocking
 `SendMessage`. The work queue answers a resend with its task, a2a-go subscribes at the log's tail, and a turn that
 ended at `input-required` before that sends nothing more: the call waited until the task's next turn, its deadline or
 the caller's timeout. The pinned TCK hit it in every run (its prerequisite tasks are resends, DM4-24): a dozen tests per
 binding ran into its 30 s read timeout. Decision ([`relay.md`](../spec/relay.md) §9): a resend whose task stands at
-`input-required` or `auth-required` is answered at once with the task as it stands (`internal/relay` `resendAnswer`,
-after Admission and the other checks, with the work queue's own lookup). Only those two states, because a task
-reaches them only by a turn its workflow ran, so the start a resend re-issues (§14.5) is moot; a resend of a terminal
-task is still answered by a2a-go after the re-issue, and one of a `submitted`, `working` or `quoted` task, whose start
-may be the lost one, still goes through the work queue and waits for the turn. Test: `TestBlockingResendAtTurnEnd`
-(10 s deadline exceeded before, under a second after).
+`input-required`, `quoted` or `auth-required` is answered at once with the task as it stands (`internal/relay`
+`resendAnswer`, after Admission and the other checks, with the work queue's own lookup), the states on which D108's
+stream of the same resend closes at once. A task reaches `input-required` or `auth-required` only by a turn its
+workflow ran, so the start a resend re-issues (§14.5) is moot there; a `quoted` task's start may be the lost one, so
+it is re-issued first, as the work queue does for a resend (`lifecycle.Queue.ReissueStart`, which the gate hands the
+interceptors as `relay.StartReissuer`): a lost start gets its workflow, which waits for `kontra.approval` until the
+quote expires, and nothing is approved by the resend (D38, D45). A resend of a terminal task is still answered by
+a2a-go after the re-issue, and one of a `submitted` or `working` task, whose start may be the lost one, still goes
+through the work queue and waits for the turn. Tests: `TestBlockingResendAtTurnEnd` (10 s deadline exceeded before,
+under a second after) and `TestBlockingResendOfAQuotedTask` (a quoted task, and one whose start was lost: the resend
+answered at once, the lost start's workflow re-issued and running once approved; 10 s deadline exceeded before), and
+`TestRemoteAdmissionThroughTheGate` through a replica. Amended by M4 WP-02's review (28 Oct), which found the
+`quoted` resend still waiting for the quote's end.
 
 ### DM4-24. What the TCK measures through the gate, per variant — **decided under the owner's standing instruction, 28 Oct** (amends DM4-12)
 
-DM4-12's expected failures were predicted; the audit showed that the plugin let a listed test skip and an unlisted
-test xfail. Measured: (1) `CORE-SEND-003` passes through the gate (a2a-tck#202 asserts success, and the gate relays
-the seller's `ContentTypeNotSupportedError` as a failed task, §6.4), and `DM-MSG-001` fails by D5; (2) the TCK's
-message ids are per session (`tck_id`; #250 fixed follow-ups only), so its prerequisite tasks after the first are
-resends, answered with the first task (§15; A2A §3.3.1 lets an agent detect duplicates by message id): once an early
-test completed or canceled that task, the tests that need a fresh one skip, eight or nine per binding (the history
-tests, cancel, context inference, subscribe, and with an API key two of the three push deliveries); (3) the JSON-RPC
-client's snake_case `task_id` on push configs, a2a-tck#242's defect not filed for push. Decision:
-`test/tck/expected-failures.txt` is the measured list, in sections per variant, each reason citing an issue or a
-decision; `kontra_xfail.py` fails a binding whose xfailed set differs from its entries in any way (a listed test that
-passes, errors or skips, an unlisted xfail, an entry naming no test) and a malformed file; a fourth variant, `auth`,
-runs nightly behind a loopback front that adds a tck API key, so ListTasks, push CRUD and a push delivery run through
-the TCK; skips are not entries. Each run uploads JUnit and HTML reports per variant and binding, and the processes'
-logs. The seller is `examples/sellers/tck`, the front `examples/front/caddy` (Caddy 2.11.7).
+DM4-12's expected failures were predicted; the audit showed that the plugin let a listed test skip and an unlisted test
+xfail. Measured: (1) `CORE-SEND-003` passes through the gate (a2a-tck#202 asserts success, and the gate relays the
+seller's `ContentTypeNotSupportedError` as a failed task, §6.4), and `DM-MSG-001` fails by D5; (2) the TCK's message ids
+are per session (`tck_id`; #250 fixed follow-ups only), so its prerequisite tasks after the first are resends, answered
+with the first task (§15; A2A §3.3.1 lets an agent detect duplicates by message id): once an early test completed or
+canceled that task, the tests that need a fresh one skipped, eight or nine per binding (CORE-CANCEL-001, CORE-MULTI-005,
+STREAM-SUB-001/002 and the history tests, MUSTs among them, and with an API key two of the three push deliveries); (3)
+the JSON-RPC client's snake_case `task_id` on push configs, a2a-tck#242's defect not filed for push. Decision:
+`test/tck/expected-failures.txt` is the measured list of the tests that do not pass, expected failures and expected
+skips (`skip <node id>`), in sections per variant, each reason citing an issue or a decision; `kontra_xfail.py` fails a
+binding whose outcomes differ from its entries in any way (an expected failure that passes, errors or skips; an unlisted
+xfail; an expected skip that does not skip; an unlisted skip of a test of the run's binding, since the TCK skips
+whenever a prerequisite request fails, so a regression would otherwise hide as a skip; an entry naming no test) and a
+malformed file; a test's binding is its id's suffix, its directory, its function's name suffix (`_jsonrpc`, `_rest`) or
+its class's name prefix (`TestJsonRpc`, `TestRest`), so the other bindings' tests, which skip "not configured", need no
+entry. The harness gives each test fresh TCK ids (`test/tck/kontra_tck_ids.py`, an autouse fixture setting
+`tck.requirements.base._SESSION` per test; no TCK file changed), so the tests of (2) run through the gate; they showed
+CORE-HIST-002 failing on JSON-RPC by #242 and CORE-HIST-003 (a SHOULD) by a2a-go v2.7.0, which applies `historyLength`
+to GetTask only (D7; the seller alone fails it too), both now entries. A fourth variant, `auth`, runs nightly behind a
+loopback front that adds a tck API key, so ListTasks, push CRUD and push delivery run through the TCK. Each run uploads
+JUnit and HTML reports per variant and binding, and the processes' logs. The seller is `examples/sellers/tck`, the front
+`examples/front/caddy` (Caddy 2.11.7). Measured by WP-02's review on 28 Oct with fresh ids, each variant once per
+binding: direct, tunnel and caddy 82 passed, 10 xfailed and 17 expected skips (jsonrpc), 76 passed, 9 xfailed and 16
+expected skips (http_json); auth 90 passed, 5 xfailed and 14 expected skips (jsonrpc), 90 passed, 3 xfailed and 8
+expected skips (http_json); the rest are the other bindings' tests. Amended by M4 WP-02's review (28 Oct): skips are
+entries, and the ids are fresh per test (before, "skips are not entries", and the tests of (2) never ran).

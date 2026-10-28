@@ -141,6 +141,18 @@ hooks:
 	if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, string(task.ID)); st != "quoted" {
 		t.Fatalf("after the caller's message tasks.state = %s, want quoted", st)
 	}
+	// A resend of the request that created it (spec §15) is answered at once with the quoted task as it stands
+	// (DM4-23: the replica gives the interceptors the service's work queue, which re-issues the start first).
+	again := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))
+	again.ID = task.History[0].ID
+	rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
+	began := time.Now()
+	resent, err := c.SendMessage(rctx, &a2a.SendMessageRequest{Message: again, Config: &a2a.SendMessageConfig{ReturnImmediately: false}})
+	rcancel()
+	if rt, ok := resent.(*a2a.Task); err != nil || !ok || rt.ID != task.ID || rt.Status.State != a2a.TaskStateInputRequired ||
+		rt.Metadata["kontra.approve.url"] != approve || time.Since(began) > 3*time.Second {
+		t.Fatalf("a resend of the quoted task: %v, %v after %v; want the quoted task at once", resent, err, time.Since(began).Round(time.Millisecond))
+	}
 
 	// The operator's approval: kontra.approval {accepted: true} moves it to submitted, and it completes.
 	tc := temporaltest.Client(t)

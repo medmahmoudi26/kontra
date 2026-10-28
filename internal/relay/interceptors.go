@@ -75,7 +75,8 @@ type ReviewMessenger interface {
 //     when its URL is new for the task (push.CheckSet): a follow-up that sends its unchanged config again
 //     is never refused for a DNS change.
 //     Then resends (spec §9, §15; resendAnswer, DM4-23): a blocking SendMessage that repeats a request whose
-//     task stands at input-required or auth-required is answered with that task as an early response.
+//     task stands at input-required, quoted or auth-required is answered with that task as an early response (a
+//     quoted task's start re-issued first, through Starts).
 //  7. Large parts (spec §10.4, D167; largeParts): with a bucket, each part over 256 KiB of a new task's first
 //     message (an object of the pre-minted task) or of an input-required task's follow-up is stored and replaced
 //     by its url part kontra-blob:<ref>; the rows are pending on the context for the transaction that creates
@@ -108,6 +109,17 @@ type Interceptors struct {
 	Render *blob.Renderer
 	// Logger logs why Admission refused a message (the caller sees only "admission unavailable"); nil logs nothing.
 	Logger *slog.Logger
+	// Starts re-issues a resend's start before a resend of a quoted task is answered at once (resendAnswer,
+	// DM4-23): the service's lifecycle.Queue. Nil leaves such a resend to the work queue, which waits for the end
+	// of the quote.
+	Starts StartReissuer
+}
+
+// StartReissuer re-issues the start of the task a resend repeats, with its first work item, as the work queue does
+// for a resend (spec §14.5): idempotent, and a task whose start was lost gets its workflow. lifecycle.Queue
+// implements it.
+type StartReissuer interface {
+	ReissueStart(ctx context.Context, prev *store.TaskRow) error
 }
 
 // interceptor adapts a Before function to a2asrv.CallInterceptor.

@@ -406,6 +406,7 @@ func (r *Replica) assemble() error {
 	})
 
 	registry := relay.NewRegistry()
+	queueOpts := lifecycle.QueueOptions{Owner: relay.CallerOwner, Push: pushStore, Hooks: snapshot}
 	executor := r.opts.executor
 	executor.TaskBytes = cfg.Limits.TaskBytes.Int64()
 	executor.Bucket, executor.Render = r.blobs, r.render
@@ -414,13 +415,13 @@ func (r *Replica) assemble() error {
 		Puller:    store.NewPullerProvider(r.storeLog, r.listener),
 		PushStore: pushStore,
 		Queue: func(svc store.ServiceRef) workqueue.Queue {
-			return lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, lifecycle.QueueOptions{
-				Owner: relay.CallerOwner, Push: pushStore, Hooks: snapshot,
-			})
+			return lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)
 		},
 		Interceptors: func(svc store.ServiceRef) []a2asrv.CallInterceptor {
+			// Starts: the service's work queue re-issues a quoted task's start before its resend is answered (DM4-23).
 			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Admit: r.admission, Canceler: r.lifecycle,
-				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log}
+				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log,
+				Starts: lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)}
 			return i.Chain()
 		},
 		Registry: registry,

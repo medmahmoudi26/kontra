@@ -9,14 +9,16 @@
 #           request, so the TCK runs as an API key's principal and reaches ListTasks and push configs, which the
 #           anonymous principal is refused (D20; the TCK sends no credential, a2a-tck#163); nightly only
 #
-# One run: a fresh database on $KONTRA_TEST_PG (a server where the user may create databases) or, when it is
-# unset, a postgres:17-alpine container; a Temporal development server from $KONTRA_TEMPORAL_CLI (the pinned CLI
-# 1.9.1, Server 1.32) on free loopback ports; kontra-gate, the seller (examples/sellers/tck) and, for tunnel,
-# kontra (`kontra connect`, enrolled with a service token) built from this checkout; Caddy ($KONTRA_CADDY, the
-# pinned 2.11.7) for caddy and auth. Every process runs from the run's directory and in a process group of its
-# own. Then the plugin's self-test (test/tck/test_kontra_xfail.py), and the TCK once per binding (--transport
-# jsonrpc, then http_json), each with test/tck/kontra_xfail.py enforcing test/tck/expected-failures.txt for the
-# variant (TCK_VARIANT; KONTRA_TCK_EXPECTED_FAILURES names another file, to try one). $KONTRA_TCK_DIR is the a2a-tck checkout at the pinned commit, its tracked files
+# One run: the TCK's environment synced (uv sync --frozen, before anything starts); a fresh database on
+# $KONTRA_TEST_PG (a server where the user may create databases) or, when it is unset, a postgres:17-alpine
+# container; a Temporal development server from $KONTRA_TEMPORAL_CLI (the pinned CLI 1.9.1, Server 1.32) on free
+# loopback ports; kontra-gate, the seller (examples/sellers/tck) and, for tunnel, kontra (`kontra connect`, enrolled
+# with a service token) built from this checkout; Caddy ($KONTRA_CADDY, the pinned 2.11.7) for caddy and auth. Every
+# process runs from the run's directory and in a process group of its own. Then the self-tests of test/tck (the
+# plugins, the template fill, this script), and the TCK once per binding (--transport jsonrpc, then http_json), each
+# with test/tck/kontra_xfail.py enforcing test/tck/expected-failures.txt for the variant (TCK_VARIANT;
+# KONTRA_TCK_EXPECTED_FAILURES names another file, to try one) and test/tck/kontra_tck_ids.py giving each test fresh
+# TCK message ids (DM4-24). $KONTRA_TCK_DIR is the a2a-tck checkout at the pinned commit, its tracked files
 # unmodified; the reports land in its reports/ directory: <variant>-<binding>.xml (JUnit), .html (pytest-html),
 # -compatibility.json/.html (the TCK's own), and <variant>-logs/ (the gate's, the seller's, the node's,
 # Caddy's and Temporal's logs).
@@ -68,6 +70,12 @@ if [[ -n "${KONTRA_TEST_PG:-}" ]]; then
 else
   need docker "without KONTRA_TEST_PG the run's database is a postgres:17-alpine container"
 fi
+
+# --- the TCK's environment, pinned by its uv.lock (D18), synced before anything starts: uv honours SSL_CERT_FILE,
+# which the caddy variant sets to Caddy's local CA for the TCK's own command only, and every download from PyPI
+# would fail against it. After this, `uv run --no-sync` never reaches the network. ---
+export PYTHONDONTWRITEBYTECODE=1
+(cd "$tck_dir" && uv sync --frozen --python "${KONTRA_TCK_PYTHON:-3.12}" --quiet)
 
 run="$(mktemp -d "${TMPDIR:-/tmp}/kontra-tck-XXXXXX")"
 id="$(basename "$run" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' '_')"
@@ -209,10 +217,12 @@ case "$variant" in
   caddy) public="https://127.0.0.1:$f_port" ;;
   auth) public="http://127.0.0.1:$f_port" ;;
 esac
-sed -e "s|@LISTEN@|127.0.0.1:$g_port|" -e "s|@PUBLIC_URL@|$public|" -e "s|@POSTGRES@|$postgres|" \
-  -e "s|@TEMPORAL@|127.0.0.1:$t_port|" -e "s|@SELLER@|$seller|" "test/tck/gate-$variant.yaml" >"$run/kontra.yaml"
-chmod 600 "$run/kontra.yaml"
-if grep -q '@[A-Z_]*@' "$run/kontra.yaml"; then die "test/tck/gate-$variant.yaml has a placeholder this script does not fill"; fi
+# Filled literally (test/tck/kontra_tck_config.py: the values from the environment, escaped for YAML's double-quoted
+# scalars; a database URL with several query parameters has '&', which a sed replacement would corrupt), mode 0600.
+KONTRA_TCK_FILL_LISTEN="127.0.0.1:$g_port" KONTRA_TCK_FILL_PUBLIC_URL="$public" KONTRA_TCK_FILL_POSTGRES="$postgres" \
+  KONTRA_TCK_FILL_TEMPORAL="127.0.0.1:$t_port" KONTRA_TCK_FILL_SELLER="$seller" \
+  python3 test/tck/kontra_tck_config.py "test/tck/gate-$variant.yaml" "$run/kontra.yaml" ||
+  die "test/tck/gate-$variant.yaml: could not fill it"
 "$run/bin/kontra-gate" migrate -f "$run/kontra.yaml" up >"$run/migrate.log" 2>&1 || { cat "$run/migrate.log" >&2; die "migrate failed"; }
 key=""
 if [[ "$variant" == auth ]]; then
@@ -232,18 +242,19 @@ if [[ "$variant" == tunnel ]]; then
 fi
 
 # --- the front (caddy: examples/front/caddy as an operator runs it; auth: test/tck/front-auth.Caddyfile) ---
-curl_ca=()
+curl_ca=() tck_env=()
 if [[ "$variant" == caddy ]]; then
   KONTRA_FRONT_SITE="$public" KONTRA_GATE="127.0.0.1:$g_port" KONTRA_CADDY_ADMIN=off KONTRA_CADDY_BIND=127.0.0.1 \
     KONTRA_CADDY_HTTP_PORT="$f_http" \
     KONTRA_CADDY_HTTPS_PORT="$f_port" XDG_DATA_HOME="$run/caddy-data" XDG_CONFIG_HOME="$run/caddy-config" \
     start caddy "$run/bin/caddy" run --adapter caddyfile --config "$repo/examples/front/caddy/Caddyfile"
-  # Caddy's local CA (tls internal, which Caddy uses for an IP site) signs the front's certificate; the TCK's
-  # httpx and curl trust it through SSL_CERT_FILE, nothing is installed in the system's store.
+  # Caddy's local CA (tls internal, which Caddy uses for an IP site) signs the front's certificate; curl trusts it
+  # through --cacert and the TCK's httpx through SSL_CERT_FILE, set on the TCK's command only (never exported: uv
+  # honours it too); nothing is installed in the system's store.
   ca="$run/caddy-data/caddy/pki/authorities/local/root.crt"
   wait_for "Caddy's local CA" 30 "${pids[caddy]}" test -s "$ca"
   curl_ca=(--cacert "$ca")
-  export SSL_CERT_FILE="$ca"
+  tck_env=(SSL_CERT_FILE="$ca")
 elif [[ "$variant" == auth ]]; then
   KONTRA_FRONT_PORT="$f_port" KONTRA_GATE="127.0.0.1:$g_port" KONTRA_CADDY_HTTP_PORT="$f_http" KONTRA_TCK_KEY="$key" \
     XDG_DATA_HOME="$run/caddy-data" XDG_CONFIG_HOME="$run/caddy-config" \
@@ -258,21 +269,20 @@ wait_for "the card at $sut/.well-known/agent-card.json" 60 "$wait_pid" \
   curl -fsS "${curl_ca[@]}" -o /dev/null "$sut/.well-known/agent-card.json"
 echo "tck: $variant: the gate serves $sut (seller $seller, Temporal 127.0.0.1:$t_port)"
 
-# --- the TCK, its own environment pinned by its uv.lock (D18) ---
-export PYTHONDONTWRITEBYTECODE=1
-(cd "$tck_dir" && uv sync --frozen --python "${KONTRA_TCK_PYTHON:-3.12}" --quiet)
+# --- the TCK, in the environment synced above (D18), with the harness's plugins (test/tck): kontra_xfail enforces
+# the expected outcomes, kontra_tck_ids gives each test fresh TCK message ids (DM4-24) ---
 export PYTHONPATH="$repo/test/tck"
 export TCK_EXPECTED_FAILURES="${KONTRA_TCK_EXPECTED_FAILURES:-$repo/test/tck/expected-failures.txt}"
 export TCK_VARIANT="$variant"
-(cd "$tck_dir" && uv run --frozen python -m pytest -p pytester -p no:cacheprovider -q \
-  -o asyncio_default_fixture_loop_scope=function "$repo/test/tck/test_kontra_xfail.py") ||
-  die "the self-test of test/tck/kontra_xfail.py failed"
+(cd "$tck_dir" && uv run --frozen --no-sync python -m pytest -p pytester -p no:cacheprovider -q \
+  -o asyncio_default_fixture_loop_scope=function "$repo/test/tck") ||
+  die "the self-tests of test/tck (the plugins, the template fill, this script) failed"
 
 status=0
 for b in "${bindings[@]}"; do
   echo "tck: $variant: --transport $b"
-  (cd "$tck_dir" && uv run --frozen ./run_tck.py --sut-host "$sut" --transport "$b" -v -- \
-    -p kontra_xfail -p no:cacheprovider -o asyncio_default_fixture_loop_scope=function --webhook-host 127.0.0.1 \
+  (cd "$tck_dir" && env "${tck_env[@]}" uv run --frozen --no-sync ./run_tck.py --sut-host "$sut" --transport "$b" -v -- \
+    -p kontra_xfail -p kontra_tck_ids -p no:cacheprovider -o asyncio_default_fixture_loop_scope=function --webhook-host 127.0.0.1 \
     --junitxml="reports/$variant-$b.xml" --html="reports/$variant-$b.html" --self-contained-html \
     --compatibility-report="reports/$variant-$b-compatibility") || status=1
 done

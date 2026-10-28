@@ -711,10 +711,12 @@ reads `Last-Event-ID`, which is why the gate cannot use it here.
 Non-streaming `SendMessage` returns on the first terminal, `input-required` or `auth-required` state (A2A
 §3.1.1), or at once with `returnImmediately: true` (the `submitted` snapshot), as a2a-go does; a blocking call
 is bounded only by the task's deadline and the caller's own connection (§15). A resend (no `taskId`, answered with
-the task it repeats, §15) whose task stands at `input-required` or `auth-required` is answered at once with the
-task as it stands, since the turn it repeats is over (DM4-23); a resend of a terminal task is answered with it once
-the work queue re-issued the start (§14.5), and one of a `submitted`, `working` or `quoted` task, whose start may be
-the lost one, waits for the end of the task's current turn.
+the task it repeats, §15) whose task stands at `input-required`, `quoted` or `auth-required` is answered at once with
+the task as it stands, since the turn it repeats is over (a `quoted` task is `input-required` on the wire, §5.1, and
+ends a turn as a stream's does, D108); a `quoted` task's start, which may be the lost one, is re-issued first
+(§14.5), so that it waits for `kontra.approval` (DM4-23). A resend of a terminal task is answered with it once the
+work queue re-issued the start, and one of a `submitted` or `working` task, whose start may be the lost one, waits
+for the end of the task's current turn.
 
 ## 10. Push, SSRF and large parts
 
@@ -1735,7 +1737,7 @@ M4 runs the six `gate_mcp_*` tests and [`tunnel.md`](tunnel.md) §16's `anon_lim
 | `gate_mcp_reply` | §12.4 (DM4-5, DM4-7), with a seller that asks one question: a legacy client that declared form elicitation sees `input_required` and one `elicitation/create` with the `reply` schema on `tasks/result`, whose `accept` reaches the same upstream task, and `decline` leaves the task waiting; a client without it sees `working`, the question, `(answer with the reply tool, taskId <id>)` and `sh.kontra/input-required`, and `reply` answers the new state; `reply` to a task that is not `input-required` is `isError` and forwards nothing |
 | `gate_mcp_modern` | §12.5 (DM4-2, DM4-7): a 2026-07-28 client gets the gate's `server/discover`; a `hire` declaring the tasks extension is answered in line within 2 s or with `CreateTaskResult`; a quoted one is `working` with the URL and no `-32042`; a question is `input_required` with one gate-keyed `inputRequests` entry that `tasks/update` answers once; a `tasks/update` on a quoted task, and one with a key that is not an outstanding gate key, is ignored (an empty result, nothing reaches the seller, a quoted task stays `quoted`); `tasks/result` and `tasks/list` are `-32601`; a legacy request without a session is `400` with `-32000`; the answers are the same from either replica |
 | `gate_mcp_oauth` | §12.1 (DM4-9), against an in-repository authorization server: a request without a credential to `/mcp`, to an existing `/mcp/{svc}` and to an unknown one is `401` with `resource_metadata` naming that route's RFC 9728 document, whose `resource` is the route's canonical URI; a token for `/mcp` is accepted there (`via = mcp` on its tasks and sessions) and is `401` on `/mcp/{svc}` and on the A2A routes; an expired token, another issuer, an HMAC or `none` algorithm and a bad signature are `401`; a rotated key is fetched once; an API key is still accepted |
-| `tck_jsonrpc`, `tck_rest`, `tck_behind_caddy` | §2, §3, §9 against the pinned TCK, expected failures in `test/tck/expected-failures.txt`, each with its reason, per variant and binding and enforced both ways (DM4-24); run by `make tck` (DM4-12): `tck_jsonrpc` and `tck_rest` on the direct and the tunnel backend, bare, and `tck_behind_caddy` on the direct backend behind `examples/front/caddy`; nightly also with an API key (`VARIANT=auth`) |
+| `tck_jsonrpc`, `tck_rest`, `tck_behind_caddy` | §2, §3, §9 against the pinned TCK, expected failures and expected skips in `test/tck/expected-failures.txt`, each with its reason, per variant and binding and enforced both ways (an unlisted skip of the run's binding fails the run), each test's prerequisite tasks new ones (fresh TCK message ids per test, so cancel, subscribe and history run through the gate; DM4-24); run by `make tck` (DM4-12): `tck_jsonrpc` and `tck_rest` on the direct and the tunnel backend, bare, and `tck_behind_caddy` on the direct backend behind `examples/front/caddy`; nightly also with an API key (`VARIANT=auth`) |
 | tunnel and sealing tests | [`tunnel.md`](tunnel.md) §16, [`ext-sealed.md`](ext-sealed.md) §9 |
 
 ## 17. Configuration keys these specs add

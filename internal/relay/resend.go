@@ -12,23 +12,26 @@ import (
 )
 
 // resendAnswer answers a blocking SendMessage that repeats an earlier request (a resend: the same principal,
-// service, messageId and request, spec §15) whose task stands at input-required or auth-required, with that task
-// as it stands (spec §9: a blocking call returns on the first input-required or auth-required state; DM4-23, the
-// blocking counterpart of D108's resend stream).
+// service, messageId and request, spec §15) whose task stands at input-required, quoted or auth-required, with that
+// task as it stands (spec §9: a blocking call returns on the first input-required or auth-required state, and a
+// quoted task is input-required on the wire, §5.1; DM4-23, the blocking counterpart of D108's resend stream, which
+// closes at once on the same states).
 //
 // Without it the work queue answers the resend with its task and a2a-go subscribes to that task's log at its
 // tail: the turn the request started ended before the subscription, nothing more of it will come, and the call
-// waits until the task's next turn, its deadline or the caller's timeout. The pinned A2A TCK found it: its message
-// ids are per session, not per call (a2a-tck tck/requirements/base.py, tck_id), so every prerequisite
-// input-required task after the first is a resend, and each such SendMessage hung for the TCK's 30 s read
-// timeout (M4 WP-02).
+// waits until the task's next turn (for a quoted task, the end of its quote), its deadline or the caller's timeout.
+// The pinned A2A TCK found it: its message ids are per session, not per call (a2a-tck tck/requirements/base.py,
+// tck_id), so every prerequisite input-required task after the first is a resend, and each such SendMessage hung
+// for the TCK's 30 s read timeout (M4 WP-02).
 //
-// Only those two states are answered here, because a task reaches them only by a turn its workflow ran: the start
-// that the work queue re-issues for a resend (spec §14.5) is moot. A resend of a terminal task is answered by
-// a2a-go itself (its subscription ends at a terminal snapshot) after that re-issue, and a resend of a submitted,
-// working or quoted task goes through the work queue as before (a lost start is re-issued, and the call waits for
-// the turn). It runs after Admission and the other checks, as the work queue's own resend lookup does, and its
-// lookup is the work queue's (store.Log.FindResend, the request's hash as the interceptors before it left it).
+// A task reaches input-required or auth-required only by a turn its workflow ran, so the start that the work queue
+// re-issues for a resend (spec §14.5) is moot there. A quoted task's start may be the lost one: it is re-issued
+// first, through Starts (the work queue's own re-issue, lifecycle.Queue.ReissueStart), and without Starts the resend
+// goes through the work queue as before. A resend of a terminal task is answered by a2a-go itself (its subscription
+// ends at a terminal snapshot) after the work queue's re-issue, and one of a submitted or working task goes through
+// the work queue (a lost start is re-issued, and the call waits for the turn). It runs after Admission and the other
+// checks, as the work queue's own resend lookup does, and its lookup is the work queue's (store.Log.FindResend, the
+// request's hash as the interceptors before it left it).
 func (i *Interceptors) resendAnswer(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	if cc.Method() != "SendMessage" {
 		return ctx, nil, nil // a stream of a resend: D108 (internal/sse)
@@ -51,6 +54,14 @@ func (i *Interceptors) resendAnswer(ctx context.Context, cc *a2asrv.CallContext,
 	}
 	switch prev.State {
 	case store.StateInputRequired, store.StateAuthRequired:
+		return ctx, prev.Snapshot, nil
+	case store.StateQuoted:
+		if i.Starts == nil {
+			return ctx, nil, nil
+		}
+		if err := i.Starts.ReissueStart(ctx, prev); err != nil {
+			return ctx, nil, err
+		}
 		return ctx, prev.Snapshot, nil
 	}
 	return ctx, nil, nil

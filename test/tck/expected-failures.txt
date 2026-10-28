@@ -1,37 +1,70 @@
-# The pinned A2A TCK's expected failures against the gate (a2aproject/a2a-tck d4d6fae7887f88ef607fb461c13e3b0e1802f19b;
-# spec/relay.md §0, §16 tck_*; D18, DM4-12, DM4-24). test/tck/kontra_xfail.py marks every entry of the binding being
-# run xfail(strict=True) and fails the run when an entry passes, errors or skips, when a test that is not listed
-# ends xfailed (the TCK xfails SHOULD requirements itself), or when an entry names no collected test: for each
-# variant and binding, the xfailed set is exactly the entries here. Format: one pytest node id per line, "#", and the
-# reason, which cites an a2a-tck issue or a decision; a line "[<variant> ...]" starts the entries of those variants
-# (TCK_VARIANT, scripts/tck.sh); the entries before the first section are every variant's. An entry's binding is its
-# id's suffix. Delete an entry when its cause is gone (strict XPASS says so) and re-pin deliberately.
+# The pinned A2A TCK's expected outcomes against the gate (a2aproject/a2a-tck d4d6fae7887f88ef607fb461c13e3b0e1802f19b;
+# spec/relay.md §0, §16 tck_*; D18, DM4-12, DM4-24): the tests that do not pass, failures and skips alike.
+# test/tck/kontra_xfail.py marks every expected failure of the binding being run xfail(strict=True) and fails the run
+# when an expected failure passes, errors or skips, when a test that is not listed ends xfailed (the TCK xfails SHOULD
+# requirements itself), when an expected skip does not skip, when a test of the binding being run skips and is not
+# listed (the TCK skips whenever a prerequisite request fails, so a regression would otherwise hide as a skip), or
+# when an entry names no collected test: for each variant and binding, the xfailed set and the skipped set (apart
+# from the other bindings' tests, "Transport ... not configured") are exactly the entries here. Format: one pytest
+# node id per line, "#", and the reason, which cites an a2a-tck issue or a decision; "skip <node id>" is an expected
+# skip; a line "[<variant> ...]" starts the entries of those variants (TCK_VARIANT, scripts/tck.sh); the entries
+# before the first section are every variant's. A test's binding is its id's suffix, else its directory, else its
+# function's name suffix (_jsonrpc, _rest) or its class's name prefix (TestJsonRpc, TestRest). Delete an entry when
+# its cause is gone (strict XPASS, or "listed as a skip, but passed", says so) and re-pin deliberately.
 #
-# Measured by M4 WP-02 on 28 Oct, the four variants each run twice (jsonrpc, then http_json), the same outcomes each
-# time: direct, tunnel and caddy 75 passed and 8 xfailed (jsonrpc), 69 passed and 8 xfailed (http_json); auth 81
-# passed and 3 xfailed (jsonrpc), 81 passed and 2 xfailed (http_json). The rest skip: the bindings not asked for and
-# gRPC, the capability tests a gate that streams and pushes cannot trigger, and, through the gate only, the tests
-# whose prerequisite task is a resend of an earlier test's (the TCK's message ids are per session, DM4-24).
+# Measured by M4 WP-02's review on 28 Oct with fresh TCK ids per test (test/tck/kontra_tck_ids.py, DM4-24), the four
+# variants each run twice (jsonrpc, then http_json); see DM4-24 for the counts.
 #
 # Not listed, because the gate passes them: CORE-SEND-003 (a2a-tck#202 asserts success for an unsupported media type;
-# the seller answers ContentTypeNotSupportedError, which the gate relays as a failed task, spec/relay.md §6.4), and
-# test_get_task_history_does_not_exceed_limit[jsonrpc] (a2a-tck#242), which skips: its prerequisite is a resend.
+# the seller answers ContentTypeNotSupportedError, which the gate relays as a failed task, spec/relay.md §6.4).
 
-# --- Every variant ---
+# --- Every variant: expected failures ---
 # The gate answers a seller's Message with a completed task (D5: in a2a-go's cluster mode a bare Message never
 # reaches the caller), and DM-MSG-001 wants the Message itself.
 tests/compatibility/core_operations/test_artifacts.py::TestMessageResponse::test_returns_message_with_text_part[jsonrpc]  # D5: a seller's Message is answered as a completed task carrying it
 tests/compatibility/core_operations/test_artifacts.py::TestMessageResponse::test_returns_message_with_text_part[http_json]  # D5: a seller's Message is answered as a completed task carrying it
-# CORE-HIST-001 on JSON-RPC: the TCK's JSON-RPC client sends history_length in snake_case (A2A §5.5: camelCase), so the
-# limit never reaches the gate; the same test passes on HTTP+JSON. The TCK xfails it itself.
+# CORE-HIST-001 and CORE-HIST-002 on JSON-RPC: the TCK's JSON-RPC client sends GetTask's history_length in snake_case
+# (A2A §5.5: camelCase), so the limit never reaches the gate; both pass on HTTP+JSON. The TCK xfails CORE-HIST-001
+# (a SHOULD) itself; CORE-HIST-002 (a MUST) fails.
 tests/compatibility/core_operations/test_task_history.py::TestHistoryLengthZeroGetTask::test_get_task_history_length_zero[jsonrpc]  # a2a-tck#242 (PR #243): the TCK sends history_length, not historyLength
+tests/compatibility/core_operations/test_task_history.py::TestHistoryLengthLimit::test_get_task_history_does_not_exceed_limit[jsonrpc]  # a2a-tck#242 (PR #243): the TCK sends history_length, not historyLength
+# CORE-HIST-003 (a SHOULD; the TCK xfails it itself): a2a-go v2.7.0's handler, which answers SendMessage (D7), applies
+# historyLength to GetTask only, so a blocking SendMessage's task carries its history whatever its
+# configuration.historyLength; the a2a-go seller alone fails it the same way on both bindings (M0's baseline).
+tests/compatibility/core_operations/test_task_history.py::TestHistoryLengthZeroSendMessage::test_send_message_history_length_zero[jsonrpc]  # D7: a2a-go v2.7.0 ignores SendMessage's historyLength (a SHOULD)
+tests/compatibility/core_operations/test_task_history.py::TestHistoryLengthZeroSendMessage::test_send_message_history_length_zero[http_json]  # D7: a2a-go v2.7.0 ignores SendMessage's historyLength (a SHOULD)
 # CORE-CANCEL-002 on HTTP+JSON: the TCK vendors spec v1.0.0's 409; v1.0.1 maps TaskNotCancelableError to 400.
 tests/compatibility/core_operations/test_task_lifecycle.py::TestCancelTask::test_cancel_terminal_task_returns_error[http_json]  # a2a-tck#231 (PR #232): v1.0.0's 409, v1.0.1's 400
 
+# --- Every variant: expected skips ---
+# The tests of an error the gate's card rules out: it declares pushNotifications (the gate pushes itself, D16,
+# spec/relay.md §3) and streaming, and no extended card (D52), so PushNotificationNotSupported, UnsupportedOperation
+# for streaming and the extended card's errors cannot be triggered.
+skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityPushNotifications::test_push_not_supported_jsonrpc  # D16: the gate's card declares pushNotifications
+skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityPushNotifications::test_push_not_supported_rest  # D16: the gate's card declares pushNotifications
+skip tests/compatibility/jsonrpc/test_error_codes.py::TestJsonRpcErrorCodeMappings::test_push_notification_not_supported_error  # D16: the gate's card declares pushNotifications
+skip tests/compatibility/http_json/test_http_status.py::TestHttpJsonStatusCodes::test_push_not_supported_returns_400  # D16: the gate's card declares pushNotifications
+skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityStreaming::test_streaming_not_supported_jsonrpc  # D52: the gate's card declares streaming
+skip tests/compatibility/jsonrpc/test_error_codes.py::TestJsonRpcErrorCodeMappings::test_unsupported_operation_error  # D52: the gate's card declares streaming
+skip tests/compatibility/http_json/test_http_status.py::TestHttpJsonStatusCodes::test_unsupported_operation_returns_400  # D52: the gate's card declares streaming
+skip tests/compatibility/core_operations/test_error_handling.py::TestExtendedCardNotConfigured::test_extended_card_not_configured_jsonrpc  # D52: extendedAgentCard is false
+skip tests/compatibility/core_operations/test_error_handling.py::TestExtendedCardNotConfigured::test_extended_card_not_configured_http_json  # D52: extendedAgentCard is false
+skip tests/compatibility/core_operations/test_error_handling.py::TestExtendedCardRequiresAuth::test_extended_card_requires_auth_jsonrpc  # D52: extendedAgentCard is false
+skip tests/compatibility/core_operations/test_error_handling.py::TestExtendedCardRequiresAuth::test_extended_card_requires_auth_http_json  # D52: extendedAgentCard is false
+# The TCK seller (examples/sellers/tck) declares no required extension, and the TCK's SHOULD catalogue has no
+# requirement its parametrized runner can dispatch (a2a-tck test_requirements.py, "no-requirements").
+skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityExtensionRequired::test_missing_required_extension_returns_error_jsonrpc  # DM4-24: the TCK seller declares no required extension
+skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityExtensionRequired::test_missing_required_extension_returns_error_http_json  # DM4-24: the TCK seller declares no required extension
+skip tests/compatibility/core_operations/test_requirements.py::test_should_requirement[no-requirements-jsonrpc]  # DM4-24: the TCK has no dispatchable SHOULD requirement
+skip tests/compatibility/core_operations/test_requirements.py::test_should_requirement[no-requirements-http_json]  # DM4-24: the TCK has no dispatchable SHOULD requirement
+# A request with a wrong Content-Type: a2a-go v2.7.0's transports (D7) read the body whatever its Content-Type, and the
+# TCK skips rather than fails (no binding requires the error); the a2a-go seller alone skips them too (M0's baseline).
+skip tests/compatibility/jsonrpc/test_error_codes.py::TestJsonRpcErrorCodeMappings::test_content_type_not_supported_error  # D7: a2a-go reads a body whatever its Content-Type
+skip tests/compatibility/http_json/test_http_status.py::TestHttpJsonStatusCodes::test_content_type_not_supported_returns_415  # D7: a2a-go reads a body whatever its Content-Type
+
 [direct tunnel caddy]
 # The TCK sends no credential (a2a-tck#163, PR #200), so these variants call `tck` as the anonymous principal, which is
-# refused ListTasks and push configs (spec/relay.md §2.3, D20). The auth variant runs them with an API key. The other
-# push tests skip once CreatePushNotificationConfig, or a message carrying an inline config, is refused.
+# refused ListTasks and push configs (spec/relay.md §2.3, D20). The auth variant runs them with an API key.
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-001-jsonrpc]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-001-http_json]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-002-jsonrpc]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
@@ -44,6 +77,23 @@ tests/compatibility/core_operations/test_requirements.py::test_must_requirement[
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-005-http_json]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
 tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[jsonrpc]  # D20: push configs are refused to anonymous callers (a2a-tck#163)
 tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[http_json]  # D20: push configs are refused to anonymous callers (a2a-tck#163)
+# The other push tests skip once CreatePushNotificationConfig, or a message carrying an inline config, is refused.
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_push_config[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_push_config[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_list_push_configs[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_list_push_configs[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_push_config[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_push_config[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_is_idempotent[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_is_idempotent[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_config_persists[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_config_persists[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_includes_auth[jsonrpc]  # D20: its message's inline push config is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_includes_auth[http_json]  # D20: its message's inline push config is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_at_least_once[jsonrpc]  # D20: its message's inline push config is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_at_least_once[http_json]  # D20: its message's inline push config is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_payload_format[jsonrpc]  # D20: its message's inline push config is refused (a2a-tck#163)
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_payload_format[http_json]  # D20: its message's inline push config is refused (a2a-tck#163)
 
 [auth]
 # With an API key ListTasks and push pass on both bindings, except CreateTaskPushNotificationConfig on JSON-RPC: the
@@ -51,3 +101,8 @@ tests/compatibility/core_operations/test_push_notifications.py::TestPushNotifica
 # It is a2a-tck#242's defect in the same client, filed there for history_length only (DM4-24). The other JSON-RPC
 # push CRUD tests then skip.
 tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[jsonrpc]  # DM4-24, a2a-tck#242's defect: the TCK sends task_id, not taskId
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_push_config[jsonrpc]  # DM4-24, a2a-tck#242's defect: its CreatePushNotificationConfig sends task_id
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_list_push_configs[jsonrpc]  # DM4-24, a2a-tck#242's defect: its CreatePushNotificationConfig sends task_id
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_push_config[jsonrpc]  # DM4-24, a2a-tck#242's defect: its CreatePushNotificationConfig sends task_id
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_is_idempotent[jsonrpc]  # DM4-24, a2a-tck#242's defect: its CreatePushNotificationConfig sends task_id
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_config_persists[jsonrpc]  # DM4-24, a2a-tck#242's defect: its CreatePushNotificationConfig sends task_id

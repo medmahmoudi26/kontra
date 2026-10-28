@@ -261,29 +261,39 @@ func admitted(d hooks.Decision) (store.State, *time.Time, map[string]any, error)
 	return store.StateQuoted, &exp, meta, nil
 }
 
-// resend answers a resend with the task it repeats and re-issues its workflow's start with the first work
-// item id: a task whose start was lost gets its workflow (spec §14.5). A refusal (the work item was
-// accepted already) and a closed workflow are what an idempotent re-issue meets, and are not errors.
+// resend answers a resend with the task it repeats and re-issues its workflow's start (ReissueStart).
 func (q *Queue) resend(ctx context.Context, p *workqueue.Payload, prev *store.TaskRow) (a2a.TaskID, error) {
 	id := a2a.TaskID(prev.ID.String())
-	wid, err := q.log.FirstWorkItemID(ctx, prev.ID)
-	switch {
-	case errors.Is(err, store.ErrWorkItemNotFound):
-	case err != nil:
+	if err := q.ReissueStart(ctx, prev); err != nil {
 		return "", err
-	default:
-		var quoteExpires *time.Time
-		if prev.SubmittedAt == nil {
-			quoteExpires = prev.QuoteExpiresAt // the task was created quoted and not yet approved
-		}
-		_, err := q.client.StartWithMessage(ctx, q.input(prev.ID, quoteExpires), wid.String())
-		if err != nil && !errors.Is(err, ErrRefused) {
-			return "", err
-		}
 	}
 	fillStreamStart(ctx, StreamStart{TaskID: id, Version: prev.Version, New: false})
 	p.TaskID = id
 	return id, nil
+}
+
+// ReissueStart re-issues the start of prev's workflow with its first work item id, as a resend does: a task whose
+// start was lost gets its workflow (spec §14.5), and one created quoted and not yet approved waits for
+// kontra.approval until its quote expires, as at its first start (§13.2). A refusal (the work item was accepted
+// already) and a closed workflow are what an idempotent re-issue meets, and are not errors; a task without a work
+// item has no start to re-issue. The relay's resend answer calls it before it answers a quoted task at once
+// (relay.StartReissuer, DM4-23).
+func (q *Queue) ReissueStart(ctx context.Context, prev *store.TaskRow) error {
+	wid, err := q.log.FirstWorkItemID(ctx, prev.ID)
+	switch {
+	case errors.Is(err, store.ErrWorkItemNotFound):
+		return nil
+	case err != nil:
+		return err
+	}
+	var quoteExpires *time.Time
+	if prev.SubmittedAt == nil {
+		quoteExpires = prev.QuoteExpiresAt // the task was created quoted and not yet approved
+	}
+	if _, err := q.client.StartWithMessage(ctx, q.input(prev.ID, quoteExpires), wid.String()); err != nil && !errors.Is(err, ErrRefused) {
+		return err
+	}
+	return nil
 }
 
 func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner store.Owner) (a2a.TaskID, error) {
