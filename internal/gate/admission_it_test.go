@@ -27,7 +27,7 @@ import (
 // in the thread URL, as Cloud's does (D188).
 type admissionDouble struct {
 	mu   sync.Mutex
-	mode string // quote, expired, down, allow
+	mode string // quote, expired, down, allow, nullcode, comma
 	reqs []hooks.AdmitRequest
 	auth []string
 	srv  *httptest.Server
@@ -56,6 +56,10 @@ func newAdmissionDouble(t *testing.T) *admissionDouble {
 			io.WriteString(w, `{"outcome":"allow"}`)
 		case "expired":
 			fmt.Fprintf(w, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/%s","expiresAt":"2020-01-01T00:00:00Z"}}`, req.TaskID)
+		case "nullcode": // not a hooks.json decision: refusal.code is an integer
+			io.WriteString(w, `{"outcome":"deny","refusal":{"code":null,"message":"over budget"}}`)
+		case "comma": // not RFC 3339, though time.Parse takes it
+			fmt.Fprintf(w, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/%s","expiresAt":"2099-01-01T00:00:00,5Z"}}`, req.TaskID)
 		default:
 			fmt.Fprintf(w, `{"outcome":"quote","metadata":{"kontra.escrow.quote":{"amount":"15.00","currency":"EUR"}},"quote":{"approveUrl":"https://app.kontra.sh/#/t/%s","expiresAt":%q}}`,
 				req.TaskID, time.Now().Add(10*time.Minute).UTC().Format(time.RFC3339))
@@ -164,9 +168,11 @@ hooks:
 		t.Errorf("the seller received %d messages, want 1", n)
 	}
 
-	// The hook down, and a quote that has expired: -32603 "admission unavailable", no task.
+	// The hook down, a quote that has expired, and answers that are not valid decisions (a refusal whose code is null,
+	// which the operator's refusal was once read from, as a final 403; an expiresAt with a comma fraction): -32603
+	// "admission unavailable", no task.
 	before := scalar[int64](t, e.pool, `select count(*) from kontra.tasks`)
-	for _, mode := range []string{"down", "expired"} {
+	for _, mode := range []string{"down", "expired", "nullcode", "comma"} {
 		adm.set(mode)
 		_, err := c.SendMessage(ctx, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))})
 		if !errors.Is(err, a2a.ErrInternalError) || !strings.Contains(err.Error(), "admission unavailable") {

@@ -471,6 +471,9 @@ func TestLoadErrors(t *testing.T) {
 		{"admission with an unknown operation", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, operations: [settle] } }\n", "hooks.admission.operations"},
 		{"admission without a url", head + "hooks: { admission: { secret_env: ADMIT } }\n", "hooks.admission.url"},
 		{"admission with a zero timeout", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 0s } }\n", "must be positive"},
+		// The MCP relay cuts a modern client's shared session decision at 30 s (spec §13.1, DM4-17).
+		{"admission with a timeout over 30s", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 31s } }\n", "hooks.admission.timeout 31s: at most 30s"},
+		{"admission with a timeout of days", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 2d } }\n", "hooks.admission.timeout 48h0m0s: at most 30s"},
 		// tunnel.anonymous (tunnel.md §6, §6.2; DM4-10, DM4-20).
 		{"anonymous on a single-tenant gate (DM4-10)", head + "tunnel: { anonymous: true }\n", "tunnel.anonymous: needs tenancy: multi"},
 		{"anonymous limits on a single-tenant gate (DM4-10)", head + "tunnel: { anonymous: { ttl: 1h } }\n", "DM4-10"},
@@ -684,6 +687,9 @@ func TestRemoteAdmissionLoads(t *testing.T) {
 	}
 	for _, ok := range []string{"https://10.0.0.7:8443/admit", "http://localhost:7000/admit", "http://[::1]:7000/admit"} {
 		parse(t, minimal+"hooks: { admission: { url: \""+ok+"\", secret_env: ADMIT } }\n")
+	}
+	if c = parse(t, minimal+"hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 30s } }\n"); c.Hooks.Admission.Timeout.D() != MaxAdmissionWait {
+		t.Errorf("a 30s timeout: %v", c.Hooks.Admission.Timeout)
 	}
 }
 

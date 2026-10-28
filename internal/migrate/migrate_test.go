@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"kontra.sh/kontra/internal/migrate"
 	"kontra.sh/kontra/internal/pgtest"
+	"kontra.sh/kontra/migrations"
 )
 
 func open(t *testing.T, dsn string) *migrate.Migrator {
@@ -351,5 +353,50 @@ func TestNewDoesNotOwnTheDB(t *testing.T) {
 	}
 	if err := db.PingContext(context.Background()); err != nil {
 		t.Errorf("Close closed the caller's pool: %v", err)
+	}
+}
+
+// Migration 0003 (M4) runs in one transaction whose first ALTER TABLE holds ACCESS EXCLUSIVE on tasks until it
+// commits, so each scan of tasks under it is a pause for the replicas still serving. It scans tasks once, to build
+// tasks_hired; the check on elicitation_notified_at, added NOT VALID (its column is new, null on every row), costs no
+// second one (M4 WP-01's review). Counted with the migration transaction's own statistics.
+func TestM4ScansTasksOnce(t *testing.T) {
+	dsn := pgtest.Database(t)
+	m := open(t, dsn)
+	ctx := context.Background()
+	if _, err := m.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Down(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := applied(t, m); len(got) != 2 || got[1] != 2 {
+		t.Fatalf("applied after one down = %v, want [1 2]", got)
+	}
+	b, err := fs.ReadFile(migrations.FS, "0003_m4.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	up, down := strings.Index(s, "-- +goose Up"), strings.Index(s, "-- +goose Down")
+	if up < 0 || down < up {
+		t.Fatal("0003_m4.sql: no Up section")
+	}
+	c := connect(t, dsn)
+	tx, err := c.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, s[up:down]); err != nil {
+		t.Fatalf("0003 up: %v", err)
+	}
+	var scans int64
+	if err := tx.QueryRow(ctx, `select coalesce((select seq_scan from pg_stat_xact_user_tables
+		where schemaname = 'kontra' and relname = 'tasks'), 0)`).Scan(&scans); err != nil {
+		t.Fatal(err)
+	}
+	if scans != 1 {
+		t.Errorf("0003 scanned tasks %d times under its lock, want once (the tasks_hired build)", scans)
 	}
 }

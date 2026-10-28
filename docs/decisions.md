@@ -2577,17 +2577,25 @@ M3 dialed the bucket as configured under a `SPEC-CONFLICT` (D189). Decision ([`r
 `hooks.admission.url`, `auth.mcp_oauth.issuer` with its RFC 8414 or OpenID metadata and the `jwks_uri` that metadata
 names, and the bucket's endpoint are **operator-configured endpoints**. They need `https://`, except `http://` on a
 loopback host (connected to a loopback address only; the bucket keeps the scheme its URL is written with), follow no
-redirect, ignore the environment's proxy, have bounded bodies (an Admission decision at 64 KiB, the metadata and the
-key set at 256 KiB each) and a timeout (5 s; `hooks.admission.timeout` for Admission), and skip the private-address
-check. Every other operator URL (`seller_keys` URLs) stays on the SSRF dialer. `internal/ssrf` builds the class
+redirect, ignore the environment's proxy and skip the private-address check. The hook's and the issuer's answers are
+bounded (an Admission decision at 64 KiB, the metadata and the key set at 256 KiB each) and each of their requests
+has a timeout (5 s; `hooks.admission.timeout` for Admission, at most 30 s: the MCP relay bounds the one `session`
+decision a modern client's first requests share at 30 s, so a longer timeout would be cut there and nowhere else).
+The bucket is not given these bounds: its requests carry parts as large as the storage limits allow, so it keeps its
+S3 client's own dial, TLS-handshake and response-header timeouts and the context of the work that makes each request
+(the corrections' "timeouts 5 s" for the whole class, read for the bucket, would cut large-part uploads; M4 WP-01's
+review). Every other operator URL (`seller_keys` URLs) stays on the SSRF dialer. `internal/ssrf` builds the class
 (`ssrf.NewOperatorClient`), and `hooks.RemoteAdmission` and the resource server (M4 WP-06) use it.
 
 What the gate accepts from the hook ([`relay.md`](../spec/relay.md) §13.1): the answer is read as
 [`schema/hooks.json`](../spec/schema/hooks.json)'s `decision` with exact keys (no repeated or case-variant key, no
-unknown member, a `deny` with its `refusal`, a `quote` with its terms); a quote's `approveUrl` must be an absolute
-`https://` URL without userinfo, and its `expiresAt` an RFC 3339 time in the future. Anything else, like a timeout,
-a non-`2xx` (a `3xx` included) or maps that break §13.2's rules, is `-32603` `admission unavailable` (`503`): it fails
-closed. The URL itself is passed through untouched (D188), so a team gate configures its own approve page.
+unknown member, a `deny` with its `refusal`, a `quote` with its terms, a `refusal.code` that is an integer and not
+`null`); a quote's `approveUrl` must be an absolute `https://` URL without userinfo, and its `expiresAt` an RFC 3339
+`date-time` in the future, written with upper-case `T` and `Z` as every reader of it parses it (Go's `time.RFC3339`;
+a comma fraction, a one-digit hour and an offset of `+24:00` or minute 60, which that parser alone also takes, are
+refused). Anything else, like a timeout, a non-`2xx` (a `3xx` included) or maps that break §13.2's rules, is
+`-32603` `admission unavailable` (`503`): it fails closed. The URL itself is passed through untouched (D188), so a
+team gate configures its own approve page.
 
 ### DM4-18. A hello asks for an anonymous session with `anonymous: true` — **decided under the owner's standing instruction, 28 Oct** (amends DM4-10)
 

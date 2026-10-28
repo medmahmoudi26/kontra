@@ -31,6 +31,7 @@ const (
 	DefaultSessionIdle    = 3600 // seconds
 	DefaultDrainTimeout   = 10 * time.Minute
 	DefaultAdmissionWait  = 5 * time.Second
+	MaxAdmissionWait      = 30 * time.Second // hooks.MaxAdmissionTimeout: the MCP relay's bound on a shared session decision
 	DefaultTasksMode      = TasksDurable
 )
 

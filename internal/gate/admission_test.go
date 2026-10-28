@@ -52,4 +52,13 @@ func TestBuildAdmission(t *testing.T) {
 	if _, _, err := buildAdmission(hook("http://cp.example.com/admit"), rules, quiet); err == nil || strings.Contains(err.Error(), secret) {
 		t.Errorf("http:// off loopback: %v", err)
 	}
+	// So is a timeout past the bound, which the configuration and the hook state alike (spec §13.1, DM4-17).
+	if config.MaxAdmissionWait != hooks.MaxAdmissionTimeout {
+		t.Errorf("config.MaxAdmissionWait %v, hooks.MaxAdmissionTimeout %v", config.MaxAdmissionWait, hooks.MaxAdmissionTimeout)
+	}
+	long := hook("http://127.0.0.1:7000/admit")
+	long.Hooks.Admission.Timeout = config.Duration(time.Minute)
+	if _, _, err := buildAdmission(long, rules, quiet); err == nil || !strings.Contains(err.Error(), "at most 30s") {
+		t.Errorf("a one-minute timeout: %v", err)
+	}
 }

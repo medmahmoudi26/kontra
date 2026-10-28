@@ -478,6 +478,11 @@ func (c *Config) validateHooks(v *validator) {
 				v.add("hooks.admission.operations: %q is not task, session or call", op)
 			}
 		}
+		// The MCP relay bounds a modern client's shared Admission session decision at 30 s; a longer timeout would be
+		// cut there, with nothing logged, and kept on A2A and legacy MCP (spec §13.1, DM4-17).
+		if h.Timeout.D() > MaxAdmissionWait {
+			v.add("hooks.admission.timeout %s: at most %s (spec §13.1)", h.Timeout, Duration(MaxAdmissionWait))
+		}
 		// Built in M4 (DM4-8). The replica reads the secret from secret_env at start and refuses to start without it,
 		// as it does peer.secret_env's, so that `kontra-gate migrate` and `enroll` load the same file without it.
 	}

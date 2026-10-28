@@ -151,7 +151,7 @@
           "properties": {
             "url": { "type": "string", "pattern": "^https?://" },
             "secret_env": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
-            "timeout": { "$ref": "#/$defs/duration", "default": "5s" },
+            "timeout": { "$ref": "#/$defs/duration", "default": "5s", "description": "At most 30s, the bound on the one session decision a modern MCP client's first requests share (spec §13.1, DM4-17)." },
             "operations": { "type": "array", "items": { "enum": ["task", "session", "call"] }, "default": ["task"] }
           }
         },

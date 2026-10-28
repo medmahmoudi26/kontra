@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +41,11 @@ const MaxDecisionBytes = 64 << 10
 
 // DefaultAdmissionTimeout is hooks.admission.timeout's default (spec §13.1).
 const DefaultAdmissionTimeout = 5 * time.Second
+
+// MaxAdmissionTimeout is hooks.admission.timeout's bound (spec §13.1, DM4-17): the MCP relay's shared Admission session
+// decision for modern clients runs at most 30 s (mcprelay's admitFlightTimeout), so a longer hook timeout would be cut
+// there, silently, and not on A2A or legacy MCP.
+const MaxAdmissionTimeout = 30 * time.Second
 
 // RemoteAdmissionConfig is hooks.admission (spec/relay.md §13.1): the operator's control plane, never derived
 // from a request and never a node.
@@ -118,6 +125,8 @@ func NewRemoteAdmission(cfg RemoteAdmissionConfig) (*RemoteAdmission, error) {
 		timeout = DefaultAdmissionTimeout
 	case timeout < 0:
 		return nil, errors.New("hooks: hooks.admission.timeout: must be positive")
+	case timeout > MaxAdmissionTimeout:
+		return nil, fmt.Errorf("hooks: hooks.admission.timeout %v: at most %v", timeout, MaxAdmissionTimeout)
 	}
 	ops := cfg.Operations
 	if len(ops) == 0 {
@@ -167,7 +176,16 @@ func (r *RemoteAdmission) Operations() []Operation { return slices.Clone(r.ops) 
 
 // String shows the hook without its secret.
 func (r *RemoteAdmission) String() string {
-	return fmt.Sprintf("remote Admission %s (operations %v, timeout %v)", r.url, r.ops, r.timeout)
+	return fmt.Sprintf("remote Admission %s (secret [redacted], operations %v, timeout %v)", r.url, r.ops, r.timeout)
+}
+
+// GoString is String, for %#v, which would otherwise print every field, the secret included.
+func (r *RemoteAdmission) GoString() string { return r.String() }
+
+// LogValue is the hook for slog, without its secret.
+func (r *RemoteAdmission) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("url", r.url), slog.String("secret", "[redacted]"),
+		slog.Duration("timeout", r.timeout), slog.Any("operations", r.ops))
 }
 
 // Admit implements Admission.
@@ -227,7 +245,7 @@ func (r *RemoteAdmission) Admit(ctx context.Context, req AdmitRequest) (Decision
 
 // unavailable is the error of a hook that failed: ErrAdmissionUnavailable with what failed and why. Its text never
 // holds the secret: a cause that might quote it (a hook that echoes the Authorization header into a key of its answer,
-// which an error quotes up to 32 bytes) is withheld.
+// which an error quotes, escaped, up to 32 bytes or whole) is withheld.
 func (r *RemoteAdmission) unavailable(what string, cause error) error {
 	if cause == nil {
 		return fmt.Errorf("%w: %s", ErrAdmissionUnavailable, what)
@@ -239,18 +257,39 @@ func (r *RemoteAdmission) unavailable(what string, cause error) error {
 	return fmt.Errorf("%w: %s: %s", ErrAdmissionUnavailable, what, msg)
 }
 
-// quotesSecret reports whether msg holds the secret or any 8 consecutive bytes of it (all of it when shorter).
+// quotesSecret reports whether msg holds the secret or any 8 consecutive bytes of it (all of it when shorter), as
+// written or in a form an error quotes it in: Go-quoted (strconv.Quote, %q and strictjson.Quote, which escape " and
+// \), ASCII-quoted (%+q) or JSON-escaped. A window of an escaped form may stand for fewer than 8 bytes of the secret,
+// which only withholds more.
 func quotesSecret(msg, secret string) bool {
 	if secret == "" {
 		return false
 	}
-	n := min(8, len(secret))
-	for i := 0; i+n <= len(secret); i++ {
-		if strings.Contains(msg, secret[i:i+n]) {
-			return true
+	for _, form := range secretForms(secret) {
+		n := min(8, len(form))
+		for i := 0; i+n <= len(form); i++ {
+			if strings.Contains(msg, form[i:i+n]) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// secretForms are the secret as written and as each quoting an error may use escapes it, without the quotes.
+func secretForms(secret string) []string {
+	forms := []string{secret}
+	add := func(quoted string) {
+		if s := quoted[1 : len(quoted)-1]; !slices.Contains(forms, s) {
+			forms = append(forms, s)
+		}
+	}
+	add(strconv.Quote(secret))
+	add(strconv.QuoteToASCII(secret))
+	if b, err := json.Marshal(secret); err == nil {
+		add(string(b))
+	}
+	return forms
 }
 
 // decisionMembers are the members of hooks.json's decision; refusalMembers and quoteMembers those of its refusal and
@@ -308,9 +347,11 @@ func ParseDecision(b []byte) (Decision, error) {
 		if !okc || !okm {
 			return Decision{}, fmt.Errorf("%w: a refusal needs its code and message", ErrInvalidDecision)
 		}
-		if err := json.Unmarshal(code, &rf.Code); err != nil {
+		n, isInt := integer(code)
+		if !isInt {
 			return Decision{}, fmt.Errorf("%w: refusal.code is not an integer", ErrInvalidDecision)
 		}
+		rf.Code = n
 		if err := json.Unmarshal(msg, &rf.Message); err != nil || !isString(msg) {
 			return Decision{}, fmt.Errorf("%w: refusal.message is not a string", ErrInvalidDecision)
 		}
@@ -399,13 +440,66 @@ func isString(raw json.RawMessage) bool {
 	return len(raw) > 0 && raw[0] == '"'
 }
 
+// integer reads raw, one JSON value, as hooks.json's integer: a JSON number whose value has no fractional part (JSON
+// Schema 2020-12, so -32001.0 and 1e2 are integers and 1.5 is not), read exactly and within int's range. Nothing else
+// is one: not null, which json.Unmarshal leaves an int untouched for (a refusal read as code 0), nor a string or a
+// boolean.
+func integer(raw json.RawMessage) (int, bool) {
+	s := string(bytes.TrimSpace(raw))
+	if s == "" || s[0] != '-' && (s[0] < '0' || s[0] > '9') || !json.Valid([]byte(s)) {
+		return 0, false
+	}
+	// A JSON number: -?digits(.digits)?([eE][+-]?digits)?, whose value is ±(whole frac) × 10^(exp - len(frac)).
+	neg := s[0] == '-'
+	s = strings.TrimPrefix(s, "-")
+	mant, expText, hasExp := strings.Cut(strings.ToLower(s), "e")
+	whole, frac, _ := strings.Cut(mant, ".")
+	digits := strings.TrimLeft(whole+frac, "0")
+	if digits == "" {
+		return 0, true // zero, however it is written
+	}
+	exp := 0
+	if hasExp {
+		e, err := strconv.Atoi(expText)
+		if err != nil || e < -1<<20 || e > 1<<20 {
+			return 0, false // past int's range, or a fraction no 64 KiB answer can write the zeros of
+		}
+		exp = e
+	}
+	for exp -= len(frac); exp < 0; exp++ {
+		if digits[len(digits)-1] != '0' {
+			return 0, false // a fractional part
+		}
+		digits = digits[:len(digits)-1] // never empties: digits starts with a non-zero digit
+	}
+	if len(digits)+exp > 19 {
+		return 0, false // past int64's range
+	}
+	digits += strings.Repeat("0", exp)
+	if neg {
+		digits = "-" + digits
+	}
+	n, err := strconv.ParseInt(digits, 10, strconv.IntSize)
+	if err != nil {
+		return 0, false
+	}
+	return int(n), true
+}
+
 // ErrBadQuote is a quote the gate may not create a task from.
 var ErrBadQuote = errors.New("hooks: the quote's terms are not usable")
 
+// rfc3339 is RFC 3339's date-time (§5.6) as every reader of a quote's expiresAt parses it, with time.RFC3339 (the A2A
+// queue, the MCP relay): upper-case T and Z, a fraction only after a period, an offset up to ±23:59. time.Parse alone
+// also takes a comma fraction, a one-digit hour and an offset of +24:00 or with minute 60 (Go issue 54580), which
+// RFC 3339 and hooks.json's format date-time do not. Lower-case t and z, which they allow, no reader parses: refused,
+// failing closed. The ranges of the date and time fields are time.Parse's.
+var rfc3339 = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$`)
+
 // CheckQuote checks a quote decision's terms (spec §13.1, DM4-17): approveUrl an absolute https:// URL (the scheme
 // written in lowercase, as hooks.json's pattern says) with a host, no userinfo, a valid port and nothing but URI
-// characters; expiresAt an RFC 3339 time after now. The URL is otherwise the operator's and passed through untouched
-// (D188).
+// characters; expiresAt an RFC 3339 time (rfc3339) after now. The URL is otherwise the operator's and passed through
+// untouched (D188).
 func CheckQuote(q *QuoteTerms, now time.Time) error {
 	if q == nil {
 		return fmt.Errorf("%w: no terms", ErrBadQuote)
@@ -427,6 +521,9 @@ func CheckQuote(q *QuoteTerms, now time.Time) error {
 	}
 	if err := ssrf.CheckOperatorURL(u); err != nil {
 		return fmt.Errorf("%w: approveUrl: %v", ErrBadQuote, err)
+	}
+	if !rfc3339.MatchString(q.ExpiresAt) {
+		return fmt.Errorf("%w: expiresAt is not an RFC 3339 time", ErrBadQuote)
 	}
 	exp, err := time.Parse(time.RFC3339, q.ExpiresAt)
 	if err != nil {
