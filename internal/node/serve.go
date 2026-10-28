@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -200,4 +201,70 @@ func clipValue(s string) string {
 		cut--
 	}
 	return s[:cut] + "…"
+}
+
+// upstreamGroups maps every URL service that shares its upstream with another service of the node to the key of
+// their group's one sealed state (sealing.HostingConfig.Shared, D236): two services share an upstream when their
+// targets have one origin (a loopback host by any of its names, a default port written or not) and the base path of
+// one is the other's or under it, the root covering every path, since the node forwards any path under a service's
+// base (spec/tunnel.md §8.2). The key is the group's first name in order. Stdio services each run children of their
+// own and share nothing.
+func upstreamGroups(serves []Serve) map[string]string {
+	var urls []Serve
+	for _, s := range serves {
+		if s.Target != nil && s.Command == nil {
+			urls = append(urls, s)
+		}
+	}
+	parent := map[string]string{}
+	var find func(string) string
+	find = func(n string) string {
+		if p, ok := parent[n]; ok && p != n {
+			r := find(p)
+			parent[n] = r
+			return r
+		}
+		return n
+	}
+	for i := range urls {
+		for j := i + 1; j < len(urls); j++ {
+			a, b := urls[i], urls[j]
+			if upstreamOrigin(a.Target) != upstreamOrigin(b.Target) || !basesOverlap(basePath(a.Target), basePath(b.Target)) {
+				continue
+			}
+			ra, rb := find(a.Name), find(b.Name)
+			if ra == rb {
+				continue
+			}
+			if rb < ra {
+				ra, rb = rb, ra
+			}
+			parent[ra], parent[rb] = ra, ra
+		}
+	}
+	out := map[string]string{}
+	for _, s := range urls {
+		if r := find(s.Name); r != s.Name || parent[s.Name] != "" {
+			out[s.Name] = r
+		}
+	}
+	return out
+}
+
+// upstreamOrigin is a target's origin as upstreamGroups compares it: scheme, host (every loopback name as one) and
+// port (the scheme's default when none is written).
+func upstreamOrigin(u *url.URL) string {
+	host, port := strings.ToLower(u.Hostname()), u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[strings.ToLower(u.Scheme)]
+	}
+	if a, err := netip.ParseAddr(host); host == "localhost" || err == nil && a.Unmap().IsLoopback() {
+		host = "loopback"
+	}
+	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(host, port)
+}
+
+// basesOverlap reports two base paths (without a trailing slash, "" the root) one of which is the other or under it.
+func basesOverlap(a, b string) bool {
+	return a == "" || b == "" || a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }

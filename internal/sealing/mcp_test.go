@@ -29,7 +29,7 @@ func mcpPre(session, reqID, task string) tunnel.Preamble {
 // mcpHeader is an MCP request header of b (a tools/call, or an answer to an input request).
 func (f *fixture) mcpHeader(b buyer, session, tool, msgID string) sealed.Header {
 	return sealed.Header{V: 1, Dir: sealed.DirRequest, Service: "fs", IAT: f.now.Unix(), Session: session, Tool: tool,
-		MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{f.kid()}, ReplyTo: b.replyTo(),
+		MessageID: msgID, Op: sealed.OpCall, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{f.kid()}, ReplyTo: b.replyTo(),
 		RK: sealed.EncodeRK(b.rk)}
 }
 
@@ -218,7 +218,7 @@ func (d *durable) answer(t *testing.T, upID string, hd sealed.Header, result str
 // and messageId, and its gate task (sealing's mcpRule1 SPEC-CONFLICT).
 func (d *durable) hdr(msgID string) sealed.Header {
 	hd := d.f.mcpHeader(d.b, d.session, d.tool, msgID)
-	hd.TaskID = d.task
+	hd.TaskID, hd.Op = d.task, sealed.OpAnswer
 	return hd
 }
 
@@ -315,7 +315,7 @@ func TestHostingMCPAnswerRules(t *testing.T) {
 		d.ask(t, "5")
 		other := newBuyer(t)
 		hd := d.f.mcpHeader(other, d.session, d.tool, "5")
-		hd.TaskID = d.task
+		hd.TaskID, hd.Op = d.task, sealed.OpAnswer
 		_, r := fromClient(t, d.f.h.MCP(mcpPre(d.session, "1", d.task)), d.answer(t, "5", hd, `{}`))
 		if r != sealed.RejectWrongJob {
 			t.Fatalf("%q", r)

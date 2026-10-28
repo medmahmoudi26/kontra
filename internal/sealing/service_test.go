@@ -150,7 +150,7 @@ func TestHiringChecksTheService(t *testing.T) {
 		rcpt, _ := age.ParseX25519Recipient(callHdr.ReplyTo)
 		rk, _ := sealed.DecodeRK(callHdr.RK)
 		hd := sealed.Header{V: 1, Dir: sealed.DirReply, Service: service, Session: callHdr.Session, Tool: "echo", MessageID: id,
-			Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{tunnel.KeyID(rcpt.String())}}
+			Op: sealed.OpResult, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{tunnel.KeyID(rcpt.String())}}
 		body := []byte(`{"content":[{"type":"text","text":"MARKER-result"}]}`)
 		hd.Auth, _ = sealed.Auth(rk, hd, body)
 		ct, err := sealed.Seal([]age.Recipient{rcpt}, hd, body)

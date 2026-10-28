@@ -896,8 +896,9 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   on a pinned session closes it `tunnel_lost` and is `404`; its `full` is `503`, its `sealed_rejected` is §11.4's,
   and any other answer it writes is `502` with `-32603`. The gate's unknown-session `404` and its `401` carry `-32001`, as MCP servers answer an
   unknown session (D196).
-- **`DELETE`** with the session id is forwarded upstream and closes the row; when the upstream's tunnel is gone
-  the gate still closes the row and answers `200` (D196). A session idle for the service's
+- **`DELETE`** with the session id is forwarded upstream and closes the row (`deleted`); when the upstream's tunnel
+  is gone, or cannot be reached from the replica the `DELETE` came to (the holder replica no longer live, no peer
+  hop), the gate still closes the row `deleted` and answers `200` (D196, D250). A session idle for the service's
   `session_idle_s` (default 3600) is closed by the gate (`idle`; upstream `DELETE` best effort).
   `last_seen_at` is written at most once a minute. The `initialize` result states that bound: the gate sets
   `_meta["sh.kontra/session_idle_s"]` to the service's `session_idle_s` (a JSON integer of seconds), after the
@@ -913,14 +914,16 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   one budget for all of them would let any caller crowd out, or close, the others' sessions; a service open to
   `anonymous` shares its upstream's sessions with everyone. An `initialize` beyond the cap closes as many of that
   principal's sessions as it needs, never another principal's, and only sessions whose `last_seen_at` is at least
-  5 minutes old, the oldest first (`idle`), with an upstream `DELETE` the gate makes on each session's pinned target
+  2 minutes old (D249: just above what a session in use shows, so that the sessions a stock client leaves without a
+  `DELETE`, as the TypeScript SDK's `close()` does, make room soon), the oldest first (`idle`), with an upstream `DELETE` the gate makes on each session's pinned target
   (the peer hop for a tunnel another replica holds) before it forwards the `initialize`, once it has chosen an
   upstream: a stdio service's children (`--max-sessions`, [`tunnel.md`](tunnel.md) §10) are shared by every
   principal admitted to it, and the closed session's child is what the new one gets. When too few are that old, it
-  closes none and is refused `429` with `Retry-After` and JSON-RPC error `-32600` `too many sessions`
-  (`data.max_sessions_per_principal`), as the edge's in-flight caps are (§2.2). A session is in use while a request
+  closes none and is refused `429` with JSON-RPC error `-32600` `too many sessions`
+  (`data.max_sessions_per_principal`), as the edge's in-flight caps are (§2.2), and a `Retry-After` that is the time
+  until enough of the principal's sessions not in use will be 2 minutes idle (D249). A session is in use while a request
   or a `GET` stream of it is open on any replica: the replica serving it writes its `last_seen_at` at least every
-  minute and a half meanwhile, and once more as the last ends, so a session in use is never 5 minutes old, and is
+  minute and a half meanwhile, and once more as the last ends, so a session in use is never 2 minutes old, and is
   never closed for a new one (nor by the idle sweep while a stream lasts, for a `session_idle_s` over 90 s). The
   check runs under one lock per principal and service, before the upstream `initialize` and again as the new row is
   written, so concurrent `initialize`s of one principal leave at most the cap open; one that finds no room then is
@@ -949,7 +952,8 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   address must be reachable only from the gate's replicas (a private network, a NetworkPolicy), or carry TLS: the
   HMAC authenticates a request and does not hide it.
   Session choice prefers this replica's sessions. Without `peer.listen`, only this replica's sessions are
-  candidates and a pinned session held elsewhere is `404` (its row stays open until it is idle): a gate of one
+  candidates and a pinned session held elsewhere is `404`, its row closed `tunnel_lost`, so that the client's new
+  `initialize` does not count the session it was told is gone (D250): a gate of one
   replica needs no peer listener, and a gate of more than one SHOULD set it, since otherwise every later request
   that its balancer sends to another replica than the session's (about half of them with two) ends the session
   with a `404` and a new `initialize`. A direct `mcp: {url}` backend is reached from any replica and never

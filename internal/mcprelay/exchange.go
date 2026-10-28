@@ -802,8 +802,14 @@ const msgTooManySessions = "too many sessions"
 
 // tooManySessions is the refusal of an initialize beyond max_sessions_per_principal when too few of the principal's
 // sessions are idle to make room (D231): 429 with Retry-After and -32600, as the edge's in-flight caps (§2.2).
-func tooManySessions(w http.ResponseWriter, rq *request) *mcpwire.Refusal {
-	w.Header().Set("Retry-After", strconv.Itoa(max(int(IdleWrite/time.Second), 1)))
+func tooManySessions(w http.ResponseWriter, rq *request, err error) *mcpwire.Refusal {
+	retry := EvictIdle
+	var te *TooManySessionsError
+	if errors.As(err, &te) {
+		retry = te.RetryAfter
+	}
+	// When a retry may find room: once enough of the principal's sessions will have been idle for EvictIdle (D249).
+	w.Header().Set("Retry-After", strconv.Itoa(max(int((retry+time.Second-1)/time.Second), 1)))
 	b, err := mcpwire.ErrorBody(rq.id(), mcpwire.CodeInvalidRequest, msgTooManySessions,
 		map[string]any{"max_sessions_per_principal": rq.svc.MaxSessionsPerPrincipal})
 	if err != nil {

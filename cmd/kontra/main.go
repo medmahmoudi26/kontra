@@ -75,7 +75,8 @@ through one outbound connection (spec/tunnel.md):
                              the gate's longest quote expiry plus task.timeout)
   --sealed-required NAME     refuse an unsealed request to the hosted service NAME; repeatable
   --pin-recipients           refuse any new recipient or seller key of a sealed service this node hires
-  --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME; repeatable
+  --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME, the one
+                             pending when this run first checks it (not a later one); repeatable
   --log json                 JSON logs on stderr (default text)
 Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only. Sealed services
 (spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, a hired job's key under ~/.kontra/jobs,

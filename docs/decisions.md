@@ -3037,3 +3037,274 @@ Tests: `TestSessionsPerPrincipal`, `TestSessionsCapLeavesAnonymousAlone`, `TestS
 `TestSessionsCapNeverClosesASessionInUse` (a held call and a `GET` stream through the peer hop, the new
 `initialize`s on the other replica), `TestSessionsCapConcurrentInitializes`, `TestSessionsCapCountsTheCredential`,
 `TestSessionsPerPrincipalThroughTheHop`, `TestSessionsPerPrincipalThroughTheGate`.
+
+### D232. On a sealed session an input request is sealed or not relayed, on whichever exchange it comes — **decided under the owner's standing instruction, 28 Oct** (amends D219)
+
+D219 sealed a plain call's `elicitation/create` and `sampling/createMessage` only when they came on the call's own
+`POST` exchange. The stdio bridge routes every server request without a related task to the session's `GET` stream,
+and a URL server resumed with `Last-Event-ID` replays one there: on that exchange the node had no call to attribute
+it to, relayed it in plaintext (the canonical `server-everything` deployment puts the sealed prompt into it), and then
+forwarded the gate's own unsealed answer, since the request was in no record (M3 review round 3, r3-hosting-1).
+Decision, the reviewer's proposal: on an exchange of a session that holds a sealed job (or whose first sealed call is
+with the server) such a request is sealed or not relayed, never relayed in plaintext. It is a task's when its related
+task, or the exchange's gate task, names one; the exchange's own sealed call's; or else the session's one sealed plain
+call the server has not answered, on that upstream session. A call in flight counts: a URL server that answers JSON
+sends its headers only with its result, and its request about the call is its acceptance of the call, which the node
+then records as `Accepted` would. With none, or more than one, the request goes nowhere, and its id is recorded on the
+upstream session (swept after `--sealed-max-age`), so that any answer to it, sealed or not, is refused: no client saw
+it. Every answer the gate could give for the buyer is so either checked by rule 4b or refused; a server's `ping`, the
+only other request a client answers, carries nothing. The hiring node opens a plain call's input request on a `GET`
+too, when its `tool` is one of the session's unanswered sealed calls' ([`ext-sealed.md`](../spec/ext-sealed.md) §2,
+§3, §5; `sealing` mcp.go `soleCall`, `dropInput`, `answer`; hiring.go `openInput`; `TestReview3PlainCallInputOnGET`,
+`TestReview3UnattributableInputIsNotRelayed`, `TestReview3InputWhileFirstCallInFlight`,
+`TestReview3StdioPlainCallInputOnGET`, `TestReview3URLInputOnResumedGET`).
+
+### D233. An MCP message the node handed whole is recorded when the gate ends its exchange — **decided under the owner's standing instruction, 28 Oct** (amends D227)
+
+D227's rule, that a request the node handed whole to the service whose exchange the gate ended before the answer is
+recorded as an accepted one, was built for A2A only: an MCP exchange was recorded when the server's response headers
+came, and a server that answers JSON sends them with its result, so a gate that ended the stream after the server had
+the buyer's sealed call released everything. It could then open the buyer's session's job with a sealed call of its
+own and read the upstream session the buyer's call set up, or replay the buyer's call, which ran again (M3 review
+round 3, r3-hosting-3). Decision, as the reviewer proposed: the MCP exchange marks itself handed once the transport has
+read its forwarded body whole, and its end with no answer records it as `Accepted` does (the job's binding, `(session,
+messageId)`, the upstream session's index, the call's record); one never handed is released, as before. One rule now
+holds for both protocols ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` mcp.go `End`, `Body`; `node` proxy.go;
+`TestReview3MCPCutBeforeAnswerIsRecorded`).
+
+### D234. The hosting node refuses a 2026-07-28 request to a sealed MCP service itself — **decided under the owner's standing instruction, 28 Oct** (amends D162)
+
+D162 has the gate never serve a sealed MCP service to a 2026-07-28 request, and only the gate enforced it: a gate could
+send the buyer's sealed legacy `tools/call` as a 2026-07-28 request, its modern `_meta` keys beside the envelope (which
+binds only its own key), and the node opened it. A dual-era server then answered with what the modern shapes carry
+outside `content` (a multi round-trip's `inputRequests` and `requestState`, built from the arguments; a
+`CreateTaskResult` at the top of `result`, not the legacy `result.task` the node binds) in plaintext (M3 review round 3,
+r3-hosting-2). Decision, the reviewer's proposal: the node reads the exchange's era itself and refuses `bad_header`,
+before anything reaches the server, every 2026-07-28 request to an MCP service with sealed state or started with
+`--sealed-required`, and any sealed `tools/call` on a modern exchange; and, in depth, a reply to a sealed call that
+carries `resultType`, `inputRequests`, `requestState` or a top-level `taskId` is never relayed. The class closes
+because no 2026-07-28 shape reaches a sealed service at all, whatever the gate checked
+([`ext-sealed.md`](../spec/ext-sealed.md) §2, §5; `sealing` mcp.go `SetModern`, `modernResult`; `node` mcp.go;
+`TestReview3SealedCallAsModernIsRefused`, `TestReview3ModernRefusedOnSealedService`).
+
+### D235. The hosting node reads the route the service gets — **decided under the owner's standing instruction, 28 Oct** (amends D217, D227)
+
+The sealing classified a request by its raw path, while the node forwards it cleaned (`path.Clean`, [`tunnel.md`](../spec/tunnel.md)
+§8.2): `GET /tasks/x/..` read as a `GetTask` of `x` reached the service as `GET /tasks`, a2a-go's `ListTasks`, past
+D227's refusal of a task list, and `…/tasks/{id}/./pushNotificationConfigs` reached it as a push config route, past
+D217 (M3 review round 3, r3-hosting-4). Decision, the reviewer's first option: the sealing reads the path the node
+forwards, cleaned as the node cleans it (a trailing slash kept); the node hands it the forwarded path itself. There
+is one spelling of a route on the node, so no spelling can hide one ([`ext-sealed.md`](../spec/ext-sealed.md) §5;
+`sealing` hosting.go `cleanRoute`; `node` proxy.go; `TestReview3DotSegmentRoutes`,
+`TestReview3DotSegmentRoutesAreRefused`).
+
+### D236. Services that reach one upstream keep one sealed state — **decided under the owner's standing instruction, 28 Oct** (amends D217, D226)
+
+Every guard of D217 and D226 was kept per service name, while the node accepts two `--serve` names with one target,
+and one service's base path may cover another's on one origin: an exchange of the other service reached the sealed
+job's upstream task or session unguarded, and its replies passed unread (an unsealed `whoami` on a second MCP service
+read the buyer's sealed login; a `GetTask` on a second A2A service read the buyer's task) (M3 review round 3,
+r3-hosting-5). Serving one server under two names is a natural configuration (per-tool policy and pricing are per
+service: a read-only and a full tier), and the e2e suites do it, so refusing it at start, the reviewer's first option,
+was not taken. Decision, the second: the node groups the services whose targets share an upstream (one origin, any
+loopback name of a loopback host as one, a default port written or not; the base path of one the other's or under
+it, the root covering every path; a stdio service shares nothing) and the hosting sealing keeps each group's state
+as one, under the group's first name: its locks, job files, indexes and the `guarded` test. A header's `service` and
+`--sealed-required` stay per service. Every guard then holds across the services one upstream is reached by, since
+there is one state to consult ([`tunnel.md`](../spec/tunnel.md) §8.2; [`ext-sealed.md`](../spec/ext-sealed.md) §5;
+`node` serve.go `upstreamGroups`; `sealing` hosting.go `stateOf`; `TestReview3TwoServicesOneUpstreamMCP`,
+`TestReview3TwoServicesOneUpstreamA2A`, `TestReview3UpstreamGroups`).
+
+### D237. Every task a request names counts, a message's references included — **decided under the owner's standing instruction, 28 Oct** (amends D217)
+
+The node read only a message's `taskId` and `contextId`, while A2A 1.0's `referenceTaskIds` name tasks an agent loads
+into the message's context, history and artifacts in plaintext (a2a-go's `ReferencedTasksLoader`, a2a-python's referred
+tasks): a message of any gate task referencing the buyer's sealed upstream task was forwarded, and its reply passed
+unread, or sealed to the gate's key (M3 review round 3, r3-hosting-7). And `other()` checked the index only when the
+exchange's job knew its own upstream task, so a job recorded by `End` reached another job's task (r3-hosting-9).
+Decision, the reviewer's proposal: `referenceTaskIds` is read with exact keys on every send; an entry naming another
+sealed job's upstream task is `wrong_task`, sealed message or not, and on a service with sealed jobs an unsealed
+message with any reference is `bad_header` (the node cannot tell a task it has not indexed, D227, from another);
+every task id a request names is checked against the index, whatever the job knows. D217's rule now reads every
+member of A2A 1.0 that names a task ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` hosting.go
+`referenceTaskIDs`, `other`; `TestReview3ReferenceTaskIDs`, `TestReview3OtherChecksIndexWithoutUpstreamTask`).
+
+### D238. A sealed MCP exchange's error that is not JSON keeps its status only — **decided under the owner's standing instruction, 28 Oct** (amends D195)
+
+D195 relays a sealed job's error with its code and fixed text. A URL MCP server's non-2xx answer whose body is not JSON
+(Go's `http.Error`, a framework's error page, a validation error quoting the refused argument) was not read, so it
+reached the gate in plaintext; the A2A side replaces any non-2xx body on a sealed job (M3 review round 3,
+r3-hosting-8). Decision, the reviewer's proposal: on an exchange that carries a sealed call or an answer to a sealed
+input request, sits on a session with a sealed job, or is of a service started with `--sealed-required`, a non-2xx
+answer that is neither JSON nor an event stream is replaced by the node's own JSON-RPC error with the request's id,
+code `-32603` and D195's fixed text, its status kept ([`ext-sealed.md`](../spec/ext-sealed.md) §2; `sealing` mcp.go
+`SealedReply`, `ErrorBody`; `node` mcp.go; `TestReview3MCPNon2xxTextErrorIsScrubbed`).
+
+### D239. An MCP header names its role: `op` — **decided under the owner's standing instruction, 28 Oct** (amends D175, D218)
+
+An MCP envelope's header did not say which of four roles it plays: a `tools/call`'s arguments, the client's answer to
+an input request, a result, an input request. A plain call's answer has no `taskId` (D218), so its header had a
+`tools/call` header's form, and an input request's had a result's; and `messageId` holds the client's ids and the
+server's. A gate could send the buyer's sealed answer to elicitation `N` of tool `X` as a `tools/call` with id `N`, and
+the node ran `X` again with the answer as its arguments; or deliver an input request whose server id equals a later
+call's id as that call's result, which the hiring node opened as an empty success (M3 review round 3, r3-hiring-5).
+Decision, the reviewer's first option: the header gains `op`, `"call"` | `"answer"` (dir `req`, the hiring node's) |
+`"result"` | `"input"` (dir `res`, the hosting node's), on every MCP header (one with `session`) and no A2A header,
+which `Canonical` enforces; it is authenticated with the rest of the header (the age file, and `auth` for replies).
+The hosting node takes a `tools/call` only with `op: "call"` and an answer only with `"answer"` (`wrong_message`); the
+hiring node a result only with `"result"`, whose body holds `content` or `structuredContent`, and an input request
+only with `"input"`. Envelope v1 is not released, so the member joins v1, and both nodes change together, as with
+D221's `service`. One member closes every splice between roles, where namespacing the server's ids in `messageId`,
+the other option, would leave a client free to choose a request id that looks like one
+([`ext-sealed.md`](../spec/ext-sealed.md) §3; `sealed` envelope.go `Header.Op`; `sealing` mcp.go, hiring.go;
+`TestReview3RolesAreNotSpliced`, `TestInputRequestHeaders`).
+
+### D240. MCP sessions and A2A services are kept apart on the hiring node — **decided under the owner's standing instruction, 28 Oct**
+
+The hiring node kept A2A services by their path and MCP sessions by the gate's `Mcp-Session-Id` in one map, and the
+gate chooses that id: answering an MCP `initialize` with `Mcp-Session-Id: /agents/<sealed service>` wrote the session's
+"not sealed" over the A2A service's entry, and the service's next messages went unsealed for a minute, renewable at
+will (M3 review round 3, r3-hiring-2). Decision, as proposed: the two are separate maps, and an `initialize` result whose
+session id is not MCP's form (visible ASCII, 0x21 to 0x7E) or starts with `/` is refused. No id the gate chooses can
+then stand for anything but an MCP session ([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4c; `sealing` hiring.go
+`sessions`, `sessionIDForm`; `TestReview3SessionIDCollidesWithA2APath`).
+
+### D241. A sealed MCP session's job stays while one of its exchanges is open — **decided under the owner's standing instruction, 28 Oct** (amends D224)
+
+Round 2 refused unread messages only on `GET`s opened after a session's job was gone. A stream already open when the
+job went (a gate `404` on another exchange closes the session; the sweep runs with the `session_idle_s` the gate chose,
+down to 1 s, and in-flight requests did not refresh it) then passed, unread, a plaintext result for a pending sealed
+call; with an honest gate, a sealed call that outlasted `session_idle_s` across a sweep lost its key and its genuine
+result was refused (M3 review round 3, r3-hiring-6). Decision, the reviewer's proposal: the node counts each session's
+exchanges in flight (the hiring server ends one when its handler returns) and never drops a session's job, by the
+sweep or a `404`, while one is open; the last to end drops a closed session's. And on a sealed session a result that
+answers no request the node tracks is refused on a `GET`, and on any stream once the node no longer holds the session.
+The job, and the records of its sealed requests, outlive every stream that could carry their answers
+([`tunnel.md`](../spec/tunnel.md) §2.3; [`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4a, 4c; `sealing` hiring.go
+`Job.Done`, `maybeEndSession`, `mcpMessage`; `TestReview3OpenGETAfterSessionJobDropped`,
+`TestReview3SweepKeepsAnOpenCallsKey`).
+
+### D242. A session entry with no job is swept when idle — **decided under the owner's standing instruction, 28 Oct**
+
+Every MCP `initialize` added a session entry that went only with a `DELETE`, a gate `404` or the session's job; a
+session that never made a sealed call, every session of an unsealed service included, has no job, and clients often
+leave without `DELETE`, so a long-running `kontra connect` grew with each new session (M3 review round 3,
+r3-hiring-10). Decision: an entry records when it was last used, and the sweep drops one with no job and no exchange
+open once it has been idle for its bound (the gate's `session_idle_s`, else a day) ([`tunnel.md`](../spec/tunnel.md)
+§2.3; `sealing` hiring.go `sweepJobs`; `TestReview3UnsealedSessionEntryIsSwept`).
+
+### D243. An input request is opened once per id space, and one gate id carries one — **decided under the owner's standing instruction, 28 Oct** (amends D218, D219)
+
+The hiring node recorded which sealed question a gate request id stands for by plain overwrite and never cleared it:
+a gate that delivered question Q1 and then Q2 with the same id had the client's answer to Q1 sealed as Q2's (the
+TypeScript SDK runs both handlers and answers each with the id), so "may I read notes.txt?" accepted became "may I
+delete everything?" accepted (M3 review round 3, r3-hiring-4). And it counted "opened before" per call or task, while
+an input request's `messageId` is the upstream session's: a plain call's question replayed on another plain call's
+stream opened again (r3-hiring-8). Decision, the reviewers' proposals: an input request on a gate id the session holds
+for an unanswered one is dropped; the entry goes once its answer is sealed, and a second answer to the id is refused
+locally; "opened before" is kept apart from the pending answers, per durable task for an input request that names one
+and per session for one with no `taskId` (plain calls and passthrough tasks share their session's upstream session);
+and once an input request of a task named it, one of that task's that does not is dropped (a durable task's always
+do, D218). Each question is then opened once and answered once, under the id it came with
+([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4; `sealing` hiring.go `openInput`, `sealAnswer`, `hireJob.Opened`,
+`Answered`; `TestReview3InputRequestIDReuse`, `TestReview3InputRequestReplayedAcrossCalls`).
+
+### D244. A `CreateTaskResult` answers only a call that asked for a task, and holds only the task — **decided under the owner's standing instruction, 28 Oct**
+
+The hiring node passed unread any result of a sealed call that had a `task` object, a plain call's included: a gate
+answered `{"task": …, "content": [forged]}`, and stock clients, which ignore `task`, read the forged `content` as the
+tool's result; the forged task also kept the session's key forever (M3 review round 3, r3-hiring-3). Decision, the
+reviewer's proposal: the node records whether a sealed call carried `params.task`, and takes a `CreateTaskResult` only
+for such a call and only with nothing beside `task` and `_meta`; anything else is refused as an unsealed result is,
+and only then is the task registered ([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4a; `sealing` hiring.go
+`openAnswer`; `TestReview3ForgedCreateTaskResult`).
+
+### D245. One local client per sealed session, and a reused id is refused on the hiring node too — **decided under the owner's standing instruction, 28 Oct** (amends D226)
+
+The hiring node accepted an `initialize` result naming a session id it already held, so a gate could put a second
+local client into a sealed session's job; and it deleted a sealed call's record whenever the session sent any request
+reusing the call's id, the deletion round 2 removed from the hosting node: two stock clients number their requests
+alike, so client B's `tools/list` id 3 deleted client A's pending sealed call 3, and the gate's plaintext result for it
+reached A on its `GET` (M3 review round 3, r3-hiring-7). Decision, as proposed: an `initialize` result whose session id
+the node holds (an entry, or a job's file) is refused; a request that reuses a sealed request's id is refused locally,
+as the hosting node refuses it (D226), and the record stays the sealed request's. The two nodes then apply one rule
+to a session's ids ([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4c; `sealing` hiring.go `mcpRequest`,
+`initResult`; `TestReview3SessionFixation`, `TestReviewReusedIDAfterSealedCall`).
+
+### D246. A client's error answer to a sealed input request goes with its code only — **decided under the owner's standing instruction, 28 Oct** (amends D175)
+
+A JSON-RPC error answer to a sealed input request (a user who rejects a sampling request, MCP 2025-11-25's `-1`; a
+client without a handler's `-32601`) could not be sent: the hiring node refused it locally, and the hosting node would
+have refused it unsealed, so the service never learnt it and the call or task waited for its own timeout; §3 and §5 said
+nothing of it (M3 review round 3, r3-hiring-9). Decision, the reviewer's second option, D195's rule for errors: the
+hiring node sends the error with its code and fixed text in place of its message and data; the hosting node takes it,
+once, on an exchange of the input request's session and task, as that request's answer, with its code and fixed text.
+An error carries no answer, so sealing it is not needed: a gate can send one of its own to deny the buyer's input
+request, as it can drop the request, never answer it, and §7 says so. Sealing it, the other option, would give the
+envelope an error body for no confidentiality gained ([`ext-sealed.md`](../spec/ext-sealed.md) §2, §5, §7; `sealing`
+hiring.go `sealAnswer`, mcp.go `declined`; `TestReview3ErrorAnswerToSealedInputRequest`).
+
+### D247. A served card names the service's own path, and the hiring node seals by it — **decided under the owner's standing instruction, 28 Oct** (amends D207)
+
+The hiring node seals by path, and the gate chose the path a local A2A client posts to: the card it serves kept the
+gate's path in every `supportedInterfaces[].url`, so a signed card for a pinned sealed service could send the client's
+messages to `/agents//x`, `{svc}/.well-known/a`, `/.well-known/a` or `/mcp`, none of which the node sealed (a card read
+was any method on a `.well-known` path), or to another service's path with a fresh first-sight pin (M3 review round 3,
+r3-hiring-1). Decision, the reviewer's proposal: the card served locally names `http://localhost:<port>{svc}`, the
+service it was read for, in every interface; a card read is a `GET` (or `HEAD`) only, and only a `GET` card route is
+unsealed; a request other than a `GET` to `/.well-known/…` or to an `/agents/…` path that names no service is refused
+`404` locally. The client can then reach only the path the node seals for the pinned service
+([`tunnel.md`](../spec/tunnel.md) §9; [`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 1; `hiring` cards.go
+`RewriteCard`, hiring.go `Handler`; `sealing` hiring.go `Request`; `TestReview3InterfaceURLIsTheService`).
+
+### D248. `--accept-change` accepts the change pending at a service's first check of the run — **decided under the owner's standing instruction, 28 Oct** (amends D228)
+
+`--accept-change <service>` accepted every later needs-accept change of that service for the life of the process, so
+a node left running with it (a systemd unit, say) recorded the service's later recipient substitutions and seller-key
+swaps silently, where the pin is meant to refuse them until the operator accepts the change it saw (M3 review round 3,
+r3-hiring-11). Decision, the reviewer's first option: the acceptance applies to the service's first check in the
+process, the change the operator saw refused and restarted to accept; any later change is refused until the next
+explicit acceptance. `kontra connect --help` and §7 say so; `--accept-change NAME=<key ids>`, the other option, would
+have the operator copy key ids for a decision the restart already expresses ([`ext-sealed.md`](../spec/ext-sealed.md)
+§7; `pins` pins.go `Check`; `TestAcceptChangeIsOnce`).
+
+### D249. The session cap evicts after 2 minutes, and its `Retry-After` says when a retry finds room — **decided under the owner's standing instruction, 28 Oct** (amends D231)
+
+D231 let an `initialize` beyond the cap close only sessions idle for 5 minutes, the stdio bridge's own bound. The
+TypeScript SDK, and Claude Code built on it, end a session without a `DELETE`, so the fifth short-lived client of one
+key within 5 minutes was refused `429`, and its `Retry-After: 60` led to another refusal: no retry inside a stock
+client's reconnect window could succeed (M3 review round 3, r3-relay-1). Decision, the reviewer's first proposal: the
+gate's bound (`EvictIdle`) is 2 minutes, just above what a session in use shows (its `last_seen_at` is written at least
+every minute and a half while a request or stream of it is open, so a session in use is still never closed), and the
+`Retry-After` is the time until enough of the principal's sessions not in use here will be that idle (2 minutes when
+the sessions in use leave too few). A client abandoned without a `DELETE` then makes room within two minutes, and
+the refusal says exactly when ([`relay.md`](../spec/relay.md) §11.2; `mcprelay` sessions.go `capped`,
+`TooManySessionsError`; exchange.go `tooManySessions`; `TestReview3SerialShortLivedClients`).
+
+### D250. A session the gate answers `404` for without a hop is closed, and a `DELETE` always closes it `deleted` — **decided under the owner's standing instruction, 28 Oct** (amends D196)
+
+A multi-replica gate without `peer.listen` answers a request for a session another replica holds `404`, and §11.2 tells
+the client to initialize again; the row stayed open and, touched by the request, looked freshly used, so the new
+`initialize` counted it and after `cap` bounces the client was refused `429` holding no usable session (M3 review round
+3, r3-relay-2). A `DELETE` that reached such a replica, or found the holder replica no longer live or the tunnel
+revoked, was answered `404` and the row closed `tunnel_lost` or left open, against D196's "a `DELETE` always closes the
+row (deleted)", and the TypeScript SDK's `terminateSession()` then throws (r3-relay-3). Decision, the reviewers'
+proposals: the no-hop `404` closes the row `tunnel_lost`, so a session the client is told is gone is gone; and a
+`DELETE` is dispatched before the target's error is acted on: it closes the row `deleted` and answers `200` when the
+tunnel is gone or cannot be reached, `503` only for a key the gate could not check ([`relay.md`](../spec/relay.md)
+§11.2; `mcprelay` legacy.go `pinned`, `upstreamFailed`; `TestReview3NoHopRowsDoNotCountAgainstTheCap`,
+`TestReview3DeleteClosesTheRowDeleted`).
+
+### D251. A gate's own sealed first message into a buyer's context is a residual — **decided under the owner's standing instruction, 28 Oct** (amends D227)
+
+D227 refuses an unsealed message into a sealed job's upstream context, since an agent that keeps a conversation per
+context would answer it from the buyer's sealed one. A gate can seal a first message of its own to the node's public
+recipients, with its own `replyTo`, under a new gate task but the buyer's gate context and its recorded upstream
+`contextId`: rule 2 accepts it, the agent answers from the buyer's conversation, and the answer is sealed to the gate's
+key (M3 review round 3, r3-hosting-6). The node cannot tell it from the buyer's own next task in the context: each
+A2A task has a fresh per-job key, and nothing in the header binds a context to its first job. Decision, the
+reviewer's second option: §7 states it as a residual next to the unsealed case D227 refuses, and §7's claim that a
+forged request "gains nothing it could not get as a buyer" names it. Binding a context to its first job (a MAC of the
+`contextId` under the first job's `rk` in every later first message) would change the header and the hiring node's
+key keeping for every context; it joins D170's list for a later envelope revision. A service that keeps no
+conversation per context is not exposed ([`ext-sealed.md`](../spec/ext-sealed.md) §7).

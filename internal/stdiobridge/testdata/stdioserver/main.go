@@ -12,6 +12,8 @@
 //	progress {n}              n notifications/progress with the request's _meta.progressToken, then the answer
 //	notify {n}                n notifications/message (routed to the GET stream), then the answer
 //	sample {}                 a sampling/createMessage request to the client, answered at once
+//	ask {text}                a sampling/createMessage request whose prompt quotes text, answered once the client
+//	                          answers it (as server-everything's sampleLLM)
 //	related {taskId}          a notifications/message related to taskId, then the answer, then the answer to the
 //	                          tasks/result of that task it holds
 //	stderr {bytes}            bytes written to stderr in lines of 1 KiB, then the answer
@@ -64,6 +66,8 @@ var (
 	pid   = os.Getpid()
 	// held is the id of the tasks/result request held for each task.
 	held = map[string]json.RawMessage{}
+	// asked is the id of the ask call waiting for each sampling request's answer.
+	asked = map[string]json.RawMessage{}
 )
 
 func main() {
@@ -126,6 +130,10 @@ func handle(m message) {
 			writeRecord("roots", json.RawMessage(orNull(m.Result)))
 		case strings.HasPrefix(id, "sample-"):
 			writeRecord("sample", json.RawMessage(orNull(m.Result)))
+			if call, ok := asked[id]; ok {
+				delete(asked, id)
+				reply(call, map[string]any{"content": []any{map[string]any{"type": "text", "text": "answered"}}, "isError": false})
+			}
 		}
 	case m.Method == "initialize":
 		writeRecord("init", json.RawMessage(orNull(m.Params)))
@@ -138,7 +146,7 @@ func handle(m message) {
 		}
 	case m.Method == "tools/list":
 		var tools []map[string]any
-		for _, n := range []string{"echo", "progress", "notify", "sample", "related", "stderr", "env", "pid", "crash"} {
+		for _, n := range []string{"echo", "progress", "notify", "sample", "ask", "related", "stderr", "env", "pid", "crash"} {
 			tools = append(tools, map[string]any{"name": n, "inputSchema": map[string]any{"type": "object"}})
 		}
 		reply(m.ID, map[string]any{"tools": tools})
@@ -159,9 +167,11 @@ func handle(m message) {
 
 var samples int
 
-func sample(id string) {
+func sample(id string) { samplePrompt(id, "hi") }
+
+func samplePrompt(id, prompt string) {
 	send(map[string]any{"jsonrpc": "2.0", "id": id, "method": "sampling/createMessage", "params": map[string]any{
-		"messages": []any{map[string]any{"role": "user", "content": map[string]any{"type": "text", "text": "hi"}}}, "maxTokens": 10}})
+		"messages": []any{map[string]any{"role": "user", "content": map[string]any{"type": "text", "text": prompt}}}, "maxTokens": 10}})
 }
 
 func call(m message) {
@@ -200,6 +210,11 @@ func call(m message) {
 		samples++
 		sample(fmt.Sprintf("sample-%d", samples+1))
 		reply(m.ID, text("asked"))
+	case "ask":
+		samples++
+		id := fmt.Sprintf("sample-%d", samples+1)
+		asked[id] = m.ID
+		samplePrompt(id, "prompt built from the arguments: "+p.Arguments.Text)
 	case "related":
 		send(map[string]any{"jsonrpc": "2.0", "method": "notifications/message", "params": map[string]any{"level": "info",
 			"data": "about " + p.Arguments.TaskID, "_meta": map[string]any{"io.modelcontextprotocol/related-task": map[string]any{"taskId": p.Arguments.TaskID}}}})

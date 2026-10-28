@@ -369,12 +369,19 @@ func (s *Server) Handler() http.Handler {
 			_, _ = io.WriteString(w, "kontra connect forwards /agents/…, /mcp/…, /mcp and /.well-known/… only\n")
 			return
 		}
+		svc := ServicePath(r.URL.Path)
+		if read := r.Method == http.MethodGet || r.Method == http.MethodHead; !read && (isA2APath(r.URL.Path) && svc == "" ||
+			strings.HasPrefix(r.URL.Path, "/.well-known/")) {
+			// The gate has no such route (a /.well-known/ document is read, never posted; /agents/ needs a service): a
+			// message sent there would go unsealed, whatever service it was meant for (D247).
+			refuse(w, r, http.StatusNotFound, "kontra connect: no service at this path")
+			return
+		}
 		if seal := s.sealing(); seal != nil {
-			svc := ServicePath(r.URL.Path)
-			// A card read ({svc}/.well-known/…, or a GET on {svc} itself) carries no part: its card is verified and its
-			// pin checked when it is served (modify, CardSeen).
-			cardRead := isA2APath(r.URL.Path) && (isCardPath(r.URL.Path) ||
-				r.Method == http.MethodGet && strings.TrimRight(r.URL.Path, "/") == svc)
+			// A card read (a GET of {svc}/.well-known/…, or of {svc} itself) carries no part: its card is verified and
+			// its pin checked when it is served (modify, CardSeen). Any other method is the service's request (D247).
+			cardRead := (r.Method == http.MethodGet || r.Method == http.MethodHead) && isA2APath(r.URL.Path) &&
+				(isCardPath(r.URL.Path) || strings.TrimRight(r.URL.Path, "/") == svc)
 			if svc != "" && !cardRead {
 				// ext-sealed.md §5: the pin is checked and the request sealed before anything is forwarded; a refusal
 				// is answered here and opens no stream.
@@ -383,6 +390,7 @@ func (s *Server) Handler() http.Handler {
 					s.sealRefused(w, r, err)
 					return
 				}
+				defer job.Done() // the exchange ends with this handler: an MCP session's job stays until then (D241)
 				r = r2.WithContext(context.WithValue(r2.Context(), jobKey{}, job))
 			}
 		}
@@ -696,7 +704,7 @@ func (s *Server) modify(res *http.Response) error {
 		}
 	}
 	if card {
-		out, err := RewriteCard(ctx, b, s.cfg.Gate, s.Local(), s.tunnel)
+		out, err := RewriteCard(ctx, b, s.cfg.Gate, s.Local(), ServicePath(req.URL.Path), s.tunnel)
 		if err != nil {
 			s.log.Error("a card whose gate signature does not verify is not served (spec/tunnel.md §9)", "path", clip(req.URL.Path), "err", err)
 			return err

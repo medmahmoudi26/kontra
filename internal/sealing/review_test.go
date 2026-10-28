@@ -3,6 +3,7 @@ package sealing
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -452,6 +453,7 @@ func TestReviewPlainCallInputRequestSealed(t *testing.T) {
 		t.Fatalf("an unsealed answer to a plain call's input request: %q", r)
 	}
 	ah := f.mcpHeader(b, s1, "sampleLLM", "0")
+	ah.Op = sealed.OpAnswer
 	ans := []byte(`{"jsonrpc":"2.0","id":0,"result":{"_meta":{"sh.kontra/sealed":` + envelope(f.seal(ah, `{"role":"assistant","content":{"type":"text","text":"SECRET-ANSWER"},"model":"m"}`)) + `}}}`)
 	ax := f.h.MCPOn(mcpPre(s1, "", ""), "up-1")
 	out, r := fromClient(t, ax, ans)
@@ -477,8 +479,8 @@ func TestReviewHiringPlainCallInputs(t *testing.T) {
 	}
 	callHdr := openCall(t, f, sent)
 	// The hosting node seals the call's sampling request to the call's replyTo with its rk.
-	hd := sealed.Header{V: 1, Dir: sealed.DirReply, Service: "fs", Session: session, Tool: "sampleLLM", MessageID: "0", Part: 0,
-		Parts: 1, Kind: sealed.KindData}
+	hd := sealed.Header{V: 1, Dir: sealed.DirReply, Service: "fs", Session: session, Tool: "sampleLLM", MessageID: "0",
+		Op: sealed.OpInput, Part: 0, Parts: 1, Kind: sealed.KindData}
 	rcpt, err := age.ParseX25519Recipient(callHdr.ReplyTo)
 	if err != nil {
 		t.Fatal(err)
@@ -915,7 +917,7 @@ func TestReviewSessionKeyReleased(t *testing.T) {
 		t.Fatalf("a session the gate closed keeps its key: %d files", len(ents))
 	}
 	hr.h.mu.Lock()
-	_, known := hr.h.services[sid]
+	_, known := hr.h.sessions[sid]
 	hr.h.mu.Unlock()
 	if known {
 		t.Fatal("a session the gate closed stays known")
@@ -923,7 +925,8 @@ func TestReviewSessionKeyReleased(t *testing.T) {
 
 	// A session that is left idle (no DELETE, no 404): its key goes after sessionJobIdle with the sweep.
 	_, hr2, sid2 := sealedMCPSession(t)
-	mcpLocal(t, hr2, sid2, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"m":"x"}}}`)
+	_, j2 := mcpLocal(t, hr2, sid2, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"m":"x"}}}`)
+	j2.Done() // the client left: the exchange ended (D241)
 	hr2.now = hr2.now.Add(time.Hour)
 	hr2.h.Sweep()
 	if ents, _ := os.ReadDir(hr2.h.cfg.Jobs.Dir()); len(ents) == 0 {
@@ -935,7 +938,7 @@ func TestReviewSessionKeyReleased(t *testing.T) {
 		t.Fatalf("an idle session keeps its key: %d files", len(ents))
 	}
 	hr2.h.mu.Lock()
-	_, known = hr2.h.services[sid2]
+	_, known = hr2.h.sessions[sid2]
 	hr2.h.mu.Unlock()
 	if known {
 		t.Fatal("an idle session stays known")
@@ -986,11 +989,15 @@ func TestReviewReusedIDAfterSealedCall(t *testing.T) {
 		}
 	}
 
+	// The hiring node refuses a request that reuses a sealed call's id here, as the hosting node does (D245): the
+	// record stays the sealed call's.
 	_, hr, sid := sealedMCPSession(t)
 	mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"m":"x"}}}`)
-	_, job := mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":4,"method":"tools/list"}`)
-	if got := mcpAnswer(t, hr, job, `{"jsonrpc":"2.0","id":4,"result":{"tools":[]}}`, false, nil); !strings.Contains(got, `"tools"`) {
-		t.Fatalf("the hiring node's answer to a reused id: %s", got)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/fs", strings.NewReader(`{"jsonrpc":"2.0","id":4,"method":"tools/list"}`))
+	req.Header.Set(mcpwire.HeaderSessionID, sid)
+	var le *LocalError
+	if _, _, err := hr.h.Request(context.Background(), "/mcp/fs", req); !errors.As(err, &le) || le.Status != http.StatusBadRequest {
+		t.Fatalf("a request reusing a sealed call's id: %v", err)
 	}
 }
 
@@ -1021,7 +1028,8 @@ func TestSessionKeyKeptForTheGatesSessionIdle(t *testing.T) {
 		_, initJob := mcpLocal(t, hr, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`)
 		mcpAnswer(t, hr, initJob, `{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"experimental":{"sh.kontra/sealed":`+
 			string(extensionFor(true, f.node.Recipient()))+`}},"serverInfo":{"name":"s","version":"1"}`+meta+`}}`, false, http.Header{mcpwire.HeaderSessionID: {sid}})
-		mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"m":"x"}}}`)
+		_, j := mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"m":"x"}}}`)
+		j.Done() // the client left: the exchange ended (D241)
 		return hr, sid
 	}
 	keys := func(hr *hirer) int {

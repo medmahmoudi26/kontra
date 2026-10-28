@@ -388,7 +388,7 @@ func TestPeerListenerRefusals(t *testing.T) {
 var b2url func(string) string
 
 // §11.2: without peer.listen a replica picks only its own sessions; a session pinned to a tunnel another replica
-// holds is 404 there, and its row stays open.
+// holds is 404 there, and its row is closed tunnel_lost (D250).
 func TestWithoutPeerOnlyLocal(t *testing.T) {
 	e := newEnv(t)
 	e.service("tun", "", nil)
@@ -407,8 +407,9 @@ func TestWithoutPeerOnlyLocal(t *testing.T) {
 	if rep := c.call(a.url+"/mcp/tun", 1, "echo", "x"); rep.status != 404 {
 		t.Errorf("a session held by B, on A: %d", rep.status)
 	}
-	if row := e.row(c.sid); row.closed {
-		t.Errorf("the row closed: %+v", row)
+	// The 404 ends the session: its row is closed, so that the client's new initialize does not count it (D250).
+	if row := e.row(c.sid); !row.closed || *row.reason != string(CloseTunnelLost) {
+		t.Errorf("the row of the session A answered 404 for: %+v", row)
 	}
 	// With a session of its own, A picks it.
 	up2 := mcptest.New()

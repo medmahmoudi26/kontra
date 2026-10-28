@@ -80,7 +80,7 @@ func (h *Handler) initialize(rq *request) {
 			case errors.Is(err, ErrTooManySessions):
 				h.log.Info("mcp: an initialize is refused: the principal's sessions are at max_sessions_per_principal and in use",
 					"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", rq.svc.MaxSessionsPerPrincipal)
-				writeRefusal(rq.w, tooManySessions(rq.w, rq))
+				writeRefusal(rq.w, tooManySessions(rq.w, rq, err))
 				return
 			case err != nil:
 				h.internal(rq, "apply max_sessions_per_principal", err)
@@ -137,6 +137,7 @@ func (h *Handler) initialize(rq *request) {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(rq.ctx()), 10*time.Second)
 		defer cancel()
 		if err := h.openSession(ctx, rq, clientID, *sess); errors.Is(err, ErrTooManySessions) {
+			tooMany := err
 			// A concurrent initialize of the principal took the room this one made (D231): its upstream session goes.
 			h.log.Info("mcp: an initialize is refused: the principal's sessions are at max_sessions_per_principal and in use",
 				"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", rq.svc.MaxSessionsPerPrincipal)
@@ -144,7 +145,7 @@ func (h *Handler) initialize(rq *request) {
 				h.deleteUpstream(context.WithoutCancel(rq.ctx()), t, *sess)
 			}
 			o.sid = ""
-			return nil, tooManySessions(rq.w, rq)
+			return nil, tooManySessions(rq.w, rq, tooMany)
 		} else if err != nil {
 			h.log.Error("mcp: a session row was not written", "service", rq.svc.Ref.Name, "error", err)
 			if sess.UpstreamSID != "" {
@@ -361,16 +362,28 @@ func (h *Handler) pinned(rq *request) {
 		return
 	}
 	t, err := h.pinnedTarget(rq)
+	if rq.r.Method == http.MethodDelete {
+		// D196: a DELETE always closes the row deleted, and is 200 when the upstream's tunnel is gone or cannot be
+		// reached from here, whichever of §6.1's check, the holder's liveness or the peer hop found it so (D250); only
+		// a key the gate could not check is 503.
+		var g *goneError
+		switch {
+		case err == nil:
+			h.delete(rq, t)
+		case errors.As(err, &g) || errors.Is(err, errNoHop):
+			h.closeRow(rq, CloseDeleted)
+			writeEmpty(rq.w, http.StatusOK)
+		default:
+			h.upstreamFailed(rq, err)
+		}
+		return
+	}
 	if err != nil {
 		h.upstreamFailed(rq, err)
 		return
 	}
-	switch rq.r.Method {
-	case http.MethodGet:
+	if rq.r.Method == http.MethodGet {
 		h.forward(rq, t, nil)
-		return
-	case http.MethodDelete:
-		h.delete(rq, t)
 		return
 	}
 	switch m := rq.msg; m.Method {
@@ -420,8 +433,8 @@ func isGateRequestID(id json.RawMessage) bool {
 // pinnedTarget is where a pinned session's requests go (§11.2): its direct backend; its tunnel session on this
 // replica after §6.1's check; or, for a tunnel session another replica holds, that replica's peer listener. A
 // session §6.1's check refuses is closed (revoked or tunnel_lost); one whose holder is no longer live is closed
-// tunnel_lost. Without peer.listen, or when the holder advertises no peer address, it is 404 and the row stays open
-// until it is idle (§11.2).
+// tunnel_lost. Without peer.listen, or when the holder advertises no peer address, it is 404 and the row is closed
+// tunnel_lost, so that the client's new initialize does not count it (§11.2, D250).
 func (h *Handler) pinnedTarget(rq *request) (target, error) {
 	s, svc := rq.sess, rq.svc
 	switch {
@@ -456,7 +469,8 @@ func (h *Handler) pinnedTarget(rq *request) (target, error) {
 }
 
 // errNoHop is a pinned session held by another replica that this replica cannot reach: no peer.listen here, or no
-// peer address there. The client gets 404 (it re-initializes on this replica) and the row stays open (§11.2).
+// peer address there. The client gets 404 (it re-initializes on this replica) and the row is closed tunnel_lost: the
+// session the client was told is gone no longer counts against max_sessions_per_principal (§11.2, D250).
 var errNoHop = errors.New("mcprelay: the session's tunnel is held by another replica and there is no peer hop")
 
 // upstreamFailed answers a request whose exchange could not be made.
@@ -471,6 +485,7 @@ func (h *Handler) upstreamFailed(rq *request, err error) {
 	case errors.Is(err, errNoHop):
 		h.log.Info("mcp: a session pinned to another replica cannot be reached without the peer hop (§11.2)",
 			"service", rq.svc.Ref.Name, "holder", rq.sess.ReplicaID)
+		h.closeRow(rq, CloseTunnelLost)
 		h.noSession(rq)
 	case errors.Is(err, errUnchecked):
 		h.log.Warn("mcp: a tunnel session's key could not be checked", "service", rq.svc.Ref.Name, "error", err)
@@ -543,7 +558,7 @@ func (h *Handler) delete(rq *request, t target) {
 	h.closeRow(rq, CloseDeleted)
 	if err != nil {
 		var g *goneError
-		if errors.As(err, &g) || errors.Is(err, errNoHop) {
+		if errors.As(err, &g) {
 			writeEmpty(rq.w, http.StatusOK) // the gate's session is ended; the upstream's dies with its tunnel
 			return
 		}

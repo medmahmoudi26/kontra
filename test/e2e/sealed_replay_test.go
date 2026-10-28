@@ -406,7 +406,7 @@ func (s *mcpSealer) call(t *testing.T, sid string, id int, tool string, args any
 	}
 	sum := sha256.Sum256([]byte(sid))
 	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: s.service, IAT: time.Now().Unix(),
-		Session: hex.EncodeToString(sum[:]), Tool: tool, MessageID: strconv.Itoa(id), Part: 0, Parts: 1, Kind: sealed.KindData,
+		Session: hex.EncodeToString(sum[:]), Tool: tool, MessageID: strconv.Itoa(id), Op: sealed.OpCall, Part: 0, Parts: 1, Kind: sealed.KindData,
 		Kids: s.kids, ReplyTo: s.job.Recipient().String(), RK: sealed.EncodeRK(s.rk)}
 	ct, err := sealed.Seal(s.recipients, hd, body)
 	if err != nil {

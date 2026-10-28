@@ -193,6 +193,9 @@ func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logge
 			mcpError(w, http.StatusBadRequest, m.ID, mcpwire.CodeInvalidRequest, "invalid request")
 			return nil, false
 		}
+		if x.era == mcpwire.EraModern {
+			x.seal.SetModern() // the node's half of D162: a sealed service is never served a 2026-07-28 request (D234)
+		}
 		out, err := x.seal.FromClient(d.Body, dm)
 		if err != nil {
 			x.seal.Refuse(w, m.ID, err)
@@ -200,7 +203,7 @@ func (f *mcpURL) request(w http.ResponseWriter, r *http.Request, log *slog.Logge
 		}
 		d.Body = out
 	}
-	r.Body = io.NopCloser(bytes.NewReader(d.Body))
+	r.Body = x.seal.Body(d.Body) // marks a sealed exchange handed once the transport read it whole (End, D233)
 	r.ContentLength = int64(len(d.Body))
 	r.Header.Del("Content-Length")
 	r.TransferEncoding = nil
@@ -279,6 +282,17 @@ func (x *mcpExchange) response(res *http.Response) error {
 			// side reads every 2xx body (sealing.Hosting.Response): a sealed call's result labelled text/plain would
 			// otherwise reach the gate unsealed (ext-sealed.md §5, "seals every part of every reply").
 			return x.unlabelled(sid, res)
+		}
+		if x.seal.SealedReply() {
+			// An error that is not JSON (Go's http.Error, a framework's error page) on a sealed exchange: its status is
+			// kept, its text, which may quote the sealed arguments, is not (D195, as the A2A side's errorResponse; D238).
+			_ = res.Body.Close()
+			b := x.seal.ErrorBody()
+			res.Header = http.Header{"Content-Type": {"application/json"}, "Content-Length": {strconv.Itoa(len(b))}}
+			res.Body = io.NopCloser(bytes.NewReader(b))
+			res.ContentLength = int64(len(b))
+			res.TransferEncoding = nil
+			res.Trailer = nil
 		}
 	}
 	return nil

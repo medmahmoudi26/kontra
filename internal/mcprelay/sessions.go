@@ -65,13 +65,24 @@ func (s *Session) HashHex() string { return hex.EncodeToString(s.Hash[:]) }
 var IdleWrite = time.Minute
 
 // EvictIdle is how old a session's last_seen_at must be before an initialize beyond max_sessions_per_principal may
-// close it (D231): the stdio bridge's own bound on stopping an idle child (stdiobridge.EvictIdle). A session with a
-// request or a stream in flight is never that old (IdleWrite). A variable for tests.
-var EvictIdle = 5 * time.Minute
+// close it (D231, D249): just above what a session in use can show (a replica serving a request or a stream of it
+// writes last_seen_at at least every IdleWrite and a half), so that a session a stock client left without a DELETE
+// (the TypeScript SDK's close sends none) makes room within one of its client's reconnect windows. A variable for
+// tests.
+var EvictIdle = 2 * time.Minute
 
 // ErrTooManySessions is a new session beyond max_sessions_per_principal when too few of the principal's sessions are
-// idle for EvictIdle to make room: it is refused, and none is closed (D231).
+// idle for EvictIdle to make room: it is refused, and none is closed (D231). The error is a *TooManySessionsError.
 var ErrTooManySessions = errors.New("mcprelay: the principal's sessions of the service are at max_sessions_per_principal and in use")
+
+// TooManySessionsError is ErrTooManySessions with when a retry may find room: once enough of the principal's sessions
+// not in use here will have been idle for EvictIdle (D249).
+type TooManySessionsError struct {
+	RetryAfter time.Duration
+}
+
+func (e *TooManySessionsError) Error() string        { return ErrTooManySessions.Error() }
+func (e *TooManySessionsError) Is(target error) bool { return target == ErrTooManySessions }
 
 // Sessions is the mcp_sessions table.
 type Sessions struct {
@@ -284,11 +295,11 @@ func (s *Sessions) capped(ctx context.Context, tenant uuid.UUID, service, princi
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, capLock(tenant, service, principal)); err != nil {
 		return nil, fmt.Errorf("mcprelay: max_sessions_per_principal: %w", err)
 	}
-	rows, err := tx.Query(ctx, `select client_sid_hash, last_seen_at <= $5::timestamptz - $6::bigint * interval '1 microsecond'
+	rows, err := tx.Query(ctx, `select client_sid_hash, last_seen_at
 		  from kontra.mcp_sessions
 		 where tenant_id = $1 and service = $2 and principal = $3 and closed_at is null and protocol_version <> $4
 		   and tunnel_session is not null
-		 order by last_seen_at, created_at`, tenant, service, principal, mcpwire.V20260728, c.Now, EvictIdle.Microseconds())
+		 order by last_seen_at, created_at`, tenant, service, principal, mcpwire.V20260728)
 	if err != nil {
 		return nil, fmt.Errorf("mcprelay: max_sessions_per_principal: %w", err)
 	}
@@ -297,19 +308,26 @@ func (s *Sessions) capped(ctx context.Context, tenant uuid.UUID, service, princi
 		busy[h] = true
 	}
 	open := 0
-	var idle [][]byte
+	var (
+		idle [][]byte
+		soon []time.Time // when each session not in use here and not idle yet will have been idle for EvictIdle
+	)
 	for rows.Next() {
 		var (
-			h      []byte
-			isIdle bool
+			h    []byte
+			seen time.Time
 		)
-		if err := rows.Scan(&h, &isIdle); err != nil {
+		if err := rows.Scan(&h, &seen); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("mcprelay: max_sessions_per_principal: %w", err)
 		}
 		open++
-		if isIdle && len(h) == 32 && !busy[[32]byte(h)] {
+		switch {
+		case len(h) != 32 || busy[[32]byte(h)]:
+		case !seen.After(c.Now.Add(-EvictIdle)):
 			idle = append(idle, h)
+		default:
+			soon = append(soon, seen.Add(EvictIdle))
 		}
 	}
 	rows.Close()
@@ -318,7 +336,13 @@ func (s *Sessions) capped(ctx context.Context, tenant uuid.UUID, service, princi
 	}
 	need := open + 1 - max(c.Limit, 1)
 	if need > len(idle) {
-		return nil, ErrTooManySessions
+		// Retry-After: when enough of the principal's sessions will be idle, the oldest first; EvictIdle when the
+		// sessions in use here leave too few (D249).
+		retry := EvictIdle
+		if k := need - len(idle); k <= len(soon) {
+			retry = soon[k-1].Sub(c.Now)
+		}
+		return nil, &TooManySessionsError{RetryAfter: max(retry, time.Second)}
 	}
 	var closed []Session
 	if need > 0 {

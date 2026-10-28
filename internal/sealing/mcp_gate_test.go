@@ -53,7 +53,9 @@ func mcpAnswer(t *testing.T, hr *hirer, job *Job, body string, sse bool, hdr htt
 	if err != nil {
 		t.Fatalf("hiring Response: %v", err)
 	}
-	return readAll(t, out)
+	got := readAll(t, out)
+	job.Done() // the exchange's end, as the hiring server's
+	return got
 }
 
 // sealed_no_plaintext (c), at package level (plan corrections WP-08): a sealed durable MCP call through a gate whose

@@ -430,7 +430,9 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		end := func() { release() }
 		if sv.Kind == tunnel.KindA2A && p.seal != nil {
 			// Sealing (ext-sealed.md §5): after the kontra-blob: parts were fetched, so a sealed part is opened once its
-			// whole age file is read; a refusal is the node's own answer (§6) and nothing reaches the service.
+			// whole age file is read; a refusal is the node's own answer (§6) and nothing reaches the service. It reads
+			// the route the service gets (out, cleaned), never the gate's spelling of it (D235).
+			r.URL.Path, r.URL.RawPath = out, ""
 			r2, sx, err := p.seal.Request(r.Context(), pre, r)
 			if err != nil {
 				reason, _ := sealed.ReasonOf(err)
@@ -459,6 +461,10 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 				sx = p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
 				defer sx.Release()
 				release = sx.Release
+				// A message the node handed whole to the server, whose exchange the gate ended before the server's answer
+				// (a URL server that answers JSON sends its headers with its result), is recorded as an accepted one, as
+				// an A2A request is (ext-sealed.md §5, D227, D233).
+				end = sx.End
 			}
 			x, ok := f.request(w, r, log, p.answerRoots(sv, out, log), sx)
 			if !ok {

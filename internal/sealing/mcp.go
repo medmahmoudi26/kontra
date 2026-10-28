@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"filippo.io/age"
@@ -39,9 +41,12 @@ import (
 // MCPExchange is one MCP exchange's sealing state on the hosting node: a POST (its message, and what the server
 // answers on its response), or a GET stream.
 type MCPExchange struct {
-	h       *Hosting
-	pre     tunnel.Preamble
+	h   *Hosting
+	pre tunnel.Preamble
+	// service is the key of the sealed state the exchange keeps (stateOf: its upstream's, D236), name the service the
+	// preamble names (the header's service, --sealed-required).
 	service string
+	name    string
 	jobID   string // "mcp-" + the session hash; "" on an exchange with no session (2026-07-28)
 	// upstreamSID is the upstream session the exchange is on (the request's Mcp-Session-Id): the server's answers to
 	// a sealed request, and the answers to its input requests, are the job's that sealed them on any exchange of
@@ -54,6 +59,20 @@ type MCPExchange struct {
 	taskOf    string      // the upstream task id a tasks/* request names
 	commit    []func() error
 	reserved  []string // what the commits record, in flight until then (hostedService.flight, Hosting.nflight)
+	// handed is set once the forwarded body was read whole by the transport (Body): End records the message then.
+	handed atomic.Bool
+	// modern is a 2026-07-28 exchange (SetModern): a sealed service is never served one (D162, D234).
+	modern bool
+	// inputAnswer is an exchange that carries an answer to an input request the node sealed (SealedReply).
+	inputAnswer bool
+}
+
+// SetModern marks the exchange a 2026-07-28 request (the node's own reading of it, relay.md §11.12), before
+// FromClient: the node refuses one to a sealed service itself rather than trust the gate to have (D162, D234).
+func (x *MCPExchange) SetModern() {
+	if x != nil {
+		x.modern = true
+	}
 }
 
 // sealedCall is a sealed tools/call of the exchange: its tool and messageId, and the replyTo and rk its request
@@ -70,7 +89,7 @@ func (h *Hosting) MCP(pre tunnel.Preamble) *MCPExchange { return h.MCPOn(pre, ""
 // MCPOn returns the sealing state of one MCP exchange on the upstream session upstreamSID (the request's
 // Mcp-Session-Id: the node's server's own session id, for a URL server or the stdio bridge).
 func (h *Hosting) MCPOn(pre tunnel.Preamble, upstreamSID string) *MCPExchange {
-	x := &MCPExchange{h: h, pre: pre, service: pre.Service, upstreamSID: upstreamSID}
+	x := &MCPExchange{h: h, pre: pre, service: h.stateOf(pre.Service), name: pre.Service, upstreamSID: upstreamSID}
 	if s := pre.MCPSession; len(s) == 64 && isHex(s) {
 		x.jobID = "mcp-" + s
 	}
@@ -100,6 +119,13 @@ func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error
 	job, err := h.jobFor(x.service, x.jobID)
 	if err != nil {
 		return nil, err
+	}
+	if x.modern && (hasSealedMeta(m.Params) || x.h.Required(x.name) || x.h.mcpGuarded(x.service, svc)) {
+		// D162 has the gate never serve a sealed MCP service to a 2026-07-28 request; the node does not take the gate's
+		// word for it (§5: the gate is not trusted to have checked a request). A sealed call sent as one would be
+		// answered with what the 2026-07-28 shapes carry outside content (a multi round-trip's inputRequests and
+		// requestState, a CreateTaskResult at the top of result) unsealed (D234).
+		return nil, reject(sealed.RejectBadHeader, "a 2026-07-28 request to a sealed MCP service (D162)")
 	}
 	if owner, ok := x.sessionOwner(svc); ok && owner != x.jobID {
 		// The upstream session the node forwards on is the request's Mcp-Session-Id, which the gate chooses as it does
@@ -140,6 +166,12 @@ func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error
 		}
 	}
 	return body, nil
+}
+
+// mcpGuarded reports an MCP service the node holds sealed state for: a sealed call it forwarded, an upstream session or
+// a task of a sealed job, or a job being opened (D234). The service's lock is held.
+func (h *Hosting) mcpGuarded(service string, svc *serviceState) bool {
+	return len(svc.MCPCalls) > 0 || len(svc.Sessions) > 0 || h.guarded(service, svc)
 }
 
 // sessionOwner is the sealed job that holds the exchange's upstream session: the session's index entry, or the job a
@@ -217,7 +249,7 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 	}
 	jobKey := flightKey("j", x.service, x.jobID)
 	if !hasEnv {
-		if x.h.Required(x.service) {
+		if x.h.Required(x.name) {
 			return nil, reject(sealed.RejectBadHeader, "an unsealed tools/call to a service started with --sealed-required")
 		}
 		if _, opening := x.h.inFlight(jobKey); job != nil || opening && x.jobID != "" {
@@ -242,12 +274,16 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 	if err := x.h.mcpRule1(hd, false); err != nil {
 		return nil, err
 	}
-	if err := x.h.checkService(hd, x.service); err != nil {
+	if err := x.h.checkService(hd, x.name); err != nil {
 		return nil, err
 	}
 	name, _ := a2awire.String(params, "name")
 	idStr := mcpID(m.ID)
 	switch {
+	case hd.Op != sealed.OpCall:
+		// D239: the buyer's sealed answer to an input request (server id N) sent as a tools/call with id N would run the
+		// tool with the answer as its arguments.
+		return nil, reject(sealed.RejectWrongMessage, "the header is not a tools/call's (op)")
 	case hd.Tool != name || name == "":
 		return nil, reject(sealed.RejectWrongMessage, "the header's tool is not params.name")
 	case hd.Session != x.pre.MCPSession || x.jobID == "":
@@ -299,6 +335,15 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 		return nil, reject(sealed.RejectReplayed, "a (session, messageId) another service of this node forwarded, or is forwarding")
 	}
 	x.reserved = append(x.reserved, flight)
+	if hs := x.h.svc(x.service); x.upstreamSID != "" {
+		// In flight until it is recorded or released: an input request the server sends about it meanwhile is its
+		// (soleCall, D232).
+		k := x.upstreamSID + "\x00" + x.jobID
+		if hs.calls[k] == nil {
+			hs.calls[k] = map[*MCPExchange]bool{}
+		}
+		hs.calls[k][x] = true
+	}
 	if job == nil {
 		x.h.reserve(bind, jobKey)
 		x.reserved = append(x.reserved, jobKey)
@@ -364,6 +409,16 @@ func (x *MCPExchange) answer(svc *serviceState, job *jobState, body []byte, m *m
 			return nil, err
 		}
 	}
+	for _, rkey := range answerKeys(x.upstreamSID, m.ID) {
+		if e, ok := svc.Inputs[rkey]; ok && e.Key == "" {
+			// An input request of a sealed session the node did not relay (D232): no client saw it, so an answer is the
+			// gate's own.
+			if hasEnv {
+				return nil, reject(sealed.RejectWrongMessage, "an answer to an input request the node did not relay")
+			}
+			return nil, reject(sealed.RejectBadHeader, "an unsealed answer to an input request of a sealed session")
+		}
+	}
 	var (
 		ij    *jobState
 		in    *InputRequest
@@ -406,6 +461,10 @@ func (x *MCPExchange) answer(svc *serviceState, job *jobState, body []byte, m *m
 		}
 		return body, nil
 	}
+	x.inputAnswer = true
+	if m.Error != nil && in != nil {
+		return x.declined(ij, in, ikey, body, m)
+	}
 	if !hasEnv {
 		return nil, reject(sealed.RejectBadHeader, "an unsealed answer to a sealed input request")
 	}
@@ -432,11 +491,13 @@ func (x *MCPExchange) answer(svc *serviceState, job *jobState, body []byte, m *m
 	if err := x.h.mcpRule1(hd, true); err != nil {
 		return nil, err
 	}
-	if err := x.h.checkService(hd, x.service); err != nil {
+	if err := x.h.checkService(hd, x.name); err != nil {
 		return nil, err
 	}
 	now := x.h.cfg.Now()
 	switch {
+	case hd.Op != sealed.OpAnswer:
+		return nil, reject(sealed.RejectWrongMessage, "the header is not an answer's (op, D239)")
 	case hd.Session != x.pre.MCPSession, hd.Session != ij.Session, hd.Tool != in.Tool, hd.MessageID != idStr:
 		return nil, reject(sealed.RejectWrongMessage, "the answer's session, tool or messageId is not the input request's")
 	case hd.TaskID != in.Gate:
@@ -472,6 +533,43 @@ func (x *MCPExchange) answer(svc *serviceState, job *jobState, body []byte, m *m
 			return err
 		}
 		if r := j.Inputs[key]; r != nil {
+			r.Answered = true
+		}
+		j.LastSeen = x.h.cfg.Now()
+		return x.h.saveJob(service, j)
+	})
+	return out, nil
+}
+
+// declined is a client's error answer to a sealed input request (a user who rejects a sampling request, a client
+// with no handler: MCP answers either with an error): it reaches the server with its code and fixed text, on an
+// exchange of the input request's session and task only and once, as a sealed answer would (D246). An error carries
+// no answer: the gate can deny the buyer's input request with one, as it can drop the request, never answer it.
+func (x *MCPExchange) declined(ij *jobState, in *InputRequest, ikey string, body []byte, m *mcpwire.Message) ([]byte, error) {
+	switch {
+	case ij.ID != x.jobID || in.Gate != x.pre.Task:
+		return nil, reject(sealed.RejectWrongMessage, "an error answer on an exchange of another session or task than its input request's")
+	case in.Answered:
+		return nil, reject(sealed.RejectReplayed, "an answer to an input request the service has had answered")
+	}
+	flight := flightKey("a", x.service, ij.ID, ikey)
+	if _, ok := x.h.inFlight(flight); ok {
+		return nil, reject(sealed.RejectReplayed, "an answer to an input request the service is being given")
+	}
+	e := map[string]json.RawMessage{"code": json.RawMessage(fmt.Sprint(m.Error.Code)), "message": a2awire.Quote(declinedText)}
+	out, err := mcpwire.SetMember(body, "error", a2awire.Encode(e))
+	if err != nil {
+		return nil, reject(sealed.RejectBadHeader, err.Error())
+	}
+	x.h.reserve(x.pre.Task, flight)
+	x.reserved = append(x.reserved, flight)
+	service, jobID := x.service, ij.ID
+	x.commit = append(x.commit, func() error {
+		j, err := x.h.jobFor(service, jobID)
+		if err != nil || j == nil {
+			return err
+		}
+		if r := j.Inputs[ikey]; r != nil {
 			r.Answered = true
 		}
 		j.LastSeen = x.h.cfg.Now()
@@ -528,13 +626,48 @@ func (x *MCPExchange) Sealed(body []byte) bool {
 	if x == nil {
 		return false
 	}
-	if x.h.Required(x.service) || bytes.Contains(bytes.ToLower(body), []byte(mcpwire.MetaSealed)) {
+	if x.h.Required(x.name) || bytes.Contains(bytes.ToLower(body), []byte(mcpwire.MetaSealed)) {
 		return true
 	}
 	hs := x.h.lock(x.service)
 	defer hs.mu.Unlock()
 	j, err := x.h.jobFor(x.service, x.jobID)
 	return err == nil && j != nil
+}
+
+// SealedReply reports an exchange whose server answer the node must never relay unread: it carries a sealed call or
+// an answer to a sealed input request, or is on a session with a sealed job, or the service was started with
+// --sealed-required (D195, D238).
+func (x *MCPExchange) SealedReply() bool {
+	if x == nil {
+		return false
+	}
+	if x.call != nil || x.inputAnswer || x.h.Required(x.name) {
+		return true
+	}
+	hs := x.h.lock(x.service)
+	defer hs.mu.Unlock()
+	if j, err := x.h.jobFor(x.service, x.jobID); err != nil || j != nil {
+		return true
+	}
+	if svc, err := x.h.service(x.service); err != nil {
+		return true
+	} else if _, ok := x.sessionOwner(svc); ok {
+		return true
+	}
+	return false
+}
+
+// ErrorBody is the node's own answer in place of a server's error on a sealed exchange that the node cannot read as
+// one JSON-RPC message (a text or HTML error page): a JSON-RPC error with the request's id, code -32603 and fixed
+// text, since a service's error routinely quotes the input it refused (D195, D238).
+func (x *MCPExchange) ErrorBody() []byte {
+	id := json.RawMessage("null")
+	if x != nil && len(bytes.TrimSpace(x.reqID)) > 0 {
+		id = x.reqID
+	}
+	return a2awire.Encode(map[string]json.RawMessage{"jsonrpc": a2awire.Quote("2.0"), "id": id,
+		"error": a2awire.Encode(map[string]json.RawMessage{"code": json.RawMessage("-32603"), "message": a2awire.Quote(sealedErrorText)})})
 }
 
 // RefuseMalformed answers a message that failed strict decoding on a sealed exchange: bad_header (§6).
@@ -553,11 +686,16 @@ func (x *MCPExchange) Refuse(w http.ResponseWriter, id json.RawMessage, err erro
 // (session, messageId), an answer's input request answered. Called once the service accepted the message (a 2xx
 // from a URL server, the message written to a stdio server); a message the node answered itself commits nothing.
 func (x *MCPExchange) Accepted() {
-	if x == nil || len(x.commit) == 0 && len(x.reserved) == 0 {
+	if x == nil {
 		return
 	}
 	hs := x.h.lock(x.service)
 	defer hs.mu.Unlock()
+	x.commitLocked()
+}
+
+// commitLocked is Accepted under the service's lock.
+func (x *MCPExchange) commitLocked() {
 	for _, c := range x.commit {
 		if err := c(); err != nil {
 			x.h.log.Error("sealing: the job's state was not written", "service", x.service, "err", err)
@@ -566,6 +704,23 @@ func (x *MCPExchange) Accepted() {
 	x.commit = nil
 	x.h.unreserve(x.reserved)
 	x.reserved = nil
+	x.unflight()
+}
+
+// unflight drops the exchange's sealed call from its service's calls in flight (soleCall). The service's lock is
+// held.
+func (x *MCPExchange) unflight() {
+	if x.call == nil {
+		return
+	}
+	hs := x.h.svc(x.service)
+	k := x.upstreamSID + "\x00" + x.jobID
+	if m := hs.calls[k]; m != nil {
+		delete(m, x)
+		if len(m) == 0 {
+			delete(hs.calls, k)
+		}
+	}
 }
 
 // Release drops what the exchange's message holds in flight without recording it: the node answered the message
@@ -581,6 +736,32 @@ func (x *MCPExchange) Release() {
 	x.commit = nil
 	x.h.unreserve(x.reserved)
 	x.reserved = nil
+	x.unflight()
+}
+
+// End is the exchange's end when the gate's context ended before the server's answer came (its headers: a URL
+// server that answers JSON sends them with its result): a message the node handed whole to the server is the
+// server's to act on, and is recorded as an accepted one, so that the gate's resend of it is a replay and the gate
+// cannot open the session's job with a binding of its own; one never handed is released (D227's rule, which MCP
+// keeps too: D233).
+func (x *MCPExchange) End() {
+	if x == nil {
+		return
+	}
+	if x.handed.Load() {
+		x.Accepted()
+		return
+	}
+	x.Release()
+}
+
+// Body is the body the node forwards for the exchange's message: it marks the exchange handed once the transport has
+// read it whole (End).
+func (x *MCPExchange) Body(b []byte) io.ReadCloser {
+	if x == nil {
+		return io.NopCloser(bytes.NewReader(b))
+	}
+	return &handedBody{r: bytes.NewReader(b), handed: &x.handed}
 }
 
 // FromServer seals one message of the server's for the client (after the roots filter): out is what to relay, keep
@@ -697,6 +878,35 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 			return compactLine(data)
 		}
 	}
+	if (m.Method == mcpwire.MethodElicit || m.Method == mcpwire.MethodSample) && (job != nil || x.opening(svc)) {
+		// D232: on a sealed session (or one whose first sealed call is with the server) an input request is sealed or
+		// not relayed, on whichever exchange it comes: of a task a sealed call created, of the exchange's own sealed
+		// call, or else of the session's one sealed plain call the server has not answered (the stdio bridge routes
+		// every request without a related task to the GET stream, and a URL server resumed with Last-Event-ID replays
+		// it there). One that nothing tells whose it is goes nowhere, and an answer to it is refused.
+		var in *InputRequest
+		if job != nil {
+			in = x.inputOf(job, m)
+		}
+		if in == nil {
+			job, in = x.soleCall(job)
+		}
+		if in == nil {
+			return nil, false, x.dropInput(svc, m)
+		}
+		params, err := x.sealInput(svc, job, in, m)
+		if err != nil {
+			return nil, false, err
+		}
+		if data, err = mcpwire.SetMember(data, "params", params); err != nil {
+			return nil, false, reject(sealed.RejectBadHeader, err.Error())
+		}
+		job.LastSeen = h.cfg.Now()
+		if err := h.saveJob(x.service, job); err != nil {
+			return nil, false, err
+		}
+		return compactLine(data)
+	}
 	if job == nil {
 		return data, true, nil
 	}
@@ -724,19 +934,6 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 			}
 			changed = true
 		}
-	case m.Method == mcpwire.MethodElicit || m.Method == mcpwire.MethodSample:
-		in := x.inputOf(job, m)
-		if in == nil {
-			break // not a request of a sealed call or of a task one created: only those are sealed (§2)
-		}
-		params, err := x.sealInput(svc, job, in, m)
-		if err != nil {
-			return nil, false, err
-		}
-		if data, err = mcpwire.SetMember(data, "params", params); err != nil {
-			return nil, false, reject(sealed.RejectBadHeader, err.Error())
-		}
-		changed = true
 	case m.Method == "notifications/tasks/status":
 		if id, _ := memberString(m.Params, "taskId"); job.Tasks[id] != nil {
 			p, err := sealStatus(m.Params, "")
@@ -788,6 +985,9 @@ func (x *MCPExchange) sealAnswer(svc *serviceState, job *jobState, req *sealedRe
 	case reqCall:
 		if bindOf(job.ReplyTo, job.RK) != bindOf(req.ReplyTo, req.RK) {
 			return nil, false, reject(sealed.RejectWrongJob, "the session's job is bound to another replyTo than the call's")
+		}
+		if res, err := strictjson.Members(m.Result); err != nil || modernResult(res) {
+			return nil, false, reject(sealed.RejectBadHeader, "a result of a sealed call that is not a 2025-11-25 one with exact keys (D162)")
 		}
 		if task, ok := mcpwire.Member(m.Result, "task"); ok && firstByte(task) == '{' {
 			up, _ := memberString(task, "taskId")
@@ -873,6 +1073,79 @@ func (x *MCPExchange) inputOf(job *jobState, m *mcpwire.Message) *InputRequest {
 	return nil
 }
 
+// soleCall is the input request an upstream request without a related task is when the exchange's upstream session
+// has exactly one sealed plain call of the job the server has not answered, recorded or in flight: that call's
+// (D232). A call in flight (handed to a URL server that answers JSON, whose answer's headers come with its result)
+// is recorded first, as Accepted would: the server's request about it is the server's acceptance of it. It returns
+// the job (made by that record for a session's first call) and nil when there is no such call, or more than one,
+// so that nothing tells whose the request is. The service's lock is held.
+func (x *MCPExchange) soleCall(job *jobState) (*jobState, *InputRequest) {
+	prefix := x.upstreamSID + "\x00"
+	var found *sealedRequest
+	n := 0
+	if job != nil {
+		for k, r := range job.Calls {
+			if r.Kind == reqCall && !r.Answered && strings.HasPrefix(k, prefix) {
+				found = r
+				n++
+			}
+		}
+	}
+	var flying *MCPExchange
+	if x.upstreamSID != "" {
+		for y := range x.h.svc(x.service).calls[x.upstreamSID+"\x00"+x.jobID] {
+			flying = y
+			n++
+		}
+	}
+	if n != 1 {
+		return job, nil
+	}
+	if flying != nil {
+		tool := flying.call.tool
+		flying.commitLocked()
+		j, err := x.h.jobFor(x.service, x.jobID)
+		if err != nil || j == nil {
+			return job, nil
+		}
+		return j, &InputRequest{Tool: tool}
+	}
+	return job, &InputRequest{Tool: found.Tool}
+}
+
+// opening reports an exchange whose session's first sealed call is in flight, its job not recorded yet (the job's
+// binding, or the upstream session, held for it). The service's lock is held.
+func (x *MCPExchange) opening(svc *serviceState) bool {
+	if x.jobID == "" {
+		return x.call != nil
+	}
+	if _, ok := x.h.inFlight(flightKey("j", x.service, x.jobID)); ok {
+		return true
+	}
+	if owner, ok := x.sessionOwner(svc); ok && owner == x.jobID {
+		return true
+	}
+	return x.call != nil
+}
+
+// dropInput is D232's answer to an input request on a sealed session that the node cannot seal (no job yet, or no
+// call or task it can tell made it): it is not relayed, and its id is recorded on the upstream session as an input
+// request the node did not relay, so that any answer to it (the gate's own, since no client saw it) is refused
+// (answer). The service's lock is held.
+func (x *MCPExchange) dropInput(svc *serviceState, m *mcpwire.Message) error {
+	x.h.log.Warn("sealing: an input request of a sealed session that no sealed call or task of it can be told to have made is not relayed (D232)",
+		"service", x.service, "method", m.Method)
+	if len(m.ID) == 0 {
+		return nil
+	}
+	key := respKey(x.upstreamSID, m.ID)
+	if _, ok := svc.Inputs[key]; ok {
+		return nil
+	}
+	svc.put(setInputs, key, indexEntry{Job: x.jobID, At: x.h.cfg.Now()})
+	return x.h.st.saveService(x.service, svc)
+}
+
 // compactLine is a message the node rewrote, on one line (an SSE data line, a stdio line).
 func compactLine(data []byte) ([]byte, bool, error) {
 	var c bytes.Buffer
@@ -895,6 +1168,9 @@ func (x *MCPExchange) sealResult(job *jobState, result json.RawMessage, tool, me
 	if _, claims, _ := sealed.ParseMCPResult(result); claims {
 		return nil, reject(sealed.RejectBadHeader, "the service sent a result with the sealed resource")
 	}
+	if modernResult(res) {
+		return nil, reject(sealed.RejectBadHeader, "a 2026-07-28 result of a sealed call (D162)")
+	}
 	inner := map[string]json.RawMessage{}
 	if v, ok := res["content"]; ok {
 		inner["content"] = v
@@ -916,8 +1192,8 @@ func (x *MCPExchange) sealResult(job *jobState, result json.RawMessage, tool, me
 			return nil, reject(sealed.RejectBadHeader, "isError is not a boolean")
 		}
 	}
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.service), TaskID: gateTask,
-		Session: job.Session, Tool: tool, MessageID: messageID, Part: 0, Parts: 1}
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.name), TaskID: gateTask,
+		Session: job.Session, Tool: tool, MessageID: messageID, Op: sealed.OpResult, Part: 0, Parts: 1}
 	ct, err := x.h.sealFor(x.service, job, hd, plainOf{kind: sealed.KindData, body: body})
 	if err != nil {
 		return nil, err
@@ -931,6 +1207,20 @@ func (x *MCPExchange) sealResult(job *jobState, result json.RawMessage, tool, me
 	res["content"] = envm["content"]
 	res["isError"] = envm["isError"]
 	return a2awire.Encode(res), nil
+}
+
+// modernResult reports a result with a member of 2026-07-28's (resultType, a multi round-trip's inputRequests and
+// requestState, a CreateTaskResult's taskId at the top of result), in any case: a sealed call's answer holds none,
+// and their content (built from the sealed arguments) would be relayed outside what the node seals (D234).
+func modernResult(res map[string]json.RawMessage) bool {
+	for k := range res {
+		for _, m := range []string{"resultType", "inputRequests", "requestState", "taskId"} {
+			if strings.EqualFold(k, m) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // resultReads are the members of a CallToolResult the node reads: a lone case variant of one is refused (D172).
@@ -967,8 +1257,8 @@ func (x *MCPExchange) sealInput(svc *serviceState, job *jobState, in *InputReque
 	// header: a durable task's input request carries its gate task id too (as its result does), so that the hiring
 	// node can tell an input request replayed from another task of the same session and tool (rule 4, which it then
 	// checks), and its answer names it back (mcpRule1); a passthrough task's, or a plain call's, carries none.
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.service), TaskID: in.Gate,
-		Session: job.Session, Tool: in.Tool, MessageID: msgID, Part: 0, Parts: 1}
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.name), TaskID: in.Gate,
+		Session: job.Session, Tool: in.Tool, MessageID: msgID, Op: sealed.OpInput, Part: 0, Parts: 1}
 	ct, err := x.h.sealFor(x.service, job, hd, plainOf{kind: sealed.KindData, body: body})
 	if err != nil {
 		return nil, err

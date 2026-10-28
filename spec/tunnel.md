@@ -79,7 +79,10 @@ states that bound in the `initialize` result's `_meta["sh.kontra/session_idle_s"
 D224). The node keeps it with the job; a value that is not a whole number of seconds from 1 to 30 days, or none,
 counts as a day. A session the node no longer knows (a gate that keeps sessions longer than 30 days, every sealed
 session after the node restarts) is answered `404` by the node, on a `GET` as on a `POST`, without forwarding
-anything, and the client initializes again.
+anything, and the client initializes again. While an exchange of a session is open (a `GET` stream, a call in
+flight) its key stays, whatever the sweep or a `404` on another exchange says, and goes once the last ends (D241);
+a session the client left without a `DELETE` and in which no sealed call was made is forgotten once idle that long
+too (D242).
 
 ### 2.4 Credentials
 
@@ -365,6 +368,10 @@ The node is a **fixed-target reverse proxy**, not a SOCKS proxy (`sidecar_not_a_
 - The node's own server for tunnel streams sets a header read timeout only, never a write timeout (SSE).
 - For an MCP service, stdio or URL, the node answers the server's `roots/list` itself and keeps the client's
   roots from the server (§10, D173).
+- Two services whose targets share an upstream (one origin, any loopback name for a loopback host, and the base
+  path of one the other's or under it, the root covering every path) reach the same server, so the node keeps their
+  sealed state as one: an exchange of either is guarded by the sealed jobs of both ([`ext-sealed.md`](ext-sealed.md)
+  §5, D236). A stdio service runs children of its own and shares nothing.
 
 **Responses the node writes itself** carry a `Kontra-Node` header, so the gate never mistakes them for the
 service's own ([`relay.md`](relay.md) §6.4): `not_hosted` (404), `kind_mismatch` (404), `full` (503),
@@ -428,10 +435,13 @@ differences:
 - Its edge limits are the session's (§6.2 for anonymous sessions), counted with the session as the client:
   `limits.body` and the body timeout as on the network, `rps_per_ip` per session, and in flight the session's
   stream cap (§14), not shared with the same API key's requests from the network (D207).
-- Card URLs: the node rewrites `supportedInterfaces[].url` in cards it serves locally to its own
-  `http://localhost:7777/…` URLs, after verifying the gate's card signature with a `jku` equal to
+- Card URLs: the node rewrites every `supportedInterfaces[].url` in a card it serves locally to its own
+  `http://localhost:7777{svc}`, the service the card was read for, whatever path the gate's names (the node seals by
+  path: a gate's card that pointed a client at another path, `{svc}/.well-known/x`, `/agents//x`, `/mcp` or another
+  service's, would have its messages go unsealed), after verifying the gate's card signature with a `jku` equal to
   `{the origin it dialed}/.well-known/jwks.json` ([`relay.md`](relay.md) §3). A card whose gate signature does not
-  verify is not served locally.
+  verify is not served locally. A request other than a `GET` (or `HEAD`) to `/.well-known/…`, or to an `/agents/…`
+  path that names no service, is refused `404` here: the gate has no such route (D247).
 
 Sealing and unsealing for hired jobs happen in the node, around this forwarding ([`ext-sealed.md`](ext-sealed.md)).
 

@@ -647,22 +647,22 @@ func TestRewriteCardRefusals(t *testing.T) {
 	g := newFakeGate(t, "http://127.0.0.1:18443")
 	other := newFakeGate(t, "http://127.0.0.1:18443") // same origin, another key
 	client := &http.Client{Transport: &streamTransport{open: &fakeTunnel{gate: g.handler(t)}}}
-	if _, err := RewriteCard(context.Background(), g.signedCard(t), gateURL, local, client); err != nil {
+	if _, err := RewriteCard(context.Background(), g.signedCard(t), gateURL, local, "/agents/hello", client); err != nil {
 		t.Fatalf("the gate's own card: %v", err)
 	}
 	before := g.jwksN.Load()
-	if _, err := RewriteCard(context.Background(), other.signedCard(t), gateURL, local, client); !errors.Is(err, ErrCardNotVerified) {
+	if _, err := RewriteCard(context.Background(), other.signedCard(t), gateURL, local, "/agents/hello", client); !errors.Is(err, ErrCardNotVerified) {
 		t.Fatalf("a card signed by another key: %v", err)
 	}
 	if g.jwksN.Load() != before+1 {
 		t.Fatalf("a card whose kid is unknown makes the node fetch the key set again once (rotation): %d fetches", g.jwksN.Load()-before)
 	}
 	unsigned := []byte(`{"name":"x","supportedInterfaces":[{"url":"http://127.0.0.1:18443/agents/x"}]}`)
-	if _, err := RewriteCard(context.Background(), unsigned, gateURL, local, client); !errors.Is(err, ErrCardNotVerified) {
+	if _, err := RewriteCard(context.Background(), unsigned, gateURL, local, "/agents/x", client); !errors.Is(err, ErrCardNotVerified) {
 		t.Fatalf("an unsigned card: %v", err)
 	}
 	dup := bytes.Replace(g.signedCard(t), []byte(`"name":"hello"`), []byte(`"name":"hello","NAME":"evil"`), 1)
-	if _, err := RewriteCard(context.Background(), dup, gateURL, local, client); !errors.Is(err, ErrCardNotVerified) {
+	if _, err := RewriteCard(context.Background(), dup, gateURL, local, "/agents/hello", client); !errors.Is(err, ErrCardNotVerified) {
 		t.Fatalf("a card with a case-variant member: %v", err)
 	}
 }

@@ -88,6 +88,9 @@ type contextEntry struct {
 type indexEntry struct {
 	Job string `json:"job"`
 	Key string `json:"key"`
+	// At is when an input request the node did not relay was recorded (Inputs with no Key, D232): Sweep drops it once
+	// it is older than --sealed-max-age.
+	At time.Time `json:"at,omitzero"`
 }
 
 // The sets of serviceState, as service.log names them.

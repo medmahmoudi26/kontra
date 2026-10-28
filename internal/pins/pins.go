@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -120,6 +121,11 @@ type Outcome struct {
 type Store struct {
 	path string
 	now  func() time.Time
+
+	// checked are the (gate, service) pairs this process has checked: --accept-change accepts what is pending at a
+	// service's first check of the run only, never a change that comes later (D248).
+	mu      sync.Mutex
+	checked map[string]bool
 }
 
 // file is the pins file's JSON.
@@ -133,7 +139,7 @@ type file struct {
 // An existing file is read once here, so that a bad file stops kontra connect at start; every Check reads it
 // again under the lock.
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, now: time.Now}
+	s := &Store{path: path, now: time.Now, checked: map[string]bool{}}
 	fh, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
@@ -167,6 +173,15 @@ func (s *Store) Check(gate, service string, now Pin, opts Options) (Outcome, err
 		return Outcome{}, errors.New("pins: a pin needs a gate and a service")
 	}
 	now = normalize(now)
+	// --accept-change <service> accepts the change pending at the service's first check in this process: the one the
+	// operator saw refused and restarted to accept. A later change is refused until the next explicit acceptance, so
+	// that a node left running with the flag does not record every later substitution silently (D248).
+	s.mu.Lock()
+	key := gate + "\x00" + service
+	first := !s.checked[key]
+	s.checked[key] = true
+	s.mu.Unlock()
+	accept := first && slices.Contains(opts.Accept, service)
 	var out Outcome
 	err := s.change(func(f *file) (bool, error) {
 		prev, ok := f.Pins[gate][service]
@@ -182,7 +197,7 @@ func (s *Store) Check(gate, service string, now Pin, opts Options) (Outcome, err
 			return false, nil
 		}
 		for _, c := range changes {
-			if c.refusedAlways() || (c.needsAccept() && (opts.PinRecipients || !slices.Contains(opts.Accept, service))) {
+			if c.refusedAlways() || (c.needsAccept() && (opts.PinRecipients || !accept)) {
 				return false, &ChangeError{Gate: gate, Service: service, Changes: changes}
 			}
 		}

@@ -102,7 +102,12 @@ type Header struct {
 	ArtifactID string `json:"artifactId,omitempty"`
 	// Chunk is, for an artifact update, the 0-based count of updates for its artifactId the hosting node
 	// sealed; 0 for a whole artifact; absent on messages.
-	Chunk     *int     `json:"chunk,omitempty"`
+	Chunk *int `json:"chunk,omitempty"`
+	// Op is an MCP header's role (D239): call (a tools/call's arguments), answer (the client's answer to an input
+	// request), result (a call's or a task's result) or input (an input request). Every MCP header carries it and no
+	// A2A header does, so that a header of one role is never taken for another's: an answer's and a call's, or an
+	// input request's and a result's, are otherwise alike, and messageId holds the client's ids and the server's.
+	Op        Op       `json:"op,omitempty"`
 	Part      int      `json:"part"`
 	Parts     int      `json:"parts"`
 	Kind      Kind     `json:"kind"`
@@ -113,10 +118,22 @@ type Header struct {
 	Auth      string   `json:"auth,omitempty"`
 }
 
+// Op is an MCP header's role (Header.Op).
+type Op string
+
+// Roles of an MCP header (D239): call and answer are sealed by the hiring node (dir req), result and input by the
+// hosting node (dir res).
+const (
+	OpCall   Op = "call"
+	OpAnswer Op = "answer"
+	OpResult Op = "result"
+	OpInput  Op = "input"
+)
+
 // headerMembers are the members Header knows, by their exact names.
 var headerMembers = map[string]bool{
 	"v": true, "dir": true, "service": true, "iat": true, "taskId": true, "contextId": true, "session": true, "tool": true,
-	"messageId": true, "artifactId": true, "chunk": true, "part": true, "parts": true, "kind": true,
+	"messageId": true, "artifactId": true, "chunk": true, "op": true, "part": true, "parts": true, "kind": true,
 	"mediaType": true, "kids": true, "replyTo": true, "rk": true, "auth": true,
 }
 
@@ -166,6 +183,15 @@ func (h Header) validate() error {
 	default:
 		return bad("kind %s is not text, raw, url or data", strictjson.Quote(string(h.Kind)))
 	}
+	switch {
+	case (h.Session != "") != (h.Op != ""):
+		return bad("op is every MCP header's (one with a session) and no A2A header's")
+	case h.Op == "":
+	case (h.Op == OpCall || h.Op == OpAnswer) && h.Dir != DirRequest, (h.Op == OpResult || h.Op == OpInput) && h.Dir != DirReply:
+		return bad("op %s is not of dir %s", strictjson.Quote(string(h.Op)), strictjson.Quote(string(h.Dir)))
+	case h.Op != OpCall && h.Op != OpAnswer && h.Op != OpResult && h.Op != OpInput:
+		return bad("op %s is not call, answer, result or input", strictjson.Quote(string(h.Op)))
+	}
 	if h.IAT < 0 {
 		return bad("iat is negative")
 	}
@@ -192,7 +218,7 @@ func (h Header) validate() error {
 		}
 	}
 	for _, s := range append([]string{string(h.Dir), h.Service, h.TaskID, h.ContextID, h.Session, h.Tool, h.MessageID,
-		h.ArtifactID, string(h.Kind), h.MediaType, h.ReplyTo, h.RK, h.Auth}, h.Kids...) {
+		h.ArtifactID, string(h.Op), string(h.Kind), h.MediaType, h.ReplyTo, h.RK, h.Auth}, h.Kids...) {
 		for i := 0; i < len(s); i++ {
 			if s[i] >= 0x80 {
 				return bad("a member is not ASCII")

@@ -225,7 +225,7 @@ func TestHeaderRefusals(t *testing.T) {
 func TestInputRequestHeaders(t *testing.T) {
 	hosting, perJob := newID(t), newID(t)
 	session := strings.Repeat("ab", 32)
-	in := Header{V: Version, Dir: DirReply, Session: session, Tool: "book", MessageID: "7", Part: 0, Parts: 1,
+	in := Header{V: Version, Dir: DirReply, Session: session, Tool: "book", MessageID: "7", Op: OpInput, Part: 0, Parts: 1,
 		Kind: KindData, MediaType: "", Kids: kidsOf(perJob)}
 	rk, _ := NewRK()
 	auth, err := Auth(rk, in, []byte(`{"message":"Which date?"}`))
@@ -234,14 +234,14 @@ func TestInputRequestHeaders(t *testing.T) {
 	}
 	in.Auth = auth
 	answer := Header{V: Version, Dir: DirRequest, IAT: 1761490100, Session: session, Tool: "book", MessageID: "7",
-		Part: 0, Parts: 1, Kind: KindData, MediaType: "", Kids: kidsOf(hosting),
+		Op: OpAnswer, Part: 0, Parts: 1, Kind: KindData, MediaType: "", Kids: kidsOf(hosting),
 		ReplyTo: perJob.Recipient().String(), RK: EncodeRK(rk)}
 	for _, c := range []struct {
 		h    Header
 		want string
 	}{
-		{in, `{"auth":"` + auth + `","dir":"res","kids":["` + in.Kids[0] + `"],"kind":"data","mediaType":"","messageId":"7","part":0,"parts":1,"session":"` + session + `","tool":"book","v":1}`},
-		{answer, `{"dir":"req","iat":1761490100,"kids":["` + answer.Kids[0] + `"],"kind":"data","mediaType":"","messageId":"7","part":0,"parts":1,"replyTo":"` + answer.ReplyTo + `","rk":"` + answer.RK + `","session":"` + session + `","tool":"book","v":1}`},
+		{in, `{"auth":"` + auth + `","dir":"res","kids":["` + in.Kids[0] + `"],"kind":"data","mediaType":"","messageId":"7","op":"input","part":0,"parts":1,"session":"` + session + `","tool":"book","v":1}`},
+		{answer, `{"dir":"req","iat":1761490100,"kids":["` + answer.Kids[0] + `"],"kind":"data","mediaType":"","messageId":"7","op":"answer","part":0,"parts":1,"replyTo":"` + answer.ReplyTo + `","rk":"` + answer.RK + `","session":"` + session + `","tool":"book","v":1}`},
 	} {
 		b, err := c.h.Canonical()
 		if err != nil {

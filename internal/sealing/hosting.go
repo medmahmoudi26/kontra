@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -56,6 +57,11 @@ type HostingConfig struct {
 	KeyIDs     func() []string       // their key ids, for the kids check (not_a_recipient)
 	MaxAge     time.Duration         // --sealed-max-age
 	Required   []string              // --sealed-required <service>: refuse an unsealed request (bad_header)
+	// Shared maps each service that shares its upstream with another (the same origin, base paths one under the
+	// other: internal/node upstreamGroups) to the key of the group's one sealed state, so that an exchange of one never
+	// reaches a sealed job of another's upstream task, context or session unguarded (D236). A service it does not
+	// name keeps a state of its own.
+	Shared map[string]string
 	// Now is the node's clock (tests); nil is time.Now.
 	Now func() time.Time
 }
@@ -199,6 +205,9 @@ type hostedService struct {
 	// closed, and replaced, whenever one ends.
 	opening     int
 	openingDone chan struct{}
+	// calls are the sealed MCP calls handed to the server and not recorded yet, by upstream session and job: an input
+	// request the server sends about one is its (soleCall, D232).
+	calls map[string]map[*MCPExchange]bool
 }
 
 // svc is the service's hostedService, made on first use.
@@ -207,7 +216,8 @@ func (h *Hosting) svc(name string) *hostedService {
 	defer h.smu.Unlock()
 	hs := h.svcs[name]
 	if hs == nil {
-		hs = &hostedService{jobs: map[string]*jobState{}, flight: map[string]flightRef{}, openingDone: make(chan struct{})}
+		hs = &hostedService{jobs: map[string]*jobState{}, flight: map[string]flightRef{}, openingDone: make(chan struct{}),
+			calls: map[string]map[*MCPExchange]bool{}}
 		h.svcs[name] = hs
 	}
 	return hs
@@ -389,9 +399,12 @@ func (h *Hosting) indexNode(set, id, service string, put bool) {
 
 // Exchange is one forwarded exchange's sealing state, from Request to Response.
 type Exchange struct {
-	h       *Hosting
-	pre     tunnel.Preamble
+	h   *Hosting
+	pre tunnel.Preamble
+	// service is the key of the sealed state the exchange keeps (stateOf: its upstream's), name the service the
+	// preamble names (the header's service, --sealed-required).
 	service string
+	name    string
 	jsonrpc bool
 	rpcID   json.RawMessage
 
@@ -419,14 +432,14 @@ type Exchange struct {
 
 // handedBody is a forwarded request body that marks its exchange handed once it was read whole.
 type handedBody struct {
-	r *bytes.Reader
-	x *Exchange
+	r      *bytes.Reader
+	handed *atomic.Bool
 }
 
 func (b *handedBody) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
 	if b.r.Len() == 0 {
-		b.x.handed.Store(true)
+		b.handed.Store(true)
 	}
 	return n, err
 }
@@ -497,7 +510,7 @@ func (x *Exchange) End() {
 //
 // On a refusal the returned Exchange is not nil: its ID is the request's JSON-RPC id, for the answer.
 func (h *Hosting) Request(ctx context.Context, pre tunnel.Preamble, req *http.Request) (*http.Request, *Exchange, error) {
-	x := &Exchange{h: h, pre: pre, service: pre.Service}
+	x := &Exchange{h: h, pre: pre, service: h.stateOf(pre.Service), name: pre.Service}
 	var body []byte
 	if req.Body != nil && req.Body != http.NoBody {
 		b, err := io.ReadAll(io.LimitReader(req.Body, maxBody+1))
@@ -553,7 +566,7 @@ func (h *Hosting) Request(ctx context.Context, pre tunnel.Preamble, req *http.Re
 	if len(x.reserved) > 0 || x.opening {
 		context.AfterFunc(ctx, x.End) // a request whose exchange ends unanswered: recorded once it was handed (End)
 	}
-	req.Body = &handedBody{r: bytes.NewReader(body), x: x}
+	req.Body = &handedBody{r: bytes.NewReader(body), handed: &x.handed}
 	req.ContentLength = int64(len(body))
 	req.Header.Del("Content-Length")
 	req.TransferEncoding = nil
@@ -618,7 +631,10 @@ var a2aMethods = map[string]struct {
 // level is read with exact keys, and a body that repeats a key, or holds a lone case variant of a member the node
 // reads, is refused bad_header (D172), whatever the route.
 func (x *Exchange) classify(req *http.Request, body []byte) (op, error) {
-	p := req.URL.Path
+	// The route is read on the path as the node forwards it, cleaned (internal/node targetPath: a dot segment or a
+	// doubled slash is folded before the service routes it), so that "/tasks/x/.." is the task list it reaches the
+	// service as, and "/tasks/{id}/./pushNotificationConfigs" a push config route (D235).
+	p := cleanRoute(req.URL.Path)
 	var top map[string]json.RawMessage
 	unreadable := false
 	if len(bytes.TrimSpace(body)) > 0 {
@@ -681,6 +697,18 @@ func (x *Exchange) classify(req *http.Request, body []byte) (op, error) {
 	return o, nil
 }
 
+// cleanRoute is a request path as the node forwards it (internal/node targetPath): path.Clean, a trailing slash kept.
+func cleanRoute(p string) string {
+	if p == "" || p[0] != '/' {
+		return p
+	}
+	c := path.Clean(p)
+	if strings.HasSuffix(p, "/") && c != "/" {
+		c += "/"
+	}
+	return c
+}
+
 // sendRoute reports an HTTP+JSON send route (.../message:send, .../message:stream), and whether it streams. Routes
 // are matched without regard to case: a service's router may.
 func sendRoute(p string) (send, stream bool) {
@@ -726,7 +754,7 @@ func tasksRoute(p string) (ids []string, stream bool, kind opKind) {
 // guarded reports a service the node holds sealed state for (or one started with --sealed-required); the service's
 // lock is held.
 func (h *Hosting) guarded(service string, svc *serviceState) bool {
-	if h.Required(service) || len(svc.ReplyTo) > 0 || len(svc.Tasks) > 0 || len(svc.UpstreamContexts) > 0 {
+	if h.requiredState(service) || len(svc.ReplyTo) > 0 || len(svc.Tasks) > 0 || len(svc.UpstreamContexts) > 0 {
 		return true
 	}
 	prefix := flightKey("j", service)
@@ -755,15 +783,15 @@ func (x *Exchange) other(svc *serviceState, taskIDs []string) error {
 	}
 	if j != nil {
 		x.job, x.bind = j, bindOf(j.ReplyTo, j.RK)
-		if len(taskIDs) > 0 && j.UpstreamTask != "" {
-			if !slices.Contains(taskIDs, j.UpstreamTask) {
-				return reject(sealed.RejectWrongTask, "the request names another upstream task than the job's")
+		// Every task the request names is checked against the index, whether or not the job's own upstream task is
+		// known (a job recorded by End after its first message's exchange was cut has none, D227).
+		for _, id := range taskIDs {
+			if owner, ok := svc.Tasks[id]; ok && owner != j.ID {
+				return reject(sealed.RejectWrongTask, "the request names another sealed job's upstream task")
 			}
-			for _, id := range taskIDs {
-				if owner, ok := svc.Tasks[id]; ok && owner != j.ID {
-					return reject(sealed.RejectWrongTask, "the request names another sealed job's upstream task")
-				}
-			}
+		}
+		if len(taskIDs) > 0 && j.UpstreamTask != "" && !slices.Contains(taskIDs, j.UpstreamTask) {
+			return reject(sealed.RejectWrongTask, "the request names another upstream task than the job's")
 		}
 		return nil
 	}
@@ -865,6 +893,23 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 	msgTask, _ := a2awire.String(msg, "taskId")
 	msgCtx, _ := a2awire.String(msg, "contextId")
 	msgID, _ := a2awire.String(msg, "messageId")
+	refs, err := referenceTaskIDs(msg)
+	if err != nil {
+		return nil, err
+	}
+	for _, ref := range refs {
+		// A2A 1.0's referenceTaskIds name tasks an agent loads into the message's context (a2a-go's
+		// ReferencedTasksLoader, a2a-python's referred tasks), history and artifacts in plaintext: another sealed job's
+		// upstream task is never one, as it is never a request's task (D217, D237).
+		if owner, ok := svc.Tasks[ref]; ok && owner != x.pre.Task {
+			return nil, reject(sealed.RejectWrongTask, "the message references another sealed job's upstream task")
+		}
+	}
+	if len(refs) > 0 && len(sealedP) == 0 && guarded {
+		// An unsealed message that references tasks, to a service with sealed jobs: the node cannot tell a sealed job's
+		// task the node has not indexed (D227) from any other (D237).
+		return nil, reject(sealed.RejectBadHeader, "an unsealed message that references tasks, to a service with sealed jobs")
+	}
 	if push && (guarded || len(sealedP) > 0) {
 		// The service would post the task, its plaintext parts included, to a URL the gate chose (spec/relay.md
 		// §10.1: the gate never sends the upstream a push config).
@@ -884,7 +929,7 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	if err := x.h.checkService(h, x.service); err != nil {
+	if err := x.h.checkService(h, x.name); err != nil {
 		return nil, err
 	}
 	if rt, ok := replyToMeta(msg); !ok || rt != h.ReplyTo {
@@ -1019,6 +1064,28 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 	return out, nil
 }
 
+// referenceTaskIDs reads a message's referenceTaskIds (A2A 1.0 Message), exact key: a case variant of it, or a value
+// that is not an array of strings, is bad_header (a lenient decoder would take it for the member, D172).
+func referenceTaskIDs(msg map[string]json.RawMessage) ([]string, error) {
+	var raw json.RawMessage
+	for k, v := range msg {
+		switch {
+		case k == "referenceTaskIds":
+			raw = v
+		case strings.EqualFold(k, "referenceTaskIds"):
+			return nil, reject(sealed.RejectBadHeader, "a case variant of referenceTaskIds")
+		}
+	}
+	if raw == nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var refs []string
+	if err := json.Unmarshal(raw, &refs); err != nil {
+		return nil, reject(sealed.RejectBadHeader, "referenceTaskIds is not an array of strings")
+	}
+	return refs, nil
+}
+
 // replyToElsewhere reports a replyTo that opened a job of another service this node hosts: one identity key opens
 // every service's requests, so rule 2's replyTo set and rule 5's (session, messageId) set are checked across every
 // service of the node (D221, ext-sealed.md §5), beside the header's service member, which binds a sealed request to
@@ -1043,7 +1110,7 @@ func (h *Hosting) mcpCallElsewhere(service, callKey string) bool {
 // exchange of a sealed job (recorded, or being opened); it may not name another job's upstream task or another gate
 // context's upstream context.
 func (x *Exchange) unsealedSend(svc *serviceState, msgTask, msgCtx string, _ int) error {
-	if slices.Contains(x.h.cfg.Required, x.service) {
+	if x.h.Required(x.name) {
 		return reject(sealed.RejectBadHeader, "an unsealed request to a service started with --sealed-required")
 	}
 	j, err := x.h.jobFor(x.service, x.pre.Task)
@@ -1530,7 +1597,7 @@ func (x *Exchange) sealContainer(j *jobState, c *a2awire.Container) error {
 	if len(c.Parts) == 0 {
 		return nil
 	}
-	base := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.service), TaskID: x.pre.Task,
+	base := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.name), TaskID: x.pre.Task,
 		ContextID: j.GateContext}
 	if base.TaskID == "" {
 		base.TaskID = j.ID
@@ -1849,7 +1916,7 @@ func (h *Hosting) sweepService(name string, hs *hostedService, now time.Time) []
 		}
 	}
 	for k, v := range svc.Inputs {
-		if gone[v.Job] {
+		if gone[v.Job] || v.Key == "" && now.Sub(v.At) > keepFor {
 			svc.del(setInputs, k)
 		}
 	}
@@ -1866,6 +1933,25 @@ func (h *Hosting) sweepService(name string, hs *hostedService, now time.Time) []
 
 // Required reports whether the node refuses an unsealed request to service (--sealed-required).
 func (h *Hosting) Required(service string) bool { return slices.Contains(h.cfg.Required, service) }
+
+// stateOf is the key of the sealed state a service's exchanges keep: its upstream's (HostingConfig.Shared, D236), so
+// that the services one upstream is served under share their guards; the service's own name otherwise.
+func (h *Hosting) stateOf(service string) string {
+	if k, ok := h.cfg.Shared[service]; ok && k != "" {
+		return k
+	}
+	return service
+}
+
+// requiredState reports a state key one of whose services was started with --sealed-required.
+func (h *Hosting) requiredState(key string) bool {
+	for _, s := range h.cfg.Required {
+		if h.stateOf(s) == key {
+			return true
+		}
+	}
+	return false
+}
 
 func pairKey(messageID string, part int) string { return fmt.Sprintf("%s\x00%d", messageID, part) }
 

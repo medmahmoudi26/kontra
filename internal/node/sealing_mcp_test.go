@@ -56,7 +56,7 @@ func sealedCall(t *testing.T, node *age.X25519Identity, service, session, tool, 
 	t.Helper()
 	job, _ := age.GenerateX25519Identity()
 	rk, _ := sealed.NewRK()
-	hd := sealed.Header{V: 1, Dir: sealed.DirRequest, Service: service, IAT: time.Now().Unix(), Session: session, Tool: tool, MessageID: id,
+	hd := sealed.Header{V: 1, Dir: sealed.DirRequest, Service: service, IAT: time.Now().Unix(), Session: session, Tool: tool, MessageID: id, Op: sealed.OpCall,
 		Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{tunnel.KeyID(node.Recipient().String())},
 		ReplyTo: job.Recipient().String(), RK: sealed.EncodeRK(rk)}
 	ct, err := sealed.Seal([]age.Recipient{node.Recipient()}, hd, []byte(args))
