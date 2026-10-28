@@ -2974,21 +2974,38 @@ make. Decisions:
   writes it, then the OpenID configuration appended and inserted; a document naming another issuer is not used.
   Headers with `crit`, RSA keys under 2048 bits and keys that are not signing keys are refused or skipped.
 - **`kontra login` against mix-up and leaks** (RFC 8414 §3.3, RFC 9207, RFC 9700; the M4 audit). The gate's RFC 9728
-  document must be for `{origin}/mcp` (§3.3), the metadata's `issuer` must be the `authorization_servers` entry, the
-  endpoints `https://` (`http://` only on a loopback host, as `--gate` allows), PKCE `S256` offered; an answer's
-  `state` must match and an `iss` must be the issuer (required when the metadata says it is sent); no request follows a
-  redirect; the code and the verifier are never printed, even when the server echoes them. The environment's proxy is
-  honoured, as `kontra connect` honours it. The DCR `client_id` is kept per origin with the issuer it was registered
-  at, and forgotten when the token endpoint answers `invalid_client`.
+  document must be for `{origin}/mcp` (§3.3), compared as an origin (lower-case scheme and host, the default port
+  elided, as `tunnel.md` §4 writes origins: the gate writes its `resource` from `public_url` as configured) and the
+  path `/mcp`, with no userinfo, query or fragment; the metadata's `issuer` must be the `authorization_servers` entry,
+  the endpoints `https://` (`http://` only on a loopback host, as `--gate` allows), PKCE `S256` offered; an answer's
+  `state` must match and an `iss` must be the issuer (required when the metadata says it is sent); no request follows
+  a redirect; the code and the verifier are never printed, even when the server echoes them. The environment's proxy
+  is honoured, as `kontra connect` honours it. The DCR `client_id` is kept per origin with the issuer it was
+  registered at, and forgotten when the token endpoint answers `invalid_client`, or when a login that reused it gets
+  no answer before its bound or an interrupt: an authorization server that no longer knows a client must not redirect
+  to it (RFC 6749 §4.1.2.1), so a reset client table would otherwise lock every person who logged in there out until
+  they edited `~/.kontra/credentials` (the M4 WP-06 review). The CLI says it forgot it; a login merely left unfinished
+  costs one registration more. No `--register` flag: the next login registers by itself. The loopback listener is
+  closed as soon as an answer arrives, before the token request (§6.3 step 3).
+- **`auth.mcp_oauth` needs a `public_url` without a path** (the M4 WP-06 review). The RFC 9728 documents are served at
+  `{public_url}/.well-known/oauth-protected-resource/mcp…`, which is RFC 9728 §3.1's location (the well-known path
+  inserted after the host) only when `public_url` has no path, and `kontra login` reads them at the gate's origin. The
+  configuration is refused at load; a `public_url` in upper case or with its default port is accepted (the
+  documents' `resource` keeps it as written, and `kontra login` compares origins).
 - **The `kk_` rule is this revision's.** The access token must be an API key of the gate (`kk_` then letters, digits
   and `_`, at most 4096 bytes), checked in one function of `internal/login`; M5 may revise it with Cloud's
   authorization server (kontra-cloud#60 accepts Cloud's JWTs as principals).
 - **What a conversion binds.** §6.3's conversion is §5's enrollment by the API key's `enroll:*` scope, with two
-  differences: a declared service the tenant does not have is created there (`allow: [org:<tenant>]`), and the key
-  moves (DM4-19) with the anonymous tenant ended at once. So an existing service of the same kind is bound, not created
-  again; one that is disabled or not a tunnel service is `service_denied`; another kind is `kind_mismatch`; nothing moves
-  on a refusal; a service's other nodes are told of the new key (§5); a hello declaring no service converts the key
-  hire-only when the API key may hire. A team tenant's `enroll:*` key converts into the team as an account's does, and a
-  gate that stopped opening anonymous sessions still converts (§6.3 does not depend on `tunnel.anonymous`). Every
-  conversion, by an API key or by enrollment tokens (DM4-19), ends the anonymous tenant with reason `converted` and
-  writes a `tunnel.anonymous_converted` audit row naming both tenants, the authority and the services bound.
+  differences: a declared service the tenant does not have is created there (`allow: [org:<tenant>]`) when the
+  anonymous session serves it (an enabled service of the anonymous tenant of that name and kind, bound to the key:
+  §6.1's "the services keep their names"), and the key moves (DM4-19) with the anonymous tenant ended at once. Any
+  other declared name the tenant lacks is §5's `service_denied` "no such service" (the M4 WP-06 review): an anonymous
+  session costs no credential, so creating every declared name would let any `enroll:*` key create services in its
+  tenant, which §5 leaves to tenant tokens and the operator (M2's C10), and past §6.2's `services` limit. So an
+  existing service of the same kind is bound, not created again; one that is disabled or not a tunnel service is
+  `service_denied`; another kind is `kind_mismatch`; nothing moves on a refusal; a service's other nodes are told of
+  the new key (§5); a hello declaring no service converts the key hire-only when the API key may hire. A team tenant's
+  `enroll:*` key converts into the team as an account's does, and a gate that stopped opening anonymous sessions still
+  converts (§6.3 does not depend on `tunnel.anonymous`). Every conversion, by an API key or by enrollment tokens
+  (DM4-19), ends the anonymous tenant with reason `converted` and writes a `tunnel.anonymous_converted` audit row
+  naming both tenants, the authority and the services bound.

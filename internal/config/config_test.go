@@ -493,6 +493,12 @@ func TestLoadErrors(t *testing.T) {
 		{"remote lifecycle hook without a queue", head + "hooks: { lifecycle: {} }\n", "hooks.lifecycle.task_queue: required"},
 		{"oidc over http", head + "auth: { oidc: { issuer: http://login.example.com, audience: kontra } }\n", "auth.oidc.issuer"},
 		{"oidc without audience", head + "auth: { oidc: { issuer: https://login.example.com } }\n", "auth.oidc.audience: required"},
+		// DM4-29 (the M4 WP-06 review): the RFC 9728 documents of a public_url with a path are not where RFC 9728 §3.1
+		// and kontra login look for them.
+		{"mcp_oauth with a public_url path", "postgres: postgres://k@db/k\npublic_url: http://localhost:8080/kontra\n" +
+			"auth: { mcp_oauth: { issuer: https://login.example.com } }\n", "auth.mcp_oauth needs a public_url without a path"},
+		{"mcp_oauth with a public_url path and slash", "postgres: postgres://k@db/k\npublic_url: http://localhost:8080/a/\n" +
+			"auth: { mcp_oauth: { issuer: https://login.example.com } }\n", "auth.mcp_oauth needs a public_url without a path"},
 		// peer: (spec §11.2, §17; D163, D179).
 		{"peer without secret_env", head + "peer: { listen: \"127.0.0.1:8444\" }\n", "peer.secret_env"},
 		{"peer secret_env not a variable name", head + "peer: { listen: \"127.0.0.1:8444\", secret_env: \"peer-secret\" }\n", "peer.secret_env"},
@@ -509,6 +515,15 @@ func TestLoadErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// DM4-29: auth.mcp_oauth takes a public_url with no path or only "/", in any case and with an explicit default port
+// (kontra login compares the resource as an origin); a path is refused only with auth.mcp_oauth.
+func TestMCPOAuthPublicURL(t *testing.T) {
+	for _, pub := range []string{"http://localhost:8080", "http://localhost:8080/", "http://LOCALHOST:8080", "http://localhost:80"} {
+		parse(t, "postgres: postgres://k@db/k\npublic_url: "+pub+"\nauth: { mcp_oauth: { issuer: https://login.example.com } }\n")
+	}
+	parse(t, "postgres: postgres://k@db/k\npublic_url: http://localhost:8080/kontra\n")
 }
 
 // A load error never prints a password written into a URL: the gate refuses credentials in its URLs, and

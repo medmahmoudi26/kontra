@@ -80,7 +80,7 @@ const (
 //     resumes it (anonymous_unavailable, rate_limited, service_denied, kind_mismatch from its limits), or
 //     anonymous_unavailable on a gate without tunnel.anonymous; a key of a live anonymous tenant presenting no
 //     tokens converts on an auth API key with enroll:* of an account (§6.3, with tunnel.enroll_with_api_key: below as
-//     a new key of that account, the declared services it lacks created there; anonymous.go's convert), is resumed
+//     a new key of that account, the session's services it lacks created there; anonymous.go's convert), is resumed
 //     on another auth key (a hire-only one) and is otherwise unknown_key; one presenting tokens, of an ended
 //     anonymous tenant, or of a live one on a gate without tunnel.anonymous (a hello that does not ask), goes on below
 //     as a new key would, and is moved (anon.MoveKey) if admitted; a live anonymous tenant a key leaves ends at once
@@ -224,8 +224,10 @@ type admission struct {
 	moveFrom  *Key
 	endTenant uuid.UUID
 	// converting is §6.3's conversion by the auth API key's enroll:* scope (anonymous.go's convert): the declared
-	// services the account does not have are created there.
+	// services the account does not have are created there when the anonymous session serves them (anonServes:
+	// name → kind of the anonymous tenant's enabled services bound to the key).
 	converting bool
+	anonServes map[string]string
 }
 
 // keyRow is a tunnel_keys row with its tenant's state.
@@ -470,13 +472,18 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 			}
 		case !p.exists && p.via == viaTenantToken:
 			p.create = true
-		case !p.exists && p.via == viaAPIKey && a.converting:
-			// §6.3 (DM4-11): a conversion creates the declared services the account does not have, under the same names.
+		case !p.exists && p.via == viaAPIKey && a.converting && a.anonServes[p.svc.Name] == p.svc.Kind:
+			// §6.3 (DM4-11, DM4-29): a conversion creates the services the anonymous session serves that the account
+			// does not have, under the same names; any other declared name is §5's (below).
 			p.create = true
 		case !p.exists:
 			// SPEC-CONFLICT (M2 plan, C10): §5 does not say what an enroll: scope naming a missing service
 			// does. Only tenant tokens (and the operator) create services.
-			denied = append(denied, p.svc.Name+": no such service")
+			why := ": no such service"
+			if a.converting {
+				why += ", and the anonymous session does not serve it (a conversion creates only the session's services)"
+			}
+			denied = append(denied, p.svc.Name+why)
 		case !p.enabled || !p.tunnel:
 			denied = append(denied, p.svc.Name+": not an enabled tunnel service")
 		case p.kind != p.svc.Kind:

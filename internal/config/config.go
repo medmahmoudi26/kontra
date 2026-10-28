@@ -837,7 +837,7 @@ func (c *Config) Validate() error {
 	c.validateEdge(v)
 	c.validateLimits(v)
 	c.validateBackends(v)
-	c.validateAuth(v)
+	c.validateAuth(v, pub)
 	c.validateMetadata(v)
 	c.validateHooks(v)
 	c.validateTunnel(v)

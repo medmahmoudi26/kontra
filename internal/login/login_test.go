@@ -515,3 +515,211 @@ func TestParseArgs(t *testing.T) {
 		}
 	}
 }
+
+// §6.3 step 2 (DM4-29): an authorization server that forgot a registered client refuses it at its authorization
+// endpoint without redirecting (RFC 6749 §4.1.2.1; oidctest answers 400 "unknown client"), so kontra login hears
+// nothing until its bound or an interrupt. A login that reused the stored client_id and got no answer forgets it and
+// says so; the next login registers again and signs in. (Before, every later login reused the dead client_id and
+// failed the same way until ~/.kontra/credentials was edited by hand.)
+func TestLoginForgetsAClientTheAuthorizationEndpointRefuses(t *testing.T) {
+	for _, how := range []string{"the bound", "an interrupt"} {
+		t.Run(how, func(t *testing.T) {
+			r := newRig(t, oidctest.Config{})
+			pre, err := node.LoadCredentials(r.creds)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pre.Update(r.origin, func(c *node.Credential) {
+				c.OAuthClient = &node.OAuthClient{Issuer: r.as.Issuer(), ClientID: "stale"}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var out syncBuffer
+			o := r.options(&out)
+			var status atomic.Int32
+			browsed := make(chan struct{})
+			o.Open = func(u string) error {
+				go func() {
+					defer close(browsed)
+					// The browser: the authorization server's own refusal page, no redirect.
+					if resp, err := r.as.Client().Get(u); err == nil {
+						resp.Body.Close()
+						status.Store(int32(resp.StatusCode))
+					}
+					if how == "an interrupt" {
+						cancel() // the person gives up (Ctrl-C)
+					}
+				}()
+				return nil
+			}
+			if how == "the bound" {
+				o.Wait = 500 * time.Millisecond
+			}
+			err = Run(ctx, o)
+			if err == nil || !strings.Contains(err.Error(), "no sign-in arrived") || !strings.Contains(err.Error(), "registers again") {
+				t.Fatalf("the login with a forgotten client: %v", err)
+			}
+			select {
+			case <-browsed:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the browser never got its answer")
+			}
+			if st, auths := status.Load(), r.as.Authorizations(); st != http.StatusBadRequest || len(auths) != 1 ||
+				auths[0].Get("client_id") != "stale" {
+				t.Fatalf("the authorization endpoint answered %d to %v, want its own 400 to the stale client", st, auths)
+			}
+			if c := r.credential(); c.OAuthClient != nil || c.APIKey != "" {
+				t.Fatalf("after the unanswered login: client %+v, key %q", c.OAuthClient, c.APIKey)
+			}
+			if n := len(r.as.Registrations()); n != 0 {
+				t.Fatalf("%d registrations before the next login", n)
+			}
+
+			// The next login registers again and signs in.
+			if err := Run(context.Background(), r.options(&out)); err != nil {
+				t.Fatalf("the next login: %v", err)
+			}
+			regs := r.as.Registrations()
+			if c := r.credential(); len(regs) != 1 || c.OAuthClient == nil || c.OAuthClient.ClientID != regs[0].ClientID || c.APIKey == "" {
+				t.Fatalf("after the next login: %+v %+v, %d registrations", c, c.OAuthClient, len(regs))
+			}
+		})
+	}
+
+	// A client registered by this very login is kept when no answer comes (the person did not finish), and dropped
+	// only by a later login that reused it and got none either.
+	t.Run("a fresh registration", func(t *testing.T) {
+		r := newRig(t, oidctest.Config{})
+		var out syncBuffer
+		o := r.options(&out)
+		o.Open = func(string) error { return nil }
+		o.Wait = 300 * time.Millisecond
+		err := Run(context.Background(), o)
+		if err == nil || strings.Contains(err.Error(), "registers again") {
+			t.Fatalf("%v", err)
+		}
+		regs := r.as.Registrations()
+		if c := r.credential(); len(regs) != 1 || c.OAuthClient == nil || c.OAuthClient.ClientID != regs[0].ClientID {
+			t.Fatalf("the fresh client was not kept: %+v, %d registrations", c.OAuthClient, len(regs))
+		}
+		if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "registers again") {
+			t.Fatalf("the second unanswered login: %v", err)
+		}
+		if c := r.credential(); c.OAuthClient != nil {
+			t.Fatalf("kept after a reused client got no answer: %+v", c.OAuthClient)
+		}
+	})
+}
+
+// §6.3 step 3: the loopback port listens only until the answer arrived. It is closed before the token request, which
+// may run for its own timeout, not when the login ends.
+func TestLoginClosesTheListenerBeforeTheTokenRequest(t *testing.T) {
+	inToken, release := make(chan struct{}), make(chan struct{})
+	var entered, released sync.Once
+	r := newRig(t, oidctest.Config{Hook: func(w http.ResponseWriter, req *http.Request) bool {
+		if req.URL.Path == oidctest.PathToken {
+			entered.Do(func() { close(inToken) })
+			<-release
+		}
+		return false
+	}})
+	t.Cleanup(func() { released.Do(func() { close(release) }) }) // before the server's Close (cleanups run last first)
+	var out syncBuffer
+	o := r.options(&out)
+	var port atomic.Value
+	follow := o.Open
+	o.Open = func(u string) error {
+		au, _ := url.Parse(u)
+		ru, _ := url.Parse(au.Query().Get("redirect_uri"))
+		port.Store(ru.Port())
+		return follow(u)
+	}
+	done := make(chan error, 1)
+	go func() { done <- Run(context.Background(), o) }()
+	select {
+	case <-inToken:
+	case err := <-done:
+		t.Fatalf("the login ended before its token request: %v", err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("no token request")
+	}
+	p, _ := port.Load().(string)
+	c, err := net.DialTimeout("tcp", "127.0.0.1:"+p, time.Second)
+	if err == nil {
+		c.Close()
+		t.Error("the loopback listener still accepts connections while the token request runs")
+	}
+	released.Do(func() { close(release) })
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if r.credential().APIKey == "" {
+		t.Error("nothing stored")
+	}
+}
+
+// §6.3 step 1 (RFC 9728 §3.3): the document's resource is compared with {gate origin}/mcp as an origin and a path. The
+// gate writes it from public_url as configured, so an explicit default port, or a host or scheme in upper case, is the
+// same resource; another origin, path, port or scheme, a trailing slash, userinfo, a query or a fragment is not.
+func TestLoginComparesTheResourceAsAnOrigin(t *testing.T) {
+	as, err := oidctest.New(oidctest.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(as.Close)
+	next := NewClient(&tls.Config{RootCAs: as.CAPool(), MinVersion: tls.VersionTLS12}).Transport
+	for _, tc := range []struct {
+		gate, resource string
+		same           bool
+	}{
+		{"https://gateway.example.com", "https://gateway.example.com/mcp", true},
+		{"https://gateway.example.com", "https://gateway.example.com:443/mcp", true},
+		{"https://gateway.example.com:443", "https://gateway.example.com/mcp", true},
+		{"https://gateway.example.com", "https://Gateway.Example.COM/mcp", true},
+		{"https://GATEWAY.example.com", "HTTPS://gateway.example.com/mcp", true},
+		{"https://gateway.example.com:8443", "https://gateway.example.com:8443/mcp", true},
+		{"https://gateway.example.com", "https://gateway.example.com/mcp/", false},
+		{"https://gateway.example.com", "https://gateway.example.com/kontra/mcp", false},
+		{"https://gateway.example.com", "https://gateway.example.com", false},
+		{"https://gateway.example.com", "https://gateway.example.com:8443/mcp", false},
+		{"https://gateway.example.com", "http://gateway.example.com/mcp", false},
+		{"https://gateway.example.com", "https://other.example.com/mcp", false},
+		{"https://gateway.example.com", "https://u@gateway.example.com/mcp", false},
+		{"https://gateway.example.com", "https://gateway.example.com/mcp?x=1", false},
+		{"https://gateway.example.com", "https://gateway.example.com/mcp#f", false},
+		{"https://gateway.example.com", "https://gateway.example.com/mcp#", false},
+	} {
+		// The gate is served in-process: requests to its host reach this handler, the authorization server's go out.
+		gate := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.URL.Path != "/.well-known/oauth-protected-resource/mcp" {
+				http.NotFound(w, req)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"resource": tc.resource, "authorization_servers": []string{as.Issuer()}})
+		})
+		client := &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Hostname() == "gateway.example.com" {
+				rec := httptest.NewRecorder()
+				gate.ServeHTTP(rec, req)
+				return rec.Result(), nil
+			}
+			return next.RoundTrip(req)
+		})}
+		s, err := Discover(context.Background(), client, tc.gate)
+		switch {
+		case tc.same && err != nil:
+			t.Errorf("--gate %s, resource %s: %v", tc.gate, tc.resource, err)
+		case tc.same && s.Issuer != as.Issuer():
+			t.Errorf("--gate %s, resource %s: issuer %q", tc.gate, tc.resource, s.Issuer)
+		case !tc.same && (err == nil || !strings.Contains(err.Error(), "another resource")):
+			t.Errorf("--gate %s, resource %s: %v, want another resource", tc.gate, tc.resource, err)
+		}
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -8,16 +8,19 @@
 // It runs in four steps:
 //
 //  1. Discover reads {gate}/.well-known/oauth-protected-resource/mcp (RFC 9728, relay.md §12.1), whose resource must
-//     be {gate origin}/mcp; a gate without one has no sign-in (ErrNoSignIn: "ask its operator for an API key,
-//     --api-key"). The first authorization server's RFC 8414 metadata must name that issuer exactly (§3.3: a
-//     document for another issuer is a mix-up), offer authorization_code with PKCE S256 and a registration_endpoint,
-//     and its endpoints must be https:// (http:// only on a loopback host, the contributors' and tests' gates).
+//     be {gate origin}/mcp (compared as an origin and a path: sameResource); a gate without one has no sign-in
+//     (ErrNoSignIn: "ask its operator for an API key, --api-key"). The first authorization server's RFC 8414 metadata
+//     must name that issuer exactly (§3.3: a document for another issuer is a mix-up), offer authorization_code with
+//     PKCE S256 and a registration_endpoint, and its endpoints must be https:// (http:// only on a loopback host, the
+//     contributors' and tests' gates).
 //  2. Register registers once per gate origin and issuer (RFC 7591, a public client with the loopback redirect); the
-//     client_id is kept with the credential.
+//     client_id is kept with the credential, and forgotten when the token endpoint answers invalid_client or a login
+//     that reused it got no answer (an authorization server that forgot a client never redirects, RFC 6749 §4.1.2.1).
 //  3. Authorize runs the code flow with PKCE S256, state and a loopback redirect on 127.0.0.1 (RFC 8252 §7.3),
-//     listening only until a code arrives or 10 minutes pass, with resource = the gate's origin (RFC 8707); the URL
-//     is opened in a browser, or printed with --no-browser. An iss in the answer must be the issuer (RFC 9207; required
-//     when the metadata says it is sent). The token request follows no redirect.
+//     listening only until an answer arrives (closed before the token request) or 10 minutes pass, with resource =
+//     the gate's origin (RFC 8707); the URL is opened in a browser, or printed with --no-browser. An iss in the
+//     answer must be the issuer (RFC 9207; required when the metadata says it is sent). The token request follows no
+//     redirect.
 //  4. The access token must be an API key of the gate (kk_…, accessToken: this revision's rule, M5's to revise);
 //     anything else is refused and not stored.
 //
@@ -50,6 +53,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"kontra.sh/kontra/internal/auth"
@@ -172,9 +176,9 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	clientID := ""
+	clientID, reused := "", false
 	if oc := creds.For(s.Origin).OAuthClient; oc != nil && oc.Issuer == s.Issuer && oc.ClientID != "" {
-		clientID = oc.ClientID
+		clientID, reused = oc.ClientID, true
 	} else {
 		if clientID, err = Register(ctx, o.Client, s); err != nil {
 			return err
@@ -193,13 +197,29 @@ func Run(ctx context.Context, o Options) error {
 		open = openBrowser
 	}
 	token, err := Authorize(ctx, o.Client, s, clientID, AuthorizeOptions{Open: open, Out: o.Out, Wait: o.Wait})
-	if errors.Is(err, errInvalidClient) {
-		// The authorization server no longer knows the client: the next login registers again.
-		_, _ = creds.Update(s.Origin, func(c *node.Credential) {
+	forget := func() bool {
+		forgot := false
+		_, uerr := creds.Update(s.Origin, func(c *node.Credential) {
 			if c.OAuthClient != nil && c.OAuthClient.ClientID == clientID {
-				c.OAuthClient = nil
+				c.OAuthClient, forgot = nil, true
 			}
 		})
+		return uerr == nil && forgot
+	}
+	switch {
+	case errors.Is(err, errInvalidClient):
+		// The authorization server no longer knows the client: the next login registers again.
+		forget()
+	case errors.Is(err, errNoAnswer) && reused:
+		// An authorization server that no longer knows a client_id must not redirect to it (RFC 6749 §4.1.2.1): it
+		// tells the person on its own page, and kontra login hears nothing until the bound or an interrupt. A login that
+		// reused a registration and got no answer forgets it (§6.3 step 2, DM4-29), so the next login registers again
+		// instead of failing the same way for ever. A login that simply was not finished costs one registration more.
+		if forget() {
+			err = fmt.Errorf("%w. It reused this computer's registration at %s, which the authorization server may have "+
+				"forgotten (its sign-in page then says it does not know the client): kontra login dropped it, and the next one "+
+				"registers again", err, clip(s.Issuer))
+		}
 	}
 	if err != nil {
 		return err
@@ -308,7 +328,7 @@ func Discover(ctx context.Context, client *http.Client, gate string) (*Server, e
 		return nil, errors.New("the gate's sign-in document names no resource or no authorization server (RFC 9728)")
 	}
 	// RFC 9728 §3.3: the document is for the resource it was fetched for, or it is not used.
-	if resource != origin+oidc.MCPPath {
+	if !sameResource(resource, origin) {
 		return nil, fmt.Errorf("the gate's sign-in document is for another resource than %s/mcp: not used (RFC 9728 §3.3)", origin)
 	}
 	s := &Server{Origin: origin, Issuer: servers[0]}
@@ -323,6 +343,20 @@ func Discover(ctx context.Context, client *http.Client, gate string) (*Server, e
 		return nil, err
 	}
 	return s, nil
+}
+
+// sameResource reports whether the RFC 9728 document's resource is the gate's /mcp (§6.3 step 1): its origin, as
+// tunnel.CanonicalOrigin writes origins (scheme and host lowercase, the default port elided), is the gate's, its path is
+// /mcp, and it has no userinfo, query or fragment. The gate writes the resource from public_url as configured
+// (oidc.CanonicalURI), whose host case or explicit default port need not be --gate's; a different path or origin is
+// another resource.
+func sameResource(resource, origin string) bool {
+	u, err := url.Parse(resource)
+	if err != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(resource, "#") {
+		return false
+	}
+	o, err := tunnel.CanonicalOrigin(u)
+	return err == nil && o == origin && u.Path == oidc.MCPPath
 }
 
 // metadata reads and checks the authorization server's metadata (§6.3 step 2; RFC 8414 §3.3 against mix-up).
@@ -430,9 +464,14 @@ type AuthorizeOptions struct {
 // errInvalidClient is a token endpoint that no longer knows the client.
 var errInvalidClient = errors.New("the authorization server does not know this client")
 
+// errNoAnswer is a sign-in that ended with no answer at the loopback listener: the bound passed, or ctx ended (an
+// interrupt). An authorization server that does not know the client_id never redirects (RFC 6749 §4.1.2.1), so this
+// is all kontra login learns of it.
+var errNoAnswer = errors.New("no sign-in arrived")
+
 // Authorize runs the authorization code flow with PKCE and a loopback redirect and returns the access token, which
-// the caller checks is an API key of the gate. The listener is on 127.0.0.1 only and is closed when Authorize
-// returns, after the code, the bound or ctx's end.
+// the caller checks is an API key of the gate. The listener is on 127.0.0.1 only and is closed once an answer arrived,
+// before the token request (§6.3 step 3), or at the bound or ctx's end (errNoAnswer).
 func Authorize(ctx context.Context, client *http.Client, s *Server, clientID string, o AuthorizeOptions) (string, error) {
 	if o.Wait <= 0 {
 		o.Wait = Wait
@@ -506,12 +545,17 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
-	defer func() {
-		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sctx) // closes the listener
-		_ = srv.Close()
-	}()
+	var stopped sync.Once
+	// stop closes the listener at once and lets the answer being written finish (at most 2 s).
+	stop := func() {
+		stopped.Do(func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(sctx) // closes the listener first
+			_ = srv.Close()
+		})
+	}
+	defer stop()
 
 	shown := tunnel.Printable(au.String())
 	if o.Open == nil {
@@ -529,10 +573,12 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 	select {
 	case res = <-got:
 	case <-timer.C:
-		return "", fmt.Errorf("no sign-in arrived within %s: run kontra login again", o.Wait)
+		return "", fmt.Errorf("%w within %s: run kontra login again", errNoAnswer, o.Wait)
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return "", fmt.Errorf("%w: %w", errNoAnswer, ctx.Err())
 	}
+	// §6.3 step 3: the port listens only until the answer arrived, not while the token request runs.
+	stop()
 	if res.err != nil {
 		return "", res.err
 	}

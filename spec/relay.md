@@ -1261,7 +1261,9 @@ principal: a request without a credential is `401` (§12.1); through a node, the
   well-formed name, existing or not. A JWT is accepted only if its `aud` contains the route's canonical URI
   (RFC 8707); a wrong-audience, invalid or expired token is `401`. The PRD's `auth.oidc.audience` applies to
   A2A routes only. The authorization server is the operator's (Cloud runs one; a team gate can point at its
-  IdP) and is not part of the gate (D25).
+  IdP) and is not part of the gate (D25). With `auth.mcp_oauth` the gate refuses to start on a `public_url` with a
+  path: its documents would not be where RFC 9728 §3.1 puts them (the well-known path inserted after the host), nor
+  where `kontra login` reads them ([`tunnel.md`](tunnel.md) §6.3; DM4-29).
 - **Which requests the challenge answers (DM4-29).** On `/mcp/{svc}` a service whose `allow:` contains `anonymous`
   still serves a request without a credential as §2.3 says (a `--public` MCP service of an anonymous session,
   [`tunnel.md`](tunnel.md) §6.1); every other request without one, to an existing service or not, is the `401` above

@@ -104,7 +104,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["issuer"],
-          "description": "The authorization server /mcp and /mcp/{svc} are a resource server for (spec §12.1; built in M4, DM4-9); its metadata and key set are fetched as operator-configured endpoints (spec §10.3, DM4-17).",
+          "description": "The authorization server /mcp and /mcp/{svc} are a resource server for (spec §12.1; built in M4, DM4-9); its metadata and key set are fetched as operator-configured endpoints (spec §10.3, DM4-17). It needs a public_url without a path (DM4-29).",
           "properties": { "issuer": { "$ref": "#/$defs/httpsURL" } }
         },
         "anonymous": { "type": "object", "additionalProperties": false, "description": "Reserved; per service, anonymous is an allow: entry." }

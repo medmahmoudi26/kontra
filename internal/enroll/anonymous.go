@@ -91,9 +91,13 @@ func (a *admission) anonymousSession(ctx context.Context) (*Decision, error) {
 // converts; if so the key goes on through §5's rules below as a new key of the API key's tenant, with two differences
 // (planned in run, written in write):
 //
-//   - a declared service the account does not have is created there, under the same name, with allow [org:<account>]
-//     (§6.3; on §5's own path only a tenant token creates one), and one of another kind is kind_mismatch, with nothing
-//     moved (the transaction rolls back);
+//   - a declared service the account does not have is created there, under the same name, with allow [org:<account>],
+//     only when the anonymous session serves it (anonServes: an enabled service of the anonymous tenant of that name
+//     and kind, bound to the key; §6.1 "the services keep their names", DM4-29). Any other declared name is §5's: on
+//     §5's own path only a tenant token or the operator creates a service (M2's C10), and an anonymous session costs
+//     no credential, so it must not become a way for an enroll:* key to create services, or past §6.2's services
+//     limit. An existing account service of another kind is kind_mismatch, with nothing moved (the transaction rolls
+//     back);
 //   - the key moves (anon.MoveKey: its anonymous bindings deleted first) and the anonymous tenant ends at once, with
 //     the conversion's audit row (anon.Convert).
 //
@@ -113,6 +117,29 @@ func (a *admission) convert(ctx context.Context) (bool, error) {
 	}
 	if anonymous {
 		return false, nil // no account to convert into: the key hires as the session's principal (DM4-19)
+	}
+	// What the anonymous session serves: the only services a conversion creates. The tenant is locked already
+	// (lockAnonymousTenant); this reads, and locks nothing more.
+	rows, err := a.tx.Query(ctx, `
+		select s.name, s.kind from kontra.services s
+		  join kontra.key_services ks on ks.tenant_id = s.tenant_id and ks.service = s.name
+		 where s.tenant_id = $1 and s.disabled_at is null and ks.key_id = $2 and ks.revoked_at is null`,
+		a.anonKey.TenantID, a.anonKey.KeyID)
+	if err != nil {
+		return false, fmt.Errorf("enroll: the anonymous session's services: %w", err)
+	}
+	a.anonServes = map[string]string{}
+	for rows.Next() {
+		var name, kind string
+		if err := rows.Scan(&name, &kind); err != nil {
+			rows.Close()
+			return false, err
+		}
+		a.anonServes[name] = kind
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
 	}
 	a.moveFrom = &a.anonKey.Key
 	a.endTenant = a.anonKey.TenantID

@@ -390,7 +390,7 @@ func (c *Config) validateSigningKey(v *validator, pub *url.URL) {
 	}
 }
 
-func (c *Config) validateAuth(v *validator) {
+func (c *Config) validateAuth(v *validator, pub *url.URL) {
 	if o := c.Auth.OIDC; o != nil {
 		if err := checkHTTPSURL(o.Issuer, false); err != nil {
 			v.add("auth.oidc.issuer: %v", err)
@@ -402,6 +402,13 @@ func (c *Config) validateAuth(v *validator) {
 	if m := c.Auth.MCPOAuth; m != nil {
 		if err := checkHTTPSURL(m.Issuer, false); err != nil {
 			v.add("auth.mcp_oauth.issuer: %v", err)
+		}
+		// DM4-29: the resource server's RFC 9728 documents are at {public_url}/.well-known/oauth-protected-resource/mcp…,
+		// which is where RFC 9728 §3.1 puts them (the well-known path inserted after the host) only for a public_url
+		// without a path; kontra login reads them there, at the gate's origin (spec/tunnel.md §6.3).
+		if pub != nil && strings.Trim(pub.EscapedPath(), "/") != "" {
+			v.add("public_url %q: auth.mcp_oauth needs a public_url without a path (its RFC 9728 documents are at the "+
+				"origin's /.well-known/oauth-protected-resource/mcp, RFC 9728 §3.1; spec §12.1, DM4-29)", redactURL(c.PublicURL))
 		}
 	}
 }

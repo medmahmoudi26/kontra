@@ -350,9 +350,11 @@ relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never t
 `kontra login [--gate URL] [--no-browser]` gets an API key for a gate from its operator's sign-in and keeps it as
 that origin's API key in `~/.kontra/credentials` (§2.4), which `kontra connect` then sends as `auth`:
 
-1. It reads `{gate}/.well-known/oauth-protected-resource/mcp` ([`relay.md`](relay.md) §12.1), whose `resource` must
-   be the gate's origin followed by `/mcp` (RFC 9728 §3.3: a document for another resource is not used). A gate that
-   serves none has no sign-in: `kontra login` says to ask its operator for an API key (`--api-key`) and exits 1.
+1. It reads `{gate}/.well-known/oauth-protected-resource/mcp` ([`relay.md`](relay.md) §12.1), whose `resource` must be
+   the gate's origin followed by `/mcp` (RFC 9728 §3.3: a document for another resource is not used), compared as an
+   origin (§4: scheme and host in lower case, the default port elided; the gate writes it from `public_url` as
+   configured) and the path `/mcp`, with no userinfo, query or fragment (DM4-29). A gate that serves none has no
+   sign-in: `kontra login` says to ask its operator for an API key (`--api-key`) and exits 1.
 2. It reads the RFC 8414 metadata of the document's first `authorization_servers` entry (looked for as the gate looks
    for its issuer's, [`relay.md`](relay.md) §12.1), whose `issuer` must be that entry byte for byte (RFC 8414 §3.3:
    a document for another issuer is a mix-up and is not used), which must offer the `authorization_code` grant with
@@ -361,30 +363,34 @@ that origin's API key in `~/.kontra/credentials` (§2.4), which `kontra connect`
    (RFC 7591: `client_name` `kontra CLI`, `redirect_uris` `["http://127.0.0.1/callback"]`,
    `token_endpoint_auth_method` `none`, `grant_types` `["authorization_code"]`) and keeps the `client_id` with the
    credential; a token endpoint that answers `invalid_client` makes it forget the `client_id`, so the next login
-   registers again.
-3. It runs the authorization code flow with PKCE (RFC 7636, `S256`), `state`, and a loopback redirect (RFC 8252
-   §7.3: `http://127.0.0.1:<ephemeral port>/callback`, listening on that port only until a code arrives or 10
-   minutes pass), with `resource` = the gate's origin (RFC 8707). The URL is opened in the browser, or printed with
-   `--no-browser`. An answer whose `state` differs ends the login; an `iss` in it must be the issuer, and must be there
-   when the metadata says it is sent (RFC 9207). The token request follows no redirect, and neither the code nor the
-   verifier is ever printed or logged.
+   registers again, and so does a login that reused it and got no answer before the bound or an interrupt: an
+   authorization server that no longer knows a client does not redirect to it (RFC 6749 §4.1.2.1), so that is all the
+   CLI hears of it, and `kontra login` says it forgot the registration (DM4-29).
+3. It runs the authorization code flow with PKCE (RFC 7636, `S256`), `state`, and a loopback redirect (RFC 8252 §7.3:
+   `http://127.0.0.1:<ephemeral port>/callback`, listening on that port only until an answer arrives, closed before
+   the token request, or 10 minutes pass), with `resource` = the gate's origin (RFC 8707). The URL is opened in the
+   browser, or printed with `--no-browser`. An answer whose `state` differs ends the login; an `iss` in it must be the
+   issuer, and must be there when the metadata says it is sent (RFC 9207). The token request follows no redirect, and
+   neither the code nor the verifier is ever printed or logged.
 4. In this revision, the token response's `access_token` must be an API key of the gate (`kk_…`); anything else, a
    JWT included, is refused and not stored. The authorization server is the operator's (Cloud's control plane): it
    issues the key for the person's account, with the scopes `hire` and `enroll:*`. This rule is M5's to revise, with
    Cloud's authorization server and the gate's OIDC principals (kontra-cloud#60); `kontra login` holds it in one place.
 
 **Conversion.** A hello whose key belongs to a live anonymous tenant and whose `auth` is an API key of an `account`
-tenant with the `enroll:*` scope (`tunnel.enroll_with_api_key`) converts the key, in the admission's transaction:
-the declared services are created in the account where they do not exist, under the same names, with `allow:
-[org:<account>]` (an existing one of another kind is `kind_mismatch`, and nothing moves); the key moves to the
-account with bindings to them; and the anonymous tenant expires at once (§6.1). `welcome` names the account's URLs and
-has no `anonymous`. The anonymous URLs answer `404` and their tasks in flight fail `service_unavailable`: a converted
-service is a new service at a new URL. An `audit` row records the conversion. A running `kontra connect` converts at
-its next handshake; `kontra login` tells the person to restart it. Otherwise the binding is §5's, through the API
-key's `enroll:*` scope (DM4-29): an existing account service is bound, not created again, and one that is disabled
-or not a tunnel service is `service_denied`; a service's other nodes are told of the new key; a hello declaring no
-service converts the key hire-only when the API key may hire (§9). A team tenant's key converts into the team as an
-account's does; a gate that stopped opening anonymous sessions still converts.
+tenant with the `enroll:*` scope (`tunnel.enroll_with_api_key`) converts the key, in the admission's transaction: the
+anonymous tenant's declared services (those the session serves: enabled and bound to the key, of the declared kind)
+are created in the account where they do not exist, under the same names, with `allow: [org:<account>]` (an existing
+one of another kind is `kind_mismatch`, and nothing moves); the key moves to the account with bindings to them; and
+the anonymous tenant expires at once (§6.1). `welcome` names the account's URLs and has no `anonymous`. The anonymous
+URLs answer `404` and their tasks in flight fail `service_unavailable`: a converted service is a new service at a new
+URL. An `audit` row records the conversion. A running `kontra connect` converts at its next handshake; `kontra login`
+tells the person to restart it. Otherwise the binding is §5's, through the API key's `enroll:*` scope (DM4-29): an
+existing account service is bound, not created again, and one that is disabled or not a tunnel service is
+`service_denied`; a declared name the session does not serve and the account does not have is `service_denied` (only a
+tenant token or the operator creates a service, §5), and nothing moves; a service's other nodes are told of the new
+key; a hello declaring no service converts the key hire-only when the API key may hire (§9). A team tenant's key
+converts into the team as an account's does; a gate that stopped opening anonymous sessions still converts.
 
 ## 7. After `welcome`
 

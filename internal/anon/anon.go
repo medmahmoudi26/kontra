@@ -1139,8 +1139,8 @@ type ConvertRequest struct {
 
 // Convert ends the anonymous tenant a converted key left and records the conversion, in tx (the admission's
 // transaction, which holds the key's row and then the anonymous tenant's, in that order, and has already moved the key
-// with MoveKey and bound it in To as §5 binds a key: the declared services created in the account where missing, with
-// allow [org:<account>], another kind kind_mismatch with nothing moved; internal/enroll). The tenant ends at once (End,
+// with MoveKey and bound it in To as §5 binds a key: the services the anonymous session served created in the account
+// where missing, with allow [org:<account>], another kind kind_mismatch with nothing moved; internal/enroll). The tenant ends at once (End,
 // reason "converted": its services disabled and 404, their tasks in flight failing service_unavailable, its session
 // told revoked), and an EventConverted row names both tenants. Nothing of another anonymous tenant is locked.
 func Convert(ctx context.Context, tx pgx.Tx, req ConvertRequest) error {

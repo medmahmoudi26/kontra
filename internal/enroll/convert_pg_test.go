@@ -2,6 +2,7 @@ package enroll
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -55,11 +56,12 @@ func withAuth(k *testKey, key string, services ...tunnel.Service) *tunnel.Hello 
 }
 
 // spec/tunnel.md §6.3 (DM4-11): a hello whose key belongs to a live anonymous tenant and whose auth is an account's API
-// key with enroll:* converts the key in the admission's transaction: the declared services are created in the account
-// where it has none (same names, allow [org:<account>]; an existing one is bound, not recreated), the key moves to the
-// account with bindings to them (its anonymous bindings gone), the anonymous tenant ends at once (expires_at now,
-// services disabled), the decision names the account's URLs with no anonymous part and the API key as the hiring
-// principal, and an audit row records the conversion; the next hello is §5's, with no conversion.
+// key with enroll:* converts the key in the admission's transaction: the declared services the session serves are
+// created in the account where it has none (same names, allow [org:<account>]; an existing one is bound, not
+// recreated), the key moves to the account with bindings to them (its anonymous bindings gone), the anonymous tenant
+// ends at once (expires_at now, services disabled), the decision names the account's URLs with no anonymous part and
+// the API key as the hiring principal, and an audit row records the conversion; the next hello is §5's, with no
+// conversion.
 func TestAdmitConvertsWithAnAccountKey(t *testing.T) {
 	c := newConvertEnv(t)
 	ctx := context.Background()
@@ -244,6 +246,73 @@ func TestAdmitConversionCases(t *testing.T) {
 		if err != nil || d.Anonymous != nil || d.Key.Tenant != "default" ||
 			!slices.Equal(served(d), []string{"a2a:hello@https://gate.example/agents/default/hello"}) {
 			t.Fatalf("%+v %v", d, err)
+		}
+	})
+	// The M4 WP-06 review: a conversion creates only what the anonymous session serves (§6.1 "the services keep their
+	// names", DM4-29). Any other declared name is §5's: an account service that exists is bound, one that does not is
+	// service_denied "no such service", as for the same key on §5's own path, and nothing moves. An anonymous session
+	// costs no credential, so otherwise any enroll:* key could create services (M2's C10: only tenant tokens and the
+	// operator do), past §6.2's services limit too.
+	refusedConversion := func(t *testing.T, c *convertEnv, k *testKey, from uuid.UUID, h *tunnel.Hello, names ...string) {
+		t.Helper()
+		before := len(c.verifyAudit())
+		_, err := c.admitFrom(k, h, "203.0.113.9")
+		wantCode(t, "a conversion declaring services the session does not serve", err, tunnel.CodeServiceDenied)
+		for _, n := range names {
+			if !strings.Contains(err.Error(), n+": no such service") {
+				t.Errorf("the refusal does not name %s: %v", n, err)
+			}
+		}
+		if n := c.count(`select count(*) from kontra.tunnel_keys where key_id = $1 and tenant_id = $2`, k.kid, from); n != 1 {
+			t.Fatal("the key moved")
+		}
+		if n := c.count(`select count(*) from kontra.tenants where id = $1 and expires_at > now()`, from); n != 1 {
+			t.Fatal("the anonymous tenant ended")
+		}
+		if n := c.count(`select count(*) from kontra.services where tenant_id = $1`, c.account); n != 0 {
+			t.Errorf("%d account services created", n)
+		}
+		if after := len(c.verifyAudit()); after != before {
+			t.Errorf("%d audit rows written by a refused conversion", after-before)
+		}
+	}
+	t.Run("names the session does not serve", func(t *testing.T) {
+		c := newConvertEnv(t)
+		k := newTestKey(t)
+		d1 := c.anonymous(k, a2a("hello"))
+		refusedConversion(t, c, k, d1.Key.TenantID, withAuth(k, c.key.Secret, a2a("hello"), a2a("payroll"), mcp("admin")), "payroll", "admin")
+		// More services than an anonymous session may serve (§6.2's services, 4) are refused the same way.
+		many := []tunnel.Service{a2a("hello")}
+		for i := range anon.Defaults.Services + 1 {
+			many = append(many, a2a(fmt.Sprintf("extra%d", i)))
+		}
+		refusedConversion(t, c, k, d1.Key.TenantID, withAuth(k, c.key.Secret, many...), "extra0", "extra4")
+	})
+	t.Run("another kind than the session's", func(t *testing.T) {
+		c := newConvertEnv(t)
+		k := newTestKey(t)
+		d1 := c.anonymous(k, a2a("hello"))
+		refusedConversion(t, c, k, d1.Key.TenantID, withAuth(k, c.key.Secret, mcp("hello")), "hello")
+	})
+	t.Run("a service the session no longer serves", func(t *testing.T) {
+		c := newConvertEnv(t)
+		k := newTestKey(t)
+		c.anonymous(k, a2a("hello"), a2a("old"))
+		d1 := c.anonymous(k, a2a("hello")) // resumed: old disabled and unbound, its row kept until the tenant ends
+		refusedConversion(t, c, k, d1.Key.TenantID, withAuth(k, c.key.Secret, a2a("hello"), a2a("old")), "old")
+	})
+	t.Run("an account service the session does not serve is bound", func(t *testing.T) {
+		c := newConvertEnv(t)
+		c.service(c.account, "ledger", "a2a", false)
+		k := newTestKey(t)
+		c.anonymous(k, a2a("hello"))
+		d, err := c.admitFrom(k, withAuth(k, c.key.Secret, a2a("hello"), a2a("ledger")), "203.0.113.9")
+		if err != nil || d.Anonymous != nil || !slices.Equal(served(d), []string{"a2a:hello@https://gate.example/agents/acme/hello",
+			"a2a:ledger@https://gate.example/agents/acme/ledger"}) {
+			t.Fatalf("%+v %v", d, err)
+		}
+		if n := c.count(`select count(*) from kontra.services where tenant_id = $1`, c.account); n != 2 {
+			t.Errorf("%d account services, want ledger and the created hello", n)
 		}
 	})
 	t.Run("a gate that stopped opening anonymous sessions", func(t *testing.T) {
