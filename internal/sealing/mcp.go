@@ -144,7 +144,7 @@ func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error
 
 // sessionOwner is the sealed job that holds the exchange's upstream session: the session's index entry, or the job a
 // sealed call in flight on it is opening it for; ok false on an exchange with no upstream session, or on one no
-// sealed job holds. the service's lock is held.
+// sealed job holds. The service's lock is held.
 func (x *MCPExchange) sessionOwner(svc *serviceState) (string, bool) {
 	if x.upstreamSID == "" {
 		return "", false
@@ -156,7 +156,7 @@ func (x *MCPExchange) sessionOwner(svc *serviceState) (string, bool) {
 }
 
 // recorded reports a request id the node recorded a sealed request under on the exchange's upstream session (the
-// job's record, or, on an upstream session, the service's index of it). the service's lock is held.
+// job's record, or, on an upstream session, the service's index of it). The service's lock is held.
 func (x *MCPExchange) recorded(svc *serviceState, job *jobState, id json.RawMessage) bool {
 	key := respKey(x.upstreamSID, id)
 	if job != nil && job.Calls[key] != nil {
@@ -760,7 +760,7 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 // sealAnswer seals the server's answer to a sealed request of the job (req, recorded under key): a sealed call's
 // CallToolResult to the call's own replyTo and rk (which must be the job's, wrong_job otherwise), or its
 // CreateTaskResult binding the task to the job; a bound task's tasks/result to the job's; an error with its code
-// only (errorResponse's SPEC-CONFLICT). the service's lock is held.
+// only (errorResponse's SPEC-CONFLICT). The service's lock is held.
 func (x *MCPExchange) sealAnswer(svc *serviceState, job *jobState, req *sealedRequest, key string, data []byte,
 	m *mcpwire.Message) ([]byte, bool, error) {
 	h := x.h
