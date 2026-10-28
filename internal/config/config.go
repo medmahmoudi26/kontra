@@ -245,9 +245,9 @@ type Service struct {
 	Listed      bool       `yaml:"listed"`
 	Annotations JSON       `yaml:"annotations"` // a JSON object (§13.4), never interpreted; default {}
 
-	// MaxSessionsPerPrincipal caps the open MCP sessions one principal holds on the service (mcp only, spec §11.2,
-	// D213): an initialize beyond it closes the principal's longest-idle session. nil is
-	// DefaultMaxSessionsPerPrincipal.
+	// MaxSessionsPerPrincipal caps the open MCP sessions one principal other than anonymous holds on a tunnel
+	// service (mcp only, spec §11.2, D213, D231): an initialize beyond it closes the principal's sessions idle for 5
+	// minutes, the longest idle first, or is refused 429 when too few are. nil is DefaultMaxSessionsPerPrincipal.
 	MaxSessionsPerPrincipal *int `yaml:"max_sessions_per_principal"`
 }
 

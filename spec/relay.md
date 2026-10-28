@@ -142,7 +142,9 @@ multi-tenant gate, are one `buyer_id`. So for the `anonymous` principal `ListTas
 are refused (`UnsupportedOperationError` / `-32601`), push configs are refused, and a task is readable
 and cancellable by whoever holds its id: ids are not secrets (a UUIDv7 discloses its creation time and
 has 62 random bits), so this is a property of opting in to `anonymous`, recorded as such (D20). The TCK
-target is the case for it (D18).
+target is the case for it (D18). An MCP service's `max_sessions_per_principal` does not apply to `anonymous`: one
+budget for callers the gate cannot tell apart would let any of them crowd out, or close, the others' sessions
+(§11.2, D231).
 
 **API key scopes.** `hire` (the default: call services), `enroll:<service>` and `enroll:*` (enroll node
 keys, [`tunnel.md`](tunnel.md) §5). A key's scopes never grant an operator action.
@@ -901,15 +903,30 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   `_meta["sh.kontra/session_idle_s"]` to the service's `session_idle_s` (a JSON integer of seconds), after the
   operator's `initialize_meta` and in place of any upstream's (§2.5), and a hiring node keeps a sealed session's key
   that long idle ([`tunnel.md`](tunnel.md) §2.3, D224).
-- **A cap per principal (D213).** A principal holds at most `services.<name>.max_sessions_per_principal` (default
-  2) open sessions of a service, 2026-07-28 virtual sessions not counted. An `initialize` beyond it closes that
-  principal's longest-idle sessions (`idle`, the oldest `last_seen_at` first), never another principal's, with an
-  upstream `DELETE` the gate makes on each session's pinned target (the peer hop for a tunnel another replica holds)
-  before it forwards the `initialize`, once it has chosen an upstream: a stdio service's children
-  (`--max-sessions`, [`tunnel.md`](tunnel.md) §10) are shared by every principal admitted to it, and the closed
-  session's child is what the new one gets. The cap is checked again once the new row is written, so concurrent
-  `initialize`s of one principal leave at most the cap open. A closed session answers `404`. A full stdio bridge
-  also stops its own longest-idle child, idle for at least 5 minutes, for a principal that holds no session there.
+- **A cap per principal (D213, D231).** A principal other than `anonymous` holds at most
+  `services.<name>.max_sessions_per_principal` (default 4) open sessions of a service whose backend is a tunnel;
+  2026-07-28 virtual sessions are not counted, and a direct backend is not capped (an HTTP server the operator runs
+  has no stdio children to share). The cap counts the principal, the credential a session is bound to: every client
+  of one API key shares it, and so do a hiring node's local clients, whose principal is the node session's
+  ([`tunnel.md`](tunnel.md) §9); a buyer's several keys each hold it, and a durable task's own upstream session
+  (D22) is not counted. `anonymous` is not capped: its callers are distinct clients the gate cannot tell apart, and
+  one budget for all of them would let any caller crowd out, or close, the others' sessions; a service open to
+  `anonymous` shares its upstream's sessions with everyone. An `initialize` beyond the cap closes as many of that
+  principal's sessions as it needs, never another principal's, and only sessions whose `last_seen_at` is at least
+  5 minutes old, the oldest first (`idle`), with an upstream `DELETE` the gate makes on each session's pinned target
+  (the peer hop for a tunnel another replica holds) before it forwards the `initialize`, once it has chosen an
+  upstream: a stdio service's children (`--max-sessions`, [`tunnel.md`](tunnel.md) §10) are shared by every
+  principal admitted to it, and the closed session's child is what the new one gets. When too few are that old, it
+  closes none and is refused `429` with `Retry-After` and JSON-RPC error `-32600` `too many sessions`
+  (`data.max_sessions_per_principal`), as the edge's in-flight caps are (§2.2). A session is in use while a request
+  or a `GET` stream of it is open on any replica: the replica serving it writes its `last_seen_at` at least every
+  minute and a half meanwhile, and once more as the last ends, so a session in use is never 5 minutes old, and is
+  never closed for a new one (nor by the idle sweep while a stream lasts, for a `session_idle_s` over 90 s). The
+  check runs under one lock per principal and service, before the upstream `initialize` and again as the new row is
+  written, so concurrent `initialize`s of one principal leave at most the cap open; one that finds no room then is
+  refused the same way, and its upstream session gets a `DELETE`. A closed session answers `404`. A full stdio
+  bridge also stops its own longest-idle child, idle for at least 5 minutes, for a principal that holds no session
+  there.
 - **The peer hop (D163).** Only the replica holding a tunnel session can open a stream on it
   ([`tunnel.md`](tunnel.md) §11), and a plain MCP request has no Temporal activity to carry it there. A request
   for a tunnel session held by another replica (a pinned session's later request, or a session chosen for an
@@ -1703,7 +1720,7 @@ task id) and `cancel_forwarded`, `input_required_sticky` and `key_scope`, with [
 | `services.<name>.sealed` | `false`; `true` or `{required: bool}` (`required` defaults to `true`); tunnel backends only (D91) | [`ext-sealed.md`](ext-sealed.md) §1 |
 | `services.<name>.seller_keys` | none (seller signatures not verified) | §3 |
 | `services.<name>.session_idle_s` | `3600` | §11.2 |
-| `services.<name>.max_sessions_per_principal` | `2` (mcp only; 1 to 10000) | §11.2 |
+| `services.<name>.max_sessions_per_principal` | `4` (mcp only, tunnel backends, not `anonymous`; 1 to 10000) | §11.2 |
 | `services.<name>.task.timeout`, `.retries`, `.retention` | `1h`, `2`, `7d` | §5.4, §6.4, §6.5 |
 | `services.<name>.listed` | `false` | §12.2 |
 | `tenancy` | `single` | §2.1 |

@@ -30,9 +30,10 @@ alter table gate_replicas add column peer_addr text;
 create unique index mcp_sessions_virtual on mcp_sessions (tenant_id, service, principal) nulls not distinct
     where protocol_version = '2026-07-28' and closed_at is null;
 
--- D213: the open MCP sessions one principal may hold on a service (R §11.2, max_sessions_per_principal); an
--- initialize beyond it closes the principal's longest-idle session. The index finds a principal's open sessions.
-alter table services add column max_sessions_per_principal integer not null default 2
+-- D213, D231: the open MCP sessions one principal may hold on a tunnel service (R §11.2, max_sessions_per_principal);
+-- an initialize beyond it closes the principal's sessions idle for 5 minutes, or is refused. The index finds a
+-- principal's open sessions.
+alter table services add column max_sessions_per_principal integer not null default 4
     check (max_sessions_per_principal between 1 and 10000);
 create index mcp_sessions_principal on mcp_sessions (tenant_id, service, principal, last_seen_at) where closed_at is null;
 

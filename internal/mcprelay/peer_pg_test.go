@@ -97,9 +97,10 @@ func TestPeerHop(t *testing.T) {
 	}
 }
 
-// D213 through the peer hop: a principal's sessions are pinned to a tunnel replica B holds, and the client reaches
-// replica A. Its third initialize closes its longest-idle session on A, and that session's upstream DELETE goes
-// through B's peer listener before the new initialize does: the upstream ends the session.
+// D213, D231 through the peer hop: a principal's sessions are pinned to a tunnel replica B holds, and the client
+// reaches replica A. Once its first session has been idle for EvictIdle, its third initialize closes that session on
+// A, and the session's upstream DELETE goes through B's peer listener before the new initialize does: the upstream
+// ends the session.
 func TestSessionsPerPrincipalThroughTheHop(t *testing.T) {
 	e := newEnv(t)
 	e.service("tun", "", func(s *Service) { s.MaxSessionsPerPrincipal = 2 })
@@ -116,6 +117,7 @@ func TestSessionsPerPrincipalThroughTheHop(t *testing.T) {
 	if n := len(up.Sessions()); n != 2 {
 		t.Fatalf("%d upstream sessions, want 2", n)
 	}
+	e.backdate(c1.sid, EvictIdle+time.Minute)
 	c3.initialize(a.url + "/mcp/tun")
 	if row := e.row(c1.sid); !row.closed || *row.reason != string(CloseIdle) {
 		t.Fatalf("the longest-idle session over the cap: %+v", row)

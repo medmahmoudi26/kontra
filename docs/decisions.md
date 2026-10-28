@@ -2687,9 +2687,11 @@ written, for concurrent `initialize`s; 2026-07-28 virtual sessions are not count
 counts as an exchange, so its session is never idle; a stopping child still counts against `--max-sessions` until its
 group is gone, and an `initialize` that finds one waits for it (the gate's `DELETE` reaches the bridge first),
 stopping no other child meanwhile, rather than answer `full` ([`relay.md`](../spec/relay.md) §11.2, §17;
-[`tunnel.md`](../spec/tunnel.md) §10; `mcprelay` exchange.go `evict`, sessions.go `Evict`; `stdiobridge` bridge.go
+[`tunnel.md`](../spec/tunnel.md) §10; `mcprelay` exchange.go `makeRoom`, sessions.go `Evict`; `stdiobridge` bridge.go
 `reserve`; `TestSessionsPerPrincipal`, `TestSessionsPerPrincipalThroughTheHop`,
-`TestFullBridgeStopsItsLongestIdleChild`, `TestSessionsPerPrincipalThroughTheGate`).
+`TestFullBridgeStopsItsLongestIdleChild`, `TestSessionsPerPrincipalThroughTheGate`). Amended by D231: the gate's half
+closes only a session idle for 5 minutes and none in use, and otherwise refuses the `initialize`; it leaves
+`anonymous` and direct backends alone, and its default is 4.
 
 ### D214. A hiring node that cannot read a sealed service's card — **decided under the owner's standing instruction, 28 Oct**
 
@@ -2882,7 +2884,7 @@ the hosting node's sealing state took one node-wide lock, so that a commit's app
 writes happened under it (M3 review robustness-4), and D199's notice has no gate-level test across two replicas (M3
 review mcp-spec-5). All five options are built in M3 now, before it merges, each with its spec text and its entry
 above saying how: `--listen off` (`node` run.go; `TestRunListenOff`), the cap and the bridge's eviction (`mcprelay`
-`evict`, `stdiobridge` `reserve`, 0002's `services.max_sessions_per_principal`; `TestSessionsPerPrincipal`,
+`makeRoom`, `stdiobridge` `reserve`, 0002's `services.max_sessions_per_principal`; `TestSessionsPerPrincipal`,
 `TestFullBridgeStopsItsLongestIdleChild`, `TestSessionsPerPrincipalThroughTheGate`), the `service` member
 (`sealing` `checkService`; `TestHostingChecksTheService`, `TestHiringChecksTheService`, `TestSealedThroughTheGate`),
 the named seller key set (`card` `SellerJWKSHandler`, `sealing` `SellerKeySet`; `TestSellerKeySetNamedByTheGate`,
@@ -2982,3 +2984,56 @@ connection was down was never made up for, and the replica kept the old list, an
 it, for up to the 10-minute refresh (M3 review round 2, other-fixes-5, records-6). Decision, as built: the reconnect
 drops every cached list as well as every era ([`relay.md`](../spec/relay.md) §11.3; `mcprelay` era.go
 `Reconnected`, `gate` gate.go; `TestToolsCacheReconnected`).
+
+### D231. The session cap closes only an idle session, and leaves `anonymous` and direct backends alone — **decided under the owner's standing instruction, 28 Oct** (amends D213)
+
+The review of D225's builds found D213's gate half too blunt (M3 review D225-1 to -4). Every unauthenticated caller is
+the one principal `anonymous`, so one budget held every anonymous client of a service, and any anonymous `initialize`
+closed another client's session, even one in use: one caller looping `initialize` ended every other anonymous
+session. A hiring node's local clients, and every user of one API key, are one principal too, so at the default of 2
+a third client closed another's session and they then closed each other's in turn; and the cap applied to direct
+HTTP backends, which have no children to share. The longest-idle session was the oldest `last_seen_at`, written only
+as a request starts and at most once a minute, so a session with a long `tools/call` or an open `GET` stream was
+taken for idle and closed mid-call, its client losing the result. And a buyer's several keys, and its durable tasks'
+own upstream sessions (D22), each escaped the cap. Decision, as built ([`relay.md`](../spec/relay.md) §2.3, §11.2,
+§17; [`tunnel.md`](../spec/tunnel.md) §9, §10; `mcprelay` exchange.go `capped`, `makeRoom`, `openSession`,
+sessions.go `Evict`, `OpenCapped`, inuse.go):
+
+- **Only an idle session is closed for a new one.** An `initialize` beyond the cap closes as many of the principal's
+  sessions as it needs among those whose `last_seen_at` is at least 5 minutes old (`EvictIdle`, the stdio bridge's
+  own bound), the oldest first, with reason `idle` and the upstream `DELETE` of D213. When too few are that old it
+  closes none and is refused `429` with `Retry-After: 60` and JSON-RPC error `-32600` `too many sessions`
+  (`data.max_sessions_per_principal`), as the edge's in-flight caps are (§2.2): a refusal costs the new client a
+  retry, where a close cost a working client its session.
+- **A session in use is never idle.** The replica serving a request or a `GET` stream of a legacy session writes its
+  `last_seen_at` at least every 90 s while one is open (a timer per session in use; the column is still written at
+  most once a minute) and once more as the last ends when it has not for a minute, so a session in use on any replica is never
+  5 minutes old; the replica's own sessions in use are also excluded by hash. The idle sweep reads the same column,
+  so a session with a `GET` stream open is no longer closed under `session_idle_s` while the stream lasts (for a
+  `session_idle_s` over 90 s), as the bridge never stops a child with one open (D213).
+- **The check is atomic.** It runs in one transaction under an advisory lock of the (tenant, service, principal),
+  before the upstream `initialize` (so a refused one reaches no upstream) and again as the new row is inserted (so
+  concurrent `initialize`s of one principal leave at most the cap open); the one that finds no room the second time
+  writes no row, is refused the same way, and its upstream session gets a `DELETE`.
+- **`anonymous` is not capped.** Its callers are distinct clients the gate cannot tell apart: a shared budget lets any
+  of them crowd out, or close, the others' sessions, and a separate one that refuses would let one caller hold every
+  place until `session_idle_s`. A service open to `anonymous` shares its upstream's sessions with everyone; the
+  bridge's own eviction of an idle child and the edge's limits are what bound them.
+- **Direct backends are not capped.** A direct `mcp: {url}` backend is an HTTP server the operator runs, with no
+  stdio children; the cap counts and closes only sessions pinned to a tunnel. The gate cannot tell a node's stdio
+  server from its URL server, so a tunnel service is capped either way.
+- **The default is 4**, half the bridge's default `--max-sessions`: one principal keeping its sessions in use leaves
+  another room on a default bridge, and a hiring node (or a team key) serves four clients of a service at once, its
+  idle ones making room for more. Every local client of a hiring node, and every user of one API key, shares the
+  principal's cap, as [`tunnel.md`](../spec/tunnel.md) §9 now says.
+- **The cap counts the credential.** It stays per principal, the identity a session is bound to: counting a
+  `buyer_id` would make every key minted for one buyer share one budget, the sharing above, and a party that can mint
+  keys can mint buyers too. A buyer's several keys each hold the cap. A durable task's upstream session (D22) is the
+  dispatch's for the attempt and is not counted: a principal's durable tasks on a stdio service can hold its children
+  (the bridge never sees them idle, the dispatch polls), bounded only by `limits.dispatch_slots`. A cap of a
+  principal's durable tasks per service joins what D225 leaves to M4.
+
+Tests: `TestSessionsPerPrincipal`, `TestSessionsCapLeavesAnonymousAlone`, `TestSessionsCapLeavesDirectBackendsAlone`,
+`TestSessionsCapNeverClosesASessionInUse` (a held call and a `GET` stream through the peer hop, the new
+`initialize`s on the other replica), `TestSessionsCapConcurrentInitializes`, `TestSessionsCapCountsTheCredential`,
+`TestSessionsPerPrincipalThroughTheHop`, `TestSessionsPerPrincipalThroughTheGate`.

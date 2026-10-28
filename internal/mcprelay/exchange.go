@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -783,28 +784,83 @@ func (h *Handler) deleteUpstreamNow(ctx context.Context, t target, s Session) {
 	_ = resp.Body.Close()
 }
 
-// evict makes room for the principal's new session of the service (§11.2, D213): its open legacy sessions beyond
-// max_sessions_per_principal, counting the new one (except, the hash it is opened under), are closed idle, the
-// longest idle first, and each upstream session gets a DELETE on its pinned target (this replica's tunnel session,
-// the direct backend, or the holder's peer listener), made before evict returns, so that an upstream with a bounded
-// number of sessions (the stdio bridge's --max-sessions children) has the room before the new initialize reaches
-// it. A session whose target is gone is closed all the same: its upstream session dies with its tunnel.
-func (h *Handler) evict(rq *request, except [32]byte) {
-	limit := rq.svc.MaxSessionsPerPrincipal
-	if limit <= 0 {
-		return
+// capped reports whether max_sessions_per_principal applies to rq's new session (§11.2, D213, D231): a positive cap,
+// a tunnel service (a direct backend is an HTTP server the operator runs, with no stdio children to share), and a
+// principal other than anonymous (its callers are distinct clients the gate cannot tell apart: one budget for all of
+// them would let any of them crowd out, or close, the others' sessions).
+func capped(rq *request) bool {
+	return rq.svc.MaxSessionsPerPrincipal > 0 && rq.svc.Direct == nil && rq.p.Authenticated()
+}
+
+// capacity is max_sessions_per_principal's check of rq's new session, now.
+func (h *Handler) capacity(rq *request) Capacity {
+	return Capacity{Limit: rq.svc.MaxSessionsPerPrincipal, Busy: h.busyHashes(), Now: h.deps.now()}
+}
+
+// msgTooManySessions is the message of the 429 an initialize beyond max_sessions_per_principal gets (D231).
+const msgTooManySessions = "too many sessions"
+
+// tooManySessions is the refusal of an initialize beyond max_sessions_per_principal when too few of the principal's
+// sessions are idle to make room (D231): 429 with Retry-After and -32600, as the edge's in-flight caps (§2.2).
+func tooManySessions(w http.ResponseWriter, rq *request) *mcpwire.Refusal {
+	w.Header().Set("Retry-After", strconv.Itoa(max(int(IdleWrite/time.Second), 1)))
+	b, err := mcpwire.ErrorBody(rq.id(), mcpwire.CodeInvalidRequest, msgTooManySessions,
+		map[string]any{"max_sessions_per_principal": rq.svc.MaxSessionsPerPrincipal})
+	if err != nil {
+		b, _ = mcpwire.ErrorBody(nil, mcpwire.CodeInvalidRequest, msgTooManySessions, nil)
+	}
+	return &mcpwire.Refusal{Status: http.StatusTooManyRequests, Body: b}
+}
+
+// makeRoom applies max_sessions_per_principal before the upstream initialize (§11.2, D213, D231): when the
+// principal's open sessions of the service leave no room for the new one, its sessions idle for EvictIdle (none in
+// flight on any replica) are closed, the longest idle first, each with a DELETE on its pinned target made before
+// makeRoom returns, so that an upstream with a bounded number of sessions (the stdio bridge's --max-sessions
+// children) has the room before the new initialize reaches it; with too few such sessions it closes none and is
+// ErrTooManySessions.
+func (h *Handler) makeRoom(rq *request) error {
+	if !capped(rq) {
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(rq.ctx()), 10*time.Second)
 	defer cancel()
-	rows, err := h.deps.Sessions.Evict(ctx, rq.svc.Ref.TenantID, rq.svc.Ref.Name, rq.p.ID, limit-1, except)
+	rows, err := h.deps.Sessions.Evict(ctx, rq.svc.Ref.TenantID, rq.svc.Ref.Name, rq.p.ID, h.capacity(rq))
 	if err != nil {
-		h.log.Warn("mcp: a principal's sessions over max_sessions_per_principal were not closed", "service", rq.svc.Ref.Name, "error", err)
-		return
+		return err
 	}
+	h.deleteEvicted(ctx, rq, rows)
+	return nil
+}
+
+// openSession writes the new session's row: under max_sessions_per_principal when it applies (OpenCapped, checked
+// again for concurrent initializes of the principal; a session it closes gets its DELETE on its own goroutine).
+func (h *Handler) openSession(ctx context.Context, rq *request, clientID string, sess Session) error {
+	if !capped(rq) {
+		return h.deps.Sessions.Open(ctx, clientID, sess)
+	}
+	rows, err := h.deps.Sessions.OpenCapped(ctx, clientID, sess, h.capacity(rq))
+	if err != nil {
+		return err
+	}
+	if len(rows) > 0 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(rq.ctx()), 10*time.Second)
+			defer cancel()
+			h.deleteEvicted(ctx, rq, rows)
+		}()
+	}
+	return nil
+}
+
+// deleteEvicted sends each session max_sessions_per_principal closed a DELETE on its pinned target (this replica's
+// tunnel session or the holder's peer listener) and waits for them. A session whose target is gone is closed all the
+// same: its upstream session dies with its tunnel.
+func (h *Handler) deleteEvicted(ctx context.Context, rq *request, rows []Session) {
 	var wg sync.WaitGroup
 	for _, s := range rows {
-		h.log.Info("mcp: a principal's longest-idle session is closed for its new one (max_sessions_per_principal)",
-			"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", limit, "holder", s.ReplicaID)
+		h.log.Info("mcp: a principal's session idle for EvictIdle is closed for its new one (max_sessions_per_principal)",
+			"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", rq.svc.MaxSessionsPerPrincipal,
+			"holder", s.ReplicaID)
 		if s.UpstreamSID == "" {
 			continue
 		}

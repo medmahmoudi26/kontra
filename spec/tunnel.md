@@ -422,7 +422,9 @@ differences:
 
 - Its principal is the session's: the API key from M1's `auth` when present, else `node:<key_id>` with the key's
   tenant ([`relay.md`](relay.md) §2.3), for anonymous sessions too. A local client never sends a credential to the
-  node.
+  node. So every local client of the node shares one principal's MCP session cap on each service,
+  `max_sessions_per_principal` ([`relay.md`](relay.md) §11.2, D231), as every user of one API key does: a client
+  beyond it is refused `429` while the node's other sessions of the service are in use.
 - Its edge limits are the session's (§6.2 for anonymous sessions), counted with the session as the client:
   `limits.body` and the body timeout as on the network, `rps_per_ip` per session, and in flight the session's
   stream cap (§14), not shared with the same API key's requests from the network (D207).
@@ -461,10 +463,11 @@ target like any other.
   answers `404`; a crashed child's session answers `404`, and its group is stopped the same way. At most 8
   children per service (`--max-sessions`), counting a stopping child until its group is gone. Every principal of
   the service, and every durable task's own session, shares these children, so a full bridge makes room (D213): an
-  `initialize` beyond `--max-sessions` waits for a child that is stopping already (the gate closed a principal's
-  longest-idle session for that principal's new one, with a `DELETE`, [`relay.md`](relay.md) §11.2), and otherwise
-  stops the longest-idle child, when it has had no exchange (none open, an open `GET` stream counting) for at least 5
-  minutes, and waits for its group to be gone. With no such child it is `503` with `Kontra-Node: full`.
+  `initialize` beyond `--max-sessions` waits for a child that is stopping already (the gate closed one of a
+  principal's sessions idle for 5 minutes for that principal's new one, with a `DELETE`, [`relay.md`](relay.md)
+  §11.2), and otherwise stops the longest-idle child, when it has had no exchange (none open, an open `GET` stream
+  counting) for at least 5 minutes, and waits for its group to be gone. With no such child it is `503` with
+  `Kontra-Node: full`.
 - The bridge is an in-process handler on tunnel streams; it listens on no port.
 - **Legacy only in v4.0.** The bridge speaks 2025-11-25 and 2025-06-18. A request without a session id that is not
   `initialize` (a 2026-07-28 request among them) is answered `400` with the legacy body of

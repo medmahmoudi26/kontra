@@ -120,7 +120,7 @@ func TestDefaultsApplied(t *testing.T) {
 		{"services.hello.sealed", s.Sealed.Mode, SealedOff},
 		{"services.hello.seller_keys", s.SellerKeys.IsZero(), true},
 		{"services.hello.session_idle_s", s.SessionIdle.D(), 3600 * time.Second},
-		{"services.hello.max_sessions_per_principal", s.SessionsPerPrincipal(), 2},
+		{"services.hello.max_sessions_per_principal", s.SessionsPerPrincipal(), 4},
 		{"services.hello.task.timeout", s.Task.Timeout.D(), time.Hour},
 		{"services.hello.task.retries", s.Task.RetryCount(), 2},
 		{"services.hello.task.retention", s.Task.Retention.D(), 7 * 24 * time.Hour},
@@ -916,8 +916,8 @@ func TestTeamFixtureLoads(t *testing.T) {
 	if team.Services["recon"].Sealed.Mode != SealedRequired || team.Services["fs"].Sealed.Mode != SealedOptional {
 		t.Errorf("the fixture's sealed services load as %q and %q", team.Services["recon"].Sealed.Mode, team.Services["fs"].Sealed.Mode)
 	}
-	if n := team.Services["fs"].SessionsPerPrincipal(); n != 4 {
-		t.Errorf("the fixture's fs service caps a principal's sessions at %d, want 4 (D213)", n)
+	if n := team.Services["fs"].SessionsPerPrincipal(); n != 2 {
+		t.Errorf("the fixture's fs service caps a principal's sessions at %d, want 2 (D213)", n)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {

@@ -251,7 +251,7 @@
           "description": "An inline JWKS or {url}; seller card signatures are verified against it (spec §3)."
         },
         "session_idle_s": { "type": "integer", "minimum": 1, "maximum": 2147483647, "default": 3600 },
-        "max_sessions_per_principal": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2, "description": "mcp only: the open MCP sessions one principal may hold on the service; an initialize beyond it closes that principal's longest-idle session, with an upstream DELETE (spec §11.2, D213)." },
+        "max_sessions_per_principal": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 4, "description": "mcp only: the open MCP sessions one principal other than anonymous may hold on a tunnel service; an initialize beyond it closes that principal's sessions idle for 5 minutes (none with a request or stream in flight), the longest idle first, with an upstream DELETE, or is refused 429 when too few are (spec §11.2, D213, D231)." },
         "task": {
           "type": "object",
           "additionalProperties": false,

@@ -9,20 +9,24 @@ import (
 	"time"
 
 	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/stdiobridge"
 	"kontra.sh/kontra/internal/tenant"
 )
 
-// D213 through a real gate and an in-process `kontra connect` (relay.md §11.2, tunnel.md §10): a stdio service at
-// --max-sessions 2. One principal's third initialize closes its own longest-idle session (the gate's
-// max_sessions_per_principal, default 2), whose upstream DELETE stops that child before the new initialize reaches
-// the full bridge: without the cap it would be 503 full. Another principal holds no session there, so the gate
-// closes none for it, and the full bridge stops its longest-idle child (idle for at least EvictIdle, shortened here)
-// rather than answer full. Each closed session answers 404, every other one keeps working.
+// D213, D231 through a real gate and an in-process `kontra connect` (relay.md §11.2, tunnel.md §10): a stdio
+// service at --max-sessions 2 and max_sessions_per_principal 2. One principal's third initialize while its sessions
+// are in recent use is refused 429 by the gate, closing nothing; once they have been idle for the gate's EvictIdle,
+// the third closes the longest idle, whose upstream DELETE stops that child before the new initialize reaches the
+// full bridge (the bridge's own EvictIdle, longer, has not passed: without the gate it would be 503 full). Another
+// principal holds no session there, so the gate closes none for it, and the full bridge stops its longest-idle child
+// (idle for at least the bridge's EvictIdle) rather than answer full. Each closed session answers 404, every other one
+// keeps working. Both EvictIdles are shortened here.
 func TestSessionsPerPrincipalThroughTheGate(t *testing.T) {
-	old := stdiobridge.EvictIdle
-	stdiobridge.EvictIdle = 3 * time.Second // longer than any exchange of the test's under load, before it waits on purpose
-	t.Cleanup(func() { stdiobridge.EvictIdle = old })
+	old, oldGate := stdiobridge.EvictIdle, mcprelay.EvictIdle
+	stdiobridge.EvictIdle = 4 * time.Second // longer than any exchange of the test's under load, before it waits on purpose
+	mcprelay.EvictIdle = 2 * time.Second
+	t.Cleanup(func() { stdiobridge.EvictIdle, mcprelay.EvictIdle = old, oldGate })
 	bin := filepath.Join(t.TempDir(), "stdioserver")
 	if out, err := exec.Command("go", "build", "-o", bin, "../stdiobridge/testdata/stdioserver").CombinedOutput(); err != nil {
 		t.Fatalf("build the stdio server double: %v\n%s", err, out)
@@ -33,6 +37,7 @@ func TestSessionsPerPrincipalThroughTheGate(t *testing.T) {
     kind: mcp
     backend: { tunnel: {} }
     allow: ["org:default"]
+    max_sessions_per_principal: 2
 `
 	run := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), fastTiming)
 	team, err := tenant.EnsureTeam(t.Context(), e.pool)
@@ -71,15 +76,28 @@ func TestSessionsPerPrincipalThroughTheGate(t *testing.T) {
 		return st
 	}
 
+	third := func() (int, string, string) {
+		t.Helper()
+		st, h, body := mcpPost(t, endpoint, keyA, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25",`+
+			`"capabilities":{},"clientInfo":{"name":"cap","version":"1"}}}`)
+		return st, h.Get("Mcp-Session-Id"), body
+	}
 	a1 := initialize(keyA)
 	a2 := initialize(keyA)
 	if st := echo(keyA, a2, "a2"); st != http.StatusOK {
 		t.Fatalf("a2: %d", st)
 	}
-	// The bridge is full (2 children): A's third initialize opens, the gate having closed a1, A's longest idle.
-	st, h, body := mcpPost(t, endpoint, keyA, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25",`+
-		`"capabilities":{},"clientInfo":{"name":"cap","version":"1"}}}`)
-	a3 := h.Get("Mcp-Session-Id")
+	// A's sessions are in recent use: its third initialize is refused by the gate, and closes nothing.
+	if st, sid, body := third(); st != http.StatusTooManyRequests || sid != "" || !strings.Contains(body, "too many sessions") {
+		t.Fatalf("A's third initialize, its sessions in use: %d %q %s", st, sid, body)
+	}
+	if n := scalar[int64](t, e.pool, `select count(*) from kontra.mcp_sessions where closed_at is not null`); n != 0 {
+		t.Fatalf("a refused initialize closed %d sessions", n)
+	}
+	// The bridge is full (2 children): once A's sessions are idle for the gate's EvictIdle, A's third initialize
+	// opens, the gate having closed a1, A's longest idle.
+	time.Sleep(mcprelay.EvictIdle + 500*time.Millisecond)
+	st, a3, body := third()
 	if st != http.StatusOK || a3 == "" {
 		t.Fatalf("A's third initialize at a full bridge: %d %s", st, body)
 	}

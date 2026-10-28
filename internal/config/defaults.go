@@ -33,9 +33,11 @@ const (
 	DefaultAdmissionWait  = 5 * time.Second
 	DefaultTasksMode      = TasksDurable
 
-	// DefaultMaxSessionsPerPrincipal is services.<name>.max_sessions_per_principal's default (spec §11.2, D213), and
-	// MaxSessionsPerPrincipal its bound (services.max_sessions_per_principal CHECK in 0002).
-	DefaultMaxSessionsPerPrincipal = 2
+	// DefaultMaxSessionsPerPrincipal is services.<name>.max_sessions_per_principal's default (spec §11.2, D213, D231:
+	// half the stdio bridge's default --max-sessions, so that one principal keeping its sessions in use leaves another
+	// room on a default bridge), and MaxSessionsPerPrincipal its bound (services.max_sessions_per_principal CHECK in
+	// 0002).
+	DefaultMaxSessionsPerPrincipal = 4
 	MaxSessionsPerPrincipal        = 10000
 )
 

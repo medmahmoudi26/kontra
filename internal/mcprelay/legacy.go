@@ -39,8 +39,10 @@ const maxPicks = 3
 // InitializeResult that negotiated 2025-11-25 or 2025-06-18, the mcp_sessions row and the client's answer: the
 // result scrubbed (§2.5), its capabilities.tasks per §11.5, the operator's initialize_meta merged into _meta
 // (§13.4), and the gate's Mcp-Session-Id. Another negotiated version is -32602 naming the supported ones, and the
-// upstream session gets a best-effort DELETE. Before the upstream initialize, and again once the row is written, the
-// principal's sessions beyond max_sessions_per_principal are closed, the longest idle first (D213, evict).
+// upstream session gets a best-effort DELETE. Before the upstream initialize, and again as the row is written,
+// max_sessions_per_principal is applied (D213, D231: makeRoom, openSession): the principal's sessions idle for
+// EvictIdle make room, the longest idle first, and without enough of them the initialize is refused 429 (once the
+// upstream answered, its session gets a DELETE).
 func (h *Handler) initialize(rq *request) {
 	if ref := h.admit(rq, hooks.OpSession, ""); ref != nil {
 		writeRefusal(rq.w, ref)
@@ -71,10 +73,19 @@ func (h *Handler) initialize(rq *request) {
 			return
 		}
 		if attempt == 0 {
-			// D213: a principal holds at most max_sessions_per_principal sessions of the service; the new one's room is
-			// made before the upstream initialize, which an upstream with a bounded number of sessions (a stdio
+			// D213, D231: a principal holds at most max_sessions_per_principal sessions of the service; the new one's
+			// room is made before the upstream initialize, which an upstream with a bounded number of sessions (a stdio
 			// service's children) would otherwise refuse full, and only once there is an upstream to initialize.
-			h.evict(rq, hash)
+			switch err := h.makeRoom(rq); {
+			case errors.Is(err, ErrTooManySessions):
+				h.log.Info("mcp: an initialize is refused: the principal's sessions are at max_sessions_per_principal and in use",
+					"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", rq.svc.MaxSessionsPerPrincipal)
+				writeRefusal(rq.w, tooManySessions(rq.w, rq))
+				return
+			case err != nil:
+				h.internal(rq, "apply max_sessions_per_principal", err)
+				return
+			}
 		}
 		resp, err = h.send(rq.ctx(), t, rq, http.MethodPost, body, hdr, "", x)
 		var g *goneError
@@ -125,7 +136,16 @@ func (h *Handler) initialize(rq *request) {
 		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(rq.ctx()), 10*time.Second)
 		defer cancel()
-		if err := h.deps.Sessions.Open(ctx, clientID, *sess); err != nil {
+		if err := h.openSession(ctx, rq, clientID, *sess); errors.Is(err, ErrTooManySessions) {
+			// A concurrent initialize of the principal took the room this one made (D231): its upstream session goes.
+			h.log.Info("mcp: an initialize is refused: the principal's sessions are at max_sessions_per_principal and in use",
+				"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", rq.svc.MaxSessionsPerPrincipal)
+			if sess.UpstreamSID != "" {
+				h.deleteUpstream(context.WithoutCancel(rq.ctx()), t, *sess)
+			}
+			o.sid = ""
+			return nil, tooManySessions(rq.w, rq)
+		} else if err != nil {
 			h.log.Error("mcp: a session row was not written", "service", rq.svc.Ref.Name, "error", err)
 			if sess.UpstreamSID != "" {
 				h.deleteUpstream(context.WithoutCancel(rq.ctx()), t, *sess)
@@ -135,8 +155,6 @@ func (h *Handler) initialize(rq *request) {
 		}
 		h.log.Info("mcp session opened", "service", rq.svc.Ref.Name, "principal", rq.p.ID, "protocol_version", version,
 			"backend", backendName(t), "holder", t.replica)
-		// Concurrent initializes of one principal each made room for one: the cap holds once each is open.
-		h.evict(rq, hash)
 		return out, nil
 	}
 	h.relayResponse(rq, resp, o)
@@ -301,11 +319,17 @@ func (h *Handler) pinned(rq *request) {
 		return
 	}
 	rq.sess, rq.sid = sess, sid
+	seen := sess.LastSeenAt
 	if now := h.deps.now(); now.Sub(sess.LastSeenAt) >= IdleWrite {
 		if err := h.deps.Sessions.Touch(rq.ctx(), sess.Hash, now); err != nil {
 			h.log.Debug("mcp: last_seen_at not written", "error", err)
+		} else {
+			seen = now
 		}
 	}
+	// D231: the session is in use until this request, or its stream, ends: its last_seen_at is kept fresh, and no
+	// initialize beyond max_sessions_per_principal closes it meanwhile.
+	defer h.hold(sess, seen)()
 
 	if last := rq.r.Header.Get(mcpwire.HeaderLastEventID); rq.r.Method == http.MethodGet && strings.HasPrefix(last, "k.") {
 		// §11.7: a gate-written stream, served from task_events by any replica and never forwarded, for the

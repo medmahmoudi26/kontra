@@ -152,10 +152,10 @@ do $$ begin
     raise exception 'FAIL: two open virtual sessions of the gate''s own /mcp for one principal';
 exception when unique_violation then null; end $$;
 
--- 0002 (D213): a service caps its principals' MCP sessions at 2 unless set, and at 1 to 10000.
+-- 0002 (D213, D231): a service caps its principals' MCP sessions at 4 unless set, and at 1 to 10000.
 do $$ begin
-    if (select max_sessions_per_principal from services where name = 'hello') <> 2 then
-        raise exception 'FAIL: max_sessions_per_principal does not default to 2';
+    if (select max_sessions_per_principal from services where name = 'hello') <> 4 then
+        raise exception 'FAIL: max_sessions_per_principal does not default to 4';
     end if;
 end $$;
 do $$ begin
