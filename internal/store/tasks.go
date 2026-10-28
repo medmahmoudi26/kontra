@@ -98,6 +98,33 @@ func (l *Log) LoadHired(ctx context.Context, buyer, taskID uuid.UUID) (*TaskRow,
 	return r, nil
 }
 
+// LoadHiredAsked is LoadHired with the row's StatusSeq, read in the same statement (one snapshot: an event and the
+// version it sets are one write, §5.2): the seq of the task or status event the row's state and status message come
+// from. For a task at input-required it is the event that asked the question the row carries, so a gate id
+// k.<taskId>.<seq> built from it names that question and no later one (§12.4; the tasks extension: a key MUST NOT name
+// two distinct requests).
+func (l *Log) LoadHiredAsked(ctx context.Context, buyer, taskID uuid.UUID) (*TaskRow, int64, error) {
+	var asked int64
+	r, err := scanTask(scanAlso{l.db.QueryRow(ctx, `select `+taskCols+`,
+			(select coalesce(max(e.seq), 0) from kontra.task_events e where e.task_id = t.id and e.kind in ('task', 'status'))
+		from kontra.tasks t where t.id = $1 and t.buyer_id = $2 and t.hired`, taskID, buyer), []any{&asked}})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, 0, notFound()
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("store: load hire task %s: %w", taskID, err)
+	}
+	return r, asked, nil
+}
+
+// scanAlso is a row whose Scan fills also after the destinations it is given (columns selected after taskCols).
+type scanAlso struct {
+	pgx.Row
+	also []any
+}
+
+func (s scanAlso) Scan(dest ...any) error { return s.Row.Scan(append(dest, s.also...)...) }
+
 // HiredPageSize is the most tasks one page of a buyer's hire tasks holds (§12.2's tasks/list).
 const HiredPageSize = 50
 

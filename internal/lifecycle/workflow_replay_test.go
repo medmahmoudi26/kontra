@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -150,6 +151,65 @@ func TestHireCancelInMCPMode(t *testing.T) {
 			}
 			recordNewHistory(t, c, string(id), tc.record)
 		})
+	}
+}
+
+// RequestCancelMCP (relay.md §12.5; M4 WP-05 review) returns once the workflow has accepted kontra.cancel in MCP mode,
+// not after its result: with an upstream whose forward_cancel never answers, it returns at once while the cancel writes
+// canceled only after mcpCancelWait (and within 10 s, D57); on the task then ended it is ErrTaskNotCancelable, whether
+// the workflow's validator refuses it (still open while forward_cancel hangs) or the workflow has closed.
+func TestRequestCancelMCPReturnsOnAcceptance(t *testing.T) {
+	e := newPGEnv(t)
+	e.acts.Push = nil
+	c := temporaltest.Client(t)
+	lc := NewClient(c)
+	d := &stuckA2A{log: e.log, first: true}
+	w, err := NewWorkers(c, WorkerConfig{ReplicaID: "it-replica", DrainTimeout: time.Second}, Activities{Lifecycle: e.acts, Dispatch: d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w.Stop)
+	q := NewQueue(e.svc, e.log, lc, QueueOptions{Owner: ownerFrom, Hooks: HooksSnapshot{LifecycleQueue: QueueLifecycle}})
+	ctx := context.Background()
+	cctx, pre := caller(true)
+	id, err := q.Write(cctx, payloadOf(requestOf("m-"+pre, "hire me")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the dispatch runs", func() bool { return e.state(string(id)) == store.StateWorking && d.running.Load() == 1 })
+	began := time.Now()
+	err = lc.RequestCancelMCP(ctx, id)
+	took := time.Since(began)
+	if err != nil || took > 3*time.Second {
+		t.Fatalf("RequestCancelMCP: %v after %v", err, took)
+	}
+	if st := e.state(string(id)); st == store.StateCanceled {
+		t.Fatalf("RequestCancelMCP returned after the cancel's result (%v): the task is %s", took, st)
+	}
+	eventually(t, "the task is canceled", func() bool { return e.state(string(id)) == store.StateCanceled })
+	if since := time.Since(began); since >= 10*time.Second || since < mcpCancelWait-time.Second {
+		t.Errorf("canceled %v after the cancel was accepted", since)
+	}
+	if d.forwarded.Load() != 1 {
+		t.Errorf("forward_cancel ran %d times", d.forwarded.Load())
+	}
+	// The workflow refuses a cancel once its terminal event is in (the validator), while forward_cancel still hangs:
+	// that refusal comes back with the handle, and is not taken for an acceptance.
+	var refused error
+	eventually(t, "a cancel of the ended task is refused", func() bool {
+		refused = lc.RequestCancelMCP(ctx, id)
+		return refused != nil
+	})
+	open := closedStatus(t, c, string(id)) == enums.WORKFLOW_EXECUTION_STATUS_RUNNING
+	if !errors.Is(refused, a2a.ErrTaskNotCancelable) || !open {
+		t.Errorf("RequestCancelMCP of the ended task: %v (workflow still running: %v)", refused, open)
+	}
+	eventually(t, "the workflow closed", func() bool { return closedStatus(t, c, string(id)) == enums.WORKFLOW_EXECUTION_STATUS_COMPLETED })
+	if err := lc.RequestCancelMCP(ctx, id); !errors.Is(err, a2a.ErrTaskNotCancelable) {
+		t.Errorf("RequestCancelMCP of a closed workflow: %v", err)
 	}
 }
 

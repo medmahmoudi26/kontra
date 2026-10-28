@@ -1,6 +1,8 @@
 package gate
 
 import (
+	"context"
+
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
@@ -27,6 +29,7 @@ func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator
 	if err != nil {
 		return err
 	}
+	r.hireTasks = tasks
 	h, err := gatemcp.NewHandler(gatemcp.Deps{
 		PublicURL: cfg.PublicURL, Multi: multi, Auth: authn, Sessions: mcprelay.NewSessions(r.pool), Catalog: catalog,
 		Hirer: hirer, Tasks: tasks, Elicitations: gatemcp.NewElicitations(r.storeLog, r.listener, r.log), Log: r.storeLog,
@@ -38,4 +41,22 @@ func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator
 	}
 	h.Register(routes)
 	return nil
+}
+
+// awaitHireCancels waits, at most gatemcp.DetachedWait, for /mcp's detached kontra.cancel Updates and for the modern
+// hires that may still send one (relay.md §12.5, D178): the public listener has stopped, which closed the streams of
+// modern hires still waiting, and each such hire's task is being cancelled. A cancel whose Update had not reached
+// Temporal when Run closes the client would be lost, and its task would run unseen; once this returns, each was accepted
+// (by another replica's kontra-lifecycle worker: this one's have stopped) and is in its task's history. A gate of one
+// replica has no worker left to accept it: the drain waits out the bound, and the Update, admitted by Temporal, waits
+// for the next worker.
+func (r *Replica) awaitHireCancels(ctx context.Context) {
+	if r.hireTasks == nil {
+		return
+	}
+	wctx, cancel := context.WithTimeout(ctx, gatemcp.DetachedWait)
+	defer cancel()
+	if err := r.hireTasks.Wait(wctx); err != nil {
+		r.log.Warn("/mcp's cancels of hire tasks were still unaccepted when the drain closed Temporal", "error", err)
+	}
 }

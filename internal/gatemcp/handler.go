@@ -78,7 +78,10 @@ type Deps struct {
 	Logger         *slog.Logger
 	// PlainWait is how long a plain hire and a reply wait (PlainWait when zero; tests shorten it).
 	PlainWait time.Duration
-	now       func() time.Time
+	// PlainBudget bounds a plain hire's or reply's whole request, from its arrival to its answer (PlainBudget when
+	// zero; tests shorten it).
+	PlainBudget time.Duration
+	now         func() time.Time
 }
 
 // Handler serves POST, GET and DELETE on /mcp after the edge and the credential check.
@@ -102,6 +105,9 @@ func NewHandler(deps Deps) (*Handler, error) {
 	}
 	if deps.PlainWait <= 0 {
 		deps.PlainWait = PlainWait
+	}
+	if deps.PlainBudget <= 0 {
+		deps.PlainBudget = PlainBudget
 	}
 	if deps.now == nil {
 		deps.now = time.Now
@@ -128,6 +134,8 @@ type request struct {
 	sid  string
 	// modern is a 2026-07-28 request (§11.12 rule 2): no session; every result carries resultType (modern.go).
 	modern bool
+	// start is when the handler took the request (the edge has read its body): a plain wait's budget counts from it.
+	start time.Time
 }
 
 func (rq *request) ctx() context.Context { return rq.r.Context() }
@@ -174,7 +182,7 @@ func (rq *request) reader() Reader {
 // tools/list, tools/call of the four tools, the legacy tasks/* (§11.6 over hire tasks), the client's responses to
 // gate requests, the GET stream of a legacy session and its DELETE; a modern request is the 2026-07-28 surface's.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	rq := &request{w: w, r: r}
+	rq := &request{w: w, r: r, start: h.now()}
 	post := r.Method == http.MethodPost
 	if post && r.Body != nil {
 		b, err := io.ReadAll(r.Body) // the edge has read it within limits.body
@@ -242,6 +250,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.session(rq)
+}
+
+// now is the handler's clock (Deps.now, tests; else the wall clock).
+func (h *Handler) now() time.Time {
+	if h.deps.now != nil {
+		return h.deps.now()
+	}
+	return time.Now()
 }
 
 // originAllowed reports whether an Origin header is listed in mcp.allowed_origins (scheme and host compared

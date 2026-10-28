@@ -2911,14 +2911,34 @@ DM4-2 and DM4-7 have `/mcp` serve the modern era, but left five things unsaid th
   so the workflow's one-follow-up-per-turn-end rule (§7, D105) makes a second answer a no-op. Everything else (a quoted
   task's keys, an earlier turn's, another task's, a malformed key, a decline, a cancel, an answer to a working or
   ended task) is the empty acknowledgement and forwards nothing (the corrections' rule: a quoted task is never
-  approved by a client). A follow-up the lifecycle did not accept in time is `503` with `-32603`, so the client
-  answers again rather than believing an acknowledgement.
+  approved by a client). So is an answer to the outstanding key that §7 refuses as no longer outstanding (another
+  follow-up of the turn accepted first: a2a's UnsupportedOperation). Any other refusal is an error, never the
+  acknowledgement, since the extension has clients track keys and never answer one twice, so an acknowledged answer
+  that was not taken would be lost while the task waits: a lifecycle that did not accept it in time and the gate's own
+  failure `503` with `-32603`, an anonymous limit `429`, another A2A refusal (the anonymous storage limit, DM4-27's
+  required extension) its JSON-RPC error, as `hire` and `reply` answer them. The key's seq is read in the statement that
+  reads the task (`store.Log.LoadHiredAsked`), so `tasks/get` never pairs one question's text with a later question's
+  key (the extension: a key MUST NOT name two distinct requests); `tasks/result`'s form elicitation reads them the same
+  way.
 - **A client that leaves.** 2026-07-28 says a server MUST treat a closed response stream as the cancellation of that
   request. A `hire` that created a task and whose client leaves before the answer is written (the 2 s wait of a
   task-augmented call, D178, or the 25 s plain wait) sends that task `kontra.cancel` in MCP mode, not awaited; the
   task's creation runs on a context the client cannot cancel (bounded to a minute), so a task created while the client
   left is learnt and cancelled rather than left running unseen. A task a retry found again (§12.3) is the earlier
-  request's and is never cancelled; neither is a `reply`'s task, whose id its client knows.
+  request's and is never cancelled; neither is a `reply`'s task, whose id its client knows. A plain wait is cut so that
+  the answer is written within 50 s of the request's arrival (at least 1 s): Admission (30 s at most) and the start
+  (`AcceptWait`) come before it, and without the cut a slow Admission would push the answer past the MCP SDKs' 60 s
+  request timeout, turning a task that runs normally into a cancelled one.
+- **The cancels nobody waits for** (a modern `tasks/cancel`, a client that left) wait only for the workflow's
+  acceptance (`lifecycle.Client.RequestCancelMCP`), and a replica sends one per task at a time: none while one is being
+  sent, none for 10 s (D57's bound) after one was accepted, so a client repeating `tasks/cancel` at the edge's rate
+  cannot pile Updates onto the task's history, whose per-workflow Update limits would then refuse the task's own
+  `kontra.message` and `kontra.approval`. The drain waits for them, and for the modern hires still being answered, at
+  most `AcceptWait` + 1 s after the listener stopped and before the Temporal client closes. Measured on the pinned
+  development server: an Update admitted before the client closes is still accepted later by another worker, so the
+  wait's guarantee is that each cancel is accepted and in the history when the replica exits (and none is cut before
+  Temporal admitted it); a gate of one replica has no worker left to accept it, waits out the bound, and the admitted
+  Update waits for the next worker.
 
 SPEC-CONFLICT, resolved by this entry: §11.12 step 4, which §12.5 applies to `hire`, cancels the task of any client
 that leaves before "either answer", a quoted task's `CreateTaskResult` included. On `/mcp` that breaks §12.3's retry:

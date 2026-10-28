@@ -13,7 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"go.temporal.io/api/enums/v1"
+
 	"kontra.sh/kontra/internal/gatemcp"
+	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/temporaltest"
 )
 
 // modernClient is an MCP 2026-07-28 client of the gate's own /mcp on one replica (spec §12.5): no session; every
@@ -517,4 +522,79 @@ func TestGateMCPModernClientLeaves(t *testing.T) {
 	if hook.count() != 3 {
 		t.Errorf("Admission asked %d times, want 3 (the re-issue is a retry)", hook.count())
 	}
+}
+
+// A drain that cuts a modern hire's wait (M4 WP-05 review; §12.5, D178): the replica's listener stops after its
+// workers drained, closing the stream of a modern plain hire whose task still runs; its client has left, so the task is
+// sent kontra.cancel, detached, and the drain awaits that cancel (gatemcp.HireTasks.Wait) before the replica closes its
+// Temporal client: when Run returns, the workflow has accepted it (another replica's kontra-lifecycle worker did; this
+// one's have stopped), so it is in the task's history and nothing of it hangs on the closed client. The task ends
+// canceled and the seller receives CancelTask.
+func TestGateMCPModernDrainCancelsTheTaskOfAHireItCut(t *testing.T) {
+	e := newGateEnv(t)
+	kinds := newHireSeller(t)
+	services := e.hireServices(kinds, "")
+	timing := fastTiming
+	timing.PlainWait = time.Minute
+	a := e.start("a", e.replicaConfig(freePort(t), 2*time.Second, services), timing)
+	key := e.mintKey("buyer")
+	c := newModernClient(t, a.url, key, `{}`)
+	answered := make(chan string, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_, ans, err := c.post(ctx, "tools/call", "hire", c.body("tools/call", `"name":"hire","arguments":{"service":"kinds","message":"slow"}`), nil)
+		if err != nil {
+			answered <- ""
+			return
+		}
+		answered <- string(ans.raw)
+	}()
+	var id string
+	eventually(t, 20*time.Second, "the hire's task runs on a", func() bool {
+		if scalar[int64](t, e.pool, `select count(*) from kontra.tasks where hired`) != 1 {
+			return false
+		}
+		id = scalar[string](t, e.pool, `select id::text from kontra.tasks where hired`)
+		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, id) == "working" &&
+			attemptReplica(t, e.pool, a2a.TaskID(id)) == a.r.ID()
+	})
+	e.start("b", e.replicaConfig(freePort(t), time.Minute, services), timing) // its workers take the cancel
+	a.drain()
+	if err := a.wait(t, 60*time.Second); err != nil {
+		t.Fatalf("Run of the drained replica: %v", err)
+	}
+	if !cancelAccepted(t, id) {
+		t.Fatal("Run of the drained replica returned before the workflow accepted the cancel it sent")
+	}
+	select {
+	case raw := <-answered:
+		if raw != "" {
+			t.Fatalf("the client whose stream the drain closed got an answer: %s", raw)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the hire's stream is still open after the drain")
+	}
+	eventually(t, 15*time.Second, "the task of the hire the drain cut is canceled", func() bool {
+		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, id) == "canceled"
+	})
+	eventually(t, 15*time.Second, "the seller received CancelTask", func() bool { return kinds.count("CancelTask") >= 1 })
+}
+
+// cancelAccepted reports whether the task's workflow history holds an accepted kontra.cancel Update.
+func cancelAccepted(t *testing.T, taskID string) bool {
+	t.Helper()
+	it := temporaltest.Client(t).GetWorkflowHistory(context.Background(), lifecycle.WorkflowID(a2a.TaskID(taskID)), "", false,
+		enums.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
+	for it.HasNext() {
+		ev, err := it.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.GetEventType() == enums.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED &&
+			ev.GetWorkflowExecutionUpdateAcceptedEventAttributes().GetAcceptedRequest().GetInput().GetName() == lifecycle.UpdateCancel {
+			return true
+		}
+	}
+	return false
 }

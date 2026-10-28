@@ -26,6 +26,16 @@ import (
 // before answering {taskId, state} (§12.2, DM4-5): below the 60 s request timeout of the MCP SDKs.
 const PlainWait = 25 * time.Second
 
+// PlainBudget bounds a plain hire's or reply's request from its arrival to its answer: the plain wait is cut so that
+// the answer is written within it, after Admission (up to 30 s, hooks.admission.timeout) and the task's start or
+// follow-up (up to lifecycle.AcceptWait), so that it stays below the 60 s request timeout of the MCP SDKs, whose
+// expiry closes the stream and, on a modern hire, cancels the task (§12.5, D178). plainFloor is the least a plain
+// wait lasts all the same.
+const (
+	PlainBudget = 50 * time.Second
+	plainFloor  = time.Second
+)
+
 // RetryWindow is how long after a task left quoted a hire with the same resend key answers that task (§12.3
 // Retries), and how long a session's GET streams still get its notifications/elicitation/complete (DM4-21).
 const RetryWindow = relay.HireRetryWindow
@@ -59,6 +69,10 @@ type Hirer interface {
 // context its client cannot cancel (bounded by modernHireBound), so that a client that leaves meanwhile has its task
 // cancelled rather than running unseen (D178).
 func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
+	if rq.modern && h.deps.Tasks != nil {
+		// A modern hire may cancel its task when its client leaves: the replica's drain awaits it (HireTasks.Wait).
+		defer h.deps.Tasks.hold()()
+	}
 	a, parts, err := parseHireArgs(args)
 	if err != nil {
 		h.toolError(rq, err)
@@ -114,7 +128,7 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 			base+"/agents/"+ref.String())+" No task was created.", nil))
 		return
 	case err != nil:
-		h.refused(rq, err)
+		h.refused(rq, "hire", err)
 		return
 	}
 	row := out.Task
@@ -234,7 +248,7 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 			strings.TrimRight(h.deps.PublicURL, "/")+"/agents/"+ref)+" Nothing was sent.", nil))
 		return
 	case err != nil:
-		h.refused(rq, err)
+		h.refused(rq, "reply", err)
 		return
 	}
 	h.waitAndAnswer(rq, row.ID, after)
@@ -256,8 +270,8 @@ func extensionsText(who, tool string, uris []string, a2aURL string) string {
 // -32600 "rate limited" and Retry-After (as the MCP relay answers it, spec/tunnel.md §6.2); "admission unavailable"
 // and a lifecycle that did not accept the request in time are 503 with -32603 (§13.1, §7); any other A2A refusal
 // (Admission's refusal with its code and message, "anonymous storage limit", a part or a follow-up refused) is that
-// JSON-RPC error; anything else is the gate's own failure.
-func (h *Handler) refused(rq *request, err error) {
+// JSON-RPC error; anything else is the gate's own failure (what names the request in the log).
+func (h *Handler) refused(rq *request, what string, err error) {
 	id := rq.msg.ID
 	code, msg := relay.CodeOf(err)
 	var ae *a2a.Error
@@ -283,7 +297,7 @@ func (h *Handler) refused(rq *request, err error) {
 		}
 		writeError(rq.w, http.StatusOK, id, code, msg, nil)
 	default:
-		h.internal(rq, "hire", err)
+		h.internal(rq, what, err)
 	}
 }
 
@@ -298,7 +312,7 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
 	ctx := rq.ctx()
 	wake, stop := h.deps.Waker.WaitTask(ctx, id)
 	defer stop()
-	deadline := time.NewTimer(h.deps.PlainWait)
+	deadline := time.NewTimer(h.plainWait(rq))
 	defer deadline.Stop()
 	reread := time.NewTicker(time.Second)
 	defer reread.Stop()
@@ -331,6 +345,20 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
 		}
 	}
 	return aw.result(h.plainAnswer(ctx, row, rq.p))
+}
+
+// plainWait is how long a plain wait of rq lasts: PlainWait, cut so that the answer is written within PlainBudget of
+// the request's start (what Admission and the task's start or follow-up took came first), and at least plainFloor (or
+// PlainWait when that is shorter).
+func (h *Handler) plainWait(rq *request) time.Duration {
+	wait, budget := h.deps.PlainWait, h.deps.PlainBudget
+	if budget <= 0 {
+		budget = PlainBudget
+	}
+	if rq.start.IsZero() {
+		return wait
+	}
+	return max(min(wait, budget-h.now().Sub(rq.start)), min(wait, plainFloor))
 }
 
 // turnOver reports whether a plain wait ends at row: terminal, quoted, or input-required with its question asked

@@ -34,6 +34,7 @@ import (
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
 	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/gatemcp"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/jws"
@@ -208,6 +209,10 @@ type Replica struct {
 	// (hooks.admission.operations; none for the built-in).
 	admission    hooks.Admission
 	admissionOps []hooks.Operation
+
+	// hireTasks are the MCP Tasks of /mcp's hire tasks (spec §12; M4 WP-04, WP-05): the drain awaits their detached
+	// cancels (gatemcp.HireTasks.Wait) before the Temporal client closes.
+	hireTasks *gatemcp.HireTasks
 
 	// Anonymous sessions (spec/tunnel.md §6; tunnel.anonymous): their limits' checks and the sweeper that ends and
 	// purges their tenants, nil without the setting; anonKick asks the expiry sweep to run now (a session's end).
@@ -838,6 +843,7 @@ func (r *Replica) drain(ctx context.Context, cause error) {
 	if err := r.metrics.Shutdown(sctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		r.log.Warn("metrics listener shutdown", "error", err)
 	}
+	r.awaitHireCancels(ctx)
 	if r.keys != nil {
 		r.keys.Wait()
 	}

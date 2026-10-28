@@ -1323,7 +1323,9 @@ as an unknown one), and `tasks/list` lists them across services, newest first (b
 declare the tasks extension) and every `reply` wait up to 25 s for the task to end, to reach `input-required` or to be
 `quoted`, and answer what it then is: an ended task as `tasks/result` renders it (above); `input-required` as §12.4's
 reply-tool text; `quoted` at once, without waiting (§12.3); a task still running with a text naming the A2A URL that
-follows it (`GetTask` with the same credential).
+follows it (`GetTask` with the same credential). The wait is cut so that the answer is written within 50 s of the
+request's arrival, at least 1 s (DM4-28): Admission (up to 30 s) and the task's start come first, and the MCP SDKs time
+a request out after 60 s, which on a modern `hire` cancels its task (§12.5).
 
 **The structured result (DM4-22).** A plain `hire`, every `reply` and `tasks/result` of a `hire` task carry one
 `structuredContent` object: `{taskId, state, data?}`, where `state` is the A2A state and `data`, present only when the
@@ -1423,13 +1425,20 @@ The gate answers both eras itself (DM4-2):
   with `isError`; a legacy reader keeps §11.8's `failed`); `canceled` is `cancelled`, with `sh.kontra/canceled` and no
   `result`. `tasks/update` reads one key only: the gate id `k.<taskId>.<seq>` of the question outstanding now, as the
   request's own `tasks/get` would show it in `inputRequests` (the task `input-required`, a text-only question, form
-  elicitation declared in that request); its `accept` with `content.reply` a string becomes the §7 follow-up, once (the
-  workflow takes one follow-up per turn end, §7). Every other key, a `decline` or `cancel`, and any answer while the
-  task is `quoted`, working or ended are ignored: the result is the empty acknowledgement and nothing is forwarded
-  (nothing a client answers approves a quote, D38, D45); a follow-up the lifecycle does not accept in time is `503`
-  with `-32603`, so the client answers again. `inputResponses` that is not an object is `-32602`. `tasks/cancel` is
-  acknowledged at once: `kontra.cancel` in MCP mode, not awaited, on a task that is not terminal (a quoted one
-  included), nothing on a terminal one.
+  elicitation declared in that request; the key and the question are read in one statement, so a key never names
+  another question's text); its `accept` with `content.reply` a string becomes the §7 follow-up, once (the workflow
+  takes one follow-up per turn end, §7). Every other key, a `decline` or `cancel`, and any answer while the task is
+  `quoted`, working or ended are ignored: the result is the empty acknowledgement and nothing is forwarded (nothing a
+  client answers approves a quote, D38, D45). So is an answer that §7 refuses because the question stopped being
+  outstanding meanwhile (another follow-up of that turn was taken first). Any other refusal of the follow-up is an
+  error, never the acknowledgement (the client never answers a key twice): a lifecycle that does not accept it in time
+  and a failure of the gate's own are `503` with `-32603`, an anonymous tenant's limit `429`, any other A2A refusal
+  (the anonymous storage limit, a required extension, DM4-27) its JSON-RPC error, so the client answers again.
+  `inputResponses` that is not an object is `-32602`. `tasks/cancel` is acknowledged at once: `kontra.cancel` in MCP
+  mode on a task that is not terminal (a quoted one included), awaited only until the workflow accepts it, and not
+  sent again by that replica while one is being sent or for 10 s after its acceptance; nothing on a terminal one. A
+  replica's drain waits (at most 11 s) for these cancels, and for those of modern hires its stopping listener cut,
+  before it closes its Temporal client.
 - No virtual session is opened and Admission's `session` operation is not consulted: `per_session` prices a
   service's sessions (§11.12), and `/mcp` is not a service. Each `hire` is an Admission with operation `task`.
 
