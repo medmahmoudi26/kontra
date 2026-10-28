@@ -1302,10 +1302,14 @@ background drain, at most one per service per 10 minutes.
 **What `hire` accepts (DM4-5).** A ref of a `kind: mcp` service, or of a service whose sealing is required
 ([`ext-sealed.md`](ext-sealed.md) §1), is answered with a `CallToolResult` whose `isError` is true and whose text names
 the route to use (`/mcp/…`; the service's A2A URL through a node, which seals): no task is created. A ref the
-principal's `allow:` does not admit is the unknown-service error (§2.1). Every task `hire` creates is marked
+principal's `allow:` does not admit is the unknown-service error (§2.1); on `/mcp`, whose tools name the service in
+their arguments, that error is one `CallToolResult` with `isError` and the text `unknown service`, the same for a ref
+that is malformed, unknown, disabled or not admitted (a `404` would end the client's session; DM4-26), and so are
+arguments that break the tool's input schema. Every task `hire` creates is marked
 (`tasks.hired`). The MCP Tasks of `/mcp` see only those, of the principal's `buyer_id` (another task's id is `-32602`,
-as an unknown one), and `tasks/list` lists them across services, newest first. `tasks/cancel` is §11.6's: the task is
-`canceled` within 10 s (D57), and the upstream receives §8's `CancelTask`.
+as an unknown one), and `tasks/list` lists them across services, newest first (by `status_at`). `tasks/cancel` is
+§11.6's: the task is `canceled` within 10 s (D57), and the upstream receives §8's `CancelTask`: the gate sends
+`kontra.cancel` with `mode: "mcp"` (§14.1, DM4-26).
 
 **Plain calls wait (DM4-5).** A plain `hire` (a legacy call without `params.task`, or a modern request that does not
 declare the tasks extension) and every `reply` wait up to 25 s for the task to end, to reach `input-required` or to be
@@ -1565,7 +1569,7 @@ are signals:
 | Name | Kind | Payload → result | Sent by | Validator / effect |
 |---|---|---|---|---|
 | `kontra.message` | Update; the first one starts the workflow (`UpdateWithStart`, conflict policy use-existing, reuse policy reject-duplicate) | `{workItemId}` → `{turn}`; `UpdateID = workItemId` | the work queue's `Write` (§15) | §7's table, on workflow state only: refused unless the task is `input-required` (or new), no turn is running, and the `workItemId` has not been accepted in this run (below, D66); a follow-up to a turn end the workflow has not processed yet is told apart from a final refusal, and sent again (§7, D105) |
-| `kontra.cancel` | Update, awaited up to 60 s | `{}` → `{outcome: canceled \| not_cancelable \| unsupported \| continues, upstreamError?}` (D107) | the cancel interceptor (§8) and MCP `tasks/cancel` (§11.6) | refused only for a terminal task; concurrent cancels share one result |
+| `kontra.cancel` | Update, awaited up to 60 s | `{mode?: "mcp"}` → `{outcome: canceled \| not_cancelable \| unsupported \| continues, upstreamError?}` (D107) | the cancel interceptor (§8) and MCP `tasks/cancel` (§11.6; on `/mcp`, of a `hire` task, with `mode: "mcp"`, which gives an A2A task §11.6's rule, DM4-26) | refused only for a terminal task; concurrent cancels share one result (the first one's mode) |
 | `kontra.approval` | Update | `{accepted, metadata, mcpMeta}` → `{state}` | the operator's control plane (§13.2) | refused unless `quoted`; metadata keys and size per §13.2 |
 | `kontra.review_message` | Update, `UpdateID = workItemId` | `{workItemId, messageId, metadata}` → `{accepted, seq?}` | the review-window interceptor (§7) | validator: refused unless the window is open and the `workItemId` has not been accepted in this run; before `ReviewWindow` has answered, accepted, and the handler waits for the window, answering `accepted: false` if it does not open (D106). Handler: runs `OnReviewMessage` (start-to-close 8 s, no retry; a failure or timeout is `accept: false`); on accept it appends the message from the work item (`message` event, after-terminal write), applies the patch and returns the `seq`. The append loads the work item by `(id, taskId)` and consumes it in the same transaction; an item that is missing or already consumed completes the Update with `accepted: false` (D66) |
 | `kontra.dispatched` | signal | `{n}` | the dispatch activity, on an attempt's first upstream task id | runs `OnDispatched` |

@@ -113,7 +113,8 @@ func (q *Queue) now() time.Time {
 // identical requests arriving together make one task), the gate task is pre-created (the id Admission was
 // shown, gate ids, submitted, or quoted on a quote decision, the caller's message in history), the inline
 // push config is saved, and the sanitized payload is stored as a work item; after the commit,
-// StartWithMessage. payload.TaskID is set to the task's id, which Write returns.
+// StartWithMessage. payload.TaskID is set to the task's id, which Write returns. A hire's new task (WithHire,
+// relay.md §12.3) is marked hired, keyed by the hire's resend key, and answered by a retry as Hire says.
 //
 // A follow-up: the work item is stored (and the task's version V, and the turn end it answers, read in the
 // same transaction) and kontra.message sent, then kontra.push for an inline config it inserted. A refusal
@@ -165,13 +166,18 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	if !ok || adm.TaskID == "" || (adm.Decision.Outcome != hooks.Allow && adm.Decision.Outcome != hooks.Quote) {
 		return "", a2a.NewError(a2a.ErrInternalError, "admission unavailable")
 	}
-	// The hash of the request as the caller sent it, before the relay stored its large parts (spec §10.4, §15).
+	// The hash of the request as the caller sent it, before the relay stored its large parts (spec §10.4, §15); a
+	// hire's resend key instead (relay.md §12.3), which a retry of the same hire matches.
+	hire, hired := HireFrom(ctx)
 	hash, err := store.RequestHashOf(ctx, req)
 	if err != nil {
 		return "", err
 	}
+	if hired {
+		hash = hire.Key
+	}
 	since := q.now().Add(-ResendWindow)
-	prev, err := q.log.FindResend(ctx, q.svc, owner, req.Message.ID, hash, since)
+	prev, err := q.findResend(ctx, nil, hire, hired, owner, req.Message.ID, hash, since)
 	if err != nil {
 		return "", err
 	}
@@ -208,7 +214,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	err = pgx.BeginFunc(ctx, q.log.DB(), func(tx pgx.Tx) error {
 		// The lookup above takes no lock: an identical request arriving at the same moment missed it too.
 		// Under the resend key's lock the later one finds the earlier one's task once it committed.
-		found, err := q.log.FindResendLocked(ctx, tx, q.svc, owner, req.Message.ID, hash, since)
+		found, err := q.findResend(ctx, tx, hire, hired, owner, req.Message.ID, hash, since)
 		if err != nil {
 			return err
 		}
@@ -227,6 +233,11 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash, QuoteExpiresAt: quoteExpires,
 		}); err != nil {
 			return err
+		}
+		if hired {
+			if err := q.log.MarkHired(ctx, tx, taskID); err != nil {
+				return err
+			}
 		}
 		// A new task's workflow lists its push configs at start: no kontra.push is needed.
 		stored, _, _, err := q.savePush(ctx, tx, taskID, owner, req)
@@ -263,6 +274,45 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 // errResent rolls back a new task's transaction that found, under the resend key's lock, the task an
 // identical request created meanwhile.
 var errResent = errors.New("lifecycle: an identical request created the task meanwhile")
+
+// Hire is what Write needs of a task the gate's own /mcp creates with hire (spec/relay.md §12.2, §12.3): the task is
+// marked hired (tasks.hired, DM4-5), its first_request is Key, SHA-256(ref ‖ 0x00 ‖ JCS(arguments)), instead of the
+// request's hash, and the earlier task Write answers it with is a hire task of the same key that is quoted, or left
+// quoted less than RetryWindow ago (§12.3 Retries), instead of a resend of the same messageId (§15). The caller
+// looks the retry up first (store.Log.FindHireRetry); Write looks again under the key's lock, so two identical
+// hires arriving together make one task.
+type Hire struct {
+	Key         [32]byte
+	RetryWindow time.Duration
+}
+
+type hireKey struct{}
+
+// WithHire marks ctx as a hire's: the work queue's Write creates the task as Hire says.
+func WithHire(ctx context.Context, h Hire) context.Context {
+	return context.WithValue(ctx, hireKey{}, h)
+}
+
+// HireFrom returns the hire ctx carries, ok false for any other request.
+func HireFrom(ctx context.Context) (Hire, bool) {
+	h, ok := ctx.Value(hireKey{}).(Hire)
+	return h, ok
+}
+
+// findResend is the earlier task a new task's request repeats: a resend of the same messageId and request hash
+// (spec §15), or for a hire one of the same resend key (relay.md §12.3). With tx it looks under the key's lock.
+func (q *Queue) findResend(ctx context.Context, tx pgx.Tx, hire Hire, hired bool, owner store.Owner, messageID string,
+	hash [32]byte, since time.Time) (*store.TaskRow, error) {
+	switch {
+	case hired && tx == nil:
+		return q.log.FindHireRetry(ctx, q.svc, owner, hire.Key, hire.RetryWindow)
+	case hired:
+		return q.log.FindHireRetryLocked(ctx, tx, q.svc, owner, hire.Key, hire.RetryWindow)
+	case tx == nil:
+		return q.log.FindResend(ctx, q.svc, owner, messageID, hash, since)
+	}
+	return q.log.FindResendLocked(ctx, tx, q.svc, owner, messageID, hash, since)
+}
 
 // admitted is what Admission's decision makes of a new task: submitted with the decision's metadata, or
 // quoted with it and the approve URL (spec §13.2). The decision's mcpMeta is rendered for MCP tasks (M3);

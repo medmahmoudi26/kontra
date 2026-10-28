@@ -2793,3 +2793,49 @@ Tests: `internal/anon` (`TestOpenCountsNetworks`, `TestOpenServicesPerTenant`, `
 `TestAnonymousPurgeDeletesObjectsWithoutRows`, `TestAnonymousSweepsRunApart`), `internal/node` and `cmd/kontra`
 (`TestRealAdmissionProbeOnAnAnonymousGate`, `TestAnonymousExpiryWithASkewedClock`, `TestAnonymousEndEstimate`,
 `TestConnectExitsWhenTheAnonymousSessionExpires`).
+
+## From M4 WP-04, the gate's own `/mcp` (28 Oct)
+
+Building [`relay.md`](../spec/relay.md) §12's legacy era settled what §12 left open. Like the entries above it is
+**decided under the owner's standing instruction, 28 Oct**, and is renumbered into the D sequence when M3 has merged.
+
+### DM4-26. How `/mcp` hires, cancels and answers — **decided under the owner's standing instruction, 28 Oct** (completes DM4-5, DM4-21, DM4-22)
+
+§12.2 has `tasks/cancel` of a `hire` task follow §11.6 (canceled within 10 s whatever the upstream answers, D57), but a
+`hire` task is an A2A task, whose `kontra.cancel` follows §8 (D79's wait, "the task continues"); and several answers of
+the tools were not written down. Decision ([`relay.md`](../spec/relay.md) §12.2, §14.1):
+
+- **The cancel's MCP mode.** `kontra.cancel` takes an optional `mode: "mcp"`; `/mcp`'s `tasks/cancel` of a `hire` task
+  sends it, and TaskLifecycle then applies §11.6's rule to the A2A task: `abort` (no upstream task yet) or
+  `forward_cancel` (which sends the upstream §8's `CancelTask`), waited for at most 8 s, then `canceled` (`client`). The
+  change is behind `workflow.GetVersion("hire-mcp-cancel")`, read only for a cancel that asked for the mode, which no
+  history recorded before it holds; those histories replay unchanged (D46: `TestReplayHistoriesBeforeTheCancelMode`), and
+  the mode's own runs are recorded (`hire_mcp_cancel_*.json`). An A2A `CancelTask` of the same task keeps §8; a cancel
+  that joins one in flight shares its result and so its mode (§8: concurrent cancels are coalesced).
+- **A `hire` is an A2A request.** The task is created by the service's own a2a-go handler (`SendStreamingMessage` with
+  the principal on the context, the first event taken): the interceptors (identity, §2.5's stripping, sealed and part
+  checks, an anonymous tenant's storage, Admission with operation `task`, protocol `a2a` and the principal's `via`,
+  `CheckQuote`, large parts) and the work queue's write are the A2A route's. The work queue marks it `hired`, keys it by
+  §12.3's hash, and under that key's lock answers a retry with the earlier task; the retry is looked up before
+  Admission too, so a retry never asks Admission again and never changes the task's state.
+- **Tool execution errors.** Arguments that break a tool's input schema, the unknown-service answer (one for every
+  ref that is malformed, unknown, disabled, of an ended tenant or not admitted), an MCP or required-sealed ref, a
+  `reply` to a task that is quoted or takes no input, and an unknown task in `reply` are a `CallToolResult` with
+  `isError` (MCP 2025-11-25 answers input validation errors so; an HTTP `404` on `/mcp` would end the client's
+  session). Admission's refusal is the JSON-RPC error it names; `admission unavailable` and a lifecycle that does not
+  accept in time are `503` with `-32603`; an anonymous tenant's caps `429` with `-32600` (DM4-25).
+- **Rendering.** A raw file part is an embedded `resource` (`uri` `kontra:task/<taskId>/<filename>`, else
+  `part-<n>`, its media type, the bytes as `blob`); a URL file part is a `resource_link`. A plain answer's
+  `structuredContent.state` is the A2A state (a `quoted` task's is `TASK_STATE_INPUT_REQUIRED`, its approve URL in the
+  text and `_meta`). A plain wait whose request accepts `text/event-stream` is answered as one event of a stream kept
+  alive every 15 s.
+- **Sessions.** `initialize` negotiates `2025-11-25` or `2025-06-18` (the client's when it asks one of them, else
+  `2025-11-25`) and asks no Admission; a `2025-06-18` session has no tasks (`tasks/*` `-32601`, `hire` without
+  `execution`). Any replica closes a `/mcp` session idle for an hour (§11.2's default `session_idle_s`).
+- **§12.4's answer.** A client response to `k.<taskId>.<seq>` is the follow-up only when it is `accept` with
+  `content.reply` a string, from a session of the task's buyer that declared form elicitation, and `seq` is the event
+  that asked the question outstanding now; anything else (a quoted task's gate id included) is `202` and dropped.
+- **`elicitation/complete`.** An open `GET` stream reads its session's elicitations at open, every 2 s and on each
+  wake of a quoted one; it claims and writes each that left `quoted` (DM4-21).
+- **Descriptions.** An MCP service's description falls back to its upstream's `serverInfo` title or name as the
+  replica's last background drain (started by `describe`) read it.
