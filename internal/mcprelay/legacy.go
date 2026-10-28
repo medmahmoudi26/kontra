@@ -745,6 +745,11 @@ func (h *Handler) toolsCall(rq *request, t target) {
 		writeRefusal(rq.w, ref)
 		return
 	}
+	release, ok := h.takeCall(rq)
+	if !ok {
+		return
+	}
+	defer release()
 	hash := rq.sess.Hash
 	meter := &callMeter{
 		start: rq.start, task: task,

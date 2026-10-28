@@ -69,7 +69,10 @@ type Dispatcher struct {
 	Heartbeater workqueue.Heartbeater
 	// TaskBytes is limits.task_bytes (spec §6.6): what a task's events and objects may hold; 256 MiB when 0.
 	TaskBytes int64
-	Logger    *slog.Logger
+	// Tenants is an anonymous tenant's parts total (spec/tunnel.md §6.2, §6.6; *anon.Caps): a task of its service counts
+	// the tenant's other tasks' bytes, and upstream bytes past parts_bytes fail it upstream_error. Nil: TaskBytes alone.
+	Tenants TenantBudget
+	Logger  *slog.Logger
 
 	// Timings, replaceable in tests.
 	minPoll, maxPoll time.Duration // the bounds of the upstream's pollInterval (§11.5 step 4: 0.5–30 s)
@@ -137,6 +140,13 @@ func (d *Dispatcher) cancelHoldFor() time.Duration {
 		return d.cancelHold
 	}
 	return 30 * time.Second
+}
+
+// TenantBudget is what a dispatch counts against an anonymous tenant's parts_bytes (*anon.Caps.Budget; svcSlug "" when
+// the dispatch does not hold it): others, the bytes the tenant's other tasks store, added to the task's own, and limit,
+// the most they may reach; applies is false for a service of a tenant that is not anonymous.
+type TenantBudget interface {
+	Budget(ctx context.Context, svcTenant uuid.UUID, svcSlug string, task uuid.UUID, taskBytes int64) (others, limit int64, applies bool, err error)
 }
 
 func (d *Dispatcher) taskBytes() int64 {

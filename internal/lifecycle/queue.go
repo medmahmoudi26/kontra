@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.temporal.io/sdk/activity"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/store"
@@ -48,9 +49,31 @@ type QueueOptions struct {
 	Push InlinePushSaver
 	// Hooks is the hook configuration a new task's workflow starts with (spec §13.3, D46).
 	Hooks HooksSnapshot
+	// Caps checks an anonymous tenant's concurrent tasks, as host and as hirer, in the transaction that creates a task
+	// (spec/tunnel.md §6.2; *anon.Caps); nil checks nothing (a gate without tunnel.anonymous).
+	Caps TaskCaps
 	// Now is the clock (tests); time.Now when nil.
 	Now func() time.Time
 }
+
+// TaskCaps checks the anonymous tenants' task caps (spec/tunnel.md §6.2, DM4-10) in tx, the transaction that creates a
+// task, before its row: an error wrapping anon.ErrRateLimited when the service's tenant (as host) or the principal's
+// (as hirer) has its cap of non-terminal tasks. *anon.Caps implements it.
+type TaskCaps interface {
+	Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug, principal string) error
+}
+
+// RateLimited is the A2A answer to a task an anonymous tenant's cap refuses (spec/tunnel.md §6.2, relay.md §2.2):
+// InvalidRequest (-32600) "rate limited", which also wraps anon.ErrRateLimited, so that both bindings answer it HTTP
+// 429 with Retry-After (sse.WriteError, internal/a2ahttp).
+func RateLimited() error {
+	return rateLimitedError{a2a.NewError(a2a.ErrInvalidRequest, "rate limited")}
+}
+
+type rateLimitedError struct{ err *a2a.Error }
+
+func (e rateLimitedError) Error() string   { return e.err.Error() }
+func (e rateLimitedError) Unwrap() []error { return []error{e.err, anon.ErrRateLimited} }
 
 // Queue is the Temporal-backed a2a-go workqueue.Queue for one service (spec §8.1, §15, D6). Its Write
 // is the only Temporal call on the request path; the HandlerFn a2a-go registers is what the dispatch
@@ -193,6 +216,12 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 			prev = found
 			return errResent
 		}
+		// An anonymous tenant's concurrent tasks (spec/tunnel.md §6.2), counted under its lock before the row.
+		if q.opts.Caps != nil {
+			if err := q.opts.Caps.Task(ctx, tx, q.svc.TenantID, q.svc.Tenant, owner.Principal); err != nil {
+				return err
+			}
+		}
 		if _, err := q.log.CreateTask(ctx, tx, store.NewTask{
 			ID: taskID, Service: q.svc, Protocol: store.ProtocolA2A, Owner: owner, ContextID: contextID, State: state,
 			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash, QuoteExpiresAt: quoteExpires,
@@ -212,6 +241,9 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	})
 	if errors.Is(err, errResent) {
 		return q.resend(ctx, p, prev)
+	}
+	if errors.Is(err, anon.ErrRateLimited) {
+		return "", RateLimited()
 	}
 	if err != nil {
 		return "", err

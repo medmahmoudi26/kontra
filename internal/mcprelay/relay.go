@@ -33,11 +33,13 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
@@ -117,7 +119,51 @@ type Deps struct {
 	// Tasks serves gate-owned MCP tasks (§11.5–§11.8); nil, a durable service advertises no tasks (as tasks: off
 	// does) and answers a task-augmented call and tasks/* -32601.
 	Tasks *Tasks
+	// Calls bounds the tools/call requests relayed at once to an anonymous tenant's services (spec/tunnel.md §6.2,
+	// DM4-20: calls, gate-wide; *anon.Caps); nil bounds nothing.
+	Calls CallCaps
 	now   func() time.Time
+}
+
+// CallCaps takes one of an anonymous tenant's slots for a relayed tools/call (*anon.Caps.Call): an error wrapping
+// anon.ErrRateLimited when its calls are in flight; release frees the slot once the answer is relayed. A service of a
+// tenant that is not anonymous takes none.
+type CallCaps interface {
+	Call(ctx context.Context, svcTenant uuid.UUID, svcSlug string) (release func(), err error)
+}
+
+// takeCall takes the call's slot of an anonymous tenant's calls (spec/tunnel.md §6.2): over it the call is 429 with
+// -32600 "rate limited" and Retry-After, before anything is forwarded or metered. Every tools/call the relay forwards
+// counts, a passthrough task-augmented one too (it holds the same relay while its answer comes back). ok is false when
+// the answer was written.
+func (h *Handler) takeCall(rq *request) (release func(), ok bool) {
+	if h.deps.Calls == nil {
+		return func() {}, true
+	}
+	release, err := h.deps.Calls.Call(rq.ctx(), rq.svc.Ref.TenantID, rq.svc.Ref.Tenant)
+	if err != nil {
+		if !anonRefused(rq.w, rq.msg.ID, err) {
+			h.internal(rq, "take an anonymous call slot", err)
+		}
+		return nil, false
+	}
+	return release, true
+}
+
+// anonRefused writes the answer to an anonymous tenant's limit (spec/tunnel.md §6.2, DM4-20) and reports whether err
+// was one: a runtime cap is 429 with -32600 "rate limited" and Retry-After (as the edge answers, relay.md §2.2), a
+// caller's call over parts_bytes -32602 "anonymous storage limit".
+func anonRefused(w http.ResponseWriter, id json.RawMessage, err error) bool {
+	switch {
+	case errors.Is(err, anon.ErrRateLimited):
+		w.Header().Set("Retry-After", strconv.Itoa(int(anon.RetryAfter/time.Second)))
+		writeError(w, http.StatusTooManyRequests, id, mcpwire.CodeInvalidRequest, anon.ErrRateLimited.Error(), nil)
+		return true
+	case errors.Is(err, anon.ErrStorageFull):
+		writeError(w, http.StatusOK, id, mcpwire.CodeInvalidParams, anon.ErrStorageFull.Error(), nil)
+		return true
+	}
+	return false
 }
 
 // Handler serves POST, GET and DELETE on /mcp/{name} (and /mcp/{tenant}/{name} on a multi-tenant gate) after

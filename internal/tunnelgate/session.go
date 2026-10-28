@@ -33,6 +33,11 @@ type Session struct {
 	CLIVersion    string
 	NodeName      string
 
+	// expiresAt is an anonymous session's end (spec/tunnel.md §6.1); zero for any other session. ended is set when
+	// its tenant ended before that (a conversion, or the sweep at a clock ahead of this replica's): Registry.ExpireTenant.
+	expiresAt time.Time
+	ended     atomic.Bool
+
 	mux       *yamux.Session
 	reg       *Registry // set by Registry.Add; nil for sessions no registry holds (the Handler's tests)
 	control   net.Conn  // the control stream, the first one the gate opened (set by the Handler)
@@ -132,6 +137,32 @@ func (s *Session) allowsLocal(service, kind string) error {
 		return fmt.Errorf("%w: the binding of key %s to %s was revoked", ErrRevoked, s.KeyID, service)
 	}
 	return nil
+}
+
+// Anonymous reports whether the session is an anonymous session (spec/tunnel.md §6), and its end.
+func (s *Session) Anonymous() (time.Time, bool) { return s.expiresAt, !s.expiresAt.IsZero() }
+
+// anonymousEnded reports whether an anonymous session has reached its end, or its tenant ended earlier.
+func (s *Session) anonymousEnded() bool {
+	return !s.expiresAt.IsZero() && (s.ended.Load() || !time.Now().Before(s.expiresAt))
+}
+
+// Expire ends an anonymous session at its expiry (spec/tunnel.md §6.1): no new stream, {"t": "revoked"} on its
+// control stream, its pinned MCP sessions closed revoked, then the session closed. Its key is not revoked. Safe to
+// call more than once.
+func (s *Session) Expire() {
+	why := "its anonymous session expired (§6.1)"
+	s.markRevoked()
+	if !s.shut(why) {
+		return
+	}
+	if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil && s.reg != nil {
+		s.reg.log.Debug("tunnel session: {t: revoked} not delivered", "session", s.ID, "error", err)
+	}
+	if s.reg != nil && s.hostedMCP() {
+		s.reg.closeMCP(s.ID, "", mcpRevoked)
+	}
+	_ = s.close(why, true)
 }
 
 // markRevoked records that the session's key was revoked or its rotation overlap ended: its later refusals wrap

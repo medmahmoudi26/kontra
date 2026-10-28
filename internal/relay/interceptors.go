@@ -17,6 +17,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/eventqueue"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/hooks"
@@ -59,6 +60,9 @@ type ReviewMessenger interface {
 //     (ext-sealed.md §3); a sealed: required service refuses an unsealed part with InvalidRequest
 //     (sealed_unsealed_part), and an optional one marks it metadata["kontra.sealed"] = false (§5). Without a bucket a part over 256 KiB is InvalidParams ("part too large: configure
 //     blobs", §10.4), and so is a contextId or messageId over 256 characters (§4), before any task row.
+//     Then an anonymous tenant's storage (spec/tunnel.md §6.2, DM4-20; anonStorage): a message to an anonymous
+//     tenant's service whose encoding would take what the tenant stores past parts_bytes is InvalidParams
+//     "anonymous storage limit", before Admission and any task row.
 //  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow, or the remote hook
 //     (hooks.RemoteAdmission, M4 DM4-8). It fails closed: a hook error, a decision whose maps break §13.2's rules,
 //     and a quote whose approveUrl is not an absolute https:// URL or whose expiresAt is not in the future
@@ -113,6 +117,16 @@ type Interceptors struct {
 	// DM4-23): the service's lifecycle.Queue. Nil leaves such a resend to the work queue, which waits for the end
 	// of the quote.
 	Starts StartReissuer
+	// Anon checks a message to an anonymous tenant's service against its parts_bytes (spec/tunnel.md §6.2;
+	// *anon.Caps); nil checks nothing (a gate without tunnel.anonymous).
+	Anon AnonStorage
+}
+
+// AnonStorage checks a caller's message of n bytes to a service of tenant svcTenant (slug svcSlug) against an
+// anonymous tenant's parts_bytes, before any task row: an error wrapping anon.ErrStorageFull when it would not fit.
+// *anon.Caps implements it.
+type AnonStorage interface {
+	Message(ctx context.Context, svcTenant uuid.UUID, svcSlug string, n int64) error
 }
 
 // StartReissuer re-issues the start of the task a resend repeats, with its first work item, as the work queue does
@@ -145,6 +159,7 @@ func (i *Interceptors) Chain() []a2asrv.CallInterceptor {
 		&finishedTurn{i: &ii},
 		interceptor(ii.anonymous),
 		interceptor(ii.callerKeys),
+		interceptor(ii.anonStorage),
 		interceptor(ii.admission),
 		interceptor(ii.followUp),
 		interceptor(ii.pushURLs),
@@ -192,6 +207,33 @@ func (i *Interceptors) anonymous(ctx context.Context, cc *a2asrv.CallContext, re
 		if r, ok := req.Payload.(*a2a.SendMessageRequest); ok && r.Config != nil && r.Config.PushConfig != nil {
 			return ctx, nil, unsupported("push notifications are not available to anonymous callers")
 		}
+	}
+	return ctx, nil, nil
+}
+
+// anonStorage refuses a message to an anonymous tenant's service that would take the tenant's stored bytes past
+// parts_bytes (spec/tunnel.md §6.2, DM4-20): InvalidParams "anonymous storage limit", before Admission and any task
+// row. The message counts as its encoding, as relay.md §6.6 counts each logged event (D103).
+func (i *Interceptors) anonStorage(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+	if i.Anon == nil || !anon.IsSlug(i.Svc.Tenant) {
+		return ctx, nil, nil
+	}
+	p, ok := req.Payload.(*a2a.SendMessageRequest)
+	if !ok || p == nil || p.Message == nil {
+		return ctx, nil, nil
+	}
+	b, err := json.Marshal(p.Message)
+	if err != nil {
+		return ctx, nil, invalid("the message does not encode")
+	}
+	switch err := i.Anon.Message(ctx, i.Svc.TenantID, i.Svc.Tenant, int64(len(b))); {
+	case errors.Is(err, anon.ErrStorageFull):
+		return ctx, nil, invalid(anon.ErrStorageFull.Error())
+	case err != nil:
+		if i.Logger != nil {
+			i.Logger.Warn("relay: an anonymous tenant's storage could not be read; the message is refused", "service", i.Svc.Name, "error", err)
+		}
+		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "the gate could not check the anonymous session's storage")
 	}
 	return ctx, nil, nil
 }

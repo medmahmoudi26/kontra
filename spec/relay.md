@@ -261,7 +261,7 @@ five fields with the 1.0 names, plus two it must also own, D52):
 | `capabilities.pushNotifications` | `true`: the gate implements push itself (§10). |
 | `capabilities.streaming` | `true`: the gate streams from its own log whatever the upstream does. |
 | `capabilities.extendedAgentCard` | `false` (PRD §17, default). `GetExtendedAgentCard` answers `UnsupportedOperationError`. |
-| `capabilities.extensions` | The seller's list, except that every entry whose URI the gate or the operator asserts — `https://kontra.sh/ext/sealed/v1` for a sealed service, and every URI in the operator's `card_extensions` (§13.4) — replaces a seller entry with the same URI. A seller's `input-schema/v1` entry passes unchanged. |
+| `capabilities.extensions` | The seller's list, except that every entry whose URI the gate or the operator asserts — `https://kontra.sh/ext/sealed/v1` for a sealed service, `https://kontra.sh/ext/anonymous/v1` (`required: false`, `params.expiresAt`) for a service of an anonymous tenant ([`tunnel.md`](tunnel.md) §6.1, DM4-25), and every URI in the operator's `card_extensions` (§13.4) — replaces a seller entry with the same URI. A seller's `input-schema/v1` entry passes unchanged. |
 | `signatures` | Exactly one: the gate's JWS (below). |
 
 **The gate's signature.** ES256 over RFC 8785 JCS of the served card without `signatures`; protected header

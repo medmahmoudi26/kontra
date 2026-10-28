@@ -27,6 +27,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"kontra.sh/kontra/internal/a2ahttp"
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/card"
@@ -91,6 +92,7 @@ type options struct {
 	// timing (tests shorten it)
 	beatEvery, silence, healthEvery, servicesEvery, cardWait, serveGrace time.Duration
 	orphanEvery, orphanAge, retentionEvery                               time.Duration
+	anonExpireEvery, anonPurgeEvery                                      time.Duration
 	tunnelPing, tunnelCards                                              time.Duration
 	executor                                                             relay.ExecutorOptions
 	hup                                                                  bool
@@ -108,6 +110,8 @@ func WithReload(fn func() (*config.Config, error)) Option { return func(o *optio
 type Timing struct {
 	Beat, Silence, Health, ServicesRefresh, CardWait, ServeGrace time.Duration
 	OrphanEvery, OrphanAge, RetentionEvery                       time.Duration
+	// AnonExpire and AnonPurge are the anonymous sweeps' intervals (AnonExpireInterval, AnonPurgeInterval).
+	AnonExpire, AnonPurge time.Duration
 	// TunnelPing is the tunnel registry's last_ping_at interval and row check (tunnel.LastPingEvery);
 	// TunnelCards a tunnel card's refetch while serving (card.Refresh).
 	TunnelPing, TunnelCards time.Duration
@@ -131,6 +135,8 @@ func WithTiming(t Timing) Option {
 		set(&o.orphanEvery, t.OrphanEvery)
 		set(&o.orphanAge, t.OrphanAge)
 		set(&o.retentionEvery, t.RetentionEvery)
+		set(&o.anonExpireEvery, t.AnonExpire)
+		set(&o.anonPurgeEvery, t.AnonPurge)
 		set(&o.tunnelPing, t.TunnelPing)
 		set(&o.tunnelCards, t.TunnelCards)
 		o.executor = t.Executor
@@ -199,6 +205,12 @@ type Replica struct {
 	admission    hooks.Admission
 	admissionOps []hooks.Operation
 
+	// Anonymous sessions (spec/tunnel.md §6; tunnel.anonymous): their limits' checks and the sweeper that ends and
+	// purges their tenants, nil without the setting; anonKick asks the expiry sweep to run now (a session's end).
+	anonCaps    *anon.Caps
+	anonSweeper *anon.Sweeper
+	anonKick    chan struct{}
+
 	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
 	pgUp       atomic.Bool
@@ -223,6 +235,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 		logger: slog.Default(), beatEvery: BeatEvery, silence: ReplicaSilence, healthEvery: HealthEvery,
 		servicesEvery: RefreshEvery, cardWait: CardWait, serveGrace: ServeGrace,
 		orphanEvery: OrphanInterval, orphanAge: OrphanAge, retentionEvery: RetentionInterval, hup: true,
+		anonExpireEvery: AnonExpireInterval, anonPurgeEvery: AnonPurgeInterval,
 	}
 	for _, opt := range opts {
 		opt(&o)
@@ -348,9 +361,19 @@ func (r *Replica) assemble() error {
 	// sessions hiring with that key: 401 on their later streams, {"t": "auth_revoked"} (tunnel.md §12).
 	r.revoked.Subscribe(r.tunnels.APIKeyRevoked)
 	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
+	// Anonymous sessions (spec/tunnel.md §6, DM4-10): opened by the admission, their limits checked where work is
+	// created, their tenants ended and purged by every replica's sweeps. A gate without tunnel.anonymous has none.
+	var anonLimits *anon.Limits
+	if cfg.Tunnel.Anonymous.Enabled {
+		lim := anon.LimitsFrom(cfg.Tunnel.Anonymous)
+		anonLimits = &lim
+		r.anonCaps = anon.NewCaps(r.pool, lim, r.id, log)
+		r.anonSweeper = anon.NewSweeper(r.pool, lim, r.objects(), log)
+		r.anonKick = make(chan struct{}, 1)
+	}
 	r.enroll = enroll.NewStore(r.pool, enroll.Options{
 		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti,
-		EnrollWithAPIKey: cfg.Tunnel.EnrollWithAPIKey, Keys: r.keys, Logger: log,
+		EnrollWithAPIKey: cfg.Tunnel.EnrollWithAPIKey, Keys: r.keys, Logger: log, Anonymous: anonLimits,
 	})
 
 	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate, Resolver: pushResolver(log)}
@@ -410,6 +433,11 @@ func (r *Replica) assemble() error {
 	executor := r.opts.executor
 	executor.TaskBytes = cfg.Limits.TaskBytes.Int64()
 	executor.Bucket, executor.Render = r.blobs, r.render
+	if r.anonCaps != nil {
+		// An anonymous tenant's concurrent tasks and parts total (spec/tunnel.md §6.2).
+		queueOpts.Caps = r.anonCaps
+		executor.Tenants = r.anonCaps
+	}
 	handlers = relay.NewHandlers(relay.HandlerDeps{
 		Log:       r.storeLog,
 		Puller:    store.NewPullerProvider(r.storeLog, r.listener),
@@ -422,6 +450,9 @@ func (r *Replica) assemble() error {
 			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Admit: r.admission, Canceler: r.lifecycle,
 				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log,
 				Starts: lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)}
+			if r.anonCaps != nil {
+				i.Anon = r.anonCaps
+			}
 			return i.Chain()
 		},
 		Registry: registry,
@@ -436,6 +467,9 @@ func (r *Replica) assemble() error {
 	mcpDispatch := &mcprelay.Dispatcher{
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Services: r.services, Tunnels: r.tunnels,
 		Waker: r.listener, Signals: r.lifecycle, TaskBytes: cfg.Limits.TaskBytes.Int64(), Logger: log,
+	}
+	if r.anonCaps != nil {
+		mcpDispatch.Tenants = r.anonCaps
 	}
 	r.dispatch = &countingDispatch{DispatchActivities: &relay.Dispatcher{
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Handlers: handlers, Backends: r.services,
@@ -509,10 +543,16 @@ func (r *Replica) assemble() error {
 	}
 	// GET /v1/tunnel (spec §2.1, tunnel.md §3): the node's WebSocket upgrade. A draining replica refuses new
 	// tunnels (relay.md §14.3).
-	th, err := tunnelgate.NewHandler(tunnelgate.HandlerConfig{
+	hcfg := tunnelgate.HandlerConfig{
 		PublicURL: cfg.PublicURL, ChannelBinding: cfg.Tunnel.ChannelBinding, ReplicaID: r.id,
 		Admitter: r.enroll, Registry: r.tunnels, Draining: r.draining.Load, Logger: log, NodeStreams: nodeStreams,
-	})
+	}
+	if anonLimits != nil {
+		// An anonymous session's hiring streams (§6.2, §14) and its end, which ends its tenant at once (RunSweeps).
+		hcfg.AnonymousHiringStreams = anonLimits.HiringStreams
+		hcfg.OnAnonymousExpiry = r.kickAnonExpiry
+	}
+	th, err := tunnelgate.NewHandler(hcfg)
 	if err != nil {
 		return err
 	}
@@ -558,9 +598,15 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 	}
 	// Gate-owned MCP tasks (spec §11.5–§11.8; M3 WP-06): tasks/* served from Postgres on any replica, LISTEN for
 	// tasks/result, the lifecycle client for the start, kontra.cancel and kontra.input_response.
-	if deps.Tasks, err = mcprelay.NewTasks(mcprelay.TasksConfig{
+	tcfg := mcprelay.TasksConfig{
 		Log: r.storeLog, Waker: r.listener, Lifecycle: r.lifecycle, Hooks: snapshot, Rules: rules, Logger: r.log,
-	}); err != nil {
+	}
+	if r.anonCaps != nil {
+		// An anonymous tenant's tasks, parts total and plain calls (spec/tunnel.md §6.2, DM4-20).
+		tcfg.Caps = r.anonCaps
+		deps.Calls = r.anonCaps
+	}
+	if deps.Tasks, err = mcprelay.NewTasks(tcfg); err != nil {
 		return err
 	}
 	h, err := mcprelay.NewHandler(deps)

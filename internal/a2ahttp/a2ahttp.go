@@ -495,7 +495,9 @@ func (s *Server) serveJSONRPC(w http.ResponseWriter, r *http.Request, rt route, 
 			s.internal(w, rt, id, "build the service handler", err)
 			return
 		}
-		boundWrites(t.jsonrpc, ResponseWriteTimeout).ServeHTTP(w, r)
+		n := &note{}
+		r = r.WithContext(context.WithValue(r.Context(), noteKey{}, n))
+		boundWrites(t.jsonrpc, ResponseWriteTimeout).ServeHTTP(&rpcWriter{ResponseWriter: w, note: n, id: id}, r)
 	})
 	s.a2a(svc, next).ServeHTTP(w, r)
 }
@@ -942,8 +944,9 @@ func emptyNotFound(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
-// note records, for one HTTP+JSON request, an error that a2a-go's REST handler would write as 500 but the
-// gate answers 503: an Update the task's lifecycle did not accept in time (spec §14.1).
+// note records, for one request a2a-go's JSON-RPC or REST handler answers, an error the gate answers otherwise: an
+// Update the task's lifecycle did not accept in time (a2a-go writes 500, the gate 503 on HTTP+JSON, spec §14.1), and a
+// task an anonymous tenant's cap refused (HTTP 429 with Retry-After on both bindings, spec/tunnel.md §6.2).
 type note struct {
 	mu  sync.Mutex
 	err error
@@ -952,7 +955,7 @@ type note struct {
 type noteKey struct{}
 
 func noteError(ctx context.Context, err error) {
-	if err == nil || !sse.Unavailable(err) {
+	if err == nil || (!sse.Unavailable(err) && !sse.RateLimited(err)) {
 		return
 	}
 	if n, ok := ctx.Value(noteKey{}).(*note); ok {
@@ -1103,10 +1106,20 @@ type restWriter struct {
 }
 
 func (w *restWriter) WriteHeader(code int) {
+	w.note.mu.Lock()
+	noted := w.note.err
+	w.note.mu.Unlock()
+	if noted != nil && sse.RateLimited(noted) {
+		status, body := sse.HTTPError(noted)
+		w.ResponseWriter.Header().Set("Content-Type", "application/json")
+		w.ResponseWriter.Header().Set("Retry-After", sse.RetryAfter)
+		w.ResponseWriter.WriteHeader(status)
+		_, _ = w.ResponseWriter.Write(body)
+		w.swallow = true
+		return
+	}
 	if code == http.StatusInternalServerError {
-		w.note.mu.Lock()
-		err := w.note.err
-		w.note.mu.Unlock()
+		err := noted
 		if err != nil {
 			status, body := sse.HTTPError(err)
 			w.ResponseWriter.Header().Set("Content-Type", "application/json")
@@ -1128,3 +1141,47 @@ func (w *restWriter) Write(b []byte) (int, error) {
 
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (w *restWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// rpcWriter turns a2a-go's JSON-RPC answer to a noted RateLimited error (HTTP 200 with -32600) into the gate's: HTTP
+// 429 with Retry-After and the same JSON-RPC error, as the edge answers its own rate limits on a JSON-RPC route
+// (relay.md §2.2, spec/tunnel.md §6.2); it drops what a2a-go writes after it. Any other answer passes unchanged.
+type rpcWriter struct {
+	http.ResponseWriter
+	note    *note
+	id      json.RawMessage
+	checked bool
+	swallow bool
+}
+
+func (w *rpcWriter) check() {
+	if w.checked {
+		return
+	}
+	w.checked = true
+	w.note.mu.Lock()
+	err := w.note.err
+	w.note.mu.Unlock()
+	if err != nil && sse.RateLimited(err) {
+		sse.WriteError(w.ResponseWriter, sse.JSONRPC, w.id, 0, err)
+		w.swallow = true
+	}
+}
+
+func (w *rpcWriter) WriteHeader(code int) {
+	w.check()
+	if w.swallow {
+		return
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *rpcWriter) Write(b []byte) (int, error) {
+	w.check()
+	if w.swallow {
+		return len(b), nil
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *rpcWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

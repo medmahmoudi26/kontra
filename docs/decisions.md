@@ -2717,3 +2717,51 @@ binding: direct, tunnel and caddy 82 passed, 10 xfailed and 17 expected skips (j
 expected skips (http_json); auth 90 passed, 5 xfailed and 14 expected skips (jsonrpc), 90 passed, 3 xfailed and 8
 expected skips (http_json); the rest are the other bindings' tests. Amended by M4 WP-02's review (28 Oct): skips are
 entries, and the ids are fresh per test (before, "skips are not entries", and the tests of (2) never ran).
+
+## From M4 WP-03, anonymous sessions (28 Oct)
+
+### DM4-25. How the gate keeps anonymous sessions' limits and ends them — **decided under the owner's standing instruction, 28 Oct** (completes DM4-10, DM4-18 to DM4-20)
+
+[`tunnel.md`](../spec/tunnel.md) §6 says what is limited and refused; it does not say how a gate of several replicas
+counts plain MCP calls in flight, what the 429s carry, how the parts total is kept across a tenant's tasks, or how the
+replica holding a session learns that its tenant ended. Decision (`internal/anon`, `internal/enroll/anonymous.go`,
+`internal/tunnelgate`; [`tunnel.md`](../spec/tunnel.md) §6.1, §6.2, [`relay.md`](../spec/relay.md) §3):
+
+- **Calls, gate-wide.** A plain `tools/call` relayed to an anonymous tenant's service holds a row of `anon_calls`
+  (migration 0003: `id`, `tenant_id`, `replica_id` referencing `gate_replicas` with `on delete cascade`, `started_at`)
+  from before it is forwarded until its answer has been relayed, inserted under a lock on the tenant's row only while
+  the tenant has fewer than `calls`. A replica that dies takes its rows with it when it is reaped (§11); the purge deletes
+  a tenant's. A passthrough task-augmented call counts too: it holds the same relay while its answer comes back. A
+  per-replica count would have allowed `calls` × replicas.
+- **The 429s.** A task over `tasks` (A2A, as host or hirer) is `-32600` `rate limited` on JSON-RPC and HTTP 429 with
+  `Retry-After: 5` on both bindings and on the streaming methods, as the edge answers its own rate limits on a JSON-RPC
+  route (§2.2); on HTTP+JSON the body is a `google.rpc.Status` `RESOURCE_EXHAUSTED` with reason `INVALID_REQUEST`. An MCP
+  task-augmented call over `tasks`, and a plain call over `calls`, are HTTP 429 with `-32600` and the same `Retry-After`.
+  A caller's message or call over `parts_bytes` is `InvalidParams` (`-32602`) `anonymous storage limit`, HTTP 200 on
+  JSON-RPC and MCP, before any task row.
+- **The parts total.** A message to an anonymous tenant's service counts as its encoding against what the tenant's
+  tasks store (each event's payload encoding and each bucket object, §6.6, D103); a dispatch of one of its tasks counts
+  the other tasks' bytes as they stood when it started, and its limit is `min(task_bytes + others, parts_bytes)`. So
+  tasks dispatched together may store up to `tasks` × the room left between them (SPEC-CONFLICT in `anon.Caps.Budget`;
+  an exact total would read every other task's bytes under a lock at every event).
+- **The end.** The replica holding an anonymous session runs its clock: `expiring` 10 minutes before the end (at once
+  when less is left), and at the end `{"t": "revoked"}` and the close; it then asks its expiry sweep to run. Every
+  replica's sweep (every 5 s) ends the tenants past `expires_at` in one transaction each: `NOTIFY kontra_tunnel,
+  'expired:<tenant_id>'` first (a gate-internal payload like M2's, which the holder of a session of that tenant applies
+  at once), then the services disabled and the bindings revoked with their `kontra_services` and `kontra_revoke`
+  notices, and an audit row; a session whose tenant ended never gets one `{"t": "revoked", "service"}` per binding. A
+  conversion (DM4-19) ends the anonymous tenant the same way. The purge runs every minute.
+- **The card.** The served card of an anonymous tenant's service carries the gate-asserted extension
+  `https://kontra.sh/ext/anonymous/v1` (`required: false`, `params.expiresAt`), written into the service's
+  `annotations.card_extensions` when the session creates or enables it, so a card the gate signs says the service is
+  an ephemeral anonymous session's (the M4 corrections' recommendation).
+- **The node.** `kontra connect` exits 1 with "the anonymous session expired at <time>" when the gate ends its anonymous
+  session, and also when such a session closes within a minute of its end without the message (a redial would open
+  another session with new URLs).
+
+Tests: `internal/anon` (`TestOpenCountsNetworks`, `TestOpenServicesPerTenant`, `TestCapsTask`, `TestCapsCall`,
+`TestCapsStorage`, `TestPurgeLeavesTheTombstone`, `TestNoTableHoldsTheClientAddress`), `internal/enroll`
+(`TestAdmitAnonymous*`, `TestAdmitEnrollFromAnAnonymousKeyConverts`), `internal/tunnelgate`
+(`TestAnonymousSessionEnds`, `TestAnonymousTenantEndClosesItsSession`, `TestAnonymousHiringStreamsCap`),
+`internal/mcprelay` (`TestPlainCallsAreCapped`), `internal/gate` (`TestAnonymousTenantLimitsThroughTheGate`),
+`internal/node` and `cmd/kontra` (`TestRealAdmissionProbeOnAnAnonymousGate`, `TestConnectExitsWhenTheAnonymousSessionExpires`).

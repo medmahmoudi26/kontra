@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -40,6 +41,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/tunnel"
@@ -104,8 +106,11 @@ type Options struct {
 	EnrollWithAPIKey bool
 	// Keys authenticates hello's auth (auth_invalid when it does not authenticate). Nil (auth.api_keys
 	// false) refuses every auth with auth_invalid.
-	Keys   *auth.APIKeys
-	Logger *slog.Logger
+	Keys *auth.APIKeys
+	// Anonymous is tunnel.anonymous's limits when the gate opens anonymous sessions (spec/tunnel.md §6; a
+	// multi-tenant gate only); nil answers a hello asking for one from an unknown key anonymous_unavailable.
+	Anonymous *anon.Limits
+	Logger    *slog.Logger
 }
 
 // Store is the gate's enrollment tables.
@@ -145,6 +150,10 @@ type Request struct {
 	OldPubKey []byte // rotate_from's recipient, decoded; nil without rotate_from
 	SessionID uuid.UUID
 	ReplicaID string
+	// Client is the edge's client address of the upgrade (relay.md §2.2: remote, x_forwarded_for or
+	// proxy_protocol): an anonymous session is counted by its network and stores the network, never the address
+	// (spec/tunnel.md §6.2).
+	Client netip.Addr
 }
 
 // Binding names one key_services row.
@@ -174,6 +183,15 @@ type Decision struct {
 	Enrolled []Binding
 	// Rotated is the old key when the handshake rotated (§12).
 	Rotated *Key
+	// Anonymous is set for an anonymous session (spec/tunnel.md §6): welcome.anonymous, and the session's end.
+	Anonymous *Anonymous
+}
+
+// Anonymous is an anonymous session's admission.
+type Anonymous struct {
+	ExpiresAt time.Time
+	Resumed   bool     // the key's tenant before expiry
+	Public    []string // the services that admit unauthenticated callers (hello.public)
 }
 
 // enrolledPrefix starts the gate-internal NOTIFY kontra_tunnel payload of an enrollment (EnrolledPayload).

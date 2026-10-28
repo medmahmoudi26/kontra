@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/pg"
@@ -74,6 +75,12 @@ const (
 //     exists is enroll_invalid; an old key stored with another public key is bad_proof, a revoked one
 //     revoked, a rotated one enroll_invalid;
 //  4. auth_invalid: an auth API key that is unknown, revoked or expired (or any, when the gate takes none);
+//     then anonymous sessions (spec/tunnel.md §6, DM4-18, DM4-19; anonymousSession): a hello asking for one
+//     (anonymous: true, neither enroll nor auth) from an unknown key, or from a key of an anonymous tenant, opens or
+//     resumes it (anonymous_unavailable, rate_limited, service_denied, kind_mismatch from its limits), or
+//     anonymous_unavailable on a gate without tunnel.anonymous; a key of a live anonymous tenant presenting no
+//     tokens is resumed on a hire-only auth key and is otherwise unknown_key; one presenting tokens, or of an ended
+//     anonymous tenant, goes on below as a new key would, and is moved (anon.MoveKey) if admitted;
 //  5. enroll_invalid: a token that is malformed, unknown, used or expired, of another tenant than the key's
 //     or the other authorities', or that applies to no declared service (a service token for a service the
 //     hello does not declare; a tenant token listing none of them);
@@ -203,12 +210,22 @@ type admission struct {
 	// hireOnly: a new key admitted on its auth API key alone, with no service (step 6's second
 	// SPEC-CONFLICT).
 	hireOnly bool
+
+	// Anonymous sessions (spec/tunnel.md §6, DM4-18, DM4-19; anonymous.go). anonKey is the key's row when it belongs
+	// to an anonymous tenant, live or ended, and is neither revoked nor rotated: what the hello makes of it is decided
+	// after the rotation and API key checks (anonymousSession). moveFrom is such a key that §5's rules below enroll as
+	// if it were new: write moves it (anon.MoveKey) instead of inserting it; endTenant is the live anonymous tenant
+	// that move converts, ended at once (anon.End).
+	anonKey   *keyRow
+	moveFrom  *Key
+	endTenant uuid.UUID
 }
 
 // keyRow is a tunnel_keys row with its tenant's state.
 type keyRow struct {
 	Key
 	tenantEnded bool
+	anonymous   bool // its tenant is an anonymous tenant (kind anonymous)
 }
 
 // consumed is one token this handshake consumed.
@@ -243,10 +260,15 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 		return nil, err
 	}
 	if key != nil {
-		if herr := refuseUnusable(key, "the key"); herr != nil {
-			return nil, herr
+		if key.anonymous && key.RevokedAt == nil && key.RevokedReason != ReasonRotated && key.RotatedTo == "" && h.RotateFrom == nil {
+			// A key of an anonymous tenant: its tenant's end does not revoke it (§6.1, §12; DM4-10).
+			a.anonKey = key
+		} else {
+			if herr := refuseUnusable(key, "the key"); herr != nil {
+				return nil, herr
+			}
+			a.key = &key.Key
 		}
-		a.key = &key.Key
 	}
 
 	// 3. The rotation (§12).
@@ -259,6 +281,12 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	// 4. The API key.
 	if a.authErr != nil {
 		return nil, a.authErr
+	}
+
+	// An anonymous session (spec/tunnel.md §6): opened or resumed here, or the key of an anonymous tenant handed to
+	// §5's rules below as a key to move.
+	if d, err := a.anonymousSession(ctx); d != nil || err != nil {
+		return d, err
 	}
 
 	// 5. The tokens, and the tenant they and the key name.
@@ -462,7 +490,7 @@ func (a *admission) lockKey(ctx context.Context, kid string, pub []byte, what st
 	rows, err := a.tx.Query(ctx, `
 		select k.key_id, k.tenant_id, t.slug, k.pubkey, k.node_name, k.revoked_at, coalesce(k.revoked_reason, ''),
 		       coalesce(k.rotated_to, ''), k.overlap_until,
-		       t.deleted_at is not null or (t.expires_at is not null and t.expires_at <= now())
+		       t.deleted_at is not null or (t.expires_at is not null and t.expires_at <= now()), t.kind = 'anonymous'
 		  from kontra.tunnel_keys k join kontra.tenants t on t.id = k.tenant_id
 		 where k.key_id = $1 or k.pubkey = $2
 		 order by k.key_id
@@ -473,7 +501,7 @@ func (a *admission) lockKey(ctx context.Context, kid string, pub []byte, what st
 	found, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (*keyRow, error) {
 		var k keyRow
 		err := r.Scan(&k.KeyID, &k.TenantID, &k.Tenant, &k.PubKey, &k.NodeName, &k.RevokedAt, &k.RevokedReason,
-			&k.RotatedTo, &k.OverlapUntil, &k.tenantEnded)
+			&k.RotatedTo, &k.OverlapUntil, &k.tenantEnded, &k.anonymous)
 		return &k, err
 	})
 	if err != nil {
@@ -651,7 +679,17 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 	h := a.h
 	newKey := a.key == nil
 	keyID := h.KID
-	if newKey {
+	if newKey && a.moveFrom != nil {
+		// A key of an anonymous tenant, enrolled here as §5 enrolls a new key: it moves (DM4-19), its old bindings
+		// deleted first.
+		if err := anon.MoveKey(ctx, a.tx, keyID, a.tenant); err != nil {
+			return nil, err
+		}
+		if _, err := a.tx.Exec(ctx, `update kontra.tunnel_keys set node_name = $2 where key_id = $1`, keyID, h.Name); err != nil {
+			return nil, err
+		}
+		a.key = &Key{KeyID: keyID, TenantID: a.tenant, Tenant: a.slug, PubKey: a.req.PubKey, NodeName: h.Name}
+	} else if newKey {
 		k := Key{KeyID: keyID, TenantID: a.tenant, Tenant: a.slug, PubKey: a.req.PubKey, NodeName: h.Name}
 		_, err := a.tx.Exec(ctx, `insert into kontra.tunnel_keys (key_id, tenant_id, pubkey, node_name) values ($1, $2, $3, $4)`,
 			keyID, a.tenant, a.req.PubKey, h.Name)
@@ -740,6 +778,10 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 		if a.hireOnly {
 			f["hire_only"] = true
 		}
+		if a.moveFrom != nil {
+			f["moved_from"] = a.moveFrom.Tenant
+			f["moved_from_id"] = a.moveFrom.TenantID
+		}
 		if len(toks) > 0 {
 			ids := make([]string, len(toks))
 			for i, t := range toks {
@@ -766,6 +808,13 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 			continue
 		}
 		if _, err := a.tx.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelServices), a.slug+"/"+name); err != nil {
+			return nil, err
+		}
+	}
+	// DM4-19: enroll from a key of a live anonymous tenant converts it; that tenant ends at once (its URLs 404, its
+	// session told revoked).
+	if a.endTenant != uuid.Nil && a.endTenant != a.tenant {
+		if _, err := anon.End(ctx, a.tx, a.endTenant, "converted"); err != nil {
 			return nil, err
 		}
 	}

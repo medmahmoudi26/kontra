@@ -2,7 +2,8 @@
 --
 -- The tasks the gate's own /mcp creates with hire, which its MCP Tasks see (spec/relay.md §12.2, DM4-5); the one GET
 -- stream that delivers a hire task's notifications/elicitation/complete (R §12.3, DM4-21); the live anonymous tenants
--- of a network (T §6.2, DM4-10); and the anon- slug, reserved to anonymous tenants (T §6.1, DM4-20). Every M4 schema
+-- of a network (T §6.2, DM4-10); the anon- slug, reserved to anonymous tenants (T §6.1, DM4-20); and the plain MCP
+-- calls in flight to an anonymous tenant's services (T §6.2, DM4-20). Every M4 schema
 -- change is in this one file, frozen when M4 merges. Section references are to spec/relay.md (R) and spec/tunnel.md
 -- (T).
 --
@@ -37,8 +38,22 @@ create index tenants_anonymous_network on tenants (created_from) where kind = 'a
 -- or team can take an anonymous tenant's name, and an anonymous tenant always has one.
 alter table tenants add constraint anonymous_slug check ((kind = 'anonymous') = (slug ~ '^anon-[0-9a-f]{16}$'));
 
+-- T §6.2 (DM4-20): one row per plain MCP tools/call being relayed to an anonymous tenant's service, at most
+-- tunnel.anonymous.calls per tenant, counted gate-wide under a lock on the tenant's row. The row is deleted when the
+-- call's answer has been relayed; a replica that dies takes its rows with its gate_replicas row (T §11), and the purge
+-- takes a tenant's.
+create table anon_calls (
+    id          uuid primary key,
+    tenant_id   uuid not null references tenants (id) on delete cascade,
+    replica_id  text not null references gate_replicas (replica_id) on delete cascade,
+    started_at  timestamptz not null default now()
+);
+create index anon_calls_by_tenant on anon_calls (tenant_id);
+create index anon_calls_by_replica on anon_calls (replica_id);
+
 -- +goose Down
 set local search_path to kontra;
+drop table anon_calls;
 alter table tenants drop constraint anonymous_slug;
 drop index tenants_anonymous_network;
 alter table tasks drop constraint elicitation_notified_has_id;

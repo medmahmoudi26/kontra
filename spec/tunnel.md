@@ -296,8 +296,8 @@ bindings, with or without the field.
 - `purge_after` (24 h) after expiry the gate deletes what the tenant still holds: the keys still in it (`tunnel_keys`,
   with their bindings and tunnels), its services with their calls ([`relay.md`](relay.md) §13.5), enrollments,
   tasks with their bucket objects (the objects first), and the MCP sessions whose `tenant_id` is the tenant, the
-  gate's own `/mcp` sessions (`service` NULL) included (DM4-20). The tenant row stays as a tombstone
-  (`tenants.deleted_at`, with `created_from`), so a slug is never reused.
+  gate's own `/mcp` sessions (`service` NULL) included (DM4-20), and its `anon_calls` rows (DM4-25). The tenant row
+  stays as a tombstone (`tenants.deleted_at`, with `created_from`), so a slug is never reused.
 - `kontra login` turns the anonymous tenant into the person's account (§6.3); the services keep their names
   under the account's slug and stop expiring.
 
@@ -334,7 +334,9 @@ relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never t
   task-augmented MCP call `429` with `-32600`, and `hire` a `CallToolResult` with `isError`.
 - A plain MCP call is not a task. Plain `tools/call` requests in flight to the tenant's services, whoever sent them,
   are at most `calls`; over it the call is `429` with `-32600` `rate limited`, so a `--public` MCP service is not an
-  unbounded relay. The node's own hiring streams are bounded by `hiring_streams` and the edge.
+  unbounded relay. They are counted gate-wide: each call being relayed is a row of `anon_calls` (migration 0003),
+  deleted when its answer has been relayed and with the replica that held it when that replica dies (§11; DM4-25). The
+  node's own hiring streams are bounded by `hiring_streams` and the edge.
 - Parts: a caller's message whose parts would take the tenant's stored parts past `parts_bytes` is `InvalidParams`
   `anonymous storage limit`, before any task row; upstream bytes past it fail the task `upstream_error`, as
   [`relay.md`](relay.md) §6.6 says.

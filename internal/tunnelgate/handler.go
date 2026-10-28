@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
 
+	"kontra.sh/kontra/internal/anon"
+	"kontra.sh/kontra/internal/edge"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
@@ -72,6 +75,13 @@ type HandlerConfig struct {
 	// that has no router and no bucket: every hiring request is 404 and every ref not_found (the e2e FakeGate's
 	// default); the in-flight cap is the same.
 	NodeStreams *NodeStreams
+	// AnonymousHiringStreams is an anonymous session's cap of node-opened streams in flight (tunnel.anonymous's
+	// hiring_streams, spec/tunnel.md §6.2, §14, D182); tunnel.GateMaxInflightAnonymous when zero.
+	AnonymousHiringStreams int
+	// OnAnonymousExpiry runs when an anonymous session this replica holds reaches its end, after the session was
+	// told {"t": "revoked"} and closed (the gate's sweeper ends its tenant at once rather than at its next pass).
+	// Nil does nothing.
+	OnAnonymousExpiry func()
 }
 
 // Handler serves GET /v1/tunnel (relay.md §2.1). Mounted on the edge router, it is behind the edge's
@@ -196,7 +206,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// for use after Accept.
 	hctx, cancel := context.WithDeadline(context.WithoutCancel(r.Context()), upgraded.Add(tunnel.HandshakeTimeout))
 	defer cancel()
-	a, err := h.handshake(hctx, c, cbValue, log)
+	a, err := h.handshake(hctx, c, cbValue, clientAddr(r), log)
 	if err != nil {
 		var herr *tunnel.HandshakeError
 		if errors.As(err, &herr) {
@@ -238,7 +248,7 @@ type admitted struct {
 
 // handshake runs M1 to Admit and writes welcome. A refusal is a *tunnel.HandshakeError for the caller to
 // send; any other error closes the connection without one.
-func (h *Handler) handshake(ctx context.Context, c *websocket.Conn, cbValue []byte, log *slog.Logger) (*admitted, error) {
+func (h *Handler) handshake(ctx context.Context, c *websocket.Conn, cbValue []byte, client netip.Addr, log *slog.Logger) (*admitted, error) {
 	// M1.
 	hb, err := readMessage(ctx, c)
 	if err != nil {
@@ -327,7 +337,7 @@ func (h *Handler) handshake(ctx context.Context, c *websocket.Conn, cbValue []by
 
 	// Admission, inside the handshake's 10 s (§4).
 	dec, err := h.cfg.Admitter.Admit(ctx, enroll.Request{
-		Hello: hello, PubKey: pub.Bytes(), OldPubKey: oldPub, SessionID: session, ReplicaID: h.cfg.ReplicaID,
+		Hello: hello, PubKey: pub.Bytes(), OldPubKey: oldPub, SessionID: session, ReplicaID: h.cfg.ReplicaID, Client: client,
 	})
 	if err != nil {
 		var herr *tunnel.HandshakeError
@@ -341,10 +351,14 @@ func (h *Handler) handshake(ctx context.Context, c *websocket.Conn, cbValue []by
 	}
 
 	// M4.
-	wb, err := tunnel.Encode(&tunnel.Welcome{
+	welcome := &tunnel.Welcome{
 		Session: session.String(), Replica: h.cfg.ReplicaID, PingS: pingSeconds(h.ping),
 		Tenant: dec.Key.Tenant, Services: dec.Served,
-	})
+	}
+	if dec.Anonymous != nil {
+		welcome.Anonymous = &tunnel.AnonymousInfo{ExpiresAt: dec.Anonymous.ExpiresAt.UTC()}
+	}
+	wb, err := tunnel.Encode(welcome)
 	if err != nil {
 		return nil, fmt.Errorf("%w: welcome: %w", errGate, err)
 	}
@@ -412,13 +426,21 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 	for _, sv := range dec.Served {
 		s.served[sv.Name] = sv.Kind
 	}
+	limit := ns.limit()
+	if dec.Anonymous != nil {
+		s.expiresAt = dec.Anonymous.ExpiresAt
+		// An anonymous session's hiring streams take tunnel.anonymous's hiring_streams (§6.2, §14, D182).
+		limit = tunnel.GateMaxInflightAnonymous
+		if h.cfg.AnonymousHiringStreams > 0 {
+			limit = h.cfg.AnonymousHiringStreams
+		}
+	}
 	// The hiring API key is watched by every re-read of the revocation cache while the session lives (§12).
 	if s.hire != nil && ns.Keys != nil {
 		defer ns.Keys.Hold(*s.hire)()
 	}
 
-	// Anonymous sessions (§6, M4) will take tunnel.GateMaxInflightAnonymous.
-	go acceptNodeStreams(ctx, s, mux, ns, log)
+	go acceptNodeStreams(ctx, s, mux, ns, limit, log)
 	live := make(chan error, 1)
 	go func() { live <- tunnel.KeepAlive(ctx, mux, h.ping, tunnel.PingFailures) }()
 
@@ -433,6 +455,9 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 		return
 	}
 	log.Info("tunnel session open", "services", servedNames(dec.Served), "agent", a.hello.Agent)
+	if dec.Anonymous != nil {
+		go h.anonymousEnd(ctx, s, dec.Anonymous.ExpiresAt, log)
+	}
 	<-mux.CloseChan()
 	// The ping loop ends with the session; when it is what closed it, it returns once the close is done.
 	cancel()
@@ -441,6 +466,54 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 	} else {
 		log.Info("tunnel session closed")
 	}
+}
+
+// anonymousEnd is an anonymous session's clock (spec/tunnel.md §6.1, §13): {"t": "expiring", "at"} anon.ExpiringNotice
+// before its end, or at once when less is left, then at the end {"t": "revoked"} and the session closed, the tenant's
+// services disabled by the gate's sweeper (OnAnonymousExpiry asks it to run now). It returns when ctx ends (the
+// session closed first).
+func (h *Handler) anonymousEnd(ctx context.Context, s *Session, at time.Time, log *slog.Logger) {
+	wait := func(until time.Time) bool {
+		d := time.Until(until)
+		if d <= 0 {
+			return ctx.Err() == nil
+		}
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			return true
+		}
+	}
+	if !wait(at.Add(-anon.ExpiringNotice)) {
+		return
+	}
+	end := at.UTC()
+	if err := s.WriteControl(tunnel.Control{T: tunnel.CtlExpiring, At: &end}); err != nil {
+		log.Debug("tunnel session: {t: expiring} not delivered", "error", err)
+	}
+	if !wait(at) {
+		return
+	}
+	log.Info("anonymous tunnel session expired (§6.1)", "expires_at", end)
+	s.Expire()
+	if h.cfg.OnAnonymousExpiry != nil {
+		h.cfg.OnAnonymousExpiry()
+	}
+}
+
+// clientAddr is the upgrade's client address: the edge's (relay.md §2.2: remote, x_forwarded_for or
+// proxy_protocol), else the connection's remote address (a Handler mounted without the edge, in tests).
+func clientAddr(r *http.Request) netip.Addr {
+	if a, ok := edge.ClientAddr(r.Context()); ok && a.IsValid() {
+		return a
+	}
+	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		return ap.Addr().Unmap()
+	}
+	return netip.Addr{}
 }
 
 // muxConfig is one session's yamux configuration: HandlerConfig.Yamux, or §7's table when it is nil, with

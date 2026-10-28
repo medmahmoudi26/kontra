@@ -54,7 +54,7 @@ type NodeStreams struct {
 	// Blobs serves blob streams; nil answers every ref not_found (a gate without a bucket).
 	Blobs BlobServer
 	// Limit is the in-flight cap of node-opened streams per session: tunnel.GateMaxInflight when zero.
-	// Anonymous sessions (M4) take tunnel.GateMaxInflightAnonymous.
+	// Anonymous sessions take tunnel.anonymous's hiring_streams instead (HandlerConfig.AnonymousHiringStreams).
 	Limit int
 	// Keys re-validates a session's hiring API key on every request (*auth.APIKeys); nil refuses every API key
 	// principal (401).
@@ -301,11 +301,15 @@ func (s *Session) hireAddr() net.Addr {
 // buffers up to a window (tunnel.MaxStreamWindowSize) of what the node still sends on it, until the node closes
 // its half, resets it, or StreamCloseTimeout (5 min) passes; yamux v0.1.2 has no reset. So a stream counts from
 // Accept until it has ended on both sides: once served (or refused), the gate closes its half and reads and
-// discards what the node sends until the node's half ends. Over the cap (ns.Limit, 32) the gate answers 429
+// discards what the node sends until the node's half ends. Over the cap (sessionCap: ns.Limit, 32, or an anonymous
+// session's hiring_streams, 8) the gate answers 429
 // (an http stream; a blob stream is closed unanswered), and a node that keeps more than the cap of refused streams
 // open loses its session: what a node can pin is then at most twice the cap's windows and the backlog's.
-func acceptNodeStreams(ctx context.Context, s *Session, mux *yamux.Session, ns *NodeStreams, log *slog.Logger) {
-	limit := int64(ns.limit())
+func acceptNodeStreams(ctx context.Context, s *Session, mux *yamux.Session, ns *NodeStreams, sessionCap int, log *slog.Logger) {
+	limit := int64(sessionCap)
+	if limit <= 0 {
+		limit = int64(ns.limit())
+	}
 	var refused atomic.Int64
 	for {
 		st, err := mux.AcceptStream()

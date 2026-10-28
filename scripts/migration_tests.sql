@@ -227,4 +227,16 @@ do $$ begin
     end if;
 end $$;
 
+-- 0003 (T §6.2, DM4-20): an anonymous call's row goes with its replica (a replica that dies frees its slots) and with
+-- its tenant.
+insert into gate_replicas (replica_id, version) values ('r-anon-calls', 'test');
+insert into anon_calls (id, tenant_id, replica_id)
+    values ('01900000-0000-7000-8000-0000000000c1', '01900000-0000-7000-8000-0000000000f1', 'r-anon-calls');
+delete from gate_replicas where replica_id = 'r-anon-calls';
+do $$ begin
+    if exists (select 1 from anon_calls where id = '01900000-0000-7000-8000-0000000000c1') then
+        raise exception 'FAIL: an anonymous call row outlived its replica';
+    end if;
+end $$;
+
 select 'migration behaviour: ok';

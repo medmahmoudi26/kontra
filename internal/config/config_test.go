@@ -798,7 +798,8 @@ tenancy: multi
 tunnel: { anonymous: true }
 peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 `)
-	want := []string{"auth.oidc", "services.files.seller_keys", "tunnel.anonymous"}
+	// tunnel.anonymous is built (M4 WP-03): it loads with no warning.
+	want := []string{"auth.oidc", "services.files.seller_keys"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)
@@ -810,6 +811,9 @@ peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 	for _, w := range c.Warnings {
 		if strings.Contains(w, "services.remote") || strings.Contains(w, "tunnel backends") {
 			t.Errorf("a served tunnel service is warned about: %q", w)
+		}
+		if strings.Contains(w, "tunnel.anonymous") {
+			t.Errorf("tunnel.anonymous is built, but warned about: %q", w)
 		}
 	}
 	// The plain tunnel service loads with no warning at all.
