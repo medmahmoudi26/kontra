@@ -478,9 +478,8 @@ func (c *Config) validateHooks(v *validator) {
 				v.add("hooks.admission.operations: %q is not task, session or call", op)
 			}
 		}
-		// Not built until M5. Using the built-in hook instead would admit what the operator's hook
-		// would deny, so the gate refuses to start rather than fail open.
-		v.add("hooks.admission: the remote Admission hook is not built in this release (M5); remove it to use the built-in")
+		// Built in M4 (DM4-8). The replica reads the secret from secret_env at start and refuses to start without it,
+		// as it does peer.secret_env's, so that `kontra-gate migrate` and `enroll` load the same file without it.
 	}
 	// The remote Lifecycle hook is accepted (D186): the five activities are scheduled by type name on the operator's
 	// queue (spec §13.3, lifecycle.WorkerConfig.RemoteHooks), and the built-in no-ops are then not registered.
@@ -498,6 +497,14 @@ func (c *Config) validateTunnel(v *validator) {
 		}
 	default:
 		v.add("tunnel.channel_binding %q: want tls-exporter or none", c.Tunnel.ChannelBinding)
+	}
+	if a := c.Tunnel.Anonymous; a.Enabled {
+		if c.Tenancy != TenancyMulti {
+			v.add("tunnel.anonymous: needs tenancy: multi, since an anonymous service's URL names its tenant (tunnel.md §6, DM4-10)")
+		}
+		if a.HiringStreams > MaxAnonHiringStreams {
+			v.add("tunnel.anonymous.hiring_streams %d: at most %d, the gate's per-session stream cap (tunnel.md §14)", a.HiringStreams, MaxAnonHiringStreams)
+		}
 	}
 }
 
@@ -765,7 +772,7 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 
 // unbuilt lists the keys this build accepts but does not act on yet. Each one fails closed when ignored
 // (nobody is admitted by it, nothing is served for it); keys that would fail open are refused by
-// Validate instead (the remote hooks, sealed on a direct backend). seller_keys on an MCP service, which has no card
+// Validate instead (sealed on a direct backend). seller_keys on an MCP service, which has no card
 // (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
 // served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
 // M3 WP-04; sealed: on tunnel services since M3 WP-08.
@@ -780,7 +787,7 @@ func (c *Config) unbuilt() []string {
 		// keys and node principals, and a bearer JWT is refused (401).
 		note("auth.mcp_oauth: the MCP OAuth resource server is not built in this release (M5, D170); /mcp/{svc} accepts API keys and node principals")
 	}
-	if c.Tunnel.Anonymous {
+	if c.Tunnel.Anonymous.Enabled {
 		// Fails closed: an M2 gate creates no anonymous tenant, so a hello with neither enroll nor auth from an
 		// unknown key is unknown_key (spec/tunnel.md §4, §6).
 		note("tunnel.anonymous: anonymous sessions are not built in this release (M4); a node key that is not enrolled is refused unknown_key")

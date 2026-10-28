@@ -59,8 +59,11 @@ type ReviewMessenger interface {
 //     (ext-sealed.md §3); a sealed: required service refuses an unsealed part with InvalidRequest
 //     (sealed_unsealed_part), and an optional one marks it metadata["kontra.sealed"] = false (§5). Without a bucket a part over 256 KiB is InvalidParams ("part too large: configure
 //     blobs", §10.4), and so is a contextId or messageId over 256 characters (§4), before any task row.
-//  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow in M1. The pre-minted task
-//     id and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
+//  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow, or the remote hook
+//     (hooks.RemoteAdmission, M4 DM4-8). It fails closed: a hook error, a decision whose maps break §13.2's rules,
+//     and a quote whose approveUrl is not an absolute https:// URL or whose expiresAt is not in the future
+//     (hooks.CheckQuote, DM4-17) are -32603 "admission unavailable", HTTP 503 on HTTP+JSON. The pre-minted task id
+//     and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
 //  5. Follow-up checks (spec §7): a message with a taskId is refused UnsupportedOperationError unless the
 //     task is input-required; a taskId/contextId disagreement is InvalidParams; a terminal task is
 //     UnsupportedOperationError (a2a-go itself answers InvalidParams there); a review-window message is
@@ -101,6 +104,8 @@ type Interceptors struct {
 	Bucket blob.Store
 	// Render renders the kontra-blob: parts of every answer as presigned GETs; nil renders nothing.
 	Render *blob.Renderer
+	// Logger logs why Admission refused a message (the caller sees only "admission unavailable"); nil logs nothing.
+	Logger *slog.Logger
 }
 
 // interceptor adapts a Before function to a2asrv.CallInterceptor.
@@ -304,16 +309,19 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 	d, err := i.Admit.Admit(ctx, ar)
 	if err != nil {
 		// Admission fails closed (spec §13.1).
-		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		i.logRefusal("admission failed; the message is refused (it fails closed)", "service", i.Svc.Name, "error", err)
+		return ctx, nil, admissionUnavailable()
 	}
 	if err := i.Rules.CheckOperatorMaps(d.Metadata, d.MCPMeta); err != nil {
-		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		i.logRefusal("an Admission decision's metadata was refused; the message is refused", "service", i.Svc.Name, "error", err)
+		return ctx, nil, admissionUnavailable()
 	}
 	switch d.Outcome {
 	case hooks.Allow:
 	case hooks.Quote:
-		if d.Quote == nil || !strings.HasPrefix(d.Quote.ApproveURL, "https://") || d.Quote.ExpiresAt == "" {
-			return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		if err := hooks.CheckQuote(d.Quote, time.Now()); err != nil {
+			i.logRefusal("an Admission quote was refused; the message is refused", "service", i.Svc.Name, "error", err)
+			return ctx, nil, admissionUnavailable()
 		}
 	case hooks.Deny:
 		code, msg := a2a.ErrUnauthorized, "admission denied"
@@ -327,9 +335,23 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 		}
 		return ctx, nil, a2a.NewError(code, msg)
 	default:
-		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		return ctx, nil, admissionUnavailable()
 	}
 	return hooks.WithAdmitted(ctx, hooks.Admitted{TaskID: string(taskID), Decision: d}), nil, nil
+}
+
+// admissionUnavailable is Admission failing closed (spec §13.1): -32603 "admission unavailable", which the HTTP+JSON
+// binding answers 503 (the error carries lifecycle.ErrUnavailable for sse.HTTPError, as an Update not accepted in
+// time does).
+func admissionUnavailable() error {
+	return unavailableError{a2a.NewError(a2a.ErrInternalError, "admission unavailable")}
+}
+
+// logRefusal logs why a message was refused when the interceptors have a logger.
+func (i *Interceptors) logRefusal(msg string, args ...any) {
+	if i.Logger != nil {
+		i.Logger.Warn("relay: "+msg, args...)
+	}
 }
 
 // errorForCode maps a JSON-RPC error code (an Admission refusal's, an upstream's) to a2a-go's sentinel.

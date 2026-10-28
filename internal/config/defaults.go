@@ -34,6 +34,20 @@ const (
 	DefaultTasksMode      = TasksDurable
 )
 
+// tunnel.anonymous's defaults (spec/tunnel.md §6.2, DM4-10, DM4-20).
+const (
+	DefaultAnonTTL               = 2 * time.Hour
+	DefaultAnonTenantsPerNetwork = 3
+	DefaultAnonServices          = 4
+	DefaultAnonTasks             = 4
+	DefaultAnonCalls             = 8
+	DefaultAnonHiringStreams     = 8
+	MaxAnonHiringStreams         = 32 // the gate's per-session stream cap (tunnel.md §14)
+	DefaultAnonPartsBytes        = 64 << 20
+	DefaultAnonPurgeAfter        = 24 * time.Hour
+	DefaultAnonMaxTenants        = 1000
+)
+
 // Defaults returns a configuration holding every default that does not depend on another key. Parse
 // decodes the file over it, so a key present in the file always wins and an explicit zero is seen (and
 // refused) rather than silently replaced.
@@ -103,6 +117,7 @@ func (c *Config) applyDerivedDefaults() {
 			h.Operations = []string{"task"}
 		}
 	}
+	c.Tunnel.Anonymous.applyDefaults()
 	if c.Tunnel.ChannelBinding == "" {
 		c.Tunnel.ChannelBinding = ChannelBindingNone
 		if c.TLS.TerminatesTLS() {

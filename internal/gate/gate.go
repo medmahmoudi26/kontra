@@ -194,6 +194,11 @@ type Replica struct {
 	peerAddr   string
 	peerWarned atomic.Bool
 
+	// admission is the configured Admission (spec §13.1, DM4-8) and admissionOps the operations that consult it
+	// (hooks.admission.operations; none for the built-in).
+	admission    hooks.Admission
+	admissionOps []hooks.Operation
+
 	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
 	pgUp       atomic.Bool
@@ -351,6 +356,10 @@ func (r *Replica) assemble() error {
 	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate, Resolver: pushResolver(log)}
 	pushStore := push.NewConfigStore(r.pool, r.lifecycle, policy, log)
 	rules := hooks.KeyRules{OperatorPrefixes: cfg.OperatorMetadataPrefixes, CallerMetadata: cfg.CallerMetadata}
+	var err error
+	if r.admission, r.admissionOps, err = buildAdmission(cfg, rules, log); err != nil {
+		return err
+	}
 	hookQueue := lifecycle.QueueLifecycle
 	if cfg.Hooks.Lifecycle != nil && cfg.Hooks.Lifecycle.TaskQueue != "" {
 		hookQueue = cfg.Hooks.Lifecycle.TaskQueue
@@ -410,8 +419,8 @@ func (r *Replica) assemble() error {
 			})
 		},
 		Interceptors: func(svc store.ServiceRef) []a2asrv.CallInterceptor {
-			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Canceler: r.lifecycle,
-				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render}
+			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Admit: r.admission, Canceler: r.lifecycle,
+				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log}
 			return i.Chain()
 		},
 		Registry: registry,
@@ -436,7 +445,6 @@ func (r *Replica) assemble() error {
 	// dispatch runs on kontra-tunnel-<the session's replica> (§14.2).
 	acts := &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Sessions: tunnelgate.NewPicker(r.pool),
 		Push: pushStore, Rules: rules, Refusals: &r.refusals, Logger: log}
-	var err error
 	r.workers, err = lifecycle.NewWorkers(r.temporal, lifecycle.WorkerConfig{
 		ReplicaID:     r.id,
 		DispatchSlots: cfg.Limits.DispatchSlots,
@@ -536,17 +544,12 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 	if r.listener != nil {
 		r.listener.OnReconnect(r.tools.DropEras)
 	}
-	var ops []hooks.Operation
-	if a := cfg.Hooks.Admission; a != nil {
-		// The remote Admission hook is refused at load until M5 (C3); its operations are read for when it is not.
-		for _, op := range a.Operations {
-			ops = append(ops, hooks.Operation(op))
-		}
-	}
+	// The configured Admission (spec §13.1, DM4-8): session at initialize, call at a plain tools/call, task at a
+	// task-augmented one, as hooks.admission.operations lists them.
 	deps := mcprelay.Deps{
 		ReplicaID: r.id, Services: r.services, Auth: authn, Multi: cfg.Tenancy == config.TenancyMulti,
 		Sessions: mcprelay.NewSessions(r.pool), Tools: r.tools, Meter: mcprelay.NewMeter(r.pool),
-		Admission: hooks.BuiltinAdmission{}, AdmissionOps: ops, Tunnels: r.tunnels, Picker: tunnelgate.NewPicker(r.pool),
+		Admission: r.admission, AdmissionOps: r.admissionOps, Tunnels: r.tunnels, Picker: tunnelgate.NewPicker(r.pool),
 		AllowedOrigins: cfg.MCP.AllowedOrigins, Log: r.log,
 	}
 	if peerClient != nil {
