@@ -186,14 +186,31 @@ func TestAcceptedChanges(t *testing.T) {
 	if _, err := s.Check(gate, "svc", start, Options{}); err != nil {
 		t.Fatal(err)
 	}
-	// Upgrades and fewer keys pass without --accept-change, even under --pin-recipients, and are recorded.
+	// Upgrades pass without --accept-change, even under --pin-recipients, and are recorded; a removed seller key does
+	// not (round 2 sealing-fixes-5, D228): it is refused under --pin-recipients, and otherwise until accepted.
 	now := Pin{Sealed: true, Recipients: nil, SellerKeys: []string{"tp1"}, Signed: true}
-	out, err := s.Check(gate, "svc", now, Options{PinRecipients: true})
+	if _, err := s.Check(gate, "svc", now, Options{PinRecipients: true}); err == nil {
+		t.Fatal("a removed seller key was accepted under --pin-recipients")
+	}
+	if _, err := s.Check(gate, "svc", now, Options{}); err == nil {
+		t.Fatal("a removed seller key was accepted without --accept-change")
+	}
+	out, err := s.Check(gate, "svc", now, Options{Accept: []string{"svc"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(out.Changes, []Change{ChangeSealed, ChangeSigned, ChangeLessSellerKey}) {
 		t.Fatalf("Changes = %v", out.Changes)
+	}
+	if out, err := s.Check(gate, "svc", Pin{Sealed: true, SellerKeys: []string{"tp1"}, Signed: true}, Options{PinRecipients: true}); err != nil || len(out.Changes) != 0 {
+		t.Fatalf("the accepted pin again: %+v %v", out, err)
+	}
+	if _, err := s.Check(gate, "svc2", Pin{SellerKeys: []string{"tp1"}}, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := s.Check(gate, "svc2", Pin{Sealed: true, SellerKeys: []string{"tp1"}, Signed: true}, Options{PinRecipients: true}); err != nil ||
+		!slices.Equal(out.Changes, []Change{ChangeSealed, ChangeSigned}) {
+		t.Fatalf("upgrades under --pin-recipients: %+v %v", out, err)
 	}
 	// Going from no recipients (unsealed) to sealed with recipients is a new recipient: the first recipients of a
 	// service that was unsealed are exactly what an active gate would substitute.

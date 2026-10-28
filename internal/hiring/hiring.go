@@ -158,7 +158,9 @@ func (s *Server) verified(ctx context.Context, body []byte) (*sealing.Card, erro
 		if c.SellerKeys, err = sealing.SellerKeyIDs(ub, up.SHA256); err != nil {
 			return nil, err
 		}
-		c.Signed = true
+		// Signed only when a seller signature verified (or names its key by kid only, D223): a card whose signatures
+		// all fail to verify is unsigned, a downgrade a pin refuses (round 2 sealing-fixes-5).
+		c.Signed = len(c.SellerKeys) > 0
 	}
 	return c, nil
 }

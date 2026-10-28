@@ -1,6 +1,7 @@
 package sealing
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,11 +9,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"filippo.io/age"
+
 	"kontra.sh/kontra/internal/jcs"
 	"kontra.sh/kontra/internal/jws"
+	"kontra.sh/kontra/internal/pins"
 )
 
 // sellerSign signs card (A2A 1.0 §8.4: ES256 over the JCS of the card without signatures) with key under kid, its
@@ -100,5 +106,68 @@ func TestReviewSellerKeyIDsVerified(t *testing.T) {
 	other := sellerSign(t, up, attacker, "seller-key-1", true)
 	if ids, err := SellerKeyIDs(other, hashOf(t, other)); err != nil || len(ids) != 1 || ids[0] == want {
 		t.Fatalf("another key under the pinned kid: %v %v", ids, err)
+	}
+}
+
+// M3 review round 2, sealing-fixes-5: a gate that replaces the seller's upstream card and keeps a signature that does not verify (here
+// the seller's jwk with another key's signature) made the card count as signed with no seller key, and the pin
+// accepted the loss of the pinned key silently, even under --pin-recipients. Such a card is unsigned now (a downgrade
+// from a signed pin, always refused); a kid-only signature still counts as signed (D223).
+func TestReview2SellerSignatureThatVerifiesNothingIsUnsigned(t *testing.T) {
+	node, _ := age.GenerateX25519Identity()
+	seller, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	attacker, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	g := newSealGate(t, node)
+	serve := func(up []byte) *Card {
+		t.Helper()
+		g.upstream = up
+		g.card = g.signWith(t, cardWith(extensionFor(true, node.Recipient())), &jws.Upstream{SHA256: hashOf(t, up),
+			URL: g.srv.URL + "/agents/echo/.well-known/agent-card.upstream.json", Verified: true})
+		c, err := VerifyCard(context.Background(), g.card, g.srv.URL, func(ctx context.Context, u string) ([]byte, error) {
+			return httpGet(ctx, http.DefaultClient, u, "")
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	genuine := serve(sellerSign(t, []byte(`{"name":"booking","description":"the seller's card"}`), seller, "seller-key-1", true))
+	if !genuine.Signed || len(genuine.SellerKeys) != 1 {
+		t.Fatalf("the seller's card: %+v", genuine)
+	}
+	forgedUp := sellerSign(t, []byte(`{"name":"booking","description":"THE GATE'S card"}`), attacker, "seller-key-1", false)
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(forgedUp, &m)
+	var sigs []map[string]string
+	_ = json.Unmarshal(m["signatures"], &sigs)
+	sk, _ := seller.PublicKey.Bytes()
+	p, _ := json.Marshal(map[string]any{"alg": "ES256", "kid": "seller-key-1", "jwk": map[string]string{"kty": "EC", "crv": "P-256",
+		"x": base64.RawURLEncoding.EncodeToString(sk[1:33]), "y": base64.RawURLEncoding.EncodeToString(sk[33:])}})
+	sigs[0]["protected"] = base64.RawURLEncoding.EncodeToString(p)
+	m["signatures"], _ = json.Marshal(sigs)
+	forgedUp, _ = json.Marshal(m)
+	forged := serve(forgedUp)
+	if forged.Signed || len(forged.SellerKeys) != 0 {
+		t.Fatalf("a card whose seller signature verifies with no key counts as signed: %+v", forged)
+	}
+	st, err := pins.Open(filepath.Join(t.TempDir(), "pins.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := func(c *Card) pins.Pin {
+		return pins.Pin{Sealed: true, Recipients: []string{"k1_a"}, SellerKeys: c.SellerKeys, Signed: c.Signed}
+	}
+	if _, err := st.Check("https://gate", "booking", pin(genuine), pins.Options{PinRecipients: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, opts := range []pins.Options{{PinRecipients: true}, {Accept: []string{"booking"}}} {
+		if out, err := st.Check("https://gate", "booking", pin(forged), opts); err == nil {
+			t.Fatalf("%+v: the forged card is accepted: %+v", opts, out)
+		}
+	}
+	// A kid-only signature is unverifiable and pinned so: signed.
+	prot := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"seller-1"}`))
+	if c := serve([]byte(`{"name":"echo","signatures":[{"protected":"` + prot + `","signature":"c2ln"}]}`)); !c.Signed {
+		t.Fatalf("a kid-only signature: %+v", c)
 	}
 }

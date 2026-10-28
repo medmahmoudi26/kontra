@@ -5,8 +5,9 @@
 // What a hiring node learns from a gate is only what the gate serves, so an active gate could substitute its own
 // recipient, drop the extension or strip the seller's signature. Pins make that visible and, where it matters,
 // refused: a downgrade (sealed to unsealed, signed to unsigned) is always refused; with --pin-recipients any new
-// recipient or seller key is refused; without it a change is refused until the operator runs kontra connect
-// with --accept-change <service>, and is named on stderr and in the log (there is no local console, D164).
+// recipient, and any new or removed seller key, is refused; without it such a change is refused until the operator
+// runs kontra connect with --accept-change <service>, and is named on stderr and in the log (there is no local
+// console, D164, D228).
 // kontra seal reads and writes the same file.
 //
 // The file is JSON, 0600, rewritten atomically under flock(2) like the credentials file, since one
@@ -57,18 +58,22 @@ const (
 	ChangeNewRecipient  Change = "new_recipient"  // refused under --pin-recipients, else until accepted
 	ChangeNewSellerKey  Change = "new_seller_key" // as new_recipient
 	ChangeLessRecipient Change = "removed_recipient"
-	// ChangeLessSellerKey, ChangeSealed and ChangeSigned are accepted and recorded: fewer keys, or an upgrade to
-	// sealed or signed, give an active gate nothing (and make a later downgrade refused).
+	// ChangeLessSellerKey is a pinned seller key the card no longer verifies with: a gate that strips or replaces the
+	// seller's signature loses it, so it is refused as a new one is (round 2 sealing-fixes-5, D228).
 	ChangeLessSellerKey Change = "removed_seller_key"
-	ChangeSealed        Change = "sealed"
-	ChangeSigned        Change = "signed"
+	// ChangeSealed and ChangeSigned are accepted and recorded: an upgrade to sealed or signed gives an active gate
+	// nothing (and makes a later downgrade refused); so is ChangeLessRecipient.
+	ChangeSealed Change = "sealed"
+	ChangeSigned Change = "signed"
 )
 
 // refusedAlways are refused whatever the options.
 func (c Change) refusedAlways() bool { return c == ChangeUnsealed || c == ChangeUnsigned }
 
 // needsAccept are refused under --pin-recipients, and otherwise until --accept-change names the service.
-func (c Change) needsAccept() bool { return c == ChangeNewRecipient || c == ChangeNewSellerKey }
+func (c Change) needsAccept() bool {
+	return c == ChangeNewRecipient || c == ChangeNewSellerKey || c == ChangeLessSellerKey
+}
 
 // ChangeError is a refused change; the hiring node answers its local client without forwarding anything.
 type ChangeError struct {

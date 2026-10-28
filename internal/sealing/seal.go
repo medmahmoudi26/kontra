@@ -356,7 +356,10 @@ func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx co
 		if err != nil {
 			return nil, err
 		}
-		out.SellerKeys, out.Signed = ids, true
+		// Signed only when a seller signature verified, or names its key by kid only (unverifiable, D223): a card
+		// whose signatures all fail to verify is unsigned, which a pin of a signed card refuses (round 2
+		// sealing-fixes-5).
+		out.SellerKeys, out.Signed = ids, len(ids) > 0
 	}
 	return out, nil
 }
@@ -365,7 +368,8 @@ func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx co
 // and returns what the pins record of the seller's keys (ext-sealed.md §7), sorted: for each seller signature that
 // carries its public key (a jwk in its protected header, EC P-256) and verifies with it over the JCS of the card
 // without signatures, the RFC 7638 thumbprint of that key; for each that names its key by kid only, "kid:<kid>". A
-// signature that carries a key and does not verify with it, or is malformed, is no key of the seller's.
+// signature that carries a key and does not verify with it, or is malformed, is no key of the seller's; a card with
+// no key at all is pinned unsigned (an empty result: Card.Signed is false).
 //
 // SPEC-CONFLICT (D223; ext-sealed.md §7, relay.md §3: a verifier "checks the seller's signatures against keys it
 // trusts for the seller", and the pins hold "the seller key thumbprints that verified its upstream card"; D187 prints
