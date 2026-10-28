@@ -3526,3 +3526,20 @@ cap's eviction probe backdates its sessions' `last_seen_at` in the gate's databa
 only write a probe makes to the gate's state. The second run (`33f06a8`): 232 probes held, no finding, and two
 observations recorded, D223's accepted residual (a forged `kid`-only seller signature, where a gate names no seller
 key set, leaves an unverified `kid:` pin unchanged) and the dual-era client of D177 (`test/pentest`; `pentest-m3.md`).
+
+## The merge (29 Oct)
+
+### D267. M3 merges after four review rounds; the dishonest-gate review of sealing continues as follow-up work — **decided under the owner's standing instruction, 29 Oct**
+
+Four adversarial review rounds of the branch confirmed 30, 19, 23 and 15 findings, every one fixed or recorded as a
+residual (D191–D265), and each round's fixes carry regression tests that fail before them. The findings of the last two
+rounds are in the dishonest-gate model alone (a gate that splices, replays, cuts or re-routes a sealed exchange to read
+it), and each round still found new ones there: the review does not converge to an empty round on this surface in a
+bounded time, while M4 and M5 wait on this merge. Decision: M3 merges on a bar it meets: M3's named tests
+(`sealed_no_plaintext`, `sealed_replay`, `sealed_unsealed_part`, `mcp_session_cross_node`, `mcp_tool_denied`,
+`mcp_task_resume`) and the full suites (`check-go`, `test-integration`, `test-e2e`) green on the final tree, the PRD §12
+pentest rerun on it with no finding (D266), and every confirmed finding of the four rounds fixed or recorded. The
+review of sealing against a dishonest gate continues after the merge on its own branch, rounds of review, verify and
+fix until a round confirms no blocker or major, starting with a review of round 4's fixes (D252–D265); it is tracked in
+an issue that lists the open residuals of [`ext-sealed.md`](../spec/ext-sealed.md) §7 (D227, D251, D252, D253, D255,
+D256). Sealing stays opt-in, and §7 states what it does not yet withstand.
