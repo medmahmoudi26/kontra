@@ -42,7 +42,7 @@ const ProbeTimeout = 10 * time.Second
 // probeBackoff is how long after an inconclusive probe the era stays unknown without another probe: the requests in
 // that window are forwarded, as the one that waited for the probe was.
 //
-// SPEC-CONFLICT (relay §11.12, D177: "A modern request that finds the era unknown waits for that probe"): read
+// SPEC-CONFLICT (D204; relay §11.12, D177: "A modern request that finds the era unknown waits for that probe"): read
 // literally, every modern request to a service whose probe keeps ending inconclusively (an upstream that answers the
 // probe with a modern error, a node that cannot reach its target, a probe that times out after ProbeTimeout) would
 // send another probe and wait for it, up to 10 s each. The closest faithful behaviour: an inconclusive probe leaves

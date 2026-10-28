@@ -1372,9 +1372,9 @@ var errOverTaskBytes = errors.New("relay: the task's stored bytes would exceed l
 // storePart stores one part's content as an object of this task and returns its url part. The object counts
 // toward limits.task_bytes, checked before it is written: one that would cross it is errOverTaskBytes.
 //
-// SPEC-CONFLICT (§6.6 with §10.4): §6.6's table counts in limits.task_bytes "each logged event's whole encoding"
-// (D103), and the M3 plan counted a part moved to the bucket only as its logged url part. But §6.6's rule is that
-// "nothing an upstream sends is unbounded", and §10.4 says of the bucket "the gate stores bytes it does not
+// SPEC-CONFLICT (D194; §6.6 with §10.4): §6.6's table counts in limits.task_bytes "each logged event's whole
+// encoding" (D103), and the M3 plan counted a part moved to the bucket only as its logged url part. But §6.6's rule
+// is that "nothing an upstream sends is unbounded", and §10.4 says of the bucket "the gate stores bytes it does not
 // interpret; per-task totals are bounded (§6.6)". Counting the url part only bounded a task's objects in number
 // (task_bytes over a url part's few hundred bytes), each up to an SSE event's 4 MiB: thousands of times
 // task_bytes in bytes. The closest faithful behaviour: task_bytes bounds everything the gate stores

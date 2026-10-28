@@ -460,9 +460,9 @@ func (h *Handler) forward(rq *request, t target, meter *callMeter) {
 	x := upstream.MCPExchange{Session: rq.sess.HashHex()}
 	if m := rq.msg; m != nil {
 		var err error
-		// SPEC-CONFLICT (relay §2.5, D174: keep the envelope "in the result._meta of the caller's response to one of
-		// those [elicitation/create, sampling/createMessage]"): a JSON-RPC response does not name the request it
-		// answers, and on a pinned session the request may have reached the client through another replica's
+		// SPEC-CONFLICT (D200; relay §2.5, D174: keep the envelope "in the result._meta of the caller's response to
+		// one of those [elicitation/create, sampling/createMessage]"): a JSON-RPC response does not name the request
+		// it answers, and on a pinned session the request may have reached the client through another replica's
 		// stream. The closest faithful behaviour: on a sealed service an exact {v, envelope} is kept on every client
 		// response (method elicitation/create for the scrub's rule); every other sh.kontra/ key is removed, and the
 		// hosting node, which sealed the request, still checks the answer (ext-sealed.md §5 rule 4b).

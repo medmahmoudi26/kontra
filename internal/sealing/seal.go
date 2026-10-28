@@ -70,21 +70,21 @@ const (
 // --open reads one sealed part (or a Message, a Task or an artifact holding sealed parts) and writes the plaintext
 // of each part a key of ~/.kontra/jobs opens, after checking dir res, the job key's id in kids and auth.
 //
-// SPEC-CONFLICT: §5.1 has kontra seal fetch the service's card with no word on a credential, but relay.md §2.1 answers
-// a card GET of a service that neither is listed nor admits anonymous with 404 when no credential admits the caller,
-// so kontra seal could seal for listed services only (and examples/sealing's flow, an allow: org:default service,
-// failed). It sends an API key given explicitly with --api-key (or @file), never one read from the environment: a
-// variable such as $KONTRA_API_KEY is tied to no gate, and the gate a --service names is not trusted (§7), so a key
-// exported for one gate would reach every other one sealed for. As kontra connect sends a key only to the --gate it
-// was given with, the key goes only to the --service's origin, and only where §2.1 needs a credential: the service's
-// card, after an unauthenticated GET of it was 404, and then its upstream card; never the gate's key set
+// SPEC-CONFLICT (D222): §5.1 has kontra seal fetch the service's card with no word on a credential, but relay.md §2.1
+// answers a card GET of a service that neither is listed nor admits anonymous with 404 when no credential admits the
+// caller, so kontra seal could seal for listed services only (and examples/sealing's flow, an allow: org:default
+// service, failed). It sends an API key given explicitly with --api-key (or @file), never one read from the
+// environment: a variable such as $KONTRA_API_KEY is tied to no gate, and the gate a --service names is not trusted
+// (§7), so a key exported for one gate would reach every other one sealed for. As kontra connect sends a key only to
+// the --gate it was given with, the key goes only to the --service's origin, and only where §2.1 needs a credential:
+// the service's card, after an unauthenticated GET of it was 404, and then its upstream card; never the gate's key set
 // (/.well-known/jwks.json is public), and never to a listed service, whose cards are public.
 //
-// SPEC-CONFLICT: §5.1 has kontra seal mint a per-job key and rk for every message it seals, --task included, but a
-// follow-up's header must carry the job's replyTo and rk (§5 rule 3: wrong_job otherwise), so a follow-up sealed
-// with a fresh key could never be accepted. --open binds a job to the gate task its replies name (renaming the job's
-// key and state to the task id, as the hiring node names its jobs), and --task <id> seals with that task's job key,
-// rk and contextId; a task with no job here is refused, saying to --open one of its replies first.
+// SPEC-CONFLICT (D222): §5.1 has kontra seal mint a per-job key and rk for every message it seals, --task included,
+// but a follow-up's header must carry the job's replyTo and rk (§5 rule 3: wrong_job otherwise), so a follow-up
+// sealed with a fresh key could never be accepted. --open binds a job to the gate task its replies name (renaming
+// the job's key and state to the task id, as the hiring node names its jobs), and --task <id> seals with that task's
+// job key, rk and contextId; a task with no job here is refused, saying to --open one of its replies first.
 func SealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	return sealCommand(ctx, args, stdin, stdout, stderr, os.Getenv("HOME"), http.DefaultClient, time.Now)
 }
@@ -367,14 +367,15 @@ func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx co
 // without signatures, the RFC 7638 thumbprint of that key; for each that names its key by kid only, "kid:<kid>". A
 // signature that carries a key and does not verify with it, or is malformed, is no key of the seller's.
 //
-// SPEC-CONFLICT (ext-sealed.md §7, relay.md §3: a verifier "checks the seller's signatures against keys it trusts for
-// the seller", and the pins hold "the seller key thumbprints that verified its upstream card"; D187 prints them as
-// thumbprints): the node is given no seller key set (seller_keys is the gate's configuration), so a signature that
-// names its key by kid only cannot be verified by it, and its kid is only what the signature claims. The closest
+// SPEC-CONFLICT (D223; ext-sealed.md §7, relay.md §3: a verifier "checks the seller's signatures against keys it
+// trusts for the seller", and the pins hold "the seller key thumbprints that verified its upstream card"; D187 prints
+// them as thumbprints): the node is given no seller key set (seller_keys is the gate's configuration), so a signature
+// that names its key by kid only cannot be verified by it, and its kid is only what the signature claims. The closest
 // faithful behaviour: a signature that carries its key is verified, and its key's thumbprint pinned (a gate that
 // replaces the card and its signature changes it); one that does not is pinned as the unverified "kid:<kid>", and
 // printed so, never as a thumbprint. A gate that forges a kid-only signature naming the pinned kid is not detected:
-// that residual stays until the node can verify with the seller's own key set.
+// that residual stays until the node can verify with the seller's own key set (kontra.upstream.jwks, decided in D223
+// and not built yet).
 func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 	c, err := jcs.Transform(upstream)
 	if err != nil {

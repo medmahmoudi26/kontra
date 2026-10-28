@@ -492,13 +492,13 @@ func (r *Replica) assemble() error {
 	// session's stream cap; their principal is the session's (auth.HireSource); blob streams are served from
 	// the bucket for the tasks the session serves or hires.
 	//
-	// SPEC-CONFLICT (tunnel.md §9 "its edge limits are the session's (§6.2 for anonymous sessions; otherwise the
-	// API key's)"; relay.md §2.2): the edge counts in flight per presented credential and rates per client
-	// address, and a hiring request carries neither (the gate holds no API key secret after the handshake, and
-	// the session has no address of its own). The closest faithful behaviour: the edge's limits apply with the
-	// session as the client: limits.body and the body timeout as on the network, rps_per_ip per session, and in
-	// flight the session's stream cap (§14: 32, inflight_per_key's default), not shared with the same key's
-	// requests from the network. The owner may want §9 to say so.
+	// SPEC-CONFLICT (D207; tunnel.md §9 "its edge limits are the session's (§6.2 for anonymous sessions; otherwise
+	// the API key's)"; relay.md §2.2): the edge counts in flight per presented credential and rates per client
+	// address, and a hiring request carries neither (the gate holds no API key secret after the handshake, and the
+	// session has no address of its own). The closest faithful behaviour: the edge's limits apply with the session
+	// as the client: limits.body and the body timeout as on the network, rps_per_ip per session, and in flight the
+	// session's stream cap (§14: 32, inflight_per_key's default), not shared with the same key's requests from the
+	// network. §9 now says so.
 	nodeStreams := &tunnelgate.NodeStreams{
 		Hire:   edge.Middleware(edge.MiddlewareConfig{Limits: ecfg.Limits, ClientIP: edge.ClientIP{From: config.ClientIPRemote}}, routes),
 		Blobs:  &tunnelgate.Blobs{DB: r.pool, Store: r.blobs, Logger: log},

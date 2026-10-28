@@ -416,10 +416,10 @@ func (s *Server) Local() *url.URL {
 // 403 for a Host that is not one of --listen's loopback names with its port, or an Origin not listed by
 // --allow-origin; 401 without the local token when one is set; 405 for OPTIONS (no CORS preflight is answered).
 //
-// SPEC-CONFLICT (spec/tunnel.md §9): §9 accepts only 127.0.0.1:<port>, localhost:<port> and [::1]:<port> as Host,
-// and also allows --listen on a non-loopback address with --local-token, whose clients reach it by that address.
-// The closest faithful behaviour: with a non-loopback --listen of a specific address (never 0.0.0.0 or ::), that
-// address with the port is accepted too; the local token, which a web page cannot know, guards it.
+// SPEC-CONFLICT (D207; spec/tunnel.md §9): §9 accepts only 127.0.0.1:<port>, localhost:<port> and [::1]:<port> as
+// Host, and also allows --listen on a non-loopback address with --local-token, whose clients reach it by that
+// address. The closest faithful behaviour: with a non-loopback --listen of a specific address (never 0.0.0.0 or
+// ::), that address with the port is accepted too; the local token, which a web page cannot know, guards it.
 func CheckLocal(r *http.Request, cfg Config) (status int, err error) {
 	host, port, err := net.SplitHostPort(cfg.Listen)
 	if err != nil {

@@ -404,11 +404,11 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		}
 		out, ok := targetPath(basePath(sv.Target), r.URL.Path)
 		if sv.Kind == tunnel.KindMCP && (r.URL.Path == "/" || r.URL.Path == "") {
-			// SPEC-CONFLICT (spec/tunnel.md §8.2 with relay.md §11, M3 WP-05): the gate sends every MCP exchange of a
-			// tunnel service to "/" (upstream.Tunnel.Base), and §8.2 prefixes a path not under the base with it, which
-			// sends "/" to "<base>/": a server whose one endpoint is /mcp (a Go ServeMux pattern "/mcp") would answer
-			// 404 there. The closest faithful behaviour: the gate's root is the target itself, its endpoint exactly as
-			// --serve names it (ParseServe); every other path follows §8.2's rule.
+			// SPEC-CONFLICT (D210; spec/tunnel.md §8.2 with relay.md §11, M3 WP-05): the gate sends every MCP exchange
+			// of a tunnel service to "/" (upstream.Tunnel.Base), and §8.2 prefixes a path not under the base with it,
+			// which sends "/" to "<base>/": a server whose one endpoint is /mcp (a Go ServeMux pattern "/mcp") would
+			// answer 404 there. The closest faithful behaviour: the gate's root is the target itself, its endpoint
+			// exactly as --serve names it (ParseServe); every other path follows §8.2's rule.
 			out, ok = sv.Target.Path, true
 		}
 		if !ok {
@@ -524,13 +524,13 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 //     full, which the gate retries (on another session before the first upstream task id, with backoff after it,
 //     relay.md §6.4).
 //
-// SPEC-CONFLICT (spec/tunnel.md §8.2, §8.3, §14): §8.3 has the node refuse an announced size over 64 MiB and more
-// bytes than announced, and §8.2 closes the list of reasons a node's own answer carries; neither says what the
+// SPEC-CONFLICT (D209; spec/tunnel.md §8.2, §8.3, §14): §8.3 has the node refuse an announced size over 64 MiB and
+// more bytes than announced, and §8.2 closes the list of reasons a node's own answer carries; neither says what the
 // exchange whose part cannot be fetched answers. The closest faithful behaviour: a refusal that would come again is
 // D151's 400 without Kontra-Node, final, like the node's other 400s; a fetch that may succeed if asked again is
 // §8.2's full (503), the reason the gate already retries, since the node then had no room for the exchange's
 // stream: the node keeps its node-opened streams under the gate's cap (§14) and waits for a slot first. full
-// otherwise names the node's own in-flight cap (--max-inflight); the owner may want a reason of its own for it.
+// otherwise names the node's own in-flight cap (--max-inflight); D209 gives it no reason of its own.
 func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Logger) (done func(), ok bool) {
 	none := func() {}
 	if r.Body == nil || r.Body == http.NoBody {

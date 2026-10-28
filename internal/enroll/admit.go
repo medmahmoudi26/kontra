@@ -368,15 +368,14 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	// hello is therefore unknown_key whatever else it carries; service_denied stays for a known key, and
 	// for a hello that enrolls something but not everything it declares.
 	//
-	// SPEC-CONFLICT (spec/tunnel.md §5 and D133 against §4 and §9; the M3 plan's conflict on §4–§5, WP-03):
+	// SPEC-CONFLICT (D206; spec/tunnel.md §5 and D133 against §4 and §9; the M3 plan's conflict on §4–§5, WP-03):
 	// §5 makes an unknown key that nothing in its hello enrolls unknown_key "whatever else the hello carries",
-	// while §4 lets a hello declare no services ("a node that only hires") and §9 gives its streams the
-	// principal of the hello's auth API key; a session needs a tunnel_keys row (tunnels.key_id references it).
-	// The closest faithful behaviour: an unknown key whose hello declares no service and carries an auth API
-	// key with the hire scope (and no token, which step 5 refused already) is admitted hire-only, its
-	// tunnel_keys row in the API key's tenant and no binding, audited with the API key; without such a key it
-	// stays unknown_key (D133), so the lost-welcome probe, which carries no auth, still learns that nothing
-	// committed. The owner may want §5 to say so.
+	// while §4 lets a hello declare no services ("a node that only hires") and §9 gives its streams the principal
+	// of the hello's auth API key; a session needs a tunnel_keys row (tunnels.key_id references it). The closest
+	// faithful behaviour: an unknown key whose hello declares no service and carries an auth API key with the hire
+	// scope (and no token, which step 5 refused already) is admitted hire-only, its tunnel_keys row in the API
+	// key's tenant and no binding, audited with the API key; without such a key it stays unknown_key (D133), so the
+	// lost-welcome probe, which carries no auth, still learns that nothing committed. §5 now says so.
 	//
 	// Such a key is no node of its tenant: no binding was ever made for it. §9 gives a session without auth the
 	// principal node:<key_id> with the key's tenant, which the services' org:<tenant> allow entries admit; for a
@@ -393,7 +392,7 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	// bind a key to services (§5's table), and a hire-only admission binds nothing, under the hire scope; with
 	// the option's default (false on self-hosted gates) a node could otherwise never hire through such a gate
 	// without hosting a service. §5's "a key without an enroll: scope only hires" is read as that key's whole
-	// authority. The owner may want §5 to name this admission, and whether it needs the option.
+	// authority. §5 now names this admission, without the option (D206).
 	if a.key == nil && a.old == nil && !enrolls {
 		if len(h.Services) > 0 || a.principal == nil || !a.principal.MayHire() || a.principal.TenantID == nil {
 			return nil, tunnel.Refuse(tunnel.CodeUnknownKey, "the key %s is not enrolled at this gate, and nothing in this hello enrolls it", h.KID)

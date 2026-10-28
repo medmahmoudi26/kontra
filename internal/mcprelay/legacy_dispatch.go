@@ -846,12 +846,12 @@ func (r *legacyRun) terminal(ctx context.Context, st store.State) (lifecycle.Dis
 // error (§11.8). After a cancel the gate forwarded, the run writes nothing of the kind: the workflow writes the
 // client's canceled (append's hold, D57).
 //
-// SPEC-CONFLICT (relay §11.8 case 3, §11.5 step 6): case 3's data names who cancelled ("client" | "declined" |
-// "quote_expired"), and step 6 fetches the upstream's tasks/result at any terminal status; an upstream that cancels
-// its own task fits neither (a 2025-11-25 receiver stores no result for a cancelled task: server-everything@1.0.0's
-// tasks/result then answers an error). The closest faithful behaviour (as §11.12 says for the modern dispatch,
-// "cancelled is canceled"): the task ends canceled with no kontra.canceled, whose tasks/result is -32603 "task
-// cancelled" without data.
+// SPEC-CONFLICT (D203; relay §11.8 case 3, §11.5 step 6): case 3's data names who cancelled ("client" | "declined"
+// | "quote_expired"), and step 6 fetches the upstream's tasks/result at any terminal status; an upstream that
+// cancels its own task fits neither (a 2025-11-25 receiver stores no result for a cancelled task:
+// server-everything@1.0.0's tasks/result then answers an error). The closest faithful behaviour (as §11.12 says for
+// the modern dispatch, "cancelled is canceled"): the task ends canceled with no kontra.canceled, whose tasks/result
+// is -32603 "task cancelled" without data.
 func (r *legacyRun) cancelledUpstream(ctx context.Context) (lifecycle.DispatchResult, bool) {
 	err := r.append(ctx, gateWrite, func(row *store.TaskRow) (store.Write, error) {
 		w, err := store.MCPStatusWrite(row, store.StateCanceled, "the service cancelled the task", nil)

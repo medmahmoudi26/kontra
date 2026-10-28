@@ -65,13 +65,12 @@ func (n *Node) Run(ctx context.Context) error {
 	// Hiring (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
 	// stops kontra connect at once; its requests wait for a session.
 	//
-	// SPEC-CONFLICT (spec/tunnel.md §9; M3 WP-03 review): §9 has every node serve 127.0.0.1:7777 (--listen), and
-	// none turns it off. So every kontra connect binds it, hosting-only ones included: a second node on the same
-	// host stops at start unless it is given another --listen (this host's kontra-node-hello and
+	// SPEC-CONFLICT (D208; spec/tunnel.md §9; M3 WP-03 review): §9 has every node serve 127.0.0.1:7777 (--listen),
+	// and none turns it off. So every kontra connect binds it, hosting-only ones included: a second node on the
+	// same host stops at start unless it is given another --listen (this host's kontra-node-hello and
 	// kontra-seller-hello units would collide on an upgrade), and every hosting node offers its hiring principal
 	// (its --api-key, or node:<key_id>, which org:<tenant> admits) to every local process without a token. Built as
-	// written; the owner decides whether a node that hosts serves the endpoint by default, or whether hiring can
-	// be turned off (for example --listen off).
+	// written; D208 decides that --listen off turns hiring off, which is not built yet.
 	ln, err := net.Listen("tcp", n.cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>)", n.cfg.Listen, err)

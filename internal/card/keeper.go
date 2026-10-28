@@ -311,9 +311,9 @@ func (k *Keeper) installOver(ctx context.Context, raw []byte, at time.Time, v ve
 			return err
 		}
 	}
-	// SPEC-CONFLICT (spec §3 with D49): §3 keeps the upstream card verbatim and serves every seller member byte
-	// for byte, and signs the served card over its RFC 8785 JCS with the upstream card's JCS hash in the header;
-	// JCS is defined for valid Unicode only (I-JSON), so a card that is not valid UTF-8, or carries a lone
+	// SPEC-CONFLICT (D193; spec §3 with D49): §3 keeps the upstream card verbatim and serves every seller member
+	// byte for byte, and signs the served card over its RFC 8785 JCS with the upstream card's JCS hash in the
+	// header; JCS is defined for valid Unicode only (I-JSON), so a card that is not valid UTF-8, or carries a lone
 	// surrogate, can be neither hashed nor signed, though M1 served such bytes as they were. The closest faithful
 	// behaviour: such a card is not installed (ErrBadCard, as for any card the gate cannot serve), so the service
 	// has no card until the seller publishes one; it is never served unsigned or altered.

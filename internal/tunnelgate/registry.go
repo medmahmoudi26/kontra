@@ -77,8 +77,8 @@ type RegistryConfig struct {
 // across replicas they follow the replicas' clocks (NTP), so a skew larger than the time between two
 // handshakes of one key can order them wrongly: the wrongly refused session closes, and its node redials.
 //
-// SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): tunnel.md names no way for one replica to act
-// on a session another replica holds (a supersede, an "enrolled" notice): kontra_revoke's payloads cover keys,
+// SPEC-CONFLICT (D138, D199; M2 plan, confirmed conflict on §11 and §5): tunnel.md names no way for one replica to
+// act on a session another replica holds (a supersede, an "enrolled" notice): kontra_revoke's payloads cover keys,
 // bindings and API keys only. The closest faithful behaviour is a gate-internal NOTIFY channel between
 // replicas, pg.ChannelTunnel ('session:<id>', 'enrolled:<key_id>/<tenant_id>/<service>', and since M3
 // 'mcp:<tenant_id>/<service>/<replica_id>', a node of an MCP service connecting or disconnecting, which drops the

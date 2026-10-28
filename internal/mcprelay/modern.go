@@ -248,12 +248,12 @@ func withID(ref *mcpwire.Refusal, id json.RawMessage) *mcpwire.Refusal {
 // principal and service). It is the session the request's calls row names. A failure is logged: the answer is
 // relayed all the same, and the next request opens it.
 //
-// SPEC-CONFLICT (relay §11.12 "per_session", D177: the row opens "once the upstream has answered that request with
-// a modern result"): two modern requests are answered without the upstream answering them, a tools/list served from
-// the modern cache (§11.3) and a tools/call that becomes a gate-owned task (whose upstream call is the dispatch's,
-// later). The closest faithful behaviour: both open the virtual session too, since the service is known modern from
-// its upstream's own modern answers (the cached list, the server/discover result that declared the tasks extension),
-// which is what the rule guards (a probe ending in the legacy 400 still opens nothing).
+// SPEC-CONFLICT (D204; relay §11.12 "per_session", D177: the row opens "once the upstream has answered that request
+// with a modern result"): two modern requests are answered without the upstream answering them, a tools/list served
+// from the modern cache (§11.3) and a tools/call that becomes a gate-owned task (whose upstream call is the
+// dispatch's, later). The closest faithful behaviour: both open the virtual session too, since the service is known
+// modern from its upstream's own modern answers (the cached list, the server/discover result that declared the tasks
+// extension), which is what the rule guards (a probe ending in the legacy 400 still opens nothing).
 func (h *Handler) openVirtual(rq *request) {
 	if rq.vsess != nil {
 		return
@@ -281,11 +281,12 @@ func (h *Handler) openVirtual(rq *request) {
 // Authorization. MCP-Protocol-Version, Mcp-Method and Mcp-Name are forwarded as the one value Classify and
 // CheckModern read (each was refused when sent more than once), so the upstream reads what the gate checked (D172).
 //
-// SPEC-CONFLICT (relay §11.12: "The gate forwards MCP-Protocol-Version, Mcp-Method, Mcp-Name and the Mcp-Param-*
-// headers"): 2026-07-28 defines Mcp-Name for tools/call, prompts/get and resources/read (and the tasks extension for
-// tasks/get, tasks/update and tasks/cancel) only, so on any other method there is no body member to check it against,
-// and an intermediary behind the gate that routed on it would route on a value nobody checked (2026-07-28 Streamable
-// HTTP, "Server Validation"). The closest faithful behaviour: an Mcp-Name on such a method is not forwarded.
+// SPEC-CONFLICT (D204; relay §11.12: "The gate forwards MCP-Protocol-Version, Mcp-Method, Mcp-Name and the
+// Mcp-Param-* headers"): 2026-07-28 defines Mcp-Name for tools/call, prompts/get and resources/read (and the tasks
+// extension for tasks/get, tasks/update and tasks/cancel) only, so on any other method there is no body member to
+// check it against, and an intermediary behind the gate that routed on it would route on a value nobody checked
+// (2026-07-28 Streamable HTTP, "Server Validation"). The closest faithful behaviour: an Mcp-Name on such a method is
+// not forwarded.
 func modernHeaders(r *http.Request, m *mcpwire.Message) http.Header {
 	h := http.Header{}
 	for _, k := range []string{"Accept", "Content-Type"} {
@@ -393,9 +394,9 @@ func (h *Handler) modernForward(rq *request, meter *callMeter, rewrite func(m *m
 			}
 			if meter != nil && msg.Error == nil {
 				if rt, _ := stringMember(msg.Result, "resultType"); rt == "input_required" {
-					// SPEC-CONFLICT (relay §11.4, §11.12): a multi round-trip request's InputRequiredResult answers
-					// the tools/call without its outcome, and the client sends the call again with its answers; §11.4
-					// says one calls row is written when "the response completes" and does not say what an
+					// SPEC-CONFLICT (D204; relay §11.4, §11.12): a multi round-trip request's InputRequiredResult
+					// answers the tools/call without its outcome, and the client sends the call again with its answers;
+					// §11.4 says one calls row is written when "the response completes" and does not say what an
 					// InputRequiredResult is. The closest faithful behaviour: as for a passthrough task's
 					// CreateTaskResult (§11.5), the row is written with is_error NULL (the outcome is not observed),
 					// so an operator never bills per_call on it; the call sent again with the answers gets its own row.

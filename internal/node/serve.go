@@ -63,7 +63,7 @@ var ErrBasePath = errors.New("a --serve target with a base path is refused in M2
 // target cannot host the pinned server-everything@1.0.0 (examples/mcp/everything), whose endpoint is /mcp, and
 // tunnel.md §8.2 allows a target with a path once the node forwards by its rule ("a path already under the
 // target's base path as it is ... prefixes any other"), which targetPath now does. D123's refusal is kept for A2A
-// targets, as D123 decided for M2.
+// targets, as D123 decided for M2 (D210).
 func ParseServe(s string) (Serve, error) {
 	return parseServe(s, os.Getenv("HOME"))
 }

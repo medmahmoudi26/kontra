@@ -21,11 +21,11 @@ const shellOperators = "|&;<>()$`"
 //   - Nothing else is expanded, and nothing runs a shell. An unquoted |, &, ;, <, >, (, ), $ or `, or a # at the
 //     start of a word, is refused rather than passed on literally: quote it, or run a script.
 //
-// SPEC-CONFLICT (spec/tunnel.md §10: "split with POSIX shell word rules, expands a leading ~/ and runs it without a
-// shell"): §10 does not say what an unquoted operator, expansion or comment becomes when no shell runs. Under POSIX
-// rules they are not word characters, and passing them on as arguments would run something other than what the
-// operator wrote (a "> log" would reach the server as two arguments). The closest faithful behaviour is to refuse
-// them at start (a usage error), so no command line is run with a meaning a shell would not give it.
+// SPEC-CONFLICT (D211; spec/tunnel.md §10: "split with POSIX shell word rules, expands a leading ~/ and runs it
+// without a shell"): §10 does not say what an unquoted operator, expansion or comment becomes when no shell runs.
+// Under POSIX rules they are not word characters, and passing them on as arguments would run something other than
+// what the operator wrote (a "> log" would reach the server as two arguments). The closest faithful behaviour is to
+// refuse them at start (a usage error), so no command line is run with a meaning a shell would not give it.
 func SplitCommand(line, home string) ([]string, error) {
 	var (
 		words  []string

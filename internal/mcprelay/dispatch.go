@@ -552,7 +552,7 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 	case err != nil:
 		return lifecycle.ForwardCancelResult{}, fmt.Errorf("mcprelay: forward_cancel of task %s: %w", in.TaskID, err)
 	}
-	// SPEC-CONFLICT (relay §11.6: forward_cancel "sends upstream tasks/cancel only if the upstream declared
+	// SPEC-CONFLICT (D203; relay §11.6: forward_cancel "sends upstream tasks/cancel only if the upstream declared
 	// tasks.cancel"): what the upstream declared is in the InitializeResult of the dispatch's own session, which
 	// attempts (0001's columns, frozen with 0002) has no place for; the replica running the dispatch keeps it in
 	// memory. The closest faithful behaviour: on that replica, an upstream that did not declare it gets nothing;

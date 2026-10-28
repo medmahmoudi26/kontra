@@ -90,10 +90,10 @@ type HostingConfig struct {
 // to the service, so a gate cannot answer the service's question in plaintext for the buyer (spec §5, "Answers
 // must be sealed").
 //
-// SPEC-CONFLICT (ext-sealed.md §5, rules 1–5): the rules bind the sealed parts of a request, and say nothing of an
-// exchange without one (a GetTask, a CancelTask, a SubscribeToTask, an unsealed message) that names a sealed job's
-// upstream task: its replies would be sealed to the replyTo of whatever job the preamble names, or not at all, so a
-// gate could read a sealed task's content by asking for it on an exchange of a job of its own, or of none. The
+// SPEC-CONFLICT (D217; ext-sealed.md §5, rules 1–5): the rules bind the sealed parts of a request, and say nothing
+// of an exchange without one (a GetTask, a CancelTask, a SubscribeToTask, an unsealed message) that names a sealed
+// job's upstream task: its replies would be sealed to the replyTo of whatever job the preamble names, or not at all,
+// so a gate could read a sealed task's content by asking for it on an exchange of a job of its own, or of none. The
 // closest faithful behaviour: the node never lets an exchange reach a sealed job's upstream task or context unless
 // the exchange is that job's (its preamble names the job's gate task, or for MCP its session): a request naming
 // another job's upstream task id is wrong_task, one naming another gate context's upstream context wrong_context,
@@ -736,13 +736,14 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 // service, and one identity key opens every service's requests, so a gate could otherwise send a buyer's first
 // message to every service of the node in turn (security review). h.mu is held.
 //
-// SPEC-CONFLICT (ext-sealed.md §3, §5 rule 2, §7): the header binds the gate's task, context, session, tool and
-// messageId, never the service, and §5 keeps the replay sets per service. A gate can therefore deliver a buyer's
+// SPEC-CONFLICT (D221; ext-sealed.md §3, §5 rule 2, §7): the header binds the gate's task, context, session, tool
+// and messageId, never the service, and §5 keeps the replay sets per service. A gate can therefore deliver a buyer's
 // sealed request to another service of the same node instead of the one hired, which opens it and answers with valid
 // auth (the hiring node checks no service either). The closest faithful behaviour: rule 2's replyTo set and rule 5's
 // (session, messageId) set are checked node-wide, so a request a service of the node accepted is refused by every
 // other; a first delivery to the wrong service is not detected, and stays a residual until the header names the
-// service (a `service` member in request and reply headers, checked by both nodes).
+// service (a `service` member in request and reply headers, checked by both nodes, decided in D221 and not built
+// yet).
 func (h *Hosting) replyToElsewhere(service, replyTo string) bool {
 	for _, name := range h.knownServices() {
 		if name == service {
@@ -959,11 +960,11 @@ const sealedErrorText = "the service returned an error (its text stays on the no
 // sealedErrorText, never the service's text, which may quote the sealed input (a validation error echoing an
 // argument). A body that is not one error object becomes the node's own error of that status.
 //
-// SPEC-CONFLICT (ext-sealed.md §2, §7): §2 lists what is sealed (parts, MCP arguments and results) and says nothing
-// of errors, while §7 promises that the gate's database and logs hold ciphertext only, and the gate stores and logs a
-// service's error text. The closest faithful behaviour: on a sealed job the hosting node keeps an error's code and
-// replaces its message and data with fixed text; sealing them for the hiring node to open would need §3 to define an
-// error's envelope.
+// SPEC-CONFLICT (D195; ext-sealed.md §2, §7): §2 lists what is sealed (parts, MCP arguments and results) and says
+// nothing of errors, while §7 promises that the gate's database and logs hold ciphertext only, and the gate stores
+// and logs a service's error text. The closest faithful behaviour: on a sealed job the hosting node keeps an error's
+// code and replaces its message and data with fixed text; sealing them for the hiring node to open would need §3 to
+// define an error's envelope.
 func (h *Hosting) errorResponse(x *Exchange, resp *http.Response) *http.Response {
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	_ = resp.Body.Close()
@@ -1186,19 +1187,20 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 // with its messageId; an artifact update's with the artifactId and the next chunk; a whole artifact's (a Task's)
 // reusing the ciphertext of the parts the gate already holds unchanged and sealing the rest as the next chunk.
 //
-// SPEC-CONFLICT (ext-sealed.md §3's table, chunk: "for artifact updates, the 0-based count of updates for that
+// SPEC-CONFLICT (D216; ext-sealed.md §3's table, chunk: "for artifact updates, the 0-based count of updates for that
 // artifactId this node sealed; 0 for a whole artifact"): a whole artifact reuses the ciphertext of the parts the gate
 // already holds (§5, so that polling sees identical bytes), and those carry the chunk they were sealed as; its new
 // parts cannot be chunk 0 again once a chunk 0 was sealed, since the hiring node refuses a (chunk, part) seen before
 // with other bytes (rule 4). The closest faithful behaviour: chunk counts every chunk this node sealed for the
 // artifactId, an update or the new parts of a whole artifact, so that a whole artifact sealed first is chunk 0 and
-// the updates that follow count on from it; §3 would need to say so.
+// the updates that follow count on from it; §3 now says so.
 func (x *Exchange) sealContainer(j *jobState, c *a2awire.Container) error {
 	if c.Where == a2awire.WhereArtifact || c.Where == a2awire.WhereArtifactUpdate {
 		// An artifact's name and description are the service's words about its content, and nothing seals them (§2
 		// lists a part's filename as the only member of content left outside): on a sealed job they are not relayed.
-		// SPEC-CONFLICT (ext-sealed.md §2): §2 names neither; the closest faithful behaviour to "the gate holds
-		// ciphertext only" (§7) drops them, any case variant included (a lenient decoder takes one for the member).
+		// SPEC-CONFLICT (D220; ext-sealed.md §2): §2 names neither; the closest faithful behaviour to "the gate
+		// holds ciphertext only" (§7) drops them, any case variant included (a lenient decoder takes one for the
+		// member).
 		for k := range c.Members {
 			if strings.EqualFold(k, "name") || strings.EqualFold(k, "description") {
 				c.Set(k, nil)

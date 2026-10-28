@@ -295,11 +295,11 @@ func (h *Handler) relayResponse(rq *request, resp *http.Response, o *relayOpts) 
 				// ext-sealed.md §6: the hosting node refused a sealed part of the call. The JSON-RPC error is relayed
 				// to the client, as the node wrote it (-32602 "sealed part rejected: <reason>", the reason only when
 				// it is one of §6's), the calls row says is_error, and the audit chain records the rejection.
-				// SPEC-CONFLICT (ext-sealed.md §6, tunnel.md §8.2, the M3 plan's "the JSON-RPC error is relayed"):
-				// §6's 400 is the node's answer to the gate, and nothing says which status the client gets; a
-				// Streamable HTTP client takes a 400 as a transport failure and may not read the body. The closest
-				// faithful behaviour: the error is relayed as a JSON-RPC error response with 200, the request's id
-				// and the session header, as the gate answers any other failed call.
+				// SPEC-CONFLICT (D202; ext-sealed.md §6, tunnel.md §8.2, the M3 plan's "the JSON-RPC error is
+				// relayed"): §6's 400 is the node's answer to the gate, and nothing says which status the client
+				// gets; a Streamable HTTP client takes a 400 as a transport failure and may not read the body. The
+				// closest faithful behaviour: the error is relayed as a JSON-RPC error response with 200, the
+				// request's id and the session header, as the gate answers any other failed call.
 				reason := upstream.SealedRejectReason(resp.Header.Get(tunnel.HeaderSealedReject))
 				msg := "sealed part rejected"
 				if reason != "" {
@@ -464,15 +464,15 @@ const keepAliveEvery = 15 * time.Second
 // stream before it (§11.1). With o.hold the headers and the events wait for the response to the client's request
 // (onResponse decides it), within upstream.MaxBody.
 //
-// SPEC-CONFLICT (relay §11.1, §11.2, §11.4; D172): the spec says what happens to an event whose message fails strict
-// decoding, and that events otherwise pass unchanged, but not what happens to an event a client does not dispatch,
-// nor to a second response to one request, both of which let metering read another is_error than the client reads.
-// The closest faithful behaviour: the relay reads, meters and relays what a client reads, the events a client
-// dispatches as messages (type absent or "message", event.message). An event of another type is no MCP message to
-// any client; it is neither read nor relayed, so a seller cannot meter an answer in it that its client never sees,
-// nor carry Kontra's keys past the scrub in it. A second response to the client's request ends the stream before it,
-// as a refused message does, and the call stays metered as its first response says (a client takes the first
-// response for an id, and reports a later one as unknown).
+// SPEC-CONFLICT (D197; relay §11.1, §11.2, §11.4; D172): the spec says what happens to an event whose message fails
+// strict decoding, and that events otherwise pass unchanged, but not what happens to an event a client does not
+// dispatch, nor to a second response to one request, both of which let metering read another is_error than the
+// client reads. The closest faithful behaviour: the relay reads, meters and relays what a client reads, the events a
+// client dispatches as messages (type absent or "message", event.message). An event of another type is no MCP
+// message to any client; it is neither read nor relayed, so a seller cannot meter an answer in it that its client
+// never sees, nor carry Kontra's keys past the scrub in it. A second response to the client's request ends the
+// stream before it, as a refused message does, and the call stays metered as its first response says (a client takes
+// the first response for an id, and reports a later one as unknown).
 func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64 {
 	type item struct {
 		ev  *event
