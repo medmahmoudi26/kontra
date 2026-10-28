@@ -1236,9 +1236,10 @@ request without a credential is `401` (§12.1); through a node, the session's pr
   A2A routes only. The authorization server is the operator's (Cloud runs one; a team gate can point at its
   IdP) and is not part of the gate (D25).
 - **Verification (DM4-9).** The issuer's metadata is read from `{issuer}/.well-known/oauth-authorization-server` (RFC
-  8414), else `{issuer}/.well-known/openid-configuration`, and its `jwks_uri` key set, both through the SSRF-safe
-  client (§10.3) and cached 10 minutes; a token whose `kid` is not in the cached set refetches it, at most once a
-  minute. `iss` must equal the issuer, `exp` must not have passed and `nbf`, when present, must have, within 60 s of
+  8414), else `{issuer}/.well-known/openid-configuration`, and its `jwks_uri` key set, over `https://` and cached 10
+  minutes; a token whose `kid` is not in the cached set refetches it, at most once a minute. Like the Admission URL
+  (§13.1) and the bucket, the issuer is the operator's and never derived from a request, so it is dialed as
+  configured, a team's IdP on a private network included. `iss` must equal the issuer, `exp` must not have passed and `nbf`, when present, must have, within 60 s of
   skew; `alg` is ES256, RS256 or EdDSA, never `none` or an HMAC. `scope` is not checked. The principal is
   `oidc:sub:<sub>` with `buyer_id` UUIDv5(issuer ‖ sub) and no tenant: mapping a subject to a tenant comes with the
   OIDC principals of the A2A routes (M5).

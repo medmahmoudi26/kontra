@@ -2452,8 +2452,10 @@ D170 put §12.1's resource server in M5 with the OIDC principals. It is code in 
 in-repository authorization server, and M5's control plane builds the authorization server it trusts
 (kontra-cloud#60: authorization code with PKCE, RFC 8414, RFC 9728, DCR). §12.1 says what is checked, not how the key
 set is found. Decision ([`relay.md`](../spec/relay.md) §12.1): M4 builds the resource server on `/mcp` and every
-`/mcp/{svc}`; the issuer's RFC 8414 metadata (else its OpenID configuration) and its `jwks_uri` are fetched through the
-SSRF-safe client and cached 10 minutes, an unknown `kid` refetching the key set at most once a minute; `iss`, `aud`
+`/mcp/{svc}`; the issuer's RFC 8414 metadata (else its OpenID configuration) and its `jwks_uri` are fetched over
+`https://`, dialed as configured (the issuer is the operator's and never derived from a request, and a team's IdP
+may be on a private network, as the Admission URL and the bucket are), and cached 10 minutes, an unknown `kid`
+refetching the key set at most once a minute; `iss`, `aud`
 (the route's canonical URI), `exp` and `nbf` are checked with 60 s of skew; ES256, RS256 and EdDSA are accepted, never
 `none` or HMAC; `scope` is not checked. The principal is `oidc:sub:<sub>` with no tenant and `via = mcp`. OIDC
 principals on the A2A routes (`auth.oidc`) and Cloud's revocation feed stay in M5, on the same verifier.
@@ -2547,3 +2549,11 @@ an in-repository Admission server and authorization server, and anonymous limits
 gate names are not tests in CI: the clean-laptop demo against the staging gate (`scripts/demo-clean-laptop.sh`, a
 container image built from `golang` with nothing else) and the team gate on a clean VPS (`scripts/team-gate-vps.sh`);
 both are recorded in `docs/gate-runs-m4.md` with what was run, what was seen and when everything was torn down.
+
+### DM4-16. PRD §14's other M4 examples stay skeletons — **decided under the owner's standing instruction, 28 Oct**
+
+PRD §14's M4 row also lists `kontra dev` with embedded Temporal (removed by note 2), the sellers
+`examples/sellers/{temporal-harness,adk,claude-cli}` and the fronts `examples/front/{agentgateway,ingress}`. The owner's
+M4 goal names none of them, and no gate item needs them. Decision: M4 builds `examples/sellers/tck` and
+`examples/front/caddy`, which `tck_*` need (DM4-12); the other three sellers and two fronts keep their skeleton
+READMEs until a milestone needs them.
