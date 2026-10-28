@@ -385,6 +385,10 @@ The node serves `127.0.0.1:7777` (`--listen`) to local clients and forwards each
   forwards `Origin` only when it was allowed.
 - `--listen` on a non-loopback address requires `--local-token <file>`; every request must then carry
   `Authorization: Bearer <local token>`, which the node strips before forwarding.
+- On a loopback `--listen` without `--local-token`, the node serves only its own user: on Linux it reads the
+  owner of each connection's client socket from the kernel's socket table (`/proc/net/tcp`, `/proc/net/tcp6`) and
+  closes a connection of another user, or one it cannot attribute. Where that table does not exist the check is not
+  made: on a machine shared with other users, set `--local-token`, which then serves any user that presents it.
 - The node serves no other local port: there is no local console (D164).
 
 On the gate the forwarded request is served by the same handler as a request from the network, with three

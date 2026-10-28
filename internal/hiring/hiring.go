@@ -370,11 +370,18 @@ func (s *Server) config() Config {
 
 // Serve serves ln until ctx ends. The listener's address is --listen's (a port 0 bound to a free port): the Host
 // check and the card URLs take its port.
+//
+// On a loopback address without --local-token only the node's own user is served: a connection of another account
+// on the machine is closed (peerListener, spec/tunnel.md §9).
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.mu.Lock()
 	s.listen = ln.Addr().String()
 	s.local = localBase(s.listen)
+	token := s.cfg.LocalToken
 	s.mu.Unlock()
+	if host, _, err := net.SplitHostPort(ln.Addr().String()); err == nil && loopbackHost(host) && token == "" {
+		ln = &peerListener{Listener: ln, uid: os.Getuid(), log: s.log}
+	}
 	defer forgetKeySets(s.tunnel)
 	srv := &http.Server{
 		Handler:           s.Handler(),
@@ -549,6 +556,9 @@ var errNoSession = errors.New("hiring: no tunnel session to forward on")
 // proxyError answers a forwarding that failed: 429 while the session has the gate's cap of node-opened streams in
 // flight, 503 while there is no session, 502 otherwise (a card that does not verify included).
 func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
+	if job, _ := r.Context().Value(jobKey{}).(*sealing.Job); job != nil {
+		job.Release() // no answer: a new task's provisional key goes (ext-sealed.md §5; tunnel.md §2.3)
+	}
 	status, msg := http.StatusBadGateway, "kontra connect: the gate's answer could not be forwarded"
 	switch {
 	case errors.Is(err, ErrBusy):
