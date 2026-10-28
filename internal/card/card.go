@@ -630,7 +630,9 @@ func extensions(caps object, in Input) (json.RawMessage, error) {
 // Signer signs a served card (ES256 over RFC 8785 JCS, protected header with kontra.upstream, D13): it returns
 // one AgentCardSignature's JSON. JWSSigner is the gate's.
 type Signer interface {
-	Sign(ctx context.Context, served []byte, upstreamSHA256 [32]byte, upstreamURL string, verified bool) (json.RawMessage, error)
+	// Sign signs served; jwksURL is kontra.upstream.jwks, the URL of the seller key set the gate verified the upstream
+	// card with ("" when it verified none, D223).
+	Sign(ctx context.Context, served []byte, upstreamSHA256 [32]byte, upstreamURL, jwksURL string, verified bool) (json.RawMessage, error)
 }
 
 // Served is one service's current cards.
@@ -642,6 +644,9 @@ type Served struct {
 	Unavailable  bool     // configured seller keys and no verifying signature, or no fetch for 30 min: card routes answer 503
 	Hash         [32]byte // SHA-256 over the JCS of Upstream (kontra.upstream.sha256, services.card_hash)
 	Verified     bool     // a configured seller key verified a signature of Upstream (kontra.upstream.verified)
+	// SellerJWKS is the public JWK Set of the seller keys that verified Upstream, served at kontra.upstream.jwks
+	// ({svc}/.well-known/seller-jwks.json, D223); nil when no configured key verified it.
+	SellerJWKS []byte
 }
 
 // ETag is the strong entity tag of a served body: a quoted hex SHA-256 prefix. Replicas that fetched the
@@ -653,6 +658,47 @@ func ETag(body []byte) string {
 
 // CacheControl is the card responses' Cache-Control (spec §3).
 const CacheControl = "max-age=60"
+
+// SellerJWKSHandler serves GET {svc}/.well-known/seller-jwks.json (spec/relay.md §2.1, §3; D223): the public JWK Set
+// of the seller keys the gate verified the current upstream card with, the set kontra.upstream.jwks names, with
+// Cache-Control max-age=60 and an ETag, as the cards it goes with. A service whose card is unavailable answers 503,
+// as its card routes do; one whose card no configured seller key verified (none configured) has no such set: 404.
+func SellerJWKSHandler(get func(r *http.Request) (*Served, error)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		s, err := get(r)
+		switch {
+		case err != nil || s == nil || s.Unavailable:
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		case len(s.SellerJWKS) == 0:
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		etag := ETag(s.SellerJWKS)
+		h := w.Header()
+		h.Set("Cache-Control", CacheControl)
+		h.Set("ETag", etag)
+		if notModified(r, etag, time.Time{}, false) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		h.Set("Content-Type", "application/jwk-set+json")
+		h.Set("Content-Length", strconv.Itoa(len(s.SellerJWKS)))
+		h.Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(s.SellerJWKS)
+		}
+	})
+}
 
 // Handler serves a card with Cache-Control: max-age=60, ETag and Last-Modified (the TCK hard-fails
 // without them). upstream selects the verbatim upstream card.

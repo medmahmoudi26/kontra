@@ -314,10 +314,10 @@ replies, refusing one whose `service` is not its job's (D221). `--open` binds th
 names, and `--task <id>` then seals a follow-up with that job's key, `rk` and `contextId`, as rule 3 requires; a task
 with no job is refused, saying to `--open` one of its replies first. A service that is neither listed nor open to
 `anonymous` answers its card `404` to a caller with no credential ([`relay.md`](relay.md) §2.1): `--api-key <key>` (or
-`@<file>`) is then sent as a bearer credential, to the `--service`'s origin only, on the service's card and its
-upstream card, never on the key set; no key is read from the environment, since the gate a `--service` names is
-untrusted (§7) (D222). Sealing in-process without the CLI means reproducing §3 exactly; the age calls (Go
-`filippo.io/age`, Python `pyrage`) are documented in the example, not offered as an SDK.
+`@<file>`) is then sent as a bearer credential, to the `--service`'s origin only, on the service's card, its upstream
+card and its seller key set, never on the gate's key set; no key is read from the environment, since the gate a
+`--service` names is untrusted (§7) (D222). Sealing in-process without the CLI means reproducing §3 exactly; the age
+calls (Go `filippo.io/age`, Python `pyrage`) are documented in the example, not offered as an SDK.
 
 ## 6. Rejections
 
@@ -332,16 +332,20 @@ node's JSON-RPC error with HTTP `200`, the request's id and the session header, 
 
 ## 7. What sealing protects, and what it does not
 
-`kontra connect` keeps a **pin per (gate, service)** in `~/.kontra/pins`: whether the service is sealed, the
-recipient key ids, the seller key thumbprints that verified its upstream card, and whether the upstream card was
-signed. A seller signature that carries its key (`jwk`) is verified, and its key's RFC 7638 thumbprint pinned; one
-that names its key by `kid` only, which the node has no key set to verify, is pinned as the unverified `kid:<kid>`
-and printed so, never as a thumbprint (D223). An upstream card none of whose seller signatures verifies (and none
-names its key only) is unsigned (D228). A change from sealed to unsealed, or from signed to unsigned, is always
-refused. With `--pin-recipients`, any new recipient, and any new or removed seller key, is refused; without it, the
-change is refused too until the operator accepts it with `--accept-change <service>` (D228), and `kontra connect`
-names the change on stderr and in its log (there is no local console, D164). An enrollment that adds a recipient is announced to the
-service's other nodes ([`tunnel.md`](tunnel.md) §5).
+`kontra connect` keeps a **pin per (gate, service)** in `~/.kontra/pins`: whether the service is sealed, the recipient
+key ids, the seller key thumbprints that verified its upstream card, and whether the upstream card was signed. A
+seller signature that carries its key (`jwk`) is verified, and its key's RFC 7638 thumbprint pinned; one that names
+its key by `kid` only is verified with the seller key set the gate names in `kontra.upstream.jwks`
+([`relay.md`](relay.md) §3), fetched from the gate's origin, and that key's thumbprint pinned: the set is the gate's
+word, trusted on first use like every pin, so a gate that forges a signature naming the pinned `kid` must serve a key
+of its own under it, whose thumbprint the pin refuses as a new seller key. A named set that cannot be read leaves the
+card unreadable (§5 rule 1). Only when the gate names no set is a `kid`-only signature pinned as the unverified
+`kid:<kid>`, printed so, never as a thumbprint (D223). An upstream card none of whose seller signatures verifies (and,
+with no set named, none names its key only) is unsigned (D228). A change from sealed to unsealed, or from signed to
+unsigned, is always refused. With `--pin-recipients`, any new recipient, and any new or removed seller key, is
+refused; without it, the change is refused too until the operator accepts it with `--accept-change <service>` (D228),
+and `kontra connect` names the change on stderr and in its log (there is no local console, D164). An enrollment that
+adds a recipient is announced to the service's other nodes ([`tunnel.md`](tunnel.md) §5).
 
 | Threat | Holds? |
 |---|---|
@@ -353,7 +357,7 @@ service's other nodes ([`tunnel.md`](tunnel.md) §5).
 | A gate answering a sealed task's input request itself: in plaintext, with an answer replayed, or for a request never sealed or sealed more than `max_age` ago | **Yes**: the hosting node forwards only a sealed answer that passes rule 4b; an unsealed one is refused `bad_header`, and the service never sees it (§5, D175) |
 | A gate delivering a buyer's sealed request to **another service** of the same node than the one hired | **Yes**: the header names the hired service, which the hosting node checks against the preamble's (`wrong_job`, §5 rule 1) and the hiring node against the service it hired (rule 4), and the replay sets are node-wide besides (rules 2 and 5) (D221) |
 | A gate forging a request of its own | Not prevented (age does not authenticate senders), but it gains nothing it could not get as a buyer: the reply goes to its own key, and it cannot continue another buyer's job (`wrong_job`) |
-| A gate that **substitutes recipients**, drops the extension, or strips the seller's signature | **Only with pins**: the buyer learns recipients from what the gate serves. Pins refuse a downgrade always (a card whose seller signatures verify nothing is unsigned, D228), and a new recipient, or a new or removed seller key, when `--pin-recipients` is set. `kontra connect` prints the recipient key ids and the seller key thumbprints on stderr and in its log when it first sees a service and on every change, for out-of-band comparison (D164, D187). A seller signature that names its key by `kid` only is pinned unverified, so a forged one naming the pinned `kid` is not detected (D223) |
+| A gate that **substitutes recipients**, drops the extension, or strips the seller's signature | **Only with pins**: the buyer learns recipients from what the gate serves. Pins refuse a downgrade always (a card whose seller signatures verify nothing is unsigned, D228), and a new recipient, or a new or removed seller key, when `--pin-recipients` is set. `kontra connect` prints the recipient key ids and the seller key thumbprints on stderr and in its log when it first sees a service and on every change, for out-of-band comparison (D164, D187). A seller signature that names its key by `kid` only is verified with the key set the gate names and pinned by that key's thumbprint; with no set named it is pinned unverified, and a forged one naming the pinned `kid` is not detected (D223) |
 | An MCP task's input requests, answers and status messages | **Yes**, for a task a sealed call created, and the input requests and answers of a sealed plain call (§2, D219) |
 | A service's error text, or an artifact's name or description, quoting the sealed input | **Yes**: on a sealed job the hosting node keeps an error's code only and drops the name and description, and the gate keeps no sealed service's error text (§2, D195, D220) |
 | A stolen identity key | Revocation stops future use. Parts already sealed to it open for whoever holds the key and the ciphertext: age has no forward secrecy. Retention ([`relay.md`](relay.md) §5.4) bounds the exposure |

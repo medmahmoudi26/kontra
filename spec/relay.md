@@ -56,6 +56,7 @@ The gate's public listener serves these routes and nothing else (closed default 
 |---|---|
 | `GET  {svc}` and `GET {svc}/.well-known/agent-card.json` | The served A2A card (§3). The first form exists because a2a-go's resolver fetches a non-root URL as the card itself (D10). |
 | `GET {svc}/.well-known/agent-card.upstream.json` | The upstream card, verbatim (§3). |
+| `GET {svc}/.well-known/seller-jwks.json` | The public JWK Set of the seller keys the gate verified the upstream card with, which `kontra.upstream.jwks` names (§3, D223); `404` when the gate verified none, `503` when the card is unavailable. |
 | `POST {svc}` and `POST {svc}/` | A2A JSON-RPC 2.0, decoded strictly (§2.4). The trailing-slash form is what the TCK posts (D18). |
 | `{svc}/message:send`, `{svc}/message:stream`, `{svc}/tasks…`, `{svc}/extendedAgentCard` | A2A HTTP+JSON, every route of spec v1.0.1 §5.3 / `a2a.proto`. `:subscribe` accepts both `GET` and `POST` (spec prose says POST, the proto says GET; the TCK uses POST). The gate's path already names the service, so its interfaces carry no A2A `tenant`: the `/{tenant}/` additional bindings are not served, and a JSON-RPC request with a non-empty `tenant` is answered as an unknown service. |
 | `POST\|GET\|DELETE /mcp/{svc}` | MCP Streamable HTTP for a hosted MCP server (§11). |
@@ -264,15 +265,16 @@ five fields with the 1.0 names, plus two it must also own, D52):
 | `capabilities.extensions` | The seller's list, except that every entry whose URI the gate or the operator asserts — `https://kontra.sh/ext/sealed/v1` for a sealed service, and every URI in the operator's `card_extensions` (§13.4) — replaces a seller entry with the same URI. A seller's `input-schema/v1` entry passes unchanged. |
 | `signatures` | Exactly one: the gate's JWS (below). |
 
-**The gate's signature.** ES256 over RFC 8785 JCS of the served card without `signatures`; protected header
-`{alg: "ES256", kid, typ: "JOSE", jku: {public_url}/.well-known/jwks.json, "kontra.upstream": {sha256, url,
-verified}}`, where `sha256` is the hex SHA-256 over the JCS of the upstream card, `url` is
-`{public_url}{svc}/.well-known/agent-card.upstream.json`, and `verified` says whether the gate verified the
-seller's signature (below). `kontra.upstream` is never listed in `crit`, so stock verifiers (a2a-go's
-included) accept the card. The gate signs with its own JWS code over a vetted JCS library, because a2a-go's
-signer cannot add a header parameter (D13). JCS is defined for valid Unicode only: an upstream card that is not
-valid UTF-8, or holds a lone surrogate, is not installed, and the service has no card until its seller publishes
-one; it is never served unsigned or altered (D193).
+**The gate's signature.** ES256 over RFC 8785 JCS of the served card without `signatures`; protected header `{alg:
+"ES256", kid, typ: "JOSE", jku: {public_url}/.well-known/jwks.json, "kontra.upstream": {sha256, url, verified,
+jwks}}`, where `sha256` is the hex SHA-256 over the JCS of the upstream card, `url` is
+`{public_url}{svc}/.well-known/agent-card.upstream.json`, `verified` says whether the gate verified the seller's
+signature (below), and `jwks`, present only when it did, is `{public_url}{svc}/.well-known/seller-jwks.json`, where
+the gate serves the public keys of the `seller_keys` it verified with (D223). `kontra.upstream` is never listed in
+`crit`, so stock verifiers (a2a-go's included) accept the card. The gate signs with its own JWS code over a vetted JCS
+library, because a2a-go's signer cannot add a header parameter (D13). JCS is defined for valid Unicode only: an
+upstream card that is not valid UTF-8, or holds a lone surrogate, is not installed, and the service has no card until
+its seller publishes one; it is never served unsigned or altered (D193).
 
 **The seller's signature (D13).** A signature over the upstream card does not verify over the rewritten
 card (spec §8.4.3), so it is not copied into `signatures`; the upstream card is served verbatim instead.
@@ -288,9 +290,10 @@ card (spec §8.4.3), so it is not copied into `signatures`; the upstream card is
 - A verifier (`kontra connect` does this) checks the gate's signature with a `jku` equal to the origin it
   dialed, fetches the upstream card, checks the hash, and checks the seller's signatures against keys it
   trusts for the seller. A gate that strips the seller's signatures cannot hide it from a verifier that
-  pinned the seller's keys ([`ext-sealed.md`](ext-sealed.md) §7). `kontra connect` holds no seller key set: it
-  verifies a signature that carries its key (`jwk`) and pins that key's thumbprint, and pins one that names its key
-  by `kid` only as unverified (D223).
+  pinned the seller's keys ([`ext-sealed.md`](ext-sealed.md) §7). `kontra connect` holds no seller key set of its
+  own: it verifies a signature that carries its key (`jwk`) and pins that key's thumbprint, and verifies one that
+  names its key by `kid` only with the key set `kontra.upstream.jwks` names, fetched from the gate's origin (through
+  its tunnel), and pins that key's thumbprint; with no `jwks` named, such a signature is pinned unverified (D223).
 
 Caching: the card responses carry `Cache-Control: max-age=60`, an `ETag` (the hash of the served body) and
 `Last-Modified` (the TCK hard-fails without them).

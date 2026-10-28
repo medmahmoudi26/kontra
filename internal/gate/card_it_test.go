@@ -160,7 +160,8 @@ func TestCardPassthrough(t *testing.T) {
 	canon, _ := jcs.Transform([]byte(upstreamCard))
 	sum := sha256.Sum256(canon)
 	if header.JKU != jku || header.Upstream.SHA256 != hex.EncodeToString(sum[:]) || !header.Upstream.Verified ||
-		header.Upstream.URL != publicURL+"/agents/hello/.well-known/agent-card.upstream.json" {
+		header.Upstream.URL != publicURL+"/agents/hello/.well-known/agent-card.upstream.json" ||
+		header.Upstream.JWKS != publicURL+"/agents/hello/.well-known/seller-jwks.json" {
 		t.Fatalf("protected header %s", hb)
 	}
 	// The upstream route serves the seller's card byte for byte, signature included.
@@ -203,7 +204,8 @@ func TestCardPassthrough(t *testing.T) {
 	}
 
 	// The forged service: its keys verify no signature.
-	for _, route := range []string{"/agents/forged", "/agents/forged/.well-known/agent-card.json", "/agents/forged/.well-known/agent-card.upstream.json"} {
+	for _, route := range []string{"/agents/forged", "/agents/forged/.well-known/agent-card.json", "/agents/forged/.well-known/agent-card.upstream.json",
+		"/agents/forged/.well-known/seller-jwks.json"} {
 		if status, _, body := get(t, run.url, route, key); status != http.StatusServiceUnavailable || len(body) != 0 {
 			t.Errorf("%s: %d %q, want 503 with an empty body", route, status, body)
 		}

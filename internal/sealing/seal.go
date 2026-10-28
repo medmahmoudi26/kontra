@@ -165,7 +165,8 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	svcPath := strings.TrimRight(svcURL.EscapedPath(), "/")
 	cardURL := origin + svcPath + "/.well-known/agent-card.json"
-	get := keyedGet(client, key, origin+svcPath+"/.well-known/agent-card.json", origin+svcPath+"/.well-known/agent-card.upstream.json")
+	get := keyedGet(client, key, origin+svcPath+"/.well-known/agent-card.json", origin+svcPath+"/.well-known/agent-card.upstream.json",
+		origin+svcPath+"/.well-known/seller-jwks.json")
 	cardBody, err := get(ctx, cardURL)
 	if err != nil {
 		return fmt.Errorf("the service's card: %w", err)
@@ -292,7 +293,8 @@ var randReader = cryptoRand{}
 // key set at jku = origin + /.well-known/jwks.json, fetched from that origin only; a card none of whose signatures
 // does is refused. When the gate says it verified a seller signature (kontra.upstream.verified), the upstream card
 // is fetched from kontra.upstream.url (on the same origin), its JCS hash checked against kontra.upstream.sha256, and
-// its signatures' key ids are the seller keys the pins record (ext-sealed.md §7).
+// the seller key set the gate names in kontra.upstream.jwks (D223) fetched from the same origin; the keys that verify
+// its signatures are the seller keys the pins record (ext-sealed.md §7, SellerKeyIDs).
 func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx context.Context, u string) ([]byte, error)) (*Card, error) {
 	if len(card) > maxCardBytes {
 		return nil, errors.New("the card is over 1 MiB")
@@ -356,13 +358,17 @@ func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx co
 		if err != nil {
 			return nil, fmt.Errorf("the upstream card: %w", err)
 		}
-		ids, err := SellerKeyIDs(ub, up.SHA256)
+		set, err := SellerKeySet(ctx, up, origin, get)
 		if err != nil {
 			return nil, err
 		}
-		// Signed only when a seller signature verified, or names its key by kid only (unverifiable, D223): a card
-		// whose signatures all fail to verify is unsigned, which a pin of a signed card refuses (round 2
-		// sealing-fixes-5).
+		ids, err := SellerKeyIDs(ub, up.SHA256, set)
+		if err != nil {
+			return nil, err
+		}
+		// Signed only when a seller signature verified, with its own key or the named set's, or names its key by kid
+		// only and no set is named (unverifiable, D223): a card whose signatures all fail to verify is unsigned, which a
+		// pin of a signed card refuses (round 2 sealing-fixes-5).
 		out.SellerKeys, out.Signed = ids, len(ids) > 0
 	}
 	return out, nil
@@ -371,20 +377,18 @@ func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx co
 // SellerKeyIDs checks an upstream card against the hex SHA-256 of its JCS that the gate signed (kontra.upstream.sha256)
 // and returns what the pins record of the seller's keys (ext-sealed.md §7), sorted: for each seller signature that
 // carries its public key (a jwk in its protected header, EC P-256) and verifies with it over the JCS of the card
-// without signatures, the RFC 7638 thumbprint of that key; for each that names its key by kid only, "kid:<kid>". A
-// signature that carries a key and does not verify with it, or is malformed, is no key of the seller's; a card with
-// no key at all is pinned unsigned (an empty result: Card.Signed is false).
+// without signatures, the RFC 7638 thumbprint of that key; for each that names its key by kid only, the thumbprint of
+// the key of sellerKeys it verifies with, sellerKeys being the seller key set the gate names in kontra.upstream.jwks
+// and serves on its origin (D223), or, when the gate names none (nil), "kid:<kid>", unverified. A signature that does
+// not verify, with its own key or with the named set's, or is malformed, is no key of the seller's; a card with no key
+// at all is pinned unsigned (an empty result: Card.Signed is false).
 //
-// SPEC-CONFLICT (D223; ext-sealed.md §7, relay.md §3: a verifier "checks the seller's signatures against keys it
-// trusts for the seller", and the pins hold "the seller key thumbprints that verified its upstream card"; D187 prints
-// them as thumbprints): the node is given no seller key set (seller_keys is the gate's configuration), so a signature
-// that names its key by kid only cannot be verified by it, and its kid is only what the signature claims. The closest
-// faithful behaviour: a signature that carries its key is verified, and its key's thumbprint pinned (a gate that
-// replaces the card and its signature changes it); one that does not is pinned as the unverified "kid:<kid>", and
-// printed so, never as a thumbprint. A gate that forges a kid-only signature naming the pinned kid is not detected:
-// that residual stays until the node can verify with the seller's own key set (kontra.upstream.jwks, decided in D223
-// and not built yet).
-func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
+// The set comes from the gate, like the card, and is trusted on first use like every pin (§7): a gate that replaces
+// the card and its kid-only signature must replace the key set too, and the pinned thumbprint changes, which the pins
+// refuse (with --pin-recipients) or report until accepted, and which kontra connect prints for comparison out of
+// band (D187). Only a gate that names no set leaves a kid-only signature pinned unverified, and a forged one naming
+// the pinned kid undetected; a pin that recorded kid:<kid> reports a seller-key change once its gate names the set.
+func SellerKeyIDs(upstream []byte, sha string, sellerKeys *jws.KeySetPublic) ([]string, error) {
 	c, err := jcs.Transform(upstream)
 	if err != nil {
 		return nil, fmt.Errorf("the upstream card has no canonical form: %w", err)
@@ -433,7 +437,16 @@ func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 		}
 		jwk, has := pm["jwk"]
 		if !has {
-			add("kid:" + kid)
+			if sellerKeys == nil {
+				add("kid:" + kid)
+				continue
+			}
+			if _, err := jws.Verify(upstream, sig, sellerKeys); err != nil {
+				continue
+			}
+			if t, ok := sellerKeys.Thumbprint(kid); ok {
+				add(t)
+			}
 			continue
 		}
 		key, err := strictjson.Members(jwk)
@@ -455,6 +468,37 @@ func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 	slices.Sort(ids)
 	return ids, nil
 }
+
+// SellerKeySet fetches the seller key set the gate names in kontra.upstream.jwks (D223), nil when it names none: a URL
+// on origin, the gate the card came from, fetched with get (through the tunnel for kontra connect), a JWK Set with an
+// EC P-256 signing key. A named set that cannot be read makes the card unreadable: nothing is pinned from it.
+func SellerKeySet(ctx context.Context, up *jws.Upstream, origin string, get func(ctx context.Context, u string) ([]byte, error)) (*jws.KeySetPublic, error) {
+	if up == nil || up.JWKS == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(up.JWKS)
+	if err != nil {
+		return nil, errors.New("kontra.upstream.jwks is not a URL")
+	}
+	if o, err := tunnel.CanonicalOrigin(u); err != nil || o != origin || u.RawQuery != "" || u.Fragment != "" {
+		return nil, errors.New("kontra.upstream.jwks is not on the gate's origin")
+	}
+	b, err := get(ctx, origin+u.EscapedPath())
+	if err != nil {
+		return nil, fmt.Errorf("the seller key set the gate names (kontra.upstream.jwks): %w", err)
+	}
+	if len(b) > maxSellerKeySet {
+		return nil, errors.New("the seller key set the gate names is over 256 KiB")
+	}
+	set, err := jws.ParseJWKS(b)
+	if err != nil {
+		return nil, fmt.Errorf("the seller key set the gate names: %w", err)
+	}
+	return set, nil
+}
+
+// maxSellerKeySet bounds the seller key set a node reads (the gate's own bound on a fetched set, card.SellerKeysMax).
+const maxSellerKeySet = 256 << 10
 
 // openParts is kontra seal --open: every sealed part of the file that a per-job key under ~/.kontra/jobs opens is
 // checked (dir res, the key's id in kids, auth with the job's rk, the service its job hired, D221) and its plaintext
@@ -636,7 +680,8 @@ func allJobKeys(home string) ([]age.Identity, map[string][]byte, map[string]*job
 }
 
 // keyedGet is kontra seal's GET (SealCommand's SPEC-CONFLICT on a credential): key, --api-key's or "", goes as a
-// bearer credential only to the URLs of keyed (the service's card and upstream card, on the --service's origin,
+// bearer credential only to the URLs of keyed (the service's card, upstream card and seller key set, D223, on the
+// --service's origin,
 // compared in canonical form), and only once a GET of one of them without it was 404, the unknown-service answer of
 // relay.md §2.1 to a caller no credential admits; the later GETs of keyed send it at once. Any other URL (the gate's
 // key set) never gets it.

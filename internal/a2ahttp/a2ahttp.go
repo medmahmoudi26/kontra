@@ -4,6 +4,7 @@
 //
 //	GET  {svc} and {svc}/.well-known/agent-card.json   the served card (D10)
 //	GET  {svc}/.well-known/agent-card.upstream.json    the upstream card, verbatim (D13)
+//	GET  {svc}/.well-known/seller-jwks.json            the seller key set the gate verified it with (D223)
 //	POST {svc} and {svc}/                              JSON-RPC 2.0 (the TCK posts the trailing slash)
 //	     {svc}/message:send, {svc}/tasks…, …           HTTP+JSON, every route of spec §5.3
 //
@@ -187,6 +188,7 @@ func (s *Server) Register(rt *edge.Router) {
 		"GET " + p,
 		"GET " + p + "/.well-known/agent-card.json",
 		"GET " + p + "/.well-known/agent-card.upstream.json",
+		"GET " + p + "/.well-known/seller-jwks.json",
 		"POST " + p + "/message:send",
 		"POST " + p + "/message:stream",
 		"GET " + p + "/tasks",
@@ -208,6 +210,7 @@ type kind int
 const (
 	routeCard          kind = iota // GET {svc}, {svc}/.well-known/agent-card.json
 	routeUpstreamCard              // GET {svc}/.well-known/agent-card.upstream.json
+	routeSellerJWKS                // GET {svc}/.well-known/seller-jwks.json (D223)
 	routeJSONRPC                   // POST {svc}, POST {svc}/
 	routeREST                      // HTTP+JSON, served by a2a-go
 	routeRESTStream                // POST {svc}/message:stream
@@ -229,7 +232,9 @@ func (rt route) binding() sse.Binding {
 	return sse.HTTPJSON
 }
 
-func (rt route) card() bool { return rt.kind == routeCard || rt.kind == routeUpstreamCard }
+func (rt route) card() bool {
+	return rt.kind == routeCard || rt.kind == routeUpstreamCard || rt.kind == routeSellerJWKS
+}
 
 // parseRoute classifies a request by method and path; ok is false for anything that is not an A2A route.
 // The tenant and name are not validated here: a malformed one is an unknown service, answered in the
@@ -266,6 +271,8 @@ func parseRoute(r *http.Request, multi bool) (route, bool) {
 		rt.kind = routeCard
 	case rest == ".well-known/agent-card.upstream.json" && get:
 		rt.kind = routeUpstreamCard
+	case rest == ".well-known/seller-jwks.json" && get:
+		rt.kind = routeSellerJWKS
 	case rest == "message:send" && post:
 		rt.kind = routeREST
 	case rest == "message:stream" && post:
@@ -372,12 +379,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cards := svc.Cards
-		card.Handler(func(*http.Request) (*card.Served, error) {
+		get := func(*http.Request) (*card.Served, error) {
 			if cards == nil {
 				return nil, card.ErrUnavailable
 			}
 			return cards()
-		}, rt.kind == routeUpstreamCard).ServeHTTP(w, r)
+		}
+		if rt.kind == routeSellerJWKS {
+			card.SellerJWKSHandler(get).ServeHTTP(w, r)
+			return
+		}
+		card.Handler(get, rt.kind == routeUpstreamCard).ServeHTTP(w, r)
 		return
 	}
 	if !admitted {

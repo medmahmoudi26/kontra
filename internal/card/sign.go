@@ -17,7 +17,7 @@ import (
 
 // JWSSigner is the gate's Signer (spec/relay.md §3, D13, D166): ES256 over the JCS of the served card without
 // signatures, with the protected header {alg, kid, typ JOSE, jku: {public_url}/.well-known/jwks.json,
-// kontra.upstream: {sha256, url, verified}}. The served card carries exactly this one signature; the seller's
+// kontra.upstream: {sha256, url, verified, jwks when verified (D223)}}. The served card carries exactly this one signature; the seller's
 // stay on the upstream card, served verbatim.
 //
 // Work package: M3 WP-02.
@@ -31,12 +31,15 @@ var _ Signer = (*JWSSigner)(nil)
 // Sign implements Signer: the AgentCardSignature JSON for served (a card without signatures). The signature is
 // deterministic (RFC 6979, jws.KeySet.Sign): replicas that rewrote the same upstream card with the same key
 // serve the same bytes, and so the same ETag (spec §3's caching).
-func (s *JWSSigner) Sign(_ context.Context, served []byte, upstreamSHA256 [32]byte, upstreamURL string, verified bool) (json.RawMessage, error) {
+func (s *JWSSigner) Sign(_ context.Context, served []byte, upstreamSHA256 [32]byte, upstreamURL, jwksURL string, verified bool) (json.RawMessage, error) {
 	if s == nil || s.Keys == nil {
 		return nil, errors.New("card: no signing key")
 	}
+	if !verified {
+		jwksURL = "" // only a key set the gate verified with is named
+	}
 	sig, err := s.Keys.Sign(served, s.JWKSURL, &jws.Upstream{
-		SHA256: hex.EncodeToString(upstreamSHA256[:]), URL: upstreamURL, Verified: verified,
+		SHA256: hex.EncodeToString(upstreamSHA256[:]), URL: upstreamURL, Verified: verified, JWKS: jwksURL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("card: sign: %w", err)

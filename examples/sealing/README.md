@@ -55,12 +55,14 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "
 
 The hiring node keeps a **pin** per (gate, service) in `~/.kontra/pins` (§7): whether the service is sealed, its
 recipients' key ids, and the seller keys of its upstream card: the RFC 7638 thumbprint of a key a seller signature
-carries and verifies with, and, for a signature that names its key by `kid` only (which the node cannot verify), the
-unverified `kid:<kid>` (D223). A card whose seller signatures verify nothing counts as unsigned (D228). A downgrade
+carries and verifies with, or, for a signature that names its key by `kid` only, of the key it verifies with in the
+seller key set the gate names (`kontra.upstream.jwks`: the gate serves the public keys of its `seller_keys` at
+`<gate>/agents/hello/.well-known/seller-jwks.json`, D223); only when the gate names no set is such a signature pinned
+as the unverified `kid:<kid>`. A card whose seller signatures verify nothing counts as unsigned (D228). A downgrade
 (sealed to unsealed, signed to unsigned) is always refused. A new recipient (a second hosting node enrolled for
-`hello`), or a new or removed seller key, is refused until the operator accepts it: `kontra connect …
---accept-change hello`; `--pin-recipients` refuses every such change. Both print the recipient key ids and the seller
-keys (thumbprints, or `kid:<kid>`) on stderr and in the log, for comparison out of band (D164, D187, D223).
+`hello`), or a new or removed seller key, is refused until the operator accepts it: `kontra connect … --accept-change
+hello`; `--pin-recipients` refuses every such change. Both print the recipient key ids and the seller keys
+(thumbprints, or `kid:<kid>`) on stderr and in the log, for comparison out of band (D164, D187, D223).
 
 The hosting node keeps its job state under `~/.kontra/hosted/<gate host>/<service>/` (0600): which reply key opened
 which job, the pairs it forwarded, the input requests it sealed. It refuses a replayed or reordered part itself
@@ -96,8 +98,9 @@ curl -s http://localhost:8080/agents/hello -H "Authorization: Bearer $KONTRA_API
 `kontra seal` verifies the gate's signature on the card (with the key set at `<gate>/.well-known/jwks.json`) and
 checks the pin, as `kontra connect` does; a card that does not verify is refused. It never reads an API key from the
 environment: `--api-key` (or `--api-key @<file>`) names the key for the gate `--service` names, and it is sent only on
-that service's card and upstream card, after the card answered `404` without it (a listed service's cards are
-public), never on the key set. A key exported for one gate therefore never reaches another gate you seal for.
+that service's card, upstream card and seller key set, after the card answered `404` without it (a listed service's
+cards are public), never on the key set. A key exported for one gate therefore never reaches another gate you seal
+for.
 
 ## Sealing in-process
 

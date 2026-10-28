@@ -149,11 +149,22 @@ func (s *SellerKeys) current() (*jws.KeySetPublic, error) {
 // malformed, names a key the set does not hold, or does not verify is skipped (any one valid signature is
 // enough, as a2a-go's verifier also accepts). An error is a set that cannot be used yet (ErrNoSellerKeys) or a
 // card that is not one JSON object without repeated keys: the card is then neither verified nor refused.
-func (s *SellerKeys) Verify(_ context.Context, upstream []byte) (verified bool, thumbprints []string, err error) {
+func (s *SellerKeys) Verify(ctx context.Context, upstream []byte) (verified bool, thumbprints []string, err error) {
+	verified, thumbprints, _, err = s.verify(ctx, upstream)
+	return verified, thumbprints, err
+}
+
+// verify is Verify, and the key set it verified with (served at kontra.upstream.jwks, D223).
+func (s *SellerKeys) verify(_ context.Context, upstream []byte) (verified bool, thumbprints []string, set *jws.KeySetPublic, err error) {
 	keys, err := s.current()
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
+	verified, thumbprints, err = verifyWith(keys, upstream)
+	return verified, thumbprints, keys, err
+}
+
+func verifyWith(keys *jws.KeySetPublic, upstream []byte) (verified bool, thumbprints []string, err error) {
 	m, err := strictjson.Members(upstream)
 	if err != nil {
 		return false, nil, fmt.Errorf("%w: %v", ErrBadCard, err)

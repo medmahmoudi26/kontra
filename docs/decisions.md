@@ -2208,8 +2208,8 @@ with them.
 [`ext-sealed.md`](../spec/ext-sealed.md) §7's threat table still said "The seller's key ids are shown in the
 operator's console for out-of-band comparison", though D164 removed the local console and a team gate has none.
 Decision: `kontra connect` prints the recipient key ids and the seller key thumbprints on stderr and in its log
-when it first sees a service and on every change. Amended by D223 (a `kid`-only seller signature is pinned
-unverified).
+when it first sees a service and on every change. Amended by D223 (a `kid`-only seller signature is verified with the
+seller key set the gate names, and pinned unverified only when it names none).
 
 ### D188. Cloud's thread URL is `https://app.kontra.sh/#/t/<taskId>` — **decided by the owner, 26 Oct** (kontra-cloud#60)
 
@@ -2831,14 +2831,26 @@ signature with a forged one claiming the pinned `kid` left the pin unchanged (M3
 given no seller key set: `seller_keys` is the gate's configuration. Built: a signature that carries its key (a `jwk`
 in its protected header) is verified over the card's JCS and its key's RFC 7638 thumbprint pinned; one that names
 its key by `kid` only is pinned as the unverified `kid:<kid>` and printed so, never as a thumbprint; a pin that
-recorded a raw `kid` before reports a seller-key change once. A forged `kid`-only signature naming the pinned `kid`
-is still not detected. Decision: the reviewer's first proposal. The gate's `kontra.upstream` header parameter gains
-`jwks`, the URL on the gate's origin where it serves the seller key set it verified with (`seller_keys`); the node
-fetches it through its tunnel, verifies `kid`-only signatures with it and pins its keys' thumbprints, trusted on
-first use like every pin and compared out of band through the printed thumbprints (D187). A `kontra connect
---seller-keys` flag, the other option, would have every operator carry each seller's keys. Not built in M3 (D225);
-until it is, §7 says that a `kid`-only signature is pinned unverified ([`ext-sealed.md`](../spec/ext-sealed.md) §7;
-[`relay.md`](../spec/relay.md) §3; `sealing` seal.go `SellerKeyIDs`, `TestReviewSellerKeyIDsVerified`).
+recorded a raw `kid` before reports a seller-key change once. Decision: the reviewer's first proposal. The gate's
+`kontra.upstream` header parameter gains `jwks`, the URL on the gate's origin where it serves the seller key set it
+verified with (`seller_keys`); the node fetches it through its tunnel, verifies `kid`-only signatures with it and pins
+its keys' thumbprints, trusted on first use like every pin and compared out of band through the printed thumbprints
+(D187). A `kontra connect --seller-keys` flag, the other option, would have every operator carry each seller's keys.
+Built (D225): `jwks` is `{public_url}{svc}/.well-known/seller-jwks.json`, present only with `verified: true` (a
+verifier that read exactly three members refuses the card, but v4 is not released and both sides change together);
+the route serves the public keys (`kty`, `crv`, `x`, `y`, `kid`, `use`, `alg`, nothing private) of the set the
+current card verified with, with the cards' admission and caching, `404` when the gate verified none and `503` while
+the card is unavailable; the hiring node and `kontra seal` (its `--api-key` going to the set as to the cards, D222)
+fetch it from the gate's origin only. A `kid`-only signature the named set does not verify is no seller key, as one
+carrying a key that does not verify (D228); a named set that cannot be read leaves the card unreadable (D214's rules
+then apply); with no set named, a `kid`-only signature is pinned unverified as before, and a pin that recorded
+`kid:<kid>` reports a seller-key change once its gate names the set. Each replica installs its card with the set it
+verified it with, so during a seller's key rotation a node may, for one refresh, read one replica's card and
+another's set: the card then reads as unsigned, refused once and read again a minute later
+([`ext-sealed.md`](../spec/ext-sealed.md) §7; [`relay.md`](../spec/relay.md) §2.1, §3; `jws` jws.go `Upstream.JWKS`;
+`card` keeper.go, card.go `SellerJWKSHandler`; `sealing` seal.go `SellerKeySet`, `SellerKeyIDs`; `hiring` hiring.go
+`verified`; `TestReviewSellerKeyIDsVerified`, `TestSellerKeySetNamedByTheGate`, `TestKeeperWithSellerKeys`,
+`TestSellerKeySetThroughTheGate`, `TestCardPassthrough`).
 
 ### D224. A sealed MCP session's key outlives the gate's idle period, and the gate will state it — **decided under the owner's standing instruction, 28 Oct**
 

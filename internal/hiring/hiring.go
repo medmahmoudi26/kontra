@@ -128,8 +128,9 @@ func (s *Server) sealing() *sealing.Hiring {
 }
 
 // Card fetches an A2A service's served card through the tunnel and verifies the gate's signature (VerifyCard); when the
-// gate says it verified the seller's signature, the upstream card is fetched too and its hash checked, for the seller
-// keys the pins record (ext-sealed.md §7). svc is the service's path ({svc}).
+// gate says it verified the seller's signature, the upstream card is fetched too and its hash checked, and the seller
+// key set the gate names (kontra.upstream.jwks, D223), for the seller keys the pins record (ext-sealed.md §7). svc is
+// the service's path ({svc}).
 func (s *Server) Card(ctx context.Context, svc string) (*sealing.Card, error) {
 	body, err := s.get(ctx, svc+"/.well-known/agent-card.json")
 	if err != nil {
@@ -159,11 +160,23 @@ func (s *Server) verified(ctx context.Context, body []byte) (*sealing.Card, erro
 		if err != nil {
 			return nil, err
 		}
-		if c.SellerKeys, err = sealing.SellerKeyIDs(ub, up.SHA256); err != nil {
+		g, _ := tunnel.CanonicalOrigin(s.cfg.Gate)
+		set, err := sealing.SellerKeySet(ctx, up, g, func(ctx context.Context, raw string) ([]byte, error) {
+			ju, err := url.Parse(raw)
+			if err != nil {
+				return nil, err
+			}
+			return s.get(ctx, ju.EscapedPath()) // through the tunnel, to the gate's origin only
+		})
+		if err != nil {
 			return nil, err
 		}
-		// Signed only when a seller signature verified (or names its key by kid only, D223): a card whose signatures
-		// all fail to verify is unsigned, a downgrade a pin refuses (round 2 sealing-fixes-5).
+		if c.SellerKeys, err = sealing.SellerKeyIDs(ub, up.SHA256, set); err != nil {
+			return nil, err
+		}
+		// Signed only when a seller signature verified, with its own key or the named set's (or names its key by kid
+		// only and no set is named, D223): a card whose signatures all fail to verify is unsigned, a downgrade a pin
+		// refuses (round 2 sealing-fixes-5).
 		c.Signed = len(c.SellerKeys) > 0
 	}
 	return c, nil

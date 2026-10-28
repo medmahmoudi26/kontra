@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,8 @@ type sealGate struct {
 	keys     *jws.KeySet
 	card     []byte // served at /agents/echo/.well-known/agent-card.json
 	upstream []byte // served at /agents/echo/.well-known/agent-card.upstream.json when set
+	jwks     []byte // the seller key set, served at /agents/echo/.well-known/seller-jwks.json when set (D223)
+	jwksGets atomic.Int32
 }
 
 func newSealGate(t *testing.T, node *age.X25519Identity) *sealGate {
@@ -63,6 +66,15 @@ func newSealGate(t *testing.T, node *age.X25519Identity) *sealGate {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(g.upstream)
+	})
+	mux.HandleFunc("GET /agents/echo/.well-known/seller-jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		g.jwksGets.Add(1)
+		if g.jwks == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/jwk-set+json")
+		_, _ = w.Write(g.jwks)
 	})
 	g.srv = httptest.NewServer(mux)
 	t.Cleanup(g.srv.Close)
