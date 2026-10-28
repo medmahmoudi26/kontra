@@ -10,7 +10,7 @@
   "auth": { "api_keys": true },
   "metrics": { "listen": ":9090" },
   "tunnel": {
-    "anonymous": { "ttl": "2h", "tenants_per_network": 3, "services": 4, "tasks": 4, "hiring_streams": 8,
-                   "parts_bytes": "64MiB", "purge_after": "24h" }
+    "anonymous": { "ttl": "2h", "tenants_per_network": 3, "services": 4, "tasks": 4, "calls": 8, "hiring_streams": 8,
+                   "parts_bytes": "64MiB", "purge_after": "24h", "max_tenants": 200 }
   }
 }

@@ -2413,7 +2413,7 @@ ended task rendered as `tasks/result` renders it; a quoted task is answered at o
 required, is a `CallToolResult` with `isError` naming the route to use (sealing tool arguments is envelope v2's) and
 creates no task. Every task `hire` creates is marked (`tasks.hired`, migration 0003): the MCP Tasks of `/mcp` see only
 those, of the principal's buyer, and `tasks/list` lists them across services; `tasks/cancel` is §11.6's (D57), the
-upstream receiving §8's `CancelTask`.
+upstream receiving §8's `CancelTask`. Amended by DM4-22 (the structured result, and no `calls` rows).
 
 ### DM4-6. `notifications/elicitation/complete` reaches each open stream of the session once — **decided under the owner's standing instruction, 28 Oct**
 
@@ -2423,7 +2423,7 @@ Decision ([`relay.md`](../spec/relay.md) §12.3): each `GET` stream of the sessi
 when the task leaves `quoted` or opened within the 10 minutes after, gets the notification once, written by the
 replica holding the stream, which the task's events wake (§9); never another session's stream. `/mcp`'s `GET`
 streams carry no event ids and are not resumed: a client that missed the notification retries `hire`, which §12.3
-answers with the task's state.
+answers with the task's state. Amended by DM4-21: one stream per session, never each stream.
 
 ### DM4-7. A modern reader of a `hire` task that asks a question — **decided under the owner's standing instruction, 28 Oct** (amends D58)
 
@@ -2453,9 +2453,9 @@ in-repository authorization server, and M5's control plane builds the authorizat
 (kontra-cloud#60: authorization code with PKCE, RFC 8414, RFC 9728, DCR). §12.1 says what is checked, not how the key
 set is found. Decision ([`relay.md`](../spec/relay.md) §12.1): M4 builds the resource server on `/mcp` and every
 `/mcp/{svc}`; the issuer's RFC 8414 metadata (else its OpenID configuration) and its `jwks_uri` are fetched over
-`https://`, dialed as configured (the issuer is the operator's and never derived from a request, and a team's IdP
-may be on a private network, as the Admission URL and the bucket are), and cached 10 minutes, an unknown `kid`
-refetching the key set at most once a minute; `iss`, `aud`
+`https://` as §10.3's operator-configured endpoints (DM4-17: no address check, since the issuer is the operator's and
+never derived from a request and a team's IdP may be on a private network; no redirect followed, no proxy, bounded
+bodies), and cached 10 minutes, an unknown `kid` refetching the key set at most once a minute; `iss`, `aud`
 (the route's canonical URI), `exp` and `nbf` are checked with 60 s of skew; ES256, RS256 and EdDSA are accepted, never
 `none` or HMAC; `scope` is not checked. The principal is `oidc:sub:<sub>` with no tenant and `via = mcp`. OIDC
 principals on the A2A routes (`auth.oidc`) and Cloud's revocation feed stay in M5, on the same verifier.
@@ -2477,7 +2477,9 @@ tasks, calls and bucket objects are deleted and the tenant row stays as a tombst
 live anonymous tenants created from it; tasks as host count the non-terminal tasks of the tenant's services, as hirer
 those whose principal is one of its keys, under a per-tenant lock at creation; over a cap A2A answers `429` as §2.2
 does, MCP `429` with `-32600`, and `hire` an `isError` result. `public` names must be declared services. Services of an
-anonymous tenant are never `listed` and never in `search`.
+anonymous tenant are never `listed` and never in `search`. Amended by DM4-18 (only a hello carrying `anonymous: true`
+opens one), DM4-19 (what a key of an anonymous tenant may present) and DM4-20 (the limits per tenant and gate-wide,
+the purge, the reserved slug).
 
 ### DM4-11. `kontra login` gets an API key through the gate's authorization server, and a handshake with it converts the anonymous tenant — **decided under the owner's standing instruction, 28 Oct**
 
@@ -2557,3 +2559,97 @@ PRD §14's M4 row also lists `kontra dev` with embedded Temporal (removed by not
 M4 goal names none of them, and no gate item needs them. Decision: M4 builds `examples/sellers/tck` and
 `examples/front/caddy`, which `tck_*` need (DM4-12); the other three sellers and two fronts keep their skeleton
 READMEs until a milestone needs them.
+
+## From the M4 plan's audit (28 Oct)
+
+The audit of the M4 plan (seven blockers, all accepted by the orchestrator) found that §10.3 still sent every operator
+URL through the SSRF dialer, that the anonymous rules broke the lost-welcome probe, that `elicitation/complete` was
+broadcast across streams, and several holes in the anonymous limits. These entries settle them before the code that
+depends on them. Like DM4-1 to DM4-16 they are **decided under the owner's standing instruction, 28 Oct**, and are
+renumbered into the D sequence when M3 has merged.
+
+### DM4-17. The operator-configured endpoints, and what the gate accepts from the Admission hook — **decided under the owner's standing instruction, 28 Oct** (amends D67; settles D189's bucket conflict; corrects DM4-9)
+
+[`relay.md`](../spec/relay.md) §10.3 (D67) sent every operator URL through the SSRF dialer, with one exception for
+`http://` on loopback for `hooks.*` URLs. Yet a team's Admission hook, its IdP and its object store are usually on a
+private network; DM4-9 had the issuer "dialed as configured, like the Admission URL", which §10.3 contradicted, and
+M3 dialed the bucket as configured under a `SPEC-CONFLICT` (D189). Decision ([`relay.md`](../spec/relay.md) §10.3):
+`hooks.admission.url`, `auth.mcp_oauth.issuer` with its RFC 8414 or OpenID metadata and the `jwks_uri` that metadata
+names, and the bucket's endpoint are **operator-configured endpoints**. They need `https://`, except `http://` on a
+loopback host (connected to a loopback address only; the bucket keeps the scheme its URL is written with), follow no
+redirect, ignore the environment's proxy, have bounded bodies (an Admission decision at 64 KiB, the metadata and the
+key set at 256 KiB each) and a timeout (5 s; `hooks.admission.timeout` for Admission), and skip the private-address
+check. Every other operator URL (`seller_keys` URLs) stays on the SSRF dialer. `internal/ssrf` builds the class
+(`ssrf.NewOperatorClient`), and `hooks.RemoteAdmission` and the resource server (M4 WP-06) use it.
+
+What the gate accepts from the hook ([`relay.md`](../spec/relay.md) §13.1): the answer is read as
+[`schema/hooks.json`](../spec/schema/hooks.json)'s `decision` with exact keys (no repeated or case-variant key, no
+unknown member, a `deny` with its `refusal`, a `quote` with its terms); a quote's `approveUrl` must be an absolute
+`https://` URL without userinfo, and its `expiresAt` an RFC 3339 time in the future. Anything else, like a timeout,
+a non-`2xx` (a `3xx` included) or maps that break §13.2's rules, is `-32603` `admission unavailable` (`503`): it fails
+closed. The URL itself is passed through untouched (D188), so a team gate configures its own approve page.
+
+### DM4-18. A hello asks for an anonymous session with `anonymous: true` — **decided under the owner's standing instruction, 28 Oct** (amends DM4-10)
+
+Under DM4-10 a hello with neither `enroll` nor `auth` from an unknown key opened an anonymous tenant. That is also the
+shape of [`tunnel.md`](../spec/tunnel.md) §2.4's lost-welcome probe, on which `internal/enroll` and `internal/node`
+rely: on a gate with `tunnel.anonymous`, a probe after an enrollment that did not commit would open an anonymous
+tenant, the node would record its unconfirmed tokens as consumed and never send them again, and a network slot and a
+tombstone would be spent. Decision ([`tunnel.md`](../spec/tunnel.md) §4, §6): the hello gains an optional field
+`anonymous: true`. `kontra connect` sends it only when the origin's credentials hold no API key and no pending or
+consumed enrollment token and neither `--enroll` nor `--api-key` was given; a probe never sends it. The gate opens or
+resumes an anonymous session only on such a hello; without it an unknown key stays `unknown_key`. A gate without
+`tunnel.anonymous` answers it, from a key it does not know, `anonymous_unavailable`.
+
+### DM4-19. What a key of a live anonymous tenant may present, and how a key moves — **decided under the owner's standing instruction, 28 Oct** (amends DM4-10, DM4-11)
+
+[`tunnel.md`](../spec/tunnel.md) §6.3 converts an anonymous key on an `auth` key with `enroll:*`; nothing said what
+`enroll` tokens or a hire-only API key from such a key do, and `key_services`' foreign key `(key_id, tenant_id)` has no
+`ON UPDATE`, so moving a key with its bindings in place fails. Decision ([`tunnel.md`](../spec/tunnel.md) §6.1):
+`enroll` tokens from a key of a live anonymous tenant convert it into the tokens' tenant (bound as §5 says, the
+anonymous tenant expired at once), as §6.3 does; a hire-only `auth` is admitted as the anonymous session with that key
+as its hiring principal (§9), and nothing is converted. Every move of a key to another tenant (these conversions,
+§6.3's, and a new anonymous tenant after expiry) is one transaction under the key's row lock that deletes the key's
+old `key_services` rows before it updates `tunnel_keys.tenant_id`.
+
+### DM4-20. Anonymous tenants are bounded per tenant and gate-wide, and the purge leaves only the tombstone — **decided under the owner's standing instruction, 28 Oct** (amends DM4-10)
+
+DM4-10 counted services per hello while undeclared services kept their rows, so reconnecting with new names grew a
+tenant without bound; plain MCP calls to a `--public` service were bounded only by the node; nothing capped the live
+anonymous tenants of the gate (an IPv6 /32 holds 65,536 /48 networks); the `anon-` slug could be taken by an account;
+the purge kept the node keys and the gate's own `/mcp` sessions; [`tunnel.md`](../spec/tunnel.md) §12 still listed
+anonymous expiry as a key revocation; and "parts over the total are refused" named no answer. Decision
+([`tunnel.md`](../spec/tunnel.md) §6.1, §6.2, §12; [`relay.md`](../spec/relay.md) §13.5, §17):
+
+- services are counted per tenant (those not disabled), and a resumed hello disables what it no longer declares;
+- two new limits in `tunnel.anonymous`: `calls` (8, concurrent plain MCP calls to the tenant's services as host,
+  over it `429` with `-32600`) and `max_tenants` (1000, live anonymous tenants gate-wide, over it
+  `anonymous_unavailable`; the staging gate sets 200);
+- a caller's message whose parts would pass `parts_bytes` is `InvalidParams` `anonymous storage limit` before any
+  task row, and upstream bytes past it fail the task `upstream_error` (§6.6);
+- migration 0003 adds the check `(kind = 'anonymous') = (slug ~ '^anon-[0-9a-f]{16}$')` on `tenants`, and a new slug
+  that collides is drawn again;
+- the purge deletes the keys still in the tenant (their bindings and tunnels go with them), the MCP sessions whose
+  `tenant_id` is the tenant (`service` NULL included), its services with their calls (an exception to §13.5's "the
+  gate never deletes calls"), enrollments, tasks and bucket objects, and keeps only the tenants row;
+- §12's key revocation no longer names anonymous expiry: expiry revokes the bindings, not the key.
+
+### DM4-21. `notifications/elicitation/complete` goes on one stream of the session — **decided under the owner's standing instruction, 28 Oct** (amends DM4-6)
+
+DM4-6 sent the notification on each open `GET` stream of the session. MCP 2025-11-25 transports, "Multiple
+Connections": the server "MUST send each of its JSON-RPC messages on only one of the connected streams; that is, it
+MUST NOT broadcast the same message across multiple streams." Decision ([`relay.md`](../spec/relay.md) §12.3):
+migration 0003 adds `tasks.elicitation_notified_at`; a replica holding an open `GET` stream of the session claims the
+notification with `UPDATE … SET elicitation_notified_at = now() WHERE id = $1 AND elicitation_notified_at IS NULL`
+and writes it on that one stream only if its update won; a stream opened within the 10 minutes after the task left
+`quoted` gets it only if nothing claimed it. A client that missed it retries `hire` (§12.3).
+
+### DM4-22. The structured result of `hire`, `reply` and `tasks/result`, and `/mcp`'s metering — **decided under the owner's standing instruction, 28 Oct** (amends DM4-5)
+
+§12.2 put data parts "in `structuredContent`" while DM4-5 put `{taskId, state}` there beside the content: both cannot
+be one object, and several data parts had no shape. Nor did anything say what `/mcp` meters, while `calls.service` is
+`NOT NULL` with a foreign key to `services`. Decision ([`relay.md`](../spec/relay.md) §12.2): a plain `hire`, every
+`reply` and `tasks/result` of a `hire` task carry `structuredContent` `{taskId, state, data?}`, `data` being the
+values of the rendered data parts in order (message first, then each artifact's), present only when there are some.
+`search`, `describe`, `hire`, `reply` and the MCP Tasks of `/mcp` write no `calls` rows: a `hire` is accounted as its
+A2A task.
