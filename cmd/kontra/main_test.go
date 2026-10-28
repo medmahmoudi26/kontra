@@ -39,8 +39,8 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"seal", "--open", "/nonexistent/part.json"}, 1, "", "kontra seal: open /nonexistent/part.json"},
 		{[]string{"connect", "-h"}, 0, "--sealed-max-age DURATION", ""},
 		{[]string{"connect", "-h"}, 0, "--accept-change NAME", ""},
-		{[]string{"console"}, 2, "", "usage:"}, // no local console (D164)
-		{[]string{"login"}, 1, "", "kontra login: not until M4"},
+		{[]string{"console"}, 2, "", "usage:"},                                               // no local console (D164)
+		{[]string{"login"}, 1, "", "kontra login: kontra login: not implemented (M4 WP-06)"}, // the M4 skeleton's stub
 		{[]string{"publish"}, 1, "", "kontra publish: not until M5"},
 		{[]string{"connect", "-h"}, 0, "--serve a2a:NAME=URL", ""},
 		{[]string{"connect", "-h"}, 0, "--listen ADDR", ""},

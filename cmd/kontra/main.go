@@ -6,10 +6,10 @@
 //	kontra seal --service <service URL> [--api-key <key>] [--context <id>] [--task <id>] [file | -],
 //	kontra seal --open <part.json>
 //	(spec/ext-sealed.md §5.1; internal/sealing)
+//	kontra login [--gate URL] [--no-browser] (spec/tunnel.md §6.3; internal/login; M4 WP-06)
 //	kontra version
 //
-// The other subcommands come with their milestones (PRD §14, note 2 §4): login with the anonymous sessions on
-// the public gate (M4), publish with Cloud's listings (M5).
+// publish comes with Cloud's listings (PRD §14 M5).
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"kontra.sh/kontra/internal/login"
 	"kontra.sh/kontra/internal/node"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/sealing"
@@ -40,6 +41,7 @@ const usage = `usage:
   kontra seal --service <service URL> [--api-key <key>|@<file>] [--context <id>] [--task <id>]
               [--media-type <type>] [file | -]
   kontra seal --open <part.json>
+  kontra login [--gate <url>] [--no-browser]
   kontra version
 
 kontra connect hosts the services on this machine at a gate, and lets local clients hire the gate's services,
@@ -86,12 +88,15 @@ plaintext of a reply's sealed parts and binds its job to the task the reply name
 follow-up of that task with its job's key. --api-key KEY|@FILE (never read from the environment) is sent to the
 --service's gate only, to read the card of a service that is not listed: on the service's card and upstream card once
 the card answered 404 without it, never on the gate's key set.
+
+kontra login gets an API key for a gate (default https://gateway.kontra.sh) from the gate's sign-in and keeps it in
+~/.kontra/credentials for that gate only; kontra connect then hires as it, and an anonymous session's next handshake
+with it becomes the account's (spec/tunnel.md §6.3). --no-browser prints the sign-in URL instead of opening it.
 `
 
 // later is when each subcommand that is not built yet comes (PRD §14, note 2 §4). There is no console
 // subcommand: the owner dropped the local console (D164).
 var later = map[string]string{
-	"login":   "M4", // turns an anonymous session into an account (tunnel.md §6.1; M4)
 	"publish": "M5", // listings (PRD §14 M5)
 }
 
@@ -134,6 +139,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if err := sealing.SealCommand(ctx, args[1:], os.Stdin, stdout, stderr); err != nil {
 			fmt.Fprintln(stderr, "kontra seal:", tunnel.Printable(err.Error()))
 			if errors.Is(err, sealing.ErrUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
+	case "login":
+		// tunnel.md §6.3 (DM4-11): an API key from the gate's sign-in, kept for that gate only.
+		if err := login.Command(ctx, args[1:], stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, "kontra login:", tunnel.Printable(err.Error()))
+			if errors.Is(err, login.ErrUsage) {
 				return 2
 			}
 			return 1

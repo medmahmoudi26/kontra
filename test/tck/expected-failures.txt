@@ -1,0 +1,40 @@
+# The pinned TCK's expected failures (a2aproject/a2a-tck d4d6fae7887f88ef607fb461c13e3b0e1802f19b, spec/relay.md §0,
+# §16; D18, DM4-12). One pytest node id per line, then "#" and the reason with its upstream issue. kontra_xfail.py
+# marks each xfail(strict=True): a listed test that passes fails the run, and so does an entry that names no
+# collected test of the binding being run. Delete an entry when its cause is fixed and re-pin deliberately.
+#
+# M4 planning seeded this file. The TCK-bug rows were measured against a2a-go v2.7.0 (M0); the anonymous rows are
+# predicted from relay.md §2.3 and D20 and are confirmed or corrected by M4 WP-02's first run against the gate.
+
+# --- TCK bugs (D18): the TCK is wrong; the gate answers as A2A v1.0.1 says ---
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[jsonrpc]  # TCK sends snake_case task_id on JSON-RPC (ProtoJSON camelCase expected); also refused to anonymous (D20)
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-SEND-003-jsonrpc]  # a2a-tck#202: CORE-SEND-003 has no expected_error, so it asserts success for an unsupported media type
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-SEND-003-http_json]  # a2a-tck#202: as above
+tests/compatibility/core_operations/test_task_history.py::TestHistoryLengthLimit::test_get_task_history_does_not_exceed_limit[jsonrpc]  # a2a-tck#242 (PR #243): TCK sends snake_case history_length
+tests/compatibility/core_operations/test_task_lifecycle.py::TestCancelTask::test_cancel_terminal_task_returns_error[http_json]  # a2a-tck#231 (PR #232): TCK vendors v1.0.0's 409; v1.0.1 maps TaskNotCancelable to 400
+
+# --- Refused to the anonymous principal by design (relay.md §2.3, D20; DM4-12) ---
+# The TCK sends no credential (a2a-tck#163, PR #200), so its target is a service with allow: [anonymous], and the
+# gate refuses ListTasks and push configs to anonymous callers. Re-pin and run with an API key when #200 merges.
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-001-jsonrpc]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-001-http_json]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-002-jsonrpc]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-002-http_json]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-003-jsonrpc]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-003-http_json]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-004-jsonrpc]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-004-http_json]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-005-jsonrpc]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-005-http_json]  # D20: ListTasks refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[http_json]  # D20: push configs refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_config_persists[http_json]  # D20: push configs refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_push_config[http_json]  # D20: push configs refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_list_push_configs[http_json]  # D20: push configs refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_push_config[http_json]  # D20: push configs refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_is_idempotent[http_json]  # D20: push configs refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_includes_auth[jsonrpc]  # D20: inline push config refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_includes_auth[http_json]  # D20: inline push config refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_at_least_once[jsonrpc]  # D20: inline push config refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_at_least_once[http_json]  # D20: inline push config refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_payload_format[jsonrpc]  # D20: inline push config refused to anonymous; a2a-tck#163
+tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_payload_format[http_json]  # D20: inline push config refused to anonymous; a2a-tck#163
