@@ -20,7 +20,8 @@
 // in internal/tunnelgate, the parts total with relay §6.6's byte accounting (Caps.Message before a task row,
 // Caps.Budget at each dispatch).
 //
-// kontra login's conversion (§6.3, DM4-11) is Convert, also inside the admission's transaction.
+// kontra login's conversion (§6.3, DM4-11) and enroll tokens from an anonymous key (DM4-19) move the key in the
+// admission's transaction (MoveKey, then §5's binding in internal/enroll) and end the tenant there (Convert).
 //
 // Work packages: M4 WP-03 (sessions, limits, sweeps, --public), M4 WP-06 (Convert).
 package anon
@@ -50,7 +51,6 @@ import (
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/pg"
-	"kontra.sh/kontra/internal/unimpl"
 )
 
 // Limits are tunnel.anonymous's (spec/tunnel.md §6.2, relay.md §17; DM4-10, DM4-20).
@@ -1115,20 +1115,77 @@ func (c *Caps) Budget(ctx context.Context, svcTenant uuid.UUID, svcSlug string, 
 	return others, min(taskBytes+others, c.lim.PartsBytes), true, nil
 }
 
-// ConvertRequest is a hello that converts an anonymous key (§6.3): its key, the account the auth API key belongs
-// to, and the services it declares.
+// EventConverted is the audit row of a conversion: a key of a live anonymous tenant moved into an account (or the
+// enrollment tokens' tenant), and the anonymous tenant ended at once (spec/tunnel.md §6.3, DM4-11, DM4-19).
+const EventConverted = "tunnel.anonymous_converted"
+
+// Conversion authorities (ConvertRequest.Via).
+const (
+	ViaAPIKey = "api_key"          // §6.3: the hello's auth, an API key with enroll:* (or one admitted hire-only)
+	ViaTokens = "enrollment_token" // DM4-19: the hello's enroll tokens
+)
+
+// ConvertRequest is a handshake that converted a key of a live anonymous tenant (§6.3, DM4-19): the key, the
+// anonymous tenant it left, the tenant it moved into, by which authority, and the services it is bound to there.
 type ConvertRequest struct {
-	KeyID     string
-	AccountID uuid.UUID
-	Services  []Service
-	Now       time.Time
+	KeyID    string
+	From     uuid.UUID // the live anonymous tenant; the admission holds its row (FOR NO KEY UPDATE)
+	To       uuid.UUID
+	ToSlug   string
+	Via      string   // ViaAPIKey or ViaTokens
+	APIKey   string   // the auth API key's principal (key:<prefix>), when the hello carried one
+	Services []string // the services the key serves in To after the handshake, sorted
 }
 
-// Convert moves an anonymous key to the account in tx (the admission's transaction): the declared services created
-// in the account where missing (same names, allow [org:<account>]; another kind is kind_mismatch and nothing moves),
-// the key moved with bindings to them (MoveKey), the anonymous tenant ended at once (End), and an audit row.
+// Convert ends the anonymous tenant a converted key left and records the conversion, in tx (the admission's
+// transaction, which holds the key's row and then the anonymous tenant's, in that order, and has already moved the key
+// with MoveKey and bound it in To as §5 binds a key: the declared services created in the account where missing, with
+// allow [org:<account>], another kind kind_mismatch with nothing moved; internal/enroll). The tenant ends at once (End,
+// reason "converted": its services disabled and 404, their tasks in flight failing service_unavailable, its session
+// told revoked), and an EventConverted row names both tenants. Nothing of another anonymous tenant is locked.
 func Convert(ctx context.Context, tx pgx.Tx, req ConvertRequest) error {
-	return unimpl.Error("anon.Convert", "M4 WP-06")
+	var in uuid.UUID
+	if err := tx.QueryRow(ctx, `select tenant_id from kontra.tunnel_keys where key_id = $1`, req.KeyID).Scan(&in); err != nil {
+		return fmt.Errorf("anon: convert %s: %w", req.KeyID, err)
+	}
+	if in != req.To || req.To == req.From {
+		return fmt.Errorf("anon: convert %s: the key is not in the tenant it converts into", req.KeyID)
+	}
+	var (
+		from string
+		kind string
+	)
+	if err := tx.QueryRow(ctx, `select slug, kind from kontra.tenants where id = $1`, req.From).Scan(&from, &kind); err != nil {
+		return fmt.Errorf("anon: convert %s: %w", req.KeyID, err)
+	}
+	if kind != "anonymous" {
+		return fmt.Errorf("anon: convert %s: tenant %s is not anonymous", req.KeyID, from)
+	}
+	disabled, err := End(ctx, tx, req.From, "converted")
+	if err != nil {
+		return err
+	}
+	services := make([]any, len(req.Services))
+	for i, n := range req.Services {
+		services[i] = n
+	}
+	f := audit.Fields{
+		"actor": "tunnel handshake", "key_id": req.KeyID, "from": from, "from_id": req.From, "to": req.ToSlug,
+		"to_id": req.To, "via": req.Via, "services": services, "disabled": anyOf(disabled),
+	}
+	if req.APIKey != "" {
+		f["api_key"] = req.APIKey
+	}
+	_, err = audit.Append(ctx, tx, EventConverted, f)
+	return err
+}
+
+func anyOf(s []string) []any {
+	out := make([]any, len(s))
+	for i, v := range s {
+		out[i] = v
+	}
+	return out
 }
 
 // IsUniqueViolation reports a Postgres unique violation (SQLSTATE 23505).

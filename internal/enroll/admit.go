@@ -79,9 +79,12 @@ const (
 //     (anonymous: true, neither enroll nor auth) from an unknown key, or from a key of an anonymous tenant, opens or
 //     resumes it (anonymous_unavailable, rate_limited, service_denied, kind_mismatch from its limits), or
 //     anonymous_unavailable on a gate without tunnel.anonymous; a key of a live anonymous tenant presenting no
-//     tokens is resumed on a hire-only auth key and is otherwise unknown_key; one presenting tokens, of an ended
+//     tokens converts on an auth API key with enroll:* of an account (§6.3, with tunnel.enroll_with_api_key: below as
+//     a new key of that account, the declared services it lacks created there; anonymous.go's convert), is resumed
+//     on another auth key (a hire-only one) and is otherwise unknown_key; one presenting tokens, of an ended
 //     anonymous tenant, or of a live one on a gate without tunnel.anonymous (a hello that does not ask), goes on below
-//     as a new key would, and is moved (anon.MoveKey) if admitted;
+//     as a new key would, and is moved (anon.MoveKey) if admitted; a live anonymous tenant a key leaves ends at once
+//     (anon.Convert);
 //  5. enroll_invalid: a token that is malformed, unknown, used or expired, of another tenant than the key's
 //     or the other authorities', or that applies to no declared service (a service token for a service the
 //     hello does not declare; a tenant token listing none of them);
@@ -220,6 +223,9 @@ type admission struct {
 	anonKey   *keyRow
 	moveFrom  *Key
 	endTenant uuid.UUID
+	// converting is §6.3's conversion by the auth API key's enroll:* scope (anonymous.go's convert): the declared
+	// services the account does not have are created there.
+	converting bool
 }
 
 // keyRow is a tunnel_keys row with its tenant's state.
@@ -463,6 +469,9 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 				denied = append(denied, p.svc.Name+": the key is not enrolled for it")
 			}
 		case !p.exists && p.via == viaTenantToken:
+			p.create = true
+		case !p.exists && p.via == viaAPIKey && a.converting:
+			// §6.3 (DM4-11): a conversion creates the declared services the account does not have, under the same names.
 			p.create = true
 		case !p.exists:
 			// SPEC-CONFLICT (M2 plan, C10): §5 does not say what an enroll: scope naming a missing service
@@ -831,10 +840,23 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 			return nil, err
 		}
 	}
-	// DM4-19: enroll from a key of a live anonymous tenant converts it; that tenant ends at once (its URLs 404, its
-	// session told revoked).
+	// §6.3 and DM4-19: a key of a live anonymous tenant that moved here converts it; that tenant ends at once (its URLs
+	// 404, its session told revoked), with the conversion's audit row.
 	if a.endTenant != uuid.Nil && a.endTenant != a.tenant {
-		if _, err := anon.End(ctx, a.tx, a.endTenant, "converted"); err != nil {
+		cr := anon.ConvertRequest{KeyID: keyID, From: a.endTenant, To: a.tenant, ToSlug: a.slug, Via: anon.ViaAPIKey}
+		if len(toks) > 0 {
+			cr.Via = anon.ViaTokens
+		}
+		if a.principal != nil {
+			cr.APIKey = a.principal.ID
+		}
+		for _, p := range plans {
+			if p.bound && p.exists && p.tunnel && p.enabled && p.kind == p.svc.Kind {
+				cr.Services = append(cr.Services, p.svc.Name)
+			}
+		}
+		sort.Strings(cr.Services)
+		if err := anon.Convert(ctx, a.tx, cr); err != nil {
 			return nil, err
 		}
 	}
