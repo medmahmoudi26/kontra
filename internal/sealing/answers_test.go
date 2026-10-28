@@ -217,7 +217,9 @@ func TestHiringRefusesUnreadableAnswers(t *testing.T) {
 
 // Finding: the walk read exact names only, and the local client's encoding/json reads a lone case variant as the
 // member, so a gate's forged "Artifacts" (or "Task", "Parts", "Result", ...) passed rule 4a, and a terminal state
-// beside it ended the job and deleted its key. Each is refused now (sealed_rejected), and the job is kept.
+// beside it ended the job and deleted its key. Each is refused now (sealed_rejected), and the job is kept. (The job
+// has its gate task already, as after the first answer: a new task's provisional key, which no refused answer named a
+// task for, goes with its exchange, M3 review robustness-2.)
 func TestHiringLoneCaseVariants(t *testing.T) {
 	task := uuid.NewString()
 	art := `[{"artifactId":"a","parts":[{"text":"FORGED by the gate"}]}]`
@@ -239,6 +241,12 @@ func TestHiringLoneCaseVariants(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newFakeGate(t)
 			req, job := hiredRequest(t, g, tc.binding, tc.stream)
+			g.hr.h.mu.Lock()
+			err := g.hr.h.renameJob(job.job, task)
+			g.hr.h.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
 			ct := "application/json"
 			if tc.stream {
 				ct = "text/event-stream"

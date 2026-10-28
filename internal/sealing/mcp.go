@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -42,6 +43,10 @@ type MCPExchange struct {
 	pre     tunnel.Preamble
 	service string
 	jobID   string // "mcp-" + the session hash; "" on an exchange with no session (2026-07-28)
+	// upstreamSID is the upstream session the exchange is on (the request's Mcp-Session-Id): the server's answers to
+	// a sealed request, and the answers to its input requests, are the job's that sealed them on any exchange of
+	// that upstream session, whatever the exchange's preamble says (svc.Responses, svc.Inputs).
+	upstreamSID string
 
 	reqMethod string
 	reqID     json.RawMessage
@@ -51,14 +56,21 @@ type MCPExchange struct {
 	reserved  []string // what the commits record, in flight until then (Hosting.flight)
 }
 
-// sealedCall is a sealed tools/call of the exchange.
+// sealedCall is a sealed tools/call of the exchange: its tool and messageId, and the replyTo and rk its request
+// carried, which its result is sealed to.
 type sealedCall struct {
 	tool, messageID string
+	replyTo, rk     string
 }
 
-// MCP returns the sealing state of one MCP exchange of the service the preamble names.
-func (h *Hosting) MCP(pre tunnel.Preamble) *MCPExchange {
-	x := &MCPExchange{h: h, pre: pre, service: pre.Service}
+// MCP returns the sealing state of one MCP exchange of the service the preamble names, on no upstream session (an
+// initialize, a stateless server); MCPOn names the upstream session.
+func (h *Hosting) MCP(pre tunnel.Preamble) *MCPExchange { return h.MCPOn(pre, "") }
+
+// MCPOn returns the sealing state of one MCP exchange on the upstream session upstreamSID (the request's
+// Mcp-Session-Id: the node's server's own session id, for a URL server or the stdio bridge).
+func (h *Hosting) MCPOn(pre tunnel.Preamble, upstreamSID string) *MCPExchange {
+	x := &MCPExchange{h: h, pre: pre, service: pre.Service, upstreamSID: upstreamSID}
 	if s := pre.MCPSession; len(s) == 64 && isHex(s) {
 		x.jobID = "mcp-" + s
 	}
@@ -93,19 +105,54 @@ func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error
 	case m.Method == mcpwire.MethodToolsCall:
 		return x.toolsCall(svc, job, body, m)
 	case m.Method == "":
-		return x.answer(job, body, m)
+		return x.answer(svc, job, body, m)
 	case strings.HasPrefix(m.Method, "tasks/"):
 		id, _ := memberString(m.Params, "taskId")
 		if owner, ok := svc.Tasks[id]; ok && id != "" && owner != x.jobID {
 			return nil, reject(sealed.RejectWrongTask, "a tasks/* request names a sealed task of another session")
 		}
 		x.taskOf = id
+		if m.Method == "tasks/result" && job != nil && job.Tasks[id] != nil && len(m.ID) > 0 {
+			// The result of a bound task is the job's to seal wherever the server sends it (a resumed stream included).
+			x.record(svc, respKey(x.upstreamSID, m.ID), func(j *jobState) *sealedRequest {
+				t := j.Tasks[id]
+				if t == nil {
+					return nil
+				}
+				return &sealedRequest{Kind: reqResult, Tool: t.Tool, MessageID: t.MessageID, Task: id, Gate: t.Gate}
+			})
+		}
 	}
 	return body, nil
 }
 
+// record arranges for the exchange's commit to record a sealed request of the session's job under key (the upstream
+// session and the request's id), and to index it for the service when the exchange is on an upstream session.
+func (x *MCPExchange) record(svc *serviceState, key string, req func(j *jobState) *sealedRequest) {
+	service, jobID, sid := x.service, x.jobID, x.upstreamSID
+	x.commit = append(x.commit, func() error {
+		j, err := x.h.jobFor(service, jobID)
+		if err != nil || j == nil {
+			return err
+		}
+		r := req(j)
+		if r == nil {
+			return nil
+		}
+		r.At = x.h.cfg.Now()
+		j.Calls[key] = r
+		if sid != "" {
+			svc.put(setResponses, key, indexEntry{Job: j.ID, Key: key})
+		}
+		if err := x.h.saveJob(service, j); err != nil {
+			return err
+		}
+		return x.h.st.saveService(service, svc)
+	})
+}
+
 // toolsCall checks and opens a sealed tools/call (rules 1, 4, 5); an unsealed one passes unless the service was
-// started with --sealed-required.
+// started with --sealed-required, or the session has a sealed job.
 func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m *mcpwire.Message) ([]byte, error) {
 	params, err := strictjson.Members(m.Params)
 	if err != nil {
@@ -115,9 +162,16 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 	if err != nil {
 		return nil, err
 	}
+	jobKey := flightKey("j", x.service, x.jobID)
 	if !hasEnv {
 		if x.h.Required(x.service) {
 			return nil, reject(sealed.RejectBadHeader, "an unsealed tools/call to a service started with --sealed-required")
+		}
+		if _, opening := x.h.inFlight(jobKey); job != nil || opening && x.jobID != "" {
+			// A sealed session is the hiring node's, which seals every call on it: an unsealed call is the gate's own,
+			// made in the upstream session the buyer's sealed calls set up (a login, an opened document), and its result
+			// would reach the gate in plaintext (§7, "cannot continue another buyer's job"; security review).
+			return nil, reject(sealed.RejectBadHeader, "an unsealed tools/call on a session with a sealed job")
 		}
 		return body, nil
 	}
@@ -132,7 +186,7 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 	if err != nil {
 		return nil, err
 	}
-	if err := x.h.mcpRule1(hd); err != nil {
+	if err := x.h.mcpRule1(hd, false); err != nil {
 		return nil, err
 	}
 	name, _ := a2awire.String(params, "name")
@@ -145,14 +199,24 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 	case hd.MessageID != x.pre.MCPRequestID || hd.MessageID != idStr:
 		return nil, reject(sealed.RejectWrongMessage, "the header's messageId is not the preamble's mcp_request_id")
 	}
-	if job != nil && (job.ReplyTo != hd.ReplyTo || job.RK != hd.RK) {
+	bind := bindOf(hd.ReplyTo, hd.RK)
+	if job != nil && bindOf(job.ReplyTo, job.RK) != bind {
 		return nil, reject(sealed.RejectWrongJob, "the session's job was opened with another replyTo")
+	}
+	// Rule 4's binding holds from the node's checks on: a call of another replyTo while the session's first sealed
+	// call is in flight is refused as it would be once that call is recorded (otherwise whichever the server accepted
+	// first would bind the job, and the other's result would be sealed to it).
+	if b, ok := x.h.inFlight(jobKey); ok && b != bind {
+		return nil, reject(sealed.RejectWrongJob, "the session's job is being opened with another replyTo")
 	}
 	callKey := hd.Session + "/" + hd.MessageID
 	if _, seen := svc.MCPCalls[callKey]; seen {
 		return nil, reject(sealed.RejectReplayed, "a (session, messageId) the service forwarded before")
 	}
-	flight := flightKey("m", x.service, callKey)
+	if x.h.mcpCallElsewhere(x.service, callKey) {
+		return nil, reject(sealed.RejectReplayed, "a (session, messageId) another service of this node forwarded")
+	}
+	flight := flightKey("m", "", callKey)
 	if _, ok := x.h.inFlight(flight); ok {
 		return nil, reject(sealed.RejectReplayed, "a (session, messageId) the service is being forwarded")
 	}
@@ -170,55 +234,48 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 	if err != nil {
 		return nil, reject(sealed.RejectBadHeader, err.Error())
 	}
-	x.call = &sealedCall{tool: name, messageID: hd.MessageID}
+	x.call = &sealedCall{tool: name, messageID: hd.MessageID, replyTo: hd.ReplyTo, rk: hd.RK}
 	x.h.reserve(x.pre.Task, flight)
 	x.reserved = append(x.reserved, flight)
-	service, jobID := x.service, x.jobID
+	if job == nil {
+		x.h.reserve(bind, jobKey)
+		x.reserved = append(x.reserved, jobKey)
+	}
+	service, jobID, gate := x.service, x.jobID, x.pre.Task
 	x.commit = append(x.commit, func() error {
 		now := x.h.cfg.Now()
 		j, err := x.h.jobFor(service, jobID)
 		if err != nil {
 			return err
 		}
-		if j == nil {
-			j = &jobState{ID: jobID, ReplyTo: hd.ReplyTo, RK: hd.RK, Created: now, Session: hd.Session,
-				Artifacts: map[string]*artifactState{}, Tasks: map[string]*mcpTask{}}
+		switch {
+		case j == nil:
+			j = &jobState{ID: jobID, ReplyTo: hd.ReplyTo, RK: hd.RK, Created: now, Session: hd.Session}
+			j.init()
+		case bindOf(j.ReplyTo, j.RK) != bind:
+			return fmt.Errorf("sealing: job %s is bound to another replyTo: this call records nothing", jobID)
 		}
 		j.LastSeen = now
-		svc.MCPCalls[callKey] = now
+		svc.put(setMCPCalls, callKey, now)
 		if err := x.h.saveJob(service, j); err != nil {
 			return err
 		}
 		return x.h.st.saveService(service, svc)
 	})
+	x.record(svc, respKey(x.upstreamSID, m.ID), func(*jobState) *sealedRequest {
+		return &sealedRequest{Kind: reqCall, Tool: name, MessageID: hd.MessageID, Gate: gate, ReplyTo: hd.ReplyTo, RK: hd.RK}
+	})
 	return out, nil
 }
 
-// answer applies rule 4b and "answers must be sealed" to a client's JSON-RPC response on a job's exchange.
-func (x *MCPExchange) answer(job *jobState, body []byte, m *mcpwire.Message) ([]byte, error) {
-	if job == nil {
-		return body, nil
-	}
+// answer applies rule 4b and "answers must be sealed" to a client's JSON-RPC response. Which input request a response
+// answers is the node's own record, not the preamble's word: on an upstream session, the input request it sealed with
+// that id on that session (svc.Inputs), whatever job or task the exchange's preamble names; without one, the input
+// request of the preamble's job and task. A response to one is refused unless it is sealed (bad_header) and passes
+// rule 4b against that request's job and task (wrong_message when it comes on an exchange of another session or
+// task, replayed when the request was answered).
+func (x *MCPExchange) answer(svc *serviceState, job *jobState, body []byte, m *mcpwire.Message) ([]byte, error) {
 	idStr := mcpID(m.ID)
-	var (
-		task *mcpTask
-		in   *InputRequest
-	)
-	answered := false
-	for up, t := range job.Tasks {
-		if x.pre.Task != "" && t.Gate != x.pre.Task {
-			continue
-		}
-		if r := t.Inputs[idStr]; r != nil {
-			if r.Answered {
-				answered = true
-				continue
-			}
-			task, in = t, r
-			_ = up
-			break
-		}
-	}
 	var (
 		result map[string]json.RawMessage
 		meta   map[string]json.RawMessage
@@ -234,11 +291,38 @@ func (x *MCPExchange) answer(job *jobState, body []byte, m *mcpwire.Message) ([]
 			return nil, err
 		}
 	}
-	if in == nil {
-		switch {
-		case hasEnv && answered:
-			return nil, reject(sealed.RejectReplayed, "an answer to an input request the service has had answered")
-		case hasEnv:
+	rkey := respKey(x.upstreamSID, m.ID)
+	var (
+		ij    *jobState
+		in    *InputRequest
+		ikey  string
+		known bool // the id names an input request this node sealed
+	)
+	switch {
+	case x.upstreamSID != "":
+		if e, ok := svc.Inputs[rkey]; ok {
+			known = true
+			j, err := x.h.jobFor(x.service, e.Job)
+			if err != nil {
+				return nil, err
+			}
+			if j != nil {
+				ij, in, ikey = j, j.Inputs[e.Key], e.Key
+			}
+		}
+	case job != nil:
+		ikey = rkey + "\x00" + x.pre.Task
+		if in = job.Inputs[ikey]; in != nil {
+			ij, known = job, true
+		}
+		for k := range job.Inputs {
+			if strings.HasPrefix(k, rkey+"\x00") {
+				known = true // an input request of another task with this id: an unsealed answer is refused all the same
+			}
+		}
+	}
+	if !known {
+		if hasEnv {
 			return nil, reject(sealed.RejectWrongMessage, "a sealed answer to no input request this node sealed")
 		}
 		return body, nil
@@ -246,7 +330,15 @@ func (x *MCPExchange) answer(job *jobState, body []byte, m *mcpwire.Message) ([]
 	if !hasEnv {
 		return nil, reject(sealed.RejectBadHeader, "an unsealed answer to a sealed input request")
 	}
-	flight := flightKey("a", x.service, x.jobID, in.Task, idStr)
+	switch {
+	case in == nil:
+		return nil, reject(sealed.RejectWrongMessage, "an answer to an input request this node no longer holds")
+	case ij.ID != x.jobID || in.Gate != x.pre.Task:
+		return nil, reject(sealed.RejectWrongMessage, "an answer on an exchange of another session or task than its input request's")
+	case in.Answered:
+		return nil, reject(sealed.RejectReplayed, "an answer to an input request the service has had answered")
+	}
+	flight := flightKey("a", x.service, ij.ID, ikey)
 	if _, ok := x.h.inFlight(flight); ok {
 		return nil, reject(sealed.RejectReplayed, "an answer to an input request the service is being given")
 	}
@@ -258,16 +350,20 @@ func (x *MCPExchange) answer(job *jobState, body []byte, m *mcpwire.Message) ([]
 	if err != nil {
 		return nil, err
 	}
-	if err := x.h.mcpRule1(hd); err != nil {
+	if err := x.h.mcpRule1(hd, true); err != nil {
 		return nil, err
 	}
 	now := x.h.cfg.Now()
 	switch {
-	case hd.Session != x.pre.MCPSession, hd.Tool != task.Tool, hd.MessageID != idStr:
+	case hd.Session != x.pre.MCPSession, hd.Session != ij.Session, hd.Tool != in.Tool, hd.MessageID != idStr:
 		return nil, reject(sealed.RejectWrongMessage, "the answer's session, tool or messageId is not the input request's")
+	case hd.TaskID != in.Gate:
+		// The answer names the gate task whose input request it answers (security review: upstream ids restart in each
+		// durable task's own upstream session, so session, tool and messageId alone match another task's request).
+		return nil, reject(sealed.RejectWrongMessage, "the answer's taskId is not its input request's task")
 	case now.Sub(in.SealedAt) > x.h.cfg.MaxAge:
 		return nil, reject(sealed.RejectWrongMessage, "the input request was sealed more than --sealed-max-age ago")
-	case hd.ReplyTo != job.ReplyTo || hd.RK != job.RK:
+	case hd.ReplyTo != ij.ReplyTo || hd.RK != ij.RK:
 		return nil, reject(sealed.RejectWrongJob, "the answer's replyTo or rk is not the job's")
 	}
 	if firstByte(plain) != '{' || !json.Valid(plain) {
@@ -287,16 +383,14 @@ func (x *MCPExchange) answer(job *jobState, body []byte, m *mcpwire.Message) ([]
 	}
 	x.h.reserve(x.pre.Task, flight)
 	x.reserved = append(x.reserved, flight)
-	service, jobID, msgID := x.service, x.jobID, idStr
+	service, jobID, key := x.service, ij.ID, ikey
 	x.commit = append(x.commit, func() error {
 		j, err := x.h.jobFor(service, jobID)
 		if err != nil || j == nil {
 			return err
 		}
-		for _, t := range j.Tasks {
-			if r := t.Inputs[msgID]; r != nil && (x.pre.Task == "" || t.Gate == x.pre.Task) {
-				r.Answered = true
-			}
+		if r := j.Inputs[key]; r != nil {
+			r.Answered = true
 		}
 		j.LastSeen = x.h.cfg.Now()
 		return x.h.saveJob(service, j)
@@ -305,8 +399,16 @@ func (x *MCPExchange) answer(job *jobState, body []byte, m *mcpwire.Message) ([]
 }
 
 // mcpRule1 is rule 1 for an MCP request or answer: dir req, one data part (part 0 of 1, no mediaType), the node's
-// key id in kids, iat within the window, and replyTo and rk present; no A2A member.
-func (h *Hosting) mcpRule1(hd sealed.Header) error {
+// key id in kids, iat within the window, and replyTo and rk present; no A2A member (an answer's taskId aside).
+//
+// SPEC-CONFLICT (ext-sealed.md §3's table, MCP request column: taskId "—"; rule 4b): an answer to an input request
+// binds session, tool and messageId, and every durable task of a session has its own upstream session (relay.md
+// §11.5, D22), whose request ids start again, so one answer would match the request of another task of the same
+// tool: a gate could deliver the buyer's answer to one task's question as the answer to another's. The closest
+// faithful behaviour, as the input request's own header already does (sealInput): the answer carries the gate task
+// id of the input request it answers (its header's taskId, "" when that had none), and the node requires it; a
+// tools/call still carries none.
+func (h *Hosting) mcpRule1(hd sealed.Header, answer bool) error {
 	switch {
 	case hd.Dir != sealed.DirRequest:
 		return reject(sealed.RejectBadHeader, "an MCP request header that is not dir req")
@@ -314,7 +416,7 @@ func (h *Hosting) mcpRule1(hd sealed.Header) error {
 		return reject(sealed.RejectBadHeader, "an MCP header that is not one data part")
 	case hd.ReplyTo == "" || hd.RK == "":
 		return reject(sealed.RejectBadHeader, "an MCP request header without replyTo or rk")
-	case hd.TaskID != "" || hd.ContextID != "" || hd.ArtifactID != "" || hd.Chunk != nil:
+	case hd.TaskID != "" && !answer || hd.ContextID != "" || hd.ArtifactID != "" || hd.Chunk != nil:
 		return reject(sealed.RejectBadHeader, "an MCP request header with A2A members")
 	}
 	if _, err := age.ParseX25519Recipient(hd.ReplyTo); err != nil {
@@ -402,6 +504,10 @@ func (x *MCPExchange) Release() {
 // FromServer seals one message of the server's for the client (after the roots filter): out is what to relay, keep
 // false removes it, and an error refuses it (nothing of it is relayed; a JSON response becomes the node's
 // refusal, an event stream ends before it).
+//
+// The answer to a sealed request of a job (a sealed tools/call, a bound task's tasks/result) is sealed by the job's
+// record of that request, on whichever exchange of its upstream session it comes (a GET stream resumed with
+// Last-Event-ID included), and refused on an exchange of another session; an error answer to one keeps its code only.
 func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error) {
 	m, err := mcpwire.Parse(data, mcpwire.FromUpstream)
 	if err != nil {
@@ -425,6 +531,36 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 		}
 	}
 	isResp := m.Method == "" && len(m.ID) > 0 && bytes.Equal(bytes.TrimSpace(m.ID), bytes.TrimSpace(x.reqID))
+	if m.Method == "" && len(m.ID) > 0 {
+		key := respKey(x.upstreamSID, m.ID)
+		owner := ""
+		if x.upstreamSID != "" {
+			owner = svc.Responses[key].Job
+		}
+		if owner != "" && owner != x.jobID {
+			return nil, false, reject(sealed.RejectWrongMessage, "the answer to another session's sealed request")
+		}
+		var req *sealedRequest
+		if job != nil {
+			req = job.Calls[key]
+		}
+		switch {
+		case req != nil:
+		case isResp && x.call != nil:
+			// The exchange's own sealed call, not recorded (the server refused it, or its record failed).
+			req = &sealedRequest{Kind: reqCall, Tool: x.call.tool, MessageID: x.call.messageID, Gate: x.pre.Task,
+				ReplyTo: x.call.replyTo, RK: x.call.rk}
+		case isResp && x.reqMethod == "tasks/result" && job != nil && job.Tasks[x.taskOf] != nil:
+			t := job.Tasks[x.taskOf]
+			req = &sealedRequest{Kind: reqResult, Tool: t.Tool, MessageID: t.MessageID, Task: x.taskOf, Gate: t.Gate}
+		case owner != "":
+			// The job's sealed request, which the job no longer holds (older than --sealed-max-age): not relayed.
+			return nil, false, nil
+		}
+		if req != nil {
+			return x.sealAnswer(svc, job, req, key, data, m)
+		}
+	}
 	// A sealed task's statusMessage is "sealed" wherever the node reads one, on every exchange, a session with no
 	// job and a modern exchange included (§2): an upstream that does not scope tasks/list or its status
 	// notifications per session would otherwise hand one session another's.
@@ -463,52 +599,6 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 	}
 	changed := false
 	switch {
-	case isResp && m.Result != nil && x.call != nil:
-		if task, ok := mcpwire.Member(m.Result, "task"); ok && firstByte(task) == '{' {
-			up, _ := memberString(task, "taskId")
-			if up == "" {
-				return nil, false, reject(sealed.RejectBadHeader, "a CreateTaskResult without a taskId")
-			}
-			if owner, bound := svc.Tasks[up]; bound && owner != job.ID {
-				return nil, false, reject(sealed.RejectWrongTask, "a CreateTaskResult names another job's task")
-			}
-			t := job.Tasks[up]
-			if t == nil {
-				t = &mcpTask{Gate: x.pre.Task, Tool: x.call.tool, MessageID: x.call.messageID, Inputs: map[string]*InputRequest{}}
-				job.Tasks[up] = t
-			}
-			svc.Tasks[up] = job.ID
-			if err := h.st.saveService(x.service, svc); err != nil {
-				return nil, false, err
-			}
-			res, err := sealStatus(m.Result, "task")
-			if err != nil {
-				return nil, false, err
-			}
-			if data, err = mcpwire.SetMember(data, "result", res); err != nil {
-				return nil, false, reject(sealed.RejectBadHeader, err.Error())
-			}
-			changed = true
-			break
-		}
-		res, err := x.sealResult(job, m.Result, x.call.tool, x.call.messageID, "")
-		if err != nil {
-			return nil, false, err
-		}
-		if data, err = mcpwire.SetMember(data, "result", res); err != nil {
-			return nil, false, reject(sealed.RejectBadHeader, err.Error())
-		}
-		changed = true
-	case isResp && m.Result != nil && x.reqMethod == "tasks/result" && job.Tasks[x.taskOf] != nil:
-		t := job.Tasks[x.taskOf]
-		res, err := x.sealResult(job, m.Result, t.Tool, t.MessageID, t.Gate)
-		if err != nil {
-			return nil, false, err
-		}
-		if data, err = mcpwire.SetMember(data, "result", res); err != nil {
-			return nil, false, reject(sealed.RejectBadHeader, err.Error())
-		}
-		changed = true
 	case isResp && m.Result != nil && (x.reqMethod == "tasks/get" || x.reqMethod == "tasks/cancel"):
 		if id, _ := memberString(m.Result, "taskId"); job.Tasks[id] != nil || id != "" && svc.Tasks[id] != "" {
 			res, err := sealStatus(m.Result, "")
@@ -532,20 +622,11 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 			changed = true
 		}
 	case m.Method == mcpwire.MethodElicit || m.Method == mcpwire.MethodSample:
-		up, ok := relatedTask(m)
-		t := job.Tasks[up]
-		if !ok || t == nil {
-			// Not a request of a task a sealed call created: only those are sealed (§2).
-			for id, tt := range job.Tasks {
-				if !ok && x.pre.Task != "" && tt.Gate == x.pre.Task {
-					up, t = id, tt
-				}
-			}
+		in := x.inputOf(job, m)
+		if in == nil {
+			break // not a request of a sealed call or of a task one created: only those are sealed (§2)
 		}
-		if t == nil {
-			break
-		}
-		params, err := x.sealInput(job, up, t, m)
+		params, err := x.sealInput(svc, job, in, m)
 		if err != nil {
 			return nil, false, err
 		}
@@ -573,6 +654,114 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 		return compactLine(data)
 	}
 	return data, true, nil
+}
+
+// sealAnswer seals the server's answer to a sealed request of the job (req, recorded under key): a sealed call's
+// CallToolResult to the call's own replyTo and rk (which must be the job's, wrong_job otherwise), or its
+// CreateTaskResult binding the task to the job; a bound task's tasks/result to the job's; an error with its code
+// only (errorResponse's SPEC-CONFLICT). h.mu is held.
+func (x *MCPExchange) sealAnswer(svc *serviceState, job *jobState, req *sealedRequest, key string, data []byte,
+	m *mcpwire.Message) ([]byte, bool, error) {
+	h := x.h
+	if m.Error != nil {
+		e := map[string]json.RawMessage{"code": json.RawMessage(fmt.Sprint(m.Error.Code)), "message": a2awire.Quote(sealedErrorText)}
+		out, err := mcpwire.SetMember(data, "error", a2awire.Encode(e))
+		if err != nil {
+			return nil, false, reject(sealed.RejectBadHeader, err.Error())
+		}
+		return compactLine(out)
+	}
+	if m.Result == nil || job == nil {
+		return nil, false, reject(sealed.RejectBadHeader, "a result of a sealed request the session holds no job for")
+	}
+	var res json.RawMessage
+	switch req.Kind {
+	case reqCall:
+		if bindOf(job.ReplyTo, job.RK) != bindOf(req.ReplyTo, req.RK) {
+			return nil, false, reject(sealed.RejectWrongJob, "the session's job is bound to another replyTo than the call's")
+		}
+		if task, ok := mcpwire.Member(m.Result, "task"); ok && firstByte(task) == '{' {
+			up, _ := memberString(task, "taskId")
+			if up == "" {
+				return nil, false, reject(sealed.RejectBadHeader, "a CreateTaskResult without a taskId")
+			}
+			if owner, bound := svc.Tasks[up]; bound && owner != job.ID {
+				return nil, false, reject(sealed.RejectWrongTask, "a CreateTaskResult names another job's task")
+			}
+			if job.Tasks[up] == nil {
+				job.Tasks[up] = &mcpTask{Gate: req.Gate, Tool: req.Tool, MessageID: req.MessageID}
+			}
+			if svc.Tasks[up] != job.ID {
+				svc.put(setTasks, up, job.ID)
+				if err := h.st.saveService(x.service, svc); err != nil {
+					return nil, false, err
+				}
+			}
+			r, err := sealStatus(m.Result, "task")
+			if err != nil {
+				return nil, false, err
+			}
+			res = r
+			break
+		}
+		r, err := x.sealResult(job, m.Result, req.Tool, req.MessageID, "")
+		if err != nil {
+			return nil, false, err
+		}
+		res = r
+	case reqResult:
+		t := job.Tasks[req.Task]
+		if t == nil {
+			return nil, false, reject(sealed.RejectWrongTask, "a tasks/result of a task the job does not hold")
+		}
+		r, err := x.sealResult(job, m.Result, t.Tool, t.MessageID, t.Gate)
+		if err != nil {
+			return nil, false, err
+		}
+		res = r
+	default:
+		return nil, false, reject(sealed.RejectBadHeader, "a sealed request of no known kind")
+	}
+	out, err := mcpwire.SetMember(data, "result", res)
+	if err != nil {
+		return nil, false, reject(sealed.RejectBadHeader, err.Error())
+	}
+	if r := job.Calls[key]; r != nil {
+		r.Answered = true
+	}
+	job.LastSeen = h.cfg.Now()
+	if err := h.saveJob(x.service, job); err != nil {
+		return nil, false, err
+	}
+	return compactLine(out)
+}
+
+// inputOf is the input request an upstream elicitation/create or sampling/createMessage is, when the node seals it
+// (D175): of a task a sealed call of the job created (its related-task, or the preamble's gate task), or, without a
+// related task, of the exchange's own sealed call (a plain call's request on its stream). nil: not sealed.
+//
+// SPEC-CONFLICT (ext-sealed.md §2: input requests and their answers are sealed "for a task the sealed call created";
+// §2 and D62 also say the gate holds no plaintext of a sealed MCP call, plain or durable): a plain call's server
+// builds its input requests from the sealed arguments too (server-everything's sampleLLM sends the prompt). The
+// closest faithful behaviour: a sealed plain call's input requests are sealed as a task's are, with the call's tool
+// and no taskId, and their answers must come sealed.
+func (x *MCPExchange) inputOf(job *jobState, m *mcpwire.Message) *InputRequest {
+	up, ok := relatedTask(m)
+	t := job.Tasks[up]
+	if !ok || t == nil {
+		for id, tt := range job.Tasks {
+			if !ok && x.pre.Task != "" && tt.Gate == x.pre.Task {
+				up, t = id, tt
+			}
+		}
+	}
+	switch {
+	case t != nil:
+		return &InputRequest{Gate: t.Gate, UpTask: up, Tool: t.Tool}
+	case !ok && x.call != nil:
+		return &InputRequest{Tool: x.call.tool}
+	}
+	return nil
 }
 
 // compactLine is a message the node rewrote, on one line (an SSE data line, a stdio line).
@@ -638,9 +827,11 @@ func (x *MCPExchange) sealResult(job *jobState, result json.RawMessage, tool, me
 // resultReads are the members of a CallToolResult the node reads: a lone case variant of one is refused (D172).
 var resultReads = []strictjson.Path{{"content"}, {"structuredContent"}, {"isError"}}
 
-// sealInput seals an upstream input request of a bound task (D175): its params, without _meta, become the body;
-// params are replaced by {"_meta": {<the related-task key>, "sh.kontra/sealed": …}}; the InputRequest is recorded.
-func (x *MCPExchange) sealInput(job *jobState, up string, t *mcpTask, m *mcpwire.Message) (json.RawMessage, error) {
+// sealInput seals an upstream input request (D175): its params, without _meta, become the body; params are replaced
+// by {"_meta": {<the related-task key>, "sh.kontra/sealed": …}}; the InputRequest is recorded in the job by the
+// upstream session and the server's id (and the gate task its answer must come on), and indexed for the service when
+// the exchange is on an upstream session, so that its answer is checked against it on whichever exchange it comes.
+func (x *MCPExchange) sealInput(svc *serviceState, job *jobState, in *InputRequest, m *mcpwire.Message) (json.RawMessage, error) {
 	if len(m.ID) == 0 {
 		return nil, reject(sealed.RejectBadHeader, "an input request without an id")
 	}
@@ -666,8 +857,8 @@ func (x *MCPExchange) sealInput(job *jobState, up string, t *mcpTask, m *mcpwire
 	// result", and an input request is "sealed like a reply" with session, tool and messageId. The closest faithful
 	// header: a durable task's input request carries its gate task id too (as its result does), so that the hiring
 	// node can tell an input request replayed from another task of the same session and tool (rule 4, which it then
-	// checks); a passthrough task has no gate task id and carries none.
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, TaskID: t.Gate, Session: job.Session, Tool: t.Tool,
+	// checks), and its answer names it back (mcpRule1); a passthrough task's, or a plain call's, carries none.
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, TaskID: in.Gate, Session: job.Session, Tool: in.Tool,
 		MessageID: msgID, Part: 0, Parts: 1}
 	ct, err := x.h.sealFor(x.service, job, hd, plainOf{kind: sealed.KindData, body: body})
 	if err != nil {
@@ -681,15 +872,19 @@ func (x *MCPExchange) sealInput(job *jobState, up string, t *mcpTask, m *mcpwire
 	if related != nil {
 		meta[mcpwire.MetaRelatedTask] = related
 	}
-	if t.Inputs == nil {
-		t.Inputs = map[string]*InputRequest{}
+	rkey := respKey(x.upstreamSID, m.ID)
+	ikey := rkey + "\x00" + in.Gate
+	if cur := job.Inputs[ikey]; cur == nil || cur.Answered && cur.MessageID == msgID && cur.Tool != in.Tool {
+		in.MessageID, in.SealedAt = msgID, x.h.cfg.Now()
+		job.Inputs[ikey] = in
 	}
-	if t.Inputs[msgID] == nil {
-		task := t.Gate
-		if task == "" {
-			task = up
+	if x.upstreamSID != "" {
+		if e := svc.Inputs[rkey]; e.Job != job.ID || e.Key != ikey {
+			svc.put(setInputs, rkey, indexEntry{Job: job.ID, Key: ikey})
+			if err := x.h.st.saveService(x.service, svc); err != nil {
+				return nil, err
+			}
 		}
-		t.Inputs[msgID] = &InputRequest{Task: task, MessageID: msgID, SealedAt: x.h.cfg.Now()}
 	}
 	return a2awire.Encode(map[string]json.RawMessage{"_meta": a2awire.Encode(meta)}), nil
 }

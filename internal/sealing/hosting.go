@@ -112,14 +112,16 @@ type Hosting struct {
 	services map[string]*serviceState // loaded service.json, written through
 	jobs     map[string]*jobState     // loaded job files by "<service>/<job>", written through
 	// flight holds what a request the service has not accepted yet will record once it does (rule 2's replyTo, rule
-	// 5's pairs and MCP (session, messageId), rule 4b's answered input request), by flightKey, with its gate task for a
-	// replyTo: a second copy in flight is refused as a replay of the first, as it would be once the first is recorded.
-	// An exchange releases its keys when the service accepts it (they are then recorded) or the node answers it
-	// itself (nothing is recorded: the gate's retry is not a replay).
+	// 5's pairs and MCP (session, messageId), rule 4b's answered input request, and the binding a new job opens with),
+	// by flightKey, with its owner: a second copy in flight is refused as a replay of the first, and a second binding
+	// for a job being opened as wrong_job, as each would be once the first is recorded. An exchange releases its keys
+	// when the service accepts it (they are then recorded) or the node answers it itself (nothing is recorded: the
+	// gate's retry is not a replay).
 	flight map[string]flightRef
 }
 
-// flightRef is one in-flight key: the gate task that holds it and how many exchanges do.
+// flightRef is one in-flight key: who holds it (for "r" the service and gate task, for "j" the replyTo and rk the
+// job opens with) and how many exchanges do.
 type flightRef struct {
 	owner string
 	n     int
@@ -149,11 +151,15 @@ func NewHosting(cfg HostingConfig, log *slog.Logger) (*Hosting, error) {
 		services: map[string]*serviceState{}, jobs: map[string]*jobState{}, flight: map[string]flightRef{}}, nil
 }
 
-// flightKey is the in-flight key of what a request records: kind "r" a replyTo, "p" a job's (messageId, part) pair,
-// "m" an MCP (session, messageId), "a" an MCP input request's answer.
+// flightKey is the in-flight key of what a request records: kind "r" a replyTo (node-wide: service ""), "p" a job's
+// (messageId, part) pair, "m" an MCP (session, messageId) (node-wide), "a" an MCP input request's answer, "j" the
+// replyTo and rk a job is being opened with (sealing-spec: one binding per job, in flight as once recorded).
 func flightKey(kind, service string, parts ...string) string {
 	return kind + "\x00" + service + "\x00" + strings.Join(parts, "\x00")
 }
+
+// binding is a job's replyTo and rk as one value (the "j" key's owner).
+func bindOf(replyTo, rk string) string { return replyTo + "\x00" + rk }
 
 // reserve records keys in flight for owner; h.mu is held.
 func (h *Hosting) reserve(owner string, keys ...string) {
@@ -186,14 +192,6 @@ func (h *Hosting) inFlight(key string) (string, bool) {
 	return r.owner, ok
 }
 
-// InputRequest is an MCP input request this node sealed for a gate task and has not seen answered.
-type InputRequest struct {
-	Task      string    `json:"task"`       // the preamble's task (the gate task; for a passthrough task its upstream id)
-	MessageID string    `json:"message_id"` // the upstream server's JSON-RPC id, as a string
-	SealedAt  time.Time `json:"sealed_at"`  // node clock; the answer must come within MaxAge
-	Answered  bool      `json:"answered,omitempty"`
-}
-
 // Exchange is one forwarded exchange's sealing state, from Request to Response.
 type Exchange struct {
 	h       *Hosting
@@ -207,8 +205,11 @@ type Exchange struct {
 	stream bool
 
 	// job is the sealed job whose replies are sealed (nil: an unsealed exchange, whose replies pass unless they
-	// name a sealed job's upstream task).
-	job *jobState
+	// name a sealed job's upstream task). bind is the replyTo and rk they are sealed to: those of the request the
+	// exchange carried (or, on an exchange that carries none, the job's when the request came), never a job's that
+	// another exchange recorded since (reply refuses a job bound otherwise, wrong_job).
+	job  *jobState
+	bind string
 	// commit is what the service's acceptance records (rule 2's new job, rule 5's pairs); reserved are its in-flight
 	// keys (Hosting.flight) until then.
 	commit   func() error
@@ -461,7 +462,7 @@ func (h *Hosting) guarded(service string, svc *serviceState) bool {
 	if h.Required(service) || len(svc.ReplyTo) > 0 || len(svc.Tasks) > 0 || len(svc.UpstreamContexts) > 0 {
 		return true
 	}
-	prefix := flightKey("r", service)
+	prefix := flightKey("j", service)
 	for k := range h.flight {
 		if strings.HasPrefix(k, prefix) {
 			return true
@@ -478,7 +479,7 @@ func (x *Exchange) other(svc *serviceState, taskIDs []string) error {
 		return err
 	}
 	if j != nil {
-		x.job = j
+		x.job, x.bind = j, bindOf(j.ReplyTo, j.RK)
 		if len(taskIDs) > 0 && j.UpstreamTask != "" {
 			if !slices.Contains(taskIDs, j.UpstreamTask) {
 				return reject(sealed.RejectWrongTask, "the request names another upstream task than the job's")
@@ -597,8 +598,12 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 	if len(sealedP) == 0 {
 		return out, x.unsealedSend(svc, msgTask, msgCtx, unsealed)
 	}
-	if unsealed > 0 && slices.Contains(x.h.cfg.Required, x.service) {
-		return nil, reject(sealed.RejectBadHeader, "an unsealed part beside sealed ones (--sealed-required)")
+	if unsealed > 0 {
+		// A message with a sealed part is the hiring node's, which seals every part of it (§5, hiring rule 3): an
+		// unsealed part beside sealed ones is the gate's, written into the buyer's message (an instruction to the
+		// service about the buyer's sealed content), whatever --sealed-required says (security review: the A2A half of
+		// D175's "answers must be sealed").
+		return nil, reject(sealed.RejectBadHeader, "an unsealed part beside sealed ones")
 	}
 	h, err := x.h.rule1(sealedP)
 	if err != nil {
@@ -638,11 +643,21 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 		if e, ok := svc.ReplyTo[h.ReplyTo]; ok && e.Job != x.pre.Task {
 			return nil, reject(sealed.RejectReplayed, "the replyTo opened a job for another gate task")
 		}
-		if owner, ok := x.h.inFlight(flightKey("r", x.service, h.ReplyTo)); ok && owner != x.pre.Task {
+		if x.h.replyToElsewhere(x.service, h.ReplyTo) {
+			return nil, reject(sealed.RejectReplayed, "the replyTo opened a job of another service of this node")
+		}
+		if owner, ok := x.h.inFlight(flightKey("r", "", h.ReplyTo)); ok && owner != x.service+"\x00"+x.pre.Task {
 			return nil, reject(sealed.RejectReplayed, "the replyTo is opening a job for another gate task")
 		}
 		if j != nil && (j.ReplyTo != h.ReplyTo || j.RK != h.RK) {
 			return nil, reject(sealed.RejectWrongJob, "the gate task's job was opened with another replyTo")
+		}
+		// The job's binding is the first request's from the node's checks on, not from its record only: a first message
+		// of another replyTo for the same gate task while one is in flight would otherwise pass too, and whichever the
+		// service accepted last would bind the job, so that the buyer's replies were sealed to the other's key (rules 2–4,
+		// §7 "cannot continue another buyer's job").
+		if b, ok := x.h.inFlight(flightKey("j", x.service, x.pre.Task)); ok && b != bindOf(h.ReplyTo, h.RK) {
+			return nil, reject(sealed.RejectWrongJob, "the gate task's job is being opened with another replyTo")
 		}
 	} else {
 		// Rule 3: a follow-up of job T. A header naming another task than the preamble's is a follow-up sent into
@@ -675,22 +690,40 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 		}
 		flight = append(flight, k)
 	}
-	if j == nil {
-		j = &jobState{ID: x.pre.Task, ReplyTo: h.ReplyTo, RK: h.RK, Created: now, GateContext: x.pre.Context,
-			Artifacts: map[string]*artifactState{}, Tasks: map[string]*mcpTask{}}
-	}
-	x.job = j
-	if h.TaskID == "" {
-		flight = append(flight, flightKey("r", x.service, h.ReplyTo))
-	}
 	x.h.reserve(x.pre.Task, flight...)
 	x.reserved = flight
+	if h.TaskID == "" {
+		rk := flightKey("r", "", h.ReplyTo)
+		x.h.reserve(x.service+"\x00"+x.pre.Task, rk)
+		x.reserved = append(x.reserved, rk)
+	}
+	if j == nil {
+		j = &jobState{ID: x.pre.Task, ReplyTo: h.ReplyTo, RK: h.RK, Created: now, GateContext: x.pre.Context}
+		j.init()
+		jk := flightKey("j", x.service, x.pre.Task)
+		x.h.reserve(bindOf(h.ReplyTo, h.RK), jk)
+		x.reserved = append(x.reserved, jk)
+	}
+	x.job, x.bind = j, bindOf(h.ReplyTo, h.RK)
 	service, job := x.service, j
 	x.commit = func() error {
 		at := x.h.cfg.Now()
+		// The job recorded meanwhile, if any: the same binding (the gate's retry of the first message) is that job, and
+		// another is never overwritten.
+		cur, err := x.h.jobFor(service, job.ID)
+		if err != nil {
+			return err
+		}
+		if cur != nil && cur != job {
+			if bindOf(cur.ReplyTo, cur.RK) != bindOf(job.ReplyTo, job.RK) {
+				return fmt.Errorf("sealing: job %s is bound to another replyTo: this request opens nothing", job.ID)
+			}
+			job = cur
+			x.job = cur
+		}
 		job.Pairs = append(job.Pairs, pairs...)
 		job.LastSeen = at
-		svc.ReplyTo[h.ReplyTo] = replyEntry{Job: job.ID, At: at}
+		svc.put(setReplyTo, h.ReplyTo, replyEntry{Job: job.ID, At: at})
 		if err := x.h.saveJob(service, job); err != nil {
 			return err
 		}
@@ -699,9 +732,61 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 	return out, nil
 }
 
-// unsealedSend is a send request with no sealed part: refused bad_header under --sealed-required; on a sealed job's
-// exchange its replies are sealed all the same; it may not name another job's upstream task or another gate context's
-// upstream context.
+// replyToElsewhere reports a replyTo that opened a job of another service this node hosts: the envelope names no
+// service, and one identity key opens every service's requests, so a gate could otherwise send a buyer's first
+// message to every service of the node in turn (security review). h.mu is held.
+//
+// SPEC-CONFLICT (ext-sealed.md §3, §5 rule 2, §7): the header binds the gate's task, context, session, tool and
+// messageId, never the service, and §5 keeps the replay sets per service. A gate can therefore deliver a buyer's
+// sealed request to another service of the same node instead of the one hired, which opens it and answers with valid
+// auth (the hiring node checks no service either). The closest faithful behaviour: rule 2's replyTo set and rule 5's
+// (session, messageId) set are checked node-wide, so a request a service of the node accepted is refused by every
+// other; a first delivery to the wrong service is not detected, and stays a residual until the header names the
+// service (a `service` member in request and reply headers, checked by both nodes).
+func (h *Hosting) replyToElsewhere(service, replyTo string) bool {
+	for _, name := range h.knownServices() {
+		if name == service {
+			continue
+		}
+		if svc, err := h.service(name); err == nil {
+			if _, ok := svc.ReplyTo[replyTo]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mcpCallElsewhere reports an MCP (session, messageId) a sealed call of another service of this node forwarded
+// (replyToElsewhere's SPEC-CONFLICT). h.mu is held.
+func (h *Hosting) mcpCallElsewhere(service, callKey string) bool {
+	for _, name := range h.knownServices() {
+		if name == service {
+			continue
+		}
+		if svc, err := h.service(name); err == nil {
+			if _, ok := svc.MCPCalls[callKey]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// knownServices are the services the node holds state for, loaded or on disk. h.mu is held.
+func (h *Hosting) knownServices() []string {
+	names, _ := h.st.services()
+	for name := range h.services {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// unsealedSend is a send request with no sealed part: refused bad_header under --sealed-required, and on the
+// exchange of a sealed job (recorded, or being opened); it may not name another job's upstream task or another gate
+// context's upstream context.
 func (x *Exchange) unsealedSend(svc *serviceState, msgTask, msgCtx string, _ int) error {
 	if slices.Contains(x.h.cfg.Required, x.service) {
 		return reject(sealed.RejectBadHeader, "an unsealed request to a service started with --sealed-required")
@@ -710,12 +795,13 @@ func (x *Exchange) unsealedSend(svc *serviceState, msgTask, msgCtx string, _ int
 	if err != nil {
 		return err
 	}
-	if j != nil {
-		x.job = j
-		if msgTask != "" && j.UpstreamTask != "" && msgTask != j.UpstreamTask {
-			return reject(sealed.RejectWrongTask, "the message names another upstream task than the job's")
-		}
-		return nil
+	_, opening := x.h.inFlight(flightKey("j", x.service, x.pre.Task))
+	if j != nil || opening {
+		// A job opened by a sealed request is the hiring node's, which seals every message of it: an unsealed follow-up
+		// is the gate's own (answering the service's question for the buyer, say), and its replies would reach the buyer
+		// sealed and authenticated as the service's answer to the buyer. The A2A half of D175's "answers must be
+		// sealed", whatever --sealed-required says (security review).
+		return reject(sealed.RejectBadHeader, "an unsealed message on a sealed job's exchange")
 	}
 	if owner, ok := svc.Tasks[msgTask]; ok && msgTask != "" && owner != x.pre.Task {
 		return reject(sealed.RejectWrongTask, "the message names a sealed job's upstream task")
@@ -836,7 +922,10 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 		resp.Header.Del("Content-Length")
 		return resp, nil
 	case resp.StatusCode/100 != 2:
-		return resp, nil // an error: no client reads it as an answer
+		if x.job == nil {
+			return resp, nil // an error: no client reads it as an answer
+		}
+		return h.errorResponse(x, resp), nil
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	_ = resp.Body.Close()
@@ -862,6 +951,122 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 	return resp, nil
 }
 
+// sealedErrorText replaces a service's error message on a sealed job's exchange (errorResponse, scrubError): the code
+// stays, the text and data do not, since a service's error routinely quotes the input it refused.
+const sealedErrorText = "the service returned an error (its text stays on the node: the job is sealed)"
+
+// errorResponse is a sealed job's non-2xx answer as the gate gets it: its error's code (and HTTP+JSON status) with
+// sealedErrorText, never the service's text, which may quote the sealed input (a validation error echoing an
+// argument). A body that is not one error object becomes the node's own error of that status.
+//
+// SPEC-CONFLICT (ext-sealed.md §2, §7): §2 lists what is sealed (parts, MCP arguments and results) and says nothing
+// of errors, while §7 promises that the gate's database and logs hold ciphertext only, and the gate stores and logs a
+// service's error text. The closest faithful behaviour: on a sealed job the hosting node keeps an error's code and
+// replaces its message and data with fixed text; sealing them for the hiring node to open would need §3 to define an
+// error's envelope.
+func (h *Hosting) errorResponse(x *Exchange, resp *http.Response) *http.Response {
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	_ = resp.Body.Close()
+	out, ok := []byte(nil), false
+	if err == nil && len(b) <= maxBody {
+		out, ok = scrubError(b)
+	}
+	if !ok {
+		if x.jsonrpc {
+			id := x.rpcID
+			if len(bytes.TrimSpace(id)) == 0 {
+				id = json.RawMessage("null")
+			}
+			out = a2awire.Encode(map[string]json.RawMessage{"jsonrpc": a2awire.Quote("2.0"), "id": id,
+				"error": a2awire.Encode(map[string]json.RawMessage{"code": json.RawMessage("-32603"), "message": a2awire.Quote(sealedErrorText)})})
+		} else {
+			out = a2awire.Encode(map[string]json.RawMessage{"error": a2awire.Encode(map[string]json.RawMessage{
+				"code": json.RawMessage(fmt.Sprint(resp.StatusCode)), "status": a2awire.Quote("UNKNOWN"), "message": a2awire.Quote(sealedErrorText)})})
+		}
+	}
+	h.log.Info("sealing: a sealed job's error is relayed with its code only", "service", x.service, "status", resp.StatusCode)
+	resp.Header.Set("Content-Type", "application/json")
+	resp.Header.Del("Content-Encoding")
+	resp.Trailer = nil
+	setBody(resp, out)
+	return resp
+}
+
+// scrubError replaces the message and data of a body's error object (a JSON-RPC error, or HTTP+JSON's
+// google.rpc.Status) with sealedErrorText, keeping its code (and status); ok false when the body is not one JSON
+// object whose error member is one (any case variant of "error" counts, as a lenient decoder reads it).
+func scrubError(body []byte) ([]byte, bool) {
+	top, err := strictjson.Members(body)
+	if err != nil {
+		return nil, false
+	}
+	key := ""
+	for k := range top {
+		if strings.EqualFold(k, "error") {
+			if key != "" {
+				return nil, false
+			}
+			key = k
+		}
+	}
+	if key == "" {
+		return nil, false
+	}
+	e, err := strictjson.Members(top[key])
+	if err != nil {
+		return nil, false
+	}
+	ne := map[string]json.RawMessage{"message": a2awire.Quote(sealedErrorText)}
+	for k, v := range e {
+		switch {
+		case strings.EqualFold(k, "code") && firstByte(v) != '"' && json.Valid(v):
+			ne["code"] = v
+		case strings.EqualFold(k, "status") && firstByte(v) == '"':
+			var st string
+			if json.Unmarshal(v, &st) == nil && isStatusName(st) {
+				ne["status"] = v
+			}
+		}
+	}
+	if _, ok := ne["code"]; !ok {
+		ne["code"] = json.RawMessage("-32603")
+	}
+	out := map[string]json.RawMessage{"error": a2awire.Encode(ne)}
+	for k, v := range top {
+		if k == "jsonrpc" || k == "id" {
+			out[k] = v
+		}
+	}
+	return a2awire.Encode(out), true
+}
+
+// isStatusName reports a google.rpc.Code name (upper case letters and underscores), which quotes nothing.
+func isStatusName(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'A' && c <= 'Z' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// lastSeenEvery is how often a job's LastSeen is written when nothing else of the job changed: retention is counted
+// in days, and a poll of an unchanged task should not cost a write.
+const lastSeenEvery = 10 * time.Minute
+
+// jobDigest is what a reply may change of a job (its artifacts' chunks, its upstream ids): reply writes the job when
+// it changed, and LastSeen alone only every lastSeenEvery.
+func jobDigest(j *jobState) string {
+	b, _ := json.Marshal(struct {
+		A    map[string]*artifactState
+		T, C string
+	}{j.Artifacts, j.UpstreamTask, j.UpstreamContext})
+	return string(b)
+}
+
 // reply checks and seals one reply body (a JSON response, or one SSE event's data).
 func (x *Exchange) reply(b []byte) ([]byte, error) {
 	h := x.h
@@ -873,10 +1078,22 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 	}
 	j := x.job
 	if j != nil {
-		// Reload what the job holds now (another exchange of the task may have sealed meanwhile).
+		// Reload what the job holds now (another exchange of the task may have sealed meanwhile); a job bound to
+		// another replyTo than the exchange's request is never sealed to.
 		if cur, err := h.jobFor(x.service, j.ID); err == nil && cur != nil {
+			if bindOf(cur.ReplyTo, cur.RK) != x.bind {
+				return nil, reject(sealed.RejectWrongJob, "the job is bound to another replyTo than the exchange's request")
+			}
 			j, x.job = cur, cur
 		}
+		if out, ok := scrubError(b); ok {
+			// A JSON-RPC error answer of a sealed job: its code only (errorResponse).
+			return out, nil
+		}
+	}
+	before := ""
+	if j != nil {
+		before = jobDigest(j)
 	}
 	changedIndex := false
 	binding := a2awire.BindingHTTP
@@ -909,7 +1126,7 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 				switch {
 				case j.UpstreamTask == "":
 					j.UpstreamTask = task
-					svc.Tasks[task] = j.ID
+					svc.put(setTasks, task, j.ID)
 					changedIndex = true
 				case task != j.UpstreamTask:
 					return reject(sealed.RejectWrongTask, "a reply names another upstream task than the job's")
@@ -922,9 +1139,9 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 				switch {
 				case j.UpstreamContext == "":
 					j.UpstreamContext = cctx
-					svc.UpstreamContexts[cctx] = j.GateContext
+					svc.put(setUpstreamContexts, cctx, j.GateContext)
 					if j.GateContext != "" {
-						svc.Contexts[j.GateContext] = contextEntry{Upstream: cctx, At: h.cfg.Now()}
+						svc.put(setContexts, j.GateContext, contextEntry{Upstream: cctx, At: h.cfg.Now()})
 					}
 					changedIndex = true
 				case cctx != j.UpstreamContext:
@@ -947,9 +1164,11 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 		return nil, reject(sealed.RejectBadHeader, "a reply that is not an A2A 1.0 answer with exact keys (D172)")
 	}
 	if j != nil {
-		j.LastSeen = h.cfg.Now()
-		if err := h.saveJob(x.service, j); err != nil {
-			return nil, err
+		if now := h.cfg.Now(); jobDigest(j) != before || now.Sub(j.LastSeen) >= lastSeenEvery {
+			j.LastSeen = now
+			if err := h.saveJob(x.service, j); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if changedIndex {
@@ -966,7 +1185,26 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 // sealContainer seals every part of one message or artifact of a reply to the job's replyTo (§5): a message's parts
 // with its messageId; an artifact update's with the artifactId and the next chunk; a whole artifact's (a Task's)
 // reusing the ciphertext of the parts the gate already holds unchanged and sealing the rest as the next chunk.
+//
+// SPEC-CONFLICT (ext-sealed.md §3's table, chunk: "for artifact updates, the 0-based count of updates for that
+// artifactId this node sealed; 0 for a whole artifact"): a whole artifact reuses the ciphertext of the parts the gate
+// already holds (§5, so that polling sees identical bytes), and those carry the chunk they were sealed as; its new
+// parts cannot be chunk 0 again once a chunk 0 was sealed, since the hiring node refuses a (chunk, part) seen before
+// with other bytes (rule 4). The closest faithful behaviour: chunk counts every chunk this node sealed for the
+// artifactId, an update or the new parts of a whole artifact, so that a whole artifact sealed first is chunk 0 and
+// the updates that follow count on from it; §3 would need to say so.
 func (x *Exchange) sealContainer(j *jobState, c *a2awire.Container) error {
+	if c.Where == a2awire.WhereArtifact || c.Where == a2awire.WhereArtifactUpdate {
+		// An artifact's name and description are the service's words about its content, and nothing seals them (§2
+		// lists a part's filename as the only member of content left outside): on a sealed job they are not relayed.
+		// SPEC-CONFLICT (ext-sealed.md §2): §2 names neither; the closest faithful behaviour to "the gate holds
+		// ciphertext only" (§7) drops them, any case variant included (a lenient decoder takes one for the member).
+		for k := range c.Members {
+			if strings.EqualFold(k, "name") || strings.EqualFold(k, "description") {
+				c.Set(k, nil)
+			}
+		}
+	}
 	if len(c.Parts) == 0 {
 		return nil
 	}
@@ -1144,8 +1382,16 @@ func (h *Hosting) saveJob(service string, j *jobState) error {
 	return h.st.saveJob(service, j)
 }
 
-// Sweep drops jobs JobRetention after their last exchange, and the per-service entries older than MaxAge (and the
-// clock skew rule 1 allows) that no kept job needs.
+// jobCacheIdle is how long a job stays loaded in memory after its last exchange (Sweep evicts it then; it is read
+// again from its file when an exchange names it).
+const jobCacheIdle = time.Hour
+
+// Sweep drops jobs JobRetention after their last exchange, and the per-service entries they leave: a replyTo or an
+// MCP (session, messageId) once it is older than MaxAge (and the clock skew rule 1 allows), whatever became of its
+// job, since rule 2 and rule 5 refuse a replay for that long (§5); a gate context's upstream context, and the
+// reverse index, once no kept job is in it; the indexes of the jobs dropped. A job file is read to decide, not kept
+// loaded, and a loaded job idle for jobCacheIdle is evicted, so that the jobs in memory are the busy ones. Each
+// service's sets are written as a new snapshot.
 func (h *Hosting) Sweep(now time.Time) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1167,46 +1413,90 @@ func (h *Hosting) Sweep(now time.Time) error {
 			continue
 		}
 		gone := map[string]bool{}
+		liveCtx, liveUp := map[string]bool{}, map[string]bool{}
 		for _, id := range jobs {
-			j, err := h.jobFor(name, id)
-			if err != nil || j == nil {
-				continue
+			k := name + "/" + id
+			j := h.jobs[k]
+			if j == nil {
+				if j, err = h.st.loadJob(name, id); err != nil {
+					continue
+				}
 			}
 			last := j.LastSeen
 			if last.IsZero() {
 				last = j.Created
 			}
 			if now.Sub(last) < JobRetention {
+				liveCtx[j.GateContext], liveUp[j.UpstreamContext] = true, true
+				// A sealed MCP request or input request older than MaxAge is no longer answerable (rule 4b's age; a
+				// result that late is a replay of one already sealed): it leaves the job, and its index entry stays with
+				// the job, so that an answer to it is still the job's, and refused (FromServer, answer).
+				pruned := false
+				for ck, c := range j.Calls {
+					if now.Sub(c.At) > keepFor {
+						delete(j.Calls, ck)
+						pruned = true
+					}
+				}
+				for ik, in := range j.Inputs {
+					if now.Sub(in.SealedAt) > keepFor {
+						delete(j.Inputs, ik)
+						pruned = true
+					}
+				}
+				if pruned {
+					if err := h.st.saveJob(name, j); err != nil {
+						errs = append(errs, err)
+					}
+				}
+				if h.jobs[k] != nil && now.Sub(last) >= jobCacheIdle {
+					delete(h.jobs, k)
+				}
 				continue
 			}
 			if err := h.st.removeJob(name, id); err != nil {
 				errs = append(errs, err)
 				continue
 			}
-			delete(h.jobs, name+"/"+id)
+			delete(h.jobs, k)
 			gone[id] = true
 		}
 		for k, v := range svc.ReplyTo {
-			if now.Sub(v.At) > keepFor || gone[v.Job] {
-				delete(svc.ReplyTo, k)
+			if now.Sub(v.At) > keepFor {
+				svc.del(setReplyTo, k)
 			}
 		}
 		for k, v := range svc.MCPCalls {
 			if now.Sub(v) > keepFor {
-				delete(svc.MCPCalls, k)
+				svc.del(setMCPCalls, k)
 			}
 		}
 		for k, v := range svc.Contexts {
-			if now.Sub(v.At) > JobRetention {
-				delete(svc.Contexts, k)
+			if !liveCtx[k] && now.Sub(v.At) > JobRetention {
+				svc.del(setContexts, k)
+			}
+		}
+		for k, v := range svc.UpstreamContexts {
+			if c, ok := svc.Contexts[v]; !liveUp[k] && (!ok || c.Upstream != k) {
+				svc.del(setUpstreamContexts, k)
 			}
 		}
 		for k, v := range svc.Tasks {
 			if gone[v] {
-				delete(svc.Tasks, k)
+				svc.del(setTasks, k)
 			}
 		}
-		if err := h.st.saveService(name, svc); err != nil {
+		for k, v := range svc.Responses {
+			if gone[v.Job] {
+				svc.del(setResponses, k)
+			}
+		}
+		for k, v := range svc.Inputs {
+			if gone[v.Job] {
+				svc.del(setInputs, k)
+			}
+		}
+		if err := h.st.compactService(name, svc); err != nil {
 			errs = append(errs, err)
 		}
 	}

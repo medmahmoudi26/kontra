@@ -213,8 +213,12 @@ func (d *durable) answer(t *testing.T, upID string, hd sealed.Header, result str
 	return []byte(`{"jsonrpc":"2.0","id":` + upID + `,"result":{"_meta":{"io.modelcontextprotocol/related-task":{"taskId":"up-t"},"sh.kontra/sealed":` + envelope(ct) + `}}}`)
 }
 
+// hdr is the header of the client's answer to the input request msgID of the task: the input request's session, tool
+// and messageId, and its gate task (sealing's mcpRule1 SPEC-CONFLICT).
 func (d *durable) hdr(msgID string) sealed.Header {
-	return d.f.mcpHeader(d.b, d.session, d.tool, msgID)
+	hd := d.f.mcpHeader(d.b, d.session, d.tool, msgID)
+	hd.TaskID = d.task
+	return hd
 }
 
 // A sealed durable task (D175): its elicitation is sealed with the upstream's id as messageId and the creating call's
@@ -309,7 +313,9 @@ func TestHostingMCPAnswerRules(t *testing.T) {
 		d := newDurable(t)
 		d.ask(t, "5")
 		other := newBuyer(t)
-		_, r := fromClient(t, d.f.h.MCP(mcpPre(d.session, "1", d.task)), d.answer(t, "5", d.f.mcpHeader(other, d.session, d.tool, "5"), `{}`))
+		hd := d.f.mcpHeader(other, d.session, d.tool, "5")
+		hd.TaskID = d.task
+		_, r := fromClient(t, d.f.h.MCP(mcpPre(d.session, "1", d.task)), d.answer(t, "5", hd, `{}`))
 		if r != sealed.RejectWrongJob {
 			t.Fatalf("%q", r)
 		}

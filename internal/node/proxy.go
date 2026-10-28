@@ -22,6 +22,7 @@ import (
 	"kontra.sh/kontra/internal/a2awire"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/mcproots"
+	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/sealed"
 	"kontra.sh/kontra/internal/sealing"
@@ -393,7 +394,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			sw := &statusWriter{ResponseWriter: w} // the bridge's own Kontra-Node answers (full, target_unreachable) are kept
 			ctx := stdiobridge.WithOwner(r.Context(), p)
 			if p.seal != nil {
-				sx := p.seal.MCP(pre)
+				sx := p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
 				defer sx.Release() // what a message the child never got holds in flight (ext-sealed.md §5)
 				ctx = stdiobridge.WithFilter(ctx, sx)
 			}
@@ -451,7 +452,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		if f := p.mcp[sv.Name]; sv.Kind == tunnel.KindMCP && f != nil {
 			var sx *sealing.MCPExchange
 			if p.seal != nil {
-				sx = p.seal.MCP(pre)
+				sx = p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
 				defer sx.Release()
 				release = sx.Release
 			}
