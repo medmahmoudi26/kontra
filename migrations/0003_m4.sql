@@ -1,0 +1,39 @@
+-- Kontra gate schema, revision 0003 (M4).
+--
+-- The tasks the gate's own /mcp creates with hire, which its MCP Tasks see (spec/relay.md §12.2, DM4-5); the one GET
+-- stream that delivers a hire task's notifications/elicitation/complete (R §12.3, DM4-21); the live anonymous tenants
+-- of a network (T §6.2, DM4-10); and the anon- slug, reserved to anonymous tenants (T §6.1, DM4-20). Every M4 schema
+-- change is in this one file, frozen when M4 merges. Section references are to spec/relay.md (R) and spec/tunnel.md
+-- (T).
+
+-- +goose Up
+set local search_path to kontra;
+
+-- R §12.2 (DM4-5): a task hire created. The MCP Tasks of /mcp see only these, of the principal's buyer, across
+-- services and newest first (tasks/list). A constant default adds the column without rewriting the table.
+alter table tasks add column hired boolean not null default false;
+create index tasks_hired on tasks (buyer_id, status_at desc, id desc) where hired;
+
+-- R §12.3 (DM4-21): when a GET stream of the session that received the -32042 claimed the task's
+-- notifications/elicitation/complete. A replica writes the notification only if its
+-- `update … set elicitation_notified_at = now() where id = $1 and elicitation_notified_at is null` won, so one stream
+-- of the session gets it (MCP 2025-11-25 transports: a message is never broadcast across streams). Only a task that
+-- sent a URL elicitation has one to claim.
+alter table tasks add column elicitation_notified_at timestamptz;
+alter table tasks add constraint elicitation_notified_has_id check (elicitation_notified_at is null or elicitation_id is not null);
+
+-- T §6.2 (DM4-10): a network's live anonymous tenants, counted when a hello would open one more.
+create index tenants_anonymous_network on tenants (created_from) where kind = 'anonymous' and deleted_at is null;
+
+-- T §6.1 (DM4-20): a tenant is anonymous if and only if its slug is anon- and 16 lowercase hex digits, so no account
+-- or team can take an anonymous tenant's name, and an anonymous tenant always has one.
+alter table tenants add constraint anonymous_slug check ((kind = 'anonymous') = (slug ~ '^anon-[0-9a-f]{16}$'));
+
+-- +goose Down
+set local search_path to kontra;
+alter table tenants drop constraint anonymous_slug;
+drop index tenants_anonymous_network;
+alter table tasks drop constraint elicitation_notified_has_id;
+alter table tasks drop column elicitation_notified_at;
+drop index tasks_hired;
+alter table tasks drop column hired;

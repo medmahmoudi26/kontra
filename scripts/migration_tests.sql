@@ -160,4 +160,71 @@ do $$ begin
     end if;
 end $$;
 
+-- 0003 (R §12.2, DM4-5): a task is not hired unless the gate's /mcp marks it; hired tasks are indexed by buyer.
+insert into tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version,
+                   snapshot, status_at)
+    values ('01900000-0000-7000-8000-0000000000e1', '01900000-0000-7000-8000-000000000001', 'hello', 'a2a',
+            '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', 'ctx-h', 'submitted', 1, '{"id": "h"}', now());
+do $$ begin
+    if (select hired from tasks where id = '01900000-0000-7000-8000-0000000000e1') then
+        raise exception 'FAIL: tasks.hired defaults to true';
+    end if;
+    if to_regclass('kontra.tasks_hired') is null then
+        raise exception 'FAIL: no tasks_hired index';
+    end if;
+end $$;
+update tasks set hired = true where id = '01900000-0000-7000-8000-0000000000e1';
+
+-- 0003 (R §12.3, DM4-21): a notification is claimed once, and only for a task that sent a URL elicitation.
+do $$ begin
+    update tasks set elicitation_notified_at = now() where id = '01900000-0000-7000-8000-0000000000e1';
+    raise exception 'FAIL: elicitation_notified_at without elicitation_id';
+exception when check_violation then null; end $$;
+update tasks set elicitation_id = 'el-h', elicitation_session = sha256('s-h') where id = '01900000-0000-7000-8000-0000000000e1';
+do $$
+declare first int; second int;
+begin
+    update tasks set elicitation_notified_at = now()
+        where id = '01900000-0000-7000-8000-0000000000e1' and elicitation_notified_at is null;
+    get diagnostics first = row_count;
+    update tasks set elicitation_notified_at = now()
+        where id = '01900000-0000-7000-8000-0000000000e1' and elicitation_notified_at is null;
+    get diagnostics second = row_count;
+    if first <> 1 or second <> 0 then
+        raise exception 'FAIL: the notification claim won % then % times', first, second;
+    end if;
+end $$;
+
+-- 0003 (T §6.1, DM4-20): a tenant is anonymous if and only if its slug is anon- and 16 lowercase hex digits.
+insert into tenants (id, slug, kind, expires_at, created_from)
+    values ('01900000-0000-7000-8000-0000000000f1', 'anon-0123456789abcdef', 'anonymous', now() + interval '2 hours', '198.51.100.0/24');
+do $$ begin
+    insert into tenants (id, slug, kind) values ('01900000-0000-7000-8000-0000000000f2', 'anon-fedcba9876543210', 'account');
+    raise exception 'FAIL: an account took an anonymous slug';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into tenants (id, slug, kind) values ('01900000-0000-7000-8000-0000000000f3', 'anon-fedcba9876543210', 'team');
+    raise exception 'FAIL: a team took an anonymous slug';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into tenants (id, slug, kind, expires_at, created_from)
+        values ('01900000-0000-7000-8000-0000000000f4', 'anon-7f3a', 'anonymous', now() + interval '2 hours', '198.51.100.0/24');
+    raise exception 'FAIL: an anonymous tenant with a short slug';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into tenants (id, slug, kind, expires_at, created_from)
+        values ('01900000-0000-7000-8000-0000000000f5', 'acme2', 'anonymous', now() + interval '2 hours', '2001:db8:1::/48');
+    raise exception 'FAIL: an anonymous tenant without the anon- slug';
+exception when check_violation then null; end $$;
+do $$ begin
+    update tenants set kind = 'account', expires_at = null where id = '01900000-0000-7000-8000-0000000000f1';
+    raise exception 'FAIL: an anonymous tenant became an account under its anon- slug';
+exception when check_violation then null; end $$;
+insert into tenants (id, slug, kind) values ('01900000-0000-7000-8000-0000000000f6', 'anonymous-users', 'account');
+do $$ begin
+    if to_regclass('kontra.tenants_anonymous_network') is null then
+        raise exception 'FAIL: no tenants_anonymous_network index';
+    end if;
+end $$;
+
 select 'migration behaviour: ok';
