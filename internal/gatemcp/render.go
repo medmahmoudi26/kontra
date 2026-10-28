@@ -66,8 +66,9 @@ func textResult(text string, structured any, meta map[string]any) json.RawMessag
 // value's JSON) and in structuredContent.data, file parts as resource blocks (raw bytes embedded, a URL as a
 // resource_link), from the final status message and then each artifact; structuredContent {taskId, state, data?}
 // with the A2A state. A CallToolResult whatever the state: isError for failed, rejected and canceled, with the final
-// status message as text (the failure's reason text when it has none) and sh.kontra/failure or sh.kontra/canceled in
-// _meta (§11.8). Kontra-blob parts must have been rendered as presigned URLs before (blob.Renderer.Task).
+// status message as text (the failure's reason text when it has none) and sh.kontra/failure (§11.8's reason; a
+// rejected task's is "rejected") or sh.kontra/canceled in _meta. Kontra-blob parts must have been rendered as
+// presigned URLs before (blob.Renderer.Task).
 func Render(task *a2a.Task, state store.State) (json.RawMessage, error) {
 	res := render(task, state)
 	return json.Marshal(res)
@@ -124,17 +125,11 @@ func render(task *a2a.Task, state store.State) callToolResult {
 	switch state {
 	case store.StateFailed, store.StateRejected:
 		isError = true
-		reason, _ := md[store.MetaFailure].(string)
-		if state == store.StateFailed {
-			if reason == "" {
-				reason = string(store.ReasonUpstreamError)
-			}
-			meta = map[string]any{MetaFailure: reason}
-		}
+		meta = map[string]any{MetaFailure: failureOf(state, md)}
 		if statusText(task) == "" {
-			text := "the task was rejected"
+			text := rejectedText
 			if state == store.StateFailed {
-				text = store.ReasonText(store.FailureReason(reason))
+				text = store.ReasonText(store.FailureReason(failureOf(state, md)))
 				if text == "" {
 					text = "the task failed"
 				}
@@ -161,6 +156,27 @@ func render(task *a2a.Task, state store.State) callToolResult {
 	}
 	return callToolResult{Content: blocks, IsError: isError, Meta: meta,
 		StructuredContent: PlainState{TaskID: id, State: string(state.A2A()), Data: data}}
+}
+
+// FailureRejected is sh.kontra/failure of a hire task the agent rejected (A2A rejected, MCP "failed"): §12.2 gives
+// every failed, rejected or canceled hire task sh.kontra/failure or sh.kontra/canceled, and §11.8's reasons are the
+// gate's failures, none of which a rejection is (DM4-26).
+const FailureRejected = "rejected"
+
+// rejectedText is a rejected task's text when its status message has none.
+const rejectedText = "the task was rejected"
+
+// failureOf is sh.kontra/failure of a task that ended failed (its kontra.failure reason, upstream_error when it has
+// none) or rejected (FailureRejected).
+func failureOf(state store.State, md map[string]any) string {
+	if state == store.StateRejected {
+		return FailureRejected
+	}
+	reason, _ := md[store.MetaFailure].(string)
+	if reason == "" {
+		reason = string(store.ReasonUpstreamError)
+	}
+	return reason
 }
 
 // canceledText says why a task was canceled (relay §13.2: a declined quote, an expired one, the client's cancel).
@@ -278,8 +294,9 @@ type taskView struct {
 
 // view presents a hire task to rd (§5.1, §12.4): quoted is working with the approve URL as statusMessage and in
 // _meta (D21); input-required is input_required for a text-only question when rd declared form elicitation, else
-// working with the reply-tool text and _meta sh.kontra/input-required (D58); failed has sh.kontra/failure, canceled
-// sh.kontra/canceled (§11.8); the statusMessage is otherwise the text of the status message.
+// working with the reply-tool text and _meta sh.kontra/input-required (D58); failed has sh.kontra/failure (§11.8),
+// rejected sh.kontra/failure "rejected" (FailureRejected), canceled sh.kontra/canceled; the statusMessage is otherwise
+// the text of the status message.
 func view(row *store.TaskRow, rd Reader) taskView {
 	t := row.Snapshot
 	v := taskView{status: row.State.MCPStatus(), statusMessage: statusText(t)}
@@ -300,13 +317,15 @@ func view(row *store.TaskRow, rd Reader) taskView {
 			v.meta = map[string]any{MetaInputRequired: true}
 		}
 	case store.StateFailed:
-		reason, _ := md[store.MetaFailure].(string)
-		if reason == "" {
-			reason = string(store.ReasonUpstreamError)
-		}
+		reason := failureOf(row.State, md)
 		v.meta = map[string]any{MetaFailure: reason}
 		if v.statusMessage == "" {
 			v.statusMessage = store.ReasonText(store.FailureReason(reason))
+		}
+	case store.StateRejected:
+		v.meta = map[string]any{MetaFailure: FailureRejected}
+		if v.statusMessage == "" {
+			v.statusMessage = rejectedText
 		}
 	case store.StateCanceled:
 		why, _ := md[store.MetaCanceled].(string)

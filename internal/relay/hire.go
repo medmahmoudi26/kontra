@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -51,6 +53,41 @@ type Hirer struct {
 	Log      *store.Log
 	// RetryWindow is §12.3's retry window; zero is HireRetryWindow.
 	RetryWindow time.Duration
+	// RequiredExtensions are the URIs a service's served card marks required: true, as the A2A route reads them for
+	// §2.4's check (the gate wires a2ahttp.Server.Declared); nil: none.
+	RequiredExtensions func(svc store.ServiceRef) []string
+	// Starts is the service's work queue re-issuing a task's start (lifecycle.Queue.ReissueStart, as the A2A route's
+	// resend does, §14.5); nil re-issues nothing.
+	Starts func(svc store.ServiceRef) StartReissuer
+}
+
+// ExtensionsRequiredError refuses a hire or a reply, before anything is stored or sent, to a service whose served
+// card marks extensions required: true (spec §2.4: a request missing one is refused before any task row exists). A
+// tool call of /mcp has no A2A-Extensions to activate them with, so it always misses them (DM4-27). It is
+// ExtensionSupportRequiredError (-32008).
+type ExtensionsRequiredError struct {
+	URIs []string // the required URIs, in the card's order
+}
+
+func (e *ExtensionsRequiredError) Error() string {
+	s, them := "", "it"
+	if len(e.URIs) != 1 {
+		s, them = "s", "them"
+	}
+	return "the service requires the extension" + s + " " + strings.Join(e.URIs, ", ") + ": send " + them + " in A2A-Extensions"
+}
+
+func (e *ExtensionsRequiredError) Unwrap() error { return a2a.ErrExtensionSupportRequired }
+
+// requireNone is §2.4's check of a request that activates no extension: refused when svc's served card requires any.
+func (h *Hirer) requireNone(svc store.ServiceRef) error {
+	if h.RequiredExtensions == nil {
+		return nil
+	}
+	if req := h.RequiredExtensions(svc); len(req) > 0 {
+		return &ExtensionsRequiredError{URIs: slices.Clone(req)}
+	}
+	return nil
 }
 
 func (h *Hirer) window() time.Duration {
@@ -66,12 +103,14 @@ func HireOwner(p auth.Principal) store.Owner {
 	return store.Owner{BuyerID: p.BuyerID, Principal: p.ID, Via: string(p.Via), TenantID: p.TenantID}
 }
 
-// Hire answers a hire: the task of the same resend key that is quoted, or left quoted less than the retry window
-// ago, as it is (nothing is sent, Admission is not asked again, and nothing changes its state: a retry never
-// approves anything, §13.2); otherwise a new task created through the service's handler. An error is the A2A
-// error the interceptors or the work queue refused it with (a2a-go's sentinels: Admission's refusal, "admission
-// unavailable", "rate limited", "anonymous storage limit", a sealed or part refusal, a lifecycle not accepting it in
-// time), or the gate's own failure.
+// Hire answers a hire: refused with ExtensionsRequiredError when the service's served card requires an extension
+// (§2.4, as the A2A route refuses a request that does not activate it, before anything else); the task of the same
+// resend key that is quoted, or left quoted less than the retry window ago, as it is (nothing is sent, Admission is
+// not asked again, and nothing changes its state: a retry never approves anything, §13.2), its start re-issued first
+// while it is quoted (§14.5: a task whose start was lost gets its workflow, as an A2A resend does); otherwise a new
+// task created through the service's handler. An error is the A2A error the interceptors or the work queue refused
+// it with (a2a-go's sentinels: Admission's refusal, "admission unavailable", "rate limited", "anonymous storage
+// limit", a sealed or part refusal, a lifecycle not accepting it in time), or the gate's own failure.
 func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) {
 	if h.Handlers == nil || h.Log == nil {
 		return HireOutcome{}, errors.New("relay: the hirer needs the handlers and the log")
@@ -79,12 +118,23 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 	if req.Message == nil || req.Message.ID == "" || len(req.Message.Parts) == 0 || req.Message.TaskID != "" {
 		return HireOutcome{}, fmt.Errorf("relay: a hire needs a new message with its id and parts: %w", a2a.ErrInvalidParams)
 	}
+	if err := h.requireNone(req.Service); err != nil {
+		return HireOutcome{}, err
+	}
 	owner := HireOwner(req.Principal)
 	prev, err := h.Log.FindHireRetry(ctx, req.Service, owner, req.FirstRequest, h.window())
 	if err != nil {
 		return HireOutcome{}, err
 	}
 	if prev != nil {
+		// A retry of a quoted task (its first hire may have had its row committed and its start lost, and answered
+		// 503): re-issue the start, idempotent, so the person's approval has a workflow to reach (§14.5, DM4-23). A task
+		// that left quoted had its workflow (kontra.approval, or the quote's expiry, came through it).
+		if prev.State == store.StateQuoted && h.Starts != nil {
+			if err := h.Starts(req.Service).ReissueStart(ctx, prev); err != nil {
+				return HireOutcome{}, err
+			}
+		}
 		return HireOutcome{Task: prev, Existing: true}, nil
 	}
 	sh, err := h.Handlers.For(ctx, req.Service)
@@ -110,8 +160,9 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 // Reply sends parts as the §7 follow-up of a hire task of the principal's buyer, through the service's handler: the
 // followUp interceptor and the kontra.message Update decide (spec §7: refused unless the task is input-required; a
 // quoted task is refused, its quote being accepted on the operator's page and never in the protocol, §13.2; one
-// follow-up per turn end). It returns the task's version read before the Update (the turn the follow-up started
-// begins after it). task is the caller's row (store.Log.LoadHired).
+// follow-up per turn end); a service whose served card now requires an extension refuses it as Hire does (§2.4). It
+// returns the task's version read before the Update (the turn the follow-up started begins after it). task is the
+// caller's row (store.Log.LoadHired).
 func (h *Hirer) Reply(ctx context.Context, p auth.Principal, task *store.TaskRow, parts a2a.ContentParts) (int64, error) {
 	if h.Handlers == nil || h.Log == nil {
 		return 0, errors.New("relay: the hirer needs the handlers and the log")
@@ -125,6 +176,9 @@ func (h *Hirer) Reply(ctx context.Context, p auth.Principal, task *store.TaskRow
 	}
 	svc, err := h.Log.LoadService(ctx, task.TenantID, task.Service)
 	if err != nil {
+		return 0, err
+	}
+	if err := h.requireNone(svc); err != nil {
 		return 0, err
 	}
 	sh, err := h.Handlers.For(ctx, svc)

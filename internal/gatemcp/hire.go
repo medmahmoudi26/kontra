@@ -51,10 +51,11 @@ type Hirer interface {
 }
 
 // hire answers the hire tool (§12.2, §12.3): the service a ref names when the principal may hire it (else the
-// unknown-service answer); an MCP service or one whose sealing is required is a tool execution error naming the
-// route to use, and no task; then the task through the Hirer, answered as §12.3 says: quoted, -32042 to a session
-// that declared elicitation.url and otherwise the approve URL at once (CreateTaskResult working, or the plain text);
-// any other task, CreateTaskResult when task-augmented, else after the plain wait.
+// unknown-service answer); an MCP service, one whose sealing is required, or one whose served card requires an
+// extension (DM4-27) is a tool execution error naming the route to use, and no task; then the task through the
+// Hirer, answered as §12.3 says: quoted, -32042 to a session that declared elicitation.url and otherwise the approve
+// URL at once (CreateTaskResult working, or the plain text); any other task, CreateTaskResult when task-augmented,
+// else after the plain wait.
 func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 	a, parts, err := parseHireArgs(args)
 	if err != nil {
@@ -98,7 +99,13 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 	}
 	msg := &a2a.Message{ID: mid.String(), Role: a2a.MessageRoleUser, ContextID: a.ContextID, Parts: parts}
 	out, err := h.deps.Hirer.Hire(rq.ctx(), HireRequest{Principal: rq.p, Service: svc.ref, Message: msg, FirstRequest: key})
-	if err != nil {
+	var xe *relay.ExtensionsRequiredError
+	switch {
+	case errors.As(err, &xe):
+		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult(extensionsText("service "+ref.String(), "hire", xe.URIs,
+			base+"/agents/"+ref.String())+" No task was created.", nil))
+		return
+	case err != nil:
 		h.refused(rq, err)
 		return
 	}
@@ -207,11 +214,30 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 		return
 	}
 	after, err := h.deps.Hirer.Reply(rq.ctx(), rq.p, row, parts)
-	if err != nil {
+	var xe *relay.ExtensionsRequiredError
+	switch {
+	case errors.As(err, &xe):
+		ref := h.serviceRef(row)
+		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult(extensionsText("the task's service "+ref, "reply", xe.URIs,
+			strings.TrimRight(h.deps.PublicURL, "/")+"/agents/"+ref)+" Nothing was sent.", nil))
+		return
+	case err != nil:
 		h.refused(rq, err)
 		return
 	}
 	h.waitAndAnswer(rq, row.ID, after)
+}
+
+// extensionsText is the tool execution error of a hire or a reply to a service whose served card requires extensions
+// (spec §2.4, DM4-27): a tool call activates none, so the route is A2A with A2A-Extensions, as the required-sealed
+// answer names its route.
+func extensionsText(who, tool string, uris []string, a2aURL string) string {
+	s, them := "", "it"
+	if len(uris) != 1 {
+		s, them = "s", "them"
+	}
+	return who + " requires the A2A extension" + s + " " + strings.Join(uris, ", ") + ", which " + tool +
+		" cannot activate. Send it A2A messages that activate " + them + " in the A2A-Extensions header, at " + a2aURL + "."
 }
 
 // refused answers an error the Hirer returned (the A2A route's own refusals): an anonymous tenant's cap is 429 with

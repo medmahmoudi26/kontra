@@ -281,3 +281,45 @@ func TestCatalogMultiTenant(t *testing.T) {
 		t.Errorf("search as the team: %+v", r.Services)
 	}
 }
+
+// One search request reads at most SearchExamine rows (M4 WP-04 review): a principal who sees none of more services
+// than that gets an early page, empty here, whose nextCursor is the last row read, never a scan of the whole table;
+// following the cursors reaches what it may see. Shown with a bound of 10 rows read 4 at a time.
+func TestSearchBoundsTheRowsOneRequestReads(t *testing.T) {
+	e := newCatalogEnv(t)
+	ctx := context.Background()
+	for i := range 25 {
+		e.service(e.team, fmt.Sprintf("hidden%02d", i), "a2a", directA2A, []string{"key:kk_zz_*"}, false, "", "", false)
+	}
+	e.service(e.team, "visible", "a2a", directA2A, []string{"org:default"}, false, "", "", false)
+	c := NewCatalog(CatalogConfig{DB: e.pool, PublicURL: "https://gate.example"})
+	c.batch, c.examine = 4, 10
+	p := keyPrincipal(e.team, tenant.TeamSlug, "kk_default_ab12cd34")
+
+	var pages []string
+	cursor := ""
+	for range 5 {
+		res, err := c.Search(ctx, p, SearchArgs{Cursor: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var refs []string
+		for _, s := range res.Services {
+			refs = append(refs, s.Ref)
+		}
+		at := ""
+		if res.NextCursor != "" {
+			if at, err = decodeCursor(res.NextCursor); err != nil {
+				t.Fatal(err)
+			}
+		}
+		pages = append(pages, fmt.Sprintf("%v@%s", refs, at))
+		if cursor = res.NextCursor; cursor == "" {
+			break
+		}
+	}
+	// Each request reads 10 rows; the third reads hidden20..24 and visible, and ends the table.
+	if want := "[[]@hidden09 []@hidden19 [visible]@]"; fmt.Sprint(pages) != want {
+		t.Fatalf("search pages %v\nwant %s", pages, want)
+	}
+}

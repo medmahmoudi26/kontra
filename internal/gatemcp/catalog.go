@@ -52,6 +52,9 @@ type Catalog struct {
 	warmed map[mcprelay.ToolsKey]time.Time // the last drain describe started per service (DrainEvery)
 	infos  map[mcprelay.ToolsKey]string    // an MCP upstream's serverInfo title or name, as its last drain read it
 	now    func() time.Time
+
+	batch   int // rows one query of a search reads (searchBatch)
+	examine int // rows one search request reads at most (SearchExamine)
 }
 
 // ToolsWarmer drains an MCP service's tools/list into the relay's cache in the background, on its own context and
@@ -79,7 +82,7 @@ func NewCatalog(cfg CatalogConfig) *Catalog {
 	}
 	return &Catalog{db: cfg.DB, multi: cfg.Multi, publicURL: strings.TrimRight(cfg.PublicURL, "/"), mcp: cfg.MCP,
 		tools: cfg.Tools, warm: cfg.Warm, log: cfg.Logger, warmed: map[mcprelay.ToolsKey]time.Time{},
-		infos: map[mcprelay.ToolsKey]string{}, now: time.Now}
+		infos: map[mcprelay.ToolsKey]string{}, now: time.Now, batch: searchBatch, examine: SearchExamine}
 }
 
 // service is one services row as the catalog reads it.
@@ -201,9 +204,16 @@ func decodeCursor(s string) (string, error) {
 // searchBatch is how many rows one query of a search reads; a page filters them for the principal.
 const searchBatch = 200
 
+// SearchExamine bounds the rows one search request reads (five queries of searchBatch): a page is filtered for the
+// principal after the read, so a principal who sees few of many services would otherwise make each request read the
+// whole table. A request that reaches it answers what it found, fewer than PageSize services or none, with nextCursor
+// at the last row it read (DM4-26).
+const SearchExamine = 1000
+
 // Search answers search for p (DM4-4): the services visible to p whose ref, name or description contains query
 // (case-insensitively), of kind, whose price_model annotation equals price ("free": none); ordered by ref (byte
-// order), PageSize a page, with an opaque keyset cursor; anonymous tenants never appear.
+// order), PageSize a page, with an opaque keyset cursor; anonymous tenants never appear. One request reads at most
+// SearchExamine rows: past them the page ends early, its nextCursor at the last row read.
 func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs) (SearchResult, error) {
 	after := ""
 	if args.Cursor != "" {
@@ -223,10 +233,12 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 	}
 	query := strings.ToLower(args.Query)
 	out := SearchResult{Services: []ServiceEntry{}}
+	examined := 0
 	for {
+		limit := min(c.batch, c.examine-examined)
 		rows, err := c.db.Query(ctx, `select `+serviceColumns+`, `+refExpr+serviceFrom+scope+`
 			and ($1::text is null or s.kind = $1) and (`+refExpr+`) collate "C" > $2::text collate "C"
-			order by (`+refExpr+`) collate "C" limit $3`, kind, after, searchBatch)
+			order by (`+refExpr+`) collate "C" limit $3`, kind, after, limit)
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("gatemcp: search: %w", err)
 		}
@@ -261,7 +273,12 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 			}
 			out.Services = append(out.Services, c.entry(s))
 		}
-		if len(batch) < searchBatch {
+		if len(batch) < limit {
+			return out, nil
+		}
+		if examined += len(batch); examined >= c.examine {
+			// The request's bound: the next page starts after the last row read (a cursor grants nothing).
+			out.NextCursor = encodeCursor(after)
 			return out, nil
 		}
 	}

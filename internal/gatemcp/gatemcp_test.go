@@ -278,7 +278,9 @@ func TestRender(t *testing.T) {
 		{store.StateFailed, a2a.TaskStateFailed, map[string]any{store.MetaFailure: "upstream_error"}, nil, MetaFailure, "upstream_error", "the service returned an error"},
 		{store.StateCanceled, a2a.TaskStateCanceled, map[string]any{store.MetaCanceled: "declined"}, agentText("the quote was declined"), MetaCanceled, "declined", "the quote was declined"},
 		{store.StateCanceled, a2a.TaskStateCanceled, map[string]any{store.MetaCanceled: "quote_expired"}, nil, MetaCanceled, "quote_expired", "the quote expired before it was approved: the task was canceled and nothing was charged"},
-		{store.StateRejected, a2a.TaskStateRejected, nil, agentText("no"), "", "", "no"},
+		// §12.2: a rejected hire task has sh.kontra/failure too (M4 WP-04 review): "rejected".
+		{store.StateRejected, a2a.TaskStateRejected, nil, agentText("no"), MetaFailure, "rejected", "no"},
+		{store.StateRejected, a2a.TaskStateRejected, nil, nil, MetaFailure, "rejected", "the task was rejected"},
 	} {
 		r := renderOf(t, taskWith(tc.a2a, tc.msg, tc.md), tc.state)
 		if !r.IsError || r.Content[0].Text != tc.text {
@@ -333,6 +335,28 @@ func TestView(t *testing.T) {
 	if v := view(row, Reader{}); v.status != "working" || v.meta[MetaInputRequired] != true || !strings.Contains(v.statusMessage, "reply tool") {
 		t.Errorf("input-required, no form: %+v", v)
 	}
+	// Ended (§12.2, §11.8): failed and rejected are MCP failed with sh.kontra/failure, canceled is cancelled with
+	// sh.kontra/canceled; the statusMessage is the status message's text, else the reason's.
+	for _, tc := range []struct {
+		state          store.State
+		a2a            a2a.TaskState
+		msg            *a2a.Message
+		md             map[string]any
+		status, key    string
+		value, status2 string
+	}{
+		{store.StateFailed, a2a.TaskStateFailed, nil, map[string]any{store.MetaFailure: "timeout"}, "failed", MetaFailure, "timeout", store.ReasonText(store.ReasonTimeout)},
+		{store.StateFailed, a2a.TaskStateFailed, agentText("boom"), nil, "failed", MetaFailure, "upstream_error", "boom"},
+		{store.StateRejected, a2a.TaskStateRejected, agentText("not for me"), nil, "failed", MetaFailure, "rejected", "not for me"},
+		{store.StateRejected, a2a.TaskStateRejected, nil, nil, "failed", MetaFailure, "rejected", "the task was rejected"},
+		{store.StateCanceled, a2a.TaskStateCanceled, nil, map[string]any{store.MetaCanceled: "declined"}, "cancelled", MetaCanceled, "declined", ""},
+	} {
+		row.State, row.Snapshot = tc.state, taskWith(tc.a2a, tc.msg, tc.md)
+		v := view(row, Reader{})
+		if v.status != tc.status || v.meta[tc.key] != tc.value || len(v.meta) != 1 || v.statusMessage != tc.status2 {
+			t.Errorf("%s %v: %+v, want %s with %s = %s and %q", tc.state, tc.md, v, tc.status, tc.key, tc.value, tc.status2)
+		}
+	}
 }
 
 // ParseMessage (mcp-tools.json#/$defs/message): a string, or {parts} with exactly one content member each.
@@ -349,9 +373,31 @@ func TestParseMessage(t *testing.T) {
 	}
 	for _, bad := range []string{`""`, `1`, `[]`, `{}`, `{"parts":[]}`, `{"parts":[{}]}`, `{"parts":[{"text":"a","data":1}]}`,
 		`{"parts":[{"raw":"not base64!"}]}`, `{"parts":[{"text":"a","x":1}]}`, `{"parts":[{"text":"a"}],"extra":1}`,
-		`{"parts":[{"text":"a","TEXT":"b"}]}`, `{"parts":[{"text":1}]}`, `{"parts":[{"text":"a","metadata":[]}]}`} {
-		if _, err := ParseMessage(json.RawMessage(bad)); err == nil {
-			t.Errorf("ParseMessage(%s) accepted it", bad)
+		`{"parts":[{"text":"a","TEXT":"b"}]}`, `{"parts":[{"text":1}]}`, `{"parts":[{"text":"a","metadata":[]}]}`,
+		// A null data value: a2a-go writes {"data":null} and cannot read it back (M4 WP-04 review).
+		`{"parts":[{"data":null}]}`, `{"parts":[{"text":"a"},{"data": null ,"mediaType":"application/json"}]}`} {
+		var ae *argError
+		if _, err := ParseMessage(json.RawMessage(bad)); !errors.As(err, &ae) {
+			t.Errorf("ParseMessage(%s) = %v, want an invalid-arguments error", bad, err)
+		}
+	}
+	// Every part ParseMessage builds is one a2a-go reads back from what it writes: the message a task stores is decoded
+	// by every later read of the task.
+	for _, good := range []string{`"hi"`, `{"parts":[{"text":""}]}`, `{"parts":[{"raw":""}]}`, `{"parts":[{"data":0}]}`,
+		`{"parts":[{"data":false}]}`, `{"parts":[{"data":""}]}`, `{"parts":[{"data":[null]}]}`, `{"parts":[{"data":{"k":null}}]}`,
+		`{"parts":[{"text":"a","metadata":{}}]}`, `{"parts":[{"url":"https://x.example/f","filename":"f"}]}`} {
+		parts, err := ParseMessage(json.RawMessage(good))
+		if err != nil {
+			t.Errorf("ParseMessage(%s): %v", good, err)
+			continue
+		}
+		b, err := json.Marshal(&a2a.Message{ID: "m", Role: a2a.MessageRoleUser, Parts: parts})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back a2a.Message
+		if err := json.Unmarshal(b, &back); err != nil {
+			t.Errorf("ParseMessage(%s) built a message a2a-go cannot read back (%s): %v", good, b, err)
 		}
 	}
 }

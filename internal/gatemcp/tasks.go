@@ -82,9 +82,10 @@ var errTaskNotFound = &mcpwire.Error{Code: mcpwire.CodeInvalidParams, Message: "
 // errLifecycleUnavailable is a kontra.cancel that no lifecycle worker accepted in time (§14.1): -32603, HTTP 503.
 var errLifecycleUnavailable = errors.New("gatemcp: the task's lifecycle is unavailable")
 
-// load is the reader's hire task taskID names, nil when it names none of them.
+// load is the reader's hire task taskID names, nil when it names none of them. A principal that may not hire (spec
+// §2.3) has none: the handler refuses it before (403), and this holds for every caller of HireTasks.
 func (t *HireTasks) load(ctx context.Context, rd Reader, taskID uuid.UUID) (*store.TaskRow, error) {
-	if taskID == uuid.Nil {
+	if taskID == uuid.Nil || !rd.Principal.MayHire() {
 		return nil, nil
 	}
 	row, err := t.log.LoadHired(ctx, rd.Principal.BuyerID, taskID)
@@ -261,6 +262,9 @@ func (t *HireTasks) List(ctx context.Context, rd Reader, params json.RawMessage)
 			return nil, &mcpwire.Error{Code: mcpwire.CodeInvalidParams, Message: "Invalid cursor"}, nil
 		}
 		cursor = s
+	}
+	if !rd.Principal.MayHire() {
+		return json.RawMessage(`{"tasks":[]}`), nil, nil // as load: a principal that may not hire has no hire tasks
 	}
 	rows, next, err := t.log.ListHired(ctx, rd.Principal.BuyerID, cursor)
 	if errors.Is(err, store.ErrBadCursor) {

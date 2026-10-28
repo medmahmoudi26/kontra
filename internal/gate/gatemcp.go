@@ -12,13 +12,12 @@ import (
 // assembleGateMCP builds the gate's own /mcp (spec/relay.md §12; M4 WP-04) and mounts it: the catalog over the
 // services table and the MCP relay's tools cache (describe's background drain through the relay's own sessions), the
 // hirer over the A2A services' handlers (a hire task is an ordinary A2A task, created by the service's interceptors
-// and work queue), the MCP Tasks of hire tasks (the lifecycle client's MCP-mode cancel), the URL elicitations, and
-// /mcp's legacy sessions (mcp_sessions rows with service NULL). It runs after assembleMCP, whose handler and tools
-// cache it uses.
-func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator, handlers *relay.Handlers) error {
+// and work queue; assemble builds the hirer), the MCP Tasks of hire tasks (the lifecycle client's MCP-mode cancel),
+// the URL elicitations, and /mcp's legacy sessions (mcp_sessions rows with service NULL). It runs after
+// assembleMCP, whose handler and tools cache it uses.
+func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator, hirer *relay.Hirer) error {
 	cfg := r.cfg
 	multi := cfg.Tenancy == config.TenancyMulti
-	hirer := &relay.Hirer{Handlers: handlers, Log: r.storeLog}
 	catalog := gatemcp.NewCatalog(gatemcp.CatalogConfig{
 		DB: r.pool, Multi: multi, PublicURL: cfg.PublicURL, MCP: r.services, Tools: r.tools, Warm: r.mcp, Logger: r.log,
 	})

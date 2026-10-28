@@ -502,16 +502,28 @@ func (r *Replica) assemble() error {
 
 	writer := sse.NewWriterWithOptions(r.storeLog, r.listener, sse.Options{Logger: log, Render: r.render})
 	routes := edge.NewRouter()
-	a2ahttp.New(a2ahttp.Deps{
+	a2aRoutes := a2ahttp.New(a2ahttp.Deps{
 		Services: r.services, Handlers: handlers, SSE: writer, Auth: authn,
 		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
-	}).Register(routes)
+	})
+	a2aRoutes.Register(routes)
 	// /mcp/{svc} (spec §11; M3 WP-04): plain MCP requests, sessions pinned to a tunnel session or a direct backend,
 	// and the peer hop to the replica holding a tunnel session (§11.2). The gate's own /mcp (§12; M4 WP-04) after it.
 	if err := r.assembleMCP(routes, authn, snapshot, rules); err != nil {
 		return err
 	}
-	if err := r.assembleGateMCP(routes, authn, handlers); err != nil {
+	// /mcp's hire is an A2A request (DM4-26): the A2A routes' reading of a served card's required extensions (§2.4) and
+	// the service's work queue re-issuing a retried quoted task's start (§14.5), as the A2A routes have them.
+	hirer := &relay.Hirer{Handlers: handlers, Log: r.storeLog,
+		RequiredExtensions: func(svc store.ServiceRef) []string {
+			served, _ := r.services.Lookup(context.Background(), svc.Tenant, svc.Name)
+			return a2aRoutes.Declared(served).Required()
+		},
+		Starts: func(svc store.ServiceRef) relay.StartReissuer {
+			return lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)
+		},
+	}
+	if err := r.assembleGateMCP(routes, authn, hirer); err != nil {
 		return err
 	}
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))

@@ -138,11 +138,10 @@ func (rq *request) id() json.RawMessage {
 	return rq.msg.ID
 }
 
-// version is the request's legacy protocol version: its header when it names one, else the session's.
+// version is the legacy protocol version the request's session negotiated (initialize): it decides what the session
+// has (tasks/*, hire's execution, task-augmented calls; DM4-26). A request whose MCP-Protocol-Version names another
+// version is refused before (session).
 func (rq *request) version() string {
-	if v := rq.r.Header.Get(mcpwire.HeaderProtocolVersion); slices.Contains(Versions, v) {
-		return v
-	}
 	if rq.sess != nil {
 		return rq.sess.ProtocolVersion
 	}
@@ -161,7 +160,8 @@ func (rq *request) reader() Reader {
 }
 
 // ServeHTTP classifies the request's era (§11.12 rules 1–5) and serves it, in the order of spec §2.1 and §11.1: the
-// credential (401), the one-message rule and strict decoding (400), Origin (403), the era; then initialize,
+// credential (401; a principal that may not hire, 403), the one-message rule and strict decoding (400), Origin (403),
+// the era; then initialize,
 // tools/list, tools/call of the four tools, the legacy tasks/* (§11.6 over hire tasks), the client's responses to
 // gate requests, the GET stream of a legacy session and its DELETE; a modern request is the 2026-07-28 surface's.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +188,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		h.internal(rq, "authenticate", err)
+		return
+	case !p.MayHire():
+		// Spec §2.3: an API key with only enroll: scopes enrolls nodes and nothing else. The A2A routes refuse it every
+		// request (their allow: check and the identity interceptor); /mcp, whose every tool and task surface is hiring,
+		// refuses it whole, before a session exists, so no task of the buyer it shares with a hire key is read or
+		// cancelled through it (DM4-26).
+		if post {
+			writeError(w, http.StatusForbidden, nil, mcpwire.CodeInvalidRequest, MsgMayNotHire, nil)
+		} else {
+			writeEmpty(w, http.StatusForbidden)
+		}
 		return
 	}
 	rq.p = p
@@ -309,6 +320,15 @@ func (h *Handler) session(rq *request) {
 		return
 	case err != nil:
 		h.internal(rq, "look up the session", err)
+		return
+	}
+	if v := rq.r.Header.Get(mcpwire.HeaderProtocolVersion); v != "" && v != sess.ProtocolVersion {
+		// MCP 2025-11-25 transports: a request carries the version the session negotiated, and a server answers an
+		// invalid or unsupported one 400. Classify has refused a version /mcp does not speak; this is one the session did
+		// not negotiate (a 2025-06-18 session naming 2025-11-25 would otherwise get tasks, DM4-26). Both values are
+		// among Versions, so the answer names them.
+		writeError(rq.w, http.StatusBadRequest, rq.id(), mcpwire.CodeUnsupportedVersion, "Unsupported protocol version",
+			map[string]any{"supported": []string{sess.ProtocolVersion}, "requested": v})
 		return
 	}
 	rq.sess, rq.sid = sess, sid
@@ -465,6 +485,10 @@ func (h *Handler) internal(rq *request, what string, err error) {
 	h.log.Warn("mcp: could not "+what, "error", err)
 	writeError(rq.w, http.StatusServiceUnavailable, rq.id(), mcpwire.CodeInternal, "the gate could not serve the request", nil)
 }
+
+// MsgMayNotHire is the 403 answer to a principal that may not call services (an API key without the hire scope),
+// the A2A identity interceptor's words.
+const MsgMayNotHire = "this API key may not call services (it has no hire scope)"
 
 // Messages and codes of the gate's own answers.
 const (

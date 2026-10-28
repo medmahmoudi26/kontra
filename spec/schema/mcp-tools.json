@@ -9,7 +9,7 @@
       "oneOf": [ { "required": ["text"] }, { "required": ["raw"] }, { "required": ["url"] }, { "required": ["data"] } ],
       "properties": {
         "text": { "type": "string" }, "raw": { "type": "string", "contentEncoding": "base64" },
-        "url": { "type": "string", "format": "uri" }, "data": {},
+        "url": { "type": "string", "format": "uri" }, "data": { "not": { "type": "null" } },
         "filename": { "type": "string" }, "mediaType": { "type": "string" }, "metadata": { "type": "object" }
       }
     },

@@ -131,7 +131,7 @@ type PlainState struct {
 const (
 	schemaPart = `{"type":"object","description":"An A2A 1.0 Part: exactly one of text, raw (base64), url, data; plus optional filename, mediaType, metadata.",` +
 		`"oneOf":[{"required":["text"]},{"required":["raw"]},{"required":["url"]},{"required":["data"]}],` +
-		`"properties":{"text":{"type":"string"},"raw":{"type":"string","contentEncoding":"base64"},"url":{"type":"string","format":"uri"},"data":{},` +
+		`"properties":{"text":{"type":"string"},"raw":{"type":"string","contentEncoding":"base64"},"url":{"type":"string","format":"uri"},"data":{"not":{"type":"null"}},` +
 		`"filename":{"type":"string"},"mediaType":{"type":"string"},"metadata":{"type":"object"}}}`
 	schemaMessage = `{"oneOf":[{"type":"string","minLength":1},{"type":"object","required":["parts"],"additionalProperties":false,` +
 		`"properties":{"parts":{"type":"array","minItems":1,"items":` + schemaPart + `}}}]}`
@@ -370,8 +370,8 @@ var partKeys = []string{"text", "raw", "url", "data", "filename", "mediaType", "
 
 // ParseMessage builds the A2A parts of a message argument (mcp-tools.json#/$defs/message): a non-empty string is
 // one text part; {parts: [Part, …]} is those parts, each with exactly one of text, raw (standard base64), url and
-// data, and optional filename, mediaType and metadata (an object), read with exact keys. Anything else is an
-// invalid-arguments error.
+// data (any JSON value but null), and optional filename, mediaType and metadata (an object), read with exact keys,
+// and each one a2a-go reads back as it writes it. Anything else is an invalid-arguments error, before any task exists.
 func ParseMessage(raw json.RawMessage) (a2a.ContentParts, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
@@ -457,9 +457,14 @@ func parsePart(raw json.RawMessage) (*a2a.Part, error) {
 		p.Content, n = a2a.URL(s), n+1
 	}
 	if v, ok := m["data"]; ok {
+		// A null value is no content to a2a-go (it writes {"data":null} and cannot read it back): a task whose message
+		// held one could never be loaded (mcp-tools.json's data excludes null).
 		var d any
 		if err := json.Unmarshal(v, &d); err != nil {
 			return nil, errors.New("data must be JSON")
+		}
+		if d == nil {
+			return nil, errors.New("data must not be null")
 		}
 		p.Content, n = a2a.Data{Value: d}, n+1
 	}
@@ -477,5 +482,21 @@ func parsePart(raw json.RawMessage) (*a2a.Part, error) {
 			return nil, errors.New("metadata must be an object")
 		}
 	}
+	if !roundTrips(p) {
+		return nil, errors.New("not a part A2A can carry")
+	}
 	return p, nil
+}
+
+// roundTrips reports whether a2a-go reads p back from what it writes. The task the gate creates stores the message
+// as a2a-go encodes it, and every later read of the task decodes it: a part that does not survive that would leave a
+// task no reader can load (stuck, counted against an anonymous host's tasks cap, breaking the buyer's tasks/list).
+// The A2A routes cannot take one (a2a-go's decoding refuses it); a tool argument is built here, so it is checked here.
+func roundTrips(p *a2a.Part) bool {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return false
+	}
+	var back a2a.Part
+	return json.Unmarshal(b, &back) == nil
 }

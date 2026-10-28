@@ -2817,21 +2817,37 @@ the tools were not written down. Decision ([`relay.md`](../spec/relay.md) §12.2
   checks, an anonymous tenant's storage, Admission with operation `task`, protocol `a2a` and the principal's `via`,
   `CheckQuote`, large parts) and the work queue's write are the A2A route's. The work queue marks it `hired`, keys it by
   §12.3's hash, and under that key's lock answers a retry with the earlier task; the retry is looked up before
-  Admission too, so a retry never asks Admission again and never changes the task's state.
+  Admission too, so a retry never asks Admission again and never changes the task's state. A retry of a task still
+  `quoted` re-issues its start (the service's work queue, as an A2A resend does, §14.5), so a task whose first `hire`
+  committed its row, lost its start and answered `503` gets the workflow the person's approval reaches. §2.4's
+  required extensions, which the A2A routes check in front of a2a-go, are checked by the hirer too (DM4-27).
 - **Tool execution errors.** Arguments that break a tool's input schema, the unknown-service answer (one for every
-  ref that is malformed, unknown, disabled, of an ended tenant or not admitted), an MCP or required-sealed ref, a
-  `reply` to a task that is quoted or takes no input, and an unknown task in `reply` are a `CallToolResult` with
-  `isError` (MCP 2025-11-25 answers input validation errors so; an HTTP `404` on `/mcp` would end the client's
-  session). Admission's refusal is the JSON-RPC error it names; `admission unavailable` and a lifecycle that does not
+  ref that is malformed, unknown, disabled, of an ended tenant or not admitted), an MCP or required-sealed ref, a ref
+  whose served card requires an extension (DM4-27), a `reply` to a task that is quoted or takes no input, and an
+  unknown task in `reply` are a `CallToolResult` with `isError` (MCP 2025-11-25 answers input validation errors so; an
+  HTTP `404` on `/mcp` would end the client's session). A `message` part is one a2a-go reads back from what it writes:
+  a `data` of JSON `null` is no content to it (`{"data":null}` is written and not read back), so a task holding one
+  could never be loaded (`hire` answered `503`, the task stayed `submitted` past its deadline, counted against an
+  anonymous host's tasks cap, and every later `tasks/list` of the buyer failed); `mcp-tools.json`'s `data` excludes
+  `null`, and the gate checks each built part's round trip besides. Admission's refusal is the JSON-RPC error it names; `admission unavailable` and a lifecycle that does not
   accept in time are `503` with `-32603`; an anonymous tenant's caps `429` with `-32600` (DM4-25).
 - **Rendering.** A raw file part is an embedded `resource` (`uri` `kontra:task/<taskId>/<filename>`, else
   `part-<n>`, its media type, the bytes as `blob`); a URL file part is a `resource_link`. A plain answer's
   `structuredContent.state` is the A2A state (a `quoted` task's is `TASK_STATE_INPUT_REQUIRED`, its approve URL in the
   text and `_meta`). A plain wait whose request accepts `text/event-stream` is answered as one event of a stream kept
-  alive every 15 s.
+  alive every 15 s. A `rejected` task (MCP `failed`) carries `sh.kontra/failure: "rejected"` in its result's and its
+  `tasks/get`'s `_meta`: §12.2 gives every failed, rejected or canceled `hire` task one of the two keys, and §11.8's
+  reasons are the gate's own failures, none of which an agent's rejection is.
 - **Sessions.** `initialize` negotiates `2025-11-25` or `2025-06-18` (the client's when it asks one of them, else
   `2025-11-25`) and asks no Admission; a `2025-06-18` session has no tasks (`tasks/*` `-32601`, `hire` without
-  `execution`). Any replica closes a `/mcp` session idle for an hour (§11.2's default `session_idle_s`).
+  `execution`). The negotiated version decides that, never a request's header: a request whose `MCP-Protocol-Version`
+  names the other version is `400` with `-32022` (`data.supported` the session's), as MCP's transport answers a version
+  the session may not use. Any replica closes a `/mcp` session idle for an hour (§11.2's default `session_idle_s`).
+- **Who may use `/mcp`.** A principal that may not call services (`auth.Principal.MayHire`: an API key with only
+  `enroll:` scopes, which §2.3 gives node enrollment only) is `403` (`-32600`, the A2A identity interceptor's words)
+  on every request, before parsing and before any session, in both eras. Keys of one account may share a `buyer_id`,
+  and `/mcp`'s task surfaces are keyed by the buyer: without this, an enroll-only key listed, read and cancelled the
+  hire key's tasks. `HireTasks` answers such a principal as having no tasks too, whatever calls it.
 - **§12.4's answer.** A client response to `k.<taskId>.<seq>` is the follow-up only when it is `accept` with
   `content.reply` a string, from a session of the task's buyer that declared form elicitation, and `seq` is the event
   that asked the question outstanding now; anything else (a quoted task's gate id included) is `202` and dropped.
@@ -2839,3 +2855,27 @@ the tools were not written down. Decision ([`relay.md`](../spec/relay.md) §12.2
   wake of a quoted one; it claims and writes each that left `quoted` (DM4-21).
 - **Descriptions.** An MCP service's description falls back to its upstream's `serverInfo` title or name as the
   replica's last background drain (started by `describe`) read it.
+- **Search's bound.** A page is filtered for the principal after the read, so one request reads at most 1000 services
+  (five queries of 200); one that reaches the bound answers what it found, fewer than 50 services or none, with
+  `nextCursor` at the last service read, which grants nothing. Without it a principal who sees few of many services
+  made each request read the whole table, sorted by the computed ref (no index applies to `slug || '/' || name`).
+
+### DM4-27. A `hire` of a service whose card requires an extension is refused — **decided under the owner's standing instruction, 28 Oct** (completes DM4-26; §2.4 on `/mcp`)
+
+§2.4 refuses an A2A request missing a URI the served card marks `required: true` (`-32008`, before any task row), and
+§13.4 enforces an operator's `card_extensions` entry "like any other". The check is HTTP middleware in front of
+a2a-go, so a `hire`, which runs through the service's a2a-go handler (DM4-26), skipped it: a task was created and
+dispatched to a service that requires an extension no tool call can activate. Decision ([`relay.md`](../spec/relay.md)
+§12.2): `hire` and `reply` read the service's required URIs as the A2A routes read them (the replica's served card,
+`a2ahttp.Server.Declared`), and a service that has any is refused before anything else (no Admission, no task row,
+nothing sent), as a `CallToolResult` with `isError` naming the URIs and the service's A2A URL, where a client
+activates them in `A2A-Extensions`; the required-sealed answer is the precedent. A form answer to a question
+(§12.4) goes through `reply`'s path and is dropped the same way.
+
+Consequence, for the owner: Cloud's `per_task` services carry the escrow entry with `required: true`
+([`ext-escrow.md`](../spec/ext-escrow.md) §1), so they cannot be hired through `/mcp`: §12.3's quote flow on `/mcp` then
+serves a quoting Admission on services without a required extension (a team gate's, or Cloud's if its escrow entry is
+not required). Proposal, not built: `hire` and `reply` take an optional `extensions: [uri]` argument that activates
+URIs as `A2A-Extensions` does (ignored unless declared, passed to Admission and the upstream as the A2A route passes
+them; activating escrow acknowledges the quote, D38, and a person still approves it); §12.4's form answers would then
+need the task's activation kept for its follow-ups.

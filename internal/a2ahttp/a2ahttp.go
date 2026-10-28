@@ -670,6 +670,16 @@ func (s *Server) declared(svc *Service) func(*http.Request) *ExtensionSet {
 	}
 }
 
+// Declared is what svc's served card declares in capabilities.extensions, read as Extensions reads it for the
+// service's routes (spec §2.4); nil (none) for no service or one without a servable card. The gate's own /mcp checks a
+// hire against it (relay.Hirer.RequiredExtensions, M4 WP-04).
+func (s *Server) Declared(svc *Service) *ExtensionSet {
+	if svc == nil {
+		return nil
+	}
+	return s.declared(svc)(nil)
+}
+
 // cardExtensions reads capabilities.extensions of a served card, entry by entry: an entry that is not an
 // object with a string uri is skipped, so one malformed seller entry cannot hide the operator's.
 func cardExtensions(body []byte) (all, required []string) {
