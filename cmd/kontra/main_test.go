@@ -40,8 +40,11 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"seal", "--open", "/nonexistent/part.json"}, 1, "", "kontra seal: open /nonexistent/part.json"},
 		{[]string{"connect", "-h"}, 0, "--sealed-max-age DURATION", ""},
 		{[]string{"connect", "-h"}, 0, "--accept-change NAME", ""},
-		{[]string{"console"}, 2, "", "usage:"},                                               // no local console (D164)
-		{[]string{"login"}, 1, "", "kontra login: kontra login: not implemented (M4 WP-06)"}, // the M4 skeleton's stub
+		{[]string{"console"}, 2, "", "usage:"},                                             // no local console (D164)
+		{[]string{"login", "-h"}, 0, "--no-browser", ""},                                   // spec/tunnel.md §6.3 (M4 WP-06)
+		{[]string{"login", "--gate", "http://gate.example"}, 2, "", "kontra login: usage"}, // https:// except on localhost
+		{[]string{"login", "--bogus"}, 2, "", "usage: kontra login"},
+		{[]string{"login", "extra"}, 2, "", "unexpected argument"},
 		{[]string{"publish"}, 1, "", "kontra publish: not until M5"},
 		{[]string{"connect", "-h"}, 0, "--serve a2a:NAME=URL", ""},
 		{[]string{"connect", "-h"}, 0, "--listen ADDR", ""},
@@ -56,6 +59,22 @@ func TestSubcommands(t *testing.T) {
 			t.Errorf("kontra %q = %d, stdout %q, stderr %q; want %d, %q, %q", c.args, code, stdout.String(), stderr.String(),
 				c.code, c.out, c.errOut)
 		}
+	}
+}
+
+// spec/tunnel.md §6.3 step 1: a gate without the RFC 9728 document for /mcp has no sign-in: kontra login exits 1 naming
+// --api-key, and writes nothing.
+func TestLoginWithoutSignIn(t *testing.T) {
+	home := isolate(t)
+	gate := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(gate.Close)
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"login", "--gate", gate.URL, "--no-browser"}, &stdout, &stderr); code != 1 ||
+		!strings.Contains(stderr.String(), "kontra login: this gate has no sign-in") || !strings.Contains(stderr.String(), "--api-key") {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".kontra", "credentials")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a login without sign-in wrote the credentials file: %v", err)
 	}
 }
 
