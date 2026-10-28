@@ -70,7 +70,7 @@ func TestHostingChecksTheService(t *testing.T) {
 		t.Fatalf("the reply: %d sealed parts, %v: %s", n, err, out)
 	}
 
-	// MCP: a sealed tools/call, and an answer to an input request, name the service too.
+	// MCP: a sealed tools/call names its service too (an answer to an input request is checked alike, rule 1).
 	s := sessionHash("gate-session-svc")
 	hd := f.mcpHeader(b, s, "echo", "4")
 	hd.Service = "other"
