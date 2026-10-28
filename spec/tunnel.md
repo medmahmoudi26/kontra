@@ -263,7 +263,10 @@ true` (§4) and neither `enroll` nor `auth`, whose key is unknown at the gate or
 `anonymous: true` never opens or resumes one (DM4-18): an unknown key that nothing in it enrolls stays `unknown_key`
 (§5), which the lost-welcome probe of §2.4 relies on. A gate without the setting answers a hello carrying it from a
 key it does not know `anonymous_unavailable`, and so does a gate whose live anonymous tenants already number
-`max_tenants` (§6.2). A hello from a key of a team or account tenant is admitted as §5 says, for its existing
+`max_tenants` (§6.2). A gate without the setting (turned off while anonymous tenants live) answers a hello carrying
+it from a key of an anonymous tenant `anonymous_unavailable` too, and treats any other hello from such a key as §5
+treats a new key's: the probe is `unknown_key`; a hello §5 admits moves the key, and the tenant it leaves ends at once
+(DM4-25). A hello from a key of a team or account tenant is admitted as §5 says, for its existing
 bindings, with or without the field.
 
 ### 6.1 What happens
@@ -295,7 +298,8 @@ bindings, with or without the field.
   not revoked (§12): its next hello opens a new anonymous tenant with a new slug (DM4-10).
 - `purge_after` (24 h) after expiry the gate deletes what the tenant still holds: the keys still in it (`tunnel_keys`,
   with their bindings and tunnels), its services with their calls ([`relay.md`](relay.md) §13.5), enrollments,
-  tasks with their bucket objects (the objects first), and the MCP sessions whose `tenant_id` is the tenant, the
+  tasks with their bucket objects (the objects first, by each task's prefix, whether or not it has a `blobs` row,
+  D167), and the MCP sessions whose `tenant_id` is the tenant, the
   gate's own `/mcp` sessions (`service` NULL) included (DM4-20), and its `anon_calls` rows (DM4-25). The tenant row
   stays as a tombstone (`tenants.deleted_at`, with `created_from`), so a slug is never reused.
 - `kontra login` turns the anonymous tenant into the person's account (§6.3); the services keep their names

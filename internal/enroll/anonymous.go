@@ -28,7 +28,8 @@ const EventAnonymous = "tunnel.anonymous_session"
 //   - from a key of a live anonymous tenant: resumed when the hello asks, or carries an auth API key that cannot
 //     convert it (a hire-only key, DM4-19: the session's hiring principal); an auth key with enroll:* converts it
 //     (§6.3, anon.Convert, WP-06); a hello with neither (a probe, §2.4) is unknown_key, so that a node whose earlier
-//     hello converted nothing sends it again;
+//     hello converted nothing sends it again. On a gate without tunnel.anonymous only a hello that asks is
+//     anonymous_unavailable; any other goes through §5 as below (a probe is unknown_key);
 //   - enroll tokens from a key of an anonymous tenant: §5 enrolls the key into the tokens' tenant, moving it, and a
 //     live anonymous tenant ends at once (DM4-19);
 //   - any other hello from a key of an ended anonymous tenant goes through §5 as a new key would (moved if admitted).
@@ -48,8 +49,16 @@ func (a *admission) anonymousSession(ctx context.Context) (*Decision, error) {
 		return nil, nil
 	case k != nil && !k.tenantEnded:
 		switch {
-		case lim == nil:
+		case lim == nil && asks:
 			return nil, tunnel.Refuse(tunnel.CodeAnonymousUnavailable, "this gate opens no anonymous sessions (tunnel.anonymous)")
+		case lim == nil:
+			// A gate without tunnel.anonymous (turned off while the tenant lives) resumes no anonymous session: any other
+			// hello is §5's, as a new key's (the M4 WP-03 review). The probe (§2.4) is then unknown_key, which tells the
+			// node that nothing committed; a hello §5 admits moves the key, and the tenant it leaves ends at once, as
+			// DM4-19's conversions end it.
+			a.moveFrom = &k.Key
+			a.endTenant = k.TenantID
+			return nil, nil
 		case a.principal != nil && a.principal.HasScope(auth.ScopeEnrollAll) && a.s.opts.EnrollWithAPIKey:
 			return a.convert(ctx)
 		case a.principal != nil || asks:

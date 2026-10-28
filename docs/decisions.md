@@ -2750,18 +2750,46 @@ replica holding a session learns that its tenant ended. Decision (`internal/anon
   'expired:<tenant_id>'` first (a gate-internal payload like M2's, which the holder of a session of that tenant applies
   at once), then the services disabled and the bindings revoked with their `kontra_services` and `kontra_revoke`
   notices, and an audit row; a session whose tenant ended never gets one `{"t": "revoked", "service"}` per binding. A
-  conversion (DM4-19) ends the anonymous tenant the same way. The purge runs every minute.
+  conversion (DM4-19) ends the anonymous tenant the same way.
+- **The purge** runs every minute on every replica, on a goroutine of its own (the expiry on another), so a bucket that
+  hangs holds neither the expiry nor the gate's other sweeps. A pass takes up to 100 due tenants and claims each with a
+  session advisory lock (a tenant another replica is purging is skipped); it deletes the bucket objects of every task
+  of the tenant by the task's prefix, whether or not the task has a `blobs` row (D167: an object stored for an event
+  that was then refused, such as an upstream part past `parts_bytes`, has none), 8 tasks at once and each within a
+  minute, then the rows in one transaction. It stops at the first bucket failure (that tenant keeps its rows) and after
+  5 minutes; the next pass goes on (the M4 WP-03 review).
+- **Lock order.** A transaction that takes a key and its anonymous tenant takes the key's row first, then the
+  tenant's, before anything else: the admission locks the anonymous tenant of the hello's key, live or ended, right
+  after the key. The sweeps take a tenant with `SKIP LOCKED`, and the purge takes the tenant's keys with `NOWAIT`,
+  leaving to its next pass a tenant one of whose keys an admission holds. So a resume, a key's move and a conversion
+  never deadlock with the sweeps (the M4 WP-03 review's 40P01s).
+- **A gate that stopped opening them.** On a gate without `tunnel.anonymous` (turned off while anonymous tenants live),
+  a hello from a key of a live anonymous tenant that asks for a session is `anonymous_unavailable`; any other is §5's,
+  as a new key's: the probe (§2.4) is `unknown_key`, so the node sends its full hello; a hello §5 admits (enroll tokens,
+  a hire-only `auth` key with no service) moves the key, and the anonymous tenant ends at once as DM4-19's conversions
+  end it. Answering every hello `anonymous_unavailable` kept a probing node probing forever (the M4 WP-03 review).
 - **The card.** The served card of an anonymous tenant's service carries the gate-asserted extension
   `https://kontra.sh/ext/anonymous/v1` (`required: false`, `params.expiresAt`), written into the service's
   `annotations.card_extensions` when the session creates or enables it, so a card the gate signs says the service is
   an ephemeral anonymous session's (the M4 corrections' recommendation).
 - **The node.** `kontra connect` exits 1 with "the anonymous session expired at <time>" when the gate ends its anonymous
   session, and also when such a session closes within a minute of its end without the message (a redial would open
-  another session with new URLs).
+  another session with new URLs). `expires_at` is the gate's time, and the node's clock may be off by more than that
+  minute, so the node measures the end on its monotonic clock: from the welcome by its own wall clock, then from the
+  gate's `expiring`, which the gate sends ten minutes before the end by its own clock (at once when less is left); a
+  `{"t": "revoked"}` without a service after `expiring` is the end, and a close of an anonymous session is judged only
+  once the control stream has been read (the end's `{"t": "revoked"}` comes just before the close, which the node may
+  see first). A revocation of the key in the session's last ten minutes therefore reads as its end: the node stops
+  either way, and its next hello learns `revoked` (the M4 WP-03 review).
 
 Tests: `internal/anon` (`TestOpenCountsNetworks`, `TestOpenServicesPerTenant`, `TestCapsTask`, `TestCapsCall`,
-`TestCapsStorage`, `TestPurgeLeavesTheTombstone`, `TestNoTableHoldsTheClientAddress`), `internal/enroll`
-(`TestAdmitAnonymous*`, `TestAdmitEnrollFromAnAnonymousKeyConverts`), `internal/tunnelgate`
+`TestCapsStorage`, `TestPurgeLeavesTheTombstone`, `TestPurgeDeletesTheObjectsOfEveryTask`,
+`TestPurgeNeverWaitsOnAnAdmissionOfItsKey`, `TestPurgePassStopsAtTheFirstBucketFailure`, `TestPurgePassEndsAtItsBudget`,
+`TestPurgeClaimsATenant`, `TestNoTableHoldsTheClientAddress`), `internal/enroll` (`TestAdmitAnonymous*`,
+`TestAdmitEnrollFromAnAnonymousKeyConverts`, `TestConversionAndExpiryNeverWaitOnEachOther`,
+`TestEnrollFromAnEndedAnonymousKeyAndExpiryNeverWaitOnEachOther`), `internal/tunnelgate`
 (`TestAnonymousSessionEnds`, `TestAnonymousTenantEndClosesItsSession`, `TestAnonymousHiringStreamsCap`),
-`internal/mcprelay` (`TestPlainCallsAreCapped`), `internal/gate` (`TestAnonymousTenantLimitsThroughTheGate`),
-`internal/node` and `cmd/kontra` (`TestRealAdmissionProbeOnAnAnonymousGate`, `TestConnectExitsWhenTheAnonymousSessionExpires`).
+`internal/mcprelay` (`TestPlainCallsAreCapped`), `internal/gate` (`TestAnonymousTenantLimitsThroughTheGate`,
+`TestAnonymousPurgeDeletesObjectsWithoutRows`, `TestAnonymousSweepsRunApart`), `internal/node` and `cmd/kontra`
+(`TestRealAdmissionProbeOnAnAnonymousGate`, `TestAnonymousExpiryWithASkewedClock`, `TestAnonymousEndEstimate`,
+`TestConnectExitsWhenTheAnonymousSessionExpires`).

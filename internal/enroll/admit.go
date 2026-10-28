@@ -79,8 +79,9 @@ const (
 //     (anonymous: true, neither enroll nor auth) from an unknown key, or from a key of an anonymous tenant, opens or
 //     resumes it (anonymous_unavailable, rate_limited, service_denied, kind_mismatch from its limits), or
 //     anonymous_unavailable on a gate without tunnel.anonymous; a key of a live anonymous tenant presenting no
-//     tokens is resumed on a hire-only auth key and is otherwise unknown_key; one presenting tokens, or of an ended
-//     anonymous tenant, goes on below as a new key would, and is moved (anon.MoveKey) if admitted;
+//     tokens is resumed on a hire-only auth key and is otherwise unknown_key; one presenting tokens, of an ended
+//     anonymous tenant, or of a live one on a gate without tunnel.anonymous (a hello that does not ask), goes on below
+//     as a new key would, and is moved (anon.MoveKey) if admitted;
 //  5. enroll_invalid: a token that is malformed, unknown, used or expired, of another tenant than the key's
 //     or the other authorities', or that applies to no declared service (a service token for a service the
 //     hello does not declare; a tenant token listing none of them);
@@ -262,6 +263,9 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	if key != nil {
 		if key.anonymous && key.RevokedAt == nil && key.RevokedReason != ReasonRotated && key.RotatedTo == "" && h.RotateFrom == nil {
 			// A key of an anonymous tenant: its tenant's end does not revoke it (§6.1, §12; DM4-10).
+			if err := a.lockAnonymousTenant(ctx, key); err != nil {
+				return nil, err
+			}
 			a.anonKey = key
 		} else {
 			if herr := refuseUnusable(key, "the key"); herr != nil {
@@ -514,6 +518,22 @@ func (a *admission) lockKey(ctx context.Context, kid string, pub []byte, what st
 		return nil, tunnel.Refuse(tunnel.CodeBadProof, "%s: this gate stores %s with another public key", what, kid)
 	}
 	return found[0], nil
+}
+
+// lockAnonymousTenant locks the tenant of a key of an anonymous tenant (FOR NO KEY UPDATE), live or ended, right after
+// the key's row and before anything else the admission locks or writes, and reads again under the lock whether it has
+// ended (an expiry committed meanwhile is seen). Every transaction that takes a key and its anonymous tenant takes them
+// in that order, and the anonymous sweeps take a tenant with SKIP LOCKED and its keys with NOWAIT (anon.Sweeper): so a
+// resume, a key's move (anon.MoveKey) and a conversion's end of the tenant (anon.End) never wait on a sweep that waits
+// on them (the M4 WP-03 review's 40P01s: the expiry sweep updating the bindings MoveKey deleted, the purge deleting
+// the key this admission holds). The expiry sweep skips the tenant until this admission commits.
+func (a *admission) lockAnonymousTenant(ctx context.Context, k *keyRow) error {
+	err := a.tx.QueryRow(ctx, `select deleted_at is not null or (expires_at is not null and expires_at <= now())
+		from kontra.tenants where id = $1 for no key update`, k.TenantID).Scan(&k.tenantEnded)
+	if err != nil {
+		return fmt.Errorf("enroll: lock the anonymous tenant of key %s: %w", k.KeyID, err)
+	}
+	return nil
 }
 
 // refuseUnusable is revoked for a key that may open no new session: revoked, of an ended tenant, or rotated.

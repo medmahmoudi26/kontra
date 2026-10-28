@@ -50,8 +50,14 @@ type session struct {
 	auth string
 	// slots bounds the node-opened streams in flight on the session to the gate's cap (§14; session.open).
 	slots chan struct{}
-	// anonEnd is an anonymous session's welcome.anonymous.expires_at (§6.1); zero for any other session.
-	anonEnd time.Time
+	// anonEnd is an anonymous session's welcome.anonymous.expires_at (§6.1); zero for any other session. anonLeft is
+	// how long after opened it ends by the node's estimate, expiring whether the gate's {"t": "expiring"} came
+	// (anonymous.go).
+	anonEnd  time.Time
+	anonLeft atomic.Int64
+	expiring atomic.Bool
+	// controlDone is closed when the session's control stream reader returns (drainControl).
+	controlDone chan struct{}
 
 	retired  atomic.Bool // drained or replaced: serves on, never redialed
 	replaced atomic.Bool // its key, rotated since, was revoked: Run dials the active key's session at once
@@ -102,6 +108,9 @@ func (s *session) readControl(stream net.Conn, br *bufio.Reader) {
 		s.log.Warn("a second control stream on one session is refused")
 		return
 	}
+	if s.controlDone != nil {
+		defer close(s.controlDone)
+	}
 	for {
 		c, err := tunnel.ReadControl(br)
 		if err != nil {
@@ -127,6 +136,7 @@ func (s *session) readControl(stream net.Conn, br *bufio.Reader) {
 		case tunnel.CtlEnrolled:
 			s.log.Info("another key was enrolled for a service this node hosts (§5)", "service", c.Service, "enrolled_key_id", c.Key)
 		case tunnel.CtlExpiring:
+			s.noteExpiring(time.Since(s.opened))
 			s.log.Warn("the gate says this anonymous session ends soon", "at", c.At)
 			if c.At != nil {
 				fmt.Fprintf(s.n.out, "kontra connect: the anonymous session ends at %s (in %s)\n",

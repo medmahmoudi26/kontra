@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -50,8 +51,24 @@ type WorkflowChecker interface {
 }
 
 // RunSweeps runs the sweeps until ctx ends, each once at start and then on its interval. Any replica may
-// run them; each pass is idempotent.
+// run them; each pass is idempotent. It returns once every sweep has stopped.
 func (r *Replica) RunSweeps(ctx context.Context) error {
+	// The anonymous sweeps (a gate with tunnel.anonymous only) run on goroutines of their own, the expiry apart from
+	// the purge: a purge waiting on the bucket holds neither the expiry, which disables the services of the tenants
+	// past their end, nor the sweeps below (the M4 WP-03 review).
+	var anonSweeps sync.WaitGroup
+	defer anonSweeps.Wait()
+	if r.anonSweeper != nil {
+		anonSweeps.Add(2)
+		go func() {
+			defer anonSweeps.Done()
+			r.runAnonExpiry(ctx)
+		}()
+		go func() {
+			defer anonSweeps.Done()
+			r.runAnonPurge(ctx)
+		}()
+	}
 	orphans := time.NewTicker(r.opts.orphanEvery)
 	defer orphans.Stop()
 	retention := time.NewTicker(r.opts.retentionEvery)
@@ -60,17 +77,6 @@ func (r *Replica) RunSweeps(ctx context.Context) error {
 	defer overlaps.Stop()
 	idle := time.NewTicker(IdleInterval)
 	defer idle.Stop()
-	// The anonymous sweeps run only on a gate with tunnel.anonymous: a nil channel never fires.
-	var anonExpire, anonPurge <-chan time.Time
-	if r.anonSweeper != nil {
-		e := time.NewTicker(r.opts.anonExpireEvery)
-		defer e.Stop()
-		p := time.NewTicker(r.opts.anonPurgeEvery)
-		defer p.Stop()
-		anonExpire, anonPurge = e.C, p.C
-		r.sweepAnonExpiry(ctx)
-		r.sweepAnonPurge(ctx)
-	}
 	keys := enroll.NewStore(r.pool, enroll.Options{Logger: r.log})
 	r.sweepOrphans(ctx)
 	r.sweepRetention(ctx)
@@ -80,12 +86,6 @@ func (r *Replica) RunSweeps(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-anonExpire:
-			r.sweepAnonExpiry(ctx)
-		case <-r.anonKick:
-			r.sweepAnonExpiry(ctx)
-		case <-anonPurge:
-			r.sweepAnonPurge(ctx)
 		case <-orphans.C:
 			r.sweepOrphans(ctx)
 		case <-retention.C:
@@ -94,6 +94,39 @@ func (r *Replica) RunSweeps(ctx context.Context) error {
 			r.sweepOverlaps(ctx, keys)
 		case <-idle.C:
 			r.sweepIdle(ctx)
+		}
+	}
+}
+
+// runAnonExpiry runs the anonymous expiry sweep until ctx ends: at once, on its interval, and when kicked.
+func (r *Replica) runAnonExpiry(ctx context.Context) {
+	every := time.NewTicker(r.opts.anonExpireEvery)
+	defer every.Stop()
+	r.sweepAnonExpiry(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-every.C:
+			r.sweepAnonExpiry(ctx)
+		case <-r.anonKick:
+			r.sweepAnonExpiry(ctx)
+		}
+	}
+}
+
+// runAnonPurge runs the anonymous purge until ctx ends: at once, then on its interval (a pass is bounded,
+// anon.Sweeper.Purge; a tick that comes during a pass is dropped).
+func (r *Replica) runAnonPurge(ctx context.Context) {
+	every := time.NewTicker(r.opts.anonPurgeEvery)
+	defer every.Stop()
+	r.sweepAnonPurge(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-every.C:
+			r.sweepAnonPurge(ctx)
 		}
 	}
 }

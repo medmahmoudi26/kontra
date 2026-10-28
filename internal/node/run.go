@@ -37,8 +37,8 @@ func (e *AnonymousExpiredError) Error() string {
 
 func (e *AnonymousExpiredError) Is(target error) bool { return target == ErrAnonymousExpired }
 
-// expirySlack is how far before welcome.anonymous.expires_at a {"t": "revoked"}, or a close of the session, is taken
-// for its end rather than a revocation (the gate's clock and the node's differ).
+// expirySlack is how far before an anonymous session's end, by the node's estimate (anonymous.go), a {"t": "revoked"}
+// or a close of the session is taken for its end rather than a revocation or a redial.
 const expirySlack = time.Minute
 
 // How often a running node looks at its key file: a rotation another `kontra connect` made (one process
@@ -161,7 +161,17 @@ func (n *Node) Run(ctx context.Context) error {
 				n.clearCurrent(s)
 				lived := time.Since(s.opened)
 				n.backoff.SessionEnded(lived)
-				if !s.anonEnd.IsZero() && !time.Now().Before(s.anonEnd.Add(-expirySlack)) {
+				if !s.anonEnd.IsZero() {
+					// At an anonymous session's end the gate sends {"t": "revoked"}, then closes it: what the control
+					// stream received is read before the close is taken for anything (drainControl).
+					s.drainControl()
+					select {
+					case <-n.revoked:
+						return n.stopError()
+					default:
+					}
+				}
+				if s.anonymousOver() {
 					// An anonymous session that closed at its end, whether or not its {"t": "revoked"} arrived: it is
 					// over (§6.1), and a redial would open another one with new URLs.
 					s.log.Error("the anonymous session ended: kontra connect stops", "expires_at", s.anonEnd)
@@ -651,9 +661,11 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 		ctx:     sctx,
 		auth:    auth,
 		slots:   make(chan struct{}, limit),
+
+		controlDone: make(chan struct{}),
 	}
 	if w.Anonymous != nil {
-		s.anonEnd = w.Anonymous.ExpiresAt
+		s.setAnonymousEnd(w.Anonymous.ExpiresAt, n.now())
 	}
 	s.proxy = n.proxy.forSession(served, log)
 	s.proxy.onControl = s.readControl
@@ -758,7 +770,7 @@ func (n *Node) closeAll() {
 // then revoke the old key: D125, D128) closes the old key's session, which Run then replaces at once with a
 // session of the new key (session.replaced), as maintain would have (M2 review, tunnel-spec-2).
 func (n *Node) keyRevoked(s *session) {
-	if !s.anonEnd.IsZero() && !time.Now().Before(s.anonEnd.Add(-expirySlack)) {
+	if s.revokeEndsAnonymous() {
 		// §6.1: at an anonymous session's end the gate sends {"t": "revoked"} and closes it; the key is not revoked.
 		s.log.Error("the gate ended the anonymous session at its end: kontra connect stops", "expires_at", s.anonEnd)
 		n.stop(&AnonymousExpiredError{At: s.anonEnd})

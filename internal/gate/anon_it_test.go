@@ -5,14 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
 	"kontra.sh/kontra/internal/anon"
+	"kontra.sh/kontra/internal/blob/blobtest"
 )
 
 // anonPost posts body to url as an anonymous caller (the services admit anonymous) and returns the status, the
@@ -51,13 +56,19 @@ func restSendBody(text string) string {
 // admission of an anonymous hello with --public would, then NOTIFY kontra_services, and waits until the gate serves it.
 func (e *gateEnv) seedAnonymousService(base, slug, name string) uuid.UUID {
 	e.t.Helper()
+	return e.seedAnonymousServiceAt(base, slug, name, e.seller.srv.URL+"/base")
+}
+
+// seedAnonymousServiceAt is seedAnonymousService with the service's backend at upstream.
+func (e *gateEnv) seedAnonymousServiceAt(base, slug, name, upstream string) uuid.UUID {
+	e.t.Helper()
 	ctx := context.Background()
 	id := uuid.Must(uuid.NewV7())
 	if _, err := e.pool.Exec(ctx, `insert into kontra.tenants (id, slug, kind, expires_at, created_from)
 		values ($1, $2, 'anonymous', now() + interval '1 hour', '203.0.113.0/24')`, id, slug); err != nil {
 		e.t.Fatal(err)
 	}
-	backend := `{"a2a": {"url": "` + e.seller.srv.URL + `/base", "allow_private": true}}`
+	backend := `{"a2a": {"url": "` + upstream + `", "allow_private": true}}`
 	ann, err := anon.CardAnnotations(time.Now().Add(time.Hour))
 	if err != nil {
 		e.t.Fatal(err)
@@ -218,4 +229,103 @@ func TestAnonymousTenantLimitsThroughTheGate(t *testing.T) {
 		t.Fatal("the expired tenant's service is enabled")
 	}
 	e.seller.releaseAll()
+}
+
+// bigSeller is an a2a-go v2.7.0 agent that answers every message with one artifact of two parts of size bytes each.
+type bigSeller struct{ size int }
+
+func (b bigSeller) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		if ec.StoredTask == nil && !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
+			return
+		}
+		part := strings.Repeat("z", b.size)
+		if !yield(a2a.NewArtifactEvent(ec, a2a.NewTextPart(part), a2a.NewTextPart(part)), nil) {
+			return
+		}
+		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
+	}
+}
+
+func (bigSeller) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCanceled, nil), nil)
+	}
+}
+
+// newBigSeller serves bigSeller behind /base and returns that URL.
+func newBigSeller(t *testing.T, size int) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	card := `{"name":"big","description":"answers big parts","version":"1.0.0",
+"supportedInterfaces":[{"url":"` + srv.URL + `/base/rpc","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
+"capabilities":{"streaming":true},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],
+"skills":[{"id":"big","name":"big","description":"big","tags":["b"]}]}`
+	mux.HandleFunc("/base/.well-known/agent-card.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, card)
+	})
+	mux.Handle("/base/rpc", a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(bigSeller{size: size})))
+	return srv.URL + "/base"
+}
+
+// spec/tunnel.md §6.1, §6.2, D167 (M4 WP-03 review): an anonymous tenant's upstream part stored in the bucket for an
+// event that is then refused (the next part would pass parts_bytes) leaves an object and no blobs row; the task fails
+// upstream_error. The purge, purge_after after the tenant's end, deletes that object too, by the task's prefix, before
+// the rows: nothing of the tenant is left in the bucket.
+func TestAnonymousPurgeDeletesObjectsWithoutRows(t *testing.T) {
+	e := newGateEnv(t)
+	ctx := context.Background()
+	bt := blobtest.New(t, "anon")
+	port := freePort(t)
+	path := e.replicaConfig(port, time.Minute, `tenancy: multi
+blobs: "`+bt.URL+`"
+tunnel: { anonymous: { parts_bytes: 512KiB, purge_after: 1s } }
+`)
+	timing := fastTiming
+	timing.AnonExpire, timing.AnonPurge = 200*time.Millisecond, 200*time.Millisecond
+	run := e.start("a", path, timing)
+	slug := "anon-00000000000000c3"
+	tenantID := e.seedAnonymousServiceAt(run.url, slug, "big", newBigSeller(t, 300<<10))
+
+	st, _, body := anonPost(t, run.url+"/agents/"+slug+"/big", sendBody("SendMessage", "two big parts", true))
+	if st != 200 || !strings.Contains(string(body), `"result"`) {
+		t.Fatalf("SendMessage: %d %s", st, body)
+	}
+	eventually(t, 30*time.Second, "the task failed upstream_error", func() bool {
+		return scalar[int64](t, e.pool, `select count(*) from kontra.tasks t join kontra.attempts a on a.task_id = t.id
+			where t.tenant_id = $1 and t.state = 'failed' and a.outcome = 'upstream_error'`, tenantID) == 1
+	})
+	prefix := "anon/" + tenantID.String() + "/"
+	objectsOfTenant := func() []string {
+		var out []string
+		for _, k := range bt.Keys(t) {
+			if strings.HasPrefix(k, prefix) {
+				out = append(out, k)
+			}
+		}
+		return out
+	}
+	if objs := objectsOfTenant(); len(objs) != 1 {
+		t.Fatalf("the bucket holds %v of the tenant, want the first part's object", objs)
+	}
+	if n := scalar[int64](t, e.pool, `select count(*) from kontra.blobs where tenant_id = $1`, tenantID); n != 0 {
+		t.Fatalf("%d blobs rows: the refused event's object should have none", n)
+	}
+
+	// The tenant ends; purge_after (1 s) later the purge leaves only its tombstone, and nothing in the bucket.
+	if _, err := e.pool.Exec(ctx, `update kontra.tenants set expires_at = now() - interval '1 minute' where id = $1`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 30*time.Second, "the tenant purged", func() bool {
+		return scalar[int64](t, e.pool, `select count(*) from kontra.tenants where id = $1 and deleted_at is not null`, tenantID) == 1
+	})
+	if n := scalar[int64](t, e.pool, `select count(*) from kontra.tasks where tenant_id = $1`, tenantID); n != 0 {
+		t.Fatalf("%d tasks after the purge", n)
+	}
+	if objs := objectsOfTenant(); len(objs) != 0 {
+		t.Fatalf("the purge left the tenant's objects %v in the bucket", objs)
+	}
 }

@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/netip"
 	"regexp"
@@ -272,22 +273,33 @@ func Open(ctx context.Context, tx pgx.Tx, lim Limits, req OpenRequest) (*Tenant,
 	return t, nil
 }
 
-// resume locks the key's tenant and returns it when it is a live anonymous tenant, nil otherwise. The lock (FOR NO
-// KEY UPDATE) keeps Expire (FOR UPDATE SKIP LOCKED) off it until the admission commits.
+// resume returns the key's tenant when it is a live anonymous tenant, locked (FOR NO KEY UPDATE, which keeps Expire's
+// FOR UPDATE SKIP LOCKED off it until the admission commits), and nil otherwise. A tenant that has ended is read, never
+// locked: the admission already holds the key's row, and a purge holds the ended tenant's row before it takes the
+// tenant's keys, so locking it here would close a cycle (the M4 WP-03 review; internal/enroll locks a key's anonymous
+// tenant right after the key, before anything else, and the purge takes the keys with NOWAIT).
 func resume(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*Tenant, error) {
-	t := &Tenant{ID: tenantID, Resumed: true}
-	var live bool
-	err := tx.QueryRow(ctx, `select slug, expires_at, kind = 'anonymous' and deleted_at is null and expires_at > now()
-		from kontra.tenants where id = $1 for no key update`, tenantID).Scan(&t.Slug, &t.ExpiresAt, &live)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return nil, nil
-	case err != nil:
-		return nil, err
-	case !live:
-		return nil, nil
+	live := func(sql string) (*Tenant, error) {
+		t := &Tenant{ID: tenantID, Resumed: true}
+		var ok bool
+		err := tx.QueryRow(ctx, sql, tenantID).Scan(&t.Slug, &t.ExpiresAt, &ok)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return nil, nil
+		case err != nil:
+			return nil, err
+		case !ok:
+			return nil, nil
+		}
+		return t, nil
 	}
-	return t, nil
+	const read = `select slug, expires_at, kind = 'anonymous' and deleted_at is null and expires_at > now()
+		from kontra.tenants where id = $1`
+	if t, err := live(read); t == nil || err != nil {
+		return nil, err
+	}
+	// Live: locked, and read again under the lock (an expiry committed meanwhile is seen).
+	return live(read + ` for no key update`)
 }
 
 func open(ctx context.Context, tx pgx.Tx, lim Limits, req OpenRequest) (*Tenant, error) {
@@ -568,7 +580,12 @@ type ObjectDeleter interface {
 }
 
 // Sweeper ends anonymous tenants: Expire at expires_at, Purge purge_after later. Every replica runs it; each tenant is
-// claimed by one pass at a time (FOR UPDATE SKIP LOCKED).
+// taken by one pass at a time (Expire: FOR UPDATE SKIP LOCKED; Purge: a claim, then the same).
+//
+// Lock order. A transaction that takes a key and its anonymous tenant takes the key's row first, then the tenant's,
+// before anything else (internal/enroll's admission). The sweeps take a tenant's row with SKIP LOCKED, and Purge takes
+// the tenant's keys with NOWAIT, leaving a tenant whose key an admission holds to its next pass: so an admission and a
+// sweep never wait on each other in a cycle (the M4 WP-03 review's 40P01s).
 type Sweeper struct {
 	db      *pgxpool.Pool
 	lim     Limits
@@ -589,6 +606,30 @@ const sweepBatch = 100
 
 // sweepTimeout bounds one pass's statements.
 const sweepTimeout = 30 * time.Second
+
+// objectDeleteTimeout bounds the deletion of one task's objects (store.ObjectDeleteTimeout's); tests shorten it.
+var objectDeleteTimeout = time.Minute
+
+// purgeDeleters is how many tasks' objects a purge deletes at once (the retention sweep's objectDeleters).
+const purgeDeleters = 8
+
+// purgeBudget bounds one Purge pass: the tenants left when it is spent are the next pass's (tests shorten it).
+var purgeBudget = 5 * time.Minute
+
+// errObjects is a purge that the bucket stopped: the tenant keeps its rows, and the pass stops (the bucket is likely
+// down; the next pass tries again).
+var errObjects = errors.New("the bucket would not delete the objects")
+
+// purgeLockSpace is the high half of a purge's claim on a tenant, a session advisory lock: "ktap", then a 32-bit
+// FNV-1a hash of the tenant id (two tenants with one hash are only purged one after the other). It is far from openLock
+// ("ktan"), the enrollments' "ktsv" and the gate's "kontra" keys.
+const purgeLockSpace int64 = 0x6b746170 << 32
+
+func purgeLock(tenantID uuid.UUID) int64 {
+	h := fnv.New32a()
+	h.Write(tenantID[:])
+	return purgeLockSpace | int64(h.Sum32())
+}
 
 // Expire ends the tenants whose expires_at has passed and that still have a service not disabled or a binding not
 // revoked (End, with reason "expired"), and returns how many it ended.
@@ -631,11 +672,20 @@ func (s *Sweeper) Expire(ctx context.Context) (int, error) {
 }
 
 // Purge deletes what the tenants expired purge_after ago still hold (§6.1, DM4-20): for each, the bucket objects of
-// its tasks first, then in one transaction the keys still in it (their bindings and tunnels go with them), its MCP
-// sessions (the gate's own /mcp sessions, service NULL, included), its calls, tasks, services, enrollment tokens and
-// in-flight call rows, and sets tenants.deleted_at: the row stays as the tombstone, with created_from. A tenant whose
-// objects the bucket would not delete keeps everything for the next pass. It returns how many tenants it purged.
+// every one of its tasks first, by prefix, whether or not the task has a blobs row (D167: an object stored for an event
+// that was then refused has none), then in one transaction the keys still in it (their bindings and tunnels go with
+// them), its MCP sessions (the gate's own /mcp sessions, service NULL, included), its calls, tasks, services, enrollment
+// tokens and in-flight call rows, and sets tenants.deleted_at: the row stays as the tombstone, with created_from. It
+// returns how many tenants it purged.
+//
+// A pass is bounded: it takes up to sweepBatch tenants, claims each before touching it (a session advisory lock, so
+// replicas never purge one tenant together; one another replica holds is skipped), deletes a tenant's objects
+// purgeDeleters tasks at once, each within objectDeleteTimeout, stops at the first bucket failure (that tenant keeps
+// everything) and ends when purgeBudget is spent; what is left is the next pass's. A tenant one of whose keys an
+// admission holds is left to the next pass too (NOWAIT, see Sweeper).
 func (s *Sweeper) Purge(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, purgeBudget)
+	defer cancel()
 	rows, err := s.db.Query(ctx, `select id from kontra.tenants
 		where kind = 'anonymous' and deleted_at is null and expires_at <= now() - make_interval(secs => $1)
 		order by expires_at limit $2`, s.lim.PurgeAfter.Seconds(), sweepBatch)
@@ -649,9 +699,16 @@ func (s *Sweeper) Purge(ctx context.Context) (int, error) {
 	purged := 0
 	var errs []error
 	for _, id := range ids {
+		if ctx.Err() != nil {
+			errs = append(errs, fmt.Errorf("anon: purge: the pass ended at its budget (%s); the next pass goes on", purgeBudget))
+			break
+		}
 		ok, err := s.purge(ctx, id)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
+			errs = append(errs, fmt.Errorf("anon: purge tenant %s: %w", id, err))
+			if errors.Is(err, errObjects) {
+				break
+			}
 			continue
 		}
 		if ok {
@@ -661,43 +718,63 @@ func (s *Sweeper) Purge(ctx context.Context) (int, error) {
 	return purged, errors.Join(errs...)
 }
 
+// purge purges one tenant under its claim, and reports whether it did (false: another pass holds it, an admission
+// holds one of its keys, or it is no longer due).
 func (s *Sweeper) purge(ctx context.Context, tenantID uuid.UUID) (bool, error) {
-	// The objects first (spec §5.4: objects go before their rows; a tenant whose objects remain keeps its rows).
+	conn, err := s.db.Acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Release()
+	claim := purgeLock(tenantID)
+	var claimed bool
+	if err := conn.QueryRow(ctx, `select pg_try_advisory_lock($1)`, claim).Scan(&claimed); err != nil {
+		return false, err
+	}
+	if !claimed {
+		return false, nil // another replica's pass is purging it
+	}
+	defer func() {
+		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), callTimeout)
+		defer cancel()
+		var released bool
+		if err := conn.QueryRow(uctx, `select pg_advisory_unlock($1)`, claim).Scan(&released); err != nil || !released {
+			// A claim that could not be released goes with its connection (Release then discards it).
+			_ = conn.Conn().Close(uctx)
+		}
+	}()
+	due := `select slug, exists (select 1 from kontra.services where tenant_id = t.id and disabled_at is null)
+		from kontra.tenants t where id = $1 and kind = 'anonymous' and deleted_at is null
+		  and expires_at <= now() - make_interval(secs => $2)`
+	var (
+		slug    string
+		running bool
+	)
+	if err := conn.QueryRow(ctx, due, tenantID, s.lim.PurgeAfter.Seconds()).Scan(&slug, &running); errors.Is(err, pgx.ErrNoRows) {
+		return false, nil // purged by the pass that held the claim before
+	} else if err != nil {
+		return false, err
+	}
+	// The objects first (spec §5.4, D167: objects go before their rows; a tenant whose objects remain keeps its rows).
 	if s.objects != nil {
-		rows, err := s.db.Query(ctx, `select distinct task_id from kontra.blobs where tenant_id = $1`, tenantID)
-		if err != nil {
+		if err := s.deleteObjects(ctx, conn, tenantID); err != nil {
 			return false, err
-		}
-		tasks, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
-		if err != nil {
-			return false, err
-		}
-		for _, task := range tasks {
-			dctx, cancel := context.WithTimeout(ctx, time.Minute)
-			err := s.objects.DeleteTask(dctx, tenantID, task)
-			cancel()
-			if err != nil {
-				return false, fmt.Errorf("the bucket objects of task %s: %w", task, err)
-			}
 		}
 	}
 	purged := false
-	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `select set_config('statement_timeout', $1, true)`, fmt.Sprint(sweepTimeout.Milliseconds())); err != nil {
 			return err
 		}
-		var (
-			slug    string
-			running bool
-		)
-		err := tx.QueryRow(ctx, `select slug, exists (select 1 from kontra.services where tenant_id = t.id and disabled_at is null)
-			from kontra.tenants t where id = $1 and kind = 'anonymous' and deleted_at is null
-			  and expires_at <= now() - make_interval(secs => $2)
-			for update skip locked`, tenantID, s.lim.PurgeAfter.Seconds()).Scan(&slug, &running)
+		err := tx.QueryRow(ctx, due+` for update skip locked`, tenantID, s.lim.PurgeAfter.Seconds()).Scan(&slug, &running)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil // another pass holds it, or it is done
+			return nil // an admission of one of its keys holds it, or it is done
 		}
 		if err != nil {
+			return err
+		}
+		// Its keys next, without waiting: an admission holding one took it before the tenant (the lock order above).
+		if _, err := tx.Exec(ctx, `select 1 from kontra.tunnel_keys where tenant_id = $1 for update nowait`, tenantID); err != nil {
 			return err
 		}
 		if running {
@@ -740,7 +817,68 @@ func (s *Sweeper) purge(ctx context.Context, tenantID uuid.UUID) (bool, error) {
 		purged = true
 		return nil
 	})
+	if isLockNotAvailable(err) {
+		s.log.Debug("anonymous purge: an admission holds a key of the tenant; the next pass purges it", "tenant_id", tenantID)
+		return false, nil
+	}
 	return purged, err
+}
+
+// deleteObjects deletes the bucket objects of every task of the tenant (DeleteTask, by prefix), purgeDeleters at once,
+// each within objectDeleteTimeout. The first failure stops the others and is returned wrapping errObjects.
+func (s *Sweeper) deleteObjects(ctx context.Context, conn *pgxpool.Conn, tenantID uuid.UUID) error {
+	rows, err := conn.Query(ctx, `select id from kontra.tasks where tenant_id = $1`, tenantID)
+	if err != nil {
+		return err
+	}
+	tasks, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return err
+	}
+	dctx, stop := context.WithCancel(ctx)
+	defer stop()
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		first error
+	)
+	fail := func(err error) {
+		mu.Lock()
+		if first == nil {
+			first = err
+		}
+		mu.Unlock()
+		stop()
+	}
+	sem := make(chan struct{}, purgeDeleters)
+launch:
+	for _, task := range tasks {
+		select {
+		case sem <- struct{}{}:
+		case <-dctx.Done():
+			break launch
+		}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			tctx, cancel := context.WithTimeout(dctx, objectDeleteTimeout)
+			defer cancel()
+			if err := s.objects.DeleteTask(tctx, tenantID, task); err != nil {
+				fail(fmt.Errorf("%w of task %s: %w", errObjects, task, err))
+			}
+		}()
+	}
+	wg.Wait()
+	if first == nil && dctx.Err() != nil {
+		first = fmt.Errorf("%w: %w", errObjects, context.Cause(dctx))
+	}
+	return first
+}
+
+// isLockNotAvailable reports Postgres's lock_not_available (SQLSTATE 55P03: a NOWAIT lock, or lock_timeout).
+func isLockNotAvailable(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "55P03"
 }
 
 // Role is how a new task counts against an anonymous tenant (§6.2).

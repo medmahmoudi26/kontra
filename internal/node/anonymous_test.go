@@ -190,3 +190,70 @@ func TestParsePublic(t *testing.T) {
 		t.Fatalf("New with an unserved --public: %v", err)
 	}
 }
+
+// §6.1, DM4-25 (M4 WP-03 review): the node tells the gate's end of its anonymous session from a revocation of its key
+// whatever its own clock says. A node whose clock runs 5 minutes behind the gate's still exits with
+// ErrAnonymousExpired when the gate sends {"t": "revoked"} at the session's end (welcome.anonymous.expires_at is the
+// gate's time), and does not redial.
+func TestAnonymousExpiryWithASkewedClock(t *testing.T) {
+	g := newTestGate(t, nil)
+	end := time.Now().Add(4 * time.Second).UTC().Truncate(time.Second).Add(time.Second)
+	g.adm.set(func(_ int, req enroll.Request) (*enroll.Decision, error) { return anonymousDecision(req, end), nil })
+	rec := newRecorder(t)
+	tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url())))
+	tn.n.now = func() time.Time { return time.Now().Add(-5 * time.Minute) }
+	tn.run(t)
+	g.session(t)
+	err := tn.result(t, 20*time.Second)
+	var ae *AnonymousExpiredError
+	if !errors.As(err, &ae) || !ae.At.Equal(end) {
+		t.Fatalf("Run = %v, want the anonymous session's end", err)
+	}
+	if n := g.adm.count(); n != 1 {
+		t.Fatalf("%d handshakes: the node redialed", n)
+	}
+}
+
+// The node's estimate of an anonymous session's end, on its monotonic clock: from the welcome by its own wall clock,
+// then from the gate's {"t": "expiring"}, which the gate sends expiringNotice before the end by its own clock (or at
+// once when less is left), so a skew between the clocks no longer counts once it came. A close is the end when the
+// estimate says so (anonymousOver); a {"t": "revoked"} also once expiring came (revokeEndsAnonymous).
+func TestAnonymousEndEstimate(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// skew is the node's clock less the gate's; opened is how long ago the welcome came, left what the gate had
+		// left then; expiring how long after the welcome the gate's expiring came (-1: not yet).
+		skew, opened, left, expiring time.Duration
+		closed, revoked              bool // a close now is the end; a revoked now is the end
+	}{
+		{"in step, at the end", 0, 2 * time.Hour, 2 * time.Hour, 2*time.Hour - expiringNotice, true, true},
+		{"in step, mid-session", 0, time.Hour, 2 * time.Hour, -1, false, false},
+		{"behind, no expiring, at the end", -5 * time.Minute, 2 * time.Hour, 2 * time.Hour, -1, false, false},
+		{"behind, at the end", -5 * time.Minute, 2 * time.Hour, 2 * time.Hour, 2*time.Hour - expiringNotice, true, true},
+		{"ahead, at the end", 5 * time.Minute, 2 * time.Hour, 2 * time.Hour, 2*time.Hour - expiringNotice, true, true},
+		{"ahead, 5 minutes before the end", 5 * time.Minute, 115 * time.Minute, 2 * time.Hour, 2*time.Hour - expiringNotice, false, true},
+		{"ahead, no expiring, 5 minutes before the end", 5 * time.Minute, 115 * time.Minute, 2 * time.Hour, -1, true, true},
+		{"behind, a quarter of an hour before", -5 * time.Minute, 105 * time.Minute, 2 * time.Hour, -1, false, false},
+		{"behind, expiring at once, at the end", -5 * time.Minute, 3 * time.Minute, 3 * time.Minute, 0, false, true},
+		{"in step, expiring at once, at the end", 0, 3 * time.Minute, 3 * time.Minute, 0, true, true},
+		{"not anonymous", 0, 2 * time.Hour, 0, -1, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			now := time.Now()
+			s := &session{opened: now.Add(-c.opened)}
+			if c.left > 0 {
+				// The gate's end and the node's wall clock at the welcome.
+				s.setAnonymousEnd(now.Add(c.left-c.opened), now.Add(-c.opened+c.skew))
+			}
+			if c.expiring >= 0 {
+				s.noteExpiring(c.expiring)
+			}
+			if got := s.anonymousOver(); got != c.closed {
+				t.Errorf("a close now is the end: %v, want %v (left %s)", got, c.closed, time.Duration(s.anonLeft.Load()))
+			}
+			if got := s.revokeEndsAnonymous(); got != c.revoked {
+				t.Errorf("a revoked now is the end: %v, want %v (left %s)", got, c.revoked, time.Duration(s.anonLeft.Load()))
+			}
+		})
+	}
+}

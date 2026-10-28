@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"kontra.sh/kontra/internal/anon"
+	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/tunnel"
 )
@@ -272,5 +274,228 @@ func TestAnonymousSlugIsReserved(t *testing.T) {
 		if !errors.As(err, &pe) || pe.Code != "23514" || pe.ConstraintName != "anonymous_slug" {
 			t.Errorf("an %s tenant with an anon- slug: %v", kind, err)
 		}
+	}
+}
+
+// §2.4, §6 (DM4-18; M4 WP-03 review): on a gate without tunnel.anonymous (the operator turned it off), a key of a
+// still-live anonymous tenant is no anonymous session's: a hello asking for one is anonymous_unavailable; any other is
+// §5's, as a new key's. So the probe (no field, no tokens, no auth) is unknown_key, which tells the node nothing
+// committed; a hire-only auth key with no service is admitted hire-only, the key moved into the API key's tenant and
+// the anonymous tenant ended (DM4-19's "converted"); one declaring services that nothing enrolls is unknown_key.
+func TestAdmitAnonymousKeyOnAGateWithoutAnonymous(t *testing.T) {
+	e := newAnonEnv(t, nil)
+	ctx := context.Background()
+	k := newTestKey(t)
+	d1, err := e.admitFrom(k, anonHello(k, a2a("hello")), "203.0.113.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := NewStore(e.pool, Options{PublicURL: "https://gate.example", Keys: e.keys, Multi: true})
+	admitOff := func(h *tunnel.Hello) (*Decision, error) {
+		return off.Admit(ctx, Request{Hello: h, PubKey: k.pub, SessionID: uuid.Must(uuid.NewV7()), ReplicaID: e.replic,
+			Client: netip.MustParseAddr("203.0.113.5")})
+	}
+	_, err = admitOff(hello(k, a2a("hello")))
+	wantCode(t, "the probe", err, tunnel.CodeUnknownKey)
+	_, err = admitOff(anonHello(k, a2a("hello")))
+	wantCode(t, "a hello asking for a session", err, tunnel.CodeAnonymousUnavailable)
+
+	hireOnly, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "hirer", Scopes: []auth.Scope{auth.ScopeHire}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withServices := hello(k, a2a("hello"))
+	withServices.Auth = hireOnly.Secret
+	_, err = admitOff(withServices)
+	wantCode(t, "a hire-only auth key declaring services", err, tunnel.CodeUnknownKey)
+	if n := e.count(`select count(*) from kontra.tunnel_keys where key_id = $1 and tenant_id = $2`, k.kid, d1.Key.TenantID); n != 1 {
+		t.Fatal("a refused hello moved the key")
+	}
+
+	h := hello(k)
+	h.Auth = hireOnly.Secret
+	d, err := admitOff(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Anonymous != nil || d.Key.TenantID != e.team || d.Hire == nil || d.HirePrincipal != d.Hire.ID || len(d.Served) != 0 {
+		t.Fatalf("hire-only: %+v %+v", d.Key, d.Hire)
+	}
+	if n := e.count(`select count(*) from kontra.tunnel_keys where key_id = $1 and tenant_id = $2`, k.kid, e.team); n != 1 {
+		t.Fatal("the key did not move into the API key's tenant")
+	}
+	if n := e.count(`select count(*) from kontra.tenants where id = $1 and expires_at <= now()`, d1.Key.TenantID); n != 1 {
+		t.Fatal("the anonymous tenant the key left did not end")
+	}
+	if n := e.count(`select count(*) from kontra.services where tenant_id = $1 and disabled_at is null`, d1.Key.TenantID); n != 0 {
+		t.Errorf("%d services of the anonymous tenant still enabled", n)
+	}
+}
+
+// waitLockWaits waits until n sessions of this database wait on a lock of type lock ("advisory", "transactionid",
+// "tuple", ...).
+func (e *pgEnv) waitLockWaits(n int, lock string) {
+	e.t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for e.count(`select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'
+		and wait_event = $1`, lock) < n {
+		if time.Now().After(deadline) {
+			e.t.Fatalf("%d sessions never waited on a %s lock", n, lock)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// DM4-19, §6.1 (M4 WP-03 review, lock order): a conversion in flight (enroll tokens from a key of a live anonymous
+// tenant: the key moved, its anonymous bindings deleted, then the tenant ended) holds the anonymous tenant's row from
+// right after the key's, so the expiry sweep, when the tenant reaches its end meanwhile, skips it instead of waiting on
+// the conversion's bindings while the conversion waits on the tenant (a 40P01 before). The conversion then ends the
+// tenant itself ("converted"), once.
+func TestConversionAndExpiryNeverWaitOnEachOther(t *testing.T) {
+	e := newAnonEnv(t, nil)
+	ctx := context.Background()
+	e.service(e.team, "hello", "a2a", false)
+	k := newTestKey(t)
+	d1, err := e.admitFrom(k, anonHello(k, a2a("hello")), "203.0.113.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := e.token(e.team, "hello")
+	// The tenant reaches its end while the conversion runs.
+	e.exec(`update kontra.tenants set expires_at = now() + interval '3 seconds' where id = $1`, d1.Key.TenantID)
+
+	// Hold the audit lock: the conversion stops at its first audit row, after the key's move (enroll's write).
+	e.store.lockTimeout = 30 * time.Second
+	defer func() { e.store.lockTimeout = admitLockTimeout }()
+	locker, err := pgx.Connect(ctx, e.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close(context.Background())
+	held, err := locker.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Rollback(context.Background())
+	if _, err := held.Exec(ctx, `select pg_advisory_xact_lock($1)`, audit.LockID); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		d   *Decision
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		h := hello(k, a2a("hello"))
+		h.Enroll = []string{tok}
+		d, err := e.admitFrom(k, h, "203.0.113.7")
+		done <- result{d, err}
+	}()
+	e.waitLockWaits(1, "advisory")
+	deadline := time.Now().Add(20 * time.Second)
+	for e.count(`select count(*) from kontra.tenants where id = $1 and expires_at <= now()`, d1.Key.TenantID) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the tenant never reached its end")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	n, err := anon.NewSweeper(e.pool, anon.Defaults, nil, nil).Expire(sctx)
+	cancel()
+	if err != nil || n != 0 {
+		t.Errorf("the expiry sweep during the conversion: ended %d, %v (it waited on the conversion)", n, err)
+	}
+	if err := held.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r := <-done
+	if r.err != nil || r.d.Key.TenantID != e.team {
+		t.Fatalf("the conversion: %v %+v", r.err, r.d)
+	}
+	reasons := map[any]int{}
+	for _, row := range e.verifyAudit() {
+		if row["event"] == anon.EventExpired && row["tenant_id"] == d1.Key.TenantID.String() {
+			reasons[row["reason"]]++
+		}
+	}
+	if len(reasons) != 1 || reasons["converted"] != 1 {
+		t.Fatalf("the anonymous tenant's end: %v, want it converted once", reasons)
+	}
+	if n, err := anon.NewSweeper(e.pool, anon.Defaults, nil, nil).Expire(ctx); err != nil || n != 0 {
+		t.Fatalf("expire after the conversion: %d %v", n, err)
+	}
+}
+
+// DM4-19, §6.1 (M4 WP-03 review, lock order): the admission locks a key's anonymous tenant even once it has ended, as
+// long as the expiry sweep has not run on it. Otherwise enroll tokens from such a key move it (its bindings deleted)
+// while an expiry batch that has already written an audit row (the global audit lock) waits on those bindings, and the
+// admission then waits on the audit lock. Here the admission is held after the move (the team service's row locked);
+// the batch must end the other tenant and skip this one, without waiting.
+func TestEnrollFromAnEndedAnonymousKeyAndExpiryNeverWaitOnEachOther(t *testing.T) {
+	e := newAnonEnv(t, nil)
+	ctx := context.Background()
+	e.service(e.team, "hello", "a2a", false)
+	other, k := newTestKey(t), newTestKey(t)
+	d1, err := e.admitFrom(other, anonHello(other, a2a("x")), "198.51.100.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2, err := e.admitFrom(k, anonHello(k, a2a("hello")), "203.0.113.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both past their end, not yet swept; the other one first in the batch.
+	e.exec(`update kontra.tenants set expires_at = now() - interval '2 seconds' where id = $1`, d1.Key.TenantID)
+	e.exec(`update kontra.tenants set expires_at = now() - interval '1 second' where id = $1`, d2.Key.TenantID)
+	tok := e.token(e.team, "hello")
+
+	e.store.lockTimeout = 30 * time.Second
+	defer func() { e.store.lockTimeout = admitLockTimeout }()
+	locker, err := pgx.Connect(ctx, e.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close(context.Background())
+	held, err := locker.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Rollback(context.Background())
+	// The team service's row: the admission's binding to it waits here, after the key's move.
+	if _, err := held.Exec(ctx, `select 1 from kontra.services where tenant_id = $1 and name = 'hello' for update`, e.team); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		d   *Decision
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		h := hello(k, a2a("hello"))
+		h.Enroll = []string{tok}
+		d, err := e.admitFrom(k, h, "203.0.113.7")
+		done <- result{d, err}
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for e.count(`select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the admission never waited on the service's row")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	n, err := anon.NewSweeper(e.pool, anon.Defaults, nil, nil).Expire(sctx)
+	cancel()
+	if err != nil || n != 1 {
+		t.Errorf("the expiry sweep during the enrollment: ended %d, %v (it waited on the enrollment)", n, err)
+	}
+	if err := held.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := <-done; r.err != nil || r.d.Key.TenantID != e.team {
+		t.Fatalf("the enrollment: %v %+v", r.err, r.d)
+	}
+	if n, err := anon.NewSweeper(e.pool, anon.Defaults, nil, nil).Expire(ctx); err != nil || n != 1 {
+		t.Fatalf("expire after the enrollment: %d %v, want the tenant the key left", n, err)
 	}
 }
