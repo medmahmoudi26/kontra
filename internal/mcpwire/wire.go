@@ -71,6 +71,9 @@ const (
 	ExtTasks               = "io.modelcontextprotocol/tasks"
 	// KontraPrefix is the prefix of Kontra's own _meta keys (D27), which only the gate or the operator writes.
 	KontraPrefix = "sh.kontra/"
+	// MetaServerInfo is the _meta key of a 2026-07-28 server/discover result that names the server (DiscoverResult;
+	// the gate's own /mcp writes it, M4 WP-05).
+	MetaServerInfo = "io.modelcontextprotocol/serverInfo"
 )
 
 // ErrBatch is a POST body that is one JSON value but not an object: an array or a scalar (§11.1). From a client it

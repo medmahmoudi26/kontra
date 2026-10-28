@@ -2879,3 +2879,51 @@ not required). Proposal, not built: `hire` and `reply` take an optional `extensi
 URIs as `A2A-Extensions` does (ignored unless declared, passed to Admission and the upstream as the A2A route passes
 them; activating escrow acknowledges the quote, D38, and a person still approves it); §12.4's form answers would then
 need the task's activation kept for its follow-ups.
+
+## From M4 WP-05, `/mcp` in the 2026-07-28 era (28 Oct)
+
+### DM4-28. How `/mcp` answers a 2026-07-28 client — **decided under the owner's standing instruction, 28 Oct** (completes DM4-2, DM4-7; one SPEC-CONFLICT with §11.12 step 4)
+
+DM4-2 and DM4-7 have `/mcp` serve the modern era, but left five things unsaid that building it had to settle
+([`relay.md`](../spec/relay.md) §12.5, §16 `gate_mcp_modern`):
+
+- **What the gate's own modern results carry.** 2026-07-28 gives every result a `resultType` and every list and
+  `server/discover` result `ttlMs` and `cacheScope` (CacheableResult). The tool results, the empty acknowledgements of
+  `tasks/update` and `tasks/cancel`, and `tasks/get`'s DetailedTask carry `resultType: "complete"`, a
+  `CreateTaskResult` `"task"`; `server/discover` and the modern `tools/list` carry `ttlMs` 600000 (§11.12's bound on a
+  relayed list; the four tools change only with the gate's version) and `cacheScope: "private"`, and `server/discover`
+  names the gate in `_meta["io.modelcontextprotocol/serverInfo"]` (a SHOULD) with `initialize`'s instructions.
+- **Methods `/mcp` does not serve.** `ping` (removed by 2026-07-28), `tasks/result` and `tasks/list` (removed by the
+  extension) and every method other than `server/discover`, `tools/list`, `tools/call` and the three `tasks/*` are `404`
+  with `-32601` (2026-07-28 Streamable HTTP: a method the server does not implement). `subscriptions/listen` asking for
+  `taskIds` without declaring the extension is `-32021` (the extension's MUST, D176); any other is `404` with
+  `-32601`: `/mcp` has no notification to offer (its tools never change while it runs; `notifications/tasks` is not
+  offered, D161), and `server/discover` declares no `listChanged`.
+- **A failed `hire` task to a modern reader.** §12.2 makes every terminal `hire` task a `CallToolResult`, never a
+  JSON-RPC error; the tasks extension forbids `failed` for a tool result with `isError` ("MUST NOT be used for
+  non-JSON-RPC errors") and requires `error` with it. So a task that ended `failed` or `rejected` is `completed` to a
+  modern reader, its `result` the `isError` `CallToolResult` with `sh.kontra/failure` in both `_meta`s, as §11.12's
+  table already says for a stored `CallToolResult` whatever its `isError`; `canceled` is `cancelled`, without `result`.
+  A legacy reader keeps §11.8's `failed`.
+- **`tasks/update`.** Only the gate id of the question outstanding now, as the request's own `tasks/get` would show it
+  (DM4-7: input-required, a text-only question, form elicitation declared in that request), is read; its `accept` with
+  a string `content.reply` is the §7 follow-up through the Hirer, the path `reply` and a legacy client's response take,
+  so the workflow's one-follow-up-per-turn-end rule (§7, D105) makes a second answer a no-op. Everything else (a quoted
+  task's keys, an earlier turn's, another task's, a malformed key, a decline, a cancel, an answer to a working or
+  ended task) is the empty acknowledgement and forwards nothing (the corrections' rule: a quoted task is never
+  approved by a client). A follow-up the lifecycle did not accept in time is `503` with `-32603`, so the client
+  answers again rather than believing an acknowledgement.
+- **A client that leaves.** 2026-07-28 says a server MUST treat a closed response stream as the cancellation of that
+  request. A `hire` that created a task and whose client leaves before the answer is written (the 2 s wait of a
+  task-augmented call, D178, or the 25 s plain wait) sends that task `kontra.cancel` in MCP mode, not awaited; the
+  task's creation runs on a context the client cannot cancel (bounded to a minute), so a task created while the client
+  left is learnt and cancelled rather than left running unseen. A task a retry found again (§12.3) is the earlier
+  request's and is never cancelled; neither is a `reply`'s task, whose id its client knows.
+
+SPEC-CONFLICT, resolved by this entry: §11.12 step 4, which §12.5 applies to `hire`, cancels the task of any client
+that leaves before "either answer", a quoted task's `CreateTaskResult` included. On `/mcp` that breaks §12.3's retry:
+2026-07-28 makes a client re-issue a request whose stream broke, and a re-issued `hire` within 10 minutes of its quoted
+task's end answers that task, so the client would be told "the task was canceled" for 10 minutes, and a person could
+never approve the quote. A quoted task runs nothing until a person approves it, and ends by itself when its quote
+expires. Decision: a quoted task is not cancelled when its client leaves; the re-issued `hire` answers it with its
+approve URL (`TestGateMCPModernClientLeaves`). §11.12 step 4 stands for `/mcp/{svc}`, whose MCP tasks have no retry.

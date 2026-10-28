@@ -55,7 +55,9 @@ type Hirer interface {
 // extension (DM4-27) is a tool execution error naming the route to use, and no task; then the task through the
 // Hirer, answered as §12.3 says: quoted, -32042 to a session that declared elicitation.url and otherwise the approve
 // URL at once (CreateTaskResult working, or the plain text); any other task, CreateTaskResult when task-augmented,
-// else after the plain wait.
+// else after the plain wait. A modern request's task is answered by answerModernHire (§12.5); its creation runs on a
+// context its client cannot cancel (bounded by modernHireBound), so that a client that leaves meanwhile has its task
+// cancelled rather than running unseen (D178).
 func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 	a, parts, err := parseHireArgs(args)
 	if err != nil {
@@ -79,11 +81,11 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 	base := strings.TrimRight(h.deps.PublicURL, "/")
 	switch {
 	case svc.ref.Kind == config.KindMCP:
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult("service "+ref.String()+" is an MCP server: hire takes A2A agents only. "+
+		rq.result(errorResult("service "+ref.String()+" is an MCP server: hire takes A2A agents only. "+
 			"Call its tools directly at "+base+"/mcp/"+ref.String()+".", nil))
 		return
 	case svc.ref.Sealed == string(config.SealedRequired):
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult("service "+ref.String()+" takes sealed messages only, and hire cannot seal "+
+		rq.result(errorResult("service "+ref.String()+" takes sealed messages only, and hire cannot seal "+
 			"tool arguments. Send it A2A messages through a node (kontra connect seals them) at "+base+"/agents/"+ref.String()+".", nil))
 		return
 	}
@@ -98,11 +100,17 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 		return
 	}
 	msg := &a2a.Message{ID: mid.String(), Role: a2a.MessageRoleUser, ContextID: a.ContextID, Parts: parts}
-	out, err := h.deps.Hirer.Hire(rq.ctx(), HireRequest{Principal: rq.p, Service: svc.ref, Message: msg, FirstRequest: key})
+	hctx := rq.ctx()
+	if rq.modern {
+		var cancel context.CancelFunc
+		hctx, cancel = context.WithTimeout(context.WithoutCancel(hctx), modernHireBound)
+		defer cancel()
+	}
+	out, err := h.deps.Hirer.Hire(hctx, HireRequest{Principal: rq.p, Service: svc.ref, Message: msg, FirstRequest: key})
 	var xe *relay.ExtensionsRequiredError
 	switch {
 	case errors.As(err, &xe):
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult(extensionsText("service "+ref.String(), "hire", xe.URIs,
+		rq.result(errorResult(extensionsText("service "+ref.String(), "hire", xe.URIs,
 			base+"/agents/"+ref.String())+" No task was created.", nil))
 		return
 	case err != nil:
@@ -114,6 +122,10 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 		h.log.Info("hire answered with an existing task (a retry)", "task_id", row.ID, "state", row.State, "principal", rq.p.ID)
 	} else {
 		h.log.Info("hire created a task", "service", ref.String(), "task_id", row.ID, "state", row.State, "principal", rq.p.ID)
+	}
+	if rq.modern {
+		h.answerModernHire(rq, out, svc.ref, augmented)
+		return
 	}
 	if row.State == store.StateQuoted {
 		h.quoted(rq, row, svc.ref, augmented)
@@ -197,7 +209,7 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 	row, err := h.deps.Log.LoadHired(rq.ctx(), rq.p.BuyerID, a.TaskID)
 	switch {
 	case errors.Is(err, a2a.ErrTaskNotFound):
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult("unknown task", nil))
+		rq.result(errorResult("unknown task", nil))
 		return
 	case err != nil:
 		h.internal(rq, "read the task", err)
@@ -206,11 +218,11 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 	switch {
 	case row.State == store.StateQuoted:
 		u := approveURL(row.Snapshot)
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult("The task is waiting for a person to approve its quote at "+u+
+		rq.result(errorResult("The task is waiting for a person to approve its quote at "+u+
 			"; a reply cannot approve it, and nothing was sent.", map[string]any{MetaApproveURL: u}))
 		return
 	case row.State != store.StateInputRequired:
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult("The task is "+string(row.State)+" and takes no input now; nothing was sent.", nil))
+		rq.result(errorResult("The task is "+string(row.State)+" and takes no input now; nothing was sent.", nil))
 		return
 	}
 	after, err := h.deps.Hirer.Reply(rq.ctx(), rq.p, row, parts)
@@ -218,7 +230,7 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 	switch {
 	case errors.As(err, &xe):
 		ref := h.serviceRef(row)
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult(extensionsText("the task's service "+ref, "reply", xe.URIs,
+		rq.result(errorResult(extensionsText("the task's service "+ref, "reply", xe.URIs,
 			strings.TrimRight(h.deps.PublicURL, "/")+"/agents/"+ref)+" Nothing was sent.", nil))
 		return
 	case err != nil:
@@ -264,7 +276,7 @@ func (h *Handler) refused(rq *request, err error) {
 		if msg == "" {
 			msg = "the task takes no input now"
 		}
-		writeResult(rq.w, rq.sid, id, errorResult(msg+"; nothing was sent.", nil))
+		rq.result(errorResult(msg+"; nothing was sent.", nil))
 	case errors.As(err, &ae) || code != mcpwire.CodeInternal:
 		if msg == "" {
 			msg = err.Error()
@@ -279,8 +291,9 @@ func (h *Handler) refused(rq *request, err error) {
 // reply's turn; 0 for a new task), or to be quoted, and answers what it then is (§12.2, DM4-5): an ended task as
 // tasks/result renders it; input-required as §12.4's reply-tool text; quoted as the approve URL; a task still
 // running with a text naming the A2A URL that follows it. A request that accepts text/event-stream is answered on an
-// event stream with keep-alives while it waits.
-func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) {
+// event stream with keep-alives while it waits. It reports whether the answer was written: false when the client left
+// first (its request context ended), which a modern hire reads as the request's cancellation (answerModernHire).
+func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
 	aw := newAnswerWriter(rq)
 	ctx := rq.ctx()
 	wake, stop := h.deps.Waker.WaitTask(ctx, id)
@@ -297,10 +310,10 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) {
 		r, err := h.deps.Log.Load(ctx, id)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return false
 			}
 			aw.internal(h, "read the task", err)
-			return
+			return true
 		}
 		row = r
 		if h.turnOver(ctx, row, after) {
@@ -308,17 +321,16 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) {
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-deadline.C:
-			aw.result(h.plainAnswer(ctx, row, rq.p))
-			return
+			return aw.result(h.plainAnswer(ctx, row, rq.p))
 		case <-wake:
 		case <-reread.C:
 		case <-keep.C:
 			aw.keepAlive()
 		}
 	}
-	aw.result(h.plainAnswer(ctx, row, rq.p))
+	return aw.result(h.plainAnswer(ctx, row, rq.p))
 }
 
 // turnOver reports whether a plain wait ends at row: terminal, quoted, or input-required with its question asked
@@ -402,12 +414,17 @@ func (a *answerWriter) begin() {
 
 func (a *answerWriter) keepAlive() { _ = a.s.KeepAlive() }
 
-func (a *answerWriter) result(res json.RawMessage) {
-	if !a.s.Started() {
-		writeResult(a.rq.w, a.rq.sid, a.rq.msg.ID, res)
-		return
+// result writes the answer (with resultType on a modern request), and reports whether it did: false when the
+// client had left.
+func (a *answerWriter) result(res json.RawMessage) bool {
+	if a.rq.ctx().Err() != nil {
+		return false
 	}
-	_ = a.s.Event("", responseBytes(a.rq.msg.ID, "result", res))
+	if !a.s.Started() {
+		a.rq.result(res)
+		return true
+	}
+	return a.s.Event("", responseBytes(a.rq.msg.ID, "result", a.rq.complete(res))) == nil
 }
 
 func (a *answerWriter) internal(h *Handler, what string, err error) {

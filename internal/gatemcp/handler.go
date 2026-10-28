@@ -49,7 +49,6 @@ import (
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/strictjson"
-	"kontra.sh/kontra/internal/version"
 )
 
 // Path is the route of the gate's own MCP server (spec §2.1).
@@ -127,6 +126,8 @@ type request struct {
 	msg  *mcpwire.Message // nil for GET and DELETE
 	sess *mcprelay.Session
 	sid  string
+	// modern is a 2026-07-28 request (§11.12 rule 2): no session; every result carries resultType (modern.go).
+	modern bool
 }
 
 func (rq *request) ctx() context.Context { return rq.r.Context() }
@@ -140,16 +141,24 @@ func (rq *request) id() json.RawMessage {
 
 // version is the legacy protocol version the request's session negotiated (initialize): it decides what the session
 // has (tasks/*, hire's execution, task-augmented calls; DM4-26). A request whose MCP-Protocol-Version names another
-// version is refused before (session).
+// version is refused before (session). A modern request's is 2026-07-28, which CheckModern held equal to its _meta.
 func (rq *request) version() string {
+	if rq.modern {
+		return mcpwire.V20260728
+	}
 	if rq.sess != nil {
 		return rq.sess.ProtocolVersion
 	}
 	return mcpwire.V20251125
 }
 
-// reader is the request's Reader: its principal, its era, and what its session declared.
+// reader is the request's Reader: its principal, its era, and what its session (legacy) or the request itself
+// (modern: its per-request clientCapabilities, DM4-7) declared.
 func (rq *request) reader() Reader {
+	if rq.modern {
+		return Reader{Principal: rq.p, Era: mcpwire.EraModern,
+			FormElicitation: declaresForm(mcpwire.ClientCapabilities(rq.msg.Params))}
+	}
 	rd := Reader{Principal: rq.p, Era: mcpwire.EraLegacy}
 	if rq.sess != nil {
 		rd.FormElicitation = declaresForm(rq.sess.ClientCaps)
@@ -224,6 +233,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if era == mcpwire.EraModern {
+		rq.modern = true
 		h.modern(rq)
 		return
 	}
@@ -293,9 +303,8 @@ func (h *Handler) initialize(rq *request) {
 	res, err := json.Marshal(map[string]any{
 		"protocolVersion": v,
 		"capabilities":    capabilities,
-		"serverInfo":      map[string]any{"name": "kontra-gate", "title": "Kontra gate", "version": version.Get()},
-		"instructions": "Find agents with search, read one with describe, and hire it with hire; answer a hired task's " +
-			"question with reply. A priced task waits for a person to approve its quote at the URL hire gives.",
+		"serverInfo":      serverInfo(),
+		"instructions":    instructions,
 	})
 	if err != nil {
 		h.internal(rq, "write the initialize result", err)
@@ -388,13 +397,18 @@ func (h *Handler) session(rq *request) {
 
 // toolsCall serves tools/call of the four tools; any other name is -32602 "Unknown tool: <name>" (§11.3's answer).
 // A task-augmented call (params.task, 2025-11-25 sessions) is hire's only: the other tools are -32601, as for a
-// tool whose execution.taskSupport is absent (§11.5 step 0).
+// tool whose execution.taskSupport is absent (§11.5 step 0). A modern request has no per-request opt-in: a hire
+// whose request declares the tasks extension may become a task, the gate deciding (§11.12, D159, DM4-2), and every
+// other tool call, and a modern params.task (a 2025-11-25 field), is a plain call.
 func (h *Handler) toolsCall(rq *request) {
 	m := rq.msg
 	name, _ := stringOf(m.Params, "name")
 	args, _ := mcpwire.Member(m.Params, "arguments")
 	_, augmented := mcpwire.Member(m.Params, "task")
 	augmented = augmented && rq.version() == mcpwire.V20251125
+	if rq.modern {
+		augmented = name == ToolHire && mcpwire.DeclaresTasks(m.Params)
+	}
 	switch name {
 	case ToolSearch, ToolDescribe, ToolHire, ToolReply:
 	default:
@@ -430,7 +444,7 @@ func (h *Handler) search(rq *request, args json.RawMessage) {
 		return
 	}
 	text, _ := json.Marshal(res)
-	writeResult(rq.w, rq.sid, rq.msg.ID, textResult(string(text), res, nil))
+	rq.result(textResult(string(text), res, nil))
 }
 
 // describeTool answers the describe tool (§12.2).
@@ -451,7 +465,7 @@ func (h *Handler) describeTool(rq *request, args json.RawMessage) {
 		return
 	}
 	text, _ := json.Marshal(res)
-	writeResult(rq.w, rq.sid, rq.msg.ID, textResult(string(text), res, nil))
+	rq.result(textResult(string(text), res, nil))
 }
 
 // toolError answers a tool call whose execution failed: invalid arguments and an unknown service are tool execution
@@ -467,9 +481,9 @@ func (h *Handler) toolError(rq *request, err error) {
 	var ae *argError
 	switch {
 	case errors.As(err, &ae):
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult(ae.Error(), nil))
+		rq.result(errorResult(ae.Error(), nil))
 	case errors.Is(err, ErrUnknownService):
-		writeResult(rq.w, rq.sid, rq.msg.ID, errorResult(UnknownService, nil))
+		rq.result(errorResult(UnknownService, nil))
 	default:
 		h.internal(rq, "serve a tool call", err)
 	}
@@ -569,6 +583,22 @@ func writeError(w http.ResponseWriter, status int, id json.RawMessage, code int,
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
+}
+
+// result writes the request's JSON-RPC result answer, status 200: with the gate's session id (legacy), or with
+// resultType "complete" unless res has one (modern: 2026-07-28 gives every result one; a CreateTaskResult's is
+// "task").
+func (rq *request) result(res json.RawMessage) {
+	writeResult(rq.w, rq.sid, rq.msg.ID, rq.complete(res))
+}
+
+// complete is res as the request's era writes it: unchanged for a legacy request; for a modern one, with resultType
+// "complete" when it has no resultType (2026-07-28: "All results now carry a required resultType field").
+func (rq *request) complete(res json.RawMessage) json.RawMessage {
+	if !rq.modern {
+		return res
+	}
+	return withResultType(res, resultComplete)
 }
 
 // writeResult writes a JSON-RPC result answer with status 200 and the gate's session id.

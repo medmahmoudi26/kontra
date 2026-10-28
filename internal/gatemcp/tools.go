@@ -188,7 +188,9 @@ var tools = []tool{
 }
 
 // ToolsList is the tools/list result for a request of era: the four tools with their input schemas; hire
-// declares execution.taskSupport "optional" in the legacy list of a 2025-11-25 session only (§12.5).
+// declares execution.taskSupport "optional" in the legacy list of a 2025-11-25 session only (§12.5). The modern list
+// (2026-07-28 removed Tool.execution: the server decides, D159) is one page with resultType "complete", ttlMs
+// ModernListTTL and cacheScope "private" (§12.5; 2026-07-28 CacheableResult, as §11.12 writes a relayed list).
 func ToolsList(era mcpwire.Era, protocolVersion string) (json.RawMessage, error) {
 	list := make([]tool, len(tools))
 	copy(list, tools)
@@ -198,6 +200,10 @@ func ToolsList(era mcpwire.Era, protocolVersion string) (json.RawMessage, error)
 				list[i].Execution = &toolExecution{TaskSupport: "optional"}
 			}
 		}
+	}
+	if era == mcpwire.EraModern {
+		return json.Marshal(map[string]any{"tools": list, "resultType": resultComplete,
+			"ttlMs": ModernListTTL.Milliseconds(), "cacheScope": "private"})
 	}
 	return json.Marshal(map[string]any{"tools": list})
 }
