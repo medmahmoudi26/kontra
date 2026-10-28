@@ -248,15 +248,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rq.body = b
 	}
 
-	p, authenticated, err := h.deps.Auth.Authenticate(r, uuid.Nil)
+	// §12.1 (M4 WP-06): with auth.mcp_oauth, a bearer JWT is verified for this route's canonical URI (oauth.go).
+	route := routeSvc(r, h.deps.Multi)
+	p, authenticated, err := h.deps.Auth.AuthenticateMCP(r, uuid.Nil, route)
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated):
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		if post {
-			writeError(w, http.StatusUnauthorized, nil, codeUnauthenticated, "unauthenticated", nil)
-		} else {
-			writeEmpty(w, http.StatusUnauthorized)
-		}
+		h.unauthorized(rq, route, true)
 		return
 	case err != nil:
 		h.internal(rq, "authenticate", err)
@@ -268,7 +265,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if svc == nil || svc.Disabled || svc.Ref.Kind != config.KindMCP {
-		h.unknownService(rq)
+		h.notServed(rq, route, authenticated)
 		return
 	}
 	if !authenticated {
@@ -284,7 +281,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p = auth.Anonymous(buyer)
 	}
 	if !svc.Allow.Admits(p) {
-		h.unknownService(rq)
+		h.notServed(rq, route, authenticated)
 		return
 	}
 	rq.svc, rq.p = svc, p

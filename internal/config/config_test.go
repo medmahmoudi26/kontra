@@ -793,12 +793,12 @@ func TestUnbuiltWarnings(t *testing.T) {
     seller_keys: { url: "https://seller.example.com/jwks.json" }
 blobs: s3://kontra-parts
 signing_key: file:./kontra.key
-auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra } }
+auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra }, mcp_oauth: { issuer: "https://login.example.com" } }
 tenancy: multi
 tunnel: { anonymous: true }
 peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 `)
-	// tunnel.anonymous is built (M4 WP-03): it loads with no warning.
+	// tunnel.anonymous (M4 WP-03) and auth.mcp_oauth (M4 WP-06) are built: they load with no warning.
 	want := []string{"auth.oidc", "services.files.seller_keys"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
@@ -812,8 +812,8 @@ peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 		if strings.Contains(w, "services.remote") || strings.Contains(w, "tunnel backends") {
 			t.Errorf("a served tunnel service is warned about: %q", w)
 		}
-		if strings.Contains(w, "tunnel.anonymous") {
-			t.Errorf("tunnel.anonymous is built, but warned about: %q", w)
+		if strings.Contains(w, "tunnel.anonymous") || strings.Contains(w, "mcp_oauth") {
+			t.Errorf("tunnel.anonymous and auth.mcp_oauth are built, but warned about: %q", w)
 		}
 	}
 	// The plain tunnel service loads with no warning at all.

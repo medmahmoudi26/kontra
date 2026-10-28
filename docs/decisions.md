@@ -2947,3 +2947,48 @@ task's end answers that task, so the client would be told "the task was canceled
 never approve the quote. A quoted task runs nothing until a person approves it, and ends by itself when its quote
 expires. Decision: a quoted task is not cancelled when its client leaves; the re-issued `hire` answers it with its
 approve URL (`TestGateMCPModernClientLeaves`). §11.12 step 4 stands for `/mcp/{svc}`, whose MCP tasks have no retry.
+
+## From M4 WP-06, the MCP resource server and `kontra login` (28 Oct)
+
+### DM4-29. How the MCP routes answer OAuth clients, how `kontra login` defends itself, and what a conversion binds — **decided under the owner's standing instruction, 28 Oct** (completes DM4-9, DM4-11, DM4-19; one SPEC-CONFLICT between §12.1 and §2.3)
+
+Building [`relay.md`](../spec/relay.md) §12.1 and [`tunnel.md`](../spec/tunnel.md) §6.3 left choices the text did not
+make. Decisions:
+
+- **A request without a credential on `/mcp/{svc}` (SPEC-CONFLICT, §12.1 with §2.3 and tunnel.md §6.1).** §12.1 has
+  every request without a credential answer `401` once `auth.mcp_oauth` is set; §2.3 gives such a request the
+  `anonymous` principal on a service whose `allow:` contains `anonymous`, and §6.1's `--public` MCP services are
+  "callable by anyone". Taken: a service that admits `anonymous` still serves it; every other request without a
+  credential, to an existing service or not, gets the `401` challenge instead of §2.1's `404`, so an OAuth client can
+  sign in and nothing says which services exist (D50). `/mcp` itself has no anonymous principal (DM4-3).
+- **The challenge.** Without a credential, exactly `Bearer resource_metadata="…", scope="mcp"`; a credential that was
+  presented and refused adds `error="invalid_token"` (RFC 6750 §3.1); a name that is not well formed has no document
+  and gets `Bearer scope="mcp"` (nothing a client sends is quoted into the header).
+- **JWT or API key.** On the MCP routes, with a resource server, a bearer of a JWT's shape (three base64url segments,
+  at most 16 KiB) is verified as the authorization server's token; any other is an API key, as on every route. A
+  key the gate mints never has that shape, and an operator's own key (D37) with two dots between base64url segments is
+  not one anyone writes. The A2A routes never ask the resource server: a JWT there stays `401` until M5.
+- **An issuer the gate cannot read** is its own failure: `503` with `-32603`, never `401` (a client would discard a
+  valid token). It is asked again at most every 5 s, and a refetch for an unknown `kid` that fails keeps the fresh set.
+  The metadata is looked for at RFC 8414's well-known URI (inserted before an issuer's path, §3.1), then as §12.1
+  writes it, then the OpenID configuration appended and inserted; a document naming another issuer is not used.
+  Headers with `crit`, RSA keys under 2048 bits and keys that are not signing keys are refused or skipped.
+- **`kontra login` against mix-up and leaks** (RFC 8414 §3.3, RFC 9207, RFC 9700; the M4 audit). The gate's RFC 9728
+  document must be for `{origin}/mcp` (§3.3), the metadata's `issuer` must be the `authorization_servers` entry, the
+  endpoints `https://` (`http://` only on a loopback host, as `--gate` allows), PKCE `S256` offered; an answer's
+  `state` must match and an `iss` must be the issuer (required when the metadata says it is sent); no request follows a
+  redirect; the code and the verifier are never printed, even when the server echoes them. The environment's proxy is
+  honoured, as `kontra connect` honours it. The DCR `client_id` is kept per origin with the issuer it was registered
+  at, and forgotten when the token endpoint answers `invalid_client`.
+- **The `kk_` rule is this revision's.** The access token must be an API key of the gate (`kk_` then letters, digits
+  and `_`, at most 4096 bytes), checked in one function of `internal/login`; M5 may revise it with Cloud's
+  authorization server (kontra-cloud#60 accepts Cloud's JWTs as principals).
+- **What a conversion binds.** §6.3's conversion is §5's enrollment by the API key's `enroll:*` scope, with two
+  differences: a declared service the tenant does not have is created there (`allow: [org:<tenant>]`), and the key
+  moves (DM4-19) with the anonymous tenant ended at once. So an existing service of the same kind is bound, not created
+  again; one that is disabled or not a tunnel service is `service_denied`; another kind is `kind_mismatch`; nothing moves
+  on a refusal; a service's other nodes are told of the new key (§5); a hello declaring no service converts the key
+  hire-only when the API key may hire. A team tenant's `enroll:*` key converts into the team as an account's does, and a
+  gate that stopped opening anonymous sessions still converts (§6.3 does not depend on `tunnel.anonymous`). Every
+  conversion, by an API key or by enrollment tokens (DM4-19), ends the anonymous tenant with reason `converted` and
+  writes a `tunnel.anonymous_converted` audit row naming both tenants, the authority and the services bound.

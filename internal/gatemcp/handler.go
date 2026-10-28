@@ -13,8 +13,8 @@
 //     serve hire tasks. No virtual session is opened and Admission's session operation is not consulted (DM4-2).
 //
 // /mcp has no anonymous principal: a request without a credential is 401, with §12.1's challenge when the MCP
-// OAuth resource server is configured (internal/oidc, DM4-3, DM4-9). Through a node, the session's principal
-// applies (spec/tunnel.md §9).
+// OAuth resource server is configured (internal/oidc, DM4-3, DM4-9), which also makes a JWT for /mcp's canonical URI a
+// principal (oidc:sub:<sub>, via mcp). Through a node, the session's principal applies (spec/tunnel.md §9).
 //
 // hire creates an ordinary A2A gate task (protocol a2a, dispatched as §6) through the A2A service's own handler
 // and work queue (Hirer, internal/relay), marked tasks.hired (DM4-5); Admission (operation task) decides first, and
@@ -65,7 +65,7 @@ var Versions = []string{mcpwire.V20251125, mcpwire.V20250618}
 type Deps struct {
 	PublicURL      string
 	Multi          bool                // tenancy: multi: refs are <tenant>/<name> (§12.2, DM4-4)
-	Auth           *auth.Authenticator // API keys and node principals; the OAuth resource server wraps it (WP-06)
+	Auth           *auth.Authenticator // API keys, node principals, and the MCP OAuth resource server's JWTs (§12.1)
 	Sessions       *mcprelay.Sessions  // legacy sessions: mcp_sessions rows with service NULL
 	Catalog        *Catalog            // search, describe, and the service a hire names
 	Hirer          Hirer               // creates and follows up hire tasks (*relay.Hirer)
@@ -192,11 +192,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		rq.body = b
 	}
-	p, authenticated, err := h.deps.Auth.Authenticate(r, uuid.Nil)
+	// §12.1 (M4 WP-06): with auth.mcp_oauth, a bearer JWT is verified for /mcp's canonical URI, and a 401 carries the
+	// challenge naming /mcp's RFC 9728 document (internal/oidc).
+	p, authenticated, err := h.deps.Auth.AuthenticateMCP(r, uuid.Nil, "")
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated) || (err == nil && !authenticated):
 		// DM4-3: /mcp has no anonymous principal.
-		w.Header().Set("WWW-Authenticate", "Bearer")
+		w.Header().Set("WWW-Authenticate", h.deps.Auth.MCPChallenge("", err != nil))
 		if post {
 			writeError(w, http.StatusUnauthorized, nil, codeUnauthenticated, "unauthenticated", nil)
 		} else {

@@ -162,7 +162,7 @@ type OIDC struct {
 	Audience string `yaml:"audience"`
 }
 
-// MCPOAuth is the MCP authorization server the gate is a resource server for (spec §12.1). M3.
+// MCPOAuth is the MCP authorization server the gate is a resource server for (spec §12.1). Built in M4 (DM4-9).
 type MCPOAuth struct {
 	Issuer string `yaml:"issuer"`
 }

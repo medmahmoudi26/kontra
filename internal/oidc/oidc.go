@@ -4,32 +4,35 @@
 // With auth.mcp_oauth.issuer configured:
 //
 //   - A request to an MCP route without a credential is 401 with WWW-Authenticate: Bearer
-//     resource_metadata="{public_url}/.well-known/oauth-protected-resource/mcp[/{svc}]", scope="mcp" (Challenge).
+//     resource_metadata="{public_url}/.well-known/oauth-protected-resource/mcp[/{svc}]", scope="mcp" (Challenge;
+//     a credential that was presented and refused adds error="invalid_token", RFC 6750 §3.1). On /mcp/{svc} a
+//     service whose allow: admits anonymous still serves a request without one (DM4-29).
 //   - That RFC 9728 document (MetadataHandler) is served for every well-formed name, existing or not: its resource
 //     is the route's canonical URI ({public_url}/mcp or {public_url}/mcp/{svc}) and it names the issuer.
-//   - A bearer token that is not an API key is a JWT verified by Verifier against the route's canonical URI as
-//     audience (RFC 8707): iss, aud, exp and nbf with 60 s of skew, ES256, RS256 or EdDSA only. The key set comes
-//     from the issuer's RFC 8414 metadata (else its OpenID configuration) over https://, dialed as configured (the
-//     issuer is the operator's, never derived from a request), cached 10 minutes; an unknown kid refetches it at
-//     most once a minute. scope is not checked.
+//   - A bearer token shaped as a JWT (auth.LooksLikeJWT) is verified by Verifier against the route's canonical URI as
+//     audience (RFC 8707): iss, aud, exp and nbf with 60 s of skew, ES256, RS256 or EdDSA only. Any other bearer is
+//     an API key, as on every route. The key set comes from the issuer's RFC 8414 metadata (else its OpenID
+//     configuration), fetched as one of §10.3's operator-configured endpoints (DM4-17: https://, no redirect, no
+//     proxy, no address check, bodies at most 256 KiB, 5 s), cached 10 minutes; an unknown kid refetches it at most
+//     once a minute. scope is not checked.
 //   - The principal is oidc:sub:<sub>, buyer UUIDv5(issuer ‖ sub), no tenant, via mcp (spec §2.3).
 //
-// The authorization server is the operator's (Cloud's control plane, M5), never part of the gate. The A2A routes'
-// OIDC principals (auth.oidc, audience kontra) and Cloud's revocation feed reuse Verifier in M5.
+// The authorization server is the operator's (Cloud's control plane, M5), never part of the gate; oidctest is an
+// in-repository one for the tests. The A2A routes' OIDC principals (auth.oidc, audience kontra) and Cloud's
+// revocation feed reuse Verifier in M5: until then a JWT on an A2A route is 401, as any bearer that is not an API key.
 //
 // Work package: M4 WP-06.
 package oidc
 
 import (
-	"context"
 	"errors"
-	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"kontra.sh/kontra/internal/auth"
-	"kontra.sh/kontra/internal/unimpl"
+	"kontra.sh/kontra/internal/ids"
 )
 
 // Verification parameters (DM4-9).
@@ -37,20 +40,21 @@ const (
 	Skew         = 60 * time.Second
 	KeySetTTL    = 10 * time.Minute
 	RefetchEvery = time.Minute
-	Scope        = "mcp" // named in the challenge; not checked in tokens
+	Scope        = "mcp" // named in the challenge and the RFC 9728 document; not checked in tokens
 )
 
 // MetadataPrefix is the path prefix of the RFC 9728 documents (spec §2.1).
 const MetadataPrefix = "/.well-known/oauth-protected-resource"
 
+// MCPPath is the gate's own MCP route, the last segment of every canonical URI's path but the services'.
+const MCPPath = "/mcp"
+
 // ErrInvalidToken is every verification failure: the route answers 401 and says no more.
 var ErrInvalidToken = errors.New("oidc: invalid token")
 
-// Config configures a Verifier.
-type Config struct {
-	Issuer string       // auth.mcp_oauth.issuer
-	Client *http.Client // https only, dialed as configured; metadata and key set are fetched through it
-}
+// ErrUnavailable is an issuer whose metadata or key set could not be read when a token needed them (and no fresh key
+// set was held): the gate's own failure, never the caller's (the route answers 503, not 401).
+var ErrUnavailable = errors.New("oidc: the authorization server's keys are unavailable")
 
 // Claims are what the gate reads of a verified token.
 type Claims struct {
@@ -60,49 +64,40 @@ type Claims struct {
 	Expiry   time.Time
 }
 
-// Verifier verifies the issuer's JWTs.
-type Verifier struct {
-	cfg Config
-}
-
-// NewVerifier checks cfg. It does not fetch anything: the issuer's metadata and key set are read on first use.
-func NewVerifier(cfg Config) (*Verifier, error) {
-	return nil, unimpl.Error("oidc.NewVerifier", "M4 WP-06")
-}
-
-// Verify checks token's signature, issuer, audience (it must contain audience) and times. Any failure is
-// ErrInvalidToken (a 401), never a detail an attacker can probe.
-func (v *Verifier) Verify(ctx context.Context, token, audience string) (Claims, error) {
-	return Claims{}, unimpl.Error("oidc.Verifier.Verify", "M4 WP-06")
-}
-
-// Principal is the principal a verified token stands for on an MCP route (spec §2.3, §12.1).
+// Principal is the principal a verified token stands for on an MCP route (spec §2.3, §12.1): oidc:sub:<sub>, the
+// buyer UUIDv5(issuer ‖ sub), no tenant (mapping a subject to a tenant is M5's), via mcp.
 func Principal(issuer string, c Claims) auth.Principal {
 	return auth.Principal{
 		Kind: auth.KindOIDC, ID: "oidc:sub:" + c.Subject, BuyerID: BuyerID(issuer, c.Subject), Via: auth.ViaMCP,
 	}
 }
 
-// BuyerID is UUIDv5(issuer ‖ sub) (spec §2.3).
+// BuyerID is UUIDv5(issuer ‖ sub) (spec §2.3; ids.OIDCBuyer): the same subject of the same issuer is the same buyer
+// in every replica and release. An empty issuer or subject, which Verify never accepts, is uuid.Nil.
 func BuyerID(issuer, subject string) uuid.UUID {
-	panic(unimpl.Error("oidc.BuyerID", "M4 WP-06"))
+	id, err := ids.OIDCBuyer(issuer, subject)
+	if err != nil {
+		return uuid.Nil
+	}
+	return id
 }
 
 // CanonicalURI is the route's canonical URI, the audience its tokens must carry: {public_url}/mcp, or
-// {public_url}/mcp/{svc} where svc is name or tenant/name (spec §12.1).
+// {public_url}/mcp/{svc} where svc is name or tenant/name (spec §12.1). public_url is taken as configured, without a
+// trailing slash, as the gate's other URLs are built.
 func CanonicalURI(publicURL, svc string) string {
-	panic(unimpl.Error("oidc.CanonicalURI", "M4 WP-06"))
+	u := strings.TrimRight(publicURL, "/") + MCPPath
+	if svc != "" {
+		u += "/" + svc
+	}
+	return u
 }
 
-// Challenge writes the 401 of a request without a usable credential on an MCP route: WWW-Authenticate naming the
-// route's RFC 9728 document and scope="mcp", and a JSON-RPC error body without id on a POST.
-func Challenge(w http.ResponseWriter, publicURL, svc string, post bool) {
-	panic(unimpl.Error("oidc.Challenge", "M4 WP-06"))
-}
-
-// MetadataHandler serves GET /.well-known/oauth-protected-resource/mcp[/{svc}] for every well-formed name, existing
-// or not (spec §12.1): {resource, authorization_servers: [issuer], scopes_supported: ["mcp"],
-// bearer_methods_supported: ["header"]}.
-func MetadataHandler(publicURL, issuer string, multi bool) http.Handler {
-	panic(unimpl.Error("oidc.MetadataHandler", "M4 WP-06"))
+// MetadataURL is the route's RFC 9728 document: {public_url}/.well-known/oauth-protected-resource/mcp[/{svc}].
+func MetadataURL(publicURL, svc string) string {
+	u := strings.TrimRight(publicURL, "/") + MetadataPrefix + MCPPath
+	if svc != "" {
+		u += "/" + svc
+	}
+	return u
 }

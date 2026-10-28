@@ -780,17 +780,13 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 // Validate instead (sealed on a direct backend). seller_keys on an MCP service, which has no card
 // (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
 // served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
-// M3 WP-04; sealed: on tunnel services since M3 WP-08; tunnel.anonymous since M4 WP-03.
+// M3 WP-04; sealed: on tunnel services since M3 WP-08; tunnel.anonymous since M4 WP-03; auth.mcp_oauth since M4 WP-06
+// (DM4-9).
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
 	if c.Auth.OIDC != nil {
 		note("auth.oidc: OIDC callers are not built in this release; their bearer tokens are refused (401)")
-	}
-	if c.Auth.MCPOAuth != nil {
-		// D170: the MCP OAuth resource server comes with the OIDC principals in M5; until then /mcp/{svc} accepts API
-		// keys and node principals, and a bearer JWT is refused (401).
-		note("auth.mcp_oauth: the MCP OAuth resource server is not built in this release (M5, D170); /mcp/{svc} accepts API keys and node principals")
 	}
 	for _, name := range sortedKeys(c.Services) {
 		s := c.Services[name]

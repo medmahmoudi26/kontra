@@ -4,6 +4,7 @@ package gate
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -97,6 +98,7 @@ type options struct {
 	tunnelPing, tunnelCards                                              time.Duration
 	plainWait                                                            time.Duration
 	executor                                                             relay.ExecutorOptions
+	operatorRoots                                                        *x509.CertPool // WithOperatorRoots (oauth.go)
 	hup                                                                  bool
 	hupCh                                                                <-chan os.Signal
 }
@@ -507,6 +509,10 @@ func (r *Replica) assemble() error {
 
 	writer := sse.NewWriterWithOptions(r.storeLog, r.listener, sse.Options{Logger: log, Render: r.render})
 	routes := edge.NewRouter()
+	// The MCP OAuth resource server (spec §12.1; M4 WP-06), before the MCP routes it guards serve anything.
+	if err := r.assembleMCPOAuth(routes, authn); err != nil {
+		return err
+	}
 	a2aRoutes := a2ahttp.New(a2ahttp.Deps{
 		Services: r.services, Handlers: handlers, SSE: writer, Auth: authn,
 		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
