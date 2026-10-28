@@ -45,6 +45,7 @@ what() {
     *server-everything*|*server-filesystem*|*node_modules*|*npm*) echo "a stock MCP server (npm) or a node's stdio child" ;;
     *stdioserver*) echo "a node's stdio child" ;;
     *helloworld*|*__main__.py*|*uv\ run*) echo "the helloworld seller" ;;
+    */tck\ --host*|*/booking\ --host*) echo "an example seller (examples/sellers, M4)" ;;
     *temporal*) echo "the Temporal server" ;;
     *) echo "a process" ;;
   esac

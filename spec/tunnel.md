@@ -292,10 +292,11 @@ bindings, with or without the field.
   under the key's row lock that deletes the key's `key_services` rows of the old tenant before it changes
   `tunnel_keys.tenant_id`.
 - Ten minutes before `expires_at` the gate sends `{"t": "expiring", "at"}` on the control stream (§13). At
-  `expires_at` it revokes the key's bindings to the tenant's services and disables them (every route answers `404`;
-  tasks in flight fail `service_unavailable` at their next dispatch, [`relay.md`](relay.md) §13.5), sends `{"t":
-  "revoked"}` and closes the session; the node exits saying that the anonymous session expired. The key itself is
-  not revoked (§12): its next hello opens a new anonymous tenant with a new slug (DM4-10).
+  `expires_at` it revokes the key's bindings to the tenant's services and disables them (every route answers `404`; a
+  dispatch in flight is aborted as a revoked binding's is, §12: its task fails `tunnel_lost` once an upstream task
+  exists, and is otherwise retried and fails `service_unavailable` at that next dispatch, [`relay.md`](relay.md) §6.4,
+  §13.5; DM4-30), sends `{"t": "revoked"}` and closes the session; the node exits saying that the anonymous session
+  expired. The key itself is not revoked (§12): its next hello opens a new anonymous tenant with a new slug (DM4-10).
 - `purge_after` (24 h) after expiry the gate deletes what the tenant still holds: the keys still in it (`tunnel_keys`,
   with their bindings and tunnels), its services with their calls ([`relay.md`](relay.md) §13.5), enrollments,
   tasks with their bucket objects (the objects first, by each task's prefix, whether or not it has a `blobs` row,
@@ -681,8 +682,8 @@ A stream is in flight until both its halves have ended, on either side (D137, D1
 
 M2 runs `tunnel_kill`, `sidecar_not_a_proxy` and `key_scope`, with [`relay.md`](relay.md) §16's tunnel tests;
 `anon_limits`, `local_rebinding` and `stdio_roots` come with M3 and M4 (D154).
-M4 runs `anon_limits`, `anon_lifecycle` and `login_converts` (DM4-15), with `tunnel.anonymous`'s limits compressed
-where a row waits on a clock.
+M4 runs `anon_limits`, `anon_lifecycle` and `login_converts` (DM4-15, DM4-30), with `tunnel.anonymous`'s limits
+compressed where a row waits on a clock, in the tests' own configuration.
 
 | Test | Expected |
 |---|---|
@@ -691,7 +692,7 @@ where a row waits on a clock.
 | `key_scope` | §5, §8.1; [`relay.md`](relay.md) §6.1 |
 | `replica_kill` | §11; [`relay.md`](relay.md) §14.2 |
 | `anon_limits` | §6.2: a 4th anonymous tenant from one /24 is `rate_limited`, and a 4th from one IPv6 /48; one past `max_tenants` is `anonymous_unavailable`; a 5th declared service is `service_denied`, with nothing enrolled, and reconnecting with new names never takes the tenant past 4 services; a 5th concurrent task is `429`, as host and as hirer; a 9th concurrent plain MCP call to the tenant's services is `429`; a 9th hiring stream is `429`; a caller's parts over the tenant's total are `InvalidParams` before any task row, an upstream's fail the task `upstream_error`; the services are absent from `search`; at `expires_at` the session closes `revoked` and the URLs answer `404` |
-| `anon_lifecycle` | §6.1: the same key before expiry gets its tenant back; a `--public` service answers a caller without a credential and a service not public answers `404` to it and to another node; `expiring` arrives before the end; at the end tasks in flight fail `service_unavailable`, the node exits saying so, and the key's next hello opens a new tenant with a new slug; a probe after an enrollment that did not commit still gets `unknown_key`, and its tokens are sent again (DM4-18); `enroll` from an anonymous key converts it; after `purge_after` the tenant's keys, services, enrollments, tasks, calls, MCP sessions and bucket objects are gone, its row is a tombstone with `created_from` a CIDR, and no table holds the client's address in any form; an `anon-…` slug is refused for an account tenant |
+| `anon_lifecycle` | §6.1: the same key before expiry gets its tenant back; a `--public` service answers a caller without a credential and a service not public answers `404` to it and to another node; `expiring` arrives before the end; at the end a task in flight fails `tunnel_lost` once an upstream task exists and `service_unavailable` at its next dispatch otherwise (DM4-30), the node exits saying so, and the key's next hello opens a new tenant with a new slug; a probe after an enrollment that did not commit still gets `unknown_key`, and its tokens are sent again (DM4-18); `enroll` from an anonymous key converts it; after `purge_after` the tenant's keys, services, enrollments, tasks, calls, MCP sessions and bucket objects are gone, its row is a tombstone with `created_from` a CIDR, and no table holds the client's address in any form; an `anon-…` slug is refused for an account tenant |
 | `login_converts` | §6.3, against an in-repository authorization server: `kontra login --no-browser` registers once, sends PKCE `S256` and `resource` = the gate's origin, accepts the code on its loopback port only, stores the `kk_` key for that origin only (0600), and refuses an access token that is not an API key; `kontra connect` with it converts the tenant: `welcome` has no `anonymous` and names the account's URLs, the services stop expiring, the anonymous URLs answer `404`, and an `audit` row records it; a gate without `auth.mcp_oauth` makes `kontra login` exit 1 naming `--api-key` |
 | `local_rebinding` | §9: `Host: evil.example:7777` or `Origin: http://evil.example:7777` on `/mcp/…`, `/agents/…` and `/.well-known/…` gets `403` and opens no stream |
 | `stdio_roots` | §10: `server-filesystem@1.0.0` over stdio, started with one directory and served with `--roots` naming another; a client that declares roots of `file:///` gets its first `tools/call` answered in under 2 s and never receives `roots/list`; the server's `list_allowed_directories` names only the node's configured root, and a read of `~/.kontra/identity.key` is refused (D173) |

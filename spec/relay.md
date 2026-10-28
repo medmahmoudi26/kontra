@@ -1771,7 +1771,8 @@ with their milestones (D80). M2 runs the tunnel variants of `replica_kill` (afte
 task id) and `cancel_forwarded`, `input_required_sticky` and `key_scope`, with [`tunnel.md`](tunnel.md) §16's
 `tunnel_kill` and `sidecar_not_a_proxy`, and the helloworld seller through the tunnel (D154). M3's are D171's and D189's.
 M4 runs the six `gate_mcp_*` tests and [`tunnel.md`](tunnel.md) §16's `anon_limits`, `anon_lifecycle` and
-`login_converts`; the `tck_*` rows run from `make tck`, not `go test` (DM4-12, DM4-15).
+`login_converts`; the `tck_*` rows run from `make tck`, not `go test` (DM4-12, DM4-15). What ran, and the spec conflict
+met, are DM4-30.
 
 | Test | Expected |
 |---|---|

@@ -3009,3 +3009,69 @@ make. Decisions:
   converts (§6.3 does not depend on `tunnel.anonymous`). Every conversion, by an API key or by enrollment tokens
   (DM4-19), ends the anonymous tenant with reason `converted` and writes a `tunnel.anonymous_converted` audit row
   naming both tenants, the authority and the services bound.
+
+## From M4 WP-07, the M4 end-to-end tests (28 Oct)
+
+### DM4-30. The named tests M4 runs, how the harness runs them, and the spec conflicts met — **decided under the owner's standing instruction, 28 Oct** (like D189 for M3; completes DM4-15; one SPEC-CONFLICT in tunnel.md §6.1)
+
+Like D189 for M3. **The tests** (`test/e2e`, `make test-e2e`; [`relay.md`](../spec/relay.md) §16,
+[`tunnel.md`](../spec/tunnel.md) §16): `gate_mcp_search` (`TestGateMCPSearch`), `gate_mcp_hire` (`TestGateMCPHire`),
+`gate_mcp_hire_quote` (`TestGateMCPHireQuote`), `gate_mcp_reply` (`TestGateMCPReply`), `gate_mcp_modern`
+(`TestGateMCPModern`), `gate_mcp_oauth` (`TestGateMCPOAuth`), `anon_limits` (`TestAnonLimits`), `anon_lifecycle`
+(`TestAnonLifecycle`) and `login_converts` (`TestLoginConverts`), each with one assertion per clause of its §16 row and
+of the M4 corrections' WP-07 list (the quote-acceptance invariant item by item, each asserting the task still quoted and
+the seller without a request; the `-32042` URL byte-equal to the hook's `approveUrl` and naming the pre-minted id; a
+team gate's own approve URL; exactly one of a session's two `GET` streams notified and another session's none; a
+malformed, past or unreachable Admission answer `-32603` with no task; `tasks/update` on a quoted task ignored; no
+`calls` row and the `{taskId, state, data?}` shape; the per-tenant services cap across a reconnect, the `calls` cap,
+`max_tenants`, both parts-over-total outcomes; the probe, a conversion by enrollment tokens, the purge of a key still in
+its tenant, the widened address scan with its positive control, and the `anon-` slug refused for an account). Each runs
+on two replicas behind the Front with the client on one replica and the tunnel on the other wherever the row allows;
+D185's loopback check and `scripts/test_e2e.sh`'s leftover check hold for every one.
+
+**Tenancy.** Single tenant (a `services:` block): the five `gate_mcp_*` tests other than search. Multi-tenant
+(`tenancy: multi`): `gate_mcp_search`, `anon_limits`, `anon_lifecycle`, `login_converts`; their tenants, services and API
+keys are rows the harness writes as Cloud would, each service followed by `NOTIFY kontra_services` (D116, D37), and
+refs are `<tenant>/<name>`.
+
+**The harness's M4 additions.** `tunnel.anonymous` compressed in the test's own configuration only (never `deploy/`):
+`ttl` 60 s (`anon_limits`), 40 s (`anon_lifecycle`), 10 min (`login_converts`), `purge_after` 10 s, the caps 3/4/4/8/8,
+`parts_bytes` 1 MiB, `max_tenants` 12 (`anon_limits`); the Front as a PROXY v2 forwarder (`edge.client_ip`
+`proxy_protocol`, trusted `127.0.0.1/32`) naming the source the test sets, so nodes come from chosen /24s and /48s (its
+header is checked against the gate's own edge parser, `TestFrontProxyHeaderIsTheClientAddress`); an Admission double on
+loopback quoting `https://app.kontra.sh/#/t/<taskId>` or a team gate's own page, approvals sent as `kontra.approval`
+through the harness's Temporal client; `internal/oidc/oidctest` over HTTPS as the issuer, trusted through
+`SSL_CERT_FILE` by the replica processes and `kontra login`; peer listeners where an MCP request crosses replicas
+(§11.2); a third replica without `auth.mcp_oauth` on the same database for `login_converts`' last clause.
+
+**Where the tests differ from the plan's steps** (the rows hold; the means differ):
+
+- **The exec sellers.** hello-exec through a2a-cli v0.3.1 is installed neither on this host nor in CI's e2e job, so an
+  a2a-go seller in the test process, keyed on the message text, stands in for it (a slow exec working until cancelled,
+  a failing exec, a question) and serves the TCK seller's artifact kinds. `examples/sellers/tck` and
+  `examples/sellers/booking` run unmodified, as processes built from the checkout (`e2e.yml`'s paths name both).
+- **The TCK seller's artifact kinds.** It keys every scenario on the message id, and `hire` mints that id (§12.3), so
+  through `/mcp` it answers every message "Unhandled messageId prefix" completed: the fast hire uses it; the artifact
+  kinds come from the in-test seller.
+- **"The booking seller logs one task id."** booking logs nothing at its level; the test reads it from the gate:
+  the task's attempts carry one `upstream_task_id`.
+- **`max_tenants`.** The gate is filled with live anonymous tenant rows (12 of them) rather than nodes; one more node is
+  then `anonymous_unavailable`.
+- **The probe.** An enrollment that did not commit is reproduced by the node's own state (its credentials hold the token
+  unconfirmed, as after a connection lost after the proof): splitting the WebSocket frames at the Front to lose a proof
+  would test the Front. The probe gets `unknown_key` on the anonymous gate, opens no tenant, and the token is sent again.
+
+**The spec conflict met (SPEC-CONFLICT, marked in `test/e2e/anon_lifecycle_test.go`).** tunnel.md §6.1 and its §16
+`anon_lifecycle` row said that at an anonymous session's end "tasks in flight fail `service_unavailable` at their next
+dispatch". The end revokes the session's bindings and closes it, and §12 says a revoked binding's in-flight dispatches
+"fail `tunnel_lost`, or are retried if no upstream task exists" (relay.md §6.4 fails a task `tunnel_lost` once an
+upstream task exists). The gate does what §12 and §6.4 say: a working task fails `tunnel_lost`, and one whose dispatch
+had no upstream task id yet is retried and fails `service_unavailable` at that next dispatch (its service disabled,
+relay.md §13.5). Decision: the gate is right; §6.1 and the row now say so. The test asserts both.
+
+**Measured** (28-29 Oct, this host, 2 CPUs at a load of 5 to 9 beside the M3 review): `make test-e2e ARGS='-run
+"TestAnon|TestLoginConverts|TestGateMCP" -v'` passes the nine in 329 s (6 min 15 s with the builds), the longest
+`TestAnonLifecycle` (77 s, the end and the purge), `TestAnonLimits` (66 s, a session's end) and `TestGateMCPOAuth`
+(66 s, the key set's minute); the leftover check found nothing. Mutations checked red: the `elicitation/complete` claim
+without its `is null` guard (`TestGateMCPHireQuote`: both of S1's streams notified), and a 4th tenant per network let in
+(`TestAnonLimits`).
