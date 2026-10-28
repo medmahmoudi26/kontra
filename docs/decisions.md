@@ -2681,3 +2681,20 @@ reaches them only by a turn its workflow ran, so the start a resend re-issues (�
 task is still answered by a2a-go after the re-issue, and one of a `submitted`, `working` or `quoted` task, whose start
 may be the lost one, still goes through the work queue and waits for the turn. Test: `TestBlockingResendAtTurnEnd`
 (10 s deadline exceeded before, under a second after).
+
+### DM4-24. What the TCK measures through the gate, per variant — **decided under the owner's standing instruction, 28 Oct** (amends DM4-12)
+
+DM4-12's expected failures were predicted; the audit showed that the plugin let a listed test skip and an unlisted
+test xfail. Measured: (1) `CORE-SEND-003` passes through the gate (a2a-tck#202 asserts success, and the gate relays
+the seller's `ContentTypeNotSupportedError` as a failed task, §6.4), and `DM-MSG-001` fails by D5; (2) the TCK's
+message ids are per session (`tck_id`; #250 fixed follow-ups only), so its prerequisite tasks after the first are
+resends, answered with the first task (§15; A2A §3.3.1 lets an agent detect duplicates by message id): once an early
+test completed or canceled that task, the tests that need a fresh one skip, eight or nine per binding (the history
+tests, cancel, context inference, subscribe, and with an API key two of the three push deliveries); (3) the JSON-RPC
+client's snake_case `task_id` on push configs, a2a-tck#242's defect not filed for push. Decision:
+`test/tck/expected-failures.txt` is the measured list, in sections per variant, each reason citing an issue or a
+decision; `kontra_xfail.py` fails a binding whose xfailed set differs from its entries in any way (a listed test that
+passes, errors or skips, an unlisted xfail, an entry naming no test) and a malformed file; a fourth variant, `auth`,
+runs nightly behind a loopback front that adds a tck API key, so ListTasks, push CRUD and a push delivery run through
+the TCK; skips are not entries. Each run uploads JUnit and HTML reports per variant and binding, and the processes'
+logs. The seller is `examples/sellers/tck`, the front `examples/front/caddy` (Caddy 2.11.7).

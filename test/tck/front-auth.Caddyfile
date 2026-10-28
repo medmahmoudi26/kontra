@@ -1,0 +1,22 @@
+# The loopback front of the TCK's nightly auth run (scripts/tck.sh, VARIANT=auth; DM4-12): plaintext on
+# 127.0.0.1, it adds `Authorization: Bearer $KONTRA_TCK_KEY` to every request and proxies it to the gate
+# (test/tck/gate-auth.yaml), because the pinned TCK sends no credential (a2a-tck#163, PR #200). A test fixture
+# only: never put a credential in front of a gate for its callers.
+#
+#   KONTRA_FRONT_PORT       the port to listen on (the gate's public_url names it)
+#   KONTRA_GATE             the gate's listen address
+#   KONTRA_CADDY_HTTP_PORT  a free port for Caddy's HTTP default (nothing listens there: automatic HTTPS is off)
+#   KONTRA_TCK_KEY          the API key, read when each request is proxied
+{
+	admin off
+	default_bind 127.0.0.1
+	auto_https off
+	http_port {$KONTRA_CADDY_HTTP_PORT}
+}
+
+http://127.0.0.1:{$KONTRA_FRONT_PORT} {
+	reverse_proxy {$KONTRA_GATE} {
+		flush_interval -1
+		header_up Authorization "Bearer {env.KONTRA_TCK_KEY}"
+	}
+}

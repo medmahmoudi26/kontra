@@ -1,5 +1,5 @@
 # `make check` is what CI runs and what runs before every PR.
-.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e pentest-image pentest
+.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e tck pentest-image pentest
 
 # The system Go may be older than the module's toolchain (go 1.26, a2a-go v2.7.0 needs it); pin the one
 # the module names so every go command, and gofmt, come from the same toolchain.
@@ -47,6 +47,18 @@ test-race:
 # ARGS='-run TestRelayResume -v').
 test-e2e:
 	GO="$(GO)" scripts/test_e2e.sh $(ARGS)
+
+# The pinned A2A TCK against the gate (spec/relay.md §16 tck_jsonrpc, tck_rest, tck_behind_caddy; D18, DM4-12),
+# one variant per run: VARIANT=direct (the default) or tunnel (the seller examples/sellers/tck on the direct
+# backend, or hosted through `kontra connect`), caddy (the direct backend behind examples/front/caddy), auth (behind
+# a loopback front that adds a tck API key: ListTasks and push through the TCK, nightly). scripts/tck.sh starts a
+# Temporal development server from $KONTRA_TEMPORAL_CLI, a fresh database on $KONTRA_TEST_PG (or a postgres:17-alpine
+# container), the gate, the seller, the node and Caddy ($KONTRA_CADDY, 2.11.7) as processes, runs the TCK checkout
+# $KONTRA_TCK_DIR (a2a-tck d4d6fae) under uv for each binding with test/tck/kontra_xfail.py enforcing
+# test/tck/expected-failures.txt, and removes everything it started. One run at a time, never beside the e2e tests.
+VARIANT ?= direct
+tck:
+	GO="$(GO)" scripts/tck.sh $(VARIANT)
 
 # The pentest (M3 WP-10, D168, D186): PRD §12's list and M3's own surface against the compose team gate, built from
 # this repository under the compose project m3pentest. pentest-image builds kontra-gate:m3 once, with the docker
