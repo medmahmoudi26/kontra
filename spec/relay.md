@@ -710,7 +710,11 @@ reads `Last-Event-ID`, which is why the gate cannot use it here.
 
 Non-streaming `SendMessage` returns on the first terminal, `input-required` or `auth-required` state (A2A
 §3.1.1), or at once with `returnImmediately: true` (the `submitted` snapshot), as a2a-go does; a blocking call
-is bounded only by the task's deadline and the caller's own connection (§15).
+is bounded only by the task's deadline and the caller's own connection (§15). A resend (no `taskId`, answered with
+the task it repeats, §15) whose task stands at `input-required` or `auth-required` is answered at once with the
+task as it stands, since the turn it repeats is over (DM4-23); a resend of a terminal task is answered with it once
+the work queue re-issued the start (§14.5), and one of a `submitted`, `working` or `quoted` task, whose start may be
+the lost one, waits for the end of the task's current turn.
 
 ## 10. Push, SSRF and large parts
 

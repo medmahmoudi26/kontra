@@ -2661,3 +2661,23 @@ be one object, and several data parts had no shape. Nor did anything say what `/
 values of the rendered data parts in order (message first, then each artifact's), present only when there are some.
 `search`, `describe`, `hire`, `reply` and the MCP Tasks of `/mcp` write no `calls` rows: a `hire` is accounted as its
 A2A task.
+
+## From M4 WP-02's TCK runs (28 Oct)
+
+The first measured runs of the pinned TCK through the gate (`make tck`, four variants, two bindings each) found one
+gate defect and corrected the predicted expected failures. Like the entries above they are **decided under the
+owner's standing instruction, 28 Oct**, and are renumbered into the D sequence when M3 has merged.
+
+### DM4-23. A blocking resend of a task at `input-required` is answered at once — **decided under the owner's standing instruction, 28 Oct** (completes D108)
+
+D108 closes the stream of a resend whose task already ended a turn; nothing said the same of a blocking
+`SendMessage`. The work queue answers a resend with its task, a2a-go subscribes at the log's tail, and a turn that
+ended at `input-required` before that sends nothing more: the call waited until the task's next turn, its deadline or
+the caller's timeout. The pinned TCK hit it in every run (its prerequisite tasks are resends, DM4-24): a dozen tests per
+binding ran into its 30 s read timeout. Decision ([`relay.md`](../spec/relay.md) §9): a resend whose task stands at
+`input-required` or `auth-required` is answered at once with the task as it stands (`internal/relay` `resendAnswer`,
+after Admission and the other checks, with the work queue's own lookup). Only those two states, because a task
+reaches them only by a turn its workflow ran, so the start a resend re-issues (§14.5) is moot; a resend of a terminal
+task is still answered by a2a-go after the re-issue, and one of a `submitted`, `working` or `quoted` task, whose start
+may be the lost one, still goes through the work queue and waits for the turn. Test: `TestBlockingResendAtTurnEnd`
+(10 s deadline exceeded before, under a second after).

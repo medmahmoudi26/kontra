@@ -74,6 +74,8 @@ type ReviewMessenger interface {
 //     the work queue saves an inline config with the task. A follow-up's inline config is checked only
 //     when its URL is new for the task (push.CheckSet): a follow-up that sends its unchanged config again
 //     is never refused for a DNS change.
+//     Then resends (spec §9, §15; resendAnswer, DM4-23): a blocking SendMessage that repeats a request whose
+//     task stands at input-required or auth-required is answered with that task as an early response.
 //  7. Large parts (spec §10.4, D167; largeParts): with a bucket, each part over 256 KiB of a new task's first
 //     message (an object of the pre-minted task) or of an input-required task's follow-up is stored and replaced
 //     by its url part kontra-blob:<ref>; the rows are pending on the context for the transaction that creates
@@ -134,6 +136,7 @@ func (i *Interceptors) Chain() []a2asrv.CallInterceptor {
 		interceptor(ii.admission),
 		interceptor(ii.followUp),
 		interceptor(ii.pushURLs),
+		interceptor(ii.resendAnswer),
 		&largeParts{i: &ii},
 		&CancelInterceptor{Svc: ii.Svc, Log: ii.Log, Canceler: ii.Canceler},
 		interceptor(extendedCard),
