@@ -43,12 +43,13 @@ const SealUsage = `usage:
 // ErrUsage is a kontra seal command line that is not one of SealUsage's (the CLI exits 2).
 var ErrUsage = errors.New("usage")
 
-// usageErr is a usage error with the synopsis.
+// usageErr is a usage error: its reason only (the CLI prints SealUsage after it, as it is, so that a reason is
+// escaped for the terminal and the synopsis keeps its lines).
 func usageErr(why string) error {
 	if why != "" {
-		return fmt.Errorf("%w: %s\n%s", ErrUsage, why, SealUsage)
+		return fmt.Errorf("%w: %s", ErrUsage, why)
 	}
-	return fmt.Errorf("%w\n%s", ErrUsage, SealUsage)
+	return ErrUsage
 }
 
 // maxCardBytes bounds a card, a key set or an input file kontra seal reads.
@@ -100,6 +101,9 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	mediaType := fs.String("media-type", "application/octet-stream", "")
 	apiKey := fs.String("api-key", "", "")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return flag.ErrHelp // --help: the CLI prints SealUsage and exits 0
+		}
 		return usageErr(err.Error())
 	}
 	var key string // only --api-key's: never the environment's (SealCommand's SPEC-CONFLICT)

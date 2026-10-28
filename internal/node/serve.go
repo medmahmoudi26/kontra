@@ -35,8 +35,8 @@ const stdioPrefix = "stdio:"
 // node does not retry.
 var serviceNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// ErrBasePath is an A2A --serve target with a path other than "/" (see ParseServe).
-var ErrBasePath = errors.New("a --serve target with a base path is refused in M2")
+// ErrBasePath is an A2A --serve target with a path other than "/" (see ParseServe; D123, D210).
+var ErrBasePath = errors.New("an A2A --serve target with a base path is refused (D123, D210)")
 
 // ParseServe parses one --serve value, a stdio command line split with HOME from the process's environment
 // (ParseArgs splits it with the HOME it was given). An A2A target whose path is not empty or "/" is refused (see
@@ -154,9 +154,8 @@ func checkTarget(raw, kind string) (*url.URL, error) {
 		return nil, fmt.Errorf("target %s: empty port", origin(u))
 	}
 	if kind != tunnel.KindMCP && u.Path != "" && u.Path != "/" {
-		return nil, fmt.Errorf("%w (target %s, base path %q): the gate calls the upstream card's interface path, "+
-			"which already holds the base, and the node would prefix it again (spec/tunnel.md §8.2 against relay.md §6.2 "+
-			"and D71; spec conflict C1 of the M2 plan, for the owner); serve the agent at its root", ErrBasePath, origin(u), clipValue(u.Path))
+		return nil, fmt.Errorf("%w (target %s, base path %q): serve the agent at its root; an MCP target may name "+
+			"its endpoint path (spec/tunnel.md §8.2)", ErrBasePath, origin(u), clipValue(u.Path))
 	}
 	if p := u.Path; kind == tunnel.KindMCP && p != "" {
 		c := path.Clean(p)

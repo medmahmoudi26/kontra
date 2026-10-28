@@ -77,8 +77,8 @@ through one outbound connection (spec/tunnel.md):
   --log json                 JSON logs on stderr (default text)
 Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only. Sealed services
 (spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, a hired job's key under ~/.kontra/jobs,
-and the pins in ~/.kontra/pins; recipient key ids and seller key thumbprints are printed on stderr on a first sight
-and on every change.
+and the pins in ~/.kontra/pins; recipient key ids and seller key thumbprints (kid:<kid> for a seller signature that
+names its key only, D223) are printed on stderr on a first sight and on every change.
 
 kontra seal seals a file for a sealed service without a node (the escape hatch for scripting, ext-sealed.md §5.1):
 it prints one A2A Message JSON whose single part is the file sealed to the service's recipients; --open writes the
@@ -131,14 +131,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	case "seal":
-		if err := sealing.SealCommand(ctx, args[1:], os.Stdin, stdout, stderr); err != nil {
+		err := sealing.SealCommand(ctx, args[1:], os.Stdin, stdout, stderr)
+		switch {
+		case err == nil:
+			return 0
+		case errors.Is(err, flag.ErrHelp):
+			fmt.Fprint(stdout, sealing.SealUsage)
+			return 0
+		case errors.Is(err, sealing.ErrUsage):
+			// The reason may quote an argument: escaped for the terminal; the synopsis is the CLI's own.
 			fmt.Fprintln(stderr, "kontra seal:", tunnel.Printable(err.Error()))
-			if errors.Is(err, sealing.ErrUsage) {
-				return 2
-			}
+			fmt.Fprint(stderr, sealing.SealUsage)
+			return 2
+		default:
+			fmt.Fprintln(stderr, "kontra seal:", tunnel.Printable(err.Error()))
 			return 1
 		}
-		return 0
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0

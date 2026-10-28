@@ -46,6 +46,10 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"connect", "-h"}, 0, "--listen ADDR", ""},
 		{[]string{"connect", "-h"}, 0, "mcp:NAME=stdio:CMD", ""},
 		{[]string{"connect", "-h"}, 0, "--roots NAME=DIR", ""},
+		{[]string{"seal", "--help"}, 0, "usage:\n  kontra seal --service <service URL>", ""},
+		{[]string{"seal", "-h"}, 0, "\n  kontra seal --open <part.json>\n", ""},
+		{[]string{"seal", "--bogus"}, 2, "", "usage:\n  kontra seal --service"},
+		{[]string{"--help"}, 0, "kid:<kid> for a seller signature", ""},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := run(ctx, c.args, &stdout, &stderr); code != c.code ||
@@ -53,6 +57,26 @@ func TestSubcommands(t *testing.T) {
 			t.Errorf("kontra %q = %d, stdout %q, stderr %q; want %d, %q, %q", c.args, code, stdout.String(), stderr.String(),
 				c.code, c.out, c.errOut)
 		}
+	}
+}
+
+// Round 2 records-4: kontra seal's usage error escapes its reason for the terminal and prints the synopsis as it is
+// (no literal \n); --help is no usage error; the base-path refusal cites its decisions, not "M2" or "the owner".
+func TestCLITexts(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"seal", "--bogus\x1b[31m"}, &stdout, &stderr); code != 2 ||
+		strings.Contains(stderr.String(), `\n`) || strings.Contains(stderr.String(), "\x1b") || !strings.Contains(stderr.String(), "\n  kontra seal --open") {
+		t.Errorf("a seal usage error = %d, %q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(context.Background(), []string{"seal", "--help"}, &stdout, &stderr); code != 0 || stderr.Len() != 0 ||
+		strings.Contains(stdout.String(), "help requested") {
+		t.Errorf("kontra seal --help = %d, %q, %q", code, stdout.String(), stderr.String())
+	}
+	_, err := node.ParseServe("a2a:x=http://127.0.0.1:9/path")
+	if err == nil || strings.Contains(err.Error(), "M2") || strings.Contains(err.Error(), "owner") || !strings.Contains(err.Error(), "D210") {
+		t.Errorf("the base-path refusal: %v", err)
 	}
 }
 
@@ -132,7 +156,7 @@ func TestConnectRefusesFlags(t *testing.T) {
 		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--max-sessions", "0"}, "--max-sessions"},
 		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--session-idle", "0s"}, "--session-idle"},
 		{[]string{"--serve", "a2a:x=http://h:1/base"}, "base path"},
-		{[]string{"--serve", "a2a:x=http://h:1/base"}, "conflict"},
+		{[]string{"--serve", "a2a:x=http://h:1/base"}, "(D123, D210)"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--gate", "http://gate.example"}, "--gate"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--gate", "https://gate.example/?k=v"}, "no query"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--enroll", "nope"}, "not an enrollment token"},
