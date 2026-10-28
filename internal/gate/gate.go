@@ -94,6 +94,7 @@ type options struct {
 	orphanEvery, orphanAge, retentionEvery                               time.Duration
 	anonExpireEvery, anonPurgeEvery                                      time.Duration
 	tunnelPing, tunnelCards                                              time.Duration
+	plainWait                                                            time.Duration
 	executor                                                             relay.ExecutorOptions
 	hup                                                                  bool
 	hupCh                                                                <-chan os.Signal
@@ -115,7 +116,9 @@ type Timing struct {
 	// TunnelPing is the tunnel registry's last_ping_at interval and row check (tunnel.LastPingEvery);
 	// TunnelCards a tunnel card's refetch while serving (card.Refresh).
 	TunnelPing, TunnelCards time.Duration
-	Executor                relay.ExecutorOptions
+	// PlainWait is how long /mcp's plain hire and reply wait for the task (gatemcp.PlainWait, M4 WP-04).
+	PlainWait time.Duration
+	Executor  relay.ExecutorOptions
 }
 
 // WithTiming replaces the replica's intervals (tests).
@@ -138,6 +141,7 @@ func WithTiming(t Timing) Option {
 		set(&o.anonExpireEvery, t.AnonExpire)
 		set(&o.anonPurgeEvery, t.AnonPurge)
 		set(&o.tunnelPing, t.TunnelPing)
+		set(&o.plainWait, t.PlainWait)
 		set(&o.tunnelCards, t.TunnelCards)
 		o.executor = t.Executor
 	}
@@ -503,8 +507,11 @@ func (r *Replica) assemble() error {
 		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
 	}).Register(routes)
 	// /mcp/{svc} (spec §11; M3 WP-04): plain MCP requests, sessions pinned to a tunnel session or a direct backend,
-	// and the peer hop to the replica holding a tunnel session (§11.2). The gate's own /mcp is M4's (D170).
+	// and the peer hop to the replica holding a tunnel session (§11.2). The gate's own /mcp (§12; M4 WP-04) after it.
 	if err := r.assembleMCP(routes, authn, snapshot, rules); err != nil {
+		return err
+	}
+	if err := r.assembleGateMCP(routes, authn, handlers); err != nil {
 		return err
 	}
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))

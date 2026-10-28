@@ -12,6 +12,8 @@ import (
 
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/gatemcp"
+	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/store"
 )
 
@@ -169,6 +171,10 @@ func (r *Replica) sweepIdle(ctx context.Context) {
 	}
 	if _, err := r.mcp.SweepIdle(ctx); err != nil && ctx.Err() == nil {
 		r.log.Warn("mcp idle sweep", "error", err)
+	}
+	// The gate's own /mcp's sessions (relay.md §12; M4 WP-04): service NULL, an hour idle.
+	if _, err := mcprelay.NewSessions(r.pool).SweepGateIdle(ctx, gatemcp.SessionIdle, time.Now()); err != nil && ctx.Err() == nil {
+		r.log.Warn("/mcp idle sweep", "error", err)
 	}
 }
 
