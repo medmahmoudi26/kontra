@@ -8,13 +8,17 @@ relays ciphertext it cannot open: Postgres, its logs and its bucket hold envelop
 
 What is sealed (§2): the content of every A2A part (`text`, `raw`, `url` or `data`), both directions; for MCP the
 `tools/call` arguments, the result's `content` and `structuredContent` (on the call's response, or a task's
-`tasks/result`), the upstream's elicitation and sampling requests made for a sealed call or for a task it created,
-and the client's answers to them (D219), and a sealed task's `statusMessage` (which becomes `"sealed"`). Not relayed
-at all on a sealed job: an artifact's `name` and `description` (D220). Errors are not sealed and keep their code
-only: on a sealed job the hosting node replaces an error's message and data with fixed text, so the service's
-message (which may quote the input) stays on the hosting node and the local client never sees it (D195). What is
-not sealed: task states and ids, message and artifact ids, metadata, a part's `filename` (do not put secrets in it),
-tool names, `isError`, `tools/list` and every other MCP method.
+`tasks/result`), the upstream's `elicitation/create` and `sampling/createMessage` requests made for a sealed call,
+plain or durable, and the client's answers to them (D219: a plain call's server builds them from the sealed arguments
+too, so they are sealed like a task's), and a sealed task's `statusMessage` (which becomes `"sealed"`). Not relayed
+at all on a sealed job: an artifact's `name` and `description`, which the hosting node drops, since a service may
+write them from the sealed input (D220). Errors are not sealed and keep their code only: on a sealed job the hosting
+node replaces an error's message and data with fixed text, so the service's message (which may quote the input) stays
+on the hosting node, the local client never sees it, and the gate keeps none of a sealed service's error text in its
+logs or its database (D195). What is not sealed: task states and ids, message and artifact ids, `metadata`, a part's
+`filename` (do not put secrets in it), tool names, `isError`, `_meta` outside `sh.kontra/sealed`, `tools/list`, every
+other MCP method, and notifications, a sealed call's progress and log messages included. Every envelope names the
+service it is sealed for, so a gate cannot deliver it to another service of the same node (D221).
 
 ## Run it on one machine
 

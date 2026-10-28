@@ -2354,8 +2354,8 @@ behaviour built. The owner's standing instruction ("Don't ask me anything", 26 O
 under the owner's standing instruction, 28 Oct** below, with the option its builder or reviewer recommended, and
 each code marker names its entry. Where that option is what the code does, the specs now say it and cite the entry
 ([`relay.md`](../spec/relay.md) revision 7, [`tunnel.md`](../spec/tunnel.md) revision 5,
-[`ext-sealed.md`](../spec/ext-sealed.md) revision 3); where it is not built yet, the specs state the built behaviour
-and its residual, and D225 lists what is left to build. As in M2, a proposal that would only add a value to what
+[`ext-sealed.md`](../spec/ext-sealed.md) revision 3); where it was not built yet, the specs stated the built
+behaviour and its residual, and D225 listed what was left to build, since built in M3 too. As in M2, a proposal that would only add a value to what
 both binaries already speak (a blob refusal, a `Kontra-Node` reason) is not taken where the built behaviour holds;
 the envelope's `service` member (D221) is taken, because it closes a residual nothing else closes.
 
@@ -2873,16 +2873,26 @@ asks it to keep), or none, counts as a day, as before ([`relay.md`](../spec/rela
 
 ### D225. What the M3 decisions leave to build — **decided under the owner's standing instruction, 28 Oct** (adds to D170)
 
-Five options decided above are not built in M3, and join D170's list for M4, before v4.0 is released: `kontra
-connect --listen off` (D208); the gate's cap of MCP sessions per principal and service,
+Five options decided above were not built when the M3 decisions were recorded, and were to join D170's list for M4:
+`kontra connect --listen off` (D208); the gate's cap of MCP sessions per principal and service,
 `services.<name>.max_sessions_per_principal`, with the stdio bridge's eviction of a long-idle child (D213); the
 envelope header's `service` member (D221); the seller key set the gate names in `kontra.upstream.jwks` (D223); and
-`_meta["sh.kontra/session_idle_s"]` in the `initialize` result (D224). Each gets its spec text when it is built;
-until then the specs state the built behaviour and its residual. Two smaller follow-ups of the review are left too:
-the hosting node's sealing state still takes one node-wide lock, so a commit's append and `fsync` and the job files'
-writes happen under it (per-service locks, with D221's node-wide checks under a lock of their own, are the review's
-proposal; M3 review robustness-4); and D199's notice has no gate-level test across two replicas (M3 review
-mcp-spec-5).
+`_meta["sh.kontra/session_idle_s"]` in the `initialize` result (D224). The review also left two smaller follow-ups:
+the hosting node's sealing state took one node-wide lock, so that a commit's append and `fsync` and the job files'
+writes happened under it (M3 review robustness-4), and D199's notice has no gate-level test across two replicas (M3
+review mcp-spec-5). All five options are built in M3 now, before it merges, each with its spec text and its entry
+above saying how: `--listen off` (`node` run.go; `TestRunListenOff`), the cap and the bridge's eviction (`mcprelay`
+`evict`, `stdiobridge` `reserve`, 0002's `services.max_sessions_per_principal`; `TestSessionsPerPrincipal`,
+`TestFullBridgeStopsItsLongestIdleChild`, `TestSessionsPerPrincipalThroughTheGate`), the `service` member
+(`sealing` `checkService`; `TestHostingChecksTheService`, `TestHiringChecksTheService`, `TestSealedThroughTheGate`),
+the named seller key set (`card` `SellerJWKSHandler`, `sealing` `SellerKeySet`; `TestSellerKeySetNamedByTheGate`,
+`TestSellerKeySetThroughTheGate`) and the stated `session_idle_s` (`mcprelay` `initializeResult`, `sealing`
+`sessionIdleOf`; `TestSessionKeyKeptForTheGatesSessionIdle`, `TestSealedMCPThroughTheGate`); so is the review's
+proposal for robustness-4: each hosted service's state has a lock of its own, and the node-wide replay checks of
+D221 a lock of their own over an index of what each service recorded, filled at start, checked and reserved in one
+step (`sealing` hosting.go `hostedService`, `claimNode`; `TestHostingServicesLockedApart`,
+`TestHostingNodeWideReplyToIsClaimedOnce`). The specs no longer state those residuals. What remains for M4 of this
+list is mcp-spec-5's gate-level two-replica test of D199's notice; D170's list is otherwise unchanged.
 
 ### D226. A sealed MCP job holds its upstream session, and its requests' ids — **decided under the owner's standing instruction, 28 Oct** (amends D217)
 
