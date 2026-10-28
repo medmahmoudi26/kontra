@@ -217,6 +217,9 @@ func drainOnSignal(log *slog.Logger, cancel context.CancelCauseFunc) (stop func(
 
 // migrateCmd applies, rolls back or lists the embedded migrations (D28). The database comes from
 // --postgres, else from the configuration file's postgres:. Flags may come before or after the action.
+// migrateWait is how long migrate waits for a database that refuses connections (one still starting).
+const migrateWait = time.Minute
+
 func migrateCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -253,6 +256,9 @@ func migrateCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	defer m.Close()
+	if err := m.WaitReady(ctx, migrateWait); err != nil {
+		return err
+	}
 
 	switch action {
 	case "up":

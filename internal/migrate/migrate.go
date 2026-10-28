@@ -16,8 +16,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
@@ -92,6 +95,35 @@ func Open(ctx context.Context, dsn string) (*Migrator, error) {
 	}
 	m.ownsDB = true
 	return m, nil
+}
+
+// WaitReady waits, at most d, until the database accepts a connection: one that is refused or reset, or answered
+// "the database system is starting up" (SQLSTATE 57P03), is tried again every second, since a one-shot started as
+// soon as the server's healthcheck passed may find it still starting (the compose team gate's gate-migrate); any
+// other error (authentication, a database that does not exist) is returned at once.
+func (m *Migrator) WaitReady(ctx context.Context, d time.Duration) error {
+	deadline := time.Now().Add(d)
+	for {
+		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := m.db.PingContext(pctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		var (
+			op *net.OpError
+			pe *pgconn.PgError
+		)
+		starting := errors.As(err, &op) || errors.As(err, &pe) && pe.Code == "57P03"
+		if !starting || ctx.Err() != nil || !time.Now().Add(time.Second).Before(deadline) {
+			return fmt.Errorf("migrate: the database: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // Close closes the connection pool if Open created it.
