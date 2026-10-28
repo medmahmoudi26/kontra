@@ -90,9 +90,9 @@ func TestReviewA2AConcurrentFirstMessageHijack(t *testing.T) {
 	}
 	j := &jobState{ID: task, ReplyTo: g.replyTo(), RK: sealed.EncodeRK(g.rk), GateContext: ctx}
 	j.init()
-	f2.h.mu.Lock()
+	hs := f2.h.lock("echo")
 	_ = f2.h.saveJob("echo", j) // as if another exchange had recorded the gate's binding meanwhile
-	f2.h.mu.Unlock()
+	hs.mu.Unlock()
 	got := readAll(t, f2.answer(x1, http.StatusOK, taskAnswer("up-B", "upctx-B", "TASK_STATE_COMPLETED", "done", "BUYER SECRET RESULT")))
 	if strings.Contains(got, "BUYER SECRET") {
 		t.Fatalf("plaintext: %s", got)
@@ -613,10 +613,10 @@ func TestReviewSweepRetention(t *testing.T) {
 	if err := h.Sweep(f.now); err != nil {
 		t.Fatal(err)
 	}
-	h.mu.Lock()
+	hs := h.lock("echo")
 	svc, _ := h.service("echo")
 	nUp, nCtx := len(svc.UpstreamContexts), len(svc.Contexts)
-	h.mu.Unlock()
+	hs.mu.Unlock()
 	if nUp != 0 || nCtx != 0 {
 		t.Fatalf("the gone job's contexts are kept: %d upstream, %d gate", nUp, nCtx)
 	}
@@ -678,10 +678,10 @@ func TestReviewServiceStateIsAppended(t *testing.T) {
 	}
 	// A restart reads the snapshot and the log; Sweep compacts them.
 	f.open()
-	f.h.mu.Lock()
+	hs := f.h.lock("echo")
 	svc, _ := f.h.service("echo")
 	n := len(svc.ReplyTo)
-	f.h.mu.Unlock()
+	hs.mu.Unlock()
 	if n != 3 {
 		t.Fatalf("after a restart: %d replyTo entries", n)
 	}
@@ -692,10 +692,10 @@ func TestReviewServiceStateIsAppended(t *testing.T) {
 		t.Fatal("Sweep left service.log")
 	}
 	f.open()
-	f.h.mu.Lock()
+	hs = f.h.lock("echo")
 	svc, _ = f.h.service("echo")
 	n = len(svc.ReplyTo)
-	f.h.mu.Unlock()
+	hs.mu.Unlock()
 	if n != 3 {
 		t.Fatalf("after Sweep and a restart: %d replyTo entries", n)
 	}
@@ -731,17 +731,17 @@ func TestReviewSweepDoesNotLoadJobs(t *testing.T) {
 	if err := f.h.Sweep(f.now); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(f.h.jobs); n != 0 {
+	if n := f.h.loadedJobs(); n != 0 {
 		t.Fatalf("Sweep loaded %d jobs", n)
 	}
 	// Loaded and idle past jobCacheIdle: evicted.
-	f.h.mu.Lock()
+	hs := f.h.lock("echo")
 	_, _ = f.h.jobFor("echo", "0193c0de-0000-7000-8000-0000000002a0")
-	f.h.mu.Unlock()
+	hs.mu.Unlock()
 	if err := f.h.Sweep(f.now.Add(jobCacheIdle + time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(f.h.jobs); n != 0 {
+	if n := f.h.loadedJobs(); n != 0 {
 		t.Fatalf("an idle job stays loaded: %d", n)
 	}
 }

@@ -60,13 +60,13 @@ type HostingConfig struct {
 	Now func() time.Time
 }
 
-// Hosting is the hosting node's sealing, keyed per service and per job (spec §5 "Hosting node"): per job (the
-// gate task id; for plain MCP calls, the session hash) the replyTo and rk of its first sealed request, the
-// upstream task and context ids, the (messageId, part) pairs forwarded, and per gate task the MCP input requests
-// it sealed and has not seen answered (InputRequest); per service every replyTo that opened a job, the upstream
-// context id recorded per gate context, and for MCP every (session, messageId) forwarded. A job is opened, and
-// its pairs recorded, only once the service has accepted the request; until then what a request will record is
-// held in flight (Hosting.flight), so that a second copy sent while the first is in flight is replayed too, and
+// Hosting is the hosting node's sealing, keyed per service and per job (spec §5 "Hosting node"): per job (the gate task
+// id; for plain MCP calls, the session hash) the replyTo and rk of its first sealed request, the upstream task and
+// context ids, the (messageId, part) pairs forwarded, and per gate task the MCP input requests it sealed and has not
+// seen answered (InputRequest); per service every replyTo that opened a job, the upstream context id recorded per gate
+// context, and for MCP every (session, messageId) forwarded. A job is opened, and its pairs recorded, only once the
+// service has accepted the request; until then what a request will record is held in flight (hostedService.flight, and
+// Hosting.nflight for the node-wide keys), so that a second copy sent while the first is in flight is replayed too, and
 // released with nothing recorded when the node answers the request itself or the service refuses it.
 //
 // Bodies are read with exact keys (internal/mcpwire.Parse, internal/strictjson; D172): one with a repeated or
@@ -104,27 +104,31 @@ type HostingConfig struct {
 // bad_header (it would have the service post a sealed task's plaintext to a URL the gate chose; the gate never sends
 // one upstream, relay.md §10.1), as are a JSON-RPC request that is none of A2A 1.0's methods and a body that is not
 // one JSON object; and a sealed job's MCP tasks keep their statusMessage sealed on every session's exchanges.
+//
+// Locking (M3 review robustness-4, D225): each hosted service's state is guarded by a lock of its own, under which its
+// exchanges check and record and its commits append, sync and write its files, so that one service's disk never holds
+// up another's exchanges; the node-wide replay checks (D221) are guarded by a lock of their own, over an index of the
+// replyTos and MCP (session, messageId)s each service recorded, which is filled from every service's state on disk
+// when the node starts. A service's lock is always taken before the node-wide one.
 type Hosting struct {
 	cfg HostingConfig
 	log *slog.Logger
 	st  *fileStore
 
-	mu       sync.Mutex
-	services map[string]*serviceState // loaded service.json, written through
-	jobs     map[string]*jobState     // loaded job files by "<service>/<job>", written through
-	// flight holds what a request the service has not accepted yet will record once it does (rule 2's replyTo, rule
-	// 5's pairs and MCP (session, messageId), rule 4b's answered input request, and the binding a new job opens with),
-	// by flightKey, with its owner: a second copy in flight is refused as a replay of the first, and a second binding
-	// for a job being opened as wrong_job, as each would be once the first is recorded. An exchange releases its keys
-	// when the service accepts it (they are then recorded) or the node answers it itself (nothing is recorded: the
-	// gate's retry is not a replay).
-	flight map[string]flightRef
-	// opening counts, per service, the exchanges opening a sealed job whose upstream task the node has not read yet
-	// (a first message in flight, or accepted and not answered): while one is, a reply on an exchange of no sealed job
-	// that names an upstream task or context the node has not indexed may be that job's, and waits (holdReply, D227).
-	// openingDone is closed, and replaced, whenever one ends.
-	opening     map[string]int
-	openingDone chan struct{}
+	// Each hosted service's state has a lock of its own (hostedService.mu), under which its exchanges check and
+	// record, and its commits append, sync and write its job files: one service's writes never wait for another's
+	// (M3 review robustness-4, D225). smu guards the map only.
+	smu  sync.Mutex
+	svcs map[string]*hostedService
+
+	// The node-wide replay checks (rule 2's replyTo and rule 5's MCP (session, messageId), across every service of the
+	// node, D221) have a lock of their own: nmu guards their in-flight keys (flightKey's kinds "r" and "m", service "")
+	// and the index of what each service recorded, which a service's exchange reads without another service's lock.
+	// Lock order: a service's lock, then nmu; never the other way.
+	nmu      sync.Mutex
+	nflight  map[string]flightRef
+	nReplyTo map[string]string // replyTo -> the service that recorded it
+	nCalls   map[string]string // "<session>/<messageId>" -> the service that forwarded it
 
 	// paths are the hosted services as the gate's URL path names them (SetServicePaths): what a sealed header's
 	// service must be (D221).
@@ -174,6 +178,62 @@ type flightRef struct {
 	n     int
 }
 
+// hostedService is one hosted service's state on the node and the lock that guards it.
+type hostedService struct {
+	mu    sync.Mutex
+	state *serviceState        // loaded service.json and service.log, written through; nil until loaded
+	jobs  map[string]*jobState // loaded job files by job id, written through
+	// flight holds what a request the service has not accepted yet will record once it does (rule 5's pairs, rule 4b's
+	// answered input request, the binding a new job opens with, the upstream session a sealed call opens a job's on),
+	// by flightKey, with its owner: a second copy in flight is refused as a replay of the first, and a second binding
+	// for a job being opened as wrong_job, as each would be once the first is recorded. An exchange releases its keys
+	// when the service accepts it (they are then recorded) or the node answers it itself (nothing is recorded: the
+	// gate's retry is not a replay). The node-wide keys are Hosting.nflight.
+	flight map[string]flightRef
+	// opening counts the exchanges opening a sealed job whose upstream task the node has not read yet (a first message
+	// in flight, or accepted and not answered): while one is, a reply on an exchange of no sealed job that names an
+	// upstream task or context the node has not indexed may be that job's, and waits (holdReply, D227). openingDone is
+	// closed, and replaced, whenever one ends.
+	opening     int
+	openingDone chan struct{}
+}
+
+// svc is the service's hostedService, made on first use.
+func (h *Hosting) svc(name string) *hostedService {
+	h.smu.Lock()
+	defer h.smu.Unlock()
+	hs := h.svcs[name]
+	if hs == nil {
+		hs = &hostedService{jobs: map[string]*jobState{}, flight: map[string]flightRef{}, openingDone: make(chan struct{})}
+		h.svcs[name] = hs
+	}
+	return hs
+}
+
+// lock locks the service's state and returns it; the caller unlocks hs.mu.
+func (h *Hosting) lock(name string) *hostedService {
+	hs := h.svc(name)
+	hs.mu.Lock()
+	return hs
+}
+
+// loadedJobs is the number of jobs held in memory, every service's (tests).
+func (h *Hosting) loadedJobs() int {
+	h.smu.Lock()
+	all := make([]*hostedService, 0, len(h.svcs))
+	for _, hs := range h.svcs {
+		all = append(all, hs)
+	}
+	h.smu.Unlock()
+	n := 0
+	for _, hs := range all {
+		hs.mu.Lock()
+		n += len(hs.jobs)
+		hs.mu.Unlock()
+	}
+	return n
+}
+
 // NewHosting opens the job state directory.
 func NewHosting(cfg HostingConfig, log *slog.Logger) (*Hosting, error) {
 	if log == nil {
@@ -194,9 +254,23 @@ func NewHosting(cfg HostingConfig, log *slog.Logger) (*Hosting, error) {
 	if err := privateDir(cfg.Dir); err != nil {
 		return nil, err
 	}
-	return &Hosting{cfg: cfg, log: log.With("component", "sealing-hosting"), st: &fileStore{dir: cfg.Dir},
-		services: map[string]*serviceState{}, jobs: map[string]*jobState{}, flight: map[string]flightRef{},
-		opening: map[string]int{}, openingDone: make(chan struct{})}, nil
+	h := &Hosting{cfg: cfg, log: log.With("component", "sealing-hosting"), st: &fileStore{dir: cfg.Dir},
+		svcs: map[string]*hostedService{}, nflight: map[string]flightRef{}, nReplyTo: map[string]string{},
+		nCalls: map[string]string{}}
+	// Every service's state is read now, so that the node-wide replay checks know what each service recorded before
+	// any exchange (a service whose state cannot be read is read again, and refused, when an exchange names it).
+	names, err := h.st.services()
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		hs := h.lock(name)
+		if _, err := h.service(name); err != nil {
+			h.log.Warn("sealing: a hosted service's state could not be read", "service", name, "err", err)
+		}
+		hs.mu.Unlock()
+	}
+	return h, nil
 }
 
 // flightKey is the in-flight key of what a request records: kind "r" a replyTo (node-wide: service ""), "p" a job's
@@ -209,35 +283,101 @@ func flightKey(kind, service string, parts ...string) string {
 // binding is a job's replyTo and rk as one value (the "j" key's owner).
 func bindOf(replyTo, rk string) string { return replyTo + "\x00" + rk }
 
-// reserve records keys in flight for owner; h.mu is held.
+// flightOf is the in-flight map key belongs to, and the lock that guards it beyond the caller's: a node-wide key's
+// (service "") is nflight under nmu, a service's that service's flight, whose lock the caller holds.
+func (h *Hosting) flightOf(key string) (map[string]flightRef, *sync.Mutex) {
+	_, rest, _ := strings.Cut(key, "\x00")
+	service, _, _ := strings.Cut(rest, "\x00")
+	if service == "" {
+		return h.nflight, &h.nmu
+	}
+	return h.svc(service).flight, nil
+}
+
+// reserve records keys in flight for owner; the lock of each key's service is held.
 func (h *Hosting) reserve(owner string, keys ...string) {
 	for _, k := range keys {
-		r := h.flight[k]
+		m, mu := h.flightOf(k)
+		if mu != nil {
+			mu.Lock()
+		}
+		r := m[k]
 		r.owner = owner
 		r.n++
-		h.flight[k] = r
+		m[k] = r
+		if mu != nil {
+			mu.Unlock()
+		}
 	}
 }
 
-// unreserve drops one hold of each key; h.mu is held.
+// unreserve drops one hold of each key; the lock of each key's service is held.
 func (h *Hosting) unreserve(keys []string) {
 	for _, k := range keys {
-		r, ok := h.flight[k]
-		if !ok {
-			continue
+		m, mu := h.flightOf(k)
+		if mu != nil {
+			mu.Lock()
 		}
-		if r.n--; r.n <= 0 {
-			delete(h.flight, k)
-			continue
+		if r, ok := m[k]; ok {
+			if r.n--; r.n <= 0 {
+				delete(m, k)
+			} else {
+				m[k] = r
+			}
 		}
-		h.flight[k] = r
+		if mu != nil {
+			mu.Unlock()
+		}
 	}
 }
 
-// inFlight returns the gate task holding key, ok false when no exchange does; h.mu is held.
+// inFlight returns the gate task holding key, ok false when no exchange does; the lock of key's service is held.
 func (h *Hosting) inFlight(key string) (string, bool) {
-	r, ok := h.flight[key]
+	m, mu := h.flightOf(key)
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	r, ok := m[key]
 	return r.owner, ok
+}
+
+// claimNode is the node-wide replay check and its reservation in one step under nmu (D221: rule 2's replyTo, rule 5's
+// MCP (session, messageId)): false when index records id for another service than service, or another owner holds key
+// in flight; otherwise owner holds key. Checked and reserved at once, so that two services' exchanges of one request
+// cannot both pass.
+func (h *Hosting) claimNode(key, owner string, index map[string]string, id, service string) bool {
+	h.nmu.Lock()
+	defer h.nmu.Unlock()
+	if s, ok := index[id]; ok && s != service {
+		return false
+	}
+	if r, ok := h.nflight[key]; ok && r.owner != owner {
+		return false
+	}
+	r := h.nflight[key]
+	r.owner = owner
+	r.n++
+	h.nflight[key] = r
+	return true
+}
+
+// indexNode records that service holds id in a node-wide set (setReplyTo or setMCPCalls), or no longer does (put
+// false), for the checks of other services' exchanges. The service's lock is held.
+func (h *Hosting) indexNode(set, id, service string, put bool) {
+	h.nmu.Lock()
+	defer h.nmu.Unlock()
+	index := h.nReplyTo
+	if set == setMCPCalls {
+		index = h.nCalls
+	}
+	cur, ok := index[id]
+	switch {
+	case put && !ok:
+		index[id] = service
+	case !put && ok && cur == service:
+		delete(index, id)
+	}
 }
 
 // Exchange is one forwarded exchange's sealing state, from Request to Response.
@@ -259,7 +399,7 @@ type Exchange struct {
 	job  *jobState
 	bind string
 	// commit is what the service's acceptance records (rule 2's new job, rule 5's pairs); reserved are its in-flight
-	// keys (Hosting.flight) until then.
+	// keys (hostedService.flight, Hosting.nflight) until then.
 	commit   func() error
 	reserved []string
 	done     bool
@@ -286,18 +426,18 @@ func (b *handedBody) Read(p []byte) (int, error) {
 
 func (b *handedBody) Close() error { return nil }
 
-// endOpening drops the exchange from Hosting.opening; h.mu is held.
+// endOpening drops the exchange from its service's opening count; the service's lock is held.
 func (x *Exchange) endOpening() {
 	if !x.opening {
 		return
 	}
 	x.opening = false
-	h := x.h
-	if h.opening[x.service]--; h.opening[x.service] <= 0 {
-		delete(h.opening, x.service)
+	hs := x.h.svc(x.service)
+	if hs.opening--; hs.opening < 0 {
+		hs.opening = 0
 	}
-	close(h.openingDone)
-	h.openingDone = make(chan struct{})
+	close(hs.openingDone)
+	hs.openingDone = make(chan struct{})
 }
 
 // Release drops what the exchange holds in flight without recording it: the node answered the request itself (the
@@ -308,8 +448,8 @@ func (x *Exchange) Release() {
 	if x == nil {
 		return
 	}
-	x.h.mu.Lock()
-	defer x.h.mu.Unlock()
+	hs := x.h.lock(x.service)
+	defer hs.mu.Unlock()
 	x.h.unreserve(x.reserved)
 	x.reserved = nil
 	if !x.done {
@@ -331,8 +471,8 @@ func (x *Exchange) End() {
 		x.Release()
 		return
 	}
-	x.h.mu.Lock()
-	defer x.h.mu.Unlock()
+	hs := x.h.lock(x.service)
+	defer hs.mu.Unlock()
 	if x.commit != nil && !x.done {
 		x.done = true
 		if err := x.commit(); err != nil {
@@ -368,8 +508,8 @@ func (h *Hosting) Request(ctx context.Context, pre tunnel.Preamble, req *http.Re
 		return nil, x, err
 	}
 	x.stream = op.stream
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	hs := h.lock(x.service)
+	defer hs.mu.Unlock()
 	svc, err := h.service(x.service)
 	if err != nil {
 		return nil, x, err
@@ -576,13 +716,14 @@ func tasksRoute(p string) (ids []string, stream bool, kind opKind) {
 	return ids, stream, kind
 }
 
-// guarded reports a service the node holds sealed state for (or one started with --sealed-required); h.mu is held.
+// guarded reports a service the node holds sealed state for (or one started with --sealed-required); the service's
+// lock is held.
 func (h *Hosting) guarded(service string, svc *serviceState) bool {
 	if h.Required(service) || len(svc.ReplyTo) > 0 || len(svc.Tasks) > 0 || len(svc.UpstreamContexts) > 0 {
 		return true
 	}
 	prefix := flightKey("j", service)
-	for k := range h.flight {
+	for k := range h.svc(service).flight {
 		if strings.HasPrefix(k, prefix) {
 			return true
 		}
@@ -820,13 +961,17 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 		}
 		flight = append(flight, k)
 	}
-	x.h.reserve(x.pre.Task, flight...)
-	x.reserved = flight
 	if h.TaskID == "" {
+		// Rule 2's node-wide check, checked again and reserved in one step under the node-wide lock: another service's
+		// exchange of the same first message may be between its checks and its reservation (D221).
 		rk := flightKey("r", "", h.ReplyTo)
-		x.h.reserve(x.service+"\x00"+x.pre.Task, rk)
+		if !x.h.claimNode(rk, x.service+"\x00"+x.pre.Task, x.h.nReplyTo, h.ReplyTo, x.service) {
+			return nil, reject(sealed.RejectReplayed, "the replyTo opened, or is opening, a job of another service of this node")
+		}
 		x.reserved = append(x.reserved, rk)
 	}
+	x.h.reserve(x.pre.Task, flight...)
+	x.reserved = append(x.reserved, flight...)
 	if j == nil {
 		j = &jobState{ID: x.pre.Task, ReplyTo: h.ReplyTo, RK: h.RK, Created: now, GateContext: x.pre.Context}
 		j.init()
@@ -836,7 +981,7 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 	}
 	if j.UpstreamTask == "" && !x.opening {
 		x.opening = true
-		x.h.opening[x.service]++
+		x.h.svc(x.service).opening++
 	}
 	x.job, x.bind = j, bindOf(h.ReplyTo, h.RK)
 	service, job := x.service, j
@@ -858,6 +1003,7 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 		job.Pairs = append(job.Pairs, pairs...)
 		job.LastSeen = at
 		svc.put(setReplyTo, h.ReplyTo, replyEntry{Job: job.ID, At: at})
+		x.h.indexNode(setReplyTo, h.ReplyTo, service, true)
 		if err := x.h.saveJob(service, job); err != nil {
 			return err
 		}
@@ -869,46 +1015,21 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 // replyToElsewhere reports a replyTo that opened a job of another service this node hosts: one identity key opens
 // every service's requests, so rule 2's replyTo set and rule 5's (session, messageId) set are checked across every
 // service of the node (D221, ext-sealed.md §5), beside the header's service member, which binds a sealed request to
-// the service the buyer hired (checkService). h.mu is held.
+// the service the buyer hired (checkService). It reads the node-wide index (nmu), never another service's state.
 func (h *Hosting) replyToElsewhere(service, replyTo string) bool {
-	for _, name := range h.knownServices() {
-		if name == service {
-			continue
-		}
-		if svc, err := h.service(name); err == nil {
-			if _, ok := svc.ReplyTo[replyTo]; ok {
-				return true
-			}
-		}
-	}
-	return false
+	h.nmu.Lock()
+	defer h.nmu.Unlock()
+	s, ok := h.nReplyTo[replyTo]
+	return ok && s != service
 }
 
 // mcpCallElsewhere reports an MCP (session, messageId) a sealed call of another service of this node forwarded
-// (replyToElsewhere's SPEC-CONFLICT). h.mu is held.
+// (replyToElsewhere's node-wide check).
 func (h *Hosting) mcpCallElsewhere(service, callKey string) bool {
-	for _, name := range h.knownServices() {
-		if name == service {
-			continue
-		}
-		if svc, err := h.service(name); err == nil {
-			if _, ok := svc.MCPCalls[callKey]; ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// knownServices are the services the node holds state for, loaded or on disk. h.mu is held.
-func (h *Hosting) knownServices() []string {
-	names, _ := h.st.services()
-	for name := range h.services {
-		if !slices.Contains(names, name) {
-			names = append(names, name)
-		}
-	}
-	return names
+	h.nmu.Lock()
+	defer h.nmu.Unlock()
+	s, ok := h.nCalls[callKey]
+	return ok && s != service
 }
 
 // unsealedSend is a send request with no sealed part: refused bad_header under --sealed-required, and on the
@@ -1008,7 +1129,7 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 	if resp.StatusCode/100 != 2 {
 		x.Release() // the service did not accept the request: nothing is recorded
 	} else {
-		h.mu.Lock()
+		hs := h.lock(x.service)
 		var err error
 		if x.commit != nil && !x.done {
 			x.done = true
@@ -1016,28 +1137,28 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 		}
 		h.unreserve(x.reserved)
 		x.reserved = nil
-		h.mu.Unlock()
+		hs.mu.Unlock()
 		if err != nil {
 			// The service has the request; its replies are sealed all the same (x.job), and the job's file is
 			// written again with them.
 			h.log.Error("sealing: the job's state was not written", "service", x.service, "err", err)
 		}
 	}
-	h.mu.Lock()
+	hs := h.lock(x.service)
 	svc, err := h.service(x.service)
 	// A job being opened counts (D227): until its first reply is read, its upstream task is not indexed, and a reply on
 	// another exchange that names it must be read to be held.
 	guard := err == nil && h.guarded(x.service, svc)
-	h.mu.Unlock()
+	hs.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	streaming := false
 	defer func() {
 		if !streaming {
-			h.mu.Lock()
+			hs.mu.Lock()
 			x.endOpening() // the job's first reply is read (or there was none to read)
-			h.mu.Unlock()
+			hs.mu.Unlock()
 		}
 	}()
 	if x.job == nil && !guard {
@@ -1051,9 +1172,9 @@ func (h *Hosting) Response(ctx context.Context, x *Exchange, resp *http.Response
 		pr, pw := io.Pipe()
 		go func() {
 			err := sseTransform(body, pw, func(data []byte) ([]byte, error) { return x.replyHeld(ctx, data) })
-			h.mu.Lock()
+			hs.mu.Lock()
 			x.endOpening()
-			h.mu.Unlock()
+			hs.mu.Unlock()
 			_ = body.Close()
 			if err != nil {
 				h.log.Warn("sealing: a service event stream ends before an event the node refused", "service", x.service,
@@ -1232,9 +1353,9 @@ func (x *Exchange) replyHeld(ctx context.Context, b []byte) ([]byte, error) {
 		if !errors.Is(err, errHold) {
 			return out, err
 		}
-		x.h.mu.Lock()
-		n, ch := x.h.opening[x.service], x.h.openingDone
-		x.h.mu.Unlock()
+		hs := x.h.lock(x.service)
+		n, ch := hs.opening, hs.openingDone
+		hs.mu.Unlock()
 		if n == 0 {
 			continue
 		}
@@ -1251,8 +1372,8 @@ func (x *Exchange) replyHeld(ctx context.Context, b []byte) ([]byte, error) {
 // reply checks and seals one reply body (a JSON response, or one SSE event's data).
 func (x *Exchange) reply(b []byte) ([]byte, error) {
 	h := x.h
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	hs := h.lock(x.service)
+	defer hs.mu.Unlock()
 	svc, err := h.service(x.service)
 	if err != nil {
 		return nil, err
@@ -1301,7 +1422,7 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 				if ctxIndexed && cctx != "" {
 					return reject(sealed.RejectWrongContext, "a reply names a sealed job's upstream context on another exchange")
 				}
-				if h.opening[x.service] > 0 && (task != "" && !taskIndexed || cctx != "" && !ctxIndexed) {
+				if hs.opening > 0 && (task != "" && !taskIndexed || cctx != "" && !ctxIndexed) {
 					return errHold // it may name the task of a sealed job being opened (replyHeld, D227)
 				}
 				return nil
@@ -1538,26 +1659,34 @@ func (x *Exchange) sealOne(j *jobState, hd sealed.Header, pl plainOf) ([]byte, s
 	return ct, key, nil
 }
 
-// service returns the service's state, loading it once; h.mu is held.
+// service returns the service's state, loading it once and indexing its node-wide sets (nReplyTo, nCalls); the
+// service's lock is held.
 func (h *Hosting) service(name string) (*serviceState, error) {
-	if s := h.services[name]; s != nil {
-		return s, nil
+	hs := h.svc(name)
+	if hs.state != nil {
+		return hs.state, nil
 	}
 	s, err := h.st.loadService(name)
 	if err != nil {
 		return nil, err
 	}
-	h.services[name] = s
+	hs.state = s
+	for k := range s.ReplyTo {
+		h.indexNode(setReplyTo, k, name, true)
+	}
+	for k := range s.MCPCalls {
+		h.indexNode(setMCPCalls, k, name, true)
+	}
 	return s, nil
 }
 
-// jobFor returns the job id of the service, nil when it has none; h.mu is held.
+// jobFor returns the job id of the service, nil when it has none; the service's lock is held.
 func (h *Hosting) jobFor(service, id string) (*jobState, error) {
 	if id == "" || element("job", id) != nil {
 		return nil, nil
 	}
-	k := service + "/" + id
-	if j := h.jobs[k]; j != nil {
+	hs := h.svc(service)
+	if j := hs.jobs[id]; j != nil {
 		return j, nil
 	}
 	j, err := h.st.loadJob(service, id)
@@ -1567,13 +1696,13 @@ func (h *Hosting) jobFor(service, id string) (*jobState, error) {
 	if err != nil {
 		return nil, err
 	}
-	h.jobs[k] = j
+	hs.jobs[id] = j
 	return j, nil
 }
 
-// saveJob writes a job through; h.mu is held.
+// saveJob writes a job through; the service's lock is held.
 func (h *Hosting) saveJob(service string, j *jobState) error {
-	h.jobs[service+"/"+j.ID] = j
+	h.svc(service).jobs[j.ID] = j
 	return h.st.saveJob(service, j)
 }
 
@@ -1588,137 +1717,144 @@ const jobCacheIdle = time.Hour
 // loaded, and a loaded job idle for jobCacheIdle is evicted, so that the jobs in memory are the busy ones. Each
 // service's sets are written as a new snapshot.
 func (h *Hosting) Sweep(now time.Time) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	services, err := h.st.services()
 	if err != nil {
 		return err
 	}
+	var errs []error
+	for _, name := range services {
+		// One service at a time, under its own lock: the other services' exchanges go on meanwhile (robustness-4).
+		hs := h.lock(name)
+		errs = append(errs, h.sweepService(name, hs, now)...)
+		hs.mu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+// sweepService is Sweep for one service; its lock is held.
+func (h *Hosting) sweepService(name string, hs *hostedService, now time.Time) []error {
 	var errs []error
 	keepFor := h.cfg.MaxAge + sealed.MaxClockSkew*time.Second
 	// A job outlives every request of it that rule 1 still lets through: its pairs (rule 5) and binding must be there
 	// as long as its first message could be resent under its own gate task (the replyTo stays MaxAge; round 2
 	// sealing-fixes-8).
 	retain := max(JobRetention, keepFor)
-	for _, name := range services {
-		svc, err := h.service(name)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		jobs, err := h.st.jobs(name)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		gone := map[string]bool{}
-		liveCtx, liveUp := map[string]bool{}, map[string]bool{}
-		for _, id := range jobs {
-			k := name + "/" + id
-			j := h.jobs[k]
-			if j == nil {
-				if j, err = h.st.loadJob(name, id); err != nil {
-					continue
-				}
+	svc, err := h.service(name)
+	if err != nil {
+		return append(errs, err)
+	}
+	jobs, err := h.st.jobs(name)
+	if err != nil {
+		return append(errs, err)
+	}
+	gone := map[string]bool{}
+	liveCtx, liveUp := map[string]bool{}, map[string]bool{}
+	for _, id := range jobs {
+		j := hs.jobs[id]
+		if j == nil {
+			if j, err = h.st.loadJob(name, id); err != nil {
+				continue
 			}
-			last := j.LastSeen
-			if last.IsZero() {
-				last = j.Created
-			}
-			if now.Sub(last) < retain {
-				liveCtx[j.GateContext], liveUp[j.UpstreamContext] = true, true
-				// A sealed MCP request or input request older than MaxAge is no longer answerable (rule 4b's age; a
-				// result that late is a replay of one already sealed): it leaves the job. An answered one's index entry
-				// goes with it, so that the indexes do not grow with a long-lived session (round 2 sealing-fixes-9): a
-				// late answer to it on the job's session is dropped there all the same, since an exchange of a sealed
-				// job relays no response that answers neither its own request nor one the node holds (FromServer), and
-				// no other exchange reaches the session (D226). An unanswered one's entry stays with the job, so that an
-				// answer to it is still the job's, and refused.
-				pruned := false
-				for ck, c := range j.Calls {
-					if now.Sub(c.At) > keepFor {
-						delete(j.Calls, ck)
-						pruned = true
-						if e, ok := svc.Responses[ck]; ok && e.Job == j.ID && c.Answered {
-							svc.del(setResponses, ck)
-						}
+		}
+		last := j.LastSeen
+		if last.IsZero() {
+			last = j.Created
+		}
+		if now.Sub(last) < retain {
+			liveCtx[j.GateContext], liveUp[j.UpstreamContext] = true, true
+			// A sealed MCP request or input request older than MaxAge is no longer answerable (rule 4b's age; a
+			// result that late is a replay of one already sealed): it leaves the job. An answered one's index entry
+			// goes with it, so that the indexes do not grow with a long-lived session (round 2 sealing-fixes-9): a
+			// late answer to it on the job's session is dropped there all the same, since an exchange of a sealed
+			// job relays no response that answers neither its own request nor one the node holds (FromServer), and
+			// no other exchange reaches the session (D226). An unanswered one's entry stays with the job, so that an
+			// answer to it is still the job's, and refused.
+			pruned := false
+			for ck, c := range j.Calls {
+				if now.Sub(c.At) > keepFor {
+					delete(j.Calls, ck)
+					pruned = true
+					if e, ok := svc.Responses[ck]; ok && e.Job == j.ID && c.Answered {
+						svc.del(setResponses, ck)
 					}
 				}
-				for ik, in := range j.Inputs {
-					if now.Sub(in.SealedAt) > keepFor {
-						delete(j.Inputs, ik)
-						pruned = true
-						if in.Answered {
-							for k, e := range svc.Inputs {
-								if e.Job == j.ID && e.Key == ik {
-									svc.del(setInputs, k)
-								}
+			}
+			for ik, in := range j.Inputs {
+				if now.Sub(in.SealedAt) > keepFor {
+					delete(j.Inputs, ik)
+					pruned = true
+					if in.Answered {
+						for k, e := range svc.Inputs {
+							if e.Job == j.ID && e.Key == ik {
+								svc.del(setInputs, k)
 							}
 						}
 					}
 				}
-				if pruned {
-					if err := h.st.saveJob(name, j); err != nil {
-						errs = append(errs, err)
-					}
+			}
+			if pruned {
+				if err := h.st.saveJob(name, j); err != nil {
+					errs = append(errs, err)
 				}
-				if h.jobs[k] != nil && now.Sub(last) >= jobCacheIdle {
-					delete(h.jobs, k)
-				}
-				continue
 			}
-			if err := h.st.removeJob(name, id); err != nil {
-				errs = append(errs, err)
-				continue
+			if hs.jobs[id] != nil && now.Sub(last) >= jobCacheIdle {
+				delete(hs.jobs, id)
 			}
-			delete(h.jobs, k)
-			gone[id] = true
+			continue
 		}
-		for k, v := range svc.ReplyTo {
-			if now.Sub(v.At) > keepFor {
-				svc.del(setReplyTo, k)
-			}
-		}
-		for k, v := range svc.MCPCalls {
-			if now.Sub(v) > keepFor {
-				svc.del(setMCPCalls, k)
-			}
-		}
-		for k, v := range svc.Contexts {
-			if !liveCtx[k] && now.Sub(v.At) > JobRetention {
-				svc.del(setContexts, k)
-			}
-		}
-		for k, v := range svc.UpstreamContexts {
-			if c, ok := svc.Contexts[v]; !liveUp[k] && (!ok || c.Upstream != k) {
-				svc.del(setUpstreamContexts, k)
-			}
-		}
-		for k, v := range svc.Tasks {
-			if gone[v] {
-				svc.del(setTasks, k)
-			}
-		}
-		for k, v := range svc.Responses {
-			if gone[v.Job] {
-				svc.del(setResponses, k)
-			}
-		}
-		for k, v := range svc.Inputs {
-			if gone[v.Job] {
-				svc.del(setInputs, k)
-			}
-		}
-		for k, v := range svc.Sessions {
-			if gone[v] {
-				svc.del(setSessions, k)
-			}
-		}
-		if err := h.st.compactService(name, svc); err != nil {
+		if err := h.st.removeJob(name, id); err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		delete(hs.jobs, id)
+		gone[id] = true
+	}
+	for k, v := range svc.ReplyTo {
+		if now.Sub(v.At) > keepFor {
+			svc.del(setReplyTo, k)
+			h.indexNode(setReplyTo, k, name, false)
 		}
 	}
-	return errors.Join(errs...)
+	for k, v := range svc.MCPCalls {
+		if now.Sub(v) > keepFor {
+			svc.del(setMCPCalls, k)
+			h.indexNode(setMCPCalls, k, name, false)
+		}
+	}
+	for k, v := range svc.Contexts {
+		if !liveCtx[k] && now.Sub(v.At) > JobRetention {
+			svc.del(setContexts, k)
+		}
+	}
+	for k, v := range svc.UpstreamContexts {
+		if c, ok := svc.Contexts[v]; !liveUp[k] && (!ok || c.Upstream != k) {
+			svc.del(setUpstreamContexts, k)
+		}
+	}
+	for k, v := range svc.Tasks {
+		if gone[v] {
+			svc.del(setTasks, k)
+		}
+	}
+	for k, v := range svc.Responses {
+		if gone[v.Job] {
+			svc.del(setResponses, k)
+		}
+	}
+	for k, v := range svc.Inputs {
+		if gone[v.Job] {
+			svc.del(setInputs, k)
+		}
+	}
+	for k, v := range svc.Sessions {
+		if gone[v] {
+			svc.del(setSessions, k)
+		}
+	}
+	if err := h.st.compactService(name, svc); err != nil {
+		errs = append(errs, err)
+	}
+	return errs
 }
 
 // Required reports whether the node refuses an unsealed request to service (--sealed-required).

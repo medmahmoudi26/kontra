@@ -53,7 +53,7 @@ type MCPExchange struct {
 	call      *sealedCall // the exchange's sealed tools/call
 	taskOf    string      // the upstream task id a tasks/* request names
 	commit    []func() error
-	reserved  []string // what the commits record, in flight until then (Hosting.flight)
+	reserved  []string // what the commits record, in flight until then (hostedService.flight, Hosting.nflight)
 }
 
 // sealedCall is a sealed tools/call of the exchange: its tool and messageId, and the replyTo and rk its request
@@ -90,8 +90,8 @@ func isHex(s string) bool {
 // of the message reaches the server.
 func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error) {
 	h := x.h
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	hs := h.lock(x.service)
+	defer hs.mu.Unlock()
 	x.reqMethod, x.reqID = m.Method, m.ID
 	svc, err := h.service(x.service)
 	if err != nil {
@@ -144,7 +144,7 @@ func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error
 
 // sessionOwner is the sealed job that holds the exchange's upstream session: the session's index entry, or the job a
 // sealed call in flight on it is opening it for; ok false on an exchange with no upstream session, or on one no
-// sealed job holds. h.mu is held.
+// sealed job holds. the service's lock is held.
 func (x *MCPExchange) sessionOwner(svc *serviceState) (string, bool) {
 	if x.upstreamSID == "" {
 		return "", false
@@ -156,7 +156,7 @@ func (x *MCPExchange) sessionOwner(svc *serviceState) (string, bool) {
 }
 
 // recorded reports a request id the node recorded a sealed request under on the exchange's upstream session (the
-// job's record, or, on an upstream session, the service's index of it). h.mu is held.
+// job's record, or, on an upstream session, the service's index of it). the service's lock is held.
 func (x *MCPExchange) recorded(svc *serviceState, job *jobState, id json.RawMessage) bool {
 	key := respKey(x.upstreamSID, id)
 	if job != nil && job.Calls[key] != nil {
@@ -291,7 +291,11 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 		return nil, reject(sealed.RejectBadHeader, err.Error())
 	}
 	x.call = &sealedCall{tool: name, messageID: hd.MessageID, replyTo: hd.ReplyTo, rk: hd.RK}
-	x.h.reserve(x.pre.Task, flight)
+	// Rule 5's node-wide check, checked again and reserved in one step under the node-wide lock (D221).
+	if !x.h.claimNode(flight, x.pre.Task, x.h.nCalls, callKey, x.service) {
+		x.call = nil
+		return nil, reject(sealed.RejectReplayed, "a (session, messageId) another service of this node forwarded, or is forwarding")
+	}
 	x.reserved = append(x.reserved, flight)
 	if job == nil {
 		x.h.reserve(bind, jobKey)
@@ -320,6 +324,7 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 		}
 		j.LastSeen = now
 		svc.put(setMCPCalls, callKey, now)
+		x.h.indexNode(setMCPCalls, callKey, service, true)
 		if sid != "" && svc.Sessions[sid] != j.ID {
 			svc.put(setSessions, sid, j.ID)
 		}
@@ -524,8 +529,8 @@ func (x *MCPExchange) Sealed(body []byte) bool {
 	if x.h.Required(x.service) || bytes.Contains(bytes.ToLower(body), []byte(mcpwire.MetaSealed)) {
 		return true
 	}
-	x.h.mu.Lock()
-	defer x.h.mu.Unlock()
+	hs := x.h.lock(x.service)
+	defer hs.mu.Unlock()
 	j, err := x.h.jobFor(x.service, x.jobID)
 	return err == nil && j != nil
 }
@@ -549,8 +554,8 @@ func (x *MCPExchange) Accepted() {
 	if x == nil || len(x.commit) == 0 && len(x.reserved) == 0 {
 		return
 	}
-	x.h.mu.Lock()
-	defer x.h.mu.Unlock()
+	hs := x.h.lock(x.service)
+	defer hs.mu.Unlock()
 	for _, c := range x.commit {
 		if err := c(); err != nil {
 			x.h.log.Error("sealing: the job's state was not written", "service", x.service, "err", err)
@@ -569,8 +574,8 @@ func (x *MCPExchange) Release() {
 	if x == nil {
 		return
 	}
-	x.h.mu.Lock()
-	defer x.h.mu.Unlock()
+	hs := x.h.lock(x.service)
+	defer hs.mu.Unlock()
 	x.commit = nil
 	x.h.unreserve(x.reserved)
 	x.reserved = nil
@@ -589,8 +594,8 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 		return nil, false, reject(sealed.RejectBadHeader, "a server message that is not one with exact keys")
 	}
 	h := x.h
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	hs := h.lock(x.service)
+	defer hs.mu.Unlock()
 	svc, err := h.service(x.service)
 	if err != nil {
 		return nil, false, err
@@ -755,7 +760,7 @@ func (x *MCPExchange) FromServer(data []byte) (out []byte, keep bool, err error)
 // sealAnswer seals the server's answer to a sealed request of the job (req, recorded under key): a sealed call's
 // CallToolResult to the call's own replyTo and rk (which must be the job's, wrong_job otherwise), or its
 // CreateTaskResult binding the task to the job; a bound task's tasks/result to the job's; an error with its code
-// only (errorResponse's SPEC-CONFLICT). h.mu is held.
+// only (errorResponse's SPEC-CONFLICT). the service's lock is held.
 func (x *MCPExchange) sealAnswer(svc *serviceState, job *jobState, req *sealedRequest, key string, data []byte,
 	m *mcpwire.Message) ([]byte, bool, error) {
 	h := x.h

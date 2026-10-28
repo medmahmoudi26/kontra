@@ -3,12 +3,15 @@ package sealing
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 
@@ -157,6 +160,121 @@ func TestHiringChecksTheService(t *testing.T) {
 		got := mcpAnswer(t, hr2, mjob, `{"jsonrpc":"2.0","id":`+id+`,"result":`+string(res)+`}`, false, nil)
 		if strings.Contains(got, "MARKER-result") || !strings.Contains(got, `"sh.kontra/failure":"sealed_rejected"`) {
 			t.Fatalf("a result naming service %q reaches the local client: %s", service, got)
+		}
+	}
+}
+
+// M3 review robustness-4 (D225): each hosted service's state has a lock of its own, so a service whose commit holds
+// its lock (an append and fsync of its service.log, its job files' writes) never holds up another service's
+// exchanges; and the node-wide replay checks (D221) have a lock of their own, so they still see what the held
+// service recorded without taking its lock.
+func TestHostingServicesLockedApart(t *testing.T) {
+	f := newFixture(t)
+	b := newBuyer(t)
+	const ctx = "ctx-locks"
+	first := send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "for echo")))
+	_, x, r := f.request(pre("0193c0de-0000-7000-8000-0000000003a1", ctx), first)
+	if r != "" {
+		t.Fatal(r)
+	}
+	readAll(t, f.answer(x, 200, taskAnswer("up-1", "upctx-1", "TASK_STATE_WORKING", "ok", "")))
+
+	hs := f.h.lock("echo") // as if echo's commit were appending and syncing
+	request := func(service, msg, replyToOf string) <-chan sealed.Reject {
+		out := make(chan sealed.Reject, 1)
+		hd := f.reqHeader(b, "", ctx, msg, 0, 1)
+		hd.Service = service
+		body := send(msg, "", "", replyToOf, sealedPartJSON(f.seal(hd, "for "+service)))
+		p := pre("0193c0de-0000-7000-8000-0000000003a2", ctx)
+		p.Service = service
+		go func() {
+			_, x, err := f.h.Request(context.Background(), p, post(body))
+			reason, _ := sealed.ReasonOf(err)
+			if err == nil {
+				x.Release()
+			}
+			out <- reason
+		}()
+		return out
+	}
+	// Another service's first message, sealed for it, with another buyer's key: served while echo's lock is held.
+	other := newBuyer(t)
+	hd := f.reqHeader(other, "", ctx, "m2", 0, 1)
+	hd.Service = "other"
+	p := pre("0193c0de-0000-7000-8000-0000000003a3", ctx)
+	p.Service = "other"
+	done := make(chan sealed.Reject, 1)
+	go func() {
+		_, x, err := f.h.Request(context.Background(), p, post(send("m2", "", "", other.replyTo(), sealedPartJSON(f.seal(hd, "for other")))))
+		reason, _ := sealed.ReasonOf(err)
+		if err == nil {
+			x.Release()
+		}
+		done <- reason
+	}()
+	select {
+	case r := <-done:
+		if r != "" {
+			t.Fatalf("another service's first message: %q", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("another service's exchange waits for echo's lock")
+	}
+	// The node-wide check sees the replyTo echo recorded without echo's lock: sealed for "other", it is replayed.
+	select {
+	case r := <-request("other", "m3", b.replyTo()):
+		if r != sealed.RejectReplayed {
+			t.Fatalf("a replyTo echo recorded, sealed for another service, while echo's lock is held: %q", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the node-wide replay check waits for echo's lock")
+	}
+	hs.mu.Unlock()
+}
+
+// The node-wide replay check and its reservation are one step (D221): of two first messages with one replyTo, sealed
+// for two services of the node and in flight at once, one is forwarded and the other replayed, never both.
+func TestHostingNodeWideReplyToIsClaimedOnce(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 20; i++ {
+		b := newBuyer(t)
+		ctx := fmt.Sprintf("ctx-race-%d", i)
+		results := make(chan sealed.Reject, 2)
+		var xs [2]*Exchange
+		var wg sync.WaitGroup
+		for k, service := range []string{"echo", "other"} {
+			hd := f.reqHeader(b, "", ctx, "m", 0, 1)
+			hd.Service = service
+			body := send("m", "", "", b.replyTo(), sealedPartJSON(f.seal(hd, "x")))
+			p := pre(fmt.Sprintf("0193c0de-0000-7000-8000-%012d", 4000+2*i+k), ctx)
+			p.Service = service
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, x, err := f.h.Request(context.Background(), p, post(body))
+				reason, _ := sealed.ReasonOf(err)
+				if err == nil {
+					xs[k] = x
+				}
+				results <- reason
+			}()
+		}
+		wg.Wait()
+		close(results)
+		var ok, replayed int
+		for r := range results {
+			switch r {
+			case "":
+				ok++
+			case sealed.RejectReplayed:
+				replayed++
+			}
+		}
+		if ok != 1 || replayed != 1 {
+			t.Fatalf("round %d: %d forwarded, %d replayed; want one of each", i, ok, replayed)
+		}
+		for _, x := range xs {
+			x.Release()
 		}
 	}
 }

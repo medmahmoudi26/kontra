@@ -247,8 +247,8 @@ func TestReview2AbandonedFirstMessageIsRecorded(t *testing.T) {
 		}
 		cancel()
 		ended := func() bool {
-			f.h.mu.Lock()
-			defer f.h.mu.Unlock()
+			hs := f.h.lock(x.service)
+			defer hs.mu.Unlock()
 			return len(x.reserved) == 0 && !x.opening
 		}
 		for deadline := time.Now().Add(5 * time.Second); !ended(); time.Sleep(5 * time.Millisecond) {
@@ -423,12 +423,12 @@ func TestReview2SweepPrunesAnsweredIndexEntries(t *testing.T) {
 	if err := f.h.Sweep(f.now); err != nil {
 		t.Fatal(err)
 	}
-	f.h.mu.Lock()
+	hs := f.h.lock("fs")
 	svc, _ := f.h.service("fs")
 	_, has1 := svc.Responses[respKey("up-1", []byte("1"))]
 	_, has2 := svc.Responses[respKey("up-1", []byte("2"))]
 	_, has3 := svc.Responses[respKey("up-1", []byte("3"))]
-	f.h.mu.Unlock()
+	hs.mu.Unlock()
 	if has1 || !has2 || !has3 {
 		t.Fatalf("index entries after Sweep: answered-and-old %v (want false), unanswered %v, recent %v (want true)", has1, has2, has3)
 	}
