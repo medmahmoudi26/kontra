@@ -535,7 +535,7 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 	r.tools = mcprelay.NewToolsCache()
 	// A node of an MCP service connecting or disconnecting on any replica drops the service's era (§11.12, D177): the
 	// registry runs the hook for its own sessions and for the other replicas' (NOTIFY kontra_tunnel 'mcp:…'); a LISTEN
-	// reconnect, which may have lost such a notice, drops every era.
+	// reconnect, which may have lost such a notice, drops every era and every drained list.
 	if r.tunnels != nil {
 		tools := r.tools
 		r.tunnels.OnMCPChange(func(tenantID uuid.UUID, service string) {
@@ -543,7 +543,9 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 		})
 	}
 	if r.listener != nil {
-		r.listener.OnReconnect(r.tools.DropEras)
+		// A notice lost while the connection was down (a node's change, an upstream's tools/list_changed) is made up
+		// for: every era and every drained list goes (D199, D229).
+		r.listener.OnReconnect(r.tools.Reconnected)
 	}
 	// An upstream's tools/list_changed seen on any replica drops the service's drained lists on every one (§11.3):
 	// the replica that relayed it sends NOTIFY kontra_tunnel 'tools:<tenant_id>/<service>' (coalesced per service).

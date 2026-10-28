@@ -33,7 +33,8 @@ import (
 // What it learned is kept RefreshTools, and dropped when a node of the service connects or disconnects on any replica
 // (DropEra: the tunnel registry's hook, which the replica holding the node runs and tells every other one by NOTIFY
 // kontra_tunnel, since through the peer hop each replica uses the nodes another one holds), when the replica's LISTEN
-// connection comes back (DropEras: a notice may have been lost) or when the service's row changes (Forget).
+// connection comes back (Reconnected: a notice may have been lost, and the drained lists go too) or when the
+// service's row changes (Forget).
 
 // ProbeTimeout bounds the gate's own server/discover (an answer that does not come within it leaves the era
 // unknown).
@@ -176,6 +177,27 @@ func (c *ToolsCache) DropEras() {
 	}
 	for key := range c.probes {
 		c.dropEra(key)
+	}
+}
+
+// Reconnected is the replica's LISTEN reconnect: every era and every drained tool list is dropped, since a notice of
+// either (a node's change, an upstream's tools/list_changed relayed by another replica, D199) may have been lost while
+// the connection was down, and a list kept would drive tools/list and the "Unknown tool" decisions for up to
+// RefreshTools (round 2 other-fixes-5).
+func (c *ToolsCache) Reconnected() {
+	c.DropEras()
+	c.DropLists()
+}
+
+// DropLists drops every service's drained lists (a drain in flight installs nothing: its generation is bumped).
+func (c *ToolsCache) DropLists() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, t := range c.byService {
+		c.gen[k.ToolsKey]++
+		if t.filling == nil {
+			delete(c.byService, k)
+		}
 	}
 }
 
