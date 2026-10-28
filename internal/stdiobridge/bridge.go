@@ -379,10 +379,10 @@ func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, b
 
 // reserve counts a child about to be spawned against MaxSessions; false when the service is full or closed.
 //
-// A full bridge first makes room (D213; spec/tunnel.md §10): it stops its longest-idle child, when that child has had
-// no exchange (none open, none started, a GET stream counting as open) for at least EvictIdle, and waits for its
-// process group to be gone; and an initialize that finds a child stopping already (the gate closed a principal's
-// longest-idle session for this one with a DELETE, relay.md §11.2) waits for it rather than answer full. Every
+// A full bridge first makes room (D213; spec/tunnel.md §10): an initialize that finds a child stopping already (the
+// gate closed a principal's longest-idle session for this one with a DELETE, relay.md §11.2) waits for it rather than
+// answer full; otherwise it stops the longest-idle child, when that child has had no exchange (none open, none
+// started, a GET stream counting as open) for at least EvictIdle, and waits for its process group to be gone. Every
 // principal admitted to the service shares the children, and so does every durable task's own upstream session
 // (D22): the gate caps each principal's sessions, and the bridge, which sees tunnel sessions and never principals,
 // gives a busy service's idle children to new sessions. The wait is bounded by the group's stop (TerminateAfter
@@ -402,19 +402,21 @@ func (b *Bridge) reserve(ctx context.Context) bool {
 			return true
 		}
 		released := b.released
+		// A child stopping already frees a place soon: it is waited for, and no other child is stopped meanwhile.
+		stopping := b.stopping()
 		var victim *child
-		if !evicted {
+		if !stopping && !evicted {
 			victim = b.longestIdle(time.Now())
 		}
-		stopping := b.stopping()
 		b.mu.Unlock()
 		switch {
+		case stopping:
 		case victim != nil:
 			evicted = true
 			victim.log.Info("the stdio service is at --max-sessions: its longest-idle child is stopped for a new session (D213)",
 				"max_sessions", b.cfg.MaxSessions, "evict_idle", EvictIdle)
 			victim.shutdown("stopped for a new session: the service is at --max-sessions")
-		case !stopping:
+		default:
 			return false // every child is busy, or idle for less than EvictIdle: full
 		}
 		if deadline == nil {

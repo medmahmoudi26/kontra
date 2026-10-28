@@ -640,7 +640,7 @@ func TestSessionEnd(t *testing.T) {
 // relay.md §11.2) is waited for rather than answered full.
 func TestFullBridgeStopsItsLongestIdleChild(t *testing.T) {
 	old := EvictIdle
-	EvictIdle = 400 * time.Millisecond
+	EvictIdle = time.Second
 	t.Cleanup(func() { EvictIdle = old })
 	f := newFixture(t, func(c *Config) { c.MaxSessions = 3 })
 	init := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
@@ -649,6 +649,8 @@ func TestFullBridgeStopsItsLongestIdleChild(t *testing.T) {
 	s3 := f.initialize(`{}`)
 	f.get(s3, "") // s3 has an exchange open: never idle
 	// Every child idle for less than EvictIdle: full, and nothing is stopped.
+	f.call(s1, 1, "echo", `{"text":"used just now"}`)
+	f.call(s2, 1, "echo", `{"text":"used just now"}`)
 	if r := f.post("", init); r.status != http.StatusServiceUnavailable || r.header.Get(tunnel.HeaderNode) != string(tunnel.NodeFull) {
 		t.Fatalf("an initialize with no child idle long enough: %d %q %s", r.status, r.header.Get(tunnel.HeaderNode), r.body)
 	}

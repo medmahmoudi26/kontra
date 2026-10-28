@@ -21,7 +21,7 @@ import (
 // rather than answer full. Each closed session answers 404, every other one keeps working.
 func TestSessionsPerPrincipalThroughTheGate(t *testing.T) {
 	old := stdiobridge.EvictIdle
-	stdiobridge.EvictIdle = 1500 * time.Millisecond
+	stdiobridge.EvictIdle = 3 * time.Second // longer than any exchange of the test's under load, before it waits on purpose
 	t.Cleanup(func() { stdiobridge.EvictIdle = old })
 	bin := filepath.Join(t.TempDir(), "stdioserver")
 	if out, err := exec.Command("go", "build", "-o", bin, "../stdiobridge/testdata/stdioserver").CombinedOutput(); err != nil {
