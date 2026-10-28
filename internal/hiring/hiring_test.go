@@ -243,17 +243,29 @@ type testServer struct {
 	tun    *fakeTunnel
 	gate   *fakeGate
 	url    string // http://127.0.0.1:<port>
+	host   string // 127.0.0.1:<port>
 	port   string
 	cancel context.CancelFunc
 }
 
 func startServer(t *testing.T, mod func(*Config)) *testServer {
 	t.Helper()
+	return startServerAt(t, "127.0.0.1:0", mod)
+}
+
+// startServerOn is startServer listening on addr ([::1]:0, say).
+func startServerOn(t *testing.T, addr string) *testServer {
+	t.Helper()
+	return startServerAt(t, addr, nil)
+}
+
+func startServerAt(t *testing.T, addr string, mod func(*Config)) *testServer {
+	t.Helper()
 	gateURL, _ := url.Parse("http://127.0.0.1:18443")
 	g := newFakeGate(t, "http://127.0.0.1:18443")
 	big := bytes.Repeat([]byte{7, 0, 'b'}, 300<<10/3)
 	tun := &fakeTunnel{gate: g.handler(t), blobs: map[blob.Ref][]byte{g.ref: big}}
-	cfg := Config{Listen: "127.0.0.1:0", Gate: gateURL}
+	cfg := Config{Listen: addr, Gate: gateURL}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -261,7 +273,7 @@ func startServer(t *testing.T, mod func(*Config)) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +283,7 @@ func startServer(t *testing.T, mod func(*Config)) *testServer {
 	t.Cleanup(func() { cancel(); <-done })
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
 	eventually(t, func() bool { return s.Local().Port() == port })
-	return &testServer{s: s, tun: tun, gate: g, url: "http://" + ln.Addr().String(), port: port, cancel: cancel}
+	return &testServer{s: s, tun: tun, gate: g, url: "http://" + ln.Addr().String(), host: ln.Addr().String(), port: port, cancel: cancel}
 }
 
 func eventually(t *testing.T, cond func() bool) {

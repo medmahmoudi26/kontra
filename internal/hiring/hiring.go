@@ -382,6 +382,14 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	token := s.cfg.LocalToken
 	s.mu.Unlock()
 	if host, _, err := net.SplitHostPort(ln.Addr().String()); err == nil && loopbackHost(host) && token == "" {
+		if !peerCheckWorks() {
+			s.log.Warn("the socket table (/proc/self/net/tcp) cannot be read: every local connection will be closed; " +
+				"run with --local-token to serve this machine's users (spec/tunnel.md §9)")
+		}
+		if os.Getuid() == overflowUID {
+			s.log.Warn("kontra connect runs as the overflow uid, which the node attributes to no one: every local "+
+				"connection will be closed; run with --local-token (spec/tunnel.md §9)", "uid", overflowUID)
+		}
 		ln = &peerListener{Listener: ln, uid: os.Getuid(), log: s.log}
 	}
 	defer forgetKeySets(s.tunnel)
